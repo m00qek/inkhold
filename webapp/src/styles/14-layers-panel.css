@@ -1,0 +1,178 @@
+/* ================= LAYERS PANEL BODY ================= */
+/* The layers panel component (src/pages/layersPanel.ts) fills a SHARED side
+   panel (src/ui/sidePanel.ts, 15-side-panel.css) with its own rows. The card,
+   head and open/hide are the primitive's now — the layers panel rides
+   `.side-panel--wide` with the `.spd-layers`/`.note-layers` hook namespace. What
+   stays HERE is only the body: the `<ul>` of layer rows and everything on them
+   (name, visibility eye, opacity fill bar, thumbnail). Every rule selects the
+   component's own neutral classes (`.layers-panel__*`); a format's HOOK classes
+   (`.spd-layer__…`) carry no look of their own — they exist for tests and for
+   format-specific rules, which stay in that format's file (the `.spd` blank
+   Reference Layer thumb stays in 12).
+
+   Appended after 13 per the manifest's own rule; nothing later overrides it. */
+
+/* A real <ul> (the panel IS a list of layers); the UA's list box is reset and
+   the classes carry the look. */
+.layers-panel__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* A layer row (variant C): the thumbnail LEADS, then a middle column carrying a
+   top line (name + visibility eye) and — only when the layer has opacity — a
+   draggable opacity fill bar beneath. A hidden layer dims its name so the on/off
+   state reads at a glance. */
+.layers-panel__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 6px;
+  border-radius: 6px;
+}
+.layers-panel__row:hover {
+  background: var(--hover);
+}
+/* The middle column: the name+eye line, then the opacity fill bar beneath it. */
+.layers-panel__mid {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+/* The top line: the name takes the width, the eye sits at its right end. */
+.layers-panel__top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.layers-panel__eye {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  /* Compact control, kept square, on the system chrome. */
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.layers-panel__eye:hover {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+}
+.layers-panel__eye svg {
+  width: 16px;
+  height: 16px;
+}
+/* The "on" toggle carries the same pressed treatment the toolbar controls use. */
+.layers-panel__eye[aria-pressed="true"] {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+  background: var(--hover);
+}
+.layers-panel__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-body);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.layers-panel__row.is-hidden .layers-panel__name {
+  color: var(--ink-faint);
+}
+
+/* The opacity FILL BAR (variant C) — a slim draggable track whose fill LENGTH
+   IS the value (the app's "length carries the number" signature, same idea as
+   the bin's retention rule), with a mono `%` readout at its right end. Rendered
+   only for a format whose layers CARRY opacity (data-driven — `.spd` yes,
+   `.note` no). When the layer is hidden the whole thing is dimmed and inert
+   (opacity is meaningless on an invisible layer). */
+.layers-panel__barwrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* The track: a thin `--line` ground the fill rides. `role="slider"`, focusable,
+   arrow-key operable (see layersPanel.ts). A little vertical padding gives the
+   ~6px track a taller, forgiving hit area without changing its drawn height. */
+.layers-panel__bar {
+  flex: 1 1 auto;
+  position: relative;
+  height: var(--layer-bar-h);
+  padding: 0;
+  border-radius: 1px;
+  background: var(--line);
+  cursor: pointer;
+  touch-action: none; /* a drag steers the bar, never scrolls the panel */
+}
+/* The fill: WIDTH == the opacity % (set inline). A soft `--accent` body with a
+   crisp `--accent` leading edge that reads as the drag handle at the value. */
+.layers-panel__bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 0;
+  height: 100%;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  border-right: 2px solid var(--accent);
+  box-sizing: border-box;
+}
+/* A real slider takes a visible focus ring in the brand colour. */
+.layers-panel__bar:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.layers-panel__pct {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+}
+/* Dim AND freeze the whole bar when its layer is hidden, so "off" reads as one
+   state; layersPanel.ts also drops the track from the tab order + input paths. */
+.layers-panel__barwrap.is-disabled {
+  opacity: 0.45;
+}
+.layers-panel__barwrap.is-disabled .layers-panel__bar {
+  cursor: default;
+}
+
+/* The per-layer thumbnail: a white sheet showing that layer's own pixels, at
+   the PANEL height class — the same height as the note reader's page-index
+   (filmstrip) thumbnail, so the two previews render at equal height. WIDTH
+   follows the drawing's own aspect: the caller's thumb painter mints the canvas
+   backing store at that aspect, capped at 2.5× the height, and `width: auto`
+   scales it from the fixed height. `flex: 0 1 auto` + `object-fit: contain`
+   let a wide thumbnail letterbox down rather than crush the name/controls
+   column when the panel runs out of row. The class is stamped by the component
+   onto whatever element the painter returns (canvas or an empty frame). */
+.layers-panel__thumb {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: block;
+  height: var(--preview-h-panel);
+  width: auto;
+  max-width: calc(var(--preview-h-panel) * 2.5);
+  object-fit: contain;
+  border: 1px solid var(--line);
+  /* The app's corner — the same `--radius` the filmstrip thumbnail (this thumb's
+     equal-height sibling, 06-reader.css) already carries, so previews agree. */
+  border-radius: var(--radius);
+  background: var(--sheet, #fff);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}

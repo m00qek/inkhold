@@ -1,0 +1,14 @@
+{
+  "comment": "Typecheck config for build tooling (vite.config.ts) — Node context, kept separate so Node globals never leak into app code under src/.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true
+  },
+  "include": ["vite.config.ts", "vitest.config.ts", "playwright.config.ts"]
+}

@@ -1,0 +1,143 @@
+/* ================= VIEWER TOOLBAR ================= */
+/* The bar every viewer is painted from (see `pages/toolbar.ts`), lifted out of
+   the reader so a future `.spd`/`.txt`/image viewer reuses the SAME skeleton and
+   the universal actions never move between file types.
+
+   Only the SKELETON lives here — the flex container, the two zones, the divider,
+   the spacer, and the zoom/pager slot. The button treatment (`.btn`, `.icon-btn`)
+   and the export dropdown (`.menu*`) stay where they are: they are shared with
+   the library and the bin and are cascade-sensitive (later files extend `.btn`),
+   so moving them would reorder the manifest this file is appended to the end of.
+   The container carries `.btn`/`.pager`/`.menu` children by class, unmoved. */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--desk) 55%, var(--sheet));
+}
+/* Pushes the two zones to the trailing edge, leaving the leading navigation
+   (the reader's Back + title) at the start. Was `.reader__spacer`. */
+.toolbar__spacer {
+  flex: 1;
+}
+
+/* The two zones — left contextual, right universal — as `role="group"`s. Their
+   own gap matches the bar's so a control reads the same distance from its
+   neighbour whether or not a zone boundary sits between them. */
+.toolbar__group {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}
+
+/* THE DIVIDER IS LOAD-BEARING, NOT ORNAMENTAL (`toolbar.md`): it is what makes
+   the universal zone land in a predictable spot however wide the contextual zone
+   grows. A CSS rule, `aria-hidden`, carrying no text — never a `|` glyph, which a
+   screen reader would read aloud and which would drift with the font. Hidden when
+   a zone beside it is empty is a future concern; today both zones always paint. */
+.toolbar__sep {
+  align-self: stretch;
+  width: 1px;
+  margin: 2px 0;
+  background: var(--line);
+}
+
+/* ACTIVE / PRESSED CONTROL STATE — a control that opens a panel or toggles a
+   mode wears a persistent "on" look for as long as that panel is visible, so the
+   bar shows what is currently open rather than only reacting to the last click.
+
+   REUSABLE ON PURPOSE, and driven off the control's OWN real state — never a
+   second flag that can desync from the panel:
+     - a menu trigger (Download) uses `aria-expanded`, which its open/close code
+       already sets, so the look tracks the menu however it closes (Esc, a click
+       outside, choosing an item);
+     - a toggle (find, recognised-text) uses `aria-pressed`, set by the panel's
+       own open/close callback.
+   A future `.spd`/`.txt`/image viewer's Download — and the `.spd` layers-panel
+   toggle — get this for free by carrying the same attribute; nothing per-viewer
+   to add. Stronger than `:hover` (which is transient) so "open" reads as a state,
+   not a pointer that happens to be resting on the button. */
+.toolbar .btn[aria-pressed="true"],
+.toolbar .btn[aria-expanded="true"] {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+  background: var(--hover);
+}
+
+/* The zoom/pager SLOT — one control shape (`−` [value] `+`, or a pair around a
+   count), one position, in every viewer. `.zoom`'s label adapts per file type
+   (`Fit` / a percentage / a font size); the geometry does not. */
+.pager {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.pager__count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  min-width: 66px;
+  text-align: center;
+}
+/* The readout at the centre of every zoom/pager control. ONE definition for the
+   reader's bare `.zoom`, the `.spd` viewer's `.spd-zoom` and the `.txt` viewer's
+   `.txt-zoom`: those two carry their own class ONLY so a `.zoom` test locator
+   stays unambiguous with more than one readout mounted at once (every viewer is
+   in the DOM, hidden) — the CHROME is shared, so it lives here once rather than
+   being re-copied per viewer where a copy can silently drift or go missing. */
+.zoom,
+.spd-zoom,
+.txt-zoom {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-soft);
+  min-width: 46px;
+  text-align: center;
+}
+
+/* --- the viewer's BIN-MODE cluster ------------------------------------------
+   When a file is open FROM the recycle bin the universal zone shows
+   `|— retention —| ⋯` — the same controls a bin ROW carries. Built by
+   `ui/binViewerActions.ts`; the countdown is the bin's own `.life` rule
+   (08-bin.css) laid out inline here, and the "…" is the shared overflow menu. */
+.viewer__bin-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+/* The bin viewer toolbar's countdown — STACKED (line over label), like the bin
+   ROW, and compact: line-beside-label stretched the toolbar too wide. The colour
+   logic — neutral until `is-soon`, then `--margin` — is inherited wholesale from
+   `.life` / `.life.is-soon`. */
+.life--inline {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 92px;
+}
+.life--inline .life__track {
+  width: 100%;
+}
+.life--inline .life__label {
+  margin-top: 0;
+  text-align: right;
+}
+/* The "…" trigger sits on the toolbar's own ground, not over a page image, so it
+   drops the grid card's image-fill + blur and stays visible at rest — but keeps
+   the SAME quiet border at rest as the library trigger, gaining contrast on hover. */
+.viewer__bin-actions .card__more {
+  opacity: 1;
+  background: transparent;
+  backdrop-filter: none;
+  border-color: var(--line);
+}
+.viewer__bin-actions .card__more:hover {
+  border-color: var(--ink-soft);
+}
+/* (The whole-bar lift that used to sit here is gone: the shared menu's popover
+   now portals to <body> and paints at `--z-popover`, above the viewer body, so
+   the toolbar no longer needs raising to clear its own dropdown — see
+   06-reader.css.) */

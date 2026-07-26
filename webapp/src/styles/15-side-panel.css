@@ -1,0 +1,87 @@
+/* ================= SHARED SIDE PANEL ================= */
+/* The reader's docked side-panel CHROME (src/ui/sidePanel.ts) — the ONE card
+   both the "Layers" panel (14-layers-panel.css fills its body with rows) and the
+   "Recognized text" OCR panel (reader.ts fills its body with the transcript)
+   ride. This treatment used to be hand-copied across `.layers-panel` (14) and
+   `.ocr` (07) and kept in sync only by comments — which is exactly how their
+   widths and card radii drifted apart. It lives in ONE place now; the two panels
+   differ only where a token says they should (width) and where the body's own
+   content differs.
+
+   Appended at the END of the manifest (after 14) per the manifest's own rule;
+   the earlier files now carry only each panel's body-specific look. A format's
+   HOOK classes (`.spd-layers`, `.ocr`, …) sit on these same elements for tests
+   and format-specific rules — they carry no chrome of their own. */
+
+/* The card — docked on the RIGHT of the reader's page (and the `.spd` viewer's
+   stage), opened by a toolbar toggle that wears the open-panel active look off
+   its own `aria-pressed`/`aria-expanded`. A `--sheet` ground, a full `--line`
+   border, the raised-card corner and matching padding. `hidden` drops it from
+   layout so the stage takes the full width when it is shut. The dock MARGIN is
+   context-specific and lives with each context: none here (the reader's
+   `.page-wrap` pays a flex gap), a stage margin in `.spd-body` (12). */
+.side-panel {
+  flex: none;
+  width: var(--panel-w);
+  min-width: 0;
+  align-self: stretch;
+  overflow-y: auto;
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  padding: var(--sp-4);
+}
+.side-panel[hidden] {
+  display: none;
+}
+/* The wider track — the layers panel, whose rows carry a name + opacity stepper
+   + eye + a page-sized thumbnail. 320 (up from a plain 268) keeps the name +
+   controls column usable beside a landscape thumbnail that leads ~135px wide. */
+.side-panel--wide {
+  width: var(--panel-w-wide);
+}
+
+/* `[icon] Label` — the feature's glyph inline before a mono-eyebrow label, in
+   the panel's own `--ink-faint`. The icon is decorative (`aria-hidden`); the
+   card's `aria-label` names the panel. */
+.side-panel__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-3);
+  color: var(--ink-faint);
+}
+.side-panel__head-ic {
+  display: inline-flex;
+  align-items: center;
+}
+.side-panel__head svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+.side-panel__head span {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* The body region the caller fills. Structural only — its content carries its
+   own look (`.layers-panel__list` rows, `.ocr__body` transcript text). */
+.side-panel__body {
+  min-width: 0;
+}
+
+/* The shared state line: "still loading" / "nothing here" / "that failed",
+   spoken identically by every panel. Set apart from real body content (a mono
+   eyebrow in `--ink-faint`) so "nothing recognized here" never reads as text. */
+.side-panel__state {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  color: var(--ink-faint);
+}

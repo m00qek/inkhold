@@ -1,0 +1,427 @@
+/* ================= READER ================= */
+/* One column, three rows: the bar, the find bar, and the content row. The page
+   index is no longer a reader COLUMN — it is a docked side panel inside
+   `.page-wrap` (like Layers and OCR), so the reader grid carries only the header
+   rows over the single content row. */
+.reader {
+  position: absolute;
+  inset: 0;
+  display: none;
+  /* `minmax(0, 1fr)` — NOT bare `1fr`. A `1fr` track floors at the column's
+     min-content, and the reader__bar's toolbar (a non-wrapping flex row of
+     controls) has a min-content wider than a narrow viewport, so `1fr` let the
+     single column — and with it the stage — grow past the viewport and scroll
+     horizontally. `minmax(0, …)` caps the track at the container width; the
+     toolbar and stage manage their own overflow inside it. */
+  grid-template-columns: minmax(0, 1fr);
+  /* Four rows now: the bar, the "previewing an older version" banner (0-height
+     when hidden — an empty auto track collapses), the find bar, and the content
+     row. The banner only ever shows in history-preview mode. */
+  grid-template-rows: auto auto auto 1fr;
+  background: var(--desk);
+}
+.reader > .reader__bar {
+  grid-row: 1;
+}
+.reader > .version-banner {
+  grid-row: 2;
+}
+.reader > .findbar {
+  grid-row: 3;
+}
+.reader > .reader__main {
+  grid-row: 4;
+}
+.reader.is-open {
+  display: grid;
+}
+
+/* Reading is a MODE, not a folder. The library topbar repeated the note's title
+   and its folder, and two of the controls it kept were wrong here: sort and the
+   view toggle describe a listing, and the search box was worse than dead weight
+   — typing in it CLOSED the reader, so it looked like search-within-note and did
+   the opposite. The reader's own bar carries everything reading needs, so the
+   library header leaves rather than sitting above it repeating itself.
+
+   This is why the theme toggle is NOT in here: it is an app-level preference,
+   and hiding this bar took it away exactly while reading. It lives in the rail's
+   footer (`.account__actions`), which nothing hides. */
+.sn-root.is-reading .topbar {
+  display: none;
+}
+
+/* The page-index rail — the BODY of the "Pages" side panel now (src/ui/sidePanel.ts
+   frames it: the `--sheet` ground, `--line` border, corner, padding and the
+   scroll all belong to `.side-panel`). So the rail keeps only its own inner
+   layout: a centred column of page thumbnails. */
+
+/* A column of thumbnails wants far less width than the text/list panels the
+   primitive defaults to (`--panel-w`), so the "Pages" dock takes the narrow
+   track. The reader's relayout math reads `--panel-w-narrow` for the LEFT slice
+   (reader.ts), so this stays in sync with the layout. */
+#note-pages-panel {
+  width: var(--panel-w-narrow);
+}
+.filmstrip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.filmstrip__page {
+  /* LOAD-BEARING for `.filmstrip__hits`, which is absolutely positioned against
+     it. Without this the badges resolve against a distant positioned ancestor
+     and stack in the window corner — with the right counts in the DOM and
+     nothing visible where they belong. */
+  position: relative;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+/* Match density across the notebook, on UI that already exists. */
+.filmstrip__hits {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-variant-numeric: tabular-nums;
+  background: var(--accent);
+  color: var(--sheet);
+  pointer-events: none;
+}
+.filmstrip__thumb {
+  /* The PANEL height class (shared with the .spd layers panel). A vertical
+     strip lives on a FIXED item height — it keeps the scroll math stable — and
+     the width is the portrait 3:4 page derived from it (~76px): note pages are
+     painted through the canvas pipeline, which carries no per-page aspect, so
+     the strip keeps the page's known portrait shape rather than guessing. */
+  height: var(--preview-h-panel);
+  width: calc(var(--preview-h-panel) * 3 / 4);
+  border-radius: 2px;
+  overflow: hidden;
+  box-shadow:
+    0 1px 1px var(--shadow),
+    0 6px 12px -10px var(--shadow);
+  outline: 1.5px solid transparent;
+  outline-offset: 2px;
+  transition: outline-color 0.12s ease;
+}
+.filmstrip__thumb canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.filmstrip__page[aria-current="true"] .filmstrip__thumb {
+  outline-color: var(--accent);
+}
+.filmstrip__num {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.filmstrip__page[aria-current="true"] .filmstrip__num {
+  color: var(--ink);
+}
+
+/* Rows PINNED, for the same reason `.main`'s are: the find bar appears and
+   disappears between the reader bar and the stage, and with auto placement its
+   arrival would push the stage into an implicit `auto` row and collapse the page
+   to nothing. Row 2 costs nothing while the bar is `display: none`. */
+.reader__main {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
+  min-width: 0;
+}
+/* The bar and the find bar are placed by `.reader` now (they are its children,
+   not `reader__main`'s). All that is left in here is the stage, which fills the
+   single content row — it carried `grid-row: 3` from the old three-row layout,
+   which on a one-row grid would have created two implicit rows above it. */
+.stage,
+.filestage {
+  grid-row: 1;
+}
+
+/* `hidden` must actually hide. The reader switches between its three modes by
+   setting the attribute on components that declare their own `display`
+   (`.stage` is a grid, `.btn` is inline-flex, `.pager` is a flex row), and a
+   class beats the UA sheet's `[hidden] { display: none }` — so without this the
+   stage stayed on screen under the image preview.
+   Deliberately NOT a global `[hidden] { display: none !important }`: that is the
+   shape of reset that recently outranked a component class and made a button
+   unreadable. Scoped to the reader and to the attribute, at (0,2,0), it can only
+   ever win over the element it is actually set on. */
+.reader [hidden] {
+  display: none;
+}
+/* The bar's flex skeleton moved to `10-toolbar.css` (`.toolbar`) for reuse across
+   viewers; `.reader > .reader__bar` above still PLACES it in the reader grid, and
+   the reader adds `reader__bar` alongside the shared `toolbar` class for that. */
+.backbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  /* Compact viewer-toolbar control (see 00-tokens `--control-h-sm`). */
+  height: var(--control-h-sm);
+  border: 1px solid var(--line);
+  background: transparent;
+  cursor: pointer;
+  padding: 6px 12px 6px 9px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+.backbtn:hover {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+  background: var(--hover-fill);
+}
+.backbtn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Reader toolbar button (Download, and the mockup's other labelled controls).
+   Shares the .backbtn toolbar treatment —
+   outlined chip, mono label + leading glyph, same geometry — so it sits
+   consistently among the reader controls. The --ink modifier fills it as the
+   primary action (matching the app's primary button), keeping both themes via
+   the same tokens; keyboard focus comes from the global :focus-visible rule. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  /* The app's shared button — list rows, bin, search, and every viewer toolbar.
+     Compact control height + the system chrome (border --line, --radius, mono
+     label, --accent focus via the global :focus-visible, --hover-fill hover). */
+  height: var(--control-h-sm);
+  border: 1px solid var(--line);
+  background: transparent;
+  cursor: pointer;
+  padding: 6px 12px 6px 10px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+  transition:
+    color 0.14s ease,
+    background-color 0.14s ease,
+    border-color 0.14s ease;
+}
+.btn svg {
+  width: 14px;
+  height: 14px;
+}
+.btn:hover {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+  background: var(--hover-fill);
+}
+/* The mockup's filled `btn--ink` variant was dropped: Export now matches the
+ * other toolbar controls. The variant is still defined in the mockup if a
+ * high-emphasis button is ever wanted again. */
+
+/* --- the Export dropdown, from the mockup ---------------------------------
+ *
+ * `.menu__item--off` is a first-class state, not an afterthought: two of the
+ * four formats cannot be produced faithfully yet, and the menu says so in place
+ * rather than hiding them. Dimmed, not-allowed, and carrying their reason as a
+ * second line — the row still reads as a real row, which is the point.
+ */
+.menu {
+  position: relative;
+}
+.menu__pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 10;
+  min-width: 244px;
+  padding: 6px;
+  display: none;
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow:
+    0 18px 40px -20px var(--shadow),
+    0 2px 6px -4px var(--shadow);
+}
+.menu.is-open .menu__pop {
+  display: block;
+}
+/* The SHARED overflow menu (ui/menu.ts) FLOATS its popover. On open, JS portals
+   the element to a <body>-level root and positions it with position:fixed from
+   the trigger's viewport rect, so no ancestor's overflow/transform/stacking can
+   clip or mis-anchor it (which is what used to slice a card-edge menu). Because
+   it's portaled OUT of the `.menu` wrapper, the `.menu.is-open .menu__pop` rule
+   above no longer reaches it — visibility is toggled by its own `is-open` here.
+   The reader/spd EXPORT menus keep the plain absolute `.menu__pop` above: they
+   don't portal, so their `right:0; top:100%+6px` anchoring still applies. */
+.menu__pop--float {
+  position: fixed;
+  right: auto;
+  top: auto;
+  z-index: var(--z-popover);
+}
+.menu__pop--float.is-open {
+  display: block;
+}
+/* `.menu__head` is the hand-built export menus' group label; `.menu__section` is
+   the SAME eyebrow rendered by the shared `createMenu()` component (ui/menu.ts),
+   which titles every section it draws (the "always a title" rule). One rule for
+   both so the two menu families read identically — a non-interactive mono eyebrow
+   in `--ink-faint`. */
+.menu__head,
+.menu__section {
+  padding: 8px 10px 4px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.menu__item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 8px 10px;
+  border-radius: 5px;
+  color: var(--ink);
+  font-size: var(--fs-body);
+  text-align: left;
+}
+.menu__item > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.menu__item:hover:not(:disabled) {
+  background: var(--hover);
+}
+.menu__item kbd {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-faint);
+  padding-top: 1px;
+}
+.menu__item--off,
+.menu__item:disabled {
+  cursor: not-allowed;
+  color: var(--ink-faint);
+}
+/* Menu rows that LEAD with a glyph — Move to bin, Restore, Delete permanently.
+   The export rows are a label plus a trailing `.pdf` hint, laid out by the
+   item's default space-between; these are an icon + label that must read as one
+   left cluster, so they override to flex-start. The glyph is stroked in
+   currentColor, so the danger variant's mark turns red with its text — no extra
+   rule and no second colour. */
+.menu__item--lead {
+  justify-content: flex-start;
+  align-items: center;
+  gap: 10px;
+}
+.menu__item-mark {
+  flex: none;
+}
+.menu__item-mark svg {
+  width: 16px;
+  height: 16px;
+}
+.menu__why {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  line-height: 1.35;
+  color: var(--ink-faint);
+}
+.menu__sep {
+  height: 1px;
+  margin: 5px 8px;
+  background: var(--line);
+}
+
+.reader__title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.reader__title b {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reader__title span {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-faint);
+}
+/* `.reader__spacer` became the shared `.toolbar__spacer`; the pager and zoom slot
+   styles moved to `10-toolbar.css` — see there. */
+
+.stage {
+  position: relative;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+.page {
+  position: relative;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--sheet);
+  box-shadow:
+    0 2px 3px var(--shadow),
+    0 26px 50px -28px var(--shadow);
+}
+.page::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid color-mix(in srgb, var(--ink) 9%, transparent);
+  border-radius: 3px;
+  pointer-events: none;
+}
+.page canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* The focused page's PER-LAYER canvas stack (pages/noteLayers.ts), shown
+   instead of the composite canvas when the page's meta carries layers. The
+   host fills the page box and carries the paper backdrop (set inline per
+   theme — the pixels `decode_page`'s composite base has); each layer canvas
+   is absolutely stacked over it at 100% (they are native-res backing stores,
+   so zoom/resize is a pure CSS scale, exactly the spd-canvas-wrap mechanism).
+   Visibility per layer is `style.display` — the shared panel's eye. */
+.note-stack {
+  position: absolute;
+  inset: 0;
+}
+.note-stack canvas {
+  position: absolute;
+  inset: 0;
+}
+

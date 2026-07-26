@@ -1,0 +1,193 @@
+/* ================= VERSION HISTORY =================
+   Two surfaces for the "history of this file" feature (hot-cache versioning,
+   phases 3-6): the reader's "previewing an older version" BANNER, and the
+   version-list DIALOG launched from a card's ⋯ menu. Both draw entirely from the
+   existing design tokens — no new visual language — so they read as the same
+   app the library and the bin do. The restore CONFIRM reuses the shared
+   `.confirm` shell (src/ui/confirm.ts, styled in 08-bin.css); nothing for it
+   lives here. */
+
+/* ---------------- the reader banner ----------------
+   A quiet, full-width strip under the toolbar. It is INFORMATION, not a warning,
+   so it uses the accent (green ink — the brand's "this is a known, safe state")
+   rather than the red reserved for destruction. Restore is the one action. */
+.version-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 10px var(--sp-4);
+  background: color-mix(in srgb, var(--sheet), var(--accent) 12%);
+  border-bottom: 1px solid color-mix(in srgb, var(--line), var(--accent) 30%);
+  color: var(--ink);
+  font-size: var(--fs-body);
+}
+.version-banner[hidden] {
+  display: none;
+}
+.version-banner__badge {
+  display: inline-flex;
+  color: var(--accent);
+  flex: none;
+}
+.version-banner__badge svg {
+  width: 18px;
+  height: 18px;
+}
+.version-banner__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.4;
+}
+.version-banner__restore {
+  flex: none;
+}
+
+/* ---------------- the version-history MENU ----------------
+   An ANCHORED FLOATING PANEL, not a modal — the SAME popover shell (ui/popover.ts)
+   the ⋯ overflow menu uses: portaled to the body-level `.menu-portal`, positioned
+   `fixed` from the trigger's rect (`.menu__pop--float` supplies position/z; the JS
+   sets left/top), dismissed on outside-click / Escape / scroll. `.vh` layers only
+   the visual container on top of that shell — sheet, 2px card corner, popover
+   shadow. It anchors to the card's ⋯ trigger or the reader's Versions button. */
+.vh {
+  width: 296px;
+  max-width: calc(100vw - 16px);
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow:
+    0 18px 46px -18px var(--shadow),
+    0 2px 6px -3px var(--shadow);
+  padding: 2px 0 6px;
+  color: var(--ink);
+}
+/* The section eyebrow — EXACTLY the ⋯ menu's DOWNLOAD / ACTIONS label: mono,
+   uppercase, letter-spaced, --ink-faint. No file-name title, no bottom border. */
+.vh__eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 15px 16px 9px;
+}
+.vh__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* The loading / empty / error line — a quiet, centred state in the panel body. */
+.vh-state {
+  padding: 18px 16px 22px;
+  text-align: center;
+  color: var(--ink-soft);
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+}
+
+/* ---------------- one version row ----------------
+   Two lines, no thumbnails, no per-row buttons: a row CLICK previews the version.
+   Line 1: relative time + status; line 2: exact date + content signal. */
+.vh-row {
+  position: relative;
+  padding: 10px 16px;
+  cursor: default;
+}
+.vh-row + .vh-row {
+  border-top: 1px solid var(--row-rule);
+}
+.vh-row.is-hover,
+.vh-row:focus-visible {
+  background: var(--hover-fill);
+  outline: none;
+}
+/* VIEWING — selection state (the version on screen): an accent left rail + a faint
+   accent tint. A different CHANNEL from the Current label; a row can be both. */
+.vh-row.is-viewing {
+  background: color-mix(in srgb, var(--sheet), var(--accent) 8%);
+}
+.vh-row.is-viewing::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+}
+.vh-row.is-viewing.is-hover,
+.vh-row.is-viewing:focus-visible {
+  background: color-mix(in srgb, var(--sheet), var(--accent) 12%);
+}
+
+.vh-l1 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.vh-when {
+  font-size: var(--fs-body);
+  color: var(--ink);
+}
+/* The status cluster on line 1's right — holds Viewing and/or Current together. */
+.vh-status {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.vh-l2 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.02em;
+  color: var(--ink-faint);
+}
+.vh-pages,
+.vh-size {
+  flex: none;
+}
+.vh-delta {
+  color: var(--accent);
+}
+.vh-delta.is-first {
+  color: var(--ink-faint);
+}
+
+/* CURRENT — an outlined LABEL (a fact about the file), 2px corner, never a pill. */
+.tag-current {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  border-radius: var(--radius);
+  padding: 1px 6px;
+}
+/* VIEWING — a dotted status marker, backed by the row's rail + tint above. */
+.mark-viewing {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.mark-viewing .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}

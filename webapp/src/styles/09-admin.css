@@ -1,0 +1,731 @@
+/*
+ * The admin console (see src/pages/admin.ts, docs/mockups/admin.html).
+ *
+ * The console is A ROOM IN THE SAME HOUSE, not a separate building: every colour
+ * here is a token from 01, and the two rules the rest of the app lives by hold
+ * unchanged — red (`--margin`) is danger and nothing else, green (`--accent`) is
+ * brand and state. There are no solid-black buttons: the app's one filled button
+ * is the auth sheet's `.button`, and the gate reuses that rather than minting a
+ * second filled style for a list of household accounts.
+ *
+ * The GATE is deliberately the app's auth language and not the console's own —
+ * `2px` radius, uppercase mono button, an underlined field at `16px` (which is
+ * what stops iOS zooming on focus). It is the same act as signing in, so it
+ * should not look like a different one.
+ *
+ * TWO RADIUS VOCABULARIES IN ONE FILE, and which one applies is decided by which
+ * surface an element belongs to — not by which file it happens to be declared
+ * in. This is worth stating because the file once got it wrong everywhere:
+ *
+ *   - THE GATE IS SQUARE (`2px`) BECAUSE IT IS AN AUTH SURFACE. `2px` is
+ *     01-tokens-auth.css's language — the login card and its underlined fields —
+ *     and it is deliberately unlike the app around it, because signing in is
+ *     deliberately unlike using the app. Only `.admin-gate__*` may take it.
+ *   - EVERYTHING ELSE HERE IS THE APP SHELL, so it takes the shell's radii, per
+ *     element kind, with the recycle bin as the reference — it is this console's
+ *     sibling destination, and two destinations that round their rows
+ *     differently read as two authors rather than as one app. A row is `4px`
+ *     (`.bin__row`, `.gallery.is-list .card`), something nested inside a row is
+ *     `3px`, a chip is `3px` (`.card__badge`), a rule or track is `1px`
+ *     (`.life__track`), a modal is `12px` (`.confirm`). A CONTROL takes the
+ *     coherence system's one corner — `var(--radius)` (2px) — the same as
+ *     `.btn` and every other button/select since the control-chrome pass
+ *     unified them; the console's buttons (`.admin-btn`, `.admin-change`,
+ *     `.admin-device__cut`) followed `.btn` there.
+ *
+ * The whole console body was at `2px` before this — the gate's number, applied
+ * to fifteen selectors that are not the gate — and the tell was the confirm
+ * dialog: the same component, in the same shell, for the same class of
+ * destructive action, squarer here than in the bin two clicks away.
+ */
+
+/* The console is an overlay on the shell's content area, exactly as the reader
+   is: the rail and the topbar stay live behind it, which is what makes clicking
+   a folder row the way out. */
+.admin {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow-y: auto;
+  background: var(--desk);
+
+  /*
+   * `--margin` AS TEXT is `--margin-ink`, and the distinction is measured, not
+   * decorative: `--margin` is tuned as the sheet's printed margin RULE, where
+   * the 3.0 non-text threshold applies, and as words on `--sheet` it comes to
+   * 4.49:1 — under the 4.5 a label owes, and not by enough to argue about.
+   *
+   * The token lives in `01-tokens-auth.css` because the recycle bin needs the
+   * same colour and two definitions of one token is how they drift. Aliased here
+   * so every red in this file reads as one decision.
+   */
+  --admin-danger: var(--margin-ink);
+}
+
+.admin__body {
+  padding: 26px 28px 60px;
+}
+
+/* --- the gate ------------------------------------------------------------- */
+
+.admin-gate {
+  display: grid;
+  place-items: center;
+  min-height: 70vh;
+}
+
+.admin-gate__form {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 30px 28px;
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  box-shadow: 0 20px 50px -30px var(--shadow);
+}
+
+.admin-gate__mark {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-soft); /* not --ink-faint: this is a label, and it must clear 4.5 */
+}
+
+.admin-gate__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-heading);
+  /* Pin the weight to the design-system heading step (600). As an <h1> this
+     otherwise inherited the UA bold (700); with Space Grotesk shipping only
+     400/600, 700 resolved to 600 by nearest-match anyway, so this just makes
+     the heading weight explicit. -0.01em is the guide's .sp-heading tracking —
+     Space Grotesk wants a hair of tightening at display sizes. */
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+.admin-gate__why,
+.admin-gate__note {
+  margin: 0;
+  font-size: var(--fs-body);
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+
+.admin-gate__note {
+  font-size: var(--fs-caption);
+}
+
+/*
+ * The gate's one action. The auth pages' `.button` cannot be reused inside the
+ * shell — `02`'s `:where(button) { color: inherit }` reset is declared later at
+ * the same specificity and beats it, painting the label `--ink` on an `--ink`
+ * background. This file is last in the manifest, so this class holds.
+ *
+ * Outlined rather than filled: the app reserves its one solid button for the
+ * pre-auth sheet, and a black slab in the middle of a paper console is not the
+ * language. The `--ink` border makes it unambiguously the primary action here,
+ * which is all a form with a single button needs.
+ */
+.admin-gate__submit {
+  width: 100%;
+  padding: 13px 16px;
+  appearance: none;
+  border: 1.5px solid var(--ink);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.admin-gate__submit:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.admin-gate__submit:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* --- section head --------------------------------------------------------- */
+
+/* CENTRED, like the list view's `.gallery.is-list` and all three of the bin's
+   760px blocks. A capped measure left-aligned under a full-width topbar reads as
+   a layout that ran out rather than as a deliberate column — the eye takes the
+   empty right half as unfinished. The cap is the measure; `margin-inline: auto`
+   is what makes it look chosen. */
+.admin-wrap {
+  max-width: 880px;
+  margin-inline: auto;
+}
+
+.admin-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 16px;
+}
+
+.admin-head__title {
+  margin: 0;
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+.admin-head__rule {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.admin-head__acts {
+  display: flex;
+  gap: 8px;
+}
+
+/* --- buttons -------------------------------------------------------------- */
+
+/* Outlined, never filled: the console's actions are peers of each other, and a
+   filled button among them would nominate one of "Add", "Reset" and "Delete" as
+   the thing you probably came here to do. */
+.admin-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  /* 24px is the WCAG target floor; 30px leaves room for it to be hit, not just
+     to satisfy the measurement. */
+  min-height: 30px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  /* `.btn` in 06 — the app's shared button radius. */
+  border-radius: var(--radius);
+  background: var(--sheet);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.admin-btn:hover:not(:disabled) {
+  border-color: var(--ink-soft);
+}
+
+.admin-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* `--margin` is the ONE colour reserved for "this destroys something", and this
+   is the only place in the console that spends it. */
+.admin-btn--danger {
+  color: var(--admin-danger);
+  border-color: color-mix(in srgb, var(--margin) 40%, var(--line));
+}
+
+.admin-btn--danger:hover:not(:disabled) {
+  border-color: var(--margin);
+  background: color-mix(in srgb, var(--margin) 8%, var(--sheet));
+}
+
+/* --- a person ------------------------------------------------------------- */
+
+.admin-people {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.admin-person {
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  gap: 14px;
+  align-items: start;
+  padding: 16px 14px;
+  border: 1px solid var(--line);
+  /* A ROW, so the bin's row (`.bin__row`) and the gallery's list card. */
+  border-radius: 4px;
+  background: var(--sheet);
+}
+
+.admin-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--hover);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-soft);
+}
+
+.admin-person__id {
+  min-width: 0;
+}
+
+.admin-person__name {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+
+.admin-person__mail,
+.admin-person__since {
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.admin-person__acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.admin-chip {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  /* `.card__badge` / `.card__ocr` — the shell's small-pill radius. */
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+/* Green is brand and STATE — "this account carries the admin capability" is a
+   state, not a warning. */
+.admin-chip--admin {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+}
+
+/* Red here is the app's other reserved meaning: something is not finished. A
+   temporary password is a credential still waiting to be replaced. */
+.admin-chip--pending {
+  color: var(--admin-danger);
+  border-color: color-mix(in srgb, var(--margin) 40%, var(--line));
+}
+
+/* --- notices -------------------------------------------------------------- */
+
+/* The OTHER capped block at this level, and it replaces `.admin-wrap` outright
+   (`body.replaceChildren` in the view) rather than sitting beside it — so it is
+   the whole console while it is up, and centring it is the same decision for the
+   same reason. Left out, it was the one thing still hanging off the left edge
+   while every other state was centred, which reads as a bug in the state rather
+   than as a narrower measure. */
+.admin-notice {
+  max-width: 46ch;
+  margin-inline: auto;
+  padding: 40px 0;
+}
+
+.admin-notice__title {
+  margin: 0 0 8px;
+  font-size: var(--fs-title);
+  font-weight: 600;
+}
+
+.admin-notice__text {
+  margin: 0;
+  font-size: var(--fs-body);
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+
+/* --- dialogs -------------------------------------------------------------- */
+
+/* The dialog SHELL and BACKDROP now live once, shared with the bin's `.confirm`,
+   in 08-bin.css — the two used to hand-copy each other "to the pixel". Only the
+   console-specific interior (a flex-gap body, fielded rows, the type-to-confirm
+   literal) stays here. */
+
+.admin-dialog__body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 24px 24px 4px;
+}
+
+.admin-dialog__title {
+  margin: 0;
+  font-size: var(--fs-title);
+  font-weight: 600;
+  line-height: 1.35;
+  text-wrap: balance;
+}
+
+.admin-dialog__text {
+  margin: 0;
+  font-size: var(--fs-body);
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+
+/* The literal the user has to reproduce, in its own case — the field label above
+   it is uppercased for rhythm and an address is not. */
+.admin-dialog__word {
+  align-self: flex-start;
+  margin-top: -2px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  color: var(--ink);
+  user-select: all;
+}
+
+.admin-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 18px 24px 20px;
+}
+
+/* A string that is read aloud or copied, so one click takes all of it: a
+   half-selected password is a support call. */
+.admin-secret {
+  display: block;
+  padding: 14px;
+  border: 1px solid var(--line);
+  /* A block, not a control — the same 4px as the cards and rows. */
+  border-radius: 4px;
+  background: var(--desk);
+  font-family: var(--font-mono);
+  font-size: var(--fs-title);
+  letter-spacing: 0.06em;
+  text-align: center;
+  user-select: all;
+}
+
+.admin-check {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  align-items: center;
+  font-size: var(--fs-body);
+}
+
+.admin-check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.admin-check small {
+  grid-column: 2;
+  font-size: var(--fs-caption);
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
+/* --- narrow ---------------------------------------------------------------- */
+
+@media (max-width: 620px) {
+  .admin__body {
+    padding: 20px 16px 48px;
+  }
+
+  /* The action column stops being a column: at this width it would squeeze the
+     address into two characters per line. */
+  .admin-person {
+    grid-template-columns: 34px 1fr;
+  }
+
+  .admin-person__acts {
+    grid-column: 2;
+  }
+}
+
+/* --- storage, as a rule ----------------------------------------------------
+ *
+ * The SAME idiom the recycle bin uses for its retention countdown, so "how much
+ * is left" reads the same way in both places rather than the console inventing a
+ * second visual language for the same question.
+ */
+
+.admin-meter {
+  margin-top: 12px;
+  max-width: 420px;
+}
+
+.admin-meter__track {
+  height: 3px;
+  background: var(--rule);
+  /* `.life__track` in 08. The console says in prose that this is the bin's
+     countdown idiom; this is that claim being true of the geometry too. */
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.admin-meter__fill {
+  height: 100%;
+  background: var(--ink-faint);
+  border-radius: 1px;
+}
+
+.admin-meter__label {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-soft);
+}
+
+/* 90% is where a device is about to fail a sync. That is danger, not
+   decoration, so it takes the colour the rest of the app reserves for it. */
+.admin-meter.is-tight .admin-meter__fill,
+.admin-meter.is-over .admin-meter__fill {
+  background: var(--margin);
+}
+
+.admin-meter.is-tight .admin-meter__label,
+.admin-meter.is-over .admin-meter__label {
+  color: var(--admin-danger);
+}
+
+/*
+ * OVER ALLOTMENT. The bar is already at 100% and has nowhere further to go, so
+ * the state cannot be carried by length — a rule that looks identical at 100%
+ * and at 140% is exactly the lie this console cannot afford. It is carried by
+ * the label, which states the overage in bytes, and by this hatch, which makes
+ * "full" and "past full" different at a glance rather than only on reading.
+ */
+.admin-meter.is-over .admin-meter__fill {
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--margin) 0 4px,
+    color-mix(in srgb, var(--margin) 55%, var(--sheet)) 4px 8px
+  );
+}
+
+/* --- the one editing control ------------------------------------------------
+ *
+ * ONE IDIOM, used by the allotment and by the retention window alike: a small
+ * bordered "Change" beside the value it changes. An earlier design made the
+ * allotment an inline dashed-underline number, which was a second way to edit in
+ * a console that otherwise had none.
+ */
+.admin-change {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* 24px is the WCAG target floor and this is the smallest control here, so it
+     is the one that has to be checked against it. */
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  /* A button, so the button radius — small, but not a different kind of thing. */
+  border-radius: var(--radius);
+  background: var(--sheet);
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+/* The pencil, inside the button and taking the label's colour — decoration on a
+   control whose word already says what it does. Sized to the cap height of the
+   10.5px mono label rather than to the 15px a topbar action uses: this is the
+   smallest control in the console and a glyph that outgrew its own text would
+   read as the button's subject rather than as its mark. */
+.admin-change__mark svg {
+  width: 11px;
+  height: 11px;
+  display: block;
+}
+
+.admin-change:hover {
+  border-color: var(--ink-soft);
+  color: var(--ink);
+}
+
+/* --- devices ----------------------------------------------------------------
+ *
+ * One per line at a shared width, so a person's tablets read as a LIST: every
+ * row the same size, every Unlink in the same column. Pills sized to their own
+ * text made two devices look like two different kinds of thing.
+ */
+
+.admin-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  max-width: 480px;
+}
+
+.admin-device {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 5px 5px 5px 10px;
+  border: 1px solid var(--line);
+  /* NESTED INSIDE a person row, so one step tighter than the 4px around it. */
+  border-radius: 3px;
+  background: var(--desk);
+  font-size: var(--fs-caption);
+}
+
+.admin-device__name {
+  white-space: nowrap;
+}
+
+.admin-device__meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-soft);
+}
+
+/* A revoked binding is DIMMED BUT PRESENT. Unlinking is a soft status flip, not
+   a row delete — which is exactly what makes re-pairing possible — so hiding it
+   would hide the thing that explains why the tablet can come back. */
+.admin-device.is-revoked .admin-device__name,
+.admin-device.is-revoked .admin-device__meta {
+  color: var(--ink-faint);
+}
+
+/*
+ * An explicit control, not a chip's dismiss glyph. A bare "×" on a pill reads as
+ * "remove this from a selection" — harmless, local, undone by clicking again.
+ * This cuts a tablet off from syncing and re-linking needs the device in hand,
+ * so it says what it does and looks like something you press. 26px clears the
+ * 24px target the bare glyph missed.
+ */
+.admin-device__cut {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.admin-device__cut:hover {
+  color: var(--admin-danger);
+  border-color: color-mix(in srgb, var(--margin) 45%, var(--line));
+  background: color-mix(in srgb, var(--margin) 8%, var(--sheet));
+}
+
+.admin-devices__none {
+  margin-top: 12px;
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+
+/* A revoked device's label is a statement of fact, not a warning. */
+.admin-chip--muted {
+  color: var(--ink-soft);
+}
+
+/* --- the server panel ------------------------------------------------------- */
+
+.admin-server {
+  margin-top: 34px;
+}
+
+.admin-head__ver {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-soft);
+}
+
+.admin-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.admin-stat {
+  padding: 14px;
+  border: 1px solid var(--line);
+  /* A card. Same as `.admin-person`: both are bordered blocks in the body. */
+  border-radius: 4px;
+  background: var(--sheet);
+}
+
+.admin-stat__k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.admin-stat__v {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: var(--fs-heading);
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-stat__sub {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-soft);
+}
+
+.admin-stat .admin-meter {
+  max-width: none;
+}
+
+/* The non-retroactive promise, said on the card as well as in the dialog: the
+   admin reading the number is the one who needs to know that lowering it is
+   safe, and they read the card before they ever open the control. */
+.admin-server__note {
+  margin: 12px 0 0;
+  max-width: 62ch;
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+  color: var(--ink-soft);
+}

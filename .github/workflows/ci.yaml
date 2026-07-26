@@ -1,0 +1,91 @@
+name: Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Test Parsers
+        run: make parser-test
+
+      - name: Test Backend
+        run: make test
+
+  test-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('webapp/package-lock.json') }}
+
+      - name: Setup Web Tests
+        run: make web-test-setup
+
+      - name: Test Frontend
+        run: make web-test
+
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-linux-musl, x86-linux-musl, aarch64-linux-musl, arm-linux-musleabihf]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Install Frontend Dependencies
+        run: npm --prefix webapp ci
+
+      - name: Build Artifact
+        run: make release-artifact TARGET=${{ matrix.target }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: inkhold-${{ matrix.target }}
+          path: inkhold-${{ matrix.target }}.tar.gz

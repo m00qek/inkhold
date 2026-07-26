@@ -1,0 +1,798 @@
+import { describe, it, expect, vi, afterEach } from "vitest";
+import {
+  createThumbnails,
+  strategyFor,
+  boxDownscaleRgba,
+  coverCropRect,
+  downscalePlan,
+  type ThumbNet,
+  type ThumbPainter,
+  type ThumbSource,
+} from "../../src/render/thumbnails";
+import { thumbTargetWidth } from "../../src/render/types";
+import type { PersistentThumbStore } from "../../src/cache/idb";
+import { cacheId } from "../../src/cache/renderCache";
+import type { PageRef, Theme } from "../../src/core/types";
+
+// The facade's ORCHESTRATION is what these exercise — dispatch, cache keys,
+// 404-fallback, theme separation — with every pixel/network seam faked, so it
+// runs on plain Node with no canvas and no server. The real canvas/fetch seams
+// (`createCanvasThumbPainter`/`createFetchThumbNet`) are browser code, covered by
+// the e2e layer.
+
+/** A tagged fake blob, so a test can tell WHICH strategy produced a result. */
+const tagged = (tag: string): Blob => new Blob([tag], { type: "image/webp" });
+const tagOf = async (b: Blob): Promise<string> => b.text();
+
+function page(hash: string): PageRef {
+  return { index: 0, hash, width: 1404, height: 1872, textHash: null };
+}
+
+function fakePainter() {
+  const glyph = vi.fn(async (kind: string, theme: Theme) => tagged(`glyph:${kind}:${theme}`));
+  const fromImageBytes = vi.fn(
+    async (_b: Blob, theme: Theme, _cropAspect?: { w: number; h: number }) => tagged(`image:${theme}`),
+  );
+  const fromBitmap = vi.fn(async (_bm: ImageBitmap) => tagged("note"));
+  const textSnippet = vi.fn(async (content: string, theme: Theme) => tagged(`text:${content.slice(0, 3)}:${theme}`));
+  // The image-document tile: a fixed 3000×2000 "photo" source, so dims-memo
+  // assertions can check the SOURCE truth is what gets recorded.
+  const imageTile = vi.fn(async (_b: Blob) => ({ blob: tagged("imgdoc"), sourceW: 3000, sourceH: 2000 }));
+  return { glyph, fromImageBytes, fromBitmap, textSnippet, imageTile } satisfies ThumbPainter;
+}
+
+function fakeNet(over: Partial<ThumbNet> = {}) {
+  return {
+    bytes: vi.fn(async () => tagged("bytes")),
+    text: vi.fn(async () => "hello\nworld\nthird line"),
+    ...over,
+  } as ThumbNet & { bytes: ReturnType<typeof vi.fn>; text: ReturnType<typeof vi.fn> };
+}
+
+/** Unless a test supplies its own `probe`, delegate to `bytes` and read null as
+ *  a DEFINITIVE 404 — the pre-probe tests were written when null meant exactly
+ *  that, so their call-count assertions keep working unchanged. */
+function withProbe(net: ReturnType<typeof fakeNet>): ReturnType<typeof fakeNet> {
+  if (!("probe" in net) || net.probe === undefined) {
+    (net as { probe?: ThumbNet["probe"] }).probe = vi.fn(async (url: string) => {
+      const b = await net.bytes(url);
+      return b ?? "not-found";
+    });
+  }
+  return net;
+}
+
+/** A fresh in-memory cover memo per test — the module-level shared instance
+ *  must never leak state across tests. */
+function fakeCoverMemo() {
+  const persisted = new Set<string>();
+  const session = new Set<string>();
+  return {
+    persisted,
+    session,
+    async hasNoCover(hash: string) {
+      return persisted.has(hash) || session.has(hash);
+    },
+    async setNoCover(hash: string) {
+      persisted.add(hash);
+    },
+    noteTransientMiss(hash: string) {
+      session.add(hash);
+    },
+  };
+}
+
+/**
+ * A fake of the persistent `sn-thumbs` store — a plain in-memory Map with spied
+ * get/put, so a test can populate it in one "session" and assert a fresh facade
+ * reads through it in the next, and can make either op throw to prove fail-open.
+ */
+function fakePersistentStore(over: Partial<PersistentThumbStore> = {}): PersistentThumbStore & {
+  map: Map<string, Blob>;
+  get: ReturnType<typeof vi.fn>;
+  put: ReturnType<typeof vi.fn>;
+} {
+  const map = new Map<string, Blob>();
+  const store = {
+    map,
+    available: true,
+    get: vi.fn(async (key: string) => map.get(key)),
+    put: vi.fn(async (key: string, image: Blob) => {
+      map.set(key, image);
+    }),
+    async clear() {
+      map.clear();
+    },
+    ...over,
+  } as PersistentThumbStore & { map: Map<string, Blob>; get: ReturnType<typeof vi.fn>; put: ReturnType<typeof vi.fn> };
+  return store;
+}
+
+function build(
+  opts: {
+    theme?: () => Theme;
+    net?: ThumbNet;
+    coverMemo?: ReturnType<typeof fakeCoverMemo>;
+    persistent?: PersistentThumbStore | null;
+  } = {},
+) {
+  const painter = fakePainter();
+  const net = withProbe((opts.net ?? fakeNet()) as ReturnType<typeof fakeNet>);
+  const coverMemo = opts.coverMemo ?? fakeCoverMemo();
+  const renderNote = vi.fn(async () => ({ width: 240, height: 320, close() {} }) as unknown as ImageBitmap);
+  // Injected dims sink, so tests never touch the module-level persistent memo.
+  const setDims = vi.fn(async (_hash: string, _dims: { w: number; h: number }) => {});
+  const thumbs = createThumbnails({
+    coverMemo,
+    getTheme: opts.theme ?? (() => "light"),
+    net,
+    painter,
+    renderNote,
+    setDims,
+    persistent: opts.persistent,
+  });
+  return { coverMemo, thumbs, painter, net: net as ReturnType<typeof fakeNet>, renderNote, setDims };
+}
+
+const noteSrc = (fileHash = "notehash"): ThumbSource => ({ fileHash, fileId: "n1", noteId: "n1", page: page("pageh") });
+const fileSrc = (hash: string | null): ThumbSource => ({ fileHash: hash, fileId: "f1" });
+
+describe("strategyFor", () => {
+  it("maps each type to its closed strategy", () => {
+    expect(strategyFor("note")).toBe("note-page");
+    expect(strategyFor("spd")).toBe("image");
+    // Plain raster documents are the LOCAL-ONLY branch: raw bytes fetched once,
+    // downscaled client-side, true dims memoised (masonry.md decision 5).
+    expect(strategyFor("png")).toBe("image-doc");
+    expect(strategyFor("JPG")).toBe("image-doc");
+    expect(strategyFor("webp")).toBe("image-doc");
+    expect(strategyFor("gif")).toBe("image-doc");
+    expect(strategyFor("txt")).toBe("text");
+    expect(strategyFor("pdf")).toBe("glyph");
+    expect(strategyFor("")).toBe("glyph");
+    expect(strategyFor("mystery")).toBe("glyph");
+  });
+});
+
+describe("thumbnail facade", () => {
+  it("every strategy resolves to a WebP blob, never null", async () => {
+    const t = build();
+    for (const [src, type] of [
+      [fileSrc(null), "folder"],
+      [noteSrc(), "note"],
+      [fileSrc("h1"), "spd"],
+      [fileSrc("h2"), "png"],
+      [fileSrc("h3"), "txt"],
+      [fileSrc("h4"), "pdf"],
+    ] as const) {
+      const blob = await t.thumbs.getThumbnail(src, type);
+      expect(blob).toBeInstanceOf(Blob);
+      expect(blob.type).toBe("image/webp");
+    }
+  });
+
+  it("the glyph path draws client-side and makes NO network call", async () => {
+    const t = build();
+    const blob = await t.thumbs.getThumbnail(fileSrc("h9"), "pdf");
+    expect(await tagOf(blob)).toBe("glyph:PDF:light");
+    expect(t.painter.glyph).toHaveBeenCalledTimes(1);
+    expect(t.net.bytes).not.toHaveBeenCalled();
+    expect(t.net.text).not.toHaveBeenCalled();
+    expect(t.renderNote).not.toHaveBeenCalled();
+  });
+
+  it("a folder (null hash) is a folder glyph, no network", async () => {
+    const t = build();
+    const blob = await t.thumbs.getThumbnail(fileSrc(null), "");
+    expect(await tagOf(blob)).toBe("glyph:folder:light");
+    expect(t.net.bytes).not.toHaveBeenCalled();
+  });
+
+  it("a .note with a cover prefers it: /thumbnail fetched + transcoded, render pipeline untouched", async () => {
+    const t = build();
+    const blob = await t.thumbs.getThumbnail(noteSrc("abcnote"), "note");
+    expect(await tagOf(blob)).toBe("image:light");
+    expect(t.net.bytes).toHaveBeenCalledWith("/thumbnail/abcnote");
+    expect(t.painter.fromImageBytes).toHaveBeenCalledTimes(1);
+    expect(t.renderNote).not.toHaveBeenCalled();
+    expect(t.painter.fromBitmap).not.toHaveBeenCalled();
+  });
+
+  it("a coverless .note (404) falls back to the injected render pipeline, once per session", async () => {
+    const t = build({ net: fakeNet({ bytes: vi.fn(async () => null) }) });
+    const blob = await t.thumbs.getThumbnail(noteSrc(), "note");
+    expect(await tagOf(blob)).toBe("note");
+    expect(t.renderNote).toHaveBeenCalledWith("n1", expect.objectContaining({ hash: "pageh" }), "light");
+    expect(t.painter.fromBitmap).toHaveBeenCalledTimes(1);
+    // The miss is remembered per hash: a repaint goes straight to the (cached)
+    // render — the whole session costs ONE cheap 404, not one per repaint.
+    await t.thumbs.getThumbnail(noteSrc(), "note");
+    expect(t.net.bytes).toHaveBeenCalledTimes(1);
+  });
+
+  it("a .note with no hash at all skips the cover probe and renders", async () => {
+    const t = build();
+    const blob = await t.thumbs.getThumbnail({ fileHash: null, noteId: "n1", page: page("pageh") }, "note");
+    expect(await tagOf(blob)).toBe("note");
+    expect(t.net.bytes).not.toHaveBeenCalled();
+  });
+
+  it("a .spd fetches the embedded-thumbnail endpoint, then transcodes", async () => {
+    const t = build();
+    const blob = await t.thumbs.getThumbnail(fileSrc("abc"), "spd");
+    expect(await tagOf(blob)).toBe("image:light");
+    expect(t.net.bytes).toHaveBeenCalledWith("/thumbnail/abc");
+    expect(t.painter.fromImageBytes).toHaveBeenCalledTimes(1);
+  });
+
+  it("the .spd (image) strategy passes source.aspect THROUGH to the painter's crop", async () => {
+    const t = build();
+    await t.thumbs.getThumbnail({ fileHash: "big", fileId: "f1", aspect: { w: 16, h: 9 } }, "spd");
+    // The corrected canvas aspect reaches fromImageBytes as its 3rd arg, so the
+    // transcode de-letterboxes the fixed-portrait embedded preview at cache time.
+    expect(t.painter.fromImageBytes).toHaveBeenCalledTimes(1);
+    const [, , cropAspect] = t.painter.fromImageBytes.mock.calls[0]!;
+    expect(cropAspect).toEqual({ w: 16, h: 9 });
+  });
+
+  it("a .spd with NO aspect transcodes whole — no crop arg (behaves as before)", async () => {
+    const t = build();
+    await t.thumbs.getThumbnail(fileSrc("noasp"), "spd");
+    expect(t.painter.fromImageBytes).toHaveBeenCalledTimes(1);
+    const [, , cropAspect] = t.painter.fromImageBytes.mock.calls[0]!;
+    expect(cropAspect).toBeUndefined();
+  });
+
+  it("an image file fetches the raw-file URL, not the thumbnail endpoint", async () => {
+    const t = build();
+    await t.thumbs.getThumbnail(fileSrc("def"), "png");
+    expect(t.net.bytes).toHaveBeenCalledTimes(1);
+    expect(t.net.bytes.mock.calls[0]![0]).toMatch(/^\/file\/f1\?v=def$/);
+    // …and it goes through the tier-sized local decode, not the spd transcode.
+    expect(t.painter.imageTile).toHaveBeenCalledTimes(1);
+    expect(t.painter.fromImageBytes).not.toHaveBeenCalled();
+  });
+
+  it("a .spd with no embedded thumbnail (404) falls back to the glyph", async () => {
+    const t = build({ net: fakeNet({ bytes: vi.fn(async () => null) }) });
+    const blob = await t.thumbs.getThumbnail(fileSrc("ghi"), "spd");
+    expect(await tagOf(blob)).toBe("glyph:SPD:light");
+    expect(t.painter.fromImageBytes).not.toHaveBeenCalled();
+    expect(t.painter.glyph).toHaveBeenCalledTimes(1);
+  });
+
+  it(".txt rasterises a snippet of the fetched head, not a static glyph", async () => {
+    const t = build();
+    const blob = await t.thumbs.getThumbnail(fileSrc("txth"), "txt");
+    expect(await tagOf(blob)).toBe("text:hel:light");
+    expect(t.net.text).toHaveBeenCalledTimes(1);
+    expect(t.painter.textSnippet).toHaveBeenCalledTimes(1);
+    expect(t.painter.glyph).not.toHaveBeenCalled();
+  });
+
+  it("an unreadable .txt (404) falls back to the glyph", async () => {
+    const t = build({ net: fakeNet({ text: vi.fn(async () => null) }) });
+    const blob = await t.thumbs.getThumbnail(fileSrc("t2"), "txt");
+    expect(await tagOf(blob)).toBe("glyph:TXT:light");
+    expect(t.painter.textSnippet).not.toHaveBeenCalled();
+  });
+
+  it("a TRASHED image/text file fetches the BIN-scoped raw route, not the live one", async () => {
+    const t = build();
+    await t.thumbs.getThumbnail({ fileHash: "png", fileId: "f1", bin: true }, "png");
+    await t.thumbs.getThumbnail({ fileHash: "txt", fileId: "f1", bin: true }, "txt");
+    // The live `/file/{id}` 404s for anything trashed (Files.get hardcodes
+    // deleted=0), so both raw-file strategies mint the bin twin.
+    expect(t.net.bytes.mock.calls[0]![0]).toMatch(/^\/api\/controlplane\/bin\/file\/f1\?v=png$/);
+    expect(t.net.text.mock.calls[0]![0]).toMatch(/^\/api\/controlplane\/bin\/file\/f1\?v=txt$/);
+  });
+
+  it("a trashed .spd/.note cover still probes the content-addressed /thumbnail route, flag or not", async () => {
+    // `/thumbnail/{hash}` serves trashed blobs too — it is content-addressed —
+    // so the cover/embedded-thumbnail probes take no bin flag and key by hash
+    // alone (the bytes are the same bytes whichever scope carried them).
+    const t = build();
+    await t.thumbs.getThumbnail({ fileHash: "spdh", fileId: "f1", bin: true }, "spd");
+    expect(t.net.bytes).toHaveBeenCalledWith("/thumbnail/spdh");
+  });
+
+  it("a hashless image/text file cannot be fetched → its own glyph", async () => {
+    const t = build();
+    const spd = await t.thumbs.getThumbnail({ fileHash: null, fileId: "x" }, "spd");
+    const txt = await t.thumbs.getThumbnail({ fileHash: null, fileId: "x" }, "txt");
+    expect(t.net.bytes).not.toHaveBeenCalled();
+    expect(t.net.text).not.toHaveBeenCalled();
+    // Distinct kinds → two distinct glyphs, not one shared folder glyph.
+    expect(await tagOf(spd)).toBe("glyph:SPD:light");
+    expect(await tagOf(txt)).toBe("glyph:TXT:light");
+    expect(t.painter.glyph).toHaveBeenCalledTimes(2);
+  });
+
+  it("caches by content hash — a repeat request produces once", async () => {
+    const t = build();
+    const a = t.thumbs.getThumbnail(fileSrc("same"), "spd");
+    const b = t.thumbs.getThumbnail(fileSrc("same"), "spd");
+    await Promise.all([a, b]);
+    await t.thumbs.getThumbnail(fileSrc("same"), "spd");
+    expect(t.net.bytes).toHaveBeenCalledTimes(1);
+    expect(t.painter.fromImageBytes).toHaveBeenCalledTimes(1);
+  });
+
+  it("keys by theme — light and dark are distinct entries", async () => {
+    let theme: Theme = "light";
+    const t = build({ theme: () => theme });
+    const light = await t.thumbs.getThumbnail(fileSrc("k"), "spd");
+    theme = "dark";
+    const dark = await t.thumbs.getThumbnail(fileSrc("k"), "spd");
+    expect(await tagOf(light)).toBe("image:light");
+    expect(await tagOf(dark)).toBe("image:dark");
+    // One fetch/transcode PER theme, not shared.
+    expect(t.net.bytes).toHaveBeenCalledTimes(2);
+    expect(t.painter.fromImageBytes).toHaveBeenCalledTimes(2);
+  });
+
+  it("glyphs key by type:theme — one folder glyph shared across folders", async () => {
+    const t = build();
+    await t.thumbs.getThumbnail({ fileHash: null }, "");
+    await t.thumbs.getThumbnail({ fileHash: null }, "folder");
+    // Both are the folder glyph in the same theme → produced once.
+    expect(t.painter.glyph).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed render is not cached — the next request retries", async () => {
+    const renderNote = vi
+      .fn<() => Promise<ImageBitmap>>()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce({ width: 1, height: 1, close() {} } as unknown as ImageBitmap);
+    const painter = fakePainter();
+    // A coverless note (404), so the render pipeline is what runs.
+    const net = fakeNet({ bytes: vi.fn(async () => null) });
+    const thumbs = createThumbnails({ getTheme: () => "light", net, painter, renderNote });
+    await expect(thumbs.getThumbnail(noteSrc(), "note")).rejects.toThrow("boom");
+    // Not pinned: a second attempt runs the pipeline again and succeeds.
+    const ok = await thumbs.getThumbnail(noteSrc(), "note");
+    expect(await tagOf(ok)).toBe("note");
+    expect(renderNote).toHaveBeenCalledTimes(2);
+  });
+
+  it("records the image SOURCE's true dims into the memo, once per hash", async () => {
+    const t = build();
+    await t.thumbs.getThumbnail(fileSrc("dimhash"), "jpeg");
+    await t.thumbs.getThumbnail(fileSrc("dimhash"), "jpeg");
+    // The fake tile decodes a 3000×2000 source — the SOURCE dims are recorded,
+    // never the tier raster's.
+    expect(t.setDims).toHaveBeenCalledTimes(1);
+    expect(t.setDims).toHaveBeenCalledWith("dimhash", { w: 3000, h: 2000 });
+  });
+
+  it("an image document fetches its raw bytes ONCE per hash — theme toggles included", async () => {
+    let theme: Theme = "light";
+    const t = build({ theme: () => theme });
+    const light = await t.thumbs.getThumbnail(fileSrc("imgh"), "png");
+    theme = "dark";
+    const dark = await t.thumbs.getThumbnail(fileSrc("imgh"), "png");
+    // A photo's pixels are its own in both themes: ONE multi-MB fetch, ONE
+    // decode, both themes served from the same theme-free entry.
+    expect(t.net.bytes).toHaveBeenCalledTimes(1);
+    expect(t.painter.imageTile).toHaveBeenCalledTimes(1);
+    expect(await tagOf(light)).toBe("imgdoc");
+    expect(await tagOf(dark)).toBe("imgdoc");
+  });
+
+  it("evictTheme leaves theme-free image-document tiles cached", async () => {
+    const t = build();
+    await t.thumbs.getThumbnail(fileSrc("keepme"), "png");
+    t.thumbs.evictTheme("light");
+    await t.thumbs.getThumbnail(fileSrc("keepme"), "png");
+    expect(t.net.bytes).toHaveBeenCalledTimes(1);
+  });
+
+  it("a 404 image document falls back to the glyph and records no dims", async () => {
+    const t = build({ net: fakeNet({ bytes: vi.fn(async () => null) }) });
+    const blob = await t.thumbs.getThumbnail(fileSrc("gone"), "png");
+    expect(await tagOf(blob)).toBe("glyph:PNG:light");
+    expect(t.setDims).not.toHaveBeenCalled();
+  });
+
+  it("evictTheme drops only that theme's cached blobs", async () => {
+    let theme: Theme = "light";
+    const t = build({ theme: () => theme });
+    await t.thumbs.getThumbnail(fileSrc("e"), "spd"); // light entry
+    theme = "dark";
+    await t.thumbs.getThumbnail(fileSrc("e"), "spd"); // dark entry
+    expect(t.net.bytes).toHaveBeenCalledTimes(2);
+
+    t.thumbs.evictTheme("light");
+    theme = "dark";
+    await t.thumbs.getThumbnail(fileSrc("e"), "spd"); // still cached → no new fetch
+    expect(t.net.bytes).toHaveBeenCalledTimes(2);
+    theme = "light";
+    await t.thumbs.getThumbnail(fileSrc("e"), "spd"); // evicted → refetch
+    expect(t.net.bytes).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("density-bucket cache keys", () => {
+  // The pristine tier keys every entry by (hash, theme, bucket), the bucket
+  // read from the LIVE devicePixelRatio per call — so a DPR change (monitor
+  // hop, zoom) re-produces into a new bucket instead of serving a
+  // wrong-density raster, and same-bucket DPRs share one entry.
+  afterEach(() => {
+    delete (globalThis as { devicePixelRatio?: number }).devicePixelRatio;
+  });
+
+  it("a DPR change re-produces into a new bucket; same bucket stays cached", async () => {
+    const t = build();
+    (globalThis as { devicePixelRatio?: number }).devicePixelRatio = 1;
+    await t.thumbs.getThumbnail(fileSrc("bk"), "spd"); // bucket 1
+    expect(t.net.bytes).toHaveBeenCalledTimes(1);
+
+    (globalThis as { devicePixelRatio?: number }).devicePixelRatio = 1.25; // fractional → bucket 2
+    await t.thumbs.getThumbnail(fileSrc("bk"), "spd");
+    expect(t.net.bytes).toHaveBeenCalledTimes(2);
+
+    (globalThis as { devicePixelRatio?: number }).devicePixelRatio = 1.5; // still bucket 2 → cached
+    await t.thumbs.getThumbnail(fileSrc("bk"), "spd");
+    (globalThis as { devicePixelRatio?: number }).devicePixelRatio = 2; // ceil(2)=2 → cached
+    await t.thumbs.getThumbnail(fileSrc("bk"), "spd");
+    expect(t.net.bytes).toHaveBeenCalledTimes(2);
+
+    (globalThis as { devicePixelRatio?: number }).devicePixelRatio = 2.5; // → bucket 3
+    await t.thumbs.getThumbnail(fileSrc("bk"), "spd");
+    expect(t.net.bytes).toHaveBeenCalledTimes(3);
+
+    (globalThis as { devicePixelRatio?: number }).devicePixelRatio = 4; // clamped → still bucket 3
+    await t.thumbs.getThumbnail(fileSrc("bk"), "spd");
+    expect(t.net.bytes).toHaveBeenCalledTimes(3);
+  });
+
+  it("glyphs key per bucket too — their raster is tier-sized", async () => {
+    const t = build();
+    (globalThis as { devicePixelRatio?: number }).devicePixelRatio = 1;
+    await t.thumbs.getThumbnail(fileSrc(null), "pdf");
+    (globalThis as { devicePixelRatio?: number }).devicePixelRatio = 3;
+    await t.thumbs.getThumbnail(fileSrc(null), "pdf");
+    expect(t.painter.glyph).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("coverCropRect — the .spd de-letterbox geometry", () => {
+  // A `.spd` ships a FIXED 600×800 portrait embedded thumbnail that letterboxes
+  // the real drawing in white bands. The crop rect recovers the true-aspect
+  // content band, centered; the output is then sized to the density tier (below).
+
+  it("a landscape target crops top/bottom into a centered band (big.spd)", () => {
+    // 600×800 portrait preview, true canvas 16:9 (A≈1.778, wider than 0.75).
+    const r = coverCropRect(600, 800, { w: 16, h: 9 });
+    expect(r.sw).toBe(600); // full width kept
+    expect(r.sh).toBeCloseTo(337.5, 1); // 600 / (16/9)
+    expect(r.sy).toBeCloseTo(231.25, 1); // (800 - 337.5) / 2 — centered band
+    expect(r.sx).toBe(0);
+    // The band's own aspect equals the target aspect — no distortion.
+    expect(r.sw / r.sh).toBeCloseTo(16 / 9, 3);
+  });
+
+  it("a tall-portrait target crops left/right into a centered band", () => {
+    // Source 600×800, target taller/narrower than the source (A=0.5 < 0.75).
+    const r = coverCropRect(600, 800, { w: 1, h: 2 });
+    expect(r.sh).toBe(800); // full height kept
+    expect(r.sw).toBeCloseTo(400, 3); // 800 * 0.5
+    expect(r.sx).toBeCloseTo(100, 3); // (600 - 400) / 2 — centered band
+    expect(r.sy).toBe(0);
+    expect(r.sw / r.sh).toBeCloseTo(0.5, 3);
+  });
+
+  it("an exact-match aspect (3:4 sketch) is a NO-OP — the full frame", () => {
+    const r = coverCropRect(600, 800, { w: 3, h: 4 }); // A=0.75 == 600/800
+    expect(r).toEqual({ sx: 0, sy: 0, sw: 600, sh: 800 });
+  });
+
+  it("a missing or degenerate aspect yields the full frame (no crop)", () => {
+    const full = { sx: 0, sy: 0, sw: 600, sh: 800 };
+    expect(coverCropRect(600, 800, undefined)).toEqual(full);
+    expect(coverCropRect(600, 800, { w: 0, h: 9 })).toEqual(full);
+    expect(coverCropRect(600, 800, { w: 16, h: 0 })).toEqual(full);
+    expect(coverCropRect(600, 800, { w: -16, h: 9 })).toEqual(full);
+    expect(coverCropRect(600, 800, { w: Number.NaN, h: 9 })).toEqual(full);
+    expect(coverCropRect(600, 800, { w: Infinity, h: 9 })).toEqual(full);
+  });
+
+  it("a non-positive source is left whole", () => {
+    expect(coverCropRect(0, 0, { w: 16, h: 9 })).toEqual({ sx: 0, sy: 0, sw: 0, sh: 0 });
+  });
+
+  // The coordinator's density-aware requirement: the crop changes the SOURCE
+  // rect, but the OUTPUT is still sized to the bucket tier target (never the raw
+  // band) and never upscaled past the band's own pixels.
+  it("the cropped output is sized to the bucket tier target, not the raw band", () => {
+    // big.spd content band ≈ 600×338 (rounded). At bucket 1 the tier target is
+    // 230px wide — the output takes THAT width, preserving the corrected aspect.
+    const r = coverCropRect(600, 800, { w: 16, h: 9 });
+    const bandW = Math.round(r.sw); // 600
+    const bandH = Math.round(r.sh); // 338
+    const plan = downscalePlan(bandW, bandH, thumbTargetWidth(1)); // target 230
+    expect(thumbTargetWidth(1)).toBe(230);
+    expect(plan.w).toBe(230); // bucket target, NOT the 600 raw band
+    expect(plan.h).toBe(Math.round((bandH * 230) / bandW));
+    expect(plan.method).toBe("high"); // >2× reduction → quality path
+    // The band's shape is carried into the output — a landscape tile.
+    expect(plan.w / plan.h).toBeCloseTo(16 / 9, 1);
+  });
+
+  it("never UPSCALES past the band: a hi-DPR bucket target above the band clamps to source", () => {
+    // Bucket 3 target is 690px, but the cropped band is only 600px wide — the
+    // plan keeps the band's own size rather than inventing sharpness.
+    const r = coverCropRect(600, 800, { w: 16, h: 9 });
+    const bandW = Math.round(r.sw); // 600
+    const bandH = Math.round(r.sh); // 338
+    expect(thumbTargetWidth(3)).toBe(690);
+    const plan = downscalePlan(bandW, bandH, thumbTargetWidth(3));
+    expect(plan.w).toBe(bandW); // clamped to the 600 band, not inflated to 690
+    expect(plan.h).toBe(bandH);
+    expect(plan.method).toBe("none");
+  });
+});
+
+describe("the shared quality downscale preserves thin lines (the panel-thumb bug)", () => {
+  // The bug the user saw: the `.spd`/`.note` layer-panel thumbnails painted a
+  // full-res (~1872-wide) layer canvas down to ~200px with a SINGLE bilinear
+  // `drawImage` step, so at ~9× reduction the sampler skipped most source rows
+  // and a RULED template lost lines (or moiréd against the rule spacing). Both
+  // panels now route through the shared quality downscale, whose deterministic
+  // area-averaging floor (`boxDownscaleRgba`) is pinned here on plain Node — no
+  // canvas — against a synthetic ruled source. `createImageBitmap`'s
+  // high-quality resize is the browser fast path; this floor is the guarantee.
+
+  /** A white RGBA buffer with a 1-px black horizontal line every `every` rows,
+   *  the first line at row `offset` — a minimal ruled/lined template. */
+  function ruled(w: number, h: number, every: number, offset: number): Uint8ClampedArray {
+    const buf = new Uint8ClampedArray(w * h * 4).fill(255); // opaque white
+    for (let y = offset; y < h; y += every) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        buf[i] = 0;
+        buf[i + 1] = 0;
+        buf[i + 2] = 0; // black, alpha stays 255
+      }
+    }
+    return buf;
+  }
+
+  /** Count output rows whose centre pixel is darker than pure white — i.e. rows
+   *  that received a line's ink. `< 250` tolerates the box average (a single
+   *  black row in a band of white lands well under 250). */
+  function darkRows(rgba: Uint8ClampedArray, w: number, h: number): number {
+    let count = 0;
+    for (let y = 0; y < h; y++) {
+      if (rgba[(y * w + (w >> 1)) * 4]! < 250) count++;
+    }
+    return count;
+  }
+
+  /** The naive single-step path the bug had: sample one source row per output
+   *  row (nearest), which is what a bilinear downscale degenerates toward at
+   *  high reduction — used only to SHOW the box filter fixes what it dropped. */
+  function nearestDownscaleRows(src: Uint8ClampedArray, w: number, h: number, dstH: number): Uint8ClampedArray {
+    const out = new Uint8ClampedArray(w * dstH * 4);
+    const sy = h / dstH;
+    for (let dy = 0; dy < dstH; dy++) {
+      const y = Math.floor(dy * sy);
+      for (let x = 0; x < w; x++) {
+        const s = (y * w + x) * 4;
+        const o = (dy * w + x) * 4;
+        out[o] = src[s]!;
+        out[o + 1] = src[s + 1]!;
+        out[o + 2] = src[s + 2]!;
+        out[o + 3] = src[s + 3]!;
+      }
+    }
+    return out;
+  }
+
+  it("keeps every ruled line the naive single-step path drops (9× reduction)", () => {
+    // 40 lines every 4 rows, each 4-row band holding exactly one line. At a 4×
+    // vertical reduction (160 → 40) every output band spans one line.
+    const W = 8;
+    const H = 160;
+    const src = ruled(W, H, 4, 2);
+    const DST_H = 40;
+
+    // The naive nearest sampler lands on row 4·dy (≡0 mod 4) — never a line row
+    // (lines sit at ≡2) — so it DROPS the whole template: zero dark rows.
+    const naive = nearestDownscaleRows(src, W, H, DST_H);
+    expect(darkRows(naive, W, DST_H)).toBe(0);
+
+    // The shared box filter averages each band, so EVERY one of the 40 output
+    // rows carries its line's ink — no dropped lines.
+    const box = boxDownscaleRgba(src, W, H, W, DST_H);
+    expect(darkRows(box, W, DST_H)).toBe(DST_H);
+  });
+
+  it("no line vanishes at an extreme non-integer reduction", () => {
+    // A denser template (every 3 rows) reduced by a non-integer ~9.4× (1500 →
+    // 160): the naive sampler drops a large share of lines to blank white rows,
+    // while the box filter leaves NO fully-white row — every band it covers held
+    // at least one line, so all of them register.
+    const W = 4;
+    const H = 1500;
+    const src = ruled(W, H, 3, 1);
+    const DST_H = 160;
+
+    const naive = nearestDownscaleRows(src, W, H, DST_H);
+    const box = boxDownscaleRgba(src, W, H, W, DST_H);
+
+    // The box filter drops none; the naive path drops many — the exact regression.
+    expect(darkRows(box, W, DST_H)).toBe(DST_H);
+    expect(darkRows(naive, W, DST_H)).toBeLessThan(DST_H);
+  });
+
+  it("leaves an all-white source white and preserves aspect dims", () => {
+    const W = 12;
+    const H = 90;
+    const white = new Uint8ClampedArray(W * H * 4).fill(255);
+    const out = boxDownscaleRgba(white, W, H, 4, 30);
+    expect(out.length).toBe(4 * 30 * 4);
+    expect(darkRows(out, 4, 30)).toBe(0);
+    expect([...out.slice(0, 4)]).toEqual([255, 255, 255, 255]);
+  });
+});
+
+describe("persistent negative-thumbnail memo (the hard-reload 404 fix)", () => {
+  it("a definitive 404 is persisted: a SECOND facade instance never probes", async () => {
+    const memo = fakeCoverMemo();
+    const s1 = build({ net: fakeNet({ bytes: vi.fn(async () => null) }), coverMemo: memo });
+    await s1.thumbs.getThumbnail(noteSrc("n404"), "note");
+    expect(memo.persisted.has("n404")).toBe(true);
+
+    // "New session": fresh facade, fresh net — same persistent memo.
+    const net2 = fakeNet({ bytes: vi.fn(async () => null) });
+    const s2 = build({ net: net2, coverMemo: memo });
+    await s2.thumbs.getThumbnail(noteSrc("n404"), "note");
+    expect(net2.bytes).not.toHaveBeenCalled(); // no probe at all — the memo answered
+  });
+
+  it("a transport failure is session-only: a second instance probes again", async () => {
+    const memo = fakeCoverMemo();
+    const failing = fakeNet();
+    (failing as { probe?: ThumbNet["probe"] }).probe = vi.fn(async () => null); // 5xx/offline, NOT 404
+    const s1 = build({ net: failing, coverMemo: memo });
+    await s1.thumbs.getThumbnail(noteSrc("nOff"), "note");
+    expect(memo.persisted.has("nOff")).toBe(false); // never persisted
+    expect(memo.session.has("nOff")).toBe(true); // suppressed this session
+
+    const net2 = withProbe(fakeNet());
+    const s2 = build({ net: net2, coverMemo: fakeCoverMemo() }); // fresh session state
+    await s2.thumbs.getThumbnail(noteSrc("nOff"), "note");
+    expect(net2.bytes).toHaveBeenCalled(); // probes again, server is back
+  });
+
+  it("an .spd's missing embedded thumbnail persists the same way", async () => {
+    const memo = fakeCoverMemo();
+    const s1 = build({ net: fakeNet({ bytes: vi.fn(async () => null) }), coverMemo: memo });
+    await s1.thumbs.getThumbnail(fileSrc("s404"), "spd");
+    expect(memo.persisted.has("s404")).toBe(true);
+
+    const net2 = fakeNet({ bytes: vi.fn(async () => null) });
+    const s2 = build({ net: net2, coverMemo: memo });
+    await s2.thumbs.getThumbnail(fileSrc("s404"), "spd");
+    expect(net2.bytes).not.toHaveBeenCalled();
+  });
+});
+
+describe("facade persistent tier — the shared sn-thumbs store", () => {
+  // The facade path now has the render path's structure: `[hot in-memory memo] →
+  // sn-thumbs → produce`. These pin the read-through/write-through at the `memo`
+  // choke point, the collision-safe key, fail-open, and the version token — all
+  // with a fake in-memory store standing in for IndexedDB.
+
+  it("write-through: a produced facade thumbnail is PUT to the store", async () => {
+    const store = fakePersistentStore();
+    const t = build({ persistent: store });
+    const blob = await t.thumbs.getThumbnail(fileSrc("wt"), "spd");
+    expect(store.put).toHaveBeenCalledTimes(1);
+    const [key, stored] = store.put.mock.calls[0]!;
+    expect(stored).toBe(blob); // the exact produced blob, written back
+    // Namespaced + versioned + bucketed — the facade key shape.
+    expect(key).toMatch(/^facade:v\d+:wt:light:b\d+$/);
+  });
+
+  it("read-through across a NEW SESSION: a fresh facade serves the persisted blob without producing", async () => {
+    const store = fakePersistentStore();
+    const s1 = build({ persistent: store });
+    await s1.thumbs.getThumbnail(fileSrc("rt"), "spd");
+    expect(store.map.size).toBe(1);
+
+    // "New session": a fresh facade instance, fresh net/painter, SAME store.
+    const s2 = build({ persistent: store });
+    const blob = await s2.thumbs.getThumbnail(fileSrc("rt"), "spd");
+    expect(await tagOf(blob)).toBe("image:light"); // the persisted tile, verbatim
+    // produce never ran in the second session — no probe/fetch, no transcode.
+    expect(s2.net.bytes).not.toHaveBeenCalled();
+    expect(s2.painter.fromImageBytes).not.toHaveBeenCalled();
+    expect(store.put).toHaveBeenCalledTimes(1); // s1 wrote; s2 was a pure read
+  });
+
+  it("key isolation: a facade key never equals a renderCache hash:thumb:theme id for the same hash/theme", async () => {
+    const store = fakePersistentStore();
+    const t = build({ persistent: store });
+    // Drive the note-page RENDER path with the SAME page hash a renderCache thumb
+    // would key on (the collision the discriminator must prevent in the one store).
+    await t.thumbs.getThumbnail({ fileHash: null, noteId: "n1", page: page("collide") }, "note");
+    const facadeKey = store.put.mock.calls.at(-1)![0] as string;
+    const renderKey = cacheId({ hash: "collide", size: "thumb", theme: "light" });
+    expect(facadeKey).not.toBe(renderKey);
+    expect(facadeKey.startsWith("facade:")).toBe(true); // facade namespace
+    expect(renderKey.startsWith("facade:")).toBe(false); // renderCache ids start with a hex hash
+    // And it is not even a suffix/prefix of the render id — a robust separation.
+    expect(facadeKey.includes(":thumb:")).toBe(false);
+  });
+
+  it("fail-open on get: a store whose get THROWS still returns the produced blob", async () => {
+    const store = fakePersistentStore({
+      get: vi.fn(async () => {
+        throw new Error("idb get boom");
+      }),
+    });
+    const t = build({ persistent: store });
+    const blob = await t.thumbs.getThumbnail(fileSrc("fo1"), "spd");
+    expect(await tagOf(blob)).toBe("image:light"); // produced despite the broken read
+    expect(t.painter.fromImageBytes).toHaveBeenCalledTimes(1);
+  });
+
+  it("fail-open on put: a store whose put THROWS never sinks the produced blob", async () => {
+    const store = fakePersistentStore({
+      put: vi.fn(async () => {
+        throw new Error("idb put boom");
+      }),
+    });
+    const t = build({ persistent: store });
+    const blob = await t.thumbs.getThumbnail(fileSrc("fo2"), "spd");
+    expect(await tagOf(blob)).toBe("image:light"); // the write-through error is swallowed
+  });
+
+  it("version bump: an entry persisted under an OLD version token is not served under the new one", async () => {
+    const store = fakePersistentStore();
+    const s1 = build({ persistent: store });
+    await s1.thumbs.getThumbnail(fileSrc("ver"), "spd");
+    const currentKey = store.put.mock.calls[0]![0] as string; // facade:v{N}:ver:light:b{b}
+    const persistedBlob = store.map.get(currentKey)!;
+
+    // Re-file that blob under an OLDER version token and drop the current one —
+    // a stale persisted entry from before a crop/encode change.
+    const oldKey = currentKey.replace(/^facade:v\d+:/, "facade:v0:");
+    store.map.clear();
+    store.map.set(oldKey, persistedBlob);
+    store.get.mockClear();
+    store.put.mockClear();
+
+    const s2 = build({ persistent: store });
+    await s2.thumbs.getThumbnail(fileSrc("ver"), "spd");
+    // The current-version key missed (only v0 exists) → produce RAN and the tile
+    // was re-persisted under the CURRENT token.
+    expect(s2.painter.fromImageBytes).toHaveBeenCalledTimes(1);
+    expect(store.put).toHaveBeenCalledTimes(1);
+    expect(store.put.mock.calls[0]![0]).toBe(currentKey);
+  });
+
+  it("glyphs are never persisted — they regenerate instantly and earn no byte of the shared budget", async () => {
+    const store = fakePersistentStore();
+    const t = build({ persistent: store });
+    await t.thumbs.getThumbnail(fileSrc("g"), "pdf"); // → glyph
+    expect(store.get).not.toHaveBeenCalled();
+    expect(store.put).not.toHaveBeenCalled();
+  });
+
+  it("a 404 fallback persists NOTHING — not the caught failure, not the glyph it becomes", async () => {
+    const store = fakePersistentStore();
+    const t = build({ net: fakeNet({ bytes: vi.fn(async () => null) }), persistent: store });
+    const blob = await t.thumbs.getThumbnail(fileSrc("miss"), "spd");
+    expect(await tagOf(blob)).toBe("glyph:SPD:light");
+    expect(store.put).not.toHaveBeenCalled();
+  });
+
+  it("null store (memory-only) is a clean no-op: everything still resolves", async () => {
+    const t = build({ persistent: null });
+    const blob = await t.thumbs.getThumbnail(fileSrc("nostore"), "spd");
+    expect(await tagOf(blob)).toBe("image:light");
+  });
+});

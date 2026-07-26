@@ -1,0 +1,128 @@
+/* --- universal search results -----------------------------------------------
+   THE `.hit` COMPONENT IS GONE. A result is not a thing of its own any more: it
+   is the library's own list row, asked a question, plus the two things the
+   question adds — the excerpt that matched and the pages it matched on. So there
+   are no row, name or page rules here; the row's rules are the card's, which is
+   what keeps a result and a listing aligned to the same grid by construction
+   rather than by two sets of numbers that drift.
+
+   Every rule below is scoped to its own component class — nothing here can
+   outrank a component elsewhere, which is the reset bug (specificity (0,1,1)
+   beating `.btn--ink`) this file is not allowed to repeat. Colour comes only
+   from tokens, so both themes follow automatically. */
+
+/* Said ONCE, above the results — never per row. */
+.hits__notice {
+  grid-column: 1 / -1;
+  max-width: 760px;
+  margin: 0 2px 14px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+  background: var(--hover);
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+/* "still counting", in the section head beside the totals. */
+.hits__count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.16em;
+  color: var(--ink-faint);
+}
+
+/* A path answers "not where you are standing". The BIN needs it because the
+   row's home is gone; SEARCH needs it because results span the whole library.
+   Same question, same treatment, one rule — the mockup's `.bin__path,
+   .card__path`, carried over rather than reinvented as a second look. */
+.card__path {
+  color: var(--ink-soft);
+}
+
+/* How far the query reached into the note, beside the folder and the date. A
+   QUIET line, not a control: it retired a strip of per-page buttons that turned
+   the row into a menu of destinations, and it must not read as one. Same ink as
+   the path it sits next to, tabular figures so a column of results does not
+   jitter as the counts change width. */
+.card__matches {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.hit__snippet {
+  margin-top: 4px;
+  font-size: var(--fs-caption);
+  line-height: 1.55;
+  color: var(--ink-soft);
+  /* Two lines, then elide: the excerpt is a reason to click, not the reading. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Mirrors `.ocr__body mark` — the highlight in a result, in a title and in the
+   reader's transcript are one idea, so they look the same. Scoped under the
+   component class, so their (0,1,1) reach stops at this block. */
+.hit__snippet mark,
+.card__title mark {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--ink);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* The keyset "More results" row — the ONE control the capped list offers. It
+   exists exactly while the server holds a cursor (the JS removes it when none
+   comes back), so there is no "disabled because exhausted" look to design: an
+   absent control is the honest exhausted state. Full row in both gallery
+   layouts, same spanning idiom as `.empty` below; centred, because it belongs
+   to the whole list rather than to the row above it. The button itself is the
+   app's own `.btn` chip — outline, mono label, shared hover/disabled rules —
+   so its loading state (disabled + relabelled) needs no rules of its own. */
+.hits__more {
+  flex-basis: 100%;
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: center;
+  padding: 18px 0 6px;
+}
+
+.empty {
+  /* Full row in both gallery layouts: the icon mode's flex wrap (basis) and the
+     list mode's one-column grid (column span). */
+  flex-basis: 100%;
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 64px 20px;
+  color: var(--ink-soft);
+}
+.empty__mark {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.empty h3 {
+  font-size: var(--fs-title);
+  font-weight: 600;
+  margin: 10px 0 6px;
+}
+.empty p {
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--ink-soft);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+

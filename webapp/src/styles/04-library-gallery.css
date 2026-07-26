@@ -1,0 +1,599 @@
+/* ================= LIBRARY GALLERY ================= */
+/* ICON mode is a MASONRY of uniform columns (masonry.md decisions 1-2): every
+   tile shares one WIDTH (`--tile-w-icon`) and takes its own height from its
+   thumbnail's aspect — portrait notes tall, landscape .spd short. The mechanism
+   is CSS grid row-span masonry: fixed-width columns over a small fixed row unit
+   (`--masonry-row`), each card spanning the rows its own height needs — the
+   spans are computed in JS at paint (`spanTiles` in library.ts; native
+   `grid-template-rows: masonry` is not shipped cross-browser). `row-gap` stays
+   0 because the vertical gap (`--masonry-gap`) is folded into each card's span,
+   which is what lets cards start mid-track instead of on a shared row line.
+
+   `grid-auto-flow: row` (the default) is LOAD-BEARING: it places cards in DOM
+   order, left-to-right then top-to-bottom, which is the §D rule — the sort
+   order must read left-to-right, never down a column (`column-count` stays
+   rejected). `align-items: start` is equally load-bearing: without it every
+   card would stretch to its (one-row-tall) grid area before the span pass, and
+   the pass would measure 8px cards. */
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, var(--tile-w-icon));
+  grid-auto-rows: var(--masonry-row);
+  align-items: start;
+  justify-content: start;
+  column-gap: 22px;
+  row-gap: 0;
+  padding: 26px 28px 48px;
+  /* The masonry constants, component-local: the row unit JS spans over, and the
+     vertical rhythm between cards (the old flex row gap, folded into spans). */
+  --masonry-row: 8px;
+  --masonry-gap: 26px;
+}
+.gallery.is-list {
+  /* The list is a plain grid: full-width rows, one column. The masonry stands
+     down — auto rows, no spans (renderGallery rebuilds the children per view,
+     so no stale `grid-row-end` survives the toggle). */
+  grid-template-columns: 1fr;
+  grid-auto-rows: auto;
+  /* NO GAP. The rule is what separates rows now, and a gap as well would leave
+     the divider floating between two rows rather than belonging to the list. */
+  gap: 0;
+  max-width: 760px;
+  /* CENTRED. The measure was always 760px, but left-aligned under a topbar that
+     spans the full width — so the block read as unfinished rather than as a
+     deliberate column, with all the leftover space pooled on one side. Centring
+     makes the whitespace symmetric, which is what tells the eye it was chosen. */
+  margin-inline: auto;
+  /* The leading tile is `--preview-h-list` tall; its WIDTH follows each item's
+     aspect (see the tokens file), so rows no longer share one hard lead width —
+     a portrait note leads with the 3:4 fallback (~64px, the old `--lead`), a
+     landscape .spd leads wider. Names align across the common portrait case and
+     step right only where the content genuinely is wider. */
+  --row-pad-x: 12px;
+}
+
+.section-head {
+  /* Full row in BOTH layouts — the masonry and the one-column list are both
+     grids now, so the column span is the whole rule; the flex-basis is inert
+     and kept only for any flex context that ever mounts this (the bin's block
+     layout ignores both). In the masonry it is spanned VERTICALLY by the same
+     JS pass as every card, so the tiles below start under it, not through it. */
+  flex-basis: 100%;
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 4px 2px -6px;
+}
+.section-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+  align-self: center;
+}
+
+/* folder card */
+/* THE `.folder` CHIP IS GONE, in both views, and its `align-self: start` with it.
+   That rule existed to stop a compact chip stretching to note-thumbnail height in
+   a grid row it shared with cards. A folder is now a full `.card.card--folder`
+   whose tile has the same footprint as a note's, so there is nothing left to keep
+   from stretching — filling the row is exactly what it is supposed to do, and the
+   grid reads as one uniform set of tiles rather than chips interleaved with
+   cards. Every folder rule below is therefore a `.card` rule. */
+
+/* note card */
+/* The card is a clickable region PLUS (in list view) an action of its own, so it
+   cannot be a <button> with another button inside it — that is invalid HTML and
+   the inner control would be unreachable. `.card` is therefore a wrapper: it
+   owns the position, the stagger animation and the row box, and `.card__open`
+   is the button. */
+.card {
+  position: relative;
+  animation: rise 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+/* An ICON card is exactly as wide as its COLUMN — the masonry track is the
+   tile, so the caption wraps to it by construction and there is no per-card
+   width to derive any more. Scoped off `.is-list` (rows are full-width there)
+   — the bin never mounts `.card`. */
+.gallery:not(.is-list) .card {
+  width: 100%;
+}
+/* A device-authored name can be one long unbroken token; without a break
+   opportunity its min-content width would widen the card past the tile. */
+.gallery:not(.is-list) .card__title {
+  overflow-wrap: anywhere;
+}
+.card__open {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+/* The tile in ICON mode: FIXED width (the masonry column), height from the
+   content's aspect. The aspect is PRE-SET as an inline `aspect-ratio` by
+   library.ts for every entry whose shape is known (`thumbAspect`, the `.txt`
+   constant, the image dims memo) — which is what makes the layout reflow-free:
+   the box is its final shape before any bytes arrive. The stylesheet's 3:4 is
+   the fallback for aspect-less tiles (folders, glyphs, an image on its very
+   first view — the one case allowed a single corrective reflow on decode).
+
+   The clamps guard the FREE axis, which is now height: a pathological scroll is
+   capped at 2.5× the column width, a pathological panorama floored at width/2.5
+   — the same 2.5 discipline every preview class applies to its own free axis —
+   and `object-fit: contain` letterboxes whatever the clamp displaced. */
+.thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  min-height: calc(var(--tile-w-icon) / 2.5);
+  max-height: calc(var(--tile-w-icon) * 2.5);
+  display: grid;
+  place-items: center;
+  border-radius: 2px;
+  background: var(--sheet);
+  box-shadow:
+    0 1px 1px var(--shadow),
+    0 10px 22px -16px var(--shadow);
+  overflow: hidden;
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.16s ease;
+}
+.thumb::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.thumb canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* Any card's thumbnail image (a note render, an extracted .spd preview, an
+   image file itself off /file/{id}). In ICON mode it simply FILLS the tile —
+   the tile's own `aspect-ratio` already IS the image's shape wherever it is
+   known, so `contain` paints edge-to-edge with nothing cropped or stretched,
+   and only ever letterboxes where a clamp displaced the box (the 2.5× cap and
+   floor above) or where the shape was unknown and the 3:4 fallback stands.
+   Same box as the tile, so the hover lift and the hairline still frame it.
+
+   Filling the tile is also what keeps a `loading="lazy"` image loadable: the
+   box's size comes from the TILE (width + aspect), never from the image's
+   intrinsic size, so an unloaded image is never a zero-area box the browser
+   would refuse to consider in view. */
+.thumb__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.card:hover .thumb {
+  transform: translateY(-4px);
+  box-shadow:
+    0 2px 2px var(--shadow),
+    0 18px 30px -18px var(--shadow);
+}
+.card__open:focus-visible {
+  outline: none;
+}
+.card__open:focus-visible .thumb {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* The file type and the recognized-text marker, as ONE group.
+   They used to sit in opposite corners of the thumbnail, which reads as two
+   unrelated marks rather than one set — and left nowhere for a third to go. The
+   same element serves both views: over the thumb in the grid (absolute, below),
+   and in flow as the list row's first line. */
+.card__marks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.thumb .card__marks {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  /* Wrap inside the sheet rather than running off it — the badge is a
+     server-supplied file type of unbounded length. */
+  max-width: calc(100% - 16px);
+}
+
+.card__badge {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: var(--ink-soft);
+  background: color-mix(in srgb, var(--sheet) 80%, transparent);
+  backdrop-filter: blur(2px);
+  border: 1px solid var(--line);
+}
+/* Recognized-text marker: the badge's companion, immediately beside it.
+   Same chip treatment and the same --ink-soft, so the two read as one pair; it
+   stays quiet by being a glyph rather than letterforms, not by fading out.
+   (--ink-faint was tried and scores ~3.0:1 on the sheet — too close to the floor
+   for something that carries meaning.) Both chips keep their own translucent
+   ground and blur in BOTH views: in the grid they sit on the page image, where a
+   transparent fill would vanish against white paper. Component-level specificity
+   only — no :where(), no element selectors that could outrank a component class. */
+.card__ocr {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 3px;
+  color: var(--ink-soft);
+  background: color-mix(in srgb, var(--sheet) 80%, transparent);
+  backdrop-filter: blur(2px);
+  border: 1px solid var(--line);
+}
+/* svg() emits no width/height attributes, so the size lives here. */
+.card__ocr svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+}
+.card__title {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  line-height: 1.3;
+  text-wrap: balance;
+}
+.card__meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.card__meta .dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+/* list-view rows — folder rows and note rows share the same track sizing
+   (leading column + gap + horizontal padding) so their names align, and the
+   section header aligns to the same left edge. */
+.gallery.is-list .section-head {
+  margin: 4px var(--row-pad-x) 2px;
+}
+/* The wrapper becomes the row box: padding, hover ground, and the trailing slot
+   for the export action. The three-line flex row itself lives on .card__open.
+
+   RULED AT REST, not only on hover. A row had no boundary of its own — a 2px gap
+   and nothing else — so where one item ended and the next began was information
+   the pointer carried and the eye did not, and a list read as a single block of
+   text. The ruled line is the design language answering its own question. */
+.gallery.is-list .card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: var(--row-pad-y) var(--row-pad-x);
+  border-radius: 4px;
+  border-bottom: 1px solid var(--row-rule);
+}
+/* The list ends with an item, not with a line waiting for one. */
+.gallery.is-list .card:last-child {
+  border-bottom: none;
+}
+/* A section heading is already a boundary; a rule above it would double it.
+   Inert in the app as it stands — both the listing and the search results emit a
+   single `.section-head`, and it is always the FIRST child, so no card ever
+   precedes one. Carried across anyway: it costs nothing and it is what keeps the
+   rule correct on the day grouping returns. */
+.gallery.is-list .card:has(+ .section-head) {
+  border-bottom: none;
+}
+.gallery.is-list .card:hover {
+  background: var(--hover);
+  /* drop the grid-view lift so list rows stay flush */
+  transform: none;
+  box-shadow: none;
+}
+/* NOTE: there is no `.folder` rule anywhere any more, in either view. A folder is
+   a `.card.card--folder` everywhere, so it inherits every row and tile rule here
+   by construction instead of needing a parallel set that drifts out of step. */
+.gallery.is-list .thumb {
+  /* Same tile, the LIST class — which fixes HEIGHT (rows fix height, columns
+     fix width), so the icon rule's fixed width and vertical clamps all stand
+     down and the clamps move back to the width axis: min-width is the portrait
+     3:4 fallback (~64px, the old lead), max-width the 2.5×-height cap.
+
+     THE REFLOW RIDER (masonry.md step 2): where the entry's shape is known,
+     library.ts pre-sets an inline `aspect-ratio` — PRE-CLAMPED to
+     min(aspect, 2.5), so an extreme panorama reserves its final LETTERBOXED
+     width up front instead of snapping narrower when the max-width bites at
+     load — and marks the tile `has-aspect`. The row then lays out final-width
+     before any bytes arrive, and nothing beside it moves. Aspect-less entries
+     keep the old behaviour: content-sized width off the 3:4 floor. */
+  width: auto;
+  height: var(--preview-h-list);
+  aspect-ratio: auto;
+  min-width: calc(var(--preview-h-list) * 3 / 4);
+  max-width: calc(var(--preview-h-list) * 2.5);
+  min-height: 0;
+  max-height: none;
+  flex: none;
+}
+/* An aspect-less image sizes the tile from its own decoded shape (the one
+   reflow the rider removes wherever the shape is known ahead of time). The
+   min-width is LOAD-BEARING here exactly as it used to be on the base rule: an
+   unloaded image has no intrinsic size, and a zero-area `loading="lazy"` box
+   never loads. A `has-aspect` tile keeps the base fill-the-box rule — its box
+   is already the image's (clamped) shape. */
+.gallery.is-list .thumb:not(.has-aspect) .thumb__img {
+  width: auto;
+  height: 100%;
+  min-width: calc(var(--preview-h-list) * 3 / 4);
+  max-width: calc(var(--preview-h-list) * 2.5);
+}
+/* Tiles with nothing to preview: a FOLDER (no page at all) and a FILE we cannot
+   render (a PDF, an `.spd`, anything unrecognised). Both carry a centred glyph on
+   the same stock as a note thumb, at the same footprint — so the grid is one
+   uniform set of tiles, and a list row's lead is the same box whatever is in it
+   (the tile's 3:4 min-width, since a glyph has no aspect of its own). An IMAGE
+   is deliberately not here: it has a real preview and gets it.
+
+   Values from the approved mockup's `.thumb--folder`. `background-image: none` is
+   in the mockup because its thumb carries a ruled-paper image; this app paints
+   the ruling into the canvas instead, so there is no image to clear. */
+.thumb--folder,
+.thumb--file {
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--ink) 4%, var(--sheet));
+}
+.thumb--folder svg,
+.thumb--file svg {
+  width: 40%;
+  height: 40%;
+  color: var(--ink-faint);
+  stroke-width: 1.4;
+  fill: none;
+}
+/* The glyph wrapper fills the tile so `place-items: center` truly centres the
+   glyph (as `.thumb--folder` does with its direct svg child) and the svg's 40% is
+   40% OF THE TILE. The svg is now a DIRECT child — the old inline `-mark` span,
+   there only to sit beside the removed type label, offset the glyph off-centre. */
+.thumb__glyph {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+}
+/* The preview-less type used to be lettered on the tile too (`.thumb__ext`), but
+   the `.card__badge` chip already carries the exact type in BOTH views — so the
+   label was redundant AND (only shown in the grid) made the two views disagree.
+   Dropped: the glyph alone now centres cleanly, badge does the naming. */
+/* At a ~64px lead a 40% glyph is ~26px and reads as oversized against the
+   row's text; the mockup pins it to 20px. */
+.gallery.is-list .thumb--folder svg,
+.gallery.is-list .thumb--file svg {
+  width: 20px;
+  height: 20px;
+}
+/* A folder tile is not a sheet of paper, so it does not cast a page's shadow. */
+.card--folder .thumb {
+  box-shadow: none;
+}
+
+/* THE PINNED CATEGORY FOLDERS — and only these six (Note, Document, MyStyle,
+   Export, Screenshot, Inbox). The Library root's Ratta categories render as the
+   device's own FOLDER SILHOUETTE with the category glyph inside, rather than the
+   plain tinted-glyph tile an ordinary user folder gets — so the special ones read
+   as special. Ported from the approved mockup's `.cat__folder` / `.cat__shape` /
+   `.cat__glyph`, resolved here against the app's real tokens (00-tokens.css).
+
+   The silhouette IS the frame: no sheet ground, no hairline, no page shadow — and
+   nothing to lift into on hover, where instead the stroke and glyph go green-ink
+   (the same "you're about to open this" the rail speaks). */
+.thumb--category {
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
+}
+.thumb--category::after {
+  content: none;
+}
+.card:hover .thumb--category {
+  box-shadow: none;
+}
+/* Grid: the folder's own 100:82 proportion. In a list row the height-fixed lead
+   sizing stands and the silhouette simply fills it. */
+.gallery:not(.is-list) .thumb--category {
+  aspect-ratio: 100 / 82;
+}
+.thumb--category .cat__shape {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  filter: drop-shadow(0 1px 1px color-mix(in srgb, var(--shadow), transparent 55%));
+}
+.thumb--category .cat__shape path {
+  fill: color-mix(in srgb, var(--sheet), var(--ink) 3%);
+  stroke: var(--line);
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+  transition:
+    stroke 0.12s,
+    fill 0.12s;
+}
+.thumb--category .cat__glyph {
+  position: absolute;
+  left: 50%;
+  top: 58%;
+  transform: translate(-50%, -50%);
+  width: 34%;
+  color: var(--ink-soft);
+  transition: color 0.12s;
+}
+.thumb--category .cat__glyph svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.card:hover .thumb--category .cat__shape path,
+.card__open:focus-visible .thumb--category .cat__shape path {
+  stroke: var(--accent);
+  fill: color-mix(in srgb, var(--sheet), var(--accent) 6%);
+}
+.card:hover .thumb--category .cat__glyph {
+  color: var(--ink);
+}
+/* The category silhouette centres its glyph, so the name + count centre under it
+   too — GRID view only (a list row keeps its left-aligned 64px lead). */
+.gallery:not(.is-list) .card--category .card__title {
+  text-align: center;
+}
+.gallery:not(.is-list) .card--category .card__meta {
+  justify-content: center;
+}
+/* The row is three lines: the badges, the title, the date + page count.
+   The body STRETCHES to the row's height and distributes those lines, so the
+   badge line sits on the thumb's top edge and the meta near its bottom edge.
+   Centring the block instead left it floating with dead space above and below,
+   and nothing in the row lined up with anything else.
+
+   The old body was `justify-content: space-between` on a single baseline row,
+   which threw the date to the far edge — on a wide window a note's name and its
+   date ended up a window apart with nothing tying them together. */
+.gallery.is-list .card__open {
+  flex-direction: row;
+  align-items: stretch;
+  gap: 14px;
+}
+/* The thumb keeps its own alignment: it carries the fixed class height and
+   must not be stretched to the row's. */
+.gallery.is-list .thumb {
+  align-self: center;
+}
+.gallery.is-list .card__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+/* Optical, not geometric: flush with the thumb's bottom edge measures as aligned
+   but reads as sitting too low, because the chip at the top shows its full box
+   while the date's line box carries empty leading beneath the glyphs. Five
+   pixels buys back the difference. */
+.gallery.is-list .card__main {
+  margin-bottom: 5px;
+}
+.gallery.is-list .card__meta {
+  margin-top: 3px;
+}
+/* One line, ellipsised — a row cannot reflow its title without breaking the
+   three-line rhythm every other row keeps. */
+.gallery.is-list .card__title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- the card / row overflow menu -------------------------------------------
+   ONE control in BOTH views now (and the recycle bin's rows): the mockup's "…"
+   trigger opening the shared floating menu (`.menu`/`.menu__pop`/`.menu__item`,
+   06-reader.css). A list row once carried labelled buttons in a `.card__actions`
+   slot; grid and list offer the identical action set through this menu instead,
+   so that slot and its resting-opacity reasoning are gone with it.
+
+   THE SPECIFICITY TRAP, scoped on purpose: the element carries BOTH `menu` and
+   `card__menu`, and the generic `.menu { position: relative }` is declared later
+   — now in 06-reader.css, which imports after this file — at equal specificity
+   (0,1,0). An unscoped `.card__menu` would
+   lose the cascade, the menu would fall back into flow, and every grid card
+   would silently grow by the trigger's height — a bug that only shows up if you
+   measure per-element boxes. `.card .card__menu` is (0,2,0), so it wins on
+   specificity and cannot be undone by declaration order. */
+.card .card__menu {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+/* (The open-card z-index lift that used to sit here is gone: the shared menu's
+   popover now portals to <body> and paints at `--z-popover`, above all cards, so
+   nothing local needs raising to clear a later sibling — see 06-reader.css.) */
+/* In a LIST row the "…" is a flow item at the trailing edge, not an overlay on a
+   tile — so it keeps `.menu`'s own `position: relative` (which is what anchors
+   its `.menu__pop`) instead of the grid card's absolute inset. Higher
+   specificity than `.card .card__menu` above, so it wins whatever the order. */
+.gallery.is-list .card .card__menu {
+  position: relative;
+  inset: auto;
+  flex: none;
+}
+.card__more {
+  display: grid;
+  place-items: center;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  /* Its own ground + blur: the trigger sits on the page image, where a
+     transparent fill would vanish against white paper — the same reason the
+     badge chips carry one. */
+  background: color-mix(in srgb, var(--sheet) 88%, transparent);
+  backdrop-filter: blur(3px);
+  color: var(--ink-soft);
+  /* ALWAYS VISIBLE, in both views. The grid trigger used to hide until hover,
+     which is invisible on the Nomad's touch surface — a hover-only affordance a
+     touch user can never find. It reads as a real, pressable control now (the
+     border below), kept QUIET at rest — muted ink on a translucent sheet ground —
+     and only gaining contrast on hover/press. */
+  opacity: 1;
+  transition:
+    color 0.14s ease,
+    border-color 0.14s ease;
+}
+.card__more svg {
+  width: 14px;
+  height: 14px;
+}
+.card__more:hover,
+.card__menu.is-open .card__more {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+}
+/* A LIST row's "…" has no image ground to sit over, so it drops the grid
+   trigger's own fill and blur — but keeps the SAME quiet border, so the control
+   reads as pressable at rest in both views (it used to be a borderless glyph
+   here). It gains contrast on hover/press exactly like the grid trigger. */
+.gallery.is-list .card__more {
+  background: transparent;
+  backdrop-filter: none;
+}
+

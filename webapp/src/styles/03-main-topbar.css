@@ -1,0 +1,263 @@
+/* ================= MAIN ================= */
+.main {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-width: 0;
+  min-height: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--desk) 55%, var(--sheet));
+}
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  letter-spacing: 0.02em;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.crumbs button {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--ink-soft);
+  padding: 2px;
+}
+.crumbs button:hover {
+  color: var(--ink);
+}
+.crumbs .crumbs__here {
+  color: var(--ink);
+}
+.crumbs__sep {
+  opacity: 0.5;
+}
+
+.search {
+  position: relative;
+  flex: 1;
+  max-width: 520px;
+  margin: 0 auto;
+}
+.search svg.search__glyph {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  color: var(--ink-faint);
+  pointer-events: none;
+}
+.search input {
+  width: 100%;
+  /* One shared height with the sort/view controls (see `--topbar-control-h`);
+     border-box folds the padding + border inside it, so the visual box matches. */
+  height: var(--control-h);
+  /* Right padding clears the OCR chip, so a long query scrolls under the glyph
+     rather than behind the chip. */
+  padding: 9px 52px 9px 36px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  font-size: var(--fs-body);
+}
+/* The mockup's chip: this box reads the recognised ink, not just the names. */
+.search__ocr {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.12em;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: var(--ink-soft);
+  background: var(--hover);
+  border: 1px solid var(--line);
+  pointer-events: none;
+}
+.search input::placeholder {
+  color: var(--ink-faint);
+}
+.search input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.tools {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* ---- A DESTINATION IS A MODE IN THE TOPBAR ---------------------------------
+ *
+ * `.sn-root.is-destination` is set while any full-content view that is NOT a
+ * folder listing is up — the recycle bin, the admin console (see
+ * `setDestinationMode` in library.ts). It began as `.sn-root.is-bin`, for the
+ * bin alone, and generalised the moment the console needed the identical
+ * treatment: the reason is not "this is the bin", it is "what is on screen is
+ * not the library", which is equally true of both. Two classes doing one thing
+ * is how they drift apart.
+ *
+ * The rules live HERE, with `.search` and `.tools`, rather than in either
+ * destination's stylesheet: they are facts about the topbar's own layout, and a
+ * third destination should not have to find them inside the bin's file.
+ *
+ * The search box leaves because it searches the LIBRARY, which is not what is on
+ * screen — and typing in it navigates off the destination entirely, which is the
+ * trap rather than the box.
+ */
+.sn-root.is-destination .search {
+  display: none;
+}
+/* The search box is what normally pushes `.tools` to the far edge (`flex: 1`),
+   so removing it collapses the toolbar against the breadcrumb and a topbar
+   action lands mid-header, reading as part of the crumb rather than as a
+   control. The margin restores the position the box was holding, so nothing in
+   the topbar moves as you enter and leave a destination. */
+.sn-root.is-destination .tools {
+  margin-left: auto;
+}
+
+/* A LABELLED topbar action belonging to whichever destination is open — `Empty
+   bin`, `Lock console`. Labelled and not icon-only on purpose: a lone glyph in a
+   toolbar is a guess, and both of these do something a guess should not reach.
+   The glyph is decoration on a control that already says what it does, so it
+   sits INSIDE the button and takes the label's colour; nothing here says
+   anything about tone. `is-danger` (08) carries the bin's red, and the console's
+   Lock deliberately does not take it — red is danger and nothing else here, and
+   locking destroys nothing. */
+.topbar__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  /* Aligns with the search box and the sort/view controls — one topbar height
+     (see `--topbar-control-h`), border-box so the `.btn` padding sits inside it. */
+  height: var(--control-h);
+}
+/* Same specificity trap as `.select[hidden]` above, and the reason this rule
+   exists at all: `display: inline-flex` at (0,1,0) beats the UA's `[hidden] {
+   display: none }` at (0,0,1), so without this the button would stay on screen
+   over every folder with only the accessibility tree agreeing it was gone. */
+.topbar__action[hidden] {
+  display: none;
+}
+.topbar__action-mark svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+/* Disabled rather than removed over an empty bin — the control stays where it
+   will be looked for. Not dimmed past legibility: it still has to read as the
+   thing that will be available once there is something to empty. */
+.topbar__action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+/* Both of these are HIDDEN OVER SEARCH RESULTS — they describe a folder listing,
+   and a query has left the folder behind. `[hidden]`'s `display: none` is a UA
+   rule at specificity (0,0,1), so the `display: inline-flex` above silently beat
+   it and the attribute did nothing visible: the controls stayed on screen with
+   only the accessibility tree agreeing they were gone. Restated here at (0,1,1)
+   so the attribute means what it says. */
+.select[hidden],
+.segmented[hidden] {
+  display: none;
+}
+.select select {
+  appearance: none;
+  /* The topbar's shared control height (see `--topbar-control-h`) — this was the
+     control that read a touch SHORTER than the view toggle in the mockup. */
+  height: var(--control-h);
+  padding: 7px 26px 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.select svg {
+  position: absolute;
+  right: 8px;
+  /* BOTH axes, because `position: absolute` only escapes flow on the axes it is
+     given one. With `right` alone the chevron kept its STATIC vertical position —
+     the flex line's start rather than its centre — so it sat low against a label
+     the flex container had already centred. The offset is small enough to read as
+     sloppy rendering rather than a missing rule, which is why it survived. */
+  top: 50%;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 12px;
+  pointer-events: none;
+  color: var(--ink-faint);
+}
+.segmented {
+  display: inline-flex;
+  /* One topbar height (see `--topbar-control-h`); border-box keeps the 1px frame
+     inside it so the toggle matches the sort select and the search box exactly. */
+  height: var(--control-h);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.segmented button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  /* Fill the frame's inner height rather than pinning 32px, so the segment's
+     height follows `--topbar-control-h` from the one place it is set. */
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.segmented button svg {
+  width: 15px;
+  height: 15px;
+}
+.segmented button[aria-pressed="true"] {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+/* ---- content scroll area ---- */
+/* Rows are PINNED rather than auto-placed. `.reader` is `position: absolute;
+   inset: 0`, so its height comes entirely from `.content`. With auto placement,
+   hiding the topbar (see `.sn-root.is-reading` below) promotes `.content` into
+   the collapsed `auto` row — the gallery being `display: none` leaves nothing to
+   give it height, so the reader resolves to `Wx0` and the whole panel renders
+   BLANK while every class and computed style still reads correctly (`is-open`
+   true, `display: grid`, `visibility: visible`). Pinning the rows means hiding a
+   header can never reflow what sits under it. */
+.topbar {
+  grid-row: 1;
+}
+.content {
+  grid-row: 2;
+  min-height: 0;
+  overflow-y: auto;
+  position: relative;
+}
+

@@ -1,0 +1,54 @@
+# --- build output & caches ---
+.zig-cache/
+zig-out/
+*.o
+zig-pkg/
+__pycache__/
+*.pyc
+
+# --- TLS material & secrets (NEVER commit) ---
+certs/
+cred.key
+test-server.key
+test-server.key.pub
+*.pem
+
+# --- runtime state: blob store, render cache, databases + ALL their backups ---
+# `*.db` alone missed the backup copies (minicloud.db.backup-*, .pre-*,
+# .pretemplate-*) because those don't end in `.db`; the trailing-* forms catch them.
+data/
+*.db
+*.db.*
+*.db-wal*
+*.db-shm*
+*.log
+
+# --- local config (capture.zon is a committed template; config.zon/serve-run are yours) ---
+config.zon
+serve-run.zon
+
+# --- capture / reverse-engineering scratch (not source) ---
+mitm/
+
+# --- frontend (webapp): dev deps + build/test output ---
+node_modules/
+dist/
+playwright-report/
+test-results/
+# The Zig-built wasm decoders live in public/ ONLY as build output: `npm run
+# build:wasm` (a pre* hook of dev/build/test) compiles them from webapp/wasm/*.zig
+# and Vite copies them into dist/. Like dist/, they're never committed. The
+# fonts in public/ ARE source and stay tracked.
+webapp/public/*.wasm
+
+# --- docs site (MkDocs): local venv + built static site ---
+.venv-docs/
+release/
+
+# --- server instance state: the whole server/ tree is local (db, blobs, keys,
+# mitm logs, and the instance's own serve.zon). Nothing under it is committed;
+# config.example.zon at the root is the template a fresh deploy copies from. ---
+server/
+
+# --- editor / tooling local state ---
+.claude/

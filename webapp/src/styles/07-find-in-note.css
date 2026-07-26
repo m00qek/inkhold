@@ -1,0 +1,266 @@
+/* ================= FIND IN NOTE =================
+   Universal search answers "which note"; find answers "where on this page". It
+   can, because the device's recognition carries a rectangle per word (WordBox,
+   in millimetres) — the same data the PDF exporter already places its invisible
+   text layer from. So a match is drawn ON the ink rather than described beside
+   it. */
+.findbar {
+  display: none;
+  align-items: center;
+  /* Anchor the field + count + nav to the right edge of the bar. The field caps
+     at 340px, so on a wide reader the leftover space falls to the left and the
+     whole cluster sits right; on a narrow bar it just fills, unchanged. */
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--desk);
+}
+.reader.is-finding .findbar {
+  display: flex;
+}
+/* BUILT LIKE THE LIBRARY'S SEARCH FIELD, not as a bare text node. As one it had
+   no border, no ground and no focus ring, so the only thing saying "type here"
+   was the placeholder — and once you typed, nothing at all. */
+.findbar__field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  max-width: 340px;
+}
+.findbar__field svg {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  color: var(--ink-faint);
+  pointer-events: none;
+}
+.findbar input {
+  width: 100%;
+  padding: 7px 12px 7px 33px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-size: var(--fs-body);
+}
+.findbar input::placeholder {
+  color: var(--ink-faint);
+}
+.findbar input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+/* WEIGHTED THE OTHER WAY ROUND FROM THE MOCKUP, deliberately. There it was
+   `--ink-faint` for the live count and `--ink-soft` for everything else, but
+   `--ink-faint` measures 2.5:1 in light mode and 3.9:1 in dark — under AA for
+   text this size, and this is the string carrying the answer. So a real count
+   gets full `--ink` (it IS the answer) and the non-count states — "searching…",
+   "No matches", "Not recognised on the device" — stay quieter at `--ink-soft`,
+   which is what the pager count beside it already uses. The distinction the
+   mockup drew survives; the illegible end of it does not. */
+.findbar__count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.findbar__count.is-none {
+  color: var(--ink-soft);
+}
+/* Said in the bar, not as an empty result: a note with no recognition cannot be
+   searched at all, which is a different fact from "no matches here". */
+.findbar__note {
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+/* "These are close matches" — said once, beside the counter, never per match.
+   Same soft treatment as the aside above, because it qualifies the count rather
+   than competing with it; the count is still the thing being read. */
+.findbar__fuzzy {
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The manual-fuzzy OPT-IN affordance (in-doc-search Phase 3): shown beside the
+   "No matches" count when a typo-tolerant search WOULD find something. A quiet
+   inline action, link-styled off --accent so it reads as "do this" without
+   competing with the counter — never a heavy button for a suggestion. */
+.findbar__ask {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-family: var(--font-text);
+  font-size: var(--fs-caption);
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.findbar__ask:hover {
+  text-decoration: none;
+}
+.findbar .icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* An OVAL, not a rectangle. The rectangles come from the device's own
+   recognition and can sit slightly off the ink, so a hard box asserts a
+   precision the data does not have — an oval reads as "circled", which is
+   inherently approximate, and matches a pen going round a word in a notebook.
+   Outline rather than fill throughout: a wash would obscure the very ink it is
+   pointing at. */
+.findbox {
+  position: absolute;
+  pointer-events: none;
+}
+/* `preserveAspectRatio="none"` stretches one drawn loop to any word's
+   proportions; `non-scaling-stroke` then keeps the line an even weight instead
+   of smearing with it — without it a long word gets a fat horizontal stroke and
+   a thin vertical one. `overflow: visible` lets the overshoot leave the box. */
+.findbox svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.findbox path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1.4;
+  opacity: 0.55;
+}
+/* Nothing but the stroke separates the current match, since the background is
+   transparent by design — a fill would sit on top of the ink it circles. */
+.findbox.is-current path {
+  stroke-width: 2.2;
+  opacity: 1;
+}
+
+/* ================= NON-.note STAGE =================
+   The reader's other two outcomes, in the slot `.stage` occupies (exactly one of
+   the two is ever in the grid; the other is `hidden`). An image is shown as
+   itself; anything else falls back to the shared `.empty` block, so the "no
+   preview" state inherits the library's existing empty-state typography rather
+   than introducing a second voice for the same idea. */
+.filestage {
+  position: relative;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  min-height: 0;
+}
+.filestage__img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 3px;
+  background: var(--sheet);
+  box-shadow:
+    0 2px 3px var(--shadow),
+    0 26px 50px -28px var(--shadow);
+}
+.filestage__empty {
+  max-width: 44ch;
+}
+.filestage__download {
+  margin-top: 18px;
+  text-decoration: none;
+}
+
+/* The page and the recognized-text aside are SIBLINGS in a row: opening the
+   panel narrows the page rather than covering it, which is why the reader
+   re-runs showPage on every toggle. The gap is `--panel-gap`; the panel widths
+   are `--panel-w` / `--panel-w-wide` — the canvas is sized in JS against the
+   stage, and the reader's relayout reads all three straight off those tokens
+   (getComputedStyle), so the JS subtracts exactly what this layout takes away
+   with nothing hand-synced. */
+.page-wrap {
+  position: relative;
+  display: flex;
+  gap: var(--panel-gap);
+  align-items: flex-start;
+}
+
+/* ================= RECOGNIZED TEXT =================
+   The card, head and state treatment are the SHARED side panel now
+   (src/ui/sidePanel.ts, 15-side-panel.css); the OCR panel rides `.side-panel`
+   with the `.ocr` hook namespace. All that stays here is the body's own text
+   look — the transcript, which is unlike the layers panel's row list. */
+.ocr__body {
+  font-size: var(--fs-body);
+  line-height: 1.62;
+  color: var(--ink-soft);
+  /* The transcript carries the device's own line breaks — preserve them. */
+  white-space: pre-wrap;
+}
+/* Reserved for the search-highlight pass: the panel already renders <mark>. */
+.ocr__body mark {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--ink);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+/* The loading / failed / genuinely-empty states are the SHARED
+   `.side-panel__state` now (15-side-panel.css) — promoted from here so every
+   docked panel says "still loading / nothing here / that failed" identically. */
+
+/* A page with no recognized text still shows the control — dimmed, so the
+   feature stays discoverable instead of vanishing between pages. */
+.btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+.btn:disabled:hover {
+  color: var(--ink-soft);
+  border-color: var(--line);
+  background: transparent;
+}
+
+/* ================= TOAST ================= */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%) translateY(20px);
+  opacity: 0;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  letter-spacing: 0.03em;
+  background: var(--ink);
+  color: var(--sheet);
+  padding: 9px 16px;
+  border-radius: var(--radius-card);
+  box-shadow: 0 12px 30px -12px var(--shadow);
+  transition:
+    transform 0.22s ease,
+    opacity 0.22s ease;
+  z-index: 50;
+}
+.toast.is-shown {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sn-root *,
+  .sn-root *::before,
+  .sn-root *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

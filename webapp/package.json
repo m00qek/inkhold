@@ -1,0 +1,31 @@
+{
+  "name": "inkhold-app",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Web app shell (auth + file browser) for Inkhold. Static SPA, zero runtime dependencies.",
+  "scripts": {
+    "dev": "vite",
+    "predev": "npm run build:wasm",
+    "build:wasm": "cd .. && zig build wasm-note-decode && cp zig-out/bin/note-decode.wasm webapp/public/note-decode.wasm && zig build wasm-spd-decode && cp zig-out/bin/spd-decode.wasm webapp/public/spd-decode.wasm",
+    "prebuild": "npm run build:wasm",
+    "build": "npm run typecheck && vite build",
+    "postbuild": "node scripts/precompress.mjs",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "lint:styles": "node scripts/lint-styles.mjs",
+    "pretest": "npm run build:wasm",
+    "test": "npm run lint:styles && npm run test:unit && npm run test:e2e",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@types/node": "^22.10.0",
+    "happy-dom": "^20.11.1",
+    "typescript": "^5.7.2",
+    "vite": "^7.0.0",
+    "vitest": "^3.2.0"
+  }
+}

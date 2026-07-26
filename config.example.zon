@@ -1,0 +1,44 @@
+// Inkhold server config. Copy to config.zon and edit.
+// All fields are optional; omitted ones use the defaults shown here.
+.{
+    .host = "127.0.0.1",
+    .port = 8089,
+
+    // SQLite database file (created if absent). ":memory:" for an ephemeral db.
+    .db_path = "inkhold.db",
+
+    // 32-byte credential-encryption key, held OUTSIDE the db (ideally outside the
+    // backup path too) so a stolen inkhold.db yields no recoverable credentials.
+    // Generated + persisted 0600 on first run if absent. BACK THIS UP: losing it
+    // makes every stored credential unrecoverable → forced resets. See docs/design/auth.md.
+    .cred_key_path = "cred.key",
+
+    // Directory for the content-addressed blob store and render cache.
+    .data_dir = "data",
+
+    // Path to the built web SPA (dist/) to serve as static files. Empty disables
+    // static serving (404 on any non-API route). When set, this same process
+    // serves the browser UI alongside the device sync API — one port for everything.
+    .web_dir = "",
+
+    // Email/login of the auto-created first-run administrator.
+    .admin_email = "admin",
+
+    // Max connections in flight at once (a thread per connection in serve mode, so
+    // this bounds memory: max_connections * ~1 MiB reserved stack). Slots are held
+    // for a connection's whole lifetime — keep-alive parks ~6 per browser tab and
+    // the device holds a persistent WebSocket. 96 covers a household inside the
+    // ~50 MB RSS budget. Raise only together with the budget.
+    .max_connections = 96,
+
+    .tls = .{
+        // Terminate TLS in-process. When false, plaintext HTTP is served.
+        .enabled = false,
+        .cert_path = "certs/cert.pem",
+        .key_path = "certs/key.pem",
+        // Allowed TLS 1.3 cipher suites, preferred first. Empty = library default.
+        // Names match tls.zig's CipherSuite enum, e.g.:
+        //   "AES_256_GCM_SHA384", "AES_128_GCM_SHA256", "CHACHA20_POLY1305_SHA256"
+        .cipher_suites = .{},
+    },
+}

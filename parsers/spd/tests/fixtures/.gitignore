@@ -1,0 +1,6 @@
+# .spd captures can carry personal handwriting — ignore them by default so a
+# real device drawing is never committed by accident. The one exception is the
+# committed test fixture below, which is synthetic (digit scribbles over a
+# hidden layer and a semi-transparent one — see spd_test.zig).
+*.spd
+!layers_hidden.spd

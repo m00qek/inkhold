@@ -1,0 +1,96 @@
+/* ================= .spd (Atelier) VIEWER ================= */
+/* The compositor's surface: a layers panel beside a scrollable canvas stage,
+   under the shared toolbar (10-toolbar.css). The loading / error / empty states
+   reuse the stub's centred `.viewer__placeholder` (11-viewer-stub.css) — this
+   file only adds the RENDERED body (`.spd-body`), which lives beside `.viewer__main`
+   and is shown once the tiles have composited.
+
+   Appended at the END of the manifest (after 11) so it can override the stub's
+   `.viewer__main` treatment for `.spd` without reopening earlier files. */
+
+/* The rendered body fills the viewer below the bar, laid out as [stage | panel] —
+   the layers panel docks on the RIGHT, a card beside the canvas, exactly as the
+   reader's "Recognized text" aside sits right of the page (`.ocr`, 07-find-in-note).
+   Shown only once the canvas has content; until then `.viewer__main` (the
+   placeholder) is what paints. Both carry an explicit `[hidden]` rule because
+   their `display` is set at class specificity, which would otherwise beat the
+   UA `[hidden]` — the same discipline `.viewer[hidden]` needs in 11. */
+.spd-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+}
+.spd-body[hidden] {
+  display: none;
+}
+.viewer--spd .viewer__main[hidden] {
+  display: none;
+}
+
+/* The layers panel itself is the SHARED side panel now — its card, head and
+   open/hide are the primitive (`.side-panel`, 15-side-panel.css); its rows,
+   eyes, steppers and thumb sizing are the layers body (`.layers-panel*`,
+   14-layers-panel.css). The `spd-layers`/`spd-layer__…` classes on the same
+   elements are the `.spd` HOOK namespace — test selectors and the home of the
+   one `.spd`-specific thumb rule below; they carry no other look.
+
+   The DOCK MARGIN is this context's, not the primitive's: the `.spd-body` lays
+   the panel out beside the stage and floats it off the edges by --sp-6 (24px),
+   mirroring the stage's own padding. The reader's `.page-wrap` pays a flex gap
+   instead and so leaves the primitive's zero margin alone. */
+.spd-body .side-panel {
+  margin: var(--sp-6) var(--sp-6) var(--sp-6) 0;
+}
+
+   The blank Reference Layer's empty frame: no canvas to derive a width from, so
+   buildThumb (spdViewer.ts) sets the drawing's real aspect inline, and this
+   portrait 3:4 stands in if it cannot. `.spd`-specific because the reserved
+   blank Reference Layer (id 9999) is `.spd` knowledge. */
+.spd-layer__thumb--blank {
+  aspect-ratio: 3 / 4;
+}
+
+/* The stage scrolls its own overflow (a drawing larger than the viewport at
+   100%/150%) and centres the canvas while it fits. */
+.spd-stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+/* The zoom surface AND the transparency backdrop. It holds one absolutely-
+   positioned canvas per layer; its own size (set in px by the viewer) is the only
+   thing zoom changes, and the browser scales the whole stack. Its CHECKERBOARD
+   shows through wherever a layer is hidden or transparent — the white base is the
+   Reference Layer's OWN canvas, not a fill here, so hiding it goes see-through. */
+.spd-canvas-wrap {
+  position: relative;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 6px 20px rgba(0, 0, 0, 0.08);
+  line-height: 0;
+  /* A light-neutral checker (two 45deg gradients), the universal "transparent"
+     backdrop. Sits under every layer canvas. */
+  background-color: #f4f4f4;
+  background-image:
+    linear-gradient(45deg, #d8d8d8 25%, transparent 25%, transparent 75%, #d8d8d8 75%),
+    linear-gradient(45deg, #d8d8d8 25%, transparent 25%, transparent 75%, #d8d8d8 75%);
+  background-size: 22px 22px;
+  background-position: 0 0, 11px 11px;
+}
+/* Each layer's own canvas: base-res backing, stretched to the wrap so zoom is a
+   single CSS resize with no re-raster. Stacked in DOM order (topmost last). */
+.spd-layer-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* The zoom readout wears its OWN class (`.spd-zoom`) — every viewer is mounted at
+   once, so a shared `.zoom` locator would resolve to more than one element — but
+   its CHROME is the shared `.zoom` treatment, grouped with `.spd-zoom`/`.txt-zoom`
+   in 10-toolbar.css so there is one source of truth rather than a per-viewer copy. */

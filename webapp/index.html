@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Inkhold</title>
+    <!-- Restore the pinned theme BEFORE first paint. The entry module is
+         deferred, so it typically runs after the browser has already painted the
+         body background — restoring there is a visible flash of the wrong theme.
+         Blocking and inline in <head> is the only place that is guaranteed to
+         beat it. Kept deliberately tiny; the real logic lives in src/ui/theme.ts,
+         which re-applies this idempotently. No stored choice => no attribute =>
+         the prefers-color-scheme media query stays in charge. -->
+    <script>
+      try {
+        var t = localStorage.getItem("sn.theme");
+        if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {
+        /* private mode / storage disabled — fall through to the OS preference */
+      }
+    </script>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <main id="app" aria-live="polite"></main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,52 @@
+/*
+ * Inkhold — app shell styling.
+ *
+ * Design direction: the Supernote is a monochrome e-ink writing device, so the
+ * app dresses as what it holds — a leaf of ruled notebook paper. The signature
+ * is the "sheet": a paper card with faint horizontal rules and a single red
+ * margin line, where each input reads as a ruled line you write on. Everything
+ * else stays quiet and monochrome. The utility face is a monospace, echoing the
+ * device firmware and the self-hosted, homelab nature of the tool.
+ *
+ * Typography: Space Grotesk (SIL OFL) for the display face — titles, headings
+ * and the big display moment; system sans for body; system monospace for the
+ * wordmark, field labels, and buttons. Space Grotesk is SELF-HOSTED under
+ * public/fonts/ (see the @font-face block in 01-tokens-auth.css) — nothing is
+ * fetched from a CDN, in keeping with the tiny, fully self-hostable, works-
+ * offline ethos. Deferred follow-up: --font-mono → self-hosted Space Mono would
+ * complete the superfamily (one token; not done this pass).
+ */
+
+/*
+ * THIS FILE IS AN ORDERED MANIFEST, NOT A PLACE TO PUT RULES. Everything below
+ * is one flat cascade split at its own section banners so that separate UI work
+ * can edit separate files; concatenating these seven in this order reproduces
+ * the single stylesheet this was cut from, byte for byte.
+ *
+ * THE ORDER IS LOAD-BEARING and the numeric prefixes exist to say so. Later
+ * files deliberately override earlier ones at equal specificity — a `[hidden]`
+ * that has to survive a `display: inline-flex`, a `.card__menu { position:
+ * absolute }` that a later `.menu { position: relative }` would otherwise beat.
+ * Reordering these imports, or moving a rule between files, changes what renders
+ * even though every rule still exists. Add new sections at the end; keep the
+ * PURE token layer (00) first, since every file after it — starting with the
+ * @font-face + auth rules in 01 — resolves `var(--…)` against it.
+ */
+
+@import "./styles/00-tokens.css";
+@import "./styles/01-tokens-auth.css";
+@import "./styles/02-app-shell-rail.css";
+@import "./styles/03-main-topbar.css";
+@import "./styles/04-library-gallery.css";
+@import "./styles/05-search-results.css";
+@import "./styles/06-reader.css";
+@import "./styles/07-find-in-note.css";
+@import "./styles/08-bin.css";
+@import "./styles/09-admin.css";
+@import "./styles/10-toolbar.css";
+@import "./styles/11-viewer-stub.css";
+@import "./styles/12-spd-viewer.css";
+@import "./styles/13-txt-viewer.css";
+@import "./styles/14-layers-panel.css";
+@import "./styles/15-side-panel.css";
+@import "./styles/16-history.css";

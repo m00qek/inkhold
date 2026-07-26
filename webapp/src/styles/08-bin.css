@@ -1,0 +1,653 @@
+/* ================= RECYCLE BIN =================
+ *
+ * A bin is not a folder — it is a countdown. Rows group by deletion date (which
+ * reunites a folder-delete batch the device sends as separate per-entity
+ * requests, children first) and each carries the signature of the whole design
+ * language: a page rule whose remaining length IS the remaining retention,
+ * crossing to --margin at the end. No new colour is introduced.
+ *
+ * THE COLOUR RULE THIS FILE OBEYS. Red (--margin) is DANGER and nothing else;
+ * green (--accent) is brand and state. So the countdown rule is neutral until it
+ * is nearly out, the aside that explains the device behaviour is green because
+ * it is information, and only Delete and the confirm's second button are red.
+ *
+ * Loaded last, after 07 — see the manifest note in styles.css. Nothing here
+ * overrides an earlier file at equal specificity; every selector is new.
+ */
+
+/* --margin-ink (the AA-legible red for TYPE) now lives in 01-tokens-auth.css:
+   the admin console needs the same colour, and two definitions of one token is
+   how they drift. The uses below are unchanged. */
+
+/* The bin paints INTO the gallery (see bin.ts), so the grid has to stand down:
+   this is a list of rows, not a wall of tiles. Same container geometry as
+   `.gallery`, so the left edge does not shift as you move between them. */
+.gallery.is-bin {
+  display: block;
+  padding: 0;
+}
+.bin {
+  display: block;
+  padding: 26px 28px 48px;
+}
+
+/* THE BIN IS A MODE IN THE TOPBAR, exactly as reading is (`.sn-root.is-reading`
+   in 06 takes the whole header away). Two things follow from it:
+
+   - the search box leaves. It searches the LIBRARY, which is not what is on
+     screen, and typing in it navigates off the bin entirely — the same trap the
+     reader's header had, for the same reason;
+   - `Empty bin` arrives, in `.tools` beside sort and the view toggle, because it
+     acts on the whole view rather than on any row. It used to sit in the bin's
+     own header on the argument that a topbar control would need a teardown hook
+     the shell lacks. It does need one, and the shell has had it all along —
+     `renderGallery()` runs on every navigation out of here and is what turns the
+     mode off, precisely as it is already what closes the bin.
+
+   NEITHER RULE IS HERE ANY MORE. Both were written for the bin and both were
+   the admin console's requirement verbatim, so they moved to 03 as
+   `.sn-root.is-destination` and `.topbar__action` — the topbar's own layout,
+   shared by every destination. What stays in this file is what is really about a
+   bin: `.gallery.is-bin` above, and `.btn.is-danger` below, which the console
+   deliberately does NOT take for its Lock button.
+
+   Sort and the view toggle are NOT handled by the mode class either: they use
+   the `hidden` attribute (restated at `.select[hidden]` in 03 — a UA
+   `display:none` at (0,0,1) loses to a component's `display:flex`), which is
+   already how they leave over search results. One rule, one mechanism. */
+
+/* The aside is the whole of this row now: why the bin behaves as it does, at the
+   point where the consequence is visible. */
+/* CENTRED with the rows. The mockup centres `.bin__aside` itself because there
+   the aside IS the 760px block; here it is a `flex: 1` child of `.bin__head`,
+   which is the element that actually carries the measure — so `margin-inline`
+   on the aside would do nothing and the notice would hang to the left of the
+   rows. Same result, one level up. */
+.bin__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  max-width: 760px;
+  margin-inline: auto;
+}
+.bin__aside {
+  flex: 1;
+  margin: 20px 0 4px;
+  padding: 11px 14px 11px 13px;
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-radius: 0 6px 6px 0;
+  font-size: var(--fs-body);
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+.bin__aside b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.bin__group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 760px;
+  /* `auto` horizontally, with the rows and the aside — the old 2px was a nudge
+     that only meant anything while the whole bin was left-aligned. */
+  margin: 28px auto 6px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.bin__group::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.bin__rows {
+  max-width: 760px;
+  margin-inline: auto;
+}
+/* RULED AT REST, like the list row it is the sibling of — the bin had the same
+   problem for the same reason, and takes the same answer. */
+.bin__row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: var(--row-pad-y) 12px;
+  border-radius: 4px;
+  border-bottom: 1px solid var(--row-rule);
+}
+.bin__row:last-child {
+  border-bottom: none;
+}
+/* (The open-row z-index lift that used to sit here is gone: the shared menu's
+   popover now portals to <body> and paints at `--z-popover`, above every row, so
+   no row needs raising to clear the ones below it — see 06-reader.css.) */
+/* NOT between a trashed folder and its own children. The nesting says these came
+   down together and go back together — one restore, one decision — and a divider
+   through the middle of that would say the opposite. The rule returns after the
+   last child, where the next entry really is a separate thing.
+
+   SPECIFICITY, not order: `:has()` takes the specificity of its most specific
+   argument, so `.bin__row:has(+ .bin__row.is-child)` is (0,3,0) against the
+   (0,1,0) `padding` shorthand above — it cannot be undone by moving these rules,
+   the way an unscoped longhand could (see the `.card .card__menu` note in
+   04-library-gallery.css). `.bin__row.is-child` is (0,2,0) and beats it for the
+   same reason, which is also what has always kept its `padding-left: 34px`. */
+.bin__row:has(+ .bin__row.is-child) {
+  border-bottom: none;
+}
+/* The tight pairing, applied to BOTH sides of every seam inside the subtree —
+   the folder's underside, each child's top, and a child's underside while more
+   children follow. Air and a rule are the same signal, so dropping the rule
+   without dropping the air would leave two 15px paddings meeting as 30px of
+   blank, and a folder's own children would read as FURTHER apart than two
+   unrelated ruled entries. The LAST child keeps the full padding, because it is
+   the end of the group and the next row genuinely is a stranger. */
+.bin__row:has(+ .bin__row.is-child) {
+  padding-bottom: var(--row-pad-y-tight);
+}
+.bin__row.is-child {
+  padding-top: var(--row-pad-y-tight);
+}
+.bin__row.is-child:has(+ .bin__row.is-child) {
+  padding-bottom: var(--row-pad-y-tight);
+}
+.bin__row:hover {
+  background: var(--hover);
+}
+/* A child sits under the trashed folder it came from. The nesting is not
+   decoration: restoring a child restores its ancestors too, so showing the
+   relationship is what stops that being a surprise. A row whose parent is NOT in
+   the bin stays flush. */
+.bin__row.is-child {
+  padding-left: 34px;
+}
+.bin__row.is-child::before {
+  content: "";
+  position: absolute;
+  left: 19px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--rule);
+}
+
+.bin__open {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* A folder has nothing to open, so its lead is not a control and must not offer
+   itself as one. */
+.bin__open.is-static {
+  cursor: default;
+}
+
+/* The bin row's lead tile is LIST-class: same height as the library's list row
+   and a search result, so the three list surfaces share one rhythm. A page/glyph
+   tile keeps the portrait 3:4 width derived from the height (the canvas pipeline
+   carries no per-item aspect); an image tile takes its image's own width — see
+   `.is-image` below. (The old 0.773 tile ratio quietly stretched 0.75 note pages
+   a hair; 3:4 removes even that.) */
+.bin__thumb {
+  height: var(--preview-h-list);
+  width: calc(var(--preview-h-list) * 3 / 4);
+  flex: none;
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background-image: repeating-linear-gradient(var(--sheet) 0 7px, var(--paper-rule) 7px 8px);
+  color: var(--ink-faint);
+}
+.bin__thumb-mark svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+/* A REAL first page, painted by the gallery's own lazy engine. The engine sizes
+   the canvas from its CSS box, so the box has to resolve before the blit — which
+   is why the height and the width live on `.bin__thumb` above and the
+   canvas simply fills it. The ruled stock stays UNDER it: the engine's own
+   placeholder is a ruled sheet too, so the tile looks like paper from the first
+   frame rather than flashing an empty rectangle while the page decodes. */
+.bin__thumb.is-page canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+/* An image tile takes the image's own aspect at the class height — nothing
+   cropped (the old `cover` crop went with the fixed-ratio tile), capped at
+   2.5× the height with `contain` letterboxing inside the cap. The 3:4 width
+   above becomes a MINIMUM so the row does not jump while the image loads. */
+.bin__thumb.is-image {
+  width: fit-content;
+  min-width: calc(var(--preview-h-list) * 3 / 4);
+  max-width: calc(var(--preview-h-list) * 2.5);
+  background-image: none;
+  /* The tile is the sizing authority — a fixed-height, centred, CLIPPING box —
+     and the img just fills it (below). Earlier this file put min/max-width on
+     the IMG as well; with `height:100%`+`width:auto` the browser resolved the
+     width against those clamps FIRST and then derived height from the image's
+     own aspect, overriding `height:100%` — so a wide `.txt`/`.spd` or a
+     tall-ratio `.png` rendered a box taller than the 85px row and spilled out
+     (visibly inconsistent tile heights). Making the tile clip and the img
+     fit-contain is immune to that interaction. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.bin__thumb.is-image img {
+  /* Fill the (correctly-shaped, clipping) tile in BOTH axes; `contain`
+     letterboxes the image's own aspect inside. No px min/max here — the tile
+     owns the clamp — which is what stops height being derived from a clamped
+     width. The tile's min-width floor still holds the row steady before a
+     lazy image arrives (a zero-width `loading="lazy"` image never loads). */
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+/* THE REFLOW RIDER (masonry.md step 2), the bin's copy of the list row's rule
+   in 04: where the row's entry states its shape (`BinEntry.thumbAspect`, or the
+   image dims memo), bin.ts pre-sets an inline `aspect-ratio` — PRE-CLAMPED to
+   min(aspect, 2.5), the class's width cap — and marks the tile `has-aspect`.
+   The lead is then its final (letterboxed) width before any bytes arrive, so
+   the row's text never moves; and a landscape note's canvas gets an honestly
+   wide box instead of being squashed into the fixed 3:4 one. The base rule's
+   explicit width has to stand down for the inline aspect to size the box. */
+.bin__thumb.has-aspect {
+  width: auto;
+  min-width: calc(var(--preview-h-list) * 3 / 4);
+  max-width: calc(var(--preview-h-list) * 2.5);
+}
+/* has-aspect just shapes the tile box; the img rule above (fill + contain)
+   already does the right thing, so no separate img override is needed. */
+.bin__thumb.is-folder {
+  background-image: none;
+}
+.bin__thumb.is-folder svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  stroke-width: 1.7;
+}
+
+.bin__body {
+  flex: 1;
+  min-width: 0;
+}
+.bin__name {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bin__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A path answers "not where you are standing". The bin needs it because the
+   row's home is gone; search needs it because results span the whole library.
+   Same question, same treatment — `.card__path` in 05 is the other half of this
+   one rule. */
+.bin__path {
+  color: var(--ink-soft);
+}
+.bin__dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+  flex: none;
+}
+
+/* The countdown. Neutral until it is nearly out — a rule that is red from the
+   first day says "danger" about a file with four weeks to live. */
+.life {
+  width: 108px;
+  flex: none;
+}
+.life__track {
+  /* A BORDERED track so the retention window's TOTAL is legible — without it the
+     fill floated on the paper with nothing to measure against (the old --rule
+     ground was ~invisible). Taller than the old 2px so the fill proportion reads. */
+  height: 6px;
+  box-sizing: border-box;
+  background: var(--hover);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.life__fill {
+  height: 100%;
+  /* --ink-faint, not --line: a clear step darker than the track + its border, so
+     "how much time is left" reads at a glance (red via --margin when is-soon). */
+  background: var(--ink-faint);
+  border-radius: 1px;
+}
+.life__label {
+  margin-top: 6px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-faint);
+}
+.life.is-soon .life__fill {
+  background: var(--margin);
+}
+.life.is-soon .life__label {
+  color: var(--margin-ink);
+}
+
+/* A RESTING STATE, like the gallery row's own export control and for the same
+   reason — hiding a control on a wide three-line row buys nothing and costs
+   discoverability. Hover and `:focus-within` still bring it to full strength (and
+   `:focus-within` is what keeps it reachable by keyboard), and a coarse pointer
+   has no hover at all, so there it is always fully shown.
+
+   0.65 is the mockup's number and carries the mockup's caveat — see the long
+   note on `.card__actions` in 04-library-gallery.css. In short: it measures
+   5.28:1 there because that `.btn` is a filled `--ink`-on-`--sheet` chip, while
+   this app's `.btn` is a transparent outline in `--ink-soft`/`--margin-ink` on
+   `--desk` with only ~4.5–4.7:1 to begin with, so any fade at all puts it under
+   the floor. Ported for consistency with the list, NOT because it is measured
+   safe here. Do not lower it. */
+  /* FULL OPACITY at rest, and this is forced, not chosen. The approved mockup used
+     0.65 to make a resting control quiet — but its `.btn` is FILLED (`--ink` on
+     `--sheet`, 16.64:1), so it had contrast to spend. This app's `.btn` is an
+     OUTLINE button in `--ink-soft`, which measures 5.47:1 — and every partial
+     opacity fails: 0.85 -> 3.97, 0.75 -> 3.25, 0.65 -> 2.69, all under the 4.5
+     floor. There is no fade that keeps this button legible.
+     
+     Nothing is lost. The fade existed to make the control quiet, and an outline
+     button in the soft ink is ALREADY quiet — the emphasis is in the style, not in
+     the alpha. Hover still marks the active row through the row background.
+     If the button ever becomes filled, a resting fade is back on the table; until
+     then, raising this below 1 reintroduces an accessibility bug. */
+.bin__actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+  opacity: 1;
+  transition: opacity 0.12s ease;
+}
+.bin__row:hover .bin__actions,
+.bin__row:focus-within .bin__actions {
+  opacity: 1;
+}
+@media (hover: none) {
+  .bin__actions {
+    opacity: 1;
+  }
+}
+/* The bin row's "…" is the shared overflow trigger (`.card__more`), which hides
+   itself until hover FOR A GRID CARD — it sits over a page image there. A bin
+   row has no such image and a dedicated actions slot, so the trigger stays
+   visible at rest (the labelled buttons it replaced were), and drops the grid
+   trigger's image-ground fill and blur — but keeps the SAME quiet border at rest
+   as the library trigger, gaining contrast on hover. */
+.bin__actions .card__more {
+  opacity: 1;
+  background: transparent;
+  backdrop-filter: none;
+  border-color: var(--line);
+}
+.bin__row:hover .bin__actions .card__more,
+.bin__actions .card__more:hover {
+  border-color: var(--ink-soft);
+}
+
+/* Destructive AT REST, not just on hover — Delete must not look like Restore
+   until you are already over it. The text uses --margin-ink (AA as small text);
+   the border uses --margin, which only has to clear the 3.0 non-text bar. */
+.btn.is-danger {
+  color: var(--margin-ink);
+  border-color: color-mix(in srgb, var(--margin) 30%, var(--line));
+}
+.btn.is-danger:hover:not(:disabled) {
+  color: var(--margin-ink);
+  border-color: color-mix(in srgb, var(--margin) 60%, var(--line));
+  background: color-mix(in srgb, var(--margin) 9%, transparent);
+}
+.menu__item--danger {
+  color: var(--margin-ink);
+}
+
+/* Every control in this file clears the 24×24 target minimum. The row's actions
+   are now the shared "…" trigger (`.card__more`, sized off `--control-h-sm`),
+   which already clears it; the confirm dialog's buttons are the ones pinned here. */
+.confirm__actions .btn {
+  min-height: 26px;
+}
+
+/* ---------------- confirm ----------------
+   A native <dialog>: the modal focus trap, Esc, and the inertness of the page
+   behind it come from the element rather than from us re-implementing three
+   things the platform already gets right. The form is method="dialog", so
+   returnValue carries the choice, and Cancel — FIRST IN DOM ORDER — is the
+   button Enter activates and the one that takes autofocus. The destructive
+   button is never the default action.
+
+   THE SHELL AND BACKDROP ARE SHARED WITH THE ADMIN CONSOLE'S `.admin-dialog`
+   (the other caller of src/ui/confirm.ts). One rule set, one look — the console
+   used to hand-copy these declarations "to the pixel". The BODY layouts stay
+   per-component on purpose: the bin spaces its rows with margins, the console
+   stacks fielded rows with a flex gap — two different models, not drift. */
+.confirm::backdrop,
+.admin-dialog::backdrop {
+  background: color-mix(in srgb, var(--desk) 74%, transparent);
+}
+.confirm,
+.admin-dialog {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0;
+  background: var(--sheet);
+  color: var(--ink);
+  box-shadow: 0 26px 60px -20px var(--shadow);
+  width: min(430px, calc(100vw - 32px));
+}
+.confirm__body {
+  padding: 22px 24px 0;
+}
+.confirm h2 {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: var(--fs-title);
+  line-height: 1.35;
+  margin: 0 0 8px;
+  text-wrap: balance;
+}
+.confirm p {
+  margin: 0;
+  font-size: var(--fs-body);
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+/* The freed size is the one number worth reading twice: trashing keeps charging
+   quota, so this is the moment the bytes actually come back — and it answers
+   "why didn't deleting free space?" exactly where it is being asked. */
+.confirm__frees {
+  margin-top: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.confirm__frees b {
+  color: var(--ink);
+  font-weight: 600;
+}
+.confirm__frees[hidden] {
+  display: none;
+}
+.confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 20px 24px 20px;
+}
+.confirm__actions .btn {
+  font-size: var(--fs-body);
+}
+
+/* ---------------- the undo toast ----------------
+   The bin's own, not the shell's. Trash is reversible, so it reports and offers
+   the reverse rather than asking first — and that only works if the offer
+   outlasts the glance, which a 2.4s notification does not. */
+.bin-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%) translateY(20px);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: min(560px, calc(100vw - 32px));
+  background: var(--ink);
+  color: var(--sheet);
+  padding: 10px 12px 10px 16px;
+  border-radius: 8px;
+  box-shadow: 0 12px 30px -12px var(--shadow);
+  transition:
+    transform 0.22s ease,
+    opacity 0.22s ease;
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  letter-spacing: 0.03em;
+}
+.bin-toast.is-shown {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+}
+.bin-toast__lines {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.bin-toast__sub {
+  opacity: 0.72;
+  font-size: var(--fs-eyebrow);
+}
+.bin-toast__sub[hidden] {
+  display: none;
+}
+.bin-toast__action {
+  flex: none;
+  min-height: 26px;
+  border: 1px solid color-mix(in srgb, var(--sheet) 40%, transparent);
+  background: transparent;
+  color: var(--sheet);
+  cursor: pointer;
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  font: inherit;
+}
+.bin-toast__action:hover {
+  background: color-mix(in srgb, var(--sheet) 16%, transparent);
+}
+.bin-toast__action[hidden] {
+  display: none;
+}
+
+/* ---------------- the preview overlay ----------------
+   For an IMAGE or a file with no preview; a `.note` goes to the real reader.
+   Deciding whether to restore something deleted a fortnight ago usually means
+   looking at it first, so the two decisions and the deadline sit in the bar
+   beside the evidence. Export is absent: this file is on its way out. */
+.bin-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  background: var(--desk);
+}
+.bin-preview[hidden] {
+  display: none;
+}
+.bin-preview__bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--sheet);
+}
+.bin-preview__spacer {
+  flex: 1;
+}
+.bin-preview__title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.bin-preview__title b {
+  font-size: var(--fs-body);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bin-preview__title span {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-faint);
+}
+.bin-preview__bar .life {
+  width: 232px;
+}
+.bin-preview__stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow: auto;
+}
+.bin-preview__img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}

@@ -1,0 +1,118 @@
+/* ================= STUB VIEWERS (.spd / .txt) ================= */
+/* The overlay shell every type-specific viewer paints into (see
+   pages/spdViewer.ts, pages/txtViewer.ts). Today the bodies are placeholders —
+   the real `.spd` compositor and `.txt` layout land at the markers in those
+   modules — but the FRAME is real: a viewer overlays the gallery exactly as the
+   reader does, one visible at a time (the shell's `activate` hides the rest), and
+   hosts the shared toolbar (10-toolbar.css) so Back, Download and Move to bin
+   work before any content renders.
+
+   Kept in its own file at the END of the manifest so the two viewer agents can
+   add their contextual controls' styling without reopening the reader's cascade
+   (06) — the same separation rail/bin/admin already have. */
+.viewer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--desk);
+}
+/* Beats the `display: flex` above so a hidden (inactive) viewer truly leaves the
+   layer — the same `[hidden]` discipline the reader relies on for `.filestage`. */
+.viewer[hidden] {
+  display: none;
+}
+/* …and INSIDE a viewer too, exactly as `.reader [hidden]` (06) does: the toolbar
+   swaps its file actions by the attribute (Move to bin ⟷ Restore / Delete
+   permanently, per origin), and `.btn`'s `display: inline-flex` at (0,1,0) beats
+   the UA sheet's `[hidden] { display: none }`. Scoped, never a global reset —
+   the same reasoning as the reader's copy of this rule. */
+.viewer [hidden] {
+  display: none;
+}
+
+/* The content area under the bar — the real compositor/text layout's slot. It
+   scrolls its own overflow (a tall `.spd` page, a long `.txt`) rather than the
+   page body, and centres the placeholder until there is something to render. */
+.viewer__main {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+/* Back + title, mirroring the reader's `.backbtn`/`.reader__title` treatment
+   (06-reader.css) but under OWN class names — every viewer is mounted at once, so
+   the stubs cannot share a class a bare `.reader__title`/`.backbtn` test locator
+   selects, or it would resolve to three elements. Same look, separate names. */
+.viewer__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  /* Compact viewer-toolbar control: the shared chrome (border --line, --radius,
+     mono label) at the compact height. */
+  height: var(--control-h-sm);
+  border: 1px solid var(--line);
+  background: transparent;
+  cursor: pointer;
+  padding: 6px 12px 6px 9px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+.viewer__back:hover {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+  background: var(--hover-fill);
+}
+.viewer__back svg {
+  width: 14px;
+  height: 14px;
+}
+.viewer__title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.viewer__title b {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.viewer__title span {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-faint);
+}
+
+/* The placeholder — a centred mark/heading/body, mirroring the shared `.empty`
+   block (05-search-results.css) under own names (same reason as above). `open()`
+   fills it; the real render replaces it. */
+.viewer__placeholder {
+  max-width: 420px;
+  text-align: center;
+  color: var(--ink-soft);
+}
+.viewer__mark {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.viewer__placeholder h3 {
+  font-size: var(--fs-title);
+  font-weight: 600;
+  margin: 10px 0 6px;
+}
+.viewer__placeholder p {
+  margin: 0;
+  font-size: var(--fs-body);
+  color: var(--ink-soft);
+}

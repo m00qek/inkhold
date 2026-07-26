@@ -1,0 +1,168 @@
+//! Server configuration, loaded from a ZON file (native Zig object notation:
+//! typed, comment-friendly, no extra dependency). All fields have defaults, so
+//! a missing or partial config file still yields a usable server.
+
+const std = @import("std");
+
+pub const Tls = struct {
+    /// Terminate TLS in-process. When false the server speaks plaintext HTTP.
+    enabled: bool = false,
+    cert_path: []const u8 = "certs/cert.pem",
+    key_path: []const u8 = "certs/key.pem",
+    /// TLS 1.3 cipher-suite names to allow, most-preferred first. Empty = the
+    /// library default set. Names must match tls.zig's `CipherSuite` enum tags
+    /// (e.g. "AES_256_GCM_SHA384", "AES_128_GCM_SHA256", "CHACHA20_POLY1305_SHA256").
+    cipher_suites: []const []const u8 = &.{},
+};
+
+/// Hot-cache versioning ("history of this file"). A synced edit RETAINS the
+/// superseded version instead of pruning it: the old blob stays on disk, a
+/// `file_history` row records it, and only the search rows are dropped (the
+/// render index rides along with the retained blob). See
+/// docs/scratch/hot-cache-versioning.md. Bounded two ways, both required.
+pub const History = struct {
+    /// Recent versions kept hot, per file (the single K, H6). `keep = 0`
+    /// disables versioning cleanly — back to prune-on-supersede, no history
+    /// rows written.
+    keep: u32 = 5,
+    /// HARD global ceiling on the retained-history store, in bytes (H4) — the
+    /// real SD guard. When retained history would exceed it, the OLDEST versions
+    /// are evicted (their blobs GC'd) until it is under again. Backup-independent.
+    max_bytes: u64 = 500_000_000,
+};
+
+pub const Config = struct {
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 8089,
+    /// SQLite database file (created if absent). ":memory:" for an ephemeral db.
+    db_path: []const u8 = "inkhold.db",
+    /// Path to the 32-byte credential-encryption key, held OUTSIDE the DB (and
+    /// ideally outside the backup path) so a stolen `inkhold.db` yields no
+    /// recoverable credentials. Generated + persisted 0600 on first run if absent.
+    /// **Losing this file makes every stored credential unrecoverable → forced
+    /// password resets** — back it up. See docs/design/auth.md §5b.
+    cred_key_path: []const u8 = "cred.key",
+    /// Directory for the content-addressed blob store and render cache.
+    data_dir: []const u8 = "data",
+    /// Path to the built web SPA (`dist/`) to serve as static files. Empty
+    /// disables static serving (404 on any non-API route, as before). When set,
+    /// this same process serves the browser UI (control-plane Face 2 + the SPA)
+    /// alongside the device sync API — one port for everything. See http/static.zig.
+    web_dir: []const u8 = "",
+    /// Email/login of the auto-created first-run administrator.
+    admin_email: []const u8 = "admin",
+    /// Maximum connections in flight at once. Serve mode runs a thread per
+    /// connection, so this is what bounds thread (and therefore memory) growth
+    /// under a connection flood: `max_connections * http.transport.conn_stack_size`
+    /// is the reserved-stack ceiling. Over the cap, new connections are closed
+    /// immediately and accepting continues.
+    ///
+    /// Needs headroom, because slots are held for a connection's whole LIFETIME,
+    /// not per request: HTTP keep-alive means a browser parks ~6 idle connections
+    /// per tab, and the device holds a persistent Socket.IO WebSocket. 32 covers a
+    /// household — several browser tabs plus the device — and is the largest cap
+    /// that keeps the reserved-stack ceiling (32 x 1 MiB = 32 MB) inside the
+    /// project's ~50 MB budget with room for the heap, SQLite and the blob I/O.
+    ///
+    /// The ceiling is reserved address space, not RSS: only the pages a thread
+    /// actually touches become resident — ~68 KiB for an idle keep-alive
+    /// connection (the socket buffers), ~576 KiB for one running a big transfer.
+    /// Raise this only together with the RSS budget.
+    ///
+    /// 96, up from 32: household demand is ~80 sockets (12 browsers x ~6 + 8
+    /// devices), and the old cap refused ~8 of them at 72 sockets while the lock
+    /// still had headroom — refusing a connection does not make the box faster.
+    /// The deliberate cost is ~6.4 MB resident worst-case (96 idle keep-alives),
+    /// a spend against the ~50 MB budget, not a free win; chosen at 96 over 128
+    /// because idle threads still carry a glibc descriptor + static TLS.
+    max_connections: u16 = 96,
+    tls: Tls = .{},
+    /// Hot-cache versioning bounds (see `History`). Defaults keep the last 5
+    /// versions per file under a 500 MB global ceiling.
+    history: History = .{},
+};
+
+/// A parsed config plus the arena that owns its string allocations.
+pub const Loaded = struct {
+    config: Config,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn deinit(self: *Loaded) void {
+        self.arena.deinit();
+    }
+};
+
+pub const ParseError = error{ OutOfMemory, ParseZon };
+
+/// Parse a config from a null-terminated ZON source. Omitted fields use defaults.
+pub fn parse(gpa: std.mem.Allocator, source: [:0]const u8) ParseError!Loaded {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    errdefer arena.deinit();
+    const cfg = try std.zon.parse.fromSliceAlloc(Config, arena.allocator(), source, null, .{});
+    return .{ .config = cfg, .arena = arena };
+}
+
+/// Load config from `path`; if the file does not exist, return defaults.
+pub fn loadFileOrDefault(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Loaded {
+    const src = std.Io.Dir.cwd().readFileAllocOptions(
+        io,
+        path,
+        gpa,
+        .limited(1 << 20),
+        .of(u8),
+        0, // null sentinel -> [:0]u8 for the ZON parser
+    ) catch |err| switch (err) {
+        error.FileNotFound => {
+            const arena = std.heap.ArenaAllocator.init(gpa);
+            return .{ .config = .{}, .arena = arena };
+        },
+        else => return err,
+    };
+    defer gpa.free(src);
+    return parse(gpa, src);
+}
+
+test "parse full config" {
+    var loaded = try parse(std.testing.allocator,
+        \\.{
+        \\    .host = "0.0.0.0",
+        \\    .port = 9443,
+        \\    .tls = .{
+        \\        .enabled = true,
+        \\        .cert_path = "/etc/sn/cert.pem",
+        \\        .key_path = "/etc/sn/key.pem",
+        \\        .cipher_suites = .{ "AES_256_GCM_SHA384" },
+        \\    },
+        \\}
+    );
+    defer loaded.deinit();
+    const c = loaded.config;
+    try std.testing.expectEqualStrings("0.0.0.0", c.host);
+    try std.testing.expectEqual(@as(u16, 9443), c.port);
+    try std.testing.expect(c.tls.enabled);
+    try std.testing.expectEqualStrings("/etc/sn/cert.pem", c.tls.cert_path);
+    try std.testing.expectEqual(@as(usize, 1), c.tls.cipher_suites.len);
+    try std.testing.expectEqualStrings("AES_256_GCM_SHA384", c.tls.cipher_suites[0]);
+}
+
+test "defaults fill in for a minimal config" {
+    var loaded = try parse(std.testing.allocator, ".{ .port = 1234 }");
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(u16, 1234), loaded.config.port);
+    try std.testing.expectEqualStrings("127.0.0.1", loaded.config.host);
+    try std.testing.expect(!loaded.config.tls.enabled);
+    try std.testing.expectEqualStrings("certs/cert.pem", loaded.config.tls.cert_path);
+    try std.testing.expectEqualStrings("inkhold.db", loaded.config.db_path);
+    try std.testing.expectEqualStrings("data", loaded.config.data_dir);
+    try std.testing.expectEqualStrings("admin", loaded.config.admin_email);
+    // Hot-cache versioning defaults.
+    try std.testing.expectEqual(@as(u32, 5), loaded.config.history.keep);
+    try std.testing.expectEqual(@as(u64, 500_000_000), loaded.config.history.max_bytes);
+}
+
+test "history bounds parse from a partial config" {
+    var loaded = try parse(std.testing.allocator, ".{ .history = .{ .keep = 0, .max_bytes = 1024 } }");
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(u32, 0), loaded.config.history.keep); // disables versioning
+    try std.testing.expectEqual(@as(u64, 1024), loaded.config.history.max_bytes);
+}
