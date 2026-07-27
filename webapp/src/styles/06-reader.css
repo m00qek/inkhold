@@ -63,17 +63,14 @@
   width: var(--panel-w-narrow);
 }
 .filmstrip {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
+  display: block;
 }
 .filmstrip__page {
   /* LOAD-BEARING for `.filmstrip__hits`, which is absolutely positioned against
      it. Without this the badges resolve against a distant positioned ancestor
      and stack in the window corner — with the right counts in the DOM and
      nothing visible where they belong. */
-  position: relative;
+  position: relative; /* Overridden to absolute by VirtualList, but kept for specificity fallback */
   border: 0;
   background: transparent;
   cursor: pointer;
@@ -81,7 +78,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  height: 124px;
 }
 /* Match density across the notebook, on UI that already exists. */
 .filmstrip__hits {

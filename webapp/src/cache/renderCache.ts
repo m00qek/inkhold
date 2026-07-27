@@ -91,9 +91,18 @@ async function bitmapToWebp(bm: ImageBitmap): Promise<Blob | null> {
   if (!ctx) return null;
   ctx.drawImage(bm, 0, 0);
   if (canvas instanceof OffscreenCanvas) {
-    return canvas.convertToBlob({ type: WEBP_TYPE, quality: WEBP_QUALITY });
+    const blob = await canvas.convertToBlob({ type: WEBP_TYPE, quality: WEBP_QUALITY });
+    canvas.width = 0;
+    canvas.height = 0;
+    return blob;
   }
-  return new Promise((resolve) => canvas.toBlob(resolve, WEBP_TYPE, WEBP_QUALITY));
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => {
+      canvas.width = 0;
+      canvas.height = 0;
+      resolve(blob);
+    }, WEBP_TYPE, WEBP_QUALITY);
+  });
 }
 
 export function createRenderCache(opts: RenderCacheOptions = {}): RenderCache {

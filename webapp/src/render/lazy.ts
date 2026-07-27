@@ -405,6 +405,16 @@ export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
   async function paint(slot: Slot): Promise<void> {
     if (slot.inFlight) return;
     slot.inFlight = true;
+
+    // DEBOUNCE: Yield briefly to let the IntersectionObserver catch up if the user
+    // is scrolling extremely fast. If they scroll past before this resolves, the
+    // slot is no longer visible, and we skip the expensive 10MB decode/scale pipeline.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (!slot.visible || !slots.has(slot.target)) {
+      slot.inFlight = false;
+      return;
+    }
+
     const renderVersion = themeVersion;
     const theme = getTheme();
     try {

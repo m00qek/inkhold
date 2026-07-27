@@ -24,6 +24,8 @@
   flex: none;
   width: var(--panel-w);
   min-width: 0;
+  min-height: 0;
+  max-height: 100vh;
   align-self: stretch;
   overflow-y: auto;
   background: var(--sheet);

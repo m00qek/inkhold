@@ -42,6 +42,7 @@ import { createBinViewerActions, type BinRetention } from "../ui/binViewerAction
 import { relativeTime, absoluteTime } from "../ui/relativeTime";
 import { createLayersPanel } from "./layersPanel";
 import { createSidePanel, sidePanelState } from "../ui/sidePanel";
+import { VirtualList } from "../ui/virtualList";
 import {
   buildNoteLayerThumb,
   createNoteLayersController,
@@ -332,10 +333,11 @@ export function createReader(deps: ReaderDeps): Reader {
   // Docked beside the page like the recognized-text aside — same `.page-wrap`
   // slot, same "the panel's width is not the page's" sizing rule in showPage. The
   // page index leads on the LEFT; OCR and Layers dock on the RIGHT.
+  const pageWrap = el("div", { class: "page-wrap" }, pageIndexPanel.el, pageEl, ocrPanel.el, layersPanel.el);
   const stage = el(
     "div",
     { class: "stage" },
-    el("div", { class: "page-wrap" }, pageIndexPanel.el, pageEl, ocrPanel.el, layersPanel.el),
+    pageWrap,
   );
 
   // --- the non-`.note` stage ------------------------------------------------
@@ -981,7 +983,8 @@ export function createReader(deps: ReaderDeps): Reader {
    * DOM, nothing visible where they belong.
    */
   function paintBadges(counts: ReadonlyMap<number, number>): void {
-    for (const [i, btn] of filmButtons.entries()) {
+    if (!filmVirtualList) return;
+    for (const [i, btn] of filmVirtualList.getRenderedItems()) {
       btn.querySelector(".filmstrip__hits")?.remove();
       const n = counts.get(i);
       if (!n) continue;
@@ -1456,8 +1459,10 @@ export function createReader(deps: ReaderDeps): Reader {
     const page = meta.pages[pageIndex];
     if (!page) return;
 
-    for (const [i, btn] of filmButtons.entries()) {
-      btn.setAttribute("aria-current", String(i === pageIndex));
+    if (filmVirtualList) {
+      for (const [i, btn] of filmVirtualList.getRenderedItems()) {
+        btn.setAttribute("aria-current", String(i === pageIndex));
+      }
     }
     pagerCount.textContent = `${pageIndex + 1} / ${meta.pages.length}`;
 
@@ -1486,6 +1491,7 @@ export function createReader(deps: ReaderDeps): Reader {
     }
     pageEl.style.width = `${Math.round(w)}px`;
     pageEl.style.height = `${Math.round(h)}px`;
+    pageWrap.style.height = `${Math.round(h)}px`;
 
     // Refresh the toggle's enabled state and, while the panel is open, its body.
     // Doing it here means every path that changes page — pager, filmstrip,
@@ -1539,8 +1545,7 @@ export function createReader(deps: ReaderDeps): Reader {
       if (neighbour) filmEngine.prefetch(noteId, neighbour, "full");
     }
 
-    const active = filmButtons[pageIndex];
-    if (active) active.scrollIntoView({ block: "nearest" });
+    filmVirtualList?.scrollIntoView(pageIndex);
   }
 
   /**
@@ -1557,35 +1562,62 @@ export function createReader(deps: ReaderDeps): Reader {
     syncUrl();
   }
 
-  let filmButtons: HTMLButtonElement[] = [];
+  let filmVirtualList: VirtualList | null = null;
 
   function buildFilmstrip(): void {
     filmEngine.reset();
-    filmstrip.replaceChildren();
-    filmButtons = [];
-    if (!meta) return;
-    for (const page of meta.pages) {
-      const canvas = el("canvas");
-      const btn = el(
-        "button",
-        {
-          class: "filmstrip__page",
-          type: "button",
-          "aria-current": String(page.index === pageIndex),
-          "aria-label": `Page ${page.index + 1}`,
-        },
-        el("div", { class: "filmstrip__thumb" }, canvas),
-        el("span", { class: "filmstrip__num", text: String(page.index + 1) }),
-      );
-      btn.addEventListener("click", () => goToPage(page.index));
-      filmstrip.append(btn);
-      filmButtons.push(btn);
-      filmEngine.add({ target: canvas, noteId: meta.id, page, size: "thumb" });
+    if (filmVirtualList) {
+      filmVirtualList.destroy();
+      filmVirtualList = null;
     }
-    // The badges hung off the buttons that were just replaced, so the counts
-    // have to be re-drawn onto the new ones. (`buildFilmstrip` runs on open and
-    // on a STALE_PAGE metadata refetch — the second can happen mid-find.)
-    paintBadges(lastBadges);
+    if (!meta) {
+      filmstrip.replaceChildren();
+      return;
+    }
+    
+    filmVirtualList = new VirtualList({
+      scrollContainer: pageIndexPanel.el,
+      hostContainer: pageIndexPanel.body,
+      contentContainer: filmstrip,
+      totalItems: meta.pages.length,
+      itemHeight: 124, // --preview-h-panel (101) + gap/border/text
+      renderItem: (index) => {
+        const page = meta!.pages[index];
+        const canvas = el("canvas");
+        const btn = el(
+          "button",
+          {
+            class: "filmstrip__page",
+            type: "button",
+            "aria-current": String(index === pageIndex),
+            "aria-label": `Page ${index + 1}`,
+          },
+          el("div", { class: "filmstrip__thumb" }, canvas),
+          el("span", { class: "filmstrip__num", text: String(index + 1) }),
+        );
+        btn.addEventListener("click", () => goToPage(index));
+        
+        const n = lastBadges.get(index);
+        if (n) {
+          const label = `${n} ${n === 1 ? "match" : "matches"} on page ${index + 1}`;
+          btn.append(el("span", { class: "filmstrip__hits", text: String(n), title: label }));
+        }
+
+        filmEngine.add({ target: canvas, noteId: meta!.id, page, size: "thumb" });
+        return btn;
+      },
+      recycleItem: (_index, btn) => {
+        const canvas = btn.querySelector("canvas");
+        if (canvas) {
+          filmEngine.remove(canvas as HTMLCanvasElement);
+          canvas.width = 0;
+          canvas.height = 0;
+        }
+      },
+      overscan: 1,
+    });
+    
+    // We don't need to call paintBadges(lastBadges) here, because renderItem handles it for new items.
   }
 
   // --- keyboard (only while open) ------------------------------------------
@@ -1907,7 +1939,10 @@ export function createReader(deps: ReaderDeps): Reader {
         findInput.value = "";
         filmEngine.reset();
         filmstrip.replaceChildren();
-        filmButtons = [];
+        if (filmVirtualList) {
+          filmVirtualList.destroy();
+          filmVirtualList = null;
+        }
         header.setSubtitle(subtitle(origin, `${next.fileType.toUpperCase()} · ${formatBytes(next.size)}`));
         // Bin origin mints the bin-scoped route — the live one 404s for trashed; a
         // history preview mints the version-scoped route (its md5), since the live
