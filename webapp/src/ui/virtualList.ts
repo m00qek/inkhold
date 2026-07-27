@@ -145,8 +145,10 @@ export class VirtualList {
     this.scrollContainer.removeEventListener("scroll", this.scrollHandler);
     for (const [index, element] of this.renderedItems.entries()) {
       this.recycleItem?.(index, element);
+      element.remove();
     }
     this.renderedItems.clear();
+    this.contentContainer.replaceChildren();
     this.hostContainer.replaceChildren();
   }
 }

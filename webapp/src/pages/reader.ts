@@ -1338,7 +1338,7 @@ export function createReader(deps: ReaderDeps): Reader {
   /** True when the page index plus the currently-open right dock(s) would leave
    *  the page below {@link MIN_PAGE_W}. */
   function bothSidesTooTight(): boolean {
-    const leftW = tokenPx("--panel-w-narrow", 150) + tokenPx("--panel-gap", 22);
+    const leftW = tokenPx("--panel-w-narrow", 180) + tokenPx("--panel-gap", 22);
     return stage.getBoundingClientRect().width - 56 - leftW - rightPanelsWidth() < MIN_PAGE_W;
   }
 
@@ -1483,7 +1483,7 @@ export function createReader(deps: ReaderDeps): Reader {
     // The page index docks on the LEFT and takes its slice too — the NARROW track
     // (a thumbnail column, not a text panel), read off the live layout (see
     // `tokenPx`), so nothing is hand-synced.
-    const pagesW = pageIndexOpen ? tokenPx("--panel-w-narrow", 150) + gap : 0;
+    const pagesW = pageIndexOpen ? tokenPx("--panel-w-narrow", 180) + gap : 0;
     const maxW = Math.max(rect.width - 56 - ocrW - layersW - pagesW, 80);
     if (w > maxW) {
       w = maxW;
@@ -1584,6 +1584,11 @@ export function createReader(deps: ReaderDeps): Reader {
       renderItem: (index) => {
         const page = meta!.pages[index];
         const canvas = el("canvas");
+        const thumb = el("div", { class: "filmstrip__thumb" }, canvas);
+        if (page && page.width && page.height) {
+          const aspect = Math.min(page.width / page.height, 2.5);
+          thumb.style.aspectRatio = String(aspect);
+        }
         const btn = el(
           "button",
           {
@@ -1592,7 +1597,7 @@ export function createReader(deps: ReaderDeps): Reader {
             "aria-current": String(index === pageIndex),
             "aria-label": `Page ${index + 1}`,
           },
-          el("div", { class: "filmstrip__thumb" }, canvas),
+          thumb,
           el("span", { class: "filmstrip__num", text: String(index + 1) }),
         );
         btn.addEventListener("click", () => goToPage(index));

@@ -105,7 +105,7 @@
      painted through the canvas pipeline, which carries no per-page aspect, so
      the strip keeps the page's known portrait shape rather than guessing. */
   height: var(--preview-h-panel);
-  width: calc(var(--preview-h-panel) * 3 / 4);
+  aspect-ratio: 3 / 4;
   border-radius: 2px;
   overflow: hidden;
   box-shadow:

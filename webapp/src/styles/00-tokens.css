@@ -86,7 +86,7 @@
      (getComputedStyle) so the JS can never fall out of sync with the layout. */
   --panel-w: 268px;
   --panel-w-wide: 320px;
-  --panel-w-narrow: 150px;
+  --panel-w-narrow: 180px;
   --panel-gap: 22px;
 
   /* Row rhythm, shared by the list view and the bin so the two cannot drift.
