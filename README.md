@@ -76,12 +76,28 @@ whole point of the beta.
 
 - A machine on your home network to run it on (Linux; ARM/Raspberry Pi works — see
   [`docs/scratch/run-on-rpi-32bit.md`](docs/scratch/run-on-rpi-32bit.md)).
-- The [Zig](https://ziglang.org) toolchain to build it — or a prebuilt binary if
-  one was shared with you.
+- The [Zig](https://ziglang.org) toolchain to build it — or grab a prebuilt binary below.
 - A Supernote **Nomad** (other models are untested; see
   [Compatibility](#compatibility)).
 
-## Quick start
+## Download Latest Alpha Builds (`main`)
+
+If you prefer not to build from source, you can download the latest rolling `musl` binaries. These are highly portable and can be dropped directly into most Linux systems without `glibc` version mismatch issues:
+
+*   **[x86_64 (64-bit Linux)](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86_64-linux-musl.zip)**: For standard modern PCs, servers, Intel NUCs, cloud VMs (like Hetzner or DigitalOcean), and most Intel/AMD-based Synology NAS models (e.g., the Plus series like DS224+ or DS923+ running DSM).
+*   **[aarch64 (64-bit ARM)](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-aarch64-linux-musl.zip)**: For Raspberry Pi 3, 4, 400, and 5 **(only if running a 64-bit OS)**, modern ARM-based Synology NAS drives (e.g., the Value/J series like DS223 or DS223j), and ARM cloud servers.
+*   **[armhf (32-bit ARM)](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-arm-linux-musleabihf.zip)**: For older Raspberry Pi models (Pi 1, 2, and the original Zero), newer Raspberry Pis that are still running a legacy 32-bit OS, and older entry-level ARM-based NAS appliances.
+*   **[x86 (32-bit Linux)](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86-linux-musl.zip)**: For legacy 32-bit Intel/AMD systems, repurposed vintage computers, or very old thin clients.
+
+To use a prebuilt binary, extract the `.zip` and execute it from your terminal by pointing it to the configuration file:
+
+```sh
+./inkhold config.example.zon
+```
+
+*(Note: Ensure you have also downloaded the `config.example.zon` file from this repository to the same folder).*
+
+## Quick start (Build from source)
 
 ```sh
 git clone <this-repo> inkhold && cd inkhold
@@ -89,10 +105,9 @@ make serve            # builds the wasm decoder + browser app + server, then run
 make lan-ip           # prints this machine's LAN address
 ```
 
-`make serve` runs everything on **one port** (8090 by default; `make serve
-PORT=9000` to change it). On the **first run** it creates an `admin` account and
-prints a **temporary password** to the terminal — note it down; you'll change it
-on first sign-in.
+Whether you run a prebuilt binary directly or use `make serve`, Inkhold runs everything on **one port** (8090 by default; `PORT=9000 ./inkhold config.example.zon` or `make serve PORT=9000` to change it).
+
+On the **first run** it creates an `admin` account and prints a **temporary password** to the terminal — note it down; you'll change it on first sign-in.
 
 Then open `http://<LAN-IP>:<port>` in a browser and sign in.
 
