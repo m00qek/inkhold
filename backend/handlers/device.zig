@@ -1139,6 +1139,21 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
     var bnd_buf: [multipart.max_term]u8 = undefined;
     const boundary = multipart.boundaryFromContentType(ct, &bnd_buf) orelse return badRequest(ctx, req);
 
+    // Extract query params BEFORE reading the body (reading invalidates head strings).
+    const total_chunks_str = reply.queryParam(req.head.target, "totalChunks");
+    const part_number_str = reply.queryParam(req.head.target, "partNumber");
+    const upload_id_raw = reply.queryParam(req.head.target, "uploadId");
+
+    const total_chunks = if (total_chunks_str) |s| std.fmt.parseInt(u32, s, 10) catch 0 else 0;
+    const part_number = if (part_number_str) |s| std.fmt.parseInt(u32, s, 10) catch 0 else 0;
+
+    var uid_buf: [128]u8 = undefined;
+    const upload_id: ?[]const u8 = if (upload_id_raw) |raw| uid: {
+        if (raw.len == 0 or raw.len > uid_buf.len) break :uid null;
+        @memcpy(uid_buf[0..raw.len], raw);
+        break :uid uid_buf[0..raw.len];
+    } else null;
+
     // The session must exist and belong to the calling device. DB touch #1 of 2 —
     // the route is `manual_db_lock`, so we hold `ctx.db_lock` for just this lookup.
     {
@@ -1158,25 +1173,49 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const reader = req.readerExpectContinue(&rbuf) catch return badRequest(ctx, req);
 
     var wbuf: [blobstore.chunk_len]u8 = undefined;
-    var ing = files.blobs.beginIngest(&wbuf) catch return serverError(ctx, req);
-    multipart.extract(reader, boundary, &ing) catch {
-        ing.abort();
-        return badRequest(ctx, req);
-    };
-    const res = ing.finish(null) catch {
-        ing.abort();
-        return serverError(ctx, req);
-    };
-    ing.deinit();
 
-    // Record the stored md5 on the session; finish() verifies it against the
-    // device's content_hash. (The on-disk blob has no `blobs` row yet — if finish
-    // never arrives it is an orphan collectable by the session sweep.) DB touch
-    // #2 of 2 — re-acquire the lock for just this write.
-    {
-        ctx.lockDb();
-        defer ctx.unlockDb();
-        files.setUploadBlob(caller.user_id, inner, &res.md5) catch return serverError(ctx, req);
+    if (total_chunks > 1 and upload_id != null and part_number > 0) {
+        var ing = files.blobs.beginChunkIngest(upload_id.?, part_number, &wbuf) catch return serverError(ctx, req);
+        multipart.extract(reader, boundary, &ing) catch {
+            ing.abort();
+            return badRequest(ctx, req);
+        };
+        ing.finish() catch {
+            ing.abort();
+            return serverError(ctx, req);
+        };
+        ing.deinit();
+
+        if (part_number == total_chunks) {
+            // Implicitly merge chunks on the final part
+            const res = files.blobs.mergeChunks(upload_id.?, total_chunks, &wbuf) catch return serverError(ctx, req);
+            {
+                ctx.lockDb();
+                defer ctx.unlockDb();
+                files.setUploadBlob(caller.user_id, inner, &res.md5) catch return serverError(ctx, req);
+            }
+        }
+    } else {
+        var ing = files.blobs.beginIngest(&wbuf) catch return serverError(ctx, req);
+        multipart.extract(reader, boundary, &ing) catch {
+            ing.abort();
+            return badRequest(ctx, req);
+        };
+        const res = ing.finish(null) catch {
+            ing.abort();
+            return serverError(ctx, req);
+        };
+        ing.deinit();
+
+        // Record the stored md5 on the session; finish() verifies it against the
+        // device's content_hash. (The on-disk blob has no `blobs` row yet — if finish
+        // never arrives it is an orphan collectable by the session sweep.) DB touch
+        // #2 of 2 — re-acquire the lock for just this write.
+        {
+            ctx.lockDb();
+            defer ctx.unlockDb();
+            files.setUploadBlob(caller.user_id, inner, &res.md5) catch return serverError(ctx, req);
+        }
     }
 
     // The minimal success response the device accepted in the capture: empty 200.

@@ -43,7 +43,7 @@
   margin: var(--sp-6) var(--sp-6) var(--sp-6) 0;
 }
 
-   The blank Reference Layer's empty frame: no canvas to derive a width from, so
+/* The blank Reference Layer's empty frame: no canvas to derive a width from, so
    buildThumb (spdViewer.ts) sets the drawing's real aspect inline, and this
    portrait 3:4 stands in if it cannot. `.spd`-specific because the reserved
    blank Reference Layer (id 9999) is `.spd` knowledge. */

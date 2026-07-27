@@ -99,6 +99,49 @@ pub const BlobStore = struct {
         };
     }
 
+    /// Opens a specific temporary file for a chunk of a multipart upload.
+    pub fn beginChunkIngest(self: BlobStore, upload_id: []const u8, part_number: u32, write_buf: []u8) !ChunkIngest {
+        var tmp_buf: [128]u8 = undefined; // "tmp/" + upload_id + "_" + part_number
+        const tmp_rel = try std.fmt.bufPrint(&tmp_buf, "tmp/{s}_{d}", .{upload_id, part_number});
+        const file = try self.root.createFile(self.io, tmp_rel, .{});
+        return .{
+            .store = self,
+            .file = file,
+            .fw = file.writerStreaming(self.io, write_buf),
+        };
+    }
+
+    /// Merges all chunks of a multipart upload into a single final blob.
+    pub fn mergeChunks(self: BlobStore, upload_id: []const u8, total_chunks: u32, write_buf: []u8) !PutResult {
+        var ing = try self.beginIngest(write_buf);
+        errdefer ing.abort();
+
+        var read_buf: [chunk_len]u8 = undefined;
+        var part: u32 = 1;
+        while (part <= total_chunks) : (part += 1) {
+            var tmp_buf: [128]u8 = undefined;
+            const tmp_rel = std.fmt.bufPrint(&tmp_buf, "tmp/{s}_{d}", .{upload_id, part}) catch return error.NameTooLong;
+            var file = self.root.openFile(self.io, tmp_rel, .{}) catch |err| {
+                return err; // missing chunk -> fail
+            };
+            defer {
+                file.close(self.io);
+                self.root.deleteFile(self.io, tmp_rel) catch {};
+            }
+            
+            var fr = file.reader(self.io, &read_buf);
+            var chunk_buf: [chunk_len]u8 = undefined;
+            while (true) {
+                const n = try fr.interface.readSliceShort(&chunk_buf);
+                if (n == 0) break;
+                try ing.write(chunk_buf[0..n]);
+            }
+        }
+        const res = try ing.finish(null);
+        ing.deinit();
+        return res;
+    }
+
     /// True if a blob with this md5 is stored. A malformed md5 names no blob, so
     /// it is a miss rather than an error.
     pub fn has(self: BlobStore, md5: []const u8) bool {
@@ -261,6 +304,31 @@ pub const Ingest = struct {
     pub fn abort(self: *Ingest) void {
         self.file.close(self.store.io);
         self.store.root.deleteFile(self.store.io, self.tmp_name[0..]) catch {};
+    }
+};
+
+/// A single in-flight chunk write, streaming pushed bytes into a named temp file.
+pub const ChunkIngest = struct {
+    store: BlobStore,
+    file: File,
+    fw: File.Writer,
+
+    pub fn write(self: *ChunkIngest, bytes: []const u8) !void {
+        try self.fw.interface.writeAll(bytes);
+    }
+
+    pub fn finish(self: *ChunkIngest) !void {
+        try self.fw.interface.flush(); // userspace buffer -> fd
+        try self.file.sync(self.store.io); // fd -> disk
+    }
+
+    pub fn deinit(self: *ChunkIngest) void {
+        self.file.close(self.store.io);
+    }
+
+    pub fn abort(self: *ChunkIngest) void {
+        self.file.close(self.store.io);
+        // Abandoned temp file is swept at startup by sweepTmp
     }
 };
 

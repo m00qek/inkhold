@@ -2611,6 +2611,85 @@ test "device upload M2: commits the INGESTED size, not the device-declared size"
     try std.testing.expectEqual(@as(i64, @intCast(file_bytes.len)), try usedBytes(f, alice));
 }
 
+test "device upload chunked: parts are merged on the final part" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+
+    const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
+    const alice = (try f.svc.createUser(admin, "alice", false)).id;
+    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+
+    var obuf: [8192]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
+
+    // The .note bytes the device is uploading, split in 3 parts
+    const p1 = "SUPERNOTE upload payload ";
+    const p2 = "— the real .note ";
+    const p3 = "bytes\x00\x01\x02\r\n--not-a-boundary";
+    
+    const file_bytes = try std.mem.concat(gpa, u8, &.{ p1, p2, p3 });
+    defer gpa.free(file_bytes);
+    const md5 = blobstore.md5HexOf(file_bytes);
+
+    // 1) upload/apply
+    var inner: [16]u8 = undefined;
+    {
+        const body = try std.fmt.allocPrint(gpa, "{{\"path\":\"/NOTE/Note/up.note\",\"fileName\":\"up.note\",\"equipmentNo\":\"SN1\",\"size\":{d}}}", .{file_bytes.len});
+        defer gpa.free(body);
+        const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/3/files/upload/apply", &dev_tok, "SN1", body);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(struct {
+            success: bool,
+            innerName: []const u8,
+        }, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expect(p.value.success);
+        @memcpy(&inner, p.value.innerName);
+    }
+
+    // 2) POST /oss/put/<inner> 3 times with chunk parameters
+    const boundary = "----NomadUploadBoundaryZZ";
+    const upload_id = "1785154238763_ad76ebd7";
+    for ([_][]const u8{ p1, p2, p3 }, 1..) |part_bytes, part_num| {
+        const wire = try buildMultipart(boundary, part_bytes);
+        defer gpa.free(wire);
+
+        var ctbuf: [96]u8 = undefined;
+        const ct = try std.fmt.bufPrint(&ctbuf, "multipart/form-data; boundary={s}", .{boundary});
+        var pbuf: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pbuf, "/oss/put/{s}?uploadId={s}&totalChunks=3&partNumber={d}", .{ &inner, upload_id, part_num });
+        const req = try buildRequest(&reqbuf, "POST", path, &.{
+            .{ .name = "content-type", .value = ct },
+            .{ .name = "x-access-token", .value = &dev_tok },
+            .{ .name = "equipmentNo", .value = "SN1" },
+        }, wire);
+        const resp = try roundtrip(ctx, req, &obuf);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expectEqual(@as(usize, 0), resp.body.len); // empty success body
+    }
+
+    // The blob is now on disk
+    try std.testing.expect(f.files.blobs.has(&md5));
+
+    // 3) upload/finish
+    {
+        const body = try std.fmt.allocPrint(gpa, "{{\"content_hash\":\"{s}\",\"equipmentNo\":\"SN1\",\"fileName\":\"up.note\",\"innerName\":\"{s}\",\"path\":\"/NOTE/Note/\",\"size\":\"{d}\"}}", .{ &md5, &inner, file_bytes.len });
+        defer gpa.free(body);
+        const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/upload/finish", &dev_tok, "SN1", body);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(struct {
+            success: bool,
+            content_hash: []const u8,
+        }, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expect(p.value.success);
+        try std.testing.expectEqualStrings(&md5, p.value.content_hash);
+    }
+}
+
 test "oversized device numbers are rejected, not panicked (overflow guard)" {
     const f = try Fixture.init();
     defer f.deinit();
