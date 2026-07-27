@@ -19,10 +19,10 @@
     // Path to the built web SPA (dist/) to serve as static files. Empty disables
     // static serving (404 on any non-API route). When set, this same process
     // serves the browser UI alongside the device sync API — one port for everything.
-    .web_dir = "",
+    .web_dir = "webapp/dist",
 
     // Email/login of the auto-created first-run administrator.
-    .admin_email = "admin",
+    .admin_email = "admin@home.lan",
 
     // Max connections in flight at once (a thread per connection in serve mode, so
     // this bounds memory: max_connections * ~1 MiB reserved stack). Slots are held
