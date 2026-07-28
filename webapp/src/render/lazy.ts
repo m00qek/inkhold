@@ -151,6 +151,8 @@ export interface LazyEngineDeps {
    * no sink degrades to the previous swallow-and-retry.
    */
   failures?: ApiFailureSink;
+  /** Debounce delay before painting to survive fast scrolling. Default 150. */
+  debounceMs?: number;
 }
 
 export interface LazyEngine {
@@ -409,7 +411,9 @@ export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
     // DEBOUNCE: Yield briefly to let the IntersectionObserver catch up if the user
     // is scrolling extremely fast. If they scroll past before this resolves, the
     // slot is no longer visible, and we skip the expensive 10MB decode/scale pipeline.
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (deps.debounceMs !== 0) {
+      await new Promise((resolve) => setTimeout(resolve, deps.debounceMs ?? 150));
+    }
     if (!slot.visible || !slots.has(slot.target)) {
       slot.inFlight = false;
       return;

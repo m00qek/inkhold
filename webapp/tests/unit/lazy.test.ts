@@ -63,6 +63,7 @@ function build(observer = fakeObserver(), failures?: ApiFailureSink) {
     placeholder,
     schedule: (fn) => fn(), // run placeholder+observe synchronously
     failures,
+    debounceMs: 0,
   });
   return { engine, observer, blit, placeholder, ...s };
 }
@@ -250,6 +251,7 @@ describe("lazy engine thumbnail-facade path (canvas target)", () => {
       blit,
       placeholder,
       schedule: (fn) => fn(),
+      debounceMs: 0,
     });
     return { engine, observer, blit, decode, getThumbnail, bitmap, ...s };
   }
@@ -323,6 +325,7 @@ describe("lazy engine thumbnail-facade path (canvas target)", () => {
       placeholder: vi.fn(),
       schedule: (fn) => fn(),
       failures,
+      debounceMs: 0,
     });
 
     const c = canvas();
@@ -370,6 +373,7 @@ describe("lazy engine <img> gallery path", () => {
       observerFactory: observer.factory,
       placeholder: vi.fn(),
       schedule: (fn) => fn(),
+      debounceMs: 0,
     });
     return { engine, observer, blit, decode, getThumbnail, createObjectUrl, revokeObjectUrl, ...s };
   }
