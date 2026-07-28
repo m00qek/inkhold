@@ -183,6 +183,20 @@
   height: 100%;
   object-fit: contain;
 }
+/* Before the lazy engine resolves the WebP blob, an <img> without a src would
+   show a broken image icon + its alt text. This hides them and paints a generic
+   ruled sheet matching the reader's canvas placeholder. */
+.thumb__img:not([src]) {
+  /* Hides the alt text */
+  color: transparent;
+  /* Hides Chrome's broken image icon by replacing it with a transparent 1x1 GIF */
+  content: url("data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7");
+  
+  background-color: var(--sheet);
+  background-image:
+    linear-gradient(90deg, transparent 15%, color-mix(in srgb, var(--margin) 30%, transparent) 15%, color-mix(in srgb, var(--margin) 30%, transparent) 17%, transparent 17%),
+    repeating-linear-gradient(180deg, transparent, transparent 10%, var(--paper-rule) 10%, var(--paper-rule) calc(10% + 1px));
+}
 .card:hover .thumb {
   transform: translateY(-4px);
   box-shadow:
