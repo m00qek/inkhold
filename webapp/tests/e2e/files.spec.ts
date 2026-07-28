@@ -76,7 +76,7 @@ test.describe("non-.note files", () => {
     await page.goto("/#/note/n-doc-attn");
 
     await expect(page.locator(".pager__count")).toHaveText("1 / 20");
-    await expect(page.locator(".filmstrip")).toBeVisible();
+    await expect(page.locator(".filmstrip__page").first()).toBeVisible();
     await expect(page.locator(".filestage")).toBeHidden();
 
     const viewer = page.locator(".page canvas");
