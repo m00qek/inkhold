@@ -19,7 +19,7 @@ import { el } from "../ui/dom";
 import type { Api } from "../api/types";
 import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
-import type { Hash, Id, NoteMeta, PageRef, Theme, WordBox } from "../core/types";
+import type { Hash, Id, NoteMeta, NoteSummary, PageRef, Theme, WordBox } from "../core/types";
 import { createLazyEngine, renderPage, type LazyEngine } from "../render/lazy";
 import { createTemplateProvider } from "../render/template";
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
@@ -43,6 +43,7 @@ import { relativeTime, absoluteTime } from "../ui/relativeTime";
 import { createLayersPanel } from "./layersPanel";
 import { createSidePanel, sidePanelState } from "../ui/sidePanel";
 import { VirtualList } from "../ui/virtualList";
+import { DEFAULT_PAGE_DIMS, skeletonPage } from "../core/noteSkeleton";
 import {
   buildNoteLayerThumb,
   createNoteLayersController,
@@ -205,7 +206,7 @@ export interface Reader {
    * has. There is deliberately no second path for it — priming is `find.setQuery`
    * and nothing else, so a deep link and a keystroke reach the same code.
    */
-  open(meta: NoteMeta, startPage?: number, origin?: ReaderOrigin, query?: string): void;
+  open(summary: NoteSummary, metaPromise: Promise<NoteMeta>, startPage?: number, origin?: ReaderOrigin, query?: string): Promise<void> | void;
   close(): void;
   /**
    * The shell is switching to another viewer (see `pages/viewer.ts`). The reader
@@ -1505,13 +1506,45 @@ export function createReader(deps: ReaderDeps): Reader {
     const token = ++paintToken;
     const noteId: Id = meta.id;
 
+    // Immediately draw the thumbnail (if available) stretched and blurred,
+    // or clear the canvas so the previous page doesn't linger.
+    let thumbDrawn = false;
+    if (filmVirtualList) {
+      let btn: HTMLElement | undefined;
+      for (const [i, el] of filmVirtualList.getRenderedItems()) {
+        if (i === pageIndex) {
+          btn = el;
+          break;
+        }
+      }
+      if (btn) {
+        const thumbCanvas = btn.querySelector("canvas");
+        if (thumbCanvas && thumbCanvas.width > 0 && thumbCanvas.height > 0) {
+          const dpr = Math.min(typeof devicePixelRatio !== "undefined" ? devicePixelRatio : 1, DPR_CAP);
+          pageCanvas.width = Math.round(w * dpr);
+          pageCanvas.height = Math.round(h * dpr);
+          const ctx = pageCanvas.getContext("2d");
+          if (ctx) {
+            ctx.drawImage(thumbCanvas, 0, 0, pageCanvas.width, pageCanvas.height);
+            pageCanvas.classList.add("is-loading");
+            thumbDrawn = true;
+          }
+        }
+      }
+    }
+    if (!thumbDrawn) {
+      pageCanvas.classList.remove("is-loading");
+      const ctx = pageCanvas.getContext("2d");
+      if (ctx) ctx.clearRect(0, 0, pageCanvas.width, pageCanvas.height);
+    }
+
     // THE LAYERED PATH — only for a page whose meta carries layers, and only
     // for THE focused page (filmstrip/thumbnails/neighbours keep the composite,
     // by scope pin). On success the stack replaces the composite canvas; on ANY
     // failure the composite below paints exactly as it always has.
     const vos = page.layers ?? null;
     let layeredUp = false;
-    if (vos !== null && vos.length > 0) {
+    if (page.hash !== "" && vos !== null && vos.length > 0) {
       layeredUp = await presentLayers(noteId, page, vos, token);
       if (token !== paintToken) return; // a newer showPage superseded us
     } else {
@@ -1521,8 +1554,9 @@ export function createReader(deps: ReaderDeps): Reader {
     // One of the two paints owns the page; `hidden` keeps the other out of the
     // way without dropping its element (the stack host hides itself when empty).
     pageCanvas.hidden = layeredUp;
+    if (layeredUp) pageCanvas.classList.remove("is-loading");
 
-    if (!layeredUp) {
+    if (!layeredUp && page.hash !== "") {
       try {
         const bitmap = await renderPage({ api, renderer, cache, theme: getTheme() }, noteId, page, "full");
         if (token !== paintToken) return; // a newer showPage superseded us
@@ -1530,7 +1564,10 @@ export function createReader(deps: ReaderDeps): Reader {
         pageCanvas.width = Math.round(w * dpr);
         pageCanvas.height = Math.round(h * dpr);
         const ctx = pageCanvas.getContext("2d");
-        if (ctx) ctx.drawImage(bitmap, 0, 0, pageCanvas.width, pageCanvas.height);
+        if (ctx) {
+          ctx.drawImage(bitmap, 0, 0, pageCanvas.width, pageCanvas.height);
+          pageCanvas.classList.remove("is-loading");
+        }
       } catch (e) {
         // Leave the previous paint; the cache is never a source of truth. An
         // expired session or a stale `?v=` is not a paint failure though — those
@@ -1585,6 +1622,9 @@ export function createReader(deps: ReaderDeps): Reader {
         const page = meta!.pages[index];
         const canvas = el("canvas");
         const thumb = el("div", { class: "filmstrip__thumb" }, canvas);
+        if (page && page.hash === "") {
+          thumb.classList.add("is-loading");
+        }
         if (page && page.width && page.height) {
           const aspect = Math.min(page.width / page.height, 2.5);
           thumb.style.aspectRatio = String(aspect);
@@ -1608,7 +1648,9 @@ export function createReader(deps: ReaderDeps): Reader {
           btn.append(el("span", { class: "filmstrip__hits", text: String(n), title: label }));
         }
 
-        filmEngine.add({ target: canvas, noteId: meta!.id, page, size: "thumb" });
+        if (page && page.hash !== "") {
+          filmEngine.add({ target: canvas, noteId: meta!.id, page, size: "thumb" });
+        }
         return btn;
       },
       recycleItem: (_index, btn) => {
@@ -1808,7 +1850,7 @@ export function createReader(deps: ReaderDeps): Reader {
   return {
     el: root,
 
-    open(next: NoteMeta, startPage = 0, origin: ReaderOrigin = LIBRARY_ORIGIN, query = ""): void {
+    async open(summary: NoteSummary, metaPromise: Promise<NoteMeta>, startPage = 0, origin: ReaderOrigin = LIBRARY_ORIGIN, query = ""): Promise<void> {
       // The route is being APPLIED here, so nothing in this method may write back
       // to it. Without the suspension the `find.reset()` below would publish an
       // empty query for a note whose route carries `?q=`, wiping the search a few
@@ -1818,14 +1860,31 @@ export function createReader(deps: ReaderDeps): Reader {
       // is also how a background freshness refresh re-announces the note already
       // on screen, and shutting the dropdown someone just opened because a poll
       // landed would be a UI that fidgets under its own maintenance.
-      const changedFile = meta?.id !== next.id;
-      meta = next;
+      const changedFile = meta?.id !== summary.id;
+      
+      // A skeleton meta so the viewer paints instantly while the real metadata is
+      // still in flight: page 0 is the summary's known first page, the rest are
+      // placeholders (empty hash = "don't render") shaped by the summary's aspect.
+      const aspect = summary.thumbAspect ?? DEFAULT_PAGE_DIMS;
+      const skeletonMeta: NoteMeta = {
+        id: summary.id,
+        name: summary.name,
+        fileType: summary.fileType,
+        fileHash: summary.fileHash,
+        size: 0,
+        pxPerMm: null,
+        pages: Array.from({ length: summary.pageCount }, (_, i) =>
+          i === 0 ? summary.firstPage : skeletonPage(i, aspect),
+        ),
+      };
+      meta = skeletonMeta;
+      
       if (changedFile) exportMenu.setOpen(false);
-      const kind = fileKind(next.fileType);
+      const kind = fileKind(summary.fileType);
 
       // Shared chrome first — the overlay, the title, the Back affordance are the
       // same in all three modes.
-      header.setName(next.name);
+      header.setName(meta.name);
       // BACK NAMES ITS DESTINATION. `folder` with no known path is the whole
       // library, which is where `onBack` actually goes.
       header.setBackWord(backWord(origin));
@@ -1852,7 +1911,7 @@ export function createReader(deps: ReaderDeps): Reader {
       // Hidden on a LIVE non-note (its history entry point is the card menu, not a
       // reader toolbar it never opens live). The `fromBin` gate is deliberately
       // GONE: the bin no longer blocks the version list, only per-version restore.
-      const isRealNote = next.fileType.trim().toLowerCase() === "note";
+      const isRealNote = meta.fileType.trim().toLowerCase() === "note";
       versionsBtn.hidden = !isRealNote && !previewing;
       binActions.setBinMode(fromBin, fromBin ? origin.retention ?? null : null);
       // The banner announces WHEN this version is from and carries Restore — EXCEPT
@@ -1896,11 +1955,11 @@ export function createReader(deps: ReaderDeps): Reader {
         // `aria-current`, the pager count, the first paint) agrees from the outset.
         // A deep link to a page that no longer exists — the note was edited since
         // the transcript was indexed — lands on the last page rather than nowhere.
-        pageIndex = Math.max(0, Math.min(next.pages.length - 1, Math.floor(startPage)));
+        pageIndex = Math.max(0, Math.min(meta.pages.length - 1, Math.floor(startPage)));
         zoom = "Fit";
         zoomStepper.set("Fit");
         header.setSubtitle(
-          subtitle(origin, `${next.pages.length} ${next.pages.length === 1 ? "page" : "pages"}`),
+          subtitle(origin, `${meta.pages.length} ${meta.pages.length === 1 ? "page" : "pages"}`),
         );
         setDownload(null);
         // The whole-notebook raw ".note" download lives in the menu (note mode has
@@ -1912,11 +1971,11 @@ export function createReader(deps: ReaderDeps): Reader {
         // so point the row at that and the user saves the ".note" they're looking at.
         rawNoteItem.setHref(
           previewing
-            ? historyFileUrl(next.id, previewVersion!.md5, { download: true, bin: previewViewOnly })
-            : rawFileUrl(next.id, next.fileHash, { download: true, bin: fromBin }),
+            ? historyFileUrl(meta.id, previewVersion!.md5, { download: true, bin: previewViewOnly })
+            : rawFileUrl(meta.id, meta.fileHash, { download: true, bin: fromBin }),
         );
         // Before the filmstrip, so a badge repaint has the page list it needs.
-        find.setNote(next.id, next.pages);
+        find.setNote(meta.id, meta.pages);
         buildFilmstrip();
         // PRIMING FIND FROM THE ROUTE, through the one path that exists: open the
         // bar, fill the field, hand the controller the query. Landing on the first
@@ -1948,25 +2007,25 @@ export function createReader(deps: ReaderDeps): Reader {
           filmVirtualList.destroy();
           filmVirtualList = null;
         }
-        header.setSubtitle(subtitle(origin, `${next.fileType.toUpperCase()} · ${formatBytes(next.size)}`));
+        header.setSubtitle(subtitle(origin, `${meta.fileType.toUpperCase()} · ${formatBytes(meta.size)}`));
         // Bin origin mints the bin-scoped route — the live one 404s for trashed; a
         // history preview mints the version-scoped route (its md5), since the live
         // `/file/:id?v=` would hand back the CURRENT blob, not the version on screen.
         setDownload(
           previewing
-            ? historyFileUrl(next.id, previewVersion!.md5, { download: true, bin: previewViewOnly })
-            : rawFileUrl(next.id, next.fileHash, { download: true, bin: fromBin }),
+            ? historyFileUrl(meta.id, previewVersion!.md5, { download: true, bin: previewViewOnly })
+            : rawFileUrl(meta.id, meta.fileHash, { download: true, bin: fromBin }),
         );
 
         const preview = previewing
-          ? historyFileUrl(next.id, previewVersion!.md5, { bin: previewViewOnly })
-          : rawFileUrl(next.id, next.fileHash, { bin: fromBin });
+          ? historyFileUrl(meta.id, previewVersion!.md5, { bin: previewViewOnly })
+          : rawFileUrl(meta.id, meta.fileHash, { bin: fromBin });
         if (kind === "image" && preview) {
-          showImage(next, preview);
+          showImage(meta, preview);
         } else {
           showNoPreview(
-            next,
-            next.name,
+            meta,
+            meta.name,
             preview === null
               ? "This file has no stored contents to preview or download yet."
               : "There's no preview for this file type. Download it to open it in another app.",
@@ -1986,6 +2045,21 @@ export function createReader(deps: ReaderDeps): Reader {
       // trimmed to nothing leaves the URL describing what actually happened rather
       // than what was asked for.
       syncUrl();
+
+      // Wait for the full metadata to arrive in the background
+      const realMeta = await metaPromise;
+      if (!open || meta?.id !== realMeta.id) return;
+      meta = realMeta;
+      
+      if (kind === "note") {
+        find.setNote(meta.id, meta.pages);
+        buildFilmstrip();
+        // Always re-trigger showPage. If it was page 0, layers might have arrived.
+        // If it was > 0, it was skipped previously due to empty hash.
+        void showPage(pageIndex);
+      } else {
+        header.setSubtitle(subtitle(origin, `${meta.fileType.toUpperCase()} · ${formatBytes(meta.size)}`));
+      }
     },
 
     close: closeReader,

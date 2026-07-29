@@ -15,7 +15,7 @@
 import type { Api } from "../api/types";
 import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
-import type { Id, NoteMeta, Theme } from "../core/types";
+import type { Id, NoteMeta, NoteSummary, Theme } from "../core/types";
 // TYPE-ONLY, so this is a compile-time cycle the emit erases (`reader.ts` imports
 // `Viewer` from here; this imports `ReaderOrigin` from there). `ReaderOrigin`
 // stays defined beside the reader that authored the concept — "where was this
@@ -26,7 +26,8 @@ import type { ReaderOrigin } from "./reader";
 export type { ReaderOrigin };
 
 /**
- * The surface the shell drives every viewer through. The reader satisfies it
+ * A viewer is any module that can display a file (a `.note` / `.spd` / `.txt`).
+ * `Reader` trivially implements this because it had exactly this shape
  * already (it has `el`/`open`/`destroy` and gains `hide()`); a new viewer is any
  * module that returns this shape.
  */
@@ -34,12 +35,14 @@ export interface Viewer {
   /** The viewer's root, mounted ONCE inside the library's content area. */
   el: HTMLElement;
   /**
-   * Show `meta`, starting at `page` (0-based; ignored by viewers with no pages),
+   * Show `summary`, starting at `page` (0-based; ignored by viewers with no pages),
    * opened FROM `origin` (Back's word + the subtitle's folder), with `query`
    * priming any in-file find. Same parameter order as the reader's `open`, so the
    * shell dispatches to every viewer identically.
+   * `metaPromise` resolves with the full `NoteMeta` (page dimensions, etc)
+   * shortly after `open` is called.
    */
-  open(meta: NoteMeta, page: number, origin: ReaderOrigin, query: string): void;
+  open(summary: NoteSummary, metaPromise: Promise<NoteMeta>, page: number, origin: ReaderOrigin, query: string): void | Promise<void>;
   /**
    * The shell is switching to a DIFFERENT viewer. Stop painting and leave the
    * layer, so two viewers never stack. A viewer with resources to drop (a decoded

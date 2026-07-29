@@ -308,6 +308,22 @@ export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
   const slots = new Map<Element, Slot>();
   let themeVersion = 0;
 
+  // Anti-scroll settle gate. Skipping the decode/scale pipeline for slots the
+  // user flings past is worth a short delay — but ONLY while actively scrolling.
+  // `debounceMs` is applied only when the observed scroll container moved within
+  // the last `settleMs`; a settled view (first open, a resize, a scroll come to
+  // rest) paints with no delay, so the gate never taxes the common case. 0
+  // disables it entirely — the unit tests paint synchronously.
+  const settleMs = deps.debounceMs ?? 150;
+  const nowMs = (): number => (typeof performance !== "undefined" ? performance.now() : 0);
+  let lastScrollAt = -Infinity;
+  const onScroll = (): void => {
+    lastScrollAt = nowMs();
+  };
+  const scrollRoot: EventTarget | null =
+    settleMs > 0 ? (deps.root ?? (typeof window !== "undefined" ? window : null)) : null;
+  scrollRoot?.addEventListener("scroll", onScroll, { passive: true });
+
   /** A blob → object-URL handle whose revoke is deferred to teardown/replacement. */
   function objectUrl(blob: Blob): ObjectUrlHandle {
     const url = makeUrl(blob);
@@ -408,15 +424,15 @@ export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
     if (slot.inFlight) return;
     slot.inFlight = true;
 
-    // DEBOUNCE: Yield briefly to let the IntersectionObserver catch up if the user
-    // is scrolling extremely fast. If they scroll past before this resolves, the
-    // slot is no longer visible, and we skip the expensive 10MB decode/scale pipeline.
-    if (deps.debounceMs !== 0) {
-      await new Promise((resolve) => setTimeout(resolve, deps.debounceMs ?? 150));
-    }
-    if (!slot.visible || !slots.has(slot.target)) {
-      slot.inFlight = false;
-      return;
+    // Settle only while actively scrolling (see `settleMs`). If the user flings
+    // past this slot during the wait it's no longer visible, and we skip the whole
+    // decode/scale pipeline; a settled view falls straight through with no delay.
+    if (settleMs > 0 && nowMs() - lastScrollAt < settleMs) {
+      await new Promise((resolve) => setTimeout(resolve, settleMs));
+      if (!slot.visible || !slots.has(slot.target)) {
+        slot.inFlight = false;
+        return;
+      }
     }
 
     const renderVersion = themeVersion;
@@ -537,6 +553,7 @@ export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
 
     destroy(): void {
       observer.disconnect();
+      scrollRoot?.removeEventListener("scroll", onScroll);
       for (const slot of slots.values()) releaseSlot(slot);
       slots.clear();
     },

@@ -19,7 +19,7 @@
 // drives render + font-size/zoom persistence with no DOM network and no storage.
 
 import { el } from "../ui/dom";
-import type { NoteMeta } from "../core/types";
+import type { NoteMeta, NoteSummary } from "../core/types";
 import { formatBytes, rawFileUrl, historyFileUrl } from "../core/fileKind";
 import { readLocal, writeLocal } from "../ui/storage";
 import { dispatchApiFailure } from "../api/client";
@@ -794,17 +794,20 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
   return {
     el: root,
 
-    open(next: NoteMeta, page: number, origin: ReaderOrigin, query: string): void {
+    async open(summary: NoteSummary, metaPromise: Promise<NoteMeta>, page: number, origin: ReaderOrigin, query: string): Promise<void> {
       // Abort a prior load before starting this one (THE ABORT HAZARD, above).
       load?.abort();
       // A new file: drop the previous file's find entirely before priming this
       // one's, so a stale query, its marks, or its debounce can never carry over.
       resetFind();
 
-      meta = next;
+      // Create abort controller first so we can cancel even during the metaPromise await
+      const ctl = new AbortController();
+      load = ctl;
+
       root.hidden = false;
-      header.setName(next.name);
-      header.setSubtitle(`${next.fileType.toUpperCase()} · ${formatBytes(next.size)}`);
+      header.setName(summary.name);
+      header.setSubtitle(summary.fileType.toUpperCase());
       header.setBackWord(backWord(origin));
       // THE CONTEXT SWAP (`toolbar.md`): a live file's file action is Move to
       // bin; one open FROM the bin is already trashed, so it gets Restore and
@@ -830,8 +833,8 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
       // VERSION's bytes, not the current blob — and a TRASHED file's version off
       // the bin-scoped history route.
       const download = previewing
-        ? historyFileUrl(next.id, previewVersion!.md5, { download: true, bin: previewViewOnly })
-        : rawFileUrl(next.id, next.fileHash, { download: true, bin: fromBin });
+        ? historyFileUrl(summary.id, previewVersion!.md5, { download: true, bin: previewViewOnly })
+        : rawFileUrl(summary.id, summary.fileHash, { download: true, bin: fromBin });
       downloadLink.hidden = download === null;
       if (download !== null) downloadLink.href = download;
 
@@ -848,11 +851,26 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
         findInput.value = q;
         pendingTarget = page;
         setFindOpen(true);
+      } else {
+        setFindOpen(false);
       }
 
       // Loading state first — synchronous, so the placeholder names the file before
       // any bytes land (and a not-yet-resolved load never blanks the view).
-      showPlaceholder(next.name, "Opening this .txt file…");
+      showPlaceholder(summary.name, "Opening this .txt file…");
+
+      let next: NoteMeta;
+      try {
+        next = await metaPromise;
+      } catch (e) {
+        if (ctl.signal.aborted) return;
+        showPlaceholder("Couldn’t read this file", "The file metadata couldn’t be loaded.");
+        return;
+      }
+      
+      if (ctl.signal.aborted) return;
+      meta = next;
+      header.setSubtitle(`${next.fileType.toUpperCase()} · ${formatBytes(next.size)}`);
 
       // The INLINE raw URL (no `download` flag) is what we fetch; null when the
       // entry has no content hash, which is an honest "couldn't read", not a fetch.
@@ -867,8 +885,6 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
         return;
       }
 
-      const ctl = new AbortController();
-      load = ctl;
       seam
         .fetchText(url, ctl.signal)
         .then((text) => {

@@ -33,7 +33,7 @@
 // injectable so the whole viewer can run without a real GPU or a network.
 
 import { el } from "../ui/dom";
-import type { NoteMeta } from "../core/types";
+import type { NoteMeta, NoteSummary } from "../core/types";
 import { formatBytes, rawFileUrl, historyFileUrl } from "../core/fileKind";
 import { createToolbar } from "./toolbar";
 import { svg, VIEWER_IC, backWord, createViewerHeader, createZoomStepper, createViewerExportMenu, createViewerBody, createVersionBanner } from "./viewerChrome";
@@ -497,15 +497,15 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
   }
 
   /** The loading placeholder (mark + name), replaced by the render or an error. */
-  function showLoading(m: NoteMeta): void {
+  function showLoading(name: string): void {
     showBody(false);
-    viewerBody.showPlaceholder(m.name, "Opening this .spd sketch…");
+    viewerBody.showPlaceholder(name, "Opening this .spd sketch…");
   }
 
   /** An honest failure that still names the file and the type (mark stays SPD). */
-  function showError(m: NoteMeta, message: string): void {
+  function showError(name: string, message: string): void {
     showBody(false);
-    viewerBody.showPlaceholder(m.name, message);
+    viewerBody.showPlaceholder(name, message);
   }
 
   function setPanelOpen(open: boolean): void {
@@ -596,7 +596,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
         ? historyFileUrl(m.id, previewVersion.md5, { bin: previewViewOnly })
         : rawFileUrl(m.id, m.fileHash, { bin: fromBin });
       if (url === null) {
-        showError(m, "This .spd has no stored contents to preview yet.");
+        showError(m.name, "This .spd has no stored contents to preview yet.");
         return;
       }
       const res = await fetch(url);
@@ -672,18 +672,18 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       applyZoom();
     } catch {
       if (token !== renderToken) return;
-      showError(m, "Couldn't open this .spd sketch. You can still download the original.");
+      showError(m.name, "Couldn't open this .spd sketch. You can still download the original.");
     }
   }
 
   const viewer: Viewer = {
     el: root,
 
-    open(next: NoteMeta, _page: number, origin: ReaderOrigin, _query: string): void {
-      meta = next;
+    async open(summary: NoteSummary, metaPromise: Promise<NoteMeta>, _page: number, origin: ReaderOrigin, _query: string): Promise<void> {
       root.hidden = false;
       // A new open aborts any prior in-flight render and drops its layer canvases.
       renderToken++;
+      const token = renderToken;
       releaseRender();
       doc = null;
       bbox = null;
@@ -691,8 +691,8 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       zoomIdx = 0;
       zoomStepper.set(0);
 
-      header.setName(next.name);
-      header.setSubtitle(`${next.fileType.toUpperCase()} · ${formatBytes(next.size)}`);
+      header.setName(summary.name);
+      header.setSubtitle(summary.fileType.toUpperCase());
       header.setBackWord(backWord(origin));
       // THE CONTEXT SWAP (`toolbar.md`): a live sketch's file action is Move to
       // bin; one open FROM the bin is already trashed, so it gets Restore and
@@ -724,8 +724,8 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       // bin-scoped history route.
       rawItem.setHref(
         previewing
-          ? historyFileUrl(next.id, previewVersion!.md5, { download: true, bin: previewViewOnly })
-          : rawFileUrl(next.id, next.fileHash, { download: true, bin: fromBin }),
+          ? historyFileUrl(summary.id, previewVersion!.md5, { download: true, bin: previewViewOnly })
+          : rawFileUrl(summary.id, summary.fileHash, { download: true, bin: fromBin }),
       );
       exportMenu.setOpen(false);
 
@@ -736,11 +736,24 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       // `#/note/:id` route, so a reload of that would 404 to the library. A history
       // PREVIEW publishes the version md5 (`#/note/:id/version/:short`). A LIVE open
       // has neither and nothing to publish — its bare note URL already stands.
-      if (fromBin) deps.onPosition?.(next.id, 0, "", undefined, true);
-      else if (previewVersion) deps.onPosition?.(next.id, 0, "", previewVersion.md5);
+      if (fromBin) deps.onPosition?.(summary.id, 0, "", undefined, true);
+      else if (previewVersion) deps.onPosition?.(summary.id, 0, "", previewVersion.md5);
 
-      showLoading(next);
+      showLoading(summary.name);
       back.focus();
+
+      let next: NoteMeta;
+      try {
+        next = await metaPromise;
+      } catch (e) {
+        if (renderToken !== token) return;
+        showError("Couldn’t read this file", "The file metadata couldn’t be loaded.");
+        return;
+      }
+      
+      if (renderToken !== token) return;
+      meta = next;
+      header.setSubtitle(`${next.fileType.toUpperCase()} · ${formatBytes(next.size)}`);
 
       // Kick the async decode/render. It never rejects (its own try/catch),
       // and the token guard makes a late completion a no-op after hide/re-open.

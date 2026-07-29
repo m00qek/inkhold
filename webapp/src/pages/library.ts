@@ -47,7 +47,8 @@ import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
 import type { PersistentThumbStore } from "../cache/idb";
 import type { LiveChannel } from "../sync/types";
-import type { Entry, Folder, Hash, Id, Listing, NoteSummary, Theme } from "../core/types";
+import type { Entry, Folder, Hash, Id, Listing, NoteMeta, NoteSummary, Theme } from "../core/types";
+import { skeletonPage } from "../core/noteSkeleton";
 import { ApiError, dispatchApiFailure, type ApiFailureSink } from "../api/client";
 import { createExporter, type Exporter } from "../export/exporter";
 import { createLazyEngine, renderPage, type LazyEngine } from "../render/lazy";
@@ -1638,7 +1639,8 @@ export function createAppShell(deps: AppDeps): AppShell {
         const viewer = viewerFor(base.fileType);
         activate(viewer);
         replaceRoute(noteVersionHref(noteId, shortMd5(version.md5), startPage));
-        viewer.open(rawVersionMeta(base, version), startPage, origin, "");
+        const meta = rawVersionMeta(base, version);
+        viewer.open(synthesizeSummary(meta), Promise.resolve(meta), startPage, origin, "");
         setReading(true);
         return;
       }
@@ -1667,7 +1669,8 @@ export function createAppShell(deps: AppDeps): AppShell {
       // panel it turns the folder URL into the version URL. It also seeds the route
       // the reader's per-page `replaceNoteVersionPosition` then refines.
       replaceRoute(noteVersionHref(noteId, shortMd5(version.md5), startPage));
-      reader.open(versionMeta(template, version.md5), startPage, origin, "");
+      const meta = versionMeta(template, version.md5);
+      reader.open(synthesizeSummary(meta), Promise.resolve(meta), startPage, origin, "");
       setReading(true);
     } catch (e) {
       historyScope.clear();
@@ -2021,26 +2024,29 @@ export function createAppShell(deps: AppDeps): AppShell {
 
     async openNote(id: Id, page = 0, q = ""): Promise<void> {
       const mine = ++routeToken;
-      // A routed note is always the LIVE file — never a version preview (previews
-      // are opened directly, not through the hash). Drop any lingering reroute so
-      // the note reads its current blob, not a version left armed by a preview.
       historyScope.clear();
       try {
-        // Captured BEFORE the await, with the query and the folder as they were:
-        // this is the answer to "where did I come from", and a route change
-        // landing mid-fetch would overwrite both.
         const { origin, href } = readerReturn(id);
-        const meta = await api.getNoteMeta(id);
-        if (mine !== routeToken) return; // routed away while fetching
+        
+        let summary: NoteSummary | undefined;
+        if (listing) {
+          summary = listing.entries.find((e): e is NoteSummary => e.kind === "note" && e.id === id);
+        }
+        
+        let metaPromise: Promise<NoteMeta>;
+        if (summary) {
+          metaPromise = api.getNoteMeta(id);
+        } else {
+          const meta = await api.getNoteMeta(id);
+          if (mine !== routeToken) return;
+          summary = synthesizeSummary(meta);
+          metaPromise = Promise.resolve(meta);
+        }
+        
         readerBack = href;
-        // DISPATCH on the file's type: a `.spd`/`.txt` gets its own viewer, every
-        // other kind the reader (see `viewerFor`). `activate` hides whichever
-        // viewer was up first, so switching types never stacks two overlays.
-        const v = viewerFor(meta.fileType);
+        const v = viewerFor(summary.fileType);
         activate(v);
-        v.open(meta, page, origin, q);
-        // Last, and only once the viewer is really open: hiding the topbar over a
-        // viewer that failed to open would leave the shell with no header at all.
+        v.open(summary, metaPromise, page, origin, q);
         setReading(true);
       } catch (e) {
         // "That note couldn't be opened" would be a lie for a dead session, and
@@ -2130,7 +2136,7 @@ export function createAppShell(deps: AppDeps): AppShell {
         // with the `bin` origin, whose per-position sync writes the bin URL.
         const v = viewerFor(meta.fileType);
         activate(v);
-        v.open(meta, page, origin, "");
+        v.open(synthesizeSummary(meta), Promise.resolve(meta), page, origin, "");
         setReading(true);
       } catch (e) {
         if (handled(e)) return;
@@ -2161,5 +2167,20 @@ export function createAppShell(deps: AppDeps): AppShell {
       admin?.destroy();
       galleryEngine.destroy();
     },
+  };
+}
+
+export function synthesizeSummary(meta: NoteMeta): NoteSummary {
+  return {
+    kind: "note",
+    id: meta.id,
+    name: meta.name,
+    pageCount: meta.pages.length,
+    firstPage: meta.pages[0] ?? skeletonPage(0),
+    updatedAt: 0,
+    fileType: meta.fileType,
+    fileHash: meta.fileHash,
+    hasRecognizedText: meta.pages.some((p) => p.textHash !== null),
+    thumbAspect: undefined,
   };
 }

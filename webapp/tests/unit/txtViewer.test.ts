@@ -12,6 +12,7 @@ import { describe, it, expect, vi } from "vitest";
 import { createTxtViewer, TxtLoadError, type TxtSeam } from "../../src/pages/txtViewer";
 import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
 import type { NoteMeta, TxtMatch, TxtSearchBatch } from "../../src/core/types";
+import { synthesizeSummary } from "../../src/pages/library";
 
 function deps(over: Partial<ViewerDeps> = {}): ViewerDeps {
   return {
@@ -101,7 +102,7 @@ describe("txt viewer — render", () => {
   it("fetches the INLINE raw url (no download flag) and lays the decoded text out", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
-    v.open(meta({ id: "n-1", fileHash: "b".repeat(32) }), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta({ id: "n-1", fileHash: "b".repeat(32) })), Promise.resolve(meta({ id: "n-1", fileHash: "b".repeat(32) })), 0, FOLDER, "");
 
     // The fetch target is the versioned raw url WITHOUT `download=1`.
     expect(f.calls).toHaveLength(1);
@@ -126,7 +127,7 @@ describe("txt viewer — render", () => {
     const onRestoreVersion = vi.fn();
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps({ onVersions, onRestoreVersion }), f.seam));
-    v.open(meta({ id: "n-1", fileHash: "b".repeat(32) }), 0, HISTORY, "");
+    await v.open(synthesizeSummary(meta({ id: "n-1", fileHash: "b".repeat(32) })), Promise.resolve(meta({ id: "n-1", fileHash: "b".repeat(32) })), 0, HISTORY, "");
 
     // NOT the live `/file/:id?v=` (which serves the current blob) — the
     // version-scoped history raw route, keyed by the version's md5.
@@ -153,7 +154,7 @@ describe("txt viewer — render", () => {
   it("renders device text as TEXT, never markup (no injection)", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     f.calls[0]!.d.resolve("<img src=x onerror=alert(1)> & <b>bold</b>");
     await flush();
     const pre = q(v, ".txt__sheet")!;
@@ -166,7 +167,7 @@ describe("txt viewer — render", () => {
   it("shows an honest error state when the fetch fails (no throw)", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     f.calls[0]!.d.reject(new TxtLoadError(500));
     await flush();
 
@@ -182,17 +183,17 @@ describe("txt viewer — render", () => {
     const onSessionExpired = vi.fn();
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps({ onSessionExpired }), f.seam));
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     f.calls[0]!.d.reject(new TxtLoadError(401));
     await flush();
     expect(onSessionExpired).toHaveBeenCalledTimes(1);
     v.destroy();
   });
 
-  it("with no content hash, reads as unreadable without a fetch", () => {
+  it("with no content hash, reads as unreadable without a fetch", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
-    v.open(meta({ fileHash: null }), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta({ fileHash: null })), Promise.resolve(meta({ fileHash: null })), 0, FOLDER, "");
     expect(f.calls).toHaveLength(0);
     expect(q(v, ".viewer__placeholder")!.textContent).toContain("read this file");
     v.destroy();
@@ -206,7 +207,7 @@ describe("txt viewer — font size", () => {
     q(v, '[aria-label="Larger text"]') as HTMLButtonElement;
   const label = (v: ReturnType<typeof createTxtViewer>) => q(v, ".pager .zoom")!;
 
-  it("defaults to 16px and steps the label + persists on each change", () => {
+  it("defaults to 16px and steps the label + persists on each change", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
     expect(label(v).textContent).toBe("16px");
@@ -224,7 +225,7 @@ describe("txt viewer — font size", () => {
   it("applies the size to the live text and to text opened later", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     f.calls[0]!.d.resolve("hello");
     await flush();
 
@@ -235,7 +236,7 @@ describe("txt viewer — font size", () => {
     v.destroy();
   });
 
-  it("clamps at the 10–32px bounds and does not persist a no-op", () => {
+  it("clamps at the 10–32px bounds and does not persist a no-op", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
     for (let i = 0; i < 20; i++) larger(v).click();
@@ -253,14 +254,14 @@ describe("txt viewer — font size", () => {
     const f = fakeSeam(24); // as if a prior session had stored 24px
     const v = mount(createTxtViewer(deps(), f.seam));
     expect(label(v).textContent).toBe("24px");
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     f.calls[0]!.d.resolve("hi");
     await flush();
     expect((q(v, ".txt__sheet") as HTMLPreElement).style.fontSize).toBe("24px");
     v.destroy();
   });
 
-  it("clamps an out-of-range persisted value into bounds", () => {
+  it("clamps an out-of-range persisted value into bounds", async () => {
     const v = mount(createTxtViewer(deps(), fakeSeam(9999).seam));
     expect(q(v, ".pager .zoom")!.textContent).toBe("32px");
     v.destroy();
@@ -274,7 +275,7 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
   // two `.pager`s in the one toolbar stay individually addressable.
   const zoomLabel = (v: ReturnType<typeof createTxtViewer>) => q(v, ".pager .txt-zoom")!;
 
-  it("renders as a `−` [Fit] `+` control in the view zone, defaulting to Fit", () => {
+  it("renders as a `−` [Fit] `+` control in the view zone, defaulting to Fit", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
     expect(zoomOut(v)).not.toBeNull();
@@ -283,7 +284,7 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
     v.destroy();
   });
 
-  it("steps the label and persists on each change, clamping silently at Fit", () => {
+  it("steps the label and persists on each change, clamping silently at Fit", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
 
@@ -307,7 +308,7 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
   it("scales the reading COLUMN via --txt-zoom, on the live text and text opened later", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     f.calls[0]!.d.resolve("hello");
     await flush();
 
@@ -323,7 +324,7 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
     const f = fakeSeam(null, 2); // as if a prior session had stored step 2 (150%)
     const v = mount(createTxtViewer(deps(), f.seam));
     expect(zoomLabel(v).textContent).toBe("150%");
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     f.calls[0]!.d.resolve("hi");
     await flush();
     expect((q(v, ".txt__sheet") as HTMLPreElement).style.getPropertyValue("--txt-zoom")).toBe("1.5");
@@ -333,7 +334,7 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
   it("zoom and font size are INDEPENDENT knobs — one moves without disturbing the other", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     f.calls[0]!.d.resolve("body");
     await flush();
     const pre = q(v, ".txt__sheet") as HTMLPreElement;
@@ -396,7 +397,7 @@ describe("txt viewer — find", () => {
   const btn = (v: ReturnType<typeof createTxtViewer>, name: string) =>
     v.el.querySelector(`[aria-label="${name}"]`) as HTMLButtonElement;
 
-  it("the toolbar find button is present and ENABLED for a .txt", () => {
+  it("the toolbar find button is present and ENABLED for a .txt", async () => {
     const { v } = findViewer();
     const find = btn(v, "Find in this file");
     expect(find).not.toBeNull();
@@ -407,7 +408,7 @@ describe("txt viewer — find", () => {
   it("a ?q= deep link opens find, marks matches, and lands on the target paragraph", async () => {
     const { v, f, searchInTxtStream } = findViewer();
     // page = 1 → the paragraph ordinal the library hit routed with.
-    v.open(meta({ id: "n-r" }), 1, FOLDER, "zephyrine");
+    await v.open(synthesizeSummary(meta({ id: "n-r" })), Promise.resolve(meta({ id: "n-r" })), 1, FOLDER, "zephyrine");
     f.calls[0]!.d.resolve(BODY);
     await flush();
     await flush();
@@ -433,7 +434,7 @@ describe("txt viewer — find", () => {
 
   it("next/prev JUMP between matching paragraphs, wrapping around", async () => {
     const { v, f } = findViewer();
-    v.open(meta(), 1, FOLDER, "zephyrine");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 1, FOLDER, "zephyrine");
     f.calls[0]!.d.resolve(BODY);
     await flush();
     await flush();
@@ -453,7 +454,7 @@ describe("txt viewer — find", () => {
 
   it("a query with no matches reads 'No matches' and leaves the text unmarked", async () => {
     const { v, f } = findViewer([]);
-    v.open(meta(), 0, FOLDER, "absent");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "absent");
     f.calls[0]!.d.resolve(BODY);
     await flush();
     await flush();
@@ -466,7 +467,7 @@ describe("txt viewer — find", () => {
 
   it("opening WITHOUT a query leaves find closed (no bar, no request)", async () => {
     const { v, f, searchInTxtStream } = findViewer();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     f.calls[0]!.d.resolve(BODY);
     await flush();
     expect((q(v, ".txtbar") as HTMLElement).hidden).toBe(true);
@@ -477,7 +478,7 @@ describe("txt viewer — find", () => {
   it("reports the landed paragraph + query up to the shell (addressable ?q=)", async () => {
     const onPosition = vi.fn();
     const { v, f } = findViewer(ZEPH, { onPosition });
-    v.open(meta({ id: "n-p" }), 2, FOLDER, "zephyrine");
+    await v.open(synthesizeSummary(meta({ id: "n-p" })), Promise.resolve(meta({ id: "n-p" })), 2, FOLDER, "zephyrine");
     f.calls[0]!.d.resolve(BODY);
     await flush();
     await flush();
@@ -496,7 +497,7 @@ describe("txt viewer — find", () => {
     const onPosition = vi.fn();
     const version = { md5: "e".repeat(32), createdAt: 1_752_000_000_000 };
     const { v, f } = findViewer(ZEPH, { onPosition });
-    v.open(meta({ id: "n-p" }), 0, { kind: "history", folderPath: "Note / Files", version }, "zephyrine");
+    await v.open(synthesizeSummary(meta({ id: "n-p" })), Promise.resolve(meta({ id: "n-p" })), 0, { kind: "history", folderPath: "Note / Files", version }, "zephyrine");
     // The open-end sync already carried the version md5 (before any text arrived).
     expect(onPosition).toHaveBeenLastCalledWith("n-p", 0, "zephyrine", version.md5);
     f.calls[0]!.d.resolve(BODY);
@@ -527,7 +528,7 @@ describe("txt viewer — find", () => {
 
   it("streams a '+' FLOOR while draining, then settles to the exact count", async () => {
     const { v, f, emit } = streamViewer();
-    v.open(meta(), 1, FOLDER, "zephyrine");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 1, FOLDER, "zephyrine");
     f.calls[0]!.d.resolve(BODY);
     await flush();
 
@@ -547,7 +548,7 @@ describe("txt viewer — find", () => {
 
   it("prev/next steps the accumulated set and reaches a match only a later batch loads", async () => {
     const { v, f, emit } = streamViewer();
-    v.open(meta(), 1, FOLDER, "zephyrine");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 1, FOLDER, "zephyrine");
     f.calls[0]!.d.resolve(BODY);
     await flush();
 
@@ -571,7 +572,7 @@ describe("txt viewer — find", () => {
 
   it("manual fuzzy is OPT-IN: offers 'Search similar', reveals the held result on click", async () => {
     const { v, f } = findViewer(ZEPH, {}, { usedFuzzy: true });
-    v.open(meta(), 0, FOLDER, "zephyryne"); // a typo absent from the file
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "zephyryne"); // a typo absent from the file
     f.calls[0]!.d.resolve(BODY);
     await flush();
     await flush();
@@ -597,7 +598,7 @@ describe("txt viewer — lifecycle / abort hazard (one reused instance)", () => 
   it("hide() aborts the in-flight load; a late resolve never paints", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     v.hide();
     expect(f.calls[0]!.signal.aborted).toBe(true);
 
@@ -610,8 +611,8 @@ describe("txt viewer — lifecycle / abort hazard (one reused instance)", () => 
   it("a superseding open() aborts the prior load; only the newest text paints", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
-    v.open(meta({ id: "n-a", name: "A" }), 0, FOLDER, "");
-    v.open(meta({ id: "n-b", name: "B" }), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta({ id: "n-a", name: "A" })), Promise.resolve(meta({ id: "n-a", name: "A" })), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta({ id: "n-b", name: "B" })), Promise.resolve(meta({ id: "n-b", name: "B" })), 0, FOLDER, "");
     expect(f.calls).toHaveLength(2);
     expect(f.calls[0]!.signal.aborted).toBe(true);
 
@@ -628,7 +629,7 @@ describe("txt viewer — lifecycle / abort hazard (one reused instance)", () => 
   it("destroy() aborts the in-flight load", async () => {
     const f = fakeSeam();
     const v = mount(createTxtViewer(deps(), f.seam));
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     v.destroy();
     expect(f.calls[0]!.signal.aborted).toBe(true);
     f.calls[0]!.d.resolve("late");

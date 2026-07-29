@@ -15,6 +15,7 @@ import { createSpdViewer } from "../../src/pages/spdViewer";
 import { createTxtViewer, type TxtSeam } from "../../src/pages/txtViewer";
 import type { Viewer, ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
 import type { NoteMeta } from "../../src/core/types";
+import { synthesizeSummary } from "../../src/pages/library";
 
 // The `.txt` viewer is REAL — its `open()` fetches. This suite asserts only the
 // shared SEAM (placeholder, universal toolbar), so it hands the viewer an inert
@@ -69,7 +70,7 @@ const STUBS: { name: string; make: (d: ViewerDeps) => Viewer; type: string; mark
 ];
 
 describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
-  it("conforms to Viewer and starts hidden", () => {
+  it("conforms to Viewer and starts hidden", async () => {
     const v = make(deps());
     expect(typeof v.open).toBe("function");
     expect(typeof v.hide).toBe("function");
@@ -78,10 +79,10 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
     expect((v.el as HTMLElement).hidden).toBe(true);
   });
 
-  it("open() reveals the placeholder, the file name and the type", () => {
+  it("open() reveals the placeholder, the file name and the type", async () => {
     const v = make(deps());
     document.body.append(v.el);
-    v.open(meta({ fileType: type }), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta({ fileType: type })), Promise.resolve(meta({ fileType: type })), 0, FOLDER, "");
 
     expect(v.el.hidden).toBe(false);
     const placeholder = v.el.querySelector(".viewer__placeholder")!;
@@ -90,7 +91,7 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
     v.destroy();
   });
 
-  it("hosts a role=toolbar with Back, Download and Move to bin", () => {
+  it("hosts a role=toolbar with Back, Download and Move to bin", async () => {
     const v = make(deps());
     const bar = v.el.querySelector('[role="toolbar"]')!;
     expect(bar).not.toBeNull();
@@ -100,36 +101,36 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
     expect(bar.querySelector('[aria-label="Move to bin"]')).not.toBeNull();
   });
 
-  it("Move to bin is NEUTRAL (never the danger styling) and labelled", () => {
+  it("Move to bin is NEUTRAL (never the danger styling) and labelled", async () => {
     const v = make(deps());
     const moveBin = v.el.querySelector('[aria-label="Move to bin"]') as HTMLElement;
     expect(moveBin.className).not.toContain("is-danger");
     expect(moveBin.textContent).toContain("Move to bin");
   });
 
-  it("Back routes through onBack", () => {
+  it("Back routes through onBack", async () => {
     const onBack = vi.fn();
     const v = make(deps({ onBack }));
     document.body.append(v.el);
-    v.open(meta({ fileType: type }), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta({ fileType: type })), Promise.resolve(meta({ fileType: type })), 0, FOLDER, "");
     (v.el.querySelector(".viewer__back") as HTMLButtonElement).click();
     expect(onBack).toHaveBeenCalledTimes(1);
     v.destroy();
   });
 
-  it("Move to bin hands the open file to onMoveToBin (the one trash path)", () => {
+  it("Move to bin hands the open file to onMoveToBin (the one trash path)", async () => {
     const onMoveToBin = vi.fn();
     const v = make(deps({ onMoveToBin }));
     document.body.append(v.el);
     const m = meta({ id: "n-files", name: "readme", fileType: type });
-    v.open(m, 0, FOLDER, "");
+    await v.open(synthesizeSummary(m), Promise.resolve(m), 0, FOLDER, "");
     (v.el.querySelector('[aria-label="Move to bin"]') as HTMLButtonElement).click();
     expect(onMoveToBin).toHaveBeenCalledTimes(1);
     expect(onMoveToBin.mock.calls[0]![0]).toMatchObject({ id: "n-files", name: "readme" });
     v.destroy();
   });
 
-  it("the bin context swaps the file zone: the retention countdown + a ⋯ menu instead of Move to bin", () => {
+  it("the bin context swaps the file zone: the retention countdown + a ⋯ menu instead of Move to bin", async () => {
     const v = make(deps());
     document.body.append(v.el);
     const moveBin = v.el.querySelector('[aria-label="Move to bin"]') as HTMLElement;
@@ -140,7 +141,7 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
 
     // From the bin the file is ALREADY trashed: re-trashing is nonsense, and its
     // two real decisions are Restore and Delete permanently.
-    v.open(meta({ fileType: type }), 0, { kind: "bin", folderPath: "Note / Files", retention: { daysLeft: 30, soon: false, retentionDays: 30 } }, "");
+    await v.open(synthesizeSummary(meta({ fileType: type })), Promise.resolve(meta({ fileType: type })), 0, { kind: "bin", folderPath: "Note / Files", retention: { daysLeft: 30, soon: false, retentionDays: 30 } }, "");
     expect(moveBin.hidden).toBe(true);
     expect(cluster.hidden).toBe(false);
     // The trigger is a real button with the menu wiring, keyboard-operable.
@@ -157,19 +158,19 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
     expect(cluster.querySelector(".life__label")!.textContent).toContain("30 days left");
 
     // …and a live file swaps back to Move to bin, hiding the cluster.
-    v.open(meta({ fileType: type }), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta({ fileType: type })), Promise.resolve(meta({ fileType: type })), 0, FOLDER, "");
     expect(moveBin.hidden).toBe(false);
     expect(cluster.hidden).toBe(true);
     v.destroy();
   });
 
-  it("the ⋯ menu's Restore and Delete permanently hand the open file to the shell's bin callbacks", () => {
+  it("the ⋯ menu's Restore and Delete permanently hand the open file to the shell's bin callbacks", async () => {
     const onRestore = vi.fn();
     const onPurge = vi.fn();
     const v = make(deps({ onRestore, onPurge }));
     document.body.append(v.el);
     const m = meta({ id: "n-gone", name: "trashed", fileType: type });
-    v.open(m, 0, { kind: "bin", folderPath: null, retention: { daysLeft: 4, soon: true, retentionDays: 30 } }, "");
+    await v.open(synthesizeSummary(m), Promise.resolve(m), 0, { kind: "bin", folderPath: null, retention: { daysLeft: 4, soon: true, retentionDays: 30 } }, "");
 
     const cluster = v.el.querySelector(".viewer__bin-actions")!;
     const [restore, purge] = Array.from(cluster.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
@@ -186,24 +187,24 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
     v.destroy();
   });
 
-  it("Back names where it returns to, per origin", () => {
+  it("Back names where it returns to, per origin", async () => {
     const v = make(deps());
     const label = v.el.querySelector(".viewer__back-label") as HTMLElement;
-    v.open(meta({ fileType: type }), 0, { kind: "folder", folderPath: "Note / Files" }, "");
+    await v.open(synthesizeSummary(meta({ fileType: type })), Promise.resolve(meta({ fileType: type })), 0, { kind: "folder", folderPath: "Note / Files" }, "");
     expect(label.textContent).toBe("Files");
-    v.open(meta({ fileType: type }), 0, { kind: "search", folderPath: "Note / Files" }, "");
+    await v.open(synthesizeSummary(meta({ fileType: type })), Promise.resolve(meta({ fileType: type })), 0, { kind: "search", folderPath: "Note / Files" }, "");
     expect(label.textContent).toBe("Search");
-    v.open(meta({ fileType: type }), 0, { kind: "bin", folderPath: null }, "");
+    await v.open(synthesizeSummary(meta({ fileType: type })), Promise.resolve(meta({ fileType: type })), 0, { kind: "bin", folderPath: null }, "");
     expect(label.textContent).toBe("Recycle bin");
-    v.open(meta({ fileType: type }), 0, { kind: "folder", folderPath: null }, "");
+    await v.open(synthesizeSummary(meta({ fileType: type })), Promise.resolve(meta({ fileType: type })), 0, { kind: "folder", folderPath: null }, "");
     expect(label.textContent).toBe("Library");
     v.destroy();
   });
 
-  it("points Download at the versioned raw-file URL with the attachment flag", () => {
+  it("points Download at the versioned raw-file URL with the attachment flag", async () => {
     const v = make(deps());
     document.body.append(v.el);
-    v.open(meta({ id: "n-1", fileHash: "b".repeat(32), fileType: type }), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta({ id: "n-1", fileHash: "b".repeat(32), fileType: type })), Promise.resolve(meta({ id: "n-1", fileHash: "b".repeat(32), fileType: type })), 0, FOLDER, "");
     const trigger = v.el.querySelector('[aria-label="Download"]') as HTMLElement;
 
     if (type === "spd") {
@@ -234,13 +235,13 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
     v.destroy();
   });
 
-  it("in the bin context, Download points at the BIN-scoped raw route", () => {
+  it("in the bin context, Download points at the BIN-scoped raw route", async () => {
     // The live `/file/{id}` goes through `Files.get` (`deleted = 0`) and 404s
     // for anything trashed — the reader's precedent is that download from the
     // bin stays offered, so it has to come off the bin's own route.
     const v = make(deps());
     document.body.append(v.el);
-    v.open(meta({ id: "n-1", fileHash: "b".repeat(32), fileType: type }), 0, { kind: "bin", folderPath: null }, "");
+    await v.open(synthesizeSummary(meta({ id: "n-1", fileHash: "b".repeat(32), fileType: type })), Promise.resolve(meta({ id: "n-1", fileHash: "b".repeat(32), fileType: type })), 0, { kind: "bin", folderPath: null }, "");
     const trigger = v.el.querySelector('[aria-label="Download"]') as HTMLElement;
 
     if (type === "spd") {
@@ -264,10 +265,10 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
     v.destroy();
   });
 
-  it("hide() takes it back off the layer", () => {
+  it("hide() takes it back off the layer", async () => {
     const v = make(deps());
     document.body.append(v.el);
-    v.open(meta({ fileType: type }), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta({ fileType: type })), Promise.resolve(meta({ fileType: type })), 0, FOLDER, "");
     expect(v.el.hidden).toBe(false);
     v.hide();
     expect(v.el.hidden).toBe(true);

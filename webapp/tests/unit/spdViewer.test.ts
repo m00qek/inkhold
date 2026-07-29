@@ -21,6 +21,7 @@ import {
 import { createSpdViewer, type SpdViewerSeam } from "../../src/pages/spdViewer";
 import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
 import type { NoteMeta } from "../../src/core/types";
+import { synthesizeSummary } from "../../src/pages/library";
 
 // --- a fake decoder that speaks the real C-ABI ------------------------------
 
@@ -132,7 +133,7 @@ const SAMPLE: FakeSpec = {
 const BASE = { w: 8 * 128, h: 21 * 128 };
 
 describe("parseSpd", () => {
-  it("reads the layer tree, per-layer state and tiles out of the ABI", () => {
+  it("reads the layer tree, per-layer state and tiles out of the ABI", async () => {
     const { exports, calls } = makeFakeDecoder(SAMPLE);
     const doc = parseSpd(exports, new Uint8Array([0x53, 0x51, 0x4c]));
 
@@ -159,7 +160,7 @@ describe("parseSpd", () => {
     expect(calls.alloc.length).toBe(1);
   });
 
-  it("throws with the mapped message on a decoder error, and still closes on read failure", () => {
+  it("throws with the mapped message on a decoder error, and still closes on read failure", async () => {
     const bad = makeFakeDecoder({ ...SAMPLE, openRc: -2 });
     expect(() => parseSpd(bad.exports, new Uint8Array([0]))).toThrow(/not an \.spd file/);
     // open failed → the input was still freed, and close was NOT called (nothing open).
@@ -167,7 +168,7 @@ describe("parseSpd", () => {
     expect(bad.calls.close).toBe(0);
   });
 
-  it("copies PNG bytes so they survive a later decoder call", () => {
+  it("copies PNG bytes so they survive a later decoder call", async () => {
     const { exports } = makeFakeDecoder(SAMPLE);
     const doc = parseSpd(exports, new Uint8Array([0]));
     const png = doc.layers[0]!.tiles[0]!.png;
@@ -178,7 +179,7 @@ describe("parseSpd", () => {
 });
 
 describe("spdBbox", () => {
-  it("is the min/max tile box across every layer", () => {
+  it("is the min/max tile box across every layer", async () => {
     const { exports } = makeFakeDecoder(SAMPLE);
     const doc = parseSpd(exports, new Uint8Array([0]));
     // Across layers 4 (10,20)/(12,22), 3 (11,25), 1 (5,5): x∈[5,12] y∈[5,25].
@@ -187,7 +188,7 @@ describe("spdBbox", () => {
     expect(spdBaseDims(doc, spdBbox(doc))).toEqual(BASE);
   });
 
-  it("is null when nothing is drawn", () => {
+  it("is null when nothing is drawn", async () => {
     const doc: SpdDoc = { width: 100, height: 200, layers: [{ id: 9999, name: "Reference Layer", visible: true, opacity: 255, tiles: [] }] };
     expect(spdBbox(doc)).toBeNull();
     // …and the base dims fall back to the surface size.
@@ -274,7 +275,7 @@ describe("createSpdViewer (DOM seam)", () => {
     // A DPR > 1 must NOT enlarge the backing store — memory is bounded by base res.
     vi.stubGlobal("devicePixelRatio", 2);
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => stackCanvases(v).length > 0);
 
     const canvases = stackCanvases(v);
@@ -308,7 +309,7 @@ describe("createSpdViewer (DOM seam)", () => {
     const version = { md5: "e".repeat(32), createdAt: 1_752_000_000_000 };
     const v = createSpdViewer(deps({ onVersions, onRestoreVersion }), { loader: async () => exports, decodeTile });
     document.body.append(v.el);
-    v.open(meta({ id: "n-files-sketch", fileHash: "a".repeat(32) }), 0, { kind: "history", folderPath: "Note / Files", version }, "");
+    await v.open(synthesizeSummary(meta({ id: "n-files-sketch", fileHash: "a".repeat(32) })), Promise.resolve(meta({ id: "n-files-sketch", fileHash: "a".repeat(32) })), 0, { kind: "history", folderPath: "Note / Files", version }, "");
     await until(() => calls.length > 0);
 
     // NOT the live `/file/:id?v=` (the current blob) — the version-scoped history
@@ -331,7 +332,7 @@ describe("createSpdViewer (DOM seam)", () => {
     v.destroy();
   });
 
-  it("in a HISTORY preview: the URL sync rides the version md5 (addressable version)", () => {
+  it("in a HISTORY preview: the URL sync rides the version md5 (addressable version)", async () => {
     // A `.spd` has no page/query to refine, so its whole URL sync is asserting the
     // version's address once on open — the shell's `onPosition` keys off the version
     // md5 (its 4th arg) to write the `#/note/:id/version/:short` form, so a reload /
@@ -341,26 +342,26 @@ describe("createSpdViewer (DOM seam)", () => {
     const version = { md5: "e".repeat(32), createdAt: 1_752_000_000_000 };
     const v = createSpdViewer(deps({ onPosition }), { loader: async () => exports, decodeTile: vi.fn() });
     document.body.append(v.el);
-    v.open(meta({ id: "n-files-sketch" }), 0, { kind: "history", folderPath: "Note / Files", version }, "");
+    await v.open(synthesizeSummary(meta({ id: "n-files-sketch" })), Promise.resolve(meta({ id: "n-files-sketch" })), 0, { kind: "history", folderPath: "Note / Files", version }, "");
     expect(onPosition).toHaveBeenCalledWith("n-files-sketch", 0, "", version.md5);
     v.destroy();
   });
 
-  it("a LIVE .spd open publishes no version md5 (bare note URL)", () => {
+  it("a LIVE .spd open publishes no version md5 (bare note URL)", async () => {
     // The negative: a non-preview open must NOT emit a version address — a `.spd`
     // has nothing to sync, so `onPosition` is untouched and the bare note URL stands.
     const onPosition = vi.fn();
     const { exports } = makeFakeDecoder(SAMPLE);
     const v = createSpdViewer(deps({ onPosition }), { loader: async () => exports, decodeTile: vi.fn() });
     document.body.append(v.el);
-    v.open(meta({ id: "n-files-sketch" }), 0, { kind: "folder", folderPath: "Note / Files" }, "");
+    await v.open(synthesizeSummary(meta({ id: "n-files-sketch" })), Promise.resolve(meta({ id: "n-files-sketch" })), 0, { kind: "folder", folderPath: "Note / Files" }, "");
     expect(onPosition).not.toHaveBeenCalled();
     v.destroy();
   });
 
   it("builds the layers panel from the tree, seeded from authored visibility", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
     // The rendered body is up; the placeholder is gone.
@@ -387,7 +388,7 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("decodes one bitmap per tile, drawing then closing each (4 across the layers)", async () => {
     const { v, decodeTile, bitmaps } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => stackCanvases(v).length > 0);
     // Layer 4 has 2 tiles, layer 3 one, layer 1 one, 9999 none → 4 decodes.
     expect(decodeTile).toHaveBeenCalledTimes(4);
@@ -400,7 +401,7 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("the Layers button opens the panel with the toolbar's active state", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
     const btn = v.el.querySelector('[aria-label="Layers"]') as HTMLButtonElement;
@@ -417,7 +418,7 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("the panel head reads as `[icon] Layers` — a decorative icon before the label", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
     const head = v.el.querySelector(".spd-layers__head")!;
@@ -433,7 +434,7 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("an eye toggle flips its state AND hides the matching layer canvas", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
     const firstEye = v.el.querySelector(".spd-layer__eye") as HTMLButtonElement;
@@ -466,7 +467,7 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("the opacity bar steps 1% on arrow keys (Home/End → bounds), drives setLayerOpacity, and clamps", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
     // Row 1 is Layer 3 (Z-order 4,3,1,9999), authored opacity 128/255 → 50%.
@@ -511,7 +512,7 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("dragging the opacity bar sets the value from the pointer's position along the track", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
     const b3 = barOf(v, 1); // Layer 3 @ 50%
@@ -540,7 +541,7 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("a hidden layer's opacity bar is disabled + out of the tab order; the eye enables/disables it", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
     // Layer 1 is authored-hidden → its bar starts dimmed, aria-disabled, untabbable.
@@ -575,7 +576,7 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("gives each non-blank layer a thumbnail canvas; the empty Reference Layer gets none", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
     // Layers 4/3/1 have tiles → a <canvas> thumb each; the empty 9999 gets a blank box.
@@ -592,7 +593,7 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("mints every layer thumbnail at ONE height with the drawing's own aspect (capped at 2.5×)", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
     // Height is design (one shared backing height per panel); aspect is data —
@@ -620,7 +621,7 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("setLayerVisible / setLayerOpacity mutate the target canvas and its current state", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => stackCanvases(v).length > 0);
     const seam = seamOf(v);
     const view3 = seam.layerViews().find((lv) => lv.layer.id === 3)!;
@@ -649,7 +650,7 @@ describe("createSpdViewer (DOM seam)", () => {
     // Nothing loaded yet → null.
     expect(seamOf(v).exportModel()).toBeNull();
 
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => stackCanvases(v).length > 0);
     const seam = seamOf(v);
 
@@ -678,14 +679,14 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("current resets to authored on each open (view-only, not persisted)", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => stackCanvases(v).length > 0);
     seamOf(v).setLayerOpacity(4, 0.25);
     seamOf(v).setLayerVisible(4, false);
     expect(seamOf(v).layerViews()[0]!.current).toEqual({ opacity: 0.25, visible: false });
 
     // Re-open the same file: current is rebuilt from authored, tuning is dropped.
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => stackCanvases(v).length > 0);
     expect(seamOf(v).layerViews()[0]!.current).toEqual({ opacity: 1, visible: true });
     v.destroy();
@@ -693,7 +694,7 @@ describe("createSpdViewer (DOM seam)", () => {
 
   it("hide() drops every layer canvas and empties the wrapper", async () => {
     const { v } = mount();
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => stackCanvases(v).length > 0);
     expect(stackCanvases(v).length).toBe(4);
 
@@ -713,7 +714,7 @@ describe("createSpdViewer (DOM seam)", () => {
     const { exports } = makeFakeDecoder(SAMPLE);
     const v = createSpdViewer(deps(), { loader: async () => exports, decodeTile: async () => fakeBitmap() as unknown as CanvasImageSource });
     document.body.append(v.el);
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => (v.el.querySelector(".viewer__placeholder p") as HTMLElement)?.textContent?.includes("Couldn't") ?? false);
 
     const ph = v.el.querySelector(".viewer__placeholder")!;
@@ -732,7 +733,7 @@ describe("createSpdViewer (DOM seam)", () => {
     const { exports } = makeFakeDecoder(SAMPLE);
     const v = createSpdViewer(deps({ onSessionExpired }), { loader: async () => exports, decodeTile: async () => fakeBitmap() as unknown as CanvasImageSource });
     document.body.append(v.el);
-    v.open(meta(), 0, FOLDER, "");
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => onSessionExpired.mock.calls.length > 0);
     expect(onSessionExpired).toHaveBeenCalledTimes(1);
     v.destroy();
