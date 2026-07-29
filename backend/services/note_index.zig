@@ -800,19 +800,17 @@ pub const CoverLocation = struct {
 /// oversized length or NULL MIME is treated as no cover rather than served
 /// wrong.
 pub fn coverLocation(db: sqlite.Db, md5: []const u8) !?CoverLocation {
-    var s = try db.prepare(
+    var r = (try db.row(
         "SELECT cover_offset, cover_length, cover_mime FROM note_index " ++
             "WHERE blob_md5 = ?1 AND index_version = ?2;",
-    );
-    defer s.finalize();
-    s.bindText(1, md5);
-    s.bindInt(2, index_version);
-    if (!try s.step()) return null;
-    if (s.columnIsNull(0) or s.columnIsNull(1) or s.columnIsNull(2)) return null; // no cover
-    const offset: u64 = @intCast(s.columnInt(0));
-    const length: u64 = @intCast(s.columnInt(1));
+        &.{ .{ .text = md5 }, .{ .int = index_version } },
+    )) orelse return null;
+    defer r.finalize();
+    if (r.isNull(0) or r.isNull(1) or r.isNull(2)) return null; // no cover
+    const offset: u64 = @intCast(r.int(0));
+    const length: u64 = @intCast(r.int(1));
     if (length == 0 or length > thumbnail.max_cover_bytes) return null;
-    const mime = s.columnText(2);
+    const mime = r.text(2);
     if (mime.len == 0 or mime.len > max_cover_mime_len) return null;
     var loc: CoverLocation = .{ .offset = offset, .length = length };
     @memcpy(loc.mime_buf[0..mime.len], mime);
@@ -952,19 +950,17 @@ pub const SliceSource = struct {
 pub const NoteHeader = struct { width: u32, height: u32, rle_variant: u8, page_count: u32 };
 
 pub fn noteHeader(db: sqlite.Db, blob_md5: []const u8) !?NoteHeader {
-    var s = try db.prepare(
+    var r = (try db.row(
         "SELECT width, height, rle_variant, page_count FROM note_index " ++
             "WHERE blob_md5 = ?1 AND indexable = 1 AND index_version = ?2;",
-    );
-    defer s.finalize();
-    s.bindText(1, blob_md5);
-    s.bindInt(2, index_version);
-    if (!try s.step()) return null;
+        &.{ .{ .text = blob_md5 }, .{ .int = index_version } },
+    )) orelse return null;
+    defer r.finalize();
     return .{
-        .width = @intCast(s.columnInt(0)),
-        .height = @intCast(s.columnInt(1)),
-        .rle_variant = @intCast(s.columnInt(2)),
-        .page_count = @intCast(s.columnInt(3)),
+        .width = @intCast(r.int(0)),
+        .height = @intCast(r.int(1)),
+        .rle_variant = @intCast(r.int(2)),
+        .page_count = @intCast(r.int(3)),
     };
 }
 
@@ -1038,23 +1034,21 @@ pub fn pagePlan(db: sqlite.Db, blob_md5: []const u8, page_index: u64) !?PagePlan
     // `NoteHeader`); the note-level row contributes only the RLE variant here.
     var page_dims: [2]u32 = undefined;
     const refs = blk: {
-        var s = try db.prepare(
+        var r = (try db.row(
             "SELECT layers, content_hash, width, height, bg_hash FROM note_page_index " ++
                 "WHERE blob_md5 = ?1 AND page_index = ?2;",
-        );
-        defer s.finalize();
-        s.bindText(1, blob_md5);
-        s.bindInt(2, @intCast(page_index));
-        if (!try s.step()) return null;
-        const refs = try unpackLayers(s.columnBlob(0), &plan.layer_buf);
-        const hash = s.columnText(1);
+            &.{ .{ .text = blob_md5 }, .{ .int = @intCast(page_index) } },
+        )) orelse return null;
+        defer r.finalize();
+        const refs = try unpackLayers(r.blob(0), &plan.layer_buf);
+        const hash = r.text(1);
         if (hash.len != plan.content_hash.len) return error.NotIndexed;
         @memcpy(&plan.content_hash, hash); // copied out: the statement dies below
-        page_dims = .{ @intCast(s.columnInt(2)), @intCast(s.columnInt(3)) };
+        page_dims = .{ @intCast(r.int(2)), @intCast(r.int(3)) };
         // The asset hash a `raster_image` background carries on the wire. Copied
         // INLINE (statement memory dies at the `defer`), bounded by max_bg_hash.
-        if (!s.columnIsNull(4)) {
-            const bg = s.columnText(4);
+        if (!r.isNull(4)) {
+            const bg = r.text(4);
             if (bg.len > 0 and bg.len <= max_bg_hash) {
                 @memcpy(plan.bg_hash_buf[0..bg.len], bg);
                 plan.bg_hash_len = @intCast(bg.len);
@@ -1080,15 +1074,13 @@ pub fn pagePlan(db: sqlite.Db, blob_md5: []const u8, page_index: u64) !?PagePlan
 pub const TemplateLocation = struct { offset: u64, length: u64 };
 
 pub fn templateLocation(db: sqlite.Db, blob_md5: []const u8, hash: []const u8) !?TemplateLocation {
-    var s = try db.prepare(
+    var row = (try db.row(
         "SELECT layers FROM note_page_index WHERE blob_md5 = ?1 AND bg_hash = ?2 LIMIT 1;",
-    );
-    defer s.finalize();
-    s.bindText(1, blob_md5);
-    s.bindText(2, hash);
-    if (!try s.step()) return null;
+        &.{ .{ .text = blob_md5 }, .{ .text = hash } },
+    )) orelse return null;
+    defer row.finalize();
     var buf: [max_layers]LayerRef = undefined;
-    const refs = unpackLayers(s.columnBlob(0), &buf) catch return null;
+    const refs = unpackLayers(row.blob(0), &buf) catch return null;
     for (refs) |r| {
         if (r.raster_image) return .{ .offset = r.offset, .length = @intCast(r.len) };
     }

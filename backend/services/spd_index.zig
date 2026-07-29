@@ -286,12 +286,12 @@ pub fn deleteForBlob(db: sqlite.Db, blob_md5: []const u8) !void {
 /// "ships no thumbnail" (`thumb_w IS NULL`): the row is the memo, so a corrupt
 /// `.spd` costs its 16 MiB deserialize ONCE, not on every gallery load.
 pub fn needsRepair(db: sqlite.Db, thumbs: thumbstore.ThumbStore, md5: []const u8) !bool {
-    var s = try db.prepare("SELECT thumb_w IS NOT NULL FROM spd_index WHERE blob_md5 = ?1 AND index_version = ?2;");
-    defer s.finalize();
-    s.bindText(1, md5);
-    s.bindInt(2, index_version);
-    if (!try s.step()) return true; // no current row: derive (and memoize)
-    const claims_thumbnail = s.columnInt(0) != 0;
+    var r = (try db.row(
+        "SELECT thumb_w IS NOT NULL FROM spd_index WHERE blob_md5 = ?1 AND index_version = ?2;",
+        &.{ .{ .text = md5 }, .{ .int = index_version } },
+    )) orelse return true; // no current row: derive (and memoize)
+    defer r.finalize();
+    const claims_thumbnail = r.int(0) != 0;
     return claims_thumbnail and !thumbs.has(md5);
 }
 

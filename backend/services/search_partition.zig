@@ -72,11 +72,9 @@ pub fn rowidOf(p: i64, seq: i64) i64 {
 /// has minted one). Read-only — search paths must not write, and a user with
 /// no partition has no segment rows to find.
 pub fn active(db: sqlite.Db, user_id: u64) !?i64 {
-    var s = try db.prepare("SELECT id FROM search_partitions WHERE user_id = ?1 AND active = 1;");
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    if (!try s.step()) return null;
-    return s.columnInt(0);
+    var r = (try db.row("SELECT id FROM search_partitions WHERE user_id = ?1 AND active = 1;", &.{.{ .int = @intCast(user_id) }})) orelse return null;
+    defer r.finalize();
+    return r.int(0);
 }
 
 /// The user's active partition, minted on first need. MUST run inside the
@@ -113,11 +111,9 @@ pub fn allocSeq(db: sqlite.Db, p: i64, count: i64) !i64 {
     std.debug.assert(count > 0);
     var first: i64 = undefined;
     {
-        var s = try db.prepare("SELECT next_seq FROM search_partitions WHERE id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, p);
-        if (!try s.step()) return error.NoPartition;
-        first = s.columnInt(0);
+        var r = (try db.row("SELECT next_seq FROM search_partitions WHERE id = ?1;", &.{.{ .int = p }})) orelse return error.NoPartition;
+        defer r.finalize();
+        first = r.int(0);
     }
     var u = try db.prepare("UPDATE search_partitions SET next_seq = next_seq + ?2 WHERE id = ?1;");
     defer u.finalize();

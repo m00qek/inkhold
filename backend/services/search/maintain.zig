@@ -209,13 +209,13 @@ pub fn reconcilePage(
     var old_exists = false;
     var text_changed = false;
     {
-        var s = try db.prepare("SELECT text FROM note_page_index WHERE blob_md5 = ?1 AND page_index = ?2;");
-        defer s.finalize();
-        s.bindText(1, blob_md5);
-        s.bindInt(2, ordinal);
-        if (try s.step()) {
+        if (try db.row(
+            "SELECT text FROM note_page_index WHERE blob_md5 = ?1 AND page_index = ?2;",
+            &.{ .{ .text = blob_md5 }, .{ .int = ordinal } },
+        )) |r| {
+            defer r.finalize();
             old_exists = true;
-            text_changed = !std.mem.eql(u8, s.columnText(0), new_text);
+            text_changed = !std.mem.eql(u8, r.text(0), new_text);
         }
     }
     if (old_exists and text_changed) try deletePagePostings(db, blob_md5, ordinal);

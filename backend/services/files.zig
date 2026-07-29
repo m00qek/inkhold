@@ -242,15 +242,13 @@ pub const Files = struct {
     /// few subfolders, so `listing()` calling this once per folder row is a handful
     /// of index probes — deliberately NOT a scan or a join.
     pub fn childCount(self: Files, user_id: u64, folder_id: u64) !i64 {
-        var s = try self.db.prepare(
-            "SELECT COUNT(*) FROM files WHERE user_id = ?1 AND parent_id = ?2 AND deleted = 0;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindInt(2, @intCast(folder_id));
         // An aggregate always yields exactly one row, even over zero matches.
-        if (!try s.step()) return 0;
-        return s.columnInt(0);
+        var r = (try self.db.row(
+            "SELECT COUNT(*) FROM files WHERE user_id = ?1 AND parent_id = ?2 AND deleted = 0;",
+            &.{ .{ .int = @intCast(user_id) }, .{ .int = @intCast(folder_id) } },
+        )) orelse return 0;
+        defer r.finalize();
+        return r.int(0);
     }
 
     /// The user's current sync-version: a monotonic counter bumped on every
@@ -258,11 +256,9 @@ pub const Files = struct {
     /// browser can tell whether a cached listing is stale. A user who has never
     /// had a change (no row) reads as 0.
     pub fn syncVersion(self: Files, user_id: u64) !i64 {
-        var s = try self.db.prepare("SELECT version FROM sync_state WHERE user_id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        if (!try s.step()) return 0;
-        return s.columnInt(0);
+        var r = (try self.db.row("SELECT version FROM sync_state WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return 0;
+        defer r.finalize();
+        return r.int(0);
     }
 
     /// Bumps the user's sync-version (creating the row at 1 on the first change).
@@ -282,15 +278,13 @@ pub const Files = struct {
 
     /// Fetches one live entry by id (scoped to `user_id`), or null.
     pub fn get(self: Files, user_id: u64, id: u64) !?Entry {
-        var s = try self.db.prepare(
+        var r = (try self.db.row(
             "SELECT id, parent_id, name, is_folder, md5, size, updated_at FROM files " ++
                 "WHERE id = ?1 AND user_id = ?2 AND deleted = 0;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(id));
-        s.bindInt(2, @intCast(user_id));
-        if (!try s.step()) return null;
-        return try self.rowToEntry(&s);
+            &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
+        )) orelse return null;
+        defer r.finalize();
+        return try self.rowToEntry(&r.stmt);
     }
 
     /// Fetches one **trashed** entry by id (scoped to `user_id`), or null. The
@@ -309,15 +303,13 @@ pub const Files = struct {
     /// A foreign id, a missing id and a LIVE id all read as null, so none of them
     /// is distinguishable from the others through this endpoint.
     pub fn getTrashed(self: Files, user_id: u64, id: u64) !?Entry {
-        var s = try self.db.prepare(
+        var r = (try self.db.row(
             "SELECT id, parent_id, name, is_folder, md5, size, updated_at FROM files " ++
                 "WHERE id = ?1 AND user_id = ?2 AND deleted = 1;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(id));
-        s.bindInt(2, @intCast(user_id));
-        if (!try s.step()) return null;
-        return try self.rowToEntry(&s);
+            &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
+        )) orelse return null;
+        defer r.finalize();
+        return try self.rowToEntry(&r.stmt);
     }
 
     /// Fetches one entry by id (scoped to `user_id`) in **any state — live or
@@ -331,15 +323,13 @@ pub const Files = struct {
     /// bin is the explicit point. A foreign id reads as null exactly as it does
     /// through `get`, so ownership is enforced identically.
     pub fn getAnyState(self: Files, user_id: u64, id: u64) !?Entry {
-        var s = try self.db.prepare(
+        var r = (try self.db.row(
             "SELECT id, parent_id, name, is_folder, md5, size, updated_at FROM files " ++
                 "WHERE id = ?1 AND user_id = ?2;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(id));
-        s.bindInt(2, @intCast(user_id));
-        if (!try s.step()) return null;
-        return try self.rowToEntry(&s);
+            &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
+        )) orelse return null;
+        defer r.finalize();
+        return try self.rowToEntry(&r.stmt);
     }
 
     const tree_walk_sql =
@@ -531,17 +521,14 @@ pub const Files = struct {
         while (cur) |cid| {
             guard += 1;
             if (guard > 256) break; // cycle guard (should never trigger)
-            var s = try self.db.prepare("SELECT name, parent_id FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 0;");
-            defer s.finalize();
-            s.bindInt(1, @intCast(cid));
-            s.bindInt(2, @intCast(user_id));
-            if (!try s.step()) break; // missing/foreign node → stop here
-            const nm = try gpa.dupe(u8, s.columnText(0));
+            var r = (try self.db.row("SELECT name, parent_id FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 0;", &.{ .{ .int = @intCast(cid) }, .{ .int = @intCast(user_id) } })) orelse break; // missing/foreign node → stop here
+            defer r.finalize();
+            const nm = try gpa.dupe(u8, r.text(0));
             names.append(gpa, nm) catch |e| {
                 gpa.free(nm);
                 return e;
             };
-            const pid = s.columnInt(1);
+            const pid = r.int(1);
             cur = if (pid == 0) null else @intCast(pid); // 0 == NULL (root)
         }
 
@@ -971,20 +958,18 @@ pub const Files = struct {
         var has_md5 = false;
         var size: u64 = 0;
         {
-            var s = try self.db.prepare(
+            var r = (try self.db.row(
                 "SELECT is_folder, md5, size FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 0;",
-            );
-            defer s.finalize();
-            s.bindInt(1, @intCast(id));
-            s.bindInt(2, @intCast(user_id));
-            if (!try s.step()) return error.NotFound;
-            is_folder = s.columnInt(0) != 0;
-            const m = s.columnText(1);
+                &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
+            )) orelse return error.NotFound;
+            defer r.finalize();
+            is_folder = r.int(0) != 0;
+            const m = r.text(1);
             if (m.len == md5_len) {
                 @memcpy(&md5buf, m);
                 has_md5 = true;
             }
-            size = @intCast(s.columnInt(2));
+            size = @intCast(r.int(2));
         }
 
         // A folder may not move into its own subtree: walking UP from the target
@@ -1066,18 +1051,16 @@ pub const Files = struct {
         var md5buf: [md5_len]u8 = undefined;
         var size: u64 = 0;
         {
-            var s = try self.db.prepare(
+            var r = (try self.db.row(
                 "SELECT is_folder, md5, size FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 0;",
-            );
-            defer s.finalize();
-            s.bindInt(1, @intCast(id));
-            s.bindInt(2, @intCast(user_id));
-            if (!try s.step()) return error.NotFound;
-            if (s.columnInt(0) != 0) return error.IsFolder; // no recursive folder copy
-            const m = s.columnText(1);
+                &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
+            )) orelse return error.NotFound;
+            defer r.finalize();
+            if (r.int(0) != 0) return error.IsFolder; // no recursive folder copy
+            const m = r.text(1);
             if (m.len != md5_len) return error.NotFound; // a file with no blob is nothing to copy
             @memcpy(&md5buf, m);
-            size = @intCast(s.columnInt(2));
+            size = @intCast(r.int(2));
         }
         const md5: []const u8 = &md5buf;
 
@@ -1236,12 +1219,9 @@ pub const Files = struct {
     /// restore carries in the other direction. Counted BEFORE `trash` runs, since
     /// afterwards there is nothing live left to count.
     pub fn liveSubtreeCount(self: Files, user_id: u64, id: u64) !usize {
-        var s = try self.db.prepare(live_subtree_count_sql);
-        defer s.finalize();
-        s.bindInt(1, @intCast(id));
-        s.bindInt(2, @intCast(user_id));
-        if (!try s.step()) return 0;
-        return @intCast(s.columnInt(0));
+        var r = (try self.db.row(live_subtree_count_sql, &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } })) orelse return 0;
+        defer r.finalize();
+        return @intCast(r.int(0));
     }
 
     /// Moves an entry to the recycle bin (scoped to `user_id`): tombstones it and
@@ -1647,15 +1627,12 @@ pub const Files = struct {
 
     /// Looks up a session by `(inner_name, user_id)`. Slices are owned by `alloc`.
     pub fn uploadSession(self: Files, alloc: std.mem.Allocator, user_id: u64, inner_name: []const u8) !?UploadSession {
-        var s = try self.db.prepare("SELECT path, file_name, declared_size, blob_md5 FROM upload_sessions WHERE inner_name = ?1 AND user_id = ?2;");
-        defer s.finalize();
-        s.bindText(1, inner_name);
-        s.bindInt(2, @intCast(user_id));
-        if (!try s.step()) return null;
-        const path = try alloc.dupe(u8, s.columnText(0));
-        const file_name = try alloc.dupe(u8, s.columnText(1));
-        const declared_size: u64 = @intCast(s.columnInt(2));
-        const raw_md5 = s.columnText(3);
+        var r = (try self.db.row("SELECT path, file_name, declared_size, blob_md5 FROM upload_sessions WHERE inner_name = ?1 AND user_id = ?2;", &.{ .{ .text = inner_name }, .{ .int = @intCast(user_id) } })) orelse return null;
+        defer r.finalize();
+        const path = try alloc.dupe(u8, r.text(0));
+        const file_name = try alloc.dupe(u8, r.text(1));
+        const declared_size: u64 = @intCast(r.int(2));
+        const raw_md5 = r.text(3);
         const blob_md5 = if (raw_md5.len == 0) null else try alloc.dupe(u8, raw_md5);
         return .{ .path = path, .file_name = file_name, .declared_size = declared_size, .blob_md5 = blob_md5 };
     }
@@ -1856,16 +1833,14 @@ pub const Files = struct {
         defer doomed.deinit(self.gpa);
 
         for (ids) |fid| {
-            var s = try self.db.prepare(
+            var r = (try self.db.row(
                 "SELECT md5, size FROM files WHERE id = ?1 AND user_id = ?2 AND is_folder = 0;",
-            );
-            defer s.finalize();
-            s.bindInt(1, @intCast(fid));
-            s.bindInt(2, @intCast(user_id));
-            if (!try s.step()) continue; // a folder, or already gone
-            const m = s.columnText(0);
+                &.{ .{ .int = @intCast(fid) }, .{ .int = @intCast(user_id) } },
+            )) orelse continue; // a folder, or already gone
+            defer r.finalize();
+            const m = r.text(0);
             if (m.len != md5_len) continue; // defensive: a file row with no blob
-            var d: Doomed = .{ .md5 = undefined, .size = s.columnInt(1) };
+            var d: Doomed = .{ .md5 = undefined, .size = r.int(1) };
             @memcpy(&d.md5, m);
             try doomed.append(self.gpa, d);
         }
@@ -1943,14 +1918,12 @@ pub const Files = struct {
     /// billed per distinct blob per user; dedup across two users is not a
     /// discount on either account.
     fn userBlobRefs(self: Files, user_id: u64, md5: []const u8) !u64 {
-        var s = try self.db.prepare(
+        var r = (try self.db.row(
             "SELECT COUNT(*) FROM files WHERE user_id = ?1 AND is_folder = 0 AND md5 = ?2;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindText(2, md5);
-        if (!try s.step()) return 0;
-        return @intCast(s.columnInt(0));
+            &.{ .{ .int = @intCast(user_id) }, .{ .text = md5 } },
+        )) orelse return 0;
+        defer r.finalize();
+        return @intCast(r.int(0));
     }
 
     /// True when `user_id` holds ANY file — live or trashed — referencing blob
@@ -1982,17 +1955,15 @@ pub const Files = struct {
         var deleted = false;
         var name: []u8 = undefined;
         {
-            var s = try self.db.prepare(
+            var r = (try self.db.row(
                 "SELECT parent_id, name, deleted FROM files WHERE id = ?1 AND user_id = ?2;",
-            );
-            defer s.finalize();
-            s.bindInt(1, @intCast(id));
-            s.bindInt(2, @intCast(user_id));
-            if (!try s.step()) return error.NotFound;
-            const pid = s.columnInt(0);
+                &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
+            )) orelse return error.NotFound;
+            defer r.finalize();
+            const pid = r.int(0);
             parent_id = if (pid == 0) null else @intCast(pid);
-            name = try self.gpa.dupe(u8, s.columnText(1));
-            deleted = s.columnInt(2) != 0;
+            name = try self.gpa.dupe(u8, r.text(1));
+            deleted = r.int(2) != 0;
         }
         defer self.gpa.free(name);
         if (!deleted) return .{ .name = try self.gpa.dupe(u8, name), .was_trashed = false, .renamed = false };
@@ -2053,12 +2024,9 @@ pub const Files = struct {
     /// root. `restore` walks with this rather than a live-only lookup — the whole
     /// point is that the ancestors it is chasing are themselves trashed.
     fn parentOf(self: Files, user_id: u64, id: u64) !?u64 {
-        var s = try self.db.prepare("SELECT parent_id FROM files WHERE id = ?1 AND user_id = ?2;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(id));
-        s.bindInt(2, @intCast(user_id));
-        if (!try s.step()) return null;
-        const pid = s.columnInt(0);
+        var r = (try self.db.row("SELECT parent_id FROM files WHERE id = ?1 AND user_id = ?2;", &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } })) orelse return null;
+        defer r.finalize();
+        const pid = r.int(0);
         return if (pid == 0) null else @intCast(pid);
     }
 
@@ -2096,11 +2064,10 @@ pub const Files = struct {
     /// paths call `ensureCapacity`, so a missing row only ever means "nothing
     /// stored yet", and the device's storage display must not 500 on it.
     pub fn capacity(self: Files, user_id: u64) !Cap {
-        var s = try self.db.prepare("SELECT used_bytes, total_bytes FROM capacity WHERE user_id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        if (!try s.step()) return .{ .used = 0, .total = default_total_bytes };
-        return .{ .used = s.columnInt(0), .total = s.columnInt(1) };
+        var r = (try self.db.row("SELECT used_bytes, total_bytes FROM capacity WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse
+            return .{ .used = 0, .total = default_total_bytes };
+        defer r.finalize();
+        return .{ .used = r.int(0), .total = r.int(1) };
     }
 
     /// Guarantees a `capacity` row exists for the user before we touch usage.
@@ -2185,10 +2152,10 @@ pub const Files = struct {
     fn reapIfUnreferenced(self: Files, md5: []const u8) !bool {
         var rc: i64 = 0;
         {
-            var s = try self.db.prepare("SELECT refcount FROM blobs WHERE md5 = ?1;");
-            defer s.finalize();
-            s.bindText(1, md5);
-            if (try s.step()) rc = s.columnInt(0);
+            if (try self.db.row("SELECT refcount FROM blobs WHERE md5 = ?1;", &.{.{ .text = md5 }})) |r| {
+                defer r.finalize();
+                rc = r.int(0);
+            }
         }
         if (rc > 0) return false; // a live file still references it
 
@@ -2249,13 +2216,13 @@ pub const Files = struct {
     /// counted against `max_bytes` (and evicting its history row would free no
     /// disk). Each distinct history-only blob is counted once.
     fn historyBytes(self: Files) !u64 {
-        var s = try self.db.prepare(
+        var r = (try self.db.row(
             "SELECT COALESCE(SUM(size), 0) FROM blobs " ++
                 "WHERE refcount = 0 AND md5 IN (SELECT md5 FROM file_history);",
-        );
-        defer s.finalize();
-        if (!try s.step()) return 0;
-        return @intCast(s.columnInt(0));
+            &.{},
+        )) orelse return 0;
+        defer r.finalize();
+        return @intCast(r.int(0));
     }
 
     /// Enforces the two history bounds after a version was retained, collecting
@@ -2310,20 +2277,20 @@ pub const Files = struct {
             var md5: [md5_len]u8 = undefined;
             var found = false;
             {
-                var s = try self.db.prepare(
+                if (try self.db.row(
                     "SELECT rowid, md5 FROM file_history " ++
                         "WHERE md5 IN (SELECT md5 FROM blobs WHERE refcount = 0) " ++
                         "ORDER BY created_at ASC, rowid ASC LIMIT 1;",
-                );
-                defer s.finalize();
-                if (try s.step()) {
-                    const m = s.columnText(1);
+                    &.{},
+                )) |r| {
+                    defer r.finalize();
+                    const m = r.text(1);
                     if (m.len == md5_len) {
                         @memcpy(&md5, m);
                         found = true;
                         var d = try self.db.prepare("DELETE FROM file_history WHERE rowid = ?1;");
                         defer d.finalize();
-                        d.bindInt(1, s.columnInt(0));
+                        d.bindInt(1, r.int(0));
                         _ = try d.step();
                     }
                 }
@@ -2391,18 +2358,14 @@ pub const Files = struct {
     /// an id outside `scope`'s deleted-state are all one indistinguishable null.
     pub fn historyVersionIn(self: Files, scope: HistoryScope, user_id: u64, file_id: u64, md5: []const u8) !?HistoryVersion {
         if (md5.len != md5_len) return null;
-        var s = try self.db.prepare(
+        var r = (try self.db.row(
             "SELECT fh.size, fh.created_at FROM file_history fh " ++
                 "JOIN files f ON f.id = fh.file_id " ++
                 "WHERE fh.file_id = ?1 AND f.user_id = ?2 AND f.deleted = ?4 AND fh.md5 = ?3 LIMIT 1;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(file_id));
-        s.bindInt(2, @intCast(user_id));
-        s.bindText(3, md5);
-        s.bindInt(4, scope.deletedFlag());
-        if (!try s.step()) return null;
-        var v: HistoryVersion = .{ .md5 = undefined, .size = @intCast(s.columnInt(0)), .created_at = s.columnInt(1) };
+            &.{ .{ .int = @intCast(file_id) }, .{ .int = @intCast(user_id) }, .{ .text = md5 }, .{ .int = scope.deletedFlag() } },
+        )) orelse return null;
+        defer r.finalize();
+        var v: HistoryVersion = .{ .md5 = undefined, .size = @intCast(r.int(0)), .created_at = r.int(1) };
         @memcpy(&v.md5, md5[0..md5_len]);
         return v;
     }
@@ -2469,17 +2432,18 @@ pub const Files = struct {
 
     /// The live entry named `name` in `parent_id` for this user, or null.
     fn liveChild(self: Files, user_id: u64, parent_id: ?u64, name: []const u8) !?Child {
-        var s = try self.db.prepare(
+        var r = (try self.db.row(
             "SELECT id, is_folder, md5, size FROM files " ++
                 "WHERE user_id = ?1 AND COALESCE(parent_id, 0) = COALESCE(?2, 0) AND name = ?3 AND deleted = 0;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        bindOpt(s, 2, parent_id);
-        s.bindText(3, name);
-        if (!try s.step()) return null;
-        var c: Child = .{ .id = @intCast(s.columnInt(0)), .is_folder = s.columnInt(1) != 0, .md5 = undefined, .size = @intCast(s.columnInt(3)) };
-        const m = s.columnText(2);
+            &.{
+                .{ .int = @intCast(user_id) },
+                .{ .int_opt = if (parent_id) |p| @intCast(p) else null },
+                .{ .text = name },
+            },
+        )) orelse return null;
+        defer r.finalize();
+        var c: Child = .{ .id = @intCast(r.int(0)), .is_folder = r.int(1) != 0, .md5 = undefined, .size = @intCast(r.int(3)) };
+        const m = r.text(2);
         if (m.len == md5_len) @memcpy(&c.md5, m) else @memset(&c.md5, 0);
         return c;
     }
@@ -2508,12 +2472,9 @@ pub const Files = struct {
     /// Verifies `parent_id` is null (root) or a live folder owned by the user.
     fn assertFolder(self: Files, user_id: u64, parent_id: ?u64) !void {
         const pid = parent_id orelse return;
-        var s = try self.db.prepare("SELECT is_folder FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 0;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(pid));
-        s.bindInt(2, @intCast(user_id));
-        if (!try s.step()) return error.NotFound;
-        if (s.columnInt(0) == 0) return error.NotAFolder;
+        var r = (try self.db.row("SELECT is_folder FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 0;", &.{ .{ .int = @intCast(pid) }, .{ .int = @intCast(user_id) } })) orelse return error.NotFound;
+        defer r.finalize();
+        if (r.int(0) == 0) return error.NotAFolder;
     }
 
     fn rowToEntry(self: Files, s: *sqlite.Stmt) !Entry {
@@ -2744,16 +2705,14 @@ const Fixture = struct {
     /// reference and keeps real bytes alive. Folders reference no blob and
     /// weigh nothing.
     fn trueUsed(f: *Fixture, user_id: u64) !i64 {
-        var s = try f.db.prepare(
+        var r = (try f.db.row(
             \\SELECT COALESCE(SUM(b.size), 0) FROM blobs b WHERE b.md5 IN (
             \\  SELECT DISTINCT md5 FROM files
             \\  WHERE user_id = ?1 AND is_folder = 0 AND md5 IS NOT NULL AND md5 <> ''
             \\);
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        if (!try s.step()) return 0;
-        return s.columnInt(0);
+        , &.{.{ .int = @intCast(user_id) }})) orelse return 0;
+        defer r.finalize();
+        return r.int(0);
     }
 
     /// Asserts the invariant the whole quota system rests on: the running total
@@ -3993,11 +3952,9 @@ fn dupeMd5(m: []const u8) [md5_len]u8 {
 /// row is gone. Used by the versioning tests to prove `refcount` keeps meaning
 /// "live-file references" while a history row is the separate keep-alive.
 fn blobRefcount(f: *Fixture, md5: []const u8) !i64 {
-    var s = try f.db.prepare("SELECT refcount FROM blobs WHERE md5 = ?1;");
-    defer s.finalize();
-    s.bindText(1, md5);
-    if (!try s.step()) return -1;
-    return s.columnInt(0);
+    var r = (try f.db.row("SELECT refcount FROM blobs WHERE md5 = ?1;", &.{.{ .text = md5 }})) orelse return -1;
+    defer r.finalize();
+    return r.int(0);
 }
 
 /// How many `file_history` rows reference `md5`.
@@ -4378,11 +4335,9 @@ const NoLock = struct {
 };
 
 fn spdIndexedAt(f: *Fixture, md5: []const u8) !?i64 {
-    var s = try f.db.prepare("SELECT indexed_at FROM spd_index WHERE blob_md5 = ?1;");
-    defer s.finalize();
-    s.bindText(1, md5);
-    if (!try s.step()) return null;
-    return s.columnInt(0);
+    var r = (try f.db.row("SELECT indexed_at FROM spd_index WHERE blob_md5 = ?1;", &.{.{ .text = md5 }})) orelse return null;
+    defer r.finalize();
+    return r.int(0);
 }
 
 test "linking a .spd derives the spd_index row + thumbs file; dedup re-link does not re-derive" {
@@ -4543,11 +4498,9 @@ fn buildNote(gpa: std.mem.Allocator, cover: ?[]const u8) ![]u8 {
 }
 
 fn noteIndexedAt(f: *Fixture, md5: []const u8) !?i64 {
-    var s = try f.db.prepare("SELECT indexed_at FROM note_index WHERE blob_md5 = ?1;");
-    defer s.finalize();
-    s.bindText(1, md5);
-    if (!try s.step()) return null;
-    return s.columnInt(0);
+    var r = (try f.db.row("SELECT indexed_at FROM note_index WHERE blob_md5 = ?1;", &.{.{ .text = md5 }})) orelse return null;
+    defer r.finalize();
+    return r.int(0);
 }
 
 test "linking a .note with a cover records its location (NOT a thumbs file); a coverless one memoizes NULL and never repairs" {

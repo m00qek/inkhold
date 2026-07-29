@@ -412,13 +412,11 @@ const coverage_sql =
     "AND EXISTS (SELECT 1 FROM note_index WHERE blob_md5 = f.md5 AND indexable = 1);";
 
 fn coverageOf(db: sqlite.Db, user_id: u64) !Coverage {
-    var s = try db.prepare(coverage_sql);
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    if (!try s.step()) return .{ .notes = 0, .unsearchable = 0 };
+    var r = (try db.row(coverage_sql, &.{.{ .int = @intCast(user_id) }})) orelse return .{ .notes = 0, .unsearchable = 0 };
+    defer r.finalize();
     // `SUM` over no rows is NULL, which reads back as 0 — the right answer for
     // an empty library, and the only NULL this statement can produce.
-    return .{ .notes = s.columnInt(0), .unsearchable = s.columnInt(1) };
+    return .{ .notes = r.int(0), .unsearchable = r.int(1) };
 }
 
 /// One result row, plus what `Hit` does not carry: the `note_page_index.id`
@@ -1675,17 +1673,15 @@ const Fixture = struct {
     /// identity tracked by CONTENT, because ordinals are exactly what the
     /// reorder/insert flips move around.
     fn segRowidByText(f: *Fixture, user_id: u64, text: []const u8) !i64 {
-        var s = try f.db.prepare(
+        var r = (try f.db.row(
             "SELECT s.id FROM search_partitions sp " ++
                 "JOIN segment_search s ON s.id BETWEEN (sp.id << 48) AND ((sp.id + 1) << 48) - 1 " ++
                 "JOIN note_page_index p ON p.id = s.segment_id " ++
                 "WHERE sp.user_id = ?1 AND p.text = ?2;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindText(2, text);
-        if (!try s.step()) return error.NoSegment;
-        return s.columnInt(0);
+            &.{ .{ .int = @intCast(user_id) }, .{ .text = text } },
+        )) orelse return error.NoSegment;
+        defer r.finalize();
+        return r.int(0);
     }
 
     /// A note whose `n` pages each carry `labels`.
@@ -1729,17 +1725,15 @@ const Fixture = struct {
     /// The owner's masked segment rowid for one (blob, ordinal) — the identity
     /// the repoint/re-parse tests assert stability of.
     fn segRowid(f: *Fixture, user_id: u64, ordinal: i64) !i64 {
-        var s = try f.db.prepare(
+        var r = (try f.db.row(
             "SELECT s.id FROM search_partitions sp " ++
                 "JOIN segment_search s ON s.id BETWEEN (sp.id << 48) AND ((sp.id + 1) << 48) - 1 " ++
                 "JOIN note_page_index p ON p.id = s.segment_id " ++
                 "WHERE sp.user_id = ?1 AND p.page_index = ?2;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindInt(2, ordinal);
-        if (!try s.step()) return error.NoSegment;
-        return s.columnInt(0);
+            &.{ .{ .int = @intCast(user_id) }, .{ .int = ordinal } },
+        )) orelse return error.NoSegment;
+        defer r.finalize();
+        return r.int(0);
     }
 
     /// ONE note's own masked segment rowids, sorted — scoped by file id, so it
@@ -1763,17 +1757,15 @@ const Fixture = struct {
     /// ONE note's masked segment rowid for a given page — file-scoped, so it is
     /// unambiguous even when other notes share the ordinal.
     fn noteSegRowid(f: *Fixture, note_id: u64, page_index: i64) !i64 {
-        var s = try f.db.prepare(
+        var r = (try f.db.row(
             "SELECT s.id FROM segment_search s " ++
                 "JOIN note_page_index p ON p.id = s.segment_id " ++
                 "JOIN files fi ON fi.md5 = p.blob_md5 " ++
                 "WHERE fi.id = ?1 AND p.page_index = ?2;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(note_id));
-        s.bindInt(2, page_index);
-        if (!try s.step()) return error.NoSegment;
-        return s.columnInt(0);
+            &.{ .{ .int = @intCast(note_id) }, .{ .int = page_index } },
+        )) orelse return error.NoSegment;
+        defer r.finalize();
+        return r.int(0);
     }
 
     /// Legacy edit-scatter simulator: relocates the given `pages` of `note_id`
@@ -1821,11 +1813,10 @@ const Fixture = struct {
 
     /// The md5 of the one and only blob (for tests that assert on-disk presence).
     fn blobMd5(f: *Fixture) ![32]u8 {
-        var s = try f.db.prepare("SELECT md5 FROM blobs;");
-        defer s.finalize();
-        if (!try s.step()) return error.NoBlob;
+        var r = (try f.db.row("SELECT md5 FROM blobs;", &.{})) orelse return error.NoBlob;
+        defer r.finalize();
         var out: [32]u8 = undefined;
-        @memcpy(&out, s.columnText(0));
+        @memcpy(&out, r.text(0));
         return out;
     }
 

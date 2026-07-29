@@ -900,16 +900,14 @@ pub const ControlPlaneService = struct {
 
         self.backfill(md5); // a cold blob has no rows to read yet
 
-        var s = try self.files.db.prepare(
+        var r = (try self.files.db.row(
             "SELECT text_hash, text, recogn_offset, recogn_length FROM note_page_index " ++
                 "WHERE blob_md5 = ?1 AND page_index = ?2 AND recogn_status = 1 AND text_hash IS NOT NULL;",
-        );
-        defer s.finalize();
-        s.bindText(1, md5);
-        s.bindInt(2, @intCast(n));
-        if (!try s.step()) return null;
+            &.{ .{ .text = md5 }, .{ .int = @intCast(n) } },
+        )) orelse return null;
+        defer r.finalize();
 
-        const stored = s.columnText(0);
+        const stored = r.text(0);
         if (stored.len != 32) return null; // a malformed row is not a servable version
 
         var out: PageText = .{ .hash = undefined, .vo = .{} };
@@ -917,7 +915,7 @@ pub const ControlPlaneService = struct {
         // NULL `text` with a non-null `text_hash` is real: the indexer keeps the
         // RECOGNTEXT range when the block itself won't decode. The transcript is
         // then genuinely empty, and omitting the field says exactly that.
-        if (!s.columnIsNull(1)) out.vo.text = try arena.dupe(u8, s.columnText(1));
+        if (!r.isNull(1)) out.vo.text = try arena.dupe(u8, r.text(1));
 
         // The word boxes: the one thing on this path that is not a pure DB read.
         // `recogn_offset`/`recogn_length` were stored by the indexer for exactly
@@ -926,9 +924,9 @@ pub const ControlPlaneService = struct {
         // single KB-scale ranged read, not a note parse. Read it BEFORE the
         // statement is finalized only in the sense that the offsets are copied
         // out first; nothing below borrows the row.
-        if (!s.columnIsNull(2) and !s.columnIsNull(3)) {
-            const offset = s.columnInt(2);
-            const length = s.columnInt(3);
+        if (!r.isNull(2) and !r.isNull(3)) {
+            const offset = r.int(2);
+            const length = r.int(3);
             out.vo.words = self.wordsAt(arena, md5, offset, length) catch null;
         }
         return out;
@@ -1049,31 +1047,28 @@ pub const ControlPlaneService = struct {
         // eagerly, and the read paths backfill), so hanging `spd_index` off it
         // keeps this ONE indexed single-row lookup per note per listing — the
         // count `indexRowEnsuring`'s read-first ordering exists to protect.
-        var s = try self.files.db.prepare(
+        var r = (try self.files.db.row(
             "SELECT n.indexable, n.page_count, n.recognized_page_count, n.equipment, n.width, " ++
                 "n.cover_w, n.cover_h, sp.thumb_w, sp.thumb_h, sp.surface_w, sp.surface_h FROM note_index n " ++
                 "LEFT JOIN spd_index sp ON sp.blob_md5 = n.blob_md5 AND sp.index_version = ?3 " ++
                 "WHERE n.blob_md5 = ?1 AND n.index_version = ?2;",
-        );
-        defer s.finalize();
-        s.bindText(1, md5);
-        s.bindInt(2, noteindex.index_version);
-        s.bindInt(3, spdindex.index_version);
-        if (!try s.step()) return null;
+            &.{ .{ .text = md5 }, .{ .int = noteindex.index_version }, .{ .int = spdindex.index_version } },
+        )) orelse return null;
+        defer r.finalize();
         return .{
-            .indexable = s.columnInt(0) != 0,
-            .page_count = s.columnInt(1),
-            .recognized_page_count = s.columnInt(2),
+            .indexable = r.int(0) != 0,
+            .page_count = r.int(1),
+            .recognized_page_count = r.int(2),
             .px_per_mm = pxPerMmFor(
-                if (s.columnIsNull(3)) null else s.columnText(3),
-                s.columnInt(4),
+                if (r.isNull(3)) null else r.text(3),
+                r.int(4),
             ),
-            .cover_w = if (s.columnIsNull(5)) null else s.columnInt(5),
-            .cover_h = if (s.columnIsNull(6)) null else s.columnInt(6),
-            .spd_thumb_w = if (s.columnIsNull(7)) null else s.columnInt(7),
-            .spd_thumb_h = if (s.columnIsNull(8)) null else s.columnInt(8),
-            .spd_surface_w = if (s.columnIsNull(9)) null else s.columnInt(9),
-            .spd_surface_h = if (s.columnIsNull(10)) null else s.columnInt(10),
+            .cover_w = if (r.isNull(5)) null else r.int(5),
+            .cover_h = if (r.isNull(6)) null else r.int(6),
+            .spd_thumb_w = if (r.isNull(7)) null else r.int(7),
+            .spd_thumb_h = if (r.isNull(8)) null else r.int(8),
+            .spd_surface_w = if (r.isNull(9)) null else r.int(9),
+            .spd_surface_h = if (r.isNull(10)) null else r.int(10),
         };
     }
 
@@ -1180,20 +1175,18 @@ pub const ControlPlaneService = struct {
     /// applied) — not a hardcoded device size, which is what used to make this
     /// disagree with the SNPG payload on anything but a 1404×1872 device.
     fn pageRefAt(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8, n: u64) !?PageRefVO {
-        var s = try self.files.db.prepare(
+        var r = (try self.files.db.row(
             "SELECT content_hash, width, height, text_hash FROM note_page_index " ++
                 "WHERE blob_md5 = ?1 AND page_index = ?2;",
-        );
-        defer s.finalize();
-        s.bindText(1, md5);
-        s.bindInt(2, @intCast(n));
-        if (!try s.step()) return null;
+            &.{ .{ .text = md5 }, .{ .int = @intCast(n) } },
+        )) orelse return null;
+        defer r.finalize();
         return .{
             .index = @intCast(n),
-            .hash = try arena.dupe(u8, s.columnText(0)),
-            .width = s.columnInt(1),
-            .height = s.columnInt(2),
-            .textHash = if (s.columnIsNull(3)) null else try arena.dupe(u8, s.columnText(3)),
+            .hash = try arena.dupe(u8, r.text(0)),
+            .width = r.int(1),
+            .height = r.int(2),
+            .textHash = if (r.isNull(3)) null else try arena.dupe(u8, r.text(3)),
         };
     }
 

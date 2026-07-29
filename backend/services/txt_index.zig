@@ -434,12 +434,10 @@ pub fn store(db: sqlite.Db, blob_md5: []const u8, d: Derived, now: i64) !void {
         var old_exists = false;
         var had_text = false;
         {
-            var s = try db.prepare("SELECT text FROM note_page_index WHERE blob_md5 = ?1 AND page_index = 0;");
-            defer s.finalize();
-            s.bindText(1, blob_md5);
-            if (try s.step()) {
+            if (try db.row("SELECT text FROM note_page_index WHERE blob_md5 = ?1 AND page_index = 0;", &.{.{ .text = blob_md5 }})) |r| {
+                defer r.finalize();
                 old_exists = true;
-                had_text = s.columnText(0).len != 0;
+                had_text = r.text(0).len != 0;
             }
         }
         if (old_exists and had_text) try search.deletePagePostings(db, blob_md5, 0);
@@ -493,15 +491,13 @@ fn dropTail(db: sqlite.Db, blob_md5: []const u8, from: i64) !void {
 /// segments, or the zero-segment marker). A missing/stale row is `true`: the
 /// note half heals first and this question is asked again after.
 pub fn needsDerive(db: sqlite.Db, blob_md5: []const u8) !bool {
-    var s = try db.prepare(
+    var r = (try db.row(
         "SELECT indexable, EXISTS(SELECT 1 FROM note_page_index np WHERE np.blob_md5 = ?1 AND np.kind = 1) " ++
             "FROM note_index WHERE blob_md5 = ?1 AND index_version = ?2;",
-    );
-    defer s.finalize();
-    s.bindText(1, blob_md5);
-    s.bindInt(2, noteindex.index_version);
-    if (!try s.step()) return true;
-    return s.columnInt(0) == 0 and s.columnInt(1) == 0;
+        &.{ .{ .text = blob_md5 }, .{ .int = noteindex.index_version } },
+    )) orelse return true;
+    defer r.finalize();
+    return r.int(0) == 0 and r.int(1) == 0;
 }
 
 /// Lazy backfill, for read paths — the `.txt` half of what makes the v5→v6
@@ -532,11 +528,9 @@ pub fn ensureIndexed(
     if (!try noteindex.isCurrent(db, md5)) return; // the note half heals first
     if (!try needsDerive(db, md5)) return;
     if (name == null) {
-        var s = try db.prepare("SELECT name FROM files WHERE md5 = ?1 AND is_folder = 0 LIMIT 1;");
-        defer s.finalize();
-        s.bindText(1, md5);
-        if (!try s.step()) return; // orphan blob: nothing names it
-        if (!wants(s.columnText(0))) return;
+        var r = (try db.row("SELECT name FROM files WHERE md5 = ?1 AND is_folder = 0 LIMIT 1;", &.{.{ .text = md5 }})) orelse return; // orphan blob: nothing names it
+        defer r.finalize();
+        if (!wants(r.text(0))) return;
     }
 
     // Derive OUTSIDE the transaction (the parse-outside-lock rule): the scan
@@ -852,17 +846,15 @@ const Fixture = struct {
     /// identity tracked by CONTENT, because ordinals are exactly what a
     /// mid-file insert moves around.
     fn segRowidByText(f: *Fixture, user_id: u64, text: []const u8) !i64 {
-        var s = try f.db.prepare(
+        var r = (try f.db.row(
             "SELECT s.id FROM search_partitions sp " ++
                 "JOIN segment_search s ON s.id BETWEEN (sp.id << 48) AND ((sp.id + 1) << 48) - 1 " ++
                 "JOIN note_page_index p ON p.id = s.segment_id " ++
                 "WHERE sp.user_id = ?1 AND p.text = ?2;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindText(2, text);
-        if (!try s.step()) return error.NoSegment;
-        return s.columnInt(0);
+            &.{ .{ .int = @intCast(user_id) }, .{ .text = text } },
+        )) orelse return error.NoSegment;
+        defer r.finalize();
+        return r.int(0);
     }
 
     fn setUpdatedAt(f: *Fixture, id: u64, ts: i64) !void {

@@ -60,9 +60,9 @@ pub fn migrate(db: sqlite.Db) !void {
 }
 
 fn userVersion(db: sqlite.Db) !i64 {
-    var s = try db.prepare("PRAGMA user_version;");
-    defer s.finalize();
-    return if (try s.step()) s.columnInt(0) else 0;
+    var r = (try db.row("PRAGMA user_version;", &.{})) orelse return 0;
+    defer r.finalize();
+    return r.int(0);
 }
 
 // The full schema as authored objects only. The FTS5 virtual table
@@ -291,20 +291,18 @@ test "migrate creates the v1 schema and is idempotent" {
     try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);");
     try db.exec("INSERT INTO capacity(user_id, total_bytes) VALUES(1, 1000);");
 
-    var s = try db.prepare("SELECT email FROM users WHERE id = 1;");
-    defer s.finalize();
-    try std.testing.expect(try s.step());
-    try std.testing.expectEqualStrings("a@b.c", s.columnText(0));
+    var r = (try db.row("SELECT email FROM users WHERE id = 1;", &.{})) orelse return error.TestUnexpectedResult;
+    defer r.finalize();
+    try std.testing.expectEqualStrings("a@b.c", r.text(0));
 }
 
 test "v2: fresh and v1-upgraded databases carry an identical file_history table" {
     // The authored `file_history` DDL from `sqlite_master`, whichever path built it.
     const read_ddl = struct {
         fn get(db: sqlite.Db, buf: []u8) ![]const u8 {
-            var s = try db.prepare("SELECT sql FROM sqlite_master WHERE name = 'file_history';");
-            defer s.finalize();
-            if (!try s.step()) return error.Missing;
-            const sql = s.columnText(0);
+            var r = (try db.row("SELECT sql FROM sqlite_master WHERE name = 'file_history';", &.{})) orelse return error.Missing;
+            defer r.finalize();
+            const sql = r.text(0);
             @memcpy(buf[0..sql.len], sql);
             return buf[0..sql.len];
         }

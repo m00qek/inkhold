@@ -919,23 +919,19 @@ fn seedRecognizedVersionPages(f: *Fixture, user_id: u64, name: []const u8, page_
 /// The single retained-version md5 of `file_id` (the tests supersede exactly once
 /// before reading it).
 fn soleHistoryMd5(f: *Fixture, file_id: u64) ![32]u8 {
-    var s = try f.db.prepare("SELECT md5 FROM file_history WHERE file_id = ?1;");
-    defer s.finalize();
-    s.bindInt(1, @intCast(file_id));
-    if (!try s.step()) return error.NoHistory;
+    var r = (try f.db.row("SELECT md5 FROM file_history WHERE file_id = ?1;", &.{.{ .int = @intCast(file_id) }})) orelse return error.NoHistory;
+    defer r.finalize();
     var out: [32]u8 = undefined;
-    @memcpy(&out, s.columnText(0)[0..32]);
+    @memcpy(&out, r.text(0)[0..32]);
     return out;
 }
 
 /// The blob md5 the live `files` row currently points at.
 fn currentFileMd5(f: *Fixture, file_id: u64) ![32]u8 {
-    var s = try f.db.prepare("SELECT md5 FROM files WHERE id = ?1;");
-    defer s.finalize();
-    s.bindInt(1, @intCast(file_id));
-    if (!try s.step()) return error.NoFile;
+    var r = (try f.db.row("SELECT md5 FROM files WHERE id = ?1;", &.{.{ .int = @intCast(file_id) }})) orelse return error.NoFile;
+    defer r.finalize();
     var out: [32]u8 = undefined;
-    @memcpy(&out, s.columnText(0)[0..32]);
+    @memcpy(&out, r.text(0)[0..32]);
     return out;
 }
 
@@ -1622,12 +1618,10 @@ fn countRows(f: *Fixture, sql: []const u8) !i64 {
 
 /// The md5 recorded for a single `files` row.
 fn soleMd5(f: *Fixture, file_id: u64) ![32]u8 {
-    var s = try f.db.prepare("SELECT md5 FROM files WHERE id = ?1;");
-    defer s.finalize();
-    s.bindInt(1, @intCast(file_id));
-    if (!try s.step()) return error.NoSuchFile;
+    var r = (try f.db.row("SELECT md5 FROM files WHERE id = ?1;", &.{.{ .int = @intCast(file_id) }})) orelse return error.NoSuchFile;
+    defer r.finalize();
     var out: [32]u8 = undefined;
-    @memcpy(&out, s.columnText(0));
+    @memcpy(&out, r.text(0));
     return out;
 }
 
@@ -6825,11 +6819,9 @@ test "admin activity slides the elevation window; ordinary browsing does not" {
 
 /// A session's current elevation deadline, or null when it holds none.
 fn elevatedUntil(db: *sqlite.Db, token: []const u8) ?i64 {
-    var s = db.prepare("SELECT elevated_until FROM sessions WHERE token_hash = ?1;") catch return null;
-    defer s.finalize();
-    s.bindText(1, &password.hashToken(token));
-    if (!(s.step() catch return null)) return null;
-    return s.columnIntOpt(0);
+    var r = (db.row("SELECT elevated_until FROM sessions WHERE token_hash = ?1;", &.{.{ .text = &password.hashToken(token) }}) catch return null) orelse return null;
+    defer r.finalize();
+    return r.intOpt(0);
 }
 
 test "server-info: public, reports the LAN address, and firstRun flips once onboarding completes" {

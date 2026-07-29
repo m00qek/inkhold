@@ -403,11 +403,10 @@ pub const Service = struct {
     pub fn userQuota(self: *Service, actor_user_id: u64, target_user_id: u64) Error!Quota {
         if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
         if (!try self.userExists(target_user_id)) return error.UserNotFound;
-        var s = try self.db.prepare("SELECT used_bytes, total_bytes FROM capacity WHERE user_id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(target_user_id));
-        if (!try s.step()) return .{ .used_bytes = 0, .total_bytes = default_capacity };
-        return .{ .used_bytes = s.columnInt(0), .total_bytes = s.columnInt(1) };
+        var r = (try self.db.row("SELECT used_bytes, total_bytes FROM capacity WHERE user_id = ?1;", &.{.{ .int = @intCast(target_user_id) }})) orelse
+            return .{ .used_bytes = 0, .total_bytes = default_capacity };
+        defer r.finalize();
+        return .{ .used_bytes = r.int(0), .total_bytes = r.int(1) };
     }
 
     /// Admin-only: set a user's allotment, and report the resulting quota.
@@ -462,16 +461,14 @@ pub const Service = struct {
     /// Fetches a single user's info by id (for the web "who am I" endpoint).
     /// Caller owns `email` — free it.
     pub fn userInfo(self: *Service, gpa: std.mem.Allocator, user_id: u64) Error!?UserInfo {
-        var s = try self.db.prepare("SELECT id, email, is_admin, must_change_password, created_at FROM users WHERE id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        if (!try s.step()) return null;
+        var r = (try self.db.row("SELECT id, email, is_admin, must_change_password, created_at FROM users WHERE id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return null;
+        defer r.finalize();
         return .{
-            .id = @intCast(s.columnInt(0)),
-            .email = try gpa.dupe(u8, s.columnText(1)),
-            .is_admin = s.columnInt(2) != 0,
-            .must_change = s.columnInt(3) != 0,
-            .created_at = s.columnInt(4),
+            .id = @intCast(r.int(0)),
+            .email = try gpa.dupe(u8, r.text(1)),
+            .is_admin = r.int(2) != 0,
+            .must_change = r.int(3) != 0,
+            .created_at = r.int(4),
         };
     }
 
@@ -509,25 +506,22 @@ pub const Service = struct {
     }
 
     fn isAdmin(self: *Service, user_id: u64) Error!bool {
-        var s = try self.db.prepare("SELECT is_admin FROM users WHERE id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        return (try s.step()) and s.columnInt(0) != 0;
+        var r = (try self.db.row("SELECT is_admin FROM users WHERE id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return false;
+        defer r.finalize();
+        return r.int(0) != 0;
     }
 
     fn getUser(self: *Service, email: []const u8) Error!?User {
-        var s = try self.db.prepare("SELECT id, cred_enc, is_admin, must_change_password FROM users WHERE email = ?1;");
-        defer s.finalize();
-        s.bindText(1, email);
-        if (!try s.step()) return null;
+        var r = (try self.db.row("SELECT id, cred_enc, is_admin, must_change_password FROM users WHERE email = ?1;", &.{.{ .text = email }})) orelse return null;
+        defer r.finalize();
         // The credential is decrypted just-in-time here (the md5_len invariant now
         // lives on the decrypted value). A missing/corrupt blob is InvalidCredentials.
-        const md5 = self.decryptCred(s.columnText(1)) catch return error.InvalidCredentials;
+        const md5 = self.decryptCred(r.text(1)) catch return error.InvalidCredentials;
         return .{
-            .id = @intCast(s.columnInt(0)),
+            .id = @intCast(r.int(0)),
             .password_md5 = md5,
-            .is_admin = s.columnInt(2) != 0,
-            .must_change = s.columnInt(3) != 0,
+            .is_admin = r.int(2) != 0,
+            .must_change = r.int(3) != 0,
         };
     }
 
@@ -561,10 +555,9 @@ pub const Service = struct {
 
     /// A user's total quota in bytes (for the device `user/query` VO). 0 if absent.
     pub fn userCapacity(self: *Service, user_id: u64) Error!i64 {
-        var s = try self.db.prepare("SELECT total_bytes FROM capacity WHERE user_id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        return if (try s.step()) s.columnInt(0) else 0;
+        var r = (try self.db.row("SELECT total_bytes FROM capacity WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return 0;
+        defer r.finalize();
+        return r.int(0);
     }
 
     // ---- login challenge + session ----
@@ -621,12 +614,10 @@ pub const Service = struct {
     pub fn changePassword(self: *Service, user_id: u64, new_md5: []const u8) Error!Session {
         if (new_md5.len != password.md5_len) return error.InvalidPassword;
         {
-            var s = try self.db.prepare("SELECT cred_enc FROM users WHERE id = ?1;");
-            defer s.finalize();
-            s.bindInt(1, @intCast(user_id));
-            if (!try s.step()) return error.InvalidCredentials;
+            var r = (try self.db.row("SELECT cred_enc FROM users WHERE id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return error.InvalidCredentials;
+            defer r.finalize();
             // Same-password check against the DECRYPTED current credential.
-            const cur = self.decryptCred(s.columnText(0)) catch return error.InvalidCredentials;
+            const cur = self.decryptCred(r.text(0)) catch return error.InvalidCredentials;
             if (std.mem.eql(u8, &cur, new_md5)) return error.SamePassword;
         }
         {
@@ -692,15 +683,14 @@ pub const Service = struct {
         var who: Caller = undefined;
         var last_used: i64 = 0;
         {
-            var s = try self.db.prepare(
+            var r = (try self.db.row(
                 "SELECT s.user_id, s.audience, s.expires_at, u.is_admin, s.elevated_at, s.elevated_until, s.last_used_at " ++
                     "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?1;",
-            );
-            defer s.finalize();
-            s.bindText(1, &th); // look up by the stored hash
-            if (!try s.step()) return null;
-            if (t > s.columnInt(2)) return null; // absolute cap
-            const a = s.columnText(1);
+                &.{.{ .text = &th }}, // look up by the stored hash
+            )) orelse return null;
+            defer r.finalize();
+            if (t > r.int(2)) return null; // absolute cap
+            const a = r.text(1);
             const audience: Scope = if (std.mem.eql(u8, a, "device"))
                 .device
             else if (std.mem.eql(u8, a, "pending"))
@@ -708,15 +698,15 @@ pub const Service = struct {
             else
                 .controlplane;
             // Idle expiry (since last use), enforced here rather than by the sweeper.
-            last_used = s.columnInt(6);
+            last_used = r.int(6);
             if (idleWindow(audience)) |idle| {
                 if (t > last_used + idle) return null;
             }
             who = .{
-                .user_id = @intCast(s.columnInt(0)),
+                .user_id = @intCast(r.int(0)),
                 .audience = audience,
-                .is_admin = s.columnInt(3) != 0,
-                .elevated = elevationLive(t, s.columnIntOpt(4), s.columnIntOpt(5)),
+                .is_admin = r.int(3) != 0,
+                .elevated = elevationLive(t, r.intOpt(4), r.intOpt(5)),
             };
         }
         // Slide the idle window forward LAZILY — only when it has moved past the
@@ -812,12 +802,10 @@ pub const Service = struct {
         const t = self.now();
         var started: i64 = undefined;
         {
-            var s = try self.db.prepare("SELECT elevated_at, elevated_until FROM sessions WHERE token_hash = ?1;");
-            defer s.finalize();
-            s.bindText(1, &password.hashToken(token));
-            if (!try s.step()) return null;
-            if (!elevationLive(t, s.columnIntOpt(0), s.columnIntOpt(1))) return null;
-            started = s.columnInt(0);
+            var r = (try self.db.row("SELECT elevated_at, elevated_until FROM sessions WHERE token_hash = ?1;", &.{.{ .text = &password.hashToken(token) }})) orelse return null;
+            defer r.finalize();
+            if (!elevationLive(t, r.intOpt(0), r.intOpt(1))) return null;
+            started = r.int(0);
         }
         const until = @min(t + elevation_idle_s, started + elevation_absolute_s);
         var s = try self.db.prepare("UPDATE sessions SET elevated_until = ?1 WHERE token_hash = ?2;");
@@ -1353,11 +1341,9 @@ test "user existence, capacity set/read, and pre-login global device unlink" {
 /// Counts session rows by their STORED key (`token_hash`). Callers pass the value
 /// the row holds: a planted literal, or `password.hashToken(raw)` for a real token.
 fn sessionRowCount(db: *sqlite.Db, token_hash: []const u8) i64 {
-    var s = db.prepare("SELECT COUNT(*) FROM sessions WHERE token_hash = ?1;") catch return -1;
-    defer s.finalize();
-    s.bindText(1, token_hash);
-    _ = s.step() catch return -1;
-    return s.columnInt(0);
+    var r = (db.row("SELECT COUNT(*) FROM sessions WHERE token_hash = ?1;", &.{.{ .text = token_hash }}) catch return -1) orelse return -1;
+    defer r.finalize();
+    return r.int(0);
 }
 
 /// Overwrites a session's `last_used_at` (keyed by the RAW token's hash) so a test

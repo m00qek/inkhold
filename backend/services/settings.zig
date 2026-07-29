@@ -99,14 +99,13 @@ pub const Settings = struct {
     /// The configured bin retention window, or the compiled default when nothing
     /// has ever set one.
     pub fn binRetention(self: Settings) Error!Retention {
-        var s = try self.db.prepare("SELECT value, updated_at FROM settings WHERE key = ?1;");
-        defer s.finalize();
-        s.bindText(1, bin_retention_key);
         // `changed_at = 0` for the default: the epoch is unconditionally older than
         // any cutoff, so `sweepCutoff` never gates an install that has not been
         // configured — the default window has, in effect, always been in force.
-        if (!try s.step()) return .{ .seconds = filesmod.Files.bin_retention_s, .changed_at = 0 };
-        return .{ .seconds = s.columnInt(0), .changed_at = s.columnInt(1) };
+        var r = (try self.db.row("SELECT value, updated_at FROM settings WHERE key = ?1;", &.{.{ .text = bin_retention_key }})) orelse
+            return .{ .seconds = filesmod.Files.bin_retention_s, .changed_at = 0 };
+        defer r.finalize();
+        return .{ .seconds = r.int(0), .changed_at = r.int(1) };
     }
 
     /// Set the bin retention window, in DAYS (the unit the console edits).

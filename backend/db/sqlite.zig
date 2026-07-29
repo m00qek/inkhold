@@ -107,6 +107,36 @@ pub const Db = struct {
         return .{ .stmt = stmt.? };
     }
 
+    /// Prepares `sql`, binds `binds[i]` to parameter `?(i+1)`, and steps once —
+    /// the single-row read shape (`prepare → bind* → step → column*`) in one call.
+    /// Returns `null` (finalizing the statement) when there is no row; otherwise a
+    /// `Row` wrapping the positioned statement. The caller reads columns THEN calls
+    /// `Row.finalize` — `text`/`blob` columns alias SQLite memory that `finalize`
+    /// invalidates, so this deliberately hands back a positioned-stmt wrapper rather
+    /// than mapping columns into a struct (whose `[]const u8` fields would dangle).
+    pub fn row(self: Db, sql: []const u8, binds: []const Bind) Error!?Row {
+        var stmt = try self.prepare(sql);
+        errdefer stmt.finalize();
+        for (binds, 0..) |b, i| {
+            const idx: c_int = @intCast(i + 1);
+            switch (b) {
+                .int => |v| stmt.bindInt(idx, v),
+                .text => |v| stmt.bindText(idx, v),
+                .blob => |v| stmt.bindBlob(idx, v),
+                .null => stmt.bindNull(idx),
+                .float => |v| stmt.bindFloat(idx, v),
+                .int_opt => |v| stmt.bindIntOpt(idx, v),
+                .text_opt => |v| stmt.bindTextOpt(idx, v),
+                .float_opt => |v| stmt.bindFloatOpt(idx, v),
+            }
+        }
+        if (!try stmt.step()) {
+            stmt.finalize();
+            return null;
+        }
+        return .{ .stmt = stmt };
+    }
+
     /// rowid of the most recent successful INSERT.
     pub fn lastInsertRowId(self: Db) i64 {
         return c.sqlite3_last_insert_rowid(self.handle);
@@ -220,6 +250,52 @@ pub const Stmt = struct {
     }
 };
 
+/// One bound parameter for `Db.row`. Each variant mirrors a `Stmt.bind*` method;
+/// a `binds` slice position `i` binds to SQL parameter `?(i+1)`.
+pub const Bind = union(enum) {
+    int: i64,
+    text: []const u8,
+    blob: []const u8,
+    @"null",
+    float: f64,
+    int_opt: ?i64,
+    text_opt: ?[]const u8,
+    float_opt: ?f64,
+};
+
+/// A statement positioned on its single result row (see `Db.row`). Read the
+/// columns you need, then `finalize`. Column readers delegate straight to the
+/// underlying `Stmt`; `text`/`blob` slices are valid only until `finalize`.
+pub const Row = struct {
+    stmt: Stmt,
+
+    pub fn int(self: Row, col: c_int) i64 {
+        return self.stmt.columnInt(col);
+    }
+    pub fn text(self: Row, col: c_int) []const u8 {
+        return self.stmt.columnText(col);
+    }
+    pub fn blob(self: Row, col: c_int) []const u8 {
+        return self.stmt.columnBlob(col);
+    }
+    pub fn float(self: Row, col: c_int) f64 {
+        return self.stmt.columnFloat(col);
+    }
+    pub fn isNull(self: Row, col: c_int) bool {
+        return self.stmt.columnIsNull(col);
+    }
+    pub fn intOpt(self: Row, col: c_int) ?i64 {
+        return self.stmt.columnIntOpt(col);
+    }
+    pub fn floatOpt(self: Row, col: c_int) ?f64 {
+        return self.stmt.columnFloatOpt(col);
+    }
+
+    pub fn finalize(self: Row) void {
+        self.stmt.finalize();
+    }
+};
+
 test "float bind/column round-trips a REAL, including the NULL and 0.0 cases" {
     var db = try Db.openMemory();
     defer db.close();
@@ -274,4 +350,38 @@ test "open in-memory db, DDL, insert with bind, query back" {
         try std.testing.expectEqualStrings("a@example.com", s.columnText(1));
         try std.testing.expect((try s.step()) == false);
     }
+}
+
+test "Db.row: no-row returns null, one-row reads int + text with int/text/null binds" {
+    var db = try Db.openMemory();
+    defer db.close();
+
+    try db.exec(
+        \\CREATE TABLE t(id INTEGER PRIMARY KEY, email TEXT NOT NULL, note TEXT);
+    );
+    {
+        var s = try db.prepare("INSERT INTO t(id, email, note) VALUES(?1, ?2, ?3);");
+        defer s.finalize();
+        s.bindInt(1, 7);
+        s.bindText(2, "a@example.com");
+        s.bindNull(3);
+        try std.testing.expect(!try s.step());
+    }
+
+    // No-row case: null (and the statement is finalized inside `row`).
+    try std.testing.expect(
+        (try db.row(
+            "SELECT id FROM t WHERE email = ?1 AND note IS ?2;",
+            &.{ .{ .text = "missing@example.com" }, .null },
+        )) == null,
+    );
+
+    // One-row case: bind an int, a text, and a NULL; read an int and a text column.
+    var r = (try db.row(
+        "SELECT id, email FROM t WHERE id = ?1 AND email = ?2 AND note IS ?3;",
+        &.{ .{ .int = 7 }, .{ .text = "a@example.com" }, .null },
+    )) orelse return error.TestUnexpectedResult;
+    defer r.finalize();
+    try std.testing.expectEqual(@as(i64, 7), r.int(0));
+    try std.testing.expectEqualStrings("a@example.com", r.text(1));
 }
