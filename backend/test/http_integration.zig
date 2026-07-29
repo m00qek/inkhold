@@ -2690,6 +2690,55 @@ test "device upload chunked: parts are merged on the final part" {
     }
 }
 
+test "device upload chunked: a path-traversal uploadId is rejected before it names a file" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+
+    const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
+    const alice = (try f.svc.createUser(admin, "alice", false)).id;
+    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+
+    var obuf: [8192]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
+
+    // Mint a session + innerName so the request gets past the ownership check and
+    // reaches the chunk path — the rejection we want to prove is the uploadId one.
+    var inner: [16]u8 = undefined;
+    {
+        const body = "{\"path\":\"/NOTE/Note/evil.note\",\"fileName\":\"evil.note\",\"equipmentNo\":\"SN1\",\"size\":10}";
+        const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/3/files/upload/apply", &dev_tok, "SN1", body);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(struct {
+            success: bool,
+            innerName: []const u8,
+        }, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        @memcpy(&inner, p.value.innerName);
+    }
+
+    const boundary = "----NomadUploadBoundaryZZ";
+    const wire = try buildMultipart(boundary, "pwn");
+    defer gpa.free(wire);
+    var ctbuf: [96]u8 = undefined;
+    const ct = try std.fmt.bufPrint(&ctbuf, "multipart/form-data; boundary={s}", .{boundary});
+
+    // `../../pwned` carries both a slash and a dot — neither is in the uploadId
+    // allowlist, so the handler must 400 before `beginChunkIngest` ever splices it
+    // into a `tmp/<id>_1` path and escapes the staging dir.
+    var pbuf: [160]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, "/oss/put/{s}?uploadId=../../pwned&totalChunks=3&partNumber=1", .{&inner});
+    const req = try buildRequest(&reqbuf, "POST", path, &.{
+        .{ .name = "content-type", .value = ct },
+        .{ .name = "x-access-token", .value = &dev_tok },
+        .{ .name = "equipmentNo", .value = "SN1" },
+    }, wire);
+    const resp = try roundtrip(ctx, req, &obuf);
+    try std.testing.expectEqual(@as(u16, 400), resp.status);
+}
+
 test "oversized device numbers are rejected, not panicked (overflow guard)" {
     const f = try Fixture.init();
     defer f.deinit();

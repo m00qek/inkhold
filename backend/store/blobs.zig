@@ -40,6 +40,23 @@ pub const md5_hex_len = 32;
 /// `docs/scratch/new-indexing.md` § "Chunk size".
 pub const chunk_len = 64 * 1024;
 
+/// The longest `uploadId` a multipart chunk may carry. It names a temp file, so
+/// it is bounded here (and the handler rejects anything longer or containing a
+/// character outside its allowlist before it ever reaches this store).
+pub const max_upload_id = 64;
+
+/// Upper bound on a chunk temp path: `"tmp/" + uploadId + "_" + u32` (a u32 is at
+/// most 10 decimal digits). Sizes the on-stack buffers so a `bufPrint` can never
+/// run out of room for a well-formed `uploadId`.
+const chunk_name_max = "tmp/".len + max_upload_id + "_".len + 10;
+
+/// Builds the `tmp/<uploadId>_<part>` path for a multipart chunk into `buf`. The
+/// single place the chunk-name format lives, shared by begin/merge/cleanup so the
+/// three can't drift.
+fn chunkTmpName(buf: []u8, upload_id: []const u8, part: u32) ![]u8 {
+    return std.fmt.bufPrint(buf, "tmp/{s}_{d}", .{ upload_id, part });
+}
+
 pub const PutResult = struct {
     md5: [md5_hex_len]u8,
     size: u64,
@@ -99,10 +116,12 @@ pub const BlobStore = struct {
         };
     }
 
-    /// Opens a specific temporary file for a chunk of a multipart upload.
+    /// Opens the temp file for one part of a multipart upload. `upload_id` is a
+    /// pre-validated path component (see `max_upload_id` and the handler's
+    /// allowlist), so the only way `chunkTmpName` fails is a programming error.
     pub fn beginChunkIngest(self: BlobStore, upload_id: []const u8, part_number: u32, write_buf: []u8) !ChunkIngest {
-        var tmp_buf: [128]u8 = undefined; // "tmp/" + upload_id + "_" + part_number
-        const tmp_rel = try std.fmt.bufPrint(&tmp_buf, "tmp/{s}_{d}", .{upload_id, part_number});
+        var tmp_buf: [chunk_name_max]u8 = undefined;
+        const tmp_rel = try chunkTmpName(&tmp_buf, upload_id, part_number);
         const file = try self.root.createFile(self.io, tmp_rel, .{});
         return .{
             .store = self,
@@ -111,24 +130,36 @@ pub const BlobStore = struct {
         };
     }
 
-    /// Merges all chunks of a multipart upload into a single final blob.
+    /// Merges the `total_chunks` parts written by `beginChunkIngest` into one
+    /// content-addressed blob, deleting each part as it is consumed.
+    ///
+    /// ASSUMES it is called once, after the final part is stored. The device
+    /// uploads parts sequentially, so "the last part arrived" means "every part
+    /// is on disk"; a missing part (a drop, or out-of-order delivery) fails
+    /// cleanly here rather than merging a hole — and the resulting md5 is checked
+    /// again against the device's `content_hash` at the `upload/finish` commit. On
+    /// ANY failure every remaining part of this upload is swept, so a broken
+    /// transfer never leaks temp files until the next startup sweep.
     pub fn mergeChunks(self: BlobStore, upload_id: []const u8, total_chunks: u32, write_buf: []u8) !PutResult {
+        // Runs last on failure (after `ing.abort`): removes whatever parts the
+        // loop below hadn't yet consumed-and-deleted. Idempotent — a part already
+        // gone is exactly the goal.
+        errdefer self.deleteChunks(upload_id, total_chunks);
+
         var ing = try self.beginIngest(write_buf);
         errdefer ing.abort();
 
         var read_buf: [chunk_len]u8 = undefined;
         var part: u32 = 1;
         while (part <= total_chunks) : (part += 1) {
-            var tmp_buf: [128]u8 = undefined;
-            const tmp_rel = std.fmt.bufPrint(&tmp_buf, "tmp/{s}_{d}", .{upload_id, part}) catch return error.NameTooLong;
-            var file = self.root.openFile(self.io, tmp_rel, .{}) catch |err| {
-                return err; // missing chunk -> fail
-            };
+            var tmp_buf: [chunk_name_max]u8 = undefined;
+            const tmp_rel = try chunkTmpName(&tmp_buf, upload_id, part);
+            var file = try self.root.openFile(self.io, tmp_rel, .{}); // missing part -> fail
             defer {
                 file.close(self.io);
                 self.root.deleteFile(self.io, tmp_rel) catch {};
             }
-            
+
             var fr = file.reader(self.io, &read_buf);
             var chunk_buf: [chunk_len]u8 = undefined;
             while (true) {
@@ -140,6 +171,18 @@ pub const BlobStore = struct {
         const res = try ing.finish(null);
         ing.deinit();
         return res;
+    }
+
+    /// Best-effort deletion of every temp part of a multipart upload. Used to
+    /// clean up after an aborted merge; errors are ignored (a missing part is the
+    /// intended end state).
+    fn deleteChunks(self: BlobStore, upload_id: []const u8, total_chunks: u32) void {
+        var part: u32 = 1;
+        while (part <= total_chunks) : (part += 1) {
+            var tmp_buf: [chunk_name_max]u8 = undefined;
+            const tmp_rel = chunkTmpName(&tmp_buf, upload_id, part) catch continue;
+            self.root.deleteFile(self.io, tmp_rel) catch {};
+        }
     }
 
     /// True if a blob with this md5 is stored. A malformed md5 names no blob, so

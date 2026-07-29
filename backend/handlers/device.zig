@@ -1116,6 +1116,19 @@ pub fn uploadApply(ctx: *Context, req: *Request, params: Params) anyerror!void {
     }, null);
 }
 
+/// True if `s` is safe to use as the `uploadId` path component of a multipart
+/// chunk's temp file: non-empty, within `max_upload_id`, and made only of
+/// `[A-Za-z0-9_-]`. The allowlist is what keeps a caller string from carrying a
+/// `/` or `..` that would escape the `tmp/` staging directory.
+fn validUploadId(s: []const u8) bool {
+    if (s.len == 0 or s.len > blobstore.max_upload_id) return false;
+    for (s) |c| {
+        const ok = std.ascii.isAlphanumeric(c) or c == '-' or c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 /// POST /oss/put/:innerName -> receive the file bytes. The body is
 /// `multipart/form-data` with one `name="file"` part; we stream that part's raw
 /// bytes into the blob store WITHOUT buffering the whole file (respecting the
@@ -1139,20 +1152,34 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
     var bnd_buf: [multipart.max_term]u8 = undefined;
     const boundary = multipart.boundaryFromContentType(ct, &bnd_buf) orelse return badRequest(ctx, req);
 
-    // Extract query params BEFORE reading the body (reading invalidates head strings).
-    const total_chunks_str = reply.queryParam(req.head.target, "totalChunks");
-    const part_number_str = reply.queryParam(req.head.target, "partNumber");
-    const upload_id_raw = reply.queryParam(req.head.target, "uploadId");
+    // Multipart chunk parameters (the device splits a large file into parts).
+    // Extract them BEFORE reading the body — reading invalidates the head strings
+    // the target slices point into.
+    const total_chunks = if (reply.queryParam(req.head.target, "totalChunks")) |s|
+        std.fmt.parseInt(u32, s, 10) catch 0
+    else
+        0;
+    const part_number = if (reply.queryParam(req.head.target, "partNumber")) |s|
+        std.fmt.parseInt(u32, s, 10) catch 0
+    else
+        0;
 
-    const total_chunks = if (total_chunks_str) |s| std.fmt.parseInt(u32, s, 10) catch 0 else 0;
-    const part_number = if (part_number_str) |s| std.fmt.parseInt(u32, s, 10) catch 0 else 0;
-
-    var uid_buf: [128]u8 = undefined;
-    const upload_id: ?[]const u8 = if (upload_id_raw) |raw| uid: {
-        if (raw.len == 0 or raw.len > uid_buf.len) break :uid null;
+    // `uploadId` names a temp file on disk, so it must be a safe path component:
+    // non-empty, bounded, and drawn from a strict allowlist — never a caller
+    // string that could contain `/` or `..` and escape the `tmp/` staging dir.
+    var uid_buf: [blobstore.max_upload_id]u8 = undefined;
+    const upload_id: ?[]const u8 = if (reply.queryParam(req.head.target, "uploadId")) |raw| uid: {
+        if (!validUploadId(raw)) return badRequest(ctx, req);
         @memcpy(uid_buf[0..raw.len], raw);
         break :uid uid_buf[0..raw.len];
     } else null;
+
+    // A declared multipart upload (>1 chunk) must carry a valid id and an in-range
+    // part number. Rejecting here — rather than falling through to the single-shot
+    // path — stops one chunk from being stored as if it were the whole file.
+    const chunked = total_chunks > 1;
+    if (chunked and (upload_id == null or part_number == 0 or part_number > total_chunks))
+        return badRequest(ctx, req);
 
     // The session must exist and belong to the calling device. DB touch #1 of 2 —
     // the route is `manual_db_lock`, so we hold `ctx.db_lock` for just this lookup.
@@ -1174,7 +1201,7 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
     var wbuf: [blobstore.chunk_len]u8 = undefined;
 
-    if (total_chunks > 1 and upload_id != null and part_number > 0) {
+    if (chunked) {
         var ing = files.blobs.beginChunkIngest(upload_id.?, part_number, &wbuf) catch return serverError(ctx, req);
         multipart.extract(reader, boundary, &ing) catch {
             ing.abort();
