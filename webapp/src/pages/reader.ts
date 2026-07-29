@@ -311,7 +311,7 @@ export function createReader(deps: ReaderDeps): Reader {
     paintThumb: (pl) => {
       const v = noteLayerCtl.stack()?.views.find((x) => x.index === pl.id);
       if (!v) return el("div", { "aria-hidden": "true" });
-      return buildNoteLayerThumb(v, getTheme());
+      return buildNoteLayerThumb(v);
     },
   });
   // The PAGE INDEX, now a member of the SAME docked side-panel family as Layers

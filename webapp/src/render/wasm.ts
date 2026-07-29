@@ -5,10 +5,11 @@
 // resulting RGBA into an `ImageBitmap`.
 //
 // The decoder commits to NO theme — it emits opaque grayscale, black ink on a
-// white page. This layer applies the theme (invert RGB for dark = inverted e-ink)
-// and honours `RenderSize` (downscale for thumbnails) before building the bitmap,
-// so what's cached is already theme- and size-specific (matching the render-cache
-// key). The module is instantiated once and reused; the decode call is fully
+// white page, and that is exactly what we paint: notes always render in the LIGHT
+// world (dark ink on paper), regardless of the app theme. The dark reader chrome
+// frames the page like paper — sketches (`.spd`) already render this way. This
+// layer only honours `RenderSize` (downscale for thumbnails) before building the
+// bitmap. The module is instantiated once and reused; the decode call is fully
 // synchronous, so concurrent `render()`s can't interleave a decode and corrupt
 // the shared result buffer (which is only valid until the next `decode_page`).
 //
@@ -230,9 +231,7 @@ export function createWasmRenderer(opts: WasmRendererOptions = {}): NoteRenderer
       // A custom IMAGE background: the WASM composite is ink-on-white (the bit2
       // record is skipped). The decode also extracted the template's asset hash
       // Zig-side; read it out of wasm memory now, BEFORE any await reuses the
-      // decoder. Fetch the template ONCE per hash, draw it UNDER the ink, and —
-      // because color image templates opt out of the invert — paint in the light
-      // world regardless of theme.
+      // decoder. Fetch the template ONCE per hash and draw it UNDER the ink.
       const templateHash = getTemplate ? readWasmTemplateHash(wasm) : null;
       if (templateHash && getTemplate) {
         const template = await getTemplate(req.noteId, templateHash);
@@ -240,11 +239,9 @@ export function createWasmRenderer(opts: WasmRendererOptions = {}): NoteRenderer
           const ink = new ImageData(rgba, width, height);
           return compositeTemplateUnderInk(ink, template, outputWidth(req.size));
         }
-        // Template unavailable (404/failed): fall through to ink-on-white,
-        // still uninverted — this is a template page, just without its asset.
-      } else if (req.theme === "dark") {
-        invertRgb(rgba);
+        // Template unavailable (404/failed): fall through to plain ink-on-white.
       }
+      // No theme invert — see the file header: notes always paint on white paper.
 
       const source = new ImageData(rgba, width, height);
       const target = outputWidth(req.size);

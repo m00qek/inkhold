@@ -20,11 +20,10 @@
 // export, a decode error — returns null and the reader falls back to today's
 // single-composite paint. A wrong panel is worse than no panel.
 //
-// THEME. On-screen canvases get the same dark-mode treatment as the composite
-// (invert RGB, keep alpha; the stack backdrop flips white→black). EXPORTS are
-// decoded fresh in light form — `exportModel()` re-decodes from the presented
-// payload — matching `exporter.ts`, whose PNG/PDF always export the authored
-// light pixels regardless of the theme on screen.
+// THEME. On-screen canvases match the composite: notes always paint in the LIGHT
+// world (dark ink on white paper), the app theme never inverts them, and the
+// stack backdrop is white. EXPORTS are likewise the authored light pixels —
+// `exportModel()` re-decodes from the presented payload — matching `exporter.ts`.
 
 import { LAYER_SLOTS, type Id, type LayerSlot, type PageLayer, type Theme } from "../core/types";
 import type { PanelLayer } from "./layersPanel";
@@ -35,7 +34,6 @@ import { templatePlacement, type TemplateProvider } from "../render/template";
 import {
   browserLoader,
   decodeLayerWithExports,
-  invertRgb,
   type DecoderExports,
   type RawDecoded,
 } from "../render/wasm";
@@ -279,7 +277,7 @@ const THUMB_MAX_ASPECT = 2.5;
  * disagreed with the page beside it. Drawn once per panel rebuild from pixels
  * already in hand; never re-decoded.
  */
-export function buildNoteLayerThumb(view: NoteLayerView, theme: Theme): HTMLElement {
+export function buildNoteLayerThumb(view: NoteLayerView): HTMLElement {
   const cw = view.canvas.width;
   const ch = view.canvas.height;
   const aspect = cw > 0 && ch > 0 ? Math.min(cw / ch, THUMB_MAX_ASPECT) : 3 / 4;
@@ -290,7 +288,7 @@ export function buildNoteLayerThumb(view: NoteLayerView, theme: Theme): HTMLElem
   thumb.height = THUMB_H;
   const ctx = thumb.getContext("2d"); // null in happy-dom — the canvas still exists.
   if (ctx && cw > 0 && ch > 0) {
-    ctx.fillStyle = theme === "dark" ? "#000000" : "#ffffff";
+    ctx.fillStyle = "#ffffff"; // notes always paint on white paper (see wasm.ts)
     ctx.fillRect(0, 0, thumbW, THUMB_H);
     // The ~9× reduction from a full-res (~1872-wide) layer canvas goes through
     // the SHARED quality downscale, not a single bilinear `drawImage` step that
@@ -440,12 +438,12 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
   }
 
   /** One canvas per paired record, in wire order: an image background from its
-   *  template, every other layer from `decode_layer` (theme-inverted). */
+   *  template, every other layer from `decode_layer`. Layers paint in the LIGHT
+   *  world (see the composite renderer) — the app theme never inverts them. */
   async function buildCanvases(
     wasm: DecoderExports,
     u8: Uint8Array,
     paired: PairedLayer[],
-    theme: Theme,
     dims: { width: number; height: number },
     noteId: Id,
   ): Promise<HTMLCanvasElement[]> {
@@ -455,7 +453,6 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
         out.push(await templateLayerCanvas(noteId, new TextDecoder().decode(p.record.data), dims));
       } else {
         const raw = decodeLayerWithExports(wasm, u8, p.index);
-        if (theme === "dark") invertRgb(raw.rgba);
         out.push(layerCanvas(raw));
       }
     }
@@ -499,13 +496,7 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
         if (!paired) return null;
         const dims = { width: enumerated.width, height: enumerated.height };
 
-        // A color image template opts out of the dark-mode invert — and so, for
-        // consistency with the main viewer, does the whole page: an image-
-        // background page presents in the LIGHT world regardless of theme.
-        const hasImageBg = paired.some((p) => p.record.rasterImage);
-        const effectiveTheme: Theme = hasImageBg ? "light" : theme;
-
-        const canvases = await buildCanvases(wasm, u8, paired, effectiveTheme, dims, noteId);
+        const canvases = await buildCanvases(wasm, u8, paired, dims, noteId);
         if (my !== gen) return null; // superseded while a template loaded
         const views = paired.map(
           (p, i): NoteLayerView => ({
@@ -529,10 +520,9 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
         currentNoteId = noteId;
         currentPaired = paired;
         currentDims = dims;
-        // The stack backdrop is the page: white paper, black under dark's
-        // inverted e-ink — the exact pixels `decode_page`'s composite base has.
-        // An image-background page always shows white paper (it opted out).
-        host.style.background = effectiveTheme === "dark" ? "#000" : "#fff";
+        // The stack backdrop is the page: white paper, matching the composite
+        // base `decode_page` emits. Notes never invert for dark (see wasm.ts).
+        host.style.background = "#fff";
         for (const v of views) {
           v.canvas.style.display = v.visible ? "" : "none";
           host.append(v.canvas); // wire order; later siblings paint on top
@@ -560,9 +550,9 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
       const stack = current;
       const bytes = currentBytes;
       const wasm = await decoder();
-      // Always LIGHT: exports carry the authored pixels, never the screen theme.
-      // An image background is redrawn from its template (never inverted).
-      const canvases = await buildCanvases(wasm, bytes, currentPaired, "light", currentDims, currentNoteId);
+      // Exports carry the authored light pixels (as does every on-screen render).
+      // An image background is redrawn from its template.
+      const canvases = await buildCanvases(wasm, bytes, currentPaired, currentDims, currentNoteId);
       return {
         model: buildNoteExportModel(stack.width, stack.height, stack.views, canvases),
         release: () => canvases.forEach(zeroCanvas),

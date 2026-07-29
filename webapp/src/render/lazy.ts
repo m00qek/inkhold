@@ -284,11 +284,17 @@ export async function renderPage(
   page: PageRef,
   size: RenderSize,
 ): Promise<ImageBitmap> {
-  const key = { hash: page.hash, size, theme: deps.theme };
+  // Notes render theme-independently — dark ink on white paper, always (see
+  // wasm.ts) — so cache and render them under a FIXED light key. Light and dark
+  // share one entry, and any dark-inverted thumbnail cached before this change
+  // simply stops being referenced and ages out of the LRU. `deps.theme` stays on
+  // the seam for callers but no longer selects the note's colour world.
+  const theme: Theme = "light";
+  const key = { hash: page.hash, size, theme };
   const hit = await deps.cache.get(key);
   if (hit) return hit;
   const bytes = await deps.api.getPageBytes(noteId, page);
-  const decoded = await deps.renderer.render({ bytes, noteId, page, size, theme: deps.theme });
+  const decoded = await deps.renderer.render({ bytes, noteId, page, size, theme });
   await deps.cache.put(key, decoded.bitmap);
   return decoded.bitmap;
 }

@@ -1,9 +1,10 @@
 // A synthetic NoteRenderer for dev + e2e. It ignores the page bytes and paints a
-// deterministic ruled sheet with pseudo-handwriting seeded by the page hash, in
-// the requested theme (dark = inverted e-ink). This is what makes the whole UI
-// exercisable — and pixel-probeable in Playwright — before the real WASM decoder
-// (P5) exists. Unit tests that don't need real pixels should inject their own
-// trivial NoteRenderer stub rather than this (canvas is a browser API).
+// deterministic ruled sheet with pseudo-handwriting seeded by the page hash. Like
+// the real renderer, it paints notes in the LIGHT world regardless of theme (dark
+// ink on white paper). This is what makes the whole UI exercisable — and pixel-
+// probeable in Playwright — before the real WASM decoder (P5) exists. Unit tests
+// that don't need real pixels should inject their own trivial NoteRenderer stub
+// rather than this (canvas is a browser API).
 
 import type { DecodedPage, NoteRenderer, RenderRequest } from "./types";
 import { thumbTargetWidth } from "./types";
@@ -62,10 +63,12 @@ function makeCanvas(w: number, h: number): { canvas: OffscreenCanvas | HTMLCanva
 export function createFakeRenderer(): NoteRenderer {
   return {
     async render(req: RenderRequest): Promise<DecodedPage> {
-      const { page, size, theme } = req;
+      const { page, size } = req;
       const w = Math.min(outputWidth(size), page.width);
       const h = Math.round((w * page.height) / page.width);
-      const p = palette(theme);
+      // Notes always paint in the LIGHT world regardless of theme (see wasm.ts) —
+      // the fake mirrors the real renderer so dark-mode tests see white paper too.
+      const p = palette("light");
       const { canvas, ctx } = makeCanvas(w, h);
 
       // Paper.
