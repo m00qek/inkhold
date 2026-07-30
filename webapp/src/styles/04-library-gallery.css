@@ -197,19 +197,8 @@
     linear-gradient(90deg, transparent 15%, color-mix(in srgb, var(--margin) 30%, transparent) 15%, color-mix(in srgb, var(--margin) 30%, transparent) 17%, transparent 17%),
     repeating-linear-gradient(180deg, transparent, transparent 10%, var(--paper-rule) 10%, var(--paper-rule) calc(10% + 1px));
 }
-.thumb:has(> .thumb__img:not([src]))::before {
-  content: "Loading...";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 45%;
-  transform: translateY(-50%);
-  text-align: center;
-  font-family: var(--font-sans);
-  font-size: var(--fs-small);
-  color: var(--ink-faint);
-  pointer-events: none;
-}
+/* No "loading" word — the ruled sheet above IS the "a page is coming" signal;
+   the tile's alt text still names the file for assistive tech. */
 .card:hover .thumb {
   transform: translateY(-4px);
   box-shadow:

@@ -125,19 +125,8 @@
     linear-gradient(90deg, transparent 15%, color-mix(in srgb, var(--margin) 30%, transparent) 15%, color-mix(in srgb, var(--margin) 30%, transparent) 17%, transparent 17%),
     repeating-linear-gradient(180deg, transparent, transparent 10%, var(--paper-rule) 10%, var(--paper-rule) calc(10% + 1px));
 }
-.filmstrip__thumb.is-loading::before {
-  content: "Loading...";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 45%;
-  transform: translateY(-50%);
-  text-align: center;
-  font-family: var(--font-sans);
-  font-size: var(--fs-small);
-  color: var(--ink-faint);
-  pointer-events: none;
-}
+/* No "loading" word — the ruled sheet IS the placeholder; the `.is-loading`
+   class stays only as the state hook, without a caption. */
 .filmstrip__thumb canvas {
   display: block;
   width: 100%;

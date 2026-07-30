@@ -567,14 +567,75 @@ function encodeWebp(canvas: OffscreenCanvas | HTMLCanvasElement): Promise<Blob> 
 interface Palette {
   paper: string;
   ink: string;
-  faint: string;
+  margin: string;
+  rule: string;
 }
 
-/** Colours from the live e-ink theme, so a glyph/snippet tracks light/dark. */
+/** The design-system paper for a glyph/snippet tile, read from the LIVE CSS
+ *  tokens so a placeholder is the SAME paper (and reserved-red margin) as every
+ *  other surface, and tracks light/dark. The theme-matched fallbacks ARE the
+ *  token values, for the DOM-less path. */
 function palette(theme: Theme): Palette {
-  return theme === "dark"
-    ? { paper: "#1a1a1a", ink: "#e8e8e8", faint: "#3a3a3a" }
-    : { paper: "#fbfbf8", ink: "#2b2b2b", faint: "#d7dbe0" };
+  const fallback: Palette =
+    theme === "dark"
+      ? { paper: "#17171a", ink: "#e9e6dd", margin: "#cd6a60", rule: "rgba(233,230,221,0.12)" }
+      : { paper: "#fcfbf7", ink: "#1c1b17", margin: "#bf5248", rule: "rgba(28,27,23,0.11)" };
+  if (typeof document === "undefined") return fallback;
+  const s = getComputedStyle(document.documentElement);
+  const tok = (name: string, fb: string): string => s.getPropertyValue(name).trim() || fb;
+  return {
+    paper: tok("--sheet", fallback.paper),
+    ink: tok("--ink", fallback.ink),
+    margin: tok("--margin", fallback.margin),
+    rule: tok("--paper-rule", fallback.rule),
+  };
+}
+
+/** Ensure the brand DATA face is loaded before a canvas draw names it: `ctx.font`
+ *  silently falls back to a system mono if the face isn't ready, and a tile
+ *  painted in the wrong font is exactly the drift this removes.
+ *
+ *  Memoised to ONE load, not one per tile: the first glyph/snippet awaits the
+ *  face; every later render awaits an already-resolved promise (a microtask), so
+ *  the guard never adds real latency to the render path. A no-op where the Font
+ *  Loading API is absent; a load failure is not a render failure. */
+let monoFontReady: Promise<void> | null = null;
+function ensureMonoFont(): Promise<void> {
+  if (monoFontReady) return monoFontReady;
+  monoFontReady = (async () => {
+    if (typeof document === "undefined" || !document.fonts) return;
+    try {
+      await Promise.all([
+        document.fonts.load('400 16px "Space Mono"'),
+        document.fonts.load('700 16px "Space Mono"'),
+      ]);
+    } catch {
+      // fall back silently
+    }
+  })();
+  return monoFontReady;
+}
+
+/** The reserved-red margin rule shared by every placeholder tile (see
+ *  render/lazy.ts's ruled-sheet). Draws it in the left gutter at a low alpha so a
+ *  glyph/snippet reads as a page in the same notebook. */
+function drawMarginRule(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  w: number,
+  h: number,
+  color: string,
+): number {
+  const marginX = w * 0.12;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.3;
+  ctx.lineWidth = Math.max(1, w / 150);
+  ctx.beginPath();
+  ctx.moveTo(marginX, h * 0.06);
+  ctx.lineTo(marginX, h * 0.94);
+  ctx.stroke();
+  ctx.restore();
+  return marginX;
 }
 
 /** A source the shared downscale can consume: a decoded bitmap or a canvas. */
@@ -776,10 +837,12 @@ export function createCanvasThumbPainter(): ThumbPainter {
     async glyph(kind: string, theme: Theme): Promise<Blob> {
       const w = thumbTargetWidth(); // tier target — the facade keys glyphs per bucket
       const h = Math.round(w * (1872 / 1404)); // note the page aspect the grid uses
+      await ensureMonoFont();
       const { canvas, ctx } = makeCanvas(w, h);
       const p = palette(theme);
       ctx.fillStyle = p.paper;
       ctx.fillRect(0, 0, w, h);
+      drawMarginRule(ctx, w, h, p.margin);
 
       // A dog-eared document sheet, centred — the same "file with no preview"
       // language the grid glyph tile used, baked into the image so the display
@@ -810,7 +873,9 @@ export function createCanvasThumbPainter(): ThumbPainter {
       // caption (its shape reads on its own and it has no extension to name).
       if (kind !== "folder") {
         ctx.fillStyle = p.ink;
-        ctx.font = `600 ${Math.round(w * 0.11)}px system-ui, sans-serif`;
+        // A file extension is DATA — set in the brand mono face (Space Mono ships
+        // 400/700, no 600), so it reads as a typed label, not a system caption.
+        ctx.font = `700 ${Math.round(w * 0.1)}px "Space Mono", ui-monospace, monospace`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(kind, w / 2, y + sheetH + h * 0.09);
@@ -821,27 +886,31 @@ export function createCanvasThumbPainter(): ThumbPainter {
     async textSnippet(content: string, theme: Theme): Promise<Blob> {
       const w = thumbTargetWidth(); // tier target — keyed per bucket by the facade
       const h = Math.round(w * (1872 / 1404));
+      await ensureMonoFont();
       const { canvas, ctx } = makeCanvas(w, h);
       const p = palette(theme);
       ctx.fillStyle = p.paper;
       ctx.fillRect(0, 0, w, h);
+      const marginX = drawMarginRule(ctx, w, h, p.margin);
 
       // The first few non-empty lines, clipped — a legible preview of the actual
-      // content, which is the whole reason `.txt` is not a static glyph.
+      // content, which is the whole reason `.txt` is not a static glyph. Set past
+      // the margin in the brand mono face, like writing on a ruled page.
       const lines = content
         .split(/\r?\n/)
         .map((l) => l.replace(/\t/g, "  ").trimEnd())
         .filter((l, i, a) => l.length > 0 || (i > 0 && a[i - 1]!.length > 0))
         .slice(0, 9);
-      const padX = w * 0.1;
+      const padX = marginX + w * 0.05;
+      const padRight = w * 0.08;
       const fontPx = Math.round(w * 0.062);
       const lineH = fontPx * 1.5;
       let y = h * 0.12;
       ctx.fillStyle = p.ink;
-      ctx.font = `${fontPx}px ui-monospace, "SF Mono", Menlo, monospace`;
+      ctx.font = `${fontPx}px "Space Mono", ui-monospace, "SF Mono", Menlo, monospace`;
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
-      const maxChars = Math.floor((w - padX * 2) / (fontPx * 0.62));
+      const maxChars = Math.floor((w - padX - padRight) / (fontPx * 0.62));
       for (const line of lines) {
         const clipped = line.length > maxChars ? line.slice(0, maxChars - 1) + "…" : line;
         ctx.fillText(clipped, padX, y);
