@@ -1243,13 +1243,29 @@ test.describe("the top-bar controls share one height", () => {
     await expect(segmented).toBeVisible();
     await expect(search).toBeVisible();
 
+    // The UPLOAD control is in this list because it was NOT, and that is how it
+    // shipped six pixels short of everything beside it: `.btn` carries the
+    // compact height and wins on stylesheet order, so `.topbar__action` needed
+    // to match its specificity. A test that enumerates controls only catches the
+    // ones it enumerates — every new topbar control belongs here.
+    const upload = page.locator("#upload");
+    await expect(upload).toBeVisible();
+
     const heightOf = (loc: Locator) => loc.evaluate((el) => (el as HTMLElement).offsetHeight);
-    const [hSort, hSeg, hSearch] = await Promise.all([heightOf(sort), heightOf(segmented), heightOf(search)]);
+    const [hSort, hSeg, hSearch, hUpload] = await Promise.all([
+      heightOf(sort),
+      heightOf(segmented),
+      heightOf(search),
+      heightOf(upload),
+    ]);
 
     // THE PIN: the sort select and the view toggle are the same height…
     expect(hSort).toBe(hSeg);
     // …and the search box aligns to that same height too.
     expect(hSearch).toBe(hSeg);
+    // …as does the upload control, which is a button rather than a field or a
+    // frame and so takes its height from a different rule.
+    expect(hUpload).toBe(hSeg);
     // Guard the guard: a zero height would make the equality vacuously true.
     expect(hSeg).toBeGreaterThan(0);
   });

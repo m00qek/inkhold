@@ -22,7 +22,7 @@ import { el } from "../ui/dom";
 import { ICONS, svg, type IconName } from "../ui/icons";
 import { closeOpenMenu } from "../ui/menu";
 import { currentTheme, setTheme } from "../ui/theme";
-import { formatBytes, fileKind } from "../core/fileKind";
+import { formatBytes, fileKind, UPLOAD_ACCEPT_ATTR } from "../core/fileKind";
 import { api as authApi } from "../api/client";
 import { SORT_KEY, readLocal, writeLocal } from "../ui/storage";
 import {
@@ -51,6 +51,8 @@ import type { Entry, Folder, Hash, Id, Listing, NoteMeta, NoteSummary, Theme } f
 import { skeletonPage } from "../core/noteSkeleton";
 import { ApiError, NameTakenError, dispatchApiFailure, type ApiFailureSink } from "../api/client";
 import { openRenameDialog } from "../ui/renameDialog";
+import { createUploadZone, type UploadDestination, type UploadZone } from "../ui/uploadZone";
+import { openConflictDialog } from "../ui/uploadConflict";
 import { createExporter, type Exporter } from "../export/exporter";
 import { createLazyEngine, renderPage, type LazyEngine } from "../render/lazy";
 import {
@@ -667,16 +669,33 @@ export function createAppShell(deps: AppDeps): AppShell {
     el("div", { class: "quota__track" }, quotaFill),
     quotaTotal,
   );
-  void authApi.usage().then((u) => {
-    if (!u || u.total <= 0) return;
-    const pct = Math.max(0, Math.min(100, (u.used / u.total) * 100));
-    quotaFill.style.width = `${pct}%`;
-    quotaUsed.textContent = formatBytes(u.used);
-    quotaTotal.textContent = formatBytes(u.total);
-    quota.classList.toggle("is-over", u.used > u.total);
-    quota.setAttribute("aria-label", `Storage used: ${formatBytes(u.used)} of ${formatBytes(u.total)}`);
-    quota.hidden = false;
-  });
+  /**
+   * The last usage figures the server gave, or null before the first answer (or
+   * after a failure). THE SAME NUMBER TWICE: it draws the bar above, and it is
+   * what the upload pre-flight charges a file against so a doomed 200 MB transfer
+   * is refused in the instant it is dropped rather than four minutes later.
+   *
+   * Null is "not known", never "no room" — see `preflightUpload`.
+   */
+  let usage: { used: number; total: number } | null = null;
+
+  function refreshUsage(): void {
+    void authApi.usage().then((u) => {
+      usage = u && u.total > 0 ? u : null;
+      if (!usage) return;
+      const pct = Math.max(0, Math.min(100, (usage.used / usage.total) * 100));
+      quotaFill.style.width = `${pct}%`;
+      quotaUsed.textContent = formatBytes(usage.used);
+      quotaTotal.textContent = formatBytes(usage.total);
+      quota.classList.toggle("is-over", usage.used > usage.total);
+      quota.setAttribute(
+        "aria-label",
+        `Storage used: ${formatBytes(usage.used)} of ${formatBytes(usage.total)}`,
+      );
+      quota.hidden = false;
+    });
+  }
+  refreshUsage();
 
   // The `<aside>` itself, not the entries: the brand block and the account
   // footer (identity, theme, sign out) are shell concerns, so the shell builds
@@ -869,9 +888,18 @@ export function createAppShell(deps: AppDeps): AppShell {
    * Hidden by the `hidden` attribute (see `.topbar__action[hidden]` in 03, which
    * has to restate it) so it exists only where it means something.
    */
-  function topbarAction(opts: { id: string; label: string; icon: IconName; ariaLabel?: string; danger?: boolean }): HTMLButtonElement {
+  function topbarAction(opts: {
+    id: string;
+    label: string;
+    icon: IconName;
+    ariaLabel?: string;
+    danger?: boolean;
+    /** Render the glyph alone. Only for an action whose icon is unambiguous —
+     *  the labelled destination actions beside it deliberately are not. */
+    iconOnly?: boolean;
+  }): HTMLButtonElement {
     const b = el("button", {
-      class: `btn topbar__action${opts.danger ? " is-danger" : ""}`,
+      class: `btn topbar__action${opts.iconOnly ? " topbar__action--icon" : ""}${opts.danger ? " is-danger" : ""}`,
       // An id, as `#crumbs`, `#search`, `#sort` and `#gallery` already have:
       // there are two of these in `.tools` now and they are otherwise
       // distinguishable only by their label, which is the thing under test.
@@ -884,7 +912,11 @@ export function createAppShell(deps: AppDeps): AppShell {
       // visible text makes the control unspeakable by anyone reading it aloud.
       ...(opts.ariaLabel ? { "aria-label": opts.ariaLabel } : {}),
     });
-    b.append(el("span", { class: "topbar__action-mark", html: svg(ICONS[opts.icon], 1.7) }), el("span", { text: opts.label }));
+    b.append(el("span", { class: "topbar__action-mark", html: svg(ICONS[opts.icon], 1.7) }));
+    // The label is HIDDEN, not absent: `aria-label` above names it for a screen
+    // reader and `title` for a pointer, so nothing loses the word but the pixels.
+    if (opts.iconOnly) b.title = opts.ariaLabel ?? opts.label;
+    else b.append(el("span", { text: opts.label }));
     return b;
   }
 
@@ -918,6 +950,50 @@ export function createAppShell(deps: AppDeps): AppShell {
   });
   lockAdminBtn.addEventListener("click", () => void admin?.lock());
 
+  // UPLOAD — the discoverable half of the drop target (docs/scratch/upload.md
+  // §7). Dragging a file onto the gallery is the hero interaction, but a gesture
+  // nobody is told about is not a feature, and it is unavailable by touch and by
+  // keyboard; so the same capability sits in the toolbar as a labelled control.
+  // Both entry points hand their files to the SAME `uploadZone.add`, so the
+  // pre-flight, the refusal copy and the queue cannot drift between them.
+  //
+  // It is a `topbarAction` like Empty bin and Lock console, and shown/hidden by
+  // the same rule as sort and the view toggle: it describes a FOLDER, and a
+  // search result list or a destination is not one.
+  const uploadBtn = topbarAction({
+    id: "upload",
+    label: "Upload",
+    icon: "export",
+    ariaLabel: "Upload a file to this folder",
+    // Icon-only, unlike `Empty bin` and `Lock console`: the arrow-out-of-tray is
+    // the same mark every other application uses for this, the action is
+    // non-destructive, and dropping a file on the gallery is the primary
+    // affordance anyway — this is the discoverable second route to it.
+    iconOnly: true,
+  });
+  /** The hairline between the VIEW controls and the ACTIONS (see `.tools__sep`). */
+  const toolsSep = el("span", { class: "tools__sep", hidden: true, "aria-hidden": "true" });
+  const filePicker = el("input", {
+    class: "upload__picker",
+    type: "file",
+    multiple: true,
+    // A HINT the OS dialog filters with, never the check — drag and drop bypasses
+    // it entirely, so the pre-flight runs on every file regardless.
+    accept: UPLOAD_ACCEPT_ATTR,
+    hidden: true,
+    "aria-hidden": "true",
+    tabindex: "-1",
+  }) as HTMLInputElement;
+  filePicker.addEventListener("change", () => {
+    const picked = Array.from(filePicker.files ?? []);
+    // RESET FIRST. An `<input type=file>` fires no `change` when the same file is
+    // picked twice in a row, so a failed upload could not be retried from the
+    // picker without this.
+    filePicker.value = "";
+    if (picked.length > 0) uploadZone.add(picked);
+  });
+  uploadBtn.addEventListener("click", () => filePicker.click());
+
   /** The bin's half of the mode, plus its own topbar action's state. */
   function setBinMode(open: boolean, count: number, busy = false): void {
     setDestinationMode("bin", open);
@@ -944,7 +1020,8 @@ export function createAppShell(deps: AppDeps): AppShell {
       // says so in words — a screen-reader user should not also hear a stray "OCR".
       el("span", { class: "search__ocr", "aria-hidden": "true", text: "OCR" }),
     ),
-    el("div", { class: "tools" }, sortWrap, segmented, emptyBinBtn, lockAdminBtn),
+    el("div", { class: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, lockAdminBtn),
+    filePicker,
   );
 
   // --- DOM: content (gallery + reader) -------------------------------------
@@ -1344,6 +1421,94 @@ export function createAppShell(deps: AppDeps): AppShell {
     emptyState,
   });
 
+  /**
+   * WHERE A DROP WOULD LAND right now, or null when this surface cannot take one.
+   *
+   * Read PER EVENT rather than captured, so a drag that starts in one folder and
+   * finishes after a navigation cannot upload into the folder the user left.
+   *
+   * The four refusals are all "what is on screen is not a folder listing": a
+   * destination (the bin, the console), search results, a category the device has
+   * not created yet (there is no id to upload into — the rail's `pending` state),
+   * and an open viewer. Each of them is also a surface where the toolbar's Upload
+   * button is hidden, so the two entry points agree by construction.
+   *
+   * `templates` comes from the RAIL, which is the one owner of "which folder IS a
+   * category" — resolved by identity against the walked tree, so a user's own
+   * folder named `MyStyle` is not the device's template folder and does not get
+   * the template copy. See `Category.templates`.
+   */
+  function uploadDestination(): UploadDestination | null {
+    if (destination !== null || activeViewer !== null) return null;
+    if (query.trim() !== "" || rail.pending() !== null) return null;
+    return {
+      id: folderId,
+      templates: folderId !== null && rail.categoryFor({ id: folderId })?.templates === true,
+    };
+  }
+
+  /**
+   * THE DROP TARGET over the gallery, plus the queue behind it
+   * (docs/scratch/upload.md §7). The zone owns the drag feedback, the pre-flight,
+   * the per-file progress rows and the toasts; this shell owns only what the zone
+   * cannot know — where a drop lands, how much room is left, and what to do with
+   * a file once it exists.
+   */
+  const uploadZone: UploadZone = createUploadZone({
+    target: gallery,
+    // The overlay is absolutely positioned over the SCROLL CONTAINER, not the
+    // gallery: a short listing leaves the gallery only a few hundred pixels tall,
+    // and a dropzone that covers the tiles but not the empty space beneath them
+    // is a target that visibly disagrees with itself.
+    overlayHost: content,
+    listHost: root,
+    destination: uploadDestination,
+    // Null (usage unknown) never blocks — see `preflightUpload`. The server's 413
+    // is the authority; this only saves a transfer that could not have succeeded.
+    remainingBytes: () => (usage === null ? null : Math.max(0, usage.total - usage.used)),
+    // The FILE names in that folder, from the listing already in hand — which is
+    // what lets a clash be found and asked about before any bytes move. Folders
+    // are left out deliberately: an upload can never replace one, so a name
+    // shared with a subfolder is the server's ordinary auto-rename, not a
+    // question worth putting to the user. Null (never listed) means "cannot
+    // tell", and the zone then does not ask.
+    existingNames: (id) => {
+      const cached = cachedListings.get(key(id));
+      return cached ? cached.entries.filter((e) => e.kind === "note").map((e) => e.name) : null;
+    },
+    confirmConflict: (req) => openConflictDialog({ host: root, ...req }),
+    upload: (folderIdArg, file, onProgress, signal, onConflict) =>
+      api.upload(folderIdArg, file, onProgress, signal, onConflict),
+    onUploaded: (entry, dest) => {
+      // OPTIMISTIC, then reconciled. The row is spliced into the cached listing
+      // straight away so the file appears the instant it lands — and `refetch`
+      // behind it replaces the whole listing with the server's, which is what
+      // corrects an auto-renamed collision ("notes (2).pdf") and fills in
+      // anything the upload response did not carry.
+      const cached = cachedListings.get(key(dest.id));
+      if (cached) {
+        // A REPLACE COMES BACK WITH THE SAME ID it went in with — that is what
+        // "supersede" means — so the row is swapped in place rather than added.
+        // Anything else is a new row. Getting this wrong would show one file
+        // twice for as long as it took the refetch to land.
+        const at = cached.entries.findIndex((e) => e.id === entry.id);
+        cached.entries =
+          at >= 0 ? cached.entries.map((e, i) => (i === at ? entry : e)) : [...cached.entries, entry];
+        if (listing === cached || key(folderId) === key(dest.id)) {
+          listing = cached;
+          renderGallery();
+        }
+      }
+      // The upload just charged the account, so the bar beside it is now wrong.
+      refreshUsage();
+      void refetch(folderId, cachedListings.get(key(folderId)));
+      // The rail's counts are a function of the tree, and the tree just grew.
+      void prefetchTree(true);
+    },
+    toast,
+    handled,
+  });
+
   // set the initial theme glyph
   updateThemeGlyph();
 
@@ -1691,6 +1856,13 @@ export function createAppShell(deps: AppDeps): AppShell {
     // Sort and the view toggle describe a folder listing; results are not one.
     sortWrap.hidden = searching;
     segmented.hidden = searching;
+    // Upload obeys the SAME rule, plus one more: a category the device has not
+    // created yet has no id to upload into. `uploadDestination()` is the single
+    // authority on that, so the button and the drop target can never disagree
+    // about whether this place accepts a file.
+    uploadBtn.hidden = uploadDestination() === null;
+    // Never a hairline with nothing after it.
+    toolsSep.hidden = uploadBtn.hidden;
     // Leaving the bin is this repaint, and nothing else — the same overwrite
     // that closes it turns its mode off. That is the teardown hook bin.ts is
     // built around; it just has to be one line, here, rather than nowhere.
@@ -1745,7 +1917,16 @@ export function createAppShell(deps: AppDeps): AppShell {
     }
     const entries = visibleEntries();
     if (entries.length === 0) {
-      gallery.append(emptyState("This folder is empty", "Notes synced from your Supernote will appear here."));
+      // EMPTINESS AS DIRECTION, not mood: now that a file can be put here from
+      // the browser, the empty state names the thing to do rather than only the
+      // thing that has not happened. The device promise is a fact — a file placed
+      // in the cloud is pulled down on the next sync.
+      gallery.append(
+        emptyState(
+          "This folder is empty",
+          "Drop a PDF here to read it on your Nomad — or it'll fill up as your Supernote syncs.",
+        ),
+      );
       return;
     }
 
@@ -2597,6 +2778,10 @@ export function createAppShell(deps: AppDeps): AppShell {
       spdViewer.destroy();
       txtViewer.destroy();
       admin?.destroy();
+      // Aborts anything still uploading and drops the document-level drag
+      // swallowers — otherwise a torn-down shell would go on eating drops for the
+      // rest of the page's life.
+      uploadZone.destroy();
       galleryEngine.destroy();
     },
   };

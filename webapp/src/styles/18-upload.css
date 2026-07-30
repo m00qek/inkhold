@@ -1,0 +1,319 @@
+/* ---------------- upload: the dropzone + the transfer rows ----------------
+   docs/scratch/upload.md §7. Two surfaces, one idea: the desk RECEIVING a page.
+
+   The dropzone reuses the app's placeholder motif verbatim — the ruled sheet with
+   its single red margin line, the same gradient pair the gallery's unpainted tile
+   and the reader's canvas placeholder paint (04-library-gallery.css). Dropping a
+   file onto the library should look like laying a page on the desk, and the way
+   to make that read is to draw the page the app already draws.
+
+   The transfer rows are the opposite register: they are DATA — a name, a
+   percentage, a length — so they are Space Mono, the app's utility face, the same
+   one the toast and the extension chips use. Length carries the number (the
+   `--layer-bar-h` fill-bar signature), so the bar is legible without the label.
+
+   Both are theme-aware through the tokens, both respect prefers-reduced-motion,
+   and every control here keeps a visible focus ring. */
+
+/* --- the dropzone overlay ------------------------------------------------- */
+
+/* Covers the whole SCROLL CONTAINER (`.content`), not just the gallery's own
+   box: a short listing leaves the gallery a few hundred pixels tall, and a target
+   that stops where the tiles do is a target that disagrees with itself.
+   `pointer-events: none` is load-bearing — the overlay must never become the
+   drag's own `dragleave`, which would flicker it off the instant it appeared. */
+.dropzone {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-6);
+  pointer-events: none;
+  background: color-mix(in srgb, var(--desk) 72%, transparent);
+}
+.dropzone[hidden] {
+  display: none;
+}
+
+/* THE SHEET. The ruled paper + red margin of the placeholder tile, at page
+   scale: the same `repeating-linear-gradient` rules and the same margin rule at
+   15–17%, so this is recognisably the app's own paper rather than a second
+   invention of it. */
+.dropzone__sheet {
+  width: min(420px, 100%);
+  padding: var(--sp-8) var(--sp-6);
+  border: 1.5px dashed var(--accent);
+  border-radius: var(--radius-card);
+  background-color: var(--sheet);
+  background-image:
+    linear-gradient(
+      90deg,
+      transparent 15%,
+      color-mix(in srgb, var(--margin) 30%, transparent) 15%,
+      color-mix(in srgb, var(--margin) 30%, transparent) 17%,
+      transparent 17%
+    ),
+    repeating-linear-gradient(
+      180deg,
+      transparent,
+      transparent 10%,
+      var(--paper-rule) 10%,
+      var(--paper-rule) calc(10% + 1px)
+    );
+  box-shadow: 0 24px 60px -24px var(--shadow);
+  text-align: center;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .dropzone__sheet {
+    animation: dropzone-in 0.14s ease;
+  }
+}
+@keyframes dropzone-in {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.dropzone__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--fs-heading);
+  line-height: 1.25;
+  color: var(--ink);
+}
+.dropzone__hint {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+/* --- the file picker ------------------------------------------------------ */
+
+/* Off-screen rather than `display: none`: the toolbar's Upload button opens it
+   with `.click()`, and some browsers refuse to open a picker on an input that is
+   not rendered at all. `[hidden]` on the element still hides it from everything
+   that matters; this is the belt for the one behaviour that needs a box. */
+.upload__picker {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* --- the name-conflict prompt --------------------------------------------- */
+
+/* The shell and backdrop of the shared modals (`.rename`, the confirms) — one
+   look for every dialog in the app. What is different is only the shape of the
+   choice: THREE actions rather than two, with the safe one (Keep both) as the
+   default and Replace inked, because Replace is what the person who re-dropped a
+   file to update it came for. */
+.conflict::backdrop {
+  background: color-mix(in srgb, var(--desk) 74%, transparent);
+}
+.conflict {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0;
+  background: var(--sheet);
+  color: var(--ink);
+  box-shadow: 0 26px 60px -20px var(--shadow);
+  width: min(440px, calc(100vw - 32px));
+}
+@media (prefers-reduced-motion: no-preference) {
+  .conflict[open] {
+    animation: dropzone-in 0.16s ease;
+  }
+}
+.conflict__panel {
+  padding: 22px 24px 0;
+}
+.conflict__title {
+  margin: 0 0 var(--sp-2);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--fs-title);
+  line-height: 1.35;
+  /* A filename is data, and it is the subject of the sentence — so it does not
+     ellipsise silently; the dialog is allowed to be two lines tall. */
+  overflow-wrap: anywhere;
+}
+.conflict__body {
+  margin: 0;
+  font-size: var(--fs-body);
+  line-height: 1.55;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.conflict__rest {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.conflict__rest-box {
+  accent-color: var(--accent);
+}
+.conflict__rest-box:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.conflict__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: 20px 24px;
+}
+.conflict__actions .btn {
+  min-height: 26px;
+  font-size: var(--fs-body);
+}
+.conflict__replace {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--sheet);
+}
+.conflict__replace:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 88%, var(--ink));
+  color: var(--sheet);
+}
+
+/* --- the transfer list ---------------------------------------------------- */
+
+/* Bottom RIGHT, deliberately: the toast is bottom-centre and both can be up at
+   once (a file finishes, its toast appears). A tray that covered the toast would
+   hide the very sentence that names the payoff. */
+.transfers {
+  position: fixed;
+  right: var(--sp-6);
+  bottom: var(--sp-6);
+  z-index: 55;
+  width: min(340px, calc(100vw - 2 * var(--sp-4)));
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--sheet);
+  box-shadow: 0 26px 60px -22px var(--shadow);
+  overflow: hidden;
+}
+.transfers[hidden] {
+  display: none;
+}
+.transfers__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 44vh;
+  overflow-y: auto;
+}
+
+.transfer {
+  position: relative;
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--row-rule);
+}
+.transfer:last-child {
+  border-bottom: none;
+}
+.transfer__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+/* The NAME is the one thing here that is not data — it is what the person called
+   the file — so it stays in the body face and takes the space. */
+.transfer__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-body);
+  color: var(--ink);
+}
+/* The state IS data: mono, quiet, and never allowed to wrap under the name. */
+.transfer__state {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+}
+.transfer.is-failed .transfer__state {
+  color: var(--margin-ink);
+}
+.transfer.is-done .transfer__state {
+  color: var(--accent);
+}
+
+/* LENGTH IS THE NUMBER — the same fill-bar idiom as the layers panel's opacity
+   track, at the same height token, so a percentage is readable without reading. */
+.transfer__track {
+  margin-top: var(--sp-2);
+  height: var(--layer-bar-h);
+  border-radius: var(--layer-bar-h);
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  overflow: hidden;
+}
+.transfer__fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .transfer__fill {
+    transition: width 0.18s linear;
+  }
+}
+/* A refused or cancelled row keeps its bar as a GROUND rather than a claim: no
+   green length, because nothing arrived. */
+.transfer.is-failed .transfer__fill,
+.transfer.is-cancelled .transfer__fill {
+  background: var(--ink-faint);
+}
+.transfer.is-cancelled .transfer__name,
+.transfer.is-cancelled .transfer__state {
+  color: var(--ink-faint);
+}
+
+.transfer__cancel,
+.transfers__dismiss {
+  margin-top: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.transfer__cancel:hover,
+.transfers__dismiss:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.transfer__cancel:focus-visible,
+.transfers__dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.transfers__foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 var(--sp-4) var(--sp-3);
+}

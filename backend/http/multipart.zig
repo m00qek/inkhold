@@ -23,6 +23,11 @@ pub const max_term = 128;
 /// Cap on the part-header prologue (`--boundary\r\n` + headers + `\r\n\r\n`).
 const max_prologue = 8 * 1024;
 const read_chunk = 64 * 1024;
+/// Cap on the `filename=` value we will carry out of the part headers. Longer
+/// than any sane filename (and than every filesystem's own limit), so a value
+/// past it is reported as ABSENT rather than truncated — a truncated name would
+/// silently become a different file.
+pub const max_filename = 255;
 
 pub const Error = error{
     /// No `boundary=` in the Content-Type, or it is too long / empty.
@@ -56,11 +61,108 @@ pub fn boundaryFromContentType(content_type: []const u8, buf: []u8) ?[]const u8 
     return buf[0..rest.len];
 }
 
-/// Reads the multipart body from `reader` and streams the `file` part's raw
-/// bytes into `sink` (anything with `pub fn write(self, []const u8) !void`).
-/// `boundary` is the token from the Content-Type (WITHOUT the `--` prefix).
-/// Streams incrementally; the peak extra memory is `read_chunk + max_term`.
-pub fn extract(reader: *std.Io.Reader, boundary: []const u8, sink: anytype) !void {
+/// The consumed part-header prologue: the headers themselves, the `filename=`
+/// they declared, and whatever content bytes were over-read past the blank line.
+///
+/// It is a SEPARATE step from the body stream because the filename is the one
+/// thing a caller may need to VET before accepting a single byte — the web
+/// upload endpoint rejects an unsupported extension or an unsafe name with
+/// nothing written to disk. `extract` below is still the one-call form for
+/// callers (the device's `/oss/put`) that already know what they are storing.
+pub const Prologue = struct {
+    buf: [max_prologue]u8 = undefined,
+    /// Bytes read into `buf` (headers + over-read content).
+    filled: usize = 0,
+    /// One past the `\r\n\r\n` that ends the part headers.
+    sep_end: usize = 0,
+    name_buf: [max_filename]u8 = undefined,
+    name_len: usize = 0,
+
+    /// The part headers, including the trailing blank line.
+    pub fn headers(self: *const Prologue) []const u8 {
+        return self.buf[0..self.sep_end];
+    }
+    /// Content bytes over-read while scanning for the blank line.
+    pub fn leftover(self: *const Prologue) []const u8 {
+        return self.buf[self.sep_end..self.filled];
+    }
+    /// The part's declared `filename`, reduced to a BASENAME (any directory
+    /// prefix a client sent is dropped) — "" when absent, unparseable, or longer
+    /// than `max_filename`. Still untrusted: the caller must validate it before
+    /// using it as a path or tree component.
+    pub fn filename(self: *const Prologue) []const u8 {
+        return self.name_buf[0..self.name_len];
+    }
+};
+
+/// Consumes the part-header prologue from `reader` into `out`, stopping at the
+/// blank line that starts the content. Call `streamPart` next with the SAME
+/// `out` to write the body — it replays the over-read bytes `out` is holding.
+pub fn readPrologue(reader: *std.Io.Reader, out: *Prologue) !void {
+    out.filled = 0;
+    out.sep_end = 0;
+    out.name_len = 0;
+    while (true) {
+        if (out.filled == out.buf.len) return Error.MalformedPrologue;
+        const n = try reader.readSliceShort(out.buf[out.filled..]);
+        if (n == 0) return Error.MalformedPrologue; // EOF before headers ended
+        const search_from = if (out.filled >= 3) out.filled - 3 else 0; // "\r\n\r\n" can straddle
+        out.filled += n;
+        if (std.mem.indexOfPos(u8, out.buf[0..out.filled], search_from, "\r\n\r\n")) |i| {
+            out.sep_end = i + 4;
+            break;
+        }
+    }
+    const name = parseFilename(out.headers());
+    if (name.len > 0 and name.len <= out.name_buf.len) {
+        @memcpy(out.name_buf[0..name.len], name);
+        out.name_len = name.len;
+    }
+}
+
+/// The `filename=` value in a `Content-Disposition` part header, reduced to its
+/// basename. "" when absent or malformed.
+///
+/// Only the plain `filename=` form is read; RFC 5987's `filename*=` is
+/// deliberately not matched (searching for the literal `filename=` skips it),
+/// because decoding its charset/language envelope would be a second, richer
+/// parser for a form no mainstream browser sends for a file part.
+///
+/// The basename reduction is a SECURITY step, not a convenience: a few clients
+/// (and every hand-rolled one) put a full path in `filename`, and the value goes
+/// on to name a tree entry. Everything up to the last `/` or `\` is dropped here
+/// so a traversal attempt cannot survive as a path at all; the caller still
+/// validates what is left.
+fn parseFilename(headers: []const u8) []const u8 {
+    const marker = "filename=";
+    const at = std.ascii.indexOfIgnoreCase(headers, marker) orelse return "";
+    var rest = headers[at + marker.len ..];
+    if (rest.len > 0 and rest[0] == '"') {
+        rest = rest[1..];
+        const end = std.mem.indexOfScalar(u8, rest, '"') orelse return "";
+        rest = rest[0..end];
+    } else {
+        // An unquoted token runs to the next ';' or the end of the header line.
+        var end: usize = rest.len;
+        for (rest, 0..) |c, i| {
+            if (c == ';' or c == '\r' or c == '\n') {
+                end = i;
+                break;
+            }
+        }
+        rest = rest[0..end];
+    }
+    rest = std.mem.trim(u8, rest, " \t");
+    if (std.mem.lastIndexOfAny(u8, rest, "/\\")) |i| rest = rest[i + 1 ..];
+    return rest;
+}
+
+/// Streams the part's raw bytes into `sink` (anything with
+/// `pub fn write(self, []const u8) !void`), starting from the content `pro`
+/// already over-read. `boundary` is the token from the Content-Type (WITHOUT the
+/// `--` prefix). Streams incrementally; the peak extra memory is
+/// `read_chunk + max_term`.
+pub fn streamPart(reader: *std.Io.Reader, boundary: []const u8, pro: *const Prologue, sink: anytype) !void {
     // The delimiter that closes the part is CRLF + "--" + boundary. Content ends
     // immediately before it.
     var term_buf: [max_term]u8 = undefined;
@@ -69,27 +171,9 @@ pub fn extract(reader: *std.Io.Reader, boundary: []const u8, sink: anytype) !voi
     @memcpy(term_buf[4..][0..boundary.len], boundary);
     const term = term_buf[0 .. 4 + boundary.len];
 
-    // Phase 1: consume the part-header prologue up to and including "\r\n\r\n".
-    // Whatever we over-read past it is the START of the file content.
-    var prologue: [max_prologue]u8 = undefined;
-    var filled: usize = 0;
-    var sep_end: usize = 0;
-    while (true) {
-        if (filled == prologue.len) return Error.MalformedPrologue;
-        const n = try reader.readSliceShort(prologue[filled..]);
-        if (n == 0) return Error.MalformedPrologue; // EOF before headers ended
-        const search_from = if (filled >= 3) filled - 3 else 0; // "\r\n\r\n" can straddle
-        filled += n;
-        if (std.mem.indexOfPos(u8, prologue[0..filled], search_from, "\r\n\r\n")) |i| {
-            sep_end = i + 4;
-            break;
-        }
-    }
-    const leftover = prologue[sep_end..filled];
-
-    // Phase 2: stream content until `term`, holding back a `term`-sized window so
-    // a delimiter split across reads is still caught, and its bytes never leak.
-    var src: Source = .{ .leftover = leftover, .reader = reader };
+    // Stream content until `term`, holding back a `term`-sized window so a
+    // delimiter split across reads is still caught, and its bytes never leak.
+    var src: Source = .{ .leftover = pro.leftover(), .reader = reader };
     var pending: [max_term]u8 = undefined;
     var pending_len: usize = 0;
     var work: [read_chunk + max_term]u8 = undefined;
@@ -109,6 +193,18 @@ pub fn extract(reader: *std.Io.Reader, boundary: []const u8, sink: anytype) !voi
         @memcpy(pending[0..keep], work[emit..total]);
         pending_len = keep;
     }
+}
+
+/// Reads the multipart body from `reader` and streams the file part's raw bytes
+/// into `sink` — `readPrologue` + `streamPart` in one call, for callers that do
+/// not need to see the part headers first. The part's `filename` is discarded.
+pub fn extract(reader: *std.Io.Reader, boundary: []const u8, sink: anytype) !void {
+    // Checked here as well as in `streamPart` so a boundary too long to match is
+    // refused BEFORE any of the body is consumed, as it always has been.
+    if (4 + boundary.len > max_term) return Error.BadBoundary;
+    var pro: Prologue = .{};
+    try readPrologue(reader, &pro);
+    return streamPart(reader, boundary, &pro, sink);
 }
 
 /// A byte source that yields `leftover` (the content bytes over-read during the
@@ -250,6 +346,59 @@ test "extract rejects a body whose part headers never end" {
     var col: Collector = .{};
     defer col.deinit();
     try testing.expectError(Error.MalformedPrologue, extract(&base, boundary, &col));
+}
+
+test "readPrologue reports the part's filename and streamPart still yields the body" {
+    const boundary = "PrologueBoundary";
+    const payload = "the bytes";
+    const body = try buildBody(testing.allocator, boundary, payload);
+    defer testing.allocator.free(body);
+
+    var base = std.Io.Reader.fixed(body);
+    var pro: Prologue = .{};
+    try readPrologue(&base, &pro);
+    try testing.expectEqualStrings("x.note", pro.filename());
+
+    var col: Collector = .{};
+    defer col.deinit();
+    try streamPart(&base, boundary, &pro, &col);
+    try testing.expectEqualStrings(payload, col.buf.items);
+}
+
+test "part filenames: quoted, unquoted, path-stripped, absent, over-long" {
+    const cases = [_]struct { hdr: []const u8, want: []const u8 }{
+        .{ .hdr = "Content-Disposition: form-data; name=\"file\"; filename=\"a b.pdf\"\r\n\r\n", .want = "a b.pdf" },
+        // Unquoted token, and a following parameter that must not be swallowed.
+        .{ .hdr = "Content-Disposition: form-data; filename=plain.txt; x=1\r\n\r\n", .want = "plain.txt" },
+        .{ .hdr = "Content-Disposition: form-data; filename=tail.txt\r\n\r\n", .want = "tail.txt" },
+        // A client that sent a whole path keeps only the basename — both separators.
+        .{ .hdr = "Content-Disposition: form-data; filename=\"../../etc/passwd\"\r\n\r\n", .want = "passwd" },
+        .{ .hdr = "Content-Disposition: form-data; filename=\"C:\\\\Users\\\\me\\\\x.epub\"\r\n\r\n", .want = "x.epub" },
+        // Header-name case does not matter.
+        .{ .hdr = "content-disposition: form-data; FILENAME=\"Up.NOTE\"\r\n\r\n", .want = "Up.NOTE" },
+        // Absent, unterminated, and RFC 5987's `filename*=` all read as absent.
+        .{ .hdr = "Content-Disposition: form-data; name=\"file\"\r\n\r\n", .want = "" },
+        .{ .hdr = "Content-Disposition: form-data; filename=\"unclosed\r\n\r\n", .want = "" },
+        .{ .hdr = "Content-Disposition: form-data; filename*=UTF-8''a.pdf\r\n\r\n", .want = "" },
+    };
+    for (cases) |c| {
+        const body = try std.mem.concat(testing.allocator, u8, &.{ "--b\r\n", c.hdr, "\r\n--b--\r\n" });
+        defer testing.allocator.free(body);
+        var base = std.Io.Reader.fixed(body);
+        var pro: Prologue = .{};
+        try readPrologue(&base, &pro);
+        try testing.expectEqualStrings(c.want, pro.filename());
+    }
+
+    // A name past `max_filename` is reported ABSENT rather than truncated — a
+    // truncated name would silently be a different file.
+    const long = "x" ** (max_filename + 1);
+    const body = try std.fmt.allocPrint(testing.allocator, "--b\r\nContent-Disposition: form-data; filename=\"{s}\"\r\n\r\n\r\n--b--\r\n", .{long});
+    defer testing.allocator.free(body);
+    var base = std.Io.Reader.fixed(body);
+    var pro: Prologue = .{};
+    try readPrologue(&base, &pro);
+    try testing.expectEqual(@as(usize, 0), pro.filename().len);
 }
 
 /// A `std.Io.Reader` that hands out at most `chunk` bytes per `stream` call, to

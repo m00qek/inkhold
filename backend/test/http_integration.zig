@@ -4446,7 +4446,7 @@ test "handle() drives requests through the db_lock path without deadlocking" {
     }
 }
 
-test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the raw-file routes, the thumbnail route, the SSE route and the device list_folder route" {
+test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the raw-file routes, the thumbnail route, the SSE route, the device list_folder route and the web upload route" {
     // Pinned deliberately. `manual_db_lock` opts a route OUT of the automatic
     // whole-handler DB lock, so flagging a route whose handler touches the DB
     // without taking `ctx.db_lock` itself is a silent data race on the shared
@@ -4516,6 +4516,13 @@ test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the 
         // covers them exactly.
         "/api/controlplane/bin/note/:id/history/:md5/page/:n",
         "/api/controlplane/bin/note/:id/history/:md5/raw",
+        // The web upload is the `/oss/put` argument on the browser face: a
+        // multi-MB body streamed socket → md5 → filesystem, which must not hold
+        // the one global lock for the transfer. Audited: its ONLY DB touches are
+        // the destination `files.get` and the final `placeUpload` + `entryVO`,
+        // each in its own `ctx.lockDb()`/`unlockDb()` bracket, with the ingest
+        // between them touching the DB not at all.
+        "/api/controlplane/folder/:id/upload",
     };
     var found: usize = 0;
     for (app.routes) |r| {
@@ -4644,6 +4651,7 @@ const non_immutable_routes = [_][]const u8{
     "/api/controlplane/equipment/unlink",
     "/api/controlplane/events",
     "/api/controlplane/file/metadata/:id",
+    "/api/controlplane/folder/:id/upload",
     "/api/controlplane/note/:id/history",
     "/api/controlplane/note/:id/history/:md5/meta",
     "/api/controlplane/note/:id/history/:md5/page/:n/text",
@@ -6219,6 +6227,633 @@ test "web rename: rejects an empty name and a name containing a path separator (
     const nm = try liveName(f, admin, note);
     defer gpa.free(nm);
     try std.testing.expectEqualStrings("keep.note", nm);
+}
+
+// ---- web upload (POST /api/controlplane/folder/:id/upload) -------------------
+
+const upload_boundary = "----InkholdWebUploadBoundary";
+
+/// Frames `payload` as the ONE file part of a browser upload, declaring
+/// `filename` in the part header — the shape `FormData`/`XMLHttpRequest` sends.
+/// Caller frees.
+fn buildUploadBody(filename: []const u8, payload: []const u8) ![]u8 {
+    const head = try std.fmt.allocPrint(
+        gpa,
+        "--{s}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{s}\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+        .{ upload_boundary, filename },
+    );
+    defer gpa.free(head);
+    const tail = try std.fmt.allocPrint(gpa, "\r\n--{s}--\r\n", .{upload_boundary});
+    defer gpa.free(tail);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, head);
+    try out.appendSlice(gpa, payload);
+    try out.appendSlice(gpa, tail);
+    return out.toOwnedSlice(gpa);
+}
+
+/// POST one file to `dest` ("root", or a folder id rendered as decimal).
+fn uploadFile(
+    ctx: *Context,
+    obuf: []u8,
+    reqbuf: []u8,
+    tok: []const u8,
+    dest: []const u8,
+    filename: []const u8,
+    payload: []const u8,
+) !Response {
+    return uploadFileQuery(ctx, obuf, reqbuf, tok, dest, filename, payload, "");
+}
+
+/// `uploadFile` with a raw query string appended (`"?onConflict=replace"`), so
+/// the conflict-mode cases drive the same wire path as everything else.
+fn uploadFileQuery(
+    ctx: *Context,
+    obuf: []u8,
+    reqbuf: []u8,
+    tok: []const u8,
+    dest: []const u8,
+    filename: []const u8,
+    payload: []const u8,
+    query: []const u8,
+) !Response {
+    const wire = try buildUploadBody(filename, payload);
+    defer gpa.free(wire);
+    var pbuf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/folder/{s}/upload{s}", .{ dest, query });
+    var cbuf: [64]u8 = undefined;
+    const cookie = try std.fmt.bufPrint(&cbuf, "sn_session={s}", .{tok});
+    const req = try buildRequest(reqbuf, "POST", path, &.{
+        .{ .name = "content-type", .value = "multipart/form-data; boundary=" ++ upload_boundary },
+        .{ .name = "cookie", .value = cookie },
+    }, wire);
+    return roundtrip(ctx, req, obuf);
+}
+
+/// `dest` for a folder id.
+fn destOf(buf: []u8, id: u64) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{d}", .{id});
+}
+
+/// The load-bearing fields of the listing-shaped `EntryVO` an upload returns —
+/// the SAME shape `rename` answers with, which the SPA's `normalizeEntry` reads.
+const UploadedBody = struct {
+    kind: []const u8,
+    id: []const u8,
+    name: []const u8,
+    fileType: ?[]const u8 = null,
+    fileHash: ?[]const u8 = null,
+};
+
+test "web upload: stores the blob, links the row, charges quota, bumps syncVersion, and answers a listing-shaped entry" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    const dir = try f.files.createFolder(admin, null, "Papers");
+    defer gpa.free(dir.name);
+
+    // A PDF — the headline case: the web has no viewer for it, the DEVICE does.
+    const bytes = "%PDF-1.7\n… pretend pdf bytes …\r\n--not-a-boundary\x00\xff";
+    const md5 = blobstore.md5HexOf(bytes);
+    const v0 = try f.files.syncVersion(admin);
+
+    var dbuf: [24]u8 = undefined;
+    var file_id: u64 = undefined;
+    {
+        const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, try destOf(&dbuf, dir.id), "Ozymandias.pdf", bytes);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(UploadedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expectEqualStrings("note", p.value.kind); // the listing's file kind
+        try std.testing.expectEqualStrings("Ozymandias.pdf", p.value.name);
+        try std.testing.expectEqualStrings("pdf", p.value.fileType.?);
+        try std.testing.expectEqualStrings(&md5, p.value.fileHash.?);
+        file_id = try std.fmt.parseInt(u64, p.value.id, 10);
+    }
+
+    // The blob is on disk, content-addressed by the FILE's md5 (not the wire body's).
+    try std.testing.expect(f.files.blobs.has(&md5));
+
+    // The row is linked under the destination folder with the real size…
+    {
+        const entry = (try f.files.get(admin, file_id)).?;
+        defer gpa.free(entry.name);
+        defer if (entry.md5) |m| gpa.free(m);
+        try std.testing.expectEqualStrings("Ozymandias.pdf", entry.name);
+        try std.testing.expect(!entry.is_folder);
+        try std.testing.expectEqual(dir.id, entry.parent_id.?);
+        try std.testing.expectEqual(@as(u64, bytes.len), entry.size);
+        try std.testing.expectEqualStrings(&md5, entry.md5.?);
+    }
+    // …quota is charged the real ingested byte count, and the tree changed.
+    try std.testing.expectEqual(@as(i64, @intCast(bytes.len)), try usedBytes(f, admin));
+    try std.testing.expect(try f.files.syncVersion(admin) > v0);
+
+    // It shows up in the folder listing the SPA reads.
+    {
+        var pbuf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/tree?parent={d}", .{dir.id});
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "Ozymandias.pdf") != null);
+    }
+
+    // `root` is a real destination, not only a numeric id.
+    {
+        const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "loose.epub", "EPUB at the root");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(UploadedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        const at_root = (try f.files.get(admin, try std.fmt.parseInt(u64, p.value.id, 10))).?;
+        defer gpa.free(at_root.name);
+        defer if (at_root.md5) |m| gpa.free(m);
+        try std.testing.expect(at_root.parent_id == null);
+    }
+}
+
+test "web upload: identical bytes dedup onto one blob and charge zero extra quota" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    const bytes = "the very same bytes, twice";
+    {
+        const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "first.pdf", bytes);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+    }
+    const after_first = try usedBytes(f, admin);
+    try std.testing.expectEqual(@as(i64, @intCast(bytes.len)), after_first);
+
+    // The SAME content under a DIFFERENT name: one blob on disk, two rows, and
+    // not one extra byte charged — quota is per distinct blob per user, which is
+    // what a content-addressed store actually occupies.
+    {
+        const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "second.pdf", bytes);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+    }
+    try std.testing.expectEqual(after_first, try usedBytes(f, admin));
+}
+
+test "web upload: a name collision auto-renames instead of replacing the file already there" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    const first = try putSeed(f, admin, null, "notes.pdf", "the occupant's bytes");
+
+    // A second, DIFFERENT file that merely shares the name. The device's own
+    // link path would REPLACE (a Nomad re-uploading means "new version of this
+    // note"); a browser drop must not, so it takes the next free " (n)".
+    const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "notes.pdf", "a completely different document");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    var p = try std.json.parseFromSlice(UploadedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
+    defer p.deinit();
+    try std.testing.expectEqualStrings("notes (2).pdf", p.value.name);
+    try std.testing.expect(try std.fmt.parseInt(u64, p.value.id, 10) != first);
+
+    // The occupant is untouched — same row, same name, same bytes.
+    {
+        const kept = (try f.files.get(admin, first)).?;
+        defer gpa.free(kept.name);
+        defer if (kept.md5) |m| gpa.free(m);
+        try std.testing.expectEqualStrings("notes.pdf", kept.name);
+        try std.testing.expectEqualStrings(&blobstore.md5HexOf("the occupant's bytes"), kept.md5.?);
+    }
+    // A third drop of the same name climbs to " (3)".
+    {
+        const third = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "notes.pdf", "yet another document");
+        try std.testing.expectEqual(@as(u16, 200), third.status);
+        var q = try std.json.parseFromSlice(UploadedBody, gpa, third.body, .{ .ignore_unknown_fields = true });
+        defer q.deinit();
+        try std.testing.expectEqualStrings("notes (3).pdf", q.value.name);
+    }
+}
+
+test "web upload: an over-quota file is 413 and leaves the tree and the charge alone" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    // A tiny allotment: 8 bytes total.
+    {
+        var s = try f.db.prepare("INSERT OR REPLACE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 8);");
+        defer s.finalize();
+        s.bindInt(1, @intCast(admin));
+        _ = try s.step();
+    }
+
+    const v0 = try f.files.syncVersion(admin);
+    const bytes = "far more than eight bytes of PDF";
+    const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "big.pdf", bytes);
+    try std.testing.expectEqual(@as(u16, 413), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "QUOTA_EXCEEDED") != null);
+
+    // Nothing linked, nothing charged, nothing bumped — and the rejected blob was
+    // dropped rather than left on disk.
+    try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, admin));
+    try std.testing.expectEqual(v0, try f.files.syncVersion(admin));
+    try std.testing.expect(!f.files.blobs.has(&blobstore.md5HexOf(bytes)));
+    {
+        const resp2 = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/tree", &web, "");
+        try std.testing.expect(std.mem.indexOf(u8, resp2.body, "big.pdf") == null);
+    }
+}
+
+test "web upload: an off-list extension is 415 and an unsafe filename is 400, both before a byte is stored" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    const bytes = "payload the server must never store";
+    const md5 = blobstore.md5HexOf(bytes);
+
+    // 415: outside the accept-list. `.exe`, `.svg` (a script vector the browser
+    // face deliberately never inlines), and an extensionless name.
+    for ([_][]const u8{ "trojan.exe", "vector.svg", "README" }) |name| {
+        const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", name, bytes);
+        try std.testing.expectEqual(@as(u16, 415), resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "UNSUPPORTED_TYPE") != null);
+    }
+    // A bare extension is all suffix and no stem: a dotfile, not a PDF.
+    {
+        const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", ".pdf", bytes);
+        try std.testing.expectEqual(@as(u16, 415), resp.status);
+    }
+
+    // 400: the name cannot be a tree path component. The multipart parser has
+    // already stripped any directory prefix, so `../../etc/x.pdf` arrives as
+    // `x.pdf` and is FINE — these are the ones that survive that reduction.
+    for ([_][]const u8{ "", "..", "..pdf", "a\x00b.pdf", "line\nbreak.pdf", "\xff\xfe.pdf" }) |name| {
+        const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", name, bytes);
+        try std.testing.expectEqual(@as(u16, 400), resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "INVALID_NAME") != null);
+    }
+
+    // Not one of them reached the store or the tree.
+    try std.testing.expect(!f.files.blobs.has(&md5));
+    try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, admin));
+
+    // A traversal attempt is NEUTRALIZED, not refused: the part header's
+    // directory prefix is stripped, so the file lands under its basename at the
+    // destination and nothing escapes anywhere.
+    {
+        const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "../../../etc/passwd.txt", "innocent");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(UploadedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expectEqualStrings("passwd.txt", p.value.name);
+        const e = (try f.files.get(admin, try std.fmt.parseInt(u64, p.value.id, 10))).?;
+        defer gpa.free(e.name);
+        defer if (e.md5) |m| gpa.free(m);
+        try std.testing.expect(e.parent_id == null);
+    }
+
+    // Every accepted extension IS accepted, case-insensitively — the accept-list
+    // is the feature, so pin it rather than trusting one representative.
+    const accepted = [_][]const u8{
+        "a.note", "b.SPD",  "c.pdf",  "d.EPUB", "e.doc",  "f.docx",
+        "g.txt",  "h.PNG",  "i.jpg",  "j.jpeg", "k.webp", "l.cbz",
+        "m.fb2",  "n.xps",  "o.mobi", "p.azw",  "q.AZW3",
+    };
+    for (accepted, 0..) |name, i| {
+        // Distinct content per file so each is its own blob (dedup would still
+        // pass, but a distinct blob proves the link actually happened).
+        var pbuf: [64]u8 = undefined;
+        const payload = try std.fmt.bufPrint(&pbuf, "accepted payload number {d}", .{i});
+        const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", name, payload);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+    }
+}
+
+test "web upload: a missing, foreign, non-folder or trashed destination is one indistinguishable 404" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const bob = (try f.svc.createUser(admin, "bob", false)).id;
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+    var dbuf: [24]u8 = undefined;
+
+    const bobs_dir = try f.files.createFolder(bob, null, "BobsPapers");
+    defer gpa.free(bobs_dir.name);
+    const a_file = try putSeed(f, admin, null, "not-a-folder.pdf", "just a file");
+    const trashed = try f.files.createFolder(admin, null, "Doomed");
+    defer gpa.free(trashed.name);
+    try f.files.trash(admin, trashed.id);
+
+    const cases = [_]u64{ 999999, bobs_dir.id, a_file, trashed.id };
+    for (cases) |dest| {
+        const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, try destOf(&dbuf, dest), "drop.pdf", "bytes");
+        try std.testing.expectEqual(@as(u16, 404), resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "NOT_FOUND") != null);
+    }
+
+    // A stranger's folder is not an upload destination even by accident.
+    try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, bob));
+}
+
+test "web upload: requires a control-plane session" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    _ = try f.svc.bootstrapAdmin("admin", "admtemp00");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    const resp = try uploadFile(ctx, &obuf, &reqbuf, "0" ** 32, "root", "sneaky.pdf", "bytes");
+    try std.testing.expectEqual(@as(u16, 401), resp.status);
+}
+
+// ---- web upload: the ?onConflict= choice --------------------------------------
+
+/// One `versions` row of the history endpoint, for the supersede assertions.
+const UploadHistVersion = struct { md5: []const u8, size: i64, current: bool = false };
+
+test "web upload onConflict=replace: supersedes the same-named file, keeps the row id, and the old bytes stay a restorable version" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+    var pbuf: [128]u8 = undefined;
+
+    const v1 = "the first draft of the paper";
+    const v2 = "the SECOND draft, materially different";
+    const v1md5 = blobstore.md5HexOf(v1);
+    const v2md5 = blobstore.md5HexOf(v2);
+
+    const id = try putSeed(f, admin, null, "paper.pdf", v1);
+
+    // Replace: same name, same row, new content.
+    {
+        const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "paper.pdf", v2, "?onConflict=replace");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(UploadedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expectEqualStrings("paper.pdf", p.value.name); // no " (2)"
+        try std.testing.expectEqual(id, try std.fmt.parseInt(u64, p.value.id, 10)); // the SAME row
+        try std.testing.expectEqualStrings(&v2md5, p.value.fileHash.?);
+    }
+    try std.testing.expectEqualSlices(u8, &v2md5, &(try currentFileMd5(f, id)));
+
+    // Exactly one row of that name — a replace adds none.
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try countRows(f, "SELECT COUNT(*) FROM files WHERE name = 'paper.pdf' AND deleted = 0;"),
+    );
+
+    // The superseded bytes are a RETAINED version, not a deletion — which is the
+    // whole reason `replace` can be offered at all.
+    try std.testing.expectEqualSlices(u8, &v1md5, &(try soleHistoryMd5(f, id)));
+    {
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history", .{id});
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(
+            struct { id: []const u8, versions: []UploadHistVersion },
+            gpa,
+            resp.body,
+            .{ .ignore_unknown_fields = true },
+        );
+        defer p.deinit();
+        try std.testing.expectEqual(@as(usize, 2), p.value.versions.len);
+        try std.testing.expect(p.value.versions[0].current);
+        try std.testing.expectEqualStrings(&v2md5, p.value.versions[0].md5);
+        try std.testing.expect(!p.value.versions[1].current);
+        try std.testing.expectEqualStrings(&v1md5, p.value.versions[1].md5);
+    }
+    // And it is restorable through the ordinary version-history route.
+    {
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/restore", .{ id, v1md5 });
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", path, &web, "{}");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+    }
+    try std.testing.expectEqualSlices(u8, &v1md5, &(try currentFileMd5(f, id)));
+}
+
+test "web upload onConflict=replace: with nothing of that name it is just a create" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    const bytes = "nothing to supersede";
+    const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "fresh.pdf", bytes, "?onConflict=replace");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    var p = try std.json.parseFromSlice(UploadedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
+    defer p.deinit();
+    try std.testing.expectEqualStrings("fresh.pdf", p.value.name);
+
+    const id = try std.fmt.parseInt(u64, p.value.id, 10);
+    try std.testing.expectEqualSlices(u8, &blobstore.md5HexOf(bytes), &(try currentFileMd5(f, id)));
+    try std.testing.expectEqual(@as(i64, @intCast(bytes.len)), try usedBytes(f, admin));
+    // A create supersedes nothing, so it writes no version row.
+    try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM file_history;"));
+}
+
+test "web upload: the DEFAULT and an unrecognised onConflict both auto-rename — an old or confused client can never overwrite" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    const occupant = "the file already there";
+    const id = try putSeed(f, admin, null, "notes.pdf", occupant);
+
+    // The parameter absent entirely (what a client built before this shipped
+    // sends), then a set of values that are not `replace`.
+    const queries = [_][]const u8{
+        "",
+        "?onConflict=",
+        "?onConflict=Rename",
+        "?onConflict=overwrite",
+        "?onConflict=replace%20", // not a literal match, so not a replace
+        "?other=replace",
+    };
+    var expected_suffix: usize = 2;
+    for (queries) |q| {
+        const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "notes.pdf", "a different document", q);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(UploadedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        var want: [32]u8 = undefined;
+        try std.testing.expectEqualStrings(
+            try std.fmt.bufPrint(&want, "notes ({d}).pdf", .{expected_suffix}),
+            p.value.name,
+        );
+        expected_suffix += 1;
+    }
+
+    // Through every one of them the occupant kept its name, its bytes and its
+    // history — nothing was superseded.
+    {
+        const kept = (try f.files.get(admin, id)).?;
+        defer gpa.free(kept.name);
+        defer if (kept.md5) |m| gpa.free(m);
+        try std.testing.expectEqualStrings("notes.pdf", kept.name);
+        try std.testing.expectEqualStrings(&blobstore.md5HexOf(occupant), kept.md5.?);
+    }
+    try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM file_history;"));
+}
+
+test "web upload onConflict=replace: a FOLDER holding the name is still 409, and the folder survives" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    // A folder whose name reads like a file. A file may supersede a FILE; it may
+    // never supersede a folder, under either mode.
+    const dir = try f.files.createFolder(admin, null, "archive.pdf");
+    defer gpa.free(dir.name);
+
+    const bytes = "trying to become a folder";
+    const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "archive.pdf", bytes, "?onConflict=replace");
+    try std.testing.expectEqual(@as(u16, 409), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "NAME_TAKEN") != null);
+
+    // The folder is untouched, nothing was charged, and the rejected blob left
+    // no orphan behind.
+    {
+        const kept = (try f.files.get(admin, dir.id)).?;
+        defer gpa.free(kept.name);
+        defer if (kept.md5) |m| gpa.free(m);
+        try std.testing.expect(kept.is_folder);
+        try std.testing.expectEqualStrings("archive.pdf", kept.name);
+    }
+    try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, admin));
+    try std.testing.expect(!f.files.blobs.has(&blobstore.md5HexOf(bytes)));
+
+    // Under the default mode the same drop lands beside the folder instead.
+    {
+        const ok = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "archive.pdf", bytes);
+        try std.testing.expectEqual(@as(u16, 200), ok.status);
+        var p = try std.json.parseFromSlice(UploadedBody, gpa, ok.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expectEqualStrings("archive (2).pdf", p.value.name);
+    }
+}
+
+test "web upload onConflict=replace: quota releases the old charge only when nothing live still holds the blob" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    // `old` is deliberately a different length from `new` so the arithmetic is
+    // visible rather than coincidentally balanced.
+    const old_bytes = "old bytes";
+    const new_bytes = "the replacement bytes, rather longer than the old";
+    const old_len: i64 = @intCast(old_bytes.len);
+    const new_len: i64 = @intCast(new_bytes.len);
+
+    // --- case 1: this row is the user's ONLY holder of the old blob. ---
+    const solo = try putSeed(f, admin, null, "solo.pdf", old_bytes);
+    try std.testing.expectEqual(old_len, try usedBytes(f, admin));
+    {
+        const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "solo.pdf", new_bytes, "?onConflict=replace");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+    }
+    // The old charge is released even though a retained version keeps the bytes
+    // on disk: `used_bytes` measures LIVE files, and the superseded version is
+    // not one. The blob itself is still there — that is what makes it restorable.
+    try std.testing.expectEqual(new_len, try usedBytes(f, admin));
+    try std.testing.expect(f.files.blobs.has(&blobstore.md5HexOf(old_bytes)));
+    try std.testing.expectEqualSlices(u8, &blobstore.md5HexOf(old_bytes), &(try soleHistoryMd5(f, solo)));
+
+    // --- case 2: a SECOND live file still holds the old content. ---
+    // Two rows on one blob cost one charge; replacing one of them must NOT
+    // release it, because the other still occupies those bytes.
+    const shared_a = try putSeed(f, admin, null, "shared-a.pdf", old_bytes);
+    _ = try putSeed(f, admin, null, "shared-b.pdf", old_bytes);
+    _ = shared_a;
+    const before = try usedBytes(f, admin);
+    try std.testing.expectEqual(new_len + old_len, before); // the pair added ONE charge
+    {
+        const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "shared-a.pdf", "third distinct payload", "?onConflict=replace");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+    }
+    // Only the NEW blob's charge was added; the old one stayed, held by shared-b.
+    try std.testing.expectEqual(before + @as(i64, "third distinct payload".len), try usedBytes(f, admin));
+}
+
+test "web upload onConflict=replace: re-uploading identical bytes is a no-op, not a spurious version" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    const bytes = "unchanged content";
+    const id = try putSeed(f, admin, null, "same.pdf", bytes);
+    const charged = try usedBytes(f, admin);
+
+    const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "same.pdf", bytes, "?onConflict=replace");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    var p = try std.json.parseFromSlice(UploadedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
+    defer p.deinit();
+    try std.testing.expectEqual(id, try std.fmt.parseInt(u64, p.value.id, 10));
+
+    // Same content ⇒ nothing superseded: no history row, no extra charge, one row.
+    try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM file_history;"));
+    try std.testing.expectEqual(charged, try usedBytes(f, admin));
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try countRows(f, "SELECT COUNT(*) FROM files WHERE name = 'same.pdf' AND deleted = 0;"),
+    );
 }
 
 /// A minimal PNG whose IHDR carries 320×240 — dims the ingest-side sniff can

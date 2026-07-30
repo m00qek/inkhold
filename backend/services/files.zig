@@ -915,6 +915,35 @@ pub const Files = struct {
         };
     }
 
+    /// Links an ALREADY-STORED blob into `parent_id` as a NEW file, never over an
+    /// existing one — the web upload's tree-link. It is `linkBlob` (the ONE
+    /// tree-link path, shared with the device's `upload/finish`) with a single
+    /// thing added in front: name resolution.
+    ///
+    /// That one difference is the whole reason this exists. `linkBlob` REPLACES a
+    /// live file of the same name, which is right for the device — a Nomad
+    /// re-uploading `BuJo.note` means "here is the new version of that note", and
+    /// replacing is what keeps version history on one row. It is wrong for a
+    /// browser drop: the file arriving is a DIFFERENT file that merely shares a
+    /// name, and overwriting the user's existing one would be silently lossy. So a
+    /// collision takes the next free ` (n)` suffix (`freeName`, the same scheme
+    /// `move`/`copy`/`restore` use) and both files survive.
+    ///
+    /// Errors are `linkBlob`'s: `QuotaExceeded`, `NotAFolder` (bad destination),
+    /// and `NameConflict` only when a FOLDER holds the resolved name (`freeName`
+    /// resolves against live children of either kind, so this is unreachable in
+    /// practice — it stays as the honest error rather than a silent overwrite).
+    /// Returns the created entry; the caller frees `.name` / `.md5`.
+    pub fn placeUpload(self: Files, user_id: u64, parent_id: ?u64, name: []const u8, md5: []const u8, size: u64) !Entry {
+        // Fail a bad destination before spending a name on it (`linkBlob` checks
+        // this too — this only moves the error ahead of the `freeName` scan).
+        try self.assertFolder(user_id, parent_id);
+
+        const final = try self.freeName(user_id, parent_id, name);
+        defer self.gpa.free(final);
+        return self.linkBlob(user_id, parent_id, final, md5, size);
+    }
+
     /// Moves and/or renames a live entry (scoped to `user_id`): reparents it to
     /// `new_parent_id` (null = root) under `new_name`, in ONE transaction.
     ///

@@ -70,6 +70,62 @@ export class NameTakenError extends ApiError {
   }
 }
 
+/**
+ * Which of the three refusals an upload got. Data, not prose: the WORDS belong to
+ * the interface (`ui/uploadZone.ts` phrases each one, naming the file and the
+ * extension), and the same three reasons are produced by the CLIENT-SIDE
+ * pre-flight — so a file refused before it was sent and one refused by the server
+ * are described in identical language.
+ */
+export type UploadRefusal =
+  /** 413 — the file would take the account over its quota. */
+  | "quota"
+  /** 415 — the extension is outside the accept list; the device could not open it. */
+  | "type"
+  /** 400 — an empty or unusable filename. */
+  | "name";
+
+/**
+ * What to do when the destination already holds a file of this name.
+ *
+ * BOTH ANSWERS ARE SAFE, and that is what makes offering the choice reasonable
+ * rather than dangerous: a `replace` supersedes the occupant through the same
+ * path a device re-uploading an edited note takes, so the displaced blob is
+ * retained in `file_history` and restorable from the version-history UI that
+ * already ships. Nothing is destroyed either way.
+ *
+ * `rename` is the DEFAULT, and the only mode a caller may send without having
+ * asked: it invents a free name (`notes (2).pdf`) and leaves the occupant
+ * untouched. `replace` is sent ONLY when the user chose it — the interface
+ * detects the clash before transferring and asks.
+ */
+export type UploadConflictMode = "rename" | "replace";
+
+/**
+ * An upload the server would not accept, by reason (see {@link UploadRefusal}).
+ *
+ * A distinct SUBCLASS for the same reason `NameTakenError` is one: the upload
+ * queue catches it by TYPE and turns it into a per-row line, while
+ * `dispatchApiFailure` still sees an `ApiError` and correctly finds nothing
+ * actionable in it — a rejected file is not a dead session.
+ *
+ * NOT RETRYABLE and never auto-retried: all three are facts about the file, so
+ * sending the same bytes again would be refused the same way.
+ */
+export class UploadRefusedError extends ApiError {
+  constructor(
+    readonly reason: UploadRefusal,
+    status: number,
+  ) {
+    super(
+      reason === "quota" ? "QUOTA_EXCEEDED" : reason === "type" ? "UNSUPPORTED_TYPE" : "INVALID_NAME",
+      "That file wasn't accepted.",
+      status,
+    );
+    this.name = "UploadRefusedError";
+  }
+}
+
 /** Raised on HTTP 429. `retryAfterSeconds` comes from the `Retry-After` header. */
 export class RateLimitError extends ApiError {
   constructor(readonly retryAfterSeconds: number | null) {
@@ -114,6 +170,26 @@ const MUTATION_TIMEOUT_MS = 30_000;
  * need. Until then this is a backstop against the infinite case only.
  */
 const BYTES_TIMEOUT_MS = 300_000;
+
+/**
+ * An upload is the one place a TOTAL budget is actively wrong. A 200 MB PDF over
+ * household wifi to a Pi can legitimately take longer than any cap worth setting,
+ * and killing it at the cap punishes it for succeeding slowly — the exact failure
+ * `BYTES_TIMEOUT_MS` exists to avoid, which a total cap on a big upload
+ * reintroduces. So an upload is bounded by SILENCE instead: `upload.onprogress`
+ * reports bytes as they leave, and only a gap with no bytes at all is a stall.
+ *
+ * Slow is fine, however slow. Stopped is not.
+ */
+const UPLOAD_STALL_MS = 30_000;
+
+/**
+ * Once the last byte is sent, progress events stop by definition — the server is
+ * now hashing and linking, and the stall timer would fire on a perfectly healthy
+ * request. So the budget switches at that moment from "bytes must keep moving" to
+ * this plain cap on the ANSWER.
+ */
+const UPLOAD_RESPONSE_MS = 60_000;
 
 const TIMEOUT_MESSAGE = "The server is taking too long to answer. Check your connection and try again.";
 /** A mutation that timed out MAY HAVE APPLIED. Never say it failed. */
@@ -1605,6 +1681,145 @@ export function createHttpApi(): Api {
         if (e instanceof ApiError && e.status === 409) throw new NameTakenError();
         throw e;
       }
+    },
+
+    // --- UPLOAD (control-plane) ---
+    upload(
+      folderId: Id | null,
+      file: File,
+      onProgress?: (fraction: number) => void,
+      signal?: AbortSignal,
+      onConflict: UploadConflictMode = "rename",
+    ): Promise<Entry> {
+      // `XMLHttpRequest`, AND THIS IS THE ONE PLACE IT IS RIGHT. Every other call
+      // on this seam is `fetch`; this one needs bytes SENT, and `xhr.upload`'s
+      // progress events are the only portable source of them — a `fetch` request
+      // body cannot be observed (ui-on-slow-connection.md §2.1). The consequence
+      // is that the envelope/status handling `request()` owns has to be restated
+      // below; it is kept deliberately parallel to it, statuses in the same order.
+      return new Promise<Entry>((resolve, reject) => {
+        const form = new FormData();
+        // ONE part, named `file`, with the filename in the part header — the whole
+        // of the body contract. The server reads the name from there, sanitizes it
+        // and answers 400 if nothing usable survives.
+        form.append("file", file, file.name);
+
+        const xhr = new XMLHttpRequest();
+        // `root` for the library root: a folder id is an opaque server string, so
+        // a sentinel in the PATH is what keeps "no folder" addressable without a
+        // second route. `onConflict` rides as a query parameter because it
+        // modifies how the body is APPLIED rather than being part of it — and the
+        // server defaults it to `rename`, so an old client and a new one differ
+        // only in what they can ask for.
+        const query = onConflict === "rename" ? "" : `?onConflict=${encodeURIComponent(onConflict)}`;
+        xhr.open("POST", `/api/controlplane/folder/${encodeURIComponent(folderId ?? "root")}/upload${query}`);
+        xhr.withCredentials = true; // same-origin already sends the cookie; explicit anyway
+        xhr.responseType = "text";
+        // NO `xhr.timeout`: that is a TOTAL cap, and a total cap is what makes a
+        // big upload fail for being big. The budget is silence — see
+        // `UPLOAD_STALL_MS`.
+        let stalled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const disarm = (): void => {
+          if (timer !== undefined) clearTimeout(timer);
+          timer = undefined;
+        };
+        /** (Re)start the countdown. Every byte that leaves buys another full one. */
+        const arm = (ms: number): void => {
+          disarm();
+          timer = setTimeout(() => {
+            stalled = true;
+            xhr.abort(); // surfaces through `onabort`, which reads `stalled`
+          }, ms);
+        };
+
+        // Cancel means STOP SENDING, not "stop looking": an abandoned upload that
+        // ran to completion would still have created the file.
+        const onAbort = (): void => xhr.abort();
+        signal?.addEventListener("abort", onAbort);
+        const cleanup = (): void => {
+          disarm();
+          signal?.removeEventListener("abort", onAbort);
+        };
+
+        // ALWAYS bound, whether or not the caller wants a progress bar: this
+        // handler is the liveness signal, and reporting progress is the extra.
+        xhr.upload.onprogress = (e: ProgressEvent): void => {
+          arm(UPLOAD_STALL_MS); // bytes moved — the clock starts over
+          // `lengthComputable` is false until the browser knows the body size;
+          // reporting a fraction of an unknown total would draw a bar that means
+          // nothing, so those events are simply not passed on.
+          if (onProgress && e.lengthComputable && e.total > 0) onProgress(Math.min(1, e.loaded / e.total));
+        };
+        // The last byte is gone; the server is hashing and linking, and no further
+        // progress event will ever arrive. Swap the stall budget for a plain one
+        // on the answer, or a healthy request would be aborted mid-commit.
+        xhr.upload.onload = (): void => arm(UPLOAD_RESPONSE_MS);
+
+        xhr.onerror = (): void => {
+          cleanup();
+          reject(new ApiError("NETWORK", "Can't reach the server. Check your connection and try again.", 0));
+        };
+        xhr.ontimeout = (): void => {
+          cleanup();
+          // A MUTATION that ran out of time is AMBIGUOUS — the file may well have
+          // landed — so the message says we do not know, and nothing retries.
+          reject(new ApiError("TIMEOUT", TIMEOUT_AMBIGUOUS, 0));
+        };
+        xhr.onabort = (): void => {
+          cleanup();
+          // A stall aborts the same way a user does, so the reason has to be
+          // carried out of band — otherwise a dead link reads as "you cancelled".
+          if (stalled) return reject(new ApiError("TIMEOUT", TIMEOUT_AMBIGUOUS, 0));
+          reject(new ApiError("CANCELLED", "Upload cancelled.", 0));
+        };
+        xhr.onload = (): void => {
+          cleanup();
+          const status = xhr.status;
+          // The three refusals, mapped HERE at the seam so the rule for "which
+          // status means which refusal" lives with the other status mappings and
+          // no view re-derives it.
+          if (status === 413) return reject(new UploadRefusedError("quota", 413));
+          if (status === 415) return reject(new UploadRefusedError("type", 415));
+          if (status === 400) return reject(new UploadRefusedError("name", 400));
+          // The destination is gone, foreign or trashed — deliberately one
+          // answer. NOT routed through `statusError`, which reads a 404 as a
+          // stale `?v=` (`STALE_PAGE`) and would have the shell refetch a
+          // listing to chase page hashes that were never the problem.
+          if (status === 404) {
+            return reject(new ApiError("NOT_FOUND", "That folder isn't there any more.", 404));
+          }
+          const known = statusError(status);
+          if (known) return reject(known);
+          let body: (Entry & Envelope) | null = null;
+          try {
+            body = JSON.parse(xhr.responseText) as Entry & Envelope;
+          } catch {
+            body = null;
+          }
+          if (body && (body as Envelope).success === false) {
+            const env = body as Envelope;
+            return reject(new ApiError(env.errorCode ?? "ERROR", env.errorMsg ?? "Something went wrong.", status));
+          }
+          if (status < 200 || status >= 300 || body === null) {
+            return reject(new ApiError("SERVER", "The server returned an unexpected response.", status));
+          }
+          // A raw `EntryVO`, the same shape `rename` answers with, so the row the
+          // caller splices into the listing is the row a `listFolder` would have
+          // produced.
+          resolve(normalizeEntry(body));
+        };
+
+        // Aborting BEFORE send would leave the request in a state `send` throws
+        // on, so a caller that arrives already-cancelled is answered directly.
+        if (signal?.aborted) {
+          cleanup();
+          reject(new ApiError("CANCELLED", "Upload cancelled.", 0));
+          return;
+        }
+        arm(UPLOAD_STALL_MS); // a connection that never sends a single byte still ends
+        xhr.send(form);
+      });
     },
   };
 }

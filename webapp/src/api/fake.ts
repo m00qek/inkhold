@@ -13,7 +13,7 @@ import { createBinFake, BIN_SEED_NOTES } from "./binFake";
 // dev and e2e. Shared with binFake (a trashed note keeps its layers, as the
 // real blob-keyed index does) — see that module's header.
 import { LAYERED_NOTE_ID, layeredPagePayload, withLayeredPageLayers } from "./layeredFixture";
-import { canPreviewHistory } from "../core/fileKind";
+import { canPreviewHistory, isAcceptedUpload, nextAvailableName, uploadExtension } from "../core/fileKind";
 import type {
   Coverage,
   Entry,
@@ -726,6 +726,42 @@ function fakeWords(text: string): WordBox[] {
 function fakeSize(id: Id, pageCount: number): number {
   return 40_000 + pageCount * 90_000 + (id.length % 7) * 1_337;
 }
+
+// --- the upload fixture (docs/scratch/upload.md) ------------------------------
+
+/**
+ * How much room the fixture account has left. A file bigger than this is refused
+ * with the real 413 (`UploadRefusedError("quota")`).
+ *
+ * EXPORTED, because it is a test input rather than a decoration: the over-quota
+ * path is one the interface has to phrase, and a test that wants it should not
+ * have to guess a magic size. 8 MB is comfortably above every plausible fixture
+ * upload and comfortably below a "large PDF", so both sides of the line are easy
+ * to land on deliberately.
+ *
+ * The CLIENT-side pre-flight normally refuses an over-quota file before any of
+ * this runs (it reads the account's real usage); this is the server's own
+ * backstop, which exists because the browser's copy of "space left" is always a
+ * little stale.
+ */
+export const FAKE_UPLOAD_HEADROOM = 8 * 1024 * 1024;
+
+/**
+ * How many progress steps a file of `size` bytes is sent in — 4 for anything
+ * small, up to 24 for a few megabytes.
+ *
+ * SCALED BY SIZE ON PURPOSE. A fake that reported one instant 100% would make the
+ * progress bar and Cancel unobservable in dev and untestable in e2e, which are
+ * exactly the two things this feature's UI is made of. Each step costs one
+ * `latency` tick, so a big file takes proportionally longer to send — the same
+ * relationship the real transfer has.
+ */
+function uploadSteps(size: number): number {
+  return Math.max(4, Math.min(24, Math.ceil(size / 65_536)));
+}
+
+/** Ids for uploaded files: `up-1`, `up-2`, … — never a fixture id. */
+let uploadSeq = 0;
 
 const DAY = 86_400_000;
 const NOW = 1_752_800_000_000; // fixed epoch ms — no Date.now(), keeps fixtures deterministic
@@ -1444,6 +1480,80 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
         return { ...entry };
       }
       throw new Error(`no such entry: ${id}`);
+    },
+
+    // --- UPLOAD (control-plane) ---
+    //
+    // The web → cloud half of docs/scratch/upload.md, fixture-side. It MUTATES
+    // the fixture tree — the uploaded file appears in `CHILDREN[dest]` and in
+    // `ALL_NOTES` — so the row the gallery reconciles is the row a later
+    // `listFolder` returns, exactly as the real endpoint behaves.
+    //
+    // IT ENFORCES THE REFUSALS, and that is the point of it rather than an
+    // afterthought: the accept list (415) and a quota ceiling (413) are the two
+    // paths the UI has to phrase, and without them here they would be unreachable
+    // until the server existed. `UploadRefusedError` is imported dynamically for
+    // the same reason the admin fake imports `ApiError` that way.
+    //
+    // PROGRESS IS REPORTED IN STEPS, scaled by size (see `uploadSteps`), so a
+    // big file genuinely takes longer than a small one — which is what makes the
+    // progress bar, and Cancel, observable in dev and deterministic in e2e.
+    async upload(
+      folderId: Id | null,
+      file: File,
+      onProgress?: (fraction: number) => void,
+      signal?: AbortSignal,
+      onConflict: "rename" | "replace" = "rename",
+    ): Promise<Entry> {
+      const { UploadRefusedError, ApiError } = await import("./client");
+      const destKey = folderId === null ? "root" : String(folderId);
+      const siblings = CHILDREN[destKey];
+      // Missing, foreign and trashed are one indistinguishable answer, here as
+      // on the real route.
+      if (!siblings) throw new ApiError("NOT_FOUND", "That folder isn't there any more.", 404);
+
+      const name = file.name.trim();
+      if (name === "" || name.includes("/") || name === "." || name === "..") {
+        throw new UploadRefusedError("name", 400);
+      }
+      if (!isAcceptedUpload(name)) throw new UploadRefusedError("type", 415);
+      if (file.size > FAKE_UPLOAD_HEADROOM) throw new UploadRefusedError("quota", 413);
+
+      const steps = uploadSteps(file.size);
+      for (let i = 1; i <= steps; i++) {
+        await delay(latency);
+        // Checked BETWEEN steps, so a cancel lands mid-transfer the way an
+        // `xhr.abort()` does rather than after the whole thing completed.
+        if (signal?.aborted) throw new ApiError("CANCELLED", "Upload cancelled.", 0);
+        onProgress?.(i / steps);
+      }
+
+      // REPLACE SUPERSEDES IN PLACE, and the id is the whole point: the file
+      // keeps its identity, so every link to it still resolves and the displaced
+      // blob becomes a retained VERSION of it — the same path the device takes
+      // when it re-uploads a note it has edited. The fixture cannot really keep
+      // a blob, so it models the part the UI can see: one row, same id, new
+      // timestamp. Nothing is added, and nothing is lost.
+      const occupant =
+        onConflict === "replace"
+          ? siblings.find((e): e is NoteSummary => e.kind === "note" && e.name === name)
+          : undefined;
+      if (occupant) {
+        occupant.updatedAt = Date.now();
+        return { ...occupant };
+      }
+      // Otherwise the default: invent a free name and leave the occupant alone.
+      // Through the SAME helper the conflict prompt previews the name with, so
+      // what the dialog promised is what the tree gets.
+      const final = nextAvailableName(
+        name,
+        siblings.map((e) => e.name),
+      );
+      const id = `up-${String(++uploadSeq)}` as Id;
+      const entry = note(id, final, 1, Date.now(), { fileType: uploadExtension(final) || "note" });
+      siblings.push(entry);
+      ALL_NOTES[String(id)] = entry;
+      return { ...entry };
     },
 
     // --- WRITES (append-only, at your own marker — see `types.ts`) ---

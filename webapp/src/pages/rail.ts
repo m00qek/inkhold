@@ -55,6 +55,20 @@ export interface Category {
    * folder simply has not been created on the device yet.
    */
   pending: string;
+  /**
+   * This category's folder is where the DEVICE reads page TEMPLATES from — true
+   * for exactly one anchor, `NOTE/MyStyle`.
+   *
+   * A CAPABILITY STATED AS DATA, beside the rest of the category, rather than a
+   * name test at the call site. It is the one meaningful placement rule the
+   * device has (docs/scratch/upload.md §4): an image or PDF is usable as a
+   * template only if it sits here, which turns dropping one in from a generic
+   * upload into "add a template" — different dropzone copy, a different toast.
+   * Callers ask {@link RailController.categoryFor} and read this flag, so
+   * "which folder IS MyStyle" stays the one identity resolution this module
+   * already owns and never becomes a string comparison somewhere else.
+   */
+  templates?: boolean;
 }
 
 /**
@@ -68,7 +82,7 @@ export interface Category {
 export const CATEGORIES: Category[] = [
   { label: "Note", icon: "note", path: ["NOTE", "Note"], pending: "Notebooks you write on the device will appear here after a sync." },
   { label: "Document", icon: "doc", path: ["DOCUMENT", "Document"], pending: "PDFs and documents you open on the device will appear here after a sync." },
-  { label: "MyStyle", icon: "layers", path: ["NOTE", "MyStyle"], pending: "Templates you save on the device will appear here after a sync." },
+  { label: "MyStyle", icon: "layers", path: ["NOTE", "MyStyle"], pending: "Templates you save on the device will appear here after a sync.", templates: true },
   { label: "Export", icon: "export", path: ["EXPORT"], pending: "Nothing has been exported on the device yet. Exports will appear here after a sync." },
   { label: "Screenshot", icon: "image", path: ["SCREENSHOT"], pending: "Screenshots you take on the device will appear here after a sync." },
   { label: "Inbox", icon: "inbox", path: ["INBOX"], pending: "Files sent to the device's inbox will appear here after a sync." },
@@ -432,6 +446,19 @@ export interface RailController {
    */
   categoryIconFor(folder: { id: Id }): IconName | null;
   /**
+   * WHICH category a folder is, or null — the full answer
+   * {@link RailController.categoryIconFor} returns only the glyph of, resolved by
+   * the same identity match and covering the same pending stand-ins.
+   *
+   * Exists because a caller can need more of the category than its icon: the
+   * upload dropzone asks whether the destination is the TEMPLATE folder
+   * ({@link Category.templates}), which decides both its copy and the toast. That
+   * question has to be answered by this module — a folder merely NAMED `MyStyle`
+   * is not the anchor, and name-matching it elsewhere would be a second, wrong
+   * copy of a resolution that lives here.
+   */
+  categoryFor(folder: { id: Id }): Category | null;
+  /**
    * The tree walk finished. Drops `aria-busy`, rebuilds, and settles a category
    * that was selected while still unresolved.
    *
@@ -552,6 +579,23 @@ export function createRail(deps: RailDeps): RailController {
    */
   function itemsIn(folder: Folder | undefined): number {
     return folder?.itemCount ?? 0;
+  }
+
+  /**
+   * WHICH category a folder is, or null — the ONE identity resolution behind
+   * `categoryFor`, `categoryIconFor` and everything downstream of them.
+   *
+   * A pending stand-in still IS its category (see `pendingCategoryFolder`); a
+   * real folder is one only if a category path resolves to that exact id, so a
+   * user's own folder named `Note` is never caught.
+   */
+  function categoryOf(folder: { id: Id }): Category | null {
+    const pending = categoryForPendingId(folder.id);
+    if (pending) return pending;
+    for (const cat of CATEGORIES) {
+      if (resolveCategory(cat.path)?.id === folder.id) return cat;
+    }
+    return null;
   }
 
   /** The folder each category currently resolves to, as a set of ids. */
@@ -800,18 +844,13 @@ export function createRail(deps: RailDeps): RailController {
       return folder.name;
     },
 
+    categoryFor: categoryOf,
+
+    // The glyph half of the answer above, and deliberately derived from it: two
+    // independent walks over CATEGORIES could disagree about which folder is a
+    // category, and every surface that styles one reads this.
     categoryIconFor(folder) {
-      // An anchor with no folder yet is still the category, and must paint the
-      // category tile — otherwise it would arrive as a plain folder and RESTYLE
-      // itself when the walk lands, which is the flicker this all removes.
-      const pending = categoryForPendingId(folder.id);
-      if (pending) return pending.icon;
-      // Identity, not name — the same match `labelFor` makes: only the resolved
-      // anchor is the category, so a user's own `Note` folder gets nothing.
-      for (const cat of CATEGORIES) {
-        if (resolveCategory(cat.path)?.id === folder.id) return cat.icon;
-      }
-      return null;
+      return categoryOf(folder)?.icon ?? null;
     },
     treeWalked(changed = true): void {
       treeLoaded = true;

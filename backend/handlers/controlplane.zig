@@ -9,6 +9,7 @@ const json = @import("../http/json.zig");
 const reply = @import("../http/reply.zig");
 const controlplane = @import("../services/controlplane.zig");
 const eventstreams = @import("../http/event_streams.zig");
+const multipart = @import("../http/multipart.zig");
 const notesearch = @import("../services/search/query.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbnailmod = @import("../services/thumbnail.zig");
@@ -368,6 +369,242 @@ pub fn controlplaneRename(ctx: *Context, req: *Request, params: Params) anyerror
     defer arena.deinit();
     var svc = controlplane.ControlPlaneService.init(files);
     const vo = svc.entryVO(arena.allocator(), caller.user_id, moved) catch return serverError(ctx, req);
+    try json.respond(ctx.gpa, req, .ok, vo, null);
+}
+
+// ---- web upload (POST /api/controlplane/folder/{id}/upload) -------------------
+
+/// The extensions a web upload accepts. This list is the FEATURE — the point of
+/// the endpoint is getting a file onto the Nomad, so what the DEVICE can open is
+/// what we take (docs/scratch/upload.md §3):
+///
+///   - the device's own native set: `.note`, PDF, EPUB, Word, text, PNG/JPG/WebP,
+///     CBZ, FB2, XPS;
+///   - `.spd`, which is absent from Ratta's public import list because it is
+///     device-AUTHORED rather than an advertised import type. It is accepted
+///     anyway: restoring a sketch from a backup is a real case, and Inkhold has
+///     its own `.spd` viewer, so the file is first-class on the web;
+///   - the MOBI family, which reads through the bundled Kindle app rather than
+///     natively. Uploadable, but it does not imply a native open.
+///
+/// Matched case-insensitively on the trailing extension. Everything else is a
+/// 415 rather than a silent store: a file the device will simply ignore is worse
+/// sitting in the library than refused at the door.
+const upload_extensions = [_][]const u8{
+    ".note", ".spd",
+    ".pdf",  ".epub",
+    ".doc",  ".docx",
+    ".txt",  ".png",
+    ".jpg",  ".jpeg",
+    ".webp", ".cbz",
+    ".fb2",  ".xps",
+    ".mobi", ".azw",
+    ".azw3",
+};
+
+/// True if `name` ends in an accepted extension. `>` not `>=` on purpose: a bare
+/// `.pdf` is all extension and no stem, so it is not an accepted PDF — it is a
+/// dotfile whose whole name happens to read like a suffix.
+fn acceptedUploadExt(name: []const u8) bool {
+    for (upload_extensions) |ext| {
+        if (name.len > ext.len and std.ascii.endsWithIgnoreCase(name, ext)) return true;
+    }
+    return false;
+}
+
+/// True if `name` is safe to become a tree path component.
+///
+/// The filename arrives in a `Content-Disposition` header written by whatever
+/// posted the body, so it is exactly as trustworthy as the `uploadId` query
+/// parameter that once let a caller escape the blob store's staging directory
+/// (see `device.validUploadId`) — same posture here, one level looser because a
+/// filename legitimately carries spaces and non-ASCII where an upload id does
+/// not. `multipart.Prologue` has already reduced the value to a basename, so
+/// this is the second gate, not the only one:
+///
+///   - non-empty and within `multipart.max_filename`;
+///   - no `/` or `\` — the two path separators, so the name can never be read as
+///     a path by us or by the device;
+///   - no `..` anywhere — the traversal token. Rejecting every occurrence (not
+///     just the bare `..` component) costs the vanishingly rare `a..b.pdf` and
+///     buys a rule with no edge cases;
+///   - no control characters (`< 0x20`, `0x7F`), which would corrupt the device's
+///     path-based protocol and any log line the name appears in;
+///   - valid UTF-8, because the name becomes SQLite TEXT and is compared against
+///     siblings — invalid bytes would round-trip unpredictably.
+fn validUploadName(name: []const u8) bool {
+    if (name.len == 0 or name.len > multipart.max_filename) return false;
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
+    if (std.mem.indexOfScalar(u8, name, '\\') != null) return false;
+    if (std.mem.indexOf(u8, name, "..") != null) return false;
+    for (name) |c| if (c < 0x20 or c == 0x7F) return false;
+    if (!std.unicode.utf8ValidateSlice(name)) return false;
+    return true;
+}
+
+/// What an upload does when the destination folder already holds a LIVE file of
+/// the same name. The caller chooses with `?onConflict=`; the person dropping the
+/// file is the only one who knows which of the two they meant.
+///
+///   - `rename` — keep both. The arriving file takes the next free ` (n)` suffix
+///     and the occupant is untouched. This is the DEFAULT, and it is the default
+///     because it is the one that cannot lose anything.
+///   - `replace` — this is a new version OF that file. It links onto the existing
+///     name, which is `linkBlob`'s ordinary path: the row keeps its id and the
+///     superseded blob is written to `file_history`, so the previous file is a
+///     retained version restorable from the history UI, not a deletion. That
+///     retention is precisely why the choice can be offered at all.
+///
+/// An absent or unrecognised value is `rename`. That direction is deliberate: a
+/// client too old to know about this parameter, or one that mistypes it, must
+/// never be interpreted as asking to overwrite.
+const OnConflict = enum { rename, replace };
+
+/// Reads `?onConflict=` off the raw request target. Must be called BEFORE the
+/// body read, like every other head string — the enum it returns is a value, so
+/// it survives where the slice would not.
+fn onConflictFromTarget(target: []const u8) OnConflict {
+    const v = reply.queryParam(target, "onConflict") orelse return .rename;
+    if (std.ascii.eqlIgnoreCase(v, "replace")) return .replace;
+    return .rename; // absent, misspelled, or anything else: never overwrite by accident
+}
+
+/// POST /api/controlplane/folder/{id}/upload -> store an uploaded file into the
+/// caller's tree. `{id}` is the destination folder; the literal `root` is the
+/// library root. Body is `multipart/form-data` with ONE file part, whose
+/// `filename` names the entry. `?onConflict=rename|replace` (default `rename`)
+/// decides what happens when that name is already taken — see `OnConflict`.
+///
+/// **This does not speak the device protocol, and does not need to.** The Nomad
+/// pulls down whatever the server says it holds (upload.md §2, confirmed on a
+/// real device), so the whole job is: put the blob in the store and leave the
+/// tree in the state a sync reads. That is precisely what the device's own
+/// `upload/finish` does at the end of its three-step dance, so this shares its
+/// tree-link (`Files.placeUpload` → `Files.linkBlob`) and skips the dance.
+///
+/// **Lock discipline.** The route is `manual_db_lock`, like `/oss/put`, because
+/// the body is a multi-MB transfer: the ingest (socket → md5 → filesystem, no DB
+/// at all) runs UNLOCKED, and `ctx.db_lock` is held only for the destination
+/// lookup and the final link. The default whole-handler lock would serialize
+/// every other request — including device sync — behind one browser upload.
+///
+/// **Order of refusals.** The destination and the name are checked BEFORE a byte
+/// is stored: `readPrologue` stops at the part headers, so a 400/415 costs the
+/// headers and nothing else. Quota is the exception — it is charged on the real
+/// ingested size inside the link transaction, because the declared size of an
+/// upload is not evidence of anything (the device path learned that the hard
+/// way). A rejected link leaves the blob unreferenced on disk for the sweep,
+/// exactly as `upload/finish` does.
+///
+/// Status contract: 200 + the created (or superseded) entry as a listing-shaped
+/// `EntryVO` (the same shape `rename` returns); 413 `QUOTA_EXCEEDED`; 415
+/// `UNSUPPORTED_TYPE`; 400 `INVALID_NAME`; 404 for a destination that is missing,
+/// foreign, trashed or not a folder (all indistinguishable — upload is a
+/// live-only action, and a stranger's folder id must not be an existence oracle);
+/// 409 `NAME_TAKEN` when a FOLDER holds the name — a file cannot supersede a
+/// folder, under either conflict mode.
+pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    const caller = ctx.caller.?; // controlplane scope
+    const files = ctx.files orelse return serverError(ctx, req);
+
+    // Copy everything we need out of the request HEAD before touching the body —
+    // reading the body invalidates head strings (the `/oss/put` rule).
+    const id_raw = params.get("id") orelse return badRequest(ctx, req);
+    var id_buf: [24]u8 = undefined;
+    if (id_raw.len == 0 or id_raw.len > id_buf.len) return badRequest(ctx, req);
+    @memcpy(id_buf[0..id_raw.len], id_raw);
+    const id_str = id_buf[0..id_raw.len];
+
+    const on_conflict = onConflictFromTarget(req.head.target);
+
+    var ct_buf: [256]u8 = undefined;
+    const ct = router.headerCopy(req, "content-type", &ct_buf);
+    var bnd_buf: [multipart.max_term]u8 = undefined;
+    const boundary = multipart.boundaryFromContentType(ct, &bnd_buf) orelse return badRequest(ctx, req);
+
+    // Resolve + own the destination. `root` is the library root (parent null);
+    // anything else must be a LIVE folder this caller owns — `Files.get` is the
+    // shared ownership boundary and hardcodes `deleted = 0`, so foreign, missing
+    // and trashed collapse into one 404. DB touch #1 of 2.
+    var parent: ?u64 = null;
+    if (!std.mem.eql(u8, id_str, "root")) {
+        const id = std.fmt.parseInt(u64, id_str, 10) catch return badRequest(ctx, req);
+        ctx.lockDb();
+        const got = files.get(caller.user_id, id);
+        ctx.unlockDb();
+        const dest = (got catch return serverError(ctx, req)) orelse
+            return fail(ctx, req, .not_found, "NOT_FOUND", "no such folder");
+        defer ctx.gpa.free(dest.name);
+        defer if (dest.md5) |m| ctx.gpa.free(m);
+        if (!dest.is_folder) return fail(ctx, req, .not_found, "NOT_FOUND", "no such folder");
+        parent = id;
+    }
+
+    var rbuf: [blobstore.chunk_len]u8 = undefined;
+    const reader = req.readerExpectContinue(&rbuf) catch return badRequest(ctx, req);
+
+    // The part headers only — the filename is vetted before any byte is stored.
+    var pro: multipart.Prologue = .{};
+    multipart.readPrologue(reader, &pro) catch return badRequest(ctx, req);
+    const name = std.mem.trim(u8, pro.filename(), " \t\r\n");
+    if (!validUploadName(name))
+        return fail(ctx, req, .bad_request, "INVALID_NAME", "that filename can't be used");
+    if (!acceptedUploadExt(name))
+        return fail(ctx, req, .unsupported_media_type, "UNSUPPORTED_TYPE", "the Nomad can't open that file type");
+
+    // Stream the part straight into a new blob — UNLOCKED, 64 KB at a time, the
+    // whole file never in RAM (the RSS budget is structural here).
+    var wbuf: [blobstore.chunk_len]u8 = undefined;
+    var ing = files.blobs.beginIngest(&wbuf) catch return serverError(ctx, req);
+    multipart.streamPart(reader, boundary, &pro, &ing) catch {
+        ing.abort();
+        return badRequest(ctx, req);
+    };
+    const res = ing.finish(null) catch {
+        ing.abort();
+        return serverError(ctx, req);
+    };
+    ing.deinit();
+
+    // Link it in. DB touch #2 of 2 — the lock covers the quota check, the row
+    // write, the `incref` and the `bumpSync`, and nothing else. A dedup hit
+    // charges ZERO: quota is per DISTINCT blob per user, which is what the
+    // content-addressed store actually occupies. A `replace` that supersedes a
+    // file releases the old blob's charge only when this row held the user's LAST
+    // reference to it — a retained history version keeps the bytes on disk but
+    // does NOT keep them on the live quota, which is what `used_bytes` measures.
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    var svc = controlplane.ControlPlaneService.init(files);
+
+    var vo: controlplane.EntryVO = undefined;
+    {
+        ctx.lockDb();
+        defer ctx.unlockDb();
+        // The ONE difference between the two modes: which name the blob is linked
+        // under. `replace` is `linkBlob` unmodified — the same call the device's
+        // `upload/finish` makes, retention and all.
+        const linked = switch (on_conflict) {
+            .rename => files.placeUpload(caller.user_id, parent, name, &res.md5, res.size),
+            .replace => files.linkBlob(caller.user_id, parent, name, &res.md5, res.size),
+        };
+        const entry = linked catch |err| {
+            // The blob is unreferenced now. Drop it unless it deduped onto content
+            // something else still holds — the `putFile` rule.
+            if (!res.deduped) files.blobs.remove(&res.md5);
+            return switch (err) {
+                error.QuotaExceeded => fail(ctx, req, .payload_too_large, "QUOTA_EXCEEDED", "not enough space"),
+                error.NameConflict => fail(ctx, req, .conflict, "NAME_TAKEN", "that name is already used here"),
+                error.NotAFolder, error.NotFound => fail(ctx, req, .not_found, "NOT_FOUND", "no such folder"),
+                else => serverError(ctx, req),
+            };
+        };
+        defer ctx.gpa.free(entry.name);
+        defer if (entry.md5) |m| ctx.gpa.free(m);
+        // Built here, under the same lock: `entryVO` reads the DB (child count /
+        // page summary). The arena outlives the block, so the VO does too.
+        vo = svc.entryVO(arena.allocator(), caller.user_id, entry) catch return serverError(ctx, req);
+    }
     try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 

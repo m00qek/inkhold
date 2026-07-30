@@ -303,6 +303,28 @@ pub const routes = [_]router.Route{
     // work, nothing streams — the same lock convention as the trash route above.
     .{ .method = .POST, .path = "/api/controlplane/entry/:id/rename", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneRename },
 
+    // Upload a file from the browser into `:id` (the literal `root` = the library
+    // root). `multipart/form-data`, one file part, whose `filename` names the
+    // entry. It does NOT speak the device protocol — the Nomad pulls down
+    // whatever the tree says we hold — so it is the device's `upload/finish`
+    // tree-link (`Files.placeUpload` → `Files.linkBlob`) without the three-step
+    // apply/put/finish dance. See docs/scratch/upload.md.
+    //
+    // `?onConflict=rename|replace` (default, and fallback for anything
+    // unrecognised: `rename`) picks what happens when the name is taken — keep
+    // both, or supersede the live file, which `linkBlob` retains in
+    // `file_history` rather than destroying. See `OnConflict` in the handler.
+    //
+    // `manual_db_lock` like `/oss/put`, and for exactly its reason: the body is a
+    // multi-MB transfer, and the default whole-handler lock would hold the one
+    // global DB lock for the entire upload, stalling every other request
+    // (including device sync) behind it. Audited: the handler's ONLY DB touches
+    // are the destination `files.get` and the final `placeUpload` + `entryVO`,
+    // each inside its own `ctx.lockDb()`/`unlockDb()` bracket; the blob ingest
+    // between them touches the DB not at all. This is the opposite of `rename`
+    // above, which streams nothing and keeps the default lock.
+    .{ .method = .POST, .path = "/api/controlplane/folder/:id/upload", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneUpload, .manual_db_lock = true },
+
     // --- Admin: re-authentication ("elevation") ---
     // `require_admin` below now means "an admin who re-entered their password
     // recently", so these two are the way in and the way out. NEITHER is

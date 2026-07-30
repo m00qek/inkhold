@@ -546,5 +546,56 @@ export interface Api {
    * there, so that refusal is a backstop rather than a path the UI reaches.
    */
   rename(id: Id, name: string): Promise<import("../core/types").Entry>;
+
+  // --- UPLOAD (control-plane) ---
+  //
+  // Put a file INTO the library from the browser (docs/scratch/upload.md), which
+  // closes the one arrow the app was missing: web → cloud → device. The device
+  // half is CONFIRMED — a file placed straight into the tree is pulled down by
+  // the Nomad on its next sync — so this seam's job is only to leave the tree in
+  // the state a sync reads.
+  //
+  // The vocabulary (`Entry`) is referenced through an inline `import(...)` type,
+  // exactly like the markers above, so this seam stays extensible at its own
+  // marker.
+
+  /**
+   * Upload ONE file into folder `folderId` (`null` = the library root), as
+   * `multipart/form-data` with a single file part. Returns the created entry in
+   * the SAME listing shape `rename` returns, so the caller reconciles the new row
+   * without a refetch.
+   *
+   * `onProgress` receives the fraction of BYTES SENT, 0..1, and is what the
+   * queue's progress bar is drawn from. It is the reason this is the one call on
+   * this seam implemented with `XMLHttpRequest` rather than `fetch`: only
+   * `xhr.upload.onprogress` reports bytes sent portably — a `fetch` request body
+   * cannot be observed (ui-on-slow-connection.md §2.1). Download progress is the
+   * opposite direction and a different transport; the two share the progress UI
+   * and nothing else.
+   *
+   * `signal` ABORTS THE TRANSFER, not just its paint — that is the whole of
+   * "Cancel" on a queued row, and on a multi-megabyte PDF over wifi it is the
+   * difference between stopping and merely looking away.
+   *
+   * Refusals arrive as `UploadRefusedError` (see `client.ts`), which names WHICH
+   * of the three the server gave: quota (413), an extension outside the accept
+   * list (415), or an unusable filename (400). The UI phrases each; a missing,
+   * foreign or trashed destination is one indistinguishable 404, as everywhere
+   * else on this seam.
+   *
+   * `onConflict` decides what happens when the folder already holds a file of
+   * this name, and it defaults to the safe answer. A CALLER MUST NOT SEND
+   * `replace` UNLESS THE USER CHOSE IT: the interface detects the clash against
+   * the listing it already has and asks BEFORE transferring, so a re-dropped
+   * file is never uploaded twice to discover what to do with it. See
+   * `UploadConflictMode` for why both answers are non-destructive.
+   */
+  upload(
+    folderId: Id | null,
+    file: File,
+    onProgress?: (fraction: number) => void,
+    signal?: AbortSignal,
+    onConflict?: import("./client").UploadConflictMode,
+  ): Promise<import("../core/types").Entry>;
   // ---------------------------------------------------------------------------
 }

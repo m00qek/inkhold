@@ -59,6 +59,106 @@ export function canPreviewHistory(fileType: string): boolean {
   return t === "note" || t === "spd" || t === "txt" || fileKind(t) === "image";
 }
 
+// --- UPLOAD (web → cloud → device) -------------------------------------------
+//
+// What the WEB may send INTO the tree (docs/scratch/upload.md §3). A different
+// question from `fileKind` above — that one asks what the browser can DO with a
+// file already in the library; this one asks what the NOMAD can open once the
+// file gets there, because the device is the reader for most of these and the
+// web is only the way in.
+//
+// SHARED BY THREE CALLERS, which is why it lives in `core/` rather than beside
+// the dropzone: the client-side pre-flight (refuse before transferring), the
+// fake `Api` (so the 415 path is exercisable with no server), and the file
+// picker's `accept` attribute. The real server keeps its own copy — this is a
+// courtesy gate that saves a doomed upload, never the authority.
+
+/**
+ * Extensions the device opens, lowercase and without the dot.
+ *
+ * Ratta's published list for the Manta/Nomad — `.note`, PDF, EPUB, Word, text,
+ * PNG/JPG/WebP, CBZ, FB2, XPS — plus two deliberate additions:
+ *
+ *  - `.spd` is absent from that list because it is device-AUTHORED rather than
+ *    an advertised import type. It is accepted anyway: restoring a sketch from a
+ *    backup is a real case, and Inkhold has its own `.spd` viewer, so the file is
+ *    first-class on the WEB even where the device treats it as its own.
+ *  - `.mobi` is uploadable but reads through the bundled Kindle app rather than
+ *    natively — accepted, with nothing in the UI implying a native open.
+ */
+export const UPLOAD_ACCEPT: readonly string[] = [
+  "note",
+  "spd",
+  "pdf",
+  "epub",
+  "doc",
+  "docx",
+  "txt",
+  "png",
+  "jpg",
+  "jpeg",
+  "webp",
+  "cbz",
+  "fb2",
+  "xps",
+  "mobi",
+];
+
+/**
+ * A filename's extension, lowercase and WITHOUT the dot — `""` when it has none.
+ *
+ * Deliberately a plain last-dot split, unlike `renameDialog.peelName`: there the
+ * entry's own server-verified `fileType` says where the name ends, and here there
+ * is no such answer yet — an uploaded file is only its name until the server has
+ * sniffed it. A leading-dot name (`.gitignore`) has no extension by this reading,
+ * which is the honest answer: it is not a `.gitignore`-typed file.
+ */
+export function uploadExtension(name: string): string {
+  const base = name.slice(name.lastIndexOf("/") + 1).trim();
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || dot === base.length - 1) return "";
+  return base.slice(dot + 1).toLowerCase();
+}
+
+/** Whether the device could open a file with this name (see {@link UPLOAD_ACCEPT}). */
+export function isAcceptedUpload(name: string): boolean {
+  return UPLOAD_ACCEPT.includes(uploadExtension(name));
+}
+
+/**
+ * The name `desired` would actually get in a folder that already holds `taken` —
+ * itself if it is free, else `notes (2).pdf`, `notes (3).pdf`, …
+ *
+ * THE SAME RULE ON BOTH SIDES OF THE WIRE, which is the only reason it is here
+ * rather than inside either caller: the conflict prompt PROMISES a name ("Keep
+ * both saves it as 'notes (2).pdf'") before anything is sent, and the server
+ * then picks one. A promise made by one algorithm and kept by another is a
+ * promise that will eventually be broken, so the fake `Api` resolves collisions
+ * through this exact function and the real endpoint mirrors it.
+ *
+ * The suffix goes before the EXTENSION, never after it — `notes (2).pdf`, not
+ * `notes.pdf (2)` — or the device would stop recognising what the file is.
+ * Matching is case-insensitive, because the tree's own collision rule is.
+ */
+export function nextAvailableName(desired: string, taken: readonly string[]): string {
+  const lower = new Set(taken.map((t) => t.toLowerCase()));
+  if (!lower.has(desired.toLowerCase())) return desired;
+  const dot = desired.lastIndexOf(".");
+  const stem = dot > 0 ? desired.slice(0, dot) : desired;
+  const ext = dot > 0 ? desired.slice(dot) : "";
+  for (let n = 2; ; n++) {
+    const candidate = `${stem} (${n})${ext}`;
+    if (!lower.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
+/**
+ * The `accept` attribute for the file picker — a HINT the OS dialog uses to filter,
+ * never a check. The picker can always be talked into returning anything (drag and
+ * drop bypasses it outright), so the pre-flight runs on every file regardless.
+ */
+export const UPLOAD_ACCEPT_ATTR: string = UPLOAD_ACCEPT.map((e) => `.${e}`).join(",");
+
 /**
  * The raw-bytes URL for a file: `GET /file/{id}?v={hash}`, optionally forced to a
  * download. Null when we have no content hash — the route REQUIRES `?v=` (that is

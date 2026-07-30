@@ -139,7 +139,12 @@
    anything about tone. `is-danger` (08) carries the bin's red, and the console's
    Lock deliberately does not take it — red is danger and nothing else here, and
    locking destroys nothing. */
-.topbar__action {
+/* `.btn.topbar__action`, NOT `.topbar__action` — a specificity fix, not a style.
+   `.btn` (06-reader.css) sets the COMPACT `--control-h-sm`, and at equal
+   specificity the later stylesheet wins, so every topbar action rendered 28px
+   against 34px neighbours: a toolbar of controls that almost line up. Matching
+   `.btn`'s specificity and beating it on order is the whole of the fix. */
+.btn.topbar__action {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -147,6 +152,32 @@
   /* Aligns with the search box and the sort/view controls — one topbar height
      (see `--topbar-control-h`), border-box so the `.btn` padding sits inside it. */
   height: var(--control-h);
+}
+/* ICON-ONLY, for an action whose glyph is unambiguous and which is reached far
+   more often than the labelled destination actions beside it. Square rather than
+   pill so it reads as a control rather than a truncated button, and the padding
+   goes to the glyph since there is no text to sit beside. It keeps its
+   `aria-label` and a `title`, so the name is available to a screen reader and to
+   a hover — the label is hidden, not absent. */
+.btn.topbar__action--icon {
+  gap: 0;
+  width: var(--control-h);
+  padding: 0;
+  justify-content: center;
+}
+/* The seam between LOOKING and DOING: sort and the view toggle change how the
+   folder is shown, upload changes what is in it. A hairline says so without a
+   word. It travels with the upload control (hidden together), so it can never be
+   left dangling at the end of a toolbar with nothing after it. */
+.tools__sep {
+  flex: none;
+  width: 1px;
+  height: calc(var(--control-h) - 12px);
+  margin: 0 2px;
+  background: var(--line);
+}
+.tools__sep[hidden] {
+  display: none;
 }
 /* Same specificity trap as `.select[hidden]` above, and the reason this rule
    exists at all: `display: inline-flex` at (0,1,0) beats the UA's `[hidden] {

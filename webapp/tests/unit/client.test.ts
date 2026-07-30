@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { api, ApiError, RateLimitError, createHttpApi } from "../../src/api/client";
 
 // Build a JSON Response the way the Zig server does (envelope + optional status
@@ -225,5 +225,119 @@ describe("request budgets", () => {
     await vi.advanceTimersByTimeAsync(15_001);
 
     expect(settled).toBe(false);
+  });
+});
+
+// --- upload: bounded by SILENCE, not by total time -------------------------
+//
+// An upload is the one request where a total cap is actively wrong: a large PDF
+// over household wifi to a Pi can legitimately outlast any cap worth setting,
+// and aborting it there punishes it for succeeding slowly. So the budget is a
+// STALL — bytes must keep moving, however slowly — and these pin both halves of
+// that, because a stall timeout that also kills healthy slow uploads is no
+// better than the total cap it replaced.
+describe("upload budget", () => {
+  /** The parts of XMLHttpRequest the client touches, driven by hand. */
+  class FakeXhr {
+    static last: FakeXhr | null = null;
+    upload: { onprogress?: (e: ProgressEvent) => void; onload?: () => void } = {};
+    onload?: () => void;
+    onerror?: () => void;
+    onabort?: () => void;
+    ontimeout?: () => void;
+    status = 200;
+    responseText = "";
+    withCredentials = false;
+    responseType = "";
+    timeout = 0;
+    aborted = false;
+    constructor() {
+      FakeXhr.last = this;
+    }
+    open(): void {}
+    send(): void {}
+    abort(): void {
+      this.aborted = true;
+      this.onabort?.();
+    }
+    /** Simulate bytes leaving the machine. */
+    progress(loaded: number, total: number): void {
+      this.upload.onprogress?.({ lengthComputable: true, loaded, total } as ProgressEvent);
+    }
+    /** Simulate the last byte having gone; the server is now working. */
+    bodySent(): void {
+      this.upload.onload?.();
+    }
+  }
+
+  const bigFile = (): File => new File(["x".repeat(4096)], "big.pdf", { type: "application/pdf" });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal("XMLHttpRequest", FakeXhr as unknown as typeof XMLHttpRequest);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    FakeXhr.last = null;
+  });
+
+  it("ends an upload that sends NOTHING at all", async () => {
+    const pending = createHttpApi()
+      .upload("f1", bigFile())
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const err = await pending;
+    expect((err as ApiError).code).toBe("TIMEOUT");
+  });
+
+  it("never aborts an upload that is merely SLOW — every byte buys another window", async () => {
+    let settled = false;
+    void createHttpApi()
+      .upload("f1", bigFile())
+      .catch(() => void (settled = true));
+
+    // Ten minutes of genuine progress, each report arriving just inside the
+    // window. A total cap would have killed this long ago; a stall must not.
+    for (let i = 1; i <= 24; i++) {
+      await vi.advanceTimersByTimeAsync(25_000);
+      FakeXhr.last!.progress(i * 100, 4096);
+      expect(settled).toBe(false);
+    }
+    expect(settled).toBe(false);
+  });
+
+  it("switches to a plain budget once the body is sent, since progress stops by definition", async () => {
+    let settled = false;
+    const pending = createHttpApi()
+      .upload("f1", bigFile())
+      .catch((e: unknown) => {
+        settled = true;
+        return e;
+      });
+    FakeXhr.last!.progress(4096, 4096);
+    FakeXhr.last!.bodySent();
+
+    // Past the STALL window: the server is hashing and linking, and no further
+    // progress event can arrive — aborting here would kill a healthy commit.
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(settled).toBe(false);
+
+    // But the answer is not unbounded either.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect((await pending as ApiError).code).toBe("TIMEOUT");
+  });
+
+  it("a stall reads as a timeout; a user's cancel still reads as cancelled", async () => {
+    const ctl = new AbortController();
+    const pending = createHttpApi()
+      .upload("f1", bigFile(), undefined, ctl.signal)
+      .catch((e: unknown) => e);
+    FakeXhr.last!.progress(100, 4096);
+    ctl.abort();
+
+    // Same abort path as a stall, so the reason has to be carried out of band —
+    // otherwise a dead link would tell the user they cancelled.
+    expect((await pending as ApiError).code).toBe("CANCELLED");
   });
 });
