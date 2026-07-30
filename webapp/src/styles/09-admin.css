@@ -66,6 +66,20 @@
   padding: 26px 28px 60px;
 }
 
+/* The shell's STAND-IN while `import("./admin")` is on the wire (see
+   `showAdminBooting` in library.ts). Deliberately not `.admin` and not
+   `.admin__body`: it is not the console, it holds none of the console's state,
+   and giving it those classes would mean every `.admin` locator in the app and
+   the suite resolved to two elements. It takes the same geometry so the swap
+   when the chunk lands is a change of words rather than of layout. */
+.admin-booting {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: var(--desk);
+  padding: 26px 28px 60px;
+}
+
 /* --- the gate ------------------------------------------------------------- */
 
 .admin-gate {
@@ -169,6 +183,22 @@
 .admin-wrap {
   max-width: 880px;
   margin-inline: auto;
+}
+
+/* BUSY IS A VISIBLE STATE, not only an announced one.
+   `aria-busy` has been on this wrapper since the console was written and had NO
+   rule anywhere in src/styles — so a screen reader was told the console was
+   working while a sighted user was told nothing at all, and every control went
+   on looking pressable for the whole of a dialog-driven round trip.
+   The recycle bin already says this, in this language, for the same situation
+   (`.bin__row.is-busy`): the surface recedes and that is the whole affordance.
+   NO SPINNER — the console has no spinner vocabulary, and one mark rotating in
+   the middle of a page of household accounts would be the only animated thing
+   in the app. `--ink-faint` carries the words down with the paper so the recede
+   reads as ink lifting rather than as the panel dimming out. */
+.admin-wrap[aria-busy="true"] {
+  opacity: 0.6;
+  color: var(--ink-faint);
 }
 
 .admin-head {

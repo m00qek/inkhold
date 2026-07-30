@@ -151,20 +151,42 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
   /** One page fetch at a time — the double-click guard `loadMore` promises. */
   let fetchingMore = false;
 
+  /**
+   * The request the current {@link token} owns, so a superseded one can be
+   * ABORTED rather than merely ignored.
+   *
+   * Dropping a response on the token is what stops it painting; it does nothing
+   * about the request itself, which carries on to completion holding one of the
+   * browser's ~6 connections per origin. Typing an eight-letter query past the
+   * 220 ms debounce is a handful of those, all for answers already superseded,
+   * all competing with the gallery's own listings and thumbnails on exactly the
+   * link where that is felt. Note-scoped find has threaded a signal since it was
+   * written; this is the same thing on the library-wide half.
+   *
+   * ONE CONTROLLER FOR BOTH ARMS: the first page and a "More" page belong to the
+   * same search, and the events that supersede one supersede the other.
+   */
+  let inflight: AbortController | null = null;
+
   function cancelPending(): void {
     if (timer !== undefined) {
       clearTimeout(timer);
       timer = undefined;
     }
     // Orphans anything already awaiting a response: its captured token is stale
-    // from here on, so it will drop itself when it resolves.
+    // from here on, so it will drop itself when it resolves — and gives the
+    // connection back, which the token alone cannot do.
     token++;
+    inflight?.abort();
+    inflight = null;
     painted = null;
   }
 
   async function run(query: string, mine: number): Promise<void> {
+    const ac = new AbortController();
+    inflight = ac;
     try {
-      const results = await api.searchText(query, limit);
+      const results = await api.searchText(query, limit, undefined, ac.signal);
       if (mine !== token) return; // a later keystroke superseded us — drop it
       painted = {
         kind: "results",
@@ -221,8 +243,10 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
       // while this page is in flight orphans it, exactly as it orphans a
       // first-page response.
       const mine = token;
+      const ac = new AbortController();
+      inflight = ac;
       try {
-        const results = await api.searchText(current.query, limit, current.cursor);
+        const results = await api.searchText(current.query, limit, current.cursor, ac.signal);
         if (mine !== token) return;
         painted = {
           ...current,

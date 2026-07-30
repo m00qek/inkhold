@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { mockApi, type Scenario } from "./helpers/mockApi";
 import { signedIn, mockRawFiles } from "./helpers/app";
+import { recordText } from "./helpers/recordText";
 // The committed layered fixture, imported so the SNPG payload served below is the
 // real thing the wasm decoder is written against, and its layer descriptors pair
 // with that payload's records by slot — see src/api/layeredFixture.ts.
@@ -19,6 +20,46 @@ import { layeredPageLayers, layeredPagePayload } from "../../src/api/layeredFixt
 // otherwise run against the in-memory fake `Api`, whose latency is fixed. A held
 // response is what turns "the loading state exists" into "the loading state is
 // what the user actually sees, for the whole round trip".
+//
+// ── DOES THIS TEST HAVE TEETH? ───────────────────────────────────────────────
+//
+// Every test below was verified by REVERTING ITS FIX and confirming it fails.
+// That step is not diligence here, it is the only real validation: three tests
+// in this file passed against genuinely broken code before they were fixed, in
+// three different ways (an assertion a flash outran; a retrying matcher that
+// polled until a held response settled; a claim overwritten a moment later, so
+// any after-the-fact snapshot recorded the good state). A green run proves
+// nothing about a test in this class until you have seen it go red.
+//
+// So the line each test pins is recorded, for whoever changes one of them next.
+// If you edit the source below and the matching test does NOT fail, either the
+// test has stopped biting or you have not changed what you thought:
+//
+//   cold boot says Loading…              ← the cache-miss branch in `navigate`
+//   folder A does not stay on screen     ← the cache-miss branch in `navigate`
+//   a fast listing paints no loading     ← `LOADING_PAINT_DELAY_MS` → 0
+//   folder error dropped over the bin    ← the `galleryIsOnScreen()` guard
+//   says Searching…, never No matches    ← the `!ctx.treeLoaded()` clause
+//   held folder's name match appears     ← `place.searching` in `settle()`
+//   a row goes inert while restore runs  ← the bin's `inFlight` guard
+//   Empty bin disables itself            ← `|| busy` in `setBinMode`
+//   second image never shows the first   ← clear-before-assign in `showImage`
+//   previous stack not sharp on a turn   ← the stack-hide block in `showPage`
+//   Layers toggle right on the turn      ← `layersAvail` back to the decode result
+//   invented page claims no layers       ← collapsing the neutral third state
+//   jump past the filmstrip window       ← the ruled sheet back to `clearRect`
+//   find never claims Not recognised     ← `recognitionKnown` in `findInNote`
+//   listing-open paints the stack        ← `normalizeEntry` dropping the layers
+//   export names the page on screen      ← `stackIsCurrent()` in the export menu
+//   the console's import window          ← `showAdminBooting()` in `openAdmin`
+//   a bin retry reads as a retry         ← the `state === "error"` flip in `open`
+//   a deep-linked crumb corrects itself  ← `onLabelsSettled` in `settle()`
+//   a deep link's category tiles settle  ← `relabelFolders`'s card replacement
+//   a superseded search is aborted       ← `inflight?.abort()` in `cancelPending`
+//
+// And prefer `recordText` (helpers/recordText.ts) over any `expect(locator)` for
+// "it must never have said X": Playwright's matchers retry until they pass, so
+// they are structurally incapable of catching a claim that has already gone.
 
 const ME = { success: true, email: "ana@household.lan", isAdmin: false, mustChangePassword: false };
 
@@ -107,16 +148,7 @@ test.describe("what is painted while a listing is in flight", () => {
   // at the end: a `toHaveCount(0)` after the fact passes happily against a flash
   // that came and went.
   test("a fast listing paints no loading state at all", async ({ page }) => {
-    await page.addInitScript(() => {
-      (window as Window & { __loadingPaints?: number }).__loadingPaints = 0;
-      new MutationObserver(() => {
-        const g = document.querySelector("#gallery");
-        if (g?.textContent?.includes("Loading…")) {
-          const w = window as Window & { __loadingPaints?: number };
-          w.__loadingPaints = (w.__loadingPaints ?? 0) + 1;
-        }
-      }).observe(document, { childList: true, subtree: true });
-    });
+    const gallery = await recordText(page, "#gallery");
     await mockApi(page, {
       "controlplane/tree?parent=arch": {
         json: { folderId: "arch", path: [folder("arch", "Archive", 1)], entries: [note("n-arch", "Coastline")], syncVersion: 1 },
@@ -138,7 +170,7 @@ test.describe("what is painted while a listing is in flight", () => {
     await expect(page.locator("#gallery")).toContainText("Coastline");
 
     // Neither the cold boot nor the navigation flashed it.
-    expect(await page.evaluate(() => (window as Window & { __loadingPaints?: number }).__loadingPaints)).toBe(0);
+    expect(await gallery.everShowed("Loading…")).toBe(false);
   });
 
   // 1.3 — the failure path used to `replaceChildren` the gallery element
@@ -169,6 +201,100 @@ test.describe("what is painted while a listing is in flight", () => {
     await expect(page.locator("#gallery")).not.toContainText("Couldn't load");
     await expect(page).toHaveURL(/#\/bin$/);
   });
+});
+
+// ============================================================================
+// THE TREE WALK, AND WHAT IS WAITING ON IT
+// ============================================================================
+//
+// `prefetchTree` is a sequential BFS: N round-trips before the rail's category
+// resolution, the breadcrumb's labels, the root gallery's flattening and
+// name-search are correct. A deep link arrives in the middle of it — which is
+// the whole of 2.2/2.3.
+test.describe("a folder deep link that beats the tree walk", () => {
+  /** The container tree: `NOTE` holding the two nested anchors, plus `EXPORT`. */
+  const NOTE_KIDS = [folder("f-note", "Note", 1), folder("f-style", "MyStyle", 0)];
+
+  /** The ROOT listing is what resolves every category anchor, so holding it is
+   *  what puts the deep link ahead of the walk. Every other listing answers at
+   *  once, so the folder itself paints immediately — which is the point: the
+   *  CONTENTS never depended on the walk, only the NAMES do. */
+  async function heldRoot(page: Page, ms: number): Promise<void> {
+    await mockApi(page, {
+      "controlplane/tree?parent=export": {
+        json: {
+          folderId: "export",
+          path: [folder("export", "EXPORT", 1)],
+          entries: [note("n-e", "Trail export")],
+          syncVersion: 1,
+        },
+      },
+      "controlplane/tree?parent=dir-note": {
+        json: { folderId: "dir-note", path: [folder("dir-note", "NOTE", 2)], entries: NOTE_KIDS, syncVersion: 1 },
+      },
+      "controlplane/tree?parent=f-note": {
+        json: { folderId: "f-note", path: [], entries: [], syncVersion: 1 },
+      },
+      "controlplane/tree?parent=f-style": {
+        json: { folderId: "f-style", path: [], entries: [], syncVersion: 1 },
+      },
+      "controlplane/tree": {
+        delayMs: ms,
+        json: {
+          folderId: null,
+          path: [],
+          entries: [folder("dir-note", "NOTE", 2), folder("export", "EXPORT", 1)],
+          syncVersion: 1,
+        },
+      },
+      "user/me": { json: ME },
+    });
+  }
+
+  // 2.3 — `settle()` called `onSettled()` only at the root (or for a pending
+  // category), and `buildCrumbs` runs only inside `renderGallery`. So a bookmarked
+  // `#/folder/<export-id>` that resolved before the walk showed the breadcrumb
+  // "Library / EXPORT" — the device's raw name, two inches from a rail row
+  // reading `Export` — and never repainted, because nothing was going to.
+  test("the breadcrumb stops saying EXPORT once the walk resolves the category", async ({ page }) => {
+    await heldRoot(page, 2500);
+    await page.goto("/?real#/folder/export");
+    await expect(page.locator("#gallery")).toContainText("Trail export");
+
+    // Read ONCE, inside the window: the folder itself is fully painted and the
+    // crumb is still the raw device name, because nothing yet knows this folder
+    // IS the Export category.
+    expect(await page.locator(".crumbs__here").textContent()).toBe("EXPORT");
+
+    // The walk landing is the ONLY event — no navigation, no keystroke, no bump.
+    await expect(page.locator(".crumbs__here")).toHaveText("Export");
+  });
+
+  // The other half of the same repaint, and the reason it is a card replacement
+  // rather than a `textContent` write: a category anchor's tile is a different
+  // tile. Deep-link into the `NOTE` container and its two children are `Note` and
+  // `MyStyle` — both anchors — which arrive as plain folder chips and have to
+  // settle into category tiles in place.
+  test("a deep-linked container's children settle into category tiles", async ({ page }) => {
+    await heldRoot(page, 2500);
+    await page.goto("/?real#/folder/dir-note");
+    await expect(page.locator("#gallery")).toContainText("MyStyle");
+
+    // Inside the window: two folder cards, neither of them a category.
+    const mid = await page.evaluate(() => ({
+      folders: document.querySelectorAll("#gallery .card--folder").length,
+      categories: document.querySelectorAll("#gallery .card--category").length,
+    }));
+    expect(mid.folders).toBe(2);
+    expect(mid.categories).toBe(0);
+
+    // …and the walk landing settles them where they stand.
+    await expect(page.locator("#gallery .card--category")).toHaveCount(2);
+    // Narrow, not a rebuild: the listing's own note count is untouched and the
+    // section head still describes the same two things.
+    await expect(page.locator("#gallery .card--folder")).toHaveCount(2);
+  });
+
 });
 
 test.describe("a search inside a subfolder, while the tree walk is outstanding", () => {
@@ -253,6 +379,34 @@ test.describe("a search inside a subfolder, while the tree walk is outstanding",
   });
 });
 
+test.describe("a superseded library search", () => {
+  // 2.7 — the token machine here is correct and always was: a superseded response
+  // is dropped on both arms. But dropping is not stopping. The request went on to
+  // completion holding one of the browser's ~6 connections per origin, so typing
+  // past the 220 ms debounce spent several of them on answers nobody would ever
+  // see, against the gallery's own listings and thumbnails.
+  test("gives its connection back rather than running to completion", async ({ page }) => {
+    await mockApi(page, {
+      // Held, so the first query is still on the wire when the next keystroke
+      // supersedes it — which is the whole of the window.
+      "controlplane/search": { delayMs: 6000, json: { query: "", hits: [], usedFuzzy: false, coverage: null } },
+      "controlplane/tree": { json: { folderId: null, path: [], entries: [], syncVersion: 1 } },
+      "user/me": { json: ME },
+    });
+    await page.goto("/?real");
+    const box = page.getByRole("searchbox", { name: "Search notes" });
+
+    await box.fill("zebra");
+    await page.waitForRequest((r) => r.url().includes("controlplane/search"));
+
+    // The browser reporting the request as FAILED is the observable: an abort is
+    // `net::ERR_ABORTED`, and a request merely ignored never fails at all.
+    const dropped = page.waitForEvent("requestfailed", (r) => r.url().includes("controlplane/search"));
+    await box.fill("zebras");
+    expect((await dropped).failure()?.errorText ?? "").toContain("ABORTED");
+  });
+});
+
 test.describe("the recycle bin's actions while one is in flight", () => {
   const trashed = {
     kind: "note",
@@ -332,6 +486,126 @@ test.describe("the recycle bin's actions while one is in flight", () => {
     await page.locator("dialog.confirm .is-danger").click();
 
     await expect(emptyBin).toBeDisabled();
+  });
+});
+
+test.describe("the recycle bin's own listing, retried", () => {
+  // 2.7 — `state` was only ever moved by a RESPONSE, so a listing that failed
+  // left "Couldn't load the bin" standing and the next listing then ran its whole
+  // round trip underneath that sentence. The screen reported a failure about a
+  // request that had already been replaced by one in progress, and nothing said
+  // anything was happening — so the natural reading was that the retry had not
+  // been taken.
+  test("opening the bin after a failed listing says Loading…, not Couldn’t load", async ({ page }) => {
+    const gallery = await recordText(page, "#gallery");
+    await mockApi(page, {
+      "controlplane/tree": { json: { folderId: null, path: [], entries: [], syncVersion: 1 } },
+      "user/me": { json: ME },
+    });
+    // Registered AFTER `mockApi` so this narrower route wins (Playwright matches
+    // newest-first). The boot listing FAILS — with nothing mounted, so nothing is
+    // painted — and the retry is HELD, which is the window under test.
+    let calls = 0;
+    await page.route(
+      (url) => url.pathname === "/api/controlplane/bin",
+      async (route) => {
+        calls++;
+        if (calls === 1) {
+          await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ success: false }) });
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ entries: [], totalBytes: 0, retentionDays: 30, syncVersion: 1 }),
+        });
+      },
+    );
+
+    await page.goto("/?real");
+    // The boot listing has answered (with a failure) before the bin is opened.
+    await page.waitForResponse((r) => r.url().includes("/api/controlplane/bin"));
+
+    await page.getByRole("navigation", { name: "Folders" }).getByText("Recycle bin").click();
+
+    // Opening the bin IS the retry, and it reads as one.
+    await expect(galleryEmpty(page).locator("h3")).toHaveText("Loading…");
+    // RECORDED, not sampled: the stale failure was painted and then replaced when
+    // the held listing landed, so any assertion taken afterwards records the good
+    // state and proves nothing.
+    expect(await gallery.everShowed("Couldn’t load the bin")).toBe(false);
+
+    // …and the retry it was reporting really does arrive.
+    await expect(galleryEmpty(page).locator("h3")).toHaveText("Nothing deleted", { timeout: 10_000 });
+  });
+});
+
+test.describe("the admin console's chunk-import window", () => {
+  // 2.6 — `void import("./admin")` painted NOTHING before or during a round trip
+  // of its own, so the previous folder's gallery stayed on screen under a rail
+  // highlight that had already moved to Admin. From the BIN it was worse: the
+  // console's route closes the bin by repainting the gallery over it, so the
+  // sequence was bin → a folder listing nobody asked for → a long gap → console.
+  test("paints the console's loading state, never a folder listing nobody asked for", async ({ page }) => {
+    await mockApi(page, {
+      "controlplane/bin": { json: { entries: [], totalBytes: 0, retentionDays: 30, syncVersion: 1 } },
+      "controlplane/tree": {
+        json: { folderId: null, path: [], entries: [note("n-root", "Root readme")], syncVersion: 1 },
+      },
+      // 428 is what a cold console really meets: the session is alive and simply
+      // not elevated, so the panel lands on its gate. Without it `mockApi`'s bland
+      // fallback 200 would read as proof of elevation.
+      "admin/users": { status: 428, json: { success: false } },
+      "user/me": { json: { ...ME, isAdmin: true } },
+    });
+    // HOLD THE CHUNK. Under the dev server the console's module is a request like
+    // any other, which is the only way to make this window deterministic rather
+    // than a race against the module graph.
+    const isChunk = (u: string) => new URL(u).pathname.endsWith("/src/pages/admin.ts");
+    await page.route(
+      (url) => url.pathname.endsWith("/src/pages/admin.ts"),
+      async (route) => {
+        await new Promise((r) => setTimeout(r, 4000));
+        await route.continue();
+      },
+    );
+
+    await page.goto("/?real#/bin");
+    await expect(page.locator(".bin")).toBeVisible();
+
+    // The REQUEST is the sync point, and it has to be awaited rather than
+    // inferred: a flag set inside the route handler lives in node and the handler
+    // runs a round trip behind the browser, so reading it straight after the click
+    // is a race the assertion loses about half the time — while the window it is
+    // about is genuinely open. Awaiting the request proves the hold happened AND
+    // puts the read inside it.
+    const chunk = page.waitForRequest((r) => isChunk(r.url()));
+    await page.locator(".nav__item", { hasText: "Admin" }).click();
+    await chunk;
+
+    // Read ONCE, inside the window — a retrying matcher would poll until the
+    // chunk landed and then record the console, which is not what is under test.
+    const s = await page.evaluate(() => ({
+      galleryHidden: (document.querySelector("#gallery") as HTMLElement).hidden,
+      crumb: document.querySelector(".crumbs__here")?.textContent ?? "",
+      standIn: document.querySelector(".admin-booting")?.textContent ?? "",
+      destinationMode: document.querySelector(".sn-root")?.classList.contains("is-destination") ?? false,
+      console_: document.querySelector(".admin") !== null,
+    }));
+
+    // Not the gallery, not the bin, and not a blank: the surface says what it is.
+    expect(s.galleryHidden).toBe(true);
+    expect(s.console_).toBe(false);
+    expect(s.standIn).toContain("Opening the admin console");
+    // …with the chrome already the console's, so the crumb and the rail highlight
+    // agree with the address bar for the whole window.
+    expect(s.crumb).toBe("Admin");
+    expect(s.destinationMode).toBe(true);
+
+    // And the console takes the surface over when it lands, with the stand-in gone.
+    await expect(page.locator(".admin-gate")).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(".admin-booting")).toBeHidden();
   });
 });
 
@@ -545,6 +819,48 @@ test.describe("the reader's note stage, mid-fetch", () => {
     expect(s.panelText).not.toContain("Layer Renamed");
   });
 
+  // FOUND WHILE FIXING THE ABOVE, not looked for: the export menu read the
+  // MOUNTED stack rather than the one on screen. Across a page turn the previous
+  // page's stack survives (hidden) until the new one commits, so "save the
+  // current view as a layered image" would have written page N's layers into a
+  // file named for page N+1 — a wrong file with a convincing name, which is the
+  // worst kind. Giving "is the stack on screen the right one" a single
+  // definition (`stackIsCurrent`) fixed the export at the same time as the paint.
+  test("the export menu never offers the current view while it belongs to the page you left", async ({
+    page,
+  }) => {
+    await mockApi(page, {
+      "controlplane/file/metadata": { json: layeredMeta(2, [0, 1]) },
+      "controlplane/tree": {
+        json: { folderId: null, path: [], entries: [layeredEntry({ firstPageLayered: true, pageCount: 2 })], syncVersion: 1 },
+      },
+      "user/me": { json: ME },
+    });
+    // Page 2's bytes are held, so the turn below lands mid-flight and page 1's
+    // stack is still the only one mounted.
+    await serveLayeredPages(page, { index: 1, ms: 6000 });
+    await page.goto("/?real");
+    await page.locator(".card__open", { hasText: "Layered field sketch" }).click();
+    await expect(page.locator(".note-stack canvas")).toHaveCount(4);
+
+    // The EXPORT pop specifically — the bar also carries the bin-mode "…" pop,
+    // which shares `.menu__pop`; only the export menu has group headings.
+    const reader = page.getByRole("region", { name: "Reader" });
+    const exportMenu = page.locator(".reader__bar .menu__pop", { has: page.locator(".menu__head") });
+    const oraRow = exportMenu.getByRole("menuitem", { name: "Layered image" });
+
+    // On page 1 the row is genuinely on offer — the stack IS this page's.
+    await reader.getByRole("button", { name: "Download" }).click();
+    await expect(oraRow).toHaveCount(1);
+    await page.keyboard.press("Escape");
+
+    await reader.getByRole("button", { name: "Next page" }).click();
+    await reader.getByRole("button", { name: "Download" }).click();
+    // Mid-turn: the mounted stack is page 1's, so there is no current view to
+    // save. Offering one would export the wrong page under this page's name.
+    await expect(oraRow).toHaveCount(0);
+  });
+
   // 1.9 — `refreshLayersUi` ran only AFTER the decode resolved, so a turn onto a
   // layered page left the toggle describing the page you had just left: disabled,
   // "This page has no layers", about a page whose layers were on the wire. The
@@ -679,21 +995,7 @@ test.describe("the reader's note stage, mid-fetch", () => {
   // boxes resolve), so a snapshot taken afterwards records the good state and
   // proves nothing. What must be true is that the claim never appeared AT ALL.
   test("find never claims Not recognised while the note's metadata is in flight", async ({ page }) => {
-    await page.addInitScript(() => {
-      const w = window as Window & { __findCounts?: string[] };
-      w.__findCounts = [];
-      const isCounter = (n: Node | null): boolean =>
-        n instanceof Element ? n.classList.contains("findbar__count") : isCounter(n?.parentElement ?? null);
-      new MutationObserver((records) => {
-        for (const r of records) {
-          if (!isCounter(r.target)) continue;
-          // Every value the counter ever HELD, including one replaced later in the
-          // same task: a replaced text node still carries the text it showed.
-          for (const n of Array.from(r.addedNodes)) w.__findCounts!.push(n.textContent ?? "");
-          if (r.type === "characterData") w.__findCounts!.push(r.target.textContent ?? "");
-        }
-      }).observe(document, { childList: true, subtree: true, characterData: true });
-    });
+    const counter = await recordText(page, ".findbar__count");
     await mockApi(page, {
       "controlplane/file/metadata": { delayMs: 6000, json: layeredMeta(3, []) },
       // Held too, so the counter cannot be settled by the note-wide count landing.
@@ -724,9 +1026,8 @@ test.describe("the reader's note stage, mid-fetch", () => {
     // ("searching 0 pages…" would be a count off the skeleton's invented nulls).
     await expect(page.locator(".findbar__count")).toHaveText("searching…");
 
-    const seen = await page.evaluate(() => (window as Window & { __findCounts?: string[] }).__findCounts ?? []);
-    expect(seen.join(" | ")).not.toContain("Not recognised");
-    expect(seen.join(" | ")).not.toContain("No matches");
+    expect(await counter.everShowed("Not recognised")).toBe(false);
+    expect(await counter.everShowed("No matches")).toBe(false);
   });
 
   // THE PAYOFF of a listing's `firstPage` carrying its layers: a note opened from

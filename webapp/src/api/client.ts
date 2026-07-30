@@ -80,7 +80,23 @@ export class RateLimitError extends ApiError {
 
 type Method = "GET" | "POST" | "PUT" | "DELETE";
 
-async function request<T = unknown>(method: Method, path: string, body?: unknown): Promise<T & Envelope> {
+/**
+ * `signal`, where a caller passes one, is handed straight to `fetch` — which is
+ * the ONLY way a superseded request stops costing anything. Dropping a response
+ * on a generation token (which every caller here already does) makes it
+ * unpaintable; it does not make it stop, and a browser allows about six
+ * connections per origin, so an abandoned search-as-you-type request goes on
+ * holding one of them against the gallery's own reads for the whole of its round
+ * trip. An abort rejects `fetch`, so it lands as `NETWORK` below — which is
+ * correct and never seen: a caller that aborted has, by construction, already
+ * superseded the response it would have painted.
+ */
+async function request<T = unknown>(
+  method: Method,
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T & Envelope> {
   let res: Response;
   try {
     res = await fetch(path, {
@@ -88,6 +104,7 @@ async function request<T = unknown>(method: Method, path: string, body?: unknown
       credentials: "same-origin",
       headers: body === undefined ? undefined : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
   } catch {
     throw new ApiError("NETWORK", "Can't reach the server. Check your connection and try again.", 0);
@@ -827,7 +844,7 @@ export function createHttpApi(): Api {
       return { text: body?.text ?? "", words: normalizeWords(body?.words) };
     },
 
-    async searchText(query: string, limit?: number, cursor?: string): Promise<SearchResults> {
+    async searchText(query: string, limit?: number, cursor?: string, signal?: AbortSignal): Promise<SearchResults> {
       // Short-circuit BEFORE the network, not after. The server does answer a
       // blank `q` with an empty 200, but search-as-you-type empties this box on
       // every backspace-to-nothing, and a request per emptying is pure waste.
@@ -844,7 +861,9 @@ export function createHttpApi(): Api {
       // envelope), so `request()` passes it through while still turning a
       // 401/403 into UNAUTHORIZED — which is what stops a dead session from
       // looking like "no results".
-      const r = await request<SearchResults>("GET", `/api/controlplane/search?${params.toString()}`);
+      // The signal reaches `fetch`, so a superseded keystroke gives the
+      // connection back rather than merely declining to paint what it returns.
+      const r = await request<SearchResults>("GET", `/api/controlplane/search?${params.toString()}`, undefined, signal);
       return {
         query: r.query ?? q,
         // An absent `hits` is the empty result set, not a crash in `.map`.

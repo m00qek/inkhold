@@ -270,7 +270,79 @@ export function createAppShell(deps: AppDeps): AppShell {
    * should do. The bin can afford it (it is a listing); the console cannot.
    */
   function leaveAdmin(): void {
+    // The stand-in below is the console for as long as its chunk is on the wire,
+    // so leaving has to take that down too — otherwise a rail click during the
+    // import leaves an "Opening the admin console" overlay sitting on top of the
+    // folder the user asked for, with no console ever arriving to replace it.
+    hideAdminBooting(false);
     admin?.close();
+  }
+
+  /**
+   * THE CHUNK-IMPORT WINDOW, painted.
+   *
+   * `import("./admin")` is a round trip of its own — a separate module request,
+   * on the same throttled link as everything else — and nothing used to be
+   * painted before or during it. So the previous folder's gallery stayed on
+   * screen, under a rail highlight that had already moved to Admin, for the whole
+   * of it; and from the BIN it was worse, because the console's route closes the
+   * bin by repainting the gallery over it, so the sequence was bin → a folder
+   * listing nobody asked for → a long gap → the console.
+   *
+   * This is a STAND-IN, not the console: it takes the same surface the panel will
+   * take (the content overlay, the topbar, the crumb) and says the one true thing
+   * there is to say. The panel replaces it wholesale when the chunk lands, and it
+   * deliberately reuses `.admin-notice` so the swap is a change of words rather
+   * than a change of layout.
+   *
+   * Built lazily and kept: a session that never opens the console never creates
+   * it, and one that does creates it once.
+   */
+  let adminBooting: HTMLElement | null = null;
+
+  function adminNotice(title: string, text: string): HTMLElement {
+    return el(
+      "section",
+      { class: "admin-notice" },
+      el("h2", { class: "admin-notice__title", text: title }),
+      el("p", { class: "admin-notice__text", text }),
+    );
+  }
+
+  function showAdminBooting(): void {
+    if (!adminBooting) {
+      adminBooting = el("section", { class: "admin-booting" });
+      content.append(adminBooting);
+    }
+    adminBooting.replaceChildren(adminNotice("Loading…", "Opening the admin console."));
+    adminBooting.hidden = false;
+    // Exactly what `AdminPanel.chrome(true)` does, and for the same reasons: the
+    // gallery is HIDDEN rather than emptied (so leaving the console lands back on
+    // the folder without a refetch), sort and the view toggle describe a listing
+    // this is not, and the crumb has to agree with the rail highlight. `lockBtn`
+    // stays hidden — there is nothing to lock yet.
+    gallery.hidden = true;
+    sortWrap.hidden = true;
+    segmented.hidden = true;
+    setDestinationMode("admin", true);
+    crumbs.replaceChildren(el("span", { class: "crumbs__here", text: "Admin" }));
+    rail.build(); // the highlight reads `destination`, already ADMIN_KEY
+  }
+
+  /**
+   * Take the stand-in down. `handOver` is true when the real console is taking
+   * this surface over — the chrome it just set is the chrome the panel wants, so
+   * touching it would flash the gallery back — and false when the route has left,
+   * in which case everything the stand-in claimed has to be given back.
+   */
+  function hideAdminBooting(handOver: boolean): void {
+    if (!adminBooting || adminBooting.hidden) return;
+    adminBooting.hidden = true;
+    if (handOver) return;
+    gallery.hidden = false;
+    sortWrap.hidden = false;
+    segmented.hidden = false;
+    setDestinationMode("admin", false);
   }
 
   /**
@@ -291,37 +363,58 @@ export function createAppShell(deps: AppDeps): AppShell {
       rail.build();
       return;
     }
+    // Painted BEFORE the import is issued, so there is no frame in which the
+    // surface still belongs to whatever was here before — see `showAdminBooting`.
+    showAdminBooting();
     // The one runtime import. Everything it is handed is something this shell
     // already owns — the panel creates nothing here but its own <section>.
-    void import("./admin").then((m) => {
-      admin = m.createAdminPanel({
-        api,
-        account: identity.email,
-        content,
-        gallery,
-        crumbs,
-        sortWrap,
-        segmented,
-        lockBtn: lockAdminBtn,
-        setMode: (open) => setDestinationMode("admin", open),
-        // THE PADLOCK MUST NOT LIE. Elevation changes in three places — an
-        // unlock, a lock, and a 428 that parks the console back on the gate —
-        // and only the panel sees any of them. Every one of them comes through
-        // here, and the rail is a pure function of what it is asked, so a
-        // rebuild is the whole of the update.
-        onElevationChanged: () => rail.build(),
-        toast,
-        onSessionExpired: sessionDidExpire,
+    void import("./admin")
+      .then((m) => {
+        admin = m.createAdminPanel({
+          api,
+          account: identity.email,
+          content,
+          gallery,
+          crumbs,
+          sortWrap,
+          segmented,
+          lockBtn: lockAdminBtn,
+          setMode: (open) => setDestinationMode("admin", open),
+          // THE PADLOCK MUST NOT LIE. Elevation changes in three places — an
+          // unlock, a lock, and a 428 that parks the console back on the gate —
+          // and only the panel sees any of them. Every one of them comes through
+          // here, and the rail is a pure function of what it is asked, so a
+          // rebuild is the whole of the update.
+          onElevationChanged: () => rail.build(),
+          toast,
+          onSessionExpired: sessionDidExpire,
+        });
+        // The import is a round trip, and a route change can land inside it: a
+        // rail click while the chunk is loading would otherwise open the console
+        // over the folder the user has just asked for. `destination` is the
+        // route's answer, so checking it here is checking whether the console is
+        // still where the URL says we are.
+        if (destination !== ADMIN_KEY) {
+          hideAdminBooting(false);
+          return;
+        }
+        // HAND OVER, don't tear down: `admin.open()` sets exactly the chrome the
+        // stand-in is already holding, so giving it back first would flash the
+        // gallery between the two.
+        hideAdminBooting(true);
+        admin.open();
+        rail.build(); // the console is open now; repaint the highlight
+      })
+      .catch(() => {
+        // The chunk itself failed to load — a dropped link mid-import, or a stale
+        // tab asking a redeployed server for a hash that no longer exists. Left
+        // alone this sat on "Loading…" for the rest of the session, which is the
+        // one thing a loading state must never do: outlive the thing it describes.
+        if (destination !== ADMIN_KEY || !adminBooting) return;
+        adminBooting.replaceChildren(
+          adminNotice("The console could not be loaded", "Check your connection and try again."),
+        );
       });
-      // The import is a round trip, and a route change can land inside it: a
-      // rail click while the chunk is loading would otherwise open the console
-      // over the folder the user has just asked for. `destination` is the
-      // route's answer, so checking it here is checking whether the console is
-      // still where the URL says we are.
-      if (destination !== ADMIN_KEY) return;
-      admin.open();
-      rail.build(); // the console is open now; repaint the highlight
-    });
   }
   // Two seam wrappers, composed: `historyScope` reroutes page bytes + in-note
   // search onto a retained VERSION while a preview is up (H7/H8), `binScope`
@@ -525,6 +618,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     isAdmin: () => identity.isAdmin,
     // The rail has just rebuilt itself; only the gallery is left to repaint.
     onSettled: () => renderGallery({ rail: false }),
+    onLabelsSettled: () => relabelFolders(),
   });
 
   const logoutBtn = el("button", {
@@ -1254,12 +1348,103 @@ export function createAppShell(deps: AppDeps): AppShell {
   updateThemeGlyph();
 
   // --- rendering -----------------------------------------------------------
-  /** Populate `cachedListings` for the whole (small, household-sized) tree so the
-   *  rail can resolve category paths and render nested subfolders, and so the
-   *  root gallery can flatten the containers away — both are then pure functions
-   *  of the cache. BFS, sequential; `force` re-lists already-cached folders (used
-   *  when a sync bump lands). */
-  async function prefetchTree(force = false): Promise<void> {
+  /**
+   * The walk currently running, or null. ONE AT A TIME, and that is the whole of
+   * the fix for the stacking: `onBump` fires a forced walk per sync-version bump,
+   * and a tablet uploading a folder of notes bumps repeatedly, so a full
+   * N-round-trip BFS used to be started on top of each still-running one — every
+   * one of them contending for the browser's ~6 connections with the listing and
+   * the thumbnails the user is actually looking at, and every one of them ending
+   * in a repaint.
+   */
+  let treeWalk: Promise<void> | null = null;
+  /**
+   * A forced walk was asked for WHILE one was running, so exactly one more runs
+   * when this one finishes. This is the coalescing half: a burst of ten bumps
+   * costs two walks, not ten, and the last one still sees the settled tree —
+   * which is what the bump was asking about. A boolean rather than a counter,
+   * because "walk it again" does not get truer by being asked twice.
+   */
+  let walkAgain = false;
+  /**
+   * Bumped per walk. The in-flight guard above is what keeps two walks from
+   * existing, and this is what keeps that from being merely incidental: a walk
+   * that is no longer the current one WRITES NOTHING. Without it, a slower
+   * earlier walk finishing last would overwrite a newer walk's tree entry by
+   * entry — `cachedListings.set` and `rootFolders` were both unconditional — and
+   * the tree the rail, the crumbs and name-search read would be a blend of two.
+   */
+  let treeGen = 0;
+  /**
+   * A signature of the tree the LAST completed walk left behind, or null before
+   * the first one. What `rail.treeWalked(changed)` is answered from — see
+   * `treeSignature`. Null is deliberately not "" : the first walk must always
+   * repaint, including over a household whose tree is genuinely empty, because
+   * `rail.loaded()` flips with it and that is what turns a category's "Loading…"
+   * into "Export is empty".
+   */
+  let treeSig: string | null = null;
+
+  /**
+   * Everything a repaint would be FOR, as one string: which folders exist, where,
+   * what they hold and what they are called. The rail's rows and counts, the root
+   * gallery's flattening, the crumb labels and name-search all read exactly this
+   * and nothing else, so two walks with the same signature owe the gallery
+   * nothing. Cheap because the tree is household-sized by construction — the same
+   * assumption the sequential BFS above already rests on.
+   *
+   * The same reading `freshness.ts` takes of a single listing, one level up.
+   */
+  function treeSignature(): string {
+    const parts: string[] = [];
+    for (const k of [...cachedListings.keys()].sort()) {
+      parts.push(k);
+      for (const e of cachedListings.get(k)!.entries) {
+        // `itemCount` for a folder and `updatedAt` for a note are the two things
+        // besides existence and name that anything downstream renders.
+        parts.push(`${e.kind}${e.id}${e.name}${e.kind === "folder" ? e.itemCount : e.updatedAt}`);
+      }
+    }
+    return parts.join(" ");
+  }
+
+  /**
+   * Populate `cachedListings` for the whole (small, household-sized) tree so the
+   * rail can resolve category paths and render nested subfolders, and so the root
+   * gallery can flatten the containers away — both are then pure functions of the
+   * cache. BFS, sequential; `force` re-lists already-cached folders (used when a
+   * sync bump lands).
+   *
+   * THE SEQUENTIAL BFS STAYS SEQUENTIAL. It is N round-trips before the rail's
+   * resolution, the crumb labels and name-search are correct, and parallelising
+   * it is not a change to make here: the server serialises every connection on
+   * one coarse `db_lock`, so a fan-out would queue on a mutex while spending the
+   * browser's ~6 connections that the gallery's own reads need.
+   *
+   * This wrapper is the GUARDING half — one walk at a time, coalesced, generation-
+   * checked — and `walkTree` below is the walk.
+   */
+  function prefetchTree(force = false): Promise<void> {
+    if (treeWalk) {
+      // Join the walk already running rather than starting a second. A FORCED
+      // caller cannot be satisfied by it — the running walk may already have
+      // passed the folder whose change prompted the bump — so it books the one
+      // follow-up `walkAgain` allows.
+      if (force) walkAgain = true;
+      return treeWalk;
+    }
+    const run = walkTree(force).finally(() => {
+      treeWalk = null;
+      if (!walkAgain) return;
+      walkAgain = false;
+      void prefetchTree(true);
+    });
+    treeWalk = run;
+    return run;
+  }
+
+  async function walkTree(force: boolean): Promise<void> {
+    const mine = ++treeGen;
     const queue: (Id | null)[] = [null];
     const seen = new Set<string>();
     while (queue.length > 0) {
@@ -1277,14 +1462,20 @@ export function createAppShell(deps: AppDeps): AppShell {
           if (handled(e)) return;
           continue;
         }
+        if (mine !== treeGen) return; // superseded — this walk's tree is nobody's
         cachedListings.set(key(id), l);
         if (id === null) rootFolders = l.entries.filter((e): e is Folder => e.kind === "folder");
       }
       for (const e of l.entries) if (e.kind === "folder") queue.push(e.id);
     }
+    if (mine !== treeGen) return;
+    const sig = treeSignature();
+    const changed = treeSig === null || sig !== treeSig;
+    treeSig = sig;
     // Drops `aria-busy`, rebuilds, and settles a category that was selected
-    // while still unresolved — see `rail.ts`.
-    rail.treeWalked();
+    // while still unresolved — see `rail.ts`. `changed` is what keeps a walk
+    // that found nothing new from costing a full gallery repaint.
+    rail.treeWalked(changed);
   }
 
   function buildCrumbs(): void {
@@ -1332,6 +1523,41 @@ export function createAppShell(deps: AppDeps): AppShell {
       });
     }
     crumbs.replaceChildren(...parts);
+  }
+
+  /**
+   * The NARROW repaint the tree walk owes a folder listing — see
+   * `RailDeps.onLabelsSettled`.
+   *
+   * The crumb trail and the folder cards are the only two things in a folder
+   * gallery whose text is a function of the walk (`rail.labelFor`,
+   * `rail.categoryIconFor`), and they are rebuilt HERE rather than by calling
+   * `renderGallery`, deliberately: the full repaint drops every note card,
+   * resets the shared render engine and re-observes every lazy image, throwing
+   * away work that has nothing to do with what changed. It is the same churn
+   * `settle`'s `changed` gate is there to stop; adding a second source of it to
+   * fix a label would be a poor trade.
+   *
+   * Folder cards precede note cards in the gallery (see `renderGallery`), so the
+   * two lists line up positionally; a length mismatch means the DOM is not this
+   * listing's and nothing is touched.
+   */
+  function relabelFolders(): void {
+    // The same one question the folder fetch's own late answers ask — the crumb
+    // and the cards belong to the bin or the console while either is up.
+    if (!galleryIsOnScreen()) return;
+    // The crumb is the visible half on a deep link — "Library / EXPORT" until the
+    // walk resolves the anchor. It is cheap and unconditional.
+    buildCrumbs();
+    if (query.trim() !== "" || !listing) return;
+    const folders = visibleEntries().filter((e): e is Folder => e.kind === "folder");
+    if (folders.length === 0) return;
+    const cards = gallery.querySelectorAll<HTMLElement>(".card--folder");
+    if (cards.length !== folders.length) return;
+    closeOpenMenu(); // a folder row's menu is about to be replaced
+    folders.forEach((folder, i) => cards[i]!.replaceWith(galleryCards.folderCard(folder)));
+    // A category card is a different height from a plain folder chip.
+    scheduleSpan();
   }
 
   function visibleEntries(): Entry[] {
@@ -1384,6 +1610,20 @@ export function createAppShell(deps: AppDeps): AppShell {
       spanScheduled = false;
       spanTiles();
     });
+  }
+
+  // A LATE WEBFONT SWAP IS A HEIGHT CHANGE, and this masonry measures heights.
+  // The captions are set in the app's own faces; until those load the browser
+  // paints the fallback, and the swap re-flows every caption — so a first paint
+  // that landed before the fonts did leaves every card spanning the wrong number
+  // of rows, with the gaps that implies, until something else repaints. `size-
+  // adjust` on the @font-face keeps the error small, which is exactly why it went
+  // unnoticed rather than why it is not there. One extra pass, once per document.
+  //
+  // Guarded: `document.fonts` is absent in the non-browser environments the unit
+  // tests construct these modules in (the same guard `thumbnails.ts` uses).
+  if (typeof document !== "undefined" && document.fonts) {
+    void document.fonts.ready.then(() => scheduleSpan());
   }
 
   /**

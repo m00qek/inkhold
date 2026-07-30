@@ -103,8 +103,17 @@ export interface Api {
    * means anything relative to that result stream. No call on this surface
    * ever learns how many results there are in all; the server's query stops
    * at the page boundary by design (search-architecture.md decision 6).
+   *
+   * `signal` CANCELS THE REQUEST, not just its paint. The box searches as you
+   * type and every keystroke supersedes the last, so without it the abandoned
+   * requests carried on to completion — each holding one of the browser's ~6
+   * connections per origin, against the gallery's own reads, for the whole of a
+   * round trip nobody would ever look at. Note-scoped find has taken a signal
+   * since it was written ({@link searchInNoteStream}); this is the same seam on
+   * the library-wide half. Optional, so a caller that has nothing to cancel (a
+   * unit test, the fake) passes nothing.
    */
-  searchText(query: string, limit?: number, cursor?: string): Promise<SearchResults>;
+  searchText(query: string, limit?: number, cursor?: string, signal?: AbortSignal): Promise<SearchResults>;
 
   /**
    * Every matching page of ONE note, with a per-page match count — what

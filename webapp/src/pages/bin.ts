@@ -586,6 +586,22 @@ export function createBin(deps: BinDeps): BinController {
 
   async function refresh(mutated = false): Promise<void> {
     const mine = ++token;
+    // A RETRY HAS TO READ AS A RETRY. `state` is only ever moved by a response,
+    // so a listing that failed left "Couldn't load the bin" standing — and the
+    // NEXT listing then ran its whole round trip underneath that sentence, with
+    // the screen reporting a failure about a request that had already been
+    // replaced by one in progress. Nothing on screen said anything was happening,
+    // so the natural reading was that the retry had not been taken.
+    //
+    // ONLY out of `error`, never out of `ready`: a refresh that follows a restore
+    // or a purge is revalidating a list the user is looking at, and dropping that
+    // to "Loading…" would blank a good bin for the length of a round trip. The
+    // in-flight affordance for those is the row's own (`inFlight`), which is a
+    // statement about the ROW rather than about the listing.
+    if (state === "error") {
+      state = "loading";
+      paint();
+    }
     try {
       const next = await api.listBin();
       if (mine !== token) return;
@@ -695,6 +711,13 @@ export function createBin(deps: BinDeps): BinController {
 
   return {
     open(): void {
+      // What is in hand is a FAILURE, and opening the bin is asking again — so
+      // the state it paints from is the retry, not the answer to the request the
+      // retry replaces. Done here as well as in `refresh` (which is what actually
+      // owns the transition) because `renderNow` below runs BEFORE that call:
+      // without this the first thing painted is a sentence about a listing that
+      // is already being re-fetched.
+      if (state === "error") state = "loading";
       // Paint what is already in hand FIRST — the count has usually been fetched
       // long ago for the rail badge, so the bin opens populated rather than
       // through a "Loading…" that nothing was waiting on. Unconditional (the

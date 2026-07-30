@@ -121,6 +121,7 @@ function build(
     destinationState: vi.fn(over.destinationState ?? (() => null)),
     isAdmin: vi.fn(over.isAdmin ?? (() => false)),
     onSettled: vi.fn(),
+    onLabelsSettled: vi.fn(),
   };
   const rail = createRail(deps);
   return { rail, view, painted, ...deps, last: () => painted[painted.length - 1]!, setPlace: (p: RailPlace) => void (place = p) };
@@ -333,6 +334,7 @@ describe("selecting a category the device has not created yet", () => {
     destinationState: vi.fn(() => null),
     isAdmin: vi.fn(() => false),
       onSettled,
+      onLabelsSettled: vi.fn(),
     });
 
     rail.build();
@@ -355,10 +357,37 @@ describe("selecting a category the device has not created yet", () => {
     t.rail.treeWalked();
     expect(t.onSettled).toHaveBeenCalledTimes(1);
 
-    // Standing in a real folder, there is nothing provisional to repaint.
+    // Standing in a real folder, the ROWS are not provisional — they came from
+    // one listing that never depended on the walk — so the full repaint stays
+    // off. What IS provisional is what they are CALLED, and that gets the narrow
+    // callback instead of nothing at all (2.3: a deep link to `#/folder/<export>`
+    // used to read "Library / EXPORT" for good).
     const inside = build(FULL, { folderId: "note", openPath: [] });
     inside.rail.treeWalked();
     expect(inside.onSettled).not.toHaveBeenCalled();
+    expect(inside.onLabelsSettled).toHaveBeenCalledTimes(1);
+  });
+
+  it("owes the gallery nothing when the walk found the tree unchanged", () => {
+    // A syncing tablet bumps the sync version per file, and every bump used to
+    // end in a full `replaceChildren` + `galleryEngine.reset()` of a gallery that
+    // was already correct. `changed` is the shell's answer to "did anything the
+    // rail, the crumbs or name-search reads actually move".
+    const root = build(FULL, { folderId: null, openPath: null });
+    root.rail.treeWalked(false);
+    expect(root.onSettled).not.toHaveBeenCalled();
+
+    const inside = build(FULL, { folderId: "note", openPath: [] });
+    inside.rail.treeWalked(false);
+    expect(inside.onLabelsSettled).not.toHaveBeenCalled();
+
+    // A PENDING CATEGORY is exempt: the walk having FINISHED is the transition,
+    // whatever it found, and it is what turns "Loading…" into "Export is empty".
+    const pending = build(SPARSE);
+    pending.rail.build();
+    item(pending.last(), "Export")!.select();
+    pending.rail.treeWalked(false);
+    expect(pending.onSettled).toHaveBeenCalledTimes(1);
   });
 });
 

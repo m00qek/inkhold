@@ -388,6 +388,21 @@ export interface RailDeps {
    * been rebuilt. Called when the tree walk settles what was provisional.
    */
   onSettled(): void;
+  /**
+   * The much smaller repaint a FOLDER LISTING owes the walk: its NAMES, and
+   * nothing else.
+   *
+   * A folder's contents are one request that never depended on the walk, so
+   * {@link onSettled}'s full repaint would be pure churn there — the very churn
+   * `freshness.ts` exists to avoid. What DOES depend on the walk is what those
+   * contents are CALLED: `labelFor` and `categoryIconFor` resolve a category
+   * anchor by identity against the walked tree, so until it lands a deep link to
+   * `#/folder/<export-id>` shows the breadcrumb "Library / EXPORT" — the raw
+   * device name, beside a rail row that says `Export` — and any anchor among its
+   * children arrives as a plain folder card. That used to stand until some
+   * unrelated event repainted, which for a bookmarked folder could be never.
+   */
+  onLabelsSettled(): void;
 }
 
 export interface RailController {
@@ -419,8 +434,16 @@ export interface RailController {
   /**
    * The tree walk finished. Drops `aria-busy`, rebuilds, and settles a category
    * that was selected while still unresolved.
+   *
+   * `changed` is whether the walk MOVED anything the rail, the crumbs or
+   * name-search read — the shell answers it from a signature of the tree it just
+   * walked, the same "return the identical thing when nothing changed" reading
+   * `freshness.ts` takes of a listing. A walk that found no difference still
+   * settles a pending category (that transition is about the walk having
+   * FINISHED, not about what it found) but owes the gallery no repaint.
+   * Defaults to true, so a caller that cannot tell asks for the repaint.
    */
-  treeWalked(): void;
+  treeWalked(changed?: boolean): void;
   /**
    * Has the walk landed? The gallery's "Loading…" / real-empty-state branch —
    * see {@link RailController.pending}.
@@ -725,19 +748,36 @@ export function createRail(deps: RailDeps): RailController {
    * Either it resolves now — in which case that folder is where the user asked
    * to be, so go there — or it genuinely does not exist and the gallery repaints
    * from "Loading…" to the category's real empty state.
+   *
+   * `changed` is whether this walk actually moved the tree (see
+   * {@link RailController.treeWalked}). A walk that found everything exactly as
+   * it was owes the gallery nothing — and a live sync bump fires one per bump.
    */
-  function settle(): void {
+  function settle(changed: boolean): void {
     if (!pendingCategory) {
+      // NOTHING MOVED, so nothing needs repainting. A syncing tablet bumps the
+      // sync version repeatedly and each bump re-walks the whole tree; every one
+      // of those used to end in a full `replaceChildren` + `galleryEngine.reset()`
+      // of a gallery that was already correct, discarding every drawn thumbnail
+      // to redraw the same pixels. `freshness.ts` refuses the same repaint on the
+      // same grounds one layer down.
+      //
+      // A PENDING CATEGORY is exempt (below): the walk landing is what turns its
+      // "Loading…" into an answer, and that transition is real even when the tree
+      // is byte-identical to the last walk's.
+      if (!changed) return;
+      const place = deps.place();
       // The ROOT gallery is a function of the tree too (it flattens the
       // containers away), so it has to repaint once the walk lands — otherwise
       // the first paint's raw `NOTE`/`DOCUMENT` rows would stay on screen.
       //
       // So is a live SEARCH, at any depth: its name half reads the cached tree
-      // this walk fills (see `RailPlace.searching`). Both, and NOTHING ELSE — a
-      // plain folder listing does not depend on the walk, and repainting it here
-      // would be the unconditional full-gallery churn this deliberately avoids.
-      const place = deps.place();
+      // this walk fills (see `RailPlace.searching`).
       if (place.folderId === null || place.searching === true) deps.onSettled();
+      // A PLAIN FOLDER LISTING gets the narrow one instead — its rows came from
+      // one request that never depended on the walk, but what they are CALLED
+      // does. See `onLabelsSettled`.
+      else deps.onLabelsSettled();
       return;
     }
     const folder = resolveCategory(pendingCategory.path);
@@ -773,12 +813,12 @@ export function createRail(deps: RailDeps): RailController {
       }
       return null;
     },
-    treeWalked(): void {
+    treeWalked(changed = true): void {
       treeLoaded = true;
       // The rail is no longer guessing which categories exist.
       view.setBusy(false);
       build();
-      settle();
+      settle(changed);
     },
 
     loaded: () => treeLoaded,

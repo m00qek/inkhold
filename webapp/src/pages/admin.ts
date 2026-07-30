@@ -628,6 +628,22 @@ export function createAdminConsole(deps: AdminDeps): AdminConsole {
       if (mine !== refreshToken) return;
       set({ kind: "ready", people, server, busy: false });
     } catch (e) {
+      // THE SAME GUARD THE TWO SUCCESS POINTS ABOVE KEEP, missing here only
+      // because a failure did not look like a paint. It is one: `report` writes
+      // the failure onto whatever state is CURRENT, and when the console is
+      // locked that means the gate's error line. Two refreshes overlap on the
+      // ordinary path (unlocking re-lists while the call the gate interrupted
+      // resumes and re-lists), and `onElevationRequired` bumps this token
+      // deliberately — so without this, a superseded refresh failing on a dropped
+      // connection could write "Can't reach the server" onto the elevation gate
+      // the admin is at that moment typing their password into, or replace a
+      // newer household with a `failed` screen about an older one.
+      //
+      // Dropped WHOLE, including session death, which is the same reading the
+      // recycle bin's refresh takes (`bin.ts`: the token check precedes
+      // `handled`): a dead session fails every subsequent call identically, so it
+      // reaches the shell through the chain that still has a reader.
+      if (mine !== refreshToken) return;
       report(e);
     }
   }
@@ -1050,14 +1066,14 @@ export function createAdminView(opts: {
    * device in hand, so it says what it does — and clears the 24px target the
    * bare glyph missed.
    */
-  function deviceRow(person: Person, device: AdminDevice): HTMLElement {
+  function deviceRow(person: Person, device: AdminDevice, busy: boolean): HTMLElement {
     const name = displayName(person.user.email);
     // A revoked binding gets NO Unlink button — there is nothing left to cut —
     // but it stays on the row, labelled, because the row surviving is exactly
     // what makes re-pairing possible.
     const action = device.active
       ? (() => {
-          const b = el("button", { class: "admin-device__cut", type: "button", text: "Unlink" });
+          const b = el("button", { class: "admin-device__cut", type: "button", text: "Unlink", disabled: busy });
           b.setAttribute("aria-label", `Unlink ${deviceTitle(device)} from ${name}`);
           b.title = "Stop this device syncing";
           b.addEventListener("click", () => opts.onUnlink(person, device));
@@ -1074,7 +1090,7 @@ export function createAdminView(opts: {
     );
   }
 
-  function devicesEl(person: Person): HTMLElement {
+  function devicesEl(person: Person, busy: boolean): HTMLElement {
     // NULL IS NOT EMPTY. A failed device call must not render as the confident
     // "no device linked yet" — that sentence is a claim about the household, and
     // making it from a request that never answered is exactly the invented fact
@@ -1088,28 +1104,43 @@ export function createAdminView(opts: {
         text: "No device linked yet. One appears here after their first sync.",
       });
     }
-    return el("div", { class: "admin-devices" }, ...person.devices.map((d) => deviceRow(person, d)));
+    return el("div", { class: "admin-devices" }, ...person.devices.map((d) => deviceRow(person, d, busy)));
   }
 
-  function personRow(person: Person): HTMLElement {
+  /**
+   * One household account.
+   *
+   * `busy` is the console's in-flight flag, and every control this row owns
+   * honours it — exactly as `Add person` already does. NOT a double-submission
+   * guard: the controller has one (`busy(true)` around each dialog-driven flow),
+   * and it works. This is the FEEDBACK half of it, which was missing: a button
+   * that looks pressable, is pressed, and silently does nothing reads as an app
+   * that has stopped responding, and the natural next move is to press it again.
+   * The server never saw the second click either — so the only thing the gap ever
+   * produced was doubt.
+   */
+  function personRow(person: Person, busy: boolean): HTMLElement {
     const user = person.user;
     const name = displayName(user.email);
     const added = accountAge(user.createdAt);
-    const reset = el("button", { class: "admin-btn", type: "button", text: "Reset password" });
+    const reset = el("button", { class: "admin-btn", type: "button", text: "Reset password", disabled: busy });
     reset.setAttribute("aria-label", `Reset the password for ${name}`);
     reset.addEventListener("click", () => opts.onReset(user));
 
-    const remove = el("button", { class: "admin-btn admin-btn--danger", type: "button", text: "Delete" });
+    const remove = el("button", { class: "admin-btn admin-btn--danger", type: "button", text: "Delete", disabled: busy });
     remove.setAttribute("aria-label", `Delete ${name}`);
     remove.addEventListener("click", () => opts.onDelete(user));
 
     // Same rule as the devices above: a quota that could not be read renders as
-    // an absence, never as a meter at zero.
+    // an absence, never as a meter at zero. The allotment control stands down
+    // while busy the same way the Server panel's retention control does — through
+    // absence rather than a disabled state, because it is a bare glyph inside a
+    // meter with nowhere to show one.
     const storage = person.quota
       ? meterEl(
           meterFor(person.quota),
           `Storage for ${name}`,
-          changeBtn(`Change the allotment for ${name}`, () => opts.onQuota(person)),
+          busy ? null : changeBtn(`Change the allotment for ${name}`, () => opts.onQuota(person)),
         )
       : el("div", { class: "admin-devices__none", text: "Storage could not be counted." });
 
@@ -1134,7 +1165,7 @@ export function createAdminView(opts: {
         // omitted entirely rather than rendered blank.
         added ? el("div", { class: "admin-person__since", text: `Added ${added}` }) : null,
         storage,
-        devicesEl(person),
+        devicesEl(person, busy),
       ),
       el("div", { class: "admin-person__acts" }, reset, remove),
     );
@@ -1237,7 +1268,7 @@ export function createAdminView(opts: {
         el("span", { class: "admin-head__rule", "aria-hidden": "true" }),
         el("div", { class: "admin-head__acts" }, add),
       ),
-      el("div", { class: "admin-people" }, ...state.people.map(personRow)),
+      el("div", { class: "admin-people" }, ...state.people.map((p) => personRow(p, state.busy))),
       serverPanel(state.server, state.busy),
     );
   }

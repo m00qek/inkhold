@@ -433,6 +433,20 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
   let panelOpen = false;
   /** Bumps on every open/hide/destroy so a stale async render aborts + cannot paint. */
   let renderToken = 0;
+  /**
+   * The in-flight whole-blob download, so a superseded one can be CANCELLED and
+   * not merely ignored.
+   *
+   * `renderToken` already makes a late response unpaintable, and that was read as
+   * the whole of the problem — but a `.spd` is the biggest single thing this app
+   * ever fetches, and a token cannot make bytes stop arriving. Leaving a note and
+   * opening another meant the abandoned sketch went on downloading in full,
+   * competing for one of the browser's ~6 connections with the file the user had
+   * just asked for. `txtViewer` has threaded a signal since it was written; this
+   * is the same seam, aborted at the same three points (`open`, `hide`,
+   * `destroy`) that bump the token.
+   */
+  let load: AbortController | null = null;
 
   /**
    * Drop every layer canvas and empty the wrapper — a hidden/re-opened viewer
@@ -586,7 +600,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
    * with no tiles is the ONLY white fill; every other empty region stays
    * transparent so the wrapper's checkerboard shows through.
    */
-  async function render(m: NoteMeta): Promise<void> {
+  async function render(m: NoteMeta, signal: AbortSignal): Promise<void> {
     const token = renderToken;
     try {
       // History preview fetches the VERSION's bytes off the version-scoped route
@@ -599,7 +613,9 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
         showError(m.name, "This .spd has no stored contents to preview yet.");
         return;
       }
-      const res = await fetch(url);
+      // The signal covers the whole download: an abort mid-`arrayBuffer()` rejects
+      // it too, so a hide/re-open stops the transfer rather than waiting it out.
+      const res = await fetch(url, { signal });
       if (res.status === 401 || res.status === 403) {
         deps.onSessionExpired();
         return;
@@ -684,6 +700,11 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       // A new open aborts any prior in-flight render and drops its layer canvases.
       renderToken++;
       const token = renderToken;
+      // …and cancels its download. Created BEFORE the `metaPromise` await below,
+      // so a re-open during that window cancels this one too.
+      load?.abort();
+      const ctl = new AbortController();
+      load = ctl;
       releaseRender();
       doc = null;
       bbox = null;
@@ -757,15 +778,18 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
 
       // Kick the async decode/render. It never rejects (its own try/catch),
       // and the token guard makes a late completion a no-op after hide/re-open.
-      void render(next);
+      void render(next, ctl.signal);
     },
 
     hide(): void {
       root.hidden = true;
       exportMenu.setOpen(false);
       // Abort any in-flight render and drop the layer canvases — a hidden viewer
-      // holds no pixels, and the decoder was already closed in parseSpd.
+      // holds no pixels, and the decoder was already closed in parseSpd. The
+      // token stops the paint; the controller stops the download.
       renderToken++;
+      load?.abort();
+      load = null;
       releaseRender();
       doc = null;
       bbox = null;
@@ -778,6 +802,8 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
 
     destroy(): void {
       renderToken++;
+      load?.abort();
+      load = null;
       releaseRender();
       window.removeEventListener("resize", onResize);
       exportMenu.destroy();
