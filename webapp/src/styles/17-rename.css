@@ -1,0 +1,147 @@
+/* ---------------- rename dialog ----------------
+   The rename `<dialog>` (src/ui/renameDialog.ts). It borrows the shell + backdrop
+   of the shared confirm/admin dialogs — one look for every modal — but its body is
+   the "label" treatment: the editable STEM on a ruled paper field, the immutable
+   extension as a Space Mono chip beside it, the way you'd write a filename on a
+   notebook's spine. Theme-aware through the tokens; the focus ring is --accent, and
+   the entrance respects prefers-reduced-motion. */
+.rename::backdrop {
+  background: color-mix(in srgb, var(--desk) 74%, transparent);
+}
+.rename {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0;
+  background: var(--sheet);
+  color: var(--ink);
+  box-shadow: 0 26px 60px -20px var(--shadow);
+  width: min(430px, calc(100vw - 32px));
+}
+/* A quiet entrance — the same restraint as the rest of the chrome — turned off
+   entirely for anyone who asked not to see motion. */
+@media (prefers-reduced-motion: no-preference) {
+  .rename[open] {
+    animation: rename-in 0.16s ease;
+  }
+}
+@keyframes rename-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.rename__body {
+  padding: 22px 24px 0;
+}
+.rename__title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--fs-title);
+  line-height: 1.35;
+  margin: 0 0 16px;
+}
+
+/* THE LABEL. The stem field is a ruled line you write on (the app's signature),
+   the extension chip sits on it as a fixed, unwritable tail. They share the one
+   baseline so the name reads as one string split at the dot. */
+.rename__row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.rename__field {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--control-h);
+  padding: 6px 4px;
+  border: none;
+  border-bottom: 1.5px solid var(--line);
+  border-radius: 0;
+  background:
+    repeating-linear-gradient(
+      var(--sheet),
+      var(--sheet) calc(50% - 1px),
+      var(--paper-rule) calc(50% - 1px),
+      var(--paper-rule) 50%,
+      var(--sheet) 50%
+    );
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--fs-title);
+  line-height: 1.4;
+  outline: none;
+  transition: border-color 0.14s ease;
+}
+.rename__field:focus {
+  border-bottom-color: var(--accent);
+  box-shadow: 0 1px 0 0 var(--accent);
+}
+/* The clash / illegal state tints the underline with the reserved red — the same
+   colour the sheet's margin line and every "gone wrong" uses. */
+.rename.is-error .rename__field {
+  border-bottom-color: var(--margin);
+}
+.rename.is-error .rename__field:focus {
+  box-shadow: 0 1px 0 0 var(--margin);
+}
+
+/* The immutable extension: the SAME mono chip the download rows and the type badge
+   rhyme with (`.menu__item kbd`). It is not a control — no border affordance, no
+   focus — just the fixed tail of the name. */
+.rename__ext {
+  align-self: center;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* One line under the field: empty (unchanged stem — disabled but silent), a helper
+   ("Enter a name."), or the red clash line. Reserves its own height so the buttons
+   below never jump when it appears. */
+.rename__help {
+  margin: 8px 0 0;
+  min-height: 1.2em;
+  font-size: var(--fs-caption);
+  line-height: 1.4;
+  color: var(--ink-soft);
+}
+.rename.is-error .rename__help {
+  color: var(--margin-ink);
+}
+
+.rename__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 20px 24px 20px;
+}
+.rename__actions .btn {
+  min-height: 26px;
+  font-size: var(--fs-body);
+}
+/* Rename is the affirmative, so it is the one filled control here — inked, with a
+   readable label on it in both themes. Disabled while the stem is empty/illegal/
+   unchanged, and dimmed to say so. */
+.rename__go {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--sheet);
+}
+.rename__go:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 88%, var(--ink));
+  color: var(--sheet);
+}
+.rename__go:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}

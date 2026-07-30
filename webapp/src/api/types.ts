@@ -510,5 +510,32 @@ export interface Api {
    *  viewers (`.spd`/`.txt`/image) decode a trashed file's past version from
    *  these bytes, via `historyFileUrl(id, md5, { bin: true })`. */
   binHistoryRaw(id: Id, md5: Hash): Promise<ArrayBuffer>;
+
+  // --- RENAME (control-plane) ---
+  //
+  // Rename a LIVE file or folder in place (docs/scratch/rename.md). A rename is a
+  // `move` whose destination is the entry's current parent, so the server reuses
+  // the device-sync path's name / collision / sync-version logic; this seam only
+  // carries the new full name (extension included) and hands the updated entry
+  // back for the caller to reconcile.
+  //
+  // The vocabulary (`Entry`) is referenced through an inline `import(...)` type
+  // rather than a top-of-file `import` line, exactly like the bin/admin/history
+  // markers above, so this seam stays extensible at its own marker.
+
+  /**
+   * Rename entry `id` to `name` — the new FULL name, extension INCLUDED. Returns
+   * the updated {@link import("../core/types").Entry} so the caller can reconcile
+   * the visible listing.
+   *
+   * Rejects with a `NameTaken` error (HTTP 409 → `NameTakenError`, see
+   * `client.ts`) when a sibling in the SAME parent already holds that exact name:
+   * the rename dialog catches it and stays open with the collision message rather
+   * than silently autorenaming — a person who just typed a name wants to know it
+   * clashed, unlike the unattended device sync, which suffixes " (2)". The server
+   * also refuses to rename a fixed category-root folder; the UI hides the action
+   * there, so that refusal is a backstop rather than a path the UI reaches.
+   */
+  rename(id: Id, name: string): Promise<import("../core/types").Entry>;
   // ---------------------------------------------------------------------------
 }

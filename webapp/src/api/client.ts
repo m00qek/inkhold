@@ -53,6 +53,23 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Raised when a rename clashes with a sibling of the same name (HTTP 409).
+ *
+ * A distinct SUBCLASS, not just an `ApiError` with a code the caller sniffs, so
+ * the rename dialog can catch it by TYPE (`instanceof NameTakenError`) and stay
+ * open with the collision message. It is still an `ApiError`, so
+ * `dispatchApiFailure` sees it — and deliberately finds nothing actionable in it
+ * (a clash is not a dead session), leaving it for the dialog to handle. The
+ * message is the interface-voice line the dialog shows verbatim.
+ */
+export class NameTakenError extends ApiError {
+  constructor() {
+    super("NAME_TAKEN", "That name's already used here.", 409);
+    this.name = "NameTakenError";
+  }
+}
+
 /** Raised on HTTP 429. `retryAfterSeconds` comes from the `Retry-After` header. */
 export class RateLimitError extends ApiError {
   constructor(readonly retryAfterSeconds: number | null) {
@@ -1422,6 +1439,32 @@ export function createHttpApi(): Api {
       const url = historyFileUrl(id, md5, { bin: true });
       if (url === null) throw new Error("binHistoryRaw requires an md5");
       return (await rawFetch(url)).arrayBuffer();
+    },
+
+    // --- RENAME (control-plane) ---
+    async rename(id: Id, name: string): Promise<Entry> {
+      // `entry/:id` is the same generic per-item noun the trash `DELETE` uses.
+      // The server returns the updated entry as a raw VO (no `{success}`
+      // envelope), so `normalizeEntry` fills the omitted optionals exactly as a
+      // listing entry's are — the reconciled row must be the same shape a
+      // `listFolder` would have produced.
+      try {
+        const r = await request<Entry>(
+          "POST",
+          `/api/controlplane/entry/${encodeURIComponent(id)}/rename`,
+          { name },
+        );
+        return normalizeEntry(r);
+      } catch (e) {
+        // The one failure the DIALOG owns rather than the shell: a sibling clash.
+        // Mapped to the typed error here, at the seam, so the rule for "which
+        // status means the name was taken" lives next to the other status
+        // mappings and no view re-derives it. Everything else (a dead session,
+        // a category-root refusal, a 5xx) keeps its `ApiError` and routes the
+        // usual way.
+        if (e instanceof ApiError && e.status === 409) throw new NameTakenError();
+        throw e;
+      }
     },
   };
 }

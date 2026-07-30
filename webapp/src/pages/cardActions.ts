@@ -43,6 +43,20 @@ export interface CardActionsCtx {
   /** The ONE soft-delete path (`bin.trash`) every surface shares. */
   onTrash: (entry: Entry) => void;
   /**
+   * Open the rename dialog for `entry` (docs/scratch/rename.md). The shell owns
+   * the dialog, the `api.rename` call, the optimistic listing update and the
+   * toast; this seam only says which entry the ⋯ menu's Rename was chosen on.
+   */
+  onRename: (entry: Entry) => void;
+  /**
+   * Whether `entry` is a fixed category-root folder the device relies on
+   * (NOTE / DOCUMENT / EXPORT / SCREENSHOT / INBOX and their pinned category
+   * anchors). Rename is HIDDEN for these — the server refuses to rename them, and
+   * a disabled item would only invite a fight. The shell answers this through the
+   * rail's own "which folder IS a category" check, so there is one owner of it.
+   */
+  isCategoryRoot: (entry: Entry) => boolean;
+  /**
    * Open the "history of this file" menu for a note (hot-cache versioning). The
    * shell owns the panel, the preview reroute and the restore path; this seam
    * hands over which note was chosen and the ⋯ trigger the floating panel anchors
@@ -245,6 +259,14 @@ export function createCardActions(ctx: CardActionsCtx): CardActions {
         entry.kind === "note" && canPreviewHistory(entry.fileType)
           ? { label: "Version history", icon: "restore", onSelect: () => ctx.onHistory(entry, historyAnchor()) }
           : null,
+        // RENAME, directly above Move to bin — a note OR a folder (the menu serves
+        // both). Hidden on the fixed category-root folders the device relies on
+        // (see `isCategoryRoot`): the server refuses them, so a disabled item would
+        // only pick a fight. The `edit` glyph is the mockup's pencil, the same mark
+        // its "Change" controls carry.
+        ctx.isCategoryRoot(entry)
+          ? null
+          : { label: "Rename", icon: "edit", onSelect: () => ctx.onRename(entry) },
         // SOFT, reversible, and therefore NEUTRAL (never the danger variant): it
         // acts with no dialog and the bin's toast offers the undo plus the device
         // line. Same word and glyph the reader toolbar's "Move to bin" uses.

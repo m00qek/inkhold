@@ -497,6 +497,33 @@ pub const ControlPlaneService = struct {
         };
     }
 
+    /// Build ONE listing-shaped `EntryVO` for a single entry — the rename
+    /// response, so the client reconciles the row with the EXACT shape a `tree`
+    /// listing carries. A folder serialises to `{kind,id,name,itemCount}`; a note
+    /// to the full `NoteSummary` shape, identical to the per-row branch of
+    /// `listing` (same `summarize`, same fields). `arena` owns the strings.
+    pub fn entryVO(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, e: Entry) !EntryVO {
+        if (e.is_folder) return .{
+            .kind = "folder",
+            .id = try idStr(arena, e.id),
+            .name = try arena.dupe(u8, e.name),
+            .itemCount = try self.files.childCount(user_id, e.id),
+        };
+        const s = try self.summarize(arena, e);
+        return .{
+            .kind = "note",
+            .id = try idStr(arena, e.id),
+            .name = try arena.dupe(u8, e.name),
+            .pageCount = s.count,
+            .firstPage = s.page,
+            .updatedAt = e.updated_at * 1000, // epoch s → ms
+            .fileType = s.file_type,
+            .fileHash = if (e.md5) |m| try arena.dupe(u8, m) else null,
+            .hasRecognizedText = s.has_recognized_text,
+            .thumbAspect = s.aspect,
+        };
+    }
+
     /// `GET /api/controlplane/bin` — the caller's recycle bin, newest deletion
     /// first, each row carrying the path it had when it was deleted.
     ///

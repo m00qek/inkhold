@@ -4640,6 +4640,7 @@ const non_immutable_routes = [_][]const u8{
     "/api/controlplane/bin/note/:id/history/:md5/page/:n/text",
     "/api/controlplane/bin/note/:id/history/:md5/search",
     "/api/controlplane/entry/:id",
+    "/api/controlplane/entry/:id/rename",
     "/api/controlplane/equipment/unlink",
     "/api/controlplane/events",
     "/api/controlplane/file/metadata/:id",
@@ -5990,6 +5991,234 @@ test "web DELETE of a folder walks the subtree itself, and the bin lists every r
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "loose.note") == null);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"NOTE\"") == null);
     }
+}
+
+// ---- rename (POST /api/controlplane/entry/:id/rename) ----
+
+/// Parse a rename response body to `{ kind, name }` — the load-bearing fields of
+/// the listing-shaped `EntryVO` the handler returns for reconciliation.
+const RenamedBody = struct { kind: []const u8, name: []const u8 };
+
+fn renameEntry(ctx: *Context, obuf: []u8, reqbuf: []u8, tok: []const u8, id: u64, new_name: []const u8) !Response {
+    var pbuf: [96]u8 = undefined;
+    var bbuf: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/entry/{d}/rename", .{id});
+    const body = try std.fmt.bufPrint(&bbuf, "{{\"name\":\"{s}\"}}", .{new_name});
+    return requestWithCookie(ctx, obuf, reqbuf, "POST", path, tok, body);
+}
+
+/// The current live name of an entry, owned by `gpa` (free it).
+fn liveName(f: *Fixture, user_id: u64, id: u64) ![]u8 {
+    const e = (try f.files.get(user_id, id)).?;
+    if (e.md5) |m| gpa.free(m);
+    return @constCast(e.name);
+}
+
+test "web rename: renames a file and a folder in place, returns the updated entry, and bumps syncVersion" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+
+    // A user subfolder and a note inside it.
+    const dir = try f.files.createFolder(admin, null, "Poems");
+    defer gpa.free(dir.name);
+    const note = try putSeed(f, admin, dir.id, "Ozymandias.note", "I met a traveller");
+
+    // --- rename the file ---
+    const v0 = try f.files.syncVersion(admin);
+    {
+        const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, note, "Sonnet.note");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(RenamedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expectEqualStrings("note", p.value.kind);
+        try std.testing.expectEqualStrings("Sonnet.note", p.value.name);
+    }
+    // The rename is a tree change, so the control-plane counter moved.
+    try std.testing.expect(try f.files.syncVersion(admin) > v0);
+    {
+        const nm = try liveName(f, admin, note);
+        defer gpa.free(nm);
+        try std.testing.expectEqualStrings("Sonnet.note", nm);
+    }
+
+    // The new name shows up in the folder listing.
+    {
+        var pbuf: [64]u8 = undefined;
+        var idbuf: [24]u8 = undefined;
+        const id_str = try std.fmt.bufPrint(&idbuf, "{d}", .{dir.id});
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/tree?parent={s}", .{id_str});
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "Sonnet.note") != null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "Ozymandias.note") == null);
+    }
+
+    // --- rename the folder ---
+    {
+        const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, dir.id, "Verse");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(RenamedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expectEqualStrings("folder", p.value.kind);
+        try std.testing.expectEqualStrings("Verse", p.value.name);
+    }
+    {
+        const nm = try liveName(f, admin, dir.id);
+        defer gpa.free(nm);
+        try std.testing.expectEqualStrings("Verse", nm);
+    }
+}
+
+test "web rename: a sibling name-clash is a 409 and changes nothing" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+
+    _ = try putSeed(f, admin, null, "taken.note", "occupant");
+    const mover = try putSeed(f, admin, null, "mover.note", "the one being renamed");
+
+    const v0 = try f.files.syncVersion(admin);
+    const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, mover, "taken.note");
+    try std.testing.expectEqual(@as(u16, 409), resp.status);
+
+    // The occupant was never clobbered and the mover kept its name; nothing moved,
+    // so the sync counter did not advance either.
+    {
+        const nm = try liveName(f, admin, mover);
+        defer gpa.free(nm);
+        try std.testing.expectEqualStrings("mover.note", nm);
+    }
+    try std.testing.expectEqual(v0, try f.files.syncVersion(admin));
+}
+
+test "web rename: refuses the fixed category roots and anchor subfolders (403), but renames user folders that merely share a name" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+
+    // Mirror the device tree: root containers NOTE / DOCUMENT, plus the rail's
+    // anchor subfolders NOTE/Note, NOTE/MyStyle, DOCUMENT/Document.
+    const root_note = try f.files.createFolder(admin, null, "NOTE");
+    defer gpa.free(root_note.name);
+    const root_doc = try f.files.createFolder(admin, null, "DOCUMENT");
+    defer gpa.free(root_doc.name);
+    const anchor_note = try f.files.createFolder(admin, root_note.id, "Note");
+    defer gpa.free(anchor_note.name);
+    const anchor_mystyle = try f.files.createFolder(admin, root_note.id, "MyStyle");
+    defer gpa.free(anchor_mystyle.name);
+    const anchor_document = try f.files.createFolder(admin, root_doc.id, "Document");
+    defer gpa.free(anchor_document.name);
+
+    // Every protected folder — the two roots exercised, and all three anchors —
+    // refuses the rename with 403 and keeps its name.
+    const Guarded = struct { id: u64, name: []const u8 };
+    const guarded = [_]Guarded{
+        .{ .id = root_note.id, .name = "NOTE" },
+        .{ .id = root_doc.id, .name = "DOCUMENT" },
+        .{ .id = anchor_note.id, .name = "Note" },
+        .{ .id = anchor_mystyle.id, .name = "MyStyle" },
+        .{ .id = anchor_document.id, .name = "Document" },
+    };
+    for (guarded) |g| {
+        const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, g.id, "Renamed");
+        try std.testing.expectEqual(@as(u16, 403), resp.status);
+        const nm = try liveName(f, admin, g.id);
+        defer gpa.free(nm);
+        try std.testing.expectEqualStrings(g.name, nm); // untouched
+    }
+
+    // A user's own "Note" folder that is NOT directly under a root-level "NOTE" is
+    // not an anchor and renames fine — proving the guard keys on shape, not name.
+    // (a) A root-level "Note" (no parent container).
+    const loose_note = try f.files.createFolder(admin, null, "Note");
+    defer gpa.free(loose_note.name);
+    {
+        const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, loose_note.id, "Journal");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+    }
+    // (b) A "Note" nested one level deeper — its parent is the ANCHOR "Note", not a
+    // root-level "NOTE", so [parent.name, "Note"] = ["Note","Note"], not an anchor.
+    const deep_note = try f.files.createFolder(admin, anchor_note.id, "Note");
+    defer gpa.free(deep_note.name);
+    {
+        const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, deep_note.id, "Sub");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+    }
+    // (c) A "Note" under a user folder that is itself named "NOTE" but is NOT
+    // root-level — its parent's parent is not null, so it is not an anchor.
+    const user_container = try f.files.createFolder(admin, loose_note.id, "NOTE");
+    defer gpa.free(user_container.name);
+    const note_under_nonroot = try f.files.createFolder(admin, user_container.id, "Note");
+    defer gpa.free(note_under_nonroot.name);
+    {
+        const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, note_under_nonroot.id, "Free");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+    }
+}
+
+test "web rename: a foreign or missing id is one indistinguishable 404" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const bob = (try f.svc.createUser(admin, "bob", false)).id;
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+
+    const bob_id = try putSeed(f, bob, null, "bob.note", "bob bytes");
+
+    // Bob's id and a never-existed id both answer 404 — the admin's session is not
+    // an existence oracle over the id space (blobs are deduplicated across users).
+    const foreign = try renameEntry(ctx, &obuf, &reqbuf, &web, bob_id, "stolen.note");
+    try std.testing.expectEqual(@as(u16, 404), foreign.status);
+    const missing = try renameEntry(ctx, &obuf, &reqbuf, &web, 999999, "ghost.note");
+    try std.testing.expectEqual(@as(u16, 404), missing.status);
+
+    // Bob's file was untouched by the attempt.
+    const nm = try liveName(f, bob, bob_id);
+    defer gpa.free(nm);
+    try std.testing.expectEqualStrings("bob.note", nm);
+}
+
+test "web rename: rejects an empty name and a name containing a path separator (400)" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+
+    const note = try putSeed(f, admin, null, "keep.note", "unchanged");
+
+    const empty = try renameEntry(ctx, &obuf, &reqbuf, &web, note, "   ");
+    try std.testing.expectEqual(@as(u16, 400), empty.status);
+    const slashed = try renameEntry(ctx, &obuf, &reqbuf, &web, note, "a/b.note");
+    try std.testing.expectEqual(@as(u16, 400), slashed.status);
+
+    // The file kept its name through both refusals.
+    const nm = try liveName(f, admin, note);
+    defer gpa.free(nm);
+    try std.testing.expectEqualStrings("keep.note", nm);
 }
 
 /// A minimal PNG whose IHDR carries 320×240 — dims the ingest-side sniff can

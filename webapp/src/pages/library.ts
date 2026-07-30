@@ -49,7 +49,8 @@ import type { PersistentThumbStore } from "../cache/idb";
 import type { LiveChannel } from "../sync/types";
 import type { Entry, Folder, Hash, Id, Listing, NoteMeta, NoteSummary, Theme } from "../core/types";
 import { skeletonPage } from "../core/noteSkeleton";
-import { ApiError, dispatchApiFailure, type ApiFailureSink } from "../api/client";
+import { ApiError, NameTakenError, dispatchApiFailure, type ApiFailureSink } from "../api/client";
+import { openRenameDialog } from "../ui/renameDialog";
 import { createExporter, type Exporter } from "../export/exporter";
 import { createLazyEngine, renderPage, type LazyEngine } from "../render/lazy";
 import {
@@ -1149,6 +1150,43 @@ export function createAppShell(deps: AppDeps): AppShell {
     openPreview: (noteId, version) => void openHistoryPreview(noteId, version),
     restore: (noteId, version, noteName) => restoreVersion(noteId, version, noteName),
   });
+  /**
+   * Rename a live file or folder (docs/scratch/rename.md). Opens the dialog
+   * prefilled from the entry's name + type; the dialog owns the field, the
+   * keyboard flow and the collision loop, and calls back here to do the write.
+   *
+   * On success the visible listing is updated OPTIMISTICALLY — `entry` is the same
+   * object the card was built from and the same one the cached listing holds, so
+   * one field write plus a repaint is the whole update; the SSE `syncVersion` bump
+   * reconciles the rest. A clash (409 → `NameTakenError`) is rethrown so the dialog
+   * stays open with the collision line; every other failure routes through the
+   * shell's failure sink exactly as the other card actions do.
+   */
+  async function onRename(entry: Entry): Promise<void> {
+    await openRenameDialog({
+      host: root,
+      entry: {
+        name: entry.name,
+        fileType: entry.kind === "note" ? entry.fileType : "",
+        isFolder: entry.kind === "folder",
+      },
+      submit: async (fullName) => {
+        let updated: Entry;
+        try {
+          updated = await api.rename(entry.id, fullName);
+        } catch (e) {
+          if (e instanceof NameTakenError) throw e; // the dialog keeps itself open
+          if (handled(e)) return; // a dead session etc. — routed, dialog closes
+          toast("Couldn't rename that. Try again.");
+          return;
+        }
+        entry.name = updated.name;
+        renderGallery();
+        toast(`Renamed to '${updated.name}'.`);
+      },
+    });
+  }
+
   const cardActions = createCardActions({
     api,
     exporter,
@@ -1156,6 +1194,11 @@ export function createAppShell(deps: AppDeps): AppShell {
     handled,
     sessionDidExpire,
     onTrash: (entry) => void bin.trash(entry),
+    onRename: (entry) => void onRename(entry),
+    // The rail is the ONE owner of "which folder IS a category" (resolved by
+    // identity, so a user's own folder merely named `Note` is not caught). A note
+    // is never a category root; only the six pinned category anchors are.
+    isCategoryRoot: (entry) => entry.kind === "folder" && rail.categoryIconFor(entry) !== null,
     onHistory: (noteSummary, anchor) =>
       historyController.open(
         { id: noteSummary.id, name: noteSummary.name, fileType: noteSummary.fileType },

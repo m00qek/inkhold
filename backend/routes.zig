@@ -297,6 +297,12 @@ pub const routes = [_]router.Route{
     // happens server-side.
     .{ .method = .DELETE, .path = "/api/controlplane/entry/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTrash },
 
+    // Rename a live entry (file or folder) in place — a `move` to its own parent
+    // with `autorename = false`, so a sibling clash is a 409 the dialog surfaces
+    // rather than a silent " (2)" suffix. NOT `manual_db_lock`: pure metadata DB
+    // work, nothing streams — the same lock convention as the trash route above.
+    .{ .method = .POST, .path = "/api/controlplane/entry/:id/rename", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneRename },
+
     // --- Admin: re-authentication ("elevation") ---
     // `require_admin` below now means "an admin who re-entered their password
     // recently", so these two are the way in and the way out. NEITHER is

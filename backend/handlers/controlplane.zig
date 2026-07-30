@@ -250,6 +250,127 @@ pub fn controlplaneTrash(ctx: *Context, req: *Request, params: Params) anyerror!
     }, null);
 }
 
+/// The fixed category folders the browser rail navigates by and the device
+/// re-provisions on sync. **This MIRRORS webapp `rail.ts` `CATEGORIES`, and the
+/// two lists MUST STAY IN SYNC** — renaming any of these breaks the rail's
+/// path-based category resolution (it resolves e.g. `["NOTE","Note"]`) and the
+/// device's re-provisioning of its known paths.
+///
+/// There is no backend constant seeding them: they arrive as device-supplied path
+/// strings at bind (`device.bindEquipment` → `Files.ensureFolderPath`), so nothing
+/// marks a row "reserved" in the DB — the guard matches by NAME AND SHAPE. Two
+/// shapes, because the device tree NESTS categories:
+///
+///   - ROOT containers / single-segment categories, matched at `parent_id == null`
+///     by name: `NOTE`, `DOCUMENT`, `EXPORT`, `SCREENSHOT`, `INBOX`.
+///   - ANCHOR subfolders, matched as `[parent.name, entry.name]` where the parent
+///     is itself root-level: `NOTE/Note`, `NOTE/MyStyle`, `DOCUMENT/Document`.
+///
+/// Names are EXACT-CASE (uppercase containers `NOTE`/`DOCUMENT`; mixed-case
+/// `Note`/`MyStyle`/`Document`). So a user's own folder merely named `Note` that is
+/// NOT directly under a root-level `NOTE` (deeper nesting, or a different parent)
+/// is not an anchor and renames fine.
+const category_roots = [_][]const u8{ "NOTE", "DOCUMENT", "EXPORT", "SCREENSHOT", "INBOX" };
+const category_anchors = [_][2][]const u8{
+    .{ "NOTE", "Note" },
+    .{ "NOTE", "MyStyle" },
+    .{ "DOCUMENT", "Document" },
+};
+
+fn isCategoryRoot(name: []const u8) bool {
+    for (category_roots) |r| if (std.mem.eql(u8, name, r)) return true;
+    return false;
+}
+
+fn isCategoryAnchor(parent_name: []const u8, name: []const u8) bool {
+    for (category_anchors) |a|
+        if (std.mem.eql(u8, a[0], parent_name) and std.mem.eql(u8, a[1], name)) return true;
+    return false;
+}
+
+const RenameReq = struct { name: []const u8 };
+
+/// POST /api/controlplane/entry/{id}/rename -> rename a LIVE entry (file or
+/// folder) in place. Body `{ "name": "<new full filename incl. extension>" }` —
+/// the client sends the complete name (stem + re-appended extension), so `name` is
+/// treated as the whole filename.
+///
+/// A rename is a `move` whose destination parent is the entry's CURRENT parent, so
+/// the name-update, collision resolution and `bumpSync` are the same battle-tested
+/// path the device's `move_v3` takes — only with `autorename = false`, because a
+/// person who just typed a name wants a 409, not a silent " (2)" suffix (the device
+/// keeps `autorename = true`; its behaviour is unchanged).
+///
+/// Never touches blobs, quota or version history — a rename is metadata only. The
+/// updated entry is returned as a listing-shaped `EntryVO` so the client reconciles
+/// the row it already holds.
+///
+/// Status contract: 200 + the updated entry on success; 409 on a sibling
+/// name-clash; 400 for an empty/whitespace name or one containing '/'; 403 for a
+/// fixed category-root folder; 404 for a foreign / missing / TRASHED id (all
+/// indistinguishable — `Files.get` hardcodes `deleted = 0`, so a bin item is a 404,
+/// which is right: rename is a live-only action with restore/purge as the bin's own
+/// verbs).
+pub fn controlplaneRename(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    const caller = ctx.caller.?; // controlplane scope
+    const files = ctx.files orelse return serverError(ctx, req);
+    const id = reply.pathId(params) orelse return badRequest(ctx, req);
+
+    var parsed = json.readBody(RenameReq, ctx.gpa, req) catch return badRequest(ctx, req);
+    defer parsed.deinit();
+    const new_name = std.mem.trim(u8, parsed.value.name, " \t\r\n");
+
+    // Validate server-side too — never rely on the client. `move` would also reject
+    // an empty name, but a '/' would silently be read as a path separator by nothing
+    // here yet is not a legal filename component, so both are 400s with a clear code.
+    if (new_name.len == 0)
+        return fail(ctx, req, .bad_request, "INVALID_NAME", "a name can't be empty");
+    if (std.mem.indexOfScalar(u8, new_name, '/') != null)
+        return fail(ctx, req, .bad_request, "INVALID_NAME", "a name can't contain '/'");
+
+    // Resolve the caller's LIVE entry for its current parent + kind. `get` is the
+    // shared ownership boundary and hardcodes `deleted = 0`, so a foreign, missing
+    // or trashed id is one indistinguishable 404 (same as `controlplaneTrash`).
+    const entry = (files.get(caller.user_id, id) catch return serverError(ctx, req)) orelse
+        return fail(ctx, req, .not_found, "NOT_FOUND", "no such entry");
+    defer ctx.gpa.free(entry.name);
+    defer if (entry.md5) |m| ctx.gpa.free(m);
+
+    // Guard the fixed category folders (see `category_roots` / `category_anchors`).
+    // A root-level container/category folder, or a two-segment anchor subfolder
+    // directly under a root-level container, may not be renamed — device sync and
+    // the browser rail resolve these by path.
+    if (entry.is_folder) {
+        if (entry.parent_id) |pid| {
+            // Anchor case: the parent must itself be root-level for `[parent, entry]`
+            // to be a category anchor. A "Note" folder deeper in the tree, or under a
+            // non-root parent, is a user folder and renames fine.
+            if (files.get(caller.user_id, pid) catch return serverError(ctx, req)) |parent| {
+                defer ctx.gpa.free(parent.name);
+                defer if (parent.md5) |m| ctx.gpa.free(m);
+                if (parent.parent_id == null and isCategoryAnchor(parent.name, entry.name))
+                    return fail(ctx, req, .forbidden, "RESERVED_FOLDER", "this system folder can't be renamed");
+            }
+        } else if (isCategoryRoot(entry.name)) {
+            return fail(ctx, req, .forbidden, "RESERVED_FOLDER", "this system folder can't be renamed");
+        }
+    }
+
+    const moved = files.move(caller.user_id, id, entry.parent_id, new_name, false) catch |err| switch (err) {
+        error.NameConflict => return fail(ctx, req, .conflict, "NAME_TAKEN", "that name is already used here"),
+        error.NotFound => return fail(ctx, req, .not_found, "NOT_FOUND", "no such entry"),
+        else => return serverError(ctx, req),
+    };
+    defer ctx.gpa.free(moved.name);
+    defer if (moved.md5) |m| ctx.gpa.free(m);
+
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    var svc = controlplane.ControlPlaneService.init(files);
+    const vo = svc.entryVO(arena.allocator(), caller.user_id, moved) catch return serverError(ctx, req);
+    try json.respond(ctx.gpa, req, .ok, vo, null);
+}
+
 /// POST /api/controlplane/bin/{id}/restore -> bring a trashed entry back.
 ///
 /// **The response reports what actually happened, not what was asked**, because

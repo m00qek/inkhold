@@ -747,15 +747,16 @@ test.describe("library rail + gallery", () => {
       await page.getByRole("button", { name: "List view" }).click();
 
       // A `.note`: DOWNLOAD (PDF document + Supernote) then ACTIONS (Version
-      // history + Move to bin), each group under its own titled header, the
-      // soft-delete last.
+      // history + Rename + Move to bin), each group under its own titled header,
+      // the soft-delete last.
       await more(page, "Attention Is All You Need").click();
       const pop = page.locator(".menu-portal .menu__pop");
       await expect(pop.locator(".menu__section")).toHaveText(["DOWNLOAD", "ACTIONS"]);
-      await expect(pop.getByRole("menuitem")).toHaveCount(4);
+      await expect(pop.getByRole("menuitem")).toHaveCount(5);
       await expect(pop.getByRole("menuitem", { name: /PDF document/ })).toBeVisible();
       await expect(pop.getByRole("menuitem", { name: /Supernote/ })).toBeVisible();
       await expect(pop.getByRole("menuitem", { name: "Version history" })).toBeVisible();
+      await expect(pop.getByRole("menuitem", { name: "Rename" })).toBeVisible();
       const moveBin = pop.getByRole("menuitem", { name: "Move to bin" });
       await expect(moveBin).toBeVisible();
       // NEUTRAL: a recoverable soft-delete is NOT the red danger variant.
@@ -768,8 +769,9 @@ test.describe("library rail + gallery", () => {
       await more(page, "Apartment lease").click();
       const pdfPop = page.locator(".menu-portal .menu__pop");
       await expect(pdfPop.locator(".menu__section")).toHaveText(["DOWNLOAD", "ACTIONS"]);
-      await expect(pdfPop.getByRole("menuitem")).toHaveCount(2);
+      await expect(pdfPop.getByRole("menuitem")).toHaveCount(3);
       await expect(pdfPop.getByRole("menuitem", { name: /Original file/ })).toBeVisible();
+      await expect(pdfPop.getByRole("menuitem", { name: "Rename" })).toBeVisible();
       await expect(pdfPop.getByRole("menuitem", { name: "Move to bin" })).toBeVisible();
     });
 
@@ -996,11 +998,12 @@ test.describe("library rail + gallery", () => {
       await trigger.click();
       await expect(pop).toBeVisible();
       await expect(trigger).toHaveAttribute("aria-expanded", "true");
-      // DOWNLOAD (PDF document + Supernote) then ACTIONS (Version history + Move
-      // to bin) — the soft-delete LAST, never the one under the pointer when the
-      // menu opens, and NEUTRAL (a recoverable move is not the red danger variant).
+      // DOWNLOAD (PDF document + Supernote) then ACTIONS (Version history +
+      // Rename + Move to bin) — the soft-delete LAST, never the one under the
+      // pointer when the menu opens, and NEUTRAL (a recoverable move is not the
+      // red danger variant).
       await expect(pop.locator(".menu__section")).toHaveText(["DOWNLOAD", "ACTIONS"]);
-      await expect(pop.getByRole("menuitem")).toHaveCount(4);
+      await expect(pop.getByRole("menuitem")).toHaveCount(5);
       await expect(pop.getByRole("menuitem", { name: /PDF document/ })).toBeVisible();
       const moveBin = pop.getByRole("menuitem").last();
       await expect(moveBin).toHaveText("Move to bin");
@@ -1030,8 +1033,9 @@ test.describe("library rail + gallery", () => {
       // `.menu-portal` at the body root — so its sections/items are read there.
       const pdfPop = page.locator(".menu-portal .menu__pop");
       await expect(pdfPop.locator(".menu__section")).toHaveText(["DOWNLOAD", "ACTIONS"]);
-      await expect(pdfPop.getByRole("menuitem")).toHaveCount(2);
+      await expect(pdfPop.getByRole("menuitem")).toHaveCount(3);
       await expect(pdfPop.getByRole("menuitem", { name: /Original file/ })).toBeVisible();
+      await expect(pdfPop.getByRole("menuitem", { name: "Rename" })).toBeVisible();
       await expect(pdfPop.getByRole("menuitem", { name: "Move to bin" })).toBeVisible();
       await page.keyboard.press("Escape");
 

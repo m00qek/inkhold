@@ -1363,6 +1363,32 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       return buf.buffer;
     },
 
+    // --- RENAME (control-plane) ---
+    //
+    // Mutates the fixture entry IN PLACE — a rename is a metadata change, and the
+    // fixture's entries are the same objects `listFolder` hands out and (for a
+    // note) the same object `ALL_NOTES` holds, so one field write is seen
+    // everywhere the entry appears. The collision rule is the real server's, on
+    // the data the client cannot re-derive: a sibling in the SAME parent already
+    // carrying that exact name is a `NameTaken` (the real 409), which the dialog
+    // catches and stays open on. `NameTakenError` is imported dynamically for the
+    // same reason the admin fake imports `ApiError` that way — this file has no
+    // top-level import of `client.ts` and cannot grow one at a marker.
+    async rename(id: Id, name: string): Promise<Entry> {
+      await delay(latency);
+      for (const entries of Object.values(CHILDREN)) {
+        const entry = entries.find((e) => e.id === id);
+        if (!entry) continue;
+        if (entries.some((e) => e !== entry && e.name === name)) {
+          const { NameTakenError } = await import("./client");
+          throw new NameTakenError();
+        }
+        entry.name = name;
+        return { ...entry };
+      }
+      throw new Error(`no such entry: ${id}`);
+    },
+
     // --- WRITES (append-only, at your own marker — see `types.ts`) ---
     // --- BIN WRITES ---
     // The whole bin, from `./binFake`. It is a separate module because a fixture
