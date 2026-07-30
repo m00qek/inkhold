@@ -22,7 +22,7 @@ import { el } from "../ui/dom";
 import type { NoteMeta, NoteSummary } from "../core/types";
 import { formatBytes, rawFileUrl, historyFileUrl } from "../core/fileKind";
 import { readLocal, writeLocal } from "../ui/storage";
-import { dispatchApiFailure } from "../api/client";
+import { bytesBudget, dispatchApiFailure } from "../api/client";
 import { createToolbar } from "./toolbar";
 import { svg, VIEWER_IC, VIEWER_DEBOUNCE_MS, backWord, createViewerHeader, createZoomStepper, createViewerBody, createVersionBanner } from "./viewerChrome";
 import { createBinViewerActions } from "../ui/binViewerActions";
@@ -102,14 +102,21 @@ export class TxtLoadError extends Error {
 export function defaultTxtSeam(): TxtSeam {
   return {
     async fetchText(url: string, signal: AbortSignal): Promise<string> {
+      // `bytesBudget` folds the shared byte timeout into the caller's own signal,
+      // so a STALLED transfer ends in the honest load error below rather than
+      // leaving the viewer on "Opening this .txt file…" indefinitely.
+      const budget = bytesBudget(signal);
       let res: Response;
       try {
-        res = await fetch(url, { signal, credentials: "same-origin" });
+        res = await fetch(url, { signal: budget.signal, credentials: "same-origin" });
       } catch (err) {
         // An abort rejects here too — rethrow so the caller's aborted-check drops
-        // it silently rather than painting an error for a load it cancelled.
+        // it silently rather than painting an error for a load it cancelled. A
+        // TIMEOUT is not that: the caller did not cancel, so it must be reported.
         if (signal.aborted) throw err;
         throw new TxtLoadError(null);
+      } finally {
+        budget.done();
       }
       if (!res.ok) throw new TxtLoadError(res.status);
       return res.text(); // decodes UTF-8

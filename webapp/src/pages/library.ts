@@ -1405,7 +1405,7 @@ export function createAppShell(deps: AppDeps): AppShell {
         parts.push(`${e.kind}${e.id}${e.name}${e.kind === "folder" ? e.itemCount : e.updatedAt}`);
       }
     }
-    return parts.join(" ");
+    return parts.join("\u0000");
   }
 
   /**
@@ -1554,8 +1554,27 @@ export function createAppShell(deps: AppDeps): AppShell {
     if (folders.length === 0) return;
     const cards = gallery.querySelectorAll<HTMLElement>(".card--folder");
     if (cards.length !== folders.length) return;
+
+    // ONLY THE CARDS WHOSE RENDERING ACTUALLY MOVED. Replacing all of them
+    // unconditionally is not merely wasteful: a replaced node is DETACHED, so a
+    // card the user is hovering, has tabbed to, or is in the middle of clicking
+    // is pulled out from under them — and `settle()` runs on every completed
+    // walk, i.e. on every sync bump from the device, not just the first. The two
+    // things this pass can change are the label (`EXPORT` → `Export`) and whether
+    // the card is a category, so comparing those two is the whole test.
+    const stale = folders.filter((folder, i) => {
+      const card = cards[i]!;
+      const labelMoved = card.querySelector(".card__title")?.textContent !== rail.labelFor(folder);
+      const categoryMoved = card.classList.contains("card--category") !== (rail.categoryIconFor(folder) !== null);
+      return labelMoved || categoryMoved;
+    });
+    if (stale.length === 0) return;
+
     closeOpenMenu(); // a folder row's menu is about to be replaced
-    folders.forEach((folder, i) => cards[i]!.replaceWith(galleryCards.folderCard(folder)));
+    folders.forEach((folder, i) => {
+      if (!stale.includes(folder)) return;
+      cards[i]!.replaceWith(galleryCards.folderCard(folder));
+    });
     // A category card is a different height from a plain folder chip.
     scheduleSpan();
   }

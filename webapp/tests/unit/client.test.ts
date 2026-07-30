@@ -147,3 +147,83 @@ describe("api client", () => {
     });
   });
 });
+
+// --- request budgets ---------------------------------------------------------
+//
+// A STALLED connection — one that neither delivers nor errors — used to leave
+// every surface in its loading state forever, because `NETWORK` only fires on an
+// actual rejection. These pin the two halves of the policy that matter: that a
+// stall ends, and that a MUTATION's ending never claims to know what happened.
+describe("request budgets", () => {
+  /** A fetch that never answers, and rejects the way a real one does on abort. */
+  function stallingFetch(): typeof fetch {
+    return vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        }),
+    ) as unknown as typeof fetch;
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("ends a stalled GET as TIMEOUT rather than waiting for ever", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", stallingFetch());
+
+    const pending = createHttpApi().listFolder(null).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    const err = await pending;
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).code).toBe("TIMEOUT");
+  });
+
+  it("does not give up on a GET before its budget is spent", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", stallingFetch());
+
+    let settled = false;
+    void createHttpApi()
+      .listFolder(null)
+      .catch(() => void (settled = true));
+    // Well past a naive "a second or two" cap, nowhere near the real budget.
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(settled).toBe(false);
+  });
+
+  it("says a timed-out MUTATION may have applied, never that it failed", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", stallingFetch());
+
+    // A rename is the sharp case: the server may have renamed the file before
+    // the answer was lost, so "couldn't rename" would be a lie — and a caller
+    // that believed it might retry a purge into deleting twice.
+    const pending = createHttpApi()
+      .rename("f1", "new name.note")
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const err = await pending;
+    expect((err as ApiError).code).toBe("TIMEOUT");
+    expect((err as ApiError).message).toContain("don't know whether that finished");
+    expect((err as ApiError).message).not.toContain("failed");
+  });
+
+  it("gives a mutation more room than a GET", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", stallingFetch());
+
+    let settled = false;
+    void createHttpApi()
+      .rename("f1", "new name.note")
+      .catch(() => void (settled = true));
+    // The GET budget has been spent; a mutation's has not.
+    await vi.advanceTimersByTimeAsync(15_001);
+
+    expect(settled).toBe(false);
+  });
+});

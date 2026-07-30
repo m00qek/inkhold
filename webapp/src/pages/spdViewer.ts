@@ -33,6 +33,7 @@
 // injectable so the whole viewer can run without a real GPU or a network.
 
 import { el } from "../ui/dom";
+import { bytesBudget } from "../api/client";
 import type { NoteMeta, NoteSummary } from "../core/types";
 import { formatBytes, rawFileUrl, historyFileUrl } from "../core/fileKind";
 import { createToolbar } from "./toolbar";
@@ -615,7 +616,15 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       }
       // The signal covers the whole download: an abort mid-`arrayBuffer()` rejects
       // it too, so a hide/re-open stops the transfer rather than waiting it out.
-      const res = await fetch(url, { signal });
+      // `bytesBudget` folds in the shared byte timeout, so a STALLED transfer
+      // ends in the honest failure below instead of an open-ended wait.
+      const budget = bytesBudget(signal);
+      let res: Response;
+      try {
+        res = await fetch(url, { signal: budget.signal });
+      } finally {
+        budget.done();
+      }
       if (res.status === 401 || res.status === 403) {
         deps.onSessionExpired();
         return;

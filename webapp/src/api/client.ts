@@ -78,6 +78,95 @@ export class RateLimitError extends ApiError {
   }
 }
 
+// --- request budgets ---------------------------------------------------------
+//
+// WHAT THIS GUARDS AGAINST IS A STALL, NOT SLOWNESS, and the whole policy falls
+// out of that distinction (docs/scratch/ui-on-slow-connection.md §2.1). A
+// connection that neither delivers nor errors leaves every surface in its
+// loading state forever — the bin's "Loading…", the admin's, search's
+// "Searching…" — because `NETWORK` only fires on an actual rejection. But a
+// 200 MB PDF arriving over wifi to a Pi legitimately takes minutes and must
+// never be aborted for succeeding slowly. One number cannot serve both, so
+// there are tiers.
+//
+// The SSE stream (sync/live.ts) is deliberately exempt: it is long-lived by
+// design and carries its own heartbeat frames for liveness.
+
+/** A control-plane GET: small responses. Past this, it is not coming. */
+const CONTROL_TIMEOUT_MS = 15_000;
+
+/**
+ * A mutation. Longer, and — load-bearing — its failure is AMBIGUOUS: a rename,
+ * upload, purge or restore may well have applied server-side before the answer
+ * was lost. Nothing here may auto-retry, and the message must not claim it
+ * failed. See `TIMEOUT_AMBIGUOUS`.
+ */
+const MUTATION_TIMEOUT_MS = 30_000;
+
+/**
+ * Bytes: page payloads, raw files, thumbnails, whole `.spd`/`.txt` blobs.
+ *
+ * A total-duration cap is the WRONG instrument here — it cannot tell a stall at
+ * 5% from a slow success — and this number is deliberately far past any real
+ * transfer rather than tuned. The right primitive is a stall timeout ("no bytes
+ * for N seconds"), which needs a streaming reader; that is deferred so it can be
+ * built once, together with the byte progress upload and the `.spd` viewer both
+ * need. Until then this is a backstop against the infinite case only.
+ */
+const BYTES_TIMEOUT_MS = 300_000;
+
+const TIMEOUT_MESSAGE = "The server is taking too long to answer. Check your connection and try again.";
+/** A mutation that timed out MAY HAVE APPLIED. Never say it failed. */
+const TIMEOUT_AMBIGUOUS =
+  "The server didn't answer in time, so we don't know whether that finished. Reload to see where things stand.";
+
+/**
+ * A signal that aborts when `caller` does OR when `ms` elapses, plus the `done()`
+ * every caller must run in a `finally`.
+ *
+ * Composed by hand rather than with `AbortSignal.any`/`AbortSignal.timeout` for
+ * two reasons: the timer has to be CLEARABLE (a 5-minute pending timer per byte
+ * request, left armed after the response lands, is a leak on a gallery that
+ * fetches hundreds of thumbnails), and `timedOut` has to be readable afterwards
+ * so an abort can be reported as a timeout rather than as a bare `NETWORK`
+ * failure — `fetch` rejects identically either way.
+ */
+function withTimeout(caller: AbortSignal | undefined, ms: number) {
+  const ctl = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctl.abort();
+  }, ms);
+  const onCallerAbort = (): void => ctl.abort();
+  caller?.addEventListener("abort", onCallerAbort);
+  if (caller?.aborted) ctl.abort();
+  return {
+    signal: ctl.signal,
+    /** True only when WE aborted it, so a caller's own cancel is not a timeout. */
+    timedOut: () => timedOut,
+    done: () => {
+      clearTimeout(timer);
+      caller?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+}
+
+/**
+ * The BYTES budget as a signal, for the few whole-blob readers that own their
+ * own `fetch` because they interpret statuses themselves (the `.spd`/`.txt`
+ * viewers) rather than going through `rawFetch`. Compose it with the caller's
+ * cancellation signal; run `done()` in a `finally`.
+ *
+ * A timeout lands as an abort, so it surfaces through whatever the caller
+ * already does for a failed load — which for both viewers is an honest "couldn't
+ * open this, you can still download the original" rather than a hang.
+ */
+export function bytesBudget(caller?: AbortSignal): { signal: AbortSignal; done: () => void } {
+  const b = withTimeout(caller, BYTES_TIMEOUT_MS);
+  return { signal: b.signal, done: b.done };
+}
+
 type Method = "GET" | "POST" | "PUT" | "DELETE";
 
 /**
@@ -97,55 +186,70 @@ async function request<T = unknown>(
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<T & Envelope> {
-  let res: Response;
+  // A GET is cheap to lose and safe to repeat; a mutation is neither, so it gets
+  // room and an honest message if it runs out (see the budgets above).
+  const mutating = method !== "GET";
+  const budget = withTimeout(signal, mutating ? MUTATION_TIMEOUT_MS : CONTROL_TIMEOUT_MS);
+  // `done()` on EVERY path, including the throws below: an armed 15–30 s
+  // timer left behind by each request is a real leak on a surface that makes
+  // hundreds of them, and the abort it would eventually fire is meaningless
+  // once the response has landed.
   try {
-    res = await fetch(path, {
-      method,
-      credentials: "same-origin",
-      headers: body === undefined ? undefined : { "content-type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal,
-    });
-  } catch {
-    throw new ApiError("NETWORK", "Can't reach the server. Check your connection and try again.", 0);
-  }
+    let res: Response;
+    try {
+      res = await fetch(path, {
+        method,
+        credentials: "same-origin",
+        headers: body === undefined ? undefined : { "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: budget.signal,
+      });
+    } catch {
+      if (budget.timedOut()) {
+        throw new ApiError("TIMEOUT", mutating ? TIMEOUT_AMBIGUOUS : TIMEOUT_MESSAGE, 0);
+      }
+      throw new ApiError("NETWORK", "Can't reach the server. Check your connection and try again.", 0);
+    }
 
-  if (res.status === 429) {
-    const header = res.headers.get("Retry-After");
-    const secs = header ? Number.parseInt(header, 10) : NaN;
-    throw new RateLimitError(Number.isFinite(secs) ? secs : null);
-  }
+    if (res.status === 429) {
+      const header = res.headers.get("Retry-After");
+      const secs = header ? Number.parseInt(header, 10) : NaN;
+      throw new RateLimitError(Number.isFinite(secs) ? secs : null);
+    }
 
-  // BEFORE the 401/403 arm, and a status those two do not share, because the
-  // meaning is the opposite of theirs: the session is ALIVE and valid, it just
-  // has not been elevated to admin recently enough. Folded into UNAUTHORIZED it
-  // would sign the user out — losing the very session the gate is about to
-  // re-confirm — instead of showing the gate.
-  if (res.status === 428) {
-    throw new ApiError("ELEVATION_REQUIRED", "Confirm your password to continue.", 428);
-  }
+    // BEFORE the 401/403 arm, and a status those two do not share, because the
+    // meaning is the opposite of theirs: the session is ALIVE and valid, it just
+    // has not been elevated to admin recently enough. Folded into UNAUTHORIZED it
+    // would sign the user out — losing the very session the gate is about to
+    // re-confirm — instead of showing the gate.
+    if (res.status === 428) {
+      throw new ApiError("ELEVATION_REQUIRED", "Confirm your password to continue.", 428);
+    }
 
-  if (res.status === 401 || res.status === 403) {
-    throw new ApiError("UNAUTHORIZED", "Your session has ended. Sign in again.", res.status);
-  }
+    if (res.status === 401 || res.status === 403) {
+      throw new ApiError("UNAUTHORIZED", "Your session has ended. Sign in again.", res.status);
+    }
 
-  let data: (T & Envelope) | null = null;
-  try {
-    data = (await res.json()) as T & Envelope;
-  } catch {
-    // Endpoints like /api/version return non-JSON; only treat it as an error
-    // when the transport itself failed.
-    if (!res.ok) throw new ApiError("SERVER", "The server returned an unexpected response.", res.status);
-    return {} as T & Envelope;
-  }
+    let data: (T & Envelope) | null = null;
+    try {
+      data = (await res.json()) as T & Envelope;
+    } catch {
+      // Endpoints like /api/version return non-JSON; only treat it as an error
+      // when the transport itself failed.
+      if (!res.ok) throw new ApiError("SERVER", "The server returned an unexpected response.", res.status);
+      return {} as T & Envelope;
+    }
 
-  if (data && data.success === false) {
-    throw new ApiError(data.errorCode ?? "ERROR", data.errorMsg ?? "Something went wrong.", res.status);
+    if (data && data.success === false) {
+      throw new ApiError(data.errorCode ?? "ERROR", data.errorMsg ?? "Something went wrong.", res.status);
+    }
+    if (!res.ok) {
+      throw new ApiError("SERVER", "The server returned an unexpected response.", res.status);
+    }
+    return data;
+  } finally {
+    budget.done();
   }
-  if (!res.ok) {
-    throw new ApiError("SERVER", "The server returned an unexpected response.", res.status);
-  }
-  return data;
 }
 
 export interface LoginResult {
@@ -310,12 +414,24 @@ function statusError(status: number): ApiError | null {
  * and a non-`ok` status is SERVER. This returns a Response known to be `ok`; the
  * caller picks `arrayBuffer()`, `blob()` or `json()`.
  */
-async function rawFetch(url: string): Promise<Response> {
+export async function rawFetch(url: string, signal?: AbortSignal): Promise<Response> {
+  // The BYTES budget, not the control-plane one: this is the path a whole page
+  // payload, a raw `.note`/`.pdf` or a cover travels, and killing one of those
+  // for being large is worse than the stall it is meant to catch. It only rules
+  // out the infinite case — see `BYTES_TIMEOUT_MS`.
+  const budget = withTimeout(signal, BYTES_TIMEOUT_MS);
   let res: Response;
   try {
-    res = await fetch(url, { credentials: "same-origin" });
+    res = await fetch(url, { credentials: "same-origin", signal: budget.signal });
   } catch {
+    if (budget.timedOut()) throw new ApiError("TIMEOUT", TIMEOUT_MESSAGE, 0);
     throw new ApiError("NETWORK", "Can't reach the server. Check your connection and try again.", 0);
+  } finally {
+    // Cleared as soon as the RESPONSE lands: unlike `request`, the caller reads
+    // the body itself (`arrayBuffer`/`blob`), so there is no later await here to
+    // keep covered — and holding a 5-minute timer per thumbnail would be the
+    // leak this exists to avoid.
+    budget.done();
   }
   const err = statusError(res.status);
   if (err) throw err;
