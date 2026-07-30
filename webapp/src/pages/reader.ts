@@ -20,7 +20,7 @@ import type { Api } from "../api/types";
 import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
 import type { Hash, Id, NoteMeta, NoteSummary, PageRef, Theme, WordBox } from "../core/types";
-import { createLazyEngine, renderPage, type LazyEngine } from "../render/lazy";
+import { createLazyEngine, defaultPlaceholder, renderPage, type LazyEngine } from "../render/lazy";
 import { createTemplateProvider } from "../render/template";
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
 import { fileKind, formatBytes, rawFileUrl, historyFileUrl, type FileKind } from "../core/fileKind";
@@ -724,6 +724,26 @@ export function createReader(deps: ReaderDeps): Reader {
    */
   let layersPanelOpen = false;
   /**
+   * What the LAYERS affordance is ENTITLED TO CLAIM about the page on screen,
+   * decided from METADATA and never from the decode.
+   *
+   *  - `"some"` — the page's `PageRef.layers` is non-empty. A fact, known the
+   *    instant the page is focused: `showPage` already reads exactly this to
+   *    decide whether to attempt the layered path at all.
+   *  - `"none"` — the page carries no layers and the metadata is REAL, so the
+   *    absence is a fact too.
+   *  - `"unknown"` — `meta` is still the skeleton, which invents its pages and
+   *    therefore cannot answer. The toggle is disabled (there is nothing to
+   *    open) but says nothing about layers.
+   *
+   * Derived here rather than from `noteLayerCtl.stack()` because the stack is
+   * the answer to "has the decode finished", which lags the page turn by a fetch
+   * plus tens of megabytes of RGBA — and during that window the old code either
+   * described the PREVIOUS page's stack or claimed "This page has no layers"
+   * about a page still loading.
+   */
+  let layersAvail: "unknown" | "none" | "some" = "unknown";
+  /**
    * Whether the user WANTS the page index open. Distinct from the panel's actual
    * visibility (which also needs `mode === "note"`), exactly like `layersPanelOpen`.
    * Defaults to OPEN — the page index is the reader's primary navigation — and is
@@ -915,6 +935,10 @@ export function createReader(deps: ReaderDeps): Reader {
       case "counting": {
         const n = state.recognisedPages;
         const here = state.onThisPage > 0 ? `${state.onThisPage} on this page · ` : "";
+        // `null` = the page list is still the skeleton, so how many pages carry
+        // recognition is UNKNOWN. "searching 0 pages…" would be a number we do
+        // not have; the bare word says exactly what is going on.
+        if (n === null) return `${here}searching…`;
         return `${here}searching ${n} ${n === 1 ? "page" : "pages"}…`;
       }
       case "streaming":
@@ -1399,13 +1423,26 @@ export function createReader(deps: ReaderDeps): Reader {
    */
   const MIN_PAGE_W = 360;
 
+  /**
+   * Is the layers panel actually ON SCREEN? THE one predicate the toggle, the
+   * panel's `hidden` and both width reservations read, so the page can never be
+   * sized against a dock that is not there (or vice versa).
+   *
+   * It turns on `layersAvail`, not on the live stack: a panel open across a page
+   * turn stays open through the new page's decode (showing the shared loading
+   * line), and a page-width computed off the stack would have jumped by 342px
+   * mid-turn and jumped back.
+   */
+  function layersPanelShown(): boolean {
+    return layersPanelOpen && mode === "note" && layersAvail === "some";
+  }
+
   /** The width one open RIGHT dock (OCR) or the wider Layers dock takes, gap
    *  included — the same tokens `showPage` subtracts, so nothing is hand-synced. */
   function rightPanelsWidth(): number {
     const gap = tokenPx("--panel-gap", 22);
     const ocrW = ocr.isOpen() ? tokenPx("--panel-w", 268) + gap : 0;
-    const layersW =
-      layersPanelOpen && noteLayerCtl.stack() !== null ? tokenPx("--panel-w-wide", 320) + gap : 0;
+    const layersW = layersPanelShown() ? tokenPx("--panel-w-wide", 320) + gap : 0;
     return ocrW + layersW;
   }
 
@@ -1464,16 +1501,46 @@ export function createReader(deps: ReaderDeps): Reader {
    * affordances can never describe a stack that is not on screen.
    */
   function refreshLayersUi(): void {
-    const stack = noteLayerCtl.stack();
-    const has = stack !== null && mode === "note";
+    const has = mode === "note" && layersAvail === "some";
     layersToggle.disabled = !has;
-    layersToggle.title = has ? "Layers" : "This page has no layers";
-    if (has) layersPanel.setLayers(toPanelLayers(stack.views));
-    const open = has && layersPanelOpen;
+    // THREE STATES, AND THE THIRD IS NOT THE SECOND. "This page has no layers"
+    // is a definite claim, and the reader is in no position to make it while the
+    // note's real metadata is still in flight — the skeleton it paints from
+    // invents its pages. So an unresolved page gets a disabled toggle with
+    // NEUTRAL wording: it describes what the reader is doing, and asserts
+    // nothing about the page.
+    layersToggle.title = has
+      ? "Layers"
+      : mode === "note" && layersAvail === "unknown"
+        ? "Layers — still opening this page"
+        : "This page has no layers";
+    const open = layersPanelShown();
+    if (open) {
+      // THE BODY FOLLOWS THE LIVE STACK, and only when that stack is THIS page's.
+      // Across a layered→layered turn the previous page's stack is still mounted
+      // (it is not released until the new one commits — see `presentLayers`), and
+      // listing its rows and thumbnails under the new page's number was the panel
+      // half of the same lie the toggle was telling.
+      const stack = stackIsCurrent() ? noteLayerCtl.stack() : null;
+      if (stack) layersPanel.setLayers(toPanelLayers(stack.views));
+      else layersPanel.setState("loading", "Loading this page's layers…");
+    }
     layersPanel.el.hidden = !open;
     layersToggle.setAttribute("aria-pressed", String(open));
     layersToggle.setAttribute("aria-expanded", String(open));
     refreshExportGroups();
+  }
+
+  /**
+   * Is the mounted stack the FOCUSED page's, at the current theme? The
+   * controller's own `isPresented` is the authority — the same test
+   * `presentLayers` short-circuits on — so "the stack on screen is the right
+   * one" has exactly one definition. Everything that is about to change (a page
+   * turn, a theme flip) reads false here before the decode lands.
+   */
+  function stackIsCurrent(): boolean {
+    const page = meta?.pages[pageIndex];
+    return page !== undefined && page.hash !== "" && noteLayerCtl.isPresented(page.hash, getTheme());
   }
 
   /**
@@ -1488,7 +1555,11 @@ export function createReader(deps: ReaderDeps): Reader {
    *    would be byte-identical.
    */
   function refreshExportGroups(): void {
-    const stack = noteLayerCtl.stack();
+    // THE STACK THAT IS ON SCREEN, not merely the one that is mounted. Across a
+    // page turn the previous page's stack survives until the new one commits (it
+    // is hidden, not released — see `showPage`), and offering "save the current
+    // view" then would export page N's layers under page N+1's filename.
+    const stack = stackIsCurrent() ? noteLayerCtl.stack() : null;
     const has = stack !== null && mode === "note";
     currentOraItem.hidden = !has;
     const toggled = stack !== null && mode === "note" && stack.views.some((v) => v.visible !== v.authoredVisible);
@@ -1505,6 +1576,11 @@ export function createReader(deps: ReaderDeps): Reader {
   async function presentLayers(noteId: Id, page: PageRef, vos: PageLayer[], token: number): Promise<boolean> {
     const theme = getTheme();
     if (noteLayerCtl.isPresented(page.hash, theme)) {
+      // A relayout/zoom/theme-neutral repeat of the SAME page: the stack never
+      // went anywhere, so all that is needed is to undo `showPage`'s
+      // hide-for-the-turn. (It is hidden and re-shown inside one task, before
+      // the browser paints, so this costs no flicker.)
+      noteLayerCtl.el.hidden = false;
       refreshLayersUi();
       return true;
     }
@@ -1540,6 +1616,41 @@ export function createReader(deps: ReaderDeps): Reader {
     }
     pagerCount.textContent = `${pageIndex + 1} / ${meta.pages.length}`;
 
+    // WHAT THE LAYERS AFFORDANCE MAY SAY, decided HERE — from the metadata, in
+    // the same synchronous breath as the pager — rather than when the decode
+    // eventually resolves. `page.layers` is the very field the layered path
+    // below turns on, so this costs nothing and is right immediately on every
+    // page turn: no third "checking" state, no flicker, no lie.
+    //
+    // ABSENCE IS AN ANSWER, not a gap: the server omits `layers` exactly when a
+    // page has none, on the listing's `firstPage` as on the meta's page list. So
+    // the only genuinely unknown page is one the SKELETON invented — index > 0
+    // while the real metadata is still in flight. Page 0 always came off the
+    // summary and is trustworthy from the first paint, which is the whole point
+    // of the listing carrying its layers.
+    const pageIsAuthoritative = metaResolved || pageIndex === 0;
+    const layerVos = page.layers ?? null;
+    const pageHasLayers = layerVos !== null && layerVos.length > 0;
+    layersAvail = pageHasLayers ? "some" : pageIsAuthoritative ? "none" : "unknown";
+    refreshLayersUi();
+
+    // THE PREVIOUS PAGE'S STACK MUST NOT SURVIVE THE TURN. It is page N's ink at
+    // full sharpness, absolutely positioned over the whole page box, and it kept
+    // covering the blur-up of page N+1 for the entire fetch + decode: the title,
+    // the pager and the filmstrip moved on while the ink did not.
+    //
+    // HIDDEN, NOT RELEASED. `release()` bumps the controller's `gen` — which is
+    // load-bearing for the superseded-decode guard — and, more to the point, it
+    // would throw away the `isPresented` short-circuit that makes a zoom step, a
+    // panel toggle or a stage resize free. Hiding is reversible in one property;
+    // `present()` un-hides on commit and `presentLayers`' short-circuit un-hides
+    // for the same-page case. The composite canvas comes back out from under it
+    // in the same breath, since it is what the blur-up below is drawn into.
+    if (!stackIsCurrent()) {
+      noteLayerCtl.el.hidden = true;
+      pageCanvas.hidden = false;
+    }
+
     // Size the page: fit the stage height (or a zoom step), clamp to width.
     const rect = stage.getBoundingClientRect();
     const aspect = page.width / page.height;
@@ -1552,8 +1663,7 @@ export function createReader(deps: ReaderDeps): Reader {
     // this can never subtract a stale number (see `tokenPx`).
     const gap = tokenPx("--panel-gap", 22);
     const ocrW = ocr.isOpen() ? tokenPx("--panel-w", 268) + gap : 0;
-    const layersW =
-      layersPanelOpen && noteLayerCtl.stack() !== null ? tokenPx("--panel-w-wide", 320) + gap : 0;
+    const layersW = layersPanelShown() ? tokenPx("--panel-w-wide", 320) + gap : 0;
     // The page index docks on the LEFT and takes its slice too — the NARROW track
     // (a thumbnail column, not a text panel), read off the live layout (see
     // `tokenPx`), so nothing is hand-synced.
@@ -1579,8 +1689,9 @@ export function createReader(deps: ReaderDeps): Reader {
     const token = ++paintToken;
     const noteId: Id = meta.id;
 
-    // Immediately draw the thumbnail (if available) stretched and blurred,
-    // or clear the canvas so the previous page doesn't linger.
+    // Immediately draw the thumbnail (if available) stretched and blurred, or —
+    // when there is none to blur — the ruled sheet, so the previous page does
+    // not linger and the new one is visibly ON ITS WAY.
     let thumbDrawn = false;
     if (filmVirtualList) {
       let btn: HTMLElement | undefined;
@@ -1606,20 +1717,36 @@ export function createReader(deps: ReaderDeps): Reader {
       }
     }
     if (!thumbDrawn) {
+      // THE BLUR-UP SOURCE IS THE FILMSTRIP, AND THE FILMSTRIP IS VIRTUALIZED.
+      // Jump outside its rendered window — a deep link to page 60 of a 200-page
+      // note, a find step across a distant boundary — and there is no button to
+      // blur (`scrollIntoView` only runs at the END of this function). Clearing
+      // the canvas then left a bare white rectangle, with no indication of
+      // anything happening, for the whole fetch + decode. The lazy engine's
+      // ruled sheet is the app's established "a page is coming" treatment on
+      // every other surface; this is the same paint at page size.
       pageCanvas.classList.remove("is-loading");
-      const ctx = pageCanvas.getContext("2d");
-      if (ctx) ctx.clearRect(0, 0, pageCanvas.width, pageCanvas.height);
+      defaultPlaceholder(pageCanvas, page);
     }
 
     // THE LAYERED PATH — only for a page whose meta carries layers, and only
     // for THE focused page (filmstrip/thumbnails/neighbours keep the composite,
     // by scope pin). On success the stack replaces the composite canvas; on ANY
     // failure the composite below paints exactly as it always has.
-    const vos = page.layers ?? null;
     let layeredUp = false;
-    if (page.hash !== "" && vos !== null && vos.length > 0) {
-      layeredUp = await presentLayers(noteId, page, vos, token);
+    if (page.hash !== "" && pageHasLayers && layerVos) {
+      layeredUp = await presentLayers(noteId, page, layerVos, token);
       if (token !== paintToken) return; // a newer showPage superseded us
+      // THE DEGRADE, and the one place a decode outcome legitimately moves this
+      // affordance. The metadata answers "is this page layered"; only the decode
+      // can answer "can those layers actually be shown" — a v1/hostile payload, a
+      // slot mismatch, a stale wasm. The page is on screen as the device-authored
+      // composite and there is no stack to list, so the toggle stops offering one
+      // rather than sitting on a "loading" line that will never resolve.
+      if (!layeredUp) {
+        layersAvail = "none";
+        refreshLayersUi();
+      }
     } else {
       noteLayerCtl.release();
       refreshLayersUi();
@@ -1899,6 +2026,7 @@ export function createReader(deps: ReaderDeps): Reader {
     // Drop the layer stack — a closed reader holds no decoded RGBA (the same
     // discipline as the composite preview below, ~10 MB per layer at stake).
     layersPanelOpen = false;
+    layersAvail = "unknown";
     noteLayerCtl.release();
     refreshLayersUi();
     // Leave history mode: a closed reader holds no preview, and reopening a live
@@ -2022,6 +2150,9 @@ export function createReader(deps: ReaderDeps): Reader {
         // A same-file re-announce (a freshness poll) keeps both, same rule as
         // the export menu above.
         layersPanelOpen = false;
+        // Nothing is known about the new file's first page until `showPage`
+        // reads it — and "unknown" is what must NOT read as "no layers".
+        layersAvail = "unknown";
         noteLayerCtl.release();
         refreshLayersUi();
         // …and with the page index back to its default OPEN — but only across a
@@ -2060,7 +2191,15 @@ export function createReader(deps: ReaderDeps): Reader {
             : rawFileUrl(meta.id, meta.fileHash, { download: true, bin: fromBin }),
         );
         // Before the filmstrip, so a badge repaint has the page list it needs.
-        find.setNote(meta.id, meta.pages);
+        //
+        // THE THIRD ARGUMENT IS THE HONEST-SOURCE RULE, again (see
+        // `refreshFindUi`): while `meta` is the skeleton its per-page
+        // `textHash: null`s are invented, so find must not read "no recognition
+        // anywhere" off them — a `?q=` deep link used to paint "Not recognised
+        // on the device" over a note whose metadata was still in flight. The
+        // LISTING's whole-note answer is the one thing that IS known then, and a
+        // `false` from it settles the question negatively for real.
+        find.setNote(meta.id, meta.pages, metaResolved || !summaryRecognized);
         buildFilmstrip();
         // PRIMING FIND FROM THE ROUTE, through the one path that exists: open the
         // bar, fill the field, hand the controller the query. Landing on the first
@@ -2175,8 +2314,12 @@ export function createReader(deps: ReaderDeps): Reader {
         // empty hash paints nothing) or when the page's identity moved.
         const nextPage = meta.pages[pageIndex];
         const alreadyPainted = paintedPage?.hash !== "" && paintedPage?.hash === nextPage?.hash;
-        // Layers only ever ride on the real meta (a listing's `firstPage` never
-        // carries them), so their arrival IS a change worth repainting for.
+        // A page that GAINS layers must repaint even when its hash is unchanged:
+        // the composite is on screen and the stack is what should be. Now that a
+        // listing's `firstPage` carries its layers, page 0 of a listing-opened
+        // note is already layered on the first paint and this is a no-op there —
+        // which is the point. It still fires for a SYNTHESIZED summary and for
+        // any page the skeleton invented.
         const gainedLayers = (nextPage?.layers?.length ?? 0) > 0 && !paintedPage?.layers?.length;
         if (!alreadyPainted || gainedLayers) void showPage(pageIndex);
       } else {

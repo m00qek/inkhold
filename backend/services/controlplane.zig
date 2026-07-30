@@ -85,9 +85,21 @@ pub const PageRefVO = struct {
     /// The page's layer stack for the reader's layer panel, in **SNPG record
     /// order** (bottom-to-top, matching the payload's records one-to-one —
     /// though the panel should match by `slot`, which both sides carry
-    /// explicitly). Served ONLY on `noteMeta`'s page list; listing/bin
-    /// `firstPage` refs omit it — nothing outside the focused reader page is
-    /// layer-aware. Null there and for non-`.note` fallback pages.
+    /// explicitly). Null — and therefore an OMITTED field — for a page with no
+    /// layer records and for non-`.note` fallback pages.
+    ///
+    /// Carried on `noteMeta`'s page list AND on a listing/bin row's
+    /// `firstPage`, from the same `layerVOsFromBlob` serializer over the same
+    /// `note_page_index.layers` blob, so the two can never describe page 0
+    /// differently. The listing used to omit it on the theory that "nothing
+    /// outside the reader is layer-aware" — but the reader now OPENS from a
+    /// listing summary and fills `noteMeta` in behind itself, so without this
+    /// the Layers toggle has to guess for the one page the user actually
+    /// landed on, and the first paint is a flat composite that gets re-decoded
+    /// into a layer stack the moment the metadata lands (a visible swap).
+    /// Descriptors only — at most `note_index.max_layers` of
+    /// `{slot,name,visible,isCurrent}`, no image data, and no extra query: the
+    /// blob is one more column on a row the listing already reads.
     layers: ?[]const LayerVO = null,
 };
 
@@ -1201,9 +1213,15 @@ pub const ControlPlaneService = struct {
     /// **effective** per-page dims (the note's real header size, orientation
     /// applied) — not a hardcoded device size, which is what used to make this
     /// disagree with the SNPG payload on anything but a 1404×1872 device.
+    ///
+    /// Carries the page's layer panel too, through the SAME `layerVOsFromBlob`
+    /// the reader's page list uses — this is the LISTING's page 0, and the
+    /// reader opens from it before `noteMeta` lands. The blob is one more
+    /// column on a row this already reads: no second statement, no per-row
+    /// query, nothing proportional to the note.
     fn pageRefAt(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8, n: u64) !?PageRefVO {
         var r = (try self.files.db.row(
-            "SELECT content_hash, width, height, text_hash FROM note_page_index " ++
+            "SELECT content_hash, width, height, text_hash, layers FROM note_page_index " ++
                 "WHERE blob_md5 = ?1 AND page_index = ?2;",
             &.{ .{ .text = md5 }, .{ .int = @intCast(n) } },
         )) orelse return null;
@@ -1214,6 +1232,7 @@ pub const ControlPlaneService = struct {
             .width = r.int(1),
             .height = r.int(2),
             .textHash = if (r.isNull(3)) null else try arena.dupe(u8, r.text(3)),
+            .layers = try layerVOsFromBlob(arena, r.blob(4)),
         };
     }
 
@@ -1246,6 +1265,11 @@ pub const ControlPlaneService = struct {
     /// Null — the honest "no panel" — for an empty or malformed blob rather
     /// than failing the whole page list over one row; the blob was written by
     /// this same version's `packLayers`, so malformed means tampered.
+    ///
+    /// THE serializer for this fact, shared by `pageRefsFromIndex` (the
+    /// reader's page list) and `pageRefAt` (a listing/bin row's `firstPage`),
+    /// so page 0 reads identically whichever response the client got it from.
+    /// A second copy of this mapping is the one way those could drift.
     fn layerVOsFromBlob(arena: std.mem.Allocator, blob: []const u8) !?[]const LayerVO {
         var buf: [noteindex.max_layers]noteindex.LayerRecord = undefined;
         const recs = noteindex.unpackLayerRecords(blob, &buf) catch return null;
@@ -1671,12 +1695,93 @@ test "noteMeta: per-page layers carry {slot, name, visible, isCurrent} from the 
     try testing.expectEqualStrings("Main Layer", p0[1].name);
     try testing.expect(p0[1].isCurrent);
 
-    // The LISTING's firstPage ref stays layer-free — nothing outside the
-    // reader is layer-aware.
+    // The LISTING's firstPage carries the SAME descriptors as `noteMeta`'s
+    // page 0 — the reader opens from the summary and must not have to guess
+    // (nor repaint page 0 when the metadata lands behind it).
     const listing_vo = try svc.listing(arena.allocator(), 1, null);
-    for (listing_vo.entries) |entry| {
-        if (entry.firstPage) |fp| try testing.expect(fp.layers == null);
+    try testing.expectEqual(@as(usize, 1), listing_vo.entries.len);
+    try expectSameLayers(meta.pages[0].layers, listing_vo.entries[0].firstPage.?.layers);
+
+    // And so does the same row through `entryVO` (the rename response), which
+    // the client reconciles against a listing row field-for-field.
+    const one = (try f.files.get(1, e.id)).?;
+    defer freeEntry(testing.allocator, one);
+    const renamed = try svc.entryVO(arena.allocator(), 1, one);
+    try expectSameLayers(meta.pages[0].layers, renamed.firstPage.?.layers);
+}
+
+/// Both sides of the ONE contract `layerVOsFromBlob` serializes: absent stays
+/// absent (an omitted field, never `[]`), and present matches field-for-field
+/// in record order.
+fn expectSameLayers(want: ?[]const LayerVO, got: ?[]const LayerVO) !void {
+    if (want == null) return testing.expect(got == null);
+    try testing.expect(got != null);
+    try testing.expectEqual(want.?.len, got.?.len);
+    for (want.?, got.?) |w, g| {
+        try testing.expectEqualStrings(w.slot, g.slot);
+        try testing.expectEqualStrings(w.name, g.name);
+        try testing.expectEqual(w.visible, g.visible);
+        try testing.expectEqual(w.isCurrent, g.isCurrent);
     }
+}
+
+test "listing/bin firstPage: layer descriptors ride along, and are OMITTED when the page has none" {
+    const layers_edited = @embedFile("layers_edited.note");
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    var r = std.Io.Reader.fixed(layers_edited);
+    const layered = try f.files.putFile(1, null, "layers.note", &r, null);
+    defer testing.allocator.free(layered.name);
+    defer if (layered.md5) |m| testing.allocator.free(m);
+
+    // A synthetic note whose one page carries NO layer records at all — the
+    // "omitted" side of the contract (never `null`, never `[]`, absent).
+    const empty_bytes = try nb.serialize(testing.allocator, .{
+        .pages = &.{.{ .style = "style_white", .layers = &.{} }},
+    });
+    defer testing.allocator.free(empty_bytes);
+    const plain = try seedBytes(&f, null, "plain.note", empty_bytes);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+
+    const meta = (try svc.noteMeta(a, 1, layered.id)).?;
+    var seen_layered = false;
+    var seen_plain = false;
+    const listed = try svc.listing(a, 1, null);
+    for (listed.entries) |entry| {
+        if (std.mem.eql(u8, entry.name, "layers.note")) {
+            seen_layered = true;
+            try expectSameLayers(meta.pages[0].layers, entry.firstPage.?.layers);
+            try testing.expect(entry.firstPage.?.layers.?.len > 0);
+        } else if (std.mem.eql(u8, entry.name, "plain.note")) {
+            seen_plain = true;
+            // Null → omitted by `emit_null_optional_fields = false`. Never `[]`.
+            try testing.expect(entry.firstPage.?.layers == null);
+        }
+    }
+    try testing.expect(seen_layered and seen_plain);
+
+    // The BIN builds its `firstPage` through the very same `pageRefAt`, so a
+    // trashed row reports exactly what it did while it was live.
+    try f.files.trash(1, layered.id);
+    try f.files.trash(1, plain);
+    const b = try svc.bin(a, 1);
+    var bin_layered = false;
+    var bin_plain = false;
+    for (b.entries) |entry| {
+        if (std.mem.eql(u8, entry.name, "layers.note")) {
+            bin_layered = true;
+            try expectSameLayers(meta.pages[0].layers, entry.firstPage.?.layers);
+        } else if (std.mem.eql(u8, entry.name, "plain.note")) {
+            bin_plain = true;
+            try testing.expect(entry.firstPage.?.layers == null);
+        }
+    }
+    try testing.expect(bin_layered and bin_plain);
 }
 
 test "page serving: streams an SNPG payload whose hash and length match what noteMeta advertised" {

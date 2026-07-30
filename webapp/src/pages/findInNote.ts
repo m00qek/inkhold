@@ -76,8 +76,15 @@ export type FindState =
   | { kind: "idle" }
   /** No page of this note carries recognition, so there is nothing to search. */
   | { kind: "unrecognised" }
-  /** Phase 1: the page on screen is answered, the note is still being counted. */
-  | { kind: "counting"; onThisPage: number; recognisedPages: number }
+  /**
+   * Phase 1: the page on screen is answered, the note is still being counted.
+   *
+   * `recognisedPages` is `null` while the reader is still on the SKELETON page
+   * list, where the count is not merely zero but UNKNOWN — see
+   * {@link FindController.setNote}. The counter then says "searching…" with no
+   * number rather than "searching 0 pages…", which would be a claim.
+   */
+  | { kind: "counting"; onThisPage: number; recognisedPages: number | null }
   /**
    * Phase 2, STREAMING (in-doc-search Phase 4). Matches are arriving in page
    * order and the note is still being drained, so `total` is a FLOOR, not the
@@ -147,8 +154,19 @@ export interface FindController {
   open(): void;
   close(): void;
   toggle(): void;
-  /** A note opened, or its metadata was refetched. Clears everything found. */
-  setNote(noteId: Id | null, pages: readonly PageRef[]): void;
+  /**
+   * A note opened, or its metadata was refetched. Clears everything found.
+   *
+   * `recognitionKnown` says whether `pages` is the AUTHORITATIVE page list. The
+   * reader opens instantly from a listing summary, whose skeleton invents
+   * `textHash: null` for every page it has not seen — so "no page carries
+   * recognition" read off it is not a fact, it is the absence of one. Pass
+   * `false` there and the "Not recognised on the device" claim is withheld until
+   * the real metadata lands (a caller may still pass `true` when the LISTING's
+   * own whole-note answer settles it negatively). Defaults to `true`, which is
+   * right for every caller holding a real `NoteMeta`.
+   */
+  setNote(noteId: Id | null, pages: readonly PageRef[], recognitionKnown?: boolean): void;
   /** The reader moved to a page — repaint that page's ovals. */
   setPage(index: number): void;
   /** The field changed. Cheap, idempotent, safe per keystroke. */
@@ -285,7 +303,17 @@ export function createFindController(deps: FindDeps): FindController {
   /** Per-note word-box cache, keyed by `textHash` so it turns over with it. */
   const wordCache = new Map<Hash, WordBox[]>();
 
+  /**
+   * Is `pages` the authoritative page list, or the reader's SKELETON? See
+   * {@link FindController.setNote}. While false, "no page carries recognition"
+   * is unknown rather than false, and every claim that turns on it is withheld.
+   */
+  let recognitionKnown = true;
+
   const recognisedPages = (): number => pages.filter((p) => p.textHash !== null).length;
+  /** The recognised-page count, or `null` while the page list is provisional —
+   *  the counter renders the two differently, because they mean different things. */
+  const recognisedPagesOrNull = (): number | null => (recognitionKnown ? recognisedPages() : null);
   const total = (): number => counts.reduce((sum, p) => sum + p.matches, 0);
 
   /** The page of, and offset within, global match `index`. */
@@ -388,7 +416,7 @@ export function createFindController(deps: FindDeps): FindController {
     // handler owns the counter (a floor or the exact settle) — paintPage must not
     // clobber it, so it only speaks before the first batch.
     if (!landedCounts) {
-      view.setState({ kind: "counting", onThisPage: matched.length, recognisedPages: recognisedPages() });
+      view.setState({ kind: "counting", onThisPage: matched.length, recognisedPages: recognisedPagesOrNull() });
     }
   }
 
@@ -477,7 +505,7 @@ export function createFindController(deps: FindDeps): FindController {
         // case — an empty exact normally becomes the fuzzy one-shot). Keep the
         // still-counting feel rather than claiming an absence prematurely.
         view.setStepEnabled(false);
-        view.setState({ kind: "counting", onThisPage: 0, recognisedPages: recognisedPages() });
+        view.setState({ kind: "counting", onThisPage: 0, recognisedPages: recognisedPagesOrNull() });
         void paintPage();
         return;
       }
@@ -568,7 +596,16 @@ export function createFindController(deps: FindDeps): FindController {
     // is already on `NoteMeta.pages`, non-null exactly where a page has
     // recognition. A note with none says so, rather than reporting an absence of
     // matches that would imply a search took place.
-    if (noteId !== null && pages.length > 0 && recognisedPages() === 0) {
+    //
+    // ONLY ONCE THE PAGE LIST IS REAL, though. A `?q=` deep link primes find
+    // against the reader's skeleton, whose pages all carry an invented
+    // `textHash: null` — asking it here painted "Not recognised on the device"
+    // about a note whose metadata was still in flight. It self-corrected when
+    // the meta landed, but the false statement was what the user read meanwhile.
+    // While `recognitionKnown` is false the query simply runs: phase 2 is a
+    // SERVER-side count that does not depend on the local page list at all, so
+    // the honest answer arrives on its own.
+    if (recognitionKnown && noteId !== null && pages.length > 0 && recognisedPages() === 0) {
       clearPainted();
       view.setState({ kind: "unrecognised" });
       return;
@@ -583,7 +620,7 @@ export function createFindController(deps: FindDeps): FindController {
     // feel local while the note-wide count is still in flight.
     view.setPageCounts(new Map());
     view.setStepEnabled(false);
-    view.setState({ kind: "counting", onThisPage: 0, recognisedPages: recognisedPages() });
+    view.setState({ kind: "counting", onThisPage: 0, recognisedPages: recognisedPagesOrNull() });
     void paintPage();
 
     // PHASE 2, debounced: one request for the whole notebook. Debounced for the
@@ -635,10 +672,11 @@ export function createFindController(deps: FindDeps): FindController {
     // moment it is.
     toggle: () => (open ? closeBar() : openBar()),
 
-    setNote(id: Id | null, next: readonly PageRef[]): void {
+    setNote(id: Id | null, next: readonly PageRef[], known = true): void {
       const changed = id !== noteId;
       noteId = id;
       pages = next;
+      recognitionKnown = known;
       if (changed) pageIndex = 0;
       // Always cleared: a different note has different boxes, and a metadata
       // REFETCH of the same note (the STALE_PAGE path) hands back new hashes, so

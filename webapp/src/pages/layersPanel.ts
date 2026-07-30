@@ -47,7 +47,7 @@
 // `note-layers`/`note-layer__…` for free.
 
 import { el } from "../ui/dom";
-import { createSidePanel } from "../ui/sidePanel";
+import { createSidePanel, sidePanelState, type SidePanelStateKind } from "../ui/sidePanel";
 import { svg, VIEWER_IC } from "./viewerChrome";
 
 /**
@@ -91,6 +91,13 @@ export interface LayersPanel {
   el: HTMLElement;
   /** Rebuild the rows (top-first, Z-order) — called on each document open. */
   setLayers(layers: PanelLayer[]): void;
+  /**
+   * Replace the rows with the SHARED side-panel state line (src/ui/sidePanel.ts)
+   * — the same "still loading / nothing here / that failed" vocabulary the OCR
+   * panel speaks. A panel left open across a page turn must say it is loading
+   * the new page, not keep listing the PREVIOUS page's layers and thumbnails.
+   */
+  setState(kind: SidePanelStateKind, message: string): void;
 }
 
 export function createLayersPanel(opts: LayersPanelOptions): LayersPanel {
@@ -291,6 +298,16 @@ export function createLayersPanel(opts: LayersPanelOptions): LayersPanel {
     el: panel.el,
     setLayers(layers: PanelLayer[]): void {
       list.replaceChildren(...layers.map(buildRow));
+      // Re-seats the <ul> after a `setState` swapped it out for the state line.
+      panel.body.replaceChildren(list);
+    },
+    setState(kind: SidePanelStateKind, message: string): void {
+      // The line REPLACES the list rather than sitting beside it: a <p> is not a
+      // valid child of a <ul>, and a stale row under a "loading" line would be
+      // the very claim this exists to retract. The rows are dropped too, so the
+      // previous page's thumbnail canvases are not held alive off-screen.
+      list.replaceChildren();
+      panel.body.replaceChildren(sidePanelState(kind, message));
     },
   };
 }

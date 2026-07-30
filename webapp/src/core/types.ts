@@ -126,10 +126,23 @@ export interface PageRef {
    * server sent none — in which case there is NO panel and the page renders as
    * the single device-authored composite, exactly as before layers existed.
    *
-   * Present only on `NoteMetaVO.pages`; a listing/bin `firstPage` never carries
-   * it (nothing outside the reader is layer-aware). Optional rather than
-   * required because most `PageRef` producers (listings, fixtures, caches)
-   * rightly know nothing about layers — the reader treats absent as null.
+   * Carried on `NoteMetaVO.pages` AND on a listing/bin entry's `firstPage`, in
+   * the same shape, with the same all-or-nothing semantics. The listing half is
+   * not layer-awareness leaking outward: THE READER OPENS FROM A SUMMARY. It
+   * paints a skeleton `NoteMeta` off the listing entry while `getNoteMeta` is
+   * still in flight, so without layers on `firstPage` every listing-originated
+   * open painted the composite, disabled the Layers toggle (a claim about a page
+   * whose real metadata had not arrived), then re-fetched the very same page
+   * bytes and swapped the stack in — a second visible content swap plus a
+   * duplicate request, on every layered note, every time.
+   *
+   * ABSENT MEANS NONE, on both routes: the server omits the field exactly when
+   * the page has no layers, never sending `null` or `[]`. So a page ref that
+   * came off real data (a meta page list, or a summary's `firstPage`) answers
+   * the question definitively; only a page the reader's own skeleton INVENTED
+   * (index > 0, before the meta lands) is genuinely unknown, and the reader
+   * tracks that separately. Still optional in the type because most `PageRef`
+   * producers (caches, fixtures, synthesized refs) state nothing about layers.
    */
   layers?: PageLayer[] | null;
 }

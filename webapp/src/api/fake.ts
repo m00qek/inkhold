@@ -12,7 +12,7 @@ import { createBinFake, BIN_SEED_NOTES } from "./binFake";
 // ONE note, so the reader's layers panel runs against the real wasm decoder in
 // dev and e2e. Shared with binFake (a trashed note keeps its layers, as the
 // real blob-keyed index does) — see that module's header.
-import { LAYERED_NOTE_ID, layeredPageLayers, layeredPagePayload } from "./layeredFixture";
+import { LAYERED_NOTE_ID, layeredPagePayload, withLayeredPageLayers } from "./layeredFixture";
 import { canPreviewHistory } from "../core/fileKind";
 import type {
   Coverage,
@@ -668,7 +668,13 @@ function note(id: Id, name: string, pageCount: number, updatedAt: number, opts: 
     id,
     name,
     pageCount,
-    firstPage: first!,
+    // A LISTING ENTRY'S FIRST PAGE CARRIES ITS LAYERS, exactly as the meta's
+    // page 0 does — the server builds both from the same index, and the reader
+    // opens from this summary. Without it the layered fixture painted the
+    // composite, disabled Layers, then re-fetched the same page bytes and swapped
+    // the stack in when the meta landed; with it the stack is the FIRST paint and
+    // the toggle is right immediately. Omitted (not null) where there are none.
+    firstPage: id === LAYERED_NOTE_ID ? withLayeredPageLayers(first!) : first!,
     updatedAt,
     fileType,
     // Seeded independently of the page hashes, exactly like the real thing: this
@@ -1054,18 +1060,20 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       return {
         id,
         name: summary.name,
-        // Layers ride ONLY the noteMeta page refs (listing `firstPage` refs
-        // never carry them — nothing outside the reader is layer-aware), so
-        // they are attached here rather than inside `pages()`. Dims come off the
-        // summary's own first page, so a landscape fixture's meta agrees with
-        // its listing instead of quietly reverting to portrait.
+        // Layers are attached here rather than inside `pages()` because they are
+        // a per-note fixture fact, not a page-shape one — and the listing's
+        // `firstPage` gets the SAME treatment through the same helper (see
+        // `note()`), which is what the reader's instant layered first paint
+        // depends on. Dims come off the summary's own first page, so a landscape
+        // fixture's meta agrees with its listing instead of quietly reverting to
+        // portrait.
         pages: pages(
           id,
           summary.pageCount,
           summary.hasRecognizedText,
           { w: summary.firstPage.width, h: summary.firstPage.height },
           RECOGNIZED_FROM[String(id)],
-        ).map((p) => (id === LAYERED_NOTE_ID ? { ...p, layers: layeredPageLayers(p.index) } : p)),
+        ).map((p) => (id === LAYERED_NOTE_ID ? withLayeredPageLayers(p) : p)),
         // The reader branches on these, so the fake has to carry them: a route
         // reload lands here with nothing but the id.
         fileType: summary.fileType,

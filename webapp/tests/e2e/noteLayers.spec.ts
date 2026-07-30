@@ -1,6 +1,6 @@
 import { test, expect, type Download, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
-import { signedIn, freezeMotion } from "./helpers/app";
+import { cardButton, signedIn, freezeMotion } from "./helpers/app";
 
 // The `.note` reader's LAYERS PANEL, end to end through the REAL decoder. The
 // fake `Api` serves the layered fixture (`n-layers`, src/api/layeredFixture.ts):
@@ -252,6 +252,43 @@ test.describe(".note layers panel (real decoder)", () => {
     await page.getByRole("button", { name: "Previous page" }).click();
     await expect(stackCanvases(page)).toHaveCount(4);
     await expect(panel(page)).toBeVisible();
+  });
+
+  // OPENED FROM A LISTING, which is the ordinary way in — and the case a listing's
+  // `firstPage` carrying its layers exists for. The reader paints a skeleton
+  // `NoteMeta` off the summary while `getNoteMeta` is in flight, so without layers
+  // on `firstPage` page 1 was painted as the COMPOSITE, Layers was disabled with
+  // "This page has no layers" (a claim about a page whose real metadata had not
+  // arrived), and the meta's arrival then re-fetched the same page bytes and
+  // swapped the stack in — a second visible content swap on every layered note.
+  //
+  // Asserted with a MutationObserver rather than by polling: the thing under test
+  // is a state that must never EXIST, and a `toHaveText` after the fact passes
+  // happily against a claim that came and went in 120 ms.
+  test("opening it from a listing goes straight to the stack, never claiming no layers", async ({ page }) => {
+    await page.addInitScript(() => {
+      const w = window as Window & { __layerTitles?: string[] };
+      w.__layerTitles = [];
+      new MutationObserver((records) => {
+        for (const r of records) {
+          const el = r.target as HTMLElement;
+          if (el.getAttribute?.("aria-controls") !== "note-layers-panel") continue;
+          w.__layerTitles!.push(el.getAttribute("title") ?? "");
+        }
+      }).observe(document, { attributes: true, subtree: true, attributeFilter: ["title"] });
+    });
+    await signedIn(page);
+    await page.goto("/#/folder/note");
+    await cardButton(page, "Layered field sketch").click();
+
+    // The stack is what paints — not the composite followed by a swap.
+    await expect(stackCanvases(page)).toHaveCount(4);
+    await expect(layersBtn(page)).toBeEnabled();
+    await expect(reader(page).locator(".page > canvas").first()).toBeHidden();
+
+    // And at no point did the toggle assert an absence.
+    const titles = await page.evaluate(() => (window as Window & { __layerTitles?: string[] }).__layerTitles ?? []);
+    expect(titles).not.toContain("This page has no layers");
   });
 
   test("a layered note opened from the recycle bin keeps its panel", async ({ page }) => {

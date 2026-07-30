@@ -22,7 +22,7 @@ import type { Bin, BinEntry, Restored, Trashed } from "../core/binTypes";
 // a layered note opened from the recycle bin keeps its layers. A shared
 // fixture module (not fake.ts — see the header above) is what lets this file
 // mirror that without seeing the library fixtures.
-import { LAYERED_NOTE_ID, layeredPageLayers, layeredPagePayload } from "./layeredFixture";
+import { LAYERED_NOTE_ID, layeredPagePayload, withLayeredPageLayers } from "./layeredFixture";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RETENTION_DAYS = 30;
@@ -48,6 +48,14 @@ function pagesFor(id: Id, count: number, recognized: boolean): PageRef[] {
     height: 1872,
     textHash: recognized && index % 3 !== 2 ? `${id}-t${index}` : null,
   }));
+}
+
+/** A trashed entry's `firstPage` — the SAME ref `getBinNoteMeta` hands the reader
+ *  for page 0, layers included, so a trashed layered note opens straight to its
+ *  stack instead of painting the composite and swapping. */
+function binFirstPage(id: Id, recognized: boolean): PageRef {
+  const page = pagesFor(id, 1, recognized)[0]!;
+  return id === LAYERED_NOTE_ID ? withLayeredPageLayers(page) : page;
 }
 
 interface Seed {
@@ -164,7 +172,10 @@ export function createBinFake(delay: (ms: number) => Promise<void>, latency: num
     // The SAME ref `getBinNoteMeta` hands the reader for page 0, so the row's
     // thumbnail and the reader's first page share a content hash and therefore a
     // render-cache entry — exactly as they do against the real server.
-    firstPage: s.pageCount > 0 ? pagesFor(s.id, 1, s.recognized === true)[0]! : null,
+    // Layers ride the bin listing's `firstPage` too — the real index is blob-keyed
+    // and survives trashing, so a trashed layered note opens straight to its stack
+    // exactly as a live one does (same helper as the live fake and the meta path).
+    firstPage: s.pageCount > 0 ? binFirstPage(s.id, s.recognized === true) : null,
     // The seed notes are all portrait `.note` files, so they serve page 1's
     // effective dims exactly as the listing VO does; a folder states no shape.
     ...(s.kind === "note" && s.pageCount > 0 ? { thumbAspect: { w: 1404, h: 1872 } } : {}),
@@ -212,7 +223,7 @@ export function createBinFake(delay: (ms: number) => Promise<void>, latency: num
         name: row.name,
         // A trashed layered note keeps its layers (blob-keyed index — header).
         pages: pagesFor(id, pageCounts.get(id) ?? 1, recognizedOf.get(id) === true).map((p) =>
-          id === LAYERED_NOTE_ID ? { ...p, layers: layeredPageLayers(p.index) } : p,
+          id === LAYERED_NOTE_ID ? withLayeredPageLayers(p) : p,
         ),
         fileType: row.fileType,
         fileHash: row.fileHash,
@@ -259,7 +270,7 @@ export function createBinFake(delay: (ms: number) => Promise<void>, latency: num
         isRoot: true,
         fileType,
         fileHash: `${id}-md5`,
-        firstPage: pageCount > 0 ? pagesFor(id, 1, recognized)[0]! : null,
+        firstPage: pageCount > 0 ? binFirstPage(id, recognized) : null,
         // Carried through from the live entry, exactly like name/type/size: the
         // real index is blob-keyed, so trashing does not change a file's shape.
         ...(known?.thumbAspect ? { thumbAspect: known.thumbAspect } : {}),

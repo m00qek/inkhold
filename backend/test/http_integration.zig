@@ -6310,6 +6310,145 @@ test "thumbAspect over HTTP: tree and bin serve the aspect fact, and omit it whe
     }
 }
 
+/// One layer descriptor as it appears on EITHER response — the frontend
+/// normalizes the listing's `firstPage.layers` and the metadata's
+/// `pages[].layers` through a single code path, so the two must be the same
+/// object down to field names and casing.
+const LayerRow = struct {
+    slot: []const u8,
+    name: []const u8,
+    visible: bool,
+    isCurrent: bool,
+};
+
+fn expectSameLayerRows(want: []const LayerRow, got: []const LayerRow) !void {
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| {
+        try std.testing.expectEqualStrings(w.slot, g.slot); // record order is the contract
+        try std.testing.expectEqualStrings(w.name, g.name);
+        try std.testing.expectEqual(w.visible, g.visible);
+        try std.testing.expectEqual(w.isCurrent, g.isCurrent);
+    }
+}
+
+test "layer descriptors over HTTP: tree and bin firstPage carry what /file/metadata reports for page 0" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [32768]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+
+    // The real capture whose page 0 carries a `#`-JSON LAYERINFO panel...
+    const layered_id = try putSeed(f, admin, null, "layers.note", @embedFile("layers_edited.note"));
+
+    // ...and a synthetic note whose one page carries NO layer records, which
+    // must OMIT the field rather than send `null` or `[]`.
+    const nb = @import("note_builder");
+    const bare = try nb.serialize(gpa, .{ .pages = &.{.{ .style = "style_white", .layers = &.{} }} });
+    defer gpa.free(bare);
+    const bare_id = try putSeed(f, admin, null, "bare.note", bare);
+
+    const Page = struct { index: i64 = 0, layers: ?[]const LayerRow = null };
+    const Row = struct { name: []const u8, firstPage: ?Page = null };
+
+    // --- what the READER will eventually see for page 0 ---
+    var want_buf: [8]LayerRow = undefined;
+    var want_len: usize = 0;
+    {
+        var pbuf: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/file/metadata/{d}", .{layered_id});
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(
+            struct { pages: []const Page },
+            gpa,
+            resp.body,
+            .{ .ignore_unknown_fields = true },
+        );
+        defer p.deinit();
+        const l0 = p.value.pages[0].layers.?;
+        try std.testing.expect(l0.len > 0);
+        // Copied out (the parse arena dies with `p`) so the listing below is
+        // compared against the metadata response, not against a re-derivation.
+        for (l0, 0..) |l, i| {
+            want_buf[i] = .{
+                .slot = try gpa.dupe(u8, l.slot),
+                .name = try gpa.dupe(u8, l.name),
+                .visible = l.visible,
+                .isCurrent = l.isCurrent,
+            };
+        }
+        want_len = l0.len;
+    }
+    const want = want_buf[0..want_len];
+    defer for (want) |l| {
+        gpa.free(l.slot);
+        gpa.free(l.name);
+    };
+
+    // --- the live tree: the summary the reader opens from ---
+    {
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/tree", &web, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(
+            struct { entries: []const Row },
+            gpa,
+            resp.body,
+            .{ .ignore_unknown_fields = true },
+        );
+        defer p.deinit();
+        try std.testing.expectEqual(@as(usize, 2), p.value.entries.len);
+        var seen_layered = false;
+        var seen_bare = false;
+        for (p.value.entries) |e| {
+            if (std.mem.eql(u8, e.name, "layers.note")) {
+                seen_layered = true;
+                try expectSameLayerRows(want, e.firstPage.?.layers.?);
+            } else {
+                seen_bare = true;
+                try std.testing.expectEqualStrings("bare.note", e.name);
+                try std.testing.expect(e.firstPage.?.layers == null);
+            }
+        }
+        try std.testing.expect(seen_layered and seen_bare);
+        // Absent is OMITTED on the wire — never `"layers":null`, never `[]`,
+        // which a client would have to treat as a third state nobody defined.
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"layers\":null") == null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"layers\":[]") == null);
+    }
+
+    // --- the bin builds its `firstPage` through the same `pageRefAt`, so a
+    //     trashed row reports exactly what it did while it was live ---
+    for ([_]u64{ layered_id, bare_id }) |id| try f.files.trash(admin, id);
+    {
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/bin", &web, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(
+            struct { entries: []const Row },
+            gpa,
+            resp.body,
+            .{ .ignore_unknown_fields = true },
+        );
+        defer p.deinit();
+        try std.testing.expectEqual(@as(usize, 2), p.value.entries.len);
+        var seen_layered = false;
+        for (p.value.entries) |e| {
+            if (std.mem.eql(u8, e.name, "layers.note")) {
+                seen_layered = true;
+                try expectSameLayerRows(want, e.firstPage.?.layers.?);
+            } else {
+                try std.testing.expect(e.firstPage.?.layers == null);
+            }
+        }
+        try std.testing.expect(seen_layered);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"layers\":null") == null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"layers\":[]") == null);
+    }
+}
+
 test "the bin's own read path previews a trashed file that every LIVE route 404s" {
     const f = try Fixture.init();
     defer f.deinit();

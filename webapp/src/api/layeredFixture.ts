@@ -19,7 +19,7 @@
 // the real server, where the per-page index is keyed by blob md5 and survives
 // trashing untouched.
 
-import type { PageLayer } from "../core/types";
+import type { PageLayer, PageRef } from "../core/types";
 
 export const LAYERED_NOTE_ID = "n-layers";
 
@@ -87,6 +87,22 @@ const PAGE0_LAYERS: FixtureLayer[] = [
 export function layeredPageLayers(pageIndex: number): PageLayer[] | null {
   if (pageIndex !== 0) return null;
   return PAGE0_LAYERS.map((l) => ({ ...l.vo }));
+}
+
+/**
+ * Attach the fixture's layers to one page ref, the way the WIRE does it: the
+ * field is present with the descriptors, or OMITTED ENTIRELY — never `null`,
+ * never `[]`. That distinction is load-bearing now that the reader treats an
+ * absent `layers` on real data as "this page has none" rather than "not known
+ * yet" (see `PageRef.layers`), so a fake that emitted `null` would be modelling
+ * a payload the server never sends.
+ *
+ * Used for BOTH shapes the field rides: the meta's page list, and a listing/bin
+ * entry's `firstPage` — one helper, so the two can't drift.
+ */
+export function withLayeredPageLayers(page: PageRef): PageRef {
+  const layers = layeredPageLayers(page.index);
+  return layers === null ? page : { ...page, layers };
 }
 
 // --- the payload builder -----------------------------------------------------

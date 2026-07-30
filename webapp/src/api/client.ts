@@ -388,8 +388,13 @@ const LAYER_SLOTS: ReadonlySet<string> = new Set(["main", "layer1", "layer2", "l
  * SNPG records by slot, so a list with one bad/missing/duplicated entry cannot
  * be partially trusted — a row paired with the wrong pixels is worse than no
  * panel, and `null` is exactly the reader's safe path (the device-authored
- * composite, unchanged). Absent is the common case (every route except a
- * layered `getNoteMeta`) and normalizes to `null` like `textHash` does.
+ * composite, unchanged). Absent is the common case — a page with no layers, on
+ * ANY route — and normalizes to `null` like `textHash` does.
+ *
+ * ONE CODE PATH, DELIBERATELY. `normalizePage` is what every page ref off the
+ * wire goes through, including a listing/bin entry's `firstPage` (see
+ * `normalizeEntry`), so the summary the reader opens from validates its layers
+ * by exactly the rules the meta's page list does. Nothing here is meta-specific.
  *
  * Exported for the unit tests; nothing else should call it directly.
  */

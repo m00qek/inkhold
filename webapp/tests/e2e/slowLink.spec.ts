@@ -1,6 +1,10 @@
 import { test, expect, type Page } from "@playwright/test";
 import { mockApi, type Scenario } from "./helpers/mockApi";
 import { signedIn, mockRawFiles } from "./helpers/app";
+// The committed layered fixture, imported so the SNPG payload served below is the
+// real thing the wasm decoder is written against, and its layer descriptors pair
+// with that payload's records by slot — see src/api/layeredFixture.ts.
+import { layeredPageLayers, layeredPagePayload } from "../../src/api/layeredFixture";
 
 // WHAT IS ON SCREEN WHILE A REQUEST IS STILL IN FLIGHT.
 //
@@ -382,5 +386,373 @@ test.describe("the reader's image stage", () => {
     // And in its place, a real loading state rather than a blank rectangle.
     expect(stage.body).toContain("Loading this picture…");
     expect(stage.body).toContain("trailhead map");
+  });
+});
+
+// ============================================================================
+// THE READER'S NOTE STAGE, WITH THE LINK HELD
+// ============================================================================
+//
+// These run through REAL mode against a mocked control plane for the same reason
+// the listing cases above do — it is the only way to HOLD a page's bytes or its
+// metadata — but with one addition: the SNPG payload served for a page is the
+// committed layered fixture (src/api/layeredFixture.ts), so the real
+// `note-decode.wasm` genuinely decodes it and the stack that appears is a real
+// stack, not a stand-in. Its layer descriptors come from the same module, which
+// is what makes them pair by slot with the payload's records.
+
+const LAY = "n-lay";
+const PAGE_HASHES = ["a1".repeat(16), "b2".repeat(16), "c3".repeat(16)];
+
+/** A page ref as the control plane serves it, layered or not. Layers are OMITTED
+ *  where a page has none — never `null`, never `[]` — exactly as the wire does. */
+function wirePage(index: number, layered: boolean) {
+  return {
+    index,
+    hash: PAGE_HASHES[index] ?? `${index}`.repeat(32).slice(0, 32),
+    width: 1404,
+    height: 1872,
+    textHash: null,
+    ...(layered ? { layers: layeredPageLayers(0) } : {}),
+  };
+}
+
+/** The layered note as a LISTING entry — the shape the reader opens from. */
+function layeredEntry(opts: { firstPageLayered: boolean; pageCount: number }) {
+  return {
+    kind: "note",
+    id: LAY,
+    name: "Layered field sketch",
+    pageCount: opts.pageCount,
+    fileType: "note",
+    fileHash: "0".repeat(32),
+    updatedAt: 1_700_000_000_000,
+    hasRecognizedText: false,
+    firstPage: wirePage(0, opts.firstPageLayered),
+  };
+}
+
+/** …and as `getNoteMeta` answers it. `layered` lists which page indices carry layers. */
+function layeredMeta(pageCount: number, layered: number[]) {
+  return {
+    id: LAY,
+    name: "Layered field sketch",
+    fileType: "note",
+    fileHash: "0".repeat(32),
+    size: 1_048_576,
+    pxPerMm: null,
+    pages: Array.from({ length: pageCount }, (_, i) => wirePage(i, layered.includes(i))),
+  };
+}
+
+/**
+ * Serve `GET /note/{id}/page/{n}` with the fixture's real SNPG v2 payload,
+ * optionally HOLDING one page index. Not an `/api/` route, so it is a page.route
+ * of its own rather than a `mockApi` scenario key.
+ */
+async function serveLayeredPages(page: Page, hold?: { index: number; ms: number }): Promise<void> {
+  const payload = Buffer.from(layeredPagePayload(0)!);
+  await page.route(
+    (url) => url.pathname.startsWith(`/note/${LAY}/page/`),
+    async (route) => {
+      const n = Number(new URL(route.request().url()).pathname.split("/page/")[1]);
+      if (hold && n === hold.index) await new Promise((r) => setTimeout(r, hold.ms));
+      await route.fulfill({ status: 200, contentType: "application/octet-stream", body: payload });
+    },
+  );
+}
+
+/** The one-shot snapshot of the note stage, read in a SINGLE evaluate — never a
+ *  retrying assertion, which would poll until the held response expired and then
+ *  record the settled state instead of the one under test. */
+async function stageSnapshot(page: Page) {
+  return page.evaluate(() => {
+    const stack = document.querySelector(".note-stack") as HTMLElement | null;
+    const canvas = document.querySelector(".page > canvas") as HTMLCanvasElement | null;
+    const toggle = document.querySelector('[aria-controls="note-layers-panel"]') as HTMLButtonElement | null;
+    const panel = document.querySelector(".note-layers") as HTMLElement | null;
+    // Alpha at the page's centre. A CLEARED canvas is transparent (0) — the bare
+    // white rectangle 1.8 is about; the ruled-sheet placeholder fills it (255).
+    let centreAlpha = -1;
+    if (canvas && canvas.width > 0 && canvas.height > 0) {
+      const ctx = canvas.getContext("2d");
+      if (ctx) centreAlpha = ctx.getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data[3]!;
+    }
+    return {
+      pager: document.querySelector(".pager__count")?.textContent ?? "",
+      stackHidden: stack === null || stack.hidden,
+      stackCanvases: stack ? stack.querySelectorAll("canvas").length : 0,
+      canvasHidden: canvas === null || canvas.hidden,
+      canvasWidth: canvas?.width ?? 0,
+      centreAlpha,
+      layersDisabled: toggle?.disabled ?? null,
+      layersTitle: toggle?.getAttribute("title") ?? "",
+      panelHidden: panel === null || panel.hidden,
+      panelText: panel?.textContent ?? "",
+      findCount: document.querySelector(".findbar__count")?.textContent ?? "",
+    };
+  });
+}
+
+test.describe("the reader's note stage, mid-fetch", () => {
+  // 1.6 — `.note-stack` is `position:absolute; inset:0`, so it COVERS the page
+  // canvas; nothing released or hid it until the new page's `present()` committed.
+  // On a layered→layered turn the title, the pager and the filmstrip moved to
+  // page N+1 while page N's ink stayed fully rendered and sharp underneath them,
+  // for the whole fetch + decode. Blurring the stack was rejected as the fix: the
+  // blur-up works because it is the SAME page at low resolution, and a blurred
+  // stack is just a blurry WRONG page.
+  test("the previous page's layer stack does not stay sharp through a page turn", async ({ page }) => {
+    await mockApi(page, {
+      "controlplane/file/metadata": { json: layeredMeta(2, [0, 1]) },
+      "controlplane/tree": {
+        json: { folderId: null, path: [], entries: [layeredEntry({ firstPageLayered: true, pageCount: 2 })], syncVersion: 1 },
+      },
+      "user/me": { json: ME },
+    });
+    // Page 2's bytes are held — everything asserted below happens inside that window.
+    await serveLayeredPages(page, { index: 1, ms: 6000 });
+    await page.goto("/?real");
+    await page.locator(".card__open", { hasText: "Layered field sketch" }).click();
+
+    // Page 1's stack is genuinely up (four records, decoded by the real wasm).
+    await expect(page.locator(".note-stack canvas")).toHaveCount(4);
+    await page.getByRole("button", { name: "Layers" }).click();
+    await expect(page.locator(".note-layers")).toContainText("Layer Renamed");
+
+    await page.getByRole("button", { name: "Next page" }).click();
+    // Read ONCE. Everything `showPage` does before its first await — the pager,
+    // the layers affordance, the stack swap, the placeholder — has already run
+    // by the time the click resolves.
+    const s = await stageSnapshot(page);
+
+    expect(s.pager).toBe("2 / 2");
+    // THE REGRESSION: page 1's ink is no longer on screen…
+    expect(s.stackHidden).toBe(true);
+    // …but it was HIDDEN, not released — the canvases are still mounted, which is
+    // what keeps `isPresented`'s short-circuit (and the controller's `gen` token)
+    // intact for a zoom step or a relayout of the same page.
+    expect(s.stackCanvases).toBe(4);
+    // …and what IS on screen is the composite canvas, painted with the ruled
+    // sheet (page 2 has no filmstrip thumbnail to blur up — its bytes are held).
+    expect(s.canvasHidden).toBe(false);
+    expect(s.centreAlpha).toBe(255);
+
+    // 1.9's panel half: an open panel across a page turn showed the PREVIOUS
+    // page's rows and thumbnails. It says what it is doing instead.
+    expect(s.panelHidden).toBe(false);
+    expect(s.panelText).toContain("Loading this page's layers…");
+    expect(s.panelText).not.toContain("Layer Renamed");
+  });
+
+  // 1.9 — `refreshLayersUi` ran only AFTER the decode resolved, so a turn onto a
+  // layered page left the toggle describing the page you had just left: disabled,
+  // "This page has no layers", about a page whose layers were on the wire. The
+  // reader already knows the answer from `page.layers` before it fetches anything.
+  test("the Layers toggle is right the instant the page turns, not when it decodes", async ({ page }) => {
+    await mockApi(page, {
+      // Page 1 is plain, page 2 is layered — the direction with teeth. (The other
+      // way round the old code was accidentally correct: a layerless page released
+      // the stack synchronously.)
+      "controlplane/file/metadata": { json: layeredMeta(2, [1]) },
+      "controlplane/tree": {
+        json: { folderId: null, path: [], entries: [layeredEntry({ firstPageLayered: false, pageCount: 2 })], syncVersion: 1 },
+      },
+      "user/me": { json: ME },
+    });
+    await serveLayeredPages(page, { index: 1, ms: 6000 });
+    await page.goto("/?real");
+    await page.locator(".card__open", { hasText: "Layered field sketch" }).click();
+    await expect(page.locator(".pager__count")).toHaveText("1 / 2");
+    // Page 1 carries none, and that is a fact off real metadata.
+    expect((await stageSnapshot(page)).layersTitle).toBe("This page has no layers");
+
+    await page.getByRole("button", { name: "Next page" }).click();
+    const s = await stageSnapshot(page);
+
+    expect(s.pager).toBe("2 / 2");
+    // Correct BEFORE a single byte of page 2 has arrived.
+    expect(s.layersDisabled).toBe(false);
+    expect(s.layersTitle).toBe("Layers");
+  });
+
+  // The other half of 1.9, and the one the owner picked option (a) for: a page the
+  // SKELETON invented answers nothing about layers, so the toggle is disabled with
+  // NEUTRAL wording. "This page has no layers" there is a definite claim about a
+  // page whose metadata has not arrived.
+  test("a page the skeleton invented never claims to have no layers", async ({ page }) => {
+    await mockApi(page, {
+      "controlplane/file/metadata": { delayMs: 6000, json: layeredMeta(3, [0, 1, 2]) },
+      "controlplane/tree": {
+        json: { folderId: null, path: [], entries: [layeredEntry({ firstPageLayered: true, pageCount: 3 })], syncVersion: 1 },
+      },
+      "user/me": { json: ME },
+    });
+    await serveLayeredPages(page);
+    await page.goto("/?real");
+    await expect(page.locator("#gallery")).toContainText("Layered field sketch");
+    // Straight to page 2 — a page the summary says nothing about, so the reader
+    // stands it in with a placeholder until the real metadata lands.
+    await page.evaluate(() => {
+      window.location.hash = "#/note/n-lay/page/2";
+    });
+    await expect(page.locator(".pager__count")).toHaveText("2 / 3");
+
+    const s = await stageSnapshot(page);
+    expect(s.layersDisabled).toBe(true);
+    expect(s.layersTitle).not.toBe("This page has no layers");
+    expect(s.layersTitle).toContain("Layers");
+  });
+
+  // 1.8 — the blur-up source is the filmstrip, which is VIRTUALIZED, and
+  // `scrollIntoView` only runs at the END of `showPage`. Jump outside the rendered
+  // window and there is no button to blur, so the canvas was CLEARED: a bare white
+  // rectangle, indistinguishable from frozen, for the whole fetch + decode.
+  test("a jump past the filmstrip's window paints the ruled sheet, not a blank", async ({ page }) => {
+    const PAGES = 60;
+    const meta = {
+      id: LAY,
+      name: "Long notebook",
+      fileType: "note",
+      fileHash: "0".repeat(32),
+      size: 1_048_576,
+      pxPerMm: null,
+      pages: Array.from({ length: PAGES }, (_, i) => ({
+        index: i,
+        hash: `${i}`.padStart(32, "d"),
+        width: 1404,
+        height: 1872,
+        textHash: null,
+      })),
+    };
+    await mockApi(page, {
+      "controlplane/file/metadata": { json: meta },
+      "controlplane/tree": {
+        json: {
+          folderId: null,
+          path: [],
+          entries: [{ ...layeredEntry({ firstPageLayered: false, pageCount: PAGES }), name: "Long notebook" }],
+          syncVersion: 1,
+        },
+      },
+      "user/me": { json: ME },
+    });
+    // Page 41's bytes never arrive inside the test — the window under test is the
+    // whole of that fetch. Every other page answers at once (with bytes the
+    // renderer will reject, which is fine: nothing here is about pixels).
+    await page.route(
+      (url) => url.pathname.startsWith(`/note/${LAY}/page/`),
+      async (route) => {
+        if (new URL(route.request().url()).pathname.endsWith("/page/40")) {
+          await new Promise((r) => setTimeout(r, 15_000));
+        }
+        await route.fulfill({ status: 200, contentType: "application/octet-stream", body: Buffer.from([]) });
+      },
+    );
+    // STRAIGHT to the deep link, with no listing loaded — which is the only way to
+    // observe the FIRST `showPage` for a distant page. Every later one is safe by
+    // accident: `showPage` ends with `scrollIntoView`, so by its second run the
+    // filmstrip has scrolled the target into its rendered window and there IS a
+    // thumbnail to blur up. The bug lives in that first paint.
+    await page.goto(`/?real#/note/${LAY}/page/41`);
+
+    // The request for page 41 IS the sync point: the placeholder is painted in the
+    // same synchronous block that issues it.
+    await page.waitForRequest((r) => r.url().includes(`/note/${LAY}/page/40`));
+    const s = await stageSnapshot(page);
+
+    expect(s.pager).toBe("41 / 60");
+    // A sized, PAINTED canvas — the warm ruled sheet. Cleared, it was transparent
+    // on a zero-sized backing store, which is the blank rectangle 1.8 describes.
+    expect(s.canvasWidth).toBeGreaterThan(0);
+    expect(s.centreAlpha).toBe(255);
+  });
+
+  // 1.10 — a `?q=` deep link primes find against the SKELETON, where every page
+  // but the first carries an invented `textHash: null`. `runQuery` saw zero
+  // recognised pages and painted "Not recognised on the device" — a definite claim
+  // about a note whose page list was still in flight, and the exact class of
+  // speculative statement this reader's own copy rules forbid.
+  //
+  // Observed rather than polled, and deliberately: the claim is OVERWRITTEN a
+  // moment later by phase 1's counter (`paintPage` repaints once the page's word
+  // boxes resolve), so a snapshot taken afterwards records the good state and
+  // proves nothing. What must be true is that the claim never appeared AT ALL.
+  test("find never claims Not recognised while the note's metadata is in flight", async ({ page }) => {
+    await page.addInitScript(() => {
+      const w = window as Window & { __findCounts?: string[] };
+      w.__findCounts = [];
+      const isCounter = (n: Node | null): boolean =>
+        n instanceof Element ? n.classList.contains("findbar__count") : isCounter(n?.parentElement ?? null);
+      new MutationObserver((records) => {
+        for (const r of records) {
+          if (!isCounter(r.target)) continue;
+          // Every value the counter ever HELD, including one replaced later in the
+          // same task: a replaced text node still carries the text it showed.
+          for (const n of Array.from(r.addedNodes)) w.__findCounts!.push(n.textContent ?? "");
+          if (r.type === "characterData") w.__findCounts!.push(r.target.textContent ?? "");
+        }
+      }).observe(document, { childList: true, subtree: true, characterData: true });
+    });
+    await mockApi(page, {
+      "controlplane/file/metadata": { delayMs: 6000, json: layeredMeta(3, []) },
+      // Held too, so the counter cannot be settled by the note-wide count landing.
+      "controlplane/note/n-lay/search": { delayMs: 6000, json: { pages: [], usedFuzzy: false } },
+      "controlplane/tree": {
+        json: {
+          folderId: null,
+          path: [],
+          entries: [
+            // The LISTING's whole-note answer: this note DOES carry recognition
+            // somewhere. Page 1 happens not to — which is exactly the case the
+            // skeleton reads as "none anywhere".
+            { ...layeredEntry({ firstPageLayered: false, pageCount: 3 }), hasRecognizedText: true },
+          ],
+          syncVersion: 1,
+        },
+      },
+      "user/me": { json: ME },
+    });
+    await serveLayeredPages(page);
+    await page.goto("/?real");
+    await expect(page.locator("#gallery")).toContainText("Layered field sketch");
+    await page.evaluate(() => {
+      window.location.hash = "#/note/n-lay?q=zebra";
+    });
+    await expect(page.locator(".findbar")).toBeVisible();
+    // What it says instead: a search is under way, with no number it does not have
+    // ("searching 0 pages…" would be a count off the skeleton's invented nulls).
+    await expect(page.locator(".findbar__count")).toHaveText("searching…");
+
+    const seen = await page.evaluate(() => (window as Window & { __findCounts?: string[] }).__findCounts ?? []);
+    expect(seen.join(" | ")).not.toContain("Not recognised");
+    expect(seen.join(" | ")).not.toContain("No matches");
+  });
+
+  // THE PAYOFF of a listing's `firstPage` carrying its layers: a note opened from
+  // a listing used to paint the composite, disable Layers, then — when the meta
+  // landed — re-fetch the very same page bytes and swap the stack in. Held
+  // metadata makes the difference unmissable: the stack is up while `getNoteMeta`
+  // is still outstanding.
+  test("a listing-originated open paints the stack before the metadata lands", async ({ page }) => {
+    await mockApi(page, {
+      "controlplane/file/metadata": { delayMs: 6000, json: layeredMeta(2, [0]) },
+      "controlplane/tree": {
+        json: { folderId: null, path: [], entries: [layeredEntry({ firstPageLayered: true, pageCount: 2 })], syncVersion: 1 },
+      },
+      "user/me": { json: ME },
+    });
+    await serveLayeredPages(page);
+    await page.goto("/?real");
+    await page.locator(".card__open", { hasText: "Layered field sketch" }).click();
+
+    // Four record canvases, decoded by the real wasm, with `getNoteMeta` still held.
+    await expect(page.locator(".note-stack canvas")).toHaveCount(4);
+    const s = await stageSnapshot(page);
+    expect(s.stackHidden).toBe(false);
+    // The composite is out of the way, and the toggle is right on the FIRST paint.
+    expect(s.canvasHidden).toBe(true);
+    expect(s.layersDisabled).toBe(false);
+    expect(s.layersTitle).toBe("Layers");
   });
 });

@@ -218,8 +218,15 @@ function defaultBlit(canvas: HTMLCanvasElement, bitmap: ImageBitmap): void {
 }
 
 /** Default placeholder: a blank ruled sheet (near-zero ink), matching the note
- * aesthetic. Colours come from the live CSS custom properties so it tracks theme. */
-function defaultPlaceholder(canvas: HTMLCanvasElement, _page: PageRef): void {
+ * aesthetic. Colours come from the live CSS custom properties so it tracks theme.
+ *
+ * EXPORTED because the reader needs the identical sheet. Its full-size page has
+ * a blur-up source only while the target page's filmstrip button is inside the
+ * virtual window; jump outside it (a deep link to page 60, a find step across a
+ * distant boundary) and there is nothing to blur — where the canvas used to be
+ * CLEARED, leaving a bare white rectangle for the whole fetch. This is the
+ * "a page is coming" treatment every other note surface already paints. */
+export function defaultPlaceholder(canvas: HTMLCanvasElement, _page: PageRef): void {
   const box = canvas.getBoundingClientRect();
   if (box.width < 1 || box.height < 1) return;
   const dpr = Math.min(typeof devicePixelRatio !== "undefined" ? devicePixelRatio : 1, DPR_CAP);
