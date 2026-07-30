@@ -460,7 +460,15 @@ export function createAppShell(deps: AppDeps): AppShell {
     place: () =>
       destination !== null
         ? { folderId: null, destination, openPath: null }
-        : { folderId, destination: null, openPath: listing ? listing.path : null },
+        : {
+            folderId,
+            destination: null,
+            openPath: listing ? listing.path : null,
+            // Not a highlight — see `RailPlace.searching`. It is what tells the
+            // walk that the gallery currently on screen (a results list, whose
+            // name half reads the cached tree) depends on it finishing.
+            searching: query.trim() !== "",
+          },
     // EVERY ENTRY POINT IS NOW A URL. The rail does not navigate; it says where
     // it wants to be and the route handler takes it there. That is what makes
     // "open a subfolder, reload, and you are still in it" true without the rail
@@ -817,10 +825,15 @@ export function createAppShell(deps: AppDeps): AppShell {
   lockAdminBtn.addEventListener("click", () => void admin?.lock());
 
   /** The bin's half of the mode, plus its own topbar action's state. */
-  function setBinMode(open: boolean, count: number): void {
+  function setBinMode(open: boolean, count: number, busy = false): void {
     setDestinationMode("bin", open);
     emptyBinBtn.hidden = !open;
-    emptyBinBtn.disabled = count === 0;
+    // TWO REASONS FOR ONE APPEARANCE, and both are "there is nothing this click
+    // can usefully do": an empty bin, and this button's own call still in
+    // flight. Without the second, a slow link let `Empty bin` be pressed twice —
+    // and the second call, arriving at a bin the first had already emptied,
+    // reported a failure for an operation that had succeeded.
+    emptyBinBtn.disabled = count === 0 || busy;
   }
 
   const topbar = el(
@@ -1227,6 +1240,11 @@ export function createAppShell(deps: AppDeps): AppShell {
     getSearchState: () => searchState,
     loadMore: () => search.loadMore(),
     cachedListings,
+    // The rail owns "has the tree walk landed" (`treeWalked`), and the name half
+    // of a query is a function of exactly that walk — so the search renderer
+    // asks the same authority the gallery's pending-category branch does rather
+    // than keeping a second copy of the flag.
+    treeLoaded: () => rail.loaded(),
     labelFor: (folder) => rail.labelFor(folder),
     resultCard: galleryCards.resultCard,
     emptyState,
@@ -1808,6 +1826,67 @@ export function createAppShell(deps: AppDeps): AppShell {
     renderGallery();
   }
 
+  // --- the delayed loading paint -------------------------------------------
+  //
+  // LOADING AND KNOWN-EMPTY ARE DIFFERENT STATES, and so are LOADING and
+  // "still showing the last folder". A cache miss used to paint nothing at all:
+  // on a cold boot the shell mounted with an empty gallery for a whole round
+  // trip, and on a folder-to-folder move the previous folder stayed fully on
+  // screen under the new chrome. `renderGallery()` already knows what to say
+  // (`!listing` → "Loading…"); it was simply never called.
+  //
+  // But a loading state that paints INSTANTLY is its own defect: on a warm link
+  // every navigation would flash "Loading…" for 40 ms between two good paints,
+  // which reads as a flicker rather than as progress. So the paint is DELAYED —
+  // a fast response wins the race and the user sees no loading state at all, a
+  // slow one is admitted well before the request completes.
+
+  /**
+   * How long a folder listing may be outstanding before the gallery says so.
+   *
+   * Chosen as the usual "this is no longer instantaneous" threshold: below it a
+   * response feels like a direct result of the click and any interstitial reads
+   * as a flash; above it a blank region is indistinguishable from a freeze.
+   */
+  const LOADING_PAINT_DELAY_MS = 150;
+
+  /** The armed delayed paint, or undefined. At most one — a navigation cancels
+   *  the previous one before arming its own. */
+  let loadingPaintTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Disarm the delayed paint: the listing landed, or we left before it could. */
+  function cancelLoadingPaint(): void {
+    if (loadingPaintTimer === undefined) return;
+    clearTimeout(loadingPaintTimer);
+    loadingPaintTimer = undefined;
+  }
+
+  /**
+   * Arm the "Loading…" paint for the folder `id`, {@link LOADING_PAINT_DELAY_MS}
+   * from now.
+   *
+   * IT CAN ONLY EVER PAINT THE PLACE IT WAS ARMED FOR. The user can navigate,
+   * search or open the bin inside the delay, and every one of those makes this
+   * paint wrong — so the timer re-reads the same route state `renderGallery`
+   * itself reads (`folderId`, `query`, `destination`) and drops itself if any of
+   * them has moved. `destroy()` clears it too, so a torn-down shell leaves
+   * nothing scheduled to paint into DOM on its way out.
+   */
+  function scheduleLoadingPaint(id: Id | null): void {
+    cancelLoadingPaint();
+    loadingPaintTimer = setTimeout(() => {
+      loadingPaintTimer = undefined;
+      if (folderId !== id || destination !== null || query.trim() !== "") return;
+      if (listing !== undefined) return; // a listing arrived by another path
+      // The tree walk may have reached this folder while we waited — its listing
+      // is the same listing, so paint it rather than a loading state we no
+      // longer need.
+      const cached = cachedListings.get(key(id));
+      if (cached) listing = cached;
+      renderGallery();
+    }, LOADING_PAINT_DELAY_MS);
+  }
+
   /**
    * The `#/folder/:id` route's body (and `#/`'s, with `null`).
    *
@@ -1828,6 +1907,13 @@ export function createAppShell(deps: AppDeps): AppShell {
    * mechanism `pendingCategory` uses and deliberately not a second one.
    */
   async function navigate(id: Id | null): Promise<void> {
+    // `navigate` is fire-and-forget (`void navigate(id)`), so two can overlap: a
+    // slow folder still awaiting its listing when the user clicks another. The
+    // route token is what makes the TRAILING cancel below belong to this call
+    // only — without it, the slow one resolving last would disarm the newer
+    // navigation's loading paint and restore the blank window it exists to fill.
+    const mine = routeToken;
+    cancelLoadingPaint();
     rail.clearPending();
     folderId = id;
     query = "";
@@ -1840,8 +1926,19 @@ export function createAppShell(deps: AppDeps): AppShell {
     if (cached) {
       listing = cached;
       renderGallery(); // stale-while-revalidate: paint immediately
+    } else {
+      // CACHE MISS — nothing truthful to paint yet. `listing` is dropped
+      // IMMEDIATELY (not after the delay) because it now describes a folder we
+      // are no longer in: any repaint triggered meanwhile — the sort select, the
+      // view toggle, `rail.onSettled` — would otherwise run `visibleEntries()`
+      // with `folderId` = B and `listing` = A, and at the root would apply the
+      // root flattening to a non-root listing. The PAINT is what waits; see
+      // `scheduleLoadingPaint`.
+      listing = undefined;
+      scheduleLoadingPaint(id);
     }
     await refetch(id, cached);
+    if (mine === routeToken) cancelLoadingPaint();
   }
 
   /**
@@ -1861,6 +1958,25 @@ export function createAppShell(deps: AppDeps): AppShell {
     redirect(folderHref(null));
   }
 
+  /**
+   * Is the folder gallery still the surface on screen?
+   *
+   * ONE QUESTION, ONE PLACE. `renderGallery` refuses to paint while the route
+   * says a destination is open, and `refetch`'s success path additionally
+   * refuses while the bin's node is mounted — but the FAILURE path used to
+   * `replaceChildren` the gallery element directly, around both, and the
+   * missing-folder redirect fired regardless. So a folder you gave up on could
+   * land its failure minutes later and replace an open recycle bin with
+   * "Couldn't load", or bounce you out of it to the root, while the URL, the
+   * rail highlight and the `Empty bin` button all still said Recycle bin.
+   *
+   * A late answer about a place the user has left is DROPPED, not painted: they
+   * have moved on, and there is nothing here they asked to be told.
+   */
+  function galleryIsOnScreen(): boolean {
+    return destination === null && !bin.isOpen();
+  }
+
   async function refetch(id: Id | null, prev: Listing | undefined): Promise<void> {
     let fresh: Listing;
     try {
@@ -1870,6 +1986,8 @@ export function createAppShell(deps: AppDeps): AppShell {
       // retry empty-state over a shell that's about to be torn down.
       if (handled(e)) return;
       if (id !== folderId) return; // navigated away while failing
+      // …nor over a destination the user opened while this was in flight.
+      if (!galleryIsOnScreen()) return;
       // GONE is not UNREACHABLE. A 404 is the server answering, so retrying will
       // never help and "check your connection" would be a lie; anything else
       // (a network drop, a 500) keeps the retry state it always had.
@@ -1887,7 +2005,10 @@ export function createAppShell(deps: AppDeps): AppShell {
     // The other half of the missing-folder signal — see `missingFolder`. The
     // root legitimately has an empty path, so this asks only about a real id.
     if (id !== null && fresh.path.length === 0) {
-      missingFolder();
+      // The same guard as the failure path: a redirect is a navigation, and
+      // yanking someone out of the bin they are standing in is worse than
+      // leaving a folder id nobody is looking at uncorrected.
+      if (galleryIsOnScreen()) missingFolder();
       return;
     }
     knownSyncVersion = Math.max(knownSyncVersion, fresh.syncVersion);
@@ -2202,6 +2323,9 @@ export function createAppShell(deps: AppDeps): AppShell {
       osThemeQuery?.removeEventListener("change", onOsThemeChange);
       window.removeEventListener("resize", onWindowResize);
       if (resizeTimer !== undefined) clearTimeout(resizeTimer);
+      // Nothing scheduled to paint into a shell on its way out — see
+      // `scheduleLoadingPaint`.
+      cancelLoadingPaint();
       // The card/row overflow menus install their own document listeners once,
       // inside `ui/menu.ts`, and are keyed on which menu is open — there is
       // nothing per-shell to tear down here any more.

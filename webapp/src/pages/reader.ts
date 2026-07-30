@@ -679,6 +679,20 @@ export function createReader(deps: ReaderDeps): Reader {
    * that has no pages.
    */
   let mode: FileKind = "note";
+  /**
+   * Is `meta` the real thing, or the SKELETON `open` paints instantly from the
+   * listing summary? Load-bearing for every question the skeleton cannot answer
+   * truthfully — chiefly "does this note carry recognised text", where the
+   * skeleton's pages all say `textHash: null` because it made them up.
+   */
+  let metaResolved = false;
+  /**
+   * The listing's own answer to "does this note carry recognised text anywhere"
+   * (`NoteSummary.hasRecognizedText`), used while `metaResolved` is false. The
+   * server computed it over the WHOLE note, so it is right where the skeleton's
+   * per-page nulls are wrong.
+   */
+  let summaryRecognized = false;
   let pageIndex = 0;
   let zoom: Zoom = "Fit";
   let open = false;
@@ -1261,16 +1275,57 @@ export function createReader(deps: ReaderDeps): Reader {
     );
   }
 
-  /** Image mode: hand the bytes to the browser and let it do the work. */
+  /**
+   * The window between "this file is an image" and its bytes decoding.
+   *
+   * The SAME block as `showNoPreview`, minus the download (the file is still
+   * arriving) — so when the picture lands the change is one element appearing
+   * rather than a new layout, and the type and the name are already on screen
+   * while it does.
+   */
+  function showImageLoading(m: NoteMeta): void {
+    fileBody.hidden = false;
+    fileBody.replaceChildren(
+      el("div", { class: "empty__mark", text: m.fileType.toUpperCase() }),
+      el("h3", { text: m.name }),
+      el("p", { text: "Loading this picture…" }),
+    );
+  }
+
+  /**
+   * Image mode: hand the bytes to the browser and let it do the work.
+   *
+   * THE PREVIOUS FILE'S PICTURE IS NOT A LOADING STATE. Assigning `src` leaves
+   * the already-decoded image painted until the new bytes arrive, so opening
+   * image B from image A showed A's picture under B's title and B's download
+   * link for the whole download — the reader making, in the most literal form
+   * available to it, a false statement about the file it says it is showing.
+   * `showNoPreview` has cleared the element first for exactly this reason since
+   * it was written; this now does the same and shows a real loading state until
+   * `load` fires.
+   */
   function showImage(m: NoteMeta, url: string): void {
-    fileBody.hidden = true;
-    fileBody.replaceChildren();
-    fileImg.hidden = false;
+    // Cleared BEFORE the new src is set. An <img> with no src paints nothing,
+    // which is the honest thing to paint while the download runs.
+    fileImg.onload = null;
+    fileImg.onerror = null;
+    fileImg.removeAttribute("src");
+    fileImg.hidden = true;
+    showImageLoading(m);
     // Empty alt: the file's name is already the reader's heading, so announcing
     // it again here would be a duplicate rather than a description. The image is
     // the content, not an illustration of it.
     fileImg.alt = "";
-    fileImg.src = url;
+    fileImg.onload = () => {
+      if (meta?.id !== m.id) return; // moved on while loading
+      fileBody.hidden = true;
+      fileBody.replaceChildren();
+      fileImg.hidden = false;
+      // The construction-time `load` listener already ran, but it ran against a
+      // hidden element with no layout — so the fit is computed again here, now
+      // that the image is on screen.
+      sizeImage();
+    };
     // An <img> error carries no status and throws no ApiError, so there is
     // nothing for `dispatchApiFailure` to classify — this is not a swallowed
     // failure, it is the one failure on this surface the sink cannot type. Fall
@@ -1280,6 +1335,7 @@ export function createReader(deps: ReaderDeps): Reader {
       if (meta?.id !== m.id) return; // moved on while loading
       showNoPreview(m, m.name, "Couldn't load a preview of this image. You can still download it.");
     };
+    fileImg.src = url;
   }
 
   /** Enter (or leave) a non-note mode: swap stages and prune the toolbar. */
@@ -1303,12 +1359,29 @@ export function createReader(deps: ReaderDeps): Reader {
     if (!isNote) noteLayerCtl.release();
     refreshLayersUi();
 
-    // Find searches the DEVICE's recognition, so a note carrying none cannot be
-    // searched at all and the control would promise a search that can only
-    // answer "nothing". `textHash !== null` is that signal and it rides on the
-    // page list, so this costs no request. Note-wide, unlike the transcript
-    // toggle, which is per page.
-    const searchable = isNote && (meta?.pages.some((pg) => pg.textHash !== null) ?? false);
+    refreshFindUi();
+  }
+
+  /**
+   * The Find affordance's enabled state.
+   *
+   * Find searches the DEVICE's recognition, so a note carrying none cannot be
+   * searched at all and the control would promise a search that can only answer
+   * "nothing". `textHash !== null` is that signal and it rides on the page list,
+   * so this costs no request. Note-wide, unlike the transcript toggle, which is
+   * per page.
+   *
+   * WHICH SOURCE, AND WHY IT MATTERS: the skeleton `open` paints from invents
+   * `textHash: null` for every page but the first, so asking it would disable
+   * Find on any note whose page 1 happens to carry no recognition — permanently,
+   * since nothing recomputed this when the real metadata landed. Until the meta
+   * resolves the LISTING's whole-note answer is the honest one; after, the page
+   * list is authoritative. Called again from `open` once the meta arrives.
+   */
+  function refreshFindUi(): void {
+    const isNote = mode === "note";
+    const searchable =
+      isNote && (metaResolved ? (meta?.pages.some((pg) => pg.textHash !== null) ?? false) : summaryRecognized);
     findToggle.disabled = !searchable;
     findToggle.title = searchable ? "Find in this note" : "This note has no recognised text to search";
   }
@@ -1841,6 +1914,7 @@ export function createReader(deps: ReaderDeps): Reader {
     filmEngine.reset();
     // Drop the preview so a closed reader isn't holding a decoded image, and so
     // reopening a different file can't flash the previous one.
+    fileImg.onload = null;
     fileImg.onerror = null;
     fileImg.removeAttribute("src");
     fileBody.replaceChildren();
@@ -1861,7 +1935,16 @@ export function createReader(deps: ReaderDeps): Reader {
       // on screen, and shutting the dropdown someone just opened because a poll
       // landed would be a UI that fidgets under its own maintenance.
       const changedFile = meta?.id !== summary.id;
-      
+
+      // NEVER DOWNGRADE A LOADED READER. `open()` is also how a background
+      // freshness refresh re-announces the note already on screen; replacing its
+      // resolved meta with a skeleton would revert the filmstrip to shimmer,
+      // disable Layers, make Find claim "not recognised", and leave `showPage`
+      // unable to paint any page but the first (their hashes would be ""). Only
+      // build a skeleton when this is genuinely a different file, or when the one
+      // on screen never resolved.
+      const keepResolved = !changedFile && metaResolved && meta !== null;
+      summaryRecognized = summary.hasRecognizedText;
       // A skeleton meta so the viewer paints instantly while the real metadata is
       // still in flight: page 0 is the summary's known first page, the rest are
       // placeholders (empty hash = "don't render") shaped by the summary's aspect.
@@ -1877,7 +1960,9 @@ export function createReader(deps: ReaderDeps): Reader {
           i === 0 ? summary.firstPage : skeletonPage(i, aspect),
         ),
       };
-      meta = skeletonMeta;
+      if (!keepResolved) metaResolved = false;
+      // ONE assignment, so `meta` is provably non-null for the rest of `open`.
+      meta = keepResolved && meta ? meta : skeletonMeta;
       
       if (changedFile) exportMenu.setOpen(false);
       const kind = fileKind(summary.fileType);
@@ -2046,17 +2131,54 @@ export function createReader(deps: ReaderDeps): Reader {
       // than what was asked for.
       syncUrl();
 
-      // Wait for the full metadata to arrive in the background
-      const realMeta = await metaPromise;
+      // THE REAL METADATA, arriving behind the instant paint above.
+      //
+      // A FAILURE HERE IS NOT SILENT. Without this catch the reader sat on the
+      // skeleton forever — page 1 painted, every other page a permanent
+      // placeholder, no error and no retry — and the rejection escaped as an
+      // unhandled promise (the shell cannot catch it: it does not await `open`).
+      // The `.spd`/`.txt` viewers already own this; the reader now does too.
+      let realMeta: NoteMeta;
+      try {
+        realMeta = await metaPromise;
+      } catch (e) {
+        if (!open || meta?.id !== summary.id) return;
+        // A dead session routes to the shell; anything else leaves the reader on
+        // what it already painted (page 1 is real and readable) rather than
+        // throwing the user out of a note they can partly use.
+        dispatchApiFailure(failures, e);
+        return;
+      }
       if (!open || meta?.id !== realMeta.id) return;
+
+      // Captured BEFORE `meta` is replaced, so the repaint below can be skipped
+      // when nothing the visible page depends on actually moved.
+      const paintedPage = meta?.pages[pageIndex];
       meta = realMeta;
-      
+      metaResolved = true;
+      // The page list is authoritative now — a note whose first page carries no
+      // recognition but whose later pages do must get its Find control back.
+      refreshFindUi();
+
       if (kind === "note") {
+        header.setSubtitle(
+          subtitle(origin, `${meta.pages.length} ${meta.pages.length === 1 ? "page" : "pages"}`),
+        );
         find.setNote(meta.id, meta.pages);
         buildFilmstrip();
-        // Always re-trigger showPage. If it was page 0, layers might have arrived.
-        // If it was > 0, it was skipped previously due to empty hash.
-        void showPage(pageIndex);
+        // ONLY REPAINT WHEN THE PAGE ACTUALLY CHANGED. `buildFilmstrip` has just
+        // rebuilt the strip, so the blur-up source (a rendered thumb canvas) is
+        // freshly zero-sized — an unconditional `showPage` therefore cleared the
+        // visible page to white, discarded the in-flight render via `paintToken`
+        // and re-issued the same request. Skip it when the page on screen is
+        // already the real one; repaint when the skeleton was standing in (an
+        // empty hash paints nothing) or when the page's identity moved.
+        const nextPage = meta.pages[pageIndex];
+        const alreadyPainted = paintedPage?.hash !== "" && paintedPage?.hash === nextPage?.hash;
+        // Layers only ever ride on the real meta (a listing's `firstPage` never
+        // carries them), so their arrival IS a change worth repainting for.
+        const gainedLayers = (nextPage?.layers?.length ?? 0) > 0 && !paintedPage?.layers?.length;
+        if (!alreadyPainted || gainedLayers) void showPage(pageIndex);
       } else {
         header.setSubtitle(subtitle(origin, `${meta.fileType.toUpperCase()} · ${formatBytes(meta.size)}`));
       }

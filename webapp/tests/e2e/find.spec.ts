@@ -36,6 +36,39 @@ async function openNote(page: Page, route = NOTE): Promise<void> {
   await freezeMotion(page);
 }
 
+// The reader paints from a SKELETON page list (the listing summary + placeholder
+// pages) while `getNoteMeta` is in flight, and a skeleton page carries
+// `textHash: null` because it was invented. Deriving "can this note be searched"
+// from it therefore answers for page 1 alone — and nothing recomputed it when the
+// real metadata landed, so Find stayed disabled for the whole session on any note
+// whose recognition starts later. Not slow-link-only: it was wrong immediately.
+//
+// `n-late-ocr` exists for this: 4 pages, nothing recognised on page 1, a
+// transcript from page 2 on. The default fixture pattern always recognises page
+// 1, which is exactly why the bug was unrepresentable and shipped.
+test.describe("the Find affordance reflects the WHOLE note, not the skeleton", () => {
+  test("a note recognised only from page two still offers Find", async ({ page }) => {
+    await openNote(page, "/#/note/n-late-ocr");
+
+    const toggle = findToggle(page);
+    await expect(toggle).toBeEnabled();
+    await expect(toggle).toHaveAttribute("title", "Find in this note");
+
+    // And it really searches: the transcript on the later pages is reachable.
+    await toggle.click();
+    await expect(findBar(page)).toBeVisible();
+  });
+
+  // The other half of the same rule: a note with NO recognition anywhere must
+  // still say so, rather than being made hopeful by the summary's flag.
+  test("a note with no recognition anywhere keeps Find disabled", async ({ page }) => {
+    await openNote(page, "/#/note/n-sketch");
+    const toggle = findToggle(page);
+    await expect(toggle).toBeDisabled();
+    await expect(toggle).toHaveAttribute("title", "This note has no recognised text to search");
+  });
+});
+
 test.describe("find in note", () => {
   test("the bar is revealed by the toolbar control and by Ctrl+F, and costs nothing until used", async ({ page }) => {
     await openNote(page);

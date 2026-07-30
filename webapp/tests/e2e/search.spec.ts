@@ -563,7 +563,9 @@ test.describe("universal search", () => {
       const scrollBefore = await page.evaluate(() => document.querySelector(".content")!.scrollTop);
 
       await moreButton(page).click();
-      await expect(results(page)).toHaveCount(16);
+      // 17, not 16: the corpus includes `n-late-ocr`, a route-only fixture that
+      // joins no listing but IS recognised, so universal search finds it too.
+      await expect(results(page)).toHaveCount(17);
 
       // APPENDED, not repainted: every row that was on screen is still there,
       // in the same order, ahead of the new ones.
@@ -577,7 +579,7 @@ test.describe("universal search", () => {
       // not disabled, gone — and the header's floors settle into the plain
       // counts of what is (now completely) on screen.
       await expect(moreButton(page)).toHaveCount(0);
-      await expect(header(page)).toHaveText("16 notes · 28 pages");
+      await expect(header(page)).toHaveText("17 notes · 30 pages");
     });
 
     test("a page-boundary note GROWS its row rather than gaining a duplicate", async ({ page }) => {
@@ -621,7 +623,7 @@ test.describe("universal search", () => {
       await expect(moreButton(page)).toBeFocused();
       await page.keyboard.press("Enter");
 
-      await expect(results(page)).toHaveCount(16);
+      await expect(results(page)).toHaveCount(17);
       await expect(moreButton(page)).toHaveCount(0);
     });
   });

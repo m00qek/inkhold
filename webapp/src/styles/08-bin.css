@@ -161,6 +161,15 @@
 .bin__row:hover {
   background: var(--hover);
 }
+/* A ROW WITH ITS OWN RESTORE OR PURGE IN FLIGHT (bin.ts's `inFlight`). The row
+   recedes — it is being acted on, not offered — and its ⋯ is already `disabled`
+   in the markup, so this is the visible half of a fact the DOM states twice
+   (`aria-busy` is the other half, for a reader that cannot see the fade).
+   Deliberately NOT a spinner: the whole row is the affordance, and one more
+   spinning mark per row would be noise in a list of them. */
+.bin__row.is-busy {
+  opacity: 0.55;
+}
 /* A child sits under the trashed folder it came from. The nesting is not
    decoration: restoring a child restores its ancestors too, so showing the
    relationship is what stops that being a surprise. A row whose parent is NOT in

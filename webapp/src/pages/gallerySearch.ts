@@ -68,6 +68,13 @@ export interface GallerySearchCtx {
   loadMore: () => Promise<unknown>;
   /** The whole-tree listing cache — the name half of the query reads it. */
   cachedListings: Map<string, Listing>;
+  /**
+   * Has the tree walk that FILLS {@link GallerySearchCtx.cachedListings}
+   * finished? Until it has, the name half of a query has been matched against a
+   * partial library, so an empty result set is not yet an answer — see
+   * `renderSearch`.
+   */
+  treeLoaded: () => boolean;
   /** The rail's category-aware folder label (never `folder.name` directly). */
   labelFor: (folder: Folder) => string;
   /** The card factory's result-row builder. */
@@ -280,12 +287,26 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     }
 
     if (results.length === 0) {
-      if (searchState.kind === "searching" || searchState.kind === "idle") {
-        gallery.append(ctx.emptyState("Searching…", "Looking through every note — names, typing and handwriting."));
-      } else if (searchState.kind === "error") {
+      if (searchState.kind === "error") {
         // Distinct from "no matches", deliberately: a failed search that rendered
         // as an empty one is indistinguishable from a query nobody wrote about.
         gallery.append(ctx.emptyState("Couldn't search", "The recognised text couldn't be searched. Keep typing to retry."));
+      } else if (searchState.kind === "searching" || searchState.kind === "idle" || !ctx.treeLoaded()) {
+        // THE NEGATIVE IS THE LAST THING SAID. Two halves answer this query and
+        // they resolve independently: the transcript half is one round trip, the
+        // NAME half is matched against the cached tree that `prefetchTree` fills
+        // one folder at a time. A transcript response with no hits therefore
+        // arrives, routinely, before the name half can have been computed
+        // against a complete library — and "No matches" painted then is a
+        // confident lie about notes whose titles do match.
+        //
+        // So the walk gates the claim exactly as it gates a category's "is
+        // empty" (`rail.loaded()`, and the pending-category branch in
+        // `renderGallery`): until the data that could disprove the negative has
+        // arrived, this is still a search in progress. `rail.settle()` repaints
+        // when it lands — for a query typed inside a subfolder as much as at the
+        // root, which is what used to leave this state stranded forever.
+        gallery.append(ctx.emptyState("Searching…", "Looking through every note — names, typing and handwriting."));
       } else {
         gallery.append(ctx.emptyState(`No matches for “${q}”`, coverageLine(searchState.coverage)));
       }

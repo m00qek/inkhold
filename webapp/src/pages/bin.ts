@@ -331,6 +331,14 @@ export interface BinModel {
   rows: BinRow[];
   retentionDays: number;
   totalBytes: number;
+  /**
+   * Entry ids with a restore or a purge IN FLIGHT. Their rows paint as busy and
+   * their actions are inert until the call settles — see the `inFlight` set in
+   * the controller for why that is not merely a nicety.
+   */
+  busy: readonly Id[];
+  /** `Empty bin` is in flight. Disables the topbar control that started it. */
+  emptying: boolean;
 }
 
 export interface ToastOpts {
@@ -477,12 +485,36 @@ export function createBin(deps: BinDeps): BinController {
    */
   let token = 0;
 
+  /**
+   * The entries whose restore or purge is TRAVELLING RIGHT NOW.
+   *
+   * IN FLIGHT IS A STATE, and it was the one state this file did not keep. On a
+   * slow link nothing at all happens when Restore is chosen — no optimistic
+   * paint, no disabled control — so the natural reading is that the click missed,
+   * and the natural response is to click again. The second call then reaches a
+   * server that has already restored the entry, finds nothing to restore, and
+   * the bin reports "Couldn't restore X. Try again." for an operation that
+   * SUCCEEDED. Purge and Empty had the same hole.
+   *
+   * So every mutating entry point is a no-op while its own call is pending, and
+   * the pending one is PAINTED — the row dims and its ⋯ is disabled, the topbar's
+   * `Empty bin` goes flat — so the click that was already made is visible and
+   * there is nothing to re-click. Released on BOTH arms (a guard that outlives
+   * its own failure is a control that never comes back), and held across the
+   * refresh that follows, so the window between "the write returned" and "the
+   * list agrees" is covered too.
+   */
+  const inFlight = new Set<Id>();
+  let emptying = false;
+
   function model(): BinModel {
     return {
       state,
       rows: bin ? binRows(bin) : [],
       retentionDays: bin?.retentionDays ?? 30,
       totalBytes: bin?.totalBytes ?? 0,
+      busy: [...inFlight],
+      emptying,
     };
   }
 
@@ -525,6 +557,11 @@ export function createBin(deps: BinDeps): BinController {
       m.state,
       m.retentionDays,
       m.totalBytes,
+      // The busy flags are part of what a render PAINTS (a dimmed row, a
+      // disabled control), so they belong in the signature: without them the
+      // repaint that shows an action starting would be skipped as a no-op.
+      m.busy,
+      m.emptying,
       m.rows.map((r) => [r.entry.id, r.child, r.daysLeft, r.soon, r.detail, r.openable]),
     ]);
   }
@@ -578,51 +615,82 @@ export function createBin(deps: BinDeps): BinController {
 
   /** True only when the entry really came back — the viewers leave on that. */
   async function restore(row: BinRow): Promise<boolean> {
+    const id = row.entry.id;
+    if (inFlight.has(id)) return false; // already travelling — see `inFlight`
+    inFlight.add(id);
+    paint(); // the click that was made becomes visible
     let done = false;
     try {
-      const result = await api.restoreEntry(row.entry.id);
-      view.toast(restoreMessage(result));
-      done = true;
-    } catch (e) {
-      if (deps.handled(e)) return false;
-      view.toast(`Couldn’t restore ${row.entry.name}. Try again.`);
+      try {
+        const result = await api.restoreEntry(id);
+        view.toast(restoreMessage(result));
+        done = true;
+      } catch (e) {
+        if (deps.handled(e)) return false;
+        view.toast(`Couldn’t restore ${row.entry.name}. Try again.`);
+      }
+      await refresh(true);
+    } finally {
+      inFlight.delete(id);
+      paint();
     }
-    await refresh(true);
     return done;
   }
 
   /** True only when the confirm was accepted AND the purge succeeded. */
   async function purge(row: BinRow): Promise<boolean> {
+    const id = row.entry.id;
+    if (inFlight.has(id)) return false;
+    // The confirm comes FIRST and the row is not marked busy for it: a dialog is
+    // already modal, and dimming the row behind it would claim work had started
+    // that the user has not yet agreed to.
     if (!(await view.confirm(purgeConfirm(row)))) return false;
+    if (inFlight.has(id)) return false; // something else started while it was open
+    inFlight.add(id);
+    paint();
     let done = false;
     try {
-      await api.purgeEntry(row.entry.id);
-      view.toast(
-        row.bytes > 0
-          ? `Deleted ${row.entry.name} — ${formatBytes(row.bytes)} freed`
-          : `Deleted ${row.entry.name}`,
-      );
-      done = true;
-    } catch (e) {
-      if (deps.handled(e)) return false;
-      view.toast(`Couldn’t delete ${row.entry.name}. Try again.`);
+      try {
+        await api.purgeEntry(id);
+        view.toast(
+          row.bytes > 0
+            ? `Deleted ${row.entry.name} — ${formatBytes(row.bytes)} freed`
+            : `Deleted ${row.entry.name}`,
+        );
+        done = true;
+      } catch (e) {
+        if (deps.handled(e)) return false;
+        view.toast(`Couldn’t delete ${row.entry.name}. Try again.`);
+      }
+      await refresh(true);
+    } finally {
+      inFlight.delete(id);
+      paint();
     }
-    await refresh(true);
     return done;
   }
 
   async function empty(): Promise<void> {
+    if (emptying) return; // one at a time — see `inFlight`
     if (!bin || bin.entries.length === 0) return;
     const freed = bin.totalBytes;
     if (!(await view.confirm(emptyConfirm(bin)))) return;
+    if (emptying) return;
+    emptying = true;
+    paint();
     try {
-      const n = await api.emptyBin();
-      view.toast(freed > 0 ? `Bin emptied — ${plural(n, "item")}, ${formatBytes(freed)} freed` : `Bin emptied — ${plural(n, "item")}`);
-    } catch (e) {
-      if (deps.handled(e)) return;
-      view.toast("Couldn’t empty the bin. Try again.");
+      try {
+        const n = await api.emptyBin();
+        view.toast(freed > 0 ? `Bin emptied — ${plural(n, "item")}, ${formatBytes(freed)} freed` : `Bin emptied — ${plural(n, "item")}`);
+      } catch (e) {
+        if (deps.handled(e)) return;
+        view.toast("Couldn’t empty the bin. Try again.");
+      }
+      await refresh(true);
+    } finally {
+      emptying = false;
+      paint();
     }
-    await refresh(true);
   }
 
   return {
@@ -850,8 +918,13 @@ export interface BinViewOptions {
    * search box (searching a library you are not looking at) while adding one
    * control of its own. The shell owns both, because the elements are the
    * shell's — this seam only says which mode is on.
+   *
+   * `busy` is `Empty bin`'s OWN call being in flight. The control disables for
+   * it as well as for an empty bin: those are two different reasons for the same
+   * appearance, and both of them are "there is nothing this click can usefully
+   * do" — see the controller's `inFlight`.
    */
-  setMode(open: boolean, count: number): void;
+  setMode(open: boolean, count: number, busy: boolean): void;
 }
 
 /**
@@ -1022,12 +1095,17 @@ export function createBinView(opts: BinViewOptions): BinView {
    * The trigger names the row (a screen reader meeting a column of "Actions"
    * buttons learns nothing otherwise).
    */
-  function actionsMenu(row: BinRow, actions: BinActions): HTMLElement {
+  function actionsMenu(row: BinRow, actions: BinActions, busy: boolean): HTMLElement {
     return el(
       "div",
       { class: "bin__actions" },
       createMenu({
-        triggerLabel: `Actions for ${row.entry.name}`,
+        triggerLabel: busy ? `Working on ${row.entry.name}` : `Actions for ${row.entry.name}`,
+        // BOTH actions go at once, because the row has one operation in flight
+        // and neither of them is available until it settles. The control stays
+        // where it is rather than vanishing — a button that disappears teaches
+        // nothing about why.
+        disabled: busy,
         items: [
           { label: "Restore", icon: "restore", onSelect: () => actions.restore(row) },
           { label: "Delete permanently", icon: "trashX", danger: true, onSelect: () => actions.purge(row) },
@@ -1036,7 +1114,7 @@ export function createBinView(opts: BinViewOptions): BinView {
     );
   }
 
-  function rowEl(row: BinRow, retentionDays: number, actions: BinActions): HTMLElement {
+  function rowEl(row: BinRow, retentionDays: number, actions: BinActions, busy: boolean): HTMLElement {
     const e = row.entry;
     const body = el(
       "div",
@@ -1074,10 +1152,15 @@ export function createBinView(opts: BinViewOptions): BinView {
 
     return el(
       "div",
-      { class: row.child ? "bin__row is-child" : "bin__row" },
+      {
+        // `is-busy` dims the row while its own restore/purge travels; `aria-busy`
+        // is the same fact for a screen reader, which cannot see the dimming.
+        class: `${row.child ? "bin__row is-child" : "bin__row"}${busy ? " is-busy" : ""}`,
+        ...(busy ? { "aria-busy": "true" } : {}),
+      },
       lead,
       lifeEl(row.daysLeft, row.soon, retentionDays),
-      actionsMenu(row, actions),
+      actionsMenu(row, actions, busy),
     );
   }
 
@@ -1107,7 +1190,7 @@ export function createBinView(opts: BinViewOptions): BinView {
       // shell owns both elements, so it is told the mode rather than reaching in
       // — see `BinViewOptions.setMode`. Told on EVERY render because the count is
       // what decides whether the control is live, and a purge changes it.
-      setMode(true, model.rows.length);
+      setMode(true, model.rows.length, model.emptying);
 
       // `is-bin` neutralises the gallery's grid: this is a list of rows, not a
       // wall of tiles.
@@ -1158,6 +1241,7 @@ export function createBinView(opts: BinViewOptions): BinView {
         ),
       );
 
+      const busy = new Set(model.busy);
       let group: string | null = null;
       let rows: HTMLElement | null = null;
       for (const row of model.rows) {
@@ -1167,7 +1251,7 @@ export function createBinView(opts: BinViewOptions): BinView {
           rows = el("div", { class: "bin__rows" });
           section.append(rows);
         }
-        rows?.append(rowEl(row, model.retentionDays, actions));
+        rows?.append(rowEl(row, model.retentionDays, actions, busy.has(row.entry.id)));
       }
       gallery.replaceChildren(section);
     },

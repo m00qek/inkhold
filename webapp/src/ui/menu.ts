@@ -83,6 +83,17 @@ export interface MenuSpec {
   /** The flat group's title, when {@link MenuSpec.items} is used. Defaults to
    *  {@link DEFAULT_SECTION_TITLE} (`ACTIONS`). Ignored when `sections` is given. */
   title?: string;
+  /**
+   * Render the ⋯ trigger DISABLED — the thing this menu acts on has work in
+   * flight, so none of its actions is available until that settles (the recycle
+   * bin's rows, while a restore or a purge travels).
+   *
+   * WHOLE-MENU rather than per item, because that is the shape of the fact: it
+   * is the ROW that is busy, not one of its choices. A disabled `<button>` is
+   * inert to the pointer and to the keyboard for free, and it stays in place —
+   * a control that vanishes while an operation runs teaches nothing about why.
+   */
+  disabled?: boolean;
 }
 
 /** Normalise either spelling to titled sections; empty groups fall away. */
@@ -121,6 +132,7 @@ export function createMenu(spec: MenuSpec): HTMLElement {
     title: spec.triggerLabel,
     html: MORE_GLYPH,
   }) as HTMLButtonElement;
+  trigger.disabled = spec.disabled === true;
 
   // The item BUTTONS in document order — the roving-tabindex universe, flattened
   // across every section (the headers are non-interactive and never join it).

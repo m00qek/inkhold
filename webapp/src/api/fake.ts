@@ -74,12 +74,27 @@ export function fakeFileHash(id: Id): string {
  * Note it is seeded independently of the page content hash, mirroring the real
  * thing: RECOGNTEXT is not a layer, so its hash moves independently of strokes.
  */
-function fakeTextHash(noteId: Id, index: number, recognized: boolean): string | null {
-  if (!recognized || index % 3 === 2) return null;
+/**
+ * Notes whose recognition does not start at page 1, by id (see
+ * `NoteOpts.recognizedFrom`). A side table because `NoteSummary` has no field
+ * for it — the server never sends one, since the listing only carries the
+ * whole-note `hasRecognizedText` — and `getNoteMeta` still has to rebuild the
+ * SAME per-page pattern the summary was derived from.
+ */
+const RECOGNIZED_FROM: Record<string, number> = {};
+
+function fakeTextHash(noteId: Id, index: number, recognized: boolean, from = 0): string | null {
+  if (!recognized || index < from || index % 3 === 2) return null;
   return fakeHash(`${noteId}:${index}:recogntext`);
 }
 
-function pages(noteId: Id, count: number, recognized: boolean, dims?: { w: number; h: number }): PageRef[] {
+function pages(
+  noteId: Id,
+  count: number,
+  recognized: boolean,
+  dims?: { w: number; h: number },
+  recognizedFrom?: number,
+): PageRef[] {
   return Array.from({ length: count }, (_, index) => ({
     index,
     hash: fakeHash(`${noteId}:${index}`),
@@ -87,7 +102,7 @@ function pages(noteId: Id, count: number, recognized: boolean, dims?: { w: numbe
     // passes 1872×1404 and its refs read honestly wide, as the real index does.
     width: dims?.w ?? 1404,
     height: dims?.h ?? 1872,
-    textHash: fakeTextHash(noteId, index, recognized),
+    textHash: fakeTextHash(noteId, index, recognized, recognizedFrom),
   }));
 }
 
@@ -621,6 +636,16 @@ interface NoteOpts {
   fileType?: string;
   /** Default false — recognition is opt-in ON the device, so it is the minority. */
   hasRecognizedText?: boolean;
+  /**
+   * First page index carrying recognition, when it does NOT start at page 1.
+   *
+   * The default pattern always gives page 0 a transcript, which made a whole
+   * class of bug unrepresentable: the reader derives "can this note be searched"
+   * from the page list, and while it is showing the SKELETON only page 0 is real.
+   * A note recognised from page 2 onward is exactly the case that used to leave
+   * Find disabled forever, so the fixture has to be able to express it.
+   */
+  recognizedFrom?: number;
   /** Default 1 MB-ish, derived from the id. Only the "no preview" state shows it. */
   size?: number;
   /** Effective page dims. Default portrait 1404×1872; a landscape fixture passes
@@ -636,7 +661,8 @@ interface NoteOpts {
 function note(id: Id, name: string, pageCount: number, updatedAt: number, opts: NoteOpts = {}): NoteSummary {
   const fileType = opts.fileType ?? "note";
   const hasRecognizedText = opts.hasRecognizedText ?? false;
-  const [first] = pages(id, pageCount, hasRecognizedText, opts.pageDims);
+  if (opts.recognizedFrom !== undefined) RECOGNIZED_FROM[String(id)] = opts.recognizedFrom;
+  const [first] = pages(id, pageCount, hasRecognizedText, opts.pageDims, opts.recognizedFrom);
   return {
     kind: "note",
     id,
@@ -903,6 +929,23 @@ for (const entries of Object.values(CHILDREN)) {
   for (const e of entries) if (e.kind === "note") ALL_NOTES[e.id] = e;
 }
 
+/**
+ * RECOGNISED LATE: nothing on page 1, a transcript from page 2 on — the shape
+ * that used to leave Find disabled for a whole session, because the reader
+ * derives "can this be searched" from a SKELETON page list whose pages all read
+ * `textHash: null`. The default fixture pattern always recognises page 1, which
+ * is exactly why the bug was unrepresentable and shipped.
+ *
+ * Registered BY ID ONLY, deliberately outside `CHILDREN`: every listing count,
+ * section head and search total in the e2e suite is asserted literally, so a
+ * note added to a real folder would rewrite half a dozen unrelated expectations
+ * for a fixture that exists to be opened by route.
+ */
+ALL_NOTES["n-late-ocr"] = note("n-late-ocr", "Recognised from page two", 4, NOW - 2 * DAY, {
+  hasRecognizedText: true,
+  recognizedFrom: 1,
+});
+
 // The recycle-bin fixture's own notes, kept in a SEPARATE map from the live
 // library. Keyed the same way, so every PER-ID transcript / search / version-
 // history generator answers for a TRASHED id exactly as for a live one — the fake
@@ -1016,10 +1059,13 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
         // they are attached here rather than inside `pages()`. Dims come off the
         // summary's own first page, so a landscape fixture's meta agrees with
         // its listing instead of quietly reverting to portrait.
-        pages: pages(id, summary.pageCount, summary.hasRecognizedText, {
-          w: summary.firstPage.width,
-          h: summary.firstPage.height,
-        }).map((p) => (id === LAYERED_NOTE_ID ? { ...p, layers: layeredPageLayers(p.index) } : p)),
+        pages: pages(
+          id,
+          summary.pageCount,
+          summary.hasRecognizedText,
+          { w: summary.firstPage.width, h: summary.firstPage.height },
+          RECOGNIZED_FROM[String(id)],
+        ).map((p) => (id === LAYERED_NOTE_ID ? { ...p, layers: layeredPageLayers(p.index) } : p)),
         // The reader branches on these, so the fake has to carry them: a route
         // reload lands here with nothing but the id.
         fileType: summary.fileType,
@@ -1207,10 +1253,13 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       return {
         id,
         name: summary.name,
-        pages: pages(id, count, summary.hasRecognizedText, {
-          w: summary.firstPage.width,
-          h: summary.firstPage.height,
-        }),
+        pages: pages(
+          id,
+          count,
+          summary.hasRecognizedText,
+          { w: summary.firstPage.width, h: summary.firstPage.height },
+          RECOGNIZED_FROM[String(id)],
+        ),
         fileType: summary.fileType,
         fileHash: md5,
         size: fakeSize(id, count),

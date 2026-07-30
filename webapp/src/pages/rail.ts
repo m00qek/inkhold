@@ -111,7 +111,12 @@ export const CONTAINER_NAMES = new Set(CATEGORIES.filter((c) => c.path.length > 
 const PENDING_ID_PREFIX = "pending-category:";
 
 function pendingCategoryFolder(cat: Category): Folder {
-  return { kind: "folder", id: `${PENDING_ID_PREFIX}${cat.label}` as Id, name: cat.label, itemCount: 0 };
+  // `itemCount` is deliberately OMITTED, not 0: nothing has been counted yet, and
+  // `itemCountLabel` renders 0 as the word "Empty" — a confident lie about a
+  // folder still being fetched, which is worse than the reflow this stand-in
+  // exists to remove. An absent count renders no meta line at all, which is what
+  // "not counted yet" honestly looks like.
+  return { kind: "folder", id: `${PENDING_ID_PREFIX}${cat.label}` as Id, name: cat.label };
 }
 
 /** The category behind a {@link pendingCategoryFolder} id, or null for a real folder. */
@@ -264,6 +269,18 @@ export interface RailPlace {
    * current folder.
    */
   openPath: readonly Folder[] | null;
+  /**
+   * Is a library-wide SEARCH what is on screen?
+   *
+   * The rail does not highlight anything for it (a query is not a place), but
+   * {@link RailController.treeWalked} has to know: a search's NAME half is
+   * matched against the same cached tree the rail resolves categories from, so
+   * the gallery is a function of the walk whether the user is standing at the
+   * root or three folders down. Without this, `settle()`'s `folderId === null`
+   * test meant a query typed inside a subfolder never got the repaint — and its
+   * "Searching…" never became an answer.
+   */
+  searching?: boolean;
 }
 
 /**
@@ -714,7 +731,13 @@ export function createRail(deps: RailDeps): RailController {
       // The ROOT gallery is a function of the tree too (it flattens the
       // containers away), so it has to repaint once the walk lands — otherwise
       // the first paint's raw `NOTE`/`DOCUMENT` rows would stay on screen.
-      if (deps.place().folderId === null) deps.onSettled();
+      //
+      // So is a live SEARCH, at any depth: its name half reads the cached tree
+      // this walk fills (see `RailPlace.searching`). Both, and NOTHING ELSE — a
+      // plain folder listing does not depend on the walk, and repainting it here
+      // would be the unconditional full-gallery churn this deliberately avoids.
+      const place = deps.place();
+      if (place.folderId === null || place.searching === true) deps.onSettled();
       return;
     }
     const folder = resolveCategory(pendingCategory.path);
