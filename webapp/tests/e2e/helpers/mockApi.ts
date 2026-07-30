@@ -14,6 +14,12 @@ export interface MockResponse {
   headers?: Record<string, string>;
   /** Simulate a network failure instead of responding. */
   abort?: boolean;
+  /**
+   * Hold the response for this many ms before fulfilling. For asserting what the
+   * UI paints WHILE a request is still in flight — the loading states that are
+   * invisible on a fast link and obvious on a throttled one.
+   */
+  delayMs?: number;
 }
 
 /** Keyed by a URL substring (e.g. "login/new", "user/me"); first match wins. */
@@ -43,6 +49,7 @@ export async function mockApi(page: Page, scenario: Scenario): Promise<void> {
           await route.abort("failed");
           return;
         }
+        if (spec.delayMs) await new Promise((r) => setTimeout(r, spec.delayMs));
         await route.fulfill({
           status: spec.status ?? 200,
           contentType: "application/json",

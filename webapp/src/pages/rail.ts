@@ -98,6 +98,30 @@ const KNOWN_ROOT_NAMES = new Set(CATEGORIES.map((c) => c.path[0]!));
 export const CONTAINER_NAMES = new Set(CATEGORIES.filter((c) => c.path.length > 1).map((c) => c.path[0]!));
 
 /**
+ * The id a category anchor carries in the ROOT GALLERY while it has no folder
+ * behind it yet — the gallery's equivalent of the rail's unresolved row.
+ *
+ * A synthetic id rather than a new `Entry` kind: the gallery's render loop, its
+ * folder/note split and its card renderer all key off `kind`, and a third kind
+ * would ripple through every one of them to express "a folder card, but its
+ * folder does not exist yet". The prefix is not a device-reachable name (a real
+ * id is a number from the server), so it cannot collide, and every consumer that
+ * must not treat it as a real folder asks `pendingCategoryOf` first.
+ */
+const PENDING_ID_PREFIX = "pending-category:";
+
+function pendingCategoryFolder(cat: Category): Folder {
+  return { kind: "folder", id: `${PENDING_ID_PREFIX}${cat.label}` as Id, name: cat.label, itemCount: 0 };
+}
+
+/** The category behind a {@link pendingCategoryFolder} id, or null for a real folder. */
+function categoryForPendingId(id: Id): Category | null {
+  if (typeof id !== "string" || !id.startsWith(PENDING_ID_PREFIX)) return null;
+  const label = id.slice(PENDING_ID_PREFIX.length);
+  return CATEGORIES.find((c) => c.label === label) ?? null;
+}
+
+/**
  * A device path, in the vocabulary the rail shows — the SAME model the rail, the
  * breadcrumb and the root gallery already share, extended to a path that arrives
  * as plain segments rather than as resolved folders.
@@ -398,9 +422,25 @@ export interface RailController {
   clearPending(): void;
   /**
    * What the ROOT gallery shows, given the server's raw root listing — the same
-   * things the rail shows, in the same order.
+   * things the rail shows, in the same order. ALL SIX anchors are always present:
+   * one with no folder yet comes back as a stand-in (see
+   * {@link RailController.pendingCategoryOf}) so the gallery's shape is settled
+   * from the first paint.
    */
   rootEntries(entries: readonly Entry[]): Entry[];
+  /**
+   * The category behind a {@link rootEntries} stand-in — an anchor the device has
+   * not created yet — or null for a real folder. A caller that would otherwise
+   * treat it as a folder (navigate to its id, offer folder actions) must ask
+   * this first: there is no folder to open or act on.
+   */
+  pendingCategoryOf(folder: Folder): Category | null;
+  /**
+   * Select an anchor that has no folder yet: the gallery paints
+   * {@link Category.pending} and nothing is fetched. The same path the rail's own
+   * unresolved row takes, so both surfaces land in one state.
+   */
+  selectCategory(cat: Category): void;
 }
 
 // --- the controller ----------------------------------------------------------
@@ -698,6 +738,11 @@ export function createRail(deps: RailDeps): RailController {
     },
 
     categoryIconFor(folder) {
+      // An anchor with no folder yet is still the category, and must paint the
+      // category tile — otherwise it would arrive as a plain folder and RESTYLE
+      // itself when the walk lands, which is the flicker this all removes.
+      const pending = categoryForPendingId(folder.id);
+      if (pending) return pending.icon;
       // Identity, not name — the same match `labelFor` makes: only the resolved
       // anchor is the category, so a user's own `Note` folder gets nothing.
       for (const cat of CATEGORIES) {
@@ -733,18 +778,34 @@ export function createRail(deps: RailDeps): RailController {
      */
     rootEntries(entries: readonly Entry[]): Entry[] {
       const out: Entry[] = [];
+      // ALL SIX, ALWAYS — the same rule the rail rows follow, for the same
+      // reason. Three anchors are NESTED (`NOTE/Note`, `NOTE/MyStyle`,
+      // `DOCUMENT/Document`), so they cannot resolve until the walk fetches the
+      // containers' children — a whole round-trip after first paint. Pushing only
+      // what resolves made the root gallery paint 3 tiles, then silently grow to
+      // 6 when the walk landed: a visible re-layout on a slow link, and a
+      // different shape every load. An unresolved anchor renders as itself with a
+      // 0 (see `pendingCategoryOf`) and settles into the real folder in place.
       for (const cat of CATEGORIES) {
-        const folder = resolveCategory(cat.path);
-        if (folder) out.push(folder);
+        out.push(resolveCategory(cat.path) ?? pendingCategoryFolder(cat));
       }
       out.push(...otherRootFolders());
       for (const e of entries) {
-        // Any non-folder the device left at the root, plus not-yet-walked containers.
+        // Any non-folder the device left at the root. The CONTAINERS
+        // (`NOTE`/`DOCUMENT`) are never shown: they are noise the rail flattens
+        // away, and `CONTAINER_NAMES` is STATIC DATA derived from `CATEGORIES` —
+        // known before any fetch — so there is nothing to wait for. Showing them
+        // "until walked" is what made two folder cards appear and then vanish.
         if (e.kind !== "folder") out.push(e);
-        else if (CONTAINER_NAMES.has(e.name) && !tree.walked(e.id)) out.push(e);
       }
       return out;
     },
+
+    pendingCategoryOf(folder) {
+      return categoryForPendingId(folder.id);
+    },
+
+    selectCategory,
   };
 }
 

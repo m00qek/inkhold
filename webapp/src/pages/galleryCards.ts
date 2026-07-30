@@ -16,6 +16,7 @@ import { getDims } from "../cache/dimsMemo";
 import { go, folderHref, noteHref, notePageHref } from "../router";
 import { pageSummary, deepLinkQuery, type HitPage, type SearchState } from "./noteSearch";
 import type { Entry, Folder, Hash, Id, NoteSummary } from "../core/types";
+import type { Category } from "./rail";
 import type { LazyEngine } from "../render/lazy";
 
 /**
@@ -94,6 +95,14 @@ export interface GalleryCardsCtx {
    * user folder merely named like a category is not caught (see `categoryIconFor`).
    */
   categoryIconFor: (folder: Folder) => IconName | null;
+  /**
+   * The category behind a root-gallery stand-in for an anchor the device has not
+   * created yet, else null. Such a card has NO folder behind it: it must not
+   * navigate to its id and has nothing to act on (see `folderCard`).
+   */
+  pendingCategoryOf: (folder: Folder) => Category | null;
+  /** Select a not-yet-created anchor — the gallery paints its `pending` line. */
+  onSelectCategory: (cat: Category) => void;
   /** Re-run the masonry span pass after an async aspect correction. */
   scheduleSpan: () => void;
   /** The per-card overflow "…" menu (DOWNLOAD + ACTIONS) — see `cardActions.ts`. */
@@ -387,6 +396,7 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
     // keeps the plain tinted-glyph tile. The rail decides which is which, by
     // identity — see `categoryIconFor`.
     const catIcon = ctx.categoryIconFor(folder);
+    const pendingCat = ctx.pendingCategoryOf(folder);
     const tile = catIcon
       ? el("div", { class: "thumb thumb--category", html: categoryTileHtml(catIcon) })
       : // A folder has no page to preview, so its tile carries a centred glyph on
@@ -418,12 +428,25 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
         ),
       ),
     );
-    open.addEventListener("click", () => go(folderHref(folder.id)));
+    // A NOT-YET-CREATED anchor has no folder to open: selecting it paints the
+    // category's `pending` line, exactly as the rail's unresolved row does.
+    // Routing to its synthetic id would request a listing for a folder that does
+    // not exist.
+    open.addEventListener("click", () =>
+      pendingCat ? ctx.onSelectCategory(pendingCat) : go(folderHref(folder.id)),
+    );
     // LIST VIEW ONLY, and now the SAME overflow menu a note row carries (Move to
     // bin — a folder has no pages to Download). In the grid a folder is a compact
     // chip that sizes to its own name, with nowhere for the "…" to sit that would
     // not turn it back into a card; the list row has the room.
-    return el("div", { class: catIcon ? "card card--folder card--category" : "card card--folder" }, open, inList ? ctx.cardMenu(folder) : null);
+    // No menu on a stand-in: every action it offers (Move to bin, Rename) needs a
+    // folder that exists. It regains one the moment the walk resolves it.
+    return el(
+      "div",
+      { class: catIcon ? "card card--folder card--category" : "card card--folder" },
+      open,
+      inList && !pendingCat ? ctx.cardMenu(folder) : null,
+    );
   }
 
   /**

@@ -461,14 +461,44 @@ describe("rootEntries", () => {
     expect(out).toContain("Archive");
   });
 
-  it("emits a not-yet-walked container as ITSELF rather than dropping it", () => {
-    // Nothing may be unreachable during the first moments of a session; the
-    // repaint the tree walk triggers replaces it with its children.
+  it("drops the containers even before the walk, and still shows ALL SIX anchors", () => {
+    // THE SHAPE IS SETTLED AT FIRST PAINT. This used to emit a not-yet-walked
+    // container as itself so nothing was unreachable, and push only the anchors
+    // that already resolved — so the root painted 3 tiles + `NOTE`/`DOCUMENT`,
+    // then re-laid-out to 6 when the walk landed (plainly visible on a slow link).
+    //
+    // Reachability is preserved WITHOUT the containers: the anchors are all
+    // present from the start, and selecting an unresolved one shows "Loading…"
+    // until the walk settles it onto the real folder (see the `loaded()` gate in
+    // library.ts and `settle()` here). `CONTAINER_NAMES` is static data derived
+    // from `CATEGORIES`, so nothing has to be fetched to know these are noise.
     const t = build(FULL, { folderId: null, openPath: null }, ["dir-note"]);
     const out = t.rail.rootEntries(raw).map((e) => e.name);
-    expect(out).toContain("NOTE");
-    // The walked one is still flattened.
+    expect(out).not.toContain("NOTE");
     expect(out).not.toContain("DOCUMENT");
+    expect(out.slice(0, 6)).toEqual(["Note", "Document", "MyStyle", "EXPORT", "SCREENSHOT", "INBOX"]);
+  });
+
+  it("stands in for an anchor the device has no folder for, and never as a real folder", () => {
+    // An unresolved anchor is a card, not a gap — but it has no folder behind it,
+    // so every consumer that would navigate to its id or offer folder actions has
+    // to be able to tell (galleryCards asks exactly this).
+    const t = build([]); // a device that has synced nothing: no anchor resolves
+    const out = t.rail.rootEntries([]);
+    expect(out.map((e) => e.name).slice(0, 6)).toEqual([
+      "Note",
+      "Document",
+      "MyStyle",
+      "Export",
+      "Screenshot",
+      "Inbox",
+    ]);
+    for (const e of out) {
+      const cat = t.rail.pendingCategoryOf(e as Folder);
+      expect(cat).not.toBeNull();
+      // It still paints as its category, so resolving it never restyles the card.
+      expect(t.rail.categoryIconFor(e as Folder)).toBe(cat!.icon);
+    }
   });
 
   it("keeps every non-folder the device left at the root", () => {

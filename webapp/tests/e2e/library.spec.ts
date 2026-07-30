@@ -246,6 +246,44 @@ test.describe("library rail + gallery", () => {
       });
     }
 
+    // THE ROOT GALLERY'S SHAPE IS SETTLED AT FIRST PAINT — the regression this
+    // pins: three anchors are NESTED (`NOTE/Note`, `NOTE/MyStyle`,
+    // `DOCUMENT/Document`) and cannot resolve until the walk fetches the
+    // containers' children, a whole round-trip later. The gallery used to paint
+    // only the anchors that had resolved, plus the raw `NOTE`/`DOCUMENT`
+    // containers as ordinary folder cards — so it showed the wrong things and
+    // then re-laid-out. Invisible on localhost; plainly visible on a throttled
+    // link, which is where it was found.
+    test("the root gallery paints all six categories, and no container, WHILE the walk is still in flight", async ({
+      page,
+    }) => {
+      const folder = (id: string, name: string, itemCount: number) => ({ kind: "folder", id, name, itemCount });
+      await mockApi(page, {
+        "user/me": { json: { success: true, email: "ana@household.lan", isAdmin: false, mustChangePassword: false } },
+        // The child walk is HELD, so every assertion below runs against the
+        // first paint — the exact window the bug lived in.
+        "controlplane/tree?parent=dir-note": {
+          delayMs: 2500,
+          json: { folderId: "dir-note", path: [folder("dir-note", "NOTE", 1)], entries: [folder("note", "Note", 0)], syncVersion: 1 },
+        },
+        "controlplane/tree": {
+          json: { folderId: null, path: [], entries: [folder("dir-note", "NOTE", 1)], syncVersion: 1 },
+        },
+      });
+      await page.goto("/?real");
+
+      // All six category tiles, before the walk can have landed.
+      await expect(page.locator("#gallery .card--category")).toHaveCount(6);
+      // And never the container itself, under either casing.
+      await expect(page.locator("#gallery").getByText("NOTE", { exact: true })).toHaveCount(0);
+
+      // The shape does not change when the walk lands: same six, still no
+      // container — the tile settles into the real folder in place.
+      await expect(page.getByRole("navigation", { name: "Folders" })).toHaveAttribute("aria-busy", "false");
+      await expect(page.locator("#gallery .card--category")).toHaveCount(6);
+      await expect(page.locator("#gallery").getByText("NOTE", { exact: true })).toHaveCount(0);
+    });
+
     test("all six render, absent ones included, with a zero", async ({ page }) => {
       await sparseTree(page);
       await page.goto("/?real");
@@ -561,8 +599,12 @@ test.describe("library rail + gallery", () => {
     const exportRow = page.locator(".card--folder", { hasText: "EXPORT" });
     await expect(exportRow.locator(".card__meta")).toHaveText("Empty");
 
-    // Singular is "1 item", not "1 items".
-    await expect(page.locator(".card--folder", { hasText: "DOCUMENT" }).locator(".card__meta")).toHaveText("1 item");
+    // Singular is "1 item", not "1 items". Measured on INBOX (one note in the
+    // fixture) — this used to read the raw `DOCUMENT` CONTAINER, which the root
+    // gallery no longer paints at all: the containers are noise the rail
+    // flattens away, and showing them until the walk landed was what made two
+    // folder cards appear and then vanish.
+    await expect(page.locator(".card--folder", { hasText: "INBOX" }).locator(".card__meta")).toHaveText("1 item");
     // Plural, folders and files folded into one honest noun.
     await expect(page.locator(".card--folder", { hasText: "SCREENSHOT" }).locator(".card__meta")).toHaveText("2 items");
   });

@@ -1212,6 +1212,12 @@ export function createAppShell(deps: AppDeps): AppShell {
     getSearchState: () => searchState,
     labelFor: (folder) => rail.labelFor(folder),
     categoryIconFor: (folder) => rail.categoryIconFor(folder),
+    pendingCategoryOf: (folder) => rail.pendingCategoryOf(folder),
+    // The SAME path the rail's unresolved row takes, so a category with no folder
+    // yet lands in one state whichever surface selected it. `selectCategory` also
+    // fires the rail's own `onSelectCategory` (→ `enterPendingCategory`), so this
+    // must not call that as well.
+    onSelectCategory: (cat) => rail.selectCategory(cat),
     scheduleSpan,
     cardMenu: cardActions.cardMenu,
   });
