@@ -743,10 +743,15 @@ const Fixture = struct {
         errdefer gpa.free(config_path);
 
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "cred.key", .data = &cred_key });
-        const source = try std.fmt.allocPrint(gpa,
-            \\.{{ .db_path = "{s}", .cred_key_path = "{s}/cred.key", .data_dir = "{s}/data" }}
-        , .{ db_path, dir_path, dir_path });
-        defer gpa.free(source);
+        // BARE NAMES, relative to the config's own directory — which is what
+        // `config.rebase` now resolves them against, and which is how a real
+        // install's config should be written so that pointing `-c` at it means
+        // the same install from anywhere. This used to spell out paths relative
+        // to the TEST's cwd, the very pattern that let one config name two
+        // different databases.
+        const source =
+            \\.{ .db_path = "inkhold.db", .cred_key_path = "cred.key", .data_dir = "data" }
+        ;
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "inkhold.zon", .data = source });
 
         return .{ .tmp = tmp, .dir_path = dir_path, .config_path = config_path, .db_path = db_path };

@@ -128,7 +128,50 @@ pub fn parse(gpa: std.mem.Allocator, source: [:0]const u8) ParseError!Loaded {
     return .{ .config = cfg, .arena = arena };
 }
 
+/// Rewrites every relative path in `cfg` to be relative to `dir` — the
+/// directory the config file itself lives in.
+///
+/// **WHY THE CONFIG'S OWN DIRECTORY, AND NOT THE WORKING DIRECTORY.** These
+/// paths used to resolve against the cwd, which is invisible in the config and
+/// different for every caller. A config saying `db_path = "server/8089/mini.db"`
+/// therefore named a DIFFERENT DATABASE depending on where the process happened
+/// to be standing — the server (cwd = repo root) and a CLI run from a sibling
+/// checkout resolved the same file to two different installs.
+///
+/// That is not hypothetical. `users make-admin` was pointed at another
+/// checkout's config with `-c`, promoted the account, reported success, and
+/// changed a database nobody was looking at; the browser showed no change
+/// because from its side nothing had happened. `openExisting`'s refuse-to-create
+/// check could not catch it, because the wrong database EXISTED.
+///
+/// Resolving against the config's own directory makes `-c <path>` mean "that
+/// install" from anywhere, which is the only reading under which pointing a
+/// recovery tool at a config is a safe thing to do. Absolute paths are left
+/// exactly as written.
+fn rebase(arena: std.mem.Allocator, cfg: *Config, dir: []const u8) !void {
+    if (dir.len == 0) return;
+    const fields = [_]*[]const u8{
+        &cfg.db_path,
+        &cfg.cred_key_path,
+        &cfg.data_dir,
+        &cfg.web_dir,
+        &cfg.tls.cert_path,
+        &cfg.tls.key_path,
+    };
+    for (fields) |f| {
+        const v = f.*;
+        if (v.len == 0) continue; // "" means "unset", not "the config's directory"
+        if (std.fs.path.isAbsolute(v)) continue;
+        f.* = try std.fs.path.join(arena, &.{ dir, v });
+    }
+}
+
 /// Load config from `path`; if the file does not exist, return defaults.
+///
+/// Relative paths inside the file are resolved against the FILE's directory
+/// (see `rebase`). When the file is absent the defaults are returned untouched,
+/// so they keep meaning "relative to the working directory" — there is no config
+/// directory to be relative to, and that is the first-run case.
 pub fn loadFileOrDefault(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Loaded {
     const src = std.Io.Dir.cwd().readFileAllocOptions(
         io,
@@ -145,7 +188,65 @@ pub fn loadFileOrDefault(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !
         else => return err,
     };
     defer gpa.free(src);
-    return parse(gpa, src);
+    var loaded = try parse(gpa, src);
+    errdefer loaded.deinit();
+    rebase(loaded.arena.allocator(), &loaded.config, std.fs.path.dirname(path) orelse "") catch |e| {
+        return e;
+    };
+    return loaded;
+}
+
+test "relative paths resolve against the CONFIG's directory, not the caller's cwd" {
+    // THE BUG THIS EXISTS FOR. `users make-admin` was pointed at another
+    // checkout's config with `-c`; the config said `db_path =
+    // "server/8089/minicloud.db"`, which resolved against the CLI's working
+    // directory rather than the config's, so it promoted an account in a
+    // DIFFERENT install, reported success, and left the browser showing nothing
+    // because from its side nothing had happened. The refuse-to-create check
+    // could not catch it: the wrong database existed.
+    var loaded = try parse(std.testing.allocator,
+        \\.{
+        \\    .db_path = "minicloud.db",
+        \\    .cred_key_path = "cred.key",
+        \\    .data_dir = "data",
+        \\    .web_dir = "../../webapp/dist",
+        \\}
+    );
+    defer loaded.deinit();
+    try rebase(loaded.arena.allocator(), &loaded.config, "server/8089");
+
+    try std.testing.expectEqualStrings("server/8089/minicloud.db", loaded.config.db_path);
+    try std.testing.expectEqualStrings("server/8089/cred.key", loaded.config.cred_key_path);
+    try std.testing.expectEqualStrings("server/8089/data", loaded.config.data_dir);
+    // Escaping upward is allowed and left intact — a config in a subdirectory
+    // legitimately reaches repo-level assets.
+    try std.testing.expectEqualStrings("server/8089/../../webapp/dist", loaded.config.web_dir);
+}
+
+test "rebase leaves absolute paths alone, and leaves an empty field empty" {
+    var loaded = try parse(std.testing.allocator,
+        \\.{ .db_path = "/srv/inkhold/mini.db", .data_dir = "data" }
+    );
+    defer loaded.deinit();
+    try rebase(loaded.arena.allocator(), &loaded.config, "/etc/inkhold");
+
+    try std.testing.expectEqualStrings("/srv/inkhold/mini.db", loaded.config.db_path);
+    try std.testing.expectEqualStrings("/etc/inkhold/data", loaded.config.data_dir);
+    // `web_dir` defaults to "" and MEANS "serve nothing" — rebasing it would
+    // turn a disabled feature into a directory that happens to exist.
+    try std.testing.expectEqualStrings("", loaded.config.web_dir);
+}
+
+test "a config in the CURRENT directory is unchanged, so the common case is untouched" {
+    var loaded = try parse(std.testing.allocator,
+        \\.{ .db_path = "inkhold.db", .data_dir = "data" }
+    );
+    defer loaded.deinit();
+    // `dirname("config.zon")` is null -> "" -> no rebase at all.
+    try rebase(loaded.arena.allocator(), &loaded.config, std.fs.path.dirname("config.zon") orelse "");
+
+    try std.testing.expectEqualStrings("inkhold.db", loaded.config.db_path);
+    try std.testing.expectEqualStrings("data", loaded.config.data_dir);
 }
 
 test "parse full config" {
