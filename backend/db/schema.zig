@@ -37,7 +37,20 @@ const sqlite = @import("sqlite.zig");
 /// step: a fresh database lays the v1 baseline then applies `ddl_v2`, and an
 /// already-migrated v1 install applies only `ddl_v2`, so the two end
 /// byte-identical (the same authored `file_history` object either way).
-pub const version: i64 = 2;
+///
+/// v3 adds the two `users` columns the account screen needs
+/// (docs/scratch/user-options.md §8). Same additive shape as v2: the new columns
+/// live ONLY in `ddl_v3`, never folded back into `ddl_v1`, so a fresh database
+/// reaches them by running v1 → v2 → v3 exactly as an existing install does —
+/// which is what makes the two byte-identical, rather than a second authored
+/// copy that has to be kept in step by hand.
+///
+/// v4 RECOMPUTES `capacity.used_bytes` so retained versions are charged (§6). It
+/// is a data step with no DDL, and it is its own version rather than folded into
+/// v3 for a specific reason: v3 may already have been applied by an install that
+/// took the account-screen commit, and a step folded backwards into an
+/// already-applied version never runs.
+pub const version: i64 = 4;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -54,6 +67,8 @@ pub fn migrate(db: sqlite.Db) !void {
     if (current >= version) return;
     if (current < 1) try db.exec(ddl_v1);
     if (current < 2) try db.exec(ddl_v2);
+    if (current < 3) try db.exec(ddl_v3);
+    if (current < 4) try db.exec(ddl_v4);
     // Derived from `version` so bumping the constant above cannot leave this
     // literal behind (it was hardcoded once, and nearly missed on a bump).
     try db.exec(std.fmt.comptimePrint("PRAGMA user_version = {d};", .{version}));
@@ -279,6 +294,62 @@ const ddl_v2 =
     \\CREATE INDEX file_history_md5 ON file_history(md5);
 ;
 
+// v3 — the two columns the account screen (docs/scratch/user-options.md §8)
+// found missing. Both are ADDITIVE and both are deliberately NULLable, because
+// NULL is a meaning here rather than a placeholder:
+//
+//   `password_changed_at` — epoch seconds of the last self-service password
+//     change. NULL = never changed THROUGH THIS COLUMN, which is what every
+//     existing account is: the fact was unknowable before this migration, so
+//     backfilling `created_at` would invent a change that may never have
+//     happened. The screen has to say "never changed" for those rather than
+//     imply the account is stale (§8).
+//
+//   `history_keep` — the per-user K (how many versions of each file to retain).
+//     NULL = "follow the admin's configured default", which is exactly what
+//     every existing row has effectively been doing, so the backfill is a no-op
+//     on behaviour: nobody's history depth moves when this lands. A number here
+//     is the user's own choice, still bounded above by the config value (§7:
+//     "bounded above by whatever ceiling the admin's config sets").
+const ddl_v3 =
+    \\ALTER TABLE users ADD COLUMN password_changed_at INTEGER;
+    \\ALTER TABLE users ADD COLUMN history_keep INTEGER;
+;
+
+// v4 — retained versions count against quota (docs/scratch/user-options.md §6).
+//
+// A version kept in `file_history` occupies disk: its blob survives the GC gate
+// on the strength of that row alone (`reapIfUnreferenced`'s keep-alive). Until
+// now it was not charged, so a user could churn edits to one note and accumulate
+// unbilled disk for ever — while a TRASHED file, whose bytes occupy disk for
+// exactly the same reason, has always been charged. History was the
+// inconsistency, not the proposal.
+//
+// **It RECOMPUTES rather than adjusts.** The total is rebuilt from `files`,
+// `file_history` and `blobs` — the same reconstruction the quota audit performs
+// — so this converges from either direction, is safe to re-run, and cannot
+// double-apply if it is somehow reached twice. An adjustment (`used_bytes = ... +
+// history`) would be correct exactly once and corrupt every time after.
+//
+// EXISTING INSTALLS WILL SEE `used_bytes` JUMP, by the size of the blobs their
+// retained versions were keeping alive for free. That is the point: the meter
+// was reading low against what the disk actually held.
+//
+// `DISTINCT` is carried by the `IN (SELECT ... UNION ...)` — a blob reachable
+// both from a live file and from some version is one blob and is charged once.
+const ddl_v4 =
+    \\UPDATE capacity SET used_bytes = (
+    \\  SELECT COALESCE(SUM(b.size), 0) FROM blobs b WHERE b.md5 IN (
+    \\    SELECT md5 FROM files
+    \\     WHERE user_id = capacity.user_id AND is_folder = 0
+    \\       AND md5 IS NOT NULL AND md5 <> ''
+    \\    UNION
+    \\    SELECT fh.md5 FROM file_history fh JOIN files f ON f.id = fh.file_id
+    \\     WHERE f.user_id = capacity.user_id
+    \\  )
+    \\);
+;
+
 test "migrate creates the v1 schema and is idempotent" {
     var db = try sqlite.Db.openMemory();
     defer db.close();
@@ -335,6 +406,111 @@ test "v2: fresh and v1-upgraded databases carry an identical file_history table"
     defer s.finalize();
     _ = try s.step();
     try std.testing.expectEqual(@as(i64, 0), s.columnInt(0)); // cascaded away with its file
+}
+
+test "v3: fresh and stepwise-migrated databases carry an identical users table" {
+    // Same property the v2 test pins, for the two columns v3 adds. The columns
+    // live only in `ddl_v3` (never folded back into the v1 baseline), so this is
+    // byte-identical BY CONSTRUCTION — the test is here to keep it that way, since
+    // the tempting "just add them to the baseline too" edit breaks it silently.
+    const read_ddl = struct {
+        fn get(db: sqlite.Db, buf: []u8) ![]const u8 {
+            var r = (try db.row("SELECT sql FROM sqlite_master WHERE name = 'users';", &.{})) orelse return error.Missing;
+            defer r.finalize();
+            const sql = r.text(0);
+            @memcpy(buf[0..sql.len], sql);
+            return buf[0..sql.len];
+        }
+    }.get;
+
+    var fresh = try sqlite.Db.openMemory();
+    defer fresh.close();
+    try migrate(fresh);
+
+    // An install stamped at v1, then migrated all the way up.
+    var from_v1 = try sqlite.Db.openMemory();
+    defer from_v1.close();
+    try from_v1.exec(ddl_v1);
+    try from_v1.exec("PRAGMA user_version = 1;");
+    try migrate(from_v1);
+
+    // And one stamped at v2 (the shipped hot-cache-versioning schema).
+    var from_v2 = try sqlite.Db.openMemory();
+    defer from_v2.close();
+    try from_v2.exec(ddl_v1);
+    try from_v2.exec(ddl_v2);
+    try from_v2.exec("PRAGMA user_version = 2;");
+    try migrate(from_v2);
+
+    var a: [1024]u8 = undefined;
+    var b: [1024]u8 = undefined;
+    var c: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings(try read_ddl(fresh, &a), try read_ddl(from_v1, &b));
+    try std.testing.expectEqualStrings(try read_ddl(fresh, &a), try read_ddl(from_v2, &c));
+    try std.testing.expectEqual(version, try userVersion(fresh));
+    try std.testing.expectEqual(version, try userVersion(from_v2));
+
+    // Both columns exist and read NULL for a row created without them — the
+    // "never changed" / "follow the config default" backfill.
+    try fresh.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);");
+    var r = (try fresh.row("SELECT password_changed_at, history_keep FROM users WHERE id = 1;", &.{})) orelse return error.TestUnexpectedResult;
+    defer r.finalize();
+    try std.testing.expect(r.intOpt(0) == null);
+    try std.testing.expect(r.intOpt(1) == null);
+}
+
+test "v4: used_bytes is RECOMPUTED to charge retained versions, and converges from either direction" {
+    // The migration recomputes rather than adjusts, which is what makes it safe to
+    // re-run and correct no matter what the counter said before. This drives it
+    // from BOTH sides — a total that was too low (the real case: a v3 install whose
+    // versions were never charged) and one that was too high — and demands it land
+    // on the same reconstructed figure, twice.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    try migrate(db);
+
+    try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);");
+    try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(2, 'x@y.z', '0123456789abcdef0123456789abcdef', 0);");
+    try db.exec("INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(1, 0, 100000);");
+    try db.exec("INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(2, 0, 100000);");
+    // Three blobs: the live current (100), a retained version (30), and one the
+    // user holds BOTH live and in history (7) — which must be charged once.
+    try db.exec("INSERT INTO blobs(md5, size, refcount, created_at) VALUES('cur', 100, 1, 0);");
+    try db.exec("INSERT INTO blobs(md5, size, refcount, created_at) VALUES('old', 30, 0, 0);");
+    try db.exec("INSERT INTO blobs(md5, size, refcount, created_at) VALUES('both', 7, 1, 0);");
+    try db.exec("INSERT INTO blobs(md5, size, refcount, created_at) VALUES('theirs', 500, 1, 0);");
+    try db.exec("INSERT INTO files(id, user_id, name, md5, size, created_at, updated_at) VALUES(1, 1, 'a.note', 'cur', 100, 0, 0);");
+    try db.exec("INSERT INTO files(id, user_id, name, md5, size, created_at, updated_at) VALUES(2, 1, 'b.note', 'both', 7, 0, 0);");
+    try db.exec("INSERT INTO files(id, user_id, name, md5, size, created_at, updated_at) VALUES(3, 2, 'c.note', 'theirs', 500, 0, 0);");
+    try db.exec("INSERT INTO file_history(file_id, md5, size, created_at) VALUES(1, 'old', 30, 0);");
+    try db.exec("INSERT INTO file_history(file_id, md5, size, created_at) VALUES(2, 'both', 7, 0);");
+    // A folder row (NULL md5) and a second history row on the same blob, so the
+    // DISTINCT-ness of the reconstruction is actually exercised.
+    try db.exec("INSERT INTO files(id, user_id, name, is_folder, created_at, updated_at) VALUES(4, 1, 'Dir', 1, 0, 0);");
+    try db.exec("INSERT INTO file_history(file_id, md5, size, created_at) VALUES(2, 'old', 30, 0);");
+
+    const readUsed = struct {
+        fn get(d: sqlite.Db, uid: i64) !i64 {
+            var r = (try d.row("SELECT used_bytes FROM capacity WHERE user_id = ?1;", &.{.{ .int = uid }})) orelse return error.Missing;
+            defer r.finalize();
+            return r.int(0);
+        }
+    }.get;
+
+    // From BELOW — the real migration case: a counter that only ever saw live files.
+    try db.exec("UPDATE capacity SET used_bytes = 107 WHERE user_id = 1;");
+    try db.exec(ddl_v4);
+    try std.testing.expectEqual(@as(i64, 137), try readUsed(db, 1)); // 100 + 30 + 7, each once
+    try std.testing.expectEqual(@as(i64, 500), try readUsed(db, 2));
+
+    // From ABOVE, and then twice more: it converges to the same figure and is a
+    // no-op thereafter, which is what "safe to re-run" has to mean.
+    try db.exec("UPDATE capacity SET used_bytes = 999999 WHERE user_id = 1;");
+    try db.exec(ddl_v4);
+    try std.testing.expectEqual(@as(i64, 137), try readUsed(db, 1));
+    try db.exec(ddl_v4);
+    try std.testing.expectEqual(@as(i64, 137), try readUsed(db, 1));
+    try std.testing.expectEqual(@as(i64, 500), try readUsed(db, 2)); // never disturbed
 }
 
 test "foreign keys are enforced" {

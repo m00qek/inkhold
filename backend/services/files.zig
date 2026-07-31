@@ -40,19 +40,36 @@
 //!
 //! ## What quota counts
 //!
-//! `used_bytes` is the sum of the sizes of the **distinct blobs** a user's file
-//! rows reference — not the sum of their `files.size` columns. The store is
+//! `used_bytes` is the sum of the sizes of the **distinct blobs** a user's rows
+//! keep alive — not the sum of their `files.size` columns. The store is
 //! content-addressed, so a user's two identical files are one file on disk;
 //! billing both charges for storage that was never allocated, and the error
-//! compounds with every duplicate a device syncs. `userBlobRefs` is the per-user
-//! counterpart to the global `blobs.refcount` that makes this decidable: a link
-//! charges only on a user's first reference to a blob, a purge refunds only on
-//! their last. Dedup ACROSS users is not a discount — two users holding the same
-//! content are each charged for it.
+//! compounds with every duplicate a device syncs. `userChargedRefs` is the
+//! per-user counterpart to the global `blobs.refcount` that makes this decidable:
+//! a link charges only on a user's first reference to a blob, a purge refunds only
+//! on their last. Dedup ACROSS users is not a discount — two users holding the
+//! same content are each charged for it.
+//!
+//! **A reference is anything that keeps the bytes on disk**, which since
+//! docs/scratch/user-options.md §6 means `files` rows (live OR trashed) AND
+//! `file_history` rows. That is the same rule the trashed-file paragraph above
+//! states, applied consistently: a retained version survives the GC gate on the
+//! strength of its history row alone, so it occupies disk the account is
+//! responsible for. Charging it also makes the per-user `K` a safe thing to hand
+//! to a person — raising it spends their own allotment.
+//!
+//! `userBlobRefs` (files only) survives alongside it and is NOT interchangeable:
+//! SEARCH rows follow live file references, because text from content no file
+//! holds must stop being findable whatever history says.
+//!
+//! Under quota pressure the write paths **evict the user's oldest versions rather
+//! than refuse**, and refuse only when the live files alone do not fit — see
+//! `linkBlobIndexed`. History is discardable; the ability to edit a note is not.
 //!
 //! The invariant is asserted directly by the quota-audit test at the bottom of
-//! this file, which rebuilds the total from `files`/`blobs` and demands the
-//! running counter agree.
+//! this file, which rebuilds the total from `files`/`file_history`/`blobs` and
+//! demands the running counter agree — and by the partition audit beside it,
+//! which demands the account screen's five figures sum to exactly that total.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -768,33 +785,28 @@ pub const Files = struct {
         // Reference the new blob unless it's the same content we already had.
         const same_content = if (old_md5) |om| std.mem.eql(u8, &om, md5) else false;
 
-        // Quota is charged per DISTINCT blob per user, because that is what the
-        // user actually occupies: the store is content-addressed, so two of a
-        // user's files holding identical bytes are ONE file on disk. Charging
-        // both bills for storage that was never allocated, and the error
-        // compounds with every duplicate the device syncs.
+        // ---- the two reference counts, read BEFORE any row write changes them ----
         //
-        // Both counts MUST be read before the row write below, which is what
-        // changes them. `userBlobRefs` counts trashed rows too — the bin holds a
-        // real reference and keeps real bytes alive.
+        // They used to be one pair of booleans doing two jobs. They are now
+        // deliberately SEPARATE, because quota and search stopped agreeing about
+        // what a reference is:
         //
-        // The two booleans double as the SEARCH facts (see the segment block
-        // further down): quota and segment rows track the same per-owner
-        // reference count, so reading it twice would be a place for them to
-        // disagree.
-        var delta: i64 = 0;
-        var new_first = false; // the user's FIRST reference to the new content
-        var old_last = false; // the replaced row held their LAST reference to the old
+        //   - SEARCH follows LIVE FILE rows (`userBlobRefs`). A blob held only by
+        //     a retained version must NOT stay searchable — find-in-library would
+        //     surface text from content no live file holds.
+        //   - QUOTA follows anything that keeps the bytes on disk
+        //     (`userChargedRefs`), which since §6 includes `file_history`. A
+        //     retained version occupies disk, so the user is charged for it,
+        //     exactly as a trashed file is charged.
+        //
+        // Fusing them again would silently re-break one of the two.
+        var new_first = false; // the user's FIRST live-file reference to the new content
+        var old_last = false; // the replaced row held their LAST live-file reference to the old
+        var new_charge = false; // the user held NO reference of any kind to the new content
         if (!same_content) {
-            // A new charge only if this is the user's FIRST reference to it.
             new_first = try self.userBlobRefs(user_id, md5) == 0;
-            if (new_first) delta += @intCast(size);
-            // The replaced blob's charge goes away only with its LAST holder,
-            // which is the row we are about to overwrite.
-            if (old_md5) |om| {
-                old_last = try self.userBlobRefs(user_id, &om) == 1;
-                if (old_last) delta -= @intCast(existing.?.size);
-            }
+            new_charge = try self.userChargedRefs(user_id, md5) == 0;
+            if (old_md5) |om| old_last = try self.userBlobRefs(user_id, &om) == 1;
         }
 
         var file_id: u64 = undefined;
@@ -849,10 +861,6 @@ pub const Files = struct {
 
         if (!same_content) try self.incref(md5);
 
-        // Quota check on the resulting usage.
-        const cap = try self.capacity(user_id);
-        if (cap.used + delta > cap.total) return error.QuotaExceeded; // errdefer rolls back
-        try self.addUsed(user_id, delta);
         try self.bumpSync(user_id); // an upload/replace changed the tree
 
         // ---- search segment maintenance (docs/scratch/search-architecture.md) ----
@@ -881,24 +889,64 @@ pub const Files = struct {
         // place before the decref runs its GC gate — `reapIfUnreferenced` then
         // sees the history keep-alive and does NOT delete the blob (or its
         // md5-keyed render index). `refcount` still drops (the live-file reference
-        // is genuinely gone; the retained version leaves the user's LIVE quota, as
-        // the `old_last` charge above already accounted). With `keep == 0` no row
-        // is written and this is exactly the old prune-on-supersede path.
+        // is genuinely gone), but the CHARGE does not: the retained version still
+        // occupies disk, and since §6 the user keeps paying for it. With
+        // `keep == 0` no row is written and this is exactly the old
+        // prune-on-supersede path, refund and all.
         //
         // `gc_hist` collects blobs freed by eviction below; `gc_old` is the
         // legacy single-blob GC (non-null only when the old blob was neither
-        // retained nor otherwise referenced).
+        // retained nor otherwise referenced). `evicted` is every version dropped
+        // here, so the quota settlement below can give back exactly what left.
+        const keep = (try self.versionPolicy(user_id)).keep;
         var gc_old = false;
         var gc_hist: std.ArrayList([md5_len]u8) = .empty;
         defer gc_hist.deinit(self.gpa);
+        var evicted: std.ArrayList(Evicted) = .empty;
+        defer evicted.deinit(self.gpa);
         if (old_md5) |om| {
             if (!same_content) {
-                if (self.history.keep > 0) try self.recordHistory(file_id, &om, existing.?.size, ts);
+                if (keep > 0) try self.recordHistory(file_id, &om, existing.?.size, ts);
                 gc_old = try self.decref(&om);
                 // Bound the store: K per file, then the global max_bytes ceiling.
-                if (self.history.keep > 0) try self.evictHistory(file_id, &gc_hist);
+                if (keep > 0) try self.evictHistory(user_id, file_id, keep, &gc_hist, &evicted);
             }
         }
+
+        // ---- quota settlement (§6: retained versions are charged) ----
+        //
+        // Computed from what the rows say NOW, after every write above, rather
+        // than predicted before them. That ordering is the point: eviction can
+        // drop the very version we just recorded, and a delta guessed in advance
+        // would have to model that.
+        var settled: std.ArrayList([md5_len]u8) = .empty;
+        defer settled.deinit(self.gpa);
+        var delta: i64 = if (new_charge) @as(i64, @intCast(size)) else 0;
+        if (old_md5) |om| {
+            if (!same_content) try self.settleRefund(user_id, &om, @intCast(existing.?.size), &settled, &delta);
+        }
+        for (evicted.items) |*e| try self.settleRefund(user_id, &e.md5, e.size, &settled, &delta);
+
+        // **THE FAILURE THIS MUST NOT CREATE** (§6). A person near their allotment
+        // must not be refused when EDITING AN EXISTING NOTE just because the
+        // version the edit displaced pushed them over — an error they added
+        // nothing to earn, arriving from the device mid-sync where it is least
+        // explicable. So under quota pressure we spend HISTORY DEPTH instead:
+        // evict this user's oldest versions until the edit fits, and refuse only
+        // when the live files alone do not. A full quota costs you history before
+        // it costs you the ability to work.
+        //
+        // The loop is bounded by the user's history row count, and each pass
+        // deletes exactly one row; `evictOldestVersion` only ever offers rows
+        // whose blob no live file of theirs also holds, so a pass that frees
+        // nothing cannot repeat on the same row.
+        const cap = try self.capacity(user_id);
+        while (cap.used + delta > cap.total) {
+            const dropped = (try self.evictOldestVersion(user_id, &gc_hist)) orelse break;
+            try self.settleRefund(user_id, &dropped.md5, dropped.size, &settled, &delta);
+        }
+        if (cap.used + delta > cap.total) return error.QuotaExceeded; // errdefer rolls back
+        try self.addUsed(user_id, delta);
 
         try self.db.exec("COMMIT;");
         if (gc_old) self.removeBlobFiles(&old_md5.?);
@@ -1113,10 +1161,10 @@ pub const Files = struct {
         try self.ensureBlobRow(md5, size); // idempotent — the source already made it
 
         // Quota is charged per distinct blob per user. The source is a live
-        // reference to this content, so `userBlobRefs` is already ≥ 1 and this copy
-        // adds no new charge (delta 0) — but compute it the same way the upload
-        // path does, so the one rule lives in one place.
-        const delta: i64 = if (try self.userBlobRefs(user_id, md5) == 0) @intCast(size) else 0;
+        // reference to this content, so `userChargedRefs` is already ≥ 1 and this
+        // copy adds no new charge (delta 0) — but compute it the same way the
+        // upload path does, so the one rule lives in one place.
+        const delta: i64 = if (try self.userChargedRefs(user_id, md5) == 0) @intCast(size) else 0;
 
         var file_id: u64 = undefined;
         {
@@ -1881,18 +1929,18 @@ pub const Files = struct {
         // history leaves disk like any other unreferenced blob. NOT a quota refund
         // — a retained version already left the user's live quota when it was
         // superseded.
-        var hist_doomed: std.ArrayList([md5_len]u8) = .empty;
+        var hist_doomed: std.ArrayList(Evicted) = .empty;
         defer hist_doomed.deinit(self.gpa);
         for (ids) |fid| {
-            var s = try self.db.prepare("SELECT md5 FROM file_history WHERE file_id = ?1;");
+            var s = try self.db.prepare("SELECT md5, size FROM file_history WHERE file_id = ?1;");
             defer s.finalize();
             s.bindInt(1, @intCast(fid));
             while (try s.step()) {
                 const m = s.columnText(0);
                 if (m.len != md5_len) continue;
-                var buf: [md5_len]u8 = undefined;
-                @memcpy(&buf, m);
-                try hist_doomed.append(self.gpa, buf);
+                var e: Evicted = .{ .md5 = undefined, .size = s.columnInt(1) };
+                @memcpy(&e.md5, m);
+                try hist_doomed.append(self.gpa, e);
             }
         }
 
@@ -1904,28 +1952,42 @@ pub const Files = struct {
             _ = try s.step();
         }
 
-        // Refund the mirror image of what `linkBlobIndexed` charged: one refund
-        // per DISTINCT blob, and only for a blob this user no longer references
-        // anywhere. Two of the user's files sharing content were billed once, so
-        // deleting one of them must give back nothing — and deleting both must
-        // give back the size once, not twice.
+        // The owner's SEARCH rows follow LIVE FILE references, so this pass still
+        // asks `userBlobRefs`: a blob no file of theirs holds any more must stop
+        // being findable, whatever `file_history` says about it.
         //
-        // Read AFTER the deletes above, so `userBlobRefs` sees the final state
-        // — and BEFORE the decrefs below, because "no reference left" is also
-        // when the owner's SEARCH rows for the blob go, and their FTS 'delete'
-        // reads the md5-keyed text a refcount-0 GC would take away.
+        // Read AFTER the deletes above, so it sees the final state — and BEFORE
+        // the decrefs below, because the FTS 'delete' reads the md5-keyed text a
+        // refcount-0 GC would take away.
         var seen: std.ArrayList([md5_len]u8) = .empty;
         defer seen.deinit(self.gpa);
-        var freed_bytes: i64 = 0;
         outer: for (doomed.items) |*d| {
             for (seen.items) |*s| if (std.mem.eql(u8, s, &d.md5)) continue :outer;
             try seen.append(self.gpa, d.md5);
             if (try self.userBlobRefs(user_id, &d.md5) == 0) {
-                freed_bytes += d.size;
                 try notesearch.dropOwnerBlobSearch(self.db, user_id, &d.md5);
             }
         }
-        if (freed_bytes != 0) try self.addUsed(user_id, -freed_bytes);
+
+        // Refund the mirror image of what `linkBlobIndexed` charged: one refund
+        // per DISTINCT blob, and only for a blob this user no longer references
+        // in ANY charged sense. Two of the user's files sharing content were
+        // billed once, so deleting one of them must give back nothing — and
+        // deleting both must give back the size once, not twice.
+        //
+        // **Purged files' RETAINED VERSIONS are refunded here too** (§6). Their
+        // `file_history` rows cascaded away with the `files` rows above, so the
+        // bytes are genuinely gone; charging for them afterwards would leave a
+        // permanent phantom on the meter that no action could ever clear. This is
+        // also what makes the recycle-bin line on the account screen truthful:
+        // that figure promises what emptying the bin returns, and it returns the
+        // trashed files' versions along with the files.
+        var settled: std.ArrayList([md5_len]u8) = .empty;
+        defer settled.deinit(self.gpa);
+        var delta: i64 = 0;
+        for (doomed.items) |*d| try self.settleRefund(user_id, &d.md5, d.size, &settled, &delta);
+        for (hist_doomed.items) |*h| try self.settleRefund(user_id, &h.md5, h.size, &settled, &delta);
+        if (delta != 0) try self.addUsed(user_id, delta);
 
         for (doomed.items) |*d| {
             if (try self.decref(&d.md5)) try gc.append(self.gpa, d.md5);
@@ -1935,7 +1997,12 @@ pub const Files = struct {
         // the last keeper of (a distinct-blob pass, so an oscillation's shared
         // blob is reaped once). Runs after the decrefs so the live/history state
         // both reflect the final rows.
-        try self.reapDistinct(hist_doomed.items, gc);
+        {
+            var hist_md5s: std.ArrayList([md5_len]u8) = .empty;
+            defer hist_md5s.deinit(self.gpa);
+            for (hist_doomed.items) |*h| try hist_md5s.append(self.gpa, h.md5);
+            try self.reapDistinct(hist_md5s.items, gc);
+        }
     }
 
     /// How many of `user_id`'s file rows reference `md5` — trashed rows included,
@@ -1953,6 +2020,55 @@ pub const Files = struct {
         )) orelse return 0;
         defer r.finalize();
         return @intCast(r.int(0));
+    }
+
+    /// How many references of ANY charged kind `user_id` holds to `md5`: their
+    /// `files` rows (live or trashed) PLUS the `file_history` rows of those files.
+    ///
+    /// **This is the quota predicate since §6**, and the wider one. `userBlobRefs`
+    /// answers "does a FILE of theirs hold this blob", which is the right question
+    /// for search rows and the wrong one for billing: a retained version keeps the
+    /// blob on disk through `reapIfUnreferenced`'s keep-alive gate, so it occupies
+    /// storage the account is responsible for. The rule the service header states —
+    /// *if the bytes occupy disk, the user is charged* — already applies to a
+    /// trashed file for precisely this reason; history was the inconsistency, not
+    /// the proposal.
+    ///
+    /// Two indexed COUNTs (`files_md5`, `file_history_md5`), summed in one row.
+    fn userChargedRefs(self: Files, user_id: u64, md5: []const u8) !u64 {
+        var r = (try self.db.row(
+            "SELECT (SELECT COUNT(*) FROM files WHERE user_id = ?1 AND is_folder = 0 AND md5 = ?2) + " ++
+                "(SELECT COUNT(*) FROM file_history fh JOIN files f ON f.id = fh.file_id " ++
+                "  WHERE f.user_id = ?1 AND fh.md5 = ?2);",
+            &.{ .{ .int = @intCast(user_id) }, .{ .text = md5 } },
+        )) orelse return 0;
+        defer r.finalize();
+        return @intCast(r.int(0));
+    }
+
+    /// Gives `size` back to `delta` if `md5` is now unreferenced by `user_id` in
+    /// every charged sense — and records that it did, so the same blob cannot be
+    /// refunded twice down two paths in one transaction (the superseded blob and
+    /// an evicted version can be the same bytes).
+    ///
+    /// It reads the CURRENT row state, so callers must have finished their writes.
+    /// A blob that is still held is left alone and stays refundable later in the
+    /// same transaction — which is exactly what the quota-pressure loop needs when
+    /// it drops the second of two history rows pointing at one blob.
+    fn settleRefund(
+        self: Files,
+        user_id: u64,
+        md5: []const u8,
+        size: i64,
+        settled: *std.ArrayList([md5_len]u8),
+        delta: *i64,
+    ) !void {
+        for (settled.items) |*s| if (std.mem.eql(u8, s, md5)) return;
+        if (try self.userChargedRefs(user_id, md5) != 0) return;
+        var buf: [md5_len]u8 = undefined;
+        @memcpy(&buf, md5[0..md5_len]);
+        try settled.append(self.gpa, buf);
+        delta.* -= size;
     }
 
     /// True when `user_id` holds ANY file — live or trashed — referencing blob
@@ -2097,6 +2213,124 @@ pub const Files = struct {
             return .{ .used = 0, .total = default_total_bytes };
         defer r.finalize();
         return .{ .used = r.int(0), .total = r.int(1) };
+    }
+
+    /// The five-way storage split behind the account screen's Storage section
+    /// (docs/scratch/user-options.md §7). Every figure is a sum over DISTINCT
+    /// blobs — `used_bytes` counts distinct blobs, so a naive sum of `files.size`
+    /// would double-count the user's deduplicated copies and the lines would not
+    /// add up to the meter they sit under.
+    ///
+    /// **These five are a PARTITION of the user's charged bytes**, and the
+    /// partition only holds because of a stated PRECEDENCE — one blob is reachable
+    /// several ways, and it must be counted exactly once:
+    ///
+    ///   1. **Live kinds** — any blob a LIVE file references, filed under that
+    ///      file's kind (`.note` → notebooks, `.spd` → sketches, everything else →
+    ///      documents, which is the catch-all so a file with an unknown extension
+    ///      still lands somewhere).
+    ///   2. **Recycle bin** — blobs reachable from a TRASHED file, or from the
+    ///      history OF a trashed file (H10: history follows a file into the bin and
+    ///      is purged with it), and not already counted live.
+    ///   3. **Versions** — blobs reachable only from the history of LIVE files.
+    ///
+    /// Precedence is not arbitrary. A blob shared by a live file and a trashed one
+    /// frees NOTHING when the bin is emptied, so filing it under Recycle bin would
+    /// make that line a lie — and this line has to mean *what emptying the bin
+    /// actually returns*. The same argument puts a blob shared by a live file and a
+    /// retained version under live: Versions is the MARGINAL cost of versioning,
+    /// not a second count of bytes a live file already pays for.
+    ///
+    /// A blob two live files of DIFFERENT kinds share is filed under the
+    /// lowest-ranked kind (notebook < sketch < document) so the assignment is
+    /// deterministic and the buckets stay disjoint. Measured against the live beta
+    /// database that case does not occur, but "the day someone uploads a notebook
+    /// under a second name" is the day it would silently double-count.
+    ///
+    /// One statement, three index-assisted scans of the caller's own rows; §8
+    /// costed the split at 0.65 ms on the live database. No caching and no
+    /// maintained column: a page opened occasionally does not need either.
+    pub const StorageBreakdown = struct {
+        notebooks: i64 = 0,
+        sketches: i64 = 0,
+        documents: i64 = 0,
+        recycle_bin: i64 = 0,
+        versions: i64 = 0,
+
+        /// The sum of the five. Equals `capacity.used_bytes` — that identity is the
+        /// property the partition test asserts after every mutation.
+        pub fn total(self: StorageBreakdown) i64 {
+            return self.notebooks + self.sketches + self.documents + self.recycle_bin + self.versions;
+        }
+    };
+
+    const storage_breakdown_sql =
+        \\WITH live(md5, rank) AS (
+        \\  SELECT f.md5,
+        \\         MIN(CASE WHEN lower(f.name) LIKE '%.note' THEN 0
+        \\                  WHEN lower(f.name) LIKE '%.spd'  THEN 1
+        \\                  ELSE 2 END)
+        \\    FROM files f
+        \\   WHERE f.user_id = ?1 AND f.deleted = 0 AND f.is_folder = 0
+        \\     AND f.md5 IS NOT NULL AND f.md5 <> ''
+        \\   GROUP BY f.md5
+        \\),
+        \\binned(md5) AS (
+        \\  SELECT DISTINCT m.md5 FROM (
+        \\    SELECT f.md5 AS md5 FROM files f
+        \\     WHERE f.user_id = ?1 AND f.deleted = 1 AND f.is_folder = 0
+        \\       AND f.md5 IS NOT NULL AND f.md5 <> ''
+        \\    UNION ALL
+        \\    SELECT fh.md5 FROM file_history fh JOIN files f ON f.id = fh.file_id
+        \\     WHERE f.user_id = ?1 AND f.deleted = 1
+        \\  ) m
+        \\  WHERE m.md5 NOT IN (SELECT md5 FROM live)
+        \\),
+        \\versions(md5) AS (
+        \\  SELECT DISTINCT fh.md5 FROM file_history fh JOIN files f ON f.id = fh.file_id
+        \\   WHERE f.user_id = ?1 AND f.deleted = 0
+        \\     AND fh.md5 NOT IN (SELECT md5 FROM live)
+        \\     AND fh.md5 NOT IN (SELECT md5 FROM binned)
+        \\)
+        \\SELECT
+        \\  (SELECT COALESCE(SUM(b.size), 0) FROM live l JOIN blobs b ON b.md5 = l.md5 WHERE l.rank = 0),
+        \\  (SELECT COALESCE(SUM(b.size), 0) FROM live l JOIN blobs b ON b.md5 = l.md5 WHERE l.rank = 1),
+        \\  (SELECT COALESCE(SUM(b.size), 0) FROM live l JOIN blobs b ON b.md5 = l.md5 WHERE l.rank = 2),
+        \\  (SELECT COALESCE(SUM(b.size), 0) FROM binned x JOIN blobs b ON b.md5 = x.md5),
+        \\  (SELECT COALESCE(SUM(b.size), 0) FROM versions v JOIN blobs b ON b.md5 = v.md5);
+    ;
+
+    pub fn storageBreakdown(self: Files, user_id: u64) !StorageBreakdown {
+        var r = (try self.db.row(storage_breakdown_sql, &.{.{ .int = @intCast(user_id) }})) orelse return .{};
+        defer r.finalize();
+        return .{
+            .notebooks = r.int(0),
+            .sketches = r.int(1),
+            .documents = r.int(2),
+            .recycle_bin = r.int(3),
+            .versions = r.int(4),
+        };
+    }
+
+    /// How many versions of each file this user keeps, and the ceiling they may
+    /// choose within (docs/scratch/user-options.md §7).
+    ///
+    /// `keep` is the EFFECTIVE value the eviction path uses; `max_keep` is the
+    /// admin's configured value, which is both the default (a user who has never
+    /// chosen reads `users.history_keep IS NULL` and gets it) and the ceiling — a
+    /// stored value above it is clamped rather than honoured, so one household
+    /// member cannot set the whole install's disk policy by writing a large number
+    /// and the admin lowering the config takes effect immediately for everyone.
+    pub const VersionPolicy = struct { keep: u32, max_keep: u32 };
+
+    pub fn versionPolicy(self: Files, user_id: u64) !VersionPolicy {
+        const ceiling = self.history.keep;
+        var r = (try self.db.row("SELECT history_keep FROM users WHERE id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse
+            return .{ .keep = ceiling, .max_keep = ceiling };
+        defer r.finalize();
+        const stored = r.intOpt(0) orelse return .{ .keep = ceiling, .max_keep = ceiling };
+        const clamped: u32 = if (stored <= 0) 0 else @intCast(@min(stored, @as(i64, ceiling)));
+        return .{ .keep = clamped, .max_keep = ceiling };
     }
 
     /// Guarantees a `capacity` row exists for the user before we touch usage.
@@ -2254,36 +2488,59 @@ pub const Files = struct {
         return @intCast(r.int(0));
     }
 
+    /// One dropped version: which blob it held and what it was charged. The size
+    /// travels with it because the `blobs` row it came from may already be gone by
+    /// the time quota is settled (the GC gate deletes it in this same transaction).
+    const Evicted = struct { md5: [md5_len]u8, size: i64 };
+
     /// Enforces the two history bounds after a version was retained, collecting
-    /// into `gc` the md5s whose bytes must be removed from disk post-commit:
+    /// into `gc` the md5s whose bytes must be removed from disk post-commit, and
+    /// into `evicted` every version dropped (so the caller can settle its quota):
     ///
-    ///   (a) per-file `keep = K` — drop THIS file's versions beyond the newest K;
-    ///   (b) global `max_bytes` — drop the oldest history-only versions across
-    ///       ALL files until the retained-history footprint is under the ceiling.
+    ///   (a) per-file `keep = K` — drop THIS file's versions beyond the newest K,
+    ///       where K is now the OWNER's (`Files.versionPolicy`), not a global;
+    ///   (b) global `max_bytes` — drop THIS USER's oldest history-only versions
+    ///       until the install-wide retained footprint is under the ceiling.
+    ///
+    /// **(b) is now a per-user eviction against a global ceiling, and that is the
+    /// §6 fix.** It used to pick the globally-oldest history row, so one person's
+    /// churn evicted another person's versions — an invisible cross-account
+    /// effect with no way for either to see it. Now that every user's retained
+    /// bytes are charged to their own allotment, their quota is the primary
+    /// control and `max_bytes` demotes to what it should always have been: a
+    /// backstop on the whole install's disk, honoured by having the user doing the
+    /// writing give ground first. If their history is exhausted and the ceiling is
+    /// still exceeded, the loop stops rather than reaching into someone else's.
     ///
     /// Each dropped row's blob is reaped through `reapIfUnreferenced` (the same
     /// gate), so a blob still held by a live file or another history row survives.
     /// Backup-INDEPENDENT: bounded purely by K + `max_bytes`, computed locally.
-    /// Runs inside the supersede transaction; call only when `history.keep > 0`.
-    fn evictHistory(self: Files, file_id: u64, gc: *std.ArrayList([md5_len]u8)) !void {
+    /// Runs inside the supersede transaction; call only when the owner's K > 0.
+    fn evictHistory(
+        self: Files,
+        user_id: u64,
+        file_id: u64,
+        keep: u32,
+        gc: *std.ArrayList([md5_len]u8),
+        evicted: *std.ArrayList(Evicted),
+    ) !void {
         // (a) per-file K: drop everything past the newest `keep` for this file.
         {
-            var doomed: std.ArrayList([md5_len]u8) = .empty;
-            defer doomed.deinit(self.gpa);
+            const before = evicted.items.len;
             {
                 var s = try self.db.prepare(
-                    "SELECT rowid, md5 FROM file_history WHERE file_id = ?1 " ++
+                    "SELECT rowid, md5, size FROM file_history WHERE file_id = ?1 " ++
                         "ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?2;",
                 );
                 defer s.finalize();
                 s.bindInt(1, @intCast(file_id));
-                s.bindInt(2, @intCast(self.history.keep));
+                s.bindInt(2, @intCast(keep));
                 while (try s.step()) {
                     const m = s.columnText(1);
                     if (m.len != md5_len) continue;
-                    var buf: [md5_len]u8 = undefined;
-                    @memcpy(&buf, m);
-                    try doomed.append(self.gpa, buf);
+                    var e: Evicted = .{ .md5 = undefined, .size = s.columnInt(2) };
+                    @memcpy(&e.md5, m);
+                    try evicted.append(self.gpa, e);
                     var d = try self.db.prepare("DELETE FROM file_history WHERE rowid = ?1;");
                     defer d.finalize();
                     d.bindInt(1, s.columnInt(0));
@@ -2293,40 +2550,55 @@ pub const Files = struct {
             // Reap AFTER every doomed row is deleted, so a blob two of the file's
             // versions shared (an A→B→A oscillation) is only reaped once the last
             // of its rows is gone.
+            var doomed: std.ArrayList([md5_len]u8) = .empty;
+            defer doomed.deinit(self.gpa);
+            for (evicted.items[before..]) |*e| try doomed.append(self.gpa, e.md5);
             try self.reapDistinct(doomed.items, gc);
         }
 
-        // (b) global `max_bytes`: evict the oldest history-only version, one at a
-        // time, recomputing the footprint each pass, until under the ceiling or
-        // nothing history-only remains. Only history-only rows (blob refcount 0)
-        // are candidates — dropping a row whose blob a live file still holds would
-        // lose a version for no disk gain. Each pass deletes exactly one row, so
-        // the loop is bounded by the row count.
+        // (b) the `max_bytes` backstop: evict THIS user's oldest history-only
+        // version, one at a time, recomputing the install-wide footprint each pass,
+        // until under the ceiling or this user has nothing history-only left. Each
+        // pass deletes exactly one row, so the loop is bounded by the row count.
         while (try self.historyBytes() > self.history.max_bytes) {
-            var md5: [md5_len]u8 = undefined;
-            var found = false;
-            {
-                if (try self.db.row(
-                    "SELECT rowid, md5 FROM file_history " ++
-                        "WHERE md5 IN (SELECT md5 FROM blobs WHERE refcount = 0) " ++
-                        "ORDER BY created_at ASC, rowid ASC LIMIT 1;",
-                    &.{},
-                )) |r| {
-                    defer r.finalize();
-                    const m = r.text(1);
-                    if (m.len == md5_len) {
-                        @memcpy(&md5, m);
-                        found = true;
-                        var d = try self.db.prepare("DELETE FROM file_history WHERE rowid = ?1;");
-                        defer d.finalize();
-                        d.bindInt(1, r.int(0));
-                        _ = try d.step();
-                    }
-                }
-            }
-            if (!found) break;
-            if (try self.reapIfUnreferenced(&md5)) try gc.append(self.gpa, md5);
+            const dropped = (try self.evictOldestVersion(user_id, gc)) orelse break;
+            try evicted.append(self.gpa, dropped);
         }
+    }
+
+    /// Drops `user_id`'s single OLDEST retained version whose blob no live or
+    /// trashed file of theirs also holds, reaping the blob through the shared GC
+    /// gate. Returns what it dropped, or null when they have no such row.
+    ///
+    /// The `NOT EXISTS` is what makes the callers' loops terminate usefully: a
+    /// version whose blob a file of theirs still references frees no disk and no
+    /// quota, so evicting it would cost a version for nothing and the loop would
+    /// have to spin past it. Excluding it up front means every candidate offered is
+    /// one that either frees bytes now or is the second-to-last row pointing at
+    /// bytes the next pass frees.
+    fn evictOldestVersion(self: Files, user_id: u64, gc: *std.ArrayList([md5_len]u8)) !?Evicted {
+        var out: Evicted = .{ .md5 = undefined, .size = 0 };
+        {
+            const r = (try self.db.row(
+                "SELECT fh.rowid, fh.md5, fh.size FROM file_history fh " ++
+                    "JOIN files f ON f.id = fh.file_id WHERE f.user_id = ?1 " ++
+                    "  AND NOT EXISTS (SELECT 1 FROM files ff WHERE ff.user_id = ?1 " ++
+                    "                    AND ff.is_folder = 0 AND ff.md5 = fh.md5) " ++
+                    "ORDER BY fh.created_at ASC, fh.rowid ASC LIMIT 1;",
+                &.{.{ .int = @intCast(user_id) }},
+            )) orelse return null;
+            defer r.finalize();
+            const m = r.text(1);
+            if (m.len != md5_len) return null;
+            @memcpy(&out.md5, m);
+            out.size = r.int(2);
+            var d = try self.db.prepare("DELETE FROM file_history WHERE rowid = ?1;");
+            defer d.finalize();
+            d.bindInt(1, r.int(0));
+            _ = try d.step();
+        }
+        if (try self.reapIfUnreferenced(&out.md5)) try gc.append(self.gpa, out.md5);
+        return out;
     }
 
     // ---- history reads + restore (hot-cache versioning, phases 3-6) ----
@@ -2733,15 +3005,37 @@ const Fixture = struct {
     /// must be charged once. Rows in the bin count: the bin holds a real
     /// reference and keeps real bytes alive. Folders reference no blob and
     /// weigh nothing.
+    ///
+    /// **And retained versions count** (user-options.md §6). A `file_history` row
+    /// keeps its blob alive through the GC gate exactly as a trashed file does, so
+    /// the same rule applies: if the bytes occupy disk, the user is charged. This
+    /// is the audit's whole claim, and adding history to it is what made the
+    /// accounting change land — the running counter now has to agree with a
+    /// reconstruction that includes them.
     fn trueUsed(f: *Fixture, user_id: u64) !i64 {
         var r = (try f.db.row(
             \\SELECT COALESCE(SUM(b.size), 0) FROM blobs b WHERE b.md5 IN (
-            \\  SELECT DISTINCT md5 FROM files
-            \\  WHERE user_id = ?1 AND is_folder = 0 AND md5 IS NOT NULL AND md5 <> ''
+            \\  SELECT md5 FROM files
+            \\   WHERE user_id = ?1 AND is_folder = 0 AND md5 IS NOT NULL AND md5 <> ''
+            \\  UNION
+            \\  SELECT fh.md5 FROM file_history fh JOIN files f ON f.id = fh.file_id
+            \\   WHERE f.user_id = ?1
             \\);
         , &.{.{ .int = @intCast(user_id) }})) orelse return 0;
         defer r.finalize();
         return r.int(0);
+    }
+
+    /// THE PARTITION ASSERTION. The five category figures sum EXACTLY to
+    /// `used_bytes` — so a blob that charges without landing in a bucket makes the
+    /// sum short, and one that lands in two makes it long. Neither number is typed
+    /// out anywhere: the reconstruction is rebuilt from `files`, `file_history`
+    /// and `blobs` on the spot, and the running counter is asserted against it
+    /// too, so the identity is pinned at BOTH ends. Call it after any mutation.
+    fn expectPartition(f: *Fixture, user_id: u64) !void {
+        const b = try f.files.storageBreakdown(user_id);
+        try testing.expectEqual(try f.trueUsed(user_id), b.total());
+        try testing.expectEqual(try f.used(user_id), b.total());
     }
 
     /// Asserts the invariant the whole quota system rests on: the running total
@@ -2940,6 +3234,100 @@ test "HISTORY: the max_bytes ceiling evicts oldest history-only versions until u
     try testing.expect(f.files.blobs.has(&mds[3]));
     try testing.expect(f.files.blobs.has(&mds[4]));
     try testing.expect(f.files.blobs.has(&mds[5]));
+}
+
+test "§6: a user AT their allotment can still EDIT — history gives way, the edit does not" {
+    // **The failure §6 must not create.** Once retained versions are charged, a
+    // person near their allotment could be refused when editing an existing note:
+    // they added nothing, but the version the edit displaced pushed them over. That
+    // error would arrive from the DEVICE, mid-sync, where it is least explicable.
+    //
+    // The answer falls out of what history IS — discardable, where live files are
+    // not. So the edit goes through and the OLDEST version gives way. A full quota
+    // costs you history depth before it costs you the ability to work.
+    var f = try Fixture.init();
+    defer f.deinit();
+    f.files.history.keep = 5;
+    try f.db.exec("UPDATE capacity SET total_bytes = 30 WHERE user_id = 1;"); // exactly three 10-byte blobs
+
+    freeEntry(try putBytes(&f, 1, null, "n.note", "aaaaaaaaaa"));
+    freeEntry(try putBytes(&f, 1, null, "n.note", "bbbbbbbbbb"));
+    freeEntry(try putBytes(&f, 1, null, "n.note", "cccccccccc"));
+    try f.expectQuotaBalanced(1);
+    try f.expectPartition(1);
+    try testing.expectEqual(@as(i64, 30), try f.used(1)); // current + two retained: FULL
+    try testing.expectEqual(@as(i64, 2), try countOf(&f, "SELECT COUNT(*) FROM file_history;"));
+
+    // THE CASE: the fourth edit needs 40 bytes if everything is retained. It must
+    // NOT be refused — the oldest version is evicted to make room and the edit
+    // lands.
+    freeEntry(try putBytes(&f, 1, null, "n.note", "dddddddddd"));
+    try f.expectQuotaBalanced(1);
+    try f.expectPartition(1);
+    try testing.expectEqual(@as(i64, 30), try f.used(1));
+    try testing.expectEqual(@as(i64, 2), try countOf(&f, "SELECT COUNT(*) FROM file_history;"));
+    // The current version is the one just written, and the OLDEST retained one went.
+    {
+        const e = (try f.files.get(1, (try f.files.resolvePath(1, "/n.note")).?)).?;
+        defer freeEntry(e);
+        try testing.expectEqualStrings(&blobstore.md5HexOf("dddddddddd"), e.md5.?);
+    }
+    try testing.expectEqual(@as(i64, 0), try historyRows(&f, &blobstore.md5HexOf("aaaaaaaaaa")));
+    try testing.expectEqual(@as(i64, 1), try historyRows(&f, &blobstore.md5HexOf("cccccccccc")));
+
+    // ...but the LIVE files are not discardable, so something that does not fit
+    // even with the whole history thrown away is still refused. And the refusal
+    // rolls back completely: the versions the attempt evicted on its way to
+    // failing are all still there.
+    {
+        var r = std.Io.Reader.fixed("x" ** 40);
+        try testing.expectError(error.QuotaExceeded, f.files.putFile(1, null, "big.note", &r, null));
+    }
+    try f.expectQuotaBalanced(1);
+    try testing.expectEqual(@as(i64, 30), try f.used(1));
+    try testing.expectEqual(@as(i64, 2), try countOf(&f, "SELECT COUNT(*) FROM file_history;"));
+
+    // Editing all the way down: with K worth of versions gone, the note itself
+    // still edits, because a live file only ever displaces its own predecessor.
+    freeEntry(try putBytes(&f, 1, null, "n.note", "eeeeeeeeee"));
+    freeEntry(try putBytes(&f, 1, null, "n.note", "ffffffffff"));
+    try f.expectQuotaBalanced(1);
+    try f.expectPartition(1);
+    try testing.expectEqual(@as(i64, 30), try f.used(1));
+}
+
+test "§6: eviction is PER-USER — one person's churn can no longer evict another's versions" {
+    // Before §6 the `max_bytes` loop picked the globally-oldest history row, so a
+    // housemate syncing hard silently ate someone else's version history — an
+    // effect neither of them could see. Now every user's retained bytes are
+    // charged to their own allotment, `max_bytes` is only a backstop on the whole
+    // install's disk, and the user doing the writing is the one who gives ground.
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.db.exec("UPDATE capacity SET total_bytes = 100000000;");
+    f.files.history.keep = 100; // K is not the bound here
+    f.files.history.max_bytes = 20; // a global ceiling this test blows through
+
+    // User 2 banks a version FIRST, so it is the globally oldest — precisely what
+    // the old loop would have reached for.
+    freeEntry(try putBytes(&f, 2, null, "u2.note", "user-two-original"));
+    freeEntry(try putBytes(&f, 2, null, "u2.note", "user-two-edited!!"));
+    const u2_rows = "SELECT COUNT(*) FROM file_history fh JOIN files f ON f.id = fh.file_id WHERE f.user_id = 2;";
+    try testing.expectEqual(@as(i64, 1), try countOf(&f, u2_rows));
+
+    // User 1 churns hard against the same global ceiling.
+    for (0..6) |i| {
+        const body = try std.fmt.allocPrint(testing.allocator, "user-one-version-{d}", .{i});
+        defer testing.allocator.free(body);
+        freeEntry(try putBytes(&f, 1, null, "u1.note", body));
+    }
+
+    // User 2's version is untouched, and both accounts still balance.
+    try testing.expectEqual(@as(i64, 1), try countOf(&f, u2_rows));
+    try f.expectQuotaBalanced(1);
+    try f.expectQuotaBalanced(2);
+    try f.expectPartition(1);
+    try f.expectPartition(2);
 }
 
 test "HISTORY: a dedup'd blob is never GC'd while a live file OR a history row still holds it" {
@@ -3509,26 +3897,34 @@ test "THE QUOTA AUDIT: used_bytes equals the reconstructed sum after every mutat
     try f.expectQuotaBalanced(1);
     try testing.expectEqual(@as(i64, 10), try f.used(1));
 
-    // Replacing "b" with new content swaps one charge for another.
+    // Replacing "b" with new content ADDS a charge rather than swapping one:
+    // the displaced version is RETAINED (`history.keep` defaults to 5), it still
+    // occupies disk, and since §6 the user is charged for it — the same rule that
+    // has always kept a trashed file on the meter.
     const b2 = try putBytes(&f, 1, dir.id, "b", "bb");
     freeEntry(b2);
     try f.expectQuotaBalanced(1);
-    try testing.expectEqual(@as(i64, 6), try f.used(1)); // 4 shared + 2
+    try testing.expectEqual(@as(i64, 12), try f.used(1)); // 4 shared + 2 current + 6 retained
 
     // Replacing a file with content the user ALREADY holds elsewhere: the new
-    // reference is free, the old blob's charge goes away with its last holder.
+    // reference is free, and the displaced "bb" joins the retained history, so
+    // nothing is given back here either.
     const b3 = try putBytes(&f, 1, dir.id, "b", "aaaa");
     freeEntry(b3);
     try f.expectQuotaBalanced(1);
-    try testing.expectEqual(@as(i64, 4), try f.used(1)); // one blob, four holders
+    try testing.expectEqual(@as(i64, 12), try f.used(1)); // 4 shared + 6 + 2, both retained
 
-    // Trash holds a real reference, so nothing is refunded yet.
+    // Trash holds a real reference, so nothing is refunded yet — and history
+    // follows its file into the bin (H10), so the retained versions keep charging
+    // there too.
     try f.files.trash(1, dir.id);
     try f.expectQuotaBalanced(1);
-    try testing.expectEqual(@as(i64, 4), try f.used(1));
+    try testing.expectEqual(@as(i64, 12), try f.used(1));
 
-    // Purging the folder drops three of the four references; "c" still holds
-    // the blob at the root, so the bytes are still charged and still on disk.
+    // Purging the folder drops three of the four live references AND cascades
+    // away "b"'s two retained versions, refunding both — the bytes are genuinely
+    // gone, and charging for them afterwards would be a phantom nothing could
+    // clear. "c" still holds the shared blob at the root, so those 4 bytes stay.
     try f.files.purge(1, dir.id);
     try f.expectQuotaBalanced(1);
     try testing.expectEqual(@as(i64, 4), try f.used(1));
@@ -3570,6 +3966,187 @@ test "the quota audit holds across users sharing one blob" {
     try testing.expectEqual(@as(i64, 0), try f.used(1));
     try testing.expectEqual(@as(i64, 12), try f.used(2)); // user 2 unaffected
     try testing.expect(f.files.blobs.has(&md5)); // still theirs
+}
+
+test "THE PARTITION AUDIT: the five storage figures sum to the reconstructed total after every mutation" {
+    // The storage panel's sibling of THE QUOTA AUDIT above, and it earns its keep
+    // the same way: it asserts NO number anyone typed. `expectPartition` rebuilds
+    // what the user's blobs actually keep alive — straight from `files`,
+    // `file_history` and `blobs` — and demands the five category figures add up to
+    // it, after every operation that can move any of them.
+    //
+    // Anything that charges without landing in a bucket makes the sum short;
+    // anything that lands in two makes it long. A user shown a meter whose parts
+    // do not add up has no reason to trust any line on the page, so this fails
+    // here instead.
+    //
+    // **The era this test is in.** §6 has landed: retained versions are charged,
+    // so the five figures sum to `used_bytes` ITSELF, not merely to a reconstructed
+    // total running ahead of it. `expectPartition` asserts BOTH — against the
+    // rebuilt figure and against the running meter — because those are two
+    // different claims. The first says the split is a partition; the second says
+    // the meter agrees with reality. A bug that broke the accounting identically
+    // in both places would slip past either check alone.
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.db.exec("UPDATE capacity SET total_bytes = 100000000 WHERE user_id = 1;");
+    f.files.history.keep = 3;
+
+    try f.expectPartition(1);
+
+    const dir = try f.files.createFolder(1, null, "Dir");
+    defer testing.allocator.free(dir.name);
+    try f.expectPartition(1); // a folder references no blob
+
+    // --- upload: one of each live kind, so all three live buckets are populated.
+    const note = try putBytes(&f, 1, dir.id, "bujo.note", "notebook-bytes-v1");
+    freeEntry(note);
+    const spd = try putBytes(&f, 1, dir.id, "sketch.spd", "sketch-bytes");
+    freeEntry(spd);
+    const pdf = try putBytes(&f, 1, dir.id, "lease.pdf", "document-bytes");
+    freeEntry(pdf);
+    try f.expectPartition(1);
+    {
+        // The kinds actually split (not everything swept into one bucket).
+        const b = try f.files.storageBreakdown(1);
+        try testing.expect(b.notebooks > 0 and b.sketches > 0 and b.documents > 0);
+        try testing.expectEqual(@as(i64, 0), b.recycle_bin);
+        try testing.expectEqual(@as(i64, 0), b.versions);
+        try testing.expectEqual(try f.used(1), b.total()); // no history yet: meter == sum
+    }
+
+    // A file with NO recognisable extension still charges, so it must still land
+    // somewhere — Documents is the catch-all, not a list of known types.
+    const odd = try putBytes(&f, 1, dir.id, "README", "no-extension-bytes");
+    freeEntry(odd);
+    try f.expectPartition(1);
+
+    // --- dedup hit: identical content under a second name is ONE blob. Counting
+    //     it twice would make the documents line exceed what it occupies.
+    {
+        const before = (try f.files.storageBreakdown(1)).documents;
+        const dup = try putBytes(&f, 1, null, "copy.pdf", "document-bytes");
+        freeEntry(dup);
+        try f.expectPartition(1);
+        try testing.expectEqual(before, (try f.files.storageBreakdown(1)).documents);
+    }
+
+    // --- edit / a replace that supersedes: the displaced version leaves the
+    //     notebook line and appears under Versions, counted once.
+    const note2 = try putBytes(&f, 1, dir.id, "bujo.note", "notebook-bytes-v2");
+    freeEntry(note2);
+    try f.expectPartition(1);
+    try testing.expect((try f.files.storageBreakdown(1)).versions > 0);
+
+    const note3 = try putBytes(&f, 1, dir.id, "bujo.note", "notebook-bytes-v3");
+    freeEntry(note3);
+    const note4 = try putBytes(&f, 1, dir.id, "bujo.note", "notebook-bytes-v4");
+    freeEntry(note4);
+    try f.expectPartition(1);
+
+    // §6 HAS LANDED, and this is the line that says so: the Versions figure is
+    // NON-ZERO and is INSIDE `used_bytes`, not beside it. Before the accounting
+    // change the five summed to the meter plus the version bytes; the meter now
+    // includes them, which is what makes the panel's parts add up to its whole.
+    {
+        const b = try f.files.storageBreakdown(1);
+        try testing.expect(b.versions > 0);
+        try testing.expectEqual(try f.used(1), b.total());
+    }
+
+    // --- version eviction: K bounds the retained set, and the evicted blobs must
+    //     leave every bucket rather than lingering in one.
+    f.files.history.keep = 1; // K lowered; the next supersede re-applies it
+    const note5 = try putBytes(&f, 1, dir.id, "bujo.note", "notebook-bytes-v5");
+    freeEntry(note5);
+    try f.expectPartition(1);
+    try testing.expectEqual(@as(i64, 1), try countOf(&f, "SELECT COUNT(*) FROM file_history;"));
+
+    // --- trash: the note AND its retained versions move to the bin line, because
+    //     emptying the bin is what would actually free them (H10).
+    const note_id = (try f.files.resolvePath(1, "/Dir/bujo.note")).?;
+    try f.files.trash(1, note_id);
+    try f.expectPartition(1);
+    {
+        const b = try f.files.storageBreakdown(1);
+        try testing.expectEqual(@as(i64, 0), b.versions); // the live-file history is gone with it
+        try testing.expect(b.recycle_bin > 0);
+    }
+
+    // --- restore: everything comes back out of the bin line.
+    (try f.files.restore(1, note_id)).deinit(testing.allocator);
+    try f.expectPartition(1);
+    {
+        const b = try f.files.storageBreakdown(1);
+        try testing.expectEqual(@as(i64, 0), b.recycle_bin);
+        try testing.expect(b.versions > 0);
+        try testing.expect(b.notebooks > 0);
+    }
+
+    // --- a blob shared by a LIVE file and a trashed one belongs to LIVE: emptying
+    //     the bin would free nothing of it, so counting it under Recycle bin would
+    //     make that line a lie. Trash the dedup twin and watch documents hold.
+    {
+        const before = (try f.files.storageBreakdown(1)).documents;
+        const dup_id = (try f.files.resolvePath(1, "/copy.pdf")).?;
+        try f.files.trash(1, dup_id);
+        try f.expectPartition(1);
+        const b = try f.files.storageBreakdown(1);
+        try testing.expectEqual(before, b.documents); // still live's
+        try testing.expectEqual(@as(i64, 0), b.recycle_bin); // and NOT also the bin's
+        try f.files.purge(1, dup_id);
+        try f.expectPartition(1);
+        try testing.expectEqual(before, (try f.files.storageBreakdown(1)).documents);
+    }
+
+    // --- purge: the bytes leave every bucket at once.
+    try f.files.trash(1, note_id);
+    try f.expectPartition(1);
+    try f.files.purge(1, note_id);
+    try f.expectPartition(1);
+    {
+        const b = try f.files.storageBreakdown(1);
+        try testing.expectEqual(@as(i64, 0), b.notebooks);
+        try testing.expectEqual(@as(i64, 0), b.versions);
+        try testing.expectEqual(@as(i64, 0), b.recycle_bin);
+    }
+
+    // --- and the whole tree away: everything reads zero, from both directions.
+    try f.files.trash(1, dir.id);
+    try f.expectPartition(1);
+    _ = try f.files.emptyBin(1);
+    try f.expectPartition(1);
+    try testing.expectEqual(@as(i64, 0), (try f.files.storageBreakdown(1)).total());
+    try testing.expectEqual(@as(i64, 0), try f.used(1));
+}
+
+test "the storage partition is per-user: one household member's bytes never appear on another's panel" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.db.exec("UPDATE capacity SET total_bytes = 100000000;");
+    f.files.history.keep = 2;
+
+    // The SAME content in both accounts — deduplicated to one blob on disk, but
+    // charged to each, so each panel must show it in full.
+    const a = try putBytes(&f, 1, null, "shared.note", "shared-notebook");
+    freeEntry(a);
+    const b = try putBytes(&f, 2, null, "shared.note", "shared-notebook");
+    freeEntry(b);
+    // Plus a version apiece, so `file_history` is in play on both sides.
+    freeEntry(try putBytes(&f, 1, null, "shared.note", "user-1-edit"));
+    freeEntry(try putBytes(&f, 2, null, "shared.note", "user-2-edit"));
+
+    try f.expectPartition(1);
+    try f.expectPartition(2);
+
+    // User 2 purging their copy leaves user 1's panel untouched.
+    const id2 = (try f.files.resolvePath(2, "/shared.note")).?;
+    try f.files.trash(2, id2);
+    try f.files.purge(2, id2);
+    try f.expectPartition(1);
+    try f.expectPartition(2);
+    try testing.expectEqual(@as(i64, 0), (try f.files.storageBreakdown(2)).total());
+    try testing.expect((try f.files.storageBreakdown(1)).total() > 0);
 }
 
 test "quota keeps charging while trashed and is refunded only at purge" {

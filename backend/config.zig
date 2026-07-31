@@ -21,13 +21,20 @@ pub const Tls = struct {
 /// render index rides along with the retained blob). See
 /// docs/scratch/hot-cache-versioning.md. Bounded two ways, both required.
 pub const History = struct {
-    /// Recent versions kept hot, per file (the single K, H6). `keep = 0`
-    /// disables versioning cleanly — back to prune-on-supersede, no history
-    /// rows written.
+    /// Recent versions kept hot, per file (the single K, H6) — now the DEFAULT
+    /// and the CEILING for the per-user `users.history_keep`, rather than the
+    /// only value (docs/scratch/user-options.md §7). A user who has never chosen
+    /// gets this; a user who has is clamped to it, so lowering it here takes
+    /// effect for everyone immediately and no household member can set the whole
+    /// install's disk policy. `keep = 0` disables versioning cleanly — back to
+    /// prune-on-supersede, no history rows written.
     keep: u32 = 5,
-    /// HARD global ceiling on the retained-history store, in bytes (H4) — the
-    /// real SD guard. When retained history would exceed it, the OLDEST versions
-    /// are evicted (their blobs GC'd) until it is under again. Backup-independent.
+    /// Global ceiling on the retained-history store, in bytes (H4) — the SD
+    /// guard. Since §6 charges retained versions to their owner's quota, this is
+    /// a BACKSTOP rather than the primary control: each account is already bounded
+    /// by its own allotment, and eviction against this ceiling now takes only the
+    /// WRITING user's oldest versions, so one person's churn can no longer evict
+    /// another's. Backup-independent.
     max_bytes: u64 = 500_000_000,
 };
 

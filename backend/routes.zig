@@ -126,6 +126,33 @@ pub const routes = [_]router.Route{
     .{ .method = .GET, .path = "/api/controlplane/tree", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTree },
     // The signed-in user's own storage usage, for the rail's quota bar.
     .{ .method = .GET, .path = "/api/controlplane/usage", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneUsage },
+
+    // --- The account screen: managing YOURSELF (docs/scratch/user-options.md) ---
+    //
+    // The counterpart of `/api/admin/*`, and the distinction is the point: every
+    // verb under `/api/admin` is aimed at ANOTHER account and names it with an
+    // `:id`; nothing here takes a target at all. The session is the target. That is
+    // what stops a person who wants to change their own settings reaching for a
+    // tool built to change somebody else's, which is the incident this whole
+    // surface came out of.
+    //
+    // Deliberately NOT `require_admin` — a household member who is not an admin
+    // cannot open the console at all, and they are exactly who this is for.
+    //
+    // No `manual_db_lock` on any of them, including the storage split: it is three
+    // index-assisted scans of the caller's own rows (0.65 ms measured on the live
+    // beta database), which is ordinary whole-handler-lock work, not streaming.
+    .{ .method = .GET, .path = "/api/controlplane/account", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneAccount },
+    .{ .method = .GET, .path = "/api/controlplane/account/storage", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneAccountStorage },
+    // Self-service device unlink. Distinct from the caller-scoped
+    // `/api/controlplane/equipment/unlink` above: this one asserts the binding is
+    // the caller's and 404s when it is not, instead of answering 200 for a serial
+    // that matched nothing. Same body.
+    .{ .method = .POST, .path = "/api/controlplane/account/devices/unlink", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneUnlinkMyDevice },
+    // "Sign out everywhere else" — every session of this account but the one
+    // asking. Not `.pending`: a session that still owes a password change has no
+    // business revoking the others.
+    .{ .method = .POST, .path = "/api/controlplane/account/sign-out-others", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSignOutOthers },
     // Generic per-item metadata (page dims, `fileType`, `fileHash`) — EVERY
     // previewable kind fetches this on open, not just `.note`, so it lives under
     // `/file/metadata/` rather than the `/note/` noun. The genuinely note-only

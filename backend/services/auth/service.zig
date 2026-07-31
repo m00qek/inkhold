@@ -129,6 +129,18 @@ pub const DeviceInfo = struct {
     active: bool,
     /// When the binding was made (epoch seconds) — the row's "since".
     created_at: i64,
+    /// **"Last seen", not "last synced"** — the newest `sessions.last_used_at`
+    /// across this serial's `device`-audience sessions, i.e. the last REQUEST the
+    /// tablet made. That is usually a sync and is NOT the same claim, and
+    /// user-options.md §7 decided the narrower word against the data rather than
+    /// the wish. Maintained lazily on a 60 s granularity (see `caller`), so it is
+    /// accurate to about a minute.
+    ///
+    /// NULL when the device holds no session row at all — a binding that has never
+    /// been used since the last sweep, which must render as "never seen" rather
+    /// than as the epoch. `user_devices` carries only `created_at`; nothing needed
+    /// to be added to it, because `sessions.last_used_at` already carries this.
+    last_seen: ?i64,
 };
 
 /// A user's storage accounting for the admin console's meter (F7). Mirrors
@@ -307,6 +319,27 @@ pub const Service = struct {
     // URL instead. So each one re-derives the ownership it needs from the TARGET
     // and refuses anything that does not belong to them.
 
+    /// May `actor` act on `target`'s bindings? Either because they ARE `target`,
+    /// or because they administer the household.
+    ///
+    /// **The self case is what lets the account screen exist at all.** A non-admin
+    /// cannot see their own device bindings today, because the only listing is
+    /// admin-only (user-options.md §5) — and the fix must NOT be a second,
+    /// self-scoped copy of the query with its own idea of ownership. Two places
+    /// deciding who owns a device is how they come to disagree. So the self-service
+    /// routes call the SAME `listUserDevices` / `adminUnlinkDevice` with the caller
+    /// as both actor and target, and this is the one gate that widens.
+    ///
+    /// Nothing about the admin path changes: acting on SOMEBODY ELSE still demands
+    /// `is_admin` (and, at the route layer, a live elevation), and
+    /// `adminUnlinkDevice`'s per-binding ownership assertion still runs afterwards
+    /// — so a self-service caller naming a serial that is not theirs is refused by
+    /// that check exactly as a mistaken admin is.
+    fn assertMayManage(self: *Service, actor_user_id: u64, target_user_id: u64) Error!void {
+        if (actor_user_id == target_user_id) return;
+        if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
+    }
+
     /// Every device bound to `target_user_id`, active and revoked alike, newest
     /// binding first. Caller owns the result — free via `freeDevices`.
     ///
@@ -315,7 +348,7 @@ pub const Service = struct {
     /// device row is missing — turning a data-integrity problem into "that tablet
     /// is not linked", which is the one thing this screen exists to answer.
     pub fn listUserDevices(self: *Service, gpa: std.mem.Allocator, actor_user_id: u64, target_user_id: u64) Error![]DeviceInfo {
-        if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
+        try self.assertMayManage(actor_user_id, target_user_id);
         if (!try self.userExists(target_user_id)) return error.UserNotFound;
 
         var list: std.ArrayList(DeviceInfo) = .empty;
@@ -323,8 +356,13 @@ pub const Service = struct {
             for (list.items) |d| freeDevice(gpa, d);
             list.deinit(gpa);
         }
+        // The `last_seen` correlated subquery is scoped by BOTH `user_id` and
+        // `equipment_no`: a serial re-bound to a different housemate must not
+        // report the other household member's activity as this binding's.
         var s = try self.db.prepare(
-            "SELECT ud.equipment_no, ud.name, d.model, d.firmware, ud.status, ud.created_at " ++
+            "SELECT ud.equipment_no, ud.name, d.model, d.firmware, ud.status, ud.created_at, " ++
+                "  (SELECT MAX(s.last_used_at) FROM sessions s " ++
+                "    WHERE s.user_id = ud.user_id AND s.equipment_no = ud.equipment_no AND s.audience = 'device') " ++
                 "FROM user_devices ud LEFT JOIN devices d ON d.equipment_no = ud.equipment_no " ++
                 "WHERE ud.user_id = ?1 ORDER BY ud.created_at DESC, ud.equipment_no;",
         );
@@ -346,6 +384,7 @@ pub const Service = struct {
                 .firmware = firmware,
                 .active = std.mem.eql(u8, s.columnText(4), "Y"),
                 .created_at = s.columnInt(5),
+                .last_seen = s.columnIntOpt(6),
             });
         }
         return list.toOwnedSlice(gpa);
@@ -382,7 +421,7 @@ pub const Service = struct {
     /// the unlink is a no-op and answers 200. That keeps a double-click harmless
     /// without weakening the check, since `status` is never what is being asserted.
     pub fn adminUnlinkDevice(self: *Service, actor_user_id: u64, target_user_id: u64, equipment_no: []const u8) Error!void {
-        if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
+        try self.assertMayManage(actor_user_id, target_user_id);
         if (!try self.hasBinding(target_user_id, equipment_no)) return error.DeviceNotFound;
         try self.unlinkDevice(target_user_id, equipment_no);
     }
@@ -470,6 +509,121 @@ pub const Service = struct {
             .must_change = r.int(3) != 0,
             .created_at = r.int(4),
         };
+    }
+
+    // ---- the caller's own account (user-options.md §7 "Signing in") ----
+
+    /// Everything the account screen's identity block reads about the CALLER.
+    /// `email` / `name` are owned copies — free via `freeAccount`.
+    pub const AccountInfo = struct {
+        email: []const u8,
+        name: []const u8,
+        is_admin: bool,
+        /// When the account was created (epoch seconds).
+        created_at: i64,
+        /// When the password was last changed, or NULL for "never changed".
+        ///
+        /// The column only became true the day it landed (schema v3), so every
+        /// account that predates it reads NULL until its owner next changes their
+        /// password. **The copy has to say "never changed" and not imply the
+        /// account is stale** — the fact was unknowable before, not neglected.
+        password_changed_at: ?i64,
+    };
+
+    pub fn accountInfo(self: *Service, gpa: std.mem.Allocator, user_id: u64) Error!?AccountInfo {
+        var r = (try self.db.row(
+            "SELECT email, name, is_admin, created_at, password_changed_at FROM users WHERE id = ?1;",
+            &.{.{ .int = @intCast(user_id) }},
+        )) orelse return null;
+        defer r.finalize();
+        const email = try gpa.dupe(u8, r.text(0));
+        errdefer gpa.free(email);
+        const name = try gpa.dupe(u8, r.text(1));
+        return .{
+            .email = email,
+            .name = name,
+            .is_admin = r.int(2) != 0,
+            .created_at = r.int(3),
+            .password_changed_at = r.intOpt(4),
+        };
+    }
+
+    pub fn freeAccount(gpa: std.mem.Allocator, a: AccountInfo) void {
+        gpa.free(a.email);
+        gpa.free(a.name);
+    }
+
+    /// "This browser, since Tuesday" + "2 other browsers signed in".
+    pub const SessionSummary = struct {
+        /// `sessions.created_at` for the presented token, or null when the token
+        /// names no row (which the router makes unreachable — it resolved the
+        /// caller from that very row — but the read is written not to assume it).
+        this_since: ?i64,
+        /// Other LIVE `controlplane` sessions of this user, the presented one
+        /// excluded. Browsers only: a bound tablet is a `device` session and is
+        /// shown as a device, not as a signed-in browser.
+        other_browsers: i64,
+    };
+
+    /// The two session facts, for the token the caller actually presented — which
+    /// the handler passes in RAW and this hashes itself, because the raw token
+    /// never touches disk and `sessions` is keyed by `sha256(token)`.
+    ///
+    /// "Live" applies the SAME two deadlines `caller` enforces per request: the
+    /// absolute cap in `expires_at` AND the idle window measured from
+    /// `last_used_at`. Counting rows that `caller` would refuse would tell a person
+    /// that somebody is signed in somewhere when nobody could actually use it —
+    /// the one number on this screen that would send them looking for an intruder.
+    pub fn sessionSummary(self: *Service, user_id: u64, token: []const u8) Error!SessionSummary {
+        const th = password.hashToken(token);
+        const t = self.now();
+        const idle = idleWindow(.controlplane) orelse 0;
+
+        var this_since: ?i64 = null;
+        {
+            if (try self.db.row(
+                "SELECT created_at FROM sessions WHERE token_hash = ?1 AND user_id = ?2;",
+                &.{ .{ .text = &th }, .{ .int = @intCast(user_id) } },
+            )) |r| {
+                defer r.finalize();
+                this_since = r.int(0);
+            }
+        }
+
+        var others: i64 = 0;
+        {
+            var r = (try self.db.row(
+                "SELECT COUNT(*) FROM sessions WHERE user_id = ?1 AND audience = 'controlplane' " ++
+                    "AND token_hash <> ?2 AND expires_at > ?3 AND last_used_at + ?4 > ?3;",
+                &.{ .{ .int = @intCast(user_id) }, .{ .text = &th }, .{ .int = t }, .{ .int = idle } },
+            )) orelse return .{ .this_since = this_since, .other_browsers = 0 };
+            defer r.finalize();
+            others = r.int(0);
+        }
+        return .{ .this_since = this_since, .other_browsers = others };
+    }
+
+    /// "Sign out everywhere else": drop every one of this user's sessions except
+    /// the presented one. Returns how many rows went.
+    ///
+    /// The honest answer to "I think someone else has been in my account", and
+    /// distinct from sign-out: it must NOT log the caller out of the browser they
+    /// are asking from, or the confirmation of the thing they just did is a login
+    /// screen. `changePassword` already revokes ALL sessions as a side effect; this
+    /// is that primitive offered on its own, minus the row the caller is holding.
+    ///
+    /// **Device sessions go too**, and that is deliberate: a tablet whose session
+    /// is dropped re-authenticates from its stored credential, so sync resumes on
+    /// its own — while a session token that leaked really is revoked. The binding
+    /// (`user_devices`) is untouched; unlinking is the separate, deliberate act.
+    pub fn signOutOtherSessions(self: *Service, user_id: u64, token: []const u8) Error!i64 {
+        const th = password.hashToken(token);
+        var s = try self.db.prepare("DELETE FROM sessions WHERE user_id = ?1 AND token_hash <> ?2;");
+        defer s.finalize();
+        s.bindInt(1, @intCast(user_id));
+        s.bindText(2, &th);
+        _ = try s.step();
+        return self.db.changes();
     }
 
     /// True if an account with this email exists (device `check/exists/server`).
@@ -621,10 +775,18 @@ pub const Service = struct {
             if (std.mem.eql(u8, &cur, new_md5)) return error.SamePassword;
         }
         {
-            var s = try self.db.prepare("UPDATE users SET cred_enc = ?1, password_md5 = '', must_change_password = 0 WHERE id = ?2;");
+            // `password_changed_at` is stamped HERE and only here — this is the one
+            // path a person's own credential changes through (the first-login
+            // `pending` caller and the self-service one both land in this function).
+            // `resetPassword` deliberately does NOT stamp it: an admin issuing a
+            // temporary password has not chosen the credential the account will keep,
+            // and the screen's "last changed" line would then be measuring somebody
+            // else's action. The forced change that follows the reset stamps it.
+            var s = try self.db.prepare("UPDATE users SET cred_enc = ?1, password_md5 = '', must_change_password = 0, password_changed_at = ?3 WHERE id = ?2;");
             defer s.finalize();
             s.bindText(1, &self.encryptCred(new_md5));
             s.bindInt(2, @intCast(user_id));
+            s.bindInt(3, self.now());
             _ = try s.step();
         }
         try self.revokeAllSessions(user_id);
@@ -1545,9 +1707,29 @@ test "admin device unlink: A's admin action can NEVER reach B's binding by id co
     // this is a no-op rather than a 404 — a double-click must not read as an error.
     try svc.adminUnlinkDevice(admin, bob, "SN-BOB-1");
 
-    // A NON-admin gets nowhere at all, in either direction, even on their own row.
-    try std.testing.expectError(error.NotAdmin, svc.adminUnlinkDevice(alice, alice, "SN-ALICE-1"));
-    try std.testing.expectError(error.NotAdmin, svc.listUserDevices(std.testing.allocator, alice, alice));
+    // A NON-admin reaches their OWN row through these same two calls, and nothing
+    // else. That is the self-service half of the account screen: until it existed,
+    // a household member could not see their own bindings at all (user-options.md
+    // §5), and the fix must not be a second self-scoped copy of the query with its
+    // own idea of ownership — so the SAME functions widen by exactly one case.
+    // Alice is not an admin.
+    {
+        const mine = try svc.listUserDevices(std.testing.allocator, alice, alice);
+        defer Service.freeDevices(std.testing.allocator, mine);
+        try std.testing.expectEqual(@as(usize, 1), mine.len);
+        try std.testing.expectEqualStrings("SN-ALICE-1", mine[0].equipment_no);
+    }
+    // Bob's row stays out of reach in BOTH directions — reading and acting.
+    try std.testing.expectError(error.NotAdmin, svc.listUserDevices(std.testing.allocator, alice, bob));
+    try std.testing.expectError(error.NotAdmin, svc.adminUnlinkDevice(alice, bob, "SN-BOB-1"));
+    // And naming her OWN id with somebody else's serial is refused by the same
+    // per-binding ownership check an admin hits, with the same `DeviceNotFound` an
+    // unknown serial gets — so self-service is no cross-account probe either.
+    try std.testing.expectError(error.DeviceNotFound, svc.adminUnlinkDevice(alice, alice, "SN-BOB-1"));
+    try std.testing.expectError(error.DeviceNotFound, svc.adminUnlinkDevice(alice, alice, "SN-NOBODY"));
+    // Her own binding, she may revoke.
+    try svc.adminUnlinkDevice(alice, alice, "SN-ALICE-1");
+    try std.testing.expectEqual(@as(i64, 0), try svc.deviceCount(alice));
 
     // An unknown TARGET is a plain not-found — an admin may learn an id is unused.
     try std.testing.expectError(error.UserNotFound, svc.listUserDevices(std.testing.allocator, admin, 9999));

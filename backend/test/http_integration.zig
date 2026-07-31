@@ -830,7 +830,7 @@ test "DELETE /api/admin/users releases the account's blobs, but only decrements 
     try std.testing.expectEqualSlices(u8, &shared_md5, listing[0].md5.?);
 }
 
-test "sync supersede RETAINS the prior version: history row, old blob kept, live quota tracks current only" {
+test "sync supersede RETAINS the prior version: history row, old blob kept, and BOTH are charged" {
     const f = try Fixture.init();
     defer f.deinit();
 
@@ -856,8 +856,12 @@ test "sync supersede RETAINS the prior version: history row, old blob kept, live
     try std.testing.expectEqual(@as(i64, 1), try countRows(f, "SELECT COUNT(*) FROM file_history;"));
     try std.testing.expectEqual(@as(i64, @intCast(v1.len)), try countRows(f, "SELECT size FROM file_history;"));
     try std.testing.expect(f.files.blobs.has(&old_md5));
-    // But it has left the user's LIVE quota — usage tracks only the current blob.
-    try std.testing.expectEqual(@as(i64, @intCast(v2.len)), try usedBytes(f, alice));
+    // And it is CHARGED (user-options.md §6). The retained version occupies disk
+    // — its blob survives the GC gate on the strength of that history row alone —
+    // so the owner pays for it, exactly as they pay for a trashed file. Usage is
+    // the current blob PLUS the retained one; the meter used to read only the
+    // current, which is precisely the figure that was lying.
+    try std.testing.expectEqual(@as(i64, @intCast(v1.len + v2.len)), try usedBytes(f, alice));
     // Two blobs coexist now (current + retained); global search stays current-only
     // (the retained version never re-enters the FTS — the H2 invariant).
     try std.testing.expectEqual(@as(i64, 2), try countRows(f, "SELECT COUNT(*) FROM blobs;"));
@@ -4637,6 +4641,10 @@ const non_immutable_routes = [_][]const u8{
     "/api/admin/users/:id/quota",
     "/api/admin/settings/retention",
     "/api/admin/health",
+    "/api/controlplane/account",
+    "/api/controlplane/account/storage",
+    "/api/controlplane/account/devices/unlink",
+    "/api/controlplane/account/sign-out-others",
     "/api/controlplane/bin",
     "/api/controlplane/bin/:id",
     "/api/controlplane/bin/:id/restore",
@@ -4794,6 +4802,8 @@ test "cache policy: the served responses match the classification, route by rout
         "/api/file/query/server",
         "/api/controlplane/tree",
         "/api/controlplane/bin",
+        "/api/controlplane/account",
+        "/api/controlplane/account/storage",
         "/api/controlplane/search?q=Test",
         "/api/controlplane/events",
         "/api/admin/users",
@@ -6804,10 +6814,11 @@ test "web upload onConflict=replace: quota releases the old charge only when not
         const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "solo.pdf", new_bytes, "?onConflict=replace");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
-    // The old charge is released even though a retained version keeps the bytes
-    // on disk: `used_bytes` measures LIVE files, and the superseded version is
-    // not one. The blob itself is still there — that is what makes it restorable.
-    try std.testing.expectEqual(new_len, try usedBytes(f, admin));
+    // The old charge is NOT released, because the bytes did not leave the disk:
+    // the retained version keeps them, so the owner keeps paying (user-options.md
+    // §6). That the blob is still there is exactly what makes it restorable — and
+    // exactly why charging for it is the honest reading of the meter.
+    try std.testing.expectEqual(old_len + new_len, try usedBytes(f, admin));
     try std.testing.expect(f.files.blobs.has(&blobstore.md5HexOf(old_bytes)));
     try std.testing.expectEqualSlices(u8, &blobstore.md5HexOf(old_bytes), &(try soleHistoryMd5(f, solo)));
 
@@ -6818,13 +6829,131 @@ test "web upload onConflict=replace: quota releases the old charge only when not
     _ = try putSeed(f, admin, null, "shared-b.pdf", old_bytes);
     _ = shared_a;
     const before = try usedBytes(f, admin);
-    try std.testing.expectEqual(new_len + old_len, before); // the pair added ONE charge
+    // The pair added NOTHING: those bytes are already on the account, held by
+    // solo.pdf's retained version. Dedup against your own history is still dedup.
+    try std.testing.expectEqual(new_len + old_len, before);
     {
         const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "shared-a.pdf", "third distinct payload", "?onConflict=replace");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
     // Only the NEW blob's charge was added; the old one stayed, held by shared-b.
     try std.testing.expectEqual(before + @as(i64, "third distinct payload".len), try usedBytes(f, admin));
+}
+
+// ---- the account screen (docs/scratch/user-options.md §7) ----
+
+test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real session" {
+    // The frontend reads these two bodies field by field, so pin the WIRE rather
+    // than the service structs behind it — a rename here is a blank line on the
+    // page, and nothing else in the suite would notice.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    // One of each live kind, plus an edit so there is a retained version to show.
+    _ = try putSeed(f, admin, null, "bujo.note", "notebook bytes v1");
+    _ = try putSeed(f, admin, null, "bujo.note", "notebook bytes v2 (edited)");
+    _ = try putSeed(f, admin, null, "sketch.spd", "sketch bytes");
+    _ = try putSeed(f, admin, null, "lease.pdf", "document bytes");
+    // ...and something in the bin, the one line a person can act on immediately.
+    const doomed = try putSeed(f, admin, null, "old.pdf", "trashed document bytes");
+    try f.files.trash(admin, doomed);
+
+    const AccountBody = struct {
+        success: bool,
+        email: []const u8,
+        name: []const u8,
+        isAdmin: bool,
+        createdAt: i64,
+        // `passwordChangedAt` is ABSENT until the password is changed, so it is
+        // optional here on purpose — the JSON omits null optionals entirely.
+        passwordChangedAt: ?i64 = null,
+        thisSessionSince: ?i64 = null,
+        otherBrowsers: i64,
+        devices: []const struct {
+            equipment_no: []const u8,
+            name: []const u8,
+            model: ?[]const u8 = null,
+            firmware: ?[]const u8 = null,
+            active: bool,
+            created_at: i64,
+            last_seen: ?i64 = null,
+        },
+        versions: struct { keep: u32, maxKeep: u32 },
+    };
+
+    {
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/account", &web, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(AccountBody, gpa, resp.body, .{ .ignore_unknown_fields = false });
+        defer p.deinit();
+        try std.testing.expect(p.value.success);
+        try std.testing.expectEqualStrings("admin", p.value.email);
+        try std.testing.expect(p.value.isAdmin);
+        // The onboarding flow changed the password, so the column is now true —
+        // and it is a self-service change, which is the only thing that stamps it.
+        try std.testing.expect(p.value.passwordChangedAt != null);
+        // This browser is the ONLY live control-plane session, and it knows when
+        // it started. `changePassword` revoked the rest on the way in.
+        try std.testing.expect(p.value.thisSessionSince != null);
+        try std.testing.expectEqual(@as(i64, 0), p.value.otherBrowsers);
+        try std.testing.expectEqual(@as(usize, 0), p.value.devices.len); // no tablet bound here
+        try std.testing.expectEqual(@as(u32, 5), p.value.versions.keep); // the config default
+        try std.testing.expectEqual(p.value.versions.maxKeep, p.value.versions.keep);
+    }
+
+    const StorageBody = struct {
+        success: bool,
+        used_bytes: i64,
+        total_bytes: i64,
+        notebooks: i64,
+        sketches: i64,
+        documents: i64,
+        recycle_bin: i64,
+        versions: i64,
+    };
+
+    {
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/account/storage", &web, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(StorageBody, gpa, resp.body, .{ .ignore_unknown_fields = false });
+        defer p.deinit();
+        const b = p.value;
+        // Every line is populated, so none of them is quietly always-zero...
+        try std.testing.expect(b.notebooks > 0);
+        try std.testing.expect(b.sketches > 0);
+        try std.testing.expect(b.documents > 0);
+        try std.testing.expect(b.recycle_bin > 0);
+        try std.testing.expect(b.versions > 0);
+        // ...and THE PROPERTY, on the wire: the parts add up to the whole.
+        try std.testing.expectEqual(
+            b.used_bytes,
+            b.notebooks + b.sketches + b.documents + b.recycle_bin + b.versions,
+        );
+        try std.testing.expectEqual(b.used_bytes, try usedBytes(f, admin));
+        try std.testing.expect(b.total_bytes > b.used_bytes);
+    }
+
+    // Self-service unlink refuses a serial that is not the caller's, with the same
+    // answer an unknown one gets — it is no probe for what other households hold.
+    {
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/account/devices/unlink", &web, "{\"equipmentNo\":\"SN-NOT-MINE\"}");
+        try std.testing.expectEqual(@as(u16, 404), resp.status);
+    }
+
+    // Sign out everywhere else leaves THIS browser signed in — the confirmation of
+    // the act must not be a login screen.
+    {
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/account/sign-out-others", &web, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        const after = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/account", &web, "");
+        try std.testing.expectEqual(@as(u16, 200), after.status);
+    }
 }
 
 test "web upload onConflict=replace: re-uploading identical bytes is a no-op, not a spurious version" {

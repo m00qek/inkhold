@@ -42,7 +42,7 @@ const router = @import("router.zig");
 /// Sized with headroom over the live route table (see the pin in `routes.zig`'s
 /// test); a table that outgrows this degrades to lumping the excess into the
 /// overflow slot rather than misattributing or crashing.
-pub const max_routes = 88;
+pub const max_routes = 96;
 
 /// Buckets below which timings are recorded exactly, one bucket per nanosecond.
 /// A lock window can genuinely be single-digit nanoseconds (a no-op branch), and

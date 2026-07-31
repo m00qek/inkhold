@@ -15,6 +15,8 @@ const blobstore = @import("../store/blobs.zig");
 const thumbnailmod = @import("../services/thumbnail.zig");
 const filesvc = @import("../services/files.zig");
 const config = @import("../config.zig");
+const transport = @import("../http/transport.zig");
+const authsvc = @import("../services/auth/service.zig");
 
 const Context = context.Context;
 const Request = router.Request;
@@ -49,6 +51,170 @@ pub fn controlplaneUsage(ctx: *Context, req: *Request, params: Params) anyerror!
     const files = ctx.files orelse return serverError(ctx, req);
     const cap = files.capacity(caller.user_id) catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, UsageVO{ .used_bytes = cap.used, .total_bytes = cap.total }, null);
+}
+
+// ---- the account screen (docs/scratch/user-options.md §7) ----
+//
+// "Administering other people and managing yourself are different surfaces, and
+// the second one does not exist yet" (§2). These four routes are that second
+// surface's backend. Everything they touch is the CALLER's: there is no `:id` on
+// any of them, and none of them takes a user id from a body — the session says
+// who this is, which is the whole difference between this face and `/api/admin`.
+//
+// Two of the reads are the admin console's own service calls with the target
+// fixed to the caller (`listUserDevices`, `adminUnlinkDevice`), NOT reimplemented
+// self-scoped copies. See `Service.assertMayManage` for why that matters.
+//
+// **A NULL optional is OMITTED from the JSON, not sent as `null`** (`respond`
+// uses `emit_null_optional_fields = false`), so the client must read every `?`
+// field below as "absent = the fact does not exist", never as 0.
+
+/// One device binding, as this face reports it. Same field names as the admin
+/// console's `DevicesVO` rows (they are the same service struct, serialized
+/// verbatim), plus `last_seen`.
+const MyDeviceVO = authsvc.DeviceInfo;
+
+/// `keep` is what this account currently keeps of each file; `maxKeep` is the
+/// admin's configured ceiling AND the default. `keep == 0` is a real setting
+/// (versioning off), not a disabled control.
+const VersionPolicyVO = struct { keep: u32, maxKeep: u32 };
+
+/// GET /api/controlplane/account — everything the screen's identity, Signing in
+/// and Devices sections read, in one request. Storage is a separate route (it is
+/// the one figure that costs a scan, and it is what a person refetches after
+/// emptying the bin).
+///
+/// `passwordChangedAt` absent = never changed. That is every account created
+/// before schema v3, and it must render as "never changed" rather than as a
+/// stale-password warning — the fact was unknowable before the column, not
+/// neglected (§8).
+///
+/// `thisSessionSince` is `sessions.created_at` for the token this very request
+/// presented; `otherBrowsers` counts the caller's other LIVE control-plane
+/// sessions, that one excluded. Devices are bindings, not browsers, and appear
+/// only in `devices`.
+const AccountVO = struct {
+    success: bool = true,
+    email: []const u8,
+    name: []const u8,
+    isAdmin: bool,
+    createdAt: i64,
+    passwordChangedAt: ?i64 = null,
+    thisSessionSince: ?i64 = null,
+    otherBrowsers: i64,
+    devices: []const MyDeviceVO,
+    versions: VersionPolicyVO,
+};
+
+pub fn controlplaneAccount(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    const svc = ctx.service.?;
+    const caller = ctx.caller.?; // controlplane scope
+    const files = ctx.files orelse return serverError(ctx, req);
+    const token = transport.presentedToken(req) orelse return serverError(ctx, req);
+
+    const account = (svc.accountInfo(ctx.gpa, caller.user_id) catch return serverError(ctx, req)) orelse
+        return serverError(ctx, req); // the session resolved off this row moments ago
+    defer authsvc.Service.freeAccount(ctx.gpa, account);
+
+    const sessions = svc.sessionSummary(caller.user_id, token) catch return serverError(ctx, req);
+
+    // The admin listing with the target fixed to the caller — same query, same
+    // ownership gate, no self-scoped second copy.
+    const devices = svc.listUserDevices(ctx.gpa, caller.user_id, caller.user_id) catch return serverError(ctx, req);
+    defer authsvc.Service.freeDevices(ctx.gpa, devices);
+
+    const policy = files.versionPolicy(caller.user_id) catch return serverError(ctx, req);
+
+    try json.respond(ctx.gpa, req, .ok, AccountVO{
+        .email = account.email,
+        .name = account.name,
+        .isAdmin = account.is_admin,
+        .createdAt = account.created_at,
+        .passwordChangedAt = account.password_changed_at,
+        .thisSessionSince = sessions.this_since,
+        .otherBrowsers = sessions.other_browsers,
+        .devices = devices,
+        .versions = .{ .keep = policy.keep, .maxKeep = policy.max_keep },
+    }, null);
+}
+
+/// GET /api/controlplane/account/storage — the meter and the five lines under it.
+///
+/// The five figures are a PARTITION of `used_bytes`: every charged blob lands in
+/// exactly one, and they sum to it exactly. `Files.storageBreakdown` owns the
+/// precedence that makes that true; the partition test in `services/files.zig`
+/// keeps it true after every mutation.
+const StorageVO = struct {
+    success: bool = true,
+    used_bytes: i64,
+    total_bytes: i64,
+    notebooks: i64,
+    sketches: i64,
+    documents: i64,
+    recycle_bin: i64,
+    versions: i64,
+};
+
+pub fn controlplaneAccountStorage(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    const caller = ctx.caller.?; // controlplane scope
+    const files = ctx.files orelse return serverError(ctx, req);
+    const cap = files.capacity(caller.user_id) catch return serverError(ctx, req);
+    const b = files.storageBreakdown(caller.user_id) catch return serverError(ctx, req);
+    try json.respond(ctx.gpa, req, .ok, StorageVO{
+        .used_bytes = cap.used,
+        .total_bytes = cap.total,
+        .notebooks = b.notebooks,
+        .sketches = b.sketches,
+        .documents = b.documents,
+        .recycle_bin = b.recycle_bin,
+        .versions = b.versions,
+    }, null);
+}
+
+/// POST /api/controlplane/account/devices/unlink `{equipmentNo}` -> revoke one of
+/// the CALLER's own bindings -> `{success}`.
+///
+/// It goes through `adminUnlinkDevice` with the caller as both actor and target,
+/// which is what makes the ownership check apply: a serial that is not this
+/// caller's is `DEVICE_NOT_FOUND`, exactly as an unknown serial is, so this
+/// endpoint is not a probe for which tablets other housemates hold.
+///
+/// It is NOT the same as `/api/controlplane/equipment/unlink`, which calls the
+/// unchecked caller-scoped `unlinkDevice` and answers 200 for a serial that
+/// matched no row. That is fine for the device-management screen it was built for
+/// and wrong for a list a person is acting on item by item, where "done" must
+/// mean something happened.
+pub fn controlplaneUnlinkMyDevice(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    const svc = ctx.service.?;
+    const caller = ctx.caller.?; // controlplane scope
+    var parsed = json.readBody(UnbindReq, ctx.gpa, req) catch return badRequest(ctx, req);
+    defer parsed.deinit();
+
+    svc.adminUnlinkDevice(caller.user_id, caller.user_id, parsed.value.equipmentNo) catch |err| switch (err) {
+        error.DeviceNotFound => return fail(ctx, req, .not_found, "DEVICE_NOT_FOUND", "you have no such device"),
+        else => return serverError(ctx, req),
+    };
+    try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
+}
+
+/// POST /api/controlplane/account/sign-out-others -> drop every session of this
+/// account except the one making the request -> `{success, revoked}`.
+///
+/// The caller's own browser stays signed in on purpose: the confirmation of "sign
+/// out everywhere else" must not be a login screen. `revoked` is the row count,
+/// so the UI can say what it did rather than "done".
+const SignedOutVO = struct { success: bool = true, revoked: i64 };
+
+pub fn controlplaneSignOutOthers(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    const svc = ctx.service.?;
+    const caller = ctx.caller.?; // controlplane scope
+    const token = transport.presentedToken(req) orelse return serverError(ctx, req);
+    const revoked = svc.signOutOtherSessions(caller.user_id, token) catch return serverError(ctx, req);
+    try json.respond(ctx.gpa, req, .ok, SignedOutVO{ .revoked = revoked }, null);
 }
 
 // ---- server-info (the onboarding bootstrap fact) ----
