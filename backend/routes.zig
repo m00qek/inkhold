@@ -29,8 +29,16 @@ pub const routes = [_]router.Route{
     .{ .method = .POST, .path = "/api/official/user/account/login/equipment", .scopes = &.{.public}, .handler = auth.loginNew, .rate_limit = .{ .max = 10, .window_s = 60, .by = .ip } },
     // Reachable by a first-login `pending` token or a full control-plane session;
     // on success it revokes all the user's sessions and mints a fresh
-    // control-plane session (new cookie):
-    .{ .method = .PUT, .path = "/api/user/password", .scopes = &.{ .controlplane, .pending }, .handler = auth.changePassword },
+    // control-plane session (new cookie).
+    //
+    // RATE-LIMITED BY USER, for the same reason `elevate` below is: now that it
+    // VERIFIES `currentPassword`, it answers "was that the password?" — a guessing
+    // oracle for anyone who reaches an unlocked browser. 5 per 5 minutes per
+    // ACCOUNT. Keep `by = .user`: a household shares one address, so IP-keying (or
+    // `.both`) would let one person's fumbling block a housemate — and, worse
+    // here than on `elevate`, block them mid-way through the FORCED first-login
+    // change, which is the one screen they cannot go around.
+    .{ .method = .PUT, .path = "/api/user/password", .scopes = &.{ .controlplane, .pending }, .handler = auth.changePassword, .rate_limit = .{ .max = 5, .window_s = 300, .by = .user } },
     // Logout deletes the caller's own token; any authenticated caller may call it:
     .{ .method = .POST, .path = "/api/user/logout", .scopes = &.{ .controlplane, .device, .pending }, .handler = auth.logout },
     // Session restore for the SPA; a pending session may call it (to learn it must change):

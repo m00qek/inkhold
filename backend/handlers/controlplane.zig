@@ -79,15 +79,18 @@ const MyDeviceVO = authsvc.DeviceInfo;
 /// (versioning off), not a disabled control.
 ///
 /// `retainedPerFile` is what lets the control say "Keeping 3 will remove 8
-/// versions now" before the button is pressed, and `bytes` is the figure beside
-/// it — "keep more versions" stays abstract until it reads "13 MB". `bytes` is
-/// the storage panel's OWN Versions line, read from `storageBreakdown`, so the
-/// two places this number appears cannot disagree.
+/// versions now" before the button is pressed.
+///
+/// There is deliberately NO `bytes` here. It carried the version total and was
+/// dropped when the figure left the control: the storage panel already owns that
+/// number, off its own route, and a second copy nobody reads is an invitation to
+/// use it and let the two diverge — which is exactly the bug the `refcount = 0`
+/// correction fixed. It also cost a `storageBreakdown` scan on every load of
+/// this route for a field with no reader.
 const VersionPolicyVO = struct {
     keep: u32,
     maxKeep: u32,
     retainedPerFile: []const u32,
-    bytes: i64,
 };
 
 /// GET /api/controlplane/account — everything the screen's identity, Signing in
@@ -138,10 +141,6 @@ pub fn controlplaneAccount(ctx: *Context, req: *Request, params: Params) anyerro
     const policy = files.versionPolicy(caller.user_id) catch return serverError(ctx, req);
     const retained = files.retainedPerFile(ctx.gpa, caller.user_id) catch return serverError(ctx, req);
     defer ctx.gpa.free(retained);
-    // The Versions line of the storage split, so the control's cost figure and the
-    // storage panel's are one number rather than two definitions that can drift.
-    const breakdown = files.storageBreakdown(caller.user_id) catch return serverError(ctx, req);
-
     try json.respond(ctx.gpa, req, .ok, AccountVO{
         .email = account.email,
         .name = account.name,
@@ -155,7 +154,6 @@ pub fn controlplaneAccount(ctx: *Context, req: *Request, params: Params) anyerro
             .keep = policy.keep,
             .maxKeep = policy.max_keep,
             .retainedPerFile = retained,
-            .bytes = breakdown.versions,
         },
     }, null);
 }
@@ -186,14 +184,11 @@ pub fn controlplaneSetVersions(ctx: *Context, req: *Request, params: Params) any
 
     const retained = files.retainedPerFile(ctx.gpa, caller.user_id) catch return serverError(ctx, req);
     defer ctx.gpa.free(retained);
-    const breakdown = files.storageBreakdown(caller.user_id) catch return serverError(ctx, req);
-
     try json.respond(ctx.gpa, req, .ok, SetVersionsVO{
         .policy = .{
             .keep = changed.policy.keep,
             .maxKeep = changed.policy.max_keep,
             .retainedPerFile = retained,
-            .bytes = breakdown.versions,
         },
         .removedVersions = changed.removed_versions,
         .freedBytes = changed.freed_bytes,

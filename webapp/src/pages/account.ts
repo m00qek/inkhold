@@ -204,6 +204,37 @@ export function failureMessage(e: unknown): string {
   return "Something went wrong. Try again.";
 }
 
+/**
+ * What changing your password will COST, said before it is changed.
+ *
+ * **The tablet is the part that matters, and it was missing.** The line used to
+ * name only browsers. `revokeAllSessions` is an unqualified DELETE over the
+ * user's sessions, so the Supernote's dies with them — and unlike a browser it
+ * cannot sign itself back in, because it authenticates with the password it has
+ * stored. So sync stops until somebody walks over and types the new one. The
+ * binding itself survives (user_options.md §9.1); nothing needs re-pairing.
+ *
+ * A browser is one click away; the tablet is across the room. Someone who read
+ * only the old line would discover their Supernote had stopped syncing hours
+ * later with no reason to connect the two, which is the failure §4 asks this
+ * screen to prevent by stating the cost BEFORE the change.
+ *
+ * NAMED, not "your device" — it is the object you have to go and find. And
+ * conditional: with nothing bound, a standing warning about hardware you do not
+ * own is noise that teaches people to skip the line.
+ */
+export function passwordChangeConsequence(devices: readonly MyDevice[]): string {
+  const browsers = "Other browsers are signed out too; this one stays signed in.";
+  // No filtering here: `myDevices` already drops revoked bindings, so everything
+  // in this list is a device that is actually syncing and will actually stop.
+  if (devices.length === 0) return "Your other browsers will be signed out. This one stays signed in.";
+  if (devices.length === 1) {
+    const it = devices[0]!.name || devices[0]!.equipmentNo;
+    return `${it} will stop syncing until you enter the new password on the device. ${browsers}`;
+  }
+  return `Your ${devices.length} devices will stop syncing until you enter the new password on each. ${browsers}`;
+}
+
 /** What a failed password change says, by the server's reason. */
 export function passwordFailureMessage(e: unknown): string {
   if (e instanceof RateLimitError) return "Too many attempts. Wait a moment and try again.";
@@ -528,6 +559,8 @@ export function createAccountPage(host: AccountHost): AccountPage {
     node: HTMLFormElement;
     reset(): void;
     focus(): void;
+    /** Restate what the change will cost, now that the devices are known. */
+    syncConsequence(devices: readonly MyDevice[]): void;
   }
 
   function buildPasswordForm(): PasswordForm {
@@ -557,6 +590,9 @@ export function createAccountPage(host: AccountHost): AccountPage {
       minLength: MIN_PASSWORD_LENGTH,
     });
     const status = statusLine();
+    // Built empty and filled by `syncConsequence`: the device list arrives on its
+    // own request, so this sentence cannot be decided when the form is built.
+    const consequence = el("p", { class: "acct-hint" });
     const submit = el("button", { class: "acct-btn acct-btn--go", type: "submit", text: "Change password" });
     const cancel = el("button", { class: "acct-btn", type: "button", text: "Cancel" });
 
@@ -566,10 +602,7 @@ export function createAccountPage(host: AccountHost): AccountPage {
       current.row,
       next.row,
       confirm.row,
-      el("p", {
-        class: "acct-hint",
-        text: "Your other browsers will be signed out. This one stays signed in.",
-      }),
+      consequence,
       el("div", { class: "acct-pw__acts" }, submit, cancel),
       status.node,
     );
@@ -632,7 +665,12 @@ export function createAccountPage(host: AccountHost): AccountPage {
         });
     });
 
-    return { node, reset, focus: () => current.input.focus() };
+    const syncConsequence = (list: readonly MyDevice[]): void => {
+      consequence.textContent = passwordChangeConsequence(list);
+    };
+    syncConsequence([]);
+
+    return { node, reset, focus: () => current.input.focus(), syncConsequence };
   }
 
   function togglePasswordForm(show: boolean): void {
@@ -671,6 +709,10 @@ export function createAccountPage(host: AccountHost): AccountPage {
       return;
     }
     devicesBody.replaceChildren(...devices.data.map(deviceRow));
+    // The password form's warning names the tablet, so it has to learn about it
+    // here — the two sections load from different calls and this is the one that
+    // knows. Unlinking the last device retracts the sentence for the same reason.
+    passwordForm.syncConsequence(devices.data);
   }
 
   function deviceRow(device: MyDevice): HTMLElement {

@@ -179,6 +179,16 @@ pub fn generateTemp(rng: std.Random) TempPassword {
     return out;
 }
 
+/// True if `submitted` is the account's current credential — a DIRECT
+/// `md5_hex(pw)` comparison, not a challenge response. Used by the self-service
+/// password change, where the client already holds the new password's md5 and
+/// hashes the current one the same way at the same seam (there is no random code
+/// in that request). Constant-time, and length-checked first so a short body can
+/// never index past the stored value.
+pub fn verifyCurrent(stored_md5: []const u8, submitted: []const u8) bool {
+    return constEql(stored_md5, submitted);
+}
+
 /// True if `submitted` is a valid challenge response for `stored_md5`+`random_code`.
 pub fn verifyChallenge(stored_md5: []const u8, random_code: []const u8, submitted: []const u8) bool {
     const primary = challengeHash(stored_md5, random_code);

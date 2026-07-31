@@ -620,12 +620,15 @@ export interface Api {
   //   POST /api/controlplane/account/devices/unlink  one of YOUR bindings
   //   POST /api/controlplane/account/sign-out-others every session but this one
   //
-  // STILL MISSING, and each says so where it is declared: the per-file retained
-  // counts the versions control needs to state its cost before it is paid, the
-  // write that sets `keep`, and — the one that matters most — verification of
-  // the CURRENT password on `PUT /api/user/password` (§4). `fake.ts` implements
-  // all three as they are meant to behave, and `createHttpApi` throws a named
-  // `NOT_IMPLEMENTED` rather than inventing a number.
+  //   PUT  /api/controlplane/account/versions        how many versions to keep
+  //   PUT  /api/user/password                        your own password
+  //
+  // NOTHING UNDER THIS MARKER IS UNBACKED ANY MORE. The last gap to close was
+  // verification of the CURRENT password on `PUT /api/user/password` (§4): the
+  // handler now requires the field of a control-plane caller and the service
+  // verifies it before it writes or revokes anything. `fake.ts` remains the
+  // reference implementation of the intended behaviour, and it and the server
+  // now agree — a refusal seen in dev is a refusal the server would give.
   //
   // The vocabulary is `./accountTypes`, referenced through inline `import(...)`
   // types exactly like the bin/admin/history/rename/upload markers above, so
@@ -725,7 +728,6 @@ export interface Api {
    * Change your own password from a live session: the traditional path, with
    * the CURRENT password required.
    *
-   * **THE ENDPOINT EXISTS AND TAKES ONLY THE NEW PASSWORD.**
    * `PUT /api/user/password` was built for the forced first-login flow, where a
    * `pending` token proves identity and there is nothing to check a current
    * password against but the temporary one just used. That is right for THAT
@@ -734,19 +736,18 @@ export interface Api {
    * check anyone who reaches a signed-in window can lock the owner out of their
    * own household cloud (§4).
    *
-   * So the server must learn to distinguish the two callers: no current
-   * password for a `pending` token, current password REQUIRED and verified the
-   * same way login verifies it for a `controlplane` one. **As of the account
-   * routes landing it still does not, and the field this sends is ignored** —
-   * `Service.changePassword` decrypts the current credential only for its
-   * same-password check, three lines above where the verification would go.
-   * `fake.ts` verifies it, so the refusal path is exercised in dev and in e2e;
-   * the real server is the gap.
+   * The endpoint now distinguishes the two callers, in two halves: the HANDLER
+   * requires `currentPassword` of a `controlplane` caller and not of a `pending`
+   * one (the policy), and the SERVICE verifies it whenever it is supplied,
+   * whatever the caller (the mechanism) — so the check cannot be dodged by
+   * picking an audience. Verification runs before the write and before any
+   * session is revoked, so a typo costs a typo and not a lockout.
    *
    * Rejects with an `ApiError` coded `INVALID_CREDENTIALS` when the current
-   * password is wrong, and `SAME_PASSWORD` when the new one is not new.
-   * Succeeds by revoking every OTHER session and minting a fresh one for this
-   * browser, which the screen has to say plainly.
+   * password is wrong or missing, and `SAME_PASSWORD` when the new one is not
+   * new; the route is rate-limited per account, so it can also throw
+   * `RateLimitError`. Succeeds by revoking every OTHER session and minting a
+   * fresh one for this browser, which the screen has to say plainly.
    */
   changePassword(currentPlaintext: string, newPlaintext: string): Promise<void>;
   // ---------------------------------------------------------------------------

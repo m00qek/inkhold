@@ -16,9 +16,11 @@ import { railSettled, signedIn } from "./helpers/app";
 //   3. lowering the versions count STATES WHAT IT WILL DISCARD before the
 //      change, not after — a fact in the interface, not an apology;
 //   4. zero is a real setting, not a disabled state;
-//   5. a wrong CURRENT password is refused. That check exists only in the fake
-//      today (the endpoint ignores the field — §4), so this test is what proves
-//      the UI collects it, sends it, and shows the typed refusal;
+//   5. a wrong CURRENT password is refused. The REAL server verifies it now (the
+//      handler requires the field of a control-plane caller, the service checks
+//      it before it writes or revokes anything — §4); the fake mirrors that
+//      refusal, and this test is what proves the UI collects the field, sends
+//      it, and shows the typed `INVALID_CREDENTIALS` message;
 //   6. unlink removes the row;
 //   7. sign out still works from its new home. If this ever goes red, the app
 //      has no way out of itself;
@@ -227,6 +229,22 @@ test.describe("the account page", () => {
     await expect(page.locator(".acct-kind").filter({ hasText: "Versions" })).toContainText("0 B");
   });
 
+  test("the change-password warning names the DEVICE, not just the browsers", async ({ page }) => {
+    // The pure function is unit-tested; this pins that the sentence actually
+    // REACHES the screen, and that it waits for the device list. The form is
+    // built before that request lands, so a version that decided the copy at
+    // build time would render the browsers-only line and never correct itself —
+    // which is exactly the "claim painted from data that has not arrived" the
+    // page's own header warns about.
+    await signedIn(page);
+    await openAccount(page);
+    await page.getByRole("button", { name: "Change your password" }).click();
+
+    const hint = page.locator(".acct-pw .acct-hint");
+    await expect(hint).toContainText("Nomad will stop syncing");
+    await expect(hint).toContainText("enter the new password on the device");
+  });
+
   test("a wrong current password is refused; the right one goes through", async ({ page }) => {
     await signedIn(page);
     await openAccount(page);
@@ -234,11 +252,18 @@ test.describe("the account page", () => {
     await page.getByRole("button", { name: "Change your password" }).click();
     const form = page.locator(".acct-pw");
     await expect(form).toBeVisible();
-    // Said plainly, and only about what we know: other browsers are signed out.
-    // NOTHING is claimed about the Supernote's sync binding — that is an open
-    // question being tested against a real device (§8.1).
-    await expect(form).toContainText("Your other browsers will be signed out");
-    await expect(form).not.toContainText("sync");
+    // THIS ASSERTION INVERTED, and the reason is the point. It used to require
+    // that the form said NOTHING about the Supernote, because whether a password
+    // change cost the device was an open question and a guess either way would
+    // have been a claim we could not back. §9.1 is now ANSWERED: the session dies
+    // with the browsers', the binding survives, and the tablet cannot sign itself
+    // back in because it authenticates with the password it has stored. So the
+    // silence became the dishonest option and the form now says so.
+    //
+    // What has NOT changed is the standard — it still may not claim re-pairing,
+    // because that genuinely is not required.
+    await expect(form).toContainText("will stop syncing until you enter the new password");
+    await expect(form).toContainText("this one stays signed in");
     await expect(form).not.toContainText("pair");
 
     await page.getByLabel("Current password").fill("not-my-password");

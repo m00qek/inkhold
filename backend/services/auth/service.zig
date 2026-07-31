@@ -21,6 +21,12 @@ pub const Error = error{
     NoChallenge,
     InvalidPassword,
     SamePassword,
+    /// The `currentPassword` supplied to `changePassword` is not the account's
+    /// credential. Distinct from `InvalidCredentials` INSIDE the service (that one
+    /// also means "no such user" / "unreadable credential blob"), but deliberately
+    /// answered to the client with the same `INVALID_CREDENTIALS` code — the
+    /// account page already renders that as "That isn't your current password."
+    WrongCurrentPassword,
     LastAdmin,
     /// No such account. Only ever raised by the ADMIN-scoped lookups, which are
     /// already past an `isAdmin` check — an admin may legitimately learn that an
@@ -765,13 +771,36 @@ pub const Service = struct {
     /// device/browser — the pending first-login token included), and returns a
     /// fresh full **control-plane** session for the caller to swap to. Rejects reusing the
     /// current password.
-    pub fn changePassword(self: *Service, user_id: u64, new_md5: []const u8) Error!Session {
+    ///
+    /// `current_md5` is `md5_hex(current_plaintext)`, or null when the caller
+    /// supplies none. **This function is the MECHANISM, not the policy**: whenever
+    /// a current password is supplied it is VERIFIED, whoever the caller is — so a
+    /// first-login `pending` caller that sends a wrong one is refused just like a
+    /// self-service one. WHO MUST SUPPLY IT is decided one layer up, in
+    /// `handlers/auth.changePassword`, which requires it of a `controlplane`
+    /// caller. Splitting it this way means the check cannot be dodged by choosing
+    /// a caller: the only way to skip verification is to send no current password
+    /// at all, and that door is shut by the handler for every audience that has a
+    /// password to check.
+    ///
+    /// **The verification happens BEFORE the UPDATE, before `revokeAllSessions`
+    /// and before `issueSession`, and it must stay there.** A wrong current
+    /// password must leave the account exactly as it was, sessions included —
+    /// otherwise a typo signs a person out of every browser and device, which is
+    /// the lockout this whole feature exists to prevent (docs/scratch/user-options.md §1).
+    pub fn changePassword(self: *Service, user_id: u64, current_md5: ?[]const u8, new_md5: []const u8) Error!Session {
         if (new_md5.len != password.md5_len) return error.InvalidPassword;
         {
             var r = (try self.db.row("SELECT cred_enc FROM users WHERE id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return error.InvalidCredentials;
             defer r.finalize();
             // Same-password check against the DECRYPTED current credential.
             const cur = self.decryptCred(r.text(0)) catch return error.InvalidCredentials;
+            // Verified FIRST, ahead of the same-password check: `SamePassword` is
+            // itself an oracle ("is X the current password?"), so it must not be
+            // answerable by someone who could not prove the current password.
+            if (current_md5) |given| {
+                if (!password.verifyCurrent(&cur, given)) return error.WrongCurrentPassword;
+            }
             if (std.mem.eql(u8, &cur, new_md5)) return error.SamePassword;
         }
         {
@@ -1191,7 +1220,7 @@ fn onboardUser(svc: *Service, admin: u64, email: []const u8, final_pw: []const u
     const created = try svc.createUser(admin, email, false);
     const code = try svc.getRandomCode(email);
     _ = try svc.login(email, &clientHash(created.temp_password.slice(), code), false, null); // pending token
-    _ = try svc.changePassword(created.id, &password.md5Hex(final_pw));
+    _ = try svc.changePassword(created.id, null, &password.md5Hex(final_pw));
     return created.id;
 }
 
@@ -1209,7 +1238,7 @@ test "admin logs in (must change first) and creates a user" {
     try std.testing.expectEqual(Scope.pending, first.audience);
 
     // Changing the password revokes it and returns a full web session.
-    const full = try svc.changePassword(admin, &password.md5Hex("adminnew"));
+    const full = try svc.changePassword(admin, null, &password.md5Hex("adminnew"));
     try std.testing.expectEqual(Scope.controlplane, full.audience);
     try std.testing.expect((try svc.caller(&first.token)) == null);
 
@@ -1283,10 +1312,10 @@ test "first login issues a limited token; change reissues a full one" {
     try std.testing.expectEqual(Scope.pending, (try svc.caller(&pending.token)).?.audience);
 
     // Reusing the current password is rejected.
-    try std.testing.expectError(error.SamePassword, svc.changePassword(alice, &password.md5Hex(temp.slice())));
+    try std.testing.expectError(error.SamePassword, svc.changePassword(alice, null, &password.md5Hex(temp.slice())));
 
     // Change revokes the pending token and returns a full web session.
-    const upgraded = try svc.changePassword(alice, &password.md5Hex("brandnew"));
+    const upgraded = try svc.changePassword(alice, null, &password.md5Hex("brandnew"));
     try std.testing.expectEqual(Scope.controlplane, upgraded.audience);
     try std.testing.expect((try svc.caller(&pending.token)) == null); // limited token dead
     try std.testing.expectEqual(Scope.controlplane, (try svc.caller(&upgraded.token)).?.audience);
@@ -1300,6 +1329,50 @@ test "first login issues a limited token; change reissues a full one" {
         const c = try svc.getRandomCode("alice@home");
         try std.testing.expectError(error.InvalidCredentials, svc.login("alice@home", &clientHash(temp.slice(), c), false, null));
     }
+}
+
+test "changePassword VERIFIES a supplied current password, and refuses without touching anything" {
+    // The MECHANISM half, at the service boundary: `current_md5` is checked
+    // whenever it is present, whatever audience the caller holds — the handler
+    // decides only WHO must present one. A wrong one is `WrongCurrentPassword`,
+    // distinct from the `InvalidCredentials` that also means "no such user", and
+    // it costs the caller nothing else: the session lives, the credential stands.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+    const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
+    const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
+    const sess = try webLogin(&svc, "alice@home", "alicepw");
+
+    try std.testing.expectError(
+        error.WrongCurrentPassword,
+        svc.changePassword(alice, &password.md5Hex("not-alicepw"), &password.md5Hex("alicepw2")),
+    );
+    // A too-short current password is a mismatch, not an index-past-the-end.
+    try std.testing.expectError(
+        error.WrongCurrentPassword,
+        svc.changePassword(alice, "abc", &password.md5Hex("alicepw2")),
+    );
+    // NOTHING happened: the session that asked still resolves and the old
+    // password still logs in. This is the lockout guard — verification runs
+    // before the UPDATE, before `revokeAllSessions`, before `issueSession`.
+    try std.testing.expect((try svc.caller(&sess.token)) != null);
+    _ = try webLogin(&svc, "alice@home", "alicepw");
+
+    // `SamePassword` is itself an oracle ("is X the current password?"), so a
+    // caller who cannot prove the current one is told `WrongCurrentPassword`
+    // even when the new password happens to BE the current one.
+    try std.testing.expectError(
+        error.WrongCurrentPassword,
+        svc.changePassword(alice, &password.md5Hex("wrong"), &password.md5Hex("alicepw")),
+    );
+
+    // The right one goes through and rotates the credential.
+    const fresh = try svc.changePassword(alice, &password.md5Hex("alicepw"), &password.md5Hex("alicepw2"));
+    try std.testing.expectEqual(Scope.controlplane, fresh.audience);
+    try std.testing.expect((try svc.caller(&sess.token)) == null);
+    _ = try webLogin(&svc, "alice@home", "alicepw2");
 }
 
 /// Logs `email` in as a web client and returns the session.
@@ -1343,7 +1416,7 @@ test "changing the password revokes every existing session and reissues one" {
     try std.testing.expect((try svc.caller(&dev.token)) != null);
 
     // A voluntary password change logs out everywhere and hands back a fresh session.
-    const fresh = try svc.changePassword(alice, &password.md5Hex("rotated!"));
+    const fresh = try svc.changePassword(alice, null, &password.md5Hex("rotated!"));
     try std.testing.expectEqual(Scope.controlplane, fresh.audience);
     try std.testing.expect((try svc.caller(&web.token)) == null); // browser revoked
     try std.testing.expect((try svc.caller(&dev.token)) == null); // device revoked
@@ -1728,7 +1801,7 @@ test "admin user management: list users, last-admin guard, and password reset" {
     try std.testing.expectError(error.LastAdmin, svc.deleteUser(admin, admin, storage.files));
 
     // Reset logs the target out everywhere and re-flags must-change.
-    const sess = try svc.changePassword(bob, &password.md5Hex("bobreal0")); // clears must_change, mints a session
+    const sess = try svc.changePassword(bob, null, &password.md5Hex("bobreal0")); // clears must_change, mints a session
     try std.testing.expect((try svc.caller(&sess.token)) != null);
     const temp = try svc.resetPassword(admin, bob);
     try std.testing.expect((try svc.caller(&sess.token)) == null); // revoked by reset
@@ -1998,7 +2071,7 @@ test "elevation: an admin re-authenticates through the challenge flow; a session
     var svc = try testService(db);
     defer svc.deinit();
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
-    _ = try svc.changePassword(admin, &password.md5Hex("adminnew")); // clear must_change
+    _ = try svc.changePassword(admin, null, &password.md5Hex("adminnew")); // clear must_change
 
     // A fresh session is NOT elevated. Signing in is not proving you are at the
     // keyboard right now, which is the whole premise of the gate.
@@ -2084,7 +2157,7 @@ test "elevation: a session that still owes a password change cannot elevate arou
     try std.testing.expect(!(try svc.caller(&pending.token)).?.elevated);
 
     // After the change, the fresh session can elevate normally.
-    const full = try svc.changePassword(admin, &password.md5Hex("adminnew"));
+    const full = try svc.changePassword(admin, null, &password.md5Hex("adminnew"));
     const code2 = try svc.getRandomCode("admin@home");
     _ = try svc.elevate(admin, &full.token, &clientHash("adminnew", code2));
     try std.testing.expect((try svc.caller(&full.token)).?.elevated);
@@ -2096,7 +2169,7 @@ test "elevation: the window slides on activity but the absolute ceiling still en
     var svc = try testService(db);
     defer svc.deinit();
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
-    _ = try svc.changePassword(admin, &password.md5Hex("adminnew"));
+    _ = try svc.changePassword(admin, null, &password.md5Hex("adminnew"));
     const sess = try webLogin(&svc, "admin@home", "adminnew");
     const tok = &sess.token;
 
@@ -2153,11 +2226,11 @@ test "elevation: lock clears it at once, and a password reset takes it with the 
     var svc = try testService(db);
     defer svc.deinit();
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
-    _ = try svc.changePassword(admin, &password.md5Hex("adminnew"));
+    _ = try svc.changePassword(admin, null, &password.md5Hex("adminnew"));
 
     // A second admin, so the reset below is not the last-admin case.
     const other = try svc.createUser(admin, "other@home", true);
-    _ = try svc.changePassword(other.id, &password.md5Hex("otherpw1"));
+    _ = try svc.changePassword(other.id, null, &password.md5Hex("otherpw1"));
 
     const sess = try webLogin(&svc, "admin@home", "adminnew");
     {

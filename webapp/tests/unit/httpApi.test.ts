@@ -1096,7 +1096,11 @@ describe("createHttpApi — the account face", () => {
 
     const p = await createHttpApi().versionPolicy();
 
-    expect(p).toEqual({ keep: 5, maxKeep: 20, retainedPerFile: [7, 2, 1], bytes: 13_000_000 });
+    // NOTE the fixture still SENDS `bytes` and the result does not carry it: the
+    // field was dropped when the figure left the control, and reading a payload
+    // that still has it must not resurrect it. `toEqual` is exact, so this fails
+    // if the mapper starts passing unknown fields through.
+    expect(p).toEqual({ keep: 5, maxKeep: 20, retainedPerFile: [7, 2, 1] });
   });
 
   it("drops a non-numeric retained count instead of letting the notice read NaN", async () => {
@@ -1135,11 +1139,11 @@ describe("createHttpApi — the account face", () => {
   });
 
   it("sends the CURRENT password as well as the new one", async () => {
-    // The server ignores it today (§4) — `changePassword` decrypts the current
-    // credential only for its same-password check. This test pins the CLIENT
-    // half of the contract, so the day the backend adds verification the UI
-    // needs no change; and if this ever goes red, the current-password field
-    // on the form has become theatre.
+    // The server REQUIRES and VERIFIES it (§4): a control-plane caller that omits
+    // the field is refused `INVALID_CREDENTIALS` outright, so a client that stops
+    // sending it stops working entirely. This pins the CLIENT half of that
+    // contract — if it ever goes red, the current-password field on the form has
+    // become theatre and the endpoint will say so.
     const bodies: Record<string, unknown>[] = [];
     const fn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);

@@ -5,6 +5,7 @@ import {
   failureMessage,
   otherSessionsLabel,
   passwordAgeLabel,
+  passwordChangeConsequence,
   passwordFailureMessage,
   storageRows,
   thisBrowserLabel,
@@ -129,6 +130,48 @@ describe("the Signing in copy", () => {
     // from a column that was not there.
     expect(passwordAgeLabel(null, now)).toBe("No change recorded yet");
     expect(passwordAgeLabel(0, now)).toBe("No change recorded yet");
+  });
+
+  describe("what a password change costs", () => {
+    const dev = (name: string, equipmentNo = "SN1") => ({
+      equipmentNo,
+      name,
+      model: null,
+      firmware: null,
+      lastSeenAt: null,
+      linkedAt: 0,
+    });
+
+    it("NAMES the device, because that is the object you have to go and find", () => {
+      // The tablet is the part that matters and the line used to omit it: its
+      // session dies with the browsers', but unlike a browser it cannot sign
+      // itself back in — it authenticates with the password it has stored. So
+      // sync stops until somebody walks over to it (user-options.md §9.1).
+      const text = passwordChangeConsequence([dev("Supernote Nomad")]);
+      expect(text).toContain("Supernote Nomad will stop syncing");
+      expect(text).toContain("enter the new password on the device");
+      expect(text).toContain("this one stays signed in");
+    });
+
+    it("falls back to the serial when the device never reported a name", () => {
+      expect(passwordChangeConsequence([dev("", "SN078C10008618")])).toContain(
+        "SN078C10008618 will stop syncing",
+      );
+    });
+
+    it("says nothing about devices when none are bound", () => {
+      // A standing warning about hardware you do not own is noise, and noise is
+      // what teaches people to skip the line that matters.
+      const text = passwordChangeConsequence([]);
+      expect(text).toBe("Your other browsers will be signed out. This one stays signed in.");
+      expect(text).not.toContain("sync");
+    });
+
+    it("counts them rather than listing them when there are several", () => {
+      const text = passwordChangeConsequence([dev("Nomad", "SN1"), dev("Manta", "SN2")]);
+      expect(text).toContain("Your 2 devices will stop syncing");
+      expect(text).toContain("on each");
+    });
   });
 
   it("dates THIS browser's session, and degrades to the plain statement", () => {

@@ -1816,11 +1816,12 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     // --- ACCOUNT (self-service) ---
     //
-    // THE REFERENCE IMPLEMENTATION of a surface the server does not have yet
-    // (docs/scratch/user-options.md §5–§7). Every method here except
-    // `changePassword` has NO backing route at all, and `changePassword`'s route
-    // ignores the current password — so this fake is where the intended
-    // behaviour actually lives, and what the endpoints must be built to match.
+    // THE REFERENCE IMPLEMENTATION of this surface (docs/scratch/user-options.md
+    // §5–§7): where the intended behaviour is written down, and what the
+    // endpoints are built to match. `changePassword` mirrors the real route,
+    // which now REQUIRES and VERIFIES the current password of a control-plane
+    // caller (§4) — so the refusal below is a rehearsal of a real server answer,
+    // not a fiction the server would wave through.
     //
     // A SPREAD OF AN IIFE, for the same reason the admin block above is one:
     // these methods share mutable fixture state (a device is unlinked, `keep`
@@ -1917,7 +1918,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       let passwordChangedAt: number | null = now() - 97 * 86_400;
       const thisSessionSince = now() - 3 * 86_400;
 
-      const policy = () => ({ keep, maxKeep, retainedPerFile: [...retainedPerFile], bytes: versionBytes() });
+      const policy = () => ({ keep, maxKeep, retainedPerFile: [...retainedPerFile] });
 
       return {
         async myDevices() {
@@ -1987,10 +1988,10 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
         async changePassword(currentPlaintext: string, newPlaintext: string): Promise<void> {
           await delay(latency);
-          // THE CHECK THE SERVER DOES NOT DO YET (§4). It is modelled here so
-          // the refusal is a real, typed path in dev and in e2e rather than a
-          // branch nobody has ever seen run — and so the day the backend grows
-          // it, the UI needs no change.
+          // The same refusal the server gives (§4): `INVALID_CREDENTIALS` at
+          // status 200, before anything is changed and before any session is
+          // revoked. Modelled here so the path is exercised in dev and in e2e
+          // without standing a backend up.
           if (currentPlaintext !== password) {
             throw await httpError("INVALID_CREDENTIALS", "current password incorrect", 200);
           }

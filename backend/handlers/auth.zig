@@ -68,7 +68,14 @@ fn isDeviceLogin(in: LoginReq) bool {
 const MeVO = struct { success: bool = true, email: []const u8, isAdmin: bool, mustChangePassword: bool };
 
 /// `newPassword` is `md5_hex(new_plaintext)`, computed by the client.
-const ChangePasswordReq = struct { newPassword: []const u8 };
+///
+/// `currentPassword` is `md5_hex(current_plaintext)`, hashed at the same client
+/// seam so an existing password is no more exposed on the wire than a new one.
+/// It is OPTIONAL on the wire and REQUIRED by policy of a `controlplane` caller —
+/// see the handler, which is where that policy lives. A first-login `pending`
+/// caller omits it: it has nothing to check against but the temporary password it
+/// proved seconds ago.
+const ChangePasswordReq = struct { newPassword: []const u8, currentPassword: ?[]const u8 = null };
 
 // ---- handlers ----
 
@@ -137,6 +144,20 @@ pub fn loginNew(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// PUT /api/user/password -> change password. Revokes every existing session and
 /// issues a fresh control-plane session (delivered as a new cookie). Reachable by
 /// a first-login `pending` token or a full control-plane session.
+///
+/// **This handler owns the POLICY half of the current-password check; the service
+/// owns the MECHANISM half.** Here: a `controlplane` caller MUST supply
+/// `currentPassword`, because a live session is a longer-lived thing than a
+/// password prompt — a borrowed laptop, an unlocked screen — and without the
+/// demand anyone who reaches a signed-in window can lock the owner out of their
+/// own household cloud (docs/scratch/user-options.md §4). A `pending` caller must
+/// NOT be made to supply one: the only credential it could offer is the temporary
+/// password it proved seconds ago.
+///
+/// In the service: whenever a current password IS supplied it is verified, for
+/// every audience. The two halves together mean the check cannot be dodged by
+/// picking a caller — a `pending` token with a WRONG current password is refused
+/// too, it simply is not required to send one.
 pub fn changePassword(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
@@ -144,7 +165,14 @@ pub fn changePassword(ctx: *Context, req: *Request, params: Params) anyerror!voi
     var parsed = json.readBody(ChangePasswordReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
-    const session = svc.changePassword(caller.user_id, parsed.value.newPassword) catch |err| switch (err) {
+    // POLICY. Answered with the SAME code a wrong one gets: "you did not prove the
+    // current password" is one outcome, not two, and the account page renders it
+    // as "That isn't your current password." either way.
+    if (caller.audience == .controlplane and parsed.value.currentPassword == null)
+        return fail(ctx, req, .ok, "INVALID_CREDENTIALS", "current password required");
+
+    const session = svc.changePassword(caller.user_id, parsed.value.currentPassword, parsed.value.newPassword) catch |err| switch (err) {
+        error.WrongCurrentPassword => return fail(ctx, req, .ok, "INVALID_CREDENTIALS", "that is not your current password"),
         error.SamePassword => return fail(ctx, req, .ok, "SAME_PASSWORD", "choose a different password"),
         error.InvalidPassword => return fail(ctx, req, .ok, "INVALID_PASSWORD", "malformed password"),
         else => return serverError(ctx, req),

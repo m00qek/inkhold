@@ -142,8 +142,13 @@ fn onboardWeb(ctx: *Context, account: []const u8, temp: []const u8, final_pw: []
         @memcpy(&pending, cookieToken(resp.set_cookie.?).?);
     }
 
+    // `currentPassword` is sent even though a first-login `pending` caller is not
+    // required to: `temp` genuinely IS the current credential here, and some
+    // callers of this helper are already past their forced change (so they log in
+    // control-plane, where it IS required). One truthful body serves both.
     const new_md5 = password.md5Hex(final_pw);
-    const change_body = try std.fmt.allocPrint(gpa, "{{\"newPassword\":\"{s}\"}}", .{new_md5[0..]});
+    const cur_md5 = password.md5Hex(temp);
+    const change_body = try std.fmt.allocPrint(gpa, "{{\"currentPassword\":\"{s}\",\"newPassword\":\"{s}\"}}", .{ cur_md5[0..], new_md5[0..] });
     defer gpa.free(change_body);
     const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "PUT", "/api/user/password", &pending, change_body);
     var web: [32]u8 = undefined;
@@ -274,6 +279,275 @@ test "control-plane first login is limited, change-password revokes it and unloc
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/equipment/unlink", &web_tok, "{\"equipmentNo\":\"X\"}", 401);
 }
 
+// ---- self-service password change (docs/scratch/user-options.md §4) ----
+//
+// The endpoint was built for the FORCED first-login change, where a `pending`
+// token is the proof of identity, and it took the new password and nothing else.
+// From a live session that is wrong: a session outlives a password prompt (a
+// borrowed laptop, an unlocked screen), so it must demand and CHECK the current
+// password. The split these tests pin:
+//
+//   POLICY (handler)   — a `controlplane` caller MUST send `currentPassword`.
+//   MECHANISM (service)— whenever one IS sent it is verified, for ANY audience.
+//
+// Together those mean the check cannot be dodged by choosing a caller.
+
+/// Log `account` in over HTTP with a password it already owns (no forced change
+/// pending) and return the control-plane session token. Unlike `onboardWeb` this
+/// spends no `PUT /api/user/password` budget, so the rate-limit test can start
+/// from a full bucket.
+fn webLogin(ctx: *Context, account: []const u8, pw: []const u8) ![32]u8 {
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+    const code = try getCode(ctx, account);
+    const hash = challenge(pw, &code);
+    const body = try std.fmt.allocPrint(gpa, "{{\"account\":\"{s}\",\"password\":\"{s}\"}}", .{ account, hash[0..] });
+    defer gpa.free(body);
+    const req = try buildRequest(&reqbuf, "POST", "/api/official/user/account/login/new", &.{
+        .{ .name = "content-type", .value = "application/json" },
+    }, body);
+    const resp = try roundtrip(ctx, req, &obuf);
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    var tok: [32]u8 = undefined;
+    @memcpy(&tok, cookieToken(resp.set_cookie.?).?);
+    return tok;
+}
+
+/// A `PUT /api/user/password` body. `current` null omits the field entirely —
+/// which is what a first-login client sends, and what a control-plane one must
+/// not get away with.
+fn changePasswordBody(current: ?[]const u8, new_pw: []const u8) ![]u8 {
+    const new_md5 = password.md5Hex(new_pw);
+    if (current) |c| {
+        const cur_md5 = password.md5Hex(c);
+        return std.fmt.allocPrint(gpa, "{{\"currentPassword\":\"{s}\",\"newPassword\":\"{s}\"}}", .{ cur_md5[0..], new_md5[0..] });
+    }
+    return std.fmt.allocPrint(gpa, "{{\"newPassword\":\"{s}\"}}", .{new_md5[0..]});
+}
+
+fn tryChangePassword(ctx: *Context, obuf: []u8, reqbuf: []u8, tok: []const u8, current: ?[]const u8, new_pw: []const u8) !Response {
+    const body = try changePasswordBody(current, new_pw);
+    defer gpa.free(body);
+    return requestWithCookie(ctx, obuf, reqbuf, "PUT", "/api/user/password", tok, body);
+}
+
+/// `users.password_changed_at`, the "last changed" stamp the account screen reads.
+fn passwordChangedAt(f: *Fixture, user_id: u64) !?i64 {
+    var r = (try f.db.row("SELECT password_changed_at FROM users WHERE id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return error.NoSuchUser;
+    defer r.finalize();
+    return r.intOpt(0);
+}
+
+test "CHANGE PASSWORD: a WRONG current password is refused and leaves every session standing" {
+    // THE ORDERING TEST, and the reason this feature exists at all (§1: a beta
+    // tester locked themselves out). Verification happens BEFORE the UPDATE,
+    // before `revokeAllSessions` and before `issueSession` — so a typo costs a
+    // typo, not every session the person holds. Move the check below
+    // `revokeAllSessions` and this test goes red on the line after the refusal.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+
+    const desk = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+    const phone = try webLogin(ctx, "admin", "adminpw1"); // a second browser, elsewhere
+    const stamp_before = try passwordChangedAt(f, admin);
+
+    const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &desk, "not-my-password", "adminpw2");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try expectFailure(resp.body, "INVALID_CREDENTIALS");
+    // No session was minted, so no cookie was handed back either.
+    try std.testing.expect(resp.set_cookie == null);
+
+    // THE DURABLE FACT: the session that made the mistake still resolves, and so
+    // does the other browser. Not "the response said no" — that is the momentary
+    // half, and a refusal issued AFTER the revocation would satisfy it perfectly.
+    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &desk, "", 200);
+    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &phone, "", 200);
+
+    // And nothing about the credential moved: the old password still logs in, the
+    // one that was never accepted does not, and the stamp did not advance.
+    try std.testing.expectEqual(stamp_before, try passwordChangedAt(f, admin));
+    _ = try webLogin(ctx, "admin", "adminpw1");
+    {
+        const code = try getCode(ctx, "admin");
+        const hash = challenge("adminpw2", &code);
+        const body = try std.fmt.allocPrint(gpa, "{{\"account\":\"admin\",\"password\":\"{s}\"}}", .{hash[0..]});
+        defer gpa.free(body);
+        const req = try buildRequest(&reqbuf, "POST", "/api/official/user/account/login/new", &.{
+            .{ .name = "content-type", .value = "application/json" },
+        }, body);
+        const bad = try roundtrip(ctx, req, &obuf);
+        try expectFailure(bad.body, "INVALID_CREDENTIALS");
+    }
+}
+
+test "CHANGE PASSWORD: the RIGHT current password rotates it, revokes every other session, and stamps the change" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+
+    const desk = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+    const phone = try webLogin(ctx, "admin", "adminpw1");
+
+    // Backdate the stamp so "it moved" is a fact and not a coincidence of a suite
+    // that finishes inside one second.
+    {
+        var s = try f.db.prepare("UPDATE users SET password_changed_at = 0 WHERE id = ?1;");
+        defer s.finalize();
+        s.bindInt(1, @intCast(admin));
+        _ = try s.step();
+    }
+
+    var fresh: [32]u8 = undefined;
+    {
+        const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &desk, "adminpw1", "adminpw2");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try expectSuccess(resp.body);
+        const tok = cookieToken(resp.set_cookie.?).?;
+        @memcpy(&fresh, tok);
+        try std.testing.expect(!std.mem.eql(u8, &desk, &fresh)); // rotated
+    }
+
+    // The browser that asked gets a NEW session; the one that asked with the old
+    // token, and every other browser, is signed out. The screen has to say this.
+    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &fresh, "", 200);
+    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &desk, "", 401);
+    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &phone, "", 401);
+    try std.testing.expectEqual(@as(i64, 1), try countRows(f, "SELECT COUNT(*) FROM sessions;"));
+
+    // The credential really changed, and the account screen's "last changed" line
+    // moved off the backdate.
+    const stamp = (try passwordChangedAt(f, admin)) orelse return error.StampMissing;
+    try std.testing.expect(stamp > 0);
+    _ = try webLogin(ctx, "admin", "adminpw2");
+}
+
+test "CHANGE PASSWORD: a control-plane caller that OMITS the current password is refused" {
+    // POLICY, not mechanism: there is nothing wrong with the body except that it
+    // does not prove anything, and a live session is not proof enough. Answered
+    // with the same code a wrong one gets — "you did not prove the current
+    // password" is one outcome, not two.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+    const desk = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+    const stamp_before = try passwordChangedAt(f, admin);
+
+    const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &desk, null, "adminpw2");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try expectFailure(resp.body, "INVALID_CREDENTIALS");
+    try std.testing.expect(resp.set_cookie == null);
+
+    // Refused, not "refused after the damage": the session lives and the
+    // credential is untouched.
+    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &desk, "", 200);
+    try std.testing.expectEqual(stamp_before, try passwordChangedAt(f, admin));
+    _ = try webLogin(ctx, "admin", "adminpw1");
+}
+
+test "CHANGE PASSWORD: a first-login PENDING caller needs no current password — but a wrong one still refuses it" {
+    // Both halves of the split, on the one caller that shows the difference.
+    // Onboarding must keep working with no current password at all; and the
+    // mechanism still applies to a `pending` caller that supplies one, so the
+    // check cannot be dodged by picking the audience that is not required to send
+    // it.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const bob = try f.svc.createUser(admin, "bob", false);
+
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+
+    // Bob's first login: a `pending` token, which can reach this route and
+    // nothing else.
+    const pending = try webLogin(ctx, "bob", bob.temp_password.slice());
+
+    {
+        const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &pending, "guessing", "bobpass1");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try expectFailure(resp.body, "INVALID_CREDENTIALS");
+        try std.testing.expect(resp.set_cookie == null);
+    }
+    // The half-onboarded person is not stranded by their own typo: the pending
+    // token still resolves and can try again.
+    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &pending, "", 200);
+    try std.testing.expectEqual(@as(?i64, null), try passwordChangedAt(f, bob.id));
+
+    // And with no current password at all — the body a first-login client sends —
+    // it goes through.
+    {
+        const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &pending, null, "bobpass1");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try expectSuccess(resp.body);
+        try std.testing.expect(cookieToken(resp.set_cookie.?) != null);
+    }
+    try std.testing.expect((try passwordChangedAt(f, bob.id)) != null);
+    _ = try webLogin(ctx, "bob", "bobpass1");
+}
+
+test "CHANGE PASSWORD is rate-limited per USER, so an unattended browser is not a password oracle" {
+    // The moment the route verifies, it answers "was that the password?" — and it
+    // is reachable from any signed-in window. 5 per 5 minutes per ACCOUNT.
+    // Deliberately by USER and not by IP: a household shares one address, and
+    // IP-keying would let one person's fumbling block a housemate mid-way through
+    // their own FORCED first-login change, the one screen they cannot go around.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const alice = (try f.svc.createUser(admin, "alice", false)).id;
+    const bob = (try f.svc.createUser(admin, "bob", false)).id;
+    // Provisioned at the service layer so both start with a FULL bucket — an
+    // onboarding round trip would have spent a token on this very route.
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("alicepw1"));
+    _ = try f.svc.changePassword(bob, null, &password.md5Hex("bobpw111"));
+
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+    const a_tok = try webLogin(ctx, "alice", "alicepw1");
+    const b_tok = try webLogin(ctx, "bob", "bobpw111");
+
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &a_tok, "guess", "newpw123");
+        try std.testing.expectEqual(@as(u16, 200), resp.status); // allowed through, refused on merit
+        try expectFailure(resp.body, "INVALID_CREDENTIALS");
+    }
+    {
+        const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &a_tok, "guess", "newpw123");
+        try std.testing.expectEqual(@as(u16, 429), resp.status);
+    }
+    // Even the RIGHT password is now refused — the limit is on the route, not on
+    // being wrong.
+    {
+        const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &a_tok, "alicepw1", "newpw123");
+        try std.testing.expectEqual(@as(u16, 429), resp.status);
+    }
+
+    // Same IP (the fixture has exactly one), different account: Bob sails through.
+    {
+        const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &b_tok, "bobpw111", "bobpw222");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try expectSuccess(resp.body);
+    }
+    // And Alice is rate-limited, not locked out: her ordinary session still works.
+    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &a_tok, "", 200);
+}
+
 test "device login returns a body token, binds, and cannot cross into the control-plane face" {
     const f = try Fixture.init();
     defer f.deinit();
@@ -282,7 +556,7 @@ test "device login returns a body token, binds, and cannot cross into the contro
     // Arrange an onboarded (non-must-change) user directly at the service layer.
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111")); // clears must_change
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111")); // clears must_change
 
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
@@ -343,7 +617,7 @@ test "app login (equipment:2, no serial) yields a body token, reaches device rou
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111")); // clears must_change
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111")); // clears must_change
 
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
@@ -433,7 +707,7 @@ test "login rejects a missing challenge and a wrong password" {
     defer f.deinit();
     const ctx = &f.ctx;
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
-    _ = try f.svc.changePassword(admin, &password.md5Hex("adminpw1"));
+    _ = try f.svc.changePassword(admin, null, &password.md5Hex("adminpw1"));
 
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
@@ -1734,7 +2008,7 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111")); // clears must_change
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111")); // clears must_change
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -1890,7 +2164,7 @@ test "pre-login device unlink is public, returns success, but is NON-DESTRUCTIVE
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -1919,7 +2193,7 @@ test "capacity onboarding: wouldFit defaults for a user with no row; bindEquipme
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -1959,7 +2233,7 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -2211,7 +2485,7 @@ test "list_folder scoped query returns the SAME SET as the old whole-tree walk-a
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -2256,7 +2530,7 @@ test "get_space_usage reports the caller's real capacity row, in the exact shape
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
     try f.svc.setCapacityTotal(alice, 10 * 1024 * 1024 * 1024); // 10 GiB, server-owned
 
     var obuf: [4096]u8 = undefined;
@@ -2363,7 +2637,7 @@ test "device upload M2: apply → /oss/put → finish stores the blob and links 
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [8192]u8 = undefined;
@@ -2491,7 +2765,7 @@ test "device upload M2: content_hash mismatch rejects the commit; auth is enforc
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [8192]u8 = undefined;
@@ -2571,7 +2845,7 @@ test "device upload M2: commits the INGESTED size, not the device-declared size"
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [8192]u8 = undefined;
@@ -2637,7 +2911,7 @@ test "device upload chunked: parts are merged on the final part" {
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [8192]u8 = undefined;
@@ -2716,7 +2990,7 @@ test "device upload chunked: a path-traversal uploadId is rejected before it nam
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [8192]u8 = undefined;
@@ -2765,7 +3039,7 @@ test "oversized device numbers are rejected, not panicked (overflow guard)" {
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -2829,7 +3103,7 @@ test "create_folder_v2: a device folder reaches the server without a file in it"
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -2895,9 +3169,9 @@ test "create_folder_v2 is device-scoped and cannot reach another user's tree" {
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
     const bob = (try f.svc.createUser(admin, "bob", false)).id;
-    _ = try f.svc.changePassword(bob, &password.md5Hex("bpass111"));
+    _ = try f.svc.changePassword(bob, null, &password.md5Hex("bpass111"));
 
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -2958,7 +3232,7 @@ test "device delete_folder_v3 soft-deletes: leaves listings and search, but the 
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -3044,7 +3318,7 @@ test "device delete_folder_v3: an idempotent retry succeeds without restarting t
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -3122,7 +3396,7 @@ test "device delete_folder_v3: scope enforced, and a foreign id is indistinguish
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
     const bob = (try f.svc.createUser(admin, "bob", false)).id;
 
     var obuf: [8192]u8 = undefined;
@@ -3180,7 +3454,7 @@ test "device move_v3: renames + relocates a note, provisioning the destination p
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -3240,7 +3514,7 @@ test "device move_v3 NEVER 404s: unknown and foreign ids settle as idempotent su
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
     const bob = (try f.svc.createUser(admin, "bob", false)).id;
 
     var obuf: [8192]u8 = undefined;
@@ -3289,7 +3563,7 @@ test "device move_v3: autorename settles a destination-name conflict and reports
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -3325,7 +3599,7 @@ test "device copy_v3: duplicates a note sharing its blob (no extra quota), both 
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -3380,7 +3654,7 @@ test "device copy_v3 NEVER 404s: unknown and foreign ids settle as idempotent su
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
     const bob = (try f.svc.createUser(admin, "bob", false)).id;
 
     var obuf: [8192]u8 = undefined;
@@ -3423,7 +3697,7 @@ test "device copy_v3: autorename settles a destination-name conflict and reports
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -3459,7 +3733,7 @@ test "device copy_v3: a name conflict under autorename:false never clobbers the 
 
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
-    _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -3533,7 +3807,7 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
     {
         // A device session must not reach a .controlplane route.
         const alice = (try f.svc.createUser(admin, "alice", false)).id;
-        _ = try f.svc.changePassword(alice, &password.md5Hex("apass111"));
+        _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
         const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
         const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/tree", &.{
             .{ .name = "x-access-token", .value = &dev_tok },
@@ -4045,7 +4319,7 @@ test "control-plane OCR search: scope enforced, results are per-user, snippets a
     // A second account whose note has BYTE-IDENTICAL content, so the blob store
     // dedups and both accounts' files point at one shared, md5-keyed transcript.
     const bob = (try f.svc.createUser(admin, "bob", false)).id;
-    _ = try f.svc.changePassword(bob, &password.md5Hex("bpass111"));
+    _ = try f.svc.changePassword(bob, null, &password.md5Hex("bpass111"));
     const labels = &[_][]const u8{"reunião de avaliação trimestral"};
     _ = try seedRecognizedNote(f, admin, "mine.note", labels);
     _ = try seedRecognizedNote(f, bob, "theirs.note", labels);
@@ -4132,7 +4406,7 @@ test "control-plane note-scoped search: its own route, scoped like the note's ot
     // Byte-identical content again, so one deduplicated blob holds the single
     // copy of the transcript both accounts' files reference.
     const bob = (try f.svc.createUser(admin, "bob", false)).id;
-    _ = try f.svc.changePassword(bob, &password.md5Hex("bpass111"));
+    _ = try f.svc.changePassword(bob, null, &password.md5Hex("bpass111"));
     const labels = &[_][]const u8{"reunião de avaliação trimestral"};
     const mine = try seedRecognizedNote(f, admin, "mine.note", labels);
     const theirs = try seedRecognizedNote(f, bob, "theirs.note", labels);
@@ -5024,7 +5298,7 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
 
     const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
     const mallory = (try f.svc.createUser(admin, "mallory", false)).id;
-    _ = try f.svc.changePassword(mallory, &password.md5Hex("mpass111"));
+    _ = try f.svc.changePassword(mallory, null, &password.md5Hex("mpass111"));
 
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
@@ -6906,10 +7180,12 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
             created_at: i64,
             last_seen: ?i64 = null,
         },
-        // `retainedPerFile` and `bytes` are what let the settings control state
-        // its cost before the button is pressed; pinned here because the control
-        // cannot render without them.
-        versions: struct { keep: u32, maxKeep: u32, retainedPerFile: []const u32, bytes: i64 },
+        // `retainedPerFile` is what lets the settings control state its cost
+        // before the button is pressed; pinned here because the control cannot
+        // render without it. No `bytes`: the storage route owns that figure, and
+        // `ignore_unknown_fields = false` below means this list is exact — if one
+        // came back, this test would say so.
+        versions: struct { keep: u32, maxKeep: u32, retainedPerFile: []const u32 },
     };
 
     {

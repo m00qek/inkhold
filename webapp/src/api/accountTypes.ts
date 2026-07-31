@@ -180,9 +180,6 @@ export interface VersionPolicy {
    * time.
    */
   retainedPerFile: readonly number[];
-  /** What those retained versions occupy. The figure that sits beside the
-   *  control — "keep more versions" is abstract until it reads "13 MB". */
-  bytes: number;
 }
 
 /** The result of lowering (or raising) `keep`: the new policy, and what the

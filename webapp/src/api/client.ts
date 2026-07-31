@@ -1947,19 +1947,22 @@ export function createHttpApi(): Api {
     },
 
     async changePassword(currentPlaintext: string, newPlaintext: string): Promise<void> {
-      // ======================================================================
-      // THE SERVER DOES NOT YET VERIFY `currentPassword`. THIS IS THE GAP.
-      // ======================================================================
-      // `PUT /api/user/password` takes the new password and nothing else — it
-      // was written for the forced first-login change, where a `pending` token
-      // is the proof of identity. It must learn to require and CHECK
-      // `currentPassword` when the caller holds a `controlplane` token, using
-      // the same verification login uses; until it does, the field below is
-      // accepted and dropped, and the check the form appears to perform is only
-      // performed by `fake.ts`. See `Api.changePassword` and
-      // docs/scratch/user-options.md §4. Nothing in the UI claims the check
-      // happened — it collects the field, and the refusal it can show comes
-      // from the server saying no.
+      // `currentPassword` is REQUIRED of this caller and VERIFIED by the server.
+      // `PUT /api/user/password` splits it in two: the handler demands the field
+      // of a `controlplane` caller (the policy — a live session is not proof
+      // enough, §4), and the service verifies it whenever it is present, before
+      // it writes anything and before it revokes a single session. A wrong one
+      // costs a wrong one: the account, and every session on it, is left exactly
+      // as it was. The refusal comes back as `INVALID_CREDENTIALS`, which
+      // `passwordFailureMessage` renders as "That isn't your current password."
+      //
+      // The route is rate-limited 5 per 5 minutes PER ACCOUNT, because a route
+      // that verifies is a route that answers "was that the password?" from any
+      // signed-in window. Over that, `request` throws `RateLimitError`.
+      //
+      // The first-login caller is the other half of the split and lives on the
+      // `api` object above: it sends `newPassword` alone, from a `pending` token
+      // that has nothing to check a current password against.
       //
       // Hashed at the seam exactly as the new one is, so the plaintext of an
       // existing password is no more exposed on the wire than a new one.
@@ -1997,7 +2000,6 @@ interface AccountResponse {
     keep?: number;
     maxKeep?: number;
     retainedPerFile?: number[];
-    bytes?: number;
   };
 }
 
@@ -2032,7 +2034,6 @@ function readPolicy(v: AccountResponse["versions"]): import("./accountTypes").Ve
     keep: Number.isFinite(v?.keep) ? (v?.keep as number) : 0,
     maxKeep: Number.isFinite(v?.maxKeep) ? (v?.maxKeep as number) : 0,
     retainedPerFile: counts.filter((n): n is number => Number.isFinite(n) && n >= 0),
-    bytes: Number.isFinite(v?.bytes) ? (v?.bytes as number) : 0,
   };
 }
 
