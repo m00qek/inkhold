@@ -189,38 +189,49 @@ fn sweepFailed(e: anyerror) usize {
 /// cannot decrypt `users.cred_enc`; LOSING it makes every credential unrecoverable
 /// (forced resets), which is why a fresh key is loudly logged. See auth.md §5b.
 fn loadOrCreateCredKey(gpa: std.mem.Allocator, io: Io, path: []const u8, rng: std.Random) ![passwordmod.cred_key_len]u8 {
-    const dir = std.Io.Dir.cwd();
+    if (try loadCredKey(gpa, io, path)) |key| return key;
+
     var key: [passwordmod.cred_key_len]u8 = undefined;
-    if (dir.readFileAlloc(io, path, gpa, .limited(4096))) |bytes| {
-        defer gpa.free(bytes);
-        if (bytes.len != passwordmod.cred_key_len) {
-            std.log.err(
-                "credential key {s} is {d} bytes, expected {d} — refusing to start (restore the original key, or every credential is lost)",
-                .{ path, bytes.len, passwordmod.cred_key_len },
-            );
-            return error.BadCredKey;
-        }
-        @memcpy(&key, bytes);
-        return key;
-    } else |err| switch (err) {
-        error.FileNotFound => {
-            rng.bytes(&key);
-            dir.writeFile(io, .{
-                .sub_path = path,
-                .data = &key,
-                .flags = .{ .permissions = std.Io.File.Permissions.fromMode(0o600) },
-            }) catch |e| {
-                std.log.err("could not persist credential key to {s}: {t}", .{ path, e });
-                return e;
-            };
-            std.log.warn(
-                "generated a new credential-encryption key at {s} (0600). BACK IT UP — losing it makes every stored credential unrecoverable (forced password resets).",
-                .{path},
-            );
-            return key;
-        },
+    rng.bytes(&key);
+    std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = path,
+        .data = &key,
+        .flags = .{ .permissions = std.Io.File.Permissions.fromMode(0o600) },
+    }) catch |e| {
+        std.log.err("could not persist credential key to {s}: {t}", .{ path, e });
+        return e;
+    };
+    std.log.warn(
+        "generated a new credential-encryption key at {s} (0600). BACK IT UP — losing it makes every stored credential unrecoverable (forced password resets).",
+        .{path},
+    );
+    return key;
+}
+
+/// Reads the credential key at `path`, or null when there is none — **the
+/// load-only half, which never creates one.**
+///
+/// That distinction is the whole reason it is a separate function. Generating a
+/// fresh key is right on first run and catastrophic on an existing install: it
+/// makes every stored `cred_enc` undecryptable, so the next credential written
+/// under it "succeeds" while locking out everybody else in the household. `serve`
+/// may create (first run is real); the recovery CLI may not, and calls this.
+pub fn loadCredKey(gpa: std.mem.Allocator, io: Io, path: []const u8) !?[passwordmod.cred_key_len]u8 {
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(4096)) catch |err| switch (err) {
+        error.FileNotFound => return null,
         else => return err,
+    };
+    defer gpa.free(bytes);
+    if (bytes.len != passwordmod.cred_key_len) {
+        std.log.err(
+            "credential key {s} is {d} bytes, expected {d} — refusing to start (restore the original key, or every credential is lost)",
+            .{ path, bytes.len, passwordmod.cred_key_len },
+        );
+        return error.BadCredKey;
     }
+    var key: [passwordmod.cred_key_len]u8 = undefined;
+    @memcpy(&key, bytes);
+    return key;
 }
 
 pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const router.Route) !void {

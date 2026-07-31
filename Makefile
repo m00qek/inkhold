@@ -22,7 +22,7 @@ help:
 	@echo "Inkhold"
 	@echo "  make build          build the server (Debug)"
 	@echo "  make release-artifact build statically against musl, build frontend, and package into a tarball. Accepts TARGET (e.g. TARGET=aarch64-linux-musl)"
-	@echo "  make run            build + run (uses config.zon if present, else defaults)"
+	@echo "  make run            build + run (uses config.zon if present, else defaults; --config=PATH to override)"
 	@echo "  make serve          build wasm+SPA+server, then serve device sync AND the browser UI on ONE port (8090; PORT= to override)"
 	@echo "  make test           run the root Zig suite (backend + note unit tests)"
 	@echo "  make parser-test    run the standalone parser suites (note + spd, incl. property/golden)"
@@ -52,10 +52,19 @@ help:
 # build is genuinely what you want.
 OPTIMIZE ?= ReleaseSafe
 
+# THE FRESH-CLONE GUARD. `npm run build` needs `tsc`, which lives in
+# `webapp/node_modules` — absent in a clone that has only ever been built, so
+# the first `make serve` died on `tsc: command not found` with nothing to
+# suggest `npm ci`. Order-only would be wrong (the timestamp of a directory
+# moves), so this is a plain existence check that installs once and is a no-op
+# for ever after.
+$(WEB)/node_modules:
+	npm --prefix $(WEB) ci
+
 build:
 	zig build -Doptimize=$(OPTIMIZE)
 
-release-artifact:
+release-artifact: $(WEB)/node_modules
 	zig build -Doptimize=ReleaseSafe -Dtarget=$(TARGET)
 	npm --prefix $(WEB) run build
 	mkdir -p release-tmp/webapp
@@ -66,8 +75,12 @@ release-artifact:
 	rm -rf release-tmp
 	@echo ">>> Created inkhold-$(TARGET).tar.gz"
 
+# No `--config=` needed: the binary already defaults to `config.zon`, and
+# `serve` tolerates it being absent (first run is a real case). This used to
+# pass `$(wildcard config.zon)` positionally, which stopped parsing when the
+# config became an option.
 run: build
-	$(BIN) $(wildcard config.zon)
+	$(BIN)
 
 # Single-port serve: builds the single-page decoder wasm, the web SPA (Vite
 # `dist/`, which bundles that wasm from public/), and the server; then runs ONE
@@ -78,7 +91,7 @@ run: build
 # URL: http://<this machine's LAN IP>:$(SERVE_PORT)  (run `make lan-ip` for it).
 # A production SPA build defaults to the REAL backend (no ?real needed).
 # Port is 8090 by default (serve.zon); `make serve PORT=9000` overrides it.
-serve: build
+serve: build $(WEB)/node_modules
 	npm --prefix $(WEB) run build
 	@mkdir -p server/8089
 	@sed 's/\.port = [0-9][0-9]*,/.port = $(SERVE_PORT),/' server/8089/serve.zon > server/8089/serve-run.zon
@@ -87,7 +100,7 @@ serve: build
 	@echo ">>> Point the Nomad's server address AND your browser at  http://<LAN-IP>:$(SERVE_PORT)  (make lan-ip)."
 	@echo ">>> Ctrl-C to stop."
 	@echo ""
-	$(BIN) server/8089/serve-run.zon
+	$(BIN) --config=server/8089/serve-run.zon
 
 test:
 	zig build test --summary all

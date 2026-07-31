@@ -274,6 +274,25 @@ pub const Service = struct {
     /// sessions held, since elevation lives on the session ROW.
     pub fn resetPassword(self: *Service, actor_user_id: u64, target_user_id: u64) Error!TempPassword {
         if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
+        return self.resetPasswordFor(target_user_id);
+    }
+
+    /// **THE MECHANISM, with no policy in it** — the same split `changePassword`
+    /// uses (docs/scratch/user-options.md §4): the function that DOES the thing
+    /// takes no actor, and whoever calls it is responsible for having decided
+    /// that they may.
+    ///
+    /// It exists because the recovery CLI has no actor and cannot invent one.
+    /// That is not a hole: `inkhold reset-password` is authorised by read/write
+    /// access to the data directory, which on a self-hosted server already
+    /// implies `minicloud.db` AND `cred.key` — i.e. the caller could decrypt
+    /// every credential with `sqlite3` and more patience. See
+    /// docs/scratch/cli-recovery.md §2.
+    ///
+    /// **Nothing over HTTP may call this directly.** The admin-checked
+    /// `resetPassword` above is the only route in from a request, and it is
+    /// unchanged: the handler still passes its actor and still gets `NotAdmin`.
+    pub fn resetPasswordFor(self: *Service, target_user_id: u64) Error!TempPassword {
         const temp = self.tempPassword();
         {
             // The credential is stored ENCRYPTED (`cred_enc`); `password_md5` is
@@ -286,6 +305,52 @@ pub const Service = struct {
         }
         try self.revokeAllSessions(target_user_id);
         return temp;
+    }
+
+    /// **THE MECHANISM** for the admin flag: sets or clears it on one account.
+    /// Returns true when the flag actually MOVED, so an idempotent caller can
+    /// say "is now" or "already was" without reading the row twice.
+    ///
+    /// There was no way to change `is_admin` at all before this: `insertUser`
+    /// wrote it once at creation and nothing ever updated it, so the only route
+    /// to a second admin was creating a whole new account — the wrong shape for
+    /// a household, where the person who should hold the spare key is the one who
+    /// already has a Nomad and their notes on it.
+    ///
+    /// **The last-admin guard is written here, with the mechanism, and not with
+    /// the verb that first needs it.** Only promotion is exposed today
+    /// (`inkhold make-admin`), so the demotion branch is unreachable from the
+    /// CLI — but the console's promote/demote pair is the next thing to be built
+    /// on this (cli-recovery.md §8), and a demote that could take the count to
+    /// zero would create precisely the lockout this whole feature exists to
+    /// prevent. It mirrors `deleteUser`'s guard exactly, for exactly that reason.
+    ///
+    /// No actor: policy belongs to the caller. The CLI's authorisation is the
+    /// filesystem; an HTTP route built on this must do its own `isAdmin` check
+    /// the way `resetPassword` does.
+    ///
+    /// A demotion needs nothing else to take effect — `caller` reads `is_admin`
+    /// by JOIN on every request rather than caching it on the session row, so the
+    /// next request already sees it, elevation included.
+    pub fn setAdmin(self: *Service, target_user_id: u64, is_admin: bool) Error!bool {
+        if (!try self.userExists(target_user_id)) return error.UserNotFound;
+        const was = try self.isAdmin(target_user_id);
+        if (was == is_admin) return false;
+        if (was and (try self.adminCount()) <= 1) return error.LastAdmin;
+        var s = try self.db.prepare("UPDATE users SET is_admin = ?1 WHERE id = ?2;");
+        defer s.finalize();
+        s.bindInt(1, if (is_admin) 1 else 0);
+        s.bindInt(2, @intCast(target_user_id));
+        _ = try s.step();
+        return true;
+    }
+
+    /// The account id behind an address, or null when there is none. The CLI's
+    /// only lookup: a person knows their address, not their row id.
+    pub fn userIdByEmail(self: *Service, email: []const u8) Error!?u64 {
+        var r = (try self.db.row("SELECT id FROM users WHERE email = ?1;", &.{.{ .text = email }})) orelse return null;
+        defer r.finalize();
+        return @intCast(r.int(0));
     }
 
     /// Lists all users (admin view). Caller owns the result — free via `freeUsers`.
@@ -1822,6 +1887,53 @@ test "admin user management: list users, last-admin guard, and password reset" {
         const c = try svc.getRandomCode("bob@home");
         try std.testing.expectError(error.InvalidCredentials, svc.login("bob@home", &clientHash("bobreal0", c), false, null));
     }
+}
+
+test "setAdmin promotes and demotes, reports whether the flag moved, and will not demote the last admin" {
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+
+    const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
+    const bob = (try svc.createUser(admin, "bob@home", false)).id;
+
+    // The guard, BEFORE there is a second admin: the last one cannot be demoted.
+    // Same shape as `deleteUser`'s — demoting your way to zero admins is the same
+    // lockout as deleting your way there, and this is the one that has no HTTP
+    // route yet (docs/scratch/cli-recovery.md §5 wrote it with the mechanism
+    // rather than waiting for the console verb that will first need it).
+    try std.testing.expectError(error.LastAdmin, svc.setAdmin(admin, false));
+
+    // Promotion is asserted THROUGH an admin-only call, not by reading the flag.
+    try std.testing.expectError(error.NotAdmin, svc.createUser(bob, "carol@home", false));
+    try std.testing.expect(try svc.setAdmin(bob, true));
+    const carol = (try svc.createUser(bob, "carol@home", false)).id;
+
+    // Idempotent: a second promotion is a no-op, not an error — the CLI's
+    // `make-admin` reports "already an administrator" off this false.
+    try std.testing.expect(!try svc.setAdmin(bob, true));
+
+    // With two admins the guard lifts, and demotion really removes the capability.
+    try std.testing.expect(try svc.setAdmin(admin, false));
+    try std.testing.expectError(error.NotAdmin, svc.createUser(admin, "dave@home", false));
+
+    // Down to one again, and the guard is back.
+    try std.testing.expectError(error.LastAdmin, svc.setAdmin(bob, false));
+    // A demotion that changes nothing is still a no-op rather than a guard trip.
+    try std.testing.expect(!try svc.setAdmin(carol, false));
+    try std.testing.expectError(error.UserNotFound, svc.setAdmin(9999, true));
+}
+
+test "userIdByEmail finds an account by the address a person actually knows" {
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+    const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
+    try std.testing.expectEqual(@as(?u64, admin), try svc.userIdByEmail("admin@home"));
+    try std.testing.expect((try svc.userIdByEmail("admin@hom")) == null);
+    try std.testing.expect((try svc.userIdByEmail("")) == null);
 }
 
 test "the server, not the admin, chooses temporary passwords — and stores only their hash" {

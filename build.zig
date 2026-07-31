@@ -150,6 +150,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // `inkhold --version`. Read from `build.zig.zon` rather than restated here,
+    // so the number a user quotes in a bug report is the package version and
+    // there is exactly one place to bump at release time. (This is the SERVER's
+    // version — deliberately not `routes.api_version`, which is the sync-protocol
+    // number and is not what somebody filing a bug report means.)
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+
     // The standalone `.note` parser (`parsers/note`), the shared library module
     // (.note parse + render). Target-agnostic so both native (backend, CLI) and
     // wasm (frontend) importers can use it — a module import crosses subsystem
@@ -251,6 +259,7 @@ pub fn build(b: *std.Build) void {
     serve_mod.addImport("tls", tls_mod);
     serve_mod.addImport("supernote", supernote); // backend can use the .note library
     serve_mod.addImport("spd", spd_mod); // native .spd parser for thumbnail extraction
+    serve_mod.addOptions("build_options", build_options); // `--version`
     linkSqlite(b, serve_mod);
     const serve_exe = b.addExecutable(.{ .name = "inkhold", .root_module = serve_mod });
     b.installArtifact(serve_exe);
@@ -281,6 +290,7 @@ pub fn build(b: *std.Build) void {
     });
     note_builder_mod.addImport("note", supernote);
     backend_test_mod.addImport("note_builder", note_builder_mod);
+    backend_test_mod.addOptions("build_options", build_options); // cli.zig's `--version`
     linkSqlite(b, backend_test_mod);
     // Real device captures, for the `.note` index golden test. Wired in as named
     // imports because @embedFile cannot reach outside its module's directory.
