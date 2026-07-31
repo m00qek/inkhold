@@ -39,6 +39,9 @@ pub const max_declared_bytes: i64 = 64 * 1024 * 1024 * 1024; // 64 GiB
 /// documented and does not read as unhandled.
 const BindReq = struct {
     equipmentNo: []const u8,
+    /// The account the device is binding to. Only consulted when the request
+    /// arrives WITHOUT a token — see `bindEquipment`. Never trusted on its own.
+    account: ?[]const u8 = null,
     name: ?[]const u8 = null,
     label: ?[]const []const u8 = null,
     totalCapacity: ?[]const u8 = null,
@@ -235,7 +238,19 @@ fn resolveEquipment(ctx: *Context, body_eno: ?[]const u8, caller: *const context
     if (caller.audience == .device and body_eno != null and eno.len > 0) {
         const svc = ctx.service.?;
         if (!(svc.isDeviceBound(caller.user_id, eno) catch true)) {
-            svc.bindDevice(caller.user_id, eno, "Supernote app") catch {};
+            // "Supernote", not "Supernote app". This path fires for ANY device
+            // caller presenting a body serial — the Nomad included — so the old
+            // label told people their e-ink tablet was a phone app, on a project
+            // that deliberately does not support the phone app at all. It is a
+            // PLACEHOLDER standing in until `bindEquipment` reports the real
+            // name, so it should be the least wrong thing we can say, not a
+            // guess at hardware we have not been told about.
+            svc.bindDevice(caller.user_id, eno, "Supernote") catch {};
+            // Worth a line: this is a device appearing on the account WITHOUT
+            // having introduced itself, so whatever the screen shows for it is a
+            // placeholder until `bindEquipment` arrives. When somebody asks why
+            // their tablet is called "Supernote", this is the answer.
+            std.log.info("device {s} auto-bound from a file call; no name reported yet", .{eno});
         }
     }
     return eno;
@@ -296,13 +311,52 @@ pub fn queryServer(ctx: *Context, req: *Request, params: Params) anyerror!void {
 pub fn bindEquipment(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
-    const caller = ctx.caller.?; // device scope
     var parsed = json.readBody(BindReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
     const in = parsed.value;
 
+    // THIS ROUTE ACCEPTS AN UNAUTHENTICATED CALL, and only this one.
+    //
+    // The Nomad fires `bindEquipment` SIX MILLISECONDS before it stores the token
+    // its login just returned (docs/scratch/nomad-login.log), so the one request
+    // carrying the device's name goes out with no `x-access-token`. Requiring the
+    // token meant answering 401 to every pairing: the handler never ran, the name
+    // never landed, and the account screen showed a placeholder for a tablet that
+    // had said what it was called — while sync worked perfectly, because the
+    // binding itself already existed. Nothing about the failure was visible.
+    //
+    // With no token we fall back to the session that login just created for THIS
+    // serial and THIS account. That is the token's own evidence read from the
+    // sessions table rather than the header, and it is strictly narrower than
+    // trusting the body: an unknown serial, or one whose live session belongs to
+    // somebody else, is still refused. A caller cannot reach an account it could
+    // not already log into.
+    const user_id = if (ctx.caller) |c| c.user_id else blk: {
+        const account = in.account orelse return fail(ctx, req, .unauthorized, "UNAUTHORIZED", "unauthorized");
+        const owner = svc.deviceSessionOwner(in.equipmentNo, account) catch return serverError(ctx, req);
+        break :blk owner orelse return fail(ctx, req, .unauthorized, "UNAUTHORIZED", "unauthorized");
+    };
+
     const name = in.name orelse "Supernote";
-    svc.bindDevice(caller.user_id, in.equipmentNo, name) catch return serverError(ctx, req);
+    svc.bindDevice(user_id, in.equipmentNo, name) catch return serverError(ctx, req);
+    // THE DEVICE'S OWN NAME WINS. `bindDevice` never overwrites an existing
+    // label — it runs on every login and a placeholder must not clobber a real
+    // name — but this call IS the device saying what it is called, and by now the
+    // row usually exists already: `resolveEquipment` binds the serial on the
+    // first file call and stamps the literal "Supernote app". Without this the
+    // screen showed that placeholder for ever, for a tablet that had reported
+    // "Supernote Nomad AA". Passed `in.name` and not `name`, so the fallback can
+    // never overwrite a good label with a generic one.
+    if (in.name) |reported| svc.nameDevice(user_id, in.equipmentNo, reported) catch {};
+    // The one place a device tells us what it is called, and it happens when the
+    // account is ADDED rather than on every login — so a name that never updates
+    // is usually a `bindEquipment` that never arrived. Logged with what was
+    // actually reported, so that is answerable from the record instead of guessed.
+    if (in.name) |reported| {
+        std.log.info("device {s} bound via bindEquipment, reported name \"{s}\"", .{ in.equipmentNo, reported });
+    } else {
+        std.log.info("device {s} bound via bindEquipment but reported NO name", .{in.equipmentNo});
+    }
 
     // Ensure the capacity row EXISTS (a freshly-onboarded account may not have one
     // yet, and the upload quota pre-check must never 500 on a missing row) WITHOUT
@@ -310,11 +364,11 @@ pub fn bindEquipment(ctx: *Context, req: *Request, params: Params) anyerror!void
     // existing quota (the server default from user creation, or an admin-set value)
     // is preserved. We deliberately ignore the device-reported `totalCapacity` — a
     // device-token holder must not be able to self-raise or clobber its quota.
-    svc.ensureCapacity(caller.user_id, authsvc.default_capacity) catch {};
+    svc.ensureCapacity(user_id, authsvc.default_capacity) catch {};
     // Auto-create the default folder tree (idempotent; best-effort per label).
     if (ctx.files) |files| {
         if (in.label) |labels| {
-            for (labels) |path| _ = files.ensureFolderPath(caller.user_id, path) catch {};
+            for (labels) |path| _ = files.ensureFolderPath(user_id, path) catch {};
         }
     }
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);

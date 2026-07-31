@@ -46,7 +46,14 @@ pub const routes = [_]router.Route{
     .{ .method = .POST, .path = "/api/official/user/check/exists/server", .scopes = &.{.public}, .handler = device.checkExists, .rate_limit = .{ .max = 20, .window_s = 60, .by = .ip } },
     .{ .method = .GET, .path = "/api/file/query/server", .scopes = &.{.public}, .handler = device.queryServer },
     // Post-login device sync + file API (device token via x-access-token).
-    .{ .method = .POST, .path = "/api/terminal/user/bindEquipment", .scopes = &.{.device}, .handler = device.bindEquipment },
+    // `.public` ALONGSIDE `.device`, uniquely on this route: the Nomad sends this
+    // call before it has stored the token its login just handed it, so requiring
+    // the header answered 401 to every pairing and the device's own name never
+    // arrived (docs/scratch/nomad-login.log). The handler does NOT then trust the
+    // body — it requires a live device session for that serial and that account,
+    // which is the token's evidence taken from the sessions table. See the long
+    // comment there; this is the only route that may do this.
+    .{ .method = .POST, .path = "/api/terminal/user/bindEquipment", .scopes = &.{ .device, .public }, .handler = device.bindEquipment },
     .{ .method = .POST, .path = "/api/user/query", .scopes = &.{.device}, .handler = device.userQuery },
     // The official Android app's two extra post-login calls (docs/design/login-in-app.md):
     // `bind/status` confirms the account is paired; `capacity/query` is the storage

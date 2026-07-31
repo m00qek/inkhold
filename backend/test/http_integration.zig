@@ -1757,6 +1757,15 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         try expectSuccess(resp.body);
     }
 
+    // THE REAL ORDER, which is what made the naming bug possible: a file call
+    // reaches the server BEFORE `bindEquipment` and binds the serial it has just
+    // seen with a placeholder, because it has no name yet (`resolveEquipment`).
+    // Simulated with the same call that path makes. Without this line the bind
+    // below is the row's INSERT, the reported name arrives through it, and a test
+    // asserting the name passes whether or not the handler adopts it — which is
+    // exactly how the placeholder survived into every account screen.
+    try f.svc.bindDevice(alice, "SN1", "Supernote app");
+
     // bindEquipment: creates the default label folders. The device-reported
     // `totalCapacity` is IGNORED — the server owns the quota, so a device cannot
     // set or raise its own (finding #6).
@@ -1768,6 +1777,18 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
     try std.testing.expect(try f.svc.isDeviceBound(alice, "SN1"));
+    // THE DEVICE'S REPORTED NAME LANDS, over the placeholder an earlier file call
+    // will already have stamped ("Supernote app", from `resolveEquipment`). This
+    // is asserted through the ROUTE rather than against `nameDevice` directly,
+    // because the service function was never the broken part — the handler simply
+    // did not call it, and a unit test of the function stayed green while every
+    // account screen showed the placeholder for a tablet that had said its name.
+    {
+        const devs = try f.svc.listUserDevices(gpa, alice, alice);
+        defer authsvc.Service.freeDevices(gpa, devs);
+        try std.testing.expectEqual(@as(usize, 1), devs.len);
+        try std.testing.expectEqualStrings("Nomad", devs[0].name);
+    }
     // Quota is unchanged from the server default set at user creation — the bind's
     // reported 25485312 KB was NOT adopted.
     try std.testing.expectEqual(authsvc.default_capacity, try f.svc.userCapacity(alice));
@@ -6997,6 +7018,65 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         const after = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/account", &web, "");
         try std.testing.expectEqual(@as(u16, 200), after.status);
+    }
+}
+
+test "bindEquipment WITHOUT a token: accepted only on the strength of a live session for that serial" {
+    // THE REAL NOMAD SENDS THIS UNAUTHENTICATED. Captured in
+    // docs/scratch/nomad-login.log: login returns the token at t+0ms, the device
+    // fires bindEquipment at t+9ms, and only stores the token at t+15ms — so the
+    // one call carrying its name, model and firmware has no x-access-token. We
+    // answered 401 to every pairing, the handler never ran, and the account
+    // screen showed a placeholder for a tablet that had said what it was called.
+    // Sync worked throughout, because the binding already existed, so nothing
+    // about the failure was visible from either side.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    _ = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+    const created = try f.svc.createUser(admin, "alice@home", false);
+    const alice = created.id;
+    // Through the real first-login flow, so she has a usable password to log a
+    // DEVICE in with — a `pending` account could not reach this route at all.
+    _ = try onboardWeb(ctx, "alice@home", created.temp_password.slice(), "alicepw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+
+    const bind_body =
+        "{\"account\":\"alice@home\",\"equipmentNo\":\"SN-NOMAD-9\",\"name\":\"Supernote Nomad 2\"," ++
+        "\"totalCapacity\":\"25485312\",\"label\":[\"NOTE/Note\"],\"version\":\"202407\"}";
+    const tokenless = [_]Header{.{ .name = "content-type", .value = "application/json" }};
+
+    // 1. NO SESSION for that serial -> still 401. The body alone proves nothing,
+    //    which is the whole point: this must not become a way to bind a serial to
+    //    an account you cannot already log into.
+    {
+        const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/terminal/user/bindEquipment", &tokenless, bind_body), &obuf);
+        try std.testing.expectEqual(@as(u16, 401), resp.status);
+    }
+
+    // 2. A live session for that serial, but belonging to SOMEBODY ELSE -> 401.
+    {
+        _ = try deviceLogin(ctx, &obuf, &reqbuf, "admin", "adminpw1", "SN-NOMAD-9");
+        const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/terminal/user/bindEquipment", &tokenless, bind_body), &obuf);
+        try std.testing.expectEqual(@as(u16, 401), resp.status);
+        // ...and nothing was bound to alice on the way past.
+        try std.testing.expect(!(try f.svc.isDeviceBound(alice, "SN-NOMAD-9")));
+    }
+
+    // 3. Alice logs in on that serial — now the session says so, and the bind is
+    //    accepted with the name the device reported.
+    {
+        _ = try deviceLogin(ctx, &obuf, &reqbuf, "alice@home", "alicepw1", "SN-NOMAD-9");
+        const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/terminal/user/bindEquipment", &tokenless, bind_body), &obuf);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expect(try f.svc.isDeviceBound(alice, "SN-NOMAD-9"));
+
+        const devs = try f.svc.listUserDevices(gpa, alice, alice);
+        defer authsvc.Service.freeDevices(gpa, devs);
+        try std.testing.expectEqualStrings("Supernote Nomad 2", devs[0].name);
     }
 }
 

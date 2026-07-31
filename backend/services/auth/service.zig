@@ -1023,6 +1023,62 @@ pub const Service = struct {
         }
     }
 
+    /// The user id behind a LIVE device session for `equipment_no`, but ONLY when
+    /// that session belongs to the account named by `email`.
+    ///
+    /// **Why this exists — `bindEquipment` arrives unauthenticated.** Captured
+    /// from a real Nomad (docs/scratch/nomad-login.log): login returns a token at
+    /// t+0ms, the device fires `bindEquipment` at t+9ms, and only STORES the token
+    /// at t+15ms. So the one call that carries the device's name, model and
+    /// firmware goes out with no `x-access-token` header, we answered 401, and the
+    /// tablet kept the placeholder name for ever while syncing perfectly.
+    ///
+    /// This is the token's evidence obtained from state we already hold: somebody
+    /// completed a login on THIS serial, for THIS account, seconds ago, and the
+    /// session proving it is in the table. It is deliberately not the same as
+    /// trusting the body — a serial with no live session, or one whose session
+    /// belongs to a different account, still gets nothing. So it cannot be used to
+    /// bind a serial to an account you could not already log into, which is the
+    /// whole risk of accepting an unauthenticated bind.
+    ///
+    /// Device sessions have no idle window (see `idleWindow`), so the absolute
+    /// `expires_at` is the only clock that matters here.
+    pub fn deviceSessionOwner(self: *Service, equipment_no: []const u8, email: []const u8) Error!?u64 {
+        if (equipment_no.len == 0 or email.len == 0) return null;
+        var r = (try self.db.row(
+            "SELECT s.user_id FROM sessions s JOIN users u ON u.id = s.user_id " ++
+                "WHERE s.equipment_no = ?1 AND s.audience = 'device' AND u.email = ?2 AND s.expires_at > ?3 " ++
+                "LIMIT 1;",
+            &.{ .{ .text = equipment_no }, .{ .text = email }, .{ .int = self.now() } },
+        )) orelse return null;
+        defer r.finalize();
+        return @intCast(r.int(0));
+    }
+
+    /// Adopts the name the DEVICE reports for itself ("Supernote Nomad AA").
+    ///
+    /// Separate from `bindDevice` because the two callers know different things.
+    /// The file-call path binds a serial it has only just seen and has no name
+    /// for, so it stamps a placeholder; `bindEquipment` is the device introducing
+    /// itself and its name is the authoritative one. `bindDevice` deliberately
+    /// does not overwrite an existing label — it runs on every login, and a
+    /// placeholder must never overwrite a real name — so the authoritative name
+    /// needs its own door, or it never lands: the row already exists by then and
+    /// every account showed the literal "Supernote app" for a tablet that had
+    /// told the server exactly what it was called.
+    ///
+    /// Only ever called with a name the device actually sent, never with a
+    /// fallback, so this cannot overwrite a good label with a generic one.
+    pub fn nameDevice(self: *Service, user_id: u64, equipment_no: []const u8, name: []const u8) Error!void {
+        if (name.len == 0) return;
+        var s = try self.db.prepare("UPDATE user_devices SET name = ?3 WHERE user_id = ?1 AND equipment_no = ?2;");
+        defer s.finalize();
+        s.bindInt(1, @intCast(user_id));
+        s.bindText(2, equipment_no);
+        s.bindText(3, name);
+        _ = try s.step();
+    }
+
     /// Revokes a device: marks the binding inactive and deletes its sessions.
     pub fn unlinkDevice(self: *Service, user_id: u64, equipment_no: []const u8) Error!void {
         {
@@ -1374,6 +1430,49 @@ test "re-binding an ACTIVE device changes nothing — this path runs on every lo
     try std.testing.expectEqual(before, devs[0].created_at); // not re-dated
     try std.testing.expectEqualStrings("The name it was given", devs[0].name); // not renamed
     try std.testing.expect(devs[0].active);
+}
+
+test "the device's OWN name replaces the placeholder the file path stamped" {
+    // `resolveEquipment` binds a serial it has only just seen on the first file
+    // call, with the literal "Supernote app" — it has no name yet. `bindEquipment`
+    // is the device introducing itself, and by then the row already exists, so
+    // `bindDevice` (which never overwrites a label, because it runs on every
+    // login) left the placeholder in place for ever. The account screen showed
+    // "Supernote app" for a tablet that had reported "Supernote Nomad AA".
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+    const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
+    const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
+
+    const equipment_no = "SN2026NOMAD0001";
+    try svc.bindDevice(alice, equipment_no, "Supernote app"); // the placeholder
+    try svc.nameDevice(alice, equipment_no, "Supernote Nomad AA"); // the device speaks
+
+    const devs = try svc.listUserDevices(std.testing.allocator, alice, alice);
+    defer Service.freeDevices(std.testing.allocator, devs);
+    try std.testing.expectEqualStrings("Supernote Nomad AA", devs[0].name);
+}
+
+test "an empty reported name never blanks the one already there" {
+    // The handler only calls this with a name the device actually sent, but the
+    // guard is here too: a device that reports "" must not erase a good label and
+    // leave a nameless row the screen has to fall back to the serial for.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+    const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
+    const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
+
+    const equipment_no = "SN2026NOMAD0001";
+    try svc.bindDevice(alice, equipment_no, "Supernote Nomad AA");
+    try svc.nameDevice(alice, equipment_no, "");
+
+    const devs = try svc.listUserDevices(std.testing.allocator, alice, alice);
+    defer Service.freeDevices(std.testing.allocator, devs);
+    try std.testing.expectEqualStrings("Supernote Nomad AA", devs[0].name);
 }
 
 test "deleting a user (admin-only) cascades away their sessions" {

@@ -172,6 +172,22 @@
 .acct-rows > .acct-row:last-child {
   border-bottom-color: transparent;
 }
+/* A STANDING HINT BELONGS TO THE ROWS ABOVE IT, and the gap has to be small
+   enough to say so. It measured 27px from the device's name to the hint — the
+   last row's 15px bottom padding plus the hint's 12px margin — against 8px in
+   the Versions section, whose note sits directly under its control. Two
+   explanations of the same kind, at three times the distance.
+
+   The row's bottom padding is what separates it from the NEXT ROW, and when a
+   hint follows there is no next row: the padding is holding a gap for something
+   that is not there. Dropped, so the hint hangs at its own margin alone — the
+   same relationship, and now the same 8px, that Versions has. */
+.acct-rows:has(+ .acct-hint) > .acct-row:last-child {
+  padding-bottom: 0;
+}
+.acct-rows + .acct-hint {
+  margin-top: var(--sp-2);
+}
 /* A row whose disclosure is OPEN gives up its underline: the rule is the row's
    own bottom boundary, and the panel it opened sits below it, so leaving the
    line in place drew a border between a row and its own content. */
