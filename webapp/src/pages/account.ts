@@ -16,8 +16,12 @@
 // the byte counts, the timestamps, the version count — which is the rule the
 // app already follows everywhere else.
 //
-// FOUR SECTIONS, EACH LOADING AND FAILING SEPARATELY. Signing in · Devices ·
-// Storage · Appearance. They come off four different calls, so one unreachable
+// FIVE SECTIONS, EACH LOADING AND FAILING SEPARATELY. Appearance · Signing in ·
+// Devices · Storage · Versions. Appearance leads because it is the only one that
+// is a preference rather than a fact about the account, it needs no round trip,
+// and it is the control a person returns for; the rest you set once. Versions is
+// its own section rather than a tail on Storage because Storage REPORTS and that
+// one DISCARDS. They come off four different calls, so one unreachable
 // endpoint must cost its own section and nothing more — the same reason the
 // admin console renders a person whose meter could not be counted. And each
 // section states LOADING and KNOWN-EMPTY as different things: "no devices
@@ -35,6 +39,7 @@
 
 import { el } from "../ui/dom";
 import { field, statusLine } from "../ui/form";
+import { openDialog } from "../ui/confirm";
 import { ICONS, svg, type IconName } from "../ui/icons";
 import { relativeTime, absoluteTime } from "../ui/relativeTime";
 import { formatBytes } from "../core/fileKind";
@@ -220,6 +225,10 @@ export interface AccountHost {
   account: string;
   /** The shell's content area; the page is an overlay inside it, like `.admin`. */
   content: HTMLElement;
+  /** The app root, where a modal mounts — the same host the bin's confirm uses,
+   *  so the dialog sits above the whole shell rather than inside a scrolled
+   *  panel that would clip it. */
+  root: HTMLElement;
   /** Hidden while the page is up (not emptied) — the folder survives the visit. */
   gallery: HTMLElement;
   crumbs: HTMLElement;
@@ -316,6 +325,12 @@ export function createAccountPage(host: AccountHost): AccountPage {
         el("p", { class: "acct__mail acct-data", text: host.account }),
       ),
     ),
+    // APPEARANCE FIRST. It is the only section that is a preference rather than a
+    // fact about the account, it needs no round trip, and it is the one control
+    // here a person comes back for — the rest you set once. It also means the
+    // page opens with something already resolved instead of four "Loading…"
+    // lines, which is a better first frame on a slow link.
+    section("Appearance", appearanceBody),
     section("Signing in", securityBody),
     section("Devices", devicesBody, deviceHint()),
     section("Storage", storageBody),
@@ -326,7 +341,6 @@ export function createAccountPage(host: AccountHost): AccountPage {
     // margin label for the same reason every other section has one: the margin is
     // how this page says what you are looking at.
     section("Versions", versionsBody),
-    section("Appearance", appearanceBody),
   );
 
   const panel = el("section", { class: "acct", "aria-label": "Your account", hidden: true }, body);
@@ -387,9 +401,30 @@ export function createAccountPage(host: AccountHost): AccountPage {
   const sessionsRow = row("Other sessions");
   const thisBrowserRow = row("This browser");
 
-  passwordRow.actions.append(
-    button("Change", () => togglePasswordForm(passwordForm.node.hidden), { ariaLabel: "Change your password" }),
+  // A DISCLOSURE, so it says so. It opens and closes the form below it, and a
+  // plain button that looks identical either way leaves you guessing whether the
+  // click landed — especially since pressing it again is how you back out.
+  // `aria-expanded` states it for a screen reader; `.is-open` gives it the same
+  // held-down look the topbar's view toggle uses for its active segment, which
+  // is the app's existing idiom for "this control is currently on".
+  const passwordToggle = button("Change", () => togglePasswordForm(passwordForm.node.hidden), {
+    ariaLabel: "Change your password",
+  });
+  // A CHEVRON, because the fill alone could not carry it. The topbar's view
+  // toggle reads as pressed only because its unpressed sibling sits beside it —
+  // a lone button has nothing to be compared against, so the same `--hover` fill
+  // reads as no state at all. The chevron is the app's own disclosure motif (the
+  // rail nameplate rotates this identical path), and it points down closed, up
+  // open, which is legible with no second control to compare to.
+  passwordToggle.append(
+    // `html:`, NOT a child — `svg()` returns MARKUP, and passing it as a child
+    // makes `el` insert the path data as a text node. It renders as a diagonal
+    // smear of coordinates across the page, which is how this was caught.
+    el("span", { class: "acct-btn__chevron", "aria-hidden": "true", html: svg(ICONS.chevron) }),
   );
+  passwordToggle.setAttribute("aria-expanded", "false");
+  passwordToggle.setAttribute("aria-controls", "acct-pw-form");
+  passwordRow.actions.append(passwordToggle);
   thisBrowserRow.actions.append(
     // SIGN OUT DID NOT DISAPPEAR when it left the rail — it moved here, and it
     // is the last row of the section about signing in, which is where a person
@@ -508,7 +543,11 @@ export function createAccountPage(host: AccountHost): AccountPage {
       type: "password",
       autocomplete: "new-password",
       minLength: MIN_PASSWORD_LENGTH,
-      hint: `At least ${MIN_PASSWORD_LENGTH} characters.`,
+      // BOTH CONSTRAINTS WHERE THE CHOICE IS MADE. The tablet advice used to
+      // hang off "Confirm new password", where it arrives one field too late to
+      // act on — by then you have already chosen, and the only thing left to do
+      // is retype it. A hint that cannot change what you type is decoration.
+      hint: `At least ${MIN_PASSWORD_LENGTH} characters, and you'll type it on the Supernote too — pick something easy on a tablet keyboard.`,
     });
     const confirm = field({
       id: "acct-confirm-password",
@@ -516,7 +555,6 @@ export function createAccountPage(host: AccountHost): AccountPage {
       type: "password",
       autocomplete: "new-password",
       minLength: MIN_PASSWORD_LENGTH,
-      hint: "You'll type this on the Supernote too — pick something easy on a tablet keyboard.",
     });
     const status = statusLine();
     const submit = el("button", { class: "acct-btn acct-btn--go", type: "submit", text: "Change password" });
@@ -524,7 +562,7 @@ export function createAccountPage(host: AccountHost): AccountPage {
 
     const node = el(
       "form",
-      { class: "acct-pw", hidden: true },
+      { class: "acct-pw", id: "acct-pw-form", hidden: true },
       current.row,
       next.row,
       confirm.row,
@@ -599,6 +637,15 @@ export function createAccountPage(host: AccountHost): AccountPage {
 
   function togglePasswordForm(show: boolean): void {
     passwordForm.node.hidden = !show;
+    passwordToggle.setAttribute("aria-expanded", String(show));
+    passwordToggle.classList.toggle("is-open", show);
+    // The Password row's own bottom rule is SUPPRESSED while the form is open.
+    // That rule is the row's boundary, and with the form sitting directly under
+    // it the line landed BETWEEN the row and its own form — so the form read as
+    // belonging to "Other sessions" below rather than to the password above.
+    // Closing the row's underline makes the two one block, and the card's own
+    // border becomes the boundary.
+    passwordRow.node.classList.toggle("is-expanded", show);
     if (show) {
       passwordForm.reset();
       passwordForm.focus();
@@ -656,6 +703,42 @@ export function createAccountPage(host: AccountHost): AccountPage {
 
   async function unlinkDevice(device: MyDevice): Promise<void> {
     if (unlinking.has(device.equipmentNo)) return;
+
+    // CONFIRMED, because the webapp cannot put it back. Every other action on
+    // this page is reversible from this page — a password can be changed again,
+    // a session signed back into, `keep` raised, the theme flipped. Unlinking is
+    // the one that ends here: re-pairing happens ON THE TABLET, so a mis-click
+    // sends you across the room with a login code, and if the tablet is not to
+    // hand it sends you nowhere at all.
+    //
+    // This is exactly what the shared `confirm.ts` is for, and it earns the
+    // modal on the terms the app's other dialogs do: it acts on a TARGET OBJECT
+    // (this device), it is DESTRUCTIVE of something you cannot restore here, and
+    // Cancel is the autofocused default so a stray Return never unlinks. Note
+    // the change-password form deliberately is NOT a dialog by the same rule —
+    // it has no target object and nothing it does is unrecoverable from here.
+    const name = device.name || device.equipmentNo;
+    const ok = await openDialog({
+      host: host.root,
+      classes: { dialog: "confirm", body: "confirm__body", actions: "confirm__actions", cancel: "btn", go: "btn is-danger" },
+      goLabel: "Unlink",
+      cancelLabel: "Cancel",
+      labelledBy: "acct-unlink-title",
+      build: (body, { go }) => {
+        go.setAttribute("aria-label", `Unlink ${name}`);
+        body.append(
+          el("h2", { id: "acct-unlink-title", text: `Unlink ${name}?` }),
+          // BOTH HALVES, the same two the standing hint gives: what stops, and
+          // what is safe. A confirmation that only names the loss reads as a
+          // threat and gets clicked through.
+          el("p", {
+            text: `${name} will stop syncing until you pair it again from the device itself. Nothing already synced is removed.`,
+          }),
+        );
+      },
+    }).done;
+    if (!ok) return;
+
     unlinking.add(device.equipmentNo);
     renderDevices();
     const mine = generation;
@@ -732,11 +815,16 @@ export function createAccountPage(host: AccountHost): AccountPage {
 
   // --- the versions control -------------------------------------------------
   //
-  //     Keep the last  [ 5 ]  of each file        13 MB
+  //     Keep the last  [−][ 5 ][+]  of each file            [ Save ]
   //
-  // THE NUMBER AND ITS COST SIT TOGETHER. "Keep more versions" is abstract until
-  // it reads "13 MB", and the Versions line in Storage above exists precisely to
-  // make this control comprehensible.
+  // NO BYTE FIGURE ON THIS LINE. It carried the current version total, and sat
+  // where `Save` appears — so next to a pending change it read as what the
+  // change would cost, a delta, which it never was. A number that is right and
+  // reads as something else is worse here than no number, because the one thing
+  // this control must not do is misstate the price of pressing it.
+  //
+  // The total still has a home: the Versions line in Storage, a few rows up,
+  // where it sits among the other four and reads as the total it is.
   //
   // BOUNDED ABOVE BY THE SERVER, so one person cannot set the household's disk
   // policy; the global `max_bytes` stays a backstop behind that.
@@ -781,7 +869,6 @@ export function createAccountPage(host: AccountHost): AccountPage {
   }
   keepDown.addEventListener("click", () => step(-1));
   keepUp.addEventListener("click", () => step(1));
-  const keepCost = el("span", { class: "acct-keep__cost acct-data" });
   const keepNote = el("p", { class: "acct-keep__note", id: "acct-keep-note", role: "status", "aria-live": "polite" });
   const keepSave = el("button", { class: "acct-btn acct-btn--go acct-keep__save", type: "button", text: "Save", hidden: true });
   const keepLine = el(
@@ -790,7 +877,6 @@ export function createAccountPage(host: AccountHost): AccountPage {
     el("label", { class: "acct-keep__label", htmlFor: "acct-keep", text: "Keep the last" }),
     keepStepper,
     el("span", { class: "acct-keep__of", text: "of each file" }),
-    keepCost,
     keepSave,
   );
 
@@ -841,7 +927,6 @@ export function createAccountPage(host: AccountHost): AccountPage {
     // Only reassert the value when the user is not mid-edit, so a late refresh
     // cannot rewrite a number somebody is typing.
     if (document.activeElement !== keepInput) keepInput.value = String(p.keep);
-    keepCost.textContent = formatBytes(p.bytes);
     keepSave.disabled = savingPolicy;
     versionsBody.replaceChildren(
       keepLine,

@@ -29,6 +29,25 @@ pub const History = struct {
     /// install's disk policy. `keep = 0` disables versioning cleanly — back to
     /// prune-on-supersede, no history rows written.
     keep: u32 = 5,
+    /// The CEILING a person may raise their own `keep` to — separate from the
+    /// default above, which is what `keep` alone could not express.
+    ///
+    /// One number could not be both. Raising the ceiling to let somebody keep
+    /// more also raised everyone's default, which is most of what §6 set out to
+    /// fix: K only becomes safely user-settable if choosing a different value is
+    /// actually available. So the admin now says two things — where everyone
+    /// starts, and how far anyone may go.
+    ///
+    /// **The quota is the real limit, not this.** Since §6 charges retained
+    /// versions to their owner's allotment, someone raising their K spends their
+    /// own space and is self-limiting; this only stops one household member from
+    /// deciding the install's disk policy. `max_bytes` stays behind both.
+    ///
+    /// Read through `@max(keep, max_keep)` wherever the ceiling is needed, so a
+    /// config setting `keep` above it cannot produce a DEFAULT NOBODY MAY CHOOSE
+    /// — an install that had raised `keep` on its own keeps working untouched,
+    /// which a bare clamp would have quietly undone.
+    max_keep: u32 = 15,
     /// Global ceiling on the retained-history store, in bytes (H4) — the SD
     /// guard. Since §6 charges retained versions to their owner's quota, this is
     /// a BACKSTOP rather than the primary control: each account is already bounded

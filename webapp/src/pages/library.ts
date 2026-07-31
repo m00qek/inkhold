@@ -1612,6 +1612,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     segmented,
     setMode: (open) => setDestinationMode("account", open),
     toast,
+root,
     onLeave: () => go(folderHref(null)),
     onOpenBin: () => go(destinationHref(BIN_KEY)),
     onSignOut: () => deps.onSignOut(),

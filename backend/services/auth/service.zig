@@ -991,8 +991,28 @@ pub const Service = struct {
             _ = try s.step();
         }
         {
+            // AN UPSERT THAT REACTIVATES, not `INSERT OR IGNORE`.
+            //
+            // `unlinkDevice` marks the binding `status = 'N'` and KEEPS the row,
+            // so `INSERT OR IGNORE` found it already there and did nothing —
+            // which made unlinking a ONE-WAY DOOR. Pairing the same tablet to the
+            // same account again could never bring it back: the device logged in
+            // and got a live session, while its binding stayed revoked for ever.
+            // The webapp then showed no device for a Supernote that was sitting
+            // there syncing, and there was no way, from either side, to fix it.
+            //
+            // An ordinary re-bind of an ALREADY-ACTIVE device still changes
+            // nothing, exactly as before — this path runs on every device login,
+            // so it must not churn the name or the date. Only a REVOKED row is
+            // touched, and then it is treated as the fresh binding it is: active
+            // again, and re-dated, because the previous binding ended when it was
+            // unlinked and `created_at` is what the screen calls "Linked".
             var s = try self.db.prepare(
-                "INSERT OR IGNORE INTO user_devices(user_id, equipment_no, name, status, created_at) VALUES(?1,?2,?3,'Y',?4);",
+                "INSERT INTO user_devices(user_id, equipment_no, name, status, created_at) VALUES(?1,?2,?3,'Y',?4) " ++
+                    "ON CONFLICT(user_id, equipment_no) DO UPDATE SET " ++
+                    "  status = 'Y'," ++
+                    "  name = CASE WHEN user_devices.status = 'N' THEN excluded.name ELSE user_devices.name END," ++
+                    "  created_at = CASE WHEN user_devices.status = 'N' THEN excluded.created_at ELSE user_devices.created_at END;",
             );
             defer s.finalize();
             s.bindInt(1, @intCast(user_id));
@@ -1294,6 +1314,66 @@ test "unlinking a device marks the binding inactive and kills its sessions" {
     try svc.unlinkDevice(alice, equipment_no);
     try std.testing.expectEqual(@as(i64, 0), try svc.deviceCount(alice)); // binding inactive
     try std.testing.expect((try svc.caller(&dev.token)) == null); // device token revoked
+}
+
+test "re-pairing an UNLINKED device brings it back — unlink is not a one-way door" {
+    // `unlinkDevice` KEEPS the row and flips it to 'N', and `bindDevice` was
+    // `INSERT OR IGNORE` — so the row already being there made every later
+    // pairing a silent no-op. The tablet signed in, got a live device session,
+    // and its binding stayed revoked for ever: the account screen showed no
+    // device for a Supernote that was sitting there syncing, and there was no
+    // way to undo it from the webapp OR from the device.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+    const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
+    const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
+
+    const equipment_no = "SN2026NOMAD0001";
+    try svc.bindDevice(alice, equipment_no, "Alice's Nomad");
+    try std.testing.expectEqual(@as(i64, 1), try svc.deviceCount(alice));
+
+    try svc.unlinkDevice(alice, equipment_no);
+    try std.testing.expectEqual(@as(i64, 0), try svc.deviceCount(alice));
+
+    // Signing back in on the tablet runs exactly this — and it must bring the
+    // binding back rather than leave a live session attached to a revoked one.
+    try svc.bindDevice(alice, equipment_no, "Alice's Nomad");
+    try std.testing.expectEqual(@as(i64, 1), try svc.deviceCount(alice));
+
+    const devs = try svc.listUserDevices(std.testing.allocator, alice, alice);
+    defer Service.freeDevices(std.testing.allocator, devs);
+    try std.testing.expectEqual(@as(usize, 1), devs.len); // ONE binding, not a duplicate
+    try std.testing.expect(devs[0].active);
+}
+
+test "re-binding an ACTIVE device changes nothing — this path runs on every login" {
+    // The other half of the upsert. `bindDevice` runs on every device login, so
+    // a version that always wrote would reset the date on each sync — the screen
+    // would read "linked seconds ago" for a tablet paired last year.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+    const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
+    const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
+
+    const equipment_no = "SN2026NOMAD0001";
+    try svc.bindDevice(alice, equipment_no, "The name it was given");
+    const before = blk: {
+        const devs = try svc.listUserDevices(std.testing.allocator, alice, alice);
+        defer Service.freeDevices(std.testing.allocator, devs);
+        break :blk devs[0].created_at;
+    };
+
+    try svc.bindDevice(alice, equipment_no, "A different name");
+
+    const devs = try svc.listUserDevices(std.testing.allocator, alice, alice);
+    defer Service.freeDevices(std.testing.allocator, devs);
+    try std.testing.expectEqual(before, devs[0].created_at); // not re-dated
+    try std.testing.expectEqualStrings("The name it was given", devs[0].name); // not renamed
+    try std.testing.expect(devs[0].active);
 }
 
 test "deleting a user (admin-only) cascades away their sessions" {

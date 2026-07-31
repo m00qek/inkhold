@@ -6907,8 +6907,14 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
         try std.testing.expect(p.value.thisSessionSince != null);
         try std.testing.expectEqual(@as(i64, 0), p.value.otherBrowsers);
         try std.testing.expectEqual(@as(usize, 0), p.value.devices.len); // no tablet bound here
+        // The DEFAULT and the CEILING are two different numbers now: an account
+        // that has never chosen starts at `history.keep` and may raise itself as
+        // far as `history.max_keep`. Asserting they were equal is exactly what a
+        // config with one knob looked like, and it is what the settings control
+        // could not offer a choice within.
         try std.testing.expectEqual(@as(u32, 5), p.value.versions.keep); // the config default
-        try std.testing.expectEqual(p.value.versions.maxKeep, p.value.versions.keep);
+        try std.testing.expectEqual(@as(u32, 15), p.value.versions.maxKeep); // the config ceiling
+        try std.testing.expect(p.value.versions.maxKeep > p.value.versions.keep);
     }
 
     const StorageBody = struct {
@@ -6948,6 +6954,40 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/account/devices/unlink", &web, "{\"equipmentNo\":\"SN-NOT-MINE\"}");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
+    }
+
+    // AND IT ACTUALLY UNLINKS. Only the refusal was covered, which is the half
+    // that fails safe: a unlink route that answered 200 and did nothing would
+    // have passed every test here while the tablet kept syncing. Bound, unlinked
+    // through the caller's OWN route, then read back off the account payload.
+    {
+        try f.svc.bindDevice(admin, "SN-MINE-1", "My Nomad");
+        {
+            const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/account", &web, "");
+            try std.testing.expectEqual(@as(u16, 200), resp.status);
+            var p = try std.json.parseFromSlice(AccountBody, gpa, resp.body, .{ .ignore_unknown_fields = false });
+            defer p.deinit();
+            var found = false;
+            for (p.value.devices) |d| {
+                if (std.mem.eql(u8, d.equipment_no, "SN-MINE-1")) {
+                    found = true;
+                    try std.testing.expect(d.active); // bound and live before we touch it
+                }
+            }
+            try std.testing.expect(found);
+        }
+
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/account/devices/unlink", &web, "{\"equipmentNo\":\"SN-MINE-1\"}");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+
+        // The binding is no longer ACTIVE. It may still be listed — the screen
+        // shows revoked bindings too — so this asserts the status, not absence.
+        const after = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/account", &web, "");
+        var p = try std.json.parseFromSlice(AccountBody, gpa, after.body, .{ .ignore_unknown_fields = false });
+        defer p.deinit();
+        for (p.value.devices) |d| {
+            if (std.mem.eql(u8, d.equipment_no, "SN-MINE-1")) try std.testing.expect(!d.active);
+        }
     }
 
     // Sign out everywhere else leaves THIS browser signed in — the confirmation of

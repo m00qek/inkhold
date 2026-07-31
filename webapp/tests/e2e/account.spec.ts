@@ -146,7 +146,6 @@ test.describe("the account page", () => {
     //     this is the one control on the page that discards data, and it earns
     //     its own margin label rather than reading as a footnote to a readout.
     const versions = section(page, "Versions");
-    await expect(versions.locator(".acct-keep__cost")).toHaveText("13 MB");
     await expect(versions.locator("input.acct-keep")).toHaveValue("5");
     // The stepper is how this value moves: it is a small integer compared with
     // its neighbours, not a quantity anyone types out.
@@ -185,13 +184,16 @@ test.describe("the account page", () => {
 
     // THE FACT, BEFORE THE CHANGE — and nothing has been discarded yet.
     await expect(note).toHaveText("Keeping 3 will remove 8 versions now.");
-    await expect(page.locator(".acct-keep__cost")).toHaveText("13 MB");
+    // The stored total has NOT moved — the notice is a prediction, not a receipt.
+    // Read off Storage's Versions line, which is where that figure lives now: it
+    // used to sit on this control's own line, where next to a pending Save it
+    // read as the delta the change would cost rather than the current total.
+    await expect(page.locator(".acct-kind").filter({ hasText: "Versions" })).toContainText("13 MB");
 
     await page.getByRole("button", { name: "Save" }).click();
 
     // The count it predicted is the count it did.
     await expect(page.locator(".toast")).toContainText("Removed 8 versions");
-    await expect(page.locator(".acct-keep__cost")).toHaveText("8.8 MB");
     await expect(note).toHaveText("");
     // The Versions line in Storage moved with it, rather than going stale.
     await expect(page.locator(".acct-kind").filter({ hasText: "Versions" })).toContainText("8.8 MB");
@@ -222,7 +224,7 @@ test.describe("the account page", () => {
 
     await keep.fill("0");
     await page.getByRole("button", { name: "Save" }).click();
-    await expect(page.locator(".acct-keep__cost")).toHaveText("0 B");
+    await expect(page.locator(".acct-kind").filter({ hasText: "Versions" })).toContainText("0 B");
   });
 
   test("a wrong current password is refused; the right one goes through", async ({ page }) => {
@@ -259,6 +261,51 @@ test.describe("the account page", () => {
     await expect(section(page, "Signing in")).toContainText("Last changed just now");
   });
 
+  test("unlinking asks first, and CANCEL really does nothing", async ({ page }) => {
+    // Unlink is the one action on this page the webapp cannot undo: re-pairing
+    // happens on the tablet, so a mis-click sends you across the room with a
+    // login code — or nowhere at all, if the tablet is not to hand. The dialog
+    // is only worth having if backing out of it is genuinely inert, which is
+    // what this pins: a cancelled confirm must leave the binding alone.
+    await signedIn(page);
+
+    // RECORD THE REQUEST, do not watch the DOM. Asserting "the row is still
+    // there" after Cancel proves nothing: `toHaveCount(1)` is a retrying matcher
+    // and the row IS still there for the instant before an unlink would resolve,
+    // so it passes on its first poll and the test goes green against code that
+    // unlinks anyway. Verified by making Cancel fall through — the DOM version
+    // stayed green, this one goes red.
+    const unlinkCalls: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("/account/devices/unlink")) unlinkCalls.push(r.url());
+    });
+
+    await openAccount(page);
+
+    const devices = section(page, "Devices");
+    await expect(devices.locator(".acct-device")).toHaveCount(1);
+
+    await devices.getByRole("button", { name: "Unlink Nomad" }).click();
+    const dialog = page.locator("dialog.confirm");
+    await expect(dialog).toBeVisible();
+    // BOTH HALVES stated: what stops, and what is safe.
+    await expect(dialog).toContainText("stop syncing until you pair it again");
+    await expect(dialog).toContainText("Nothing already synced is removed");
+
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toHaveCount(0);
+    // THE ASSERTION THAT BITES: the server was never asked. Given time for one
+    // to have gone out and come back, no unlink request exists at all.
+    await expect(devices.getByRole("button", { name: "Unlink Nomad" })).toBeEnabled();
+    await expect(async () => {
+      expect(unlinkCalls).toEqual([]);
+    }).toPass({ timeout: 1500 });
+    // ...and nothing was announced. `.toast` is a PERSISTENT container that
+    // exists empty from page load, so this reads its text rather than its count.
+    await expect(devices.locator(".acct-device")).toHaveCount(1);
+    await expect(page.locator(".toast")).toHaveText("");
+  });
+
   test("unlinking a device removes its row", async ({ page }) => {
     await signedIn(page);
     await openAccount(page);
@@ -267,6 +314,7 @@ test.describe("the account page", () => {
     await expect(devices.locator(".acct-device")).toHaveCount(1);
 
     await devices.getByRole("button", { name: "Unlink Nomad" }).click();
+    await page.locator("dialog.confirm").getByRole("button", { name: "Unlink" }).click();
 
     await expect(devices.locator(".acct-device")).toHaveCount(0);
     // The known-empty state, claimed only now that the data supports it.

@@ -161,6 +161,28 @@
 .acct-rows > .acct-row:first-child {
   padding-top: 0;
 }
+/* NO RULE AFTER THE LAST ROW OF A SECTION. The rule is a separator BETWEEN rows,
+   and the last one has nothing to be separated from — it was closing a section
+   that the spine segment and the gap already close, so every section ended in a
+   line pointing at empty space.
+
+   `border-bottom-color`, not `border-bottom: 0`: the border stays in the box, so
+   removing it cannot shift the row's height by a pixel. Same technique as
+   `.acct-row.is-expanded`, and the reason is the same. */
+.acct-rows > .acct-row:last-child {
+  border-bottom-color: transparent;
+}
+/* A row whose disclosure is OPEN gives up its underline: the rule is the row's
+   own bottom boundary, and the panel it opened sits below it, so leaving the
+   line in place drew a border between a row and its own content. */
+.acct-row.is-expanded {
+  border-bottom-color: transparent;
+}
+/* The rule that row gave up, re-drawn BELOW its open panel — full width, because
+   it separates the two blocks rather than edging the 360px card. */
+.acct-pw:not([hidden]) + .acct-row {
+  border-top: 1px solid var(--row-rule);
+}
 
 .acct-row__k {
   flex: none;
@@ -228,6 +250,8 @@
 /* --- buttons --------------------------------------------------------------- */
 
 .acct-btn {
+  display: inline-flex;
+  align-items: center;
   height: var(--control-h-sm);
   padding: 0 12px;
   border: 1px solid var(--line);
@@ -253,6 +277,39 @@
   opacity: 0.5;
   cursor: default;
 }
+/* HELD DOWN while the thing it discloses is open — the same treatment the
+   topbar's view toggle gives its active segment (`--hover` fill, full-strength
+   ink), so "this control is currently on" looks the same everywhere in the app.
+   Without it the button is identical open and closed, and pressing it again is
+   how you back out, so there was nothing to tell you which press you were on. */
+.acct-btn.is-open {
+  background: var(--hover);
+  border-color: var(--ink-soft);
+  color: var(--ink);
+}
+/* The disclosure mark. Down = closed, up = open — the same chevron path the rail
+   nameplate rotates, so the motif for "this opens something" is one shape across
+   the app. It carries the state that the fill alone could not: a lone toggle has
+   no unpressed sibling to be read against. */
+.acct-btn__chevron {
+  display: inline-flex;
+  margin-left: 6px;
+  margin-right: -2px;
+  transition: transform 0.15s ease;
+}
+.acct-btn__chevron svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+}
+.acct-btn.is-open .acct-btn__chevron {
+  transform: rotate(180deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .acct-btn__chevron {
+    transition: none;
+  }
+}
 .acct-btn--danger {
   color: var(--acct-danger);
   border-color: color-mix(in srgb, var(--margin) 40%, var(--line));
@@ -272,15 +329,32 @@
 
 /* --- change password ------------------------------------------------------- */
 
+/* THE FORM BELONGS TO THE ROW ABOVE IT, and the spacing has to say so. It sat
+   flush against the Password row's bottom rule, so that line read as the CARD's
+   top edge — which put the form on the far side of the boundary and made it look
+   like part of "Other sessions" below. Two changes fix the grouping: the row
+   drops its rule while open (see `.acct-row.is-expanded`), and the gap above is
+   tight so proximity assigns the card to the row it came from.
+
+   Below it, the rule the Password row gave up is handed to the NEXT row instead
+   (`+ .acct-row`), which CLOSES the block: row + form is one tall row now, and
+   every other row on this page ends with a line. Without it the form's card just
+   trailed off into whitespace and "Other sessions" floated, unseparated. The gap
+   is `--row-pad-y` so the closing rule lands in the page's normal row rhythm
+   rather than inventing a second spacing. */
 .acct-pw {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
   max-width: 360px;
-  margin: 0 0 var(--sp-4);
+  margin: var(--sp-3) 0 var(--row-pad-y);
   padding: var(--sp-6) var(--sp-6) var(--sp-4);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  /* The RAISED-CARD corner, which is what this is: a slip laid on the page
+     inside the section. It was a bare `4px` — a third radius the token set does
+     not have (`--radius` 2px, `--radius-card` 8px), so it matched nothing and
+     read as almost-right. */
+  border-radius: var(--radius-card);
   background: var(--sheet);
 }
 .acct-pw[hidden] {
@@ -464,18 +538,19 @@
   outline-offset: -2px;
 }
 
-/* THE COST SITS WITH THE NUMBER. "Keep more versions" is abstract until it reads
-   "13 MB", which is the whole reason the Versions line above exists. Pushed to
-   the end of the line so the control reads as a sentence with its price at the
-   right, the way the design set it out. */
-.acct-keep__cost {
-  margin-left: auto;
-  font-size: var(--fs-title);
-  color: var(--ink);
-}
+/* `.acct-keep__cost` lived here — the version total, at the end of this line.
+   Removed: it sat exactly where `Save` appears, so beside a pending change it
+   read as what the change would COST rather than what is currently stored. The
+   figure was right and read as a delta, which on the one control that discards
+   data is worse than showing nothing. The total lives on Storage's Versions
+   line, among the other four, where it reads as a total.
 
+   `Save` inherits the `margin-left: auto` that pushed the figure right, so it
+   lands where every other action on this page does — Change, Sign out, Unlink,
+   Open all sit at the right edge of their row. */
 .acct-keep__save {
   flex: none;
+  margin-left: auto;
 }
 .acct-keep__save[hidden] {
   display: none;

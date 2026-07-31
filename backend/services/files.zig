@@ -2312,6 +2312,19 @@ pub const Files = struct {
         };
     }
 
+    /// The highest `keep` anyone may choose — `config.History.max_keep`, but never
+    /// below the configured DEFAULT.
+    ///
+    /// `@max` rather than the field alone, because a default outside the ceiling
+    /// is incoherent: an install that had raised `history.keep` to 20 before
+    /// `max_keep` existed would otherwise find every user silently clamped down
+    /// to 15 and their versions evicted on the next edit. The invariant lives
+    /// here, in the one place the ceiling is read, rather than in config
+    /// validation that a hand-edited file can sidestep.
+    fn historyCeiling(self: Files) u32 {
+        return @max(self.history.keep, self.history.max_keep);
+    }
+
     /// How many versions of each file this user keeps, and the ceiling they may
     /// choose within (docs/scratch/user-options.md §7).
     ///
@@ -2324,11 +2337,18 @@ pub const Files = struct {
     pub const VersionPolicy = struct { keep: u32, max_keep: u32 };
 
     pub fn versionPolicy(self: Files, user_id: u64) !VersionPolicy {
-        const ceiling = self.history.keep;
+        // TWO DIFFERENT NUMBERS, since `max_keep` split from `keep`. A user who
+        // has never chosen gets the DEFAULT (`history.keep`); the ceiling only
+        // bounds what they may choose. These were one value, and returning the
+        // ceiling as the default was harmless while they were equal — the moment
+        // they parted it silently gave every untouched account the maximum depth,
+        // which the retention tests caught by retaining more than K.
+        const ceiling = self.historyCeiling();
+        const fallback: VersionPolicy = .{ .keep = self.history.keep, .max_keep = ceiling };
         var r = (try self.db.row("SELECT history_keep FROM users WHERE id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse
-            return .{ .keep = ceiling, .max_keep = ceiling };
+            return fallback;
         defer r.finalize();
-        const stored = r.intOpt(0) orelse return .{ .keep = ceiling, .max_keep = ceiling };
+        const stored = r.intOpt(0) orelse return fallback;
         const clamped: u32 = if (stored <= 0) 0 else @intCast(@min(stored, @as(i64, ceiling)));
         return .{ .keep = clamped, .max_keep = ceiling };
     }
@@ -2393,7 +2413,7 @@ pub const Files = struct {
     /// evicted versions shared is refunded once and a blob a live file still holds
     /// is not refunded at all. Blob files are removed only after COMMIT.
     pub fn setVersionPolicy(self: Files, user_id: u64, want: u32) !VersionPolicyChange {
-        const ceiling = self.history.keep;
+        const ceiling = self.historyCeiling();
         const keep: u32 = @min(want, ceiling);
 
         try self.db.exec("BEGIN IMMEDIATE;");
@@ -4273,6 +4293,7 @@ test "setVersionPolicy: lowering evicts NOW, refunds the bytes, and keeps the pa
     defer f.deinit();
     try f.db.exec("UPDATE capacity SET total_bytes = 100000000 WHERE user_id = 1;");
     f.files.history.keep = 5;
+    f.files.history.max_keep = 5; // default AND ceiling here, so the clamp below has a bound to hit
 
     // Five distinct contents of one file: four retained versions behind it.
     inline for (.{ "v1", "v2", "v3", "v4", "v5" }) |body| {
@@ -4326,6 +4347,48 @@ test "setVersionPolicy: lowering evicts NOW, refunds the bytes, and keeps the pa
         const counts = try f.files.retainedPerFile(testing.allocator, 1);
         defer testing.allocator.free(counts);
         try testing.expectEqual(@as(usize, 0), counts.len); // no file has history now
+    }
+}
+
+test "the default and the ceiling are two knobs, and the default is always reachable" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // The shipped shape: start everyone at 5, let anyone go as far as 15.
+    f.files.history.keep = 5;
+    f.files.history.max_keep = 15;
+    {
+        // An account that has never chosen gets the DEFAULT, not the ceiling.
+        // These were one number, and returning the ceiling here would silently
+        // give every untouched account maximum depth on the day they split.
+        const p = try f.files.versionPolicy(1);
+        try testing.expectEqual(@as(u32, 5), p.keep);
+        try testing.expectEqual(@as(u32, 15), p.max_keep);
+    }
+    {
+        // ...and raising past the default is now actually available, which is the
+        // whole point of the split: a ceiling welded to the default meant the
+        // control could offer no choice at all.
+        const c = try f.files.setVersionPolicy(1, 12);
+        try testing.expectEqual(@as(u32, 12), c.policy.keep);
+        try testing.expectEqual(@as(u32, 12), (try f.files.versionPolicy(1)).keep);
+    }
+    {
+        const c = try f.files.setVersionPolicy(1, 99);
+        try testing.expectEqual(@as(u32, 15), c.policy.keep); // clamped to the ceiling
+    }
+
+    // THE UPGRADE HAZARD. An install that had raised `keep` to 20 before
+    // `max_keep` existed inherits the new field's default of 15 — and a bare
+    // clamp would drop every user to 15 and evict their versions on the next
+    // edit, from a config change the admin never made. The ceiling is read as
+    // `@max(keep, max_keep)`, so the configured default stays reachable.
+    f.files.history.keep = 20;
+    f.files.history.max_keep = 15;
+    {
+        const p = try f.files.versionPolicy(2);
+        try testing.expectEqual(@as(u32, 20), p.keep); // untouched
+        try testing.expectEqual(@as(u32, 20), p.max_keep); // and choosable
     }
 }
 
