@@ -326,6 +326,25 @@ test.describe("admin: actions", () => {
     await expect(page.locator(".admin-person", { hasText: "rui@household.lan" })).toHaveCount(1);
   });
 
+  test("YOUR OWN row has no reset button — it points at the account page instead", async ({ page }) => {
+    // THE BUTTON THAT STARTED user-options.md. A beta tester opened this console,
+    // saw "Reset password" against their own name, pressed it, and locked
+    // themselves out of their own server. Every verb here points OUTWARD; this
+    // one pointed outward at everybody except the person holding it.
+    //
+    // A POINTER, not a disabled button: greying it out invites "why can't I?",
+    // and the answer is not "you can't" but "not here".
+    await unlocked(page);
+    const me = page.locator(".admin-person", { hasText: "ana@household.lan" });
+    await expect(me).toHaveCount(1);
+    await expect(me.getByRole("button", { name: /^Reset/ })).toHaveCount(0);
+    await expect(me.locator(".admin-selfnote")).toContainText("on your account page");
+
+    // ...and it is gone from YOUR row only. This removes a footgun, not a verb.
+    const rui = page.locator(".admin-person", { hasText: "rui@household.lan" });
+    await expect(rui.getByRole("button", { name: /^Reset/ })).toHaveCount(1);
+  });
+
   test("a reset hands over the generated password, once", async ({ page }) => {
     await unlocked(page);
     const rui = page.locator(".admin-person", { hasText: "rui@household.lan" });
@@ -360,16 +379,33 @@ test.describe("admin: actions", () => {
     await expect(sofia).toContainText("must set password");
   });
 
-  test("refuses to remove the last administrator, and says why", async ({ page }) => {
+  test("YOUR OWN row cannot be deleted either — the control is absent, not disabled", async ({ page }) => {
+    // This test used to delete `ana`, the SIGNED-IN admin, to reach the
+    // last-administrator refusal. It cannot any more, because the button is
+    // gone from your own row — which is the point: the old test was driving the
+    // exact footgun that locked a beta tester out, and only the server's refusal
+    // stood between it and a purged account.
+    //
+    // Deleting an account purges its FILES, so this matters more than the reset
+    // beside it. The `LastAdmin` guard behind it only looks like the same
+    // protection: it saves the household, not you, and with two admins it would
+    // let you purge yourself.
+    //
+    // NOTHING replaces it. The reset has somewhere to send you and says so; this
+    // has nowhere — another admin must do it — and a note to that effect on a row
+    // you are only passing through is noise. Absence is the honest shape.
+    //
+    // The two server-side refusals (`LastAdmin` for the sole admin,
+    // `CannotDeleteSelf` when there is another) are unit-tested in
+    // `services/auth/service.zig`, where both audiences can actually be built.
     await unlocked(page);
-    const ana = page.locator(".admin-person", { hasText: "ana@household.lan" });
-    await ana.getByRole("button", { name: /^Delete/ }).click();
-    await page.getByLabel("Type the address to confirm").fill("ana@household.lan");
-    await page.getByRole("button", { name: "Delete permanently" }).click();
+    const me = page.locator(".admin-person", { hasText: "ana@household.lan" });
+    await expect(me).toHaveCount(1);
+    await expect(me.getByRole("button", { name: /^Delete/ })).toHaveCount(0);
 
-    await expect(page.locator(".toast")).toContainText("last administrator");
-    // And the row is still there — no optimistic removal to undo.
-    await expect(ana).toHaveCount(1);
+    // ...and it is gone from YOUR row only.
+    const rui = page.locator(".admin-person", { hasText: "rui@household.lan" });
+    await expect(rui.getByRole("button", { name: /^Delete/ })).toHaveCount(1);
   });
 });
 

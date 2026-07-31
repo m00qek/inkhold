@@ -55,16 +55,22 @@ OPTIMIZE ?= ReleaseSafe
 # THE FRESH-CLONE GUARD. `npm run build` needs `tsc`, which lives in
 # `webapp/node_modules` — absent in a clone that has only ever been built, so
 # the first `make serve` died on `tsc: command not found` with nothing to
-# suggest `npm ci`. Order-only would be wrong (the timestamp of a directory
-# moves), so this is a plain existence check that installs once and is a no-op
-# for ever after.
-$(WEB)/node_modules:
+# suggest `npm ci`. Order-only would be wrong (a directory's timestamp moves),
+# so this is a plain existence check that installs once and is a no-op after.
+#
+# KEYED ON `.package-lock.json`, NOT ON THE DIRECTORY. `npm ci` DELETES
+# `node_modules` before it repopulates it, so an install that is interrupted —
+# a timeout, a Ctrl-C, a dropped connection — leaves the directory behind and
+# EMPTY. A guard watching the directory then reports satisfied for ever and the
+# build fails on `tsc: command not found` anyway, which is the exact failure it
+# was written to remove. npm writes this file only on success.
+$(WEB)/node_modules/.package-lock.json:
 	npm --prefix $(WEB) ci
 
 build:
 	zig build -Doptimize=$(OPTIMIZE)
 
-release-artifact: $(WEB)/node_modules
+release-artifact: $(WEB)/node_modules/.package-lock.json
 	zig build -Doptimize=ReleaseSafe -Dtarget=$(TARGET)
 	npm --prefix $(WEB) run build
 	mkdir -p release-tmp/webapp
@@ -91,7 +97,7 @@ run: build
 # URL: http://<this machine's LAN IP>:$(SERVE_PORT)  (run `make lan-ip` for it).
 # A production SPA build defaults to the REAL backend (no ?real needed).
 # Port is 8090 by default (serve.zon); `make serve PORT=9000` overrides it.
-serve: build $(WEB)/node_modules
+serve: build $(WEB)/node_modules/.package-lock.json
 	npm --prefix $(WEB) run build
 	@mkdir -p server/8089
 	@sed 's/\.port = [0-9][0-9]*,/.port = $(SERVE_PORT),/' server/8089/serve.zon > server/8089/serve-run.zon

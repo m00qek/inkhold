@@ -925,6 +925,9 @@ function dialog(
 export function createAdminView(opts: {
   host: HTMLElement;
   body: HTMLElement;
+  /** The signed-in address, so the console can tell which row is YOU. Used for
+   *  one thing: never offering "Reset password" against your own account. */
+  account: string;
   toast(message: string): void;
   onUnlock(password: string): void;
   onAdd(): void;
@@ -1123,13 +1126,50 @@ export function createAdminView(opts: {
     const user = person.user;
     const name = displayName(user.email);
     const added = accountAge(user.createdAt);
-    const reset = el("button", { class: "admin-btn", type: "button", text: "Reset password", disabled: busy });
-    reset.setAttribute("aria-label", `Reset the password for ${name}`);
-    reset.addEventListener("click", () => opts.onReset(user));
+    // NO "RESET PASSWORD" ON YOUR OWN ROW. This is the button that started
+    // `user-options.md`: a beta tester opened the console, saw it against their
+    // own name, pressed it, and locked themselves out of their own server.
+    //
+    // Every verb in this console points OUTWARD — reset THEIR password, set
+    // THEIR quota, unlink THEIR device — and this one pointed outward at
+    // everybody except the person holding it. Your own password now lives on the
+    // account page, which is strictly better at it: it verifies the current one,
+    // hands you a session instead of a temporary password to retype, and says
+    // what the change will cost before you make it.
+    //
+    // Replaced by a POINTER rather than a disabled button. A greyed-out control
+    // invites the question "why can't I?", and the answer is not "you can't", it
+    // is "not here".
+    const isSelf = user.email === opts.account;
+    const reset = isSelf
+      ? el("span", {
+          class: "admin-selfnote",
+          text: "on your account page",
+          title: "Change your own password from Library / You",
+        })
+      : el("button", { class: "admin-btn", type: "button", text: "Reset password", disabled: busy });
+    if (!isSelf) {
+      reset.setAttribute("aria-label", `Reset the password for ${name}`);
+      reset.addEventListener("click", () => opts.onReset(user));
+    }
 
-    const remove = el("button", { class: "admin-btn admin-btn--danger", type: "button", text: "Delete", disabled: busy });
-    remove.setAttribute("aria-label", `Delete ${name}`);
-    remove.addEventListener("click", () => opts.onDelete(user));
+    // AND NO DELETE ON YOUR OWN ROW, for the same reason as the reset above and
+    // with more at stake: deleting an account purges its files. The `LastAdmin`
+    // guard behind this only LOOKS like the same protection — it saves the
+    // household, not you, so in a household with two admins it would happily let
+    // you purge yourself.
+    //
+    // Nothing replaces it. The reset has somewhere to send you (your account
+    // page) and says so; this has nowhere — another admin has to do it — and a
+    // note saying "ask someone else" on a row you are only passing through is
+    // noise. Absence is the honest shape.
+    const remove = isSelf
+        ? null
+        : el("button", { class: "admin-btn admin-btn--danger", type: "button", text: "Delete", disabled: busy });
+    if (remove) {
+      remove.setAttribute("aria-label", `Delete ${name}`);
+      remove.addEventListener("click", () => opts.onDelete(user));
+    }
 
     // Same rule as the devices above: a quota that could not be read renders as
     // an absence, never as a meter at zero. The allotment control stands down
@@ -1509,6 +1549,7 @@ export function createAdminPanel(host: AdminHost): AdminPanel {
   const view = createAdminView({
     host: panel,
     body: bodyEl,
+    account: host.account,
     toast: host.toast,
     onUnlock: (password) => void console_.unlock(password),
     onAdd: () => void console_.addPerson(),

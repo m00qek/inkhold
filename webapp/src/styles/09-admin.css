@@ -230,6 +230,19 @@
 /* Outlined, never filled: the console's actions are peers of each other, and a
    filled button among them would nominate one of "Add", "Reset" and "Delete" as
    the thing you probably came here to do. */
+/* Where "Reset password" would be, on YOUR OWN row. A quiet pointer, not a
+   disabled button: greying the control out invites "why can't I?", and the
+   answer is not "you can't" but "not here" — your own password is on the
+   account page, which verifies the current one first. */
+.admin-selfnote {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  align-self: center;
+}
+
 .admin-btn {
   display: inline-flex;
   align-items: center;

@@ -27,6 +27,10 @@ pub const Error = error{
     /// answered to the client with the same `INVALID_CREDENTIALS` code — the
     /// account page already renders that as "That isn't your current password."
     WrongCurrentPassword,
+    /// An admin aimed the console's reset at their OWN row (see `resetPassword`).
+    CannotResetSelf,
+    /// An admin aimed the console's delete at their OWN row (see `deleteUser`).
+    CannotDeleteSelf,
     LastAdmin,
     /// No such account. Only ever raised by the ADMIN-scoped lookups, which are
     /// already past an `isAdmin` check — an admin may legitimately learn that an
@@ -256,7 +260,28 @@ pub const Service = struct {
     /// shared with another user is decremented rather than reaped.
     pub fn deleteUser(self: *Service, actor_user_id: u64, target_user_id: u64, files: filesvc.Files) Error!void {
         if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
+        // **AN ADMIN MAY NOT DELETE THEMSELVES**, the same rule as `resetPassword`
+        // and for the same reason: every verb in this console points OUTWARD, and
+        // a control aimed at your own row is a footgun wearing a feature's
+        // clothing. `LastAdmin` below is a WEAKER guard that only looks like this
+        // one — it saves the household, not you, so with two admins it would let
+        // you purge your own account, files and all.
+        //
+        // BEFORE `purgeUser`, which is the part that matters: that call destroys
+        // the account's files. A refusal after it would be an error message
+        // printed on top of a data loss.
+        //
+        // Deliberately no way around it in this service. If an account genuinely
+        // must go, another admin removes it — and if there is no other admin,
+        // `LastAdmin` was going to refuse anyway.
+        // LAST-ADMIN FIRST, and the order carries meaning. `CannotDeleteSelf` says
+        // "another administrator has to remove your account" — which is
+        // impossible advice for the only administrator there is. The sole admin
+        // deleting themselves gets `LastAdmin` (the household needs somebody);
+        // one of two admins gets `CannotDeleteSelf` (go ask the other one). Both
+        // are true, and each is only useful in its own case.
         if (try self.isAdmin(target_user_id) and (try self.adminCount()) <= 1) return error.LastAdmin;
+        if (actor_user_id == target_user_id) return error.CannotDeleteSelf;
         try files.purgeUser(target_user_id);
         var s = try self.db.prepare("DELETE FROM users WHERE id = ?1;");
         defer s.finalize();
@@ -272,8 +297,23 @@ pub const Service = struct {
     /// housemate's account has no business knowing the credential that housemate
     /// will keep using. Revoking every session also drops any elevation those
     /// sessions held, since elevation lives on the session ROW.
+    /// The ADMIN's reset, aimed at somebody else — and only ever at somebody else.
+    ///
+    /// **An admin may not reset their OWN password here.** This is the verb that
+    /// started `user-options.md`: a beta tester opened the console, saw "Reset
+    /// password" on their own row, pressed it, and locked themselves out of their
+    /// own server. Every verb under `/api/admin` points OUTWARD by design, and
+    /// this one pointed outward at everybody except the person holding it.
+    ///
+    /// The account page is where you change your own password, and it is strictly
+    /// better at it: it verifies the current one, it hands you a session rather
+    /// than a temporary password to retype, and it tells you what the change
+    /// costs before you make it. Refusing here is not a restriction, it is a
+    /// signpost — and the console's own UI no longer offers the button, so
+    /// reaching this error means somebody went around it.
     pub fn resetPassword(self: *Service, actor_user_id: u64, target_user_id: u64) Error!TempPassword {
         if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
+        if (actor_user_id == target_user_id) return error.CannotResetSelf;
         return self.resetPasswordFor(target_user_id);
     }
 
@@ -1611,6 +1651,67 @@ test "an empty reported name never blanks the one already there" {
     const devs = try svc.listUserDevices(std.testing.allocator, alice, alice);
     defer Service.freeDevices(std.testing.allocator, devs);
     try std.testing.expectEqualStrings("Supernote Nomad AA", devs[0].name);
+}
+
+test "an admin may not delete themselves — and the sole admin is told the other reason" {
+    // Two guards, two audiences. `CannotDeleteSelf` says "another administrator
+    // has to remove your account", which is impossible advice for the only
+    // administrator there is, so the sole admin gets `LastAdmin` instead. Order
+    // is the whole of it — see `deleteUser`.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+    var storage = try TestStorage.init(db);
+    defer storage.deinit();
+    const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
+    const bob = try onboardUser(&svc, admin, "bob@home", "bobpw");
+
+    // Sole admin deleting himself: the household reason, not the "ask somebody
+    // else" reason, because there IS nobody else.
+    try std.testing.expectError(error.LastAdmin, svc.deleteUser(admin, admin, storage.files));
+
+    // With a second admin, the self rule is what bites.
+    _ = try svc.setAdmin(bob, true);
+    try std.testing.expectError(error.CannotDeleteSelf, svc.deleteUser(admin, admin, storage.files));
+    try std.testing.expectError(error.CannotDeleteSelf, svc.deleteUser(bob, bob, storage.files));
+
+    // BOTH ACCOUNTS SURVIVED. The guards run before `purgeUser`, which destroys
+    // files — a refusal after that would be an error message on top of a data
+    // loss, which is the failure this ordering exists to prevent.
+    const users = try svc.listUsers(std.testing.allocator);
+    defer Service.freeUsers(std.testing.allocator, users);
+    try std.testing.expectEqual(@as(usize, 2), users.len);
+
+    // And deleting SOMEBODY ELSE still works: this removes a footgun, not a verb.
+    try svc.deleteUser(admin, bob, storage.files);
+}
+
+test "an admin may NOT reset their own password from the console" {
+    // The incident that started user-options.md: a beta tester saw "Reset
+    // password" against their own row, pressed it, and locked themselves out of
+    // their own server. Every verb in that console points OUTWARD; this one
+    // pointed outward at everybody except the person holding it.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+    const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
+    const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
+
+    try std.testing.expectError(error.CannotResetSelf, svc.resetPassword(admin, admin));
+
+    // ...and their own credential is untouched by the attempt — the refusal has
+    // to happen BEFORE the write, or it is only an error message.
+    const sess = try webLogin(&svc, "admin@home", "adminpw");
+    try std.testing.expect((try svc.caller(&sess.token)) != null);
+
+    // Aimed at somebody else it still works: this removes a footgun, not a verb.
+    _ = try svc.resetPassword(admin, alice);
+
+    // And the CLI's own path is unaffected — it has no actor, which is the whole
+    // reason it exists. A locked-out admin is recovered from the command line.
+    _ = try svc.resetPasswordFor(admin);
 }
 
 test "deleting a user (admin-only) cascades away their sessions" {

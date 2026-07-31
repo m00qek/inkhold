@@ -151,6 +151,11 @@ pub fn deleteUser(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     svc.deleteUser(actor.user_id, id, files.*) catch |err| switch (err) {
         error.LastAdmin => return fail(ctx, req, .ok, "LAST_ADMIN", "cannot remove the last administrator"),
+        // Distinct from LAST_ADMIN on purpose: that one is about the household
+        // ("somebody has to be able to administer this"), this one is about you
+        // ("not from here"). Collapsing them would tell a household of two that
+        // it has only one admin.
+        error.CannotDeleteSelf => return fail(ctx, req, .ok, "CANNOT_DELETE_SELF", "another administrator has to remove your account"),
         else => return serverError(ctx, req),
     };
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
@@ -168,7 +173,13 @@ pub fn resetPassword(ctx: *Context, req: *Request, params: Params) anyerror!void
     const svc = ctx.service.?;
     const actor = ctx.caller.?;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
-    const temp = svc.resetPassword(actor.user_id, id) catch return serverError(ctx, req);
+    const temp = svc.resetPassword(actor.user_id, id) catch |e| switch (e) {
+        // Named rather than a generic 500, because the answer is a place to go:
+        // your own password is changed on your account page, which verifies the
+        // current one and hands you a session instead of a password to retype.
+        error.CannotResetSelf => return fail(ctx, req, .ok, "CANNOT_RESET_SELF", "change your own password on your account page"),
+        else => return serverError(ctx, req),
+    };
     try json.respond(ctx.gpa, req, .ok, ResetPasswordVO{ .temporaryPassword = temp.slice() }, null);
 }
 
