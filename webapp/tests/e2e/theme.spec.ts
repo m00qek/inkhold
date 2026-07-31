@@ -1,15 +1,53 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { signedIn, imgInkFraction, imgPainted, freezeMotion } from "./helpers/app";
+
+// THE THEME CONTROL MOVED. It used to be an icon button in the rail's footer;
+// it is now the Appearance section of the account page, as a two-option control
+// (docs/scratch/user-options.md §7). The argument for keeping it one click away
+// — people flip it often — did not survive the fact that the app already follows
+// `prefers-color-scheme`: it is a set-once override, it was already listed under
+// Appearance, and leaving it in the rail meant one control in two places.
+//
+// So every test below reaches it through the page. What is being pinned has not
+// changed: the precedence rule, the persistence, the pre-paint restore, and the
+// lazy repaint.
+
+/** Pin a theme the way a person does now: nameplate → Appearance. */
+async function pinTheme(page: Page, theme: "light" | "dark"): Promise<void> {
+  await page.goto("/#/account");
+  await expect(page.locator(".acct")).toBeVisible();
+  await page.locator(".acct-theme").getByRole("button", { name: theme === "dark" ? "Paper Dark" : "Paper", exact: true }).click();
+}
+
+test.describe("the Appearance control", () => {
+  test("pins the theme and says which one is in force", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/account");
+
+    const light = page.locator(".acct-theme").getByRole("button", { name: "Paper", exact: true });
+    const dark = page.locator(".acct-theme").getByRole("button", { name: "Paper Dark" });
+
+    // A TWO-OPTION CONTROL, so which one you are in is readable rather than
+    // inferred from a glyph that could mean either state.
+    await expect(light).toHaveAttribute("aria-pressed", "true");
+    await expect(dark).toHaveAttribute("aria-pressed", "false");
+
+    await dark.click();
+
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expect(dark).toHaveAttribute("aria-pressed", "true");
+    await expect(light).toHaveAttribute("aria-pressed", "false");
+  });
+});
 
 // Toggling the theme must repaint ONLY what's currently visible; off-screen
 // thumbnails drop back to a blank placeholder and re-render lazily when next
 // scrolled in (they're keyed by theme, so nothing is lost). Proven at the pixel
 // level against the deep Archive folder.
 //
-// The gallery tiles are `<img src="blob:…">` now, not canvases: a repaint swaps
-// the <img> to the OTHER theme's WebP blob (constraint: a toggle re-paints visible
-// tiles to the correct theme, off-screen ones stay unpainted). "Blank" therefore
-// means an unpainted <img> (empty src), not a near-zero-ink canvas.
+// The gallery tiles are `<img src="blob:…">`, not canvases: a repaint swaps the
+// <img> to the OTHER theme's WebP blob. "Blank" therefore means an unpainted
+// <img> (empty src), not a near-zero-ink canvas.
 test.describe("theme toggle", () => {
   test("sets data-theme and repaints visible thumbnails while off-screen ones stay blank", async ({ page }) => {
     await signedIn(page);
@@ -27,14 +65,22 @@ test.describe("theme toggle", () => {
     await expect.poll(async () => imgInkFraction(firstImg), { timeout: 5000 }).toBeGreaterThan(0.003);
     expect(await imgPainted(lastImg)).toBe(false);
 
-    await page.getByRole("button", { name: "Toggle light or dark" }).click();
+    // The route a person takes to the control now: the nameplate opens the
+    // account page over the gallery (which is HIDDEN, not destroyed), Appearance
+    // pins the theme, and Back returns to the folder.
+    await page.getByRole("button", { name: "Your account" }).click();
+    await page.locator(".acct-theme").getByRole("button", { name: "Paper Dark" }).click();
 
     // The theme is pinned on <html>.
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 
-    // The visible card was repainted for the new theme (still inked, not blank)…
+    await page.goBack();
+    await expect(page.locator("#gallery")).toBeVisible();
+    await expect.poll(async () => cards.count()).toBeGreaterThan(20);
+
+    // The visible card is painted for the new theme (still inked, not blank)…
     await expect.poll(async () => imgInkFraction(firstImg), { timeout: 5000 }).toBeGreaterThan(0.003);
-    // …while the off-screen card was NOT repainted — it stays an unpainted tile.
+    // …while the off-screen card was NOT painted — it stays an unpainted tile.
     expect(await imgPainted(lastImg)).toBe(false);
   });
 });
@@ -43,14 +89,11 @@ test.describe("theme toggle", () => {
 // never written to storage, so any reload dropped it back to the OS preference.
 // Precedence is: explicit stored choice > prefers-color-scheme > light.
 test.describe("theme persistence", () => {
-  const html = (page: import("@playwright/test").Page) => page.locator("html");
-  const toggle = (page: import("@playwright/test").Page) =>
-    page.getByRole("button", { name: "Toggle light or dark" });
+  const html = (page: Page) => page.locator("html");
 
   test("the chosen theme survives a reload", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/");
-    await toggle(page).click();
+    await pinTheme(page, "dark");
     await expect(html(page)).toHaveAttribute("data-theme", "dark");
     expect(await page.evaluate(() => localStorage.getItem("sn.theme"))).toBe("dark");
 
@@ -58,8 +101,8 @@ test.describe("theme persistence", () => {
     // The whole bug: this used to come back unset.
     await expect(html(page)).toHaveAttribute("data-theme", "dark");
 
-    // And toggling back is just as durable.
-    await toggle(page).click();
+    // And choosing back is just as durable.
+    await page.locator(".acct-theme").getByRole("button", { name: "Paper", exact: true }).click();
     await expect(html(page)).toHaveAttribute("data-theme", "light");
     await page.reload();
     await expect(html(page)).toHaveAttribute("data-theme", "light");
@@ -72,8 +115,7 @@ test.describe("theme persistence", () => {
   // attribute would ever appear.
   test("the restore does not wait for the app bundle (no flash of the wrong theme)", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/");
-    await toggle(page).click();
+    await pinTheme(page, "dark");
     await expect(html(page)).toHaveAttribute("data-theme", "dark");
 
     await page.route("**/src/main.ts", (route) => route.abort());
@@ -98,7 +140,7 @@ test.describe("theme persistence", () => {
     expect(await page.evaluate(() => document.documentElement.hasAttribute("data-theme"))).toBe(false);
 
     // Once the user chooses, their choice outranks the OS and survives a reload.
-    await toggle(page).click();
+    await pinTheme(page, "dark");
     await expect(html(page)).toHaveAttribute("data-theme", "dark");
     await page.emulateMedia({ colorScheme: "light" });
     await page.reload();
@@ -118,32 +160,34 @@ test.describe("theme persistence", () => {
     });
     await page.goto("/");
 
-    // The shell still boots and the toggle still works for this session.
+    // The shell still boots and the control still works for this session.
     await expect(page.locator(".sn-root")).toBeVisible();
-    await toggle(page).click();
+    await pinTheme(page, "dark");
     await expect(html(page)).toHaveAttribute("data-theme", "dark");
   });
 });
 
-// Regression: the toggle used to live in the library topbar, and `.sn-root.is-reading`
-// hides that topbar outright — so the control disappeared exactly while reading a
-// note, which is when someone most wants to switch to dark. It now lives in the
-// left rail's footer, which is rendered in both views.
+// Regression, in its second form. The toggle used to live in the library topbar,
+// and `.sn-root.is-reading` hides that topbar outright — so the control
+// disappeared exactly while reading a note, which is when someone most wants to
+// switch to dark. It moved to the rail footer, which is rendered in both views,
+// and has now moved once more onto the account page. THE PROPERTY THAT MUST
+// SURVIVE BOTH MOVES is that the door to it is reachable from the reader: the
+// rail is what carries that door now, and nothing hides the rail at any width.
 //
 // These assert COMPUTED geometry, not mere presence. `toBeVisible()` alone would
 // pass for a control that is technically in the layout but collapsed to zero
 // width by a rail that ran out of room, and the whole failure mode here is a
 // control that exists in the DOM but cannot be reached.
-test.describe("theme toggle reach", () => {
-  const toggle = (page: import("@playwright/test").Page) =>
-    page.getByRole("button", { name: "Toggle light or dark" });
+test.describe("theme control reach", () => {
+  const nameplate = (page: Page) => page.getByRole("button", { name: "Your account" });
 
-  /** Computed box + display of the toggle, measured with transitions frozen. */
-  async function probe(page: import("@playwright/test").Page) {
+  /** Computed box + display of the nameplate, measured with transitions frozen. */
+  async function probe(page: Page) {
     // An automated tab reports `visibilityState: hidden`, which freezes CSS
     // transitions mid-flight and hands back intermediate computed values.
     await freezeMotion(page);
-    return toggle(page).evaluate((node) => {
+    return nameplate(page).evaluate((node) => {
       const style = getComputedStyle(node);
       const rect = node.getBoundingClientRect();
       return {
@@ -159,9 +203,9 @@ test.describe("theme toggle reach", () => {
   test("is reachable while a note is open, not just in the library", async ({ page }) => {
     await signedIn(page);
 
-    // Baseline: the library, where it has always worked.
+    // Baseline: the library.
     await page.goto("/");
-    await expect(toggle(page)).toBeVisible();
+    await expect(nameplate(page)).toBeVisible();
     const inLibrary = await probe(page);
     expect(inLibrary.display).not.toBe("none");
     expect(inLibrary.visibility).toBe("visible");
@@ -174,8 +218,8 @@ test.describe("theme toggle reach", () => {
     await expect(page.locator(".sn-root")).toHaveClass(/is-reading/);
     await expect(page.locator(".topbar")).toBeHidden();
 
-    // …and the toggle is still there, still a real, clickable box.
-    await expect(toggle(page)).toBeVisible();
+    // …and the nameplate is still there, still a real, clickable box.
+    await expect(nameplate(page)).toBeVisible();
     const inReader = await probe(page);
     expect(inReader.display).not.toBe("none");
     expect(inReader.visibility).toBe("visible");
@@ -183,79 +227,24 @@ test.describe("theme toggle reach", () => {
     expect(inReader.width).toBeGreaterThan(20);
     expect(inReader.height).toBeGreaterThan(20);
 
-    // Exactly one of them — a duplicate in the reader bar would be a second
-    // control for one piece of state.
-    await expect(toggle(page)).toHaveCount(1);
+    // Exactly one of them — a duplicate would be a second door to one place.
+    await expect(nameplate(page)).toHaveCount(1);
 
-    // And it still does its job from here.
-    await toggle(page).click();
+    // And it still gets you to the theme, from here.
+    await nameplate(page).click();
+    await page.locator(".acct-theme").getByRole("button", { name: "Paper Dark" }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   });
 
-  // The rail footer holds an avatar, a name, a mono email, the theme toggle and
-  // sign out inside a fixed 232px column. Adding the toggle must make the email
-  // ellipsis, not make the row wider than the rail — an overflowing footer is how
-  // a control silently ends up clipped out of reach.
-  test("adding it does not push the rail footer into overflow", async ({ page }) => {
+  // ONE CONTROL, IN ONE PLACE. The point of the move was not to add a second
+  // theme control on a page while leaving the first in the rail — that is the
+  // duplication §7 removed.
+  test("there is exactly one theme control, and it is not in the rail", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/");
-    await freezeMotion(page);
+    await page.goto("/#/account");
 
-    const box = await page.locator(".account").evaluate((node) => {
-      const rail = node.closest(".rail") as HTMLElement;
-      const mail = node.querySelector(".account__mail") as HTMLElement;
-      const topbar = document.querySelector(".topbar")!.getBoundingClientRect();
-      const hit = document.elementFromPoint(topbar.x + 4, topbar.y + 4);
-      return {
-        railWidth: rail.getBoundingClientRect().width,
-        // Every grid row of the rail, by width. They all share one column, so a
-        // single over-wide row drags the rest out with it.
-        rowWidths: [...rail.children].map((c) => c.getBoundingClientRect().width),
-        footerWidth: node.getBoundingClientRect().width,
-        footerScrollWidth: node.scrollWidth,
-        footerClientWidth: node.clientWidth,
-        mailTextOverflow: getComputedStyle(mail).textOverflow,
-        mailOverflow: getComputedStyle(mail).overflow,
-        mailClientWidth: mail.clientWidth,
-        topLeftOfTopbar: hit ? hit.className : "",
-      };
-    });
-
-    // Nothing spills horizontally out of the footer or out of the rail itself.
-    expect(box.footerScrollWidth).toBeLessThanOrEqual(box.footerClientWidth);
-    expect(box.railWidth).toBeCloseTo(232, 0);
-
-    // No rail row is wider than the rail. (Deliberately not `rail.scrollWidth`:
-    // `.rail::after`, the accent margin rule, is absolutely positioned at
-    // `right: -1px` and overhangs by design, so scroll overflow reads 1px even
-    // when every row fits.)
-    expect(box.rowWidths.length).toBeGreaterThan(0);
-    for (const w of box.rowWidths) expect(w).toBeLessThanOrEqual(box.railWidth);
-
-    // The footer is not wider than the rail it sits in. This is the exact
-    // regression the toggle caused: the rail's implicit `auto` grid column floors
-    // at max-content, so a footer too wide for 232px stretched the column and
-    // every rail row painted over the topbar — invisibly, but it ate clicks
-    // aimed at the topbar's left edge.
-    expect(box.footerWidth).toBeLessThanOrEqual(box.railWidth);
-    expect(box.topLeftOfTopbar).toContain("topbar");
-
-    // The email is what gives when the row runs out of room — it is set up to
-    // ellipsis inside whatever is left rather than force the row wider.
-    expect(box.mailOverflow).toBe("hidden");
-    expect(box.mailTextOverflow).toBe("ellipsis");
-    expect(box.mailClientWidth).toBeGreaterThan(0);
-  });
-
-  // Both siblings must survive: the point of the move was one reachable control,
-  // not one control replacing another.
-  test("sits beside sign out, both usable", async ({ page }) => {
-    await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
-    await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
-
-    const actions = page.locator(".account__actions");
-    await expect(actions.getByRole("button", { name: "Toggle light or dark" })).toBeVisible();
-    await expect(actions.getByRole("button", { name: "Sign out" })).toBeVisible();
+    await expect(page.locator(".acct-theme")).toHaveCount(1);
+    await expect(page.locator(".rail").getByRole("group", { name: "Theme" })).toHaveCount(0);
+    await expect(page.locator(".rail").getByRole("button", { name: "Toggle light or dark" })).toHaveCount(0);
   });
 });

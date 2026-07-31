@@ -201,6 +201,28 @@ test.describe("recycle bin", () => {
     await expect(row).toHaveAttribute("aria-current", "true");
   });
 
+  test("the crumb is a way OUT, not just a label", async ({ page }) => {
+    // The bin is a destination, not a folder, so nothing else in the topbar
+    // leads back to the library. That was survivable while the only way in was
+    // the rail row you could click again — and stopped being survivable when
+    // the account page grew a Storage line that sends you here from somewhere
+    // else entirely, leaving the header a dead end.
+    await signedIn(page);
+    await page.goto("/");
+    await railSettled(page);
+    await binRow(page).click();
+
+    await expect(page.locator(".crumbs__here")).toHaveText("Recycle bin");
+    const home = page.locator(".crumbs button", { hasText: "Library" });
+    await expect(home).toBeVisible();
+
+    await home.click();
+
+    // Back in a folder listing: the bin is gone and the controls it hid return.
+    await expect(page.locator(".bin")).toHaveCount(0);
+    await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
+  });
+
   // --- the bin is a MODE in the topbar (`.sn-root.is-destination`) ------------
 
   test("takes the search box away, because it searches a library you are not looking at", async ({ page }) => {

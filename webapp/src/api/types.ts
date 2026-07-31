@@ -597,5 +597,157 @@ export interface Api {
     signal?: AbortSignal,
     onConflict?: import("./client").UploadConflictMode,
   ): Promise<import("../core/types").Entry>;
+
+  // --- ACCOUNT (self-service) ---
+  //
+  // The surface a person has over their OWN account
+  // (docs/scratch/user-options.md §5–§7). Everything else account-shaped in this
+  // app is an ADMIN verb aimed at somebody else — reset THEIR password, unlink
+  // THEIR device, set THEIR quota — and a person who needed one of these for
+  // themselves has, until now, had to point one of those at their own row. That
+  // is the whole reason this marker exists; §2 is the argument.
+  //
+  // ==========================================================================
+  // WHAT IS BACKED, AND WHAT IS NOT.
+  // ==========================================================================
+  // Four control-plane routes landed for this surface, and the shape of them is
+  // the point: NOT ONE TAKES A TARGET. The session is who this is about, which
+  // is what stops a person wanting to change their own settings from reaching
+  // for a tool built to change somebody else's (§1–§2).
+  //
+  //   GET  /api/controlplane/account                 identity, sign-in, devices
+  //   GET  /api/controlplane/account/storage         the meter and its five lines
+  //   POST /api/controlplane/account/devices/unlink  one of YOUR bindings
+  //   POST /api/controlplane/account/sign-out-others every session but this one
+  //
+  // STILL MISSING, and each says so where it is declared: the per-file retained
+  // counts the versions control needs to state its cost before it is paid, the
+  // write that sets `keep`, and — the one that matters most — verification of
+  // the CURRENT password on `PUT /api/user/password` (§4). `fake.ts` implements
+  // all three as they are meant to behave, and `createHttpApi` throws a named
+  // `NOT_IMPLEMENTED` rather than inventing a number.
+  //
+  // The vocabulary is `./accountTypes`, referenced through inline `import(...)`
+  // types exactly like the bin/admin/history/rename/upload markers above, so
+  // this seam stays extensible at its own marker.
+
+  /**
+   * The tablets bound to the CALLER'S OWN account, ACTIVE bindings only.
+   *
+   * `GET /api/controlplane/account`, which is the admin console's own
+   * `listUserDevices` with the target fixed to the caller rather than a
+   * self-scoped second copy — one widened ownership gate, not two queries to
+   * keep in step. Before it landed a non-admin could not see their own bindings
+   * at all, which is the gap §5 names first.
+   *
+   * The route returns revoked bindings too (an admin auditing an account needs
+   * them); the seam filters them out, because a person looking at their own
+   * account wants the list of tablets that sync.
+   */
+  myDevices(): Promise<import("./accountTypes").MyDevice[]>;
+
+  /**
+   * Cut one of YOUR OWN tablets off from syncing, by serial.
+   *
+   * `POST /api/controlplane/account/devices/unlink`. A soft status flip, so
+   * re-pairing stays possible with the device in hand, and it removes nothing
+   * already synced.
+   *
+   * A serial that is not one of the caller's own is a 404, indistinguishable
+   * from a serial that does not exist — the same conflation the admin route
+   * makes, for the same reason: a distinct status would leak exactly the fact
+   * the shared error hides.
+   */
+  unlinkMyDevice(equipmentNo: string): Promise<void>;
+
+  /**
+   * End every OTHER session, keeping this one. Returns how many were ended, so
+   * the interface can confirm what happened rather than say "done".
+   *
+   * `POST /api/controlplane/account/sign-out-others`. THIS BROWSER STAYS SIGNED
+   * IN on purpose: the confirmation of "sign out everywhere else" must not be a
+   * login screen.
+   */
+  signOutEverywhere(): Promise<number>;
+
+  /**
+   * The caller's own storage, split by KIND — what the Storage section draws.
+   *
+   * `GET /api/controlplane/account/storage`. The five figures are a PARTITION of
+   * `usedBytes` — the backend's partition audit asserts they sum to it after
+   * every mutation — so nothing above this seam re-derives or reconciles them.
+   * {@link import("./accountTypes").StorageBreakdown.byKind} is still nullable,
+   * for a server too old to answer the split: null is "not known", never "zero
+   * of everything".
+   */
+  storageBreakdown(): Promise<import("./accountTypes").StorageBreakdown>;
+
+  /**
+   * How many versions of each file are kept, its ceiling, and what the retained
+   * copies cost.
+   *
+   * **PARTIALLY BACKED, AND DELIBERATELY REFUSED UNTIL IT IS WHOLE.**
+   * `GET /api/controlplane/account` already carries `versions: {keep, maxKeep}`
+   * (schema v3's per-user `history_keep`, clamped to the admin's configured
+   * ceiling). What it does not carry is {@link
+   * import("./accountTypes").VersionPolicy.retainedPerFile} — and without that
+   * the control cannot say what lowering the number would discard, which is the
+   * condition §7 puts on offering it at all. So the real client throws rather
+   * than showing a dial that can destroy history silently.
+   *
+   * §6 is what makes handing this over safe in the first place: once retained
+   * versions count against quota, a person raising it is spending their own
+   * allotment, so the setting is self-limiting.
+   */
+  versionPolicy(): Promise<import("./accountTypes").VersionPolicy>;
+
+  /**
+   * Set how many versions of each file to keep, and report what that discarded.
+   *
+   * **NO ENDPOINT EXISTS** — the account routes that landed are read-only, plus
+   * the two unlink/sign-out writes (see {@link Api.versionPolicy}). Lowering `keep`
+   * evicts immediately and irreversibly — the recycle bin does not hold
+   * versions — so the interface states the count BEFORE calling this, and the
+   * response is the confirmation rather than the news.
+   *
+   * `keep` is clamped to `[0, maxKeep]` by the SERVER; 0 is a legal value that
+   * turns versioning off, not a refusal.
+   */
+  setVersionPolicy(keep: number): Promise<import("./accountTypes").VersionPolicyChange>;
+
+  /** When the password last changed, how many other sessions are live, and when
+   *  THIS browser signed in — what the "Signing in" section states. From
+   *  `GET /api/controlplane/account`, the same request {@link Api.myDevices}
+   *  reads; the client shares one round trip between them. */
+  accountSecurity(): Promise<import("./accountTypes").AccountSecurity>;
+
+  /**
+   * Change your own password from a live session: the traditional path, with
+   * the CURRENT password required.
+   *
+   * **THE ENDPOINT EXISTS AND TAKES ONLY THE NEW PASSWORD.**
+   * `PUT /api/user/password` was built for the forced first-login flow, where a
+   * `pending` token proves identity and there is nothing to check a current
+   * password against but the temporary one just used. That is right for THAT
+   * caller and wrong for this one: a session is a longer-lived thing than a
+   * password prompt — a borrowed laptop, an unlocked screen — so without the
+   * check anyone who reaches a signed-in window can lock the owner out of their
+   * own household cloud (§4).
+   *
+   * So the server must learn to distinguish the two callers: no current
+   * password for a `pending` token, current password REQUIRED and verified the
+   * same way login verifies it for a `controlplane` one. **As of the account
+   * routes landing it still does not, and the field this sends is ignored** —
+   * `Service.changePassword` decrypts the current credential only for its
+   * same-password check, three lines above where the verification would go.
+   * `fake.ts` verifies it, so the refusal path is exercised in dev and in e2e;
+   * the real server is the gap.
+   *
+   * Rejects with an `ApiError` coded `INVALID_CREDENTIALS` when the current
+   * password is wrong, and `SAME_PASSWORD` when the new one is not new.
+   * Succeeds by revoking every OTHER session and minting a fresh one for this
+   * browser, which the screen has to say plainly.
+   */
+  changePassword(currentPlaintext: string, newPlaintext: string): Promise<void>;
   // ---------------------------------------------------------------------------
 }

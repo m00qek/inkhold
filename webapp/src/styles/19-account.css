@@ -1,0 +1,581 @@
+/*
+ * Your own account (src/pages/account.ts, docs/scratch/user-options.md §7).
+ *
+ * PREFIXED `acct-`, NOT `account-`, and that is deliberate rather than terse:
+ * `.account` is the rail footer's nameplate, two inches to the left of this
+ * page, with `.account__name` / `.account__mail` / `.account__chevron` under it.
+ * One prefix for two surfaces is how a selector ends up matching both, and how
+ * an e2e locator written for one silently resolves to the other.
+ *
+ * THE SIGNATURE IS THE APP'S OWN MATERIAL, not a new idea: the reserved red
+ * margin rule — the `.sheet`'s printed line, the thing the whole app dresses as
+ * — runs down this page as its spine, and the section labels sit IN the margin
+ * beside it, the way you would write a heading against the rule of a notebook.
+ * One column, one readable measure, so it is a page you read rather than a
+ * dashboard you scan.
+ *
+ * TYPE. Space Grotesk (`--font-display`) for the headings; Space Mono
+ * (`--font-mono`, via `.acct-data`) for EVERY piece of data — the address, the
+ * byte counts, the timestamps, the version count. That is the rule the app
+ * already follows everywhere else, and this page is mostly data, so it is where
+ * breaking it would show most.
+ *
+ * COLOUR. Nothing new. Red (`--margin` / `--margin-ink`) is the reserved margin
+ * rule and danger, and here it is both — the spine, and the three actions that
+ * take something away (sign out everywhere, unlink, and the destructive half of
+ * the versions control's consequences). Green (`--accent`) stays brand and
+ * state. `--margin-ink` is what any RED WORDS use: `--margin` is tuned as a
+ * printed RULE, where the 3.0 non-text threshold applies, and comes to 4.49:1 as
+ * text on `--sheet` — under the 4.5 a label owes, and not by enough to argue
+ * about. Same aliasing the console does, for the same measured reason.
+ */
+
+/* An overlay on the shell's content area, exactly as the console and the reader
+   are: the rail and the topbar stay live behind it, which is what makes clicking
+   a folder row the way out. */
+.acct {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow-y: auto;
+  background: var(--desk);
+
+  --acct-danger: var(--margin-ink);
+  /* The spine's own geometry, in one place so the label column, the rule and the
+     content can never drift apart. Sized so the LONGEST label — "Signing in",
+     set in the eyebrow face at 0.14em tracking, ~92px — sits on one line: a
+     marginal note that wraps stops reading as a marginal note. */
+  --acct-gutter: 138px;
+  --acct-label-gap: 14px;
+}
+
+.acct__body {
+  position: relative;
+  /* ONE READABLE MEASURE. The gutter is outside it — a margin is not content —
+     so the text column stays the width you would set prose at whatever the
+     window does. */
+  max-width: calc(var(--acct-gutter) + 30px + 560px);
+  padding: 26px 28px 80px calc(var(--acct-gutter) + 30px);
+}
+
+/* THE SPINE, IN SEGMENTS — one per section, not one line down the whole page.
+   The sheet's red margin rule at the app's own opacity.
+
+   It ran unbroken first, and that made it scenery: a stripe the content happened
+   to sit beside, delimiting nothing. Broken at every section boundary it does
+   the job the margin label only half did — you can see where a section starts
+   and ends without reading a word, and the gaps fall exactly where the eye is
+   already looking for a seam.
+
+   Deliberately NOT beside the identity block at the top: that is who you are,
+   not a section, and it has no margin label. A segment there would promise a
+   label that never comes. So the rule now means one thing exactly — "a labelled
+   section runs alongside this" — and the page starts with a clean edge. */
+.acct-sec::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* Back out to the gutter from the section's own left edge: `.acct__body` pads
+     by `gutter + 30px`, so the rule sits 30px to the left of the content. One
+     subtraction, so the geometry still comes from `--acct-gutter` alone. */
+  left: -30px;
+  width: 1.5px;
+  background: var(--margin);
+  opacity: 0.72;
+}
+
+/* --- who you are ---------------------------------------------------------- */
+
+.acct__head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 0 34px;
+}
+
+.acct__avatar {
+  width: 42px;
+  height: 42px;
+  font-size: var(--fs-body);
+}
+
+.acct__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--fs-heading);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.acct__mail {
+  margin: 2px 0 0;
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+
+/* --- a section, and its label in the margin -------------------------------- */
+
+.acct-sec {
+  position: relative;
+  margin: 0 0 38px;
+}
+
+/* IN THE MARGIN. Pulled out of the content column and right-aligned against the
+   rule, so it reads as a note written beside the text rather than as a heading
+   sitting on top of it. */
+.acct-sec__label {
+  position: absolute;
+  left: calc(-1 * (var(--acct-gutter) + 30px) + 28px);
+  width: calc(var(--acct-gutter) - 28px - var(--acct-label-gap));
+  margin: 0;
+  padding-top: 3px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  /* Not --ink-faint: this is a label, and a label owes 4.5:1. */
+  color: var(--ink-soft);
+}
+
+.acct-sec__body {
+  display: block;
+}
+
+/* --- rows ------------------------------------------------------------------ */
+
+.acct-rows {
+  display: block;
+}
+
+.acct-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: var(--row-pad-y) 0;
+  border-bottom: 1px solid var(--row-rule);
+}
+.acct-rows > .acct-row:first-child {
+  padding-top: 0;
+}
+
+.acct-row__k {
+  flex: none;
+  width: 132px;
+  font-size: var(--fs-body);
+  color: var(--ink);
+}
+
+.acct-row__v {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+
+/* EVERY PIECE OF DATA IS MONO. Applied as a class rather than per selector so a
+   new row cannot forget it. */
+.acct-data {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.acct-row__acts {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* --- the three prose lines ------------------------------------------------- */
+
+/* LOADING, which is never the same node as a claim about what is there. */
+.acct-pending {
+  margin: 0;
+  padding: var(--row-pad-y-tight) 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  color: var(--ink-faint);
+}
+
+.acct-failed {
+  margin: 0;
+  padding: var(--row-pad-y-tight) 0;
+  font-size: var(--fs-caption);
+  color: var(--acct-danger);
+}
+
+.acct-empty {
+  margin: 0;
+  padding: var(--row-pad-y-tight) 0;
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+
+/* A standing explanation under a section — what unlinking costs, what "per file"
+   means. Quiet, and full-measure rather than in a value column. */
+.acct-hint {
+  margin: var(--sp-3) 0 0;
+  max-width: 52ch;
+  font-size: var(--fs-caption);
+  line-height: 1.55;
+  color: var(--ink-faint);
+}
+
+/* --- buttons --------------------------------------------------------------- */
+
+.acct-btn {
+  height: var(--control-h-sm);
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease;
+}
+.acct-btn:hover:not(:disabled) {
+  border-color: var(--ink-soft);
+  background: var(--hover-fill);
+}
+.acct-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.acct-btn--danger {
+  color: var(--acct-danger);
+  border-color: color-mix(in srgb, var(--margin) 40%, var(--line));
+}
+.acct-btn--danger:hover:not(:disabled) {
+  border-color: var(--margin);
+  background: color-mix(in srgb, var(--margin) 8%, var(--sheet));
+}
+.acct-btn--go {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.acct-btn--go:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--sheet));
+}
+
+/* --- change password ------------------------------------------------------- */
+
+.acct-pw {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  max-width: 360px;
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-6) var(--sp-6) var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--sheet);
+}
+.acct-pw[hidden] {
+  display: none;
+}
+.acct-pw__acts {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+/* --- devices --------------------------------------------------------------- */
+
+.acct-device__name {
+  /* The name and its sync fact read as ONE line — "Nomad · last synced 20
+     minutes ago" — so this key column is wider than the others and free to grow
+     rather than clipping the timestamp. */
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.acct-device__dot {
+  color: var(--ink-faint);
+}
+.acct-device__sync {
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+.acct-device__serial {
+  flex: none;
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-faint);
+}
+
+/* --- storage --------------------------------------------------------------- */
+
+.acct-total {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 0 0 var(--sp-4);
+}
+/* THE TOTAL IS A BYTE COUNT, so it is Space Mono like every other figure on this
+   page — not the display face. It is the page's one big number, so it takes the
+   heading step and the mono 700 the family ships, rather than a display size the
+   mono face would have to be faked at. */
+.acct-total__v {
+  font-family: var(--font-mono);
+  font-size: var(--fs-heading);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.acct-total__k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  color: var(--ink-faint);
+}
+
+.acct-kind .acct-row__k {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  width: auto;
+  flex: 1;
+}
+.acct-kind__hint {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-faint);
+}
+/* A FIXED, RIGHT-ALIGNED COLUMN so the five figures line up as a column of
+   numbers — which is the only way a reader compares them. Without it the one row
+   that carries an action (the bin) pushes its own figure left, and five numbers
+   with one of them out of line read as a mistake. */
+.acct-kind .acct-row__v {
+  flex: none;
+  width: 92px;
+  text-align: right;
+  color: var(--ink);
+}
+/* The same reservation on the action side: only the bin row has a button, and
+   the other four must not close the gap it leaves. */
+.acct-kind .acct-row__acts {
+  width: 76px;
+  justify-content: flex-end;
+}
+
+/* --- the versions control -------------------------------------------------- */
+
+.acct-versions {
+  margin-top: var(--sp-6);
+}
+
+.acct-keep__line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.acct-keep__label,
+.acct-keep__of {
+  font-size: var(--fs-body);
+  color: var(--ink);
+}
+
+/* THE STEPPER: [−][ 5 ][+] as ONE control, not three neighbours. The frame is on
+   the wrapper and the parts are separated by hairlines, so it reads as a single
+   object the way the segmented view toggle in the topbar does — same idiom, so a
+   person who has used one knows this one. */
+.acct-stepper {
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-h-sm);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  overflow: hidden;
+}
+.acct-keep {
+  width: 3em;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: var(--fs-body);
+  text-align: center;
+}
+/* The native spinners are unusable at this size and absent on some platforms —
+   the two buttons ARE the affordance, so the browser's version only crowds the
+   digits it sits on. */
+.acct-keep::-webkit-outer-spin-button,
+.acct-keep::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+.acct-keep {
+  appearance: textfield;
+}
+.acct-keep:focus-visible {
+  outline: none;
+}
+/* Focus lands on the WHOLE control, since the frame is what a person sees as the
+   thing they are operating. */
+.acct-stepper:focus-within {
+  border-color: var(--accent);
+}
+.acct-step {
+  display: grid;
+  place-items: center;
+  width: var(--control-h-sm);
+  height: 100%;
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: var(--fs-body);
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.acct-step:first-child {
+  border-right: 1px solid var(--line);
+}
+.acct-step:last-child {
+  border-left: 1px solid var(--line);
+}
+.acct-step:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.acct-step:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* THE COST SITS WITH THE NUMBER. "Keep more versions" is abstract until it reads
+   "13 MB", which is the whole reason the Versions line above exists. Pushed to
+   the end of the line so the control reads as a sentence with its price at the
+   right, the way the design set it out. */
+.acct-keep__cost {
+  margin-left: auto;
+  font-size: var(--fs-title);
+  color: var(--ink);
+}
+
+.acct-keep__save {
+  flex: none;
+}
+.acct-keep__save[hidden] {
+  display: none;
+}
+
+/* THE CONSEQUENCE, STATED BEFORE THE CHANGE. Red because it is destructive and
+   red means exactly that here; a live region so it is announced when it appears,
+   which is the accessible equivalent of it being impossible to miss. Empty most
+   of the time, and it collapses when empty rather than reserving a gap that
+   makes the control jump. */
+.acct-keep__note {
+  margin: var(--sp-2) 0 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  color: var(--acct-danger);
+}
+.acct-keep__note:empty {
+  display: none;
+}
+
+/* --- appearance ------------------------------------------------------------ */
+
+/* SIZED TO ITS OWN CONTENT, not to the value column: it sits in the row's value
+   slot, which is the flexible one, and a two-option control stretched to the
+   full measure reads as a bar rather than as a pair of choices. */
+.acct-theme {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.acct-theme__opt {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--control-h-sm);
+  padding: 0 var(--sp-3);
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.acct-theme__opt:last-child {
+  border-right: 0;
+}
+.acct-theme__opt svg {
+  width: 14px;
+  height: 14px;
+}
+.acct-theme__opt:hover {
+  background: var(--hover-fill);
+  color: var(--ink);
+}
+/* The chosen one, marked by FILL rather than by a tick: it is a two-option
+   control, so which is pressed has to be readable at a glance. */
+.acct-theme__opt[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--sheet);
+}
+
+/* --- narrow ---------------------------------------------------------------- */
+
+/* Below this the margin cannot hold a label without stealing the measure, so the
+   spine steps in to the page edge and the labels sit above their sections. The
+   rule stays — it is the page's signature, not its layout. */
+@media (max-width: 860px) {
+  .acct {
+    --acct-gutter: 16px;
+  }
+  .acct__body {
+    padding-left: calc(var(--acct-gutter) + 22px);
+  }
+  /* Follows the narrower gutter, so the segments stay on the rule rather than
+     drifting into the text. */
+  .acct-sec::before {
+    left: -22px;
+  }
+  .acct-sec__label {
+    position: static;
+    width: auto;
+    padding-top: 0;
+    margin: 0 0 var(--sp-3);
+    text-align: left;
+  }
+  .acct-row {
+    flex-wrap: wrap;
+  }
+  .acct-row__k {
+    width: 100%;
+  }
+}

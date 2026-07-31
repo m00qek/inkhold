@@ -1821,7 +1821,229 @@ export function createHttpApi(): Api {
         xhr.send(form);
       });
     },
+
+    // --- ACCOUNT (self-service) ---
+    //
+    // See the matching marker in `types.ts` for what each of these is for. What
+    // matters HERE is which of them the server can actually answer:
+    //
+    //   accountSecurity    GET  /api/controlplane/account
+    //   myDevices          GET  /api/controlplane/account          (same request)
+    //   storageBreakdown   GET  /api/controlplane/account/storage
+    //   unlinkMyDevice     POST /api/controlplane/account/devices/unlink
+    //   signOutEverywhere  POST /api/controlplane/account/sign-out-others
+    //   changePassword     PUT  /api/user/password — the route exists, and it
+    //                      IGNORES the current password (see the method)
+    //   versionPolicy      GET  /api/controlplane/account          (same request)
+    //   setVersionPolicy   PUT  /api/controlplane/account/versions
+    //
+    // THE SESSION IS THE TARGET on every one of them: not a single route here
+    // takes a user id, which is the whole difference between this face and
+    // `/api/admin/*`, where every verb names somebody else with an `:id`.
+    //
+    // Every one of them is now backed by a real route. `changePassword` is the
+    // one that is only PARTLY honest: the route exists and the password does
+    // change, but the current-password check the form implies is not performed
+    // server-side (see the method). `pages/account.ts` still renders each
+    // section's failure separately, which is what let this file ship seams ahead
+    // of their endpoints without a half-dead page.
+
+    async accountSecurity() {
+      const r = await accountRequest();
+      return {
+        // ABSENT, not null: the backend omits null optionals
+        // (`emit_null_optional_fields = false`), so every `?` field has to be
+        // read as "the fact does not exist" rather than as 0.
+        passwordChangedAt: typeof r.passwordChangedAt === "number" ? r.passwordChangedAt : null,
+        otherSessions: typeof r.otherBrowsers === "number" ? r.otherBrowsers : 0,
+        thisSessionSince: typeof r.thisSessionSince === "number" ? r.thisSessionSince : null,
+      };
+    },
+
+    async myDevices() {
+      const r = await accountRequest();
+      return (r.devices ?? [])
+        // ACTIVE ONLY, and the filter belongs here. The route is the admin
+        // console's own `listUserDevices`, which INCLUDES revoked bindings so an
+        // admin auditing an account can see them; a person looking at their own
+        // account wants the list of tablets that sync, and a revoked row there
+        // would read as a device still attached.
+        .filter((d) => d.active !== false)
+        .map((d) => ({
+          equipmentNo: d.equipment_no,
+          name: d.name ?? "",
+          model: d.model ?? null,
+          firmware: d.firmware ?? null,
+          lastSeenAt: typeof d.last_seen === "number" ? d.last_seen : null,
+          linkedAt: d.created_at ?? 0,
+        }));
+    },
+
+    async unlinkMyDevice(equipmentNo: string): Promise<void> {
+      // NOT `/api/controlplane/equipment/unlink`, which is the caller-scoped
+      // device-management call and answers 200 for a serial that matched nothing.
+      // This one asserts the binding is the caller's and 404s when it is not, so
+      // "done" on a row a person is acting on means something happened.
+      await request("POST", "/api/controlplane/account/devices/unlink", { equipmentNo });
+    },
+
+    async signOutEverywhere(): Promise<number> {
+      const r = await request<{ revoked?: number }>("POST", "/api/controlplane/account/sign-out-others");
+      return typeof r.revoked === "number" ? r.revoked : 0;
+    },
+
+    async storageBreakdown(): Promise<import("./accountTypes").StorageBreakdown> {
+      const r = await request<{
+        used_bytes?: number;
+        total_bytes?: number;
+        notebooks?: number;
+        sketches?: number;
+        documents?: number;
+        recycle_bin?: number;
+        versions?: number;
+      }>("GET", "/api/controlplane/account/storage");
+      if (typeof r.used_bytes !== "number" || typeof r.total_bytes !== "number") {
+        throw new ApiError("SERVER", "The server returned an unexpected response.", 200);
+      }
+      // THE FIVE ARE A PARTITION of `used_bytes`, enforced against the tables by
+      // the backend's partition audit. Nothing here re-derives or reconciles
+      // them: a client that summed the parts and disagreed with the meter would
+      // be a second opinion about the one number that must not have two.
+      const byKind =
+        typeof r.notebooks === "number" &&
+        typeof r.sketches === "number" &&
+        typeof r.documents === "number" &&
+        typeof r.recycle_bin === "number" &&
+        typeof r.versions === "number"
+          ? {
+              notebookBytes: r.notebooks,
+              sketchBytes: r.sketches,
+              documentBytes: r.documents,
+              binBytes: r.recycle_bin,
+              versionBytes: r.versions,
+            }
+          : null;
+      return { usedBytes: r.used_bytes, totalBytes: r.total_bytes, byKind };
+    },
+
+    async versionPolicy() {
+      const r = await accountRequest();
+      return readPolicy(r.versions);
+    },
+
+    async setVersionPolicy(keep: number) {
+      const r = await request<{
+        policy?: AccountResponse["versions"];
+        removedVersions?: number;
+        freedBytes?: number;
+      }>("PUT", "/api/controlplane/account/versions", { keep });
+      return {
+        policy: readPolicy(r.policy),
+        // What the change ACTUALLY discarded, so the page confirms the number it
+        // predicted rather than repeating its own arithmetic back to itself.
+        removedVersions: r.removedVersions ?? 0,
+        freedBytes: r.freedBytes ?? 0,
+      };
+    },
+
+    async changePassword(currentPlaintext: string, newPlaintext: string): Promise<void> {
+      // ======================================================================
+      // THE SERVER DOES NOT YET VERIFY `currentPassword`. THIS IS THE GAP.
+      // ======================================================================
+      // `PUT /api/user/password` takes the new password and nothing else — it
+      // was written for the forced first-login change, where a `pending` token
+      // is the proof of identity. It must learn to require and CHECK
+      // `currentPassword` when the caller holds a `controlplane` token, using
+      // the same verification login uses; until it does, the field below is
+      // accepted and dropped, and the check the form appears to perform is only
+      // performed by `fake.ts`. See `Api.changePassword` and
+      // docs/scratch/user-options.md §4. Nothing in the UI claims the check
+      // happened — it collects the field, and the refusal it can show comes
+      // from the server saying no.
+      //
+      // Hashed at the seam exactly as the new one is, so the plaintext of an
+      // existing password is no more exposed on the wire than a new one.
+      await request("PUT", "/api/user/password", {
+        currentPassword: md5Hex(currentPlaintext),
+        newPassword: md5Hex(newPlaintext),
+      });
+    },
   };
+}
+
+// `notImplemented` lived here — the refusal an unbacked seam answered with. It is
+// gone because it has no callers: every method under the ACCOUNT marker now
+// reaches a real route. Bring it back verbatim from history if a seam is ever
+// added ahead of its endpoint again; throwing beat returning a plausible zero,
+// which is indistinguishable from the truth.
+
+/** The wire shape of `GET /api/controlplane/account`. Snake-cased inside
+ *  `devices` because those rows are the auth service's `DeviceInfo` struct
+ *  serialized verbatim — the same convention the admin device listing has. */
+interface AccountResponse {
+  passwordChangedAt?: number;
+  thisSessionSince?: number;
+  otherBrowsers?: number;
+  devices?: {
+    equipment_no: string;
+    name?: string;
+    model?: string | null;
+    firmware?: string | null;
+    active?: boolean;
+    created_at?: number;
+    last_seen?: number;
+  }[];
+  versions?: {
+    keep?: number;
+    maxKeep?: number;
+    retainedPerFile?: number[];
+    bytes?: number;
+  };
+}
+
+/**
+ * `GET /api/controlplane/account`, with CONCURRENT CALLERS SHARING ONE REQUEST.
+ *
+ * The server deliberately answers identity, sign-in and devices in a single
+ * response; the `Api` seam deliberately keeps them as separate methods, so the
+ * account page can load and fail each section on its own. Both are right, and
+ * the join belongs here — otherwise opening the page fires the same GET twice in
+ * the same tick for no reason.
+ *
+ * The promise is held only while it is IN FLIGHT, never cached: re-entering the
+ * page must re-read (a housemate's tablet may have synced, a session may have
+ * gone), and a cache here would quietly make the refresh a no-op.
+ */
+/**
+ * The `versions` object, read defensively into a `VersionPolicy`.
+ *
+ * `retainedPerFile` drives a control that DESTROYS data, so it is filtered to
+ * finite non-negative numbers rather than trusted: a stray null in that array
+ * makes `Σ max(0, count − keep)` read `NaN`, and "Keeping 3 will remove NaN
+ * versions now" is worse than no notice at all — it is the notice, broken, in
+ * front of someone about to press the button.
+ *
+ * A missing `keep`/`maxKeep` falls back to 0, which reads as "versioning off"
+ * and offers to discard nothing. That is the safe direction to be wrong in.
+ */
+function readPolicy(v: AccountResponse["versions"]): import("./accountTypes").VersionPolicy {
+  const counts = Array.isArray(v?.retainedPerFile) ? v.retainedPerFile : [];
+  return {
+    keep: Number.isFinite(v?.keep) ? (v?.keep as number) : 0,
+    maxKeep: Number.isFinite(v?.maxKeep) ? (v?.maxKeep as number) : 0,
+    retainedPerFile: counts.filter((n): n is number => Number.isFinite(n) && n >= 0),
+    bytes: Number.isFinite(v?.bytes) ? (v?.bytes as number) : 0,
+  };
+}
+
+let accountInFlight: Promise<AccountResponse> | null = null;
+function accountRequest(): Promise<AccountResponse> {
+  if (accountInFlight) return accountInFlight;
+  const p = request<AccountResponse>("GET", "/api/controlplane/account").finally(() => {
+    if (accountInFlight === p) accountInFlight = null;
+  });
+  accountInFlight = p;
+  return p;
 }
 
 /**

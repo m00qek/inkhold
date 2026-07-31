@@ -189,6 +189,11 @@ onRoute(async (route) => {
     case "folder":
     case "search":
     case "destination":
+    // Your own account. Behind the SAME guard as everything else here and
+    // gated on nothing further: it is reachable only when signed in, and every
+    // signed-in person — admin or not — must be able to open it, which is the
+    // one thing the admin console cannot offer.
+    case "account":
     case "note":
     case "note-version":
     case "bin-note": {
@@ -226,6 +231,9 @@ onRoute(async (route) => {
           return;
         case "destination":
           shellInstance.showDestination(route.key);
+          return;
+        case "account":
+          shellInstance.showAccount();
           return;
         default:
           shellInstance.showFolder(null);

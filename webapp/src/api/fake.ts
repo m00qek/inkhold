@@ -1813,5 +1813,197 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
         },
       };
     })(),
+
+    // --- ACCOUNT (self-service) ---
+    //
+    // THE REFERENCE IMPLEMENTATION of a surface the server does not have yet
+    // (docs/scratch/user-options.md §5–§7). Every method here except
+    // `changePassword` has NO backing route at all, and `changePassword`'s route
+    // ignores the current password — so this fake is where the intended
+    // behaviour actually lives, and what the endpoints must be built to match.
+    //
+    // A SPREAD OF AN IIFE, for the same reason the admin block above is one:
+    // these methods share mutable fixture state (a device is unlinked, `keep`
+    // goes down and takes versions with it), and this marker is INSIDE the
+    // returned object literal, so there is nowhere above it to declare a `const`
+    // that is not a line another feature is also editing.
+    //
+    // The fixture is ONE HOUSEHOLD MEMBER'S account, deliberately small: a
+    // single "Nomad" (the only device this app supports — the mobile app is out
+    // of scope), and a few hundred megabytes across the four kinds.
+    ...(() => {
+      const MB = 1024 * 1024;
+
+      /**
+       * The bound tablets. ONE, named as an object rather than as a serial —
+       * that naming is the point of the section (§7), and a fixture with three
+       * anonymous devices would never show it.
+       *
+       * `lastSeenAt` is 20 minutes ago, RELATIVE to when the fake is built, so
+       * the row reads "last seen 20 minutes ago" in dev and in e2e instead of
+       * drifting into "8 months ago" as the fixture ages.
+       */
+      const now = () => Math.floor(Date.now() / 1000);
+      let devices = [
+        {
+          equipmentNo: "SN1000A2X",
+          name: "Nomad",
+          model: "A5X2",
+          firmware: "3.20.29",
+          lastSeenAt: now() - 20 * 60,
+          linkedAt: now() - 190 * 86_400,
+        },
+      ];
+
+      /**
+       * The FIVE kinds, as a PARTITION: their sum IS `usedBytes`, which is the
+       * property that makes the panel worth believing (§8). Two halves of that:
+       *
+       *  - the RECYCLE BIN line, which the numbers found — three live kinds that
+       *    came up 597,016 bytes short of a real `used_bytes`, being two trashed
+       *    files still charging;
+       *  - VERSIONS, charged at all only after §6. A fixture whose total excluded
+       *    them would model the bug rather than the fix, and the sum would not be
+       *    a partition.
+       *
+       * 214 + 46 + 178 + 12 + 13 = 463 MB, which is deliberately the figure the
+       * design doc quotes when it argues that "463 MB" alone answers nothing.
+       */
+      const kinds = { notebookBytes: 214 * MB, sketchBytes: 46 * MB, documentBytes: 178 * MB, binBytes: 12 * MB };
+      const totalBytes = 10 * 1024 * MB;
+
+      /**
+       * Retained versions per file. Chosen so the design's own example is the
+       * one the fake produces: at `keep = 3` this discards
+       * `Σ max(0, c − 3)` = 2+2+2+2+0+0 = **8** versions — "Keeping 3 will remove
+       * 8 versions now" (§7).
+       */
+      let retainedPerFile: number[] = [5, 5, 5, 5, 3, 2];
+      let keep = 5;
+      /** The admin's ceiling. One person must not set the household's disk
+       *  policy, so the control is bounded by config it cannot see. */
+      const maxKeep = 20;
+      /** What the retained copies cost. Held per version so an eviction can
+       *  report the bytes it actually freed rather than a guess. */
+      const bytesPerVersion = (13 * MB) / 25; // the 25 retained versions above ≈ 13 MB
+      const versionBytes = () => Math.round(retainedPerFile.reduce((a, b) => a + b, 0) * bytesPerVersion);
+
+      /**
+       * The fixture password — the same string the admin gate accepts, and
+       * published for the same reason: the WRONG-password branch has to be
+       * reachable in a test without the fake inventing a rule about what counts
+       * as right. Restated rather than shared because both live inside marker
+       * IIFEs that cannot see each other. MUTABLE, so a successful change makes
+       * the NEW password the one the next change has to prove — a fake where the
+       * old password kept working would model nothing.
+       */
+      let password = "inkhold";
+
+      /** The real error class, imported dynamically for the reason the admin
+       *  block's `httpError` gives (no top-level import is reachable here). */
+      const httpError = async (code: string, message: string, status: number): Promise<Error> => {
+        const { ApiError } = await import("./client");
+        return new ApiError(code, message, status);
+      };
+
+      let otherSessions = 2;
+      /**
+       * NULL WOULD ALSO BE A REALISTIC FIXTURE — `users.password_changed_at`
+       * does not exist yet, so every real account reads unrecorded until the
+       * column lands and its owner changes one. A date is used here so the
+       * common, informative rendering is the one dev and e2e exercise; the null
+       * branch is covered in the unit tests instead.
+       */
+      let passwordChangedAt: number | null = now() - 97 * 86_400;
+      const thisSessionSince = now() - 3 * 86_400;
+
+      const policy = () => ({ keep, maxKeep, retainedPerFile: [...retainedPerFile], bytes: versionBytes() });
+
+      return {
+        async myDevices() {
+          await delay(latency);
+          return devices.map((d) => ({ ...d }));
+        },
+
+        async unlinkMyDevice(equipmentNo: string): Promise<void> {
+          await delay(latency);
+          const found = devices.some((d) => d.equipmentNo === equipmentNo);
+          // The same conflation the admin route makes: an unknown serial and
+          // somebody else's serial are one indistinguishable error.
+          if (!found) throw await httpError("DEVICE_NOT_FOUND", "no such device on this account", 404);
+          // The ROW GOES. Unlike the admin listing — which keeps a revoked
+          // binding so an admin can see it — your own list is the list of
+          // tablets that sync, and an unlinked one does not.
+          devices = devices.filter((d) => d.equipmentNo !== equipmentNo);
+        },
+
+        async signOutEverywhere(): Promise<number> {
+          await delay(latency);
+          const ended = otherSessions;
+          otherSessions = 0;
+          return ended;
+        },
+
+        async storageBreakdown() {
+          await delay(latency);
+          const byKind = { ...kinds, versionBytes: versionBytes() };
+          // SUMMED, never stated separately: the whole invariant is that the
+          // lines add up to the meter, and a fixture that wrote the total down
+          // by hand could drift from its own parts.
+          const usedBytes =
+            byKind.notebookBytes +
+            byKind.sketchBytes +
+            byKind.documentBytes +
+            byKind.binBytes +
+            byKind.versionBytes;
+          return { usedBytes, totalBytes, byKind };
+        },
+
+        async versionPolicy() {
+          await delay(latency);
+          return policy();
+        },
+
+        async setVersionPolicy(next: number) {
+          await delay(latency);
+          // Clamped by the SERVER, not by the control: a hand-crafted request
+          // must not be able to set the household's disk policy either.
+          const target = Math.max(0, Math.min(maxKeep, Math.floor(next)));
+          const before = retainedPerFile.reduce((a, b) => a + b, 0);
+          retainedPerFile = retainedPerFile.map((c) => Math.min(c, target));
+          const removedVersions = before - retainedPerFile.reduce((a, b) => a + b, 0);
+          keep = target;
+          return {
+            policy: policy(),
+            removedVersions,
+            freedBytes: Math.round(removedVersions * bytesPerVersion),
+          };
+        },
+
+        async accountSecurity() {
+          await delay(latency);
+          return { passwordChangedAt, otherSessions, thisSessionSince };
+        },
+
+        async changePassword(currentPlaintext: string, newPlaintext: string): Promise<void> {
+          await delay(latency);
+          // THE CHECK THE SERVER DOES NOT DO YET (§4). It is modelled here so
+          // the refusal is a real, typed path in dev and in e2e rather than a
+          // branch nobody has ever seen run — and so the day the backend grows
+          // it, the UI needs no change.
+          if (currentPlaintext !== password) {
+            throw await httpError("INVALID_CREDENTIALS", "current password incorrect", 200);
+          }
+          if (newPlaintext === password) {
+            throw await httpError("SAME_PASSWORD", "that is already your password", 200);
+          }
+          password = newPlaintext;
+          // Every OTHER session goes — the real `changePassword` mints a new
+          // session and revokes the rest — which is why the screen says so.
+          otherSessions = 0;
+          passwordChangedAt = now();
+        },
+      };
+    })(),
   };
 }

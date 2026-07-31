@@ -69,6 +69,21 @@ export type Route =
   /** The library root — the top of the device's tree. */
   | { name: "library" }
   /**
+   * YOUR OWN ACCOUNT (docs/scratch/user-options.md §7) — password, sessions,
+   * devices, storage, appearance.
+   *
+   * A PLACE, not a menu, and so a route: it is easy to link to, a reload lands
+   * back on it, and Back out of it means "the library" the way Back out of the
+   * bin does. Its crumb reads `Library / You`, which is what the path spells.
+   *
+   * NOT a {@link Destination} — it has no rail row, because the rail footer's
+   * nameplate IS its door and a second entrance in the nav would be one control
+   * for one place in two places. It is deliberately not admin-gated either: a
+   * household member who is not an admin has no other surface at all, and this
+   * one is entirely about their own account (§8.2).
+   */
+  | { name: "account" }
+  /**
    * A folder listing. The id is the device's own, which is what makes this a
    * durable link: folder ids are assigned by the device and never reissued
    * (relocating a row would invalidate the id the device knows, so nothing
@@ -182,6 +197,11 @@ export function parseRoute(raw: string): Route {
   if (p === "/login") return { name: "login" };
   if (p === "/change-password") return { name: "change-password" };
   if (p === "/connect") return { name: "connect" };
+  // A FIXED PATH, checked here with the others, so it can never be shadowed by
+  // a `DESTINATIONS` entry somebody adds later with the key `account`: the
+  // destination fallback runs last precisely so a route that already means
+  // something wins.
+  if (p === "/account") return { name: "account" };
   if (p === "/search") return { name: "search", q: readQ(search) };
   // Same `[^/]+` reasoning as the note id below: a device-assigned folder id is
   // percent-encoded in, so nothing inside one can be read as a path separator.
@@ -288,6 +308,11 @@ export function searchHref(q: string): string {
 /** Hash href for a {@link Destination} — `#/bin`, `#/admin`. */
 export function destinationHref(key: string): string {
   return `#/${key}`;
+}
+
+/** Hash href for your own account page — what the rail's nameplate opens. */
+export function accountHref(): string {
+  return "#/account";
 }
 
 /**

@@ -4645,6 +4645,7 @@ const non_immutable_routes = [_][]const u8{
     "/api/controlplane/account/storage",
     "/api/controlplane/account/devices/unlink",
     "/api/controlplane/account/sign-out-others",
+    "/api/controlplane/account/versions",
     "/api/controlplane/bin",
     "/api/controlplane/bin/:id",
     "/api/controlplane/bin/:id/restore",
@@ -6884,7 +6885,10 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
             created_at: i64,
             last_seen: ?i64 = null,
         },
-        versions: struct { keep: u32, maxKeep: u32 },
+        // `retainedPerFile` and `bytes` are what let the settings control state
+        // its cost before the button is pressed; pinned here because the control
+        // cannot render without them.
+        versions: struct { keep: u32, maxKeep: u32, retainedPerFile: []const u32, bytes: i64 },
     };
 
     {

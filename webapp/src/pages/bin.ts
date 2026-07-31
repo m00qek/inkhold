@@ -948,6 +948,16 @@ export interface BinViewOptions {
    * do" — see the controller's `inFlight`.
    */
   setMode(open: boolean, count: number, busy: boolean): void;
+  /**
+   * Leave the bin for the library root — what the `Library` crumb does.
+   *
+   * The bin is a DESTINATION, not a folder, so nothing in the topbar otherwise
+   * leads out of it: the rail can take you somewhere else, but the header itself
+   * was a dead end. That was survivable while the only way in was the rail row
+   * you could click again; it stopped being survivable when the account page
+   * grew an `Open` button that sends you here from somewhere else entirely.
+   */
+  onLeave(): void;
 }
 
 /**
@@ -956,7 +966,7 @@ export interface BinViewOptions {
  * whole of the module's behaviour be tested without a browser.
  */
 export function createBinView(opts: BinViewOptions): BinView {
-  const { gallery, crumbs, sortWrap, segmented, root, engine, setMode } = opts;
+  const { gallery, crumbs, sortWrap, segmented, root, engine, setMode, onLeave } = opts;
 
   const section = el("section", { class: "bin", "aria-label": "Recycle bin" });
 
@@ -1208,7 +1218,18 @@ export function createBinView(opts: BinViewOptions): BinView {
       // navigation out of here.
       sortWrap.hidden = true;
       segmented.hidden = true;
-      crumbs.replaceChildren(el("span", { class: "crumbs__here", text: "Recycle bin" }));
+      // "Library / Recycle bin", with Library a way OUT. A lone `here` crumb left
+      // the header a dead end — fine when the rail row you arrived by was still
+      // one click away, wrong now that Storage's `Open` sends people here from
+      // the account page. Same shape the account page uses, so the two
+      // destinations leave the same way.
+      const home = el("button", { type: "button", text: "Library" });
+      home.addEventListener("click", () => onLeave());
+      crumbs.replaceChildren(
+        home,
+        el("span", { class: "crumbs__sep", text: "/" }),
+        el("span", { class: "crumbs__here", text: "Recycle bin" }),
+      );
       // The rest of the mode: the search box leaves and `Empty bin` arrives. The
       // shell owns both elements, so it is told the mode rather than reaching in
       // — see `BinViewOptions.setMode`. Told on EVERY render because the count is

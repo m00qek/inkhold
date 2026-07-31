@@ -44,8 +44,10 @@
    library header leaves rather than sitting above it repeating itself.
 
    This is why the theme toggle is NOT in here: it is an app-level preference,
-   and hiding this bar took it away exactly while reading. It lives in the rail's
-   footer (`.account__actions`), which nothing hides. */
+   and hiding this bar took it away exactly while reading. It has since moved on
+   again, to the account page's Appearance section — whose door is the rail
+   footer's nameplate (`.account`), which nothing hides at any width, so it is
+   still reachable from a note. */
 .sn-root.is-reading .topbar {
   display: none;
 }

@@ -59,7 +59,11 @@ test.describe("session restore on load", () => {
     await page.goto("/");
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
 
-    await page.getByRole("button", { name: "Sign out" }).click();
+    // Sign out lives on the account page now (the rail footer became a
+    // nameplate), as the last row of "Signing in". `exact` because "Sign out
+    // everywhere" sits two rows above it and a substring match takes both.
+    await page.getByRole("button", { name: "Your account" }).click();
+    await page.getByRole("button", { name: "Sign out", exact: true }).click();
 
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
   });

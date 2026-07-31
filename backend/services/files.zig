@@ -2333,6 +2333,119 @@ pub const Files = struct {
         return .{ .keep = clamped, .max_keep = ceiling };
     }
 
+    /// How many versions are retained behind each LIVE file that has any — one
+    /// entry per such file, caller-owned.
+    ///
+    /// This exists so the settings control can state its cost BEFORE it is paid:
+    /// "Keeping 3 will remove 8 versions now" is `Σ max(0, count − 3)` over this
+    /// list. Discarded versions do not go to the recycle bin, they are gone, so
+    /// the number has to be a fact offered while there is still time to not press
+    /// the button rather than an apology afterwards.
+    ///
+    /// Shipping the counts rather than answering one hypothetical at a time is
+    /// deliberate: the control recomputes on every keystroke, and a household has
+    /// tens of files with history, not millions. A round trip per digit would be
+    /// slower AND would make the notice lag the number it describes.
+    ///
+    /// LIVE files only — a trashed file's retained versions are counted in the
+    /// storage panel's Recycle bin line (`storageBreakdown`), and lowering `keep`
+    /// does not touch them, so including them here would predict a discard that
+    /// will not happen.
+    pub fn retainedPerFile(self: Files, gpa: std.mem.Allocator, user_id: u64) ![]u32 {
+        var out: std.ArrayList(u32) = .empty;
+        errdefer out.deinit(gpa);
+        var s = try self.db.prepare(
+            "SELECT COUNT(*) FROM file_history fh JOIN files f ON f.id = fh.file_id " ++
+                "WHERE f.user_id = ?1 AND f.deleted = 0 GROUP BY fh.file_id;",
+        );
+        defer s.finalize();
+        s.bindInt(1, @intCast(user_id));
+        while (try s.step()) try out.append(gpa, @intCast(s.columnInt(0)));
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// What changing `keep` cost: the policy now in force, and what the change
+    /// actually discarded. Reported so the interface can CONFIRM the number it
+    /// predicted rather than assert it a second time — if these ever disagree with
+    /// `retainedPerFile`'s arithmetic, the interface was lying and should be able
+    /// to notice.
+    pub const VersionPolicyChange = struct {
+        policy: VersionPolicy,
+        removed_versions: u32 = 0,
+        freed_bytes: i64 = 0,
+    };
+
+    /// Sets this user's version depth, evicting immediately down to the new value.
+    ///
+    /// Clamped to the admin's ceiling rather than refused, matching `versionPolicy`
+    /// — the stored value is never authoritative on its own, so a request above the
+    /// ceiling stores the ceiling and the returned policy says what actually took
+    /// effect. **`keep = 0` is a real setting, not a disabled state**: someone who
+    /// would rather spend every byte on live files must be able to say so, and it
+    /// turns versioning off end to end (`recordHistory` never runs).
+    ///
+    /// RAISING discards nothing and frees nothing; it only changes what future
+    /// edits retain. Lowering evicts through the same `evictHistory` the supersede
+    /// path uses, so eviction has one implementation and this cannot drift from it.
+    ///
+    /// The quota settlement mirrors `linkBlob`'s: refunds are computed from what
+    /// the rows say AFTER every delete, through `settleRefund`, so a blob two
+    /// evicted versions shared is refunded once and a blob a live file still holds
+    /// is not refunded at all. Blob files are removed only after COMMIT.
+    pub fn setVersionPolicy(self: Files, user_id: u64, want: u32) !VersionPolicyChange {
+        const ceiling = self.history.keep;
+        const keep: u32 = @min(want, ceiling);
+
+        try self.db.exec("BEGIN IMMEDIATE;");
+        errdefer self.db.exec("ROLLBACK;") catch {};
+
+        {
+            var s = try self.db.prepare("UPDATE users SET history_keep = ?2 WHERE id = ?1;");
+            defer s.finalize();
+            s.bindInt(1, @intCast(user_id));
+            s.bindInt(2, @intCast(keep));
+            _ = try s.step();
+        }
+
+        var gc: std.ArrayList([md5_len]u8) = .empty;
+        defer gc.deinit(self.gpa);
+        var evicted: std.ArrayList(Evicted) = .empty;
+        defer evicted.deinit(self.gpa);
+
+        // Every live file of theirs that holds more than `keep`. Selected BEFORE
+        // deleting anything, so the set cannot shift under the loop.
+        var doomed: std.ArrayList(u64) = .empty;
+        defer doomed.deinit(self.gpa);
+        {
+            var s = try self.db.prepare(
+                "SELECT fh.file_id FROM file_history fh JOIN files f ON f.id = fh.file_id " ++
+                    "WHERE f.user_id = ?1 AND f.deleted = 0 " ++
+                    "GROUP BY fh.file_id HAVING COUNT(*) > ?2;",
+            );
+            defer s.finalize();
+            s.bindInt(1, @intCast(user_id));
+            s.bindInt(2, @intCast(keep));
+            while (try s.step()) try doomed.append(self.gpa, @intCast(s.columnInt(0)));
+        }
+        for (doomed.items) |file_id| try self.evictHistory(user_id, file_id, keep, &gc, &evicted);
+
+        var settled: std.ArrayList([md5_len]u8) = .empty;
+        defer settled.deinit(self.gpa);
+        var delta: i64 = 0;
+        for (evicted.items) |*e| try self.settleRefund(user_id, &e.md5, e.size, &settled, &delta);
+        if (delta != 0) try self.addUsed(user_id, delta);
+
+        try self.db.exec("COMMIT;");
+        for (gc.items) |*m| self.removeBlobFiles(m);
+
+        return .{
+            .policy = .{ .keep = keep, .max_keep = ceiling },
+            .removed_versions = @intCast(evicted.items.len),
+            // `delta` is negative (bytes given back); the interface says "freed".
+            .freed_bytes = -delta,
+        };
+    }
+
     /// Guarantees a `capacity` row exists for the user before we touch usage.
     /// Without this the `addUsed` UPDATE matches ZERO rows for a user who has no
     /// row (admin `createUser`, manual insert, any onboarding path that skips
@@ -4147,6 +4260,104 @@ test "the storage partition is per-user: one household member's bytes never appe
     try f.expectPartition(2);
     try testing.expectEqual(@as(i64, 0), (try f.files.storageBreakdown(2)).total());
     try testing.expect((try f.files.storageBreakdown(1)).total() > 0);
+}
+
+test "setVersionPolicy: lowering evicts NOW, refunds the bytes, and keeps the partition exact" {
+    // The partition audit's `K lowered` step changes the GLOBAL ceiling and lets
+    // the next supersede re-apply it — the passive path. This is the ACTIVE one:
+    // a person moves the dial on the settings page and expects the versions to be
+    // gone and the meter to drop without editing a file first. Nothing re-applies
+    // it for them, so the setter has to do the eviction, the refund and the GC
+    // itself, and this is what says it does.
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.db.exec("UPDATE capacity SET total_bytes = 100000000 WHERE user_id = 1;");
+    f.files.history.keep = 5;
+
+    // Five distinct contents of one file: four retained versions behind it.
+    inline for (.{ "v1", "v2", "v3", "v4", "v5" }) |body| {
+        const e = try putBytes(&f, 1, null, "bujo.note", "notebook-" ++ body);
+        freeEntry(e);
+    }
+    try f.expectPartition(1);
+    try testing.expectEqual(@as(i64, 4), try countOf(&f, "SELECT COUNT(*) FROM file_history;"));
+
+    {
+        const counts = try f.files.retainedPerFile(testing.allocator, 1);
+        defer testing.allocator.free(counts);
+        // One file with history, holding four — the array the control sums over.
+        try testing.expectEqualSlices(u32, &.{4}, counts);
+    }
+
+    const before = try f.used(1);
+    const change = try f.files.setVersionPolicy(1, 1);
+
+    try testing.expectEqual(@as(u32, 1), change.policy.keep);
+    try testing.expectEqual(@as(u32, 3), change.removed_versions);
+    try testing.expect(change.freed_bytes > 0);
+    // The refund is the bytes it says it freed — not a number computed twice.
+    try testing.expectEqual(before - change.freed_bytes, try f.used(1));
+    try testing.expectEqual(@as(i64, 1), try countOf(&f, "SELECT COUNT(*) FROM file_history;"));
+    try f.expectPartition(1);
+
+    // RAISING discards nothing: it only changes what future edits retain, so a
+    // person who overshoots the dial and corrects it loses nothing by the trip.
+    const raised = try f.files.setVersionPolicy(1, 4);
+    try testing.expectEqual(@as(u32, 0), raised.removed_versions);
+    try testing.expectEqual(@as(i64, 0), raised.freed_bytes);
+    try testing.expectEqual(@as(i64, 1), try countOf(&f, "SELECT COUNT(*) FROM file_history;"));
+    try f.expectPartition(1);
+
+    // CLAMPED to the admin's ceiling, not refused — and the returned policy says
+    // what actually took effect, so the control can correct itself rather than
+    // display a number the server did not accept.
+    const over = try f.files.setVersionPolicy(1, 9999);
+    try testing.expectEqual(@as(u32, 5), over.policy.keep);
+    try testing.expectEqual(@as(u32, 5), over.policy.max_keep);
+
+    // ZERO IS A REAL SETTING: versioning off, every retained version gone, and
+    // the Versions line reads 0 rather than the control becoming unavailable.
+    const off = try f.files.setVersionPolicy(1, 0);
+    try testing.expectEqual(@as(u32, 0), off.policy.keep);
+    try testing.expectEqual(@as(i64, 0), try countOf(&f, "SELECT COUNT(*) FROM file_history;"));
+    try testing.expectEqual(@as(i64, 0), (try f.files.storageBreakdown(1)).versions);
+    try f.expectPartition(1);
+    {
+        const counts = try f.files.retainedPerFile(testing.allocator, 1);
+        defer testing.allocator.free(counts);
+        try testing.expectEqual(@as(usize, 0), counts.len); // no file has history now
+    }
+}
+
+test "setVersionPolicy is per-user: lowering your dial never touches a housemate's history" {
+    // The §6 fairness rule, at the one place a person can now trigger eviction
+    // deliberately. Before §6 the eviction path picked the globally-oldest row,
+    // so this control would have let anyone in the household discard somebody
+    // else's version history by turning their own dial down.
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.db.exec("INSERT OR IGNORE INTO users(id, email, name) VALUES(2, 'b@h.lan', 'b');");
+    try f.db.exec("INSERT OR IGNORE INTO capacity(user_id, used_bytes, total_bytes) VALUES(2, 0, 100000000);");
+    try f.db.exec("UPDATE capacity SET total_bytes = 100000000 WHERE user_id = 1;");
+    f.files.history.keep = 5;
+
+    inline for (.{ "1", "2", "3" }) |v| {
+        const a = try putBytes(&f, 1, null, "a.note", "ana-" ++ v);
+        freeEntry(a);
+        const b = try putBytes(&f, 2, null, "b.note", "ben-" ++ v);
+        freeEntry(b);
+    }
+    const ben_before = try countOf(&f, "SELECT COUNT(*) FROM file_history fh JOIN files f ON f.id = fh.file_id WHERE f.user_id = 2;");
+    try testing.expect(ben_before > 0);
+    const ben_used_before = try f.used(2);
+
+    _ = try f.files.setVersionPolicy(1, 0);
+
+    try testing.expectEqual(@as(i64, 0), try countOf(&f, "SELECT COUNT(*) FROM file_history fh JOIN files f ON f.id = fh.file_id WHERE f.user_id = 1;"));
+    try testing.expectEqual(ben_before, try countOf(&f, "SELECT COUNT(*) FROM file_history fh JOIN files f ON f.id = fh.file_id WHERE f.user_id = 2;"));
+    try testing.expectEqual(ben_used_before, try f.used(2));
+    try f.expectPartition(1);
+    try f.expectPartition(2);
 }
 
 test "quota keeps charging while trashed and is refunded only at purge" {

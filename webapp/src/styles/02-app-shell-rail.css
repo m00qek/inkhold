@@ -196,24 +196,71 @@
   opacity: 1;
 }
 
-/* The rail footer carries the app-level controls: who you are, the theme toggle
-   and sign out. It has to fit TWO 30px buttons plus the avatar inside the rail's
-   fixed 232px, so the gaps and the horizontal padding are tighter than they were
-   when it held one. The arithmetic, because it is what stops the email from
-   pushing the row into overflow:
+/* The rail footer is a NAMEPLATE: who you are, and a chevron saying it opens.
+   Nothing else. The theme toggle and sign out both moved onto the account page
+   (docs/scratch/user-options.md §7), and this row is the whole reason they had
+   to — it was full, and it is the arithmetic below that says so.
+
+   WHAT THE ROW HAD TO FIT BEFORE, with two 30px buttons in it:
 
      232 − 24 (padding) − 30 (avatar) − 66 (.account__actions) − 16 (2 × 8 gap)
        = 96px left for `.account__who`
 
-   which is the flexible child, and the only one — everything else is `flex: none`.
-   `.account__who` keeps `min-width: 0` so the name and the mono email ellipsis
-   inside that 96px instead of forcing the row wider than the rail. */
+   which is why the address ellipsised at the default rail width, and why adding
+   a settings glyph (another ~33px) was never an option: the footer had to SHED
+   rather than gain. WHAT IT FITS NOW:
+
+     232 − 24 (padding) − 30 (avatar) − 16 (.account__chevron) − 16 (2 × 8 gap)
+       = 146px left for `.account__who`
+
+   `.account__who` is still the flexible child and the only one — everything else
+   is `flex: none` — and it keeps `min-width: 0`, so a long address still
+   ellipsises inside whatever it has rather than forcing the row wider than the
+   rail. That failure mode is not hypothetical: the rail's grid column floors at
+   max-content (see `grid-template-columns` above), so one over-wide row paints
+   every rail row over the topbar and eats clicks aimed at it.
+
+   A BUTTON, because the whole block is now one target: clicking your own name to
+   manage your account is the convention everywhere, and it costs no glyph. */
 .account {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
   padding: 14px 12px;
+  border: 0;
   border-top: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.account:hover {
+  background: var(--hover);
+}
+.account:hover .account__mail,
+.account:hover .account__chevron {
+  color: var(--ink-soft);
+}
+/* The only affordance the row has room for, and it is an EXISTING glyph rather
+   than a new one. Quiet at rest — it marks the row as a door without competing
+   with the name. */
+.account__chevron {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  color: var(--ink-faint);
+  transition: color 0.12s ease;
+}
+.account__chevron svg {
+  width: 16px;
+  height: 16px;
+  /* Pointing the way it opens — the page is to the right of the rail, not below
+     it — so the shared chevron is rotated rather than duplicated as a new path. */
+  transform: rotate(-90deg);
 }
 
 /* Storage quota bar, directly under the account footer: used | track | total,
@@ -253,11 +300,6 @@
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.account__actions {
-  display: flex;
-  flex: none;
-  gap: 6px;
-}
 .avatar {
   width: 30px;
   height: 30px;
@@ -271,27 +313,34 @@
   font-size: var(--fs-caption);
   font-weight: 600;
 }
+/* `display: block` because these are SPANS now — the nameplate is a <button>,
+   and a <div> inside one is invalid content that browsers reparent. */
 .account__who {
+  display: block;
   flex: 1;
   min-width: 0;
 }
 .account__name {
+  display: block;
   font-size: var(--fs-body);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .account__mail {
+  display: block;
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
   color: var(--ink-faint);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: color 0.12s ease;
 }
-/* The square icon control — rail footer (theme toggle, sign out), the find bar's
-   prev/next, and the viewer toolbars' zoom/pager steppers. The compact control
-   height, kept square, on the system chrome (--line border, --radius, --hover-fill
+/* The square icon control — the find bar's prev/next and the viewer toolbars'
+   zoom/pager steppers. (It used to be the rail footer's too, until the theme
+   toggle and sign out moved onto the account page.) The compact control height,
+   kept square, on the system chrome (--line border, --radius, --hover-fill
    hover). */
 .icon-btn {
   display: grid;

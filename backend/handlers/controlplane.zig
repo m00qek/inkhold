@@ -77,7 +77,18 @@ const MyDeviceVO = authsvc.DeviceInfo;
 /// `keep` is what this account currently keeps of each file; `maxKeep` is the
 /// admin's configured ceiling AND the default. `keep == 0` is a real setting
 /// (versioning off), not a disabled control.
-const VersionPolicyVO = struct { keep: u32, maxKeep: u32 };
+///
+/// `retainedPerFile` is what lets the control say "Keeping 3 will remove 8
+/// versions now" before the button is pressed, and `bytes` is the figure beside
+/// it — "keep more versions" stays abstract until it reads "13 MB". `bytes` is
+/// the storage panel's OWN Versions line, read from `storageBreakdown`, so the
+/// two places this number appears cannot disagree.
+const VersionPolicyVO = struct {
+    keep: u32,
+    maxKeep: u32,
+    retainedPerFile: []const u32,
+    bytes: i64,
+};
 
 /// GET /api/controlplane/account — everything the screen's identity, Signing in
 /// and Devices sections read, in one request. Storage is a separate route (it is
@@ -125,6 +136,11 @@ pub fn controlplaneAccount(ctx: *Context, req: *Request, params: Params) anyerro
     defer authsvc.Service.freeDevices(ctx.gpa, devices);
 
     const policy = files.versionPolicy(caller.user_id) catch return serverError(ctx, req);
+    const retained = files.retainedPerFile(ctx.gpa, caller.user_id) catch return serverError(ctx, req);
+    defer ctx.gpa.free(retained);
+    // The Versions line of the storage split, so the control's cost figure and the
+    // storage panel's are one number rather than two definitions that can drift.
+    const breakdown = files.storageBreakdown(caller.user_id) catch return serverError(ctx, req);
 
     try json.respond(ctx.gpa, req, .ok, AccountVO{
         .email = account.email,
@@ -135,9 +151,65 @@ pub fn controlplaneAccount(ctx: *Context, req: *Request, params: Params) anyerro
         .thisSessionSince = sessions.this_since,
         .otherBrowsers = sessions.other_browsers,
         .devices = devices,
-        .versions = .{ .keep = policy.keep, .maxKeep = policy.max_keep },
+        .versions = .{
+            .keep = policy.keep,
+            .maxKeep = policy.max_keep,
+            .retainedPerFile = retained,
+            .bytes = breakdown.versions,
+        },
     }, null);
 }
+
+/// PUT /api/controlplane/account/versions — set how many versions of each file
+/// this account keeps, evicting down to it immediately.
+///
+/// Returns what the change actually did (`removedVersions`, `freedBytes`) rather
+/// than only the new policy, so the interface can confirm the number it predicted
+/// from `retainedPerFile` instead of asserting it twice. A value above the admin's
+/// ceiling is CLAMPED, not refused, and the returned `versions.keep` says what
+/// took effect — the same rule `versionPolicy` reads by.
+///
+/// This is the one route on the account screen that DESTROYS data: the versions it
+/// drops do not go to the recycle bin. That is why the control states the cost
+/// first, and why this reports the cost back.
+pub fn controlplaneSetVersions(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    const caller = ctx.caller.?; // controlplane scope
+    const files = ctx.files orelse return serverError(ctx, req);
+
+    var parsed = json.readBody(SetVersionsReq, ctx.gpa, req) catch return badRequest(ctx, req);
+    defer parsed.deinit();
+    if (parsed.value.keep < 0) return badRequest(ctx, req);
+
+    const changed = files.setVersionPolicy(caller.user_id, @intCast(parsed.value.keep)) catch
+        return serverError(ctx, req);
+
+    const retained = files.retainedPerFile(ctx.gpa, caller.user_id) catch return serverError(ctx, req);
+    defer ctx.gpa.free(retained);
+    const breakdown = files.storageBreakdown(caller.user_id) catch return serverError(ctx, req);
+
+    try json.respond(ctx.gpa, req, .ok, SetVersionsVO{
+        .policy = .{
+            .keep = changed.policy.keep,
+            .maxKeep = changed.policy.max_keep,
+            .retainedPerFile = retained,
+            .bytes = breakdown.versions,
+        },
+        .removedVersions = changed.removed_versions,
+        .freedBytes = changed.freed_bytes,
+    }, null);
+}
+
+/// Signed, so a negative is a BAD REQUEST rather than a huge unsigned `keep` that
+/// clamps to the ceiling — the opposite of what the caller asked for.
+const SetVersionsReq = struct { keep: i64 };
+
+const SetVersionsVO = struct {
+    success: bool = true,
+    policy: VersionPolicyVO,
+    removedVersions: u32,
+    freedBytes: i64,
+};
 
 /// GET /api/controlplane/account/storage — the meter and the five lines under it.
 ///

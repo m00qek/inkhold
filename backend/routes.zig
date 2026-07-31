@@ -153,6 +153,12 @@ pub const routes = [_]router.Route{
     // asking. Not `.pending`: a session that still owes a password change has no
     // business revoking the others.
     .{ .method = .POST, .path = "/api/controlplane/account/sign-out-others", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSignOutOthers },
+    // How many versions of each file this account keeps. PUT, not POST: it sets a
+    // value to what the body says rather than appending an action, so a retry after
+    // a dropped response lands on the same state instead of evicting twice. Not
+    // `.pending` — a session that still owes a password change should not be
+    // discarding version history.
+    .{ .method = .PUT, .path = "/api/controlplane/account/versions", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSetVersions },
     // Generic per-item metadata (page dims, `fileType`, `fileHash`) — EVERY
     // previewable kind fetches this on open, not just `.note`, so it lives under
     // `/file/metadata/` rather than the `/note/` noun. The genuinely note-only

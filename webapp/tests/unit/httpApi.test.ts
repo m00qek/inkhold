@@ -927,3 +927,232 @@ describe("dispatchApiFailure", () => {
     });
   });
 });
+
+// --- the account face (docs/scratch/user-options.md §7) ---
+//
+// Four routes, and the thing they have in common is what is being pinned here
+// as much as the mapping: NOT ONE OF THEM TAKES A TARGET. Every verb under
+// `/api/admin` names another account with an `:id`; the session is the target
+// here, which is the whole difference between the two faces.
+describe("createHttpApi — the account face", () => {
+  const ACCOUNT = {
+    email: "ana@household.lan",
+    name: "ana",
+    isAdmin: false,
+    createdAt: 1_700_000_000,
+    passwordChangedAt: 1_750_000_000,
+    thisSessionSince: 1_760_000_000,
+    otherBrowsers: 2,
+    devices: [
+      {
+        equipment_no: "SN1",
+        name: "Nomad",
+        model: "A5X2",
+        firmware: "3.20.29",
+        active: true,
+        created_at: 1_700_000_000,
+        last_seen: 1_760_000_100,
+      },
+    ],
+    versions: { keep: 5, maxKeep: 20, retainedPerFile: [7, 2, 1], bytes: 13_000_000 },
+  };
+
+  it("reads the sign-in facts off /account, with no user id anywhere in the URL", async () => {
+    const { fn, calls } = recordingFetch(() => jsonResponse(ACCOUNT));
+    vi.stubGlobal("fetch", fn);
+
+    const s = await createHttpApi().accountSecurity();
+
+    expect(calls[0]).toContain("/api/controlplane/account");
+    expect(calls[0]).not.toMatch(/\/\d+/); // no `:id` — the session is the target
+    expect(s).toEqual({ passwordChangedAt: 1_750_000_000, otherSessions: 2, thisSessionSince: 1_760_000_000 });
+  });
+
+  it("reads an ABSENT optional as 'the fact does not exist', never as 0", async () => {
+    // `respond` omits null optionals, so a password that has never been
+    // changed arrives as a missing key. Reading it as 0 would date the change
+    // to 1970 and the screen would say "last changed 56 years ago".
+    const { passwordChangedAt, thisSessionSince, ...bare } = ACCOUNT;
+    void passwordChangedAt;
+    void thisSessionSince;
+    vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(bare)).fn);
+
+    const s = await createHttpApi().accountSecurity();
+    expect(s.passwordChangedAt).toBeNull();
+    expect(s.thisSessionSince).toBeNull();
+  });
+
+  it("maps a device row and drops REVOKED bindings", async () => {
+    // The route is the admin console's own listing, which keeps revoked
+    // bindings so an admin can audit them. On your own account they would read
+    // as a tablet still attached, so the seam filters them out here.
+    const withRevoked = {
+      ...ACCOUNT,
+      devices: [
+        ...ACCOUNT.devices,
+        { equipment_no: "SN2", name: "Manta", active: false, created_at: 1, last_seen: 2 },
+      ],
+    };
+    vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(withRevoked)).fn);
+
+    const devices = await createHttpApi().myDevices();
+    expect(devices).toEqual([
+      {
+        equipmentNo: "SN1",
+        name: "Nomad",
+        model: "A5X2",
+        firmware: "3.20.29",
+        lastSeenAt: 1_760_000_100,
+        linkedAt: 1_700_000_000,
+      },
+    ]);
+  });
+
+  it("reads a device never seen as null, not as the epoch", async () => {
+    const unseen = { ...ACCOUNT, devices: [{ ...ACCOUNT.devices[0], last_seen: undefined }] };
+    vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(unseen)).fn);
+    expect((await createHttpApi().myDevices())[0]!.lastSeenAt).toBeNull();
+  });
+
+  it("shares ONE /account round trip between the two methods that read it", async () => {
+    // The server answers identity, sign-in and devices in one response; the
+    // seam keeps them separate so the page can fail each section on its own.
+    // Both are right, and the join belongs in the client.
+    const { fn, calls } = recordingFetch(() => jsonResponse(ACCOUNT));
+    vi.stubGlobal("fetch", fn);
+
+    const api = createHttpApi();
+    await Promise.all([api.accountSecurity(), api.myDevices()]);
+    expect(calls).toHaveLength(1);
+
+    // …and it is NOT a cache: a later read re-asks, or re-entering the page
+    // would silently show what was true when it was first opened.
+    await api.myDevices();
+    expect(calls).toHaveLength(2);
+  });
+
+  it("maps the five-way storage split, and re-derives none of it", async () => {
+    const { fn, calls } = recordingFetch(() =>
+      jsonResponse({
+        used_bytes: 15,
+        total_bytes: 100,
+        notebooks: 5,
+        sketches: 4,
+        documents: 3,
+        recycle_bin: 2,
+        versions: 1,
+      }),
+    );
+    vi.stubGlobal("fetch", fn);
+
+    const s = await createHttpApi().storageBreakdown();
+    expect(calls[0]).toContain("/api/controlplane/account/storage");
+    expect(s.usedBytes).toBe(15);
+    expect(s.totalBytes).toBe(100);
+    expect(s.byKind).toEqual({
+      notebookBytes: 5,
+      sketchBytes: 4,
+      documentBytes: 3,
+      binBytes: 2,
+      versionBytes: 1,
+    });
+  });
+
+  it("reports byKind as NOT KNOWN when the split is absent, rather than as zeros", async () => {
+    // A server too old to answer the split can still answer the total. Five
+    // zeroes beside a full meter is the confident lie; null is the truth.
+    vi.stubGlobal("fetch", recordingFetch(() => jsonResponse({ used_bytes: 15, total_bytes: 100 })).fn);
+    const s = await createHttpApi().storageBreakdown();
+    expect(s.usedBytes).toBe(15);
+    expect(s.byKind).toBeNull();
+  });
+
+  it("unlinks by POSTing the serial, with no user id in the URL or the body", async () => {
+    const bodies: unknown[] = [];
+    const fn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return jsonResponse({ success: true });
+    }) as unknown as typeof fetch;
+    vi.stubGlobal("fetch", fn);
+
+    await createHttpApi().unlinkMyDevice("SN1");
+    expect(bodies).toEqual([{ equipmentNo: "SN1" }]);
+  });
+
+  it("returns how many sessions signing out everywhere ended", async () => {
+    const { fn, calls } = recordingFetch(() => jsonResponse({ success: true, revoked: 3 }));
+    vi.stubGlobal("fetch", fn);
+    expect(await createHttpApi().signOutEverywhere()).toBe(3);
+    expect(calls[0]).toContain("/api/controlplane/account/sign-out-others");
+  });
+
+  it("reads the per-file retained counts, which are what let the dial state its cost", async () => {
+    // §7 makes stating the cost the CONDITION on offering the control at all:
+    // discarded versions are gone, the recycle bin does not hold them. So the
+    // counts are not decoration on this response, they are the reason the
+    // section can render — "keeping 3 will remove 8 versions now" is
+    // `Σ max(0, count − 3)` over exactly this array.
+    vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(ACCOUNT)).fn);
+
+    const p = await createHttpApi().versionPolicy();
+
+    expect(p).toEqual({ keep: 5, maxKeep: 20, retainedPerFile: [7, 2, 1], bytes: 13_000_000 });
+  });
+
+  it("drops a non-numeric retained count instead of letting the notice read NaN", async () => {
+    // This array drives a control that DESTROYS data. One null in it makes the
+    // sum `NaN`, and "Keeping 3 will remove NaN versions now" is worse than no
+    // notice at all: it is the notice, broken, in front of someone whose next
+    // click discards history that the bin will not hold.
+    const bad = { ...ACCOUNT, versions: { keep: 1, maxKeep: 9, retainedPerFile: [3, null, -1, 4], bytes: 5 } };
+    vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(bad)).fn);
+
+    const p = await createHttpApi().versionPolicy();
+
+    expect(p.retainedPerFile).toEqual([3, 4]);
+  });
+
+  it("PUTs the dial and reports what the change ACTUALLY discarded", async () => {
+    // The page predicted a number from `retainedPerFile` before the click; the
+    // server answers with what it really removed. Both exist on purpose — if
+    // they ever disagree, the interface promised something it did not deliver
+    // and should be able to notice rather than repeat its own arithmetic back.
+    const { fn, calls } = recordingFetch(() =>
+      jsonResponse({
+        policy: { keep: 3, maxKeep: 20, retainedPerFile: [3, 2, 1], bytes: 9_000_000 },
+        removedVersions: 4,
+        freedBytes: 4_000_000,
+      }),
+    );
+    vi.stubGlobal("fetch", fn);
+
+    const r = await createHttpApi().setVersionPolicy(3);
+
+    expect(calls[0]).toContain("/api/controlplane/account/versions");
+    expect(r.removedVersions).toBe(4);
+    expect(r.freedBytes).toBe(4_000_000);
+    expect(r.policy.keep).toBe(3);
+  });
+
+  it("sends the CURRENT password as well as the new one", async () => {
+    // The server ignores it today (§4) — `changePassword` decrypts the current
+    // credential only for its same-password check. This test pins the CLIENT
+    // half of the contract, so the day the backend adds verification the UI
+    // needs no change; and if this ever goes red, the current-password field
+    // on the form has become theatre.
+    const bodies: Record<string, unknown>[] = [];
+    const fn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return jsonResponse({ success: true });
+    }) as unknown as typeof fetch;
+    vi.stubGlobal("fetch", fn);
+
+    await createHttpApi().changePassword("old-one", "new-one");
+    expect(Object.keys(bodies[0]!).sort()).toEqual(["currentPassword", "newPassword"]);
+    // BOTH hashed at the seam, so an existing password is no more exposed on
+    // the wire than a new one.
+    expect(bodies[0]!["currentPassword"]).toMatch(/^[0-9a-f]{32}$/);
+    expect(bodies[0]!["newPassword"]).toMatch(/^[0-9a-f]{32}$/);
+    expect(bodies[0]!["currentPassword"]).not.toBe(bodies[0]!["newPassword"]);
+  });
+});

@@ -27,6 +27,7 @@ import { api as authApi } from "../api/client";
 import { SORT_KEY, readLocal, writeLocal } from "../ui/storage";
 import {
   current,
+  accountHref,
   binNotePageHref,
   destinationHref,
   folderHref,
@@ -91,9 +92,29 @@ import { BIN_KEY, createBin, createBinScope, createBinView, type BinController }
 // have a single admin, so the console's code and CSS should not ride along in
 // every reader's first paint.
 import type { AdminPanel } from "./admin";
+// YOUR OWN ACCOUNT. Statically imported, unlike the console: it is a fraction of
+// the console's size, everybody has one (a non-admin has no other surface at
+// all), and a chunk boundary here would buy a round trip and the loading
+// stand-in that goes with it for no useful saving.
+import { createAccountPage, type AccountHost, type AccountPage } from "./account";
 
 /** The admin console's {@link Destination} key. Matches `DESTINATIONS` in rail.ts. */
 const ADMIN_KEY = "admin";
+/**
+ * The account page's place key.
+ *
+ * NOT a {@link Destination} — it has no rail row, and `DESTINATIONS` does not
+ * contain it. It is written into `destination` all the same, because every guard
+ * in this file asks that variable ONE question — "is a folder listing what is on
+ * screen?" — and for the account page the answer is no, exactly as it is for the
+ * bin and the console. So it inherits `renderGallery`'s refusal to paint over an
+ * open place, the upload button's refusal to offer a destination, and the rail's
+ * "no folder is current" reading, all without a second flag that could disagree
+ * with the first. The rail simply matches no row and highlights nothing, which
+ * is right: the door to this page is the nameplate below the rail, not a row in
+ * it.
+ */
+const ACCOUNT_KEY = "account";
 
 export interface AppDeps {
   api: Api;
@@ -159,6 +180,16 @@ export interface AppShell {
    * live elevation, and a bookmark must not imply otherwise.
    */
   showDestination(key: string): void;
+  /**
+   * Show YOUR OWN ACCOUNT — `#/account`, opened by the rail footer's nameplate.
+   *
+   * A method of its own rather than a `showDestination` arm because it is not a
+   * {@link Destination}: it has no rail row and no key in `DESTINATIONS`. It is
+   * gated on nothing beyond being signed in — a household member who is not an
+   * admin must be able to open it, which is precisely what the admin console
+   * cannot offer.
+   */
+  showAccount(): void;
   /**
    * Open a note in the reader at `page` — the INTERNAL 0-based index. The route
    * it came off counts from one (`#/note/:id` and `#/note/:id/page/1` are both
@@ -327,7 +358,18 @@ export function createAppShell(deps: AppDeps): AppShell {
     sortWrap.hidden = true;
     segmented.hidden = true;
     setDestinationMode("admin", true);
-    crumbs.replaceChildren(el("span", { class: "crumbs__here", text: "Admin" }));
+    // "Library / Admin" — same way out as the bin and the account page. The
+    // console had the identical dead-end header, and it is the destination you
+    // are MOST likely to want to leave without picking a rail row first.
+    {
+      const home = el("button", { type: "button", text: "Library" });
+      home.addEventListener("click", () => go(folderHref(null)));
+      crumbs.replaceChildren(
+        home,
+        el("span", { class: "crumbs__sep", text: "/" }),
+        el("span", { class: "crumbs__here", text: "Admin" }),
+      );
+    }
     rail.build(); // the highlight reads `destination`, already ADMIN_KEY
   }
 
@@ -623,38 +665,45 @@ export function createAppShell(deps: AppDeps): AppShell {
     onLabelsSettled: () => relabelFolders(),
   });
 
-  const logoutBtn = el("button", {
-    class: "icon-btn",
-    type: "button",
-    title: "Sign out",
-    "aria-label": "Sign out",
-    html: svg(ICONS.logout),
-  });
-  logoutBtn.addEventListener("click", () => deps.onSignOut());
-
-  // The theme toggle lives HERE, in the rail's footer, and not in the topbar.
+  // THE FOOTER IS A NAMEPLATE NOW, and both of the buttons that used to sit
+  // beside it have moved onto the account page (docs/scratch/user-options.md
+  // §7). Neither was deleted — sign out is the last row of "Signing in", and the
+  // theme toggle is Appearance.
   //
-  // Theme is an app-level preference — the same category as the signed-in
-  // account and signing out, which already sit in this footer. It is not a
-  // property of the view you happen to be in, so it should not come and go with
-  // one. It used to live in the topbar, and `.sn-root.is-reading` hides the
-  // topbar outright, so the control vanished exactly when someone is staring at
-  // a bright page and wants dark. The rail is rendered in both the library and
-  // the reader (nothing hides it, at any viewport width), so one instance here
-  // is reachable from everywhere.
+  // THE ROW HAD TO SHED RATHER THAN GAIN, and its own CSS does the arithmetic
+  // (see `.account` in 02): with two 30px buttons in it there were 96px left for
+  // a name and an address, which is why the address ellipsised. A settings glyph
+  // would have taken another ~33px. So the identity block becomes ONE button
+  // that opens the page — clicking your own name to manage your account is the
+  // convention everywhere — with a chevron as the only affordance, and the name
+  // column grows to ~146px, which fixes a legibility problem that predated the
+  // question.
   //
-  // The alternative — a second toggle in the reader's own bar — was rejected:
-  // two controls for one piece of state means two glyphs to keep in sync with
-  // `updateThemeGlyph`, and it is the same duplication that hiding the topbar
-  // was meant to remove.
-  const themeBtn = el("button", {
-    class: "icon-btn",
-    type: "button",
-    title: "Toggle theme",
-    "aria-label": "Toggle light or dark",
-    html: svg(ICONS.sun),
-  });
-  themeBtn.addEventListener("click", () => toggleTheme());
+  // The theme toggle in particular does not need to be one click away: the app
+  // already follows `prefers-color-scheme`, so the control is a set-once
+  // override, and it was ALREADY listed under Appearance — keeping it here was
+  // one control in two places.
+  const nameplate = el(
+    "button",
+    {
+      class: "account",
+      type: "button",
+      // The address is inside the button, but an accessible name assembled from
+      // three stacked lines reads as a sentence nobody wrote. This says what
+      // pressing it does, and who it is about.
+      "aria-label": `Your account: ${identity.email || "signed in"}`,
+      title: "Your account",
+    },
+    el("span", { class: "avatar", "aria-hidden": "true", text: initials(identity.email) }),
+    el(
+      "span",
+      { class: "account__who" },
+      el("span", { class: "account__name", text: (identity.email || "").split("@")[0] || "Signed in" }),
+      el("span", { class: "account__mail", text: identity.email }),
+    ),
+    el("span", { class: "account__chevron", "aria-hidden": "true", html: svg(ICONS.chevron, 1.8) }),
+  );
+  nameplate.addEventListener("click", () => go(accountHref()));
 
   // Storage quota bar, under the account footer. Progressive + optional: hidden
   // until `usage()` resolves; a failed/absent fetch, or a user with no quota,
@@ -698,8 +747,11 @@ export function createAppShell(deps: AppDeps): AppShell {
   refreshUsage();
 
   // The `<aside>` itself, not the entries: the brand block and the account
-  // footer (identity, theme, sign out) are shell concerns, so the shell builds
-  // them. `rail` above owns everything inside `nav`.
+  // nameplate are shell concerns, so the shell builds them. `rail` above owns
+  // everything inside `nav`. The storage meter STAYS here, directly beneath the
+  // nameplate — it is the one thing in this corner that answers a question at a
+  // glance, and moving it onto the page would mean opening a page to learn
+  // whether there is room for the file you are about to drop.
   const sidebar = el(
     "aside",
     { class: "rail" },
@@ -709,22 +761,7 @@ export function createAppShell(deps: AppDeps): AppShell {
       el("span", { text: "INKHOLD" }),
     ),
     nav,
-    el(
-      "div",
-      { class: "account" },
-      el("div", { class: "avatar", text: initials(identity.email) }),
-      el(
-        "div",
-        { class: "account__who" },
-        el("div", { class: "account__name", text: (identity.email || "").split("@")[0] || "Signed in" }),
-        el("div", { class: "account__mail", text: identity.email }),
-      ),
-      // Grouped so the two app-level buttons read as one cluster, and so the
-      // footer stays one flex row: `.account__who` is the only flexible child,
-      // which is what keeps the email ellipsising instead of pushing the rail's
-      // fixed 232px into overflow now that there are two buttons, not one.
-      el("div", { class: "account__actions" }, themeBtn, logoutBtn),
-    ),
+    nameplate,
     quota,
   );
 
@@ -812,8 +849,9 @@ export function createAppShell(deps: AppDeps): AppShell {
    */
   function applyQuery(next: string): void {
     // Searching is navigation: the results belong in the gallery, which the
-    // console is currently covering.
+    // console (or the account page) is currently covering.
     leaveAdmin();
+    leaveAccount();
     query = next;
     // Two halves of ONE question, and they resolve at different speeds: names
     // are matched against the cached tree on the keystroke, transcripts are a
@@ -874,10 +912,47 @@ export function createAppShell(deps: AppDeps): AppShell {
   // on a live sync bump and calls `setBinMode(false, …)`; a single flag would let
   // a housemate's tablet finishing an upload strip the mode off the console
   // somebody is standing in, putting the search box back over it.
-  const destinationsOpen = { bin: false, admin: false };
-  function setDestinationMode(which: "bin" | "admin", open: boolean): void {
+  const destinationsOpen = { bin: false, admin: false, account: false };
+  function setDestinationMode(which: "bin" | "admin" | "account", open: boolean): void {
+    // DESTINATIONS ARE MUTUALLY EXCLUSIVE — exactly one surface is on screen, so
+    // opening one closes the rest. Without this the flags could BOTH be true:
+    // the bin's was only ever cleared by `renderGallery`, which returns early
+    // while a destination is open, so going bin -> account left the bin still
+    // marked open and its `Empty bin` still on the toolbar, over a page with no
+    // bin on it. The flags are what every question below is asked of, so they
+    // have to describe one screen rather than a history of them.
+    if (open) {
+      for (const other of ["bin", "admin", "account"] as const) {
+        if (other !== which) destinationsOpen[other] = false;
+      }
+    }
     destinationsOpen[which] = open;
-    root.classList.toggle("is-destination", destinationsOpen.bin || destinationsOpen.admin);
+    const anyOpen = destinationsOpen.bin || destinationsOpen.admin || destinationsOpen.account;
+    root.classList.toggle("is-destination", anyOpen);
+
+    // ---- THE TOOLBAR BELONGS TO WHAT IS ON SCREEN --------------------------
+    //
+    // `renderGallery` used to be the only thing that cleared these, and it
+    // returns early while a destination is open — so entering one from a place
+    // that had them left them stranded over a page they say nothing about:
+    // `Upload` over your account settings, `Empty bin` still there after going
+    // from the bin to the account page. It read as intermittent because it
+    // depended entirely on where you came from; a folder that takes no uploads
+    // showed no bug at all.
+    //
+    // This function already knows which destinations are open, so it is the one
+    // place that can answer "does this control still mean anything". It only
+    // ever TAKES AWAY, never restores: each destination stays the authority on
+    // showing its own action (the console keeps `Lock` hidden until there is a
+    // session to lock), and `renderGallery` brings `Upload` back when a folder
+    // listing is the view again.
+    if (anyOpen) {
+      // Upload targets a FOLDER, and a destination is not one.
+      uploadBtn.hidden = true;
+      toolsSep.hidden = true; // never a hairline with nothing after it
+    }
+    if (!destinationsOpen.bin) emptyBinBtn.hidden = true;
+    if (!destinationsOpen.admin) lockAdminBtn.hidden = true;
   }
 
   /**
@@ -1285,7 +1360,16 @@ export function createAppShell(deps: AppDeps): AppShell {
     // The gallery's OWN engine, not a second one: the bin paints into the
     // gallery, so the scroll root is already right and `renderGallery`'s
     // `reset()` is already the teardown its canvases need.
-    view: createBinView({ gallery, crumbs, sortWrap, segmented, root, engine: galleryEngine, setMode: setBinMode }),
+    view: createBinView({
+      gallery,
+      crumbs,
+      sortWrap,
+      segmented,
+      root,
+      engine: galleryEngine,
+      setMode: setBinMode,
+      onLeave: () => go(folderHref(null)),
+    }),
     // A trashed file with a real viewer (`.note`, `.spd`, `.txt` — the bin's
     // `actions.open` mirrors `viewerFor`) is ROUTED, not opened directly, so
     // Back, a reload and the browser's own history all behave. It routes to the
@@ -1509,8 +1593,62 @@ export function createAppShell(deps: AppDeps): AppShell {
     handled,
   });
 
-  // set the initial theme glyph
-  updateThemeGlyph();
+  /**
+   * What YOUR OWN ACCOUNT is handed — all of it something this shell already
+   * owns, so the page creates nothing but its own `<section>`.
+   *
+   * Two of the callbacks out (`onSignOut`, `onSetTheme`) are exactly the two
+   * controls that LEFT the rail footer, which is the shape of that move: the
+   * shell still owns what signing out and repainting for a theme MEAN; the page
+   * owns only where the buttons are and what they say.
+   */
+  const ACCOUNT_HOST: AccountHost = {
+    api,
+    account: identity.email,
+    content,
+    gallery,
+    crumbs,
+    sortWrap,
+    segmented,
+    setMode: (open) => setDestinationMode("account", open),
+    toast,
+    onLeave: () => go(folderHref(null)),
+    onOpenBin: () => go(destinationHref(BIN_KEY)),
+    onSignOut: () => deps.onSignOut(),
+    onSessionExpired: sessionDidExpire,
+    onSetTheme: (next) => setThemeTo(next),
+  };
+  /**
+   * The account page, BUILT ON FIRST ENTRY and kept for the life of the shell —
+   * the same lifetime the admin console has, and for a measured reason rather
+   * than symmetry.
+   *
+   * It used to be constructed with the shell, and that put its whole DOM — four
+   * sections, five storage rows, a three-field password form — on the BOOT PATH,
+   * between the shell existing and the first listing painting. The gallery's
+   * loading state has a 150 ms grace (`LOADING_PAINT_DELAY_MS`) that a fast
+   * listing is meant to win outright, and the extra work was enough to lose that
+   * race on a loaded machine: `slowLink`'s "a fast listing paints no loading
+   * state at all" and `find`'s stroke probe both went red, on a clean checkout's
+   * green suite. Nothing on the boot path may cost what only a visitor to one
+   * page needs.
+   *
+   * The MODULE is still statically imported, deliberately: it is a fraction of
+   * the console's size, and a chunk boundary here would buy a round trip and the
+   * loading stand-in that goes with it (see `showAdminBooting`) for no useful
+   * saving. What was expensive was the DOM, not the code.
+   */
+  let accountPage: AccountPage | null = null;
+  function account(): AccountPage {
+    accountPage ??= createAccountPage(ACCOUNT_HOST);
+    return accountPage;
+  }
+
+  /** Leave the account page. The twin of `leaveAdmin`, and called from the same
+   *  places: a route handler that means "you are somewhere else now". */
+  function leaveAccount(): void {
+    accountPage?.close();
+  }
 
   // --- rendering -----------------------------------------------------------
   /**
@@ -2256,6 +2394,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     hideActiveViewer();
     setReading(false);
     leaveAdmin();
+    leaveAccount();
     destination = null;
     folderId = null;
     listing = undefined;
@@ -2486,10 +2625,6 @@ export function createAppShell(deps: AppDeps): AppShell {
     renderGallery();
   }
 
-  function updateThemeGlyph(): void {
-    themeBtn.innerHTML = svg(currentTheme() === "dark" ? ICONS.moon : ICONS.sun);
-  }
-
   /** Repaint for a theme change: drop the now-off-theme bitmaps, then repaint only
    * what's on screen; the rest re-lazy on next scroll (keyed by theme, so nothing
    * is lost). */
@@ -2498,16 +2633,32 @@ export function createAppShell(deps: AppDeps): AppShell {
     // The facade caches WebP blobs per theme too; drop the off-theme ones so a
     // toggle does not leave both worlds resident.
     thumbnails.evictTheme(previous);
-    updateThemeGlyph();
+    // The Appearance control is the only thing on screen that CLAIMS a theme, so
+    // it is what has to stop claiming the old one — including on the OS-flip
+    // path below, which nobody clicked.
+    accountPage?.themeChanged();
     galleryEngine.bumpTheme();
     reader.bumpTheme();
   }
 
-  function toggleTheme(): void {
+  /**
+   * Pin a theme, from the account page's two-option control.
+   *
+   * A no-op when it is already in force, which is what makes the control safe to
+   * press twice: re-pinning would evict every off-theme bitmap and repaint the
+   * gallery for no change at all. (The FIRST press of the theme you are already
+   * following does still pin it — `currentTheme()` reads the OS when nothing is
+   * stored — so choosing "Light" while the OS is light stops following the OS,
+   * which is exactly what pressing it means.)
+   */
+  function setThemeTo(next: Theme): void {
     const previous = currentTheme();
-    const next: Theme = previous === "dark" ? "light" : "dark";
     // Pins the attribute AND persists it, so the choice survives a reload.
     setTheme(next);
+    if (previous === next) {
+      accountPage?.themeChanged();
+      return;
+    }
     repaintForTheme(previous);
   }
 
@@ -2564,6 +2715,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     showFolder(id: Id | null): void {
       enterPlace();
       leaveAdmin();
+      leaveAccount();
       destination = null;
       void navigate(id);
       // Ensure on-screen thumbnails are painted for the current theme.
@@ -2593,6 +2745,9 @@ export function createAppShell(deps: AppDeps): AppShell {
 
     showDestination(key: string): void {
       enterPlace();
+      // One place at a time, and the account page is one — whichever arm runs
+      // below, arriving at a destination IS the navigation away from it.
+      leaveAccount();
       query = "";
       searchInput.value = "";
       search.reset();
@@ -2630,6 +2785,25 @@ export function createAppShell(deps: AppDeps): AppShell {
           redirect(folderHref(folderId));
           return;
       }
+    },
+
+    showAccount(): void {
+      enterPlace();
+      // The bin has no `close()` — it closes by the gallery being repainted over
+      // it — and the console does, so both are dealt with the same way the admin
+      // arm above deals with them, and for the same reasons. The repaint runs
+      // while `destination` is still null, which is what lets it through the
+      // guard at the top of `renderGallery`.
+      if (bin.isOpen()) renderGallery({ rail: false });
+      leaveAdmin();
+      query = "";
+      searchInput.value = "";
+      search.reset();
+      destination = ACCOUNT_KEY;
+      account().open();
+      // No rail row matches this key, so this repaints the highlight OFF —
+      // which is right: you are not in a folder, the bin or the console.
+      rail.build();
     },
 
     async openNote(id: Id, page = 0, q = ""): Promise<void> {
@@ -2778,6 +2952,7 @@ export function createAppShell(deps: AppDeps): AppShell {
       spdViewer.destroy();
       txtViewer.destroy();
       admin?.destroy();
+      accountPage?.destroy();
       // Aborts anything still uploading and drops the document-level drag
       // swallowers — otherwise a torn-down shell would go on eating drops for the
       // rest of the page's life.

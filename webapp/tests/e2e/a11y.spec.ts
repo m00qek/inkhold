@@ -54,8 +54,31 @@ test.describe("accessibility — library & reader", () => {
 
     await expect(page.getByRole("navigation", { name: "Folders" })).toBeVisible();
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Toggle light or dark" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+    // The rail footer is a nameplate: ONE button, whose accessible name says
+    // what pressing it does and whose account it is about. The three stacked
+    // lines inside it would otherwise be read out as a sentence nobody wrote.
+    await expect(page.getByRole("button", { name: "Your account: ana@household.lan" })).toBeVisible();
+  });
+
+  test("the account page's landmarks and controls carry accessible names", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/account");
+
+    await expect(page.getByRole("region", { name: "Your account" })).toBeVisible();
+    // A two-option control needs to be a GROUP with a name, or the two buttons
+    // are just two buttons that happen to sit together.
+    await expect(page.getByRole("group", { name: "Theme" })).toBeVisible();
+    // Per-device actions name their device: a column of identical "Unlink"
+    // buttons tells a screen reader nothing about which one it is on.
+    await expect(page.getByRole("button", { name: "Unlink Nomad" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Change your password" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "Change your password" }).click();
+    // getByLabel only resolves when the label is correctly associated.
+    await expect(page.getByLabel("Current password")).toBeVisible();
+    await expect(page.getByLabel("New password", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Confirm new password")).toBeVisible();
   });
 
   test("the reader exposes a named region and labelled pager controls", async ({ page }) => {
