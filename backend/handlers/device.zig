@@ -9,6 +9,7 @@ const context = @import("../http/context.zig");
 const json = @import("../http/json.zig");
 const reply = @import("../http/reply.zig");
 const multipart = @import("../http/multipart.zig");
+const upload_cap = @import("upload_cap.zig");
 const sync = @import("../services/sync.zig");
 const filesmod = @import("../services/files.zig");
 const authsvc = @import("../services/auth/service.zig");
@@ -1183,12 +1184,44 @@ fn validUploadId(s: []const u8) bool {
     return true;
 }
 
+/// Refuses an `/oss/put` body that ran past its cap, and tears the reservation
+/// down with it.
+///
+/// **The wire shape is the protocol's, not ours.** The device sync protocol is
+/// frozen: its failures are HTTP **200** carrying the coded envelope
+/// (`{success:false, errorCode, errorMsg}`), which is exactly what the two
+/// sibling steps of this same upload — `upload/apply` and `upload/finish` —
+/// answer with when there is no room (`QUOTA_EXCEEDED` / "not enough space").
+/// This is the same refusal arriving earlier, so it says the same thing. A 413
+/// here would be a status the device never sees on this flow, and a transport-
+/// level error mid-sync reads to it as a network failure, not as a decision.
+///
+/// **The reservation goes too.** `deleteUploadSession` removes the row this
+/// `innerName` names, so the refusal leaves no `upload_sessions` row (and, with
+/// the caller's `abort`, no blob) behind. `sweepUploadSessions` at startup would
+/// eventually reclaim it, but "eventually" is not cleanup on a path we control:
+/// a later `upload/finish` for this id now answers `NOT_FOUND` rather than
+/// finding a reservation whose bytes were thrown away.
+fn refuseOversize(ctx: *Context, req: *Request, files: *filesmod.Files, inner: []const u8) anyerror!void {
+    {
+        ctx.lockDb();
+        defer ctx.unlockDb();
+        files.deleteUploadSession(inner) catch {};
+    }
+    return fail(ctx, req, .ok, "QUOTA_EXCEEDED", "not enough space");
+}
+
 /// POST /oss/put/:innerName -> receive the file bytes. The body is
 /// `multipart/form-data` with one `name="file"` part; we stream that part's raw
 /// bytes into the blob store WITHOUT buffering the whole file (respecting the
 /// 50 MB budget) and record the computed md5 on the session. The device sends its
 /// `x-access-token` here, so this is `.device`-scoped. The exact success response
 /// the device accepts (from the capture) is an empty `200`.
+///
+/// The body is CAPPED as it arrives, at the session's `declared_size` plus
+/// `upload_cap.slack_bytes` — see `refuseOversize` for what a caller that runs
+/// past it gets back, and `upload_cap` for why the cap has to be here rather than
+/// at the `upload/finish` quota check.
 pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // device scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -1235,17 +1268,33 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
     if (chunked and (upload_id == null or part_number == 0 or part_number > total_chunks))
         return badRequest(ctx, req);
 
-    // The session must exist and belong to the calling device. DB touch #1 of 2 —
-    // the route is `manual_db_lock`, so we hold `ctx.db_lock` for just this lookup.
-    {
+    // The session must exist and belong to the calling device, and it carries the
+    // `declared_size` this body is measured against. DB touch #1 of 2 — the route
+    // is `manual_db_lock`, so we hold `ctx.db_lock` for just this lookup.
+    const declared: u64 = blk: {
         ctx.lockDb();
         defer ctx.unlockDb();
         var arena = std.heap.ArenaAllocator.init(ctx.gpa);
         defer arena.deinit();
         const session = (files.uploadSession(arena.allocator(), caller.user_id, inner) catch return serverError(ctx, req)) orelse
             return reply.notFound(req);
-        _ = session;
-    }
+        break :blk session.declared_size;
+    };
+
+    // THE CAP. The device announced `declared_size` at `upload/apply`, where it was
+    // checked against quota before this URL was ever handed out; the bytes now
+    // arriving are held to it (plus `slack_bytes`) AS THEY ARRIVE. Without this,
+    // quota applied only at `upload/finish` — after the whole body was on disk —
+    // so one authenticated request could fill the disk with every quota check
+    // still passing, and on a Pi a full disk takes the database with it.
+    //
+    // On a multipart (chunked) upload each PART is held to the same figure. That
+    // is the right per-request bound — no single part can legitimately exceed the
+    // whole file — but it is knowingly a per-part bound, not a per-session one:
+    // N parts can still stage N × the cap before the merge. Closing that needs a
+    // running received-bytes total on the `upload_sessions` row (a `services/` +
+    // `db/` change), which is a bigger claim than this handler can make on its own.
+    const limit = upload_cap.limitFor(declared);
 
     // Stream the multipart file part straight into a new blob (incremental md5).
     // UNLOCKED: the ingest is socket → md5 → filesystem only (store/blobs.zig
@@ -1257,8 +1306,14 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
     if (chunked) {
         var ing = files.blobs.beginChunkIngest(upload_id.?, part_number, &wbuf) catch return serverError(ctx, req);
-        multipart.extract(reader, boundary, &ing) catch {
+        var sink = upload_cap.Capped(blobstore.ChunkIngest).init(&ing, limit);
+        multipart.extract(reader, boundary, &sink) catch |err| {
+            // `ChunkIngest.abort` closes the fd but does NOT unlink the part (its
+            // single-shot sibling `Ingest.abort` does) — what it staged is bounded
+            // by the cap and reclaimed by the startup `sweepTmp`. Nothing is
+            // published either way.
             ing.abort();
+            if (err == error.UploadTooLarge) return refuseOversize(ctx, req, files, inner);
             return badRequest(ctx, req);
         };
         ing.finish() catch {
@@ -1278,8 +1333,13 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
         }
     } else {
         var ing = files.blobs.beginIngest(&wbuf) catch return serverError(ctx, req);
-        multipart.extract(reader, boundary, &ing) catch {
+        var sink = upload_cap.Capped(blobstore.Ingest).init(&ing, limit);
+        multipart.extract(reader, boundary, &sink) catch |err| {
+            // `abort` closes the fd AND drops the temp file, so an over-cap body
+            // leaves nothing behind: the partial blob is gone here, and the
+            // session row goes in `refuseOversize`. Neither is left for the sweep.
             ing.abort();
+            if (err == error.UploadTooLarge) return refuseOversize(ctx, req, files, inner);
             return badRequest(ctx, req);
         };
         const res = ing.finish(null) catch {

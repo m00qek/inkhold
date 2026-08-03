@@ -123,10 +123,14 @@ pub const BlobStore = struct {
         var tmp_buf: [chunk_name_max]u8 = undefined;
         const tmp_rel = try chunkTmpName(&tmp_buf, upload_id, part_number);
         const file = try self.root.createFile(self.io, tmp_rel, .{});
+        var kept: [chunk_name_max]u8 = undefined;
+        @memcpy(kept[0..tmp_rel.len], tmp_rel);
         return .{
             .store = self,
             .file = file,
             .fw = file.writerStreaming(self.io, write_buf),
+            .tmp_name = kept,
+            .tmp_len = tmp_rel.len,
         };
     }
 
@@ -355,6 +359,11 @@ pub const ChunkIngest = struct {
     store: BlobStore,
     file: File,
     fw: File.Writer,
+    /// The part's own temp path, kept so `abort` can drop it. `Ingest` has
+    /// carried one all along; this had none, which is the whole reason its
+    /// `abort` used to leave the file for the sweep.
+    tmp_name: [chunk_name_max]u8,
+    tmp_len: usize,
 
     pub fn write(self: *ChunkIngest, bytes: []const u8) !void {
         try self.fw.interface.writeAll(bytes);
@@ -369,11 +378,43 @@ pub const ChunkIngest = struct {
         self.file.close(self.store.io);
     }
 
+    /// Closes the fd and drops the part — the same contract as `Ingest.abort`.
+    ///
+    /// It used to only close, leaving the part for `sweepTmp` at the next boot.
+    /// That was survivable while nothing refused mid-upload; the ingest cap now
+    /// aborts parts on a routine, caller-triggered path, and "the disk gets it
+    /// back when you next restart" is not a bound on a server that stays up for
+    /// months. The sweep remains the backstop for parts nobody aborted at all.
     pub fn abort(self: *ChunkIngest) void {
         self.file.close(self.store.io);
-        // Abandoned temp file is swept at startup by sweepTmp
+        self.store.root.deleteFile(self.store.io, self.tmp_name[0..self.tmp_len]) catch {};
     }
 };
+
+test "ChunkIngest.abort drops its part rather than leaving it for the sweep" {
+    // `Ingest.abort` has always closed AND unlinked; this one only closed, and
+    // said so — the part waited for `sweepTmp` at the next boot. That was fine
+    // while nothing refused mid-upload. The ingest cap now aborts parts on a
+    // routine, caller-triggered path, and "you get the disk back when you next
+    // restart" is not a bound on a server that stays up for months.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = try BlobStore.init(std.testing.io, tmp.dir);
+
+    var buf: [64]u8 = undefined;
+    var ing = try store.beginChunkIngest("abcdef0123456789", 1, &buf);
+    try ing.write("some partial bytes");
+
+    // The path the ingest ACTUALLY used, read off the ingest rather than
+    // re-derived here — a test that recomputes the name can pass by checking
+    // somewhere the code never wrote.
+    const path = try std.testing.allocator.dupe(u8, ing.tmp_name[0..ing.tmp_len]);
+    defer std.testing.allocator.free(path);
+    try std.testing.expect(store.hasRel(path)); // it is really there first
+
+    ing.abort();
+    try std.testing.expect(!store.hasRel(path));
+}
 
 fn ensureDir(io: Io, root: Dir, sub: []const u8) !void {
     var d = root.createDirPathOpen(io, sub, .{}) catch |err| switch (err) {

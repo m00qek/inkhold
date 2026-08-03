@@ -24,6 +24,7 @@ const noteindex = @import("../services/note_index.zig");
 const notesearch = @import("../services/search/query.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
+const uploadcap = @import("../handlers/upload_cap.zig");
 const eventstreams = @import("../http/event_streams.zig");
 const sn = @import("supernote");
 
@@ -60,6 +61,26 @@ fn roundtrip(ctx: *Context, req_bytes: []const u8, out_buf: []u8) !Response {
     var req = try server.receiveHead();
     try transport.handle(ctx, &app.routes, &req);
     return parseResponse(out_buf[0..out.end]);
+}
+
+/// `roundtrip` plus HOW MUCH OF THE REQUEST THE SERVER READ.
+///
+/// The ingest cap is a claim about *where a body stops*, and the end state of a
+/// refusal-during-ingest is indistinguishable from the end state of the old
+/// refusal-after-ingest: both answer QUOTA_EXCEEDED, publish no blob, charge
+/// nothing and leave no row. The only observable difference is that the capped
+/// one never read the rest of the body — which is the entire point, because the
+/// bytes it did not read are the bytes it did not write to disk. So the tests
+/// assert on this number, not merely on the aftermath.
+const Sent = struct { resp: Response, consumed: usize };
+
+fn roundtripCounting(ctx: *Context, req_bytes: []const u8, out_buf: []u8) !Sent {
+    var in = std.Io.Reader.fixed(req_bytes);
+    var out = std.Io.Writer.fixed(out_buf);
+    var server = std.http.Server.init(&in, &out);
+    var req = try server.receiveHead();
+    try transport.handle(ctx, &app.routes, &req);
+    return .{ .resp = try parseResponse(out_buf[0..out.end]), .consumed = in.seek };
 }
 
 fn parseResponse(raw: []const u8) !Response {
@@ -2630,6 +2651,76 @@ fn buildMultipart(boundary: []const u8, payload: []const u8) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
+/// How many files are staged under the blob store's `tmp/` directory — where a
+/// half-written ingest lives before it is published, and the only place a refused
+/// upload could strand bytes. Counted (not asserted empty inline) so a failure
+/// reports how many were left.
+fn blobTempCount(f: *Fixture) !usize {
+    var d = try f.tmp.dir.openDir(std.testing.io, "tmp", .{ .iterate = true });
+    defer d.close(std.testing.io);
+    var it = d.iterate();
+    var n: usize = 0;
+    while (try it.next(std.testing.io)) |_| n += 1;
+    return n;
+}
+
+/// `len` bytes of a deterministic non-repeating pattern — big enough to outrun
+/// the ingest cap, and containing no multipart delimiter look-alike.
+fn filler(len: usize) ![]u8 {
+    const buf = try gpa.alloc(u8, len);
+    for (buf, 0..) |*b, i| b.* = @intCast((i * 31 + 7) & 0xFF);
+    return buf;
+}
+
+/// `upload/apply` announcing `size` bytes, returning the minted `innerName` —
+/// which is what the cap on the following `/oss/put` is measured against.
+fn applyUpload(ctx: *Context, obuf: []u8, reqbuf: []u8, tok: []const u8, name: []const u8, size: usize) ![16]u8 {
+    const body = try std.fmt.allocPrint(
+        gpa,
+        "{{\"path\":\"/NOTE/Note/{s}\",\"fileName\":\"{s}\",\"equipmentNo\":\"SN1\",\"size\":{d}}}",
+        .{ name, name, size },
+    );
+    defer gpa.free(body);
+    const resp = try deviceRequest(ctx, obuf, reqbuf, "POST", "/api/file/3/files/upload/apply", tok, "SN1", body);
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    var p = try std.json.parseFromSlice(struct { success: bool, innerName: []const u8 }, gpa, resp.body, .{ .ignore_unknown_fields = true });
+    defer p.deinit();
+    try std.testing.expect(p.value.success);
+    var inner: [16]u8 = undefined;
+    @memcpy(&inner, p.value.innerName);
+    return inner;
+}
+
+/// POSTs `payload` to `/oss/put/<inner>`, multipart-framed as the device frames
+/// it; `query` is appended raw (the chunk parameters). The request buffer is
+/// heap-allocated because these payloads are deliberately larger than any stack
+/// buffer in this file.
+fn ossPut(ctx: *Context, obuf: []u8, tok: []const u8, inner: []const u8, payload: []const u8, query: []const u8) !Sent {
+    const boundary = "----NomadUploadBoundaryZZ";
+    const wire = try buildMultipart(boundary, payload);
+    defer gpa.free(wire);
+    const reqbuf = try gpa.alloc(u8, wire.len + 1024);
+    defer gpa.free(reqbuf);
+    var pbuf: [160]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, "/oss/put/{s}{s}", .{ inner, query });
+    const req = try buildRequest(reqbuf, "POST", path, &.{
+        .{ .name = "content-type", .value = "multipart/form-data; boundary=" ++ boundary },
+        .{ .name = "x-access-token", .value = tok },
+        .{ .name = "equipmentNo", .value = "SN1" },
+    }, wire);
+    return roundtripCounting(ctx, req, obuf);
+}
+
+/// The most of a request body a CAPPED ingest can legitimately have read before
+/// refusing: the cap itself, plus the framing and the reader's lookahead — the
+/// multipart extractor is fed in `chunk_len` reads and holds a boundary-sized
+/// window back, and the HTTP reader fills its own `chunk_len` buffer ahead of it.
+/// Three chunks of headroom is generous and still an order of magnitude below the
+/// bodies these tests send, so "it stopped early" is unambiguous.
+fn cappedReadCeiling(limit: usize) usize {
+    return limit + 3 * blobstore.chunk_len;
+}
+
 test "device upload M2: apply → /oss/put → finish stores the blob and links it into the tree" {
     const f = try Fixture.init();
     defer f.deinit();
@@ -3030,6 +3121,165 @@ test "device upload chunked: a path-traversal uploadId is rejected before it nam
     }, wire);
     const resp = try roundtrip(ctx, req, &obuf);
     try std.testing.expectEqual(@as(u16, 400), resp.status);
+}
+
+// ---- the ingest cap: a body may not outrun what was declared ------------------
+
+test "device /oss/put: a body past the declared size is refused MID-STREAM, leaving no session row and nothing on disk" {
+    // Before the cap, `/oss/put` streamed whatever arrived straight onto disk and
+    // quota was consulted only at `upload/finish` — i.e. after every byte had
+    // landed. One authenticated request could therefore fill the disk with every
+    // quota check in the codebase still passing, and on the Pi a full disk takes
+    // the SQLite database with it.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+
+    const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
+    const alice = (try f.svc.createUser(admin, "alice", false)).id;
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
+
+    var obuf: [8192]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+    const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
+
+    // The device announces 4 KiB and then sends a body several caps long.
+    const declared: usize = 4096;
+    const inner = try applyUpload(ctx, &obuf, &reqbuf, &dev_tok, "flood.note", declared);
+    const payload = try filler(declared + 4 * uploadcap.slack_bytes);
+    defer gpa.free(payload);
+
+    const sent = try ossPut(ctx, &obuf, &dev_tok, &inner, payload, "");
+    const resp = sent.resp;
+
+    // THE WIRE SHAPE IS THE PROTOCOL'S. The device sync protocol answers failures
+    // as HTTP 200 carrying the coded envelope — the same `QUOTA_EXCEEDED` its
+    // sibling steps (`upload/apply`, `upload/finish`) answer when there is no
+    // room. A 4xx/5xx here would read to the tablet as a network failure
+    // mid-sync rather than as a decision it can report.
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try expectFailure(resp.body, "QUOTA_EXCEEDED");
+
+    // THE REFUSAL IS MID-STREAM, which is the whole claim: the server stopped
+    // reading near the cap instead of swallowing the body and refusing at the end
+    // (the old behaviour, which produces an identical response and an identical
+    // aftermath — see `Sent`).
+    try std.testing.expect(sent.consumed < cappedReadCeiling(uploadcap.limitFor(declared)));
+
+    // THE DURABLE FACTS, not the response: the reservation is gone, no blob was
+    // published, and nothing is staged in `tmp/` for the startup sweep to find.
+    try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
+    try std.testing.expect(!f.files.blobs.has(&blobstore.md5HexOf(payload)));
+    try std.testing.expectEqual(@as(usize, 0), try blobTempCount(f));
+    try std.testing.expectEqual(@as(i64, 0), (try f.files.capacity(alice)).used);
+
+    // And the reservation really is unusable afterwards — `finish` finds nothing.
+    {
+        const md5 = blobstore.md5HexOf(payload);
+        const body = try std.fmt.allocPrint(
+            gpa,
+            "{{\"content_hash\":\"{s}\",\"equipmentNo\":\"SN1\",\"fileName\":\"flood.note\",\"innerName\":\"{s}\",\"path\":\"/NOTE/Note/\",\"size\":\"{d}\"}}",
+            .{ &md5, &inner, payload.len },
+        );
+        defer gpa.free(body);
+        const fin = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/upload/finish", &dev_tok, "SN1", body);
+        try std.testing.expectEqual(@as(u16, 200), fin.status);
+        try expectFailure(fin.body, "NOT_FOUND");
+    }
+}
+
+test "device /oss/put: the declared size, and the cap itself, both still upload — the cap removes an attack, not the feature" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+
+    const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
+    const alice = (try f.svc.createUser(admin, "alice", false)).id;
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
+
+    var obuf: [8192]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+    const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
+
+    const declared: usize = 4096;
+
+    // (a) The ordinary upload — exactly what was declared — goes all the way
+    //     through apply → put → finish and lands in the tree.
+    {
+        const inner = try applyUpload(ctx, &obuf, &reqbuf, &dev_tok, "normal.note", declared);
+        const payload = try filler(declared);
+        defer gpa.free(payload);
+        const md5 = blobstore.md5HexOf(payload);
+
+        const resp = (try ossPut(ctx, &obuf, &dev_tok, &inner, payload, "")).resp;
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expectEqual(@as(usize, 0), resp.body.len); // the empty-200 success shape
+        try std.testing.expect(f.files.blobs.has(&md5));
+
+        const body = try std.fmt.allocPrint(
+            gpa,
+            "{{\"content_hash\":\"{s}\",\"equipmentNo\":\"SN1\",\"fileName\":\"normal.note\",\"innerName\":\"{s}\",\"path\":\"/NOTE/Note/\",\"size\":\"{d}\"}}",
+            .{ &md5, &inner, payload.len },
+        );
+        defer gpa.free(body);
+        const fin = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/upload/finish", &dev_tok, "SN1", body);
+        try std.testing.expectEqual(@as(u16, 200), fin.status);
+        var p = try std.json.parseFromSlice(struct { success: bool, id: []const u8 }, gpa, fin.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expect(p.value.success);
+        try std.testing.expectEqual(@as(i64, @intCast(payload.len)), try usedBytes(f, alice));
+    }
+
+    // (b) THE BOUNDARY: declared + the whole slack, to the byte, is ACCEPTED. The
+    //     refusal above is one byte past this, so the two together pin the edge
+    //     rather than "somewhere in that region".
+    {
+        const inner = try applyUpload(ctx, &obuf, &reqbuf, &dev_tok, "edge.note", declared);
+        const payload = try filler(declared + uploadcap.slack_bytes);
+        defer gpa.free(payload);
+        const resp = (try ossPut(ctx, &obuf, &dev_tok, &inner, payload, "")).resp;
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expectEqual(@as(usize, 0), resp.body.len);
+        try std.testing.expect(f.files.blobs.has(&blobstore.md5HexOf(payload)));
+    }
+}
+
+test "device /oss/put chunked: an over-cap PART is refused with the same envelope, and takes the session with it" {
+    // The chunked path is the same hole with more steps: each part streamed to
+    // disk unmeasured. Each part is now held to the same figure — no single part
+    // can legitimately exceed the whole declared file.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+
+    const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
+    const alice = (try f.svc.createUser(admin, "alice", false)).id;
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
+
+    var obuf: [8192]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+    const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
+
+    const declared: usize = 4096;
+    const inner = try applyUpload(ctx, &obuf, &reqbuf, &dev_tok, "flood.note", declared);
+    const payload = try filler(declared + 4 * uploadcap.slack_bytes);
+    defer gpa.free(payload);
+
+    const sent = try ossPut(ctx, &obuf, &dev_tok, &inner, payload, "?uploadId=abc123&totalChunks=3&partNumber=1");
+    try std.testing.expectEqual(@as(u16, 200), sent.resp.status);
+    try expectFailure(sent.resp.body, "QUOTA_EXCEEDED");
+    try std.testing.expect(sent.consumed < cappedReadCeiling(uploadcap.limitFor(declared)));
+
+    // Reservation gone, nothing published. (What the refused part had already
+    // staged under `tmp/` is bounded by the cap and reclaimed by the startup
+    // `sweepTmp`: `ChunkIngest.abort` closes the fd without unlinking, unlike its
+    // single-shot sibling — a store-level asymmetry, noted with the review.)
+    try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
+    try std.testing.expect(!f.files.blobs.has(&blobstore.md5HexOf(payload)));
+
+    // A later part of the same upload has nothing left to attach to.
+    const again = try ossPut(ctx, &obuf, &dev_tok, &inner, "small", "?uploadId=abc123&totalChunks=3&partNumber=2");
+    try std.testing.expectEqual(@as(u16, 404), again.resp.status);
 }
 
 test "oversized device numbers are rejected, not panicked (overflow guard)" {
@@ -6572,6 +6822,21 @@ fn uploadFile(
     return uploadFileQuery(ctx, obuf, reqbuf, tok, dest, filename, payload, "");
 }
 
+/// `uploadFile`, reporting how much of the request the server read — the ingest
+/// cap's one observable (see `Sent`).
+fn uploadFileCounting(
+    ctx: *Context,
+    obuf: []u8,
+    reqbuf: []u8,
+    tok: []const u8,
+    dest: []const u8,
+    filename: []const u8,
+    payload: []const u8,
+) !Sent {
+    const req = try buildUploadRequest(reqbuf, tok, dest, filename, payload, "");
+    return roundtripCounting(ctx, req, obuf);
+}
+
 /// `uploadFile` with a raw query string appended (`"?onConflict=replace"`), so
 /// the conflict-mode cases drive the same wire path as everything else.
 fn uploadFileQuery(
@@ -6584,17 +6849,29 @@ fn uploadFileQuery(
     payload: []const u8,
     query: []const u8,
 ) !Response {
+    const req = try buildUploadRequest(reqbuf, tok, dest, filename, payload, query);
+    return roundtrip(ctx, req, obuf);
+}
+
+/// Serializes one browser upload request into `reqbuf`.
+fn buildUploadRequest(
+    reqbuf: []u8,
+    tok: []const u8,
+    dest: []const u8,
+    filename: []const u8,
+    payload: []const u8,
+    query: []const u8,
+) ![]const u8 {
     const wire = try buildUploadBody(filename, payload);
     defer gpa.free(wire);
     var pbuf: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/folder/{s}/upload{s}", .{ dest, query });
     var cbuf: [64]u8 = undefined;
     const cookie = try std.fmt.bufPrint(&cbuf, "sn_session={s}", .{tok});
-    const req = try buildRequest(reqbuf, "POST", path, &.{
+    return buildRequest(reqbuf, "POST", path, &.{
         .{ .name = "content-type", .value = "multipart/form-data; boundary=" ++ upload_boundary },
         .{ .name = "cookie", .value = cookie },
     }, wire);
-    return roundtrip(ctx, req, obuf);
 }
 
 /// `dest` for a folder id.
@@ -6785,6 +7062,69 @@ test "web upload: an over-quota file is 413 and leaves the tree and the charge a
         const resp2 = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/tree", &web, "");
         try std.testing.expect(std.mem.indexOf(u8, resp2.body, "big.pdf") == null);
     }
+}
+
+test "web upload: a body past the caller's remaining quota is refused MID-STREAM and stores nothing" {
+    // The browser face has no `upload/apply`, so there is no declared size to hold
+    // it to: the cap is the caller's REMAINING QUOTA — the figure `linkBlob` is
+    // about to enforce anyway. The difference is where the bytes stop: at the cap,
+    // instead of after the whole body has been written to disk and then refused.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+
+    // A tiny allotment: 8 bytes total, so the cap is 8 + the slack.
+    {
+        var s = try f.db.prepare("INSERT OR REPLACE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 8);");
+        defer s.finalize();
+        s.bindInt(1, @intCast(admin));
+        _ = try s.step();
+    }
+
+    const v0 = try f.files.syncVersion(admin);
+    const payload = try filler(8 + 4 * uploadcap.slack_bytes);
+    defer gpa.free(payload);
+    const reqbuf = try gpa.alloc(u8, payload.len + 1024);
+    defer gpa.free(reqbuf);
+
+    const sent = try uploadFileCounting(ctx, &obuf, reqbuf, &web, "root", "flood.pdf", payload);
+    const resp = sent.resp;
+    // The browser face is not the frozen device protocol: it answers the SPA's own
+    // shape, the same 413 + QUOTA_EXCEEDED the link-time refusal uses.
+    try std.testing.expectEqual(@as(u16, 413), resp.status);
+    try expectFailure(resp.body, "QUOTA_EXCEEDED");
+
+    // AND IT STOPPED THERE. Without the cap this same 413 arrives too — after the
+    // whole body has been written to disk and then deleted, which is the disk-fill
+    // this closes. The read count is the only thing that tells the two apart.
+    try std.testing.expect(sent.consumed < cappedReadCeiling(uploadcap.limitFor(8)));
+
+    // Durable facts: no blob published, nothing staged, nothing charged, no row.
+    try std.testing.expect(!f.files.blobs.has(&blobstore.md5HexOf(payload)));
+    try std.testing.expectEqual(@as(usize, 0), try blobTempCount(f));
+    try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, admin));
+    try std.testing.expectEqual(v0, try f.files.syncVersion(admin));
+    {
+        const tree = try requestWithCookie(ctx, &obuf, reqbuf, "GET", "/api/controlplane/tree", &web, "");
+        try std.testing.expect(std.mem.indexOf(u8, tree.body, "flood.pdf") == null);
+    }
+
+    // With room, the very same body uploads — the cap is a bound, not a ban.
+    {
+        var s = try f.db.prepare("UPDATE capacity SET total_bytes = ?1 WHERE user_id = ?2;");
+        defer s.finalize();
+        s.bindInt(1, @intCast(payload.len * 2));
+        s.bindInt(2, @intCast(admin));
+        _ = try s.step();
+    }
+    const ok = try uploadFile(ctx, &obuf, reqbuf, &web, "root", "flood.pdf", payload);
+    try std.testing.expectEqual(@as(u16, 200), ok.status);
+    try std.testing.expect(f.files.blobs.has(&blobstore.md5HexOf(payload)));
+    try std.testing.expectEqual(@as(i64, @intCast(payload.len)), try usedBytes(f, admin));
 }
 
 test "web upload: an off-list extension is 415 and an unsafe filename is 400, both before a byte is stored" {

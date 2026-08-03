@@ -10,6 +10,7 @@ const reply = @import("../http/reply.zig");
 const controlplane = @import("../services/controlplane.zig");
 const eventstreams = @import("../http/event_streams.zig");
 const multipart = @import("../http/multipart.zig");
+const upload_cap = @import("upload_cap.zig");
 const notesearch = @import("../services/search/query.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbnailmod = @import("../services/thumbnail.zig");
@@ -718,16 +719,20 @@ fn onConflictFromTarget(target: []const u8) OnConflict {
 /// **Lock discipline.** The route is `manual_db_lock`, like `/oss/put`, because
 /// the body is a multi-MB transfer: the ingest (socket → md5 → filesystem, no DB
 /// at all) runs UNLOCKED, and `ctx.db_lock` is held only for the destination
-/// lookup and the final link. The default whole-handler lock would serialize
-/// every other request — including device sync — behind one browser upload.
+/// lookup, the quota headroom read, and the final link. The default whole-handler
+/// lock would serialize every other request — including device sync — behind one
+/// browser upload.
 ///
 /// **Order of refusals.** The destination and the name are checked BEFORE a byte
 /// is stored: `readPrologue` stops at the part headers, so a 400/415 costs the
-/// headers and nothing else. Quota is the exception — it is charged on the real
-/// ingested size inside the link transaction, because the declared size of an
-/// upload is not evidence of anything (the device path learned that the hard
-/// way). A rejected link leaves the blob unreferenced on disk for the sweep,
-/// exactly as `upload/finish` does.
+/// headers and nothing else. Quota is charged on the real ingested size inside the
+/// link transaction, because the declared size of an upload is not evidence of
+/// anything (the device path learned that the hard way) — but the ingest itself is
+/// CAPPED at the caller's remaining headroom as the bytes arrive, so a body that
+/// could never be linked stops costing disk the moment it passes the point of no
+/// return rather than at the end. A rejected link leaves the blob unreferenced on
+/// disk for the sweep, exactly as `upload/finish` does; a body rejected for length
+/// leaves nothing at all.
 ///
 /// Status contract: 200 + the created (or superseded) entry as a listing-shaped
 /// `EntryVO` (the same shape `rename` returns); 413 `QUOTA_EXCEEDED`; 415
@@ -758,7 +763,7 @@ pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror
     // Resolve + own the destination. `root` is the library root (parent null);
     // anything else must be a LIVE folder this caller owns — `Files.get` is the
     // shared ownership boundary and hardcodes `deleted = 0`, so foreign, missing
-    // and trashed collapse into one 404. DB touch #1 of 2.
+    // and trashed collapse into one 404. DB touch #1 of 3 (skipped for `root`).
     var parent: ?u64 = null;
     if (!std.mem.eql(u8, id_str, "root")) {
         const id = std.fmt.parseInt(u64, id_str, 10) catch return badRequest(ctx, req);
@@ -772,6 +777,23 @@ pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror
         if (!dest.is_folder) return fail(ctx, req, .not_found, "NOT_FOUND", "no such folder");
         parent = id;
     }
+
+    // THE CAP, read before a byte is accepted. This route has no `upload/apply`
+    // step and therefore no declared size to hold the body to — so it is held to
+    // the user's REMAINING QUOTA instead, which is the figure `linkBlob` is about
+    // to enforce anyway. Bytes past it could never be kept; accepting them only to
+    // refuse them at the end is precisely how an authenticated caller filled the
+    // disk before this existed. (The SPA already refuses the same files client-side
+    // — `preflightUpload` compares the file size against the remaining headroom —
+    // so this takes no feature away from the UI; see `upload_cap.slack_bytes` for
+    // the one behaviour it does change, at-quota dedup.) DB touch #2 of 3.
+    const limit = blk: {
+        ctx.lockDb();
+        defer ctx.unlockDb();
+        const cap = files.capacity(caller.user_id) catch return serverError(ctx, req);
+        const remaining: u64 = if (cap.total <= cap.used) 0 else @intCast(cap.total - cap.used);
+        break :blk upload_cap.limitFor(remaining);
+    };
 
     var rbuf: [blobstore.chunk_len]u8 = undefined;
     const reader = req.readerExpectContinue(&rbuf) catch return badRequest(ctx, req);
@@ -789,8 +811,14 @@ pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror
     // whole file never in RAM (the RSS budget is structural here).
     var wbuf: [blobstore.chunk_len]u8 = undefined;
     var ing = files.blobs.beginIngest(&wbuf) catch return serverError(ctx, req);
-    multipart.streamPart(reader, boundary, &pro, &ing) catch {
+    var sink = upload_cap.Capped(blobstore.Ingest).init(&ing, limit);
+    multipart.streamPart(reader, boundary, &pro, &sink) catch |err| {
+        // `abort` drops the temp file, so a body refused for length leaves nothing
+        // on disk — it is the same end state as the link-time refusal below, just
+        // reached before the bytes were paid for.
         ing.abort();
+        if (err == error.UploadTooLarge)
+            return fail(ctx, req, .payload_too_large, "QUOTA_EXCEEDED", "not enough space");
         return badRequest(ctx, req);
     };
     const res = ing.finish(null) catch {
@@ -799,7 +827,7 @@ pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror
     };
     ing.deinit();
 
-    // Link it in. DB touch #2 of 2 — the lock covers the quota check, the row
+    // Link it in. DB touch #3 of 3 — the lock covers the quota check, the row
     // write, the `incref` and the `bumpSync`, and nothing else. A dedup hit
     // charges ZERO: quota is per DISTINCT blob per user, which is what the
     // content-addressed store actually occupies. A `replace` that supersedes a
