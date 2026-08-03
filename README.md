@@ -51,8 +51,8 @@ searching, and exporting everything from any device on your network.
 |---|---|
 | ![The library](docs/screenshots/library.png) | ![A notebook open with its layers](docs/screenshots/layers.png) |
 | **Your library** — folders and notebooks, at a glance. | **Rich reader** — pages with their layers, in the browser. |
-| ![Searching handwriting](docs/screenshots/search.png) |  |
-| **Search your handwriting** — full-text, across every note. |  |
+| ![Searching handwriting](docs/screenshots/search.png) | |
+| **Search your handwriting** — full-text, across every note. | |
 
 ## Beta status — please read
 
@@ -75,7 +75,7 @@ whole point of the beta.
 ## Requirements
 
 - A machine on your home network to run it on (Linux; ARM and Raspberry Pi work).
-- A Supernote **Nomad** — other models are untested, see [Devices](#devices).
+- A Supernote **Nomad** — see [Devices](#devices).
 - To build from source: the [Zig](https://ziglang.org) toolchain. To run a
   prebuilt binary: nothing.
 
@@ -97,8 +97,19 @@ Linux system without glibc version trouble.
 - **[x86](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86-linux-musl.zip)**
   — legacy 32-bit Intel/AMD machines and old thin clients.
 
-Extract the `.zip`. You will also want `config.example.zon` from this repository
-beside the binary.
+Extract the `.zip`, and put a config beside the binary:
+
+```sh
+cp config.example.zon config.zon    # from this repository; then edit it
+./inkhold                            # picks up ./config.zon from the current directory
+```
+
+To keep the config elsewhere, name it: `./inkhold --config=/etc/inkhold/config.zon`
+
+**Set `.host` before you start.** It defaults to `127.0.0.1`, which accepts
+connections only from the machine itself: your tablet and your browser will both
+fail to reach it, and it looks exactly like a firewall problem. Use `0.0.0.0` to
+listen on every interface, or your server's LAN address to pin it to one.
 
 ### Build from source
 
@@ -108,35 +119,26 @@ make serve
 ```
 
 `make serve` builds the WebAssembly page decoder, the browser app and the server,
-then runs it. On first use it writes a config for you — already set to listen on
-every interface — so you can skip straight past the `.host` note below.
+then **starts it**. On first use it writes the config for you, already listening
+on every interface, so there is nothing to edit to get going.
+
+It also prints the first-run admin password described below — keep that terminal
+where you can read it.
 
 ## First run
 
-**If you wrote your own config, set `.host` first.** It defaults to `127.0.0.1`,
-which accepts connections only from the machine itself: your tablet and your
-browser will both fail to reach it, and it looks exactly like a firewall problem.
-Use `0.0.0.0` to listen on every interface, or your server's LAN address to pin it
-to one. (`make serve` already does this for you.)
+Whichever way you started it, the first start does the same three things.
 
-```sh
-cp config.example.zon config.zon    # then edit — see Configuration below
-./inkhold                            # picks up ./config.zon from the current directory
-```
+**It serves everything on one port** — device sync, the browser app and optional
+TLS, all from the same program — **8089 by default**. Change it with `.port` in
+your config, or `make serve PORT=9000`.
 
-To keep the config elsewhere, name it: `./inkhold --config=/etc/inkhold/config.zon`
+**It creates an `admin` account and prints a temporary password to the terminal.**
+That password is shown once. Note it down: you will be asked to change it the
+first time you sign in.
 
-Inkhold serves **everything on one port** — device sync, the browser app and
-optional TLS — **8089 by default**. Change it with `.port` in your config, or
-`make serve PORT=9000`.
-
-On the **first run** it creates an `admin` account and prints a **temporary
-password to the terminal**. Note it down: it is shown once, and you will change it
-when you first sign in.
-
-Then open `http://<LAN-IP>:<port>` in a browser and sign in. `make serve` prints
-the address; `make lan-ip` prints it on its own, and without the repository
-`hostname -I` will do.
+**It serves the browser app at `http://<LAN-IP>:<port>`.** Open that and sign in.
+`make lan-ip` prints the address; without the repository, `hostname -I` will do.
 
 ## Point your Supernote at it
 
@@ -162,7 +164,7 @@ Honest gaps, so you know before you try:
 
 | Device            | Status                                             |
 |-------------------|----------------------------------------------------|
-| Supernote **Nomad** (A6 X2) | ✅ Verified end-to-end against a real device |
+| Supernote **Nomad** (A6 X2) | ✅ Verified — see [Beta status](#beta-status--please-read) |
 | Other Supernote models (A5 X, A6 X, **Manta** (A5 X2), …) | ❓ Untested — likely similar, help wanted |
 
 Own a non-Nomad Supernote? Trying it and reporting back is one of the most useful
@@ -173,7 +175,10 @@ things a beta tester can do.
 Copy [`config.example.zon`](config.example.zon) to `config.zon` and edit. Fields
 are optional; omitted ones use defaults:
 
-`host`, `port`, `db_path`, `data_dir`, `web_dir`, `cred_key_path`, `admin_email`,
+**`host`** — the one worth getting right: `127.0.0.1` (the default) is reachable
+only from the machine itself. Use `0.0.0.0`, or your server's LAN address.
+
+Then `port`, `db_path`, `data_dir`, `web_dir`, `cred_key_path`, `admin_email`,
 `max_connections`, and `tls` (`enabled`, `cert_path`, `key_path`, `cipher_suites`).
 
 ## TLS
