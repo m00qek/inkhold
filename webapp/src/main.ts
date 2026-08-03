@@ -7,13 +7,14 @@
 // the real HTTP `Api`, P5 swaps `renderer` for the WASM decoder, and P4 also swaps
 // `live` for the SSE `createLiveChannel` — each is a one-line change right here.
 
-import { onRoute, go } from "./router";
+import { onRoute, go, current, type Route } from "./router";
 import { mount } from "./ui/dom";
 import { applyStoredTheme } from "./ui/theme";
 import { readLocal, writeLocal } from "./ui/storage";
-import { api as authApi, createHttpApi, type Me } from "./api/client";
+import { api as authApi, createHttpApi, dispatchApiFailure, type Me } from "./api/client";
 import { session } from "./session";
 import { loginPage } from "./pages/login";
+import { bootFailurePage } from "./pages/bootFailure";
 import { changePasswordPage } from "./pages/changePassword";
 import { connectPage } from "./pages/connect";
 import { createAppShell, type AppShell } from "./pages/library";
@@ -152,7 +153,7 @@ async function ensureProfile(): Promise<Me | null> {
   return me;
 }
 
-onRoute(async (route) => {
+async function renderRoute(route: Route): Promise<void> {
   // Close the previous page's resources (see `disposePage`) before anything else.
   disposePage?.();
   disposePage = null;
@@ -241,4 +242,48 @@ onRoute(async (route) => {
       }
     }
   }
+}
+
+/**
+ * A ROUTE THAT COULD NOT BE RENDERED SAYS SO.
+ *
+ * Reached from the `onRoute` seam (see router.ts) for every arm at once, so the
+ * boot arm — the one that runs with `#app` still empty and therefore the one
+ * whose failure was a blank page — is covered by the same code as the rest.
+ *
+ * SIGNED OUT IS NOT UNREACHABLE. `dispatchApiFailure` is the client's own
+ * taxonomy seam and already owns that rule: a 401/403 is `UNAUTHORIZED` and
+ * lands on `onSessionExpired` → `#/login`, exactly as before. (The common
+ * spelling of "no session" never gets here at all — `api.me()` answers null for
+ * it, and the guard routes to login itself.) Everything left is a server that
+ * gave no usable answer, and for that a login form would be a lie.
+ *
+ * The shell is deliberately NOT torn down. It holds the listing, the reader and
+ * their caches; a transient network failure should cost a retry, not a reload
+ * of everything. Detached from the DOM it renders nothing, and `ensureShell`
+ * hands the same instance back when the retry succeeds.
+ */
+function showRouteFailure(error: unknown, route: Route): void {
+  if (dispatchApiFailure({ onSessionExpired }, error)) return;
+  console.error("route failed", route.name, error);
+  mount(root, bootFailurePage({ error, onRetry: () => renderRoute(route) }));
+}
+
+onRoute(renderRoute, showRouteFailure);
+
+// THE BACKSTOP, and only that. Every route arm is handled above; this catches
+// the rejections that belong to nothing on screen — a bare `void promise` in a
+// page, a listener that went async — and it acts ONLY when the app has painted
+// nothing at all, because that is the case indistinguishable from a blank page.
+// With something already mounted, hijacking the whole screen for a stray
+// background failure would destroy more than it explains, so it stays a console
+// error (and the default logging is left intact — no `preventDefault`).
+//
+// It is NOT the fix, and `tests/e2e/boot.spec.ts` is written so that it cannot
+// be mistaken for one: with the seam's catch removed, this backstop still
+// satisfies every cold-boot assertion (measured), so that file carries one case
+// only the seam can answer — a route that fails with a page already on screen.
+window.addEventListener("unhandledrejection", (e) => {
+  if (root.childElementCount > 0) return;
+  showRouteFailure(e.reason, current());
 });

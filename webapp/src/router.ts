@@ -510,9 +510,34 @@ export function go(to: string): void {
  * being idempotent too, and a route dispatched once is a property worth keeping
  * rather than a bug being fixed twice. (Its regression test moved with it — see
  * `tests/e2e/navigation.spec.ts`.)
+ *
+ * A ROUTE ARM IS ASYNC, AND ITS REJECTION IS HANDLED HERE — at the seam, not in
+ * the arm. `render` used to be typed `(route) => void` while its only caller
+ * passed an `async` function, so every arm's promise was DISCARDED: a rejection
+ * became an unhandled rejection, and on the boot arm — which rejects whenever
+ * the server is unreachable, before anything is mounted — that was a
+ * permanently blank page. Catching it in the arm instead would fix exactly the
+ * arms someone remembered to wrap; catching it here means no future route can
+ * reintroduce the bug by omission, which is the same argument main.ts makes for
+ * keeping the auth guard on one shared arm. `onFailure` is REQUIRED rather than
+ * optional for the same reason: a caller that has not said what a failed route
+ * looks like has not finished writing one.
  */
-export function onRoute(render: (route: Route) => void): void {
-  const run = () => render(current());
+export function onRoute(
+  render: (route: Route) => void | Promise<void>,
+  onFailure: (error: unknown, route: Route) => void,
+): void {
+  const run = () => {
+    const route = current();
+    try {
+      // `void` on the catch, not on `render(...)`: the rejection is now handled,
+      // so nothing is left floating. A synchronous throw lands in the catch below.
+      const done = render(route);
+      if (done) void done.catch((error: unknown) => onFailure(error, route));
+    } catch (error) {
+      onFailure(error, route);
+    }
+  };
   window.addEventListener("hashchange", run);
   let started = false;
   const start = () => {
