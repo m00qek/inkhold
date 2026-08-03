@@ -28,7 +28,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const config = @import("config.zig");
-const transport = @import("http/transport.zig");
+const app = @import("app.zig");
 const routes = @import("routes.zig");
 const sqlite = @import("db/sqlite.zig");
 const schema = @import("db/schema.zig");
@@ -306,7 +306,7 @@ pub fn execute(
             // CREATED if it is not there. First run is a real case.
             var loaded = try config.loadFileOrDefault(gpa, io, inv.configPath());
             defer loaded.deinit();
-            try transport.run(gpa, io, loaded.config, &routes.routes);
+            try app.run(gpa, io, loaded.config, &routes.routes);
             return exit_ok;
         },
         .users_list => return listUsers(gpa, io, inv, out, err, st),
@@ -411,7 +411,7 @@ fn openExisting(
     // larger mistake.
     var cred_key: [passwordmod.cred_key_len]u8 = @splat(0);
     if (need_cred_key) {
-        cred_key = transport.loadCredKey(gpa, io, cfg.cred_key_path) catch |e| {
+        cred_key = app.loadCredKey(gpa, io, cfg.cred_key_path) catch |e| {
             try err.print("Could not read the credential key at {s}: {t}\n", .{ cfg.cred_key_path, e });
             return error.NoCredKey;
         } orelse {

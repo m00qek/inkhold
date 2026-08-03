@@ -53,6 +53,7 @@ test {
     // Every file is referenced so its colocated tests run.
     _ = config;
     _ = transport;
+    _ = @import("app.zig");
     _ = routes;
     _ = cli;
     _ = @import("expiring.zig");
