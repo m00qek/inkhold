@@ -685,9 +685,17 @@ pub const Files = struct {
         try self.assertFolder(user_id, parent_id);
 
         const res = try self.blobs.put(reader, expected_md5);
-        // If linking bails, drop the blob we just wrote (unless it was a dedup of
+        // If linking bails, drop what we just wrote (unless it was a dedup of
         // content we already hold, which another file still references).
-        errdefer if (!res.deduped) self.blobs.remove(&res.md5);
+        //
+        // `removeBlobFiles`, not `blobs.remove`: linking INDEXES the blob on the
+        // way through, and indexing writes a thumbnail. Removing only the blob
+        // left that thumbnail behind, keyed by an md5 no file references — the
+        // nine other cleanup paths in this file all clear both, and this was one
+        // of two that cleared half. `thumbs.remove` is a no-op when there is
+        // nothing there, so the symmetric call costs nothing on the paths that
+        // never got as far as a thumbnail.
+        errdefer if (!res.deduped) self.removeBlobFiles(&res.md5);
 
         return self.linkBlob(user_id, parent_id, name, &res.md5, res.size);
     }
@@ -4610,6 +4618,34 @@ test "setVersionPolicy is per-user: lowering your dial never touches a housemate
     try testing.expectEqual(ben_used_before, try f.used(2));
     try f.expectPartition(1);
     try f.expectPartition(2);
+}
+
+test "a link that fails takes the thumbnail with the blob, not just the blob" {
+    // Linking INDEXES the blob on the way through, and indexing writes a
+    // thumbnail. The failure path removed only the blob, leaving a thumbnail
+    // keyed by an md5 no file references — invisible, unreachable, and never
+    // collected, since nothing sweeps thumbnails.
+    //
+    // The thumbnail is seeded directly rather than by driving a real parse: what
+    // is under test is the CLEANUP, and making the test depend on which formats
+    // happen to produce a cover would tie it to a decision it does not care
+    // about.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const bytes = "content that will not fit";
+    const md5 = blobstore.md5HexOf(bytes);
+    try f.files.thumbs.put(&md5, "fake-thumb-bytes");
+    try testing.expect(f.files.thumbs.has(&md5));
+
+    // No room, so `linkBlob` refuses after the blob is already written.
+    try f.db.exec("UPDATE capacity SET total_bytes = 1 WHERE user_id = 1;");
+    try testing.expectError(error.QuotaExceeded, putBytes(&f, 1, null, "too-big.note", bytes));
+
+    // BOTH gone. Asserting the thumbnail is the point; the blob assertion is
+    // there so a change that stopped cleaning either one fails here.
+    try testing.expect(!f.files.thumbs.has(&md5));
+    try testing.expect(!f.files.blobs.has(&md5));
 }
 
 test "quota keeps charging while trashed and is refunded only at purge" {
