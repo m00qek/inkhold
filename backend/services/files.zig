@@ -176,6 +176,11 @@ pub const UploadSession = struct {
     file_name: []const u8,
     declared_size: u64,
     blob_md5: ?[]const u8, // null until /oss/put has stored the bytes
+    /// Bytes this session has staged so far, summed over its DISTINCT parts (v5).
+    /// What makes the `/oss/put` byte cap per-session rather than per-part: each
+    /// arriving part is held to what is left of `declared_size` + slack, not to
+    /// the whole figure again. See `addUploadReceived`.
+    received_bytes: u64,
 };
 
 pub const Files = struct {
@@ -1702,16 +1707,59 @@ pub const Files = struct {
         if (self.db.changes() == 0) return error.NotFound;
     }
 
+    /// Adds `delta` to a session's staged-byte total and returns the new value.
+    ///
+    /// **The per-session half of the upload cap.** `upload_cap` bounds one
+    /// arriving body; nothing bounded their SUM, so a chunked `/oss/put` with a
+    /// caller-chosen `totalChunks` could stage N × the cap before the merge. This
+    /// is the running total each part's budget is computed against.
+    ///
+    /// `delta` is SIGNED because a re-POSTed part replaces its temp file rather
+    /// than appending to it (`BlobStore.stagedPartSize` is the "before" figure the
+    /// caller subtracts). A device retrying one part of a large upload must not be
+    /// charged for it twice. The stored value is clamped at 0 so an over-large
+    /// subtraction — a part file vanishing under us — cannot make the total
+    /// negative and hand out an unbounded budget.
+    ///
+    /// `error.NotFound` when the session does not exist for this caller, which is
+    /// the same ownership scoping `setUploadBlob` applies.
+    pub fn addUploadReceived(self: Files, user_id: u64, inner_name: []const u8, delta: i64) !u64 {
+        {
+            var s = try self.db.prepare(
+                "UPDATE upload_sessions SET received_bytes = MAX(0, received_bytes + ?1) " ++
+                    "WHERE inner_name = ?2 AND user_id = ?3;",
+            );
+            defer s.finalize();
+            s.bindInt(1, delta);
+            s.bindText(2, inner_name);
+            s.bindInt(3, @intCast(user_id));
+            _ = try s.step();
+            if (self.db.changes() == 0) return error.NotFound;
+        }
+        var r = (try self.db.row(
+            "SELECT received_bytes FROM upload_sessions WHERE inner_name = ?1 AND user_id = ?2;",
+            &.{ .{ .text = inner_name }, .{ .int = @intCast(user_id) } },
+        )) orelse return error.NotFound;
+        defer r.finalize();
+        return @intCast(r.int(0));
+    }
+
     /// Looks up a session by `(inner_name, user_id)`. Slices are owned by `alloc`.
     pub fn uploadSession(self: Files, alloc: std.mem.Allocator, user_id: u64, inner_name: []const u8) !?UploadSession {
-        var r = (try self.db.row("SELECT path, file_name, declared_size, blob_md5 FROM upload_sessions WHERE inner_name = ?1 AND user_id = ?2;", &.{ .{ .text = inner_name }, .{ .int = @intCast(user_id) } })) orelse return null;
+        var r = (try self.db.row("SELECT path, file_name, declared_size, blob_md5, received_bytes FROM upload_sessions WHERE inner_name = ?1 AND user_id = ?2;", &.{ .{ .text = inner_name }, .{ .int = @intCast(user_id) } })) orelse return null;
         defer r.finalize();
         const path = try alloc.dupe(u8, r.text(0));
         const file_name = try alloc.dupe(u8, r.text(1));
         const declared_size: u64 = @intCast(r.int(2));
         const raw_md5 = r.text(3);
         const blob_md5 = if (raw_md5.len == 0) null else try alloc.dupe(u8, raw_md5);
-        return .{ .path = path, .file_name = file_name, .declared_size = declared_size, .blob_md5 = blob_md5 };
+        return .{
+            .path = path,
+            .file_name = file_name,
+            .declared_size = declared_size,
+            .blob_md5 = blob_md5,
+            .received_bytes = @intCast(r.int(4)),
+        };
     }
 
     /// Deletes a consumed (or rejected) session row by key.
@@ -2660,6 +2708,17 @@ pub const Files = struct {
         // (a) per-file K: drop everything past the newest `keep` for this file.
         {
             const before = evicted.items.len;
+
+            // COLLECT, THEN DELETE — the file's own discipline (see `deleteUser`'s
+            // "collect their md5s first", and `restore`'s id list). This loop used
+            // to step a `DELETE FROM file_history` while its own SELECT over
+            // `file_history` was mid-cursor. It happened to be safe, because the
+            // `ORDER BY … OFFSET` forces SQLite to materialise the result through a
+            // sorter before emitting a row — but that is a property of the query
+            // plan, which the next person to touch this ORDER BY is under no
+            // obligation to preserve. Collecting first does not depend on it.
+            var doomed_ids: std.ArrayList(i64) = .empty;
+            defer doomed_ids.deinit(self.gpa);
             {
                 var s = try self.db.prepare(
                     "SELECT rowid, md5, size FROM file_history WHERE file_id = ?1 " ++
@@ -2674,9 +2733,17 @@ pub const Files = struct {
                     var e: Evicted = .{ .md5 = undefined, .size = s.columnInt(2) };
                     @memcpy(&e.md5, m);
                     try evicted.append(self.gpa, e);
-                    var d = try self.db.prepare("DELETE FROM file_history WHERE rowid = ?1;");
-                    defer d.finalize();
-                    d.bindInt(1, s.columnInt(0));
+                    try doomed_ids.append(self.gpa, s.columnInt(0));
+                }
+            }
+            {
+                // Prepared once and rebound per row, the house pattern (sync.zig),
+                // rather than re-prepared inside the loop as before.
+                var d = try self.db.prepare("DELETE FROM file_history WHERE rowid = ?1;");
+                defer d.finalize();
+                for (doomed_ids.items) |rowid| {
+                    d.reset();
+                    d.bindInt(1, rowid);
                     _ = try d.step();
                 }
             }
@@ -2711,7 +2778,10 @@ pub const Files = struct {
     /// bytes the next pass frees.
     fn evictOldestVersion(self: Files, user_id: u64, gc: *std.ArrayList([md5_len]u8)) !?Evicted {
         var out: Evicted = .{ .md5 = undefined, .size = 0 };
-        {
+        // Same collect-then-delete discipline as (a) above: read the row out, let
+        // the cursor go, THEN delete. The read is a single row, so the old shape
+        // deleted with the cursor still positioned on the very row it was removing.
+        const doomed_rowid = blk: {
             const r = (try self.db.row(
                 "SELECT fh.rowid, fh.md5, fh.size FROM file_history fh " ++
                     "JOIN files f ON f.id = fh.file_id WHERE f.user_id = ?1 " ++
@@ -2725,9 +2795,12 @@ pub const Files = struct {
             if (m.len != md5_len) return null;
             @memcpy(&out.md5, m);
             out.size = r.int(2);
+            break :blk r.int(0);
+        };
+        {
             var d = try self.db.prepare("DELETE FROM file_history WHERE rowid = ?1;");
             defer d.finalize();
-            d.bindInt(1, r.int(0));
+            d.bindInt(1, doomed_rowid);
             _ = try d.step();
         }
         if (try self.reapIfUnreferenced(&out.md5)) try gc.append(self.gpa, out.md5);
@@ -3340,6 +3413,63 @@ test "HISTORY: keep = K retains only the newest K superseded versions; evicted b
     try testing.expectEqual(@as(i64, 0), try countOf(&f, "SELECT COUNT(*) FROM blobs WHERE refcount < 0;")); // never over-decremented
 }
 
+test "HISTORY: eviction never DELETEs with a cursor open on file_history" {
+    // THE DISCIPLINE, NOT THE OUTCOME. Both eviction arms used to step a
+    // `DELETE FROM file_history` while their own SELECT over `file_history` was
+    // mid-cursor. It was de-facto safe — the `ORDER BY … OFFSET` forces SQLite to
+    // materialise the result through a sorter first — so every row-count and
+    // blob-presence assertion in the tests around this one passes identically
+    // against the old shape. There is nothing to assert but the discipline itself,
+    // which is what `sqlite.CursorWatch` exists to see (see its own test).
+    //
+    // BOTH arms are driven, in separate phases, because they are bounded by
+    // different things and one configuration cannot reach both: (a) needs K to
+    // bite while `max_bytes` does not, (b) needs the reverse.
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.db.exec("UPDATE capacity SET total_bytes = 100000000 WHERE user_id = 1;");
+
+    // (a) per-file K. K = 2 over six versions, ceiling out of the way.
+    {
+        f.files.history.keep = 2;
+        f.files.history.max_bytes = 1_000_000;
+        var w: sqlite.CursorWatch = .{ .db = f.db, .table = "file_history" };
+        w.arm();
+        defer w.disarm();
+        for (0..6) |i| {
+            const body = try std.fmt.allocPrint(testing.allocator, "bodybytes{d}", .{i}); // exactly 10 bytes
+            defer testing.allocator.free(body);
+            freeEntry(try putBytes(&f, 1, null, "doc.txt", body));
+        }
+        // K really evicted (six versions in, two retained), and not one row
+        // mutation happened with a reader still on the table.
+        try testing.expectEqual(@as(i64, 2), try countOf(&f, "SELECT COUNT(*) FROM file_history;"));
+        try testing.expect(w.mutations > 0);
+        try testing.expectEqual(@as(usize, 0), w.overlaps);
+    }
+
+    // (b) the `max_bytes` backstop, through `evictOldestVersion`. K out of the way,
+    // a 20-byte ceiling: two 10-byte history blobs fit and no more.
+    {
+        f.files.history.keep = 100;
+        f.files.history.max_bytes = 20;
+        var w: sqlite.CursorWatch = .{ .db = f.db, .table = "file_history" };
+        w.arm();
+        defer w.disarm();
+        for (0..6) |i| {
+            const body = try std.fmt.allocPrint(testing.allocator, "otherbyt{d}x", .{i}); // exactly 10 bytes
+            defer testing.allocator.free(body);
+            freeEntry(try putBytes(&f, 1, null, "doc2.txt", body));
+        }
+        // The ceiling really bit (K = 100 would have kept five for doc2.txt alone),
+        // and again nothing mutated under an open cursor.
+        try testing.expect(try f.files.historyBytes() <= 20);
+        try testing.expectEqual(@as(i64, 2), try countOf(&f, "SELECT COUNT(*) FROM file_history;"));
+        try testing.expect(w.mutations > 0);
+        try testing.expectEqual(@as(usize, 0), w.overlaps);
+    }
+}
+
 test "HISTORY: the max_bytes ceiling evicts oldest history-only versions until under" {
     var f = try Fixture.init();
     defer f.deinit();
@@ -3879,6 +4009,65 @@ test "upload session sweep drops stale sessions and reclaims only untracked blob
     alloc.free(young.path);
     alloc.free(young.file_name);
     if (young.blob_md5) |m| alloc.free(m);
+}
+
+test "addUploadReceived accumulates per session, credits a replaced part, and clamps at zero" {
+    // The running total that makes the `/oss/put` byte cap per-SESSION. A cap that
+    // only ever added would refuse a device retrying one part of a large upload,
+    // because a part's temp file is REPLACED rather than appended to — hence the
+    // signed delta.
+    var f = try Fixture.init();
+    defer f.deinit();
+    const alloc = testing.allocator;
+
+    try f.files.createUploadSession(1, "aaaaaaaaaaaaaaaa", "/NOTE", "a.note", 1000);
+    try f.files.createUploadSession(2, "bbbbbbbbbbbbbbbb", "/NOTE", "b.note", 1000);
+
+    // A fresh session starts at zero (the v5 column's DEFAULT), and parts accrue.
+    {
+        const s = (try f.files.uploadSession(alloc, 1, "aaaaaaaaaaaaaaaa")).?;
+        defer {
+            alloc.free(s.path);
+            alloc.free(s.file_name);
+            if (s.blob_md5) |m| alloc.free(m);
+        }
+        try testing.expectEqual(@as(u64, 0), s.received_bytes);
+    }
+    try testing.expectEqual(@as(u64, 400), try f.files.addUploadReceived(1, "aaaaaaaaaaaaaaaa", 400));
+    try testing.expectEqual(@as(u64, 700), try f.files.addUploadReceived(1, "aaaaaaaaaaaaaaaa", 300));
+
+    // A retried part: the earlier copy is credited back, so re-sending a 300-byte
+    // part as 300 bytes leaves the total where it was.
+    try testing.expectEqual(@as(u64, 700), try f.files.addUploadReceived(1, "aaaaaaaaaaaaaaaa", -300 + 300));
+
+    // Sessions do not bleed into each other, and the write is user-scoped exactly
+    // as `setUploadBlob` is: another account's `inner_name` is NotFound, not a
+    // silent no-op that would leave the budget untouched.
+    {
+        const b = (try f.files.uploadSession(alloc, 2, "bbbbbbbbbbbbbbbb")).?;
+        defer {
+            alloc.free(b.path);
+            alloc.free(b.file_name);
+            if (b.blob_md5) |m| alloc.free(m);
+        }
+        try testing.expectEqual(@as(u64, 0), b.received_bytes);
+    }
+    try testing.expectError(error.NotFound, f.files.addUploadReceived(2, "aaaaaaaaaaaaaaaa", 100));
+    try testing.expectError(error.NotFound, f.files.addUploadReceived(1, "nosuchsession___", 100));
+
+    // Clamped at zero: an over-large credit (a part file that vanished under us)
+    // must not make the total negative — a negative total read back as a u64 is an
+    // enormous budget, i.e. the cap switched off for that session.
+    try testing.expectEqual(@as(u64, 0), try f.files.addUploadReceived(1, "aaaaaaaaaaaaaaaa", -100_000));
+
+    // And the value really is on the row, not just in the return.
+    const again = (try f.files.uploadSession(alloc, 1, "aaaaaaaaaaaaaaaa")).?;
+    defer {
+        alloc.free(again.path);
+        alloc.free(again.file_name);
+        if (again.blob_md5) |m| alloc.free(m);
+    }
+    try testing.expectEqual(@as(u64, 0), again.received_bytes);
 }
 
 test "a missing capacity row is created on the write path and used_bytes accrues (no quota bypass)" {

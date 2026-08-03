@@ -160,6 +160,112 @@ pub const Db = struct {
     }
 };
 
+/// Watches for a row mutation issued while a SELECT over the SAME table is still
+/// mid-cursor — the "DELETE inside an open cursor" hazard the services layer's
+/// collect-then-delete discipline exists to avoid.
+///
+/// **This is the only way that discipline can be TESTED.** SQLite tolerates the
+/// overlap, so the rows deleted are identical either way and every outcome
+/// assertion passes against both shapes; the difference is internal cursor state,
+/// and it stops being harmless the day a query plan stops materialising the
+/// result through a sorter. `sqlite3_update_hook` fires per mutated row, and
+/// `sqlite3_stmt_busy` says which statements on the connection have been stepped
+/// and not yet reset — together they observe exactly the overlap.
+///
+/// Only READERS count: the mutating statement is itself busy inside its own hook,
+/// so a statement is an offender only if its SQL starts with SELECT and names the
+/// table being mutated.
+pub const CursorWatch = struct {
+    db: Db,
+    /// Watch only this table when set (a whole-service call path mutates many;
+    /// naming one keeps a test about `file_history` from answering for `blobs`).
+    table: ?[]const u8 = null,
+    /// Row mutations seen while a SELECT over the same table was mid-cursor.
+    overlaps: usize = 0,
+    /// Row mutations seen at all — so a test can tell "no overlap" from
+    /// "the code under test never ran".
+    mutations: usize = 0,
+
+    pub fn arm(self: *CursorWatch) void {
+        _ = c.sqlite3_update_hook(self.db.handle, onRow, self);
+    }
+
+    pub fn disarm(self: *CursorWatch) void {
+        _ = c.sqlite3_update_hook(self.db.handle, null, null);
+    }
+
+    fn onRow(user: ?*anyopaque, _: c_int, _: [*c]const u8, table: [*c]const u8, _: c.sqlite3_int64) callconv(.c) void {
+        const self: *CursorWatch = @ptrCast(@alignCast(user.?));
+        const t = std.mem.span(table);
+        if (self.table) |want| {
+            if (!std.mem.eql(u8, want, t)) return;
+        }
+        self.mutations += 1;
+        var it: ?*c.sqlite3_stmt = c.sqlite3_next_stmt(self.db.handle, null);
+        while (it) |stmt| : (it = c.sqlite3_next_stmt(self.db.handle, stmt)) {
+            if (c.sqlite3_stmt_busy(stmt) == 0) continue;
+            const sql_ptr = c.sqlite3_sql(stmt);
+            if (sql_ptr == null) continue;
+            const sql = std.mem.span(sql_ptr);
+            if (!std.mem.startsWith(u8, sql, "SELECT")) continue; // the mutator itself
+            if (std.mem.indexOf(u8, sql, t) == null) continue; // a cursor on some other table
+            self.overlaps += 1;
+            return;
+        }
+    }
+};
+
+test "CursorWatch sees a DELETE issued inside an open cursor, and not one issued after it" {
+    var db = try Db.openMemory();
+    defer db.close();
+    try db.exec("CREATE TABLE t(k INTEGER);");
+    try db.exec("INSERT INTO t(k) VALUES(1),(2),(3);");
+
+    // The hazardous shape: delete each row as the cursor emits it.
+    {
+        var w: CursorWatch = .{ .db = db };
+        w.arm();
+        defer w.disarm();
+        var s = try db.prepare("SELECT k FROM t ORDER BY k;");
+        defer s.finalize();
+        while (try s.step()) {
+            var d = try db.prepare("DELETE FROM t WHERE k = ?1;");
+            defer d.finalize();
+            d.bindInt(1, s.columnInt(0));
+            _ = try d.step();
+        }
+        try std.testing.expectEqual(@as(usize, 3), w.mutations);
+        try std.testing.expectEqual(@as(usize, 3), w.overlaps);
+    }
+
+    // The disciplined shape: collect inside the cursor, delete after it is closed.
+    try db.exec("INSERT INTO t(k) VALUES(1),(2),(3);");
+    {
+        var w: CursorWatch = .{ .db = db };
+        w.arm();
+        defer w.disarm();
+        var ids: [8]i64 = undefined;
+        var n: usize = 0;
+        {
+            var s = try db.prepare("SELECT k FROM t ORDER BY k;");
+            defer s.finalize();
+            while (try s.step()) {
+                ids[n] = s.columnInt(0);
+                n += 1;
+            }
+        }
+        var d = try db.prepare("DELETE FROM t WHERE k = ?1;");
+        defer d.finalize();
+        for (ids[0..n]) |k| {
+            d.reset();
+            d.bindInt(1, k);
+            _ = try d.step();
+        }
+        try std.testing.expectEqual(@as(usize, 3), w.mutations);
+        try std.testing.expectEqual(@as(usize, 0), w.overlaps);
+    }
+}
+
 /// Every `Stmt.bind*` routes its SQLite return code through here.
 ///
 /// It ASSERTS rather than returning an error, deliberately. A bind fails for two

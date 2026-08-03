@@ -64,6 +64,23 @@ pub fn limitFor(declared: u64) u64 {
     return declared +| slack_bytes;
 }
 
+/// What is LEFT of a chunked upload's whole-session budget after `received` bytes
+/// have already been staged — the limit ONE part of it may carry.
+///
+/// **This is what makes the cap per-session rather than per-part.** `limitFor`
+/// alone bounds one request, and a chunked `/oss/put` is N requests under a
+/// caller-chosen `totalChunks`: each part passed the same test independently, so
+/// N parts could stage N × the cap before the merge and the total was still
+/// unbounded. Charging each part against the running total closes it, because the
+/// budget the parts share is the one the device declared and quota already
+/// approved at `upload/apply`.
+///
+/// Saturating, so a total that has somehow overshot its limit yields 0 (refuse
+/// everything but an empty write) rather than wrapping to an enormous budget.
+pub fn remainingFor(declared: u64, received: u64) u64 {
+    return limitFor(declared) -| received;
+}
+
 /// A `multipart` sink that forwards to `Inner` (`blobstore.Ingest` or
 /// `blobstore.ChunkIngest`) until more than `limit` bytes have been offered, then
 /// fails with `error.UploadTooLarge` and writes no more.
@@ -149,4 +166,22 @@ test "limitFor saturates instead of wrapping on an absurd declared size" {
     try testing.expectEqual(@as(u64, 1000 + slack_bytes), limitFor(1000));
     try testing.expectEqual(std.math.maxInt(u64), limitFor(std.math.maxInt(u64)));
     try testing.expectEqual(std.math.maxInt(u64), limitFor(std.math.maxInt(u64) - 1));
+}
+
+test "remainingFor shrinks the budget by what the session already staged" {
+    // The per-part cap was `limitFor(declared)` on EVERY part of a chunked upload,
+    // so N parts each got the whole budget and the total was unbounded. The budget
+    // is one figure the parts share.
+    const declared: u64 = 1000;
+    const whole = limitFor(declared); // 1000 + slack
+
+    try testing.expectEqual(whole, remainingFor(declared, 0)); // first part: all of it
+    try testing.expectEqual(whole - 400, remainingFor(declared, 400)); // 400 already staged
+    try testing.expectEqual(@as(u64, 0), remainingFor(declared, whole)); // spent
+
+    // Saturating: a total that somehow overshot leaves NO budget, rather than
+    // wrapping to something enormous — which is the direction that would hand an
+    // attacker the whole disk out of an arithmetic slip.
+    try testing.expectEqual(@as(u64, 0), remainingFor(declared, whole + 1));
+    try testing.expectEqual(@as(u64, 0), remainingFor(declared, std.math.maxInt(u64)));
 }

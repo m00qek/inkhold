@@ -449,6 +449,22 @@ comptime {
     }
 }
 
+// No route may be BOTH `manual_db_lock` and `require_admin`. `dispatchLocked`
+// renews the admin elevation window only on the automatic-locking path — the
+// manual branch returns before it — so such a route would silently stop sliding
+// elevation and hand admins a surprise 428 with nothing pointing at the flag.
+//
+// An assert rather than renewing in both branches, deliberately: the second is a
+// silent behaviour someone has to remember exists in two places under two lock
+// disciplines, while this one cannot be got wrong. Adding the flag pair is a
+// build error, here, where the table is edited. See `router.manualAdminRoute`.
+comptime {
+    if (router.manualAdminRoute(&routes)) |i| {
+        @compileError("route '" ++ routes[i].path ++ "' is both manual_db_lock and require_admin; " ++
+            "dispatchLocked's manual branch never renews admin elevation (see router.manualAdminRoute)");
+    }
+}
+
 test "the route table fits the db_lock histogram's fixed table" {
     // `http/lock_stats.zig` sizes its per-route histogram at compile time, and a
     // route past the end degrades silently into the shared overflow slot — the

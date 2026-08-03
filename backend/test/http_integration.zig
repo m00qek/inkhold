@@ -2664,6 +2664,24 @@ fn blobTempCount(f: *Fixture) !usize {
     return n;
 }
 
+/// Total bytes staged under the blob store's `tmp/` directory. The per-session
+/// cap's real claim is about this number: with a per-PART cap, N chunked parts
+/// could each stage up to the cap and the sum was unbounded, so counting the
+/// files (`blobTempCount`) cannot see the difference — only their size can.
+fn blobTempBytes(f: *Fixture) !u64 {
+    var d = try f.tmp.dir.openDir(std.testing.io, "tmp", .{ .iterate = true });
+    defer d.close(std.testing.io);
+    var it = d.iterate();
+    var total: u64 = 0;
+    while (try it.next(std.testing.io)) |e| {
+        var file = d.openFile(std.testing.io, e.name, .{}) catch continue;
+        defer file.close(std.testing.io);
+        const st = file.stat(std.testing.io) catch continue;
+        total += st.size;
+    }
+    return total;
+}
+
 /// `len` bytes of a deterministic non-repeating pattern — big enough to outrun
 /// the ingest cap, and containing no multipart delimiter look-alike.
 fn filler(len: usize) ![]u8 {
@@ -3280,6 +3298,130 @@ test "device /oss/put chunked: an over-cap PART is refused with the same envelop
     // A later part of the same upload has nothing left to attach to.
     const again = try ossPut(ctx, &obuf, &dev_tok, &inner, "small", "?uploadId=abc123&totalChunks=3&partNumber=2");
     try std.testing.expectEqual(@as(u16, 404), again.resp.status);
+}
+
+test "device /oss/put chunked: the byte cap is per SESSION — N parts cannot each stage the whole budget" {
+    // THE HOLE THE PER-PART CAP LEFT. Every part was measured against
+    // `limitFor(declared)` on its own, and `totalChunks` is a number the CALLER
+    // puts in the query string — so a device could declare 100 KB and then send
+    // part after part, each one passing the cap, until the disk was full. The cap
+    // closed the single-shot hole and left the chunked one exactly as it was.
+    //
+    // Each part below is EXACTLY the declared file size: unimpeachable on its own,
+    // absurd in aggregate. That is what the session total is for.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+
+    const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
+    const alice = (try f.svc.createUser(admin, "alice", false)).id;
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
+
+    var obuf: [8192]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+    const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
+
+    // Deliberately much larger than `slack_bytes`, so "it stopped reading near the
+    // remaining budget" and "it read the whole part" are numbers far apart.
+    const declared: usize = 400_000;
+    const inner = try applyUpload(ctx, &obuf, &reqbuf, &dev_tok, "flood.note", declared);
+    const part = try filler(declared);
+    defer gpa.free(part);
+
+    // Part 1 is within the session budget (`declared + slack`) and is accepted —
+    // the cap removes an attack, not the feature.
+    {
+        const sent = try ossPut(ctx, &obuf, &dev_tok, &inner, part, "?uploadId=floodid&totalChunks=9&partNumber=1");
+        try std.testing.expectEqual(@as(u16, 200), sent.resp.status);
+        try std.testing.expectEqual(@as(usize, 0), sent.resp.body.len); // empty-200 success
+    }
+
+    // Part 2 is the same size and, under the per-part rule, equally acceptable.
+    // Against the SESSION's remaining budget it is not, and it is refused
+    // MID-STREAM — the server stops reading near the remainder rather than taking
+    // the whole part and refusing afterwards.
+    const remaining = uploadcap.limitFor(declared) - declared;
+    {
+        const sent = try ossPut(ctx, &obuf, &dev_tok, &inner, part, "?uploadId=floodid&totalChunks=9&partNumber=2");
+        try std.testing.expectEqual(@as(u16, 200), sent.resp.status);
+        try expectFailure(sent.resp.body, "QUOTA_EXCEEDED"); // the protocol's refusal, not a 413
+        try std.testing.expect(sent.consumed < cappedReadCeiling(remaining));
+    }
+
+    // THE DURABLE, DISTINGUISHING FACT, and the one that needs no slack in it:
+    // what this session managed to put on disk is bounded by ONE budget, however
+    // many parts it send. Exactly `limitFor(declared)`, because the refused part's
+    // sink was capped at the REMAINDER before a byte of it was written — not at
+    // the whole figure again. Under the per-part rule these two parts alone stage
+    // ~800 KB, and part 3 would have been welcome to another 400 KB.
+    //
+    // Refusing only AFTER a part has landed (the plausible half-fix: keep the
+    // per-part sink limit, add the running total, check it at the end) also fails
+    // here — it bounds the accounting but not the disk, which is the thing a full
+    // SD card cares about. `ChunkIngest.abort` leaves what it staged for the
+    // startup `sweepTmp`, so the bytes are real until the next boot.
+    try std.testing.expect(try blobTempBytes(f) <= uploadcap.limitFor(declared));
+
+    // And the reservation is gone, so the upload cannot simply be continued.
+    try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
+    const again = try ossPut(ctx, &obuf, &dev_tok, &inner, "small", "?uploadId=floodid&totalChunks=9&partNumber=3");
+    try std.testing.expectEqual(@as(u16, 404), again.resp.status);
+}
+
+test "device /oss/put chunked: re-sending a part is not charged twice" {
+    // THE WAY A RUNNING TOTAL GOES WRONG. A part's temp file is named
+    // deterministically (`tmp/<uploadId>_<n>`), so re-POSTing part 2 REPLACES it.
+    // A total that only ever added would bill the session for both copies and
+    // refuse a device that retried a part after a dropped connection — mid-sync,
+    // for doing exactly what a resilient client should. `stagedPartSize` is what
+    // gives the earlier copy back.
+    //
+    // The sizes are chosen so the double-charge is the only thing that can fail
+    // it: two parts fit the budget, three do not, and the third request here is a
+    // REPEAT of the second.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+
+    const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
+    const alice = (try f.svc.createUser(admin, "alice", false)).id;
+    _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
+
+    var obuf: [8192]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+    const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
+
+    const declared: usize = 50_000; // budget = 50_000 + 65_536 = 115_536
+    const part = try filler(50_000); //  2 parts = 100_000 (fits), 3 = 150_000 (does not)
+    defer gpa.free(part);
+    try std.testing.expect(2 * part.len <= uploadcap.limitFor(declared));
+    try std.testing.expect(3 * part.len > uploadcap.limitFor(declared));
+
+    const inner = try applyUpload(ctx, &obuf, &reqbuf, &dev_tok, "retry.note", declared);
+    for ([_]u8{ 1, 2 }) |n| {
+        var q: [64]u8 = undefined;
+        const query = try std.fmt.bufPrint(&q, "?uploadId=retryid&totalChunks=3&partNumber={d}", .{n});
+        const sent = try ossPut(ctx, &obuf, &dev_tok, &inner, part, query);
+        try std.testing.expectEqual(@as(u16, 200), sent.resp.status);
+        try std.testing.expectEqual(@as(usize, 0), sent.resp.body.len);
+    }
+
+    // The retry: part 2 again, byte for byte. Accepted, because it replaces what
+    // part 2 already contributed rather than adding to it.
+    {
+        const sent = try ossPut(ctx, &obuf, &dev_tok, &inner, part, "?uploadId=retryid&totalChunks=3&partNumber=2");
+        try std.testing.expectEqual(@as(u16, 200), sent.resp.status);
+        try std.testing.expectEqual(@as(usize, 0), sent.resp.body.len);
+    }
+
+    // The session survived it, and its running total still reads two parts — not
+    // three. That is the durable fact: the response above would look the same if
+    // the total had been left inflated and the refusal simply deferred.
+    try std.testing.expectEqual(@as(i64, 1), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
+    try std.testing.expectEqual(
+        @as(i64, @intCast(2 * part.len)),
+        try countRows(f, "SELECT received_bytes FROM upload_sessions;"),
+    );
 }
 
 test "oversized device numbers are rejected, not panicked (overflow guard)" {

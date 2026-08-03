@@ -1211,6 +1211,58 @@ fn refuseOversize(ctx: *Context, req: *Request, files: *filesmod.Files, inner: [
     return fail(ctx, req, .ok, "QUOTA_EXCEEDED", "not enough space");
 }
 
+/// Adds the bytes a just-staged part contributed to its session's running total,
+/// and re-checks that total against the session's whole budget. Returns true when
+/// it has already answered the request (a refusal or a 500) and the caller must
+/// return immediately.
+///
+/// **Two checks, not one, and they catch different things.** The `Capped` sink
+/// bounds what reaches the FILESYSTEM, using the budget read before the stream
+/// started — that is the important one and it is the reason nothing oversized
+/// ever lands. This one bounds the ACCOUNTING, using the value the database
+/// actually holds now. They differ only when two parts of one session are in
+/// flight at the same time: both would read the same "received" figure and both
+/// would be granted the whole remaining budget. The device uploads parts
+/// sequentially (see `BlobStore.mergeChunks`), so that is a hostile client, and
+/// against one this turns an overshoot bounded by `max_connections` into a
+/// refusal on the very next part rather than a session that quietly keeps going.
+///
+/// `error.NotFound` from the service means the session was deleted underneath us
+/// (a concurrent refusal, or the startup sweep) — there is nothing to charge and
+/// nothing to publish, so it takes the same refusal as running past the cap.
+fn chargeSession(
+    ctx: *Context,
+    req: *Request,
+    files: *filesmod.Files,
+    user_id: u64,
+    inner: []const u8,
+    sink: anytype,
+    prior_part: u64,
+    declared: u64,
+) anyerror!bool {
+    const delta = @as(i64, @intCast(sink.written)) - @as(i64, @intCast(prior_part));
+    const total: ?u64 = blk: {
+        ctx.lockDb();
+        defer ctx.unlockDb();
+        break :blk files.addUploadReceived(user_id, inner, delta) catch |e| switch (e) {
+            error.NotFound => null,
+            else => {
+                try serverError(ctx, req);
+                return true;
+            },
+        };
+    };
+    const t = total orelse {
+        try refuseOversize(ctx, req, files, inner);
+        return true;
+    };
+    if (t > upload_cap.limitFor(declared)) {
+        try refuseOversize(ctx, req, files, inner);
+        return true;
+    }
+    return false;
+}
+
 /// POST /oss/put/:innerName -> receive the file bytes. The body is
 /// `multipart/form-data` with one `name="file"` part; we stream that part's raw
 /// bytes into the blob store WITHOUT buffering the whole file (respecting the
@@ -1269,17 +1321,29 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
         return badRequest(ctx, req);
 
     // The session must exist and belong to the calling device, and it carries the
-    // `declared_size` this body is measured against. DB touch #1 of 2 — the route
-    // is `manual_db_lock`, so we hold `ctx.db_lock` for just this lookup.
-    const declared: u64 = blk: {
+    // `declared_size` this body is measured against plus the bytes its earlier
+    // parts already staged. DB touch #1 of 3 — the route is `manual_db_lock`, so
+    // we hold `ctx.db_lock` for just this lookup.
+    var declared: u64 = 0;
+    var received: u64 = 0;
+    {
         ctx.lockDb();
         defer ctx.unlockDb();
         var arena = std.heap.ArenaAllocator.init(ctx.gpa);
         defer arena.deinit();
         const session = (files.uploadSession(arena.allocator(), caller.user_id, inner) catch return serverError(ctx, req)) orelse
             return reply.notFound(req);
-        break :blk session.declared_size;
-    };
+        declared = session.declared_size;
+        received = session.received_bytes;
+    }
+
+    // What this part already contributed, if it is a RETRY of a part already on
+    // disk. A part's temp file is named deterministically, so re-POSTing it
+    // replaces rather than appends — charging the session twice for it would
+    // eventually refuse a device that did nothing wrong. Zero for a part that is
+    // not staged, and for the single-shot path (where the whole body is the one
+    // "part", so whatever the session has received is what this request replaces).
+    const prior_part: u64 = if (chunked) files.blobs.stagedPartSize(upload_id.?, part_number) else received;
 
     // THE CAP. The device announced `declared_size` at `upload/apply`, where it was
     // checked against quota before this URL was ever handed out; the bytes now
@@ -1288,13 +1352,13 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
     // so one authenticated request could fill the disk with every quota check
     // still passing, and on a Pi a full disk takes the database with it.
     //
-    // On a multipart (chunked) upload each PART is held to the same figure. That
-    // is the right per-request bound — no single part can legitimately exceed the
-    // whole file — but it is knowingly a per-part bound, not a per-session one:
-    // N parts can still stage N × the cap before the merge. Closing that needs a
-    // running received-bytes total on the `upload_sessions` row (a `services/` +
-    // `db/` change), which is a bigger claim than this handler can make on its own.
-    const limit = upload_cap.limitFor(declared);
+    // PER SESSION, not per part. This used to be `limitFor(declared)` on every
+    // request, which each part of a chunked upload passed independently — so with
+    // a caller-chosen `?totalChunks=`, N parts staged N × the cap before the merge
+    // and the total was as unbounded as it had been before the cap existed. The
+    // budget is now what is LEFT of the session's, and a retried part gets its own
+    // earlier contribution back first.
+    const limit = upload_cap.remainingFor(declared, received -| prior_part);
 
     // Stream the multipart file part straight into a new blob (incremental md5).
     // UNLOCKED: the ingest is socket → md5 → filesystem only (store/blobs.zig
@@ -1322,6 +1386,10 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
         };
         ing.deinit();
 
+        // Charge the session for what this part staged, net of whatever the same
+        // part number held before (a retry replaces its file). DB touch #2.
+        if (try chargeSession(ctx, req, files, caller.user_id, inner, &sink, prior_part, declared)) return;
+
         if (part_number == total_chunks) {
             // Implicitly merge chunks on the final part
             const res = files.blobs.mergeChunks(upload_id.?, total_chunks, &wbuf) catch return serverError(ctx, req);
@@ -1347,6 +1415,10 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
             return serverError(ctx, req);
         };
         ing.deinit();
+
+        // The single-shot body IS the session's one part, so it replaces whatever
+        // the session had received rather than adding to it.
+        if (try chargeSession(ctx, req, files, caller.user_id, inner, &sink, prior_part, declared)) return;
 
         // Record the stored md5 on the session; finish() verifies it against the
         // device's content_hash. (The on-disk blob has no `blobs` row yet — if finish

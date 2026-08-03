@@ -192,7 +192,17 @@ test "ConnLimiter: a zero cap refuses everything without underflowing" {
 ///
 /// All best-effort: housekeeping must warn and let the server come up, never
 /// abort the boot.
-fn startupSweeps(io: Io, db: sqlite.Db, files_svc: filesmod.Files) void {
+fn startupSweeps(io: Io, db: sqlite.Db, svc: *authsvc.Service, files_svc: filesmod.Files) void {
+    // EXPIRED SESSIONS. This one used to sit up in `run` as a bare `try`, so a
+    // sweep that failed — a locked DB, a read-only data dir — took the whole boot
+    // down with it, while the two housekeeping sweeps below it deliberately warned
+    // and carried on. Nothing here is load-bearing for serving requests: an
+    // expired session is already refused by `caller` on every request, so the row
+    // is disk hygiene, not an authorization gate. Same policy as its neighbours.
+    svc.sweepExpiredSessions() catch |e| {
+        _ = sweepFailed("expired-session", e);
+    };
+
     {
         const set = settingsmod.Settings.init(io, db);
         const purged = sweep: {
@@ -260,12 +270,79 @@ test "startupSweeps runs EVERY sweep, including the one that was never wired" {
         "INSERT INTO upload_sessions(inner_name, user_id, path, file_name, declared_size, blob_md5, created_at) " ++
             "VALUES('stale', 1, '/Note', 'x.note', 1, '0123456789abcdef0123456789abcdef', 0);",
     );
+    // A long-expired session, likewise dated at the epoch.
+    try db.exec(
+        "INSERT INTO sessions(token_hash, user_id, audience, created_at, expires_at) " ++
+            "VALUES('deadbeef', 1, 'controlplane', 0, 1);",
+    );
 
-    startupSweeps(testing.io, db, files_svc);
+    var svc = authsvc.Service.init(testing.allocator, testing.io, db, [_]u8{0} ** passwordmod.cred_key_len);
+    defer svc.deinit();
+    startupSweeps(testing.io, db, &svc, files_svc);
 
     var r = (try db.row("SELECT COUNT(*) FROM upload_sessions;", &.{})).?;
     defer r.finalize();
     try testing.expectEqual(@as(i64, 0), r.int(0));
+
+    // The expired-session sweep is part of the SAME set: it used to be a bare
+    // `try` up in `run`, outside anything a composition test could reach.
+    var s = (try db.row("SELECT COUNT(*) FROM sessions;", &.{})).?;
+    defer s.finalize();
+    try testing.expectEqual(@as(i64, 0), s.int(0));
+}
+
+test "a failed session sweep warns and lets the boot continue, sweeps after it included" {
+    // The session sweep aborted the boot on failure while both housekeeping sweeps
+    // beside it warned and carried on. Two ways to get that wrong, so both are
+    // pinned here: propagating the error (the original bug) and catching it but
+    // returning early (the plausible half-fix), which silently drops every sweep
+    // that follows.
+    //
+    // A BEFORE DELETE trigger makes the sweep's DELETE genuinely fail inside
+    // SQLite; the abandoned-upload sweep after it must still reclaim its row.
+    const testing = std.testing;
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    try schema.migrate(db);
+    try db.exec("INSERT INTO users(id, email, password_md5, cred_enc, is_admin, created_at) VALUES(1,'a@h','','',1,0);");
+    try db.exec(
+        "INSERT INTO upload_sessions(inner_name, user_id, path, file_name, declared_size, blob_md5, created_at) " ++
+            "VALUES('stale', 1, '/Note', 'x.note', 1, '0123456789abcdef0123456789abcdef', 0);",
+    );
+    try db.exec(
+        "INSERT INTO sessions(token_hash, user_id, audience, created_at, expires_at) " ++
+            "VALUES('deadbeef', 1, 'controlplane', 0, 1);",
+    );
+    try db.exec("CREATE TRIGGER no_sweep BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'refused'); END;");
+
+    // The warn is the contract; silence it for the suite's output.
+    const saved_level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = saved_level;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = try blobstore.BlobStore.init(testing.io, tmp.dir);
+    const thumbs_dir = try tmp.dir.createDirPathOpen(testing.io, "thumbs", .{});
+    const thumbs = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
+    const files_svc = filesmod.Files.init(testing.allocator, testing.io, db, store, thumbs);
+
+    var svc = authsvc.Service.init(testing.allocator, testing.io, db, [_]u8{0} ** passwordmod.cred_key_len);
+    defer svc.deinit();
+
+    // Returns normally (the signature is `void` — a failure here cannot be an
+    // error the caller might `try`), and the later sweep still did its work.
+    startupSweeps(testing.io, db, &svc, files_svc);
+
+    var r = (try db.row("SELECT COUNT(*) FROM upload_sessions;", &.{})).?;
+    defer r.finalize();
+    try testing.expectEqual(@as(i64, 0), r.int(0));
+
+    // And the session the sweep could not take is still there, proving the DELETE
+    // really failed rather than the test asserting an empty sweep.
+    var s = (try db.row("SELECT COUNT(*) FROM sessions;", &.{})).?;
+    defer s.finalize();
+    try testing.expectEqual(@as(i64, 1), s.int(0));
 }
 
 
@@ -347,7 +424,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
 
     var svc = authsvc.Service.init(gpa, io, db, cred_key);
     defer svc.deinit();
-    try svc.sweepExpiredSessions(); // reclaim dead sessions on startup
+    // (the expired-session sweep runs with the other startup housekeeping below)
     if (try ensureAdmin(&svc, cfg.admin_email, rng)) |pw| announceAdmin(cfg.admin_email, pw);
 
     var limiter = ratelimit.Limiter.init(gpa);
@@ -397,7 +474,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     // an admin editing a number from purging a month of other people's notes on
     // the next restart; nothing is swept until the new window has been served in
     // full. See services/settings.zig.
-    startupSweeps(io, db, files_svc);
+    startupSweeps(io, db, &svc, files_svc);
 
     // Serializes access to the single shared SQLite connection across the
     // per-connection threads the accept loop spawns: a shared connection must be
@@ -605,6 +682,19 @@ fn dispatchLocked(ctx: *Context, routes: []const router.Route, req: *router.Requ
     const route = if (idx) |i| &routes[i] else null;
     const manual = if (route) |r| r.manual_db_lock else false;
     const admin_route = if (route) |r| r.require_admin else false;
+    // The two are mutually exclusive BY CONSTRUCTION: the manual branch below
+    // returns before `renewElevation`, so a manual admin route would silently stop
+    // sliding the elevation window and hand admins a surprise 428 with nothing
+    // pointing at the flag that did it. `routes.zig` refuses to compile such a
+    // route (`router.manualAdminRoute`); this assert is the same rule for the
+    // synthetic tables tests build.
+    //
+    // Chosen over renewing in BOTH branches on purpose. That fix works, and it is
+    // the worse one: it puts a silent behaviour in a second place, under a
+    // different lock discipline (a manual handler holds no lock here, so its
+    // renewal would need a window of its own), where the next reader has to
+    // remember it exists. This one cannot be got wrong.
+    std.debug.assert(!(manual and admin_route));
     if (manual) {
         const caller = blk: {
             ctx.lockDb();

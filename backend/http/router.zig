@@ -69,6 +69,29 @@ pub const Route = struct {
     manual_db_lock: bool = false,
 };
 
+/// The index of the first route that is BOTH `manual_db_lock` and
+/// `require_admin`, or null when there is none. Usable at comptime (the route
+/// table's guard in routes.zig) and at runtime (tests).
+///
+/// **Why the combination is banned rather than supported.** `dispatchLocked`
+/// slides the admin elevation window (`renewElevation`) only on the automatic
+/// locking path; the `manual_db_lock` branch returns before it. Marking an admin
+/// route manual would therefore stop renewing elevation for anyone whose admin
+/// activity happened to be that one route, and the symptom — a surprise 428
+/// mid-session — points nowhere near the flag that caused it.
+///
+/// Renewing in BOTH branches would also fix it, and is the worse fix: it is a
+/// silent behaviour someone has to remember exists, in a second place, under a
+/// different lock discipline (a manual handler holds no lock at dispatch time, so
+/// the renewal would need its own window). This cannot be got wrong — the
+/// combination simply does not compile.
+pub fn manualAdminRoute(rs: []const Route) ?usize {
+    for (rs, 0..) |r, i| {
+        if (r.manual_db_lock and r.require_admin) return i;
+    }
+    return null;
+}
+
 pub const Decision = enum { ok, unauthorized, forbidden, needs_elevation };
 
 /// HTTP status for a lapsed/absent admin elevation.
@@ -350,4 +373,42 @@ test "match: captures :params" {
 test "match: param segment must be non-empty" {
     var p: Params = .{};
     try std.testing.expect(!match("/file/:id", "/file/", &p));
+}
+
+test "manualAdminRoute finds the flag pair that would silently stop renewing elevation" {
+    // THE PAIR IS THE BUG. `dispatchLocked`'s `manual_db_lock` branch returns
+    // before `if (admin_route) renewElevation(...)`, so a route carrying both
+    // flags stops sliding the admin elevation window — admins get a surprise 428
+    // and nothing in the symptom points at the flag. `routes.zig` turns this
+    // finder into a @compileError over the real table; here it is exercised over
+    // synthetic ones, including the near-misses that must stay legal.
+    const h = struct {
+        fn f(_: *Context, _: *Request, _: Params) anyerror!void {}
+    }.f;
+
+    // Each flag ALONE is legal and must stay legal: `/oss/put` really is manual,
+    // and every admin route really does require admin.
+    const legal = [_]Route{
+        .{ .method = .GET, .path = "/oss/get/:id", .scopes = &.{.public}, .handler = h, .manual_db_lock = true },
+        .{ .method = .GET, .path = "/api/admin/health", .scopes = &.{.controlplane}, .handler = h, .require_admin = true },
+        .{ .method = .GET, .path = "/api/version", .scopes = &.{.public}, .handler = h },
+    };
+    try std.testing.expect(manualAdminRoute(&legal) == null);
+
+    // Both together: refused, and the index names the offender so the compile
+    // error can quote its path.
+    const banned = [_]Route{
+        .{ .method = .GET, .path = "/api/version", .scopes = &.{.public}, .handler = h },
+        .{
+            .method = .POST,
+            .path = "/api/admin/export",
+            .scopes = &.{.controlplane},
+            .handler = h,
+            .require_admin = true,
+            .manual_db_lock = true,
+        },
+    };
+    try std.testing.expectEqual(@as(?usize, 1), manualAdminRoute(&banned));
+
+    try std.testing.expect(manualAdminRoute(&[_]Route{}) == null);
 }

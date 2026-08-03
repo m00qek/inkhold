@@ -54,6 +54,18 @@ pub const code_len = 16; // hex chars (a 64-bit challenge nonce: anti-replay / a
 const token_len = 32; // hex chars (16 random bytes)
 const challenge_ttl: i64 = 300; // 5 min
 
+/// Longest `account` a challenge may be keyed by.
+///
+/// The entry cap alone would NOT bound bytes: `account` is an arbitrary string
+/// out of the request body, and `json.zig` allows a 64 KiB body — 4096 × 64 KiB
+/// is far past the whole 50 MB budget. With this bound the worst case is
+/// 4096 × ~278 B ≈ 1.1 MB.
+///
+/// 254 is RFC 5321's maximum for an email address, and `getUser` resolves an
+/// account against `users.email`, so a longer string can never name a real
+/// account — refusing it here cannot block a login that would otherwise work.
+pub const max_account_len: usize = 254;
+
 /// Scope-dependent session lifetime, generalising the elevation model
 /// (`elevationLive`) to whole sessions: an ABSOLUTE cap measured from creation
 /// (enforced by `caller` AND reclaimed by `sweepExpiredSessions`) plus, for
@@ -175,6 +187,11 @@ pub const Service = struct {
     cred_key: [password.cred_key_len]u8,
     /// Transient login challenges, keyed by account (owned copies).
     challenges: std.StringHashMapUnmanaged(Challenge) = .empty,
+    /// Soft cap on live challenges, mirroring `download_tokens.max_tokens` and
+    /// `ratelimit.max_keys`. Household scale is single digits; this exists so the
+    /// public `random/code` route cannot grow the table without bound. A field, not
+    /// a constant, so tests can drive the full case without minting 4096 codes.
+    max_challenges: usize = 4096,
 
     const Challenge = struct { code: [code_len]u8, expires: i64 };
     const User = struct { id: u64, password_md5: [password.md5_len]u8, is_admin: bool, must_change: bool };
@@ -828,13 +845,77 @@ pub const Service = struct {
     // ---- login challenge + session ----
 
     /// Issues a single-use random code for `account` (held in memory, 5-min TTL).
+    ///
+    /// **Bounded, because nothing else bounds it.** The route is `.public` and
+    /// takes an attacker-chosen account string — an entry was inserted for ANY
+    /// string and removed only by a same-account re-request, a login, or an
+    /// elevation, so at the route's 20/min/IP limit the table grew by ~29k entries
+    /// a day per IP and never shrank, on a server holding itself to 50 MB. This is
+    /// `http/download_tokens.zig`'s shape verbatim: sweep the expired before
+    /// growing, and refuse to grow past a soft cap even after the sweep.
+    ///
+    /// **REFUSES rather than evicting the oldest**, like `download_tokens` — and
+    /// unlike `ratelimit`, which fails open because failing open there costs only
+    /// a skipped limit. The obvious objection is that refusing blocks a legitimate
+    /// login, and it is the right trade anyway:
+    ///
+    ///   - A caller already holding a live challenge is `found_existing`, so it is
+    ///     never refused. Only a *new* account string is, and only while the table
+    ///     is genuinely full of unexpired entries.
+    ///   - Eviction would move the failure somewhere much worse. The legitimate
+    ///     caller's `getRandomCode` would succeed and their entry could then be
+    ///     evicted by the flood before their `login` POST arrived — surfacing as
+    ///     `NoChallenge`, which the client renders as a credential problem. A
+    ///     refusal here is one honest 500 at the moment of the cause.
+    ///   - Eviction also needs an oldest-entry scan or an ordering structure; a
+    ///     5-minute TTL plus a sweep already keeps the table empty in practice.
+    ///
+    /// The account is NOT checked for existence: answering differently for an
+    /// unknown account would turn this route into an enumeration oracle, and
+    /// `check/exists` is the one place that distinction is deliberately made.
     pub fn getRandomCode(self: *Service, account: []const u8) Error![code_len]u8 {
+        // Length bound first: without it the entry cap would not bound bytes.
+        if (account.len > max_account_len) return error.OutOfMemory;
+
         const code = self.randomHex(code_len);
-        self.dropChallenge(account);
-        const key = try self.gpa.dupe(u8, account);
-        errdefer self.gpa.free(key);
-        try self.challenges.put(self.gpa, key, .{ .code = code, .expires = self.now() + challenge_ttl });
+        self.sweepChallenges(self.now()); // reclaim expired before we (maybe) grow
+
+        if (self.challenges.count() >= self.max_challenges and !self.challenges.contains(account)) {
+            return error.OutOfMemory;
+        }
+
+        // getOrPut rather than dropChallenge + put: re-requesting for an account
+        // that already has a challenge reuses the owned key and simply overwrites
+        // the code, which is the same single-use semantics with no free/dupe churn
+        // — and no window in which a refusal could destroy a live challenge.
+        const gop = try self.challenges.getOrPut(self.gpa, account);
+        if (!gop.found_existing) {
+            const owned = self.gpa.dupe(u8, account) catch |e| {
+                _ = self.challenges.remove(account); // undo the half-inserted entry
+                return e;
+            };
+            gop.key_ptr.* = owned;
+        }
+        gop.value_ptr.* = .{ .code = code, .expires = self.now() + challenge_ttl };
         return code;
+    }
+
+    /// Drops expired challenges (best-effort, capped per call — `getRandomCode`
+    /// sweeps every time, so the table stays bounded). Mirrors
+    /// `download_tokens.sweepLocked`, including the fixed stale scratch: removing
+    /// while iterating the map is not safe, so keys are collected first.
+    fn sweepChallenges(self: *Service, now_s: i64) void {
+        var stale: [128][]const u8 = undefined;
+        var n: usize = 0;
+        var it = self.challenges.iterator();
+        while (it.next()) |e| {
+            if (now_s > e.value_ptr.expires) {
+                stale[n] = e.key_ptr.*;
+                n += 1;
+                if (n == stale.len) break;
+            }
+        }
+        for (stale[0..n]) |k| self.dropChallenge(k);
     }
 
     fn dropChallenge(self: *Service, account: []const u8) void {
@@ -1808,6 +1889,95 @@ test "the login challenge nonce is a 64-bit (16 hex) single-use code" {
     // Re-issuing supersedes the prior code (single-use) with a fresh one.
     const code2 = try svc.getRandomCode("someone@home");
     try std.testing.expect(!std.mem.eql(u8, &code, &code2));
+    // ...and does not grow the table: one account, one entry.
+    try std.testing.expectEqual(@as(u32, 1), svc.challenges.count());
+}
+
+test "issuing a challenge reclaims OTHER accounts' expired ones" {
+    // THE LEAK. `random/code` is public and keyed by an attacker-chosen account
+    // string, and nothing ever removed an expired entry — `dropChallenge` only
+    // fired for the SAME account on re-request. At the route's 20/min/IP that is
+    // ~29k entries a day per IP, kept for ever, on a 50 MB budget.
+    //
+    // Asserted on the DURABLE fact — the live entry count — not on the code that
+    // comes back, which the leaking version returned identically.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+
+    // Three junk accounts, then age them past the TTL. (The clock is the real one,
+    // so the expiry is moved rather than the clock.)
+    for ([_][]const u8{ "junk1@x", "junk2@x", "junk3@x" }) |a| _ = try svc.getRandomCode(a);
+    try std.testing.expectEqual(@as(u32, 3), svc.challenges.count());
+    var it = svc.challenges.valueIterator();
+    while (it.next()) |v| v.expires = 0;
+
+    // A fourth request sweeps them: one live entry, not four.
+    _ = try svc.getRandomCode("real@home");
+    try std.testing.expectEqual(@as(u32, 1), svc.challenges.count());
+    try std.testing.expect(svc.challenges.contains("real@home"));
+
+    // The sweep is expiry-driven, not a blanket clear: a LIVE entry survives the
+    // next issue, so the flow still works for two people logging in at once.
+    _ = try svc.getRandomCode("other@home");
+    try std.testing.expectEqual(@as(u32, 2), svc.challenges.count());
+    try std.testing.expect(svc.challenges.contains("real@home"));
+}
+
+test "the challenge table refuses to grow past its cap, but never refuses a live account" {
+    // The sweep alone is not a bound: every entry inside one 5-minute TTL window is
+    // unexpired, so a flood still grows the table freely. The cap is what bounds it,
+    // and `download_tokens` is the pattern — refuse, do not evict.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+    svc.max_challenges = 2;
+
+    _ = try svc.getRandomCode("alice@home");
+    _ = try svc.getRandomCode("bob@home");
+    try std.testing.expectEqual(@as(u32, 2), svc.challenges.count());
+
+    // Full of UNEXPIRED entries: a new account is refused, and the refusal does not
+    // grow or corrupt the table.
+    try std.testing.expectError(error.OutOfMemory, svc.getRandomCode("flood@x"));
+    try std.testing.expectEqual(@as(u32, 2), svc.challenges.count());
+    try std.testing.expect(!svc.challenges.contains("flood@x"));
+
+    // The legitimate-login worry, pinned: someone who already holds a challenge is
+    // `found_existing`, so a full table never refuses THEM — and the refusal path
+    // must not have destroyed the challenge they are about to redeem.
+    const again = try svc.getRandomCode("alice@home");
+    try std.testing.expectEqual(@as(u32, 2), svc.challenges.count());
+    try std.testing.expect(std.mem.eql(u8, &again, &svc.challenges.get("alice@home").?.code));
+
+    // Once an entry expires the sweep makes room again, so the cap is a bound, not
+    // a latch that wedges logins for ever after one flood.
+    svc.challenges.getPtr("bob@home").?.expires = 0;
+    _ = try svc.getRandomCode("carol@home");
+    try std.testing.expectEqual(@as(u32, 2), svc.challenges.count());
+    try std.testing.expect(svc.challenges.contains("carol@home"));
+}
+
+test "an account longer than any real email is refused, so the entry cap bounds BYTES" {
+    // The entry cap alone bounds entries, not memory: `account` comes out of a body
+    // `json.zig` allows to be 64 KiB, so 4096 such keys would be ~256 MB against a
+    // 50 MB budget.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    var svc = try testService(db);
+    defer svc.deinit();
+
+    const long = [_]u8{'a'} ** (max_account_len + 1);
+    try std.testing.expectError(error.OutOfMemory, svc.getRandomCode(&long));
+    try std.testing.expectEqual(@as(u32, 0), svc.challenges.count());
+
+    // Exactly at the bound is still accepted — the limit is the RFC 5321 maximum
+    // for an address, so it cannot refuse a login that would otherwise work.
+    const at = [_]u8{'a'} ** max_account_len;
+    _ = try svc.getRandomCode(&at);
+    try std.testing.expectEqual(@as(u32, 1), svc.challenges.count());
 }
 
 test "a session token authenticates, but the DB stores only its sha256 hash" {

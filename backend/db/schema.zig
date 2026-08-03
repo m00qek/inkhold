@@ -50,7 +50,11 @@ const sqlite = @import("sqlite.zig");
 /// v3 for a specific reason: v3 may already have been applied by an install that
 /// took the account-screen commit, and a step folded backwards into an
 /// already-applied version never runs.
-pub const version: i64 = 4;
+///
+/// v5 adds `upload_sessions.received_bytes`, the running total that makes the
+/// device upload cap per-SESSION rather than per-part. Additive, same shape as
+/// v2/v3, and defaulted so every existing row is immediately valid.
+pub const version: i64 = 5;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -64,7 +68,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 /// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
 /// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
 /// missed on a bump). The comptime check below makes the drift a build error.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5 };
 
 comptime {
     if (steps.len != version) @compileError(
@@ -387,6 +391,28 @@ const ddl_v4 =
     \\);
 ;
 
+// v5 — the device upload cap becomes per-SESSION instead of per-part.
+//
+// `handlers/upload_cap.zig` bounds an arriving `/oss/put` body at the session's
+// `declared_size` + slack. That is the right bound for ONE request and no bound
+// at all on a chunked upload: `totalChunks` is a caller-supplied u32, so N parts
+// could each stage up to the cap and the total staged before the merge stayed
+// unbounded — the very hole the cap was added to close, reachable by adding
+// `?totalChunks=` to the URL.
+//
+// `received_bytes` is the running sum of the bytes this session has actually
+// staged, so each part can be held to what is LEFT of the session's budget. It
+// lives on the row rather than being derived from disk because deriving it means
+// one stat per part per part — O(N²) syscalls over a chunk count the caller
+// chooses, which is a second denial of service in the fix for the first.
+//
+// Defaulted to 0, so every pre-existing row is valid the moment this lands: an
+// upload in flight across the upgrade is measured from zero, which at worst
+// grants it one extra budget and cannot refuse it wrongly.
+const ddl_v5 =
+    \\ALTER TABLE upload_sessions ADD COLUMN received_bytes INTEGER NOT NULL DEFAULT 0;
+;
+
 test "migrate creates the v1 schema and is idempotent" {
     var db = try sqlite.Db.openMemory();
     defer db.close();
@@ -494,6 +520,55 @@ test "v3: fresh and stepwise-migrated databases carry an identical users table" 
     defer r.finalize();
     try std.testing.expect(r.intOpt(0) == null);
     try std.testing.expect(r.intOpt(1) == null);
+}
+
+test "v5: fresh and stepwise-migrated databases carry an identical upload_sessions table" {
+    // Same property the v2/v3 tests pin, for the column v5 adds. It lives ONLY in
+    // `ddl_v5` — never folded back into the v1 baseline — so a fresh database
+    // reaches it by running the same ladder an existing install does, which is
+    // what keeps the two byte-identical instead of two authored copies drifting.
+    const read_ddl = struct {
+        fn get(db: sqlite.Db, buf: []u8) ![]const u8 {
+            var r = (try db.row("SELECT sql FROM sqlite_master WHERE name = 'upload_sessions';", &.{})) orelse return error.Missing;
+            defer r.finalize();
+            const sql = r.text(0);
+            @memcpy(buf[0..sql.len], sql);
+            return buf[0..sql.len];
+        }
+    }.get;
+
+    var fresh = try sqlite.Db.openMemory();
+    defer fresh.close();
+    try migrate(fresh);
+
+    // An install stamped at v4 — the shipped schema before this — migrated up.
+    var from_v4 = try sqlite.Db.openMemory();
+    defer from_v4.close();
+    try from_v4.exec(ddl_v1);
+    try from_v4.exec(ddl_v2);
+    try from_v4.exec(ddl_v3);
+    try from_v4.exec("PRAGMA user_version = 4;");
+    try migrate(from_v4);
+
+    var a: [1024]u8 = undefined;
+    var b: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings(try read_ddl(fresh, &a), try read_ddl(from_v4, &b));
+    try std.testing.expectEqual(version, try userVersion(fresh));
+    try std.testing.expectEqual(version, try userVersion(from_v4));
+
+    // A session row written WITHOUT the column reads 0, not NULL — the whole point
+    // of the DEFAULT. An upload in flight across the upgrade is measured from zero,
+    // and a NULL here would make the handler's budget arithmetic meaningless.
+    try from_v4.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);");
+    try from_v4.exec(
+        "INSERT INTO upload_sessions(inner_name, user_id, path, file_name, declared_size, created_at) " ++
+            "VALUES('x', 1, '/Note', 'a.note', 10, 0);",
+    );
+    var r = (try from_v4.row("SELECT received_bytes FROM upload_sessions WHERE inner_name = 'x';", &.{})) orelse
+        return error.TestUnexpectedResult;
+    defer r.finalize();
+    try std.testing.expect(!r.isNull(0));
+    try std.testing.expectEqual(@as(i64, 0), r.int(0));
 }
 
 test "v4: used_bytes is RECOMPUTED to charge retained versions, and converges from either direction" {

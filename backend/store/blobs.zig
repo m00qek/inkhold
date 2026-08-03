@@ -177,6 +177,27 @@ pub const BlobStore = struct {
         return res;
     }
 
+    /// Bytes currently staged for one part of a multipart upload, or 0 when that
+    /// part is not on disk.
+    ///
+    /// A part's temp name is deterministic (`tmp/<upload_id>_<n>`), so re-POSTing
+    /// a part REPLACES it rather than adding to it. The per-session received-bytes
+    /// total therefore has to subtract what that part already contributed before
+    /// adding what it contributes now — otherwise a device retrying one part of a
+    /// large upload would be charged for it twice and eventually refused for
+    /// having done nothing wrong. This is the "before" figure.
+    ///
+    /// Never an error: an absent (or unnameable) part contributed nothing, which
+    /// is exactly 0.
+    pub fn stagedPartSize(self: BlobStore, upload_id: []const u8, part_number: u32) u64 {
+        var tmp_buf: [chunk_name_max]u8 = undefined;
+        const tmp_rel = chunkTmpName(&tmp_buf, upload_id, part_number) catch return 0;
+        var file = self.root.openFile(self.io, tmp_rel, .{}) catch return 0;
+        defer file.close(self.io);
+        const st = file.stat(self.io) catch return 0;
+        return st.size;
+    }
+
     /// Best-effort deletion of every temp part of a multipart upload. Used to
     /// clean up after an aborted merge; errors are ignored (a missing part is the
     /// intended end state).
@@ -414,6 +435,40 @@ test "ChunkIngest.abort drops its part rather than leaving it for the sweep" {
 
     ing.abort();
     try std.testing.expect(!store.hasRel(path));
+}
+
+test "stagedPartSize reports what a part holds, and 0 for one that is not there" {
+    // The "before" figure the per-session upload cap subtracts. A part's temp name
+    // is deterministic, so re-POSTing it REPLACES the file — and a running total
+    // that did not credit the old copy back would charge a retrying device twice
+    // and eventually refuse it for doing nothing wrong.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = try BlobStore.init(std.testing.io, tmp.dir);
+
+    // A part that was never written contributes nothing — a miss, never an error.
+    try std.testing.expectEqual(@as(u64, 0), store.stagedPartSize("abcdef0123456789", 1));
+
+    var buf: [64]u8 = undefined;
+    {
+        var ing = try store.beginChunkIngest("abcdef0123456789", 1, &buf);
+        try ing.write("0123456789"); // 10 bytes
+        try ing.finish();
+        ing.deinit();
+    }
+    try std.testing.expectEqual(@as(u64, 10), store.stagedPartSize("abcdef0123456789", 1));
+    // Part-scoped: part 2 of the same upload is still nothing.
+    try std.testing.expectEqual(@as(u64, 0), store.stagedPartSize("abcdef0123456789", 2));
+
+    // RE-SENDING part 1 replaces it rather than appending — which is exactly why
+    // the total has to subtract the old size, and is the fact this reports.
+    {
+        var ing = try store.beginChunkIngest("abcdef0123456789", 1, &buf);
+        try ing.write("abc"); // 3 bytes
+        try ing.finish();
+        ing.deinit();
+    }
+    try std.testing.expectEqual(@as(u64, 3), store.stagedPartSize("abcdef0123456789", 1));
 }
 
 fn ensureDir(io: Io, root: Dir, sub: []const u8) !void {
