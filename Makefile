@@ -6,13 +6,11 @@ PORT ?= 8089
 
 WEB  := webapp
 
-# `make serve` defaults to port 8090 (as in serve.zon); `make serve PORT=9000`
-# overrides it for the run.
-ifeq ($(origin PORT),command line)
+# ONE PORT, and `PORT=` overrides it. `serve` used to default to 8090 while
+# `PORT` said 8089 and the data directory was named `server/8089`, so the help
+# text, the variable and the path disagreed three ways — a beta report started
+# by trying to reconcile them.
 SERVE_PORT := $(PORT)
-else
-SERVE_PORT := 8090
-endif
 
 TARGET ?= native-linux-musl
 
@@ -23,7 +21,7 @@ help:
 	@echo "  make build          build the server (Debug)"
 	@echo "  make release-artifact build statically against musl, build frontend, and package into a tarball. Accepts TARGET (e.g. TARGET=aarch64-linux-musl)"
 	@echo "  make run            build + run (uses config.zon if present, else defaults; --config=PATH to override)"
-	@echo "  make serve          build wasm+SPA+server, then serve device sync AND the browser UI on ONE port (8090; PORT= to override)"
+	@echo "  make serve          build wasm+SPA+server, then serve device sync AND the browser UI on ONE port ($(PORT); PORT= to override)"
 	@echo "  make test           run the root Zig suite (backend + note unit tests)"
 	@echo "  make parser-test    run the standalone parser suites (note + spd, incl. property/golden)"
 	@echo "  make test-all       run the root Zig suite, the parser suites, AND the web suite"
@@ -64,6 +62,38 @@ OPTIMIZE ?= ReleaseSafe
 # EMPTY. A guard watching the directory then reports satisfied for ever and the
 # build fails on `tsc: command not found` anyway, which is the exact failure it
 # was written to remove. npm writes this file only on success.
+# THE OTHER FRESH-CLONE GUARD. `server/` is gitignored — it holds a live database
+# — so a clone has no `serve.zon` for the recipe below to read, and `make serve`
+# died in `sed` with "No such file or directory" and nothing pointing at a fix.
+# A beta report started exactly there.
+#
+# Written once and never overwritten: it is a real config for a real install, and
+# regenerating it would silently move somebody's database. Paths are relative to
+# THIS FILE (see config.zig's rebase), which is why they are bare names and the
+# web root climbs out with `../..`.
+#
+# `.host` is 0.0.0.0, not the config default of 127.0.0.1: this target exists to
+# serve a tablet on the LAN, and a loopback bind is unreachable from one — the
+# failure looks exactly like a firewall problem, which is where the same beta
+# report went looking first.
+server/8089/serve.zon:
+	@mkdir -p $(@D)
+	@printf '%s\n' \
+	  '// Written by `make serve` on first run. Yours to edit — it is never' \
+	  '// regenerated, because it names a live database.' \
+	  '//' \
+	  '// Paths are relative to THIS file. `.host` must be reachable from the' \
+	  '// tablet: 0.0.0.0 binds every interface, 127.0.0.1 would be loopback-only.' \
+	  '.{' \
+	  '    .host = "0.0.0.0",' \
+	  '    .port = $(PORT),' \
+	  '    .db_path = "minicloud.db",' \
+	  '    .cred_key_path = "cred.key",' \
+	  '    .data_dir = "data",' \
+	  '    .web_dir = "../../webapp/dist",' \
+	  '}' > $@
+	@echo ">>> Created $@ (host 0.0.0.0, port $(PORT)). Edit it to taste."
+
 $(WEB)/node_modules/.package-lock.json:
 	npm --prefix $(WEB) ci
 
@@ -96,10 +126,9 @@ run: build
 # Point the Nomad's Private Cloud server address AND your browser at the same
 # URL: http://<this machine's LAN IP>:$(SERVE_PORT)  (run `make lan-ip` for it).
 # A production SPA build defaults to the REAL backend (no ?real needed).
-# Port is 8090 by default (serve.zon); `make serve PORT=9000` overrides it.
-serve: build $(WEB)/node_modules/.package-lock.json
+# Port is $(PORT) by default; `make serve PORT=9000` overrides it.
+serve: build $(WEB)/node_modules/.package-lock.json server/8089/serve.zon
 	npm --prefix $(WEB) run build
-	@mkdir -p server/8089
 	@sed 's/\.port = [0-9][0-9]*,/.port = $(SERVE_PORT),/' server/8089/serve.zon > server/8089/serve-run.zon
 	@echo ""
 	@echo ">>> SINGLE-PORT SERVE — device sync AND the browser UI + SPA on one port."
