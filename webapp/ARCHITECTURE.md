@@ -46,8 +46,12 @@ Four rules hold this together:
   heap reading: a browser has no peak-tracking allocator, but the pull order is
   deterministic and it is what produces the memory behaviour.
 
-One of the mockup's four menu entries — SVG vector — is rendered **disabled with
-a reason** rather than omitted or faked.
+The menu itself is three groups — *this page, current view* · *this page,
+original view* · *whole notebook* — built in `pages/readerExports.ts`. Rows that
+cannot mean anything for the page in front of you are **hidden, not disabled**:
+the layered `.ora` row needs a layer stack, and the whole *original view* group
+appears only once a layer's live visibility differs from the device-authored one,
+because until then the two exports would be byte-identical.
 
 ## Cache strategy (see memory `file-serving-and-cache`)
 

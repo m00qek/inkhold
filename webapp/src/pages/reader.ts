@@ -26,8 +26,8 @@ import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
 import { fileKind, formatBytes, rawFileUrl, historyFileUrl, type FileKind } from "../core/fileKind";
 import { createOcrController, type OcrState } from "./ocrPanel";
 import { createFindController, type FindState } from "./findInNote";
+import { createReaderExports } from "./readerExports";
 import { OVAL_VIEWBOX, ovalsFor } from "./findOvals";
-import { createExporter, download, type Exporter } from "../export/exporter";
 import { createToolbar } from "./toolbar";
 import {
   svg,
@@ -47,10 +47,8 @@ import { DEFAULT_PAGE_DIMS, skeletonPage } from "../core/noteSkeleton";
 import {
   buildNoteLayerThumb,
   createNoteLayersController,
-  noteLayerExportFilename,
   toPanelLayers,
 } from "./noteLayers";
-import { exportFlatPng, exportOra, flattenLayers, type ExportWhich } from "../export/layered";
 import type { PageLayer } from "../core/types";
 
 export interface ReaderDeps {
@@ -306,7 +304,7 @@ export function createReader(deps: ReaderDeps): Reader {
       // The Original-view export group turns on once a layer's live state differs
       // from the device-authored one — this toggle may be exactly that change, so
       // reconcile it now (without rebuilding the panel's rows).
-      refreshExportGroups();
+      downloads.refreshGroups();
     },
     paintThumb: (pl) => {
       const v = noteLayerCtl.stack()?.views.find((x) => x.index === pl.id);
@@ -1082,171 +1080,23 @@ export function createReader(deps: ReaderDeps): Reader {
   });
 
   // --- the Export menu ------------------------------------------------------
-  const exporter: Exporter = createExporter({ api, renderer });
-
-  /** An enabled menu row (label + ext) — the shared mechanics close the menu and
-   *  run it disabled-meanwhile, toasting on failure. */
-  const menuItem = exportMenu.item;
-
-  async function exportDocumentPdf(): Promise<void> {
-    const m = meta;
-    if (!m || m.pages.length === 0) return;
-    // PROGRESS THAT ONLY CLAIMS WHAT IT KNOWS: which page is being decoded, out
-    // of how many. No percentage of *time* and no spinner pretending to move —
-    // the per-page cost varies with the ink on it, and the compression step is
-    // not something this can see inside.
-    const { blob, filename, kind } = await exporter.documentPdf(m, (done, total) =>
-      deps.toast(`Exporting ${m.name} — page ${done} of ${total}…`),
-    );
-    download(filename, blob);
-    deps.toast(
-      kind === "searchable"
-        ? `Saved ${filename} — ${m.pages.length} pages, text on recognised pages is selectable`
-        : `Saved ${filename} — ${m.pages.length} pages, image only (no verified text placement for this device)`,
-    );
-  }
-
-  // THE PER-VIEW EXPORTS of the current page — Flat PNG, Layered ORA and (new)
-  // per-page PDF, each in a `current` or `original` view. The model is decoded
-  // FRESH in light form (`exportModel`) so a dark-themed screen never inverts an
-  // export; `current` reads the panel's live visibility, `original` the
-  // device-authored state — a device-hidden layer rides an "original" export with
-  // full pixels, marked invisible. Where a page has NO layer stack (a v1 or
-  // single-composite page) "current view" IS the composite, so PNG and PDF fall
-  // back to the plain page export; the layered-only ORA is not offered there (its
-  // row hides), and "original" is never offered without a stack (its whole menu
-  // group hides), so only "current" ever reaches a fallback.
-
-  async function exportViewPng(which: ExportWhich): Promise<void> {
-    const m = meta;
-    const page = currentPage();
-    if (!m || !page) return;
-    const snapshot = await noteLayerCtl.exportModel();
-    if (!snapshot) {
-      const { blob, filename } = await exporter.pagePng(m, page);
-      download(filename, blob);
-      deps.toast(`Saved ${filename}`);
-      return;
-    }
-    try {
-      const blob = await exportFlatPng(snapshot.model, which);
-      const filename = noteLayerExportFilename(m.name, page.index, which, "png");
-      download(filename, blob);
-      deps.toast(`Saved ${filename}`);
-    } finally {
-      snapshot.release();
-    }
-  }
-
-  async function exportViewOra(which: ExportWhich): Promise<void> {
-    const m = meta;
-    const page = currentPage();
-    if (!m || !page) return;
-    const snapshot = await noteLayerCtl.exportModel();
-    if (!snapshot) return; // ORA needs a stack; its row is hidden without one
-    try {
-      const blob = await exportOra(snapshot.model, which);
-      const filename = noteLayerExportFilename(m.name, page.index, which, "ora");
-      download(filename, blob);
-      deps.toast(`Saved ${filename}`);
-    } finally {
-      snapshot.release();
-    }
-  }
-
-  /**
-   * The per-page PDF — NEW. It reuses the whole PDF pipeline (export/pdf.ts: the
-   * raster plus the INVISIBLE searchable OCR layer) scoped to ONE page. With a
-   * stack it flattens the chosen view onto a WHITE sheet (PDF has no alpha, so an
-   * unfilled transparent flatten would gray to black) at the model's EFFECTIVE
-   * dims — a landscape page's model is 1872×1404, so the PDF is wide, not sheared
-   * — and hands that image to `pagePdfFromImage`. The OCR text layer is
-   * positional, so `current` and `original` carry the SAME selectable words over
-   * different pixels. With no stack it is the composite page PDF (current ==
-   * composite).
-   */
-  async function exportViewPdf(which: ExportWhich): Promise<void> {
-    const m = meta;
-    const page = currentPage();
-    if (!m || !page) return;
-    const say = (filename: string, kind: "searchable" | "raster") =>
-      // SAY WHICH ONE THEY GOT. A searchable PDF and a raster-only one look
-      // identical until someone tries to select text, and the difference is
-      // decided by whether this device's millimetre scale has been verified.
-      deps.toast(
-        kind === "searchable"
-          ? `Saved ${filename} — text is selectable`
-          : `Saved ${filename} — image only (no verified text placement for this device)`,
-      );
-    const snapshot = await noteLayerCtl.exportModel();
-    if (!snapshot) {
-      const { blob, filename, kind } = await exporter.pagePdf(m, page);
-      download(filename, blob);
-      say(filename, kind);
-      return;
-    }
-    try {
-      const image = flattenLayers(snapshot.model, which, { background: "#ffffff" });
-      const { blob, kind } = await exporter.pagePdfFromImage(m, page, image);
-      const filename = noteLayerExportFilename(m.name, page.index, which, "pdf");
-      download(filename, blob);
-      say(filename, kind);
-    } finally {
-      snapshot.release();
-    }
-  }
-
-  // THE DOWNLOAD MENU — three groups (the settled structure):
-  //   THIS PAGE — CURRENT VIEW · THIS PAGE — ORIGINAL VIEW · WHOLE NOTEBOOK
-  // `.menu__head` uppercases in CSS, so the natural-case text here renders as the
-  // headers shown. The per-page rows adapt to the focused page (see the export
-  // functions above): with a live stack they flatten the chosen VIEW; with none,
-  // "current view" is the composite and the layered-only rows fold away.
-
-  // The layered-only CURRENT row (ORA). Held apart from its group because it — and
-  // it alone in the CURRENT group — hides on a page with no stack: an ORA of a
-  // single composite has nothing to layer, whereas the Flat PNG and PDF beside it
-  // fall back to the composite and stay.
-  const currentOraItem = menuItem("Layered image", ".ora", () => exportViewOra("current"));
-  const currentGroup = el(
-    "div",
-    {},
-    el("div", { class: "menu__head", text: "This page — Current view" }),
-    menuItem("Flattened image", ".png", () => exportViewPng("current")),
-    currentOraItem,
-    menuItem("PDF document", ".pdf", () => exportViewPdf("current")),
-  );
-
-  // The WHOLE ORIGINAL group hides unless a layer's live visibility differs from
-  // its device-authored state (refreshExportGroups flips it): with nothing toggled
-  // current view == original view and the exports would be byte-identical, so a
-  // second header over duplicate rows is noise.
-  const originalGroup = el(
-    "div",
-    { hidden: true },
-    el("div", { class: "menu__sep" }),
-    el("div", { class: "menu__head", text: "This page — Original view" }),
-    menuItem("Flattened image", ".png", () => exportViewPng("original")),
-    menuItem("Layered image", ".ora", () => exportViewOra("original")),
-    menuItem("PDF document", ".pdf", () => exportViewPdf("original")),
-  );
-
-  // The raw ".note" download — the one non-transformed option, like the
-  // `.spd`/`.txt` viewers' raw row. The shared mechanics navigate to the href
-  // (its Content-Disposition names it); the href is minted per open (bin-scoped
-  // for a trashed file), and `null` disables the row.
-  const rawNoteItem = exportMenu.rawItem("Supernote", ".note");
-
-  const wholeGroup = el(
-    "div",
-    {},
-    el("div", { class: "menu__sep" }),
-    el("div", { class: "menu__head", text: "Whole notebook" }),
-    menuItem("PDF document", ".pdf", exportDocumentPdf),
-    rawNoteItem.el,
-  );
-
-  exportMenu.pop.append(currentGroup, originalGroup, wholeGroup);
+  // The rows, and what each one exports — see `readerExports.ts`. It reads the
+  // focused page and the live stack through getters because both change under it
+  // on every page turn.
+  const downloads = createReaderExports({
+    api,
+    renderer,
+    menu: exportMenu,
+    toast: deps.toast,
+    meta: () => meta,
+    currentPage,
+    layers: noteLayerCtl,
+    // The two conditions the menu's per-page rows gate on, applied HERE because
+    // this is where both live: the stack has to be the one on screen (not the
+    // previous page's, which survives until the new one commits) and the viewer
+    // has to be showing a note at all.
+    liveStack: () => (mode === "note" && stackIsCurrent() ? noteLayerCtl.stack() : null),
+  });
 
   const filmEngine: LazyEngine = createLazyEngine({
     api,
@@ -1523,7 +1373,7 @@ export function createReader(deps: ReaderDeps): Reader {
     layersPanel.el.hidden = !open;
     layersToggle.setAttribute("aria-pressed", String(open));
     layersToggle.setAttribute("aria-expanded", String(open));
-    refreshExportGroups();
+    downloads.refreshGroups();
   }
 
   /**
@@ -1536,29 +1386,6 @@ export function createReader(deps: ReaderDeps): Reader {
   function stackIsCurrent(): boolean {
     const page = meta?.pages[pageIndex];
     return page !== undefined && page.hash !== "" && noteLayerCtl.isPresented(page.hash, getTheme());
-  }
-
-  /**
-   * Reconcile the download menu's per-page groups with the live stack — split out
-   * from {@link refreshLayersUi} because a LAYER TOGGLE (the panel's eye) must
-   * update the Original group's visibility WITHOUT rebuilding the panel's own rows.
-   *
-   *  - the CURRENT group's ORA row needs a stack (nothing to layer in a composite),
-   *    so it hides without one; the Flat PNG / PDF rows stay (composite fallback);
-   *  - the ORIGINAL group appears only once a layer's live visibility differs from
-   *    its device-authored state — until then current == original and its exports
-   *    would be byte-identical.
-   */
-  function refreshExportGroups(): void {
-    // THE STACK THAT IS ON SCREEN, not merely the one that is mounted. Across a
-    // page turn the previous page's stack survives until the new one commits (it
-    // is hidden, not released — see `showPage`), and offering "save the current
-    // view" then would export page N's layers under page N+1's filename.
-    const stack = stackIsCurrent() ? noteLayerCtl.stack() : null;
-    const has = stack !== null && mode === "note";
-    currentOraItem.hidden = !has;
-    const toggled = stack !== null && mode === "note" && stack.views.some((v) => v.visible !== v.authoredVisible);
-    originalGroup.hidden = !toggled;
   }
 
   /**
@@ -2180,7 +2007,7 @@ export function createReader(deps: ReaderDeps): Reader {
         // version on screen — but `historyFileUrl` serves the version's own bytes
         // (the same route the image/PDF branch below and `spd`/`txt` viewers use),
         // so point the row at that and the user saves the ".note" they're looking at.
-        rawNoteItem.setHref(
+        downloads.setRawHref(
           previewing
             ? historyFileUrl(meta.id, previewVersion!.md5, { download: true, bin: previewViewOnly })
             : rawFileUrl(meta.id, meta.fileHash, { download: true, bin: fromBin }),

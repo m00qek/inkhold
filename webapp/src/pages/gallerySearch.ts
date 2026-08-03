@@ -15,8 +15,9 @@
 import { el } from "../ui/dom";
 import { coverageLine, groupHits, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail";
+import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
-import type { Folder, Id, Listing, NoteSummary } from "../core/types";
+import type { Folder, Id, NoteSummary } from "../core/types";
 import type { LazyEngine } from "../render/lazy";
 
 /**
@@ -67,9 +68,9 @@ export interface GallerySearchCtx {
   /** Spend the server's keyset cursor for the next page ("More results"). */
   loadMore: () => Promise<unknown>;
   /** The whole-tree listing cache — the name half of the query reads it. */
-  cachedListings: Map<string, Listing>;
+  folders: Pick<FolderCache, "values">;
   /**
-   * Has the tree walk that FILLS {@link GallerySearchCtx.cachedListings}
+   * Has the tree walk that FILLS {@link GallerySearchCtx.folders}
    * finished? Until it has, the name half of a query has been matched against a
    * partial library, so an empty result set is not yet an answer — see
    * `renderSearch`.
@@ -108,7 +109,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
    */
   function allCachedNotes(): { note: NoteSummary; folderPath: string | null }[] {
     const seen = new Map<Id, { note: NoteSummary; folderPath: string | null }>();
-    for (const cached of ctx.cachedListings.values()) {
+    for (const cached of ctx.folders.values()) {
       const names = crumbPath(cached.path).map((f) => ctx.labelFor(f));
       const folderPath = names.length === 0 ? null : names.join(" / ");
       for (const e of cached.entries) {

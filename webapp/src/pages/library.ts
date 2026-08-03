@@ -43,6 +43,7 @@ import {
   searchHref,
 } from "../router";
 import { resolveVersionShort, shortMd5 } from "./versionShort";
+import { createFolderCache } from "./folderCache";
 import type { Api } from "../api/types";
 import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
@@ -83,7 +84,7 @@ import { createGallerySearch, type GallerySearch } from "./gallerySearch";
 // there too: the breadcrumb is painted here, where its other inputs (the search
 // query, the pending category) live, but the container-flattening rule it
 // applies is the RAIL'S rule and there is exactly one copy of it.
-import { createRail, createRailView, crumbPath, type FolderTree, type RailController } from "./rail";
+import { createRail, createRailView, crumbPath, type RailController } from "./rail";
 // The recycle bin. It paints into `gallery` and is closed by `renderGallery()`
 // overwriting it, so there is no teardown hook here — see bin.ts's header.
 import { BIN_KEY, createBin, createBinScope, createBinView, type BinController } from "./bin";
@@ -493,8 +494,6 @@ export function createAppShell(deps: AppDeps): AppShell {
    */
   let destination: string | null = null;
   let listing: Listing | undefined;
-  const cachedListings = new Map<string, Listing>();
-  let rootFolders: Folder[] = [];
   let query = "";
   let sort: SortKey = readStoredSort();
   let view: View = "grid";
@@ -526,7 +525,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   function onStaleThumbnail(hash: Hash): void {
     if (sessionExpired || staleHandled.has(hash)) return;
     staleHandled.add(hash);
-    void refetch(folderId, cachedListings.get(key(folderId)));
+    void refetch(folderId, folderCache.get(folderId));
   }
 
   const failures: ApiFailureSink = {
@@ -551,27 +550,28 @@ export function createAppShell(deps: AppDeps): AppShell {
   const nav = el("nav", { class: "nav", "aria-label": "Folders", "aria-busy": "true" });
 
   /**
-   * The rail's entries, and with them the whole category/container model — see
-   * `rail.ts`. This shell keeps only what the rail cannot know: the listing
-   * cache it reads through {@link FolderTree}, where the user currently is, and
-   * what selecting a row means for the reader, the search box and the gallery.
+   * The listing cache and the walk that fills it — see `folderCache.ts`. It is
+   * what the rail's entries, the crumb labels and name-search are all functions
+   * of, and this shell keeps only what it cannot know: where the user currently
+   * is, and what selecting a row means for the reader, the search box and the
+   * gallery.
    *
-   * The rail is a PURE FUNCTION of the cache plus `place()`: it never fetches,
-   * so `prefetchTree` below stays the only thing that asks the server about
-   * folders.
+   * The rail is a PURE FUNCTION of `folderCache.tree` plus `place()`: it never
+   * fetches, so `folderCache.prefetch` stays the only thing that asks the server
+   * about folders.
    */
-  const tree: FolderTree = {
-    roots: () => rootFolders,
-    children: (id) => {
-      const cached = cachedListings.get(key(id));
-      return cached ? cached.entries.filter((e): e is Folder => e.kind === "folder") : [];
-    },
-    walked: (id) => cachedListings.has(key(id)),
-  };
+  const folderCache = createFolderCache({
+    api,
+    handled,
+    // The rail owns what a completed walk MEANS — dropping `aria-busy`, settling
+    // a category selected while still unresolved. The cache owns only whether
+    // anything changed.
+    onWalked: (changed) => rail.treeWalked(changed),
+  });
 
   const rail: RailController = createRail({
     view: createRailView(nav),
-    tree,
+    tree: folderCache.tree,
     // `listing` being undefined is not the same as an empty path: with no
     // listing nothing is expanded, not even the current folder.
     //
@@ -1387,7 +1387,7 @@ export function createAppShell(deps: AppDeps): AppShell {
       // listing would duplicate the request the first route dispatch has just
       // made.
       rail.build();
-      if (mutated) void refetch(folderId, cachedListings.get(key(folderId)));
+      if (mutated) void refetch(folderId, folderCache.get(folderId));
     },
     handled,
   });
@@ -1494,7 +1494,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     galleryEngine,
     getSearchState: () => searchState,
     loadMore: () => search.loadMore(),
-    cachedListings,
+    folders: folderCache,
     // The rail owns "has the tree walk landed" (`treeWalked`), and the name half
     // of a query is a function of exactly that walk — so the search renderer
     // asks the same authority the gallery's pending-category branch does rather
@@ -1557,7 +1557,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     // question worth putting to the user. Null (never listed) means "cannot
     // tell", and the zone then does not ask.
     existingNames: (id) => {
-      const cached = cachedListings.get(key(id));
+      const cached = folderCache.get(id);
       return cached ? cached.entries.filter((e) => e.kind === "note").map((e) => e.name) : null;
     },
     confirmConflict: (req) => openConflictDialog({ host: root, ...req }),
@@ -1569,7 +1569,7 @@ export function createAppShell(deps: AppDeps): AppShell {
       // behind it replaces the whole listing with the server's, which is what
       // corrects an auto-renamed collision ("notes (2).pdf") and fills in
       // anything the upload response did not carry.
-      const cached = cachedListings.get(key(dest.id));
+      const cached = folderCache.get(dest.id);
       if (cached) {
         // A REPLACE COMES BACK WITH THE SAME ID it went in with — that is what
         // "supersede" means — so the row is swapped in place rather than added.
@@ -1585,9 +1585,9 @@ export function createAppShell(deps: AppDeps): AppShell {
       }
       // The upload just charged the account, so the bar beside it is now wrong.
       refreshUsage();
-      void refetch(folderId, cachedListings.get(key(folderId)));
+      void refetch(folderId, folderCache.get(folderId));
       // The rail's counts are a function of the tree, and the tree just grew.
-      void prefetchTree(true);
+      void folderCache.prefetch(true);
     },
     toast,
     handled,
@@ -1652,136 +1652,6 @@ root,
   }
 
   // --- rendering -----------------------------------------------------------
-  /**
-   * The walk currently running, or null. ONE AT A TIME, and that is the whole of
-   * the fix for the stacking: `onBump` fires a forced walk per sync-version bump,
-   * and a tablet uploading a folder of notes bumps repeatedly, so a full
-   * N-round-trip BFS used to be started on top of each still-running one — every
-   * one of them contending for the browser's ~6 connections with the listing and
-   * the thumbnails the user is actually looking at, and every one of them ending
-   * in a repaint.
-   */
-  let treeWalk: Promise<void> | null = null;
-  /**
-   * A forced walk was asked for WHILE one was running, so exactly one more runs
-   * when this one finishes. This is the coalescing half: a burst of ten bumps
-   * costs two walks, not ten, and the last one still sees the settled tree —
-   * which is what the bump was asking about. A boolean rather than a counter,
-   * because "walk it again" does not get truer by being asked twice.
-   */
-  let walkAgain = false;
-  /**
-   * Bumped per walk. The in-flight guard above is what keeps two walks from
-   * existing, and this is what keeps that from being merely incidental: a walk
-   * that is no longer the current one WRITES NOTHING. Without it, a slower
-   * earlier walk finishing last would overwrite a newer walk's tree entry by
-   * entry — `cachedListings.set` and `rootFolders` were both unconditional — and
-   * the tree the rail, the crumbs and name-search read would be a blend of two.
-   */
-  let treeGen = 0;
-  /**
-   * A signature of the tree the LAST completed walk left behind, or null before
-   * the first one. What `rail.treeWalked(changed)` is answered from — see
-   * `treeSignature`. Null is deliberately not "" : the first walk must always
-   * repaint, including over a household whose tree is genuinely empty, because
-   * `rail.loaded()` flips with it and that is what turns a category's "Loading…"
-   * into "Export is empty".
-   */
-  let treeSig: string | null = null;
-
-  /**
-   * Everything a repaint would be FOR, as one string: which folders exist, where,
-   * what they hold and what they are called. The rail's rows and counts, the root
-   * gallery's flattening, the crumb labels and name-search all read exactly this
-   * and nothing else, so two walks with the same signature owe the gallery
-   * nothing. Cheap because the tree is household-sized by construction — the same
-   * assumption the sequential BFS above already rests on.
-   *
-   * The same reading `freshness.ts` takes of a single listing, one level up.
-   */
-  function treeSignature(): string {
-    const parts: string[] = [];
-    for (const k of [...cachedListings.keys()].sort()) {
-      parts.push(k);
-      for (const e of cachedListings.get(k)!.entries) {
-        // `itemCount` for a folder and `updatedAt` for a note are the two things
-        // besides existence and name that anything downstream renders.
-        parts.push(`${e.kind}${e.id}${e.name}${e.kind === "folder" ? e.itemCount : e.updatedAt}`);
-      }
-    }
-    return parts.join("\u0000");
-  }
-
-  /**
-   * Populate `cachedListings` for the whole (small, household-sized) tree so the
-   * rail can resolve category paths and render nested subfolders, and so the root
-   * gallery can flatten the containers away — both are then pure functions of the
-   * cache. BFS, sequential; `force` re-lists already-cached folders (used when a
-   * sync bump lands).
-   *
-   * THE SEQUENTIAL BFS STAYS SEQUENTIAL. It is N round-trips before the rail's
-   * resolution, the crumb labels and name-search are correct, and parallelising
-   * it is not a change to make here: the server serialises every connection on
-   * one coarse `db_lock`, so a fan-out would queue on a mutex while spending the
-   * browser's ~6 connections that the gallery's own reads need.
-   *
-   * This wrapper is the GUARDING half — one walk at a time, coalesced, generation-
-   * checked — and `walkTree` below is the walk.
-   */
-  function prefetchTree(force = false): Promise<void> {
-    if (treeWalk) {
-      // Join the walk already running rather than starting a second. A FORCED
-      // caller cannot be satisfied by it — the running walk may already have
-      // passed the folder whose change prompted the bump — so it books the one
-      // follow-up `walkAgain` allows.
-      if (force) walkAgain = true;
-      return treeWalk;
-    }
-    const run = walkTree(force).finally(() => {
-      treeWalk = null;
-      if (!walkAgain) return;
-      walkAgain = false;
-      void prefetchTree(true);
-    });
-    treeWalk = run;
-    return run;
-  }
-
-  async function walkTree(force: boolean): Promise<void> {
-    const mine = ++treeGen;
-    const queue: (Id | null)[] = [null];
-    const seen = new Set<string>();
-    while (queue.length > 0) {
-      const id = queue.shift()!;
-      if (seen.has(key(id))) continue;
-      seen.add(key(id));
-      let l = cachedListings.get(key(id));
-      if (!l || force) {
-        try {
-          l = await api.listFolder(id);
-        } catch (e) {
-          // An expired session fails every remaining hop identically — stop the
-          // walk and let the shell re-authenticate instead of grinding through
-          // the tree. Any other failure just skips this folder, as before.
-          if (handled(e)) return;
-          continue;
-        }
-        if (mine !== treeGen) return; // superseded — this walk's tree is nobody's
-        cachedListings.set(key(id), l);
-        if (id === null) rootFolders = l.entries.filter((e): e is Folder => e.kind === "folder");
-      }
-      for (const e of l.entries) if (e.kind === "folder") queue.push(e.id);
-    }
-    if (mine !== treeGen) return;
-    const sig = treeSignature();
-    const changed = treeSig === null || sig !== treeSig;
-    treeSig = sig;
-    // Drops `aria-busy`, rebuilds, and settles a category that was selected
-    // while still unresolved — see `rail.ts`. `changed` is what keeps a walk
-    // that found nothing new from costing a full gallery repaint.
-    rail.treeWalked(changed);
-  }
-
   function buildCrumbs(): void {
     const parts: (Node | string)[] = [];
     const home = el("button", { type: "button", text: "Library" });
@@ -2127,7 +1997,7 @@ root,
    * The human path of the folder a note lives in — `Note / Projects` — or null
    * when this shell cannot say.
    *
-   * Answered from `cachedListings`, which `prefetchTree` fills for the WHOLE
+   * Answered from `folderCache`, which its walk fills for the WHOLE
    * (household-sized) tree, because the question is asked from a search result
    * and a `SearchHit` carries no folder: results are library-wide, so the note is
    * very often somewhere the user has never navigated. The same container
@@ -2139,7 +2009,7 @@ root,
    * subtitle that invents a folder is worse than one that omits it.
    */
   function folderPathOf(noteId: Id): string | null {
-    for (const cached of cachedListings.values()) {
+    for (const cached of folderCache.values()) {
       if (!cached.entries.some((e) => e.kind === "note" && e.id === noteId)) continue;
       // The listing's own `path` is root → here, which is the note's folder.
       const names = crumbPath(cached.path).map((f) => rail.labelFor(f));
@@ -2346,7 +2216,7 @@ root,
       handled,
       onRestored: () => {
         historyScope.clear();
-        void refetch(folderId, cachedListings.get(key(folderId)));
+        void refetch(folderId, folderCache.get(folderId));
         rail.build();
         go(noteHref(noteId));
       },
@@ -2461,7 +2331,7 @@ root,
       // The tree walk may have reached this folder while we waited — its listing
       // is the same listing, so paint it rather than a loading state we no
       // longer need.
-      const cached = cachedListings.get(key(id));
+      const cached = folderCache.get(id);
       if (cached) listing = cached;
       renderGallery();
     }, LOADING_PAINT_DELAY_MS);
@@ -2472,7 +2342,7 @@ root,
    *
    * LANDING ON A CONTAINER is now genuinely reachable from a URL — `#/folder/
    * dir-note` is a link somebody can bookmark — where it used to be only the
-   * transient container card the root renders before `prefetchTree` has walked
+   * transient container card the root renders before the tree walk has reached
    * it. It is still RENDERED NORMALLY rather than redirected: `NOTE` really does
    * hold `Note` and `MyStyle`, so listing them is a truthful, reachable view, and
    * `crumbPath` keeps the container's name in the breadcrumb while you are
@@ -2502,7 +2372,7 @@ root,
     // previous folder's transcript hits would sit under the new folder's
     // gallery, still linking somewhere else entirely.
     search.reset();
-    const cached = cachedListings.get(key(id));
+    const cached = folderCache.get(id);
     if (cached) {
       listing = cached;
       renderGallery(); // stale-while-revalidate: paint immediately
@@ -2592,10 +2462,12 @@ root,
       return;
     }
     knownSyncVersion = Math.max(knownSyncVersion, fresh.syncVersion);
-    if (id === null) rootFolders = fresh.entries.filter((e): e is Folder => e.kind === "folder");
 
     const result = reconcile(prev, fresh);
-    cachedListings.set(key(id), result.listing);
+    // `result.listing`, not `fresh`: same data either way — `reconcile` only
+    // reuses unchanged entry OBJECTS — but the roots the rail reads are then the
+    // very objects the cache holds, so identity-keyed work downstream stays put.
+    folderCache.put(id, result.listing);
     if (result.changed || listing !== result.listing) {
       listing = result.listing;
       // NOT while the bin is on screen. A restore mutates the folder BEHIND the
@@ -2610,10 +2482,10 @@ root,
   /** A live sync-version bump: revalidate the folder we're looking at if stale. */
   function onBump(version: number): void {
     knownSyncVersion = Math.max(knownSyncVersion, version);
-    if (classify(cachedListings.get(key(folderId)), knownSyncVersion) === "stale") {
-      void refetch(folderId, cachedListings.get(key(folderId)));
+    if (classify(folderCache.get(folderId), knownSyncVersion) === "stale") {
+      void refetch(folderId, folderCache.get(folderId));
       // Refresh the rail's category counts/subfolders across the whole tree.
-      void prefetchTree(true);
+      void folderCache.prefetch(true);
     }
   }
   const unsubscribe = live.subscribe(onBump);
@@ -2708,7 +2580,7 @@ root,
   // this shell, and that dispatch is what lists a folder. A `navigate(null)` here
   // would race it — booting on `#/folder/projects` would fetch the root, throw
   // the answer away, and fetch again.
-  void prefetchTree();
+  void folderCache.prefetch();
 
   return {
     el: root,
