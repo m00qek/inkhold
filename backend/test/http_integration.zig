@@ -7297,6 +7297,35 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
     }
 }
 
+test "abandoned upload sessions are reclaimed at startup, not left for ever" {
+    // `putChunk`/`finishUpload` deliberately strand a staged blob on a hash
+    // mismatch, a quota refusal, or a client that simply stops — each with a
+    // comment saying the sweep reclaims it. The sweep existed and was called from
+    // NOTHING but its own tests, so on a real install those blobs and their
+    // `upload_sessions` rows accumulated for ever, on exactly the Pi-class box
+    // where disk is the binding constraint.
+    //
+    // This asserts the RECLAMATION, not the call: a wiring that runs the sweep
+    // with a window so wide it never collects anything would pass a "was it
+    // called" test and leak just the same.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    _ = admin;
+
+    try f.db.exec(
+        "INSERT INTO upload_sessions(inner_name, user_id, path, file_name, declared_size, blob_md5, created_at) " ++
+            "VALUES('stale-inner-name', 1, '/Note', 'abandoned.note', 12, '0123456789abcdef0123456789abcdef', 0);",
+    );
+    try std.testing.expectEqual(@as(i64, 1), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
+
+    // A day's window, the same one `transport.run` uses. `created_at = 0` is far
+    // outside it, so a correctly-wired sweep takes it.
+    const swept = try f.files.sweepUploadSessions(24 * 60 * 60);
+    try std.testing.expectEqual(@as(usize, 1), swept);
+    try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
+}
+
 test "bindEquipment WITHOUT a token: accepted only on the strength of a live session for that serial" {
     // THE REAL NOMAD SENDS THIS UNAUTHENTICATED. Captured in
     // docs/scratch/nomad-login.log: login returns the token at t+0ms, the device

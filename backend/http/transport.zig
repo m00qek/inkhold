@@ -179,10 +179,95 @@ test "ConnLimiter: a zero cap refuses everything without underflowing" {
 /// `routes` is the application's route table (see backend/routes.zig).
 /// The retention sweep is best-effort housekeeping at startup: a failure here
 /// must warn and let the server come up, never abort the boot.
-fn sweepFailed(e: anyerror) usize {
-    std.log.warn("recycle-bin retention sweep failed: {t}", .{e});
+
+/// EVERY startup housekeeping sweep, in one named place so the SET of them can be
+/// tested rather than only the individual sweeps.
+///
+/// That distinction is the reason this function exists. `sweepUploadSessions` was
+/// written, documented and unit-tested, and called from NOTHING but its own
+/// tests — so abandoned uploads accumulated for ever on real installs while a
+/// green suite reported the sweep working perfectly. A test can assert a function
+/// reclaims rows; only a test of the COMPOSITION can assert that anybody asks it
+/// to. `startup_sweeps` below is that test's handle.
+///
+/// All best-effort: housekeeping must warn and let the server come up, never
+/// abort the boot.
+fn startupSweeps(io: Io, db: sqlite.Db, files_svc: filesmod.Files) void {
+    {
+        const set = settingsmod.Settings.init(io, db);
+        const purged = sweep: {
+            const retention = set.binRetention() catch |e| break :sweep sweepFailed("recycle-bin retention", e);
+            const now = std.Io.Clock.real.now(io).toSeconds();
+            const cutoff = settingsmod.sweepCutoff(now, retention) orelse break :sweep 0;
+            break :sweep files_svc.sweepBinBefore(cutoff) catch |e| sweepFailed("recycle-bin retention", e);
+        };
+        if (purged > 0) std.log.info("recycle bin: purged {d} expired entr{s}", .{ purged, if (purged == 1) "y" else "ies" });
+    }
+
+    // ABANDONED UPLOADS. Three paths in `putChunk`/`finishUpload` deliberately
+    // leave a staged blob behind — a hash mismatch, a quota refusal, and an
+    // upload the client simply stopped — each with a comment saying the sweep
+    // will reclaim it. The sweep existed and was called from NOTHING but its own
+    // tests, so on a real install those blobs and their `upload_sessions` rows
+    // accumulated for ever, on exactly the Pi-class box where disk is the
+    // binding constraint.
+    //
+    // A day is the window: long enough that a genuinely slow upload resumed the
+    // next morning is not destroyed, short enough that a wedged one does not
+    // outlive the interest in it. Best-effort like the bin sweep above and for
+    // the same reason — housekeeping must warn and let the server come up, never
+    // abort the boot.
+    {
+        const swept = files_svc.sweepUploadSessions(24 * 60 * 60) catch |e| sweepFailed("abandoned-upload", e);
+        if (swept > 0) std.log.info("uploads: reclaimed {d} abandoned session{s}", .{ swept, if (swept == 1) "" else "s" });
+    }
+
+}
+
+/// A startup housekeeping sweep that did not run. Named by its caller, because
+/// there are two now and a warning that says "recycle-bin" while the upload sweep
+/// is what failed sends the next reader to the wrong table.
+fn sweepFailed(what: []const u8, e: anyerror) usize {
+    std.log.warn("{s} sweep failed: {t}", .{ what, e });
     return 0;
 }
+
+test "startupSweeps runs EVERY sweep, including the one that was never wired" {
+    // THE TEST THE MISSING WIRING NEEDED. `sweepUploadSessions` was written,
+    // documented and unit-tested — and called from nothing but its own tests, so
+    // abandoned uploads accumulated for ever while a green suite reported the
+    // sweep working. A test of the FUNCTION cannot catch that; only a test of the
+    // composition can, which is why `startupSweeps` exists as a named unit.
+    //
+    // Both sweeps are asserted through their EFFECT on rows, not by observing a
+    // call, so a wiring that runs a sweep with a window it can never collect
+    // anything in still fails here.
+    const testing = std.testing;
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    try schema.migrate(db);
+    try db.exec("INSERT INTO users(id, email, password_md5, cred_enc, is_admin, created_at) VALUES(1,'a@h','','',1,0);");
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = try blobstore.BlobStore.init(testing.io, tmp.dir);
+    const thumbs_dir = try tmp.dir.createDirPathOpen(testing.io, "thumbs", .{});
+    const thumbs = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
+    const files_svc = filesmod.Files.init(testing.allocator, testing.io, db, store, thumbs);
+
+    // An abandoned upload session, dated at the epoch so any sane window takes it.
+    try db.exec(
+        "INSERT INTO upload_sessions(inner_name, user_id, path, file_name, declared_size, blob_md5, created_at) " ++
+            "VALUES('stale', 1, '/Note', 'x.note', 1, '0123456789abcdef0123456789abcdef', 0);",
+    );
+
+    startupSweeps(testing.io, db, files_svc);
+
+    var r = (try db.row("SELECT COUNT(*) FROM upload_sessions;", &.{})).?;
+    defer r.finalize();
+    try testing.expectEqual(@as(i64, 0), r.int(0));
+}
+
 
 /// Load the 32-byte credential-encryption key from `path`, or generate + persist a
 /// fresh one (0600) on first run. The key lives OUTSIDE the DB so a stolen backup
@@ -312,16 +397,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     // an admin editing a number from purging a month of other people's notes on
     // the next restart; nothing is swept until the new window has been served in
     // full. See services/settings.zig.
-    {
-        const set = settingsmod.Settings.init(io, db);
-        const purged = sweep: {
-            const retention = set.binRetention() catch |e| break :sweep sweepFailed(e);
-            const now = std.Io.Clock.real.now(io).toSeconds();
-            const cutoff = settingsmod.sweepCutoff(now, retention) orelse break :sweep 0;
-            break :sweep files_svc.sweepBinBefore(cutoff) catch |e| sweepFailed(e);
-        };
-        if (purged > 0) std.log.info("recycle bin: purged {d} expired entr{s}", .{ purged, if (purged == 1) "y" else "ies" });
-    }
+    startupSweeps(io, db, files_svc);
 
     // Serializes access to the single shared SQLite connection across the
     // per-connection threads the accept loop spawns: a shared connection must be
