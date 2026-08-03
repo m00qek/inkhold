@@ -37,6 +37,13 @@ pub const Error = error{
     Step,
 };
 
+/// Whether `exec` logs SQLite's own message for a statement that failed. Always
+/// true in the server; a TEST that deliberately drives a statement into failure
+/// clears it for the duration of that call, because Zig's test runner counts
+/// every `std.log.err` as a test failure — the diagnostic would fail the very
+/// test asserting the error. Single-threaded test affordance, not a knob.
+pub var log_exec_errors: bool = true;
+
 pub const Db = struct {
     handle: *c.sqlite3,
 
@@ -91,7 +98,7 @@ pub const Db = struct {
         var msg: [*c]u8 = null;
         if (c.sqlite3_exec(self.handle, sql.ptr, null, null, &msg) != c.SQLITE_OK) {
             if (msg != null) {
-                std.log.err("sqlite exec: {s}", .{msg});
+                if (log_exec_errors) std.log.err("sqlite exec: {s}", .{msg});
                 c.sqlite3_free(msg);
             }
             return error.Exec;
@@ -153,23 +160,42 @@ pub const Db = struct {
     }
 };
 
+/// Every `Stmt.bind*` routes its SQLite return code through here.
+///
+/// It ASSERTS rather than returning an error, deliberately. A bind fails for two
+/// reasons: `SQLITE_RANGE` — the index does not exist in the statement, i.e. the
+/// bind list and the SQL have drifted apart — or `SQLITE_NOMEM`. The first is a
+/// programming error, and the second is not a condition 390 call sites across 14
+/// files can each do something useful about. Propagating would mean touching
+/// nearly every service and handler in the repo to thread an error that, at every
+/// one of those sites, means "this code is wrong".
+///
+/// Silence was the thing worth fixing: a discarded code left the parameter NULL,
+/// so a keyed `UPDATE … WHERE id = ?1` quietly matched nothing and reported
+/// success. An assert turns that into a loud stop in every debug and test build —
+/// which is exactly where a wrong index is introduced — and, since the server
+/// ships ReleaseSafe (see the Makefile), in production too.
+fn checkBind(rc: c_int) void {
+    std.debug.assert(rc == c.SQLITE_OK);
+}
+
 pub const Stmt = struct {
     stmt: *c.sqlite3_stmt,
 
     /// Parameters are 1-indexed (`?1`, `?2`, …).
     pub fn bindText(self: Stmt, index: c_int, text: []const u8) void {
-        _ = c.sqlite3_bind_text(self.stmt, index, text.ptr, @intCast(text.len), sqliteTransient());
+        checkBind(c.sqlite3_bind_text(self.stmt, index, text.ptr, @intCast(text.len), sqliteTransient()));
     }
     pub fn bindInt(self: Stmt, index: c_int, value: i64) void {
-        _ = c.sqlite3_bind_int64(self.stmt, index, value);
+        checkBind(c.sqlite3_bind_int64(self.stmt, index, value));
     }
     pub fn bindNull(self: Stmt, index: c_int) void {
-        _ = c.sqlite3_bind_null(self.stmt, index);
+        checkBind(c.sqlite3_bind_null(self.stmt, index));
     }
     /// Binds arbitrary bytes as a BLOB (no encoding, no NUL semantics) — for
     /// packed fixed-stride records that are always read back as a unit.
     pub fn bindBlob(self: Stmt, index: c_int, bytes: []const u8) void {
-        _ = c.sqlite3_bind_blob64(self.stmt, index, bytes.ptr, @intCast(bytes.len), sqliteTransient());
+        checkBind(c.sqlite3_bind_blob64(self.stmt, index, bytes.ptr, @intCast(bytes.len), sqliteTransient()));
     }
     /// Binds `text`, or SQL NULL when it is absent.
     pub fn bindTextOpt(self: Stmt, index: c_int, text: ?[]const u8) void {
@@ -182,7 +208,7 @@ pub const Stmt = struct {
     /// Binds a REAL. SQLite stores all floats as 8-byte IEEE doubles, so `f64`
     /// is the native width; narrower values widen losslessly at the call site.
     pub fn bindFloat(self: Stmt, index: c_int, value: f64) void {
-        _ = c.sqlite3_bind_double(self.stmt, index, value);
+        checkBind(c.sqlite3_bind_double(self.stmt, index, value));
     }
     /// Binds `value`, or SQL NULL when it is absent.
     pub fn bindFloatOpt(self: Stmt, index: c_int, value: ?f64) void {
@@ -350,6 +376,53 @@ test "open in-memory db, DDL, insert with bind, query back" {
         try std.testing.expectEqualStrings("a@example.com", s.columnText(1));
         try std.testing.expect((try s.step()) == false);
     }
+}
+
+test "an out-of-range bind index is a real error, not a silent no-op" {
+    // The premise `checkBind` rests on. SQLite does NOT ignore a parameter index
+    // the statement has no slot for — it reports SQLITE_RANGE and leaves the
+    // statement's other parameters alone. Discarding that code was what turned a
+    // keyed `UPDATE … WHERE id = ?1` into a no-op that reported success.
+    var db = try Db.openMemory();
+    defer db.close();
+    try db.exec("CREATE TABLE t(id INTEGER PRIMARY KEY);");
+
+    var s = try db.prepare("SELECT id FROM t WHERE id = ?1;");
+    defer s.finalize();
+    // `?2` does not exist in that SQL. Called through `s.bindInt(2, 1)` this would
+    // trip the assert, i.e. panic — and Zig 0.16 has no `std.testing.expectPanic`
+    // (checked: `std.testing` exports no panic-catching helper), and a panic cannot
+    // otherwise be caught in-process. So the contract is pinned one level down: the
+    // code SQLite returns here is non-OK, and the test below proves every bind
+    // checks it.
+    try std.testing.expectEqual(c.SQLITE_RANGE, c.sqlite3_bind_int64(s.stmt, 2, 1));
+    try std.testing.expect(c.SQLITE_RANGE != c.SQLITE_OK);
+
+    // The in-range bind on the same statement still works, so this is about the
+    // index and not about the statement having been poisoned.
+    s.bindInt(1, 1);
+    try std.testing.expect(!try s.step());
+}
+
+test "no bind discards its SQLite return code" {
+    // Mechanized inspection, standing in for the panic test Zig 0.16 cannot write.
+    // The property is "every `sqlite3_bind_*` call in this file goes through
+    // `checkBind`", and a new `bind*` helper that drops the code is exactly the
+    // regression that would restore the silent-NULL bug — so it fails here instead
+    // of six months later in a no-op UPDATE.
+    const src = @embedFile("sqlite.zig");
+    const discarded = "_ = c.sqlite3_bind"; // the pre-fix shape: code thrown away
+    const checked = "checkBind(c.sqlite3_bind";
+
+    var checked_count: usize = 0;
+    var it = std.mem.splitScalar(u8, src, '\n');
+    while (it.next()) |line| {
+        const code = std.mem.trim(u8, line, " \t");
+        if (std.mem.startsWith(u8, code, discarded)) return error.BindDiscardsReturnCode;
+        if (std.mem.startsWith(u8, code, checked)) checked_count += 1;
+    }
+    // text / int64 / null / blob64 / double — the five raw bind calls that exist.
+    try std.testing.expect(checked_count >= 5);
 }
 
 test "Db.row: no-row returns null, one-row reads int + text with int/text/null binds" {

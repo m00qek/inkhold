@@ -59,19 +59,56 @@ pub const version: i64 = 4;
 /// created with and the value a missing row reads as cannot drift apart.
 pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 
+/// The migration steps in order: `steps[i]` takes a database from version `i` to
+/// version `i + 1`. Listed once, here, rather than spelled out as a ladder of
+/// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
+/// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
+/// missed on a bump). The comptime check below makes the drift a build error.
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4 };
+
+comptime {
+    if (steps.len != version) @compileError(
+        "schema.version must equal the number of migration steps — bump one and you must add the other",
+    );
+}
+
 /// Applies the schema to `db`. On a fresh database (`user_version` 0) it lays
 /// down the whole `v1` baseline in one shot; an already-migrated database (any
 /// `user_version` >= `version`) is left untouched. Idempotent.
 pub fn migrate(db: sqlite.Db) !void {
     const current = try userVersion(db);
     if (current >= version) return;
-    if (current < 1) try db.exec(ddl_v1);
-    if (current < 2) try db.exec(ddl_v2);
-    if (current < 3) try db.exec(ddl_v3);
-    if (current < 4) try db.exec(ddl_v4);
-    // Derived from `version` so bumping the constant above cannot leave this
-    // literal behind (it was hardcoded once, and nearly missed on a bump).
-    try db.exec(std.fmt.comptimePrint("PRAGMA user_version = {d};", .{version}));
+    inline for (steps, 1..) |ddl, n| {
+        if (current < n) try applyStep(db, n, ddl);
+    }
+}
+
+/// Runs ONE migration step all-or-nothing: the step's statements and the
+/// `user_version` stamp that records them either all land or none do.
+///
+/// `db.exec` hands its script to `sqlite3_exec`, which auto-commits every
+/// statement. Unwrapped, a step that died partway (disk full, or power loss on
+/// the SD card this is meant to run from) left the objects it had already
+/// created behind with `user_version` still unstamped — so the next boot re-ran
+/// the step from the top and failed on the first `CREATE TABLE` with "table
+/// already exists". Permanently: the install could never boot again. DDL is
+/// transactional in SQLite, so a plain `BEGIN IMMEDIATE … COMMIT` closes it.
+///
+/// The stamp MUST stay INSIDE the transaction. `user_version` lives in the
+/// database header and is written transactionally like any other page, so a
+/// rollback takes it with the step (pinned by the test below). Stamping after
+/// the `COMMIT` would reopen the identical hole one statement later: step
+/// committed, crash, stamp lost, re-run dies on "already exists".
+fn applyStep(db: sqlite.Db, comptime n: comptime_int, ddl: [:0]const u8) !void {
+    try db.exec("BEGIN IMMEDIATE;");
+    // `exec` has already logged SQLite's own message by the time we get here, and
+    // a ROLLBACK that fails because SQLite already rolled the transaction back
+    // itself (what it does on SQLITE_FULL and friends) has left us in exactly the
+    // state we were asking for.
+    errdefer db.exec("ROLLBACK;") catch {};
+    try db.exec(ddl);
+    try db.exec(std.fmt.comptimePrint("PRAGMA user_version = {d};", .{n}));
+    try db.exec("COMMIT;");
 }
 
 fn userVersion(db: sqlite.Db) !i64 {
@@ -511,6 +548,61 @@ test "v4: used_bytes is RECOMPUTED to charge retained versions, and converges fr
     try db.exec(ddl_v4);
     try std.testing.expectEqual(@as(i64, 137), try readUsed(db, 1));
     try std.testing.expectEqual(@as(i64, 500), try readUsed(db, 2)); // never disturbed
+}
+
+test "a step that fails partway leaves the database untouched, and still migratable" {
+    // The failure the transaction wrapping exists for. Pre-fix each statement in a
+    // step auto-committed, so a step that died halfway left its first objects on
+    // disk with `user_version` unstamped — and the next boot re-ran the step from
+    // the top, onto tables that now existed, for ever.
+    //
+    // The injection is a step shaped exactly like a real one: a first statement
+    // that succeeds followed by one that cannot. No fault injection into SQLite is
+    // needed — "the second statement errors" is the same shape as "the disk filled
+    // up between the two", which is what makes this honest rather than a mock.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+
+    const half_failing =
+        \\CREATE TABLE users (id INTEGER PRIMARY KEY);
+        \\CREATE TABLE users (id INTEGER PRIMARY KEY);
+    ;
+    sqlite.log_exec_errors = false; // the failure below is the point, not a symptom
+    defer sqlite.log_exec_errors = true;
+    try std.testing.expectError(error.Exec, applyStep(db, 1, half_failing));
+    sqlite.log_exec_errors = true;
+
+    // Nothing the step did survived it: no half-built `users`, no version stamp.
+    try std.testing.expectEqual(@as(i64, 0), try userVersion(db));
+    var r = (try db.row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'users';",
+        &.{},
+    )) orelse return error.TestUnexpectedResult;
+    defer r.finalize();
+    try std.testing.expectEqual(@as(i64, 0), r.int(0));
+
+    // Which is the whole point: the install still boots. If the rollback had left
+    // the crippled one-column `users` behind, `migrate` would die here on "table
+    // users already exists" — and the INSERT below would fail on the missing
+    // columns even if it somehow didn't.
+    try migrate(db);
+    try std.testing.expectEqual(version, try userVersion(db));
+    try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);");
+}
+
+test "the user_version stamp rolls back with its step" {
+    // `applyStep` puts the stamp inside the step's transaction, which is only
+    // all-or-nothing if SQLite treats the `user_version` header field as ordinary
+    // transactional state. It does — but the whole fix rests on it, so it is
+    // pinned here rather than assumed.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+
+    try db.exec("BEGIN IMMEDIATE;");
+    try db.exec("PRAGMA user_version = 7;");
+    try std.testing.expectEqual(@as(i64, 7), try userVersion(db)); // visible inside
+    try db.exec("ROLLBACK;");
+    try std.testing.expectEqual(@as(i64, 0), try userVersion(db)); // and gone again
 }
 
 test "foreign keys are enforced" {
