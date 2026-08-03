@@ -21,6 +21,11 @@ jobs:
         with:
           version: 0.16.0
 
+      # Before the suites: a formatting failure is cheap to find and cheap to
+      # fix, and finding it after twenty minutes of tests is neither.
+      - name: Check formatting
+        run: make fmt
+
       - name: Test Parsers
         run: make parser-test
 
@@ -58,6 +63,11 @@ jobs:
         run: make web-test
 
   release:
+    # GATED ON THE SUITES. Without this the release job ran in PARALLEL with
+    # them, so a red build still uploaded artifacts — and the README points
+    # beta testers straight at those downloads. Shipping a binary from a build
+    # that failed is worse than shipping nothing.
+    needs: [test-backend, test-frontend]
     runs-on: ubuntu-latest
     strategy:
       matrix:

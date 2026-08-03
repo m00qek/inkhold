@@ -73,14 +73,14 @@ pub const QuerySummaryVO = struct {
 pub const SyncService = struct {
     /// Every live path for one user, computed once by SQLite so a row can CARRY its
     /// path instead of the caller deriving it.
-///
+    ///
     /// **This replaced a `pathOf` call per row.** `pathOf` walks UP the tree, one
     /// query per ancestor, so a page of N files at depth D cost N x D round trips —
     /// issued from inside an open cursor, and with the global DB lock held for all
     /// of it. The device asks for these summaries on every sync, which made it the
     /// most expensive read on the hot path. One recursive CTE does the same work in
     /// the engine, in one statement.
-///
+    ///
     /// The recursion is the same shape as `files.tree_walk_sql`, minus the columns
     /// nothing here reads.
     const path_cte =
