@@ -66,73 +66,89 @@ not a multi-tenant service.
   Inkhold never deletes device-side data — but this is early software syncing your
   real notebooks, so don't make it the *only* place your notes live yet.
 - 🔑 **Back up `cred.key`** (created on first run). It encrypts stored credentials
-  and lives outside the database; losing it means everyone has to reset their
-  password. See [`docs/design/auth.md`](docs/design/auth.md).
+  and lives outside the database, so a stolen database alone yields nothing —
+  and losing the key means everyone has to reset their password.
 
 Found a bug or something surprising? **Open a GitHub issue** — that feedback is the
 whole point of the beta.
 
 ## Requirements
 
-- A machine on your home network to run it on (Linux; ARM/Raspberry Pi works — see
-  [`docs/scratch/run-on-rpi-32bit.md`](docs/scratch/run-on-rpi-32bit.md)).
-- The [Zig](https://ziglang.org) toolchain to build it — or grab a prebuilt binary below.
-- A Supernote **Nomad** (other models are untested; see
-  [Compatibility](#compatibility)).
+- A machine on your home network to run it on (Linux; ARM and Raspberry Pi work).
+- A Supernote **Nomad** — other models are untested, see [Devices](#devices).
+- To build from source: the [Zig](https://ziglang.org) toolchain. To run a
+  prebuilt binary: nothing.
 
-## Download Latest Alpha Builds (`main`)
+## Get Inkhold
 
-If you prefer not to build from source, you can download the latest rolling `musl` binaries. These are highly portable and can be dropped directly into most Linux systems without `glibc` version mismatch issues:
+Two ways in. Both end at [First run](#first-run), which is the same either way.
 
-*   **[x86_64 (64-bit Linux)](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86_64-linux-musl.zip)**: For standard modern PCs, servers, Intel NUCs, cloud VMs (like Hetzner or DigitalOcean), and most Intel/AMD-based Synology NAS models (e.g., the Plus series like DS224+ or DS923+ running DSM).
-*   **[aarch64 (64-bit ARM)](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-aarch64-linux-musl.zip)**: For Raspberry Pi 3, 4, 400, and 5 **(only if running a 64-bit OS)**, modern ARM-based Synology NAS drives (e.g., the Value/J series like DS223 or DS223j), and ARM cloud servers.
-*   **[armhf (32-bit ARM)](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-arm-linux-musleabihf.zip)**: For older Raspberry Pi models (Pi 1, 2, and the original Zero), newer Raspberry Pis that are still running a legacy 32-bit OS, and older entry-level ARM-based NAS appliances.
-*   **[x86 (32-bit Linux)](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86-linux-musl.zip)**: For legacy 32-bit Intel/AMD systems, repurposed vintage computers, or very old thin clients.
+### Download a binary
 
-To use a prebuilt binary, extract the `.zip`, put a config beside it, and run it:
+Rolling builds from `main`, statically linked against musl — they drop into any
+Linux system without glibc version trouble.
 
-```sh
-cp config.example.zon config.zon    # then edit it — see Configuration below
-./inkhold                            # picks up ./config.zon automatically
-```
+- **[x86_64](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86_64-linux-musl.zip)**
+  — modern PCs and servers, cloud VMs, Intel/AMD Synology NAS (the Plus series).
+- **[aarch64](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-aarch64-linux-musl.zip)**
+  — Raspberry Pi 3, 4, 400 and 5 **on a 64-bit OS**, ARM Synology NAS, ARM cloud servers.
+- **[armhf](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-arm-linux-musleabihf.zip)**
+  — older Pis (1, 2, the original Zero), and newer ones still running a 32-bit OS.
+- **[x86](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86-linux-musl.zip)**
+  — legacy 32-bit Intel/AMD machines and old thin clients.
 
-`./inkhold` reads `config.zon` from the current directory. To keep the config
-somewhere else, name it:
+Extract the `.zip`. You will also want `config.example.zon` from this repository
+beside the binary.
 
-```sh
-./inkhold --config=/etc/inkhold/config.zon
-```
-
-**Set `.host` before you start.** It defaults to `127.0.0.1`, which accepts
-connections only from the machine itself — your tablet and your browser will both
-fail to reach it, and it looks exactly like a firewall problem. Use `0.0.0.0` to
-listen on every interface, or your server's LAN address to pin it to one.
-
-## Quick start (Build from source)
+### Build from source
 
 ```sh
 git clone <this-repo> inkhold && cd inkhold
-make serve            # builds the wasm decoder + browser app + server, then runs it
-make lan-ip           # prints this machine's LAN address
+make serve
 ```
 
-Whether you run a prebuilt binary directly or use `make serve`, Inkhold runs everything on **one port** — 8089 by default. Change it with `.port` in your config, or `make serve PORT=9000`.
+`make serve` builds the WebAssembly page decoder, the browser app and the server,
+then runs it. On first use it writes a config for you — already set to listen on
+every interface — so you can skip straight past the `.host` note below.
 
-On the **first run** it creates an `admin` account and prints a **temporary password** to the terminal — note it down; you'll change it on first sign-in.
+## First run
 
-Then open `http://<LAN-IP>:<port>` in a browser and sign in.
+**If you wrote your own config, set `.host` first.** It defaults to `127.0.0.1`,
+which accepts connections only from the machine itself: your tablet and your
+browser will both fail to reach it, and it looks exactly like a firewall problem.
+Use `0.0.0.0` to listen on every interface, or your server's LAN address to pin it
+to one. (`make serve` already does this for you.)
+
+```sh
+cp config.example.zon config.zon    # then edit — see Configuration below
+./inkhold                            # picks up ./config.zon from the current directory
+```
+
+To keep the config elsewhere, name it: `./inkhold --config=/etc/inkhold/config.zon`
+
+Inkhold serves **everything on one port** — device sync, the browser app and
+optional TLS — **8089 by default**. Change it with `.port` in your config, or
+`make serve PORT=9000`.
+
+On the **first run** it creates an `admin` account and prints a **temporary
+password to the terminal**. Note it down: it is shown once, and you will change it
+when you first sign in.
+
+Then open `http://<LAN-IP>:<port>` in a browser and sign in. `make serve` prints
+the address; `make lan-ip` prints it on its own, and without the repository
+`hostname -I` will do.
 
 ## Point your Supernote at it
 
 On the device: **Settings → Supernote Cloud / Private Cloud → server address**,
-and enter the same `http://<LAN-IP>:<port>` (`make lan-ip` prints the address).
-Sign in with an Inkhold account, and your notebooks sync into the library.
+and enter the same `http://<LAN-IP>:<port>`. Sign in with an Inkhold account, and
+your notebooks sync into the library.
 
 > Running over plain HTTP is fine on a trusted home network. For sync across the
 > internet, Inkhold can terminate **TLS itself** (no reverse proxy) — see
 > [TLS](#tls).
 
-## Not supported yet
+## What doesn't work yet
 
 Honest gaps, so you know before you try:
 
@@ -142,7 +158,7 @@ Honest gaps, so you know before you try:
 | **PDF previews** | A `.pdf` in the library shows a document glyph rather than a rendered first page. It still uploads, syncs and downloads — you just cannot see inside it from the browser. `.note`, `.spd`, images and text all render. |
 | **The Supernote mobile app** | Deliberately out of scope: it expects the server to render pages, which is the one thing Inkhold pushes to the browser instead. The device syncs directly; the app does not. |
 
-## Compatibility
+### Devices
 
 | Device            | Status                                             |
 |-------------------|----------------------------------------------------|
@@ -170,14 +186,13 @@ certificate to get started.
 
 The internals — how the single binary serves three faces on one port, the
 content-addressed blob store, the client-side WASM rendering pipeline, and the
-`.note`/`.spd` parsers — are documented in [`docs/`](docs/) and mapped in the
-repository layout below.
+`.note`/`.spd` parsers — are documented in comments beside the code they explain.
+The layout:
 
 ```
 backend/    the Zig server — one binary, device sync + browser API + static host
 webapp/     the browser app (TypeScript, zero runtime deps); wasm/ = page decoders
 parsers/    the .note and .spd format parsers (own build + tests + specs)
-docs/       design, how-tos, references, and approved UI mockups
 ```
 
 Build & test:
