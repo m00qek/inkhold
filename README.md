@@ -89,13 +89,24 @@ If you prefer not to build from source, you can download the latest rolling `mus
 *   **[armhf (32-bit ARM)](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-arm-linux-musleabihf.zip)**: For older Raspberry Pi models (Pi 1, 2, and the original Zero), newer Raspberry Pis that are still running a legacy 32-bit OS, and older entry-level ARM-based NAS appliances.
 *   **[x86 (32-bit Linux)](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86-linux-musl.zip)**: For legacy 32-bit Intel/AMD systems, repurposed vintage computers, or very old thin clients.
 
-To use a prebuilt binary, extract the `.zip` and execute it from your terminal by pointing it to the configuration file:
+To use a prebuilt binary, extract the `.zip`, put a config beside it, and run it:
 
 ```sh
-./inkhold config.example.zon
+cp config.example.zon config.zon    # then edit it — see Configuration below
+./inkhold                            # picks up ./config.zon automatically
 ```
 
-*(Note: Ensure you have also downloaded the `config.example.zon` file from this repository to the same folder).*
+`./inkhold` reads `config.zon` from the current directory. To keep the config
+somewhere else, name it:
+
+```sh
+./inkhold --config=/etc/inkhold/config.zon
+```
+
+**Set `.host` before you start.** It defaults to `127.0.0.1`, which accepts
+connections only from the machine itself — your tablet and your browser will both
+fail to reach it, and it looks exactly like a firewall problem. Use `0.0.0.0` to
+listen on every interface, or your server's LAN address to pin it to one.
 
 ## Quick start (Build from source)
 
@@ -105,7 +116,7 @@ make serve            # builds the wasm decoder + browser app + server, then run
 make lan-ip           # prints this machine's LAN address
 ```
 
-Whether you run a prebuilt binary directly or use `make serve`, Inkhold runs everything on **one port** (8090 by default; `PORT=9000 ./inkhold config.example.zon` or `make serve PORT=9000` to change it).
+Whether you run a prebuilt binary directly or use `make serve`, Inkhold runs everything on **one port** — 8089 by default. Change it with `.port` in your config, or `make serve PORT=9000`.
 
 On the **first run** it creates an `admin` account and prints a **temporary password** to the terminal — note it down; you'll change it on first sign-in.
 
@@ -121,12 +132,22 @@ Sign in with an Inkhold account, and your notebooks sync into the library.
 > internet, Inkhold can terminate **TLS itself** (no reverse proxy) — see
 > [TLS](#tls).
 
+## Not supported yet
+
+Honest gaps, so you know before you try:
+
+| | |
+|---|---|
+| **Data Sync — To-Do and Digest** | The tablet's To-Do and Digest data does not sync. Inkhold implements the file-sync protocol; these ride a separate one that has not been reverse-engineered. Notes, folders, and the other synced types are unaffected. |
+| **PDF previews** | A `.pdf` in the library shows a document glyph rather than a rendered first page. It still uploads, syncs and downloads — you just cannot see inside it from the browser. `.note`, `.spd`, images and text all render. |
+| **The Supernote mobile app** | Deliberately out of scope: it expects the server to render pages, which is the one thing Inkhold pushes to the browser instead. The device syncs directly; the app does not. |
+
 ## Compatibility
 
 | Device            | Status                                             |
 |-------------------|----------------------------------------------------|
-| Supernote **Nomad** (A5 X2) | ✅ Verified end-to-end against a real device |
-| Other Supernote models (A5 X, A6 X, Manta, …) | ❓ Untested — likely similar, help wanted |
+| Supernote **Nomad** (A6 X2) | ✅ Verified end-to-end against a real device |
+| Other Supernote models (A5 X, A6 X, **Manta** (A5 X2), …) | ❓ Untested — likely similar, help wanted |
 
 Own a non-Nomad Supernote? Trying it and reporting back is one of the most useful
 things a beta tester can do.
