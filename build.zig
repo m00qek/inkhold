@@ -250,7 +250,7 @@ pub fn build(b: *std.Build) void {
     const spd_decode_step = b.step("wasm-spd-decode", "Build the .spd viewer decoder wasm");
     spd_decode_step.dependOn(&b.addInstallArtifact(spd_decode, .{}).step);
 
-    // ---- Server: `zig build serve -- [config.zon]` ----
+    // ---- Server: `zig build serve -- [--config=config.zon]` ----
     const serve_mod = b.createModule(.{
         .root_source_file = b.path("backend/main.zig"),
         .target = target,

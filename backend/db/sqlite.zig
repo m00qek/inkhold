@@ -388,7 +388,7 @@ pub const Bind = union(enum) {
     int: i64,
     text: []const u8,
     blob: []const u8,
-    @"null",
+    null,
     float: f64,
     int_opt: ?i64,
     text_opt: ?[]const u8,

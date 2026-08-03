@@ -21,6 +21,7 @@
 
 import { el } from "../ui/dom";
 import { ICONS, svg, type IconName } from "../ui/icons";
+import { type DestinationKey } from "../core/destinations";
 import type { Entry, Folder, Id } from "../core/types";
 
 /**
@@ -177,26 +178,18 @@ export function labelPathSegments(segments: readonly string[]): string[] {
  * A server path with the device's container segments removed, so it says
  * `Library / Note` where the server said `NOTE / Note`.
  *
- * A PRESENTATION FILTER, deliberately client-side. `listing.path` is the
- * server's truthful answer about the real tree and stays that way; flattening
- * is a decision about how this UI names things, and pushing it into the backend
- * would bake one client's navigation model into the wire format.
+ * CLIENT-SIDE ON PURPOSE: `listing.path` stays the server's truthful answer, and
+ * pushing the flattening into the backend would bake one client's navigation
+ * model into the wire format.
  *
- * EXPORTED, and the only copy. The breadcrumb is not the only caller — the
- * reader's origin subtitle and the search results' folder column ask the same
- * question about a path they did not navigate to — and the flattening rule has
- * to be the rail's rule or the seam this file exists to close reopens somewhere
- * else. The breadcrumb's *rendering* stays in library.ts, where its other inputs
- * (the search query, the pending category) live; only the resolution is here.
+ * THE ONLY COPY. The breadcrumb, the reader's origin subtitle and the search
+ * results' folder column all ask this, so the rule lives here or the seam
+ * reopens elsewhere. Rendering stays in library.ts; only resolution is here.
  *
- * TWO GUARDS on what counts as a container segment:
- *
- *  - only at INDEX 0 — a container name is a root-folder fact, and a user's own
- *    deeply-nested folder that happens to be called `NOTE` is not noise;
- *  - never when it is the LAST segment. If you are standing IN the container,
- *    it is where you are, and dropping it would leave the breadcrumb saying
- *    "Library" while the gallery showed something else. See `navigate` in
- *    library.ts for how you can end up there.
+ * TWO GUARDS on what counts as a container segment: only at INDEX 0 (a container
+ * name is a root-folder fact — a user's own nested `NOTE` folder is not noise),
+ * and never as the LAST segment (standing in it, it is where you are, and
+ * dropping it would leave the breadcrumb saying "Library" over a full gallery).
  */
 export function crumbPath(path: readonly Folder[]): Folder[] {
   return path.filter((f, i) => !(i === 0 && i < path.length - 1 && CONTAINER_NAMES.has(f.name)));
@@ -240,8 +233,10 @@ export interface FolderTree {
  * the painter is untouched.
  */
 export interface Destination {
-  /** Stable id the shell routes on. Never shown. */
-  key: string;
+  /** Stable id the shell routes on. Never shown. Declared in
+   *  `core/destinations.ts`, so the router can test for one without importing
+   *  this file — see the note there. */
+  key: DestinationKey;
   label: string;
   icon: IconName;
   /**

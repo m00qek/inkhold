@@ -472,34 +472,14 @@ pub const ControlPlaneService = struct {
         const entries = try self.files.list(user_id, parent_id);
         defer Files.freeEntries(self.files.gpa, entries);
 
+        // ONE BUILDER, shared with the rename response. Both shapes used to be
+        // written out here as well as in `entryVO`, field for field — two places
+        // that had to agree about ten fields with nothing making them. A folder
+        // costs one indexed probe for its child count (`Files.childCount`); a
+        // listing holds a handful of folders, so that is a handful of lookups
+        // rather than the tree scan a recursive count would need.
         var out: std.ArrayList(EntryVO) = .empty;
-        for (entries) |e| {
-            if (e.is_folder) {
-                // One indexed probe per subfolder row (see `Files.childCount`).
-                // A listing holds a handful of folders, so this is a handful of
-                // lookups — not the tree scan a recursive count would need.
-                try out.append(arena, .{
-                    .kind = "folder",
-                    .id = try idStr(arena, e.id),
-                    .name = try arena.dupe(u8, e.name),
-                    .itemCount = try self.files.childCount(user_id, e.id),
-                });
-            } else {
-                const s = try self.summarize(arena, e);
-                try out.append(arena, .{
-                    .kind = "note",
-                    .id = try idStr(arena, e.id),
-                    .name = try arena.dupe(u8, e.name),
-                    .pageCount = s.count,
-                    .firstPage = s.page,
-                    .updatedAt = e.updated_at * 1000, // epoch s → ms
-                    .fileType = s.file_type,
-                    .fileHash = if (e.md5) |m| try arena.dupe(u8, m) else null,
-                    .hasRecognizedText = s.has_recognized_text,
-                    .thumbAspect = s.aspect,
-                });
-            }
-        }
+        for (entries) |e| try out.append(arena, try self.entryVO(arena, user_id, e));
 
         return .{
             .folderId = if (parent_id) |p| try idStr(arena, p) else null,

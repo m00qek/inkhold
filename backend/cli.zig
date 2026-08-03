@@ -251,25 +251,15 @@ pub fn writeHelp(w: *std.Io.Writer, st: Style) !void {
     , .{ .b = st.bold, .d = st.dim, .r = st.reset });
 }
 
-
 /// Parse + dispatch. Returns the process exit code; `serve` does not return.
 ///
 /// `out` is stdout and `err` is stderr, passed in rather than reached for, so
 /// the tests below drive the real commands against a buffer and assert on what a
 /// person would actually see.
-pub fn run(
-    gpa: std.mem.Allocator,
-    io: std.Io,
-    args: []const []const u8,
-    out: *std.Io.Writer,
-    err: *std.Io.Writer,
-) !u8 {
-    return runStyled(gpa, io, args, out, err, Style.plain);
-}
-
-/// `run`, with the styling decided by the caller. `main` chooses from the real
-/// stdout; the tests call this with `Style.plain` so an assertion never has to
-/// know about escape codes, and once with `Style.ansi` to prove they appear.
+/// Parse `args` and run the command, with the styling decided by the caller —
+/// `main` chooses it from the real stdout, and the tests pass `Style.plain` so an
+/// assertion never has to know about escape codes (one passes `Style.ansi`, to
+/// prove they appear).
 pub fn runStyled(
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -290,20 +280,10 @@ pub fn runStyled(
         try writeHelp(err, st);
         return exit_usage;
     };
-    return executeStyled(gpa, io, inv, out, err, st);
+    return execute(gpa, io, inv, out, err, st);
 }
 
 pub fn execute(
-    gpa: std.mem.Allocator,
-    io: std.Io,
-    inv: Invocation,
-    out: *std.Io.Writer,
-    err: *std.Io.Writer,
-) !u8 {
-    return executeStyled(gpa, io, inv, out, err, Style.plain);
-}
-
-pub fn executeStyled(
     gpa: std.mem.Allocator,
     io: std.Io,
     inv: Invocation,
@@ -800,7 +780,7 @@ fn capture(gpa: std.mem.Allocator, inv: Invocation) !Captured {
     errdefer out.deinit();
     var err: std.Io.Writer.Allocating = .init(gpa);
     errdefer err.deinit();
-    const code = try execute(gpa, testing.io, inv, &out.writer, &err.writer);
+    const code = try execute(gpa, testing.io, inv, &out.writer, &err.writer, Style.plain);
     var out_list = out.toArrayList();
     errdefer out_list.deinit(gpa);
     var err_list = err.toArrayList();

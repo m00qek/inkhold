@@ -19,6 +19,7 @@
 //! so a flood of mints can't grow it without limit (per the 50 MB budget).
 
 const std = @import("std");
+const expiring = @import("../expiring.zig");
 
 pub const Error = std.mem.Allocator.Error;
 
@@ -103,19 +104,11 @@ pub const DownloadTokens = struct {
     /// Reclaims expired tokens (best-effort, capped per call — `mint` sweeps every
     /// time, so the table stays bounded). The caller must hold `mutex`.
     fn sweepLocked(self: *DownloadTokens, now_ms: i64) void {
-        var stale: [128][]const u8 = undefined;
-        var n: usize = 0;
-        var it = self.tokens.iterator();
-        while (it.next()) |e| {
-            if (now_ms >= e.value_ptr.expires_at_ms) {
-                stale[n] = e.key_ptr.*;
-                n += 1;
-                if (n == stale.len) break;
+        expiring.sweep(Entry, self.gpa, &self.tokens, now_ms, struct {
+            fn f(e: Entry, now: i64) bool {
+                return now >= e.expires_at_ms;
             }
-        }
-        for (stale[0..n]) |k| {
-            if (self.tokens.fetchRemove(k)) |kv| self.gpa.free(kv.key);
-        }
+        }.f);
     }
 };
 

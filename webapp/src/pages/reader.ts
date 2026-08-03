@@ -1082,11 +1082,6 @@ export function createReader(deps: ReaderDeps): Reader {
   });
 
   // --- the Export menu ------------------------------------------------------
-  //
-  // The mockup's four entries, one of which cannot be produced honestly yet and
-  // is therefore rendered DISABLED WITH A REASON rather than omitted or, worse,
-  // wired to something that fakes the format. A disabled entry that says why is
-  // information; an entry that produces a raster and calls it a vector is not.
   const exporter: Exporter = createExporter({ api, renderer });
 
   /** An enabled menu row (label + ext) — the shared mechanics close the menu and

@@ -3031,7 +3031,7 @@ test "device upload chunked: parts are merged on the final part" {
     const p1 = "SUPERNOTE upload payload ";
     const p2 = "— the real .note ";
     const p3 = "bytes\x00\x01\x02\r\n--not-a-boundary";
-    
+
     const file_bytes = try std.mem.concat(gpa, u8, &.{ p1, p2, p3 });
     defer gpa.free(file_bytes);
     const md5 = blobstore.md5HexOf(file_bytes);
@@ -7326,9 +7326,9 @@ test "web upload: an off-list extension is 415 and an unsafe filename is 400, bo
     // Every accepted extension IS accepted, case-insensitively — the accept-list
     // is the feature, so pin it rather than trusting one representative.
     const accepted = [_][]const u8{
-        "a.note", "b.SPD",  "c.pdf",  "d.EPUB", "e.doc",  "f.docx",
-        "g.txt",  "h.PNG",  "i.jpg",  "j.jpeg", "k.webp", "l.cbz",
-        "m.fb2",  "n.xps",  "o.mobi", "p.azw",  "q.AZW3",
+        "a.note", "b.SPD", "c.pdf",  "d.EPUB", "e.doc",  "f.docx",
+        "g.txt",  "h.PNG", "i.jpg",  "j.jpeg", "k.webp", "l.cbz",
+        "m.fb2",  "n.xps", "o.mobi", "p.azw",  "q.AZW3",
     };
     for (accepted, 0..) |name, i| {
         // Distinct content per file so each is its own blob (dedup would still

@@ -179,7 +179,6 @@ test "ConnLimiter: a zero cap refuses everything without underflowing" {
 /// `routes` is the application's route table (see backend/routes.zig).
 /// The retention sweep is best-effort housekeeping at startup: a failure here
 /// must warn and let the server come up, never abort the boot.
-
 /// EVERY startup housekeeping sweep, in one named place so the SET of them can be
 /// tested rather than only the individual sweeps.
 ///
@@ -231,7 +230,6 @@ fn startupSweeps(io: Io, db: sqlite.Db, svc: *authsvc.Service, files_svc: filesm
         const swept = files_svc.sweepUploadSessions(24 * 60 * 60) catch |e| sweepFailed("abandoned-upload", e);
         if (swept > 0) std.log.info("uploads: reclaimed {d} abandoned session{s}", .{ swept, if (swept == 1) "" else "s" });
     }
-
 }
 
 /// A startup housekeeping sweep that did not run. Named by its caller, because
@@ -344,7 +342,6 @@ test "a failed session sweep warns and lets the boot continue, sweeps after it i
     defer s.finalize();
     try testing.expectEqual(@as(i64, 1), s.int(0));
 }
-
 
 /// Load the 32-byte credential-encryption key from `path`, or generate + persist a
 /// fresh one (0600) on first run. The key lives OUTSIDE the DB so a stolen backup

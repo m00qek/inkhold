@@ -9,6 +9,7 @@
 //! takes `io` to lock/unlock, mirroring `download_tokens`.
 
 const std = @import("std");
+const expiring = @import("../expiring.zig");
 
 /// What a route's limit is keyed by.
 pub const By = enum { ip, user, both };
@@ -96,19 +97,11 @@ pub const Limiter = struct {
 
     /// Reclaim buckets untouched for `max_idle_ms` (best-effort, capped per call).
     fn evictStale(self: *Limiter, now_ms: i64) void {
-        var stale: [128][]const u8 = undefined;
-        var n: usize = 0;
-        var it = self.buckets.iterator();
-        while (it.next()) |e| {
-            if (now_ms - e.value_ptr.last_ms > max_idle_ms) {
-                stale[n] = e.key_ptr.*;
-                n += 1;
-                if (n == stale.len) break;
+        expiring.sweep(Bucket, self.gpa, &self.buckets, now_ms, struct {
+            fn f(b: Bucket, now: i64) bool {
+                return now - b.last_ms > max_idle_ms;
             }
-        }
-        for (stale[0..n]) |k| {
-            if (self.buckets.fetchRemove(k)) |kv| self.gpa.free(kv.key);
-        }
+        }.f);
     }
 };
 

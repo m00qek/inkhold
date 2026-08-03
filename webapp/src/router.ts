@@ -50,10 +50,10 @@
 // spelled by the same strings the rail routes on, so a destination cannot end up
 // with a route name that drifts from its key — adding one stays a single line in
 // `DESTINATIONS`, which is the promise rail.ts makes about that list.
-import { DESTINATIONS } from "./pages/rail";
+import { DESTINATION_KEYS } from "./core/destinations";
 import type { Id } from "./core/types";
 
-const DESTINATION_KEYS = new Set(DESTINATIONS.map((d) => d.key));
+const DESTINATION_KEY_SET = new Set<string>(DESTINATION_KEYS);
 
 export type Route =
   | { name: "login" }
@@ -247,7 +247,7 @@ export function parseRoute(raw: string): Route {
     // `login` must lose to the route that already means something rather than
     // silently take it over.
     const key = p.slice(1);
-    if (p.startsWith("/") && DESTINATION_KEYS.has(key)) return { name: "destination", key };
+    if (p.startsWith("/") && DESTINATION_KEY_SET.has(key)) return { name: "destination", key };
     return { name: "library" };
   }
   return {
@@ -490,38 +490,19 @@ export function go(to: string): void {
 /**
  * Registers a render callback fired ONCE on load and on every hash change.
  *
- * THE INITIAL DISPATCH IS LATCHED, and that is not a micro-optimisation. The
- * previous version registered a `DOMContentLoaded` listener *and* called `run()`
- * immediately when `readyState !== "loading"` — but `readyState` flips to
- * `"interactive"` just BEFORE `DOMContentLoaded` fires, so a module that happened
- * to evaluate inside that window did both, and the route was dispatched twice.
- *
- * Twice used to be DESTRUCTIVE. A dispatch of `#/note/:id` calls
- * `openNote(id, route.page, route.q)`, and back when paging was not in the URL
- * the route's page was always the ENTRY page — so a second dispatch arriving
- * after the reader had been paged silently threw the reader back to page 1,
- * losing the reader's position for a reason nothing on screen could explain. It
- * reproduced as a ~60% export-the-wrong-page failure once the app grew enough for
- * module evaluation to land in that window.
- *
- * The URL now describes the position, so a re-dispatch re-opens the reader where
- * it already is and the second dispatch is merely wasteful rather than lossy.
- * THE LATCH STAYS ANYWAY: idempotence here rests on every consumer of a route
- * being idempotent too, and a route dispatched once is a property worth keeping
- * rather than a bug being fixed twice. (Its regression test moved with it — see
- * `tests/e2e/navigation.spec.ts`.)
+ * THE INITIAL DISPATCH IS LATCHED. `readyState` flips to `"interactive"` just
+ * BEFORE `DOMContentLoaded`, so a module evaluating inside that window could
+ * dispatch the route twice. It is no longer destructive — the URL carries the
+ * reader's position now — but the latch stays, because without it idempotence
+ * here would rest on every consumer of a route being idempotent too.
  *
  * A ROUTE ARM IS ASYNC, AND ITS REJECTION IS HANDLED HERE — at the seam, not in
- * the arm. `render` used to be typed `(route) => void` while its only caller
- * passed an `async` function, so every arm's promise was DISCARDED: a rejection
- * became an unhandled rejection, and on the boot arm — which rejects whenever
- * the server is unreachable, before anything is mounted — that was a
- * permanently blank page. Catching it in the arm instead would fix exactly the
- * arms someone remembered to wrap; catching it here means no future route can
- * reintroduce the bug by omission, which is the same argument main.ts makes for
- * keeping the auth guard on one shared arm. `onFailure` is REQUIRED rather than
- * optional for the same reason: a caller that has not said what a failed route
- * looks like has not finished writing one.
+ * the arm. `render` was once typed `(route) => void` while its only caller
+ * passed an `async` function, so every arm's promise was discarded; on the boot
+ * arm, which rejects whenever the server is unreachable, that was a permanently
+ * blank page. Catching in the arm fixes only the arms someone remembers to wrap.
+ * `onFailure` is REQUIRED for the same reason: a caller that has not said what a
+ * failed route looks like has not finished writing one.
  */
 export function onRoute(
   render: (route: Route) => void | Promise<void>,

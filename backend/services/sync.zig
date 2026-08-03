@@ -71,6 +71,27 @@ pub const QuerySummaryVO = struct {
 };
 
 pub const SyncService = struct {
+    /// Every live path for one user, computed once by SQLite so a row can CARRY its
+    /// path instead of the caller deriving it.
+///
+    /// **This replaced a `pathOf` call per row.** `pathOf` walks UP the tree, one
+    /// query per ancestor, so a page of N files at depth D cost N x D round trips —
+    /// issued from inside an open cursor, and with the global DB lock held for all
+    /// of it. The device asks for these summaries on every sync, which made it the
+    /// most expensive read on the hot path. One recursive CTE does the same work in
+    /// the engine, in one statement.
+///
+    /// The recursion is the same shape as `files.tree_walk_sql`, minus the columns
+    /// nothing here reads.
+    const path_cte =
+        \\WITH RECURSIVE tree(id,path) AS (
+        \\  SELECT id, '/'||name FROM files WHERE user_id=?1 AND parent_id IS NULL AND deleted=0
+        \\  UNION ALL
+        \\  SELECT f.id, t.path||'/'||f.name FROM files f JOIN tree t ON f.parent_id=t.id
+        \\  WHERE f.user_id=?1 AND f.deleted=0
+        \\)
+    ;
+
     files: *Files,
 
     pub fn init(files: *Files) SyncService {
@@ -108,9 +129,9 @@ pub const SyncService = struct {
         const w = window(total, page, size);
 
         var list: std.ArrayList(SummaryInfoVO) = .empty;
-        var s = try self.files.db.prepare(
-            "SELECT id, md5, updated_at FROM files WHERE user_id = ?1 AND is_folder = 0 AND deleted = 0 ORDER BY id LIMIT ?2 OFFSET ?3;",
-        );
+        var s = try self.files.db.prepare(path_cte ++
+            "SELECT f.id, f.md5, f.updated_at, t.path FROM files f JOIN tree t ON t.id = f.id " ++
+            "WHERE f.user_id = ?1 AND f.is_folder = 0 AND f.deleted = 0 ORDER BY f.id LIMIT ?2 OFFSET ?3;");
         defer s.finalize();
         s.bindInt(1, @intCast(user_id));
         s.bindInt(2, w.limit);
@@ -119,7 +140,7 @@ pub const SyncService = struct {
             const id: i64 = s.columnInt(0);
             const md5 = try arena.dupe(u8, s.columnText(1));
             const mtime = s.columnInt(2);
-            const path = try self.files.pathOf(arena, user_id, @intCast(id));
+            const path = try arena.dupe(u8, s.columnText(3));
             try list.append(arena, .{
                 .id = id,
                 .userId = @intCast(user_id),
@@ -143,13 +164,16 @@ pub const SyncService = struct {
     pub fn summaryById(self: SyncService, arena: std.mem.Allocator, user_id: u64, ids: []const i64) !QuerySummaryByIdVO {
         var list: std.ArrayList(SummaryDO) = .empty;
         var s = try self.files.db.prepare(
-            "SELECT id, name, is_folder, md5, created_at, updated_at FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 0;",
+            path_cte ++ "SELECT f.id, f.name, f.is_folder, f.md5, f.created_at, f.updated_at, t.path " ++
+                "FROM files f JOIN tree t ON t.id = f.id WHERE f.id = ?2 AND f.user_id = ?1 AND f.deleted = 0;",
         );
         defer s.finalize();
         for (ids) |raw_id| {
             s.reset();
-            s.bindInt(1, raw_id);
-            s.bindInt(2, @intCast(user_id));
+            // ?1 is the user (the CTE's own parameter), ?2 the file — the CTE
+            // owns ?1, so the ids swapped when the path moved into the query.
+            s.bindInt(1, @intCast(user_id));
+            s.bindInt(2, raw_id);
             if (!try s.step()) continue;
             try list.append(arena, try self.rowToSummaryDO(arena, &s, user_id));
         }
@@ -164,7 +188,9 @@ pub const SyncService = struct {
 
         var list: std.ArrayList(SummaryDO) = .empty;
         var s = try self.files.db.prepare(
-            "SELECT id, name, is_folder, md5, created_at, updated_at FROM files WHERE user_id = ?1 AND is_folder = 1 AND deleted = 0 ORDER BY id LIMIT ?2 OFFSET ?3;",
+            path_cte ++ "SELECT f.id, f.name, f.is_folder, f.md5, f.created_at, f.updated_at, t.path " ++
+                "FROM files f JOIN tree t ON t.id = f.id WHERE f.user_id = ?1 AND f.is_folder = 1 AND f.deleted = 0 " ++
+                "ORDER BY f.id LIMIT ?2 OFFSET ?3;",
         );
         defer s.finalize();
         s.bindInt(1, @intCast(user_id));
@@ -181,15 +207,16 @@ pub const SyncService = struct {
     }
 
     /// Builds a `SummaryDO` from a row of `(id, name, is_folder, md5, created_at,
-    /// updated_at)`. Reads all columns before deriving the path (a separate query).
-    fn rowToSummaryDO(self: SyncService, arena: std.mem.Allocator, s: anytype, user_id: u64) !SummaryDO {
+    /// updated_at, path)` — the path arrives WITH the row now (see `path_cte`),
+    /// rather than costing a walk up the tree per row.
+    fn rowToSummaryDO(_: SyncService, arena: std.mem.Allocator, s: anytype, user_id: u64) !SummaryDO {
         const id: i64 = s.columnInt(0);
         const name = try arena.dupe(u8, s.columnText(1));
         const is_folder = s.columnInt(2) != 0;
         const md5 = try arena.dupe(u8, s.columnText(3)); // "" for folders
         const created = s.columnInt(4);
         const updated = s.columnInt(5);
-        const path = try self.files.pathOf(arena, user_id, @intCast(id));
+        const path = try arena.dupe(u8, s.columnText(6));
         return .{
             .id = id,
             .fileId = id,

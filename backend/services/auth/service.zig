@@ -5,6 +5,7 @@
 //! integration tests drive directly against an in-memory database.
 
 const std = @import("std");
+const expiring = @import("../../expiring.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
 const password = @import("password.zig");
@@ -905,17 +906,11 @@ pub const Service = struct {
     /// `download_tokens.sweepLocked`, including the fixed stale scratch: removing
     /// while iterating the map is not safe, so keys are collected first.
     fn sweepChallenges(self: *Service, now_s: i64) void {
-        var stale: [128][]const u8 = undefined;
-        var n: usize = 0;
-        var it = self.challenges.iterator();
-        while (it.next()) |e| {
-            if (now_s > e.value_ptr.expires) {
-                stale[n] = e.key_ptr.*;
-                n += 1;
-                if (n == stale.len) break;
+        expiring.sweep(Challenge, self.gpa, &self.challenges, now_s, struct {
+            fn f(c: Challenge, at: i64) bool {
+                return at > c.expires;
             }
-        }
-        for (stale[0..n]) |k| self.dropChallenge(k);
+        }.f);
     }
 
     fn dropChallenge(self: *Service, account: []const u8) void {

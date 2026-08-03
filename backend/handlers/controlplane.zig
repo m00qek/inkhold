@@ -333,9 +333,9 @@ fn isPrivate(o: [4]u8) bool {
 fn isVirtualIface(name_z: [*:0]const u8) bool {
     const name = std.mem.span(name_z);
     const skip = [_][]const u8{
-        "lo",     "docker", "br-",       "veth",  "virbr",
-        "vboxnet", "vmnet", "tailscale", "wg",    "zt",
-        "tun",    "tap",
+        "lo",      "docker", "br-",       "veth", "virbr",
+        "vboxnet", "vmnet",  "tailscale", "wg",   "zt",
+        "tun",     "tap",
     };
     for (skip) |p| if (std.mem.startsWith(u8, name, p)) return true;
     return false;
