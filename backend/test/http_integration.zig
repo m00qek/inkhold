@@ -5061,6 +5061,26 @@ test "static serving negotiates precompressed variants: br > gzip > raw, honorin
 
 // ---- assertion helpers ----
 
+/// `requestWithCookie` plus a `Range` header — the byte routes' one conditional
+/// input. Separate rather than an optional parameter so every existing caller
+/// stays a plain read.
+fn requestRanged(
+    ctx: *Context,
+    obuf: []u8,
+    reqbuf: []u8,
+    path: []const u8,
+    token: []const u8,
+    range: []const u8,
+) !Response {
+    var cbuf: [64]u8 = undefined;
+    const cookie = try std.fmt.bufPrint(&cbuf, "sn_session={s}", .{token});
+    const req = try buildRequest(reqbuf, "GET", path, &.{
+        .{ .name = "cookie", .value = cookie },
+        .{ .name = "range", .value = range },
+    }, "");
+    return roundtrip(ctx, req, obuf);
+}
+
 fn requestWithCookie(
     ctx: *Context,
     obuf: []u8,
@@ -5725,6 +5745,68 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
         try expectHeaderContains(resp.head, try std.fmt.bufPrint(&lbuf, "etag: \"{s}\"", .{png.md5[0..]}));
     }
 
+    // --- RANGE: the PDF viewer's transport (docs/scratch/pdf-ranges.md) ---
+    {
+        const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ png.id, png.md5[0..] });
+        var lbuf: [80]u8 = undefined;
+
+        // Advertised on a PLAIN reply too — that is how a client learns it may ask.
+        {
+            const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
+            try expectHeaderContains(resp.head, "accept-ranges: bytes");
+        }
+
+        // A window: 206, the exact bytes, an inclusive content-range, and a
+        // content-length of the WINDOW rather than the file.
+        {
+            const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &web_tok, "bytes=4-11");
+            try std.testing.expectEqual(@as(u16, 206), resp.status);
+            try std.testing.expectEqualStrings(png_bytes[4..12], resp.body);
+            try expectHeaderContains(resp.head, try std.fmt.bufPrint(&lbuf, "content-range: bytes 4-11/{d}", .{png_bytes.len}));
+            try expectHeaderContains(resp.head, "content-length: 8");
+        }
+
+        // Open-ended: to the end.
+        {
+            const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &web_tok, "bytes=10-");
+            try std.testing.expectEqual(@as(u16, 206), resp.status);
+            try std.testing.expectEqualStrings(png_bytes[10..], resp.body);
+        }
+
+        // SUFFIX: the last 5 bytes, not the first 5. Read as an offset this would
+        // serve the front of the file — which for a PDF is the one place its
+        // trailer certainly is not, so every document would fail to open.
+        {
+            const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &web_tok, "bytes=-5");
+            try std.testing.expectEqual(@as(u16, 206), resp.status);
+            try std.testing.expectEqualStrings(png_bytes[png_bytes.len - 5 ..], resp.body);
+        }
+
+        // Past the end is 416 WITH the unsatisfied-range form, not a 200 and not
+        // a 404: the client needs the size to correct itself.
+        {
+            const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &web_tok, "bytes=99999-");
+            try std.testing.expectEqual(@as(u16, 416), resp.status);
+            try expectHeaderContains(resp.head, try std.fmt.bufPrint(&lbuf, "content-range: bytes */{d}", .{png_bytes.len}));
+        }
+
+        // Malformed and multi-range are IGNORED — 200 with everything, per
+        // RFC 9110 — rather than refused. A client that asks badly still reads.
+        for ([_][]const u8{ "bytes=abc", "bytes=9-2", "bytes=0-3,8-11", "items=0-3" }) |bad| {
+            const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &web_tok, bad);
+            try std.testing.expectEqual(@as(u16, 200), resp.status);
+            try std.testing.expectEqualStrings(png_bytes, resp.body);
+        }
+
+        // A range still obeys the route's other rules: ownership is checked
+        // BEFORE any of this, so a foreign caller gets the same 404 it always did
+        // rather than a 206 leaking a window of someone else's file.
+        {
+            const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &mtok, "bytes=0-3");
+            try std.testing.expectEqual(@as(u16, 404), resp.status);
+        }
+    }
+
     // --- the SAME route, forced to a download ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}&download=1", .{ png.id, png.md5[0..] });
@@ -5789,7 +5871,11 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
         try expectHeaderAbsent(resp.head, "\r\nx-injected:");
         try expectHeaderContains(resp.head, "content-disposition: inline; filename=\"ev_il__x-injected_ yes.png\"");
         try expectHeaderContains(resp.head, "content-type: image/png");
-        try std.testing.expect(std.mem.count(u8, resp.head, "\r\n") == 6); // status + 6 headers, no extras
+        // status + 7 headers, no extras. The 7th is `accept-ranges`, added when
+        // the route learned to serve byte ranges — and this count is deliberately
+        // exact rather than a lower bound, because the property under test is
+        // that a forged filename cannot MANUFACTURE a header line.
+        try std.testing.expect(std.mem.count(u8, resp.head, "\r\n") == 7);
     }
 
     // --- versioning: `?v=` is required, and must name the bytes we hold ---

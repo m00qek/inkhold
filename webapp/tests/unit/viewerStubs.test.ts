@@ -13,6 +13,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createSpdViewer } from "../../src/pages/spdViewer";
 import { createTxtViewer, type TxtSeam } from "../../src/pages/txtViewer";
+import { createPdfViewer, type PdfSeam } from "../../src/pages/pdfViewer";
 import type { Viewer, ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
 import type { NoteMeta } from "../../src/core/types";
 import { synthesizeSummary } from "../../src/pages/library";
@@ -61,15 +62,76 @@ function meta(over: Partial<NoteMeta> = {}): NoteMeta {
   };
 }
 
+// The PDF viewer is REAL too — its `open()` drives MuPDF in a worker, and unlike
+// the other two it AWAITS that work before returning. So its seam cannot simply
+// never settle (that hangs `open()`); it answers every call plausibly and hands
+// back a bitmap-shaped stub. `paint()` then bails at `getContext("2d")`, which is
+// null under happy-dom, leaving the placeholder up — exactly the state this suite
+// wants, since what it asserts is the shared TOOLBAR seam and not the pixels.
+const INERT_PDF_SEAM: PdfSeam = {
+  supported: () => true,
+  createSession: () => ({
+    open: () => Promise.resolve({ pageCount: 2, mode: "whole" as const }),
+    pageSize: () => Promise.resolve({ width: 200, height: 100 }),
+    render: () =>
+      Promise.resolve({
+        // Only `close()` is ever reached: `paint` closes the bitmap and returns
+        // the moment the 2D context comes back null.
+        bitmap: { close: () => {} } as unknown as ImageBitmap,
+        width: 200,
+        height: 100,
+      }),
+    stats: () => Promise.resolve({ mode: "whole" as const, cache: null }),
+    close: () => Promise.resolve(),
+    destroy: () => {},
+  }),
+};
+
 const FOLDER: ReaderOrigin = { kind: "folder", folderPath: "Note / Files" };
 
-/** The two stubs share a contract, so the table drives one body over both. */
-const STUBS: { name: string; make: (d: ViewerDeps) => Viewer; type: string; mark: string }[] = [
-  { name: ".spd", make: createSpdViewer, type: "spd", mark: "SPD" },
-  { name: ".txt", make: (d) => createTxtViewer(d, INERT_TXT_SEAM), type: "txt", mark: "TXT" },
+/**
+ * The raw viewers share a contract, so the table drives one body over all of
+ * them. `.pdf` joined late — it shipped without Move to bin OR the bin cluster,
+ * the only one of the four missing both, and nothing here noticed because it was
+ * never in the table.
+ */
+/**
+ * `rawRow` is the label of the raw-file row inside a viewer's Download MENU, or
+ * null for a viewer whose Download is still a plain `<a download>`. Two of the
+ * three carry a menu now: `.spd` always did, and `.pdf` gained one with its
+ * per-page layered exports — the raw file survived as one row of it, which is
+ * exactly what the two href tests below have to keep proving.
+ */
+const STUBS: {
+  name: string;
+  make: (d: ViewerDeps) => Viewer;
+  type: string;
+  mark: string;
+  rawRow: string | null;
+}[] = [
+  { name: ".spd", make: createSpdViewer, type: "spd", mark: "SPD", rawRow: "Atelier sketch" },
+  { name: ".txt", make: (d) => createTxtViewer(d, INERT_TXT_SEAM), type: "txt", mark: "TXT", rawRow: null },
+  { name: ".pdf", make: (d) => createPdfViewer(d, INERT_PDF_SEAM), type: "pdf", mark: "PDF", rawRow: "PDF document" },
 ];
 
-describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
+/**
+ * Click a menu's raw-file row and report the href the transient `<a download>`
+ * would have navigated to. The row does not carry the href as an attribute — it
+ * mints the anchor on click — so the click is the only way to read it.
+ */
+function rawHrefOnClick(row: HTMLButtonElement): string | null {
+  let href: string | null = null;
+  const clickSpy = vi
+    .spyOn(HTMLAnchorElement.prototype, "click")
+    .mockImplementation(function (this: HTMLAnchorElement) {
+      href = this.getAttribute("href");
+    });
+  row.click();
+  clickSpy.mockRestore();
+  return href;
+}
+
+describe.each(STUBS)("$name stub viewer", ({ make, type, mark, rawRow }) => {
   it("conforms to Viewer and starts hidden", async () => {
     const v = make(deps());
     expect(typeof v.open).toBe("function");
@@ -127,6 +189,31 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
     (v.el.querySelector('[aria-label="Move to bin"]') as HTMLButtonElement).click();
     expect(onMoveToBin).toHaveBeenCalledTimes(1);
     expect(onMoveToBin.mock.calls[0]![0]).toMatchObject({ id: "n-files", name: "readme" });
+    v.destroy();
+  });
+
+  it("a second open drops the first file's identity before it awaits the new one", async () => {
+    // THE WINDOW: the shell does NOT call `hide()` when you move between two
+    // files of the SAME type (`library.activate` only hides a DIFFERENT viewer),
+    // and `open()` then awaits the new file's metadata — a network round trip.
+    // For that whole time the toolbar is up, with Move to bin visible and
+    // enabled, pointed at whatever the viewer last held. Clicking it there must
+    // not trash the file you just navigated away from.
+    const onMoveToBin = vi.fn();
+    const v = make(deps({ onMoveToBin }));
+    document.body.append(v.el);
+    const first = meta({ id: "n-first", name: "First file", fileType: type });
+    await v.open(synthesizeSummary(first), Promise.resolve(first), 0, FOLDER, "");
+
+    // Open a second file whose metadata never arrives — the window, held open.
+    const second = meta({ id: "n-second", name: "Second file", fileType: type });
+    void v.open(synthesizeSummary(second), new Promise<NoteMeta>(() => {}), 0, FOLDER, "");
+    await new Promise((r) => setTimeout(r, 0));
+
+    (v.el.querySelector('[aria-label="Move to bin"]') as HTMLButtonElement).click();
+    // Nothing, rather than the wrong thing: the new file is not known yet and the
+    // old one is no longer this viewer's business.
+    expect(onMoveToBin).not.toHaveBeenCalled();
     v.destroy();
   });
 
@@ -207,26 +294,18 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
     await v.open(synthesizeSummary(meta({ id: "n-1", fileHash: "b".repeat(32), fileType: type })), Promise.resolve(meta({ id: "n-1", fileHash: "b".repeat(32), fileType: type })), 0, FOLDER, "");
     const trigger = v.el.querySelector('[aria-label="Download"]') as HTMLElement;
 
-    if (type === "spd") {
-      // The `.spd` Download is a MENU (export matrix + the raw `.spd`); the raw
-      // file is one item that navigates to the versioned URL on click via a
-      // transient `<a download>`. Open the menu and capture that anchor's href.
+    if (rawRow) {
+      // A MENU-based Download (export matrix + the raw file); the raw file is one
+      // item that navigates to the versioned URL on click via a transient
+      // `<a download>`. Open the menu and capture that anchor's href.
       expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
       trigger.click();
       const raw = Array.from(v.el.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find((b) =>
-        b.textContent?.includes("Atelier sketch"),
+        b.textContent?.includes(rawRow),
       )!;
       expect(raw).toBeTruthy();
       expect(raw.disabled).toBe(false);
-      let href: string | null = null;
-      const clickSpy = vi
-        .spyOn(HTMLAnchorElement.prototype, "click")
-        .mockImplementation(function (this: HTMLAnchorElement) {
-          href = this.getAttribute("href");
-        });
-      raw.click();
-      clickSpy.mockRestore();
-      expect(href).toMatch(/^\/file\/n-1\?v=b{32}&download=1$/);
+      expect(rawHrefOnClick(raw)).toMatch(/^\/file\/n-1\?v=b{32}&download=1$/);
     } else {
       const dl = trigger as HTMLAnchorElement;
       expect(dl.hidden).toBe(false);
@@ -244,20 +323,12 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
     await v.open(synthesizeSummary(meta({ id: "n-1", fileHash: "b".repeat(32), fileType: type })), Promise.resolve(meta({ id: "n-1", fileHash: "b".repeat(32), fileType: type })), 0, { kind: "bin", folderPath: null }, "");
     const trigger = v.el.querySelector('[aria-label="Download"]') as HTMLElement;
 
-    if (type === "spd") {
+    if (rawRow) {
       trigger.click();
       const raw = Array.from(v.el.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find((b) =>
-        b.textContent?.includes("Atelier sketch"),
+        b.textContent?.includes(rawRow),
       )!;
-      let href: string | null = null;
-      const clickSpy = vi
-        .spyOn(HTMLAnchorElement.prototype, "click")
-        .mockImplementation(function (this: HTMLAnchorElement) {
-          href = this.getAttribute("href");
-        });
-      raw.click();
-      clickSpy.mockRestore();
-      expect(href).toMatch(/^\/api\/controlplane\/bin\/file\/n-1\?v=b{32}&download=1$/);
+      expect(rawHrefOnClick(raw)).toMatch(/^\/api\/controlplane\/bin\/file\/n-1\?v=b{32}&download=1$/);
     } else {
       const dl = trigger as HTMLAnchorElement;
       expect(dl.getAttribute("href")).toMatch(/^\/api\/controlplane\/bin\/file\/n-1\?v=b{32}&download=1$/);
@@ -272,6 +343,121 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark }) => {
     expect(v.el.hidden).toBe(false);
     v.hide();
     expect(v.el.hidden).toBe(true);
+    v.destroy();
+  });
+});
+
+// A FILE WITH NO ADDRESS must not leave a live Download pointing at the app —
+// the same rule for both shapes of the control, so the table drives both.
+// A plain `<a>` (`.txt`) hides; a menu (`.spd`, `.pdf`) keeps its trigger — the
+// transformed exports do not need a download URL — and DISABLES its raw row.
+describe.each(STUBS)("$name Download, with no address", ({ make, type, rawRow }) => {
+  it("offers no route to the raw bytes, instead of pointing at the app", async () => {
+    // `rawFileUrl` answers null for a hashless entry (`fileKind.ts:217`) — the
+    // state the "no readable address" placeholder exists for. The PDF viewer
+    // used to test the ANCHOR's href for emptiness, and an empty `href`
+    // attribute resolves through the property to the document base URL: never
+    // falsy, so the button stayed up and navigated to the SPA itself.
+    const v = make(deps());
+    document.body.append(v.el);
+    const m = meta({ id: "n-1", fileHash: null, fileType: type });
+    await v.open(synthesizeSummary(m), Promise.resolve(m), 0, FOLDER, "");
+
+    const trigger = v.el.querySelector('[aria-label="Download"]') as HTMLElement;
+    if (rawRow) {
+      trigger.click();
+      const raw = Array.from(v.el.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find((b) =>
+        b.textContent?.includes(rawRow),
+      )!;
+      expect(raw.disabled).toBe(true);
+      // Disabled is not enough on its own — a click must produce no navigation
+      // either, since that is the failure the whole test is about.
+      expect(rawHrefOnClick(raw)).toBeNull();
+    } else {
+      expect((trigger as HTMLAnchorElement).hidden).toBe(true);
+    }
+    v.destroy();
+  });
+});
+
+describe(".pdf viewer, past the shared seam", () => {
+  it("a new document resets the zoom READOUT, not just the scale behind it", async () => {
+    // `open` sets the zoom state back to Fit and renders there. The stepper owns
+    // its own label, so without an explicit reset the toolbar went on showing the
+    // LAST document's zoom over a page drawn at Fit — and the next step then
+    // moved from the number on screen rather than from the page in front of you.
+    const v = createPdfViewer(deps(), INERT_PDF_SEAM);
+    document.body.append(v.el);
+    // Scoped to the zoom stepper's own `.pager`: the PAGE readout carries the
+    // `.zoom` class too (`pdfViewer.ts:204`), so a bare `.zoom` inside this
+    // viewer resolves to two elements and finds the pager's first.
+    const zoomIn = v.el.querySelector('[aria-label="Zoom in"]') as HTMLButtonElement;
+    const readout = zoomIn.parentElement!.querySelector(".zoom") as HTMLElement;
+
+    const first = meta({ id: "n-first", fileType: "pdf" });
+    await v.open(synthesizeSummary(first), Promise.resolve(first), 0, FOLDER, "");
+    expect(readout.textContent).toBe("Fit");
+
+    zoomIn.click();
+    zoomIn.click();
+    expect(readout.textContent).not.toBe("Fit");
+
+    const second = meta({ id: "n-second", fileType: "pdf" });
+    await v.open(synthesizeSummary(second), Promise.resolve(second), 0, FOLDER, "");
+    expect(readout.textContent).toBe("Fit");
+    v.destroy();
+  });
+
+  it("exports render the page FRESH, at the export's OWN scale — never the screen's", async () => {
+    // `export/exporter.ts` states the rule for notes (`nativeBitmap`) and it is
+    // the same rule here: an export decodes, it never screenshots. The canvas on
+    // screen is at whatever zoom, DPR and open-panel layout the reader happens
+    // to be at — a Fit page beside two panels is a fraction of the page's real
+    // resolution — and reusing it is the cheap mistake this pins shut.
+    //
+    // Asserted on the SCALE handed to the decoder, which is the one place the
+    // difference is observable without a GPU: happy-dom has no 2D context, so
+    // the flatten throws and the row toasts, but the render has already been
+    // asked for by then.
+    const renders: { page: number; scale: number }[] = [];
+    const seam: PdfSeam = {
+      supported: () => true,
+      createSession: () => ({
+        open: () => Promise.resolve({ pageCount: 2, mode: "whole" as const }),
+        pageSize: () => Promise.resolve({ width: 200, height: 100 }),
+        render: (page: number, scale: number) => {
+          renders.push({ page, scale });
+          return Promise.resolve({
+            bitmap: { close: () => {} } as unknown as ImageBitmap,
+            width: 400,
+            height: 200,
+          });
+        },
+        stats: () => Promise.resolve({ mode: "whole" as const, cache: null }),
+        close: () => Promise.resolve(),
+        destroy: () => {},
+      }),
+    };
+    const v = createPdfViewer(deps(), seam);
+    document.body.append(v.el);
+    const m = meta({ id: "n-1", fileType: "pdf" });
+    await v.open(synthesizeSummary(m), Promise.resolve(m), 0, FOLDER, "");
+
+    const onScreen = renders.map((r) => r.scale);
+    expect(onScreen.length).toBeGreaterThan(0);
+
+    renders.length = 0;
+    (v.el.querySelector('[aria-label="Download"]') as HTMLButtonElement).click();
+    const flat = Array.from(v.el.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+      (b) => b.querySelector("span")!.textContent === "Flattened image",
+    )!;
+    flat.click();
+    await vi.waitFor(() => expect(renders).toHaveLength(1));
+
+    // 2x the PDF's own 72 dpi, for a page with no ink to agree with — and NOT
+    // the fit scale the screen used, which in this layout is well under 1.
+    expect(renders[0]).toEqual({ page: 0, scale: 2 });
+    for (const s of onScreen) expect(s).not.toBe(2);
     v.destroy();
   });
 });

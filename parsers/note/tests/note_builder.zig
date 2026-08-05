@@ -21,6 +21,13 @@ pub const LayerSpec = struct {
 };
 
 pub const PageSpec = struct {
+    /// The number written into this page's footer key, 1-based. `null` means
+    /// "position + 1" — a notebook's contiguous `PAGE1`, `PAGE2`, … .
+    ///
+    /// Set it to build a SPARSE footer, which is what a `.mark` has: it stores
+    /// only the annotated pages and names them by the PDF page they belong to
+    /// (`<PAGE2:…><PAGE5:…><PAGE6:…>`, `note-format.md` §13.2).
+    number: ?u32 = null,
     style: []const u8 = "",
     /// `PAGESTYLEMD5`: the style asset's content hash (`null` omits the key).
     /// `"0"` = no custom asset. A custom IMAGE template names its asset here;
@@ -159,7 +166,8 @@ pub fn serialize(gpa: std.mem.Allocator, spec: Spec) ![]u8 {
     var footer_kvs: std.ArrayList(Kv) = .empty;
     try footer_kvs.append(t, .{ .key = "FILE_FEATURE", .value = try numStr(t, header_addr) });
     for (page_addrs, 0..) |addr, i| {
-        const key = try std.fmt.allocPrint(t, "PAGE{d}", .{i + 1});
+        const n = spec.pages[i].number orelse @as(u32, @intCast(i + 1));
+        const key = try std.fmt.allocPrint(t, "PAGE{d}", .{n});
         try footer_kvs.append(t, .{ .key = key, .value = try numStr(t, addr) });
     }
     try footer_kvs.appendSlice(t, cover_kvs.items);

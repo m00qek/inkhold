@@ -7,6 +7,7 @@ const router = @import("../http/router.zig");
 const context = @import("../http/context.zig");
 const json = @import("../http/json.zig");
 const reply = @import("../http/reply.zig");
+const byte_range = @import("../http/byte_range.zig");
 const controlplane = @import("../services/controlplane.zig");
 const eventstreams = @import("../http/event_streams.zig");
 const multipart = @import("../http/multipart.zig");
@@ -1877,24 +1878,70 @@ fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []const u8
     var etag_buf: [36]u8 = undefined;
     const etag = std.fmt.bufPrint(&etag_buf, "\"{s}\"", .{md5}) catch return serverError(ctx, req);
 
+    // RANGE. The client half of this is the PDF viewer, which pulls a document
+    // through MuPDF's stream a window at a time instead of downloading 76 MB to
+    // paint page 1 (`docs/scratch/pdf-ranges.md`). It costs the server nothing
+    // it was not already paying: the same fixed-buffer pump over
+    // `blobs.readRange`, for FEWER bytes and a shorter-held connection than the
+    // whole-file reply. Blobs are immutable and content-addressed, so there is
+    // no `If-Range` to honour — the `?v=` in the URL already names the bytes,
+    // and a given md5 can never answer with different content.
+    var range_buf: [128]u8 = undefined;
+    const want = byte_range.parse(router.headerCopy(req, "range", &range_buf), size);
+    if (want == .unsatisfiable) {
+        var cr_buf: [64]u8 = undefined;
+        const cr = std.fmt.bufPrint(&cr_buf, "bytes */{d}", .{size}) catch return serverError(ctx, req);
+        return req.respond("", .{
+            .status = .range_not_satisfiable,
+            .extra_headers = &.{
+                .{ .name = "content-range", .value = cr },
+                .{ .name = "accept-ranges", .value = "bytes" },
+            },
+        });
+    }
+
     var file = files.blobs.open(md5) catch return reply.notFound(req);
     defer file.close(ctx.io);
 
+    const off: u64 = switch (want) {
+        .partial => |p| p.off,
+        else => 0,
+    };
+    const len: u64 = switch (want) {
+        .partial => |p| p.len,
+        else => size,
+    };
+
+    // Built even when unused, because `extra_headers` needs a stable slice.
+    var cr_buf: [80]u8 = undefined;
+    const content_range = if (want == .partial)
+        std.fmt.bufPrint(&cr_buf, "bytes {d}-{d}/{d}", .{ off, off + len - 1, size }) catch
+            return serverError(ctx, req)
+    else
+        "";
+
+    const common = [_]std.http.Header{
+        .{ .name = "content-type", .value = mime },
+        .{ .name = "content-disposition", .value = cd },
+        // The label above is derived from the NAME, so it can be wrong. This
+        // header is what stops a wrong label from being "corrected" by content
+        // sniffing into text/html — which would re-open the same-origin script
+        // execution the allowlist exists to close.
+        .{ .name = "x-content-type-options", .value = "nosniff" },
+        .{ .name = "cache-control", .value = "public, max-age=31536000, immutable" },
+        .{ .name = "etag", .value = etag },
+        // Advertised on EVERY reply, not just partial ones: it is how a client
+        // learns it may ask at all.
+        .{ .name = "accept-ranges", .value = "bytes" },
+    };
+    const partial_headers = common ++ [_]std.http.Header{.{ .name = "content-range", .value = content_range }};
+
     var wbuf: [blobstore.chunk_len]u8 = undefined;
     var body = req.respondStreaming(&wbuf, .{
-        .content_length = size,
+        .content_length = len,
         .respond_options = .{
-            .extra_headers = &.{
-                .{ .name = "content-type", .value = mime },
-                .{ .name = "content-disposition", .value = cd },
-                // The label above is derived from the NAME, so it can be wrong. This
-                // header is what stops a wrong label from being "corrected" by content
-                // sniffing into text/html — which would re-open the same-origin script
-                // execution the allowlist exists to close.
-                .{ .name = "x-content-type-options", .value = "nosniff" },
-                .{ .name = "cache-control", .value = "public, max-age=31536000, immutable" },
-                .{ .name = "etag", .value = etag },
-            },
+            .status = if (want == .partial) .partial_content else .ok,
+            .extra_headers = if (want == .partial) &partial_headers else &common,
         },
     }) catch return;
 
@@ -1904,8 +1951,22 @@ fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []const u8
     // rather than falling through to `body.end()`, which asserts the full length was
     // written and would panic. See the page route (`controlplanePage`) for the why.
     var rbuf: [blobstore.chunk_len]u8 = undefined;
-    var fr = file.reader(ctx.io, &rbuf);
-    fr.interface.streamExact64(&body.writer, size) catch return error.StreamTruncated;
+    if (want == .partial) {
+        // The windowed pump, identical in shape to `streamBlobRange`: one fixed
+        // buffer, no allocation, no seek state kept across chunks.
+        var at: u64 = off;
+        var left: u64 = len;
+        while (left > 0) {
+            const take: usize = @intCast(@min(left, @as(u64, rbuf.len)));
+            const chunk = files.blobs.readRange(md5, at, take, rbuf[0..take]) catch return error.StreamTruncated;
+            body.writer.writeAll(chunk) catch return error.StreamTruncated;
+            at += take;
+            left -= take;
+        }
+    } else {
+        var fr = file.reader(ctx.io, &rbuf);
+        fr.interface.streamExact64(&body.writer, size) catch return error.StreamTruncated;
+    }
     body.end() catch {};
 }
 

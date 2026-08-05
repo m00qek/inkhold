@@ -82,6 +82,16 @@ pub const PageRefVO = struct {
     width: i64,
     height: i64,
     textHash: ?[]const u8 = null,
+    /// The page's own number from the container footer, 1-based — as distinct
+    /// from `index`, its position, which is what addresses the page's bytes.
+    ///
+    /// Omitted (null) when it equals `index + 1`, which is every page of every
+    /// notebook: sending it there would be a field that is always derivable.
+    /// It appears for a `.mark`, whose pages are the ANNOTATED pages of a PDF
+    /// and are named by the PDF page they belong to — the three pages of a real
+    /// capture are 2, 5 and 6 (`parsers/note/note-format.md` §13.2). Without it
+    /// a client has no way to composite a mark onto the document it annotates.
+    sourcePage: ?i64 = null,
     /// The page's layer stack for the reader's layer panel, in **SNPG record
     /// order** (bottom-to-top, matching the payload's records one-to-one —
     /// though the panel should match by `slot`, which both sides carry
@@ -235,6 +245,19 @@ pub const NoteMetaVO = struct {
     /// responses are now revalidated rather than immutably cached; see the note on
     /// `PageTextVO` for why that changed.)
     pxPerMm: ?f32 = null,
+    /// The id of the `.mark` that annotates THIS file, when one exists beside
+    /// it — `foo.pdf` is annotated by `foo.pdf.mark` in the same folder
+    /// (`parsers/note/note-format.md` §13.2).
+    ///
+    /// Resolved here rather than by the client because the client may not hold
+    /// the folder listing at all: a PDF opened from a deep link, a search result
+    /// or the bin has no siblings in hand, and fetching a whole folder to
+    /// discover one name is a round trip this link cannot spare. One indexed
+    /// lookup answers it on a request already being made.
+    ///
+    /// Null for anything that is not a live `.pdf`, and for a `.pdf` with no
+    /// mark beside it — which is most of them.
+    annotationsId: ?[]const u8 = null,
 };
 
 /// One row of the recycle bin.
@@ -538,6 +561,7 @@ pub const ControlPlaneService = struct {
             if (!r.is_folder) {
                 total += @intCast(r.size); // folders are 0 — never double-counted
                 var indexable = false;
+                var marker: ?[4]u8 = null;
                 if (r.md5) |md5| {
                     // HEAL here (`indexRowEnsuring`, not the bare `indexRow`). The
                     // original "no backfill on a list screen" reasoning assumed a
@@ -553,11 +577,12 @@ pub const ControlPlaneService = struct {
                     // just the same cheap version-check `indexRowEnsuring` protects.
                     if (try self.indexRowEnsuring(md5)) |row| {
                         indexable = row.indexable;
+                        marker = row.filetype;
                         if (indexable and row.page_count > 0) first_page = try self.pageRefAt(arena, md5, 0);
                         thumb_aspect = aspectOf(row, first_page);
                     }
                 }
-                file_type = try fileTypeFor(arena, indexable, r.name);
+                file_type = try fileTypeFor(arena, indexable, marker, r.name);
             }
             try out.append(arena, .{
                 .kind = if (r.is_folder) "folder" else "note",
@@ -617,6 +642,43 @@ pub const ControlPlaneService = struct {
         return self.noteMetaIn(arena, user_id, id, .trashed);
     }
 
+    /// Is this the server-verified `"pdf"` type? Compared against the DESCRIBED
+    /// type, never the filename, so `notes.pdf` (a `.note` misnamed) does not go
+    /// looking for annotations and a `.pdf` with no extension still does.
+    fn isPdf(file_type: ?[]const u8) bool {
+        return file_type != null and std.mem.eql(u8, file_type.?, "pdf");
+    }
+
+    /// The id of the `.mark` sitting beside `entry`, or null.
+    ///
+    /// The device writes annotations to a SEPARATE file whose name is the PDF's
+    /// full name plus `.mark` — `foo.pdf` -> `foo.pdf.mark`, same folder. Not
+    /// `foo.mark`: the extension is appended, not replaced, which is what two
+    /// real captures show.
+    ///
+    /// One statement, and it rides the `files_live_name` UNIQUE index
+    /// (`user_id, COALESCE(parent_id,0), name`) — an exact index hit rather than
+    /// a scan of the folder, which matters on the hardware this runs on.
+    ///
+    /// LIVE ONLY, deliberately. A trashed PDF's mark is not looked up: the two
+    /// are independent rows and trashing one does not trash the other, so a bin
+    /// preview that composited annotations would be showing a live file's ink on
+    /// a deleted document. The bin answers "is this the file I meant?", and the
+    /// PDF alone answers that.
+    fn annotationsIdFor(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, entry: Entry) !?[]const u8 {
+        const name = try std.fmt.allocPrint(arena, "{s}.mark", .{entry.name});
+        var s = try self.files.db.prepare(
+            "SELECT id FROM files WHERE user_id = ?1 AND COALESCE(parent_id, 0) = COALESCE(?2, 0) " ++
+                "AND name = ?3 AND is_folder = 0 AND deleted = 0;",
+        );
+        defer s.finalize();
+        s.bindInt(1, @intCast(user_id));
+        s.bindIntOpt(2, if (entry.parent_id) |pid| @intCast(pid) else null);
+        s.bindText(3, name);
+        if (!try s.step()) return null;
+        return try idStr(arena, @intCast(s.columnInt(0)));
+    }
+
     fn noteMetaIn(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, scope: ReadScope) !?NoteMetaVO {
         const entry = (try self.lookup(scope, user_id, id)) orelse return null;
         defer freeEntry(self.files.gpa, entry);
@@ -631,6 +693,13 @@ pub const ControlPlaneService = struct {
             .fileHash = if (entry.md5) |m| try arena.dupe(u8, m) else null,
             .size = @intCast(entry.size),
             .pxPerMm = described.px_per_mm,
+            // Only a LIVE `.pdf` can have annotations to point at: the lookup is
+            // scoped to live rows, so asking it from the bin would find a live
+            // mark and offer it against a trashed document.
+            .annotationsId = if (scope == .live and isPdf(described.file_type))
+                try self.annotationsIdFor(arena, user_id, entry)
+            else
+                null,
         };
     }
 
@@ -709,15 +778,17 @@ pub const ControlPlaneService = struct {
 
     fn describe(self: ControlPlaneService, arena: std.mem.Allocator, entry: Entry) !Described {
         var indexable = false;
+        var marker: ?[4]u8 = null;
         var px_per_mm: ?f32 = null;
         if (entry.md5) |md5| {
             if (try self.indexRowEnsuring(md5)) |row| {
                 indexable = row.indexable;
+                marker = row.filetype;
                 px_per_mm = row.px_per_mm;
             }
         }
         return .{
-            .file_type = try fileTypeFor(arena, indexable, entry.name),
+            .file_type = try fileTypeFor(arena, indexable, marker, entry.name),
             .px_per_mm = px_per_mm,
         };
     }
@@ -1039,6 +1110,14 @@ pub const ControlPlaneService = struct {
     const IndexRow = struct {
         indexable: bool,
         page_count: i64,
+        /// The signature's 4-byte file-type marker — "note", or "mark" for the
+        /// PDF-annotation sibling. NULL for the ASA family (no marker) and for
+        /// a row written before schema v6.
+        ///
+        /// BY VALUE, not a slice: the marker is exactly four bytes and the row
+        /// it was read from is finalized before this returns, so borrowing would
+        /// dangle and duping would need an allocator this function does not take.
+        filetype: ?[4]u8,
         recognized_page_count: i64,
         px_per_mm: ?f32,
         /// The `.note` cover memo (v14): NULL = ships none, 0 = stored but its
@@ -1068,7 +1147,7 @@ pub const ControlPlaneService = struct {
         // count `indexRowEnsuring`'s read-first ordering exists to protect.
         var r = (try self.files.db.row(
             "SELECT n.indexable, n.page_count, n.recognized_page_count, n.equipment, n.width, " ++
-                "n.cover_w, n.cover_h, sp.thumb_w, sp.thumb_h, sp.surface_w, sp.surface_h FROM note_index n " ++
+                "n.cover_w, n.cover_h, sp.thumb_w, sp.thumb_h, sp.surface_w, sp.surface_h, n.filetype FROM note_index n " ++
                 "LEFT JOIN spd_index sp ON sp.blob_md5 = n.blob_md5 AND sp.index_version = ?3 " ++
                 "WHERE n.blob_md5 = ?1 AND n.index_version = ?2;",
             &.{ .{ .text = md5 }, .{ .int = noteindex.index_version }, .{ .int = spdindex.index_version } },
@@ -1077,6 +1156,12 @@ pub const ControlPlaneService = struct {
         return .{
             .indexable = r.int(0) != 0,
             .page_count = r.int(1),
+            .filetype = blk: {
+                if (r.isNull(11)) break :blk null;
+                const t = r.text(11);
+                if (t.len != 4) break :blk null; // not a marker we wrote
+                break :blk [4]u8{ t[0], t[1], t[2], t[3] };
+            },
             .recognized_page_count = r.int(2),
             .px_per_mm = pxPerMmFor(
                 if (r.isNull(3)) null else r.text(3),
@@ -1223,7 +1308,7 @@ pub const ControlPlaneService = struct {
     fn pageRefsFromIndex(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8) ![]const PageRefVO {
         var out: std.ArrayList(PageRefVO) = .empty;
         var s = try self.files.db.prepare(
-            "SELECT page_index, content_hash, width, height, text_hash, layers FROM note_page_index " ++
+            "SELECT page_index, content_hash, width, height, text_hash, layers, source_page FROM note_page_index " ++
                 "WHERE blob_md5 = ?1 ORDER BY page_index;",
         );
         defer s.finalize();
@@ -1236,6 +1321,13 @@ pub const ControlPlaneService = struct {
                 .height = s.columnInt(3),
                 .textHash = if (s.columnIsNull(4)) null else try arena.dupe(u8, s.columnText(4)),
                 .layers = try layerVOsFromBlob(arena, s.columnBlob(5)),
+                // Omitted when it is just the position plus one — see the field.
+                // 0 is the pre-v7 / no-number reading and is omitted too: it is
+                // not a legal page number and must not travel as one.
+                .sourcePage = blk: {
+                    const n = s.columnInt(6);
+                    break :blk if (n == 0 or n == s.columnInt(0) + 1) null else n;
+                },
             });
         }
         return out.items;
@@ -1298,6 +1390,7 @@ pub const ControlPlaneService = struct {
 
     fn summarize(self: ControlPlaneService, arena: std.mem.Allocator, entry: Entry) !Summary {
         var indexable = false;
+        var marker: ?[4]u8 = null;
         var count: i64 = 0;
         var has_text = false;
         var first: ?PageRefVO = null;
@@ -1306,6 +1399,7 @@ pub const ControlPlaneService = struct {
         if (entry.md5) |md5| {
             if (try self.indexRowEnsuring(md5)) |row| {
                 indexable = row.indexable;
+                marker = row.filetype;
                 count = row.page_count;
                 has_text = row.recognized_page_count > 0;
                 if (indexable and count > 0) first = try self.pageRefAt(arena, md5, 0);
@@ -1317,7 +1411,7 @@ pub const ControlPlaneService = struct {
             self.txtBackfill(md5, entry.name);
         }
 
-        const file_type = try fileTypeFor(arena, indexable, entry.name);
+        const file_type = try fileTypeFor(arena, indexable, marker, entry.name);
 
         if (first) |p| return .{
             .page = p,
@@ -1374,8 +1468,23 @@ const no_extension = "file";
 /// THE file-type rule, in one place. VERIFIED, not claimed: `indexable` means the
 /// indexer actually parsed a `.note` container out of these bytes, whatever the
 /// file is called; only an unparseable blob falls back to its extension.
-fn fileTypeFor(arena: std.mem.Allocator, indexable: bool, name: []const u8) ![]const u8 {
-    return if (indexable) "note" else extensionOf(arena, name);
+/// The type the app reports for a blob: what the PARSER verified, not what the
+/// filename claims.
+///
+/// An indexable blob used to report the literal "note" whatever it was, which is
+/// why a `.mark` — the device's PDF-annotation sibling, structurally a thin
+/// `.note` — has always been indistinguishable from a notebook. The signature's
+/// 4-byte marker now decides, so a mark says so.
+///
+/// UNKNOWN MARKERS STILL SAY "note". The marker is NULL for the ASA family and
+/// for rows written before schema v6, and it could be some fourth thing a future
+/// firmware writes. All of those parse as notes and render as notes, so calling
+/// them notes is the truthful answer; only a marker we positively recognise as
+/// something else changes the reply.
+fn fileTypeFor(arena: std.mem.Allocator, indexable: bool, marker: ?[4]u8, name: []const u8) ![]const u8 {
+    if (!indexable) return extensionOf(arena, name);
+    if (marker) |m| if (std.mem.eql(u8, &m, "mark")) return "mark";
+    return "note";
 }
 
 fn extensionOf(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
@@ -2107,6 +2216,31 @@ test "fileType is verified from the container, not the filename" {
     try testing.expectEqualStrings("gz", try extensionOf(a, "a.tar.gz")); // last dot wins
 }
 
+test "fileTypeFor: the parser's verdict wins over the name, and a mark says so" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Not a parseable note -> the extension, whatever it claims to be.
+    try testing.expectEqualStrings("pdf", try fileTypeFor(a, false, null, "book.pdf"));
+    try testing.expectEqualStrings("note", try fileTypeFor(a, false, null, "liar.note"));
+
+    // Indexable + the "mark" marker -> a mark, EVEN THOUGH it parses as a note
+    // and even when the filename says otherwise. This is the whole point: the
+    // marker is the only thing that distinguishes them.
+    const mark: [4]u8 = "mark".*;
+    try testing.expectEqualStrings("mark", try fileTypeFor(a, true, mark, "anything.note"));
+
+    // Indexable with the "note" marker, or with NO marker at all (the ASA
+    // family, and every row written before schema v6) -> "note". An unknown
+    // marker must not demote a file that plainly renders as a notebook.
+    const note: [4]u8 = "note".*;
+    const other: [4]u8 = "xxxx".*;
+    try testing.expectEqualStrings("note", try fileTypeFor(a, true, note, "a.note"));
+    try testing.expectEqualStrings("note", try fileTypeFor(a, true, null, "a.note"));
+    try testing.expectEqualStrings("note", try fileTypeFor(a, true, other, "a.note"));
+}
+
 test "hasRecognizedText means finished pages, not recognition merely enabled" {
     var f = try Fixture.init();
     defer f.deinit();
@@ -2423,6 +2557,120 @@ fn entryNamed(vo: ListingVO, name: []const u8) !EntryVO {
         if (std.mem.eql(u8, e.name, name)) return e;
     }
     return error.TestUnexpectedResult;
+}
+
+test "noteMeta: a PDF finds the .mark beside it, by full name and same folder" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+    const mark_bytes = try nb.serialize(gpa, .{
+        .filetype = "mark",
+        .pages = &.{.{ .number = 2, .layers = &.{.{ .slot = .main, .bitmap = &bmp }} }},
+    });
+    defer gpa.free(mark_bytes);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+
+    // The pair, in a folder: `manual.pdf` + `manual.pdf.mark`. The extension is
+    // APPENDED, not replaced — `manual.mark` is a different file entirely.
+    const folder = try f.files.createFolder(1, null, "Docs");
+    testing.allocator.free(folder.name);
+    const pdf_id = try seedBytes(&f, folder.id, "manual.pdf", "%PDF-1.7\n%%EOF\n");
+    const mark_id = try seedBytes(&f, folder.id, "manual.pdf.mark", mark_bytes);
+
+    const meta = (try svc.noteMeta(a, 1, pdf_id)).?;
+    try testing.expect(meta.annotationsId != null);
+    try testing.expectEqualStrings(try idStr(a, mark_id), meta.annotationsId.?);
+
+    // A PDF with NOTHING beside it says so, rather than pointing at the mark of
+    // a different document.
+    const lonely = try seedBytes(&f, folder.id, "lease.pdf", "%PDF-1.7\n%%EOF\n");
+    try testing.expect((try svc.noteMeta(a, 1, lonely)).?.annotationsId == null);
+
+    // WRONG FOLDER IS NO MATCH. A mark belongs to the PDF it sits beside; the
+    // same name one folder up is a different pairing.
+    const elsewhere = try seedBytes(&f, null, "away.pdf", "%PDF-1.7\n%%EOF\n");
+    _ = try seedBytes(&f, folder.id, "away.pdf.mark", mark_bytes);
+    try testing.expect((try svc.noteMeta(a, 1, elsewhere)).?.annotationsId == null);
+
+    // And the MARK itself does not claim to be annotated — it is not a pdf, and
+    // `manual.pdf.mark.mark` does not exist.
+    try testing.expect((try svc.noteMeta(a, 1, mark_id)).?.annotationsId == null);
+
+    // THE TYPE IS THE VERIFIED ONE, NOT THE NAME. A `.note` container called
+    // `sneaky.pdf` is described as a note however it is spelled, so it does not
+    // go looking for annotations — even with a plausible `sneaky.pdf.mark`
+    // sitting right beside it. Naming is not evidence; the indexer's answer is.
+    const book = try nb.serialize(gpa, .{ .pages = &.{.{ .layers = &.{.{ .slot = .main, .bitmap = &bmp }} }} });
+    defer gpa.free(book);
+    const sneaky = try seedBytes(&f, folder.id, "sneaky.pdf", book);
+    _ = try seedBytes(&f, folder.id, "sneaky.pdf.mark", mark_bytes);
+    const sm = (try svc.noteMeta(a, 1, sneaky)).?;
+    try testing.expectEqualStrings("note", sm.fileType.?);
+    try testing.expect(sm.annotationsId == null);
+}
+
+test "noteMeta: a sparse .mark carries sourcePage; a notebook omits it entirely" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+
+    // A `.mark`: three pages, belonging to PDF pages 2, 5 and 6.
+    const mark = try nb.serialize(gpa, .{
+        .filetype = "mark",
+        .pages = &.{
+            .{ .number = 2, .layers = &.{.{ .slot = .main, .bitmap = &bmp }} },
+            .{ .number = 5, .layers = &.{.{ .slot = .main, .bitmap = &bmp }} },
+            .{ .number = 6, .layers = &.{.{ .slot = .main, .bitmap = &bmp }} },
+        },
+    });
+    defer gpa.free(mark);
+    const mark_id = try seedBytes(&f, null, "annotated.pdf.mark", mark);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var svc = ControlPlaneService.init(&f.files);
+
+    const mm = (try svc.noteMeta(arena.allocator(), 1, mark_id)).?;
+    try testing.expectEqual(@as(usize, 3), mm.pages.len);
+    const want = [_]i64{ 2, 5, 6 };
+    for (mm.pages, want, 0..) |pg, n, i| {
+        try testing.expectEqual(@as(i64, @intCast(i)), pg.index); // position addresses the bytes
+        try testing.expectEqual(n, pg.sourcePage.?); // the number places it in the PDF
+    }
+
+    // A NOTEBOOK omits the field. It is always `index + 1` there, and a value
+    // that is derivable is one every listing pays for and no client needs — the
+    // omission is the contract, not an accident, so it is pinned.
+    const book = try nb.serialize(gpa, .{
+        .pages = &.{
+            .{ .layers = &.{.{ .slot = .main, .bitmap = &bmp }} },
+            .{ .layers = &.{.{ .slot = .main, .bitmap = &bmp }} },
+        },
+    });
+    defer gpa.free(book);
+    const book_id = try seedBytes(&f, null, "book.note", book);
+    const bm = (try svc.noteMeta(arena.allocator(), 1, book_id)).?;
+    try testing.expectEqual(@as(usize, 2), bm.pages.len);
+    for (bm.pages) |pg| try testing.expect(pg.sourcePage == null);
+
+    // AND A ZERO IS OMITTED, not sent as a page number. 0 is what a pre-v7 row
+    // reads back as, and what every `.txt` row carries — `txt_index` shares this
+    // table and never writes the column. There is no page 0, so a client that
+    // received one would be placing annotations against a page that cannot
+    // exist. Forced here by writing the pre-v7 state directly.
+    {
+        var u = try f.db.prepare("UPDATE note_page_index SET source_page = 0;");
+        defer u.finalize();
+        try testing.expect(!try u.step());
+    }
+    const zeroed = (try svc.noteMeta(arena.allocator(), 1, mark_id)).?;
+    for (zeroed.pages) |pg| try testing.expect(pg.sourcePage == null);
 }
 
 test "thumbAspect: cover dims when a cover ships, page-0 EFFECTIVE dims otherwise, absent for the shapeless" {

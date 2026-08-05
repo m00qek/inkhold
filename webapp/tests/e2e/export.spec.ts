@@ -272,7 +272,7 @@ test.describe("export menu", () => {
 
   test("the menu is not offered for files that are not notes", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-lease"); // a PDF in the tree
+    await page.goto("/#/note/n-doc-epub"); // an .epub: no viewer, so the reader
     await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
 
     // A page exporter over a file with no pages would be chrome that does

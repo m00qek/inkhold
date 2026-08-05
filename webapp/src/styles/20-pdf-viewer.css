@@ -1,0 +1,168 @@
+/* ================= PDF VIEWER ================= */
+/* One page at a time, rastered by MuPDF in the browser (`pages/pdfViewer.ts`).
+   The loading / error / too-large / unsupported-browser states all reuse the
+   stub's centred `.viewer__placeholder` (11-viewer-stub.css); this file adds only
+   the page stage.
+
+   Appended after 11 so it can override the stub's `.viewer__main` for `.pdf`
+   without reopening an earlier file — the same move 12 and 13 make. */
+
+/* The stage scrolls, because a page at 200% is bigger than the viewport by
+   design. `place-items` centres a page that is SMALLER than the stage, which is
+   the common case at Fit. */
+/* THE SAME STAGE THE READER HAS. `.stage` (06-reader) is `overflow:auto` +
+   `place-items:center` + 28px of padding, and the reader's page index sits INSIDE
+   it, so the panel and the page float together as one centred group with air on
+   every side. The PDF viewer had the panel outside a full-bleed content area, so
+   it sat flush against the rail and the page ran to the top edge — the same
+   controls, a different language. This makes the wrap the stage. */
+.viewer--pdf .viewer__main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  /* `safe`, and the reason is scrolling. THIS is where a zoomed page overflows —
+     the wrap's flex row never does, because this box shrinks (`min-width: 0`)
+     instead of growing with the stage inside it.
+
+     Plain `center` on a box whose content is BIGGER than it splits the overflow
+     evenly, and half of it lands off the LEADING edge where no scrollbar can
+     reach: scrollable overflow only extends end-ward. Measured with plain
+     `center` at 150%, scrolled fully left, the page's left edge sat 220px
+     outside the container — on screen, and unreachable. `safe` centres while the
+     page fits, which is the Fit case and the common one, and falls back to start
+     the moment it does not. */
+  place-items: safe center;
+  /* The wrap is now the stage, so it owns BOTH of these and the stub's defaults
+     have to go, or they fight it:
+
+     - `padding: 24px` stacked on the wrap's 28, pushing the page 24px below the
+       panel beside it — two cards that should share a top edge, visibly not.
+     - `overflow: auto` made this a SECOND scroller nested inside the wrap's.
+       A page taller than the available box scrolled here instead of in the
+       stage, so it ran off the bottom past the wrap's padding and the outer
+       scrollbar never appeared to say so. */
+  padding: 0;
+  overflow: visible;
+  /* FILL THE STAGE, so `place-items: center` has a stage to centre in. The wrap
+     is `align-items: flex-start` (the panel is a card, not a full-height rail),
+     which left this box sized by its own content — and every placeholder the
+     viewer owns is a child of it. So "Opening this PDF…", the corrupt-file
+     message and the unsupported-browser message all centred inside a box
+     collapsed against the top, and read as stranded at the top of an empty desk
+     instead of centred on it. Stretching costs the page nothing: at Fit it
+     already fills the height, so centred and top-aligned are the same place. */
+  align-self: stretch;
+}
+
+/* THE STAGE IS THE SHEET now, because something is layered on it. The `.mark`
+   overlay is absolutely positioned against this box, and it is deliberately
+   WIDER than the page: the ink is in device-panel pixels and the page occupies
+   only a letterboxed sub-rect of that panel, so the host hangs over both edges
+   by the dead margin (~3% each side for A4 on a Nomad). `overflow: hidden`
+   clips it back to the page — anything the device drew outside the document is
+   not part of the document.
+
+   The card treatment moved here from `.pdf-page` with it: clipping on the
+   canvas's own box would have cut its shadow off. */
+.pdf-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 3px;
+  box-shadow:
+    0 2px 3px var(--shadow),
+    0 26px 50px -28px var(--shadow);
+}
+
+/* The ink layer. `pointer-events: none` so it never eats a click meant for the
+   page, and no background of its own — `decode_layer` returns alpha 0 wherever
+   the device wrote nothing, which is what makes this an overlay rather than a
+   second sheet. */
+.pdf-mark {
+  position: absolute;
+  pointer-events: none;
+}
+.pdf-mark canvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* The page itself. A PDF page is paper: it gets the sheet colour and a soft
+   edge, exactly as the reader's `.page` does, so a document reads as a document
+   and not as a bitmap floating on the desk.
+
+   `height: auto` with an explicit CSS width (set from JS) is what keeps the
+   raster DPR-sharp: the canvas BUFFER is device pixels, the CSS box is layout
+   pixels, and the ratio between them is the device pixel ratio. Without it a
+   HiDPI screen would upscale a 1x raster and the type would go soft. */
+/* The page is PAPER, and it is the reader's paper: the same 3px radius and the
+   same two-layer shadow (`.page`, 06-reader) — a tight contact shadow plus a
+   wide soft one, which is what makes a sheet look like it is lying on the desk
+   rather than pasted onto it. A single flat shadow read as a different material. */
+/* NO `max-width` HERE, deliberately, and it is what makes zoom mean anything.
+   `max-width: 100%` looks like ordinary defensive CSS and reads as harmless,
+   but the canvas's CSS width is the RENDER SIZE — `paint` sets it from the
+   raster it just asked MuPDF for — so clamping it does not scale the page down,
+   it throws the zoom away. Measured before this came out: at 300% the buffer
+   was 2976px wide, the box was 992, and `scrollWidth` never exceeded
+   `clientWidth`, so there was not even anything to scroll to. The app rastered
+   nine times the pixels and showed the same picture.
+
+   It also took the ink with it. The `.mark` overlay is placed against the
+   raster's intended size (`markGeometry`), so a clamped page put the ink at
+   1.5x, 2x, 3x the page it annotates — exactly the zoom factor. */
+.pdf-page {
+  display: block;
+  height: auto;
+  background: var(--sheet);
+}
+
+/* DARK MODE LEAVES THE PAGE ALONE — deliberately, and unlike the `.note`
+   reader, which inverts e-ink because a note is INK ON NOTHING and the paper is
+   ours to choose. A PDF's page is authored: its background, its images and its
+   type were chosen by whoever made it, and inverting them would misrepresent the
+   document (a photograph would come back as a negative). The chrome around it
+   goes dark; the sheet stays the sheet. */
+
+/* ================= the page index ================= */
+/* Docked LEFT beside the page, exactly as the reader's is — the same flex row,
+   the same `--panel-gap`, so the two viewers put "Pages" in the same place. The
+   panel NARROWS the page rather than covering it, which is why the stage is a
+   flex child with `min-width: 0` and the canvas is sized against it. */
+.pdf-wrap {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  display: flex;
+  gap: var(--panel-gap);
+  /* `flex-start`, not `stretch`: the panel is a CARD that sizes to the page
+     beside it, exactly as the reader's does. Stretched, it ran the full height of
+     the viewport and stopped reading as a card at all. */
+  align-items: flex-start;
+  /* Plain `center`, and it stays plain: this row's items never overflow it. The
+     page grows inside `.viewer__main`, which is `min-width: 0` and shrinks
+     rather than widening the row, so the overflow lands one level down — which
+     is where the `safe` keyword is needed and where it is. Tried `safe` here
+     too; with it reverted every zoom assertion still passes, so it was doing
+     nothing but suggesting this row was the one that overflowed. */
+  justify-content: center;
+  padding: 28px;
+}
+.pdf-wrap > .viewer__main {
+  min-width: 0;
+}
+
+/* The rows reserve their shape BEFORE any thumbnail paints, from page 0's
+   aspect (set as `--thumb-aspect` in JS, then corrected per row when that page's
+   own thumbnail resolves — see `pages/pageIndex.ts`, which applies the property
+   and `06-reader.css`, which consumes it). Without it the strip would reflow
+   under the pointer as each canvas landed — the same reason the gallery reserves
+   tile aspect. This is only the FLOOR: a PDF's pages are not the reader's
+   portrait `.note` panel, so the shared default would be the wrong guess. */
+.viewer--pdf .filmstrip__page {
+  --thumb-aspect: 0.7071; /* A4 portrait, the fallback when page 0 will not measure */
+}

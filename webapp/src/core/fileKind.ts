@@ -36,9 +36,25 @@ export type FileKind = "note" | "image" | "file";
  */
 export const PREVIEWABLE_IMAGE_TYPES: readonly string[] = ["png", "jpg", "jpeg", "webp", "gif"];
 
+/**
+ * Types the reader's `.note` stage can paint. `mark` is the device's
+ * PDF-ANNOTATION sibling — a thin `.note` container, so the SNPG pipeline
+ * renders it exactly like a notebook (its ink, on nothing).
+ *
+ * It has always rendered; until schema v6 the server could not TELL us it was a
+ * mark and reported it as `note`. Listing it here is what keeps that behaviour
+ * once the server starts telling the truth — dropping it would turn a file the
+ * user can read today into "no preview".
+ *
+ * What it is NOT is a notebook, and the UI may eventually say so (pair it with
+ * its PDF, name it "annotations"). That is a labelling question; this is the
+ * rendering one.
+ */
+const NOTE_STAGE_TYPES: readonly string[] = ["note", "mark"];
+
 /** Classify a server-verified `fileType` (lowercase, no dot). */
 export function fileKind(fileType: string): FileKind {
-  if (fileType === "note") return "note";
+  if (NOTE_STAGE_TYPES.includes(fileType)) return "note";
   return PREVIEWABLE_IMAGE_TYPES.includes(fileType.toLowerCase()) ? "image" : "file";
 }
 
@@ -56,7 +72,30 @@ export function fileKind(fileType: string): FileKind {
  */
 export function canPreviewHistory(fileType: string): boolean {
   const t = fileType.trim().toLowerCase();
-  return t === "note" || t === "spd" || t === "txt" || fileKind(t) === "image";
+  return t === "note" || t === "mark" || t === "spd" || t === "txt" || fileKind(t) === "image";
+}
+
+/**
+ * Whether this type has a viewer of its OWN — the set `library.viewerFor`
+ * dispatches on, and the gate the recycle bin uses to decide whether a row opens
+ * a real viewer or its small in-bin "is this the one I meant?" preview.
+ *
+ * SHARED SO THE TWO CANNOT DRIFT, which is not hypothetical: the bin had this
+ * set written out inline as `note || spd || txt`, under a comment claiming it
+ * was "the same set `library.viewerFor` dispatches on". It stopped being true
+ * the day the PDF viewer was added — `viewerFor` gained a `pdf` case and the
+ * bin's copy did not — so a trashed PDF fell into the preview panel and could be
+ * neither restored nor deleted from the place you were looking at it.
+ *
+ * `.spd`, `.txt` and `.pdf` are named explicitly because {@link fileKind} folds
+ * them into `"file"`: they are viewable through their bespoke viewers, not the
+ * reader. Images deliberately are NOT here — the reader's image mode paints a
+ * live one, but a trashed image is exactly the "is this the screenshot I meant?"
+ * question the bin's own preview answers better.
+ */
+export function hasDedicatedViewer(fileType: string): boolean {
+  const t = (fileType || "").trim().toLowerCase();
+  return fileKind(t) === "note" || t === "spd" || t === "txt" || t === "pdf";
 }
 
 // --- UPLOAD (web → cloud → device) -------------------------------------------

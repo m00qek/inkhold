@@ -146,6 +146,344 @@ fn linkSqlite(b: *std.Build, mod: *std.Build.Module) void {
     });
 }
 
+// ---------------------------------------------------------------------------
+// MuPDF -> wasm (`zig build wasm-pdf-decode`)
+// ---------------------------------------------------------------------------
+//
+// MuPDF 1.28.1 is a PINNED TARBALL DEPENDENCY (`build.zig.zon`), not vendored:
+// it is ~72 MB of source of which we compile maybe a fifth, and a tree that size
+// in the repo would dwarf everything else in it. `b.dependency("mupdf", .{})`
+// unpacks it into the gitignored `zig-pkg/`.
+//
+// Nothing below patches MuPDF. The two shims are ours (`webapp/wasm/pdf_shim.c`).
+
+/// Compile-time trim for the wasm build. Measured, not guessed —
+/// `docs/scratch/mupdf.md` §9.5 ranked object sizes to find these:
+///
+///   * `NO_CJK` (-881 KB) is the single biggest win and the one nobody guesses.
+///     It drops `pdf-cmap-load.c`'s embedded Adobe predefined-CMap tables — an
+///     899 KB object. `TOFU_CJK` does NOT cover it: that flag drops CJK *fonts*,
+///     this one drops CJK *encodings*. Consistent to take both.
+///   * `FZ_ENABLE_HYPHEN=0` (-643 KB) drops `resources/hyphen/hyph-all.zip`,
+///     which is otherwise linked unconditionally.
+///   * `TOFU`/`TOFU_CJK` drop the embedded Noto/SIL/Han/Droid fonts, leaving the
+///     14 URW base-35 faces a PDF actually needs. Documents that embed their
+///     fonts (nearly all of them) are unaffected.
+///   * `FZ_ENABLE_JPX=0` (-227 KB) drops openjpeg. JPEG 2000 in a PDF is rare and
+///     degrades to "unsupported image", not a broken page.
+///
+/// The format set is deliberate: PDF + EPUB + FB2 + CBZ + XPS. §9.5 measured all
+/// five at only +106 KB gzip over PDF-only, which is the whole reason MuPDF beat
+/// PDF.js here. What IS turned off is everything with no viewer story and a real
+/// cost: SVG, Markdown (would pull in cmark-gfm), MOBI, Office, barcodes, the
+/// JS interpreter (mujs), brotli, and every document *writer*.
+const mupdf_wasm_flags = [_][]const u8{
+    // --- The wasm exception-handling contract. See `buildMupdfWasm`. ---
+    "-fwasm-exceptions",
+    "-mllvm",
+    "-wasm-enable-sjlj",
+
+    "-DNDEBUG",
+
+    // --- Fonts and encodings ---
+    "-DTOFU",
+    "-DTOFU_CJK",
+    "-DNO_CJK",
+
+    // --- Formats/features off ---
+    "-DFZ_ENABLE_JS=0",
+    "-DFZ_ENABLE_JPX=0",
+    "-DFZ_ENABLE_HYPHEN=0",
+    "-DFZ_ENABLE_SVG=0",
+    "-DFZ_ENABLE_MD=0",
+    "-DFZ_ENABLE_MOBI=0",
+    "-DFZ_ENABLE_OFFICE=0",
+    "-DFZ_ENABLE_BARCODE=0",
+    "-DFZ_ENABLE_BROTLI=0",
+    "-DFZ_ENABLE_DOCX_OUTPUT=0",
+    "-DFZ_ENABLE_ODT_OUTPUT=0",
+    "-DFZ_ENABLE_OCR_OUTPUT=0",
+
+    // lcms2 here is Artifex's multi-threaded fork under a symbol prefix; MuPDF's
+    // own sources need both defines to see the right declarations.
+    "-DHAVE_LCMS2MT",
+    "-DLCMS2MT_PREFIX=lcms2mt_",
+
+    // wasi-libc has no `mkstemp` and clang 21 makes an implicit declaration a
+    // hard error. `pdf_shim.c` supplies a stub; this lets the reference compile.
+    "-Wno-implicit-function-declaration",
+
+    // Upstream's warnings are upstream's business — MuPDF and its thirdparty
+    // tree are noisy under clang and none of it is ours to fix.
+    "-w",
+};
+
+/// Per-library build flags, mirroring MuPDF's own `Makelists` (`*_BUILD_CFLAGS`).
+const mupdf_freetype_flags = [_][]const u8{
+    "-DFT_CONFIG_MODULES_H=\"slimftmodules.h\"",
+    "-DFT_CONFIG_OPTIONS_H=\"slimftoptions.h\"",
+    "-DFT2_BUILD_LIBRARY",
+};
+const mupdf_gumbo_flags = [_][]const u8{"-std=c99"};
+const mupdf_zlib_flags = [_][]const u8{ "-DHAVE_UNISTD_H", "-DHAVE_STDARG_H" };
+const mupdf_jbig2dec_flags = [_][]const u8{
+    "-DHAVE_STDINT_H",
+    "-DJBIG_EXTERNAL_MEMENTO_H=\"mupdf/memento.h\"",
+};
+const mupdf_harfbuzz_flags = [_][]const u8{
+    "-std=gnu++11",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-fno-threadsafe-statics",
+    "-fvisibility-inlines-hidden",
+    "-DHAVE_FALLBACK=1",
+    "-DHAVE_FREETYPE",
+    "-DHAVE_OT",
+    "-DHAVE_ROUND",
+    "-DHAVE_UCDN",
+    "-DHB_NO_MT",
+    "-DHB_NO_PRAGMA_GCC_DIAGNOSTIC",
+    // HarfBuzz allocates through MuPDF's allocator, so the store cap actually
+    // bounds shaping too.
+    "-Dhb_malloc_impl=fz_hb_malloc",
+    "-Dhb_calloc_impl=fz_hb_calloc",
+    "-Dhb_free_impl=fz_hb_free",
+    "-Dhb_realloc_impl=fz_hb_realloc",
+};
+
+/// MuPDF sources we deliberately do NOT compile, keyed by file name.
+///
+/// The Makefile takes `$(wildcard source/fitz/*.c)` wholesale and lets the
+/// `FZ_ENABLE_*` guards empty the files it does not want; we skip them outright
+/// so the C++ toolchain and the OCR/barcode thirdparty trees never enter the
+/// picture. `office.c`/`mobi.c` have no internal guard (only their registration
+/// in `document-all.c` does), so they must be excluded here rather than defined
+/// away.
+const mupdf_excluded_sources = [_][]const u8{
+    "tessocr.cpp", // OCR — needs tesseract + leptonica
+    "zxingbarcode.cpp", // barcodes — needs zxing-cpp + zint (C++20)
+    "leptonica-wrap.c", // ditto, leptonica
+    "office.c", // FZ_ENABLE_OFFICE=0, but the file itself is unguarded
+    "mobi.c", // FZ_ENABLE_MOBI=0, ditto
+    "md.c", // FZ_ENABLE_MD=0 — guarded, but would want cmark-gfm's headers
+    // Upstream bug, not a choice: `encode-jpx.c` puts `#include <openjpeg.h>`
+    // ABOVE its `#if FZ_ENABLE_JPX`, so the file cannot compile with JPX off
+    // however the flags are set. It is the JPX *writer*; a viewer never needs it.
+    "encode-jpx.c",
+    // A second, worse upstream bug in the same area: `load-jpx.c`'s disabled-path
+    // `fz_load_jpx_info` stub is missing the `fz_colorspace *defcs` parameter its
+    // own header declares. Harmless on x86, but `wasm-ld` replaces the mismatched
+    // call with a TRAPPING stub — a JPX-bearing PDF would kill the module instead
+    // of raising `FZ_ERROR_UNSUPPORTED`. Correctly-typed stubs live in
+    // `pdf_shim.c` instead; MuPDF itself stays unpatched.
+    "load-jpx.c",
+};
+
+/// Read a `*_SRC += path` list out of MuPDF's own `Makelists`.
+///
+/// The thirdparty trees CANNOT be directory-walked: FreeType's `src/` holds many
+/// files that are `#include`d into one another and must not be compiled
+/// separately, and HarfBuzz ships tests and unused shapers beside the real ones.
+/// `Makelists` IS the authoritative list, it is a flat `VAR += path` format with
+/// no conditionals in the parts we read, and it arrives with the pinned tarball —
+/// so parsing it cannot drift from the source it describes, which a hand-copied
+/// list in this file certainly would.
+fn mupdfListedSources(
+    b: *std.Build,
+    dep: *std.Build.Dependency,
+    groups: []const []const u8,
+) []const []const u8 {
+    const text = dep.builder.build_root.handle.readFileAlloc(
+        b.graph.io,
+        "Makelists",
+        b.allocator,
+        .limited(4 << 20),
+    ) catch @panic("mupdf: cannot read Makelists from the pinned dependency");
+
+    var out: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    lines: while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        for (groups) |group| {
+            const prefix = b.fmt("{s}_SRC +=", .{group});
+            if (!std.mem.startsWith(u8, line, prefix)) continue;
+            const path = std.mem.trim(u8, line[prefix.len..], " \t");
+            if (path.len == 0) continue :lines;
+            if (isExcludedMupdfSource(path)) continue :lines;
+            out.append(b.allocator, path) catch @panic("OOM");
+            continue :lines;
+        }
+    }
+    if (out.items.len == 0) @panic("mupdf: Makelists yielded no sources — did the pin change?");
+    return out.toOwnedSlice(b.allocator) catch @panic("OOM");
+}
+
+/// List MuPDF's OWN sources in `sub_path` — the `$(wildcard source/fitz/*.c)`
+/// the Makefile uses, done natively. Unlike the thirdparty trees these really are
+/// "every file in the directory", so a walk is the faithful translation.
+fn mupdfDirSources(
+    b: *std.Build,
+    dep: *std.Build.Dependency,
+    sub_path: []const u8,
+    extension: []const u8,
+) []const []const u8 {
+    var dir = dep.builder.build_root.handle.openDir(b.graph.io, sub_path, .{ .iterate = true }) catch
+        @panic(b.fmt("mupdf: cannot open {s} in the pinned dependency", .{sub_path}));
+    defer dir.close(b.graph.io);
+
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (it.next(b.graph.io) catch @panic("mupdf: directory iteration failed")) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, extension)) continue;
+        if (isExcludedMupdfSource(entry.name)) continue;
+        out.append(b.allocator, b.pathJoin(&.{ sub_path, b.dupe(entry.name) })) catch @panic("OOM");
+    }
+    // Directory order is filesystem order and would make the build's cache key
+    // (and any diff of it) unstable across machines. Sort, as the Makefile does.
+    const files = out.toOwnedSlice(b.allocator) catch @panic("OOM");
+    std.mem.sort([]const u8, files, {}, struct {
+        fn lessThan(_: void, a: []const u8, c: []const u8) bool {
+            return std.mem.order(u8, a, c) == .lt;
+        }
+    }.lessThan);
+    return files;
+}
+
+fn isExcludedMupdfSource(path: []const u8) bool {
+    const name = std.fs.path.basename(path);
+    for (mupdf_excluded_sources) |excluded| {
+        if (std.mem.eql(u8, name, excluded)) return true;
+    }
+    return false;
+}
+
+/// Build MuPDF (+ its thirdparty deps + our shim) into a static library for
+/// `wasm32-wasi` **with the exception-handling CPU feature on**.
+///
+/// THE SPLIT-TARGET DANCE, AND WHY IT IS NOT OPTIONAL. MuPDF's `fz_try`/`fz_catch`
+/// is `setjmp`-based, and wasi-libc's `setjmp.h` `#error`s unless
+/// `__wasm_exception_handling__` is defined — so every C compile here needs
+/// `wasm32-wasi+exception_handling` plus `-fwasm-exceptions -mllvm -wasm-enable-sjlj`.
+/// But the FINAL LINK must use the plain `wasm32-wasi` triple *without* that
+/// feature: Zig rebuilds wasi-libc as part of linking, and its own copy of the
+/// setjmp runtime fails to compile with the feature on ("undefined tag symbol
+/// cannot be weak"). Hence a static library at one target linked into an
+/// executable at another — the only arrangement that satisfies both.
+///
+/// That leaves the setjmp runtime itself missing (`__wasm_setjmp`,
+/// `__wasm_longjmp`, `__wasm_setjmp_test`): Zig ships no wasm setjmp runtime but
+/// DOES vendor the source, so we compile its `rt.c` ourselves here — with
+/// `-fwasm-exceptions` but WITHOUT `-mllvm -wasm-enable-sjlj`, which that file
+/// does not survive.
+///
+/// The consequence for the browser: the module carries a `tag` section and needs
+/// Wasm exceptions — **Chrome 95+, Firefox 131+, Safari 18.4+**. That is a floor
+/// no other part of Inkhold imposes, and Phase 2 must feature-detect it.
+fn buildMupdfWasm(b: *std.Build, dep: *std.Build.Dependency) *std.Build.Step.Compile {
+    const eh_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+        .cpu_features_add = std.Target.wasm.featureSet(&.{.exception_handling}),
+    });
+    const mod = b.createModule(.{ .target = eh_target, .optimize = .ReleaseSmall });
+    mod.link_libc = true;
+    // HarfBuzz is C++ (`.cc`); this is what puts libc++'s headers on the compile.
+    mod.link_libcpp = true;
+
+    // Include order mirrors MuPDF's `THIRD_CFLAGS`, which are applied to its own
+    // sources too. `include/mupdf` goes LAST and exists only for HarfBuzz, which
+    // takes its Unicode tables from MuPDF's bundled `ucdn.h`.
+    for ([_][]const u8{
+        "include",
+        "thirdparty/freetype/include",
+        "scripts/freetype",
+        "thirdparty/gumbo-parser/src",
+        "thirdparty/harfbuzz/src",
+        "thirdparty/libjpeg",
+        "scripts/libjpeg",
+        "thirdparty/lcms2/include",
+        "thirdparty/zlib",
+        "thirdparty/jbig2dec",
+        "include/mupdf",
+    }) |inc| mod.addIncludePath(dep.path(inc));
+
+    // --- MuPDF's own sources ---
+    // `source/svg` is excluded (FZ_ENABLE_SVG=0); `source/tools`, `source/tests`
+    // and `source/helpers` are the CLI, the test harness and the pthread/OpenSSL
+    // helpers — none of which a browser module has any use for.
+    for ([_][]const u8{
+        "source/fitz",
+        "source/pdf",
+        "source/xps",
+        "source/html",
+        "source/cbz",
+        "source/reflow",
+    }) |sub| {
+        mod.addCSourceFiles(.{
+            .root = dep.path(""),
+            .files = mupdfDirSources(b, dep, sub, ".c"),
+            .flags = &mupdf_wasm_flags,
+        });
+    }
+    // The 14 URW base-35 faces, pre-hexdumped in the tarball's `generated/`.
+    // Everything else under `resources/fonts` is dropped by TOFU/TOFU_CJK.
+    mod.addCSourceFiles(.{
+        .root = dep.path(""),
+        .files = mupdfDirSources(b, dep, "generated/resources/fonts/urw", ".c"),
+        .flags = &mupdf_wasm_flags,
+    });
+
+    // --- Thirdparty, per `Makelists` ---
+    const Group = struct { name: []const u8, extra: []const []const u8 };
+    for ([_]Group{
+        .{ .name = "FREETYPE", .extra = &mupdf_freetype_flags },
+        .{ .name = "GUMBO", .extra = &mupdf_gumbo_flags },
+        .{ .name = "LIBJPEG", .extra = &.{} },
+        .{ .name = "LCMS2", .extra = &.{} },
+        .{ .name = "ZLIB", .extra = &mupdf_zlib_flags },
+        .{ .name = "JBIG2DEC", .extra = &mupdf_jbig2dec_flags },
+    }) |group| {
+        mod.addCSourceFiles(.{
+            .root = dep.path(""),
+            .files = mupdfListedSources(b, dep, &.{group.name}),
+            .flags = concatFlags(b, &mupdf_wasm_flags, group.extra),
+        });
+    }
+    mod.addCSourceFiles(.{
+        .root = dep.path(""),
+        .files = mupdfListedSources(b, dep, &.{"HARFBUZZ"}),
+        .flags = concatFlags(b, &mupdf_wasm_flags, &mupdf_harfbuzz_flags),
+    });
+
+    // --- Ours ---
+    mod.addCSourceFile(.{
+        .file = b.path("webapp/wasm/pdf_shim.c"),
+        .flags = &mupdf_wasm_flags,
+    });
+
+    // The setjmp runtime, from Zig's own vendored wasi-libc source tree. Taken
+    // from `b.graph.zig_lib_directory` rather than a hard-coded `/usr/lib/zig`
+    // so a CI toolchain unpacked anywhere still finds it.
+    const zig_lib = b.graph.zig_lib_directory.path orelse
+        @panic("mupdf: no Zig lib directory — cannot find the wasm setjmp runtime");
+    mod.addCSourceFile(.{
+        .file = .{ .cwd_relative = b.pathJoin(&.{
+            zig_lib, "libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c",
+        }) },
+        .flags = &.{"-fwasm-exceptions"}, // NB: no `-wasm-enable-sjlj` here
+    });
+
+    return b.addLibrary(.{ .name = "mupdf-wasm", .root_module = mod, .linkage = .static });
+}
+
+fn concatFlags(b: *std.Build, a: []const []const u8, c: []const []const u8) []const []const u8 {
+    const out = b.allocator.alloc([]const u8, a.len + c.len) catch @panic("OOM");
+    @memcpy(out[0..a.len], a);
+    @memcpy(out[a.len..], c);
+    return out;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -249,6 +587,42 @@ pub fn build(b: *std.Build) void {
     spd_decode.rdynamic = true; // keep the `export fn`s
     const spd_decode_step = b.step("wasm-spd-decode", "Build the .spd viewer decoder wasm");
     spd_decode_step.dependOn(&b.addInstallArtifact(spd_decode, .{}).step);
+
+    // ---- WebAssembly PDF decoder (MuPDF) ----
+    // `docs/scratch/pdf-viewer.md` §2. Same shape as `.spd` above — a thin Zig
+    // module over a compiled-in C library, reactor-model, memory-only ABI — but
+    // the library is MuPDF, so the C build is the interesting part and lives in
+    // `buildMupdfWasm` above. The link deliberately uses the PLAIN `wasi_target`
+    // shared with `.spd`, not the exception-handling one the library is built at.
+    const mupdf_dep = b.dependency("mupdf", .{});
+    const pdf_decode_mod = b.createModule(.{
+        .root_source_file = b.path("webapp/wasm/pdf_decode.zig"),
+        .target = wasi_target,
+        .optimize = .ReleaseSmall,
+    });
+    pdf_decode_mod.link_libc = true;
+    pdf_decode_mod.linkLibrary(buildMupdfWasm(b, mupdf_dep));
+    const pdf_decode = b.addExecutable(.{ .name = "pdf-decode", .root_module = pdf_decode_mod });
+    pdf_decode.wasi_exec_model = .reactor;
+    pdf_decode.rdynamic = true; // keep the `export fn`s
+    const pdf_decode_step = b.step("wasm-pdf-decode", "Build the PDF viewer decoder wasm (MuPDF)");
+    pdf_decode_step.dependOn(&b.addInstallArtifact(pdf_decode, .{}).step);
+
+    // The proof that the artifact is a working module and not a dead-stripped
+    // shell that merely links: instantiate it under Node's WASI, open a fixture
+    // PDF from memory and render its pages. Deliberately its OWN step rather
+    // than part of `zig build test` — that suite is Zig-only and must stay
+    // runnable without Node.
+    const pdf_decode_abi_test = b.addSystemCommand(&.{ "node", "webapp/wasm/tests/pdf_decode_abi.mjs" });
+    pdf_decode_abi_test.addFileArg(pdf_decode.getEmittedBin());
+    pdf_decode_abi_test.addFileArg(b.path("webapp/wasm/tests/fixtures/two-page.pdf"));
+    pdf_decode_abi_test.expectExitCode(0);
+    pdf_decode_abi_test.stdio = .inherit;
+    const pdf_decode_test_step = b.step(
+        "wasm-pdf-decode-test",
+        "Render a fixture PDF through the built wasm (needs Node)",
+    );
+    pdf_decode_test_step.dependOn(&pdf_decode_abi_test.step);
 
     // ---- Server: `zig build serve -- [--config=config.zon]` ----
     const serve_mod = b.createModule(.{

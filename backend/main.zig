@@ -66,6 +66,7 @@ test {
     _ = @import("http/context.zig");
     _ = @import("http/reply.zig");
     _ = @import("http/multipart.zig");
+    _ = @import("http/byte_range.zig");
     _ = @import("db/sqlite.zig");
     _ = @import("db/schema.zig");
     _ = @import("store/blobs.zig");

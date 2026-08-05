@@ -13,6 +13,7 @@ const builder = @import("note_builder.zig");
 const prop = @import("prop.zig");
 
 const sample = @embedFile("fixtures/sample.note");
+const annotated_mark = @embedFile("fixtures/annotated.pdf.mark");
 const horizontal = @embedFile("fixtures/horizontal_layers.note");
 const one_thumb = @embedFile("fixtures/one_thumb.note");
 const layers_edited = @embedFile("fixtures/layers_edited.note");
@@ -520,6 +521,107 @@ fn randAlnum(r: std.Random, a: std.mem.Allocator, min: usize, max: usize) ![]u8 
 
 test "build -> serialize -> parse round-trips structure and bitmaps" {
     try prop.check(Case, std.testing.allocator, genCase, property, .{ .runs = 2000 });
+}
+
+// --- the footer's PAGE<n> key carries a NUMBER, not just an address ----------
+
+test "a page knows its own number, and a contiguous footer numbers 1..N" {
+    const gpa = std.testing.allocator;
+    const bytes = try builder.serialize(gpa, .{ .pages = &.{ .{}, .{}, .{} } });
+    defer gpa.free(bytes);
+    var n = try note.parse(gpa, bytes);
+    defer n.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), n.pages.len);
+    for (n.pages, 1..) |p, want| try std.testing.expectEqual(@as(u32, @intCast(want)), p.number);
+}
+
+test "a SPARSE footer keeps the numbers it names, not the positions they sit at" {
+    // What a `.mark` looks like: only the annotated pages, named by the PDF page
+    // they belong to (`note-format.md` §13.2). The parser used to keep the
+    // footer's ADDRESS and drop the number, so this file read back as pages
+    // 1, 2, 3 — and a mark composited onto its PDF would have put page 2's
+    // handwriting on page 1.
+    const gpa = std.testing.allocator;
+    const bytes = try builder.serialize(gpa, .{
+        .pages = &.{ .{ .number = 2 }, .{ .number = 5 }, .{ .number = 6 } },
+    });
+    defer gpa.free(bytes);
+    var n = try note.parse(gpa, bytes);
+    defer n.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), n.pages.len);
+    try std.testing.expectEqual(@as(u32, 2), n.pages[0].number);
+    try std.testing.expectEqual(@as(u32, 5), n.pages[1].number);
+    try std.testing.expectEqual(@as(u32, 6), n.pages[2].number);
+
+    // The pages are still the pages: the number rides ALONGSIDE the address, and
+    // a test that only checked numbers would pass if they had stopped resolving.
+    for (n.pages) |p| try std.testing.expect(p.block.entries.len > 0);
+}
+
+test "a PAGE key with no readable number is Corrupt, not silently renumbered" {
+    // Same posture as an unreadable VALUE. A page we cannot place is not a page
+    // to quietly hand a position to — that is how a mark lands on the wrong page
+    // of someone's document.
+    const gpa = std.testing.allocator;
+    const bytes = try builder.serialize(gpa, .{ .pages = &.{.{}} });
+    defer gpa.free(bytes);
+    const bad = try gpa.dupe(u8, bytes);
+    defer gpa.free(bad);
+    // `PAGE1` -> `PAGEx` in the footer, leaving every length and offset intact.
+    const at = std.mem.lastIndexOf(u8, bad, "<PAGE1:").?;
+    bad[at + "<PAGE".len] = 'x';
+    try std.testing.expectError(error.Corrupt, note.parse(gpa, bad));
+}
+
+// --- the REAL capture -------------------------------------------------------
+
+test "GOLDEN: the .mark capture — same container, sparse footer, MARK layers" {
+    // The one real `.mark` we hold: an N6 annotating a 77-page A4 document,
+    // written 2026-08-04. Everything `note-format.md` §13 claims about the
+    // format is asserted here against the file itself, so the spec and the
+    // parser cannot drift from the capture that established both.
+    const gpa = std.testing.allocator;
+    var n = try note.parse(gpa, annotated_mark);
+    defer n.deinit();
+
+    // It IS this container — it parses with no special casing at all.
+    try std.testing.expectEqualStrings("mark", n.signature.filetype);
+    try std.testing.expectEqualStrings("SN_FILE_VER_20260016", n.signature.raw);
+    try std.testing.expectEqualStrings("MARK", n.header.get("FILE_TYPE").?);
+    try std.testing.expectEqualStrings("N6", n.applyEquipment().?);
+
+    // Panel dimensions come from the equipment code, not the container: this is
+    // what makes the page→panel mapping something to reconstruct (§13.3).
+    const dims = n.dimensions();
+    try std.testing.expectEqual(@as(u32, 1404), dims.width);
+    try std.testing.expectEqual(@as(u32, 1872), dims.height);
+
+    // SPARSE, and named: three pages, belonging to PDF pages 2, 5 and 6.
+    try std.testing.expectEqual(@as(usize, 3), n.pages.len);
+    try std.testing.expectEqual(@as(u32, 2), n.pages[0].number);
+    try std.testing.expectEqual(@as(u32, 5), n.pages[1].number);
+    try std.testing.expectEqual(@as(u32, 6), n.pages[2].number);
+
+    // Its layers say what they are, and they render.
+    for (n.pages, 0..) |p, i| {
+        // `LAYERTYPE` lives on the LAYER block, not the page's — the layers are
+        // what is typed `MARK`, and the page block never carries the key.
+        try std.testing.expect(p.layers.len > 0);
+        for (p.layers) |l| try std.testing.expectEqualStrings("MARK", l.layerType().?);
+        const img = try note.renderPageGray(gpa, n, i);
+        defer img.deinit(gpa);
+        try std.testing.expectEqual(dims.width, @as(u32, @intCast(img.width)));
+        var ink: usize = 0;
+        for (img.pixels) |v| {
+            if (v < 250) ink += 1;
+        }
+        // Real handwriting, not an empty page — and bounded, because these are
+        // annotations in a margin rather than a filled sheet.
+        try std.testing.expect(ink > 500);
+        try std.testing.expect(ink < img.pixels.len / 100);
+    }
 }
 
 test {

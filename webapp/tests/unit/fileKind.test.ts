@@ -17,6 +17,19 @@ describe("fileKind", () => {
     expect(fileKind("note")).toBe("note");
   });
 
+  // A `.mark` is the device's PDF-ANNOTATION sibling — structurally a thin
+  // `.note`, so the reader's SNPG pipeline paints it exactly like a notebook.
+  // It has ALWAYS rendered; before schema v6 the server could not tell us it was
+  // a mark and simply reported "note". Now that it can, this is what keeps a
+  // file the user can read today from turning into "no preview".
+  it("routes a .mark to the note stage, like the notebook it structurally is", () => {
+    expect(fileKind("mark")).toBe("note");
+  });
+
+  it("lets a .mark preview its version history, like a note", () => {
+    expect(canPreviewHistory("mark")).toBe(true);
+  });
+
   it("classifies the previewable image types as images", () => {
     for (const t of ["png", "jpg", "jpeg", "webp", "gif"]) {
       expect(fileKind(t)).toBe("image");

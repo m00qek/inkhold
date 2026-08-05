@@ -223,6 +223,42 @@ pub const Files = struct {
 
     // ---- reads ----
 
+    /// The one rule that hides a row from the control-plane's view of a folder: a
+    /// `.mark` whose PDF is sitting right there.
+    ///
+    /// The device writes annotations to a SEPARATE file named after the PDF's full
+    /// name plus `.mark` (`foo.pdf` -> `foo.pdf.mark`,
+    /// `parsers/note/note-format.md` §13.2). That file is not a document — it is a
+    /// layer belonging to one — and listing it beside its PDF shows the household
+    /// two entries for one thing, the second of which opens as a page of
+    /// disembodied handwriting.
+    ///
+    /// An ORPHANED mark still lists. If the PDF is gone (or trashed — this joins on
+    /// `deleted = 0`), the mark is the only remaining trace of that ink, and hiding
+    /// it would make it unreachable through the UI while it went on consuming quota.
+    ///
+    /// SHARED BY `list` AND `childCount`, which is the whole reason it is a
+    /// constant. `childCount`'s contract is that it agrees with the listing beside
+    /// it — its own doc calls a disagreement "the one place the bin leaked back into
+    /// view" — and two copies of a predicate this fiddly would not stay equal.
+    ///
+    /// NOT applied to search or the bin, which still surface a paired mark —
+    /// see `docs/scratch/code-review-4.md` §4.3 for what that costs.
+    ///
+    /// Cost is one index seek per `.mark` in the folder, and none for anything else:
+    /// the `LIKE` fails first for every other row, and the `EXISTS` rides the
+    /// `files_live_name` UNIQUE index. `LIKE` is ASCII-case-insensitive in SQLite,
+    /// so `Foo.PDF.mark` is caught too; the stem match stays exact, because that is
+    /// what pairs the two files on disk.
+    const hide_paired_mark =
+        \\ AND NOT (f.name LIKE '%.pdf.mark' AND EXISTS (
+        \\   SELECT 1 FROM files p
+        \\    WHERE p.user_id = f.user_id
+        \\      AND COALESCE(p.parent_id, 0) = COALESCE(f.parent_id, 0)
+        \\      AND p.name = substr(f.name, 1, length(f.name) - 5)
+        \\      AND p.is_folder = 0 AND p.deleted = 0))
+    ;
+
     /// Lists the live entries directly under `parent_id` (null = root) for a user.
     /// Caller owns the result — free via `freeEntries`.
     pub fn list(self: Files, user_id: u64, parent_id: ?u64) ![]Entry {
@@ -230,9 +266,10 @@ pub const Files = struct {
         errdefer freeList(self.gpa, &out);
 
         var s = try self.db.prepare(
-            "SELECT id, parent_id, name, is_folder, md5, size, updated_at FROM files " ++
-                "WHERE user_id = ?1 AND COALESCE(parent_id, 0) = COALESCE(?2, 0) AND deleted = 0 " ++
-                "ORDER BY is_folder DESC, name;",
+            "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at FROM files f " ++
+                "WHERE f.user_id = ?1 AND COALESCE(f.parent_id, 0) = COALESCE(?2, 0) AND f.deleted = 0 " ++
+                hide_paired_mark ++
+                " ORDER BY f.is_folder DESC, f.name;",
         );
         defer s.finalize();
         s.bindInt(1, @intCast(user_id));
@@ -266,7 +303,8 @@ pub const Files = struct {
     pub fn childCount(self: Files, user_id: u64, folder_id: u64) !i64 {
         // An aggregate always yields exactly one row, even over zero matches.
         var r = (try self.db.row(
-            "SELECT COUNT(*) FROM files WHERE user_id = ?1 AND parent_id = ?2 AND deleted = 0;",
+            "SELECT COUNT(*) FROM files f WHERE f.user_id = ?1 AND f.parent_id = ?2 AND f.deleted = 0" ++
+                hide_paired_mark ++ ";",
             &.{ .{ .int = @intCast(user_id) }, .{ .int = @intCast(folder_id) } },
         )) orelse return 0;
         defer r.finalize();
@@ -5942,4 +5980,91 @@ test "SEARCH-NEUTRALITY: a renamed + relocated note leaves the blob-keyed index 
         break :blk s.columnInt(0);
     };
     try testing.expectEqual(seg_before, seg_after);
+}
+
+test "listing hides a .mark that has its PDF beside it, and counts the same way" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+
+    const pdf = try putBytes(&f, 1, docs.id, "manual.pdf", "aaaa");
+    defer freeEntry(pdf);
+    const mk = try putBytes(&f, 1, docs.id, "manual.pdf.mark", "bbbb"); // the layer
+    defer freeEntry(mk);
+    const nb2 = try putBytes(&f, 1, docs.id, "notes.note", "cccc"); // a neighbour
+    defer freeEntry(nb2);
+
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    for (rows) |r| try testing.expect(!std.mem.endsWith(u8, r.name, ".mark"));
+
+    // THE COUNT AGREES. `childCount`'s contract is that it matches the listing
+    // beside it; a hidden row that still counted would put "3 items" over a
+    // folder showing two.
+    try testing.expectEqual(@as(i64, 2), try f.files.childCount(1, docs.id));
+
+    // The file itself is untouched — hiding is a LISTING decision, not a
+    // deletion. It still resolves by id, so a viewer can still open it.
+    const still = (try f.files.get(1, mk.id)) orelse return error.Missing;
+    defer freeEntry(still);
+    try testing.expectEqualStrings("manual.pdf.mark", still.name);
+}
+
+test "an ORPHANED .mark still lists — it is the only trace of that ink left" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+
+    // No `lease.pdf` anywhere: nothing to fold this into.
+    const orphan = try putBytes(&f, 1, docs.id, "lease.pdf.mark", "aaaa");
+    defer freeEntry(orphan);
+    // A mark whose PDF is in a DIFFERENT folder is orphaned here too — the
+    // pairing is same-folder, so this must not vanish because of a namesake.
+    const away = try putBytes(&f, 1, null, "away.pdf", "bbbb");
+    defer freeEntry(away);
+    const away_mk = try putBytes(&f, 1, docs.id, "away.pdf.mark", "cccc");
+    defer freeEntry(away_mk);
+
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqual(@as(i64, 2), try f.files.childCount(1, docs.id));
+}
+
+test "a TRASHED pdf un-hides its mark, and a folder of the same name never pairs" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+
+    const pdf = try putBytes(&f, 1, docs.id, "manual.pdf", "aaaa");
+    defer freeEntry(pdf);
+    const mk = try putBytes(&f, 1, docs.id, "manual.pdf.mark", "bbbb");
+    defer freeEntry(mk);
+    try testing.expectEqual(@as(i64, 1), try f.files.childCount(1, docs.id));
+
+    // Trash the PDF. The mark does not follow it — they are independent rows —
+    // so it becomes the orphan case and comes back into view rather than
+    // becoming unreachable.
+    try f.files.trash(1, pdf.id);
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("manual.pdf.mark", rows[0].name);
+
+    // A FOLDER named `x.pdf` is not a document to annotate.
+    const sub = try f.files.createFolder(1, docs.id, "plan.pdf");
+    testing.allocator.free(sub.name);
+    const plan_mk = try putBytes(&f, 1, docs.id, "plan.pdf.mark", "dddd");
+    defer freeEntry(plan_mk);
+    const rows2 = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows2);
+    var saw_mark = false;
+    for (rows2) |r| if (std.mem.eql(u8, r.name, "plan.pdf.mark")) {
+        saw_mark = true;
+    };
+    try testing.expect(saw_mark);
 }

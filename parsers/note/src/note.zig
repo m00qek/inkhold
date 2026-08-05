@@ -97,7 +97,7 @@ const RawMetadata = struct {
     signature: signature.Signature,
     header: keyblock.Block,
     footer: keyblock.Block,
-    page_addresses: []const u32,
+    page_entries: []const PageEntry,
 };
 
 /// Tier 1: footer address -> footer block -> header block. Never reads a page
@@ -117,14 +117,14 @@ fn metadataInto(a: std.mem.Allocator, src: Source) Error!RawMetadata {
         .signature = sig,
         .header = header,
         .footer = footer,
-        .page_addresses = try pageAddresses(a, footer),
+        .page_entries = try pageEntries(a, footer),
     };
 }
 
 /// Tier 2: one page block plus its layer metadata blocks. Captures each layer's
 /// bitmap ADDRESS; never touches bitmap bodies.
-fn parsePageInto(a: std.mem.Allocator, src: Source, address: u32) Error!types.Page {
-    const block = try parseBlockInto(a, src, address);
+fn parsePageInto(a: std.mem.Allocator, src: Source, entry: PageEntry) Error!types.Page {
+    const block = try parseBlockInto(a, src, entry.address);
 
     // Collect the layers that are actually present (non-zero address).
     var present: usize = 0;
@@ -149,7 +149,7 @@ fn parsePageInto(a: std.mem.Allocator, src: Source, address: u32) Error!types.Pa
     // fact, not an error (see layerinfo.zig).
     const info = if (block.get("LAYERINFO")) |raw| try layerinfo.parse(a, raw) else null;
 
-    return .{ .block = block, .layers = layers, .layer_info = info };
+    return .{ .block = block, .layers = layers, .layer_info = info, .number = entry.number };
 }
 
 /// Reads the leading bytes into `a` and detects the signature over the copy, so
@@ -190,23 +190,45 @@ fn coverAddressIn(footer: keyblock.Block) ?u64 {
     return null;
 }
 
-/// Every footer entry whose key starts with "PAGE", as an address, preserving
-/// footer order. A PAGE value that is not a number is `Corrupt` — a footer that
-/// indexes a page it cannot point at is not "a file with fewer pages".
-fn pageAddresses(a: std.mem.Allocator, footer: keyblock.Block) Error![]const u32 {
+/// One footer `PAGE<n>:<address>` entry: which page it is, and where it lives.
+pub const PageEntry = struct {
+    /// The `<n>` in the key, 1-based. See `types.Page.number`.
+    number: u32,
+    /// The value: the byte offset of the page block.
+    address: u32,
+};
+
+/// Every footer entry whose key starts with "PAGE", preserving footer order.
+///
+/// BOTH HALVES ARE DATA. The value is the page block's address; the KEY carries
+/// the page's own number, and this used to discard it — every caller got a bare
+/// address list and inferred the number from the position. That holds for a
+/// notebook, whose footer runs `PAGE1`, `PAGE2`, … with no gaps, and fails for a
+/// `.mark`, which stores only annotated pages and names them
+/// (`<PAGE2:…><PAGE5:…><PAGE6:…>`) — see `note-format.md` §13.2. Inferring from
+/// position there says a 3-page mark is pages 1-3 rather than 2, 5 and 6.
+///
+/// A PAGE entry whose VALUE is not a number is `Corrupt` — a footer that indexes
+/// a page it cannot point at is not "a file with fewer pages" — and so is one
+/// whose KEY carries no readable number, for the same reason: a page we cannot
+/// place is not a page we can quietly renumber.
+fn pageEntries(a: std.mem.Allocator, footer: keyblock.Block) Error![]const PageEntry {
     var n: usize = 0;
     for (footer.entries) |e| {
         if (std.mem.startsWith(u8, e.key, "PAGE")) n += 1;
     }
-    const addrs = try a.alloc(u32, n);
+    const out = try a.alloc(PageEntry, n);
 
     var i: usize = 0;
     for (footer.entries) |e| {
         if (!std.mem.startsWith(u8, e.key, "PAGE")) continue;
-        addrs[i] = std.fmt.parseInt(u32, e.value, 10) catch return error.Corrupt;
+        out[i] = .{
+            .number = std.fmt.parseInt(u32, e.key["PAGE".len..], 10) catch return error.Corrupt,
+            .address = std.fmt.parseInt(u32, e.value, 10) catch return error.Corrupt,
+        };
         i += 1;
     }
-    return addrs;
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -287,9 +309,9 @@ pub fn parseSource(gpa: std.mem.Allocator, src: Source) Error!Note {
 
     const raw = try metadataInto(a, src);
 
-    const pages = try a.alloc(types.Page, raw.page_addresses.len);
-    for (raw.page_addresses, pages) |addr, *p| {
-        p.* = try parsePageInto(a, src, addr);
+    const pages = try a.alloc(types.Page, raw.page_entries.len);
+    for (raw.page_entries, pages) |entry, *p| {
+        p.* = try parsePageInto(a, src, entry);
     }
 
     return .{

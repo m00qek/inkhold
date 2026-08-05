@@ -328,6 +328,18 @@ export interface NoteLayersControllerOptions {
    * still stack); wired from the Api by the reader.
    */
   getTemplate?: TemplateProvider;
+  /**
+   * What the stack sits ON. Default `"#fff"` — the reader's case, where the
+   * stack REPLACES the page render and therefore has to supply the paper that
+   * `decode_page`'s composite base would have.
+   *
+   * Pass `null` when the stack is an OVERLAY on something else, as the PDF
+   * viewer's `.mark` layer is: there the page underneath is the document, and a
+   * white backdrop hides it completely. That failure is invisible in the reader
+   * — white paper over white paper — so it is worth naming rather than leaving
+   * to a caller to override after every `present`.
+   */
+  backdrop?: string | null;
 }
 
 export interface NoteLayersController {
@@ -382,6 +394,7 @@ function layerCanvas(raw: RawDecoded): HTMLCanvasElement {
 export function createNoteLayersController(opts: NoteLayersControllerOptions = {}): NoteLayersController {
   const load = opts.loader ?? browserLoader(opts.wasmUrl ?? "/note-decode.wasm");
   const getTemplate = opts.getTemplate;
+  const backdrop = opts.backdrop === undefined ? "#fff" : opts.backdrop;
   let exportsPromise: Promise<DecoderExports> | null = null;
   const decoder = (): Promise<DecoderExports> => (exportsPromise ??= load());
 
@@ -520,9 +533,11 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
         currentNoteId = noteId;
         currentPaired = paired;
         currentDims = dims;
-        // The stack backdrop is the page: white paper, matching the composite
-        // base `decode_page` emits. Notes never invert for dark (see wasm.ts).
-        host.style.background = "#fff";
+        // The backdrop the CALLER asked for: white paper for a stack that IS
+        // the page (the reader — matching the composite base `decode_page`
+        // emits; notes never invert for dark, see wasm.ts), and none for a stack
+        // laid OVER something, where paper would hide what it is annotating.
+        host.style.background = backdrop ?? "";
         for (const v of views) {
           v.canvas.style.display = v.visible ? "" : "none";
           host.append(v.canvas); // wire order; later siblings paint on top

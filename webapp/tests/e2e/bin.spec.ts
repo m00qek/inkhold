@@ -120,6 +120,8 @@ async function chooseMenuItem(page: Page, trigger: Locator, item: string): Promi
 const SPD_PATH = fileURLToPath(new URL("../../../parsers/spd/tests/fixtures/layers_hidden.spd", import.meta.url));
 const SPD_BYTES = readFileSync(SPD_PATH);
 const TXT_BODY = "Reading list\n\n- Piranesi\n- A Canticle for Leibowitz\n\nReturn the library books on Friday.";
+const PDF_PATH = fileURLToPath(new URL("../../wasm/tests/fixtures/two-page.pdf", import.meta.url));
+const PDF_BYTES = readFileSync(PDF_PATH);
 
 /** Serve both raw-file routes with `body`; returns the bin route's hit tally. */
 async function serveRawBytes(page: Page, contentType: string, body: Buffer | string): Promise<{ binHits: () => number }> {
@@ -925,6 +927,51 @@ test.describe("recycle bin", () => {
     await expect(page.locator(".bin")).toBeVisible();
     await expect(page.locator(".bin__row", { hasText: "readme" })).toHaveCount(0);
     await expect(binRow(page).locator(".nav__count")).toHaveText("4");
+  });
+
+  test("a trashed .pdf offers Restore and Delete permanently, like every other viewer", async ({
+    page,
+  }) => {
+    // The PDF viewer was the ONLY one of four with no bin controls at all. It
+    // knew it had been opened from the bin — it used `fromBin` to pick the
+    // bin-scoped download route — and still offered Download as the only action,
+    // so a trashed PDF could be neither restored nor deleted from the place you
+    // were looking at it. Both halves are new here: `trashAndReopenFromBin`
+    // clicks a "Move to bin" that did not exist either.
+    await signedIn(page);
+    const raw = await serveRawBytes(page, "application/pdf", PDF_BYTES);
+    await page.goto("/#/note/n-files-manual");
+    await freezeMotion(page);
+
+    await trashAndReopenFromBin(page, "PDF viewer", "Appliance manual");
+
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    // It really RENDERS from the bin route — the live one 404s for a trashed
+    // file, so a viewer that minted the wrong URL would sit on its placeholder.
+    await expect.poll(
+      () =>
+        page.evaluate(() => {
+          const c = document.querySelector(".pdf-page") as HTMLCanvasElement | null;
+          return c && c.width ? c.width : 0;
+        }),
+      { timeout: 20_000 },
+    ).toBeGreaterThan(0);
+    expect(raw.binHits()).toBeGreaterThan(0);
+
+    // The context swap the reader and the `.spd`/`.txt` viewers already wore.
+    await expect(region.getByRole("button", { name: "Move to bin" })).toBeHidden();
+    const cluster = region.locator(".viewer__bin-actions");
+    await expect(cluster.locator(".life__label")).toContainText("days left");
+    await openFileActions(page, cluster);
+    const restore = page.locator(".menu-portal").getByRole("menuitem", { name: "Restore" });
+    const purge = page.locator(".menu-portal").getByRole("menuitem", { name: "Delete permanently" });
+    await expect(restore).toBeVisible();
+    await expect(purge).toHaveClass(/menu__item--danger/);
+
+    await restore.click();
+    await expect(page.locator(".bin-toast")).toContainText("Restored Appliance manual");
+    await expect(page.locator(".bin")).toBeVisible();
+    await expect(page.locator(".bin__row", { hasText: "Appliance manual" })).toHaveCount(0);
   });
 
   // --- the tiles come off the library's own thumbnail facade -------------------

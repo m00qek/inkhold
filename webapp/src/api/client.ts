@@ -583,6 +583,11 @@ function normalizePage(p: PageRef): PageRef {
     width: p.width,
     height: p.height,
     textHash: p.textHash ?? null,
+    // Same absent-optional shape as `textHash`: the server omits it wherever it
+    // would be `index + 1`, which is every page of every notebook. A page
+    // number is 1-based, so 0 (or anything below it) is not a page and is
+    // treated as absence rather than trusted onto a document.
+    sourcePage: typeof p.sourcePage === "number" && p.sourcePage > 0 ? p.sourcePage : null,
     layers: normalizeLayers(p.layers),
   };
 }
@@ -976,6 +981,9 @@ export function createHttpApi(): Api {
         fileType: r.fileType ?? fileTypeFromName(r.name),
         fileHash: r.fileHash ?? null,
         size: r.size ?? 0,
+        // Absent for everything without a `.mark` beside it, which is almost
+        // everything — the same omitted-not-null shape as `fileHash`.
+        annotationsId: r.annotationsId ?? null,
         // Omitted whenever the server has NOT verified this device's millimetre
         // scale, which is the common case — and `null` here is a real answer that
         // the exporter must honour, not a default standing in for a number we
@@ -1214,6 +1222,9 @@ export function createHttpApi(): Api {
       // the exporter reads as a hard "do not place text" when null.
       const r = await request<NoteMeta>("GET", `/api/controlplane/bin/file/metadata/${encodeURIComponent(id)}`);
       return {
+        // The bin never pairs: trashing a PDF does not trash its mark, so
+        // annotations here would be a live file's ink on a deleted document.
+        annotationsId: null,
         id: r.id,
         name: r.name,
         pages: r.pages.map(normalizePage),
@@ -1479,6 +1490,9 @@ export function createHttpApi(): Api {
         `/api/controlplane/note/${encodeURIComponent(id)}/history/${encodeURIComponent(md5)}/meta`,
       );
       return {
+        // A version PREVIEW shows the bytes of a past blob; the mark beside
+        // the file today annotates the CURRENT one, so it is not this one's.
+        annotationsId: null,
         id: r.id,
         name: r.name,
         pages: r.pages.map(normalizePage),

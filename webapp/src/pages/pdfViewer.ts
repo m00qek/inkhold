@@ -1,0 +1,1312 @@
+// The PDF VIEWER — one page at a time, rastered in the browser by MuPDF.
+//
+// A viewer of its own rather than an arm of the reader, for the same reason the
+// `.spd` and `.txt` viewers are: a PDF has a different lifecycle. The reader's
+// `NoteRenderer` takes a page's own byte range and is contractually pure, and a
+// PDF page cannot be decoded from its own bytes — pages share a resource graph
+// through the xref. So the document is opened ONCE and held, and the handle must
+// be closed (`render/pdfDecode.ts`).
+//
+// NOTHING BELOW THIS FILE RUNS ON THIS THREAD. MuPDF, the document handle and
+// the byte-range block cache all live in a worker (`render/pdfClient.ts` ->
+// `render/pdfWorker.ts`); this asks for a page and receives an `ImageBitmap` to
+// draw. That is why every step here is `await`ed — a page size can now cost a
+// round trip — and why there is no longer a size ceiling: a 76 MB document
+// costs the blocks page 1 is written in (`docs/scratch/pdf-ranges.md`).
+//
+// WHAT THIS IS NOT, YET. No `.mark` annotation overlay — that is the point of
+// the exercise (`docs/scratch/pdf-viewer.md` §6) and it is gated on the pairing
+// work, not on this file. A plain PDF viewer is worth having on its own.
+
+import { el } from "../ui/dom";
+import type { Hash, Id, NoteMeta, NoteSummary, PageRef } from "../core/types";
+import type { RenderKey } from "../cache/types";
+import { formatBytes, rawFileUrl } from "../core/fileKind";
+import { createToolbar } from "./toolbar";
+import {
+  svg,
+  VIEWER_IC,
+  backWord,
+  createViewerHeader,
+  originSubtitle,
+  createZoomStepper,
+  createViewerBody,
+  createViewerExportMenu,
+} from "./viewerChrome";
+import type { ReaderOrigin, Viewer, ViewerDeps } from "./viewer";
+import { createPageIndex, type PageIndexRow } from "./pageIndex";
+import { createBinViewerActions } from "../ui/binViewerActions";
+import { createLayersPanel } from "./layersPanel";
+import {
+  buildNoteLayerThumb,
+  createNoteLayersController,
+  toPanelLayers,
+  type NoteLayerView,
+} from "./noteLayers";
+import {
+  composeMarkExportModel,
+  createPdfExports,
+  type MarkInkLayer,
+  type PdfExportState,
+} from "./pdfExports";
+import type { LayeredExportModel } from "../export/layered";
+import { markExportSpace, placePanelOverPage } from "../render/markGeometry";
+import { supportsWasmExceptions } from "../render/pdfDecode";
+import { PdfLoadError, createPdfSession, type PdfSession } from "../render/pdfClient";
+
+/**
+ * Zoom steps, RELATIVE TO FIT — every step multiplies the scale that fits the
+ * page to the stage, so the sequence is monotonic whatever the page measures.
+ *
+ * The reader can use absolute steps (`reader.ts`: 640px x a factor) because a
+ * `.note` page is always the device's panel. PDF pages are not: this app has
+ * seen 200pt fixtures, 458pt device exports, 612pt Letter and 1404pt
+ * panel-sized exports — a 7x spread. With absolute steps, "zoom in" from Fit
+ * SHRINKS a small page, which is what the first version of this did.
+ */
+const ZOOMS = ["Fit", "150%", "200%", "300%"] as const;
+type Zoom = (typeof ZOOMS)[number];
+const ZOOM_SCALE: Record<Zoom, number> = {
+  Fit: 1,
+  "150%": 1.5,
+  "200%": 2,
+  "300%": 3,
+};
+/** Cap the raster so a big page at 200% cannot ask for a gigabyte of pixels. */
+const MAX_RASTER_PIXELS = 16 * 1024 * 1024;
+/**
+ * The export scale for a page with NO ink over it, in PDF points per pixel.
+ *
+ * An annotated page has no choice: it is composed at the ink's own resolution
+ * (`markExportSpace`), which for A4 on a Nomad works out at 2.22. An
+ * unannotated one has nothing to agree with, so it takes the round number
+ * nearest that — 2x the PDF's own 72 dpi, i.e. 144 dpi — which keeps the two
+ * kinds of export within a hair of each other rather than making "did this page
+ * have ink on it?" decide how big the PNG is. Clamped by the same area ceiling
+ * the on-screen raster uses.
+ */
+const EXPORT_SCALE = 2;
+/** A page-index thumbnail's long edge in CSS pixels. Small on purpose — see
+ *  `paintThumbs`: a PDF thumbnail is not a free decode. */
+const THUMB_PX = 120;
+/**
+ * The layers panel's row id for the PDF page itself.
+ *
+ * Negative on purpose: a `.mark`'s layer indices are 0-based positions into its
+ * own stack, so nothing it can carry collides with this and the toggle
+ * dispatches on the id alone.
+ */
+const PDF_LAYER_ID = -1;
+
+/** The browser seams, injectable so the viewer is testable without a worker. */
+export interface PdfSeam {
+  /** A fresh decoder session. One worker, one document at a time. */
+  createSession(): PdfSession;
+  /** False → the honest "this browser can't" state instead of a dead canvas. */
+  supported(): boolean;
+}
+
+export function defaultPdfSeam(): PdfSeam {
+  return { createSession: createPdfSession, supported: supportsWasmExceptions };
+}
+
+export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam()): Viewer {
+  // --- state --------------------------------------------------------------
+  /**
+   * ONE session for the viewer's whole life, not one per document. Compiling
+   * MuPDF is ~5 MB of wasm; paying for it on every file the user opens would be
+   * a worse jank than the one the worker was introduced to remove.
+   */
+  let session: PdfSession | null = null;
+  let open_ = false;
+  let pageIndex = 0;
+  let pageCount = 0;
+  let zoom: Zoom = "Fit";
+  let fromBin = false;
+  /**
+   * The open document's metadata — what the bin actions act ON.
+   *
+   * Held because the toolbar's file zone outlives any one `open()`: the buttons
+   * are built once and re-pointed per document, exactly as `spdViewer` does it.
+   * Cleared by `release()`, so a control can never act on the file you just
+   * navigated away from.
+   */
+  let meta: NoteMeta | null = null;
+  /**
+   * The `.mark` that annotates this PDF, and its pages keyed by the PDF page
+   * they belong to (0-based, so it keys straight off `pageIndex`).
+   *
+   * A mark is SPARSE — it holds only the pages that were written on — so a
+   * missing key is the common case and means "this page has no annotations",
+   * not "not loaded yet".
+   */
+  let markId: Id | null = null;
+  const markPages = new Map<number, PageRef>();
+  /** The open document's md5 — half of a thumbnail's cache identity. */
+  let docHash = "";
+  /**
+   * Where the strip's thumbnails came from, published on `__inkholdPdfThumbs`.
+   *
+   * Instrumented for the same reason the block cache is: the caching is
+   * INVISIBLE when it works, so without a counter a regression that re-renders
+   * every thumbnail looks and behaves exactly like a hit — only slower, and only
+   * on hardware nobody tests on. Two mutations of this file (closing a bitmap the
+   * cache owns, and skipping the read-through entirely) passed the whole suite
+   * before this existed.
+   */
+  const thumbCounts = { hits: 0, renders: 0 };
+  function publishThumbCounts(): void {
+    (globalThis as unknown as { __inkholdPdfThumbs?: typeof thumbCounts }).__inkholdPdfThumbs = {
+      ...thumbCounts,
+    };
+  }
+  /**
+   * Bumped per open and per teardown. Every async step checks it before
+   * touching the DOM or the document handle, so a superseded load paints
+   * nothing and — more importantly — never renders through a handle that
+   * `hide()` has already closed.
+   */
+  let generation = 0;
+
+  // --- DOM ----------------------------------------------------------------
+  const header = createViewerHeader({
+    classes: { back: "viewer__back", backLabel: "viewer__back-label", title: "viewer__title" },
+    onBack: () => deps.onBack(),
+  });
+
+  const canvas = el("canvas", { class: "pdf-page" }) as HTMLCanvasElement;
+  /**
+   * The `.mark`'s ink, stacked over the page.
+   *
+   * The SAME controller the reader drives (`pages/noteLayers.ts`) — a mark IS a
+   * note container, so its layers decode through the identical path, and
+   * `decode_layer` already hands back RGBA whose background is alpha 0. That is
+   * what makes this an overlay rather than a second opaque sheet.
+   *
+   * Positioned by `placePanelOverPage`: the ink is in DEVICE PANEL pixels and
+   * the canvas is the PAGE, which is only part of that panel, so the host is
+   * drawn oversized and shifted until the two line up. `.pdf-stage` clips the
+   * dead margins.
+   */
+  // `backdrop: null` — the page underneath IS the document. The controller's
+  // default is white paper, which is right for the reader (where the stack
+  // replaces the page) and hides the PDF completely here.
+  const markCtl = createNoteLayersController({ backdrop: null });
+  markCtl.el.classList.add("pdf-mark");
+  const stage = el("div", { class: "pdf-stage" }, canvas, markCtl.el);
+  const body = createViewerBody({ mark: "PDF" });
+
+  const zoomStepper = createZoomStepper<Zoom>({
+    readoutClass: "zoom",
+    initial: zoom,
+    format: (z) => z,
+    labels: { out: "Zoom out", in: "Zoom in" },
+    onStep: (dir) => {
+      const at = ZOOMS.indexOf(zoom);
+      const next = ZOOMS[Math.min(ZOOMS.length - 1, Math.max(0, at + dir))]!;
+      if (next !== zoom) {
+        zoom = next;
+        void paint();
+      }
+      return zoom;
+    },
+  });
+
+  const prev = el("button", {
+    class: "icon-btn",
+    type: "button",
+    "aria-label": "Previous page",
+    title: "Previous page",
+    html: svg(VIEWER_IC.prev, 1.9),
+  }) as HTMLButtonElement;
+  const next = el("button", {
+    class: "icon-btn",
+    type: "button",
+    "aria-label": "Next page",
+    title: "Next page",
+    html: svg(VIEWER_IC.next, 1.9),
+  }) as HTMLButtonElement;
+  const pageReadout = el("span", { class: "zoom", role: "status", text: "—" });
+  const pager = el("span", { class: "pager" }, prev, pageReadout, next);
+  prev.addEventListener("click", () => void go(pageIndex - 1));
+  next.addEventListener("click", () => void go(pageIndex + 1));
+
+  // --- the download / export menu ------------------------------------------
+  // This was a bare `<a download>` — the only viewer of four whose Download did
+  // one thing. The shared dropdown (`viewerChrome.ts`) gives it the same shape
+  // the `.spd` viewer and the `.note` reader have, and the raw file survives
+  // inside it as the WHOLE DOCUMENT group's one row, so nothing that worked
+  // before stops working. The CONTENT is `pdfExports.ts`'s; the model it exports
+  // is `pageExportModel` below, because composing a PDF page with the ink
+  // written on it is the one thing only this viewer knows how to do.
+  const exportMenu = createViewerExportMenu({ toast: deps.toast, className: "viewer__export" });
+  const downloads = createPdfExports({
+    menu: exportMenu,
+    toast: deps.toast,
+    docName: () => meta?.name ?? null,
+    pageIndex: () => pageIndex,
+    model: () => pageExportModel(),
+    state: () => exportState(),
+  });
+
+  // --- the file zone: Move to bin, or the bin-origin cluster ---------------
+  // The PDF viewer was the ONLY viewer of four without either. The reader, the
+  // `.spd` viewer and the `.txt` viewer all carry both; this had Download alone,
+  // so a PDF opened FROM the recycle bin offered no way to restore it and no way
+  // to delete it — for every other file type, both are one click away in the same
+  // place. It even computed `fromBin` already (for the bin-scoped download route)
+  // and then did nothing with it.
+  const moveBin = el("button", {
+    class: "btn",
+    type: "button",
+    "aria-label": "Move to bin",
+    title: "Move to bin",
+    html: svg(VIEWER_IC.trash, 1.8) + "Move to bin",
+  });
+  moveBin.addEventListener("click", () => {
+    if (meta) deps.onMoveToBin?.(meta);
+  });
+  // The BIN-ORIGIN cluster, swapped in for Move to bin when the file is open from
+  // the recycle bin: the SAME `|— retention —| ⋯` the bin ROW shows, from the
+  // shared `createBinViewerActions` — Restore neutral, Delete permanently the one
+  // red item, its confirm carried through `onPurge`. Nothing here is
+  // PDF-specific, which is the point: a trashed file behaves the same whatever
+  // opened it.
+  const binActions = createBinViewerActions({
+    getMeta: () => meta,
+    onRestore: deps.onRestore,
+    onPurge: deps.onPurge,
+    // Card parity: the bin's "Version history" row opens the same view-only
+    // panel, anchored to the "…" trigger. Wired only when the shell can open
+    // history at all — no dead row otherwise.
+    onHistory: deps.onVersions ? (m, anchor) => deps.onVersions!(m, anchor, undefined) : undefined,
+  });
+
+  // --- the annotations panel ------------------------------------------------
+  // The SHARED layers panel (`pages/layersPanel.ts`), the same component the
+  // `.spd` viewer and the reader mount. What this viewer supplies is a stack
+  // whose BOTTOM row is the PDF itself: the document and the ink written on it
+  // are the two things a reader wants to turn on and off independently, and
+  // that is exactly the vocabulary this panel already speaks.
+  //
+  // The PDF is row `PDF_LAYER_ID`, deliberately outside the range a `.mark`'s
+  // layer indices occupy, so the toggle can dispatch on the id alone.
+  const layersPanel = createLayersPanel({
+    id: "pdf-layers-panel",
+    hookPrefix: "pdf",
+    onToggle: (id, visible) => {
+      if (id === PDF_LAYER_ID) canvas.style.visibility = visible ? "" : "hidden";
+      else markCtl.setVisible(id, visible);
+      // A toggle is what makes "current view" differ from "original view", so it
+      // is what decides whether the ORIGINAL group is offered at all — exactly
+      // as the reader re-runs `refreshGroups` on every eye click.
+      downloads.refreshGroups();
+    },
+    paintThumb: (pl) => {
+      if (pl.id !== PDF_LAYER_ID) {
+        const v = markCtl.stack()?.views.find((x) => x.index === pl.id);
+        return v ? buildNoteLayerThumb(v) : el("div", { "aria-hidden": "true" });
+      }
+      // The page's own raster, scaled down — the row should show the document,
+      // not a glyph standing in for it.
+      const t = el("canvas") as HTMLCanvasElement;
+      t.width = 96;
+      t.height = Math.max(1, Math.round((96 * canvas.height) / Math.max(canvas.width, 1)));
+      if (canvas.width > 0) t.getContext("2d")?.drawImage(canvas, 0, 0, t.width, t.height);
+      return t;
+    },
+  });
+
+  // --- the page index (docked LEFT, like the reader's) ---------------------
+  // The strip itself is the SHARED component (`pages/pageIndex.ts`) — the same
+  // panel, rows, virtual window and highlight the `.note` reader gets. What this
+  // viewer supplies is the PAINT, below, because a PDF page comes from the
+  // worker's session and nothing else in the app can produce one.
+  //
+  // WHY A THUMBNAIL IS NOT FREE HERE, unlike in the reader. A `.note` page is an
+  // independent byte range and its thumbnail is one decode. A PDF page is a walk
+  // through a shared resource graph: rendering page 40's thumbnail can pull
+  // fonts, colour spaces and images from anywhere in the file, over the network,
+  // one suspended round trip at a time (`docs/scratch/pdf-ranges.md` §5.7). So
+  // the paint is gated TWICE — on the row being inside the strip's window (the
+  // component's job) and on it actually being on screen (the observer's).
+
+  /** Rows inside the strip's window, by page index. The paint's whole world. */
+  const thumbRows = new Map<number, PageIndexRow>();
+  /** Indices seen by the observer and not yet painted, nearest-first. */
+  const thumbQueue: number[] = [];
+  /** Indices whose canvas currently holds a finished thumbnail. */
+  const thumbPainted = new Set<number>();
+  /**
+   * Page sizes learned from a thumbnail render, so a row that scrolls out and
+   * back is rebuilt at the shape it was CORRECTED to rather than reverting to
+   * page 0's guess.
+   */
+  const thumbAspects = new Map<number, number>();
+  /** Page 0's aspect — every row's reserved shape until its own is known. */
+  let firstAspect = 1 / Math.SQRT2; // A4 portrait, if page 0 will not measure
+  let thumbsBusy = false;
+
+  const pagesPanel = createPageIndex({
+    id: "pdf-pages-panel",
+    // The look is shared with the reader deliberately; the hook is what lets a
+    // selector mean THIS strip (a bare `.filmstrip` matches both viewers).
+    stripHook: "pdf-filmstrip",
+    onPick: (i) => void go(i),
+    aspect: (i) => thumbAspects.get(i) ?? firstAspect,
+    // Every PDF row starts unpainted: there is no cheap stand-in for a page we
+    // have not rastered.
+    loading: () => true,
+    mount: (row) => {
+      thumbRows.set(row.index, row);
+      thumbObserver().observe(row.el);
+    },
+    unmount: (row) => {
+      thumbObserver().unobserve(row.el);
+      thumbRows.delete(row.index);
+      // Its canvas is about to be zeroed, so whatever was on it is gone: forget
+      // the paint too, or the row would come back blank and never be redrawn.
+      thumbPainted.delete(row.index);
+      const at = thumbQueue.indexOf(row.index);
+      if (at >= 0) thumbQueue.splice(at, 1);
+    },
+  });
+
+  /**
+   * ONE observer for the whole strip, rooted on the panel (which owns the
+   * overflow). Built lazily because its root is the panel we are constructing.
+   */
+  let thumbIo: IntersectionObserver | null = null;
+  function thumbObserver(): IntersectionObserver {
+    thumbIo ??= new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          const i = Number((e.target as HTMLElement).dataset.page);
+          if (!Number.isFinite(i)) continue;
+          if (e.isIntersecting) {
+            if (!thumbPainted.has(i) && !thumbQueue.includes(i)) thumbQueue.push(i);
+          } else {
+            // Scrolled away before we got to it: drop it rather than spend a
+            // round trip on a page nobody is looking at.
+            const at = thumbQueue.indexOf(i);
+            if (at >= 0) thumbQueue.splice(at, 1);
+          }
+        }
+        void paintThumbs();
+      },
+      { root: pagesPanel.el, rootMargin: "200px 0px" },
+    );
+    return thumbIo;
+  }
+
+  /**
+   * Paint queued thumbnails ONE AT A TIME.
+   *
+   * Serial on purpose. The decoder is a single worker behind a single wasm
+   * instance, so concurrent renders would queue there anyway — but they would
+   * ALSO interleave their range fetches, so a page the user is actually reading
+   * would wait behind six thumbnails. One at a time keeps the viewer's own
+   * render first in line.
+   */
+  /**
+   * A thumbnail's identity in the SHARED cache (`sn-thumbs` — see
+   * `webapp/ARCHITECTURE.md`, "there is one cache").
+   *
+   * A `.note` page has a server-side content hash, so `RenderKey.hash` is
+   * natural. A PDF page has none — the FILE has an md5 and the pages do not — so
+   * one is synthesised. It is still honestly content-addressed: the md5 pins the
+   * bytes, the index pins the page, and a blob is immutable, so the entry can
+   * never go stale.
+   *
+   * `size: "thumb"` is not decoration — it is what admits the entry to the
+   * PERSISTENT tier (`renderCache.ts:125`), which is the whole reason for doing
+   * this rather than keeping a private map.
+   *
+   * The theme is the LIVE one even though a PDF raster does not depend on it (we
+   * deliberately never invert them). Pinning a constant instead would put these
+   * entries outside `evictTheme`'s model, which would then drop them on a theme
+   * toggle without knowing they were theme-free. Consistency costs one duplicate
+   * thumbnail per page per theme, inside the same budget; the alternative is a
+   * mechanism silently doing the wrong thing.
+   */
+  function thumbKey(index: number): RenderKey {
+    return { hash: `${docHash}:p${index}` as Hash, size: "thumb", theme: deps.getTheme() };
+  }
+
+  async function paintThumbs(): Promise<void> {
+    if (thumbsBusy) return;
+    thumbsBusy = true;
+    try {
+      while (thumbQueue.length > 0) {
+        const i = thumbQueue.shift()!;
+        if (thumbPainted.has(i)) continue;
+        const row = thumbRows.get(i);
+        const s = open_ ? session : null;
+        if (!s || !row) continue;
+        const mine = generation;
+
+        // READ-THROUGH. A row that scrolls out and back is recycled by the
+        // virtual list, so without this every return trip would re-render the
+        // page — MuPDF work plus, on a cold block, network. The cache OWNS the
+        // bitmap it returns (`renderCache.ts:113`: callers blit synchronously
+        // and never close it), so this path draws and stops there.
+        if (docHash) {
+          let hit: ImageBitmap | undefined;
+          try {
+            hit = await deps.cache.get(thumbKey(i));
+          } catch {
+            hit = undefined; // a cache failure must never sink a thumbnail
+          }
+          if (mine !== generation) return;
+          const cur = thumbRows.get(i);
+          if (hit) {
+            // A cached page is DONE either way. If the row scrolled out from
+            // under us there is nothing to draw on — but falling through would
+            // then re-render it through MuPDF, and on a cold block re-fetch it,
+            // only to discard the pixels below. The strip builds a fresh row per
+            // index and observes it on mount, so if this page comes back it is
+            // queued again and finds the same cache entry.
+            if (cur === row) {
+              thumbCounts.hits++;
+              publishThumbCounts();
+              row.canvas.width = hit.width;
+              row.canvas.height = hit.height;
+              row.canvas.getContext("2d")?.drawImage(hit, 0, 0);
+              row.setLoading(false);
+              thumbPainted.add(i);
+            }
+            continue;
+          }
+        }
+
+        let frame;
+        try {
+          const size = await s.pageSize(i);
+          if (mine !== generation) return;
+          const scale = THUMB_PX / Math.max(size.width, size.height);
+          if (size.height > 0) {
+            const a = size.width / size.height;
+            thumbAspects.set(i, a);
+            row.setAspect(a);
+          }
+          frame = await s.render(i, scale);
+        } catch {
+          // A page that will not render is left as an empty frame, not an error
+          // card: the strip is navigation, and a broken thumbnail must not stop
+          // you reaching the page it stands for.
+          row.setLoading(false);
+          thumbPainted.add(i);
+          continue;
+        }
+        thumbCounts.renders++;
+        publishThumbCounts();
+
+        // WRITE-THROUGH, and deliberately BEFORE the superseded check: the
+        // render already happened and its pixels are valid for this page
+        // forever, so handing them to the cache turns a scroll-past into work
+        // that is not wasted. Ownership passes here — from this point the
+        // bitmap must NOT be closed, because the cache's LRU closes it on
+        // eviction and a double close would poison the entry.
+        let owned = false;
+        if (docHash) {
+          try {
+            await deps.cache.put(thumbKey(i), frame.bitmap);
+            owned = true;
+          } catch {
+            owned = false; // it never entered the cache, so it is still ours
+          }
+        }
+
+        // Superseded — by another document, or by the row scrolling out of the
+        // window and its canvas being recycled under us. The pixels have nowhere
+        // legitimate to go; close them only if the cache did not take them.
+        if (mine !== generation || thumbRows.get(i) !== row) {
+          if (!owned) frame.bitmap.close();
+          if (mine !== generation) return;
+          continue;
+        }
+        row.canvas.width = frame.width;
+        row.canvas.height = frame.height;
+        row.canvas.getContext("2d")?.drawImage(frame.bitmap, 0, 0);
+        if (!owned) frame.bitmap.close();
+        row.setLoading(false);
+        thumbPainted.add(i);
+      }
+    } finally {
+      thumbsBusy = false;
+    }
+  }
+
+  /** Forget every thumbnail: a new document, or none. */
+  function resetThumbs(): void {
+    thumbCounts.hits = 0;
+    thumbCounts.renders = 0;
+    publishThumbCounts();
+    pagesPanel.clear(); // unmounts each row, which unobserves and dequeues it
+    thumbRows.clear();
+    thumbQueue.length = 0;
+    thumbPainted.clear();
+    thumbAspects.clear();
+    firstAspect = 1 / Math.SQRT2;
+  }
+
+  let pagesOpen = false;
+  const pagesToggle = el("button", {
+    class: "btn",
+    type: "button",
+    "aria-pressed": "false",
+    "aria-controls": "pdf-pages-panel",
+    "aria-label": "Pages",
+    title: "Pages",
+    html: svg(VIEWER_IC.pages, 1.8),
+  }) as HTMLButtonElement;
+  function setPagesOpen(open: boolean): void {
+    pagesOpen = open;
+    pagesPanel.setOpen(open);
+    pagesToggle.setAttribute("aria-pressed", String(open));
+    // The panel NARROWS the page rather than covering it, so a Fit page is a
+    // different size with it open — repaint, exactly as the reader re-runs
+    // `showPage` on every panel toggle.
+    if (open_) void paint();
+  }
+  pagesToggle.addEventListener("click", () => setPagesOpen(!pagesOpen));
+
+  let layersOpen = false;
+  const layersToggle = el("button", {
+    class: "btn",
+    type: "button",
+    "aria-pressed": "false",
+    "aria-controls": "pdf-layers-panel",
+    "aria-label": "Annotations",
+    title: "Annotations",
+    html: svg(VIEWER_IC.layers, 1.8),
+  }) as HTMLButtonElement;
+  function setLayersOpen(open: boolean): void {
+    layersOpen = open;
+    layersPanel.el.hidden = !open;
+    layersToggle.setAttribute("aria-pressed", String(open));
+    if (open_) void paint(); // the panel narrows the page, exactly as Pages does
+  }
+  layersToggle.addEventListener("click", () => setLayersOpen(!layersOpen));
+
+  const toolbar = createToolbar({
+    label: "PDF viewer",
+    viewLabel: "PDF controls",
+    fileLabel: "File actions",
+    className: "viewer__bar",
+    leading: [{ el: header.back, focus: [header.back] }, { el: header.title }],
+    // PAGER BEFORE ZOOM, which is the reader's order (`reader.ts`: pager, zoom,
+    // find, …). This had them reversed — the app's only two paged viewers putting
+    // the same two controls in opposite places, so moving between a `.note` and a
+    // `.pdf` meant re-finding both. Where a control sits is part of what it is.
+    view: [
+      { kind: "custom", key: "pager", el: pager, focus: [prev, next] },
+      { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus },
+      { kind: "custom", key: "pages", el: pagesToggle, focus: [pagesToggle] },
+      // Shown only where there is something to show: a PDF with no `.mark`
+      // beside it has one layer, and a panel listing it alone is a control that
+      // does nothing.
+      { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle] },
+    ],
+    file: [
+      { kind: "custom", key: "download", el: exportMenu.el, focus: [exportMenu.trigger] },
+      { kind: "custom", key: "move-bin", el: moveBin, focus: [moveBin] },
+      // Mutually exclusive with Move to bin: the retention countdown then the
+      // "…" menu, whose one focusable is its trigger. Same order as `spdViewer`.
+      { kind: "custom", key: "bin-actions", el: binActions.el, focus: [binActions.trigger] },
+    ],
+  });
+
+  // A `<section>` with an `aria-label`, like the `.spd`/`.txt` viewers: that is
+  // what makes it a named landmark rather than an anonymous div.
+  // The panel docks beside the page, exactly as the reader's does — the page
+  // index leads on the LEFT.
+  layersPanel.el.hidden = true;
+  layersToggle.hidden = true;
+  const main = el("div", { class: "pdf-wrap" }, pagesPanel.el, body.main, layersPanel.el);
+  const root = el(
+    "section",
+    { class: "viewer viewer--pdf", "aria-label": "PDF viewer", hidden: true },
+    toolbar.el,
+    main,
+  );
+
+  // --- rendering ----------------------------------------------------------
+
+  /** The scale that fits the page to the stage, in MuPDF's points-per-unit. */
+  /**
+   * The box a page may occupy: the scroll container, less its padding, less
+   * EVERY panel docked in it.
+   *
+   * NOT measured from `.pdf-stage`, which is what this did first and is
+   * circular — the stage is sized BY the canvas, so a page that overflowed
+   * measured a stage that had already grown to fit it, and "Fit" never fitted.
+   * The reader has the same rule stated in CSS: "the panel's width is not the
+   * page's", and it re-runs its layout on every panel toggle for exactly this
+   * reason.
+   *
+   * BOTH panels, not just Pages. Annotations docks in the same flex row and
+   * takes the same width out of the page's box, and this counted only Pages —
+   * so a page shown with Annotations open was fitted to a stage 342px wider
+   * than it had (a 320px panel plus the gap). Measured on the fixture: a 992px
+   * page in a 650px slot.
+   *
+   * That never announced itself, in either era. While `.pdf-page` still carried
+   * `max-width: 100%` the excess was quietly clamped away and the mark overlay —
+   * placed against the size the raster was ASKED for — went 53% too large. With
+   * the clamp gone the page simply runs 320px UNDER the panel, which is not an
+   * overflow, so no scrollbar appears to admit it either. Every panel that
+   * narrows the page has to be counted here.
+   */
+  function availableBox(): { w: number; h: number } {
+    const rect = main.getBoundingClientRect();
+    const cs = getComputedStyle(main);
+    const padX = parseFloat(cs.paddingLeft || "0") + parseFloat(cs.paddingRight || "0");
+    const padY = parseFloat(cs.paddingTop || "0") + parseFloat(cs.paddingBottom || "0");
+    const gap = parseFloat(cs.columnGap || cs.gap || "0") || 0;
+    let w = rect.width - padX;
+    const h = rect.height - padY;
+    for (const panel of [pagesOpen ? pagesPanel.el : null, layersOpen ? layersPanel.el : null]) {
+      if (panel) w -= panel.getBoundingClientRect().width + gap;
+    }
+    return { w: Math.max(w, 120), h: Math.max(h, 120) };
+  }
+
+  function fitScale(pageWidthPt: number, pageHeightPt: number): number {
+    if (pageWidthPt <= 0 || pageHeightPt <= 0) return 1;
+    const box = availableBox();
+    return Math.min(box.w / pageWidthPt, box.h / pageHeightPt);
+  }
+
+  function scaleFor(pageWidthPt: number, pageHeightPt: number): number {
+    const dpr = Math.min(globalThis.devicePixelRatio || 1, 2);
+    const wanted = fitScale(pageWidthPt, pageHeightPt) * ZOOM_SCALE[zoom] * dpr;
+    // Clamp by AREA, not by a scale ceiling: a big page at 200% and a small one
+    // at the same zoom are wildly different rasters, and it is the pixel count
+    // that costs wasm memory.
+    const px = pageWidthPt * wanted * (pageHeightPt * wanted);
+    if (px <= MAX_RASTER_PIXELS) return wanted;
+    return wanted * Math.sqrt(MAX_RASTER_PIXELS / px);
+  }
+
+  async function paint(): Promise<void> {
+    const mine = generation;
+    const s = session;
+    if (!s || !open_ || pageCount === 0) return;
+    // THE PAGE THIS PAINT IS FOR, read once. `pageIndex` is mutable and every
+    // step below awaits, so reading it again after a turn would measure one
+    // page and raster another — the current page at the previous page's fit
+    // scale, for as long as it takes the next paint to land.
+    const page = pageIndex;
+    let size: { width: number; height: number };
+    try {
+      size = await s.pageSize(page);
+    } catch {
+      return;
+    }
+    if (mine !== generation) return;
+    const scale = scaleFor(size.width, size.height);
+    let frame;
+    try {
+      frame = await s.render(page, scale);
+    } catch (err) {
+      if (mine !== generation) return;
+      body.showPlaceholder("Couldn't draw this page", String((err as Error).message ?? err));
+      return;
+    }
+    if (mine !== generation) {
+      // Superseded mid-render. An ImageBitmap holds real pixels, so dropping
+      // the reference is not enough — close it or the memory waits for a GC.
+      frame.bitmap.close();
+      return;
+    }
+    canvas.width = frame.width;
+    canvas.height = frame.height;
+    // CSS size in layout px, so the raster is DPR-sharp rather than upscaled.
+    canvas.style.width = `${frame.width / Math.min(globalThis.devicePixelRatio || 1, 2)}px`;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      frame.bitmap.close();
+      return;
+    }
+    // `drawImage` of a TRANSFERRED bitmap, not `putImageData`: the pixels were
+    // handed over from the worker rather than copied, which is the point of
+    // rendering there (`docs/scratch/pdf-ranges.md` §3).
+    ctx.drawImage(frame.bitmap, 0, 0);
+    frame.bitmap.close();
+    body.main.replaceChildren(stage);
+    syncPager();
+    // The export rows depend on what `paintMark` finds — whether this page has
+    // ink at all, and whether any of it is toggled — so they are reconciled
+    // AFTER it settles, on every path out of it (a page with no mark, a mark
+    // that would not decode, a fetch that failed, and the happy one).
+    void paintMark(page, size).finally(() => downloads.refreshGroups());
+  }
+
+  /**
+   * Put the `.mark`'s ink over the page that was just drawn, or take it away.
+   *
+   * Called AFTER the raster lands, because the placement is computed from the
+   * canvas's real size — which is the one thing that changes on every zoom step
+   * and every panel toggle. Nothing here re-decodes on a resize: the host is one
+   * element and the transform is CSS, so a zoom moves it rather than rebuilding
+   * it.
+   */
+  async function paintMark(
+    page: number,
+    pageSizePt: { width: number; height: number },
+  ): Promise<void> {
+    const mine = generation;
+    const ref = markPages.get(page);
+    // No annotations on this page — the common case, since a mark is sparse.
+    if (!ref || !markId) {
+      markCtl.el.hidden = true;
+      layersPanel.setLayers([pdfRow()]);
+      return;
+    }
+    /**
+     * Is this paint still the one the screen wants?
+     *
+     * `generation` alone cannot answer it. That counter moves when the DOCUMENT
+     * is released and never on a page turn, so every page of one document
+     * shares a generation — and this function awaits the network. Turn from one
+     * annotated page to another while the first page's bytes are in flight and
+     * the LATE arrival would present its ink over the page now on screen, then
+     * stay there: nothing repaints a page that is already drawn.
+     *
+     * Identity is the test, because every page owns its own `PageRef`.
+     */
+    const superseded = (): boolean => mine !== generation || markPages.get(pageIndex) !== ref;
+    const dpr = Math.min(globalThis.devicePixelRatio || 1, 2);
+    const place = placePanelOverPage(
+      { width: ref.width, height: ref.height },
+      pageSizePt,
+      { width: canvas.width / dpr, height: canvas.height / dpr },
+    );
+    const st = markCtl.el.style;
+    st.position = "absolute";
+    st.left = `${place.left}px`;
+    st.top = `${place.top}px`;
+    st.width = `${place.width}px`;
+    st.height = `${place.height}px`;
+    markCtl.el.hidden = false;
+
+    if (markCtl.isPresented(ref.hash, deps.getTheme())) {
+      layersPanel.setLayers(withPdfRow(markCtl.stack()?.views));
+      return;
+    }
+    try {
+      const bytes = await deps.api.getPageBytes(markId, ref);
+      // BEFORE `present`, which COMMITS. The controller discards a present that
+      // is overtaken mid-flight, but it cannot undo one that already landed —
+      // so a late arrival has to be stopped on this side of the call.
+      if (superseded()) return;
+      const stack = await markCtl.present(markId, ref.hash, bytes, ref.layers ?? [], deps.getTheme());
+      if (superseded()) return;
+      if (!stack) {
+        // This mark page would not decode. Take the OLD ink down: `present`
+        // returns null WITHOUT releasing what is mounted, so leaving it would
+        // show the previous page's handwriting over this one while the panel
+        // underneath listed only the document.
+        //
+        // Unless the stack up is already the one we wanted: `present` also
+        // returns null when a CONCURRENT present of the same page overtook it,
+        // and releasing then would destroy the good ink that other call just
+        // committed.
+        if (!markCtl.isPresented(ref.hash, deps.getTheme())) {
+          markCtl.release();
+          markCtl.el.hidden = true;
+          layersPanel.setLayers([pdfRow()]);
+        }
+        return;
+      }
+      suppressBackground(stack.views);
+      layersPanel.setLayers(withPdfRow(stack.views));
+    } catch {
+      // The PAGE still stands on its own. A mark that will not load is a missing
+      // overlay, not a broken document — the panel says so and the reader keeps
+      // reading, which is why this never touches `body.showPlaceholder`.
+      //
+      // `superseded`, not the bare generation check: a fetch that fails for the
+      // page you have already turned AWAY from must not strip the ink off the
+      // page you turned TO.
+      if (superseded()) return;
+      markCtl.el.hidden = true;
+      layersPanel.setLayers([pdfRow()]);
+    }
+  }
+
+  /**
+   * THE MARK'S BACKGROUND LAYER NEVER PAINTS HERE.
+   *
+   * A `.note` layer stack carries a BGLAYER holding the device's paper — ruled
+   * stationery, a template, or a rendering of the page being annotated. Over a
+   * PDF that layer is not content, it is a SECOND OPAQUE SHEET, and compositing
+   * it hides the document completely: the first run of this painted white bands
+   * and black bars over the page and nothing of the PDF survived.
+   *
+   * The PDF is the background. So the background is dropped from the stack and
+   * from the panel, and the `Document` row stands where it would have been.
+   */
+  function suppressBackground(views: readonly { index: number; slot: string }[] | undefined): void {
+    for (const v of views ?? []) if (v.slot === "background") markCtl.setVisible(v.index, false);
+  }
+
+  /** The panel row standing for the page itself. */
+  function pdfRow(): { id: number; name: string; visible: boolean } {
+    return { id: PDF_LAYER_ID, name: "Document", visible: canvas.style.visibility !== "hidden" };
+  }
+
+  /** The page, then the mark's layers above it — bottom-up is the panel's order. */
+  function withPdfRow(views: Parameters<typeof toPanelLayers>[0] | undefined) {
+    if (!views) return [pdfRow()];
+    const ink = views.filter((v) => v.slot !== "background");
+    return [...toPanelLayers(ink), pdfRow()];
+  }
+
+  // --- exports --------------------------------------------------------------
+  // The menu structure, the filenames and the toasts are `pdfExports.ts`'s. What
+  // is here is the part only this viewer can answer: WHICH pixels, in WHICH
+  // space.
+
+  /**
+   * The ink that belongs to `page`, or null.
+   *
+   * Guarded on `isPresented`, not merely on `markPages.has` — the mounted stack
+   * survives a page turn until the next one commits (it is hidden, not
+   * released), so a bare `stack()` would hand the previous page's handwriting to
+   * an export named after this one. The reader states the same rule about its
+   * `liveStack` and for the same reason.
+   *
+   * The BACKGROUND slot is dropped here rather than hidden, so it is absent from
+   * both the export and the "has anything been toggled?" question. It is
+   * force-hidden on screen (`suppressBackground`), and a layer that is always
+   * hidden would otherwise make every page look permanently tuned.
+   */
+  function inkForExport(page: number): { ref: PageRef; views: NoteLayerView[] } | null {
+    const ref = markPages.get(page);
+    if (!ref || !markCtl.isPresented(ref.hash, deps.getTheme())) return null;
+    const views = (markCtl.stack()?.views ?? []).filter((v) => v.slot !== "background");
+    return views.length > 0 ? { ref, views } : null;
+  }
+
+  /** Which export rows the focused page can offer. See {@link PdfExportState}. */
+  function exportState(): PdfExportState {
+    const ink = inkForExport(pageIndex);
+    return {
+      hasInk: ink !== null,
+      // The document is a layer like any other and its authored state is
+      // visible, so hiding its row IS a divergence — turning the page off and
+      // exporting the ink alone is one of the two things this panel is for.
+      tuned:
+        canvas.style.visibility === "hidden" ||
+        (ink?.views.some((v) => v.visible !== v.authoredVisible) ?? false),
+    };
+  }
+
+  /** The export scale for a page with no ink over it — see {@link EXPORT_SCALE}. */
+  function plainExportScale(size: { width: number; height: number }): number {
+    const px = size.width * EXPORT_SCALE * (size.height * EXPORT_SCALE);
+    return px <= MAX_RASTER_PIXELS ? EXPORT_SCALE : EXPORT_SCALE * Math.sqrt(MAX_RASTER_PIXELS / px);
+  }
+
+  /**
+   * The focused page as a layered export model: the document, then its ink.
+   *
+   * NOTHING HERE COMES OFF THE SCREEN. The on-screen canvas is at whatever
+   * zoom, DPR and panel layout the reader happens to be at — a Fit page beside
+   * two open panels is a fraction of the page's real resolution — so the page is
+   * rendered FRESH at the export's own scale, and the ink is re-decoded by
+   * `exportModel()` in the light world rather than reused from a possibly
+   * dark-inverted stack. `export/exporter.ts` states the identical rule for
+   * notes (`nativeBitmap`): exports decode, they never screenshot.
+   *
+   * The model's canvases are the caller's to free — several megabytes each
+   * against a 50 MB app-wide budget — which is what `release()` is for. The
+   * SOURCES are freed here, as soon as they have been drawn in.
+   */
+  async function pageExportModel(): Promise<{
+    model: LayeredExportModel;
+    release: () => void;
+  } | null> {
+    const s = session;
+    if (!s || !open_ || pageCount === 0) return null;
+    const mine = generation;
+    const page = pageIndex;
+
+    let size: { width: number; height: number };
+    try {
+      size = await s.pageSize(page);
+    } catch {
+      return null;
+    }
+    if (mine !== generation) return null;
+
+    const ink = inkForExport(page);
+    // WITH INK, the page is rendered to fit the panel's own page-rect, so the
+    // handwriting moves by a whole-pixel translation and is never resampled.
+    // WITHOUT it there is no panel to agree with, so the round number stands in.
+    const space = ink ? markExportSpace({ width: ink.ref.width, height: ink.ref.height }, size) : null;
+    let frame;
+    try {
+      frame = await s.render(page, space ? space.scale : plainExportScale(size));
+    } catch {
+      return null;
+    }
+    if (mine !== generation) {
+      frame.bitmap.close();
+      return null;
+    }
+
+    // The ink's FRESH light-theme canvases, at the mark's own panel resolution.
+    let snapshot: Awaited<ReturnType<typeof markCtl.exportModel>> = null;
+    try {
+      if (ink) snapshot = await markCtl.exportModel();
+    } catch {
+      snapshot = null; // ink that will not re-decode must not cost the page export
+    }
+    try {
+      if (mine !== generation) return null;
+      const model = composeMarkExportModel({
+        // The rendered frame's own dims stand in when there is no ink: there is
+        // no letterbox to correct for, so the page IS the export.
+        space: space ?? { width: frame.width, height: frame.height, dx: 0, dy: 0 },
+        page: frame.bitmap,
+        pageVisible: canvas.style.visibility !== "hidden",
+        ink: inkExportLayers(ink, snapshot?.model ?? null),
+      });
+      return {
+        model,
+        release: () => {
+          for (const l of model.layers) {
+            l.canvas.width = 0;
+            l.canvas.height = 0;
+          }
+        },
+      };
+    } finally {
+      // Composition COPIES both halves, so the sources are dead the moment it
+      // returns. Dropping them here rather than at GC keeps the peak at one
+      // extra stack instead of two.
+      frame.bitmap.close();
+      snapshot?.release();
+    }
+  }
+
+  /**
+   * Marry the live layer VIEWS (names, visibility, authored state) to the
+   * freshly decoded canvases, BY WIRE INDEX.
+   *
+   * By index and not by position: `exportModel()` re-decodes every record
+   * including the background, while `views` here has already dropped it, so the
+   * two lists are different lengths and zipping them would attach each name to
+   * the layer below it.
+   */
+  function inkExportLayers(
+    ink: { views: NoteLayerView[] } | null,
+    model: LayeredExportModel | null,
+  ): MarkInkLayer[] {
+    if (!ink || !model) return [];
+    const byId = new Map(model.layers.map((l) => [l.id, l]));
+    return ink.views.flatMap((v) => {
+      const decoded = byId.get(v.index);
+      return decoded
+        ? [
+            {
+              name: v.name,
+              canvas: decoded.canvas,
+              visible: v.visible,
+              authoredVisible: v.authoredVisible,
+            },
+          ]
+        : [];
+    });
+  }
+
+  function syncPager(): void {
+    pageReadout.textContent = pageCount > 0 ? `${pageIndex + 1} / ${pageCount}` : "—";
+    prev.disabled = pageIndex <= 0;
+    next.disabled = pageIndex >= pageCount - 1;
+  }
+
+  async function go(to: number): Promise<void> {
+    if (!open_ || to < 0 || to >= pageCount || to === pageIndex) return;
+    pageIndex = to;
+    syncPager();
+    pagesPanel.setCurrent(to);
+    await paint();
+  }
+
+  // --- keyboard (only while the viewer is on screen) ------------------------
+  // This app has exactly TWO paged viewers — the `.note` reader and this one —
+  // and they were reachable by different means: the reader pages with the arrow
+  // keys (`reader.ts`), while this had the pager buttons and nothing else. Same
+  // control, same interaction, so the same keys.
+  //
+  // The shape is `txtViewer.ts`'s (guard on `root.hidden`, one document listener
+  // for the viewer's life, Escape leaves) and the paging is the reader's, down
+  // to leaving modified arrows alone being a thing NEITHER does — matching the
+  // reader is the point here, and a divergence would be its own inconsistency.
+  function onKey(e: KeyboardEvent): void {
+    if (root.hidden) return;
+    if (e.key === "Escape") return deps.onBack();
+    // Paging keys belong to the page, not to the field someone is typing in.
+    if (e.target instanceof HTMLInputElement) return;
+    if (e.key === "ArrowRight") void go(pageIndex + 1);
+    else if (e.key === "ArrowLeft") void go(pageIndex - 1);
+  }
+  document.addEventListener("keydown", onKey);
+
+  /**
+   * Fetch the paired `.mark`'s page list and index it BY PDF PAGE.
+   *
+   * `sourcePage` is 1-based (it is the number the device wrote in the footer),
+   * and `pageIndex` here is 0-based, so the key is `sourcePage - 1`. A page
+   * without one is skipped rather than guessed at: an unnumbered page cannot be
+   * placed, and placing it wrongly is the failure this whole feature was warned
+   * about.
+   */
+  async function loadMark(id: Id, mine: number): Promise<void> {
+    let mm: NoteMeta;
+    try {
+      mm = await deps.api.getNoteMeta(id);
+    } catch {
+      return; // no annotations is a fine state; the PDF is the document
+    }
+    if (mine !== generation) return;
+    markId = id;
+    markPages.clear();
+    layersToggle.hidden = false;
+    for (const ref of mm.pages) {
+      if (ref.sourcePage !== null && ref.sourcePage > 0) markPages.set(ref.sourcePage - 1, ref);
+    }
+    // The page on screen was painted before this landed, so give it its ink.
+    if (open_ && markPages.has(pageIndex)) void paint();
+  }
+
+  // --- open / teardown ----------------------------------------------------
+
+  function release(): void {
+    generation++; // anything in flight stops before it touches the handle
+    if (open_ && session) {
+      // Fire and forget: the worker serialises, so a later `open` cannot
+      // overtake this close, and nothing here needs to wait for it.
+      void session.close().catch(() => {});
+    }
+    open_ = false;
+    pageCount = 0;
+    pageIndex = 0;
+    markId = null;
+    markPages.clear();
+    // NOT just hidden — RELEASED. The stack is full-resolution RGBA, megabytes
+    // per layer, and hiding the host frees none of it: only `release` zeroes the
+    // canvases (`noteLayers.ts`, `zeroCanvas`). Without this, viewing one
+    // annotated page and walking back to the library left the ink resident for
+    // the life of the tab, against a 50 MB budget for the whole app.
+    //
+    // This is the one choke point — `open`, `hide`, `destroy` and the no-pages
+    // path all come through here, and a page turn deliberately does NOT, so the
+    // decoded stack still survives paging within a document.
+    markCtl.release();
+    markCtl.el.hidden = true;
+    layersToggle.hidden = true;
+    layersPanel.el.hidden = true;
+    layersOpen = false;
+    // Forget the file the bin actions point at. Without this, Move to bin after
+    // navigating away would trash whatever was open LAST — the controls outlive
+    // any one document, so their target has to be cleared with it.
+    meta = null;
+    // Drops every canvas and stops observing: a strip left behind would keep
+    // painting into rows for a document that is no longer open.
+    resetThumbs();
+    // The per-page groups described the document that just went away. Nothing
+    // has ink now, so the layered rows fold back before the next one opens —
+    // and the popover shuts, or it would hang open over the next file with the
+    // last one's rows in it (`spdViewer` closes it on the same events).
+    downloads.refreshGroups();
+    exportMenu.setOpen(false);
+    // AND FORGET THE ADDRESS. The raw row's href is minted per open and the row
+    // outlives any one document, so leaving it set would offer the file you just
+    // navigated away from — for the whole window between the next `open()` and
+    // its metadata landing, which on a slow link is exactly when someone reaches
+    // for Download. Same reasoning as clearing `meta` above.
+    downloads.setRawHref(null);
+  }
+
+  async function open(
+    summary: NoteSummary,
+    metaPromise: Promise<NoteMeta>,
+    page: number,
+    origin: ReaderOrigin,
+    _query: string,
+  ): Promise<void> {
+    release();
+    const mine = generation;
+    root.hidden = false;
+    fromBin = origin.kind === "bin";
+    // The context swap: Move to bin for a live file, the retention + "…" cluster
+    // for a trashed one. Set BEFORE the metadata lands so the toolbar never shows
+    // the wrong pair while loading — both are inert until `meta` arrives, and
+    // each guards on it.
+    moveBin.hidden = fromBin;
+    binActions.setBinMode(fromBin, fromBin ? (origin.retention ?? null) : null);
+    header.setName(summary.name);
+    header.setBackWord(backWord(origin));
+    // THE SUBTITLE FILLS IN AS THE FILE DOES, which is the reader's habit too.
+    // It used to be a bare `"PDF"` for the whole session — the one line of copy
+    // the viewer owns, saying the only thing already on screen three times over:
+    // the library's listing, the file glyph, and the pager's `/ 77`. Its job is
+    // what nothing else carries. That is the FOLDER PATH from the first frame
+    // (the Back button shows only the deepest segment), then the SIZE once the
+    // metadata lands — on a slow link, what you want in order to decide whether
+    // to wait — and finally the page count, below, once it is known.
+    header.setSubtitle(originSubtitle(origin, summary.fileType?.toUpperCase() || "PDF"));
+    zoom = "Fit";
+    // The READOUT too, not just the state behind it. The stepper keeps its own
+    // label, so a new document opened after zooming the last one rendered at Fit
+    // while the toolbar still said 300% — and the next step moved from the
+    // number on screen rather than from the page in front of you.
+    zoomStepper.set("Fit");
+    pageIndex = Math.max(0, page);
+    body.showPlaceholder(summary.name, "Opening this PDF…");
+    syncPager();
+
+    if (!seam.supported()) {
+      // The one capability this app asks for that nothing else does: MuPDF's
+      // error handling compiles to the wasm EXCEPTION-HANDLING proposal.
+      body.showPlaceholder(
+        summary.name,
+        "This browser can't preview PDFs. Download it to read it, or try a newer browser.",
+      );
+      return;
+    }
+
+    let m: NoteMeta;
+    try {
+      m = await metaPromise;
+    } catch {
+      if (mine !== generation) return;
+      body.showPlaceholder(summary.name, "Couldn't read this file.");
+      return;
+    }
+    if (mine !== generation) return;
+    meta = m;
+    docHash = m.fileHash ?? "";
+    // The `.mark` beside this PDF, if the server found one. Fetched WITHOUT
+    // blocking the document: opening a PDF is already several round trips and
+    // the ink is useless before there is a page under it, so this rides along
+    // and lands whenever it lands. `paint` reads `markPages` each time, so a
+    // late arrival simply shows up on the next page turn — or on this page, via
+    // the repaint below.
+    if (m.annotationsId) void loadMark(m.annotationsId, mine);
+    if (m.size > 0) header.setSubtitle(originSubtitle(origin, formatBytes(m.size)));
+    const url = rawFileUrl(m.id, m.fileHash, { download: false, bin: fromBin });
+    // Decided off the URL ITSELF, never off an element's `href`: reading that
+    // property back resolves an empty attribute against the document base, so a
+    // falsy test on it is never true — which is how a file with no address (the
+    // state the placeholder below exists for) once kept a live Download button
+    // pointing at the app. `null` DISABLES the raw row; the menu itself stays,
+    // because the per-page exports are built from pixels this viewer already has
+    // and need no download URL at all.
+    downloads.setRawHref(rawFileUrl(m.id, m.fileHash, { download: true, bin: fromBin }));
+
+    if (!url) {
+      body.showPlaceholder(summary.name, "This file has no readable address.");
+      return;
+    }
+
+    // NO SIZE GATE. There used to be a 64 MB `MAX_PREVIEW_BYTES` here, refusing
+    // large files with an honest "download it instead" — honest because the
+    // viewer really did have to pull the whole file across the wire and into
+    // wasm memory before it could paint anything. With range-served blocks it
+    // does not: page 1 costs the blocks page 1 is written in, whatever the file
+    // measures (`docs/scratch/pdf-ranges.md` §5.6). The placeholder below still
+    // catches the genuine failures — a corrupt file, an encrypted one, a browser
+    // that cannot run the module.
+    session ??= seam.createSession();
+    const s = session;
+    let pages: number;
+    try {
+      ({ pageCount: pages } = await s.open(url, m.size));
+      open_ = true;
+    } catch (err) {
+      if (mine !== generation) return;
+      // 401/403 is the shell's to handle (re-authenticate), not ours to paint.
+      if (err instanceof PdfLoadError && (err.status === 401 || err.status === 403)) {
+        deps.onSessionExpired();
+        return;
+      }
+      // MuPDF's sentence goes to the CONSOLE, not to the page. The wasm keeps it
+      // "for the browser to log" (`pdf_shim.c`) and files it under Diagnostics
+      // (`pdf_decode.zig`); this used to print it verbatim in the placeholder,
+      // so a household user met "cannot find document handler for file type: ''"
+      // where every neighbouring failure speaks the app's own voice.
+      //
+      // The comment this replaces claimed the raw text distinguished "encrypted"
+      // from "not a PDF". It does not, reliably: nothing in the shim calls
+      // `fz_needs_password`, so an encrypted file fails wherever it happens to
+      // fail, with whatever message MuPDF happens to throw. Saying so properly
+      // needs that probe in the ABI — worth doing, and not this fix.
+      // The one distinction worth keeping is the one the app can stand behind:
+      // the bytes never arrived, versus they arrived and would not open.
+      if (err instanceof PdfLoadError) {
+        body.showPlaceholder(summary.name, "Couldn't load this PDF.");
+      } else {
+        console.warn("[pdf] open failed:", (err as Error).message ?? err);
+        body.showPlaceholder(summary.name, "Couldn't read this file.");
+      }
+      return;
+    }
+    if (mine !== generation) return;
+    pageCount = pages;
+    // The reader's wording for a paged document, verbatim (`reader.ts`, note
+    // mode): the count, pluralised, behind the same folder prefix.
+    header.setSubtitle(
+      originSubtitle(origin, `${pageCount} ${pageCount === 1 ? "page" : "pages"}`),
+    );
+    if (pageCount === 0) {
+      body.showPlaceholder(summary.name, "This PDF has no pages.");
+      release();
+      return;
+    }
+    pageIndex = Math.min(pageIndex, pageCount - 1);
+
+    // The strip reserves every row's shape from PAGE 0's aspect before anything
+    // is painted, so it does not reflow as thumbnails land. A page of a
+    // different size corrects its own row when its thumbnail resolves.
+    try {
+      const first = await s.pageSize(pageIndex);
+      if (mine !== generation) return;
+      if (first.height > 0) firstAspect = first.width / first.height;
+    } catch {
+      // Keep the default; a strip of slightly wrong boxes beats no strip.
+    }
+    pagesPanel.setPages(pageCount);
+    pagesPanel.setCurrent(pageIndex);
+
+    await paint();
+    // What the first page actually cost, once it is on screen. One message, and
+    // the only way to answer "did the block cache work on this document?"
+    // anywhere other than a test — see `lastPdfStats`.
+    if (mine === generation) void s.stats().catch(() => {});
+  }
+
+  return {
+    el: root,
+    open,
+    hide(): void {
+      release();
+      root.hidden = true;
+    },
+    destroy(): void {
+      release();
+      document.removeEventListener("keydown", onKey);
+      exportMenu.destroy(); // its outside-click + Escape listeners are on `document`
+      pagesPanel.destroy();
+      thumbIo?.disconnect();
+      session?.destroy();
+      session = null;
+      root.remove();
+    },
+  };
+}

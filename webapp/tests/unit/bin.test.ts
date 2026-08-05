@@ -373,7 +373,7 @@ describe("what asks, and what does not", () => {
 // --- what opens where ---------------------------------------------------------
 
 describe("what opens where", () => {
-  /** One of every openable kind: three with a real viewer, two without. */
+  /** One of every openable kind: four with a real viewer, one without. */
   const MIXED = bin([
     entry({ id: "n", name: "a.note" }),
     entry({ id: "s", name: "sketch.spd", fileType: "spd" }),
@@ -396,18 +396,28 @@ describe("what opens where", () => {
     const actions = captureActions(controller, view);
     const of = (id: string) => MIXED.entries.find((e) => e.id === id)!;
 
-    // `.note`, `.spd` and `.txt` have real viewers (the same set
-    // `library.viewerFor` dispatches on), so the SHELL routes them: Back, a
-    // reload and history behave, and the viewer gets the `"bin"` origin.
-    for (const id of ["n", "s", "t"]) actions.open(of(id));
-    expect(onOpen).toHaveBeenCalledTimes(3);
+    // Every kind with a viewer of its own — `hasDedicatedViewer`, the set
+    // `library.viewerFor` dispatches on — is routed by the SHELL: Back, a reload
+    // and history behave, and the viewer gets the `"bin"` origin.
+    //
+    // `.pdf` IS ONE OF THEM, and this test used to say otherwise. It listed the
+    // pdf beside the png as a kind "with no real viewer", which was true when it
+    // was written and stopped being true the day the PDF viewer shipped — so the
+    // test went on asserting that a trashed PDF falls into the preview panel,
+    // where it could be neither restored nor deleted. The bin's own membership
+    // check had drifted from `viewerFor` in exactly the same way; both now ask
+    // `hasDedicatedViewer`.
+    for (const id of ["n", "s", "t", "p"]) actions.open(of(id));
+    expect(onOpen).toHaveBeenCalledTimes(4);
     expect(view.preview).not.toHaveBeenCalled();
 
-    // An image or an unrecognised kind has no real viewer — those stay in the
-    // bin's own preview panel, where the decision controls and the deadline are.
-    for (const id of ["i", "p"]) actions.open(of(id));
-    expect(view.preview).toHaveBeenCalledTimes(2);
-    expect(onOpen).toHaveBeenCalledTimes(3);
+    // An image still has none. Not an oversight: a trashed image is the "is this
+    // the screenshot I meant?" question, which the bin's own preview panel — with
+    // the decision controls and the deadline right there — answers better than a
+    // full viewer would.
+    actions.open(of("i"));
+    expect(view.preview).toHaveBeenCalledTimes(1);
+    expect(onOpen).toHaveBeenCalledTimes(4);
   });
 });
 

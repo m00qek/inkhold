@@ -54,7 +54,7 @@ const sqlite = @import("sqlite.zig");
 /// v5 adds `upload_sessions.received_bytes`, the running total that makes the
 /// device upload cap per-SESSION rather than per-part. Additive, same shape as
 /// v2/v3, and defaulted so every existing row is immediately valid.
-pub const version: i64 = 5;
+pub const version: i64 = 7;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -68,7 +68,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 /// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
 /// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
 /// missed on a bump). The comptime check below makes the drift a build error.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7 };
 
 comptime {
     if (steps.len != version) @compileError(
@@ -413,6 +413,39 @@ const ddl_v5 =
     \\ALTER TABLE upload_sessions ADD COLUMN received_bytes INTEGER NOT NULL DEFAULT 0;
 ;
 
+/// The 4-byte file-type marker the `.note` signature carries — "note", "mark",
+/// or whatever else the device writes. `signature` above stores the signature
+/// PROPER (`SN_FILE_VER_<8 digits>`), which for the X-series family begins at
+/// offset 4 and therefore EXCLUDES these bytes; they were parsed and dropped.
+///
+/// NULL means "unknown", which covers both a pre-v6 row and the original/ASA
+/// family, whose signature sits at offset 0 so there is no marker to read. It
+/// never means "not a note" — `indexable` answers that.
+const ddl_v6 =
+    \\ALTER TABLE note_index ADD COLUMN filetype TEXT;
+;
+
+/// The page's OWN number, read from its `PAGE<n>` key in the container footer,
+/// 1-based — as distinct from `page_index`, which is its POSITION in the file
+/// and stays the addressing key (`/note/{id}/page/{n}`, and the `UNIQUE`
+/// constraint above).
+///
+/// For a notebook the two differ only by one: the footer runs `PAGE1`, `PAGE2`,
+/// … with no gaps. For a `.mark` they diverge, because a mark holds only the
+/// pages that were ANNOTATED and names them by the PDF page they belong to — a
+/// real capture's footer reads `<PAGE2:…><PAGE5:…><PAGE6:…>`
+/// (`parsers/note/note-format.md` §13.2). Without this column a mark's three
+/// pages are indistinguishable from pages 1–3 of a short notebook, and there is
+/// nothing to composite a PDF against.
+///
+/// 0 means "not recorded" — a pre-v7 row, or a container whose footer never had
+/// a readable number. It is not a legal page number, so it cannot be mistaken
+/// for one. `index_version` is bumped alongside this, so existing blobs re-index
+/// and 0 is a transient state rather than a permanent one.
+const ddl_v7 =
+    \\ALTER TABLE note_page_index ADD COLUMN source_page INTEGER NOT NULL DEFAULT 0;
+;
+
 test "migrate creates the v1 schema and is idempotent" {
     var db = try sqlite.Db.openMemory();
     defer db.close();
@@ -569,6 +602,62 @@ test "v5: fresh and stepwise-migrated databases carry an identical upload_sessio
     defer r.finalize();
     try std.testing.expect(!r.isNull(0));
     try std.testing.expectEqual(@as(i64, 0), r.int(0));
+}
+
+test "v6: fresh and stepwise-migrated databases carry an identical note_index table" {
+    // The same property v2/v3/v5 pin, for the column v6 adds. An install that has
+    // been serving since before the marker was recorded must reach byte-identical
+    // DDL by climbing the ladder.
+    const read_ddl = struct {
+        fn get(db: sqlite.Db, buf: []u8) ![]const u8 {
+            var r = (try db.row("SELECT sql FROM sqlite_master WHERE name = 'note_index';", &.{})) orelse return error.Missing;
+            defer r.finalize();
+            const sql = r.text(0);
+            @memcpy(buf[0..sql.len], sql);
+            return buf[0..sql.len];
+        }
+    }.get;
+
+    var fresh = try sqlite.Db.openMemory();
+    defer fresh.close();
+    try migrate(fresh);
+
+    // An install stamped at v5 — the shipped schema before this — migrated up.
+    var from_v5 = try sqlite.Db.openMemory();
+    defer from_v5.close();
+    try from_v5.exec(ddl_v1);
+    try from_v5.exec(ddl_v2);
+    try from_v5.exec(ddl_v3);
+    try from_v5.exec(ddl_v5);
+    try from_v5.exec("PRAGMA user_version = 5;");
+    try migrate(from_v5);
+
+    var a: [2048]u8 = undefined;
+    var b: [2048]u8 = undefined;
+    try std.testing.expectEqualStrings(try read_ddl(fresh, &a), try read_ddl(from_v5, &b));
+    try std.testing.expectEqual(version, try userVersion(fresh));
+    try std.testing.expectEqual(version, try userVersion(from_v5));
+
+    // A row written BEFORE the column existed reads NULL — "marker unknown",
+    // which `fileTypeFor` must answer as "note". Unlike v5's `received_bytes`
+    // there is deliberately NO default: a zero-length string would be a claim
+    // about the file, and NULL is the honest absence. The row survives the
+    // upgrade rather than being re-parsed, and the `index_version` bump is what
+    // eventually refreshes it through the ordinary self-healing read path.
+    try from_v5.exec(
+        "INSERT INTO blobs(md5, size, refcount, created_at) VALUES('0123456789abcdef0123456789abcdef', 1, 1, 0);",
+    );
+    try from_v5.exec(
+        "INSERT INTO note_index(blob_md5, index_version, indexable, page_count, indexed_at) " ++
+            "VALUES('0123456789abcdef0123456789abcdef', 1, 1, 3, 0);",
+    );
+    var r = (try from_v5.row(
+        "SELECT filetype, page_count FROM note_index WHERE blob_md5 = '0123456789abcdef0123456789abcdef';",
+        &.{},
+    )) orelse return error.TestUnexpectedResult;
+    defer r.finalize();
+    try std.testing.expect(r.isNull(0));
+    try std.testing.expectEqual(@as(i64, 3), r.int(1));
 }
 
 test "v4: used_bytes is RECOMPUTED to charge retained versions, and converges from either direction" {

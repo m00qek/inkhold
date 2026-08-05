@@ -39,6 +39,24 @@ export function backWord(origin: ReaderOrigin): string {
 }
 
 /**
+ * The header's SUBTITLE, prefixed with where the file lives.
+ *
+ * `rest` is whatever the viewer knows that the screen does not already say — the
+ * reader uses a page count for a note and `TYPE · size` for everything else. The
+ * folder path is the part no other control carries: the toolbar's Back button
+ * names only the DEEPEST segment (see {@link backWord}), so `Note / Projects`
+ * reads as "Projects" there and the full path appears nowhere else.
+ *
+ * Lifted out of `reader.ts`, where it was module-private, when the PDF viewer
+ * turned out to be showing a bare `"PDF"` — a fact the library, the file icon and
+ * the pager's `/ 77` all already carry — and no path at all.
+ */
+export function originSubtitle(origin: ReaderOrigin, rest: string): string {
+  if (origin.kind === "folder" || origin.folderPath === null) return rest;
+  return `${origin.folderPath} · ${rest}`;
+}
+
+/**
  * The `− [readout] +` stepper every viewer's zoom (and the `.txt` font/width)
  * controls share: a `.pager` holding two `.icon-btn`s around a readout `<span>`.
  *

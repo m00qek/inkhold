@@ -58,7 +58,7 @@ test.describe("library rail + gallery", () => {
     // Projects' own 2 notes are a level down and belong to its own row.
     await expect(navItem(page, "Note").locator(".nav__count")).toHaveText("5");
     await expect(navItem(page, "MyStyle").locator(".nav__count")).toHaveText("3");
-    await expect(navItem(page, "Document").locator(".nav__count")).toHaveText("3");
+    await expect(navItem(page, "Document").locator(".nav__count")).toHaveText("4");
     await expect(navItem(page, "Export").locator(".nav__count")).toHaveText("0");
     await expect(navItem(page, "Screenshot").locator(".nav__count")).toHaveText("2");
     await expect(navItem(page, "Inbox").locator(".nav__count")).toHaveText("1");
@@ -561,10 +561,10 @@ test.describe("library rail + gallery", () => {
       await signedIn(page);
       await page.goto("/");
 
-      // DOCUMENT/ holds a real .note, a PDF and an unscaled note — mixed types,
-      // one type-neutral noun.
+      // DOCUMENT/ holds a real .note, a PDF, an .epub and an unscaled note —
+      // mixed types, one type-neutral noun.
       await openCategory(page, "Document");
-      await expect(head(page)).toHaveText("3 docs");
+      await expect(head(page)).toHaveText("4 docs");
 
       // SCREENSHOT/ is nothing but PNGs. "2 notes" here was the old lie.
       await openCategory(page, "Screenshot");

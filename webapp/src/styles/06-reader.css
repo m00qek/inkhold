@@ -57,13 +57,6 @@
    scroll all belong to `.side-panel`). So the rail keeps only its own inner
    layout: a centred column of page thumbnails. */
 
-/* A column of thumbnails wants far less width than the text/list panels the
-   primitive defaults to (`--panel-w`), so the "Pages" dock takes the narrow
-   track. The reader's relayout math reads `--panel-w-narrow` for the LEFT slice
-   (reader.ts), so this stays in sync with the layout. */
-#note-pages-panel {
-  width: var(--panel-w-narrow);
-}
 .filmstrip {
   display: block;
 }
@@ -102,16 +95,18 @@
 }
 .filmstrip__thumb {
   /* The PANEL height class (shared with the .spd layers panel). A vertical
-     strip lives on a FIXED item height — it keeps the scroll math stable — and
-     the width is the portrait 3:4 page derived from it (~76px): note pages are
-     painted through the canvas pipeline, which carries no per-page aspect, so
-     the strip keeps the page's known portrait shape rather than guessing. */
+     strip lives on a FIXED item height — it is what keeps the virtual scroll
+     math exact — so the shape a row varies is its WIDTH, never its height. */
   height: var(--preview-h-panel);
-  aspect-ratio: 3 / 4;
-  /* renderItem overrides `aspect-ratio` per page, so a LANDSCAPE page (wide
-     aspect) would compute a width past the narrow column and spill out of it.
-     Clamp to the column: the thumb stays its fixed height and only the widest
-     pages give up exact aspect. */
+  /* The row RESERVES its shape before anything paints — `pages/pageIndex.ts`
+     sets `--thumb-aspect` on the `.filmstrip__page` from whatever the viewer
+     knows about that page (a `.note` page's own dims; a PDF page's measured
+     size), so the strip does not reflow under the pointer as canvases land. The
+     fallback is the portrait page every `.note` is until told otherwise. */
+  aspect-ratio: var(--thumb-aspect, 3 / 4);
+  /* A LANDSCAPE page (wide aspect) would compute a width past the narrow column
+     and spill out of it. Clamp to the column: the thumb stays its fixed height
+     and only the widest pages give up exact aspect. */
   max-width: 100%;
   border-radius: 2px;
   overflow: hidden;
@@ -122,7 +117,18 @@
   outline-offset: 2px;
   transition: outline-color 0.12s ease;
   position: relative;
+  /* A BLANK SHEET is the neutral placeholder — a page whose contents are not
+     known yet, which is all any viewer can honestly claim before it renders. */
   background-color: var(--sheet);
+}
+/* …and the RULED sheet is the `.note` reader's, because a note IS lined
+   stationery with a margin rule. This lived on `.filmstrip__thumb` itself, from
+   when the reader was the only thing with a page index — so once the PDF viewer
+   mounted the same strip, every unpainted PDF row claimed to be lined notebook
+   paper, complete with the red margin, until its thumbnail replaced it with a
+   two-column gazette. On a slow link that is most of the time you spend looking
+   at the strip. */
+.note-filmstrip .filmstrip__thumb {
   background-image:
     linear-gradient(90deg, transparent 15%, color-mix(in srgb, var(--margin) 30%, transparent) 15%, color-mix(in srgb, var(--margin) 30%, transparent) 17%, transparent 17%),
     repeating-linear-gradient(180deg, transparent, transparent 10%, var(--paper-rule) 10%, var(--paper-rule) calc(10% + 1px));

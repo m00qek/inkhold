@@ -34,7 +34,9 @@ test.describe("non-.note files", () => {
     // every control that only means something over pages.
     await expect(page.locator(".stage")).toBeHidden();
     await expect(page.locator(".page canvas")).toBeHidden();
-    await expect(page.locator(".filmstrip")).toBeHidden();
+    // Scoped to the READER: the PDF viewer mounts a `.filmstrip` of its own
+    // (same look, `pdf-filmstrip` hook), so a bare selector matches both.
+    await expect(page.getByRole("region", { name: "Reader" }).locator(".filmstrip")).toBeHidden();
     await expect(page.locator(".pager__count")).toBeHidden();
     await expect(page.getByRole("button", { name: "Recognized text" })).toBeHidden();
 
@@ -43,16 +45,47 @@ test.describe("non-.note files", () => {
     await expect(page.locator(".reader__title")).toContainText("PNG");
   });
 
-  test("a pdf gets the honest no-preview state with a working download", async ({ page }) => {
+  test("a pdf opens in the PDF viewer now, not the reader's no-preview state", async ({ page }) => {
     await signedIn(page);
     await mockRawFiles(page);
     await page.goto("/#/note/n-doc-lease");
 
+    // Its OWN viewer — the reader is not involved. (`mockRawFiles` serves PNG
+    // bytes for every raw file, so MuPDF refuses them and the viewer shows its
+    // honest failure card; that the routing happens at all is the point here.
+    // `pdfViewer.spec.ts` renders real PDF bytes end to end.)
+    await expect(page.getByRole("region", { name: "PDF viewer" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Reader" })).toBeHidden();
+    await expect(page.locator(".filestage__empty")).toBeHidden();
+
+    // The download still works, and still does not navigate away from the app.
+    // Download is a MENU here now (per-page layered exports over the raw file —
+    // `pdfExports.ts`); the raw bytes are its WHOLE DOCUMENT row, and THAT is
+    // the thing this test has always been about. The rest of the matrix is
+    // `pdfViewer.spec.ts`'s.
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await region.getByRole("button", { name: "Download" }).click();
+    const raw = region.getByRole("menuitem", { name: "PDF document" });
+    await expect(raw).toBeVisible();
+    const [download] = await Promise.all([page.waitForEvent("download"), raw.click()]);
+    expect(download.url()).toMatch(/\/file\/n-doc-lease\?v=[0-9a-f]{32}&download=1$/);
+    expect(download.suggestedFilename()).toBeTruthy();
+    await expect(region).toBeVisible();
+  });
+
+  test("a type with no viewer gets the honest no-preview state with a working download", async ({ page }) => {
+    // The reader's own fallback, which every unrecognised type still lands on.
+    // This used to be the PDF's test; PDFs preview now, so an `.epub` — device
+    // readable, no viewer here — keeps the state under test.
+    await signedIn(page);
+    await mockRawFiles(page);
+    await page.goto("/#/note/n-doc-epub");
+
     // Not a blank canvas: a named state that says what the file is.
     const body = page.locator(".filestage__empty");
     await expect(body).toBeVisible();
-    await expect(body).toContainText("PDF");
-    await expect(body).toContainText("Apartment lease");
+    await expect(body).toContainText("EPUB");
+    await expect(body).toContainText("Sourdough");
     await expect(body).toContainText("no preview");
 
     await expect(page.locator(".filestage__img")).toBeHidden();
@@ -62,7 +95,7 @@ test.describe("non-.note files", () => {
     // The download link is the versioned URL with the attachment flag.
     const link = body.locator(".filestage__download");
     await expect(link).toBeVisible();
-    expect(await link.getAttribute("href")).toMatch(/^\/file\/n-doc-lease\?v=[0-9a-f]{32}&download=1$/);
+    expect(await link.getAttribute("href")).toMatch(/^\/file\/n-doc-epub\?v=[0-9a-f]{32}&download=1$/);
 
     // …and it actually downloads, rather than navigating away from the app.
     const [download] = await Promise.all([page.waitForEvent("download"), link.click()]);

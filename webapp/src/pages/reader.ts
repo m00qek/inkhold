@@ -34,6 +34,7 @@ import {
   VIEWER_IC,
   VIEWER_DEBOUNCE_MS,
   backWord,
+  originSubtitle,
   createViewerHeader,
   createZoomStepper,
   createViewerExportMenu,
@@ -42,7 +43,7 @@ import { createBinViewerActions, type BinRetention } from "../ui/binViewerAction
 import { relativeTime, absoluteTime } from "../ui/relativeTime";
 import { createLayersPanel } from "./layersPanel";
 import { createSidePanel, sidePanelState } from "../ui/sidePanel";
-import { VirtualList } from "../ui/virtualList";
+import { createPageIndex } from "./pageIndex";
 import { DEFAULT_PAGE_DIMS, skeletonPage } from "../core/noteSkeleton";
 import {
   buildNoteLayerThumb,
@@ -246,20 +247,14 @@ function tokenPx(name: string, fallback: number): number {
  * information, and from the folder itself it would be the duplication that
  * hiding the library topbar exists to remove.
  */
-function subtitle(origin: ReaderOrigin, rest: string): string {
-  if (origin.kind === "folder" || origin.folderPath === null) return rest;
-  return `${origin.folderPath} · ${rest}`;
-}
+/** @deprecated in spirit — kept as the reader's local name for the shared
+ *  {@link originSubtitle}, so the call sites below stay short. */
+const subtitle = originSubtitle;
 
 export function createReader(deps: ReaderDeps): Reader {
   const { api, renderer, cache, getTheme } = deps;
 
   // --- DOM -----------------------------------------------------------------
-  // The page-index thumbnail rail. It is the BODY of the "Pages" side panel now
-  // (built below), so it carries no `aria-label` of its own — the panel's aside
-  // is the named "Pages" region. Still the lazy IntersectionObserver engine's
-  // target host and the source of the `.filmstrip__page` buttons.
-  const filmstrip = el("div", { class: "filmstrip" });
   // Back + title — the shared viewer header, keeping the reader's LEGACY class set
   // (`.backbtn`/`.reader__title`) so migrating it is not pure CSS/e2e churn.
   const header = createViewerHeader({
@@ -312,22 +307,43 @@ export function createReader(deps: ReaderDeps): Reader {
       return buildNoteLayerThumb(v);
     },
   });
-  // The PAGE INDEX, now a member of the SAME docked side-panel family as Layers
-  // and OCR (src/ui/sidePanel.ts) — one chrome, one show/hide mechanism — rather
-  // than a bespoke left rail in the reader grid. Two things set it apart, both
-  // expressed through the shared component: it docks on the LEFT (it is inserted
-  // ahead of the page in `.page-wrap`), and it is OPEN BY DEFAULT (it is the
-  // reader's primary navigation, not an on-demand tool). Its body IS the existing
-  // `filmstrip` rail, unchanged — so the lazy thumbnails, the current-page
-  // highlight, click-to-jump, the find badges and keyboard nav all carry over.
-  const pageIndexPanel = createSidePanel({
+  // The PAGE INDEX — the SHARED filmstrip (`pages/pageIndex.ts`), the same one
+  // the PDF viewer mounts: the docked panel, the virtual window over the rows,
+  // the current-page mark and scroll-into-view, and the find badges. What the
+  // reader supplies is the PAINT — the lazy `.note` page pipeline below — plus
+  // what it knows about each page (its shape, and whether its bytes are known
+  // yet). Two things set this instance apart: it docks on the LEFT (it is
+  // inserted ahead of the page in `.page-wrap`), and it is OPEN BY DEFAULT (it is
+  // the reader's primary navigation, not an on-demand tool).
+  const pageIndexPanel = createPageIndex({
     id: "note-pages-panel",
-    ariaLabel: "Pages",
-    icon: svg(VIEWER_IC.pages, 1.7),
-    label: "Pages",
-    hookPrefix: "pages",
+    // The RULED-PAPER placeholder is the note's, not the component's: an
+    // unpainted row here is a sheet of the lined stationery a `.note` actually
+    // is. The PDF viewer mounts the same strip and its pages are not lined, so
+    // the look hangs off this hook rather than off `.filmstrip__thumb`.
+    stripHook: "note-filmstrip",
+    onPick: (index) => goToPage(index),
+    // A page whose bytes are not known yet — the skeleton's invented pages,
+    // before the real metadata lands — has nothing to render and says so.
+    loading: (index) => meta?.pages[index]?.hash === "",
+    aspect: (index) => {
+      const page = meta?.pages[index];
+      if (!page?.width || !page.height) return null;
+      // Clamped: a very wide page would compute a thumb wider than the narrow
+      // column, and the strip's whole geometry is a fixed row height.
+      return Math.min(page.width / page.height, 2.5);
+    },
+    // The lazy engine is the reader's paint. It owns WHEN within the window
+    // (its own IntersectionObserver and settle gate) and the note-page pipeline;
+    // the strip owns whether the row exists at all.
+    mount: (row) => {
+      const page = meta?.pages[row.index];
+      if (meta && page && page.hash !== "") {
+        filmEngine.add({ target: row.canvas, noteId: meta.id, page, size: "thumb" });
+      }
+    },
+    unmount: (row) => filmEngine.remove(row.canvas),
   });
-  pageIndexPanel.body.append(filmstrip);
 
   // Docked beside the page like the recognized-text aside — same `.page-wrap`
   // slot, same "the panel's width is not the page's" sizing rule in showPage. The
@@ -1010,33 +1026,6 @@ export function createReader(deps: ReaderDeps): Reader {
     }
   }
 
-  /**
-   * The filmstrip badges — the distribution of matches through the notebook, at
-   * a glance, on UI that already exists.
-   *
-   * They anchor to `.filmstrip__page`, which is `position: relative` in the
-   * stylesheet FOR THIS REASON. Without it they resolve against a distant
-   * positioned ancestor and stack in the window corner: correct counts in the
-   * DOM, nothing visible where they belong.
-   */
-  function paintBadges(counts: ReadonlyMap<number, number>): void {
-    if (!filmVirtualList) return;
-    for (const [i, btn] of filmVirtualList.getRenderedItems()) {
-      btn.querySelector(".filmstrip__hits")?.remove();
-      const n = counts.get(i);
-      if (!n) continue;
-      const label = `${n} ${n === 1 ? "match" : "matches"} on page ${i + 1}`;
-      btn.append(el("span", { class: "filmstrip__hits", text: String(n), title: label }));
-    }
-  }
-
-  /**
-   * The counts currently on the filmstrip. Held because `buildFilmstrip`
-   * REPLACES every button — on open, and on a STALE_PAGE metadata refetch that
-   * can land mid-find — and the badges hang off the buttons it threw away.
-   */
-  let lastBadges: ReadonlyMap<number, number> = new Map();
-
   const find = createFindController({
     api,
     // The same sink everything else in this reader uses: an expired session
@@ -1063,10 +1052,11 @@ export function createReader(deps: ReaderDeps): Reader {
         if (state.kind === "idle" || state.kind === "unrecognised") findNote.hidden = true;
       },
       setPageMatches: paintOvals,
-      setPageCounts(counts) {
-        lastBadges = counts;
-        paintBadges(counts);
-      },
+      // The distribution of matches through the notebook, at a glance, on UI
+      // that already exists. The strip HOLDS the counts, which is what keeps
+      // them on a rail it rebuilds under us — on open, on a STALE_PAGE metadata
+      // refetch that can land mid-find, and on every scroll that recycles a row.
+      setPageCounts: (counts) => pageIndexPanel.setBadges(counts),
       showPage: (index) => goToPage(index),
       setStepEnabled(enabled) {
         findPrev.disabled = !enabled;
@@ -1431,11 +1421,11 @@ export function createReader(deps: ReaderDeps): Reader {
     const page = meta.pages[pageIndex];
     if (!page) return;
 
-    if (filmVirtualList) {
-      for (const [i, btn] of filmVirtualList.getRenderedItems()) {
-        btn.setAttribute("aria-current", String(i === pageIndex));
-      }
-    }
+    // Mark it AND scroll it into view. Every path that changes page comes
+    // through here, so the strip follows the page for free — and it follows it
+    // now rather than after the paint, which is what a jump across a long
+    // notebook should look like.
+    pageIndexPanel.setCurrent(pageIndex);
     pagerCount.textContent = `${pageIndex + 1} / ${meta.pages.length}`;
 
     // WHAT THE LAYERS AFFORDANCE MAY SAY, decided HERE — from the metadata, in
@@ -1515,38 +1505,28 @@ export function createReader(deps: ReaderDeps): Reader {
     // when there is none to blur — the ruled sheet, so the previous page does
     // not linger and the new one is visibly ON ITS WAY.
     let thumbDrawn = false;
-    if (filmVirtualList) {
-      let btn: HTMLElement | undefined;
-      for (const [i, el] of filmVirtualList.getRenderedItems()) {
-        if (i === pageIndex) {
-          btn = el;
-          break;
-        }
-      }
-      if (btn) {
-        const thumbCanvas = btn.querySelector("canvas");
-        if (thumbCanvas && thumbCanvas.width > 0 && thumbCanvas.height > 0) {
-          const dpr = Math.min(typeof devicePixelRatio !== "undefined" ? devicePixelRatio : 1, DPR_CAP);
-          pageCanvas.width = Math.round(w * dpr);
-          pageCanvas.height = Math.round(h * dpr);
-          const ctx = pageCanvas.getContext("2d");
-          if (ctx) {
-            ctx.drawImage(thumbCanvas, 0, 0, pageCanvas.width, pageCanvas.height);
-            pageCanvas.classList.add("is-loading");
-            thumbDrawn = true;
-          }
-        }
+    const thumbCanvas = pageIndexPanel.thumbCanvas(pageIndex);
+    if (thumbCanvas && thumbCanvas.width > 0 && thumbCanvas.height > 0) {
+      const dpr = Math.min(typeof devicePixelRatio !== "undefined" ? devicePixelRatio : 1, DPR_CAP);
+      pageCanvas.width = Math.round(w * dpr);
+      pageCanvas.height = Math.round(h * dpr);
+      const ctx = pageCanvas.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(thumbCanvas, 0, 0, pageCanvas.width, pageCanvas.height);
+        pageCanvas.classList.add("is-loading");
+        thumbDrawn = true;
       }
     }
     if (!thumbDrawn) {
       // THE BLUR-UP SOURCE IS THE FILMSTRIP, AND THE FILMSTRIP IS VIRTUALIZED.
       // Jump outside its rendered window — a deep link to page 60 of a 200-page
       // note, a find step across a distant boundary — and there is no button to
-      // blur (`scrollIntoView` only runs at the END of this function). Clearing
-      // the canvas then left a bare white rectangle, with no indication of
-      // anything happening, for the whole fetch + decode. The lazy engine's
-      // ruled sheet is the app's established "a page is coming" treatment on
-      // every other surface; this is the same paint at page size.
+      // blur: `setCurrent` above has asked the strip to scroll there, but the
+      // row it builds is a fresh 0×0 canvas whose own paint has not landed.
+      // Clearing the page canvas then left a bare white rectangle, with no
+      // indication of anything happening, for the whole fetch + decode. The lazy
+      // engine's ruled sheet is the app's established "a page is coming"
+      // treatment on every other surface; this is the same paint at page size.
       pageCanvas.classList.remove("is-loading");
       defaultPlaceholder(pageCanvas, page);
     }
@@ -1603,8 +1583,6 @@ export function createReader(deps: ReaderDeps): Reader {
       const neighbour = meta.pages[j];
       if (neighbour) filmEngine.prefetch(noteId, neighbour, "full");
     }
-
-    filmVirtualList?.scrollIntoView(pageIndex);
   }
 
   /**
@@ -1621,72 +1599,20 @@ export function createReader(deps: ReaderDeps): Reader {
     syncUrl();
   }
 
-  let filmVirtualList: VirtualList | null = null;
-
+  /**
+   * (Re)build the strip for whatever `meta` now says. Called on open and on
+   * every metadata replacement — a skeleton resolving, a STALE_PAGE refetch —
+   * because the rows are read off `meta` and a stale row would render a page
+   * that no longer exists. The badges survive it: the strip holds them.
+   */
   function buildFilmstrip(): void {
     filmEngine.reset();
-    if (filmVirtualList) {
-      filmVirtualList.destroy();
-      filmVirtualList = null;
-    }
     if (!meta) {
-      filmstrip.replaceChildren();
+      pageIndexPanel.clear();
       return;
     }
-    
-    filmVirtualList = new VirtualList({
-      scrollContainer: pageIndexPanel.el,
-      hostContainer: pageIndexPanel.body,
-      contentContainer: filmstrip,
-      totalItems: meta.pages.length,
-      itemHeight: 124, // --preview-h-panel (101) + gap/border/text
-      renderItem: (index) => {
-        const page = meta!.pages[index];
-        const canvas = el("canvas");
-        const thumb = el("div", { class: "filmstrip__thumb" }, canvas);
-        if (page && page.hash === "") {
-          thumb.classList.add("is-loading");
-        }
-        if (page && page.width && page.height) {
-          const aspect = Math.min(page.width / page.height, 2.5);
-          thumb.style.aspectRatio = String(aspect);
-        }
-        const btn = el(
-          "button",
-          {
-            class: "filmstrip__page",
-            type: "button",
-            "aria-current": String(index === pageIndex),
-            "aria-label": `Page ${index + 1}`,
-          },
-          thumb,
-          el("span", { class: "filmstrip__num", text: String(index + 1) }),
-        );
-        btn.addEventListener("click", () => goToPage(index));
-        
-        const n = lastBadges.get(index);
-        if (n) {
-          const label = `${n} ${n === 1 ? "match" : "matches"} on page ${index + 1}`;
-          btn.append(el("span", { class: "filmstrip__hits", text: String(n), title: label }));
-        }
-
-        if (page && page.hash !== "") {
-          filmEngine.add({ target: canvas, noteId: meta!.id, page, size: "thumb" });
-        }
-        return btn;
-      },
-      recycleItem: (_index, btn) => {
-        const canvas = btn.querySelector("canvas");
-        if (canvas) {
-          filmEngine.remove(canvas as HTMLCanvasElement);
-          canvas.width = 0;
-          canvas.height = 0;
-        }
-      },
-      overscan: 1,
-    });
-    
-    // We don't need to call paintBadges(lastBadges) here, because renderItem handles it for new items.
+    pageIndexPanel.setPages(meta.pages.length);
+    pageIndexPanel.setCurrent(pageIndex);
   }
 
   // --- keyboard (only while open) ------------------------------------------
@@ -1904,6 +1830,9 @@ export function createReader(deps: ReaderDeps): Reader {
         name: summary.name,
         fileType: summary.fileType,
         fileHash: summary.fileHash,
+        // The skeleton is what the listing already knows, and a listing row does
+        // not carry the pairing — the real metadata behind it does.
+        annotationsId: null,
         size: 0,
         pxPerMm: null,
         pages: Array.from({ length: summary.pageCount }, (_, i) =>
@@ -2048,11 +1977,7 @@ export function createReader(deps: ReaderDeps): Reader {
         find.reset();
         findInput.value = "";
         filmEngine.reset();
-        filmstrip.replaceChildren();
-        if (filmVirtualList) {
-          filmVirtualList.destroy();
-          filmVirtualList = null;
-        }
+        pageIndexPanel.clear();
         header.setSubtitle(subtitle(origin, `${meta.fileType.toUpperCase()} · ${formatBytes(meta.size)}`));
         // Bin origin mints the bin-scoped route — the live one 404s for trashed; a
         // history preview mints the version-scoped route (its md5), since the live
@@ -2170,6 +2095,7 @@ export function createReader(deps: ReaderDeps): Reader {
       document.removeEventListener("keydown", onKey);
       exportMenu.destroy();
       filmEngine.destroy();
+      pageIndexPanel.destroy();
       noteLayerCtl.release();
     },
   };

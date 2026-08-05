@@ -91,6 +91,19 @@ export interface PageLayer {
 export interface PageRef {
   /** 0-based position within the note. */
   index: number;
+  /**
+   * The page's OWN number in its container, 1-based — where {@link index} is
+   * where its bytes live, this is which page it IS.
+   *
+   * `null` for every `.note`, where it is always `index + 1` and the server
+   * omits it rather than shipping a derivable field. It is present for a
+   * `.mark`: a mark holds only the pages of a PDF that were ANNOTATED and names
+   * them by the PDF page they belong to, so a real three-page capture is pages
+   * 2, 5 and 6 (`parsers/note/note-format.md` §13.2). Compositing a mark onto
+   * its PDF is exactly the question "which page of the PDF is this?", and this
+   * is the only field that answers it.
+   */
+  sourcePage: number | null;
   /** Per-page content hash — the cache key and the `?v=` URL version. */
   hash: Hash;
   /** Native page dimensions in device pixels, for sizing the canvas. */
@@ -281,6 +294,21 @@ export interface NoteMeta {
   fileHash: Hash | null;
   /** Size of the stored file in bytes — shown in the "no preview" state. */
   size: number;
+  /**
+   * The id of the `.mark` that annotates this file, or `null`.
+   *
+   * Only a `.pdf` ever has one: the device writes annotations to a separate
+   * file named after the PDF's FULL name plus `.mark` (`foo.pdf` →
+   * `foo.pdf.mark`, same folder), and most PDFs have none. The server resolves
+   * the pairing, because a viewer opened from a deep link, a search result or
+   * the bin holds no folder listing to search — and on this app's target link,
+   * fetching a folder to discover one name is a round trip that need not exist.
+   *
+   * Null in the bin, deliberately: trashing a PDF does not trash its mark, so a
+   * bin preview that composited annotations would paint a live file's ink onto
+   * a deleted document.
+   */
+  annotationsId: Id | null;
   /**
    * Device pixels per millimetre for the hardware that wrote this note — the
    * scale that turns {@link WordBox} millimetres into page pixels — or `null`

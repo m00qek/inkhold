@@ -56,6 +56,18 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('webapp/package-lock.json') }}
 
+      - name: Cache Zig build (the MuPDF wasm is 441 C translation units)
+        uses: actions/cache@v4
+        with:
+          # `setup-zig` caches the GLOBAL cache (~/.cache/zig), which holds the
+          # unpacked MuPDF tarball. The compiled objects land in the repo-local
+          # `.zig-cache`, which it does not cover — so a cold runner rebuilds all
+          # of MuPDF (~3 min on 4 cores) on every job that runs `build:wasm`.
+          # Keyed on what actually changes the artifact; anything else restores.
+          path: .zig-cache
+          key: ${{ runner.os }}-zigcache-${{ hashFiles('build.zig', 'build.zig.zon', 'webapp/wasm/**') }}
+          restore-keys: ${{ runner.os }}-zigcache-
+
       - name: Setup Web Tests
         run: make web-test-setup
 
@@ -87,6 +99,16 @@ jobs:
           node-version: 22
           cache: 'npm'
           cache-dependency-path: webapp/package-lock.json
+
+      - name: Cache Zig build (shared across the matrix — the wasm is target-independent)
+        uses: actions/cache@v4
+        with:
+          # Every matrix target rebuilds the SAME `pdf-decode.wasm` (it is
+          # wasm32, not the release target), so without this the MuPDF compile is
+          # paid four times in parallel for one artifact.
+          path: .zig-cache
+          key: ${{ runner.os }}-zigcache-${{ hashFiles('build.zig', 'build.zig.zon', 'webapp/wasm/**') }}
+          restore-keys: ${{ runner.os }}-zigcache-
 
       - name: Install Frontend Dependencies
         run: npm --prefix webapp ci

@@ -341,3 +341,51 @@ describe("upload budget", () => {
     expect((await pending as ApiError).code).toBe("CANCELLED");
   });
 });
+
+describe("PageRef.sourcePage off the wire", () => {
+  // A `.mark` names its pages by the PDF page they annotate, and the server
+  // omits the field wherever it would be `index + 1`. The normalizer has to
+  // turn absence into `null` — not `undefined`, which would read as "not known
+  // yet" — and must refuse a value that cannot be a page.
+  const page = (over: Record<string, unknown>) => ({
+    index: 0,
+    hash: "a".repeat(32),
+    width: 1404,
+    height: 1872,
+    ...over,
+  });
+
+  /** `getNoteMeta` over a stubbed transport serving exactly `pages`. */
+  async function metaWith(pages: unknown[]) {
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({
+        "file/metadata": () =>
+          jsonResponse({ success: true, id: "n-1", name: "annotated.pdf.mark", pages }),
+      }),
+    );
+    return createHttpApi().getNoteMeta("n-1" as never);
+  }
+
+  it("keeps a real page number", async () => {
+    const api = await metaWith([page({ sourcePage: 2 }), page({ index: 1, sourcePage: 5 })]);
+    expect(api.pages.map((p) => p.sourcePage)).toEqual([2, 5]);
+  });
+
+  it("turns an omitted field into null, the notebook case", async () => {
+    const api = await metaWith([page({}), page({ index: 1 })]);
+    expect(api.pages.map((p) => p.sourcePage)).toEqual([null, null]);
+  });
+
+  it("refuses a value that is not a page number", async () => {
+    // 0 is what a pre-v7 row reads back as and what every `.txt` row carries;
+    // there is no page 0, and a client that trusted one would place annotations
+    // against a page that cannot exist. Negative and non-numeric likewise.
+    const api = await metaWith([
+      page({ sourcePage: 0 }),
+      page({ index: 1, sourcePage: -3 }),
+      page({ index: 2, sourcePage: "5" }),
+    ]);
+    expect(api.pages.map((p) => p.sourcePage)).toEqual([null, null, null]);
+  });
+});

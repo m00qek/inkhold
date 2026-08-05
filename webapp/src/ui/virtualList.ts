@@ -114,6 +114,21 @@ export class VirtualList {
   }
 
 
+  /**
+   * Re-measure and re-render UNCONDITIONALLY. `render` short-circuits when the
+   * scroll offset and viewport height look unchanged, which is exactly wrong
+   * after the container is revealed (a hidden element measures 0×0, so the
+   * window was computed from a guess) or resized without a scroll event.
+   */
+  public refresh() {
+    // BOTH guards have to go: `render` short-circuits on the offset AND the
+    // height together, and an offset still at 0 (the common case when a panel is
+    // revealed) is within the 5px slack all by itself.
+    this.lastScrollTop = -1;
+    this.lastClientHeight = -1;
+    this.render();
+  }
+
   public getRenderedItem(index: number): HTMLElement | undefined {
     return this.renderedItems.get(index);
   }

@@ -18,5 +18,7 @@ export function skeletonPage(
   index: number,
   dims: { w: number; h: number } = DEFAULT_PAGE_DIMS,
 ): PageRef {
-  return { index, hash: "", width: dims.w, height: dims.h, textHash: null };
+  // `sourcePage: null` — a skeleton stands in for a `.note` page, whose number
+  // is always `index + 1` (see `PageRef.sourcePage`).
+  return { index, hash: "", width: dims.w, height: dims.h, textHash: null, sourcePage: null };
 }

@@ -44,7 +44,7 @@ import { pinAspect } from "../ui/tileAspect";
 import { ICONS, svg } from "../ui/icons";
 import { createMenu } from "../ui/menu";
 import { labelPathSegments } from "./rail";
-import { fileKind, formatBytes, rawFileUrl } from "../core/fileKind";
+import { fileKind, formatBytes, hasDedicatedViewer, rawFileUrl } from "../core/fileKind";
 // The image dims memo — the row lead's aspect source for images, which carry no
 // `thumbAspect` of their own (masonry.md decision 5). Null = unknown yet.
 import { getDims } from "../cache/dimsMemo";
@@ -528,8 +528,7 @@ export function createBin(deps: BinDeps): BinController {
     // is this the screenshot I meant? That is answered in a panel this module
     // owns, because no real viewer exists to answer it better.
     open: (entry) => {
-      const type = (entry.fileType || "").toLowerCase();
-      if (fileKind(type) === "note" || type === "spd" || type === "txt") {
+      if (hasDedicatedViewer(entry.fileType)) {
         deps.onOpen(entry);
         return;
       }

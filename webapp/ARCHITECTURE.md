@@ -21,6 +21,67 @@ Domain vocabulary is `src/core/types.ts`. **Do not change a seam signature
 without updating this table and pinging the coordinator** — all three tracks
 depend on them.
 
+## Composing a viewer, and adding a file type
+
+The app has four viewers (`.note`+images in the reader, `.spd`, `.txt`, `.pdf`)
+and it will grow more. **The viewers are deliberately NOT a framework** — the
+`Viewer` interface is four methods, because a notebook, a layered sketch, a text
+file and a PDF genuinely have different lifecycles. What they share is not a base
+class but a set of SERVICES they compose.
+
+### The services — reach for these before writing anything
+
+Every one of these already exists and is used by at least two callers. Writing a
+private copy of one is the failure this section exists to prevent; it has
+happened (`pdfPageIndex.ts` was a worse re-implementation of the reader's page
+index, un-virtualised, and was folded back in).
+
+| Service | Where | What it owns |
+|---|---|---|
+| Viewer chrome | `pages/viewerChrome.ts` | header/back, zoom stepper, export menu, the placeholder card, the glyph set |
+| Toolbar | `pages/toolbar.ts` | the two-zone `role="toolbar"` with roving tabindex |
+| Side panel | `ui/sidePanel.ts` | the docked `<aside>`, its head, its loading/empty/error states |
+| Page index | `pages/pageIndex.ts` | the filmstrip: virtualised rows, current-page highlight, badges |
+| Layers panel | `pages/layersPanel.ts` + `noteLayers.ts` | the shared layer list (reader AND `.spd`) |
+| Thumbnails | `render/thumbnails.ts` | `getThumbnail(source, fileType)` — strategy per type, always a WebP |
+| Caching | `cache/renderCache.ts` + `cache/idb.ts` | `[hot in-memory] → sn-thumbs → produce`, ONE budget |
+| Virtual list | `ui/virtualList.ts` | windowed rows for any long list |
+| Confirm / rename | `ui/confirm.ts`, `ui/renameDialog.ts` | the destructive-action dialogs |
+
+**THERE IS ONE CACHE, and it is `sn-thumbs`.** `main.ts` opens it once and hands
+the same store to the render cache and the thumbnail facade, so both are
+`[hot in-memory] → sn-thumbs → produce` under one byte budget. A new surface that
+needs cached pixels **must go through one of those two**, never open a second
+store and never keep its own unbounded map. The page index is a visual component
+over the thumbnail/render path — it paints what those return; it does not cache.
+
+### The registration points — all nine
+
+A file type is not a class, it is a row in nine different decisions. There is no
+single table yet (see the backlog), so this list IS the table. Miss one and the
+feature degrades **silently** rather than failing.
+
+| # | Where | Decides |
+|---|---|---|
+| 1 | `core/fileKind.ts` — `fileKind()` | which stage renders it (`note` / `image` / `file`) |
+| 2 | `core/fileKind.ts` — `canPreviewHistory()` | whether version preview is offered |
+| 3 | `core/fileKind.ts` — `UPLOAD_ACCEPT` | whether the web may upload it |
+| 4 | `render/thumbnails.ts` — `strategyFor()` | which thumbnail strategy produces its tile |
+| 5 | `pages/galleryCards.ts` — `FACADE_THUMB_TYPES` | whether the card asks for a real tile at all |
+| 6 | `pages/library.ts` — `viewerFor()` | which viewer opens it |
+| 7 | `api/fake.ts` | a fixture, or no e2e can reach it |
+| 8 | `backend/services/controlplane.zig` — `fileTypeFor()` | what type the server REPORTS (it is server-verified, not the extension) |
+| 9 | `backend/handlers/controlplane.zig` — `inline_types` | served inline or as an attachment |
+
+**4 and 5 must agree.** `strategyFor` can return a real strategy while
+`FACADE_THUMB_TYPES` still omits the type, and the card keeps showing a glyph
+with nothing to indicate why. If you change one, check the other.
+
+**8 is the subtle one.** The server reports the type its PARSER verified, not the
+filename's extension — which is why a `.mark` (a thin `.note`) reported as
+`"note"` for a long time and rendered as a notebook. The client's `fileKind`
+receives that verdict, not the name.
+
 ## Export (`src/export/`)
 
 `pdf.ts` is a pure, dependency-free PDF writer (pixels in, bytes out — unit-tested

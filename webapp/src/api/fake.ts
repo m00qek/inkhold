@@ -12,7 +12,29 @@ import { createBinFake, BIN_SEED_NOTES } from "./binFake";
 // ONE note, so the reader's layers panel runs against the real wasm decoder in
 // dev and e2e. Shared with binFake (a trashed note keeps its layers, as the
 // real blob-keyed index does) — see that module's header.
-import { LAYERED_NOTE_ID, layeredPagePayload, withLayeredPageLayers } from "./layeredFixture";
+import {
+  LAYERED_NOTE_ID,
+  layeredPageLayers,
+  layeredPagePayload,
+  withLayeredPageLayers,
+} from "./layeredFixture";
+
+/**
+ * The `.mark` that annotates `n-files-manual`, and the PDF it belongs to.
+ *
+ * It reuses the layered fixture's payload, which is already a real SNPG v2 body
+ * at 1404x1872 — the device PANEL size, which is exactly what a mark is written
+ * in. So the overlay path runs the real wasm decoder over real layer records
+ * rather than a stand-in.
+ *
+ * SPARSE, like the real thing: one page, annotating PDF page 2 (`sourcePage: 2`,
+ * 1-based). That the mark's only page is NOT the PDF's first is the point — a
+ * viewer that ignored `sourcePage` would paint this ink on page 1 and look
+ * perfectly plausible doing it.
+ */
+export const MARKED_PDF_ID = "n-files-manual";
+export const PDF_MARK_ID = "n-files-manual.pdf.mark";
+const PDF_MARK_SOURCE_PAGE = 2;
 import { canPreviewHistory, isAcceptedUpload, nextAvailableName, uploadExtension } from "../core/fileKind";
 import type {
   Coverage,
@@ -103,6 +125,9 @@ function pages(
     width: dims?.w ?? 1404,
     height: dims?.h ?? 1872,
     textHash: fakeTextHash(noteId, index, recognized, recognizedFrom),
+    // A `.note` page: its number is always `index + 1`, so there is nothing
+    // to carry (see `PageRef.sourcePage`).
+    sourcePage: null,
   }));
 }
 
@@ -918,6 +943,12 @@ const CHILDREN: Record<string, Entry[]> = {
   document: [
     note("n-doc-attn", "Attention Is All You Need", 20, NOW - 9 * DAY, { hasRecognizedText: true }),
     note("n-doc-lease", "Apartment lease — signed", 6, NOW - 26 * DAY, { fileType: "pdf" }),
+    // An `.epub`: uploadable (`UPLOAD_ACCEPT`) and readable ON THE DEVICE, but
+    // with no viewer here — so it is the reader's "no preview, here is a
+    // download" state. That state used to be exercised by the PDF above; PDFs
+    // now open in their own viewer, and this keeps the reader's own fallback
+    // under test rather than letting it go dark.
+    note("n-doc-epub", "Sourdough — a field guide", 1, NOW - 27 * DAY, { fileType: "epub" }),
     // Recognized, but written on hardware whose millimetre scale has never been
     // measured — `getNoteMeta` answers `pxPerMm: null` for it. This is the
     // raster-only export case, kept in the fixture so it is a state the UI is
@@ -1057,6 +1088,37 @@ export interface FakeApiOptions {
 }
 
 /** Construct a fresh fixture-backed Api. State is per-instance (test isolation). */
+/**
+ * The paired `.mark`'s metadata: ONE page, and it is the PDF's page 2.
+ *
+ * `width`/`height` are the device panel, not the PDF page — that mismatch is the
+ * whole reason `markGeometry` exists, and a fixture that quietly matched the
+ * page would test nothing.
+ */
+function markMeta(): NoteMeta {
+  const layers = layeredPageLayers(0);
+  return {
+    id: PDF_MARK_ID,
+    name: "Appliance manual.pdf.mark",
+    annotationsId: null,
+    fileType: "mark",
+    fileHash: "m".repeat(32) as NoteMeta["fileHash"],
+    size: 28_349,
+    pxPerMm: null,
+    pages: [
+      {
+        index: 0,
+        hash: "m".repeat(32) as PageRef["hash"],
+        width: 1404,
+        height: 1872,
+        textHash: null,
+        sourcePage: PDF_MARK_SOURCE_PAGE,
+        layers,
+      },
+    ],
+  };
+}
+
 export function createFakeApi(opts: FakeApiOptions = {}): Api {
   const latency = opts.latencyMs ?? 120;
   const syncVersion = opts.syncVersion ?? 1;
@@ -1091,9 +1153,13 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     async getNoteMeta(id: Id): Promise<NoteMeta> {
       await delay(latency);
+      if (id === PDF_MARK_ID) return markMeta();
       const summary = ALL_NOTES[id];
       if (!summary) throw new Error(`no such note: ${id}`);
       return {
+        // The one paired fixture: this PDF has a `.mark` beside it. The real
+        // server resolves the pairing by name (`NoteMetaVO.annotationsId`).
+        annotationsId: id === MARKED_PDF_ID ? PDF_MARK_ID : null,
         id,
         name: summary.name,
         // Layers are attached here rather than inside `pages()` because they are
@@ -1125,6 +1191,11 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     async getPageBytes(_id: Id, page: PageRef): Promise<ArrayBuffer> {
       await delay(latency);
+      // The mark's ink: a real SNPG v2 payload, so the overlay decodes for real.
+      if (_id === PDF_MARK_ID) {
+        const payload = layeredPagePayload(0);
+        if (payload) return payload.slice().buffer as ArrayBuffer;
+      }
       // The layered fixture answers with a REAL SNPG v2 payload — the reader's
       // per-layer path drives the actual wasm decoder over it, fake data plane
       // or not. Every other page keeps the junk bytes below.
@@ -1295,6 +1366,9 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       // nulls them anyway), so this never needs the layered fixture.
       const count = versionPageCount(summary, md5);
       return {
+        // A version PREVIEW shows the bytes of a past blob; the mark beside
+        // the file today annotates the CURRENT one, so it is not this one's.
+        annotationsId: null,
         id,
         name: summary.name,
         pages: pages(

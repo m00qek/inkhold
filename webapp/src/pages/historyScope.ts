@@ -128,6 +128,7 @@ export function versionMeta(base: NoteMeta, md5: string): NoteMeta {
       width: p.width,
       height: p.height,
       textHash: p.textHash,
+      sourcePage: p.sourcePage,
       layers: null,
     })),
   };
@@ -152,6 +153,9 @@ export function rawVersionMeta(
     id: file.id,
     name: file.name,
     fileType: file.fileType,
+    // A version preview is a past blob; the mark beside the file annotates the
+    // current one.
+    annotationsId: null,
     fileHash: version.md5,
     pages: [],
     size: version.size,

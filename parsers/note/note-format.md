@@ -46,9 +46,23 @@ deleted layers omitted; hidden bitmaps persist) and everything about
 `LAYERINFO` — its two encodings, the `layerId` map and where display names
 live ([§4.3](#43-page)).
 
+`TOTALPATH` vector strokes ([§10](#10-totalpath-vector-strokes)) were settled
+against a **third `.mark` capture** (689,161 B; 7 annotated pages; 189 strokes),
+made deliberately to exercise this work: it contains erasures, four different
+pens, pen strokes running off both side margins, and pages labelled in the
+author's own handwriting with the pen used. Decoded strokes were re-rasterised
+and compared against the same pages' `LAYERBITMAP` — the device's own final
+picture — at IoU 0.967.
+
 Everything outside those tiers — the A-series family, the `N5`/Manta device
-class, keyword/title/link blocks, `TOTALPATH`, `RECOGNFILE` — is **I**
-or **?**. No file we hold exercises any of them.
+class, keyword/title/link blocks, `RECOGNFILE` — is **I** or **?**. No file we
+hold exercises any of them.
+
+!!! warning "One device, one firmware"
+    Every **C** above, `TOTALPATH` included, rests on N6 hardware running one
+    firmware. Unexercised even now: `"straightLine"` strokes (all 189 are
+    `"others"`), any non-`N6` equipment, a width-limited (landscape or wide)
+    page, and `TOTALPATH` inside a multi-layer `.note` rather than a `.mark`.
 
 ---
 
@@ -656,99 +670,207 @@ the server's `note_index`, so no consumer can hold a differing opinion of it.
 
 ## 10. `TOTALPATH` vector strokes
 
-**C** that `TOTALPATH` exists on a page and holds a non-zero address.
+**Mostly C**, from the third capture ([What the corpus is](#what-the-corpus-is)):
+189 strokes across 7 pages, decoded and re-rasterised, then compared against the
+same pages' `LAYERBITMAP`. That comparison is what makes this section different
+from the one it replaces — the bitmap is the device's own final picture, so a
+decode that reproduces it is checked against the device rather than against
+another reader's notes.
 
-**I / ?** for everything below, from Walnut356's
-[blog post](https://walnut356.github.io/posts/inspecting-the-supernote-note-format/)
-and [`snlib`](https://github.com/Walnut356/snlib). Never checked against a file
-we hold. Some `unk` configuration fields are unexplained even in that source.
+| page | strokes | IoU vs `LAYERBITMAP` |
+|---|---|---|
+| 2 / 5 / 6 | 4 each | 0.892 / 0.906 / 0.910 |
+| 13 (erasures) | 93 | 0.880 |
+| 16 (margins) | 33 | 0.981 |
+| 34 / 35 | 27 / 24 | 0.951 / 0.988 |
+| **all** | **189** | **0.967** |
+
+The residual is a one-pixel dither along stroke edges: a sub-pixel offset scan
+over ±0.5 px in both axes bottoms out at exactly `(0, 0)`, so it is the
+anti-aliasing threshold and not a geometry or half-pixel-convention error. The
+lower scores are simply the pages with the least ink, where a one-pixel edge is a
+larger share of the total.
 
 `TOTALPATH` addresses the **vector stroke data for a whole page** — the strokes
-as drawn, before they were flattened into `LAYERBITMAP`. It is a length-prefixed
-section of consecutive strokes.
+as drawn, before they were flattened into `LAYERBITMAP`.
 
-Each stroke, in order:
+### 10.0 Framing
 
-| Part | Contents |
-|---|---|
-| **Head** | `section_len` (u32), `pen` (enum), `stroke_color` (enum), `thickness` (Size enum, roughly 200…3800 in canvas units), several `unk`/config u32s, `page_num`, `stroke_layer` |
-| **Text buffers** | a 52-byte buffer holding the stroke kind — the string `"straightLine"` or `"others"` — followed by a 52-byte buffer holding `"superNoteNote"` |
-| **Geometry** | a bounding box (min, max and midpoint), then parallel **length-prefixed arrays**, one entry per point |
-| **Tail** | a stroke UID, then screen-space `f32` point contours |
-
-The parallel arrays:
-
-| Array | Element | Range / notes |
-|---|---|---|
-| points | `{ i32 x, i32 y }` | canvas units — but see [§10.1](#101-coordinate-transform) for the axis order |
-| pressure | `u32` | 0 – 4096 |
-| tilt | two `i16` | angle recovered via `atan2` |
-| flags | `u8` | meaning unknown (**?**) |
-
-| `pen` | Value |
-|---|---|
-| InkPen | 1 |
-| NeedlePoint | 10 |
-| Marker | 11 |
-
-| `stroke_color` | Value |
-|---|---|
-| Black | 0 |
-| MarkerBlack | 1 |
-| DarkGrey | 158 |
-| LightGrey | 202 |
-| White | 254 |
-| Eraser | 255 |
-
-**An eraser is a stroke.** Colour 255 marks a stroke used as a mask over the
-strokes beneath it, rather than an edit applied to them. A stroke that ends up
-fully masked is deleted from the data outright.
-
-This means `TOTALPATH` retains information the raster has destroyed: the strokes
-an eraser passed over are still present, along with per-point pressure and tilt
-that the flattened bitmap never recorded.
-
-### 10.1 Coordinate transform
-
-Three independent chances to be wrong, and the order matters. All **I**.
-
-```mermaid
-flowchart LR
-    A["stored pair<br/><b>(y, x)</b>"]
-    B["1 · read as <b>(x, y)</b><br/>y comes first in the file"]
-    C["2 · mirror<br/><b>x′ = 11864 − x</b><br/>origin is top-RIGHT"]
-    D["3 · scale<br/><b>× ≈ 0.1183</b><br/>10 µm units → pixels"]
-    E["pixel on the<br/>1404 × 1872 grid<br/>origin top-left"]
-
-    A --> B --> C --> D --> E
-
-    B -.-> B2["skip it<br/>⇒ page transposed"]
-    C -.-> C2["mirror after scaling<br/>⇒ page flipped"]
-    D -.-> D2["wrong constant for the device<br/>⇒ uniformly wrong,<br/>and it still looks right"]
-
-    classDef bad stroke-dasharray:4 3
-    class B2,C2,D2 bad
+```
+TOTALPATH -> u32 block_len          (bytes that follow)
+             u32 stroke_count
+             stroke × stroke_count
+stroke    -> u32 section_len        (bytes that follow; EXCLUDES itself)
+             payload
 ```
 
-Dashed boxes are the failure each step invites.
+**C**, and self-checking: walking `section_len` lands byte-exactly on the block
+end for all 10 blocks across both mark captures, and the walked count equals
+`stroke_count` every time. A decoder should assert both and refuse the block
+otherwise — this is the cheapest possible guard against the layout below
+drifting on a device or firmware we have not seen.
 
-1. **Axis order.** Coordinates are stored **`(y, x)`**, not `(x, y)`.
-2. **Origin.** The origin is **top-right**, so `screen_x = 11864 - x` — applied
-   **before** any scaling, because `11864` is expressed in canvas units.
-3. **Scale.** Canvas space is `11864 × 15819` in **10 µm units**
-   (= 118.64 × 158.19 mm). The factor ≈ `0.1183` maps canvas units onto the
-   1404 × 1872 pixel grid.
+### 10.1 Stroke layout
 
-!!! warning "`11864 × 15819` is a hardware constant, not a format constant"
-    It is the same physical canvas as [§9.2](#92-physical-canvas-in-millimetres),
-    expressed in 10 µm units, and it describes the **1404 × 1872 X-series /
-    Nomad class only**. An N5/Manta shares the aspect ratio at a different pixel
-    count, so a hard-coded `11864` yields a plausible-looking, uniformly wrong
-    scale — and a wrong *origin* constant mirrors the page horizontally.
+Offsets from the start of a stroke (i.e. from its `section_len`).
 
-    Derive the scale from the page's own pixel dimensions where possible, and
-    take the canvas extent from a per-equipment allowlist with no fallback, the
-    same rule [§9.2](#92-physical-canvas-in-millimetres) states.
+| Offset | Type | Meaning | |
+|---|---|---|---|
+| `+0` | u32 | `section_len`, excluding itself | **C** |
+| `+4` | u32 | **pen** — see the enum below | **C** |
+| `+8` | u32 | **colour** — see the enum below | **C** |
+| `+12` | u32 | **thickness**, 400…3799 observed | **C** |
+| `+16` | u32 | `10` on all 189 | **?** |
+| `+20` | u32 | `0` on all 189 | **?** |
+| `+24` | u32 | `32` on all 189 | **?** |
+| `+28` | u32 | `0xFFFFFFFF` on all 189 | **?** |
+| `+32` | u32 | **page number**, 1-based — equals the `PAGE<n>` key of the block's own page, 189/189 | **C** |
+| `+36`, `+40` | u32 | `0` | **?** |
+| `+44` | u32 | `5000` on the 184 drawing strokes; `-1`/`-2` on the 5 erasers | **?** |
+| `+48` | u32 | `0` | **?** |
+| `+52` | char[52] | **stroke kind**, NUL-padded — `"others"` on all 189 | **C** |
+| `+104` | 6 × i32 | **bounding box in PANEL PIXELS**: `minX, minY, midX, midY, maxX, maxY` | **C** |
+| `+128` | u32 | `2` on all 189 | **?** |
+| `+132` | u32 | **canvas height** for THIS stroke (see [§10.3](#103-coordinate-transform)) | **C** |
+| `+136` | u32 | **canvas width** for THIS stroke | **C** |
+| `+140` | char[52] | `"superNoteDocument"` in a `.mark` | **C** |
+| `+192` | u32 | `1` | **?** |
+| `+196` | 5 × u32 | `0` | **?** |
+| `+216` | arrays | the four parallel per-point arrays, below | **C** |
+| … | 74 B | a struct; `+16` is a 1-based per-page stroke **sequence number**, i.e. draw order. 74 bytes for every drawing stroke; **78/86/118 for erasers** | **C** |
+| … | contours | `u32 nC`, then per contour `u32 M` and `M × (f32, f32)` — **in PANEL PIXELS** | **C** |
+| … | trailer | `u32 nC` (echo), `nC × 16 B`, `u32` | **C** |
+| … | tail | 30 B (or 34–38 B on stubs), then `[u32 4]"none"[u32 4]"none"`, then 32 B | **I** |
+
+!!! danger "Navigate by `section_len`, never by arithmetic"
+    The 74-byte struct and the tail are **variable and not understood** — their
+    boundaries were found by search, not by grammar. Skip to the next stroke
+    using `section_len` alone, and treat a stroke whose arrays cannot be walked
+    as a stroke to **skip**, not one to guess at.
+
+The four parallel arrays, each `u32 N` followed by `N` elements:
+
+| Array | Element | Notes |
+|---|---|---|
+| points | `i32, i32` stored **`(y, x)`** | canvas units — see [§10.3](#103-coordinate-transform) |
+| pressure | **`u16`** | 156…2985 observed. The inherited spec says `u32`; it is **16-bit** |
+| tilt | `i16, i16` | hundredths of a degree (99.9% are multiples of 100). **I** |
+| flags | `u8` | **constant `1`** on all 23,789 points — carries no information in this corpus |
+
+| `pen` | Meaning | |
+|---|---|---|
+| 10 | Needle Point | **C** |
+| 11 | Marker | **C** |
+| 15 | **Calligraphy Pen** | **C** |
+| 16 | **Ink Pen** | **C** |
+| 1 | `InkPen` in the inherited enum — **not observed**, and 16 is what this firmware writes for the Ink Pen | **I** |
+
+15 and 16 are new here: they are absent from the inherited enum, they account for
+75 of the 189 strokes, and they are named because the capture's author wrote the
+pen's name on the page in that pen's own handwriting.
+
+| `colour` | Meaning | |
+|---|---|---|
+| 0 | Black (176 strokes) | **C** |
+| 1 | MarkerBlack (8) | **C** |
+| 255 | **Eraser** (5) — [§10.2](#102-erasure) | **C** |
+| 158 / 202 / 254 | DarkGrey / LightGrey / White | **I** — not observed |
+
+### 10.2 Erasure
+
+**`TOTALPATH` retains ink the user erased, in two different ways, and a decoder
+that mishandles either will put deleted content back on the page.** This is the
+most dangerous thing in the format: the failure is silent, it looks like a
+correct render, and what it leaks is precisely the material someone chose to
+remove.
+
+**1 — An eraser is a stroke.** Colour 255 marks a stroke that masks the strokes
+beneath it rather than an edit applied to them, so the strokes it passed over are
+still present in full. Rendering page 13 with every drawing stroke and no erasure
+draws four continuous wavy lines where the device shows them chopped into dashes
+(symmetric difference 6,753 px; precision 0.65). Compositing the erasers
+**destination-out along their point polyline** collapses that to 1,543 px and
+IoU 0.88, with the remainder 1–2 px at the dash tips.
+
+- Best-fit eraser radius ≈ **4.5–5 px** at `thickness = 1300` (≈ 0.8 mm
+  diameter). **One sample** — whether radius scales with `thickness` is unknown.
+- **Order matters.** Erasing in stroke order, so an eraser affects only strokes
+  drawn before it, scores 1,543 against 1,735 for erasing everything at the end.
+  The struct's sequence number (`+16`) gives that order.
+- Erasers are structurally different (78/86/118-byte struct, and they may carry
+  no contour section). Detect them by `colour == 255` and never fill them.
+
+**2 — A fully erased stroke is kept as a stub, with stale geometry.** The
+inherited notes say such a stroke is "deleted from the data outright". It is not.
+63 of page 13's 93 strokes have `N == 0` — points, pressure, tilt and flags all
+emptied — **while keeping their original bounding box and their original
+contour**. Filling those contours resurrects 3,287 px of deliberately deleted
+ink.
+
+!!! danger "Both guards are needed; either alone leaks"
+    Skip `N == 0` strokes **and** composite the erasers. Applying only the
+    erasers leaves the stubs; skipping only the stubs leaves the partial
+    erasures.
+
+    The hazard also generalises in a direction this corpus cannot rule out: the
+    device is willing to leave *inconsistent* geometry behind. If a future
+    firmware emptied the **contours** instead of the points, a contour-first
+    renderer would drop live ink rather than resurrect dead ink. Cross-check
+    `N == 0` against the contour extent and treat a disagreement as a stroke to
+    skip.
+
+### 10.3 Coordinate transform
+
+The inherited three-step transform is **correct**, with one fix that decides
+whether a page lands or not.
+
+1. **Axis order.** Points are stored **`(y, x)`**, not `(x, y)`.
+2. **Origin.** The origin is top-right, so `x' = canvas_width - x`, applied
+   **before** scaling because the extent is in canvas units.
+3. **Scale.** `pixels = x' × panel_width / canvas_width`.
+
+!!! warning "Take the canvas extent from the STROKE, not from a constant"
+    Each stroke carries its own canvas extent at `+132` (height) and `+136`
+    (width), and they are **not all the same within one file**. The common value
+    is `11864 × 15819`, but one stroke in the corpus declares `8898 × 11864` and
+    eight more declare `11863`. Decoded with the hard-coded constant that stroke
+    lands **358 px away** from its own declared bounding box; decoded with its
+    own extent it lands on it.
+
+    This is exactly the failure [§9.2](#92-physical-canvas-in-millimetres)
+    warns about — "uniformly wrong, and it still looks right" — caught in a real
+    file only because the bounding box gives an independent check.
+
+**The bounding box is the free self-check.** It is in panel pixels, so it is
+already in the destination space: every decoded point must fall inside its own
+stroke's box. Across all 189 strokes the worst overshoot is 1.5 px, which is the
+integer rounding of the box itself. A decoder should verify this per stroke and
+refuse a stroke that fails.
+
+### 10.4 Rendering: fill the contours, do not model the pen
+
+Each stroke carries the **device's own fill outline** in the contour section, in
+panel pixels. Filling those reproduces `LAYERBITMAP` to the anti-aliasing
+threshold, which makes a pen model unnecessary for rendering.
+
+- **Fill EVEN-ODD across all of a stroke's contours together.** Filling each
+  contour independently plugs the holes in `o`, `e` and `a`; on page 2 that is
+  the difference between precision 0.34 and 0.997.
+- Contours are already in panel pixels — no transform, and they are what makes
+  resolution-independent output possible: the same outlines can be rasterised at
+  any DPI, or emitted as vector paths.
+
+The width model is therefore **not needed**, and is recorded only because it
+describes the hardware. Pens 10 and 11 are constant-width and ignore pressure
+entirely; pens 15 and 16 are pressure-modulated:
+
+```
+pen 15/16:  width ≈ (thickness / 1000) × (2.6 + 0.0025 × pressure)   ± ~10%
+pen 10/11:  width  = constant × (thickness / 1000)
+```
+
+The ±10% residual is why the contours are the better source: they are exact where
+this is fitted.
 
 ---
 
@@ -836,14 +958,18 @@ Recorded because "this is not known" is a fact worth looking up.
 | What is `0x140E`, the blank-background block size? | **?** — a magic constant with no structural cross-check against the stream. |
 | Is any layer 24-bit RGB rather than 8-bit grayscale? | **?** — `supernote-tool` models it; no observed layer uses it. |
 | Do `SN_ASA_COMPRESS` or `PNG` content blocks appear in files a current device produces? | **?** — no A-series file has been examined. |
-| What are `TOTALPATH`'s `unk` config fields, and does the layout survive contact with a real file? | **?** — see [§10](#10-totalpath-vector-strokes). |
-| What does the per-point `flags` array in a stroke mean? | **?** — present in the structural spec, unexplained. |
-| How does `thickness` (roughly 200…3800) map to a rendered stroke width in pixels? | **?** — needs deriving and checking against the raster. |
+| What are `TOTALPATH`'s `unk` config fields? | **?** — the layout DID survive contact with a real file ([§10](#10-totalpath-vector-strokes)); eight constant u32s in the head, the 74-byte struct and the tail remain unexplained. |
+| What does the per-point `flags` array in a stroke mean? | **?** — constant `1` across all 23,789 points in the corpus, so it carries no information here and cannot be decoded from it. |
+| How does `thickness` map to a rendered stroke width in pixels? | **C** to ±10% for the four observed pens ([§10.4](#104-rendering-fill-the-contours-do-not-model-the-pen)) — and not needed, since each stroke carries the device's own fill contour. |
 | Do `LAYERPATH`, `LAYERVECTORGRAPH` and `LAYERRECOGN` mean what their names suggest? | **?** — observed in a third-party spec, never read. |
 | Keyword, title and link blocks — what encodes their images, and does it vary by version? | **?** — unexamined. The COVER branch is settled (a complete PNG, [§5](#5-keyword-title-link-and-cover-objects)); whether that holds across versions/devices, and what `COVER_1` files look like, is not. |
+| Does an eraser's radius scale with `thickness`? | **?** — fitted at ~4.5 px for one `thickness` on one page ([§10.2](#102-erasure)). |
+| Is a `.mark`'s canvas extent genuinely PER-STROKE, or per-device with outliers? | **?** — three distinct extents appear within one file ([§10.3](#103-coordinate-transform)); reading it per stroke is correct either way. |
+| What lays out a `"straightLine"` stroke? | **?** — all 189 strokes in the corpus are `"others"`. |
 | Does `SN_FILE_VER_20260016` add fields beyond those documented here? | **?** — it parses and renders correctly; absence of new fields is not established. |
 | How do the 5 layers blend with the template/background beyond the `0xFF` sentinel rule? | **?** — the sentinel rule reproduces every sample checked, now including a non-default `LAYERSEQ` (`horizontal_layers.note` page 2, golden-pinned); whether any other blend mode exists remains unexamined. |
-| Is `.mark` (the PDF-annotation sibling format) related to this container? | **?** — out of scope here; never examined. |
+| Is `.mark` (the PDF-annotation sibling format) related to this container? | **C** — YES, it is the same container. See [§13](#13-the-mark-sibling-format). |
+| How does the device map an arbitrary PDF page into its panel? | **C**, aspect-preserving and centred — the device writes the mapping itself in `HIGHLIGHTINFO` ([§13.3](#133-geometry-panel-pixels-to-page), [§13.4](#134-highlightinfo-the-devices-own-page-transform)). |
 
 ---
 
@@ -857,3 +983,128 @@ Recorded because "this is not known" is a fact worth looking up.
 Field names and constants marked **I** are those projects'. Marks of **C**
 record independent confirmation against files described in
 [What the corpus is](#what-the-corpus-is).
+
+---
+
+## 13. The `.mark` sibling format
+
+Supernote annotates a PDF by writing a **separate** `.mark` file beside it. This
+section is **C** except where marked, from two real captures written by an N6
+(Nomad) on 2026-08-04, checked against the PDFs they annotate.
+
+Corpus: `2022-03 Plano diretor de Natal.pdf.mark` (28,349 B, 3 pages) and
+`..._compressed.pdf.mark` (67,931 B), annotating a 77-page **A4** document
+(595.276 x 841.89 pt).
+
+### 13.1 It is this container
+
+The same container, byte for byte in structure — `keyblock`, footer, page
+blocks, `RATTA_RLE` layers. It parses and renders through the unmodified note
+parser, which is why Inkhold has always shown `.mark` files.
+
+What differs is only metadata:
+
+| Field | Value | Note |
+|---|---|---|
+| first 4 bytes | `mark` | where a notebook has `note` ([§4](#4-the-signature)) |
+| `<FILE_TYPE:...>` | `MARK` | stated outright, unlike a notebook |
+| `<LAYERTYPE:...>` | `MARK` | on each LAYER block (not the page's); a notebook uses `NOTE` |
+| `<PDFSTYLE:...>`, `<PDFSTYLEMD5:...>` | `none`, `0` | present but unused in both captures |
+| `<APPLY_EQUIPMENT:...>` | `N6` | so [§9.1](#91-page-dimensions-in-pixels) gives 1404 x 1872 |
+
+### 13.2 Pairing, and the sparse page map
+
+**Pairing is `<full pdf filename>.mark`, in the same folder** — `foo.pdf` pairs
+with `foo.pdf.mark`, NOT `foo.mark`. Both captures agree.
+
+**A `.mark` holds only the annotated pages, and the footer names which.** The
+footer of the 3-page capture reads:
+
+```
+<PAGE2:13104><PAGE5:19384><PAGE6:27875><COVER_0:0><DIRTY:0><FILE_FEATURE:24>
+```
+
+Not `PAGE1/2/3`. The integer in each key **is the 1-based PDF page number**,
+corroborated by `<FINALOPERATION_PAGE:6>` in the header naming a page that
+exists in the list. A notebook's footer is contiguous from `PAGE1`, which is why
+nothing has needed this until now.
+
+> **This parser currently discards that number.** `note.pageAddresses` collects
+> every `PAGE*` entry in footer order and keeps only the ADDRESS, so a 3-page
+> mark presents as pages 0,1,2 and the fact that they are PDF pages 2, 5 and 6
+> is lost. Harmless while a `.mark` is shown alone; wrong the moment it is
+> composited onto its PDF.
+
+### 13.3 Geometry: panel pixels to page
+
+Ink is written in **device panel pixels** (1404 x 1872 here). The container
+carries no page geometry at all — dimensions come from `APPLY_EQUIPMENT`
+([§9.1](#91-page-dimensions-in-pixels)) — so the page-to-panel mapping must be
+reconstructed.
+
+**The device fits the page to the panel preserving aspect.** For a page of
+`W x H` points in a `PW x PH` panel:
+
+```
+scale  = min(PW / W, PH / H)
+offset = ((PW - W*scale) / 2, (PH - H*scale) / 2)
+```
+
+A4 in an N6 panel is height-limited: `scale = 2.2236`, fitted 1323.6 x 1872.0,
+so 40.2 px of dead margin on each side and none top or bottom.
+
+Verified by compositing the decoded ink onto the rendered PDF pages: on all
+three annotated pages the handwriting lands in the whitespace it was plainly
+written in — beside a column of `VETADO` entries on page 2, at the end of a
+numbered list on page 6 — with no clipping and no visible offset.
+
+**The centring offset is now `C` too — and the device states it.** This was `I`
+for a day: the first two captures had no ink near a side margin, so they could
+not discriminate centred-letterbox from a plain stretch (for A4 the two differ by
+at most 3.0 mm, and agree exactly in `y`). The third capture settles it, but not
+in the way the question was posed — the answer turned out to be **written in the
+file**, in `HIGHLIGHTINFO` ([§13.4](#134-highlightinfo-the-devices-own-page-transform)),
+which records the same rectangle twice: once in PDF points and once in panel
+pixels.
+
+Fitting those 14 paired x-samples (PDF x 46…541 pt, panel 143…1243 px):
+
+| Mapping | Fit | Max residual |
+|---|---|---|
+| **The device's own pairs** | `panel_x = 2.223022·pdf_x + 40.6375` | 0.49 px |
+| Aspect-preserving, centred (above) | `scale 2.223568, offset 40.1815` | **0.67 px** |
+| Plain stretch to the full panel | `scale 2.358570, offset 0` | **34.51 px** |
+
+Centred wins by a factor of ~50, against geometry the device wrote itself.
+
+> **The device does NOT clip the pen to the page.** Page 16 of the third capture
+> has ink spanning the full panel, x `0.0 … 1403.8` — 1,375 contour vertices left
+> of the page rect and 2,557 right of it. Ink drawn in the dead margin is
+> therefore real, recorded, and **not on the document**. Anything compositing a
+> mark onto its PDF has to decide whether to clip it or carry it; there is no
+> answer in the file.
+
+### 13.4 `HIGHLIGHTINFO`: the device's own page transform
+
+A `.mark` records **PDF text highlights** — the ones made by selecting text
+rather than by drawing — in a header block of their own, and they are **not ink**:
+six of the seven highlight rectangles on page 34 of the third capture cover zero
+pixels in that page's `LAYERBITMAP`. A reader that renders only the layers loses
+them entirely.
+
+`<HIGHLIGHTINFO:addr>` addresses a length-prefixed, base64-encoded JSON block.
+Each highlight carries the same rectangles **twice**:
+
+| Field | Space |
+|---|---|
+| `mupdfRectList` | PDF **points**, as `{x0, y0, x1, y1}` |
+| `rnRectList` | device **panel pixels**, as `{left, top, right, bottom}` |
+
+That pairing is why [§13.3](#133-geometry-panel-pixels-to-page) is now **C**: the
+device is stating its own page-to-panel mapping, in the file, for every
+highlighted rectangle. It is also the cheapest possible calibration for any
+future device or page size — one highlight anywhere on a page yields the exact
+transform for that page, with no fitting against ink required.
+
+The field name `mupdfRectList` is worth noting on its own: the device's PDF
+engine is MuPDF, which is also what Inkhold renders with.

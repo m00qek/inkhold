@@ -110,7 +110,7 @@ const Allocator = std.mem.Allocator;
 // 1270 page's stored EFFECTIVE dims flip to landscape (were wrongly portrait,
 // which sheared the decode). Re-derive heals the stored dims for existing notes;
 // the SNPG serve path already reads them live, so its geometry fixes on rebuild.
-pub const index_version: i64 = 12;
+pub const index_version: i64 = 14;
 
 /// Chunk used when hashing a layer's bytes out of a ranged source. Bounds the
 /// memory a content hash costs, independent of how large the layer is. Shared
@@ -180,6 +180,14 @@ pub const NoteRow = struct {
     page_count: u32 = 0,
     signature: ?[]const u8 = null,
     signature_version: u32 = 0,
+    /// The 4-byte file-type marker — "note" for a notebook, "mark" for the
+    /// PDF-annotation sibling. NULL for the original/ASA family, whose signature
+    /// starts at offset 0 and so has no marker in front of it.
+    ///
+    /// `detect()` never gated on this value, which is why a `.mark` has always
+    /// parsed and rendered as a note. Recording it is what lets anything
+    /// downstream tell the two apart.
+    filetype: ?[]const u8 = null,
     equipment: ?[]const u8 = null,
     /// Base (portrait) dimensions (`note.dimensions()`) — a note-level fact.
     /// The SNPG header carries the per-page EFFECTIVE dims from `PageRow`, not
@@ -212,7 +220,13 @@ pub const NoteRow = struct {
 };
 
 pub const PageRow = struct {
+    /// The page's POSITION in the container, 0-based. The addressing key.
     page_index: u32,
+    /// The page's OWN number from its footer `PAGE<n>` key, 1-based, or 0 when
+    /// the container did not give one. Equal to `page_index + 1` for a notebook
+    /// and NOT for a `.mark`, which stores only annotated pages and names them
+    /// by the PDF page they belong to (`note-format.md` §13.2).
+    source_page: u32 = 0,
     /// Produced by `pageContentHash` — the browser's immutable `?v=` cache key.
     content_hash: [32]u8,
     /// EFFECTIVE dims: the note's base dims with this page's `ORIENTATION`
@@ -348,6 +362,7 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
 
             var row: PageRow = .{
                 .page_index = @intCast(i),
+                .source_page = page.number,
                 .content_hash = pageContentHash(src, page) catch break :derive null,
                 .width = eff.width,
                 .height = eff.height,
@@ -426,6 +441,13 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
                 .page_count = @intCast(note.pages.len),
                 .signature = try a.dupe(u8, note.signature.raw),
                 .signature_version = note.signature.version,
+                // X-series only. The ASA family's `filetype` slice is the front
+                // of its own signature ("SN_F"), not a marker, so it is dropped
+                // rather than recorded as a lie.
+                .filetype = if (note.signature.family == .x_series)
+                    try a.dupe(u8, note.signature.filetype)
+                else
+                    null,
                 .equipment = try dupeOpt(a, note.applyEquipment()),
                 .width = dims.width,
                 .height = dims.height,
@@ -618,8 +640,8 @@ const upsert_note_sql =
     \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, signature,
     \\                       signature_version, equipment, width, height, rle_variant,
     \\                       recogn_type, recogn_language, recognized_page_count, indexed_at,
-    \\                       cover_w, cover_h, cover_offset, cover_length, cover_mime)
-    \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
+    \\                       cover_w, cover_h, cover_offset, cover_length, cover_mime, filetype)
+    \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
     \\ON CONFLICT(blob_md5) DO UPDATE SET
     \\  index_version=excluded.index_version, indexable=excluded.indexable,
     \\  page_count=excluded.page_count, signature=excluded.signature,
@@ -629,18 +651,20 @@ const upsert_note_sql =
     \\  recognized_page_count=excluded.recognized_page_count, indexed_at=excluded.indexed_at,
     \\  cover_w=excluded.cover_w, cover_h=excluded.cover_h,
     \\  cover_offset=excluded.cover_offset, cover_length=excluded.cover_length,
-    \\  cover_mime=excluded.cover_mime;
+    \\  cover_mime=excluded.cover_mime, filetype=excluded.filetype;
 ;
 
 const upsert_page_sql =
     \\INSERT INTO note_page_index(blob_md5, page_index, content_hash, width, height, layers,
-    \\                            recogn_status, text_hash, recogn_offset, recogn_length, text, bg_hash)
-    \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+    \\                            recogn_status, text_hash, recogn_offset, recogn_length, text, bg_hash,
+    \\                            source_page)
+    \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
     \\ON CONFLICT(blob_md5, page_index) DO UPDATE SET
     \\  content_hash=excluded.content_hash, width=excluded.width, height=excluded.height,
     \\  layers=excluded.layers, recogn_status=excluded.recogn_status,
     \\  text_hash=excluded.text_hash, recogn_offset=excluded.recogn_offset,
-    \\  recogn_length=excluded.recogn_length, text=excluded.text, bg_hash=excluded.bg_hash;
+    \\  recogn_length=excluded.recogn_length, text=excluded.text, bg_hash=excluded.bg_hash,
+    \\  source_page=excluded.source_page;
 ;
 
 /// The one format-specific write `reconcilePage` hands the note adapter: the
@@ -666,6 +690,7 @@ const PageUpsert = struct {
         s.bindIntOpt(10, if (self.page.recogn_length) |v| @intCast(v) else null);
         s.bindTextOpt(11, self.page.text);
         s.bindTextOpt(12, self.page.bg_hash);
+        s.bindInt(13, self.page.source_page);
         _ = try s.step();
     }
 };
@@ -709,6 +734,7 @@ pub fn store(db: sqlite.Db, blob_md5: []const u8, p: Parsed, now: i64) !void {
         s.bindIntOpt(17, if (p.note.cover_offset) |v| @as(i64, @intCast(v)) else null);
         s.bindIntOpt(18, if (p.note.cover_length) |v| @as(i64, v) else null);
         s.bindTextOpt(19, p.note.cover_mime);
+        s.bindTextOpt(20, p.note.filetype);
         _ = try s.step();
     }
 
@@ -2088,6 +2114,55 @@ const mini_png = "\x89PNG\r\n\x1a\n" ++
     "\x08\x02\x00\x00\x00" ++ ("p" ** 16);
 
 /// A one-page note carrying `cover` as its `COVER_2` block (null = coverless).
+/// A `.mark` — the device's PDF-annotation sibling. Structurally a `.note` with
+/// a different 4-byte marker, which is the whole reason it has always parsed.
+fn markFile(a: Allocator) ![]u8 {
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+    return nb.serialize(a, .{
+        .filetype = "mark",
+        .header = &.{.{ .key = "APPLY_EQUIPMENT", .value = "N6" }},
+        .pages = &.{.{ .style = "style_white", .layers = &.{.{ .slot = .main, .bitmap = &bmp }} }},
+    });
+}
+
+test "the signature's file-type marker is recorded, so a .mark is distinguishable from a .note" {
+    const gpa = testing.allocator;
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    try schema.migrate(db);
+
+    // A `.mark` parses EXACTLY like a note — `detect()` never gated on the
+    // marker's value — so `indexable` cannot tell them apart. Only the recorded
+    // marker can.
+    {
+        const bytes = try markFile(gpa);
+        defer gpa.free(bytes);
+        var p = try parseBlob(gpa, bytes);
+        defer p.deinit();
+        try testing.expect(p.indexable);
+        try testing.expect(p.note.page_count == 1);
+        try testing.expectEqualStrings("mark", p.note.filetype.?);
+
+        const md5 = blobstore.md5HexOf(bytes);
+        try indexInto(db, &md5, bytes);
+        var r = (try db.row(
+            "SELECT filetype FROM note_index WHERE blob_md5 = ?1;",
+            &.{.{ .text = &md5 }},
+        )).?;
+        defer r.finalize();
+        try testing.expectEqualStrings("mark", r.text(0));
+    }
+
+    // And an ordinary notebook still says "note".
+    {
+        const bytes = try coveredNote(gpa, null);
+        defer gpa.free(bytes);
+        var p = try parseBlob(gpa, bytes);
+        defer p.deinit();
+        try testing.expectEqualStrings("note", p.note.filetype.?);
+    }
+}
+
 fn coveredNote(a: Allocator, cover: ?[]const u8) ![]u8 {
     const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
     return nb.serialize(a, .{
@@ -2600,6 +2675,57 @@ test "SNPG wire: an image background carries the asset hash (bit2), not the imag
     const bg1 = snpgRecordForSlot(sink1.written(), sn.types.LayerSlot.background.wireId()).?;
     try testing.expect(bg1.flags & sn.page_payload.FLAG_RASTER_IMAGE == 0);
     try testing.expectEqualSlices(u8, &rle_bg, bg1.data);
+}
+
+test "ingest: a sparse .mark keeps the PDF pages it names; a notebook stays 1..N" {
+    // The whole point of `source_page`. A `.mark` holds only the pages that were
+    // annotated and names them by the PDF page they belong to, so its footer
+    // reads `<PAGE2:…><PAGE5:…><PAGE6:…>` and its three pages sit at POSITIONS
+    // 0, 1, 2 while BELONGING to pages 2, 5, 6. Storing only the position — what
+    // the index did — makes it indistinguishable from a 3-page notebook, and
+    // there is nothing left to composite the PDF against.
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+
+    const mark = try nb.serialize(gpa, .{
+        .filetype = "mark",
+        .pages = &.{ .{ .number = 2 }, .{ .number = 5 }, .{ .number = 6 } },
+    });
+    defer gpa.free(mark);
+    const md5 = try f.put("annotated.pdf.mark", mark);
+    try testing.expect(try isCurrent(f.db, &md5));
+
+    var s = try f.db.prepare(
+        "SELECT page_index, source_page FROM note_page_index WHERE blob_md5 = ?1 ORDER BY page_index;",
+    );
+    defer s.finalize();
+    s.bindText(1, &md5);
+    const want = [_][2]i64{ .{ 0, 2 }, .{ 1, 5 }, .{ 2, 6 } };
+    for (want) |w| {
+        try testing.expect(try s.step());
+        try testing.expectEqual(w[0], s.columnInt(0));
+        try testing.expectEqual(w[1], s.columnInt(1));
+    }
+    try testing.expect(!try s.step());
+
+    // …and a NOTEBOOK is unchanged: contiguous footer, so the number is just the
+    // position plus one. A test that only checked the mark would pass just as
+    // happily if every file had started reporting the mark's numbering.
+    const book = try nb.serialize(gpa, .{ .pages = &.{ .{}, .{}, .{} } });
+    defer gpa.free(book);
+    const bmd5 = try f.put("book.note", book);
+    var s2 = try f.db.prepare(
+        "SELECT page_index, source_page FROM note_page_index WHERE blob_md5 = ?1 ORDER BY page_index;",
+    );
+    defer s2.finalize();
+    s2.bindText(1, &bmd5);
+    var n: i64 = 0;
+    while (try s2.step()) : (n += 1) {
+        try testing.expectEqual(n, s2.columnInt(0));
+        try testing.expectEqual(n + 1, s2.columnInt(1));
+    }
+    try testing.expectEqual(@as(i64, 3), n);
 }
 
 test "templateLocation: resolves hash to the image byte range; wrong hash is null" {

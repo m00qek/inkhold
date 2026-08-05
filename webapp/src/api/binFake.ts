@@ -47,6 +47,9 @@ function pagesFor(id: Id, count: number, recognized: boolean): PageRef[] {
     width: 1404,
     height: 1872,
     textHash: recognized && index % 3 !== 2 ? `${id}-t${index}` : null,
+    // A `.note` page: its number is always `index + 1`, so there is nothing
+    // to carry (see `PageRef.sourcePage`).
+    sourcePage: null,
   }));
 }
 
@@ -219,6 +222,9 @@ export function createBinFake(delay: (ms: number) => Promise<void>, latency: num
       const row = rows.find((r) => r.id === id && r.kind !== "folder");
       if (!row) throw new Error(`no such trashed note: ${id}`);
       return {
+        // The bin never pairs: trashing a PDF does not trash its mark, so
+        // annotations here would be a live file's ink on a deleted document.
+        annotationsId: null,
         id,
         name: row.name,
         // A trashed layered note keeps its layers (blob-keyed index — header).

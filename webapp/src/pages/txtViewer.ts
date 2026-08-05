@@ -812,6 +812,14 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
       const ctl = new AbortController();
       load = ctl;
 
+      // A NEW FILE MEANS NO FILE, until this one's metadata lands. The toolbar's
+      // Move to bin and the bin cluster act on `meta`, and the shell does not
+      // call `hide()` when you move between two files of the SAME type — so
+      // without this the controls stayed pointed at the file you just left for
+      // the whole of the `metaPromise` round trip below, and clicking Move to
+      // bin there trashed THAT one.
+      meta = null;
+
       root.hidden = false;
       header.setName(summary.name);
       header.setSubtitle(summary.fileType.toUpperCase());

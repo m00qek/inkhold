@@ -204,14 +204,30 @@ test.describe("find in note", () => {
     expect(drawn.d.length).toBeGreaterThan(60);
 
     // The current match is marked by weight alone — no fill, ever.
-    const current = page.locator(".findbox.is-current path");
-    await expect(current).toHaveCount(1);
-    const currentWidth = await current.evaluate((el) => getComputedStyle(el).strokeWidth);
-    const otherWidth = await page
-      .locator(".findbox:not(.is-current) path")
-      .first()
-      .evaluate((el) => getComputedStyle(el).strokeWidth);
-    expect(Number.parseFloat(currentWidth)).toBeGreaterThan(Number.parseFloat(otherWidth));
+    //
+    // BOTH WIDTHS IN ONE SNAPSHOT, AND POLLED. The ovals are re-rendered whenever
+    // the find state moves (a count batch landing, a re-measure), so reading the
+    // two in separate round trips can straddle a repaint: the second handle goes
+    // stale and its computed style reads back "" (→ NaN), or the two samples
+    // momentarily come from different renders and report the same weight. Both
+    // were reproducible under CPU contention, and this was the suite's only
+    // flake — it failed roughly one full run in two while passing every time it
+    // ran alone. One `evaluate` cannot straddle anything, and the poll rides out
+    // a sample taken mid-repaint.
+    await expect(page.locator(".findbox.is-current path")).toHaveCount(1);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const cur = document.querySelector(".findbox.is-current path");
+          const other = document.querySelector(".findbox:not(.is-current) path");
+          if (!cur || !other) return null;
+          const w = (el: Element): number => Number.parseFloat(getComputedStyle(el).strokeWidth);
+          const c = w(cur);
+          const o = w(other);
+          return Number.isFinite(c) && Number.isFinite(o) ? c > o : null;
+        }),
+      )
+      .toBe(true);
   });
 
   // THE PROGRESSIVE COUNTER (in-doc-search Phase 4). The count is never invented:
@@ -512,8 +528,10 @@ test.describe("find in note", () => {
   });
 
   test("find is not offered over a file that has no recognition to search", async ({ page }) => {
-    // A PDF: no word boxes, no transcript, nothing for find to answer.
-    await openNote(page, "/#/note/n-doc-lease");
+    // An `.epub`: no viewer, so the reader's no-preview state — and no word
+    // boxes, no transcript, nothing for find to answer. (A PDF would no longer
+    // do: it opens in its own viewer now, which has no find of its own either.)
+    await openNote(page, "/#/note/n-doc-epub");
     await expect(findToggle(page)).toBeHidden();
     await page.keyboard.press("ControlOrMeta+f");
     await expect(findBar(page)).toBeHidden();

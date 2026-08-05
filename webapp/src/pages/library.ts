@@ -70,6 +70,7 @@ import { createReader, type Reader, type ReaderOrigin } from "./reader";
 // and `.txt` stubs are wired in at `viewerFor` below.
 import { createSpdViewer } from "./spdViewer";
 import { createTxtViewer } from "./txtViewer";
+import { createPdfViewer } from "./pdfViewer";
 import type { Viewer, ViewerDeps } from "./viewer";
 import { createNoteSearch, MIN_GLOBAL_QUERY_LEN, type SearchState } from "./noteSearch";
 // The three features pulled out of this god-file (Review-2 Pass-2 #3), each fed
@@ -1299,6 +1300,8 @@ export function createAppShell(deps: AppDeps): AppShell {
   content.append(spdViewer.el);
   const txtViewer: Viewer = createTxtViewer(viewerDeps);
   content.append(txtViewer.el);
+  const pdfViewer: Viewer = createPdfViewer(viewerDeps);
+  content.append(pdfViewer.el);
 
   /**
    * The viewer on screen, or null. Exactly one paints at a time — {@link activate}
@@ -1314,6 +1317,12 @@ export function createAppShell(deps: AppDeps): AppShell {
    * exactly as before; only the types with a dedicated module branch off. A new
    * viewer adds a `case` at its marker and is mounted beside the reader above.
    */
+  /**
+   * The type → viewer map. Its MEMBERSHIP is `hasDedicatedViewer`
+   * (core/fileKind.ts) — the recycle bin asks that same question to decide
+   * whether a row opens a real viewer, and the two drifted once already. Add a
+   * case here and add the type there in the same commit.
+   */
   function viewerFor(fileType: string): Viewer {
     switch ((fileType || "").toLowerCase()) {
       // --- SPD VIEWER: the .spd viewer agent fills spdViewer.ts; this seam is live ---
@@ -1322,6 +1331,11 @@ export function createAppShell(deps: AppDeps): AppShell {
       // --- TXT VIEWER: the .txt viewer agent fills txtViewer.ts; this seam is live ---
       case "txt":
         return txtViewer;
+      // MuPDF, rastered in the browser (`render/pdfDecode.ts`). A `.mark` does
+      // NOT come here — it parses as a note and the reader paints it; pairing
+      // the two is still ahead (`docs/scratch/pdf-viewer.md` §6).
+      case "pdf":
+        return pdfViewer;
       default:
         return reader; // note, image, and every other kind
     }

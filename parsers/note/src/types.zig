@@ -125,6 +125,15 @@ pub const Layer = struct {
 
 pub const Page = struct {
     block: keyblock.Block,
+    /// The page's own number, read from its `PAGE<n>` key in the footer, 1-based.
+    ///
+    /// For a notebook this is just the index plus one — the footer runs `PAGE1`,
+    /// `PAGE2`, … with no gaps. For a `.mark` it is NOT: a mark holds only the
+    /// pages that were annotated, and its footer names them
+    /// (`<PAGE2:…><PAGE5:…><PAGE6:…>`), where the number is the page of the PDF
+    /// the mark belongs to (`note-format.md` §13.2). Dropping it — which this
+    /// parser did — leaves a 3-page mark looking like pages 1, 2, 3 of nothing.
+    number: u32,
     /// Only the layers actually present (non-zero address), in slot order.
     layers: []const Layer,
     /// The parsed `LAYERINFO` panel state (full stack, top-to-bottom, hidden
@@ -443,6 +452,7 @@ test "Page.orientation: typed accessor over the raw key, vertical when absent" {
     const a = arena.allocator();
 
     const landscape: Page = .{
+        .number = 1,
         .block = try keyblock.parse(a, "<PAGESTYLE:style_white><ORIENTATION:1090>"),
         .layers = &.{},
     };
@@ -450,12 +460,14 @@ test "Page.orientation: typed accessor over the raw key, vertical when absent" {
     try testing.expectEqualStrings("1090", landscape.orientationRaw().?);
 
     const portrait: Page = .{
+        .number = 1,
         .block = try keyblock.parse(a, "<ORIENTATION:1000>"),
         .layers = &.{},
     };
     try testing.expectEqual(Orientation.vertical, portrait.orientation());
 
     const absent: Page = .{
+        .number = 1,
         .block = try keyblock.parse(a, "<PAGESTYLE:style_white>"),
         .layers = &.{},
     };
@@ -520,6 +532,7 @@ test "bottomUpEmitOrder: LAYERINFO order minus deleted, hidden kept and flagged"
         .{ .layer_id = -1, .name = "Background Layer", .is_visible = true, .is_deleted = false, .is_current = false, .is_background = true },
     };
     const page: Page = .{
+        .number = 1,
         .block = try keyblock.parse(a, "<LAYERSEQ:LAYER3,LAYER1,MAINLAYER,BGLAYER>"),
         .layers = &.{},
         .layer_info = &info,
@@ -542,6 +555,7 @@ test "bottomUpEmitOrder: LAYERINFO order minus deleted, hidden kept and flagged"
         .{ .layer_id = -1, .name = "Background Layer", .is_visible = true, .is_deleted = false, .is_current = false, .is_background = true },
     };
     const page2: Page = .{
+        .number = 1,
         .block = try keyblock.parse(a, "<LAYERSEQ:MAINLAYER,BGLAYER>"),
         .layers = &.{},
         .layer_info = &with_deleted,
@@ -561,6 +575,7 @@ test "bottomUpEmitOrder degrades to the LAYERSEQ draw order when LAYERINFO is ab
 
     // Absent LAYERINFO: exactly bottomUpOrder, nothing hidden.
     const page: Page = .{
+        .number = 1,
         .block = try keyblock.parse(a, "<LAYERSEQ:MAINLAYER,LAYER1,BGLAYER>"),
         .layers = &.{},
     };
@@ -578,6 +593,7 @@ test "bottomUpEmitOrder degrades to the LAYERSEQ draw order when LAYERINFO is ab
         .{ .layer_id = 0, .name = "Main Layer", .is_visible = true, .is_deleted = true, .is_current = false, .is_background = false },
     };
     const page2: Page = .{
+        .number = 1,
         .block = try keyblock.parse(a, "<LAYERSEQ:MAINLAYER,BGLAYER>"),
         .layers = &.{},
         .layer_info = &useless,
@@ -594,6 +610,7 @@ test "bottomUpEmitOrder degrades to the LAYERSEQ draw order when LAYERINFO is ab
         .{ .layer_id = 0, .name = "B", .is_visible = true, .is_deleted = false, .is_current = false, .is_background = false },
     };
     const page3: Page = .{
+        .number = 1,
         .block = try keyblock.parse(a, "<PAGESTYLE:x>"),
         .layers = &.{},
         .layer_info = &dup,
@@ -608,7 +625,7 @@ fn pageWithSeq(a: std.mem.Allocator, seq: ?[]const u8) !Page {
         try std.fmt.allocPrint(a, "<LAYERSEQ:{s}>", .{s})
     else
         try a.dupe(u8, "<PAGESTYLE:x>");
-    return .{ .block = try keyblock.parse(a, payload), .layers = &.{} };
+    return .{ .number = 1, .block = try keyblock.parse(a, payload), .layers = &.{} };
 }
 
 test "bottomUpOrder reverses LAYERSEQ (which is stored top-to-bottom)" {
