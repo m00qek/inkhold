@@ -662,7 +662,7 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
           // ONE LAYER RESIDENT AT A TIME. A payload's layer is the panel's own
           // ~1404x1872 (10.5 MB of RGBA, and `layerCanvas` holds a second copy
           // while it blits), so the loop that `present` runs — decode them all,
-          // then stack — is 40 MB against a 50 MB app budget for a picture that
+          // then stack — is 40 MB of live canvas for a picture that
           // ends up 120 px wide. Each is reduced and released before the next is
           // asked for, which puts the peak at one layer whatever the page holds.
           const full = layerCanvas(decodeLayerWithExports(wasm, u8, index));

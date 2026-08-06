@@ -9,7 +9,7 @@
 // there is no hidden coupling back into the shell.
 
 import { el } from "../ui/dom";
-import { pinAspect } from "../ui/tileAspect";
+import { learnsAspect, pinAspect, provisionalAspect } from "../ui/tileAspect";
 import { ICONS, svg, type IconName } from "../ui/icons";
 import { fileKind, rawFileUrl } from "../core/fileKind";
 import { getDims } from "../cache/dimsMemo";
@@ -22,11 +22,24 @@ import type { LazyEngine } from "../render/lazy";
 /**
  * Non-note, non-image types that get a REAL preview through the thumbnail facade
  * (painted into an engine-managed `<img>`) rather than a static glyph tile:
- * `.spd` (its extracted embedded thumbnail) and `.txt` (a rasterised snippet).
- * Images stay a native `<img>`; everything else (pdf, unknown) keeps the honest
+ * `.spd` (its extracted embedded thumbnail), `.txt` (a rasterised snippet) and
+ * `.pdf` (page 0 rendered client-side through the MuPDF wasm). Images stay a
+ * native `<img>`; everything else (epub, doc, unknown) keeps the honest
  * no-preview glyph.
+ *
+ * REGISTRATION POINT 5 OF NINE (ARCHITECTURE.md), AND IT MUST AGREE WITH
+ * `strategyFor` (registration point 4). Nothing type-checks the pair: a real
+ * strategy with the type missing here is a glyph tile and no indication why, and
+ * that has now been the hazard for two file types running. `thumbnails.test.ts`
+ * asserts the two agree for every type in the app's vocabulary, so a third
+ * cannot land it silently.
+ *
+ * EXPORTED for that test and for `pages/bin.ts`, whose row tiles take the same
+ * decision. The bin used to keep its own inline copy of a set like this and it
+ * drifted the day the PDF viewer shipped (see `hasDedicatedViewer`); one set,
+ * two readers, no drift.
  */
-const FACADE_THUMB_TYPES = new Set(["spd", "txt"]);
+export const FACADE_THUMB_TYPES: ReadonlySet<string> = new Set(["spd", "txt", "pdf"]);
 
 /**
  * The `.txt` snippet's shape — a CLIENT-SIDE constant, deliberately not served:
@@ -297,10 +310,11 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
     if (kind !== "note") {
       const t = note.fileType.trim().toLowerCase();
       if (FACADE_THUMB_TYPES.has(t)) {
-        // A `.spd` (its embedded thumbnail, extracted server-side) or a `.txt`
-        // (a rasterised snippet of its first lines) gets a REAL preview through
-        // the thumbnail facade, painted into an `<img>` by the lazy engine — not
-        // the static glyph the type used to collapse to.
+        // A `.spd` (its embedded thumbnail, extracted server-side), a `.txt` (a
+        // rasterised snippet of its first lines) or a `.pdf` (page 0 rendered
+        // client-side) gets a REAL preview through the thumbnail facade, painted
+        // into an `<img>` by the lazy engine — not the static glyph the type
+        // used to collapse to.
         const img = engineThumbImg(note.name);
         // A `.spd`'s embedded preview is a fixed 600x800 PORTRAIT that letterboxes
         // the real (often landscape) drawing. The true canvas aspect (server
@@ -308,6 +322,8 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
         // letterbox bands at transcode — the cached WebP is already borderless and
         // correctly shaped, so display is plain `contain` for every consumer (grid,
         // list, bin). `.txt` states no aspect and rasterises its snippet at 3:4.
+        // A `.pdf` states none either — nothing indexes a PDF's page box server
+        // side — and learns its own from the render (see `applyTileAspect`).
         return {
           node: img,
           target: img,
@@ -316,10 +332,12 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
           alt: note.name,
         };
       }
-      // The glyph alone made a .pdf and an unknown file identical, because one
-      // symbol is all "a document that is not a notebook" can say. Lettering the
-      // tile with the type distinguishes them without inventing an icon per
-      // extension. `.spd`/`.txt` no longer land here — they have real previews.
+      // The glyph alone made an `.epub` and an unknown file identical, because
+      // one symbol is all "a document that is not a notebook" can say. Lettering
+      // the tile with the type distinguishes them without inventing an icon per
+      // extension. `.spd`/`.txt`/`.pdf` no longer land here — they have real
+      // previews (a PDF that will not render still gets its glyph, but from the
+      // FACADE's floor, inside the same `<img>`).
       return {
         node: el("span", { class: "thumb__glyph", html: svg(ICONS.doc, 1.4) }),
         target: null,
@@ -343,10 +361,10 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
   /**
    * Give a card's tile its final shape BEFORE any bytes arrive — the whole of
    * the reflow-free contract. Sources in priority order: `thumbAspect` → the
-   * `.txt` constant → the image dims memo → (images only) the decoded image
-   * itself, which is the single corrective reflow a first-ever view is allowed;
-   * everything else keeps the CSS 3:4 fallback. The async corrections re-span
-   * the masonry; entries with a synchronous answer never move again.
+   * `.txt` constant → the dims memo → the decoded tile itself, which is the
+   * single corrective reflow a first-ever view is allowed; everything else keeps
+   * the CSS 3:4 fallback. The async corrections re-span the masonry; entries
+   * with a synchronous answer never move again.
    */
   function applyTileAspect(tile: HTMLElement, note: NoteSummary, media: HTMLElement, row: boolean): void {
     const aspect = knownAspect(note);
@@ -354,21 +372,28 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
       pinAspect(tile, aspect, row);
       return;
     }
-    if (fileKind(note.fileType) !== "image") return; // glyph tiles have no shape to learn
+    if (!learnsAspect(note.fileType)) return; // glyph tiles have no shape to learn
+    // Something to stand on until the pixels answer. Only a `.pdf` takes one —
+    // see `provisionalAspect` for why an image deliberately does not — and it is
+    // still a GUESS, so the corrective sources below stay wired.
+    const provisional = provisionalAspect(note.fileType);
+    if (provisional !== null) pinAspect(tile, provisional, row);
     const correct = (w: number, h: number): void => {
       if (!tile.isConnected || !(w > 0) || !(h > 0)) return;
       pinAspect(tile, w / h, row);
       ctx.scheduleSpan();
     };
-    // The memo answers for every image seen before — often before this frame
+    // The memo answers for every hash decoded before — often before this frame
     // paints, so in practice only a hash's FIRST-ever view reflows.
     if (note.fileHash) {
       void getDims(note.fileHash).then((dims) => {
         if (dims) correct(dims.w, dims.h);
       });
     }
-    // The decoded image is the truth when the memo has none yet. Idempotent
-    // against the memo racing it — both state the same shape.
+    // The decoded tile is the truth when the memo has none yet. Idempotent
+    // against the memo racing it — both state the same shape. For a `.pdf` this
+    // is the facade's WebP, whose raster carries page 0's aspect; if the render
+    // failed it is the glyph instead, which is the 3:4 the tile already had.
     if (media instanceof HTMLImageElement) {
       if (media.complete && media.naturalWidth > 0) correct(media.naturalWidth, media.naturalHeight);
       else media.addEventListener("load", () => correct(media.naturalWidth, media.naturalHeight), { once: true });

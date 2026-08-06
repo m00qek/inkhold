@@ -212,7 +212,7 @@ export function inkAlpha(
   for (let i = 0; i < alpha.length; i++) alpha[i] = data[i * 4 + 3]!;
   // The flatten's sheet is dead the moment its alpha is out: an A4 page at the
   // ink's own resolution is ~10 MB of RGBA, and the `ImageData` above is another
-  // 10, against a 50 MB app-wide budget. Zeroing it drops the backing store now
+  // 10, and this runs on a phone as readily as a laptop. Zeroing it drops the backing store now
   // rather than at the next GC.
   sheet.width = 0;
   sheet.height = 0;
@@ -238,6 +238,14 @@ export interface PdfExportState {
    * being grafted, and there is no "the page, without the page".
    */
   pageVisible: boolean;
+  /**
+   * How many pages of the document carry ink — NOT of the focused page.
+   *
+   * The whole-document row's whole question. Zero means the export would be a
+   * byte-for-byte copy of the file the raw row beside it already offers, so the
+   * row hides rather than producing a duplicate under a name that promises ink.
+   */
+  markedPages: number;
 }
 
 export interface PdfExports {
@@ -261,7 +269,7 @@ export interface PdfExportsDeps {
   /**
    * The focused page as a layered model — the document under its ink, composed
    * into one space. Null when there is nothing to export. The caller MUST call
-   * `release()`: a model is several full-resolution canvases against a 50 MB
+   * `release()`: a model is several full-resolution canvases, tens of megabytes
    * app-wide budget.
    *
    * `withPage: false` SKIPS the page raster and leaves the document layer blank.
@@ -280,6 +288,22 @@ export interface PdfExportsDeps {
    * has gone away.
    */
   exportPagePdf(page: number, ink: PdfInkOverlay): Promise<Uint8Array>;
+  /**
+   * The WHOLE document with its ink burnt in, as one blob — every page, and
+   * every link and highlight the original carried.
+   *
+   * A different mechanism from `exportPagePdf`, not the same one repeated: this
+   * one appends an INCREMENTAL UPDATE to the original file rather than rebuilding
+   * it, which is why the original's own annotations survive here and do not
+   * there. `onProgress(done, total)` counts ANNOTATED pages — the sparse set,
+   * seven of seventy-seven in the real corpus — not pages of the document.
+   *
+   * `pages` is how many actually went in, which can be fewer than `total` when a
+   * mark page will not decode.
+   */
+  exportDocumentPdf(
+    onProgress: (done: number, total: number) => void,
+  ): Promise<{ blob: Blob; pages: number }>;
   state(): PdfExportState;
   /**
    * Overridable for tests, the same seam `export/layered.ts` carries and for a
@@ -390,6 +414,53 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
     );
   }
 
+  /**
+   * The whole document, ink and all — and the ONE row in this menu that loses
+   * nothing.
+   *
+   * IT IS NOT THE PER-PAGE ROW AT A LARGER SCALE, and the copy below is written
+   * so the two cannot be read that way. The per-page rows GRAFT a page into a
+   * fresh document, which silently leaves `/Annots` behind: links, highlights,
+   * comments and form fields from the source page do not come with it. This one
+   * appends to the original file instead — nothing is re-encoded, so the text,
+   * the vectors, the bookmarks, the metadata AND the original's own annotations
+   * are all still there. The bigger export is the one that loses less.
+   *
+   * PROGRESS, BECAUSE THIS IS REAL WORK. Each annotated page is decoded at the
+   * device panel's own resolution and handed to the decoder one at a time, and
+   * the original has to cross the network first (it is inside the result). The
+   * toast says which page, out of how many — the reader's `documentPdf` sets the
+   * precedent, and for the same reason: no percentage of TIME, because the
+   * per-page cost varies with how much was written on it.
+   */
+  async function saveDocumentPdf(): Promise<void> {
+    const name = deps.docName();
+    if (name === null) return;
+    // BEFORE the first await. On the link this app is designed for, fetching
+    // the original is the longest step and it happens before there is a page
+    // number to report — a menu that closes onto nothing for thirty seconds
+    // reads as a failure.
+
+    toast(`Exporting ${name} — fetching the original…`);
+    const { blob, pages } = await deps.exportDocumentPdf((done, total) =>
+      toast(`Exporting ${name} — page ${done} of ${total}…`),
+    );
+    // The document's own name with a suffix, not the per-page scheme: this IS
+    // the document, so `<stem>_annotated.pdf` says the one thing that changed.
+    const stem = name.replace(/\.[^.]*$/, "");
+    const filename = `${stem}_annotated.pdf`;
+    download(filename, blob);
+    // THE OPPOSITE CLAIM TO THE PER-PAGE ROW'S, and it is deliberate that both
+    // sentences name annotations. That one has to warn that the original's are
+    // gone; this one can say they are kept, and a user who has read the first
+    // needs to be told plainly that the second is different.
+    toast(
+      `Saved ${filename} — the whole document, with ${pages} annotated ` +
+        `${pages === 1 ? "page" : "pages"}. Text, links and the original's own ` +
+        `highlights are all preserved.`,
+    );
+  }
+
   // `.menu__head` uppercases in CSS, so the natural-case text here renders as the
   // headers shown.
 
@@ -442,25 +513,26 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
     menu.item("PDF document", ".pdf", () => savePdf("original")),
   );
 
-  // WHOLE DOCUMENT holds exactly one row today: the raw file, unchanged bytes,
-  // the one non-transformed option every viewer offers. The shared mechanics
-  // navigate to the href (its Content-Disposition names it) and `null` disables
-  // the row.
+  // WHOLE DOCUMENT — two rows, and the difference between them is the whole
+  // point of the group.
   //
-  // STILL NO WHOLE-DOCUMENT EXPORT with the ink burnt in — the row that would
-  // obviously belong beside this. The machinery now exists (the per-page rows
-  // above graft one page and stencil the ink onto it, keeping the text and
-  // vectors), so what is missing is no longer the idea but the SHAPE: a 77-page
-  // document means 77 grafts and one writer assembling them, streaming a page at
-  // a time the way `export/pdf.ts` does for notes rather than holding the whole
-  // file in memory. That is a different job from this menu's, and the group is
-  // where it lands when it is done.
+  // The RAW file is unchanged bytes, the one non-transformed option every viewer
+  // offers: the shared mechanics navigate to the href (its Content-Disposition
+  // names it) and `null` disables the row.
+  //
+  // ANNOTATED is the same file with the handwriting written into it, built by
+  // APPENDING to those very bytes rather than rebuilding the document — so it is
+  // the raw row plus the ink and nothing subtracted. It hides on a document with
+  // no ink anywhere, where it would produce a byte-for-byte copy of the row
+  // above it (`refreshGroups`).
+  const annotatedPdf = menu.item("PDF with annotations", ".pdf", saveDocumentPdf);
   const rawItem = menu.rawItem("PDF document", ".pdf");
   const wholeGroup = el(
     "div",
     {},
     el("div", { class: "menu__sep" }),
     el("div", { class: "menu__head", text: "Whole document" }),
+    annotatedPdf,
     rawItem.el,
   );
 
@@ -475,6 +547,10 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
       // A PDF of "this page with the page turned off" is not a thing, so the row
       // goes rather than lying about what it would produce.
       currentPdf.hidden = !st.pageVisible;
+      // Nothing written on this document ANYWHERE means this row would emit the
+      // raw file under a name promising ink. Hidden, not disabled — the house
+      // rule for a row that cannot mean anything (`webapp/ARCHITECTURE.md`).
+      annotatedPdf.hidden = st.markedPages === 0;
       // `tuned` covers the DOCUMENT row too, not only the ink: the document is a
       // layer of this model like any other, so hiding it is a divergence from
       // how the page was authored and "original view" is then a real, different

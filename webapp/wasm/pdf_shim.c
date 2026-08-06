@@ -542,6 +542,23 @@ static pdf_obj *ink_shim_add_ops(fz_context *ctx, pdf_document *dst, const char 
 	return obj;
 }
 
+/* The XObject name the ink is drawn through, for page `number`.
+ *
+ * PER-PAGE, AND THAT IS NOT COSMETIC. A page's /Resources dictionary is
+ * frequently SHARED between pages — one real document gives all 26 of its pages
+ * the same object (see the write options below) — so a fixed `/InkholdInk` would
+ * have page 7's ink OVERWRITE page 3's entry in the dictionary they share, and
+ * page 3's content stream, still saying `/InkholdInk Do`, would then draw page
+ * 7's handwriting. Invisible on the single-page export, which touches one page;
+ * fatal on the whole-document one, which touches seven.
+ *
+ * `dst` must have room for ~24 bytes.
+ */
+static void ink_shim_xobject_name(char *dst, size_t len, int number)
+{
+	fz_snprintf(dst, len, "InkholdInk%d", number);
+}
+
 /* Put the ink into the page's own /Contents, as `[ (q) original… (Q + ink) ]`.
  *
  * A CONTENT STREAM RATHER THAN AN ANNOTATION. Both were prototyped and they
@@ -566,20 +583,27 @@ static pdf_obj *ink_shim_add_ops(fz_context *ctx, pdf_document *dst, const char 
  * whitespace between them, so splitting our additions into their own objects
  * costs nothing and leaves the original's bytes untouched and unparsed. */
 static void ink_shim_wrap_contents(fz_context *ctx, pdf_document *dst,
-	pdf_obj *page_obj, pdf_obj *image, const char *tail)
+	pdf_obj *page_obj, pdf_obj *image, const char *name, const char *tail)
 {
 	pdf_obj *resources;
 	pdf_obj *xobjects;
 	pdf_obj *old;
 	pdf_obj *contents = NULL;
 
-	resources = pdf_dict_get(ctx, page_obj, PDF_NAME(Resources));
+	/* INHERITABLE, not `pdf_dict_get`. /Resources is one of the five keys a page
+	 * may inherit from its /Pages node, and a great many real documents put it
+	 * there once rather than on every page. Reading only the page's own key
+	 * finds nothing on those, and the `put_dict` below then writes an EMPTY
+	 * /Resources onto the page — which does not merely fail to help, it SHADOWS
+	 * the inherited one, and the page's original text loses every font it was
+	 * using. */
+	resources = pdf_dict_get_inheritable(ctx, page_obj, PDF_NAME(Resources));
 	if (!pdf_is_dict(ctx, resources))
 		resources = pdf_dict_put_dict(ctx, page_obj, PDF_NAME(Resources), 2);
 	xobjects = pdf_dict_get(ctx, resources, PDF_NAME(XObject));
 	if (!pdf_is_dict(ctx, xobjects))
 		xobjects = pdf_dict_put_dict(ctx, resources, PDF_NAME(XObject), 1);
-	pdf_dict_puts(ctx, xobjects, "InkholdInk", image);
+	pdf_dict_puts(ctx, xobjects, name, image);
 
 	old = pdf_dict_get(ctx, page_obj, PDF_NAME(Contents));
 	fz_var(contents);
@@ -605,58 +629,33 @@ static void ink_shim_wrap_contents(fz_context *ctx, pdf_document *dst,
 		fz_rethrow(ctx);
 }
 
-/* Export page `number` of `doc` as a one-page PDF with `alpha` (w*h coverage
- * bytes) drawn over it. `a`..`f` map the ALPHA IMAGE'S OWN PIXEL SPACE — (0,0)
- * at its top-left pixel, (w,h) at its bottom-right, y downwards — onto the page
- * in DISPLAY SPACE, the top-left-origin cropped-and-rotated box the viewer
- * already draws in. Covering the whole page is therefore `pageW/w, 0, 0,
- * pageH/h, 0, 0`. Returns a buffer the caller must drop, or NULL (message in
- * `ink_shim_error`).
+/* Draw `alpha` onto page `number` of the ALREADY-OPEN `doc`, in place.
  *
- * ON THE STREAMED PATH THIS CAN SUSPEND: the graft reads the source document,
- * which pulls through `ink_host_read`. That is the same proven arrangement as
- * everything else here — no Zig frame is on the stack inside the `fz_try`.
+ * The whole of the ink work, shared by the two export routes: the single-page
+ * one draws onto page 0 of the fresh document it grafted into, the incremental
+ * one draws onto page N of the document the user opened. Throws on failure.
+ *
+ * `a`..`f` map the ALPHA IMAGE'S OWN PIXEL SPACE — (0,0) at its top-left pixel,
+ * (w,h) at its bottom-right, y downwards — onto the page in DISPLAY SPACE, the
+ * top-left-origin cropped-and-rotated box the viewer already draws in.
  */
-fz_buffer *ink_shim_export_page(fz_document *doc, int number,
+static void ink_shim_draw_ink(fz_context *ctx, pdf_document *doc, int number,
 	const unsigned char *alpha, int w, int h,
 	float a, float b, float c, float d, float e, float f)
 {
-	fz_context *ctx = g_ctx;
-	pdf_document *src;
-	pdf_document *dst = NULL;
 	pdf_obj *image = NULL;
 	pdf_page *page = NULL;
-	fz_buffer *out_buf = NULL;
-	fz_output *out = NULL;
 
-	if (!ctx || !doc || !alpha || w <= 0 || h <= 0)
-		return NULL;
-
-	/* REFUSE ANYTHING THAT IS NOT A PDF. `pdf_specifics` answers NULL for EPUB,
-	 * CBZ, XPS and friends, and there is no page to graft out of a document that
-	 * has no PDF objects. The caller's fallback is the rasterising exporter, and
-	 * it needs a sentence to show for why. */
-	src = pdf_specifics(ctx, doc);
-	if (!src) {
-		ink_set_error("only a PDF can be exported with its page structure intact");
-		return NULL;
-	}
-
-	fz_var(dst);
 	fz_var(image);
 	fz_var(page);
-	fz_var(out_buf);
-	fz_var(out);
 	fz_try(ctx)
 	{
 		fz_rect box;
 		fz_matrix display, unit, place;
+		char name[24];
 		char tail[256];
-		pdf_write_options opts = pdf_default_write_options;
 
-		dst = pdf_create_document(ctx);
-		pdf_graft_page(ctx, dst, 0, src, number);
-		image = ink_shim_add_ink_image(ctx, dst, alpha, w, h);
+		image = ink_shim_add_ink_image(ctx, doc, alpha, w, h);
 
 		/* PLACEMENT, AND THE BUG IT EXISTS TO AVOID. A content stream is written
 		 * in the page's UNROTATED, MediaBox-origin user space. Every coordinate
@@ -682,16 +681,73 @@ fz_buffer *ink_shim_export_page(fz_document *doc, int number,
 		 * with the image's first row along the top edge, so a caller who thinks
 		 * in image pixels needs (u,v) -> (u*w, (1-v)*h) in front of their matrix.
 		 * MuPDF's `fz_concat(A, B)` means "A, then B". */
-		page = pdf_load_page(ctx, dst, 0);
+		page = pdf_load_page(ctx, doc, number);
 		pdf_page_transform_box(ctx, page, &box, &place, FZ_CROP_BOX);
 		display = fz_make_matrix(a, b, c, d, e, f);
 		unit = fz_make_matrix((float)w, 0, 0, -(float)h, 0, (float)h);
 		place = fz_concat(fz_concat(unit, display), fz_invert_matrix(place));
 
+		ink_shim_xobject_name(name, sizeof(name), number);
 		fz_snprintf(tail, sizeof(tail),
-			"Q\nq %g %g %g %g %g %g cm /InkholdInk Do Q\n",
-			place.a, place.b, place.c, place.d, place.e, place.f);
-		ink_shim_wrap_contents(ctx, dst, pdf_lookup_page_obj(ctx, dst, 0), image, tail);
+			"Q\nq %g %g %g %g %g %g cm /%s Do Q\n",
+			place.a, place.b, place.c, place.d, place.e, place.f, name);
+		ink_shim_wrap_contents(ctx, doc, pdf_lookup_page_obj(ctx, doc, number),
+			image, name, tail);
+	}
+	fz_always(ctx)
+	{
+		pdf_drop_page(ctx, page);
+		pdf_drop_obj(ctx, image);
+	}
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+}
+
+/* Export page `number` of `doc` as a one-page PDF with `alpha` (w*h coverage
+ * bytes) drawn over it. `a`..`f` map the ALPHA IMAGE'S OWN PIXEL SPACE — (0,0)
+ * at its top-left pixel, (w,h) at its bottom-right, y downwards — onto the page
+ * in DISPLAY SPACE, the top-left-origin cropped-and-rotated box the viewer
+ * already draws in. Covering the whole page is therefore `pageW/w, 0, 0,
+ * pageH/h, 0, 0`. Returns a buffer the caller must drop, or NULL (message in
+ * `ink_shim_error`).
+ *
+ * ON THE STREAMED PATH THIS CAN SUSPEND: the graft reads the source document,
+ * which pulls through `ink_host_read`. That is the same proven arrangement as
+ * everything else here — no Zig frame is on the stack inside the `fz_try`.
+ */
+fz_buffer *ink_shim_export_page(fz_document *doc, int number,
+	const unsigned char *alpha, int w, int h,
+	float a, float b, float c, float d, float e, float f)
+{
+	fz_context *ctx = g_ctx;
+	pdf_document *src;
+	pdf_document *dst = NULL;
+	fz_buffer *out_buf = NULL;
+	fz_output *out = NULL;
+
+	if (!ctx || !doc || !alpha || w <= 0 || h <= 0)
+		return NULL;
+
+	/* REFUSE ANYTHING THAT IS NOT A PDF. `pdf_specifics` answers NULL for EPUB,
+	 * CBZ, XPS and friends, and there is no page to graft out of a document that
+	 * has no PDF objects. The caller's fallback is the rasterising exporter, and
+	 * it needs a sentence to show for why. */
+	src = pdf_specifics(ctx, doc);
+	if (!src) {
+		ink_set_error("only a PDF can be exported with its page structure intact");
+		return NULL;
+	}
+
+	fz_var(dst);
+	fz_var(out_buf);
+	fz_var(out);
+	fz_try(ctx)
+	{
+		pdf_write_options opts = pdf_default_write_options;
+
+		dst = pdf_create_document(ctx);
+		pdf_graft_page(ctx, dst, 0, src, number);
+		ink_shim_draw_ink(ctx, dst, 0, alpha, w, h, a, b, c, d, e, f);
 
 		/* WRITE OPTIONS, AND WHY THE CLEANING IS NOT OPTIONAL. `do_clean` +
 		 * `do_sanitize` re-parse every content stream and rebuild each one's
@@ -731,13 +787,312 @@ fz_buffer *ink_shim_export_page(fz_document *doc, int number,
 	fz_always(ctx)
 	{
 		fz_drop_output(ctx, out);
-		pdf_drop_page(ctx, page);
-		pdf_drop_obj(ctx, image);
 		pdf_drop_document(ctx, dst);
 	}
 	fz_catch(ctx)
 	{
 		ink_record_error(ctx);
+		fz_drop_buffer(ctx, out_buf);
+		return NULL;
+	}
+	return out_buf;
+}
+
+/* --- Whole-document export, as an INCREMENTAL UPDATE --------------------- */
+
+/* WHY THIS IS NOT "LOOP THE ONE ABOVE". `pdf_graft_page` silently drops
+ * /Annots, so grafting all 77 pages of a document would lose every link and
+ * highlight the original carried, 77 times over. An incremental update instead
+ * keeps the ORIGINAL FILE'S BYTES VERBATIM and appends only the objects that
+ * changed: nothing is re-encoded, so the export keeps its text, vectors,
+ * bookmarks, forms, metadata, structure tree AND its own annotations. The bigger
+ * export is the one that loses less.
+ *
+ * It is also the only shape that fits the memory budget. What comes back here is
+ * the DELTA ALONE — typically tens of kilobytes — and the browser concatenates
+ * it onto the original with `new Blob([original, delta])`, which is disk-backed:
+ * a 76 MB document is exported without a single megabyte of it entering the JS
+ * heap or this one.
+ *
+ * THREE THINGS MuPDF WILL NOT DO FOR US ON THIS PATH, all verified in
+ * `source/pdf/pdf-write.c` and all handled by `ink_shim_incremental_refusal`:
+ *
+ *  1. `pdf_write_document` (2896) LACKS the `!doc->file` guard that
+ *     `pdf_save_document` (2953) has, so writing incrementally from a document
+ *     with no backing file produces a bad delta SILENTLY. We check it ourselves.
+ *  2. `opts.bias` is never set on the `pdf_write_document` path AND CANNOT BE
+ *     SET FROM OUTSIDE. `pdf_save_document` assigns it at 3009 (`opts.bias =
+ *     doc->bias`, under `if (do_incremental)`) — but that `opts` is the internal
+ *     `pdf_write_state`, not the `pdf_write_options` a caller hands in. For a
+ *     file with junk before `%PDF-` every xref offset in the delta would be
+ *     written unbiased and point at the wrong byte. `doc->bias` is public, so we
+ *     read it and refuse. Detectable, not fixable, and MuPDF stays unpatched.
+ *  3. MuPDF itself refuses incremental on a REPAIRED file, with `do_garbage`,
+ *     and with any encryption change. The repair case is pre-empted here so the
+ *     refusal arrives BEFORE any page is mutated; the other two are simply not
+ *     asked for. `do_clean`/`do_sanitize`/`do_garbage` — which the single-page
+ *     export needs, because grafting drags shared resources along — are neither
+ *     available nor wanted here: nothing is grafted, so nothing is duplicated.
+ *
+ * Each refusal is a sentence the UI can show. Falling back to grafting every
+ * page is NOT an option: that is the exact fidelity loss this route exists to
+ * avoid, and doing it silently would be worse than not offering the row.
+ */
+
+/* Why `src` cannot take an incremental update, or NULL if it can. */
+static const char *ink_shim_incremental_refusal(pdf_document *src)
+{
+	if (!src->file)
+		return "this PDF has no original file to append to";
+	if (src->repair_attempted)
+		return "this PDF had to be repaired to open, so it cannot be updated in place";
+	if (src->bias != 0)
+		return "this PDF has junk before its %PDF- header, which would misplace every offset";
+	return NULL;
+}
+
+/* The output the delta is written through: absolute file positions in, only the
+ * bytes at or after `base` kept.
+ *
+ * WHY NOT `fz_new_output_with_buffer`. Because of what MuPDF does FIRST on an
+ * incremental write: `do_pdf_save_document` calls
+ * `ensure_initial_incremental_contents(ctx, doc->file, out, doc->file_size)`,
+ * whose contract is that the output must ALREADY CONTAIN the original file. It
+ * checks by reading the output back through `fz_stream_from_output`, and a
+ * buffer output has no `as_stream`, so it takes the other branch and COPIES the
+ * whole original into the buffer — which would hand back original+delta, tens of
+ * megabytes, and throw away the entire point.
+ *
+ * So the output DISCARDS everything written below `base`. MuPDF's copy loop
+ * writes the original into a sink, which leaves the cursor at exactly `base` and
+ * every real byte after it; every offset MuPDF records afterwards —
+ * `fz_tell_output` is what fills the xref — is a true file offset, because
+ * `tell` answers in the original's coordinates rather than the delta's. No
+ * MuPDF state is poked and no documented behaviour is bent; the cost is that the
+ * original is READ once through `doc->file`, which is why the browser points
+ * `ink.host_read` at its own local copy for the duration (`pdfWorker.ts`).
+ */
+typedef struct {
+	fz_buffer *delta; /* owned reference; the bytes from `base` onwards */
+	int64_t base;     /* the original file's length */
+	int64_t pos;      /* the write cursor, as an offset into the WHOLE file */
+} ink_delta_state;
+
+static void ink_delta_write(fz_context *ctx, void *opaque, const void *data, size_t n)
+{
+	ink_delta_state *st = opaque;
+	const unsigned char *p = data;
+	int64_t at = st->pos;
+	size_t off;
+
+	st->pos += (int64_t)n;
+	if (at < st->base) {
+		int64_t skip = st->base - at;
+		if ((int64_t)n <= skip)
+			return; /* wholly inside the original: the caller already has it */
+		p += (size_t)skip;
+		n -= (size_t)skip;
+		at = st->base;
+	}
+	off = (size_t)(at - st->base);
+	if (off == st->delta->len) {
+		fz_append_data(ctx, st->delta, p, n);
+		return;
+	}
+	/* A backwards seek followed by a write. The only writer that does this is
+	 * the signature path (`pdf-write.c:1816`), which we never reach — but a
+	 * position-addressed output that silently appended instead would corrupt the
+	 * delta rather than fail, so it is handled rather than asserted. */
+	while (st->delta->len < off + n)
+		fz_append_byte(ctx, st->delta, 0);
+	memcpy(st->delta->data + off, p, n);
+}
+
+static void ink_delta_seek(fz_context *ctx, void *opaque, int64_t offset, int whence)
+{
+	ink_delta_state *st = opaque;
+	int64_t target = offset;
+
+	if (whence == SEEK_CUR)
+		target = st->pos + offset;
+	else if (whence == SEEK_END)
+		target = st->base + (int64_t)st->delta->len + offset;
+	if (target < 0)
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot seek before the start of the file");
+	st->pos = target;
+}
+
+static int64_t ink_delta_tell(fz_context *ctx, void *opaque)
+{
+	ink_delta_state *st = opaque;
+
+	(void)ctx;
+	return st->pos;
+}
+
+static void ink_delta_truncate(fz_context *ctx, void *opaque)
+{
+	ink_delta_state *st = opaque;
+
+	if (st->pos <= st->base)
+		fz_clear_buffer(ctx, st->delta);
+	else if ((size_t)(st->pos - st->base) < st->delta->len)
+		st->delta->len = (size_t)(st->pos - st->base);
+}
+
+static void ink_delta_drop(fz_context *ctx, void *opaque)
+{
+	ink_delta_state *st = opaque;
+
+	fz_drop_buffer(ctx, st->delta);
+	fz_free(ctx, st);
+}
+
+/* Draw `alpha` onto page `number` of the OPEN document, in place. Writes
+ * nothing; call once per annotated page, then `ink_shim_export_incremental`.
+ * 0 on success, -1 with a message in `ink_shim_error` on failure.
+ *
+ * THE REFUSALS ARE CHECKED HERE TOO, and that is the point of checking them
+ * early: a document that cannot be written incrementally is turned down before
+ * its first page is touched, so a refusal never leaves a half-annotated document
+ * behind for the next render to draw.
+ *
+ * ON THE STREAMED PATH THIS CAN SUSPEND — loading a page walks the xref, which
+ * pulls through `ink_host_read`. No Zig frame is on the stack inside `fz_try`.
+ */
+int ink_shim_annotate_page(fz_document *doc, int number,
+	const unsigned char *alpha, int w, int h,
+	float a, float b, float c, float d, float e, float f)
+{
+	fz_context *ctx = g_ctx;
+	pdf_document *src;
+	const char *refusal;
+
+	if (!ctx || !doc || !alpha || w <= 0 || h <= 0)
+		return -1;
+
+	src = pdf_specifics(ctx, doc);
+	if (!src) {
+		ink_set_error("only a PDF can be exported with its structure intact");
+		return -1;
+	}
+	refusal = ink_shim_incremental_refusal(src);
+	if (refusal) {
+		ink_set_error(refusal);
+		return -1;
+	}
+
+	fz_try(ctx)
+		ink_shim_draw_ink(ctx, src, number, alpha, w, h, a, b, c, d, e, f);
+	fz_catch(ctx)
+	{
+		ink_record_error(ctx);
+		return -1;
+	}
+	return 0;
+}
+
+/* Write the changes made by `ink_shim_annotate_page` as an incremental update,
+ * and hand back THE DELTA ONLY — the bytes that belong after the original file.
+ * The caller must drop the buffer. NULL on failure (message in
+ * `ink_shim_error`).
+ *
+ * The result is not a PDF on its own: `original bytes || delta` is.
+ */
+fz_buffer *ink_shim_export_incremental(fz_document *doc)
+{
+	fz_context *ctx = g_ctx;
+	pdf_document *src;
+	const char *refusal;
+	ink_delta_state *st = NULL;
+	/* A NON-OWNING alias, live only inside the `fz_try`: `out` owns `st` and
+	 * drops it, and the invariant has to be read after the write finishes. */
+	ink_delta_state *check = NULL;
+	fz_buffer *out_buf = NULL;
+	fz_output *out = NULL;
+
+	if (!ctx || !doc)
+		return NULL;
+
+	src = pdf_specifics(ctx, doc);
+	if (!src) {
+		ink_set_error("only a PDF can be exported with its structure intact");
+		return NULL;
+	}
+	refusal = ink_shim_incremental_refusal(src);
+	if (refusal) {
+		ink_set_error(refusal);
+		return NULL;
+	}
+	/* An empty delta is a valid answer to "nothing changed", and a useless one
+	 * to a caller who asked for an annotated document: the concatenation would
+	 * be the original file, which the raw-download row already offers. Refusing
+	 * says so rather than shipping a copy under a name that promises ink. */
+	if (!pdf_has_unsaved_changes(ctx, src)) {
+		ink_set_error("no ink was added to this document");
+		return NULL;
+	}
+
+	fz_var(st);
+	fz_var(check);
+	fz_var(out_buf);
+	fz_var(out);
+	fz_try(ctx)
+	{
+		pdf_write_options opts = pdf_default_write_options;
+
+		/* Compression of the NEW objects only — in an incremental write the
+		 * unchanged ones are not written at all, so nothing of the original is
+		 * re-encoded. It is not optional: one page's coverage mask is w*h raw
+		 * bytes (2.5 MB for A4 at the pen's resolution) and deflates to a few
+		 * kilobytes. `do_clean`/`do_sanitize`/`do_garbage` are absent because
+		 * MuPDF forbids garbage collection here and because the reason the
+		 * single-page path needs them — a graft dragging a shared resource
+		 * dictionary along — does not exist when nothing is grafted. */
+		opts.do_incremental = 1;
+		opts.do_compress = 1;
+		opts.do_compress_images = 1;
+		opts.do_compress_fonts = 1;
+
+		out_buf = fz_new_buffer(ctx, 8192);
+		st = fz_malloc_struct(ctx, ink_delta_state);
+		st->delta = fz_keep_buffer(ctx, out_buf);
+		st->base = src->file_size;
+		/* Position ZERO, not `base`: MuPDF's first act is to write the whole
+		 * original into this output, and those `base` bytes are what carry the
+		 * cursor to the end of it. Starting at `base` would double-count them
+		 * and put every appended object `base` bytes further on than the xref
+		 * says. The invariant below is what makes that a thrown error rather
+		 * than a file that opens and shows nothing. */
+		st->pos = 0;
+		out = fz_new_output(ctx, 0, st, ink_delta_write, NULL, ink_delta_drop);
+		check = st;
+		st = NULL; /* the output owns it, and drops it with `ink_delta_drop` */
+		out->seek = ink_delta_seek;
+		out->tell = ink_delta_tell;
+		out->truncate = ink_delta_truncate;
+
+		pdf_write_document(ctx, src, out, &opts);
+		fz_close_output(ctx, out);
+
+		/* THE INVARIANT THAT MAKES THE DISCARD SAFE. The cursor must have ended
+		 * exactly `base` bytes above the delta it produced — which holds if and
+		 * only if MuPDF's copy of the original wrote every one of its
+		 * `file_size` bytes and nothing else was silently dropped below `base`.
+		 * A short read of `doc->file` (an aborted range fetch on the streamed
+		 * path is the realistic way) would otherwise sink the real objects too
+		 * and hand back a delta whose offsets are all wrong — a file that opens
+		 * to a blank page rather than one that fails. */
+		if (check->pos != check->base + (int64_t)check->delta->len)
+			fz_throw(ctx, FZ_ERROR_LIBRARY,
+				"could not read the whole of the original while writing the update");
+	}
+	fz_always(ctx)
+		fz_drop_output(ctx, out);
+	fz_catch(ctx)
+	{
+		ink_record_error(ctx);
+		fz_free(ctx, st); /* non-NULL only if `fz_new_output` itself failed */
 		fz_drop_buffer(ctx, out_buf);
 		return NULL;
 	}

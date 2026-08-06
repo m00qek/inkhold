@@ -993,17 +993,26 @@ test.describe("library rail + gallery", () => {
         });
     });
 
-    test("a PDF gets a glyph tile; an image keeps its real preview", async ({ page }) => {
+    test("a preview-less type gets a glyph tile; an image keeps its real preview", async ({ page }) => {
       await signedIn(page);
       await page.goto("/");
       await openCategory(page, "Document");
 
-      // A PDF has no page data to render, so it gets the glyph treatment rather
-      // than a tile the renderer leaves blank. No <img> preview either.
+      // An `.epub` has nothing this app can render, so it gets the glyph
+      // treatment rather than a tile the renderer leaves blank. No <img> either.
+      // (This used to be the PDF's assertion; a PDF renders its page 0 through
+      // the MuPDF wasm now and takes the facade's <img> path — see
+      // `thumbnails.spec.ts`. The glyph is still its FLOOR, but it arrives
+      // inside that <img> rather than instead of it.)
+      const other = card(page, "Sourdough");
+      await expect(other.locator(".thumb--file")).toBeVisible();
+      await expect(other.locator(".thumb--file svg")).toBeVisible();
+      await expect(other.locator("img.thumb__img")).toHaveCount(0);
+
+      // The PDF beside it is an engine-managed <img> now, not a glyph tile.
       const pdf = card(page, "Apartment lease");
-      await expect(pdf.locator(".thumb--file")).toBeVisible();
-      await expect(pdf.locator(".thumb--file svg")).toBeVisible();
-      await expect(pdf.locator("img.thumb__img")).toHaveCount(0);
+      await expect(pdf.locator("img.thumb__img")).toHaveCount(1);
+      await expect(pdf.locator(".thumb--file")).toHaveCount(0);
 
       // A real note gets a real preview: an engine-managed <img> (painted from the
       // facade's WebP blob), not a canvas — the gallery has none any more.

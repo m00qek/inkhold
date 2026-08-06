@@ -63,6 +63,7 @@ import {
   createFetchThumbNet,
   type Thumbnails,
 } from "../render/thumbnails";
+import { createPdfThumbs, type PdfThumbs } from "../render/pdfThumb";
 import { classify, reconcile } from "../sync/freshness";
 import { createReader, type Reader, type ReaderOrigin } from "./reader";
 // The multi-viewer seam: a file's type picks a viewer, all conforming to the one
@@ -1110,11 +1111,19 @@ export function createAppShell(deps: AppDeps): AppShell {
   // `.txt` snippet, or a glyph), hiding cache/HTTP/render behind one call. The
   // note-page strategy reuses the exact `renderPage` pipeline the engine used to
   // inline, at the "thumb" tier.
+  // Page 0 of a `.pdf`, through the SAME MuPDF wasm the viewer uses — one
+  // document at a time, closed between files, and the worker released once the
+  // queue has been idle (see render/pdfThumb.ts). Built eagerly but INERT: no
+  // worker exists and no module is fetched until a PDF tile is both visible and
+  // uncached, because a persistent `sn-thumbs` hit answers inside the facade
+  // before this seam is ever called.
+  const pdfThumbs: PdfThumbs = createPdfThumbs();
   const thumbnails: Thumbnails = createThumbnails({
     getTheme: currentTheme,
     net: createFetchThumbNet(),
     painter: createCanvasThumbPainter(),
     renderNote: (noteId, page, theme) => renderPage({ api, renderer, cache, theme }, noteId, page, "thumb"),
+    renderPdfPage: pdfThumbs.renderPdfPage,
     persistent: deps.persistentThumbs,
   });
   const galleryEngine: LazyEngine = createLazyEngine({
@@ -1123,6 +1132,9 @@ export function createAppShell(deps: AppDeps): AppShell {
     cache,
     getTheme: currentTheme,
     getThumbnail: thumbnails.getThumbnail,
+    // The interim floor for a tile whose produce is slow — a `.pdf` fetching and
+    // compiling MuPDF before it has a pixel. See `PLACEHOLDER_AFTER_MS`.
+    getGlyph: thumbnails.getGlyph,
     root: content,
     failures,
   });
@@ -1346,6 +1358,21 @@ export function createAppShell(deps: AppDeps): AppShell {
   function activate(v: Viewer): void {
     if (activeViewer && activeViewer !== v) activeViewer.hide();
     activeViewer = v;
+    // AND TAKE THE GALLERY OUT OF THE LAYER, which is not cosmetic — it is what
+    // STOPS THE LAZY PAINTING BEHIND IT.
+    //
+    // `.viewer` is `position: absolute; inset: 0` over an opaque `--desk`, so
+    // the gallery is covered but still laid out. IntersectionObserver does no
+    // occlusion testing: a card under an opaque overlay is still intersecting,
+    // so every observer kept firing and the gallery went on producing
+    // thumbnails nobody could see for as long as a file was open.
+    //
+    // That was always true and never mattered, because a `.note`/`.spd`/`.txt`
+    // tile is cheap. A `.pdf` tile is a MuPDF open plus a page render, so the
+    // waste became visible the moment PDFs got real tiles — a folder of them
+    // kept decoding behind whichever one you had opened. `hidden` makes the
+    // cards `display: none`, the observers report nothing, and every type stops.
+    gallery.hidden = true;
   }
 
   /** Route away from every viewer: hide whatever is active. Replaces the old
@@ -1360,6 +1387,10 @@ export function createAppShell(deps: AppDeps): AppShell {
       activeViewer.hide();
       activeViewer = null;
     }
+    // The gallery comes back with the layer it was hidden from (see `activate`).
+    // Unconditional: this also runs when no viewer was active, and a listing
+    // that is already visible does not mind being told so.
+    gallery.hidden = false;
   }
 
   const root = el(
@@ -2845,6 +2876,10 @@ root,
       // rest of the page's life.
       uploadZone.destroy();
       galleryEngine.destroy();
+      // The tile decoder's worker, without waiting out its idle window: a
+      // sign-out must not leave 5 MB of compiled MuPDF alive behind a shell that
+      // is gone.
+      pdfThumbs.destroy();
     },
   };
 }

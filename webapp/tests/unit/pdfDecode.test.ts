@@ -38,6 +38,35 @@ const pdfPath = join(here, "../../wasm/tests/fixtures/two-page.pdf");
 const openWhole = (): Promise<AsyncPdfDocument> =>
   AsyncPdfDocument.openWhole(exports, syncCalls(exports), pdf);
 
+/**
+ * A one-page PDF with a stated `/MediaBox` and `/Rotate`, built here rather than
+ * committed: the committed fixtures are upright, and what has to be provable is
+ * that a page's ORIENTATION reaches the client — the fact a library tile's aspect
+ * rests on. Every byte is ASCII, so a string offset IS a byte offset and the
+ * xref table can be computed as the objects are written.
+ */
+function minimalPdf(w: number, h: number, rotate: number): Uint8Array {
+  const content = "0 0 0 RG 4 w 20 20 m 120 120 l S\n";
+  const objs = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Rotate ${rotate} ` +
+      "/Resources << >> /Contents 4 0 R >>",
+    `<< /Length ${content.length} >>\nstream\n${content}endstream`,
+  ];
+  let out = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (const [i, body] of objs.entries()) {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${body}\nendobj\n`;
+  }
+  const startxref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+  for (const off of offsets) out += `${String(off).padStart(10, "0")} 00000 n \n`;
+  out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${startxref}\n%%EOF\n`;
+  return new TextEncoder().encode(out);
+}
+
 let exports: PdfDecoderExports;
 let pdf: Uint8Array;
 /** Every `(offset, length)` `ink.host_read` was asked for, in order. */
@@ -126,6 +155,34 @@ describe("AsyncPdfDocument, whole-file", () => {
       await expect(doc.pageSize(99)).rejects.toThrow();
     } finally {
       doc.close();
+    }
+  });
+
+  // THE CLAIM THE LIBRARY TILE RESTS ON. A `.pdf`'s gallery thumbnail has no
+  // server-stated shape (nothing indexes a `/MediaBox`), so the tile learns its
+  // aspect from `pageSize` alone — and it is only honest if that reports the
+  // page as it will be SEEN, not as its `/MediaBox` was written. `/Rotate 90`
+  // is where those differ: MuPDF's `fz_bound_page` returns the cropped box with
+  // the rotation applied, so a portrait MediaBox marked `/Rotate 90` measures
+  // landscape, and the RENDER agrees because it derives its pixmap from the same
+  // box. Asserted rather than assumed, against the real module.
+  it("a /Rotate 90 page measures ROTATED — pageSize and render agree", async () => {
+    const upright = await AsyncPdfDocument.openWhole(exports, syncCalls(exports), minimalPdf(400, 600, 0));
+    const turned = await AsyncPdfDocument.openWhole(exports, syncCalls(exports), minimalPdf(400, 600, 90));
+    try {
+      const a = await upright.pageSize(0);
+      expect([a.width, a.height]).toEqual([400, 600]); // the MediaBox verbatim
+
+      const b = await turned.pageSize(0);
+      expect([b.width, b.height]).toEqual([600, 400]); // …swapped by /Rotate
+      // Not just the measurement: the pixels come out landscape too, off a
+      // different export, so the two cannot agree by sharing one mistake.
+      const bmp = await turned.render(0, 1);
+      expect(bmp.width).toBe(600);
+      expect(bmp.height).toBe(400);
+    } finally {
+      upright.close();
+      turned.close();
     }
   });
 
@@ -374,5 +431,156 @@ describe("ink_open_stream — the same document, pulled through `ink.host_read`"
 describe("supportsWasmExceptions", () => {
   it("is true here, since we just ran the module", () => {
     expect(supportsWasmExceptions()).toBe(true);
+  });
+});
+
+describe("annotatePage + exportIncremental — the whole document, appended to", () => {
+  // The PDF-level claim that matters most — that the ORIGINAL's own `/Annots`
+  // survive, where the grafting export loses them — is proved in
+  // `webapp/wasm/tests/pdf_decode_abi.mjs`, which can build a fixture carrying
+  // links and diff the bytes. What is proved HERE is the same split as
+  // `exportPage`'s: that the WRAPPER marshals correctly, that what comes back is
+  // a delta rather than a document, and that the concatenation is a PDF this
+  // very module will open.
+
+  const solid = (w: number, h: number): Uint8Array => new Uint8Array(w * h).fill(255);
+
+  /** `original || delta`, which is the only thing the delta is valid as. */
+  const join = (a: Uint8Array, b: Uint8Array): Uint8Array => {
+    const out = new Uint8Array(a.length + b.length);
+    out.set(a, 0);
+    out.set(b, a.length);
+    return out;
+  };
+
+  it("appends a DELTA — the original's bytes come back untouched", async () => {
+    const doc = await openWhole();
+    let delta: Uint8Array;
+    try {
+      const size = await doc.pageSize(0);
+      await doc.annotatePage(0, solid(40, 20), 40, 20, [size.width / 40, 0, 0, size.height / 20, 0, 0]);
+      delta = await doc.exportIncremental();
+    } finally {
+      doc.close();
+    }
+    // NOT A DOCUMENT. If this began with a header the module would be handing
+    // back a rewritten file, and the browser's `new Blob([original, delta])`
+    // would produce nonsense — while still looking like a successful export.
+    expect(new TextDecoder().decode(delta.subarray(0, 5))).not.toBe("%PDF-");
+    expect(delta.length).toBeGreaterThan(0);
+
+    const whole = join(pdf, delta);
+    // The incremental promise itself: nothing of the original is re-encoded.
+    expect(Array.from(whole.subarray(0, pdf.length))).toEqual(Array.from(pdf));
+
+    const out = await AsyncPdfDocument.openWhole(exports, syncCalls(exports), whole);
+    try {
+      // BOTH pages, not one — the difference from `exportPage`, which lifts a
+      // page out of the document and leaves the rest behind.
+      expect(await out.pageCount()).toBe(2);
+      expect(await out.pageSize(1)).toEqual({ width: 300, height: 150 });
+    } finally {
+      out.close();
+    }
+  });
+
+  it("inks the pages it was given and leaves the others exactly as they were", async () => {
+    // SPARSE IS THE REAL CASE — seven pages of seventy-seven — so a route that
+    // quietly touched every page would be a different and much worse feature.
+    const before = await openWhole();
+    let untouched: Uint8Array;
+    let inkedBefore: number;
+    try {
+      untouched = new Uint8Array((await before.render(1, 1)).rgba);
+      inkedBefore = new Uint8Array((await before.render(0, 1)).rgba).length;
+    } finally {
+      before.close();
+    }
+    expect(inkedBefore).toBeGreaterThan(0);
+
+    const doc = await openWhole();
+    let delta: Uint8Array;
+    try {
+      const size = await doc.pageSize(0);
+      await doc.annotatePage(0, solid(40, 20), 40, 20, [size.width / 40, 0, 0, size.height / 20, 0, 0]);
+      delta = await doc.exportIncremental();
+    } finally {
+      doc.close();
+    }
+
+    const out = await AsyncPdfDocument.openWhole(exports, syncCalls(exports), join(pdf, delta));
+    try {
+      // Page 0 is solidly inked — every sample black, since the coverage was
+      // full and the matrix covers the page.
+      const inked = await out.render(0, 1);
+      let dark = 0;
+      for (let i = 0; i < inked.rgba.length; i += 4) if (inked.rgba[i] < 64) dark += 1;
+      expect(dark).toBe(inked.width * inked.height);
+      // Page 1 is byte-for-byte what it was. Not "looks similar": a placement
+      // bug that put the ink on the wrong page passes every count-based check.
+      const other = await out.render(1, 1);
+      expect(Array.from(other.rgba)).toEqual(Array.from(untouched));
+    } finally {
+      out.close();
+    }
+  });
+
+  it("refuses a document nothing was written on", async () => {
+    // An empty delta concatenates to a byte-identical copy of the original,
+    // which the raw-download row already offers. Producing it under a name that
+    // promises ink would be a lie the user cannot see.
+    const doc = await openWhole();
+    try {
+      await expect(doc.exportIncremental()).rejects.toThrow(/no ink/i);
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("rejects an alpha buffer that does not match its dimensions, before the call", async () => {
+    // The same guard `exportPage` gets, and it has to be on both doors: the
+    // module reads `w * h` bytes from a raw pointer either way.
+    const doc = await openWhole();
+    try {
+      await expect(doc.annotatePage(0, solid(10, 10), 20, 20, [1, 0, 0, 1, 0, 0])).rejects.toThrow(
+        /alpha/,
+      );
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("surfaces MuPDF's refusal for a page that does not exist", async () => {
+    const doc = await openWhole();
+    try {
+      await expect(doc.annotatePage(99, solid(4, 4), 4, 4, [1, 0, 0, 1, 0, 0])).rejects.toThrow();
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("a closed document refuses both halves", async () => {
+    const doc = await openWhole();
+    doc.close();
+    await expect(doc.annotatePage(0, solid(4, 4), 4, 4, [1, 0, 0, 1, 0, 0])).rejects.toThrow(/closed/);
+    await expect(doc.exportIncremental()).rejects.toThrow(/closed/);
+  });
+
+  it("hands back bytes we own — a later export cannot change them", async () => {
+    // The module reuses one export buffer, so a view onto wasm memory would
+    // mutate under the caller. The delta is the one payload that is concatenated
+    // with a Blob LATER, so an aliased view here would be read after the module
+    // had already reused it.
+    const doc = await openWhole();
+    try {
+      const size = await doc.pageSize(0);
+      await doc.annotatePage(0, solid(4, 4), 4, 4, [size.width / 4, 0, 0, size.height / 4, 0, 0]);
+      const delta = await doc.exportIncremental();
+      const snapshot = new Uint8Array(delta);
+      await doc.exportPage(1, solid(8, 8), 8, 8, [37, 0, 0, 18, 0, 0]);
+      expect(delta).toEqual(snapshot);
+    } finally {
+      doc.close();
+    }
   });
 });

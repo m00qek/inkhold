@@ -175,3 +175,81 @@ describe("a healthy PDF session", () => {
     await expect(within(s.pageSize(0))).rejects.toThrow(/closed/);
   });
 });
+
+describe("the whole-document export, across the worker boundary", () => {
+  it("HANDS OVER each page's mask, one `annotatePage` at a time", async () => {
+    // Sparse by nature — seven of seventy-seven pages in the real corpus — so
+    // this is a handful of messages even for a long document, and each carries
+    // the same megabyte-scale mask the per-page export does. Transferred for the
+    // same reason.
+    const { worker, s } = session();
+    const alpha = new Uint8Array(12);
+    const annotating = s.annotatePage(5, { alpha, width: 4, height: 3, matrix: [2, 0, 0, 2, 0, 0] });
+    const req = worker.sent[0] as { id: number; kind: string; page: number };
+    expect(req.kind).toBe("annotatePage");
+    expect(req.page).toBe(5);
+    expect(worker.transfers[0]).toEqual([alpha.buffer]);
+    worker.reply({ kind: "annotatedPage", id: req.id });
+    await expect(annotating).resolves.toBeUndefined();
+  });
+
+  it("refuses a mask whose buffer disagrees with its dimensions, before posting", async () => {
+    // The same guard the per-page export gets, and it has to be on BOTH doors:
+    // `annotatePage` hands the module a raw pointer exactly as `exportPage`
+    // does, so a short buffer here is an out-of-bounds read inside wasm.
+    const { worker, s } = session();
+    await expect(
+      s.annotatePage(0, { alpha: new Uint8Array(5), width: 4, height: 3, matrix: [1, 0, 0, 1, 0, 0] }),
+    ).rejects.toThrow(/does not match/);
+    expect(worker.sent).toEqual([]);
+  });
+
+  it("LENDS the original as a Blob — not transferred, not read", async () => {
+    // THE MEMORY ARGUMENT, at the one boundary where it could be undone. A Blob
+    // crosses `postMessage` by REFERENCE, so a 76 MB document costs a handle;
+    // reading it into an ArrayBuffer to send would cost 76 MB in each thread.
+    //
+    // And it is NOT in the transfer list: transferring detaches it on this side,
+    // and this side is the one that concatenates it with the delta afterwards.
+    const { worker, s } = session();
+    const original = new Blob([new Uint8Array([0x25, 0x50, 0x44, 0x46])]);
+    const exporting = s.exportDocument(original);
+    const req = worker.sent[0] as { id: number; kind: string; original: Blob };
+    expect(req.kind).toBe("exportDocument");
+    expect(req.original).toBe(original);
+    expect(worker.transfers[0]).toEqual([]);
+
+    const delta = new Uint8Array([1, 2, 3]);
+    worker.reply({ kind: "exportedDocument", id: req.id, delta });
+    await expect(exporting).resolves.toEqual(delta);
+  });
+
+  it("refuses a wrong-kind reply to the document export", async () => {
+    // The same guard as the per-page export's, and the same consequence: a reply
+    // of another shape has no `delta`, and concatenating `undefined` onto the
+    // original would save a file that opens as the ORIGINAL — no ink, no error,
+    // and nothing to notice until someone looks for their handwriting.
+    const { worker, s } = session();
+    const exporting = s.exportDocument(new Blob([new Uint8Array([1])]));
+    const { id } = worker.sent[0] as { id: number };
+    worker.reply({ kind: "closed", id });
+    await expect(exporting).rejects.toThrow(/expected exportedDocument/);
+  });
+
+  it("surfaces a decoder that REFUSES the document, rather than resolving with nothing", async () => {
+    // The refusals are specific and unfixable: a PDF that had to be repaired to
+    // open, or one with junk before its `%PDF-` header. Falling back to grafting
+    // every page is not offered — that is the fidelity loss this route exists to
+    // avoid — so the message has to reach the menu.
+    const { worker, s } = session();
+    const exporting = s.exportDocument(new Blob([new Uint8Array([1])]));
+    const { id } = worker.sent[0] as { id: number };
+    worker.reply({
+      kind: "error",
+      id,
+      message: "this PDF had to be repaired to open, so it cannot be updated in place",
+      status: null,
+    });
+    await expect(exporting).rejects.toThrow(/repaired/);
+  });
+});

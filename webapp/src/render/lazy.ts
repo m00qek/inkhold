@@ -102,6 +102,16 @@ export type ObserverFactory = (
   onVisibility: (target: Element, isIntersecting: boolean) => void,
 ) => ObserverLike;
 
+/**
+ * How long a tile may stay blank before its glyph is painted as a placeholder.
+ *
+ * Short enough that an empty tile never reads as broken, long enough that a
+ * cache hit or a fast render — which is every strategy but `pdf-page` — wins the
+ * race and the glyph is never drawn at all. A flash of glyph on a tile that was
+ * about to paint properly would be a worse artefact than the blank it replaces.
+ */
+export const PLACEHOLDER_AFTER_MS = 200;
+
 export interface LazyEngineDeps {
   api: Api;
   renderer: NoteRenderer;
@@ -122,6 +132,12 @@ export interface LazyEngineDeps {
    * bin) or not (the reader).
    */
   getThumbnail?: (source: ThumbSource, fileType: string) => Promise<Blob>;
+  /**
+   * The type's generic glyph, for the INTERIM paint (see `PLACEHOLDER_AFTER_MS`).
+   * Optional: without it a slow tile simply stays blank, which is the behaviour
+   * this replaces.
+   */
+  getGlyph?: (fileType: string) => Promise<Blob>;
   /** Decode a facade blob to a blittable bitmap, for a CANVAS target only.
    *  Injectable for tests; defaults to `createImageBitmap`. */
   decode?: (blob: Blob) => Promise<ImageBitmap>;
@@ -309,6 +325,7 @@ export async function renderPage(
 export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
   const { api, renderer, cache, getTheme } = deps;
   const getThumbnail = deps.getThumbnail;
+  const getGlyph = deps.getGlyph;
   const decode = deps.decode ?? ((blob: Blob) => createImageBitmap(blob));
   const blit = deps.blit ?? defaultBlit;
   const placeholder = deps.placeholder ?? defaultPlaceholder;
@@ -456,7 +473,38 @@ export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
         // as an object URL. No ImageBitmap is decoded or held — the browser owns
         // decode and eviction, which is the whole point of the <img> path.
         if (!getThumbnail) throw new Error("an <img> slot requires a thumbnail facade");
-        const blob = await getThumbnail(thumbSource(slot), slot.thumb?.fileType ?? "note");
+        const fileType = slot.thumb?.fileType ?? "note";
+        const real = getThumbnail(thumbSource(slot), fileType);
+        // THE FLOOR FIRST, IF THE REAL ONE IS SLOW. A tile paints nothing until
+        // its produce resolves — `.thumb__img:not([src])` is a 1x1 transparent
+        // GIF — which was invisible while every strategy answered from a cache
+        // or a small fetch. A `.pdf` does not: it fetches 1.5 MB of MuPDF,
+        // compiles it, opens the document and renders page 0 first. Measured on
+        // a production build at 3G, the wasm alone is 8.5s (30.8s on slow 3G),
+        // and the tile is blank for all of it — which is what made a thumbnail
+        // the Largest Contentful Paint element at 10.5s.
+        //
+        // RACED, NOT UNCONDITIONAL, so nothing regresses for the types that were
+        // already fast: a cache hit or a quick render beats the timer and the
+        // glyph is never drawn, so there is no flash. Only a tile that would
+        // otherwise sit empty gets the floor, and it is replaced in place the
+        // moment the real pixels arrive (`paintImg` revokes the old URL).
+        const slow = Symbol("slow");
+        const first = await Promise.race([
+          real.catch(() => slow),
+          new Promise<typeof slow>((r) => setTimeout(() => r(slow), PLACEHOLDER_AFTER_MS)),
+        ]);
+        if (first === slow && getGlyph && renderVersion === themeVersion && slots.has(slot.target)) {
+          // Interim only: `painted` stays false so the slot is still owed its
+          // real pixels, and a failure here must never cost the tile its
+          // upgrade — the glyph is a courtesy, not the answer.
+          await getGlyph(fileType)
+            .then((g) => {
+              if (renderVersion === themeVersion && slots.has(slot.target)) paintImg(slot, g);
+            })
+            .catch(() => {});
+        }
+        const blob = await real;
         // `slots.has` guards against a reset/remove that landed WHILE this fetch
         // was in flight (a gallery repaint on a folder change or live bump): the
         // slot is gone, so minting an object URL for it now would leak one nothing

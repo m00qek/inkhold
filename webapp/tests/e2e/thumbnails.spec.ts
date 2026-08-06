@@ -12,7 +12,8 @@ import { fakeFileHash } from "../../src/api/fake";
 //   png   → a native <img> off the raw-file endpoint
 //   spd   → its extracted embedded thumbnail, transcoded to WebP, in an <img>
 //   txt   → a rasterised snippet of its first lines, in an <img>
-//   pdf   → the honest no-preview glyph tile (no cheap preview exists)
+//   pdf   → its page 0, rendered client-side through the MuPDF wasm, in an <img>
+//           — falling back to the facade's glyph when the bytes will not open
 //
 // The gallery displays every real preview as an <img src="blob:…"> now, not a
 // canvas — the browser owns decode/eviction. "Ink" here is the pixel-probe from
@@ -71,8 +72,18 @@ test.describe("thumbnails across file types", () => {
     await expect(spd.locator(".thumb--file")).toHaveCount(0);
     await expect.poll(() => imgInkFraction(spd.locator("img.thumb__img")), { timeout: 6000 }).toBeGreaterThan(INK);
 
-    // .pdf → the honest no-preview glyph, because no cheap preview exists.
-    await expect(card(page, "Appliance manual").locator(".thumb--file")).toBeVisible();
+    // .pdf → the facade's <img> as well. `mockThumbnailBackend` serves PNG bytes
+    // for every raw file, so MuPDF refuses them and this tile lands on the
+    // facade's GLYPH — which is exactly the floor worth pinning here: a document
+    // that will not render still paints something, inside the same <img>, rather
+    // than leaving an empty tile. The real page-0 render is
+    // `pdfThumbnail.spec.ts`, which serves genuine PDF bytes over byte ranges.
+    const pdf = card(page, "Appliance manual");
+    await expect(pdf.locator("img.thumb__img")).toBeVisible();
+    await expect(pdf.locator(".thumb--file")).toHaveCount(0);
+    await expect
+      .poll(() => pdf.locator("img.thumb__img").evaluate((e: HTMLImageElement) => e.src.startsWith("blob:")))
+      .toBe(true);
   });
 
   test("a .txt tile renders a snippet of its first lines, not a blank", async ({ page }) => {

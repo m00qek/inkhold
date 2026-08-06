@@ -12,7 +12,7 @@
 // WHY THIS IS VIRTUALISED, AND WHY THAT IS THE POINT. A strip is a row per page,
 // and a page is a canvas. Build them all up front and a 1,700-page document holds
 // 1,700 canvases: at a ~120px thumbnail that is tens of megabytes of backing
-// store that nothing ever releases, on a client with a 50 MB budget. So the rows
+// store that nothing ever releases, in a tab a phone may kill for it. So the rows
 // are a `VirtualList` window (`src/ui/virtualList.ts`) — the DOM cost is a
 // viewport, not a document — and a row that leaves the window is UNMOUNTED: its
 // paint is cancelled by the caller's `unmount` and its canvas is resized to 0×0,

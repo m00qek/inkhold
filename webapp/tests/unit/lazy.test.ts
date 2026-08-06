@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { createLazyEngine, type ObserverLike, type LazyEngine } from "../../src/render/lazy";
+import {
+  createLazyEngine,
+  PLACEHOLDER_AFTER_MS,
+  type ObserverLike,
+  type LazyEngine,
+} from "../../src/render/lazy";
 import { ApiError, type ApiFailureSink } from "../../src/api/client";
 import type { Api } from "../../src/api/types";
 import type { NoteRenderer } from "../../src/render/types";
@@ -69,6 +74,89 @@ function build(observer = fakeObserver(), failures?: ApiFailureSink) {
 }
 
 const canvas = () => ({}) as unknown as HTMLCanvasElement;
+
+/** A fake `<img>` target: the engine only checks `tagName`. */
+const imgEl = () => ({ tagName: "IMG", src: "", alt: "" }) as unknown as HTMLImageElement;
+
+describe("a tile whose produce is slow shows the glyph meanwhile", () => {
+  /** An engine wired for the `<img>` facade path, with both seams faked. */
+  function imgBuild(getThumbnail: () => Promise<Blob>, getGlyph: () => Promise<Blob>) {
+    const s = stubs();
+    const observer = fakeObserver();
+    const engine = createLazyEngine({
+      api: s.api,
+      renderer: s.renderer,
+      cache: s.cache,
+      getTheme: () => "light",
+      observerFactory: observer.factory,
+      blit: vi.fn(),
+      placeholder: vi.fn(),
+      schedule: (fn) => fn(),
+      debounceMs: 0,
+      getThumbnail,
+      getGlyph,
+      // The blob IS its own identity here, so `src` says which one was painted.
+      createObjectUrl: (b) => `url:${String(b)}`,
+      revokeObjectUrl: () => {},
+    });
+    return { engine, observer };
+  }
+
+  const slot = (target: HTMLImageElement) => ({
+    target,
+    noteId: "n1" as const,
+    page: page("h1"),
+    size: "thumb" as const,
+    thumb: { fileType: "pdf", fileHash: "abc" as never },
+  });
+
+  it("paints the glyph while the render is outstanding, then upgrades in place", async () => {
+    // A `.pdf` tile fetches 1.5 MB of MuPDF, compiles it, opens the document and
+    // renders page 0 before it has one pixel — measured at 8.5s on 3G, 30.8s on
+    // slow 3G. It used to stay BLANK for all of it, which is what made a
+    // thumbnail the Largest Contentful Paint element at 10.5s.
+    let land: (b: Blob) => void = () => {};
+    const real = new Promise<Blob>((r) => (land = r));
+    const getGlyph = vi.fn(async () => "GLYPH" as unknown as Blob);
+    const { engine, observer } = imgBuild(() => real, getGlyph);
+
+    const el = imgEl();
+    engine.add(slot(el));
+    observer.intersect(el, true);
+
+    // Before the placeholder window elapses the tile is untouched: a produce that
+    // answers quickly must never flash a glyph on its way to the real pixels.
+    await flush();
+    expect(el.src).toBe("");
+    expect(getGlyph).not.toHaveBeenCalled();
+
+    await new Promise((r) => setTimeout(r, PLACEHOLDER_AFTER_MS + 80));
+    expect(getGlyph).toHaveBeenCalledWith("pdf");
+    expect(el.src).toBe("url:GLYPH"); // the floor is up, and the render is still owed
+
+    land("REAL" as unknown as Blob);
+    await flush();
+    expect(el.src).toBe("url:REAL"); // replaced in place when the pixels arrive
+  });
+
+  it("never draws the glyph when the produce beats the window", async () => {
+    const getGlyph = vi.fn(async () => "GLYPH" as unknown as Blob);
+    const { engine, observer } = imgBuild(async () => "REAL" as unknown as Blob, getGlyph);
+    const el = imgEl();
+    engine.add(slot(el));
+    observer.intersect(el, true);
+    await flush();
+
+    expect(el.src).toBe("url:REAL");
+    // The whole point of racing rather than always painting the floor: every
+    // strategy but `pdf-page` answers from a cache or a small fetch, and a flash
+    // of glyph on a tile that was about to paint properly is a worse artefact
+    // than the blank it replaces.
+    await new Promise((r) => setTimeout(r, PLACEHOLDER_AFTER_MS + 80));
+    expect(getGlyph).not.toHaveBeenCalled();
+    expect(el.src).toBe("url:REAL");
+  });
+});
 
 describe("lazy engine scheduler", () => {
   it("paints a slot only once it intersects, and never renders off-screen slots", async () => {

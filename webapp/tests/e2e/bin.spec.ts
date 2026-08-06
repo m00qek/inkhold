@@ -12,6 +12,7 @@ import {
   imgInkFraction,
   imgPainted,
 } from "./helpers/app";
+import { serveRanges } from "./helpers/pdfRange";
 
 // The recycle bin, end to end against the fake `Api`'s bin fixture (see
 // `src/api/binFake.ts`): a folder deleted with the two notes inside it, plus an
@@ -1025,6 +1026,44 @@ test.describe("recycle bin", () => {
     await expect(txt).toHaveCount(1);
     await expect.poll(() => imgInkFraction(txt), { timeout: 6000 }).toBeGreaterThan(0.004);
     expect(hits.binFileHits("n-files-readme")).toBeGreaterThan(0);
+  });
+
+  test("a trashed .pdf renders its page 0 off the BIN route, and learns the page's shape", async ({ page }) => {
+    // The same question the `.txt` above asks, for the type whose bytes come in
+    // RANGES: the live `/file/{id}` hardcodes `deleted = 0`, so a tile that
+    // minted it would 404 its way to a glyph. `two-page.pdf`'s page 0 is
+    // 200x100 — landscape, nothing like the A4 portrait the row reserves — so
+    // the lead's final shape is proof the page itself was read.
+    await signedIn(page);
+    await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+    const served = await serveRanges(page, PDF_BYTES, undefined, (url) =>
+      url.pathname === "/api/controlplane/bin/file/n-files-manual",
+    );
+    await page.goto("/");
+    await railSettled(page);
+
+    await trashFromFiles(page, "Appliance manual");
+    await openBin(page);
+
+    const row = page.locator(".bin__row", { hasText: "Appliance manual" });
+    const img = row.locator(".bin__thumb img");
+    await expect(img).toHaveCount(1);
+    await expect.poll(() => imgInkFraction(img), { timeout: 20_000 }).toBeGreaterThan(0.02);
+    expect(served.count()).toBeGreaterThan(0);
+
+    // …and the lead ends up landscape, corrected from the A4 portrait it
+    // reserved — the row's one allowed reflow, and the only place page 0's own
+    // box could have come from.
+    await expect(row.locator(".bin__thumb")).toHaveClass(/has-aspect/);
+    await expect
+      .poll(
+        async () => {
+          const box = await row.locator(".bin__thumb").boundingBox();
+          return box && box.height > 0 ? box.width / box.height : null;
+        },
+        { timeout: 20_000 },
+      )
+      .toBeCloseTo(2, 1);
   });
 
   // A 120×160 grayscale PNG (the same decodable raster the thumbnail helper uses

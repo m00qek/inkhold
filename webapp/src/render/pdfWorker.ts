@@ -63,6 +63,42 @@ let cache: BlockCache | null = null;
 let doc: AsyncPdfDocument | null = null;
 let mode: PdfOpenMode | null = null;
 let lastStats: PdfCacheStats | null = null;
+/** What `open` was told, so the document can be reopened after an export. */
+let source: { url: string; size: number } | null = null;
+/**
+ * A LOCAL copy of the file that `host_read` prefers while it is set.
+ *
+ * Installed only for the duration of the whole-document export, whose first act
+ * inside MuPDF is to read the entire original back (see `exportDocument`). Over
+ * the network that would be a second download of the whole file, which on the
+ * 3G link this app is designed for is the difference between a feature and a
+ * regret. Reading it out of the Blob the main thread already holds is local and
+ * disk-backed.
+ */
+let localCopy: ((off: number, len: number) => Promise<Uint8Array>) | null = null;
+
+/**
+ * Read `blob` through ONE sliding window rather than through the block cache.
+ *
+ * 4 MB, and not `BLOCK_SIZE`. The block cache's 32 KB blocks are sized for a
+ * SCATTERED access pattern over a network — the measurement that chose them is
+ * about round trips. This read is the opposite: one strictly sequential pass
+ * over the whole file with no latency to amortise, where 32 KB blocks would mean
+ * 2,400 `slice().arrayBuffer()` round trips for a 76 MB document instead of 19.
+ */
+function blobReader(blob: Blob): (off: number, len: number) => Promise<Uint8Array> {
+  const WINDOW = 4 * 1024 * 1024;
+  let win = new Uint8Array(0);
+  let winAt = 0;
+  return async (off, len) => {
+    if (off < winAt || off + len > winAt + win.length) {
+      winAt = off;
+      const end = Math.min(blob.size, off + Math.max(WINDOW, len));
+      win = new Uint8Array(await blob.slice(off, end).arrayBuffer());
+    }
+    return win.subarray(off - winAt, off - winAt + len);
+  };
+}
 
 /**
  * `ink.host_read`, the one import the module declares.
@@ -80,9 +116,14 @@ function makeHostRead(getMemory: () => WebAssembly.Memory): HostRead {
     return bytes.length;
   };
   return (off, dst, len) => {
+    const at = Number(off);
+    // The local copy WINS while it is installed: same bytes, no network. It is
+    // only ever the file this document was opened from — `exportDocument`
+    // checks the length before installing it — so preferring it cannot change
+    // what MuPDF reads, only where it comes from.
+    if (localCopy) return localCopy(at, len).then((bytes) => copy(bytes, dst), () => -1);
     const c = cache;
     if (!c) return -1;
-    const at = Number(off);
     const got = c.read(at, len);
     if (got instanceof Uint8Array) return copy(got, dst);
     return got.then(
@@ -107,9 +148,18 @@ const loadDecoder = browserLoader(DEFAULT_WASM_URL, (getMemory) => {
  * a promise. All four suspend, not just the two the plan named: `ink_page_count`
  * walks the page tree and `ink_page_size` loads a page, and both of those read
  * bytes on a document that is still mostly unfetched.
+ *
+ * EXPORTED, AND `useJspi` IS A PARAMETER, PURELY SO THIS CAN BE TESTED. The
+ * branch is otherwise unreachable from a test — `jspi` is decided once at module
+ * load from the real engine's capabilities — and the failure it guards is
+ * invisible to every other kind of check: forget one wrapper and the suite stays
+ * green, the whole-file path stays correct, and only a RANGE-SERVED document in
+ * a real browser traps the instance on its first suspension. That is a
+ * production-only bug behind a green board, so the table gets an assertion of
+ * its own (`pdfWorker.test.ts`).
  */
-function callsFor(x: PdfDecoderExports): PdfCalls {
-  if (!jspi) return syncCalls(x);
+export function callsFor(x: PdfDecoderExports, useJspi: boolean = jspi): PdfCalls {
+  if (!useJspi) return syncCalls(x);
   return {
     openWhole: (ptr, len) => x.ink_open(ptr, len),
     openStream: WebAssembly.promising(x.ink_open_stream),
@@ -123,6 +173,12 @@ function callsFor(x: PdfDecoderExports): PdfCalls {
     // back to the raw export when this is absent — right for `syncCalls` on the
     // non-JSPI branch above, where nothing suspends, and wrong here.
     exportPage: WebAssembly.promising(x.ink_export_page),
+    // Both halves of the whole-document export, for the same reason: annotating
+    // loads a page (an xref walk), and the incremental write reads the ENTIRE
+    // original back through `ink.host_read`. Unwrapped, either would trap the
+    // instance on its first suspension.
+    annotatePage: WebAssembly.promising(x.ink_annotate_page),
+    exportIncremental: WebAssembly.promising(x.ink_export_incremental),
   };
 }
 
@@ -140,10 +196,14 @@ function release(): void {
   doc = null;
   cache = null;
   mode = null;
+  source = null;
+  localCopy = null;
+  annotated = false;
 }
 
 async function open(url: string, size: number): Promise<{ pageCount: number; mode: PdfOpenMode }> {
   release();
+  source = { url, size };
   const x = await loadDecoder();
   const calls = callsFor(x);
   inflight = new AbortController();
@@ -203,6 +263,81 @@ async function exportPage(page: number, ink: PdfInkOverlay): Promise<Uint8Array>
 }
 
 /**
+ * Has any page been drawn on since the document was opened?
+ *
+ * `ink_annotate_page` MUTATES the open document and there is no undo, so a
+ * document that has been annotated is spent: rendering it again would show the
+ * ink burnt into the page AND the `.mark` overlay on top of it, drawn twice.
+ * This is what says the document has to be reopened before the viewer uses it
+ * again — including when the export FAILED, which is the path that would
+ * otherwise leave a half-annotated document behind.
+ */
+let annotated = false;
+
+/**
+ * ONE PAGE OF THE WHOLE-DOCUMENT EXPORT: draw the ink into the open document.
+ *
+ * Sparse by nature — the real corpus is 7 annotated pages out of 77 — so this
+ * is called a handful of times even for a long document, once per page the
+ * `.mark` actually wrote on.
+ */
+async function annotatePage(page: number, ink: PdfInkOverlay): Promise<void> {
+  if (!doc) throw new Error("no document is open");
+  await doc.annotatePage(page, ink.alpha, ink.width, ink.height, ink.matrix);
+  // Set AFTER the call, not before: a refusal (a repaired file, junk before the
+  // header) is made by the module before it touches anything, so a document
+  // that refused its first page is still clean and needs no reopen.
+  annotated = true;
+}
+
+/**
+ * The whole document, as the delta of an incremental update.
+ *
+ * `original` is lent by the main thread — see `exportDocument` in
+ * `pdfWorkerTypes.ts` for why it is not a convenience. It is checked against
+ * the length the document was opened with, because pointing MuPDF's reads at a
+ * DIFFERENT file mid-write would produce a delta that is wrong in a way nothing
+ * downstream could detect.
+ */
+async function exportDocument(original: Blob): Promise<Uint8Array> {
+  if (!doc) throw new Error("no document is open");
+  const expected = cache?.length ?? source?.size ?? 0;
+  if (expected > 0 && original.size !== expected) {
+    throw new Error("the copy of this PDF does not match the one that is open");
+  }
+  localCopy = blobReader(original);
+  try {
+    return await doc.exportIncremental();
+  } finally {
+    localCopy = null;
+    // ALWAYS, and on the failure path especially: the pages were mutated before
+    // the write was attempted, so leaving this document open would show the ink
+    // twice on every page the user turns back to.
+    await reopen();
+  }
+}
+
+/** Replace the spent document with a clean one, keeping everything else. */
+async function reopen(): Promise<void> {
+  if (!annotated || !source) return;
+  annotated = false;
+  const x = await loadDecoder();
+  const calls = callsFor(x);
+  doc?.close();
+  doc = null;
+  // The block cache SURVIVES on the streamed path — it holds the original's
+  // bytes, which have not changed, and re-priming it would cost a round trip
+  // for nothing. The whole-file path has no cache to keep and re-fetches; that
+  // is the non-JSPI fallback, where the file is in the HTTP cache anyway.
+  if (mode === "stream" && cache) {
+    doc = await AsyncPdfDocument.openStream(x, calls, cache.length);
+  } else {
+    inflight ??= new AbortController();
+    doc = await AsyncPdfDocument.openWhole(x, calls, await fetchWhole(source.url, inflight.signal));
+  }
+}
+
+/**
  * Requests run ONE AT A TIME, in arrival order.
  *
  * The alternative is a race with teeth: `ink_render` reuses a single pixmap and
@@ -237,6 +372,21 @@ function handle(req: PdfRequest): Promise<void> {
         // source page's fonts and images, so this is not a small message.
         ctx.postMessage({ kind: "exportedPage", id: req.id, bytes }, [
           bytes.buffer as ArrayBuffer,
+        ]);
+        return;
+      }
+      case "annotatePage": {
+        await annotatePage(req.page, req.ink);
+        ctx.postMessage({ kind: "annotatedPage", id: req.id });
+        return;
+      }
+      case "exportDocument": {
+        const delta = await exportDocument(req.original);
+        // TRANSFERRED like the rest — though this one is the small message the
+        // whole design is for: tens of kilobytes, where the document it belongs
+        // to is tens of megabytes and never leaves the disk.
+        ctx.postMessage({ kind: "exportedDocument", id: req.id, delta }, [
+          delta.buffer as ArrayBuffer,
         ]);
         return;
       }

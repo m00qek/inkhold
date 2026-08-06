@@ -46,11 +46,12 @@ import {
 import {
   composeMarkExportModel,
   createPdfExports,
+  inkAlpha,
   type MarkInkLayer,
   type PdfExportState,
 } from "./pdfExports";
 import type { LayeredExportModel } from "../export/layered";
-import { markExportSpace, placePanelOverPage } from "../render/markGeometry";
+import { markExportMatrix, markExportSpace, placePanelOverPage } from "../render/markGeometry";
 import { supportsWasmExceptions } from "../render/pdfDecode";
 import {
   PdfLoadError,
@@ -165,7 +166,13 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
    * lands in the dead margin and the composite is pixel-identical to the bare
    * page. A viewer that never asked for the ink at all would look exactly right.
    */
-  const thumbCounts = { hits: 0, renders: 0, inked: 0 };
+  // `probe` is the largest batch the parallel cache pass asked for at once, and
+  // it is instrumented for the same reason `hits` is: the behaviour is INVISIBLE
+  // when it works. A strip that probed its rows one at a time paints exactly the
+  // same pixels as one that probed them together, only slower — so without a
+  // number there is nothing for a test to hold, and a regression to the serial
+  // read would look like success.
+  const thumbCounts = { hits: 0, renders: 0, inked: 0, probe: 0 };
   function publishThumbCounts(): void {
     (globalThis as unknown as { __inkholdPdfThumbs?: typeof thumbCounts }).__inkholdPdfThumbs = {
       ...thumbCounts,
@@ -258,6 +265,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     pageIndex: () => pageIndex,
     model: (opts) => pageExportModel(opts),
     exportPagePdf: (page, ink) => exportPagePdf(page, ink),
+    exportDocumentPdf: (onProgress) => exportDocumentPdf(onProgress),
     state: () => exportState(),
   });
 
@@ -423,7 +431,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
    * AND AN ANNOTATED ROW IS COMPOSITED HERE, which is the second reason the
    * queue has to stay serial. A mark page decodes at the DEVICE PANEL's own
    * resolution — ~10.5 MB of RGBA per layer, whatever size the thumbnail ends up
-   * — so two of these in flight is 20 MB of transient against a 50 MB budget for
+   * — so two of these in flight is 20 MB of transient on a device that may be
    * the whole app. `inkRaster` reduces and releases one layer at a time, and
    * this loop guarantees one page at a time; the peak is a single layer.
    */
@@ -555,10 +563,75 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     }
   }
 
+  /**
+   * PHASE ONE: every queued row's cache entry, asked for AT ONCE.
+   *
+   * The serial pass below is right about a MISS and wrong about a hit. Its own
+   * comment gives the reason it exists — one worker behind one wasm instance, and
+   * concurrent renders would interleave their range fetches and put the page
+   * someone is reading behind six thumbnails — and none of that describes an
+   * IndexedDB read followed by a `drawImage`. There is no decoder in it and no
+   * network.
+   *
+   * And the hit is the COMMON case: a blob is immutable, so its thumbnail is
+   * cached forever and every revisit is all hits. Those used to queue behind each
+   * other one round trip at a time, so reopening a 77-page document repainted a
+   * strip serially that could have painted in one frame.
+   *
+   * The batch bounds itself: the observer only queues rows inside the strip's
+   * window plus its 200px margin, so this is five to fifteen reads, not seventy-
+   * seven. Misses are left in the queue untouched, for the pass that is allowed
+   * to be slow.
+   *
+   * No bitmap is closed here and none is put: the cache owns what it returns, and
+   * with no writes in flight nothing can be evicted out from under the blits.
+   */
+  async function drainCachedThumbs(): Promise<void> {
+    if (!docHash || !open_) return;
+    const batch = thumbQueue.filter((i) => !thumbPainted.has(i) && thumbRows.has(i));
+    if (batch.length === 0) return;
+    const mine = generation;
+    thumbCounts.probe = Math.max(thumbCounts.probe, batch.length);
+
+    const probed = await Promise.all(
+      batch.map(async (i) => {
+        const row = thumbRows.get(i)!;
+        // Resolved BEFORE the await, exactly as the serial pass does it: a mark
+        // landing mid-probe must not let a row be fetched under one identity and
+        // painted under another.
+        return { i, row, hit: await cachedThumb(thumbKey(i)) };
+      }),
+    );
+    if (mine !== generation) return;
+
+    const painted = new Set<number>();
+    for (const { i, row, hit } of probed) {
+      if (!hit) continue; // a miss stays queued for the serial pass
+      // Recycled while the batch was in flight. The strip builds a fresh row per
+      // index and observes it on mount, so this page is queued again and finds
+      // the same entry.
+      if (thumbRows.get(i) !== row) continue;
+      thumbCounts.hits++;
+      row.canvas.width = hit.width;
+      row.canvas.height = hit.height;
+      row.canvas.getContext("2d")?.drawImage(hit, 0, 0);
+      row.setLoading(false);
+      thumbPainted.add(i);
+      painted.add(i);
+    }
+    if (painted.size === 0) return;
+    publishThumbCounts();
+    for (let n = thumbQueue.length - 1; n >= 0; n--) {
+      if (painted.has(thumbQueue[n]!)) thumbQueue.splice(n, 1);
+    }
+  }
+
   async function paintThumbs(): Promise<void> {
     if (thumbsBusy) return;
     thumbsBusy = true;
     try {
+      // The hits first and together; then the misses, one at a time.
+      await drainCachedThumbs();
       while (thumbQueue.length > 0) {
         const i = thumbQueue.shift()!;
         if (thumbPainted.has(i)) continue;
@@ -767,6 +840,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     thumbCounts.hits = 0;
     thumbCounts.renders = 0;
     thumbCounts.inked = 0;
+    thumbCounts.probe = 0;
     publishThumbCounts();
     pagesPanel.clear(); // unmounts each row, which unobserves and dequeues it
     thumbRows.clear();
@@ -1121,6 +1195,13 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     const ink = inkForExport(pageIndex);
     return {
       hasInk: ink !== null,
+      // COUNTED OFF `markPages`, not off the focused page: the whole-document
+      // row asks "does this document have handwriting anywhere", which is the
+      // one question the mark's own index answers directly. Pages beyond the
+      // document's own count are dropped — a `.mark` can name a page the PDF
+      // does not have, and offering an export of it would promise something
+      // nothing can produce.
+      markedPages: [...markPages.keys()].filter((p) => p < pageCount).length,
       // Read off the CANVAS, not off a variable of our own — the panel's toggle
       // writes it there (`layersPanel.onToggle`) and `pdfRow()` reads it back the
       // same way, so there is one answer to "is the document showing?" rather
@@ -1152,8 +1233,8 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
    * dark-inverted stack. `export/exporter.ts` states the identical rule for
    * notes (`nativeBitmap`): exports decode, they never screenshot.
    *
-   * The model's canvases are the caller's to free — several megabytes each
-   * against a 50 MB app-wide budget — which is what `release()` is for. The
+   * The model's canvases are the caller's to free — several megabytes each,
+   * on a device that may be a phone — which is what `release()` is for. The
    * SOURCES are freed here, as soon as they have been drawn in.
    */
   async function pageExportModel(opts?: { withPage?: boolean }): Promise<{
@@ -1268,6 +1349,132 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   }
 
   /**
+   * The ink for ANY annotated page, ready for the decoder — not just the one on
+   * screen.
+   *
+   * `pageExportModel` above can only answer for the FOCUSED page: it reads the
+   * mounted stack, which is one page at a time and belongs to the screen. A
+   * whole-document export needs seven pages of a seventy-seven page document
+   * without disturbing the one being read, which is exactly what `inkRaster` is
+   * for (`noteLayers.ts` says so at its definition) — it decodes, reduces and
+   * releases, touching no state the viewer owns.
+   *
+   * THE AUTHORED VIEW, NOT THE PANEL'S. `inkRaster` drops the background slot
+   * and every device-hidden layer, and nothing here consults the eye toggles.
+   * That is the honest reading: the toggles belong to the page in front of you,
+   * and a document-wide export cannot mean "as page 12 is currently tuned".
+   *
+   * ONE PAGE RESIDENT AT A TIME, and it is not a small one: the panel raster is
+   * ~10.5 MB, the composed model another ~10, and `inkAlpha`'s flatten and
+   * read-back two more. Everything is zeroed on the way out so the peak is one
+   * page's worth however long the document is.
+   */
+  async function markInkFor(page: number): Promise<PdfInkOverlay | null> {
+    const s = session;
+    const id = markId;
+    const ref = markPages.get(page);
+    if (!s || !id || !ref) return null;
+    const pagePt = await s.pageSize(page);
+    // The page's own space at the ink's resolution — the same `markExportSpace`
+    // the per-page rows compose in, so the two exports place ink identically.
+    const space = markExportSpace({ width: ref.width, height: ref.height }, pagePt);
+    if (space.width <= 0 || space.height <= 0) return null;
+    const panel = await markCtl.inkRaster(await deps.api.getPageBytes(id, ref), {
+      // 1:1 with the device panel. `markExportSpace` composes in the ink's OWN
+      // pixels, so asking for anything else here would resample every stroke on
+      // the way in and then again on the way out.
+      width: ref.width,
+      height: ref.height,
+    });
+    if (!panel) return null;
+    let model: LayeredExportModel | null = null;
+    try {
+      model = composeMarkExportModel({
+        space,
+        // NO PAGE RASTER, for the reason the per-page PDF row gives: the
+        // document's own content streams are what the export keeps, and a
+        // picture of them drawn on top would replace the text with an image of
+        // the text. `inkAlpha` drops the document layer anyway.
+        page: null,
+        pageVisible: false,
+        ink: [{ name: "Ink", canvas: panel, visible: true, authoredVisible: true }],
+      });
+      const mask = inkAlpha(model, "original");
+      if (mask.width <= 1 && mask.height <= 1) return null; // nothing was drawn
+      return {
+        ...mask,
+        matrix: markExportMatrix({ width: mask.width, height: mask.height }, pagePt),
+      };
+    } finally {
+      for (const l of model?.layers ?? []) {
+        l.canvas.width = 0;
+        l.canvas.height = 0;
+      }
+      panel.width = 0;
+      panel.height = 0;
+    }
+  }
+
+  /**
+   * THE WHOLE DOCUMENT, with the ink burnt in — every page, every link, every
+   * highlight the original had.
+   *
+   * NOT SEVENTY-SEVEN CALLS TO `exportPagePdf`. That route grafts a page into a
+   * fresh document, and grafting drops `/Annots`; doing it for a whole document
+   * would throw away the original's own annotations once per page. This one
+   * annotates the pages that were written on inside the OPEN document and asks
+   * the decoder for an INCREMENTAL UPDATE — the original's bytes untouched, with
+   * only the changed objects appended.
+   *
+   * WHICH IS ALSO WHY THE ORIGINAL IS A BLOB. It is fetched, concatenated and
+   * downloaded without ever being read into an array: `res.blob()` and
+   * `new Blob([original, delta])` are both backed by disk, so a 76 MB document
+   * costs this tab a handle and a few hundred kilobytes rather than 76 MB of
+   * heap. `arrayBuffer()` anywhere on this path would undo the entire design.
+   */
+  async function exportDocumentPdf(
+    onProgress: (done: number, total: number) => void,
+  ): Promise<{ blob: Blob; pages: number }> {
+    const s = session;
+    const m = meta;
+    if (!s || !open_ || !m) throw new Error("no document is open");
+    const pages = [...markPages.keys()].filter((p) => p < pageCount).sort((a, b) => a - b);
+    if (pages.length === 0) throw new Error("this PDF has no annotations to burn in");
+    const url = rawFileUrl(m.id, m.fileHash, { download: false, bin: fromBin });
+    if (!url) throw new Error("this file has no readable address");
+
+    const res = await fetch(url, { credentials: "same-origin" });
+    if (!res.ok) throw new Error(`could not fetch this PDF (HTTP ${res.status})`);
+    const original = await res.blob();
+
+    // TWO COUNTERS, because they answer different questions. `seen` drives the
+    // progress toast and must reach the total whatever happens; `burnt` is what
+    // actually went into the file and is what the final toast may claim.
+    let seen = 0;
+    let burnt = 0;
+    for (const page of pages) {
+      const ink = await markInkFor(page);
+      // A page whose ink will not decode is SKIPPED rather than failing the
+      // export: the other six pages of handwriting are worth more than the
+      // refusal, and the count below says how many really went in.
+      if (ink) {
+        await s.annotatePage(page, ink);
+        burnt += 1;
+      }
+      onProgress(++seen, pages.length);
+    }
+    if (burnt === 0) throw new Error("none of the annotated pages would decode");
+
+    const delta = await s.exportDocument(original);
+    // THE CONCATENATION IS THE DOCUMENT. Two blobs, no bytes: the browser
+    // stitches them when the download is read.
+    return {
+      blob: new Blob([original, delta as BlobPart], { type: "application/pdf" }),
+      pages: burnt,
+    };
+  }
+
+  /**
    * Marry the live layer VIEWS (names, visibility, authored state) to the
    * freshly decoded canvases, BY WIRE INDEX.
    *
@@ -1376,6 +1583,12 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     for (const ref of mm.pages) {
       if (ref.sourcePage !== null && ref.sourcePage > 0) markPages.set(ref.sourcePage - 1, ref);
     }
+    // AND THE MENU, which until now could only learn about a mark as a side
+    // effect of repainting an annotated page. The whole-document row asks
+    // "does this document have handwriting anywhere", and the answer arrives
+    // HERE — a document whose ink is all on page 40 would otherwise have kept
+    // the row hidden until someone happened to turn to page 40.
+    downloads.refreshGroups();
     // The page on screen was painted before this landed, so give it its ink.
     if (open_ && markPages.has(pageIndex)) void paint();
     // And so was the STRIP, which is the one place that answers "which pages did
@@ -1402,7 +1615,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     // per layer, and hiding the host frees none of it: only `release` zeroes the
     // canvases (`noteLayers.ts`, `zeroCanvas`). Without this, viewing one
     // annotated page and walking back to the library left the ink resident for
-    // the life of the tab, against a 50 MB budget for the whole app.
+    // the life of the tab, on a device that may be a phone.
     //
     // This is the one choke point — `open`, `hide`, `destroy` and the no-pages
     // path all come through here, and a page turn deliberately does NOT, so the
@@ -1588,6 +1801,11 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     }
     pagesPanel.setPages(pageCount);
     pagesPanel.setCurrent(pageIndex);
+    // The FIRST moment the export menu can be honest about this document. Its
+    // whole-document row is gated on how many pages carry ink, and that count is
+    // clamped to `pageCount` — which was zero until a few lines ago, so a
+    // `.mark` that landed before the open finished reconciled against nothing.
+    downloads.refreshGroups();
 
     await paint();
     // What the first page actually cost, once it is on screen. One message, and

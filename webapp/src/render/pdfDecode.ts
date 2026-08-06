@@ -73,7 +73,39 @@ export interface PdfDecoderExports {
     e: number,
     f: number,
   ): bigint;
-  /** Release the buffer `ink_export_page` returned. Idempotent. */
+  /**
+   * Draw the same ink onto the OPEN document's page, IN PLACE — the first half
+   * of the whole-document export. Writes nothing; 0 on success, negative on
+   * error. Call once per annotated page, then `ink_export_incremental`.
+   *
+   * THE DOCUMENT IS MUTATED AND THERE IS NO UNDO: every later render of that
+   * page shows the ink burnt in, so a session that goes on displaying the
+   * document has to reopen it. Can SUSPEND, like `ink_export_page`.
+   */
+  ink_annotate_page(
+    handle: number,
+    page: number,
+    alpha: number,
+    w: number,
+    h: number,
+    a: number,
+    b: number,
+    c: number,
+    d: number,
+    e: number,
+    f: number,
+  ): number;
+  /**
+   * The whole document, as an INCREMENTAL UPDATE — packed `(ptr << 32) | len`
+   * of **the delta only**, the bytes that belong AFTER the original file, or
+   * negative. Not a PDF on its own: `original || delta` is.
+   *
+   * Reads the whole original back through `ink.host_read` (MuPDF's incremental
+   * write begins by copying the file it appends to, which the module sinks), so
+   * on a streamed document this is a full pass over the file.
+   */
+  ink_export_incremental(handle: number): bigint;
+  /** Release the buffer an export returned. Idempotent. */
   ink_export_free(): void;
   ink_close(handle: number): void;
   ink_error_ptr(): number;
@@ -365,6 +397,29 @@ export interface PdfCalls {
     e: number,
     f: number,
   ): bigint | Promise<bigint>;
+  /**
+   * OPTIONAL IN THE TYPE, MANDATORY ON THE JSPI PATH, for exactly the reason
+   * `exportPage` is: annotating loads the page, which walks the xref.
+   */
+  annotatePage?(
+    handle: number,
+    page: number,
+    alpha: number,
+    w: number,
+    h: number,
+    a: number,
+    b: number,
+    c: number,
+    d: number,
+    e: number,
+    f: number,
+  ): number | Promise<number>;
+  /**
+   * The one call that reads the WHOLE document back — MuPDF's incremental write
+   * copies the file it appends to, and the module sinks that copy. Unwrapped on
+   * a streamed document it would trap on its first suspension.
+   */
+  exportIncremental?(handle: number): bigint | Promise<bigint>;
 }
 
 /** `PdfCalls` straight through to the exports — no JSPI, nothing suspends. */
@@ -377,6 +432,9 @@ export function syncCalls(x: PdfDecoderExports): PdfCalls {
     render: (h, p, s) => x.ink_render(h, p, s),
     exportPage: (h, p, ink, w, ih, a, b, c, d, e, f) =>
       x.ink_export_page(h, p, ink, w, ih, a, b, c, d, e, f),
+    annotatePage: (h, p, ink, w, ih, a, b, c, d, e, f) =>
+      x.ink_annotate_page(h, p, ink, w, ih, a, b, c, d, e, f),
+    exportIncremental: (h) => x.ink_export_incremental(h),
   };
 }
 
@@ -497,6 +555,89 @@ export class AsyncPdfDocument {
   ): Promise<Uint8Array> {
     const x = this.x;
     const handle = this.alive();
+    return this.withInk(alpha, width, height, async (ptr) => {
+      const [a, b, c, d, e, f] = matrix;
+      const call = this.c.exportPage ?? x.ink_export_page;
+      try {
+        const packed = await call(handle, page, ptr, width, height, a, b, c, d, e, f);
+        if (packed < 0n) throw new Error(lastError(x, `could not export page ${page}`));
+        return this.copyExport(packed);
+      } finally {
+        x.ink_export_free();
+      }
+    });
+  }
+
+  /**
+   * Draw the ink onto `page` of THIS document, in place — the first half of the
+   * whole-document export. Call once per annotated page, then
+   * {@link exportIncremental}.
+   *
+   * WHY THIS EXISTS BESIDE `exportPage`. Grafting every page into a fresh
+   * document would drop each one's `/Annots`, so a 77-page export would lose
+   * every link and highlight the original had. This route does not graft: it
+   * annotates the pages that were written on and then writes an INCREMENTAL
+   * UPDATE, which keeps the original's bytes and appends only what changed.
+   *
+   * THE DOCUMENT IS SPENT AFTERWARDS. There is no undo — every later render of
+   * `page` shows the ink burnt in, and annotating the same page twice draws it
+   * twice — so a caller that goes on displaying the document must reopen it.
+   */
+  async annotatePage(
+    page: number,
+    alpha: Uint8Array,
+    width: number,
+    height: number,
+    matrix: readonly [number, number, number, number, number, number],
+  ): Promise<void> {
+    const x = this.x;
+    const handle = this.alive();
+    await this.withInk(alpha, width, height, async (ptr) => {
+      const [a, b, c, d, e, f] = matrix;
+      const call = this.c.annotatePage ?? x.ink_annotate_page;
+      const rc = await call(handle, page, ptr, width, height, a, b, c, d, e, f);
+      if (rc < 0) throw new Error(lastError(x, `could not annotate page ${page}`));
+    });
+  }
+
+  /**
+   * Write everything {@link annotatePage} changed, and hand back THE DELTA —
+   * the bytes that belong after the original file.
+   *
+   * NOT A PDF ON ITS OWN. `new Blob([originalBlob, delta])` is, and building it
+   * that way is the whole memory argument: blobs are disk-backed, so a 76 MB
+   * document is exported without any of it entering the JS heap.
+   *
+   * The module refuses, with a sentence, for a document it cannot update in
+   * place: one that had to be repaired to open, one with junk before its
+   * `%PDF-` header (every offset in the delta would be misplaced), one with no
+   * backing file, and one where nothing was annotated.
+   */
+  async exportIncremental(): Promise<Uint8Array> {
+    const x = this.x;
+    const handle = this.alive();
+    const call = this.c.exportIncremental ?? x.ink_export_incremental;
+    try {
+      const packed = await call(handle);
+      if (packed < 0n) throw new Error(lastError(x, "could not export this document"));
+      return this.copyExport(packed);
+    } finally {
+      x.ink_export_free();
+    }
+  }
+
+  /**
+   * Copy `alpha` into wasm memory, run `use` against the pointer, and free the
+   * scratch on every path. Shared by the two ink routes, which take the same
+   * overlay and refuse the same mismatch.
+   */
+  private async withInk<T>(
+    alpha: Uint8Array,
+    width: number,
+    height: number,
+    use: (ptr: number) => Promise<T>,
+  ): Promise<T> {
+    const x = this.x;
     if (width <= 0 || height <= 0 || alpha.length !== width * height) {
       // The module reads `width * height` bytes from a raw pointer, so a short
       // buffer is an out-of-bounds read inside wasm rather than a bad export.
@@ -506,19 +647,25 @@ export class AsyncPdfDocument {
     if (!ptr) throw new Error("out of wasm memory building the export's ink");
     try {
       new Uint8Array(x.memory.buffer, ptr, alpha.length).set(alpha);
-      const [a, b, c, d, e, f] = matrix;
-      const call = this.c.exportPage ?? x.ink_export_page;
-      const packed = await call(handle, page, ptr, width, height, a, b, c, d, e, f);
-      if (packed < 0n) throw new Error(lastError(x, `could not export page ${page}`));
-      // Re-read `memory` here and not before: the export allocates, so the
-      // buffer this view is taken from may have been replaced mid-call.
-      return new Uint8Array(
-        new Uint8Array(x.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
-      );
+      return await use(ptr);
     } finally {
       x.ink_free(ptr, alpha.length);
-      x.ink_export_free();
     }
+  }
+
+  /**
+   * The packed `(ptr << 32) | len` an export returns, copied OUT of wasm memory.
+   *
+   * `memory.buffer` is re-read HERE and not captured before the call: an export
+   * allocates, so the buffer a earlier view was taken from may have been
+   * replaced — and on the JSPI path the call suspended, which is the same window
+   * with a longer name.
+   */
+  private copyExport(packed: bigint): Uint8Array {
+    const buf = this.x.memory.buffer;
+    return new Uint8Array(
+      new Uint8Array(buf, Number(packed >> 32n), Number(packed & 0xffffffffn)),
+    );
   }
 
   /** Idempotent. After this every method throws rather than using a stale handle. */

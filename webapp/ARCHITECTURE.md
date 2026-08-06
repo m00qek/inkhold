@@ -44,6 +44,8 @@ index, un-virtualised, and was folded back in).
 | Page index | `pages/pageIndex.ts` | the filmstrip: virtualised rows, current-page highlight, badges |
 | Layers panel | `pages/layersPanel.ts` + `noteLayers.ts` | the shared layer list (reader AND `.spd`) |
 | Thumbnails | `render/thumbnails.ts` | `getThumbnail(source, fileType)` — strategy per type, always a WebP |
+| PDF tile render | `render/pdfThumb.ts` | the `renderPdfPage` seam: page 0 through MuPDF, ONE document at a time |
+| Tile shape | `ui/tileAspect.ts` | `pinAspect`, the 2.5× cap, which types learn a shape and what they stand on meanwhile |
 | Caching | `cache/renderCache.ts` + `cache/idb.ts` | `[hot in-memory] → sn-thumbs → produce`, ONE budget |
 | Virtual list | `ui/virtualList.ts` | windowed rows for any long list |
 | Confirm / rename | `ui/confirm.ts`, `ui/renameDialog.ts` | the destructive-action dialogs |
@@ -75,7 +77,12 @@ feature degrades **silently** rather than failing.
 
 **4 and 5 must agree.** `strategyFor` can return a real strategy while
 `FACADE_THUMB_TYPES` still omits the type, and the card keeps showing a glyph
-with nothing to indicate why. If you change one, check the other.
+with nothing to indicate why. Nothing type-checks the pair, and it has now been
+the hazard for two file types (`.txt`, then `.pdf`) — so `thumbnails.test.ts`
+asserts the two agree for **every** type in the app's vocabulary (`UPLOAD_ACCEPT`
+∪ the image types ∪ the device-authored ones). Change one and the test names the
+other. The set is exported and `pages/bin.ts` imports it rather than restating
+it, for the same reason.
 
 **8 is the subtle one.** The server reports the type its PARSER verified, not the
 filename's extension — which is why a `.mark` (a thin `.note`) reported as

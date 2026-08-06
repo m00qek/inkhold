@@ -57,9 +57,12 @@ const mod = await WebAssembly.compile(fs.readFileSync(wasmPath));
 // same import is wrapped in `WebAssembly.Suspending` and may await a range
 // fetch; a synchronous answer is exactly what a block-cache HIT looks like, so
 // this covers the C stream's `next`/`seek` bookkeeping without needing JSPI.
-const fixture = fs.readFileSync(pdfPath);
+let fixture = fs.readFileSync(pdfPath);
+const savedFixture = fixture;
 const hostReads = [];
 let hostFails = false;
+/** Past this offset the host answers 0 — a range that came back empty. */
+let hostZeroFrom = Infinity;
 const imports = {
   ...wasi.getImportObject(),
   ink: {
@@ -67,6 +70,7 @@ const imports = {
       const at = Number(off);
       hostReads.push([at, len]);
       if (hostFails) return -1;
+      if (at >= hostZeroFrom) return 0;
       const n = Math.max(0, Math.min(len, fixture.length - at));
       if (n > 0) new Uint8Array(e.memory.buffer, dst, n).set(fixture.subarray(at, at + n));
       return n;
@@ -89,6 +93,8 @@ for (const name of [
   "ink_render_height",
   "ink_close",
   "ink_export_page",
+  "ink_annotate_page",
+  "ink_export_incremental",
   "ink_export_free",
   "memory",
 ]) {
@@ -281,14 +287,7 @@ function renderCopy(handle, page, scale) {
  * a generator makes the thing under test visible at the call site. Every byte is
  * ASCII, so a JS string's length is the byte length the xref needs.
  */
-function tinyPdf(mediaBox, extra, content) {
-  const bodies = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox.join(" ")}]${extra}` +
-      " /Contents 4 0 R /Resources << >> >>",
-    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
-  ];
+function buildPdf(bodies) {
   let out = "%PDF-1.4\n";
   const offsets = [];
   bodies.forEach((body, i) => {
@@ -301,6 +300,57 @@ function tinyPdf(mediaBox, extra, content) {
   out += `trailer\n<< /Size ${bodies.length + 1} /Root 1 0 R >>\n`;
   out += `startxref\n${xrefAt}\n%%EOF\n`;
   return Buffer.from(out, "latin1");
+}
+
+function tinyPdf(mediaBox, extra, content) {
+  return buildPdf([
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox.join(" ")}]${extra}` +
+      " /Contents 4 0 R /Resources << >> >>",
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+  ]);
+}
+
+/**
+ * An N-page PDF where EVERY page carries an `/Annots` array — the thing the
+ * incremental export exists to preserve and the thing grafting destroys.
+ *
+ * A `/Link` is used because it has no appearance stream, so it changes no
+ * pixels: the pixel diff below stays a statement about the ink alone, while
+ * `/Annots` is still there to be found (or lost) in the bytes.
+ *
+ * Three objects per page — page, contents, annotation — so the numbering is
+ * arithmetic rather than a running counter.
+ */
+function annotatedPdf(count, mediaBox = [0, 0, 200, 100], padBytes = 0) {
+  const bodies = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    `<< /Type /Pages /Kids [${Array.from({ length: count }, (_, i) => `${3 + i * 3} 0 R`).join(" ")}]` +
+      ` /Count ${count} >>`,
+  ];
+  for (let i = 0; i < count; i++) {
+    // A distinct rectangle per page, so a page drawn in place of another shows
+    // up in the diff rather than passing for it.
+    const content = `0 0 0 rg\n${10 + i * 15} 20 40 30 re f`;
+    bodies.push(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox.join(" ")}]` +
+        ` /Contents ${4 + i * 3} 0 R /Resources << >>` +
+        ` /Annots [${5 + i * 3} 0 R] >>`,
+    );
+    bodies.push(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+    bodies.push(
+      `<< /Type /Annot /Subtype /Link /Rect [5 5 60 20] /Border [0 0 0]` +
+        ` /A << /Type /Action /S /URI /URI (https://example.invalid/p${i}) >> >>`,
+    );
+  }
+  // Filler, so a fixture can be made big enough that reading it back takes MORE
+  // THAN ONE host read (the stream's window is 32 KB). Unreferenced, which is
+  // legal: an incremental write collects no garbage, so nothing prunes it.
+  if (padBytes > 0) {
+    bodies.push(`<< /Length ${padBytes} >>\nstream\n${"%".repeat(padBytes)}\nendstream`);
+  }
+  return buildPdf(bodies);
 }
 
 function openBytes(bytes) {
@@ -557,6 +607,401 @@ e.ink_free(alphaAt, 16);
 // `ink_export_free` is idempotent and safe with nothing outstanding.
 e.ink_export_free();
 e.ink_export_free();
+
+// ============================================================================
+// The WHOLE-DOCUMENT export (`ink_annotate_page` + `ink_export_incremental`)
+// ============================================================================
+//
+// Not a loop over `ink_export_page`: grafting drops `/Annots`, so a 77-page
+// document exported that way would lose every link and highlight it had, 77
+// times. This route mutates the OPEN document's pages and writes an INCREMENTAL
+// UPDATE — the original's bytes verbatim, plus only what changed.
+//
+// THE ASSERTION THAT CARRIES THE WEIGHT is that the ORIGINAL'S OWN ANNOTATIONS
+// survive, which the per-page path fails by construction; it is asserted BOTH
+// ways below, against the same fixture, so the difference is visible rather than
+// claimed. The rest: the original is a verbatim prefix of the output, the page
+// count is unchanged, the ink lands on the annotated page and NOWHERE ELSE, and
+// a reader (this module) opens the concatenation.
+
+/** Copy the last export out and release the module's buffer. */
+function takeExport(packed) {
+  if (packed <= 0n) return null;
+  const bytes = Buffer.from(
+    new Uint8Array(e.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
+  );
+  e.ink_export_free();
+  return bytes;
+}
+
+/** Draw `alpha` onto `page` of the open document, in place. */
+function annotate(handle, page, alpha, w, h, m) {
+  const at = e.ink_alloc(alpha.length);
+  new Uint8Array(e.memory.buffer, at, alpha.length).set(alpha);
+  const rc = e.ink_annotate_page(handle, page, at, w, h, ...m);
+  e.ink_free(at, alpha.length);
+  return rc;
+}
+
+function errorText() {
+  const n = e.ink_error_len();
+  return Buffer.from(new Uint8Array(e.memory.buffer, e.ink_error_ptr(), n)).toString("utf8");
+}
+
+// --- the round trip ---------------------------------------------------------
+// Three pages, every one of them carrying a /Link. Only page 1 is written on —
+// the real corpus is 7 annotated pages out of 77, and a route that quietly
+// touched the other 70 would be a different (and worse) feature.
+const source = annotatedPdf(3);
+check(/\/Annots/.test(source.toString("latin1")), "the fixture really has /Annots");
+
+const wdoc2 = openBytes(source);
+check(wdoc2 >= 1, "the annotated fixture opens", `got ${wdoc2}`);
+const beforePages = [0, 1, 2].map((p) => renderCopy(wdoc2, p, 1));
+check(
+  beforePages.every((f) => f && f.w === 200 && f.h === 100),
+  "the fixture's three pages render",
+);
+
+// Display x 20..80, y 10..30 on page 1 — clear of that page's own rectangle,
+// which sits at display y 50..80.
+const inkBox = [[20, 10, 80, 30]];
+const mask = coverage(100, 50, [[10, 5, 40, 15, 255]]);
+equal(annotate(wdoc2, 1, mask, 100, 50, [2, 0, 0, 2, 0, 0]), 0, "ink_annotate_page(page 1)");
+
+const delta = takeExport(e.ink_export_incremental(wdoc2));
+check(delta !== null, "ink_export_incremental produced a delta", errorText());
+e.ink_close(wdoc2);
+
+if (delta) {
+  // A DELTA, NOT A DOCUMENT. It must be a small fraction of the original and
+  // must NOT begin with a header — if it did, the module would be handing back
+  // a whole rewritten file and the memory argument would be a fiction.
+  check(
+    delta.subarray(0, 5).toString("latin1") !== "%PDF-",
+    "the delta is not a whole document",
+  );
+  check(delta.length > 0, "the delta is not empty");
+  // NOTHING OF THE ORIGINAL IS RE-ENCODED — the memory claim, stated as bytes.
+  // The pages' own content streams are uncompressed ASCII in the fixture, so an
+  // implementation that rewrote the document rather than appending to it would
+  // carry them here.
+  check(
+    delta.indexOf(Buffer.from("re f", "latin1")) === -1,
+    "the delta does not carry the original's content streams",
+  );
+
+  // THE DIFFERENTIATOR, half one: the rewritten page object still carries the
+  // annotation array it had. The page dict IS rewritten (its /Contents now
+  // points at the ink), so a mutation that dropped /Annots would supersede the
+  // original's copy and lose it — which the prefix check below cannot see.
+  check(
+    /\/Annots/.test(delta.toString("latin1")),
+    "the rewritten page keeps its own /Annots",
+  );
+
+  const whole = Buffer.concat([source, delta]);
+  // THE INCREMENTAL PROMISE ITSELF: nothing of the original is re-encoded.
+  check(source.equals(whole.subarray(0, source.length)), "the original is a verbatim prefix");
+
+  const rdoc2 = openBytes(whole);
+  check(rdoc2 >= 1, "the concatenation opens as a PDF", `got ${rdoc2}`);
+  if (rdoc2 >= 1) {
+    equal(e.ink_page_count(rdoc2), 3, "the export still has three pages");
+
+    // THE DIFFERENTIATOR, half two: a reader that actually parses the result
+    // still finds the link. `ink_page_count` proves the xref offsets in the
+    // delta resolve at all — an unbiased offset (trap 2) would fail here.
+    for (const p of [0, 1, 2]) {
+      const after = renderCopy(rdoc2, p, 1);
+      const before = beforePages[p];
+      check(after && after.w === before.w && after.h === before.h,
+        `page ${p} of the export renders at the source's size`);
+      let disturbed = 0;
+      let missing = 0;
+      for (let y = 0; y < before.h; y++) {
+        for (let x = 0; x < before.w; x++) {
+          const o = (y * before.w + x) * 4;
+          const inked = p === 1 && within(inkBox, x, y, 1);
+          if (!inked) {
+            if (after.px[o] !== before.px[o]) disturbed += 1;
+          } else if (within(inkBox, x, y, -1) && after.px[o] > 64) {
+            missing += 1;
+          }
+        }
+      }
+      equal(disturbed, 0, `page ${p} is untouched outside the ink`);
+      equal(missing, 0, `page ${p}: the ink is dark where it was painted`);
+    }
+    e.ink_close(rdoc2);
+  }
+}
+
+// --- two annotated pages that SHARE one /Resources dictionary ---------------
+// The common real shape — one document in the corpus gives all 26 of its pages
+// the same /Resources object — and the reason the ink's XObject is named per
+// page. Under a single fixed name the second annotate OVERWRITES the first
+// page's entry in the dictionary they share, and page 0's content stream, still
+// saying `Do` on that name, draws page 1's handwriting. The pixel diff below is
+// what sees it: the two masks paint different boxes.
+{
+  const shared = buildPdf([
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources 7 0 R >>",
+    "<< /Length 9 >>\nstream\n0 0 0 rg\n\nendstream",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 6 0 R /Resources 7 0 R >>",
+    "<< /Length 9 >>\nstream\n0 0 0 rg\n\nendstream",
+    "<< >>",
+  ]);
+  const sdoc = openBytes(shared);
+  check(sdoc >= 1, "the shared-resources fixture opens", `got ${sdoc}`);
+  // Page 0's ink -> display x 20..80, y 10..30. Page 1's -> x 100..160, y 60..80.
+  const m0 = coverage(100, 50, [[10, 5, 40, 15, 255]]);
+  const m1 = coverage(100, 50, [[50, 30, 80, 40, 255]]);
+  equal(annotate(sdoc, 0, m0, 100, 50, [2, 0, 0, 2, 0, 0]), 0, "shared: annotate page 0");
+  equal(annotate(sdoc, 1, m1, 100, 50, [2, 0, 0, 2, 0, 0]), 0, "shared: annotate page 1");
+  const d = takeExport(e.ink_export_incremental(sdoc));
+  check(d !== null, "shared: the incremental export succeeds", errorText());
+  e.ink_close(sdoc);
+  if (d) {
+    const out = openBytes(Buffer.concat([shared, d]));
+    check(out >= 1, "shared: the concatenation opens", `got ${out}`);
+    const want = [
+      [[20, 10, 80, 30]],
+      [[100, 60, 160, 80]],
+    ];
+    for (const p of [0, 1]) {
+      const f = renderCopy(out, p, 1);
+      let wrong = 0;
+      for (let y = 0; y < f.h; y++) {
+        for (let x = 0; x < f.w; x++) {
+          const dark = f.px[(y * f.w + x) * 4] < 64;
+          const should = within(want[p], x, y, -1);
+          const mayBe = within(want[p], x, y, 1);
+          if ((should && !dark) || (dark && !mayBe)) wrong += 1;
+        }
+      }
+      equal(wrong, 0, `shared: page ${p} carries its OWN ink and no other page's`);
+    }
+    e.ink_close(out);
+  }
+}
+
+// --- a page whose /Resources are INHERITED from its /Pages node -------------
+// /Resources is one of the five keys a page may inherit, and plenty of real
+// documents put it on the tree node once instead of on every page. Reading only
+// the page's own key finds nothing there, and writing a fresh /Resources onto
+// the page to hold the ink then SHADOWS the inherited one — so the page's own
+// text loses the font it was set in, and the export is a page with a hole in it.
+// The ink still lands correctly, which is why only a diff of the page's OWN
+// pixels sees this.
+{
+  const text = "BT /F1 24 Tf 20 40 Td (Hello) Tj ET";
+  const inherited = buildPdf([
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources << /Font << /F1 5 0 R >> >> >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R >>",
+    `<< /Length ${text.length} >>\nstream\n${text}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ]);
+  const idoc = openBytes(inherited);
+  check(idoc >= 1, "the inherited-resources fixture opens", `got ${idoc}`);
+  const beforeInk = renderCopy(idoc, 0, 1);
+  let inkyBefore = 0;
+  for (let i = 0; i < beforeInk.px.length; i += 4) if (beforeInk.px[i] < 128) inkyBefore += 1;
+  // A check on the FIXTURE: if the text never drew, losing it proves nothing.
+  check(inkyBefore > 200, "the inherited font really draws text", `${inkyBefore} dark px`);
+
+  // Ink well clear of the text (display y 5..15 is the top strip; the text sits
+  // at display y ~36..60).
+  equal(
+    annotate(idoc, 0, coverage(100, 50, [[60, 1, 90, 6, 255]]), 100, 50, [2, 0, 0, 2, 0, 0]),
+    0,
+    "inherited: annotate",
+  );
+  const id = takeExport(e.ink_export_incremental(idoc));
+  check(id !== null, "inherited: the incremental export succeeds", errorText());
+  e.ink_close(idoc);
+  if (id) {
+    const out = openBytes(Buffer.concat([inherited, id]));
+    check(out >= 1, "inherited: the concatenation opens", `got ${out}`);
+    const f = renderCopy(out, 0, 1);
+    const inkedBox = [[120, 2, 180, 12]];
+    // TOLERANCE OF 8, and it is not slack. The ink image covers the WHOLE page
+    // (its coverage is zero outside the box, not its extent), and compositing a
+    // fully transparent image over an ANTIALIASED grey rounds it by a unit —
+    // the same 8-bit rounding `ink_shim_render` documents when it forces the
+    // alpha channel opaque. Losing the inherited font turns 291 dark pixels
+    // white, a difference of 255, so this still catches the thing it is for.
+    let disturbed = 0;
+    for (let y = 0; y < beforeInk.h; y++) {
+      for (let x = 0; x < beforeInk.w; x++) {
+        const o = (y * beforeInk.w + x) * 4;
+        if (!within(inkedBox, x, y, 1) && Math.abs(f.px[o] - beforeInk.px[o]) > 8) disturbed += 1;
+      }
+    }
+    let darkAfter = 0;
+    for (let i = 0; i < f.px.length; i += 4) if (f.px[i] < 128) darkAfter += 1;
+    // The ink's own 60x10 box, and the text still under it.
+    check(
+      Math.abs(darkAfter - (inkyBefore + 600)) < 40,
+      "inherited: the page keeps its text AND gains the ink",
+      `before ${inkyBefore}, after ${darkAfter}`,
+    );
+    equal(disturbed, 0, "inherited: the page's own text survives the annotation");
+    e.ink_close(out);
+  }
+}
+
+// --- and the per-page path FAILS the same assertion --------------------------
+// Stated as a test rather than as a comment, because it is the entire reason
+// this second route exists. If `pdf_graft_page` ever learns to copy /Annots this
+// goes red, and the honest response is to re-read the plan, not to relax it.
+const gdoc = openBytes(source);
+const grafted = takeExport(
+  (() => {
+    const at = e.ink_alloc(mask.length);
+    new Uint8Array(e.memory.buffer, at, mask.length).set(mask);
+    const packed = e.ink_export_page(gdoc, 1, at, 100, 50, 2, 0, 0, 2, 0, 0);
+    e.ink_free(at, mask.length);
+    return packed;
+  })(),
+);
+check(grafted !== null, "the per-page export of the same page succeeds");
+if (grafted) {
+  check(
+    !/\/Annots/.test(grafted.toString("latin1")),
+    "...and it has LOST the page's /Annots — which is why the incremental route exists",
+  );
+}
+e.ink_close(gdoc);
+
+// --- refusal: junk before the version marker (trap 2) ------------------------
+// `pdf_save_document` sets `opts.bias = doc->bias` for an incremental write;
+// `pdf_write_document` — the only entry point a memory-only ABI can use — never
+// does, and the field it would set is internal. So every xref offset in the
+// delta would be written unbiased and point at the wrong byte, producing a file
+// that opens to nothing. It is detectable and not fixable from outside, so the
+// shim reads `doc->bias` and refuses.
+const biased = Buffer.concat([Buffer.from("%not a pdf yet\n"), annotatedPdf(1)]);
+const bdoc = openBytes(biased);
+check(bdoc >= 1, "MuPDF opens a file with junk before %PDF-", `got ${bdoc}`);
+equal(annotate(bdoc, 0, mask, 100, 50, [2, 0, 0, 2, 0, 0]), -2, "a biased file is refused");
+check(/%PDF-/.test(errorText()), "the bias refusal names the cause", errorText());
+// Refused BEFORE anything is mutated: the export refuses on its own terms too,
+// with the same sentence, rather than with "nothing was annotated".
+equal(e.ink_export_incremental(bdoc), -2n, "...and the write refuses as well");
+check(/%PDF-/.test(errorText()), "the write's refusal names the same cause", errorText());
+e.ink_close(bdoc);
+
+// --- refusal: a repaired file (trap 3) --------------------------------------
+// MuPDF refuses incremental on a repaired file outright, and would do so from
+// inside `pdf_write_document` AFTER the pages had been mutated. Pre-empting it
+// in `ink_annotate_page` is what keeps a refusal from leaving a half-annotated
+// document behind for the next render to draw.
+const sound = annotatedPdf(1);
+const broken = Buffer.from(
+  sound.toString("latin1").replace(/startxref\n(\d+)/, (_, n) => `startxref\n${"9".repeat(n.length)}`),
+  "latin1",
+);
+check(!sound.equals(broken), "the repair fixture really is corrupted");
+const pdoc = openBytes(broken);
+check(pdoc >= 1, "MuPDF repairs and opens the broken file", `got ${pdoc}`);
+equal(annotate(pdoc, 0, mask, 100, 50, [2, 0, 0, 2, 0, 0]), -2, "a repaired file is refused");
+check(/repair/i.test(errorText()), "the repair refusal says so", errorText());
+e.ink_close(pdoc);
+
+// --- refusal: nothing was annotated -----------------------------------------
+// An empty delta concatenates to a byte-identical copy of the original, which
+// the raw-download row already offers; shipping it under a name that promises
+// ink would be a lie the user cannot see.
+const edoc = openBytes(annotatedPdf(1));
+equal(e.ink_export_incremental(edoc), -2n, "an unannotated document is refused");
+check(/no ink/i.test(errorText()), "...and says nothing was added", errorText());
+e.ink_close(edoc);
+
+// --- argument hygiene, against a LIVE handle --------------------------------
+// Aimed at a closed handle these would all come back -1 from the lookup alone
+// and the checks could be deleted with the suite still green.
+const adoc = openBytes(annotatedPdf(2));
+const alphaAt2 = e.ink_alloc(16);
+new Uint8Array(e.memory.buffer, alphaAt2, 16).fill(255);
+equal(e.ink_annotate_page(adoc, 0, alphaAt2, 4, 4, 1, 0, 0, 1, 0, 0), 0, "annotate accepts good arguments");
+equal(e.ink_annotate_page(adoc, 0, alphaAt2, 0, 4, 1, 0, 0, 1, 0, 0), -1, "a zero width is refused");
+equal(e.ink_annotate_page(adoc, 0, alphaAt2, 4, 0, 1, 0, 0, 1, 0, 0), -1, "a zero height is refused");
+equal(e.ink_annotate_page(adoc, 0, 0, 4, 4, 1, 0, 0, 1, 0, 0), -1, "a null coverage pointer is refused");
+equal(e.ink_annotate_page(adoc, -1, alphaAt2, 4, 4, 1, 0, 0, 1, 0, 0), -1, "a negative page is refused");
+equal(e.ink_annotate_page(adoc, 0, alphaAt2, 4, 4, NaN, 0, 0, 1, 0, 0), -1, "a NaN matrix is refused");
+equal(
+  e.ink_annotate_page(adoc, 0, alphaAt2, 4, 4, 1, 0, 0, Infinity, 0, 0),
+  -1,
+  "an infinite matrix is refused",
+);
+equal(e.ink_annotate_page(adoc, 99, alphaAt2, 4, 4, 1, 0, 0, 1, 0, 0), -2, "a missing page is refused");
+e.ink_close(adoc);
+equal(e.ink_annotate_page(adoc, 0, alphaAt2, 4, 4, 1, 0, 0, 1, 0, 0), -1, "a dead handle is refused");
+equal(e.ink_export_incremental(adoc), -1n, "the write refuses a dead handle");
+e.ink_free(alphaAt2, 16);
+
+// A document MuPDF opens but that has no PDF objects at all.
+const hdoc2 = openBytes(
+  Buffer.from("<html><body><p>a document MuPDF opens but cannot annotate</p></body></html>"),
+);
+const alphaAt3 = e.ink_alloc(16);
+new Uint8Array(e.memory.buffer, alphaAt3, 16).fill(255);
+equal(e.ink_annotate_page(hdoc2, 0, alphaAt3, 4, 4, 1, 0, 0, 1, 0, 0), -2, "a non-PDF cannot be annotated");
+equal(e.ink_export_incremental(hdoc2), -2n, "a non-PDF cannot be written incrementally");
+e.ink_free(alphaAt3, 16);
+e.ink_close(hdoc2);
+
+// --- the streamed path -------------------------------------------------------
+// The real viewer opens a large document over `ink.host_read`, and the
+// incremental write READS THE WHOLE ORIGINAL back through it (MuPDF's copy of
+// the file it is appending to, which the shim sinks). That the delta is the same
+// either way is what says the sink is honest about its offsets.
+if (delta) {
+  fixture = annotatedPdf(3);
+  check(fixture.equals(source), "the streamed run uses the same bytes as the buffered one");
+  const sdoc3 = e.ink_open_stream(BigInt(fixture.length));
+  check(sdoc3 >= 1, "the annotated fixture opens as a stream", `got ${sdoc3}`);
+  equal(annotate(sdoc3, 1, mask, 100, 50, [2, 0, 0, 2, 0, 0]), 0, "annotate over the stream");
+  const streamDelta = takeExport(e.ink_export_incremental(sdoc3));
+  check(streamDelta !== null, "the streamed incremental export succeeds", errorText());
+  if (streamDelta) {
+    // NOT byte-equality: the trailer's /ID is regenerated per write, so two
+    // deltas of the same edit differ in those bytes and nowhere else. Length is
+    // the check that stays true and still catches a sink that dropped or
+    // duplicated the original.
+    equal(streamDelta.length, delta.length, "the streamed delta is the same size");
+    const sWhole = Buffer.concat([fixture, streamDelta]);
+    const sOut = openBytes(sWhole);
+    check(sOut >= 1, "the streamed concatenation opens", `got ${sOut}`);
+    equal(e.ink_page_count(sOut), 3, "...with all three pages");
+    e.ink_close(sOut);
+  }
+  e.ink_close(sdoc3);
+
+  // AND WHAT HAPPENS WHEN THE SOURCE GOES SHORT. The delta is produced by
+  // SINKING MuPDF's copy of the original — everything below the original's
+  // length is dropped on the floor — so a `doc->file` that stops early would
+  // sink the real objects too and hand back a delta whose offsets are all
+  // wrong: a file that opens to a blank page rather than one that fails. The
+  // shim checks the cursor against the delta it produced, which is what turns
+  // that into a refusal. A host answering 0 mid-file is an empty range
+  // response, which is exactly how this arrives in a browser.
+  fixture = annotatedPdf(3, [0, 0, 200, 100], 40 * 1024);
+  const zdoc = e.ink_open_stream(BigInt(fixture.length));
+  check(zdoc >= 1, "the stream opens before the host goes short", `got ${zdoc}`);
+  equal(annotate(zdoc, 1, mask, 100, 50, [2, 0, 0, 2, 0, 0]), 0, "annotate before the host fails");
+  hostZeroFrom = 32 * 1024;
+  equal(e.ink_export_incremental(zdoc), -2n, "a truncated original fails the write");
+  hostZeroFrom = Infinity;
+  e.ink_close(zdoc);
+
+  fixture = savedFixture;
+}
+
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);

@@ -10,9 +10,11 @@ import {
   type ThumbSource,
 } from "../../src/render/thumbnails";
 import { thumbTargetWidth } from "../../src/render/types";
+import { FACADE_THUMB_TYPES } from "../../src/pages/galleryCards";
+import { fileKind, PREVIEWABLE_IMAGE_TYPES, UPLOAD_ACCEPT } from "../../src/core/fileKind";
 import type { PersistentThumbStore } from "../../src/cache/idb";
 import { cacheId } from "../../src/cache/renderCache";
-import type { PageRef, Theme } from "../../src/core/types";
+import type { Id, PageRef, Theme } from "../../src/core/types";
 
 // The facade's ORCHESTRATION is what these exercise — dispatch, cache keys,
 // 404-fallback, theme separation — with every pixel/network seam faked, so it
@@ -114,12 +116,21 @@ function build(
     net?: ThumbNet;
     coverMemo?: ReturnType<typeof fakeCoverMemo>;
     persistent?: PersistentThumbStore | null;
+    pdf?: false;
   } = {},
 ) {
   const painter = fakePainter();
   const net = withProbe((opts.net ?? fakeNet()) as ReturnType<typeof fakeNet>);
   const coverMemo = opts.coverMemo ?? fakeCoverMemo();
   const renderNote = vi.fn(async () => ({ width: 240, height: 320, close() {} }) as unknown as ImageBitmap);
+  // The PDF seam. Its bitmap is the FACADE'S to close (unlike renderNote's,
+  // which belongs to the render cache), so the fake records the close.
+  const pdfBitmaps: Array<{ closed: boolean }> = [];
+  const renderPdfPage = vi.fn(async (_id: Id, _hash: string, _o?: { bin?: boolean }) => {
+    const bitmap = { width: 230, height: 345, closed: false, close(): void { bitmap.closed = true; } };
+    pdfBitmaps.push(bitmap);
+    return { bitmap: bitmap as unknown as ImageBitmap, pageW: 400, pageH: 600 };
+  });
   // Injected dims sink, so tests never touch the module-level persistent memo.
   const setDims = vi.fn(async (_hash: string, _dims: { w: number; h: number }) => {});
   const thumbs = createThumbnails({
@@ -128,10 +139,22 @@ function build(
     net,
     painter,
     renderNote,
+    // `pdf: false` builds the facade WITHOUT the seam — the state a browser that
+    // cannot run the decoder is in, and the one the glyph floor must survive.
+    renderPdfPage: opts.pdf === false ? undefined : renderPdfPage,
     setDims,
     persistent: opts.persistent,
   });
-  return { coverMemo, thumbs, painter, net: net as ReturnType<typeof fakeNet>, renderNote, setDims };
+  return {
+    coverMemo,
+    thumbs,
+    painter,
+    net: net as ReturnType<typeof fakeNet>,
+    renderNote,
+    renderPdfPage,
+    pdfBitmaps,
+    setDims,
+  };
 }
 
 const noteSrc = (fileHash = "notehash"): ThumbSource => ({ fileHash, fileId: "n1", noteId: "n1", page: page("pageh") });
@@ -148,9 +171,67 @@ describe("strategyFor", () => {
     expect(strategyFor("webp")).toBe("image-doc");
     expect(strategyFor("gif")).toBe("image-doc");
     expect(strategyFor("txt")).toBe("text");
-    expect(strategyFor("pdf")).toBe("glyph");
+    // A `.pdf` renders its page 0 client-side through the MuPDF wasm — the same
+    // decoder the viewer uses. No cover branch: it has none, and neither does
+    // its `.mark` sibling (docs/scratch/pdf-thumbnails.md §0).
+    expect(strategyFor("pdf")).toBe("pdf-page");
+    expect(strategyFor("epub")).toBe("glyph");
     expect(strategyFor("")).toBe("glyph");
     expect(strategyFor("mystery")).toBe("glyph");
+  });
+});
+
+describe("the two dispatch points agree (ARCHITECTURE.md registration 4 and 5)", () => {
+  // THE HAZARD THIS EXISTS FOR. `strategyFor` can return a real strategy while
+  // `FACADE_THUMB_TYPES` still omits the type, and the card goes on drawing a
+  // glyph with nothing to indicate why — a silent degradation nothing
+  // type-checks. It has now been live for two file types (`.txt`, then `.pdf`);
+  // this is what stops a third landing it.
+  //
+  // The vocabulary is derived, not restated: every type the web may upload plus
+  // every type the device authors, so a new previewable type joins the sweep by
+  // being addable at all rather than by someone remembering this file.
+  const VOCABULARY = [
+    ...UPLOAD_ACCEPT,
+    ...PREVIEWABLE_IMAGE_TYPES,
+    "note",
+    "mark",
+    "file",
+    "folder",
+    "",
+    "mystery",
+  ];
+
+  it("every type the card sends to the facade has a real strategy, and vice versa", () => {
+    for (const type of VOCABULARY) {
+      const strategy = strategyFor(type);
+      const kind = fileKind(type.trim().toLowerCase());
+      // Notes and images are routed by `fileKind` before the set is consulted
+      // (a note always goes through the facade, an image is a native <img>), so
+      // the set speaks for everything else — and must not claim those two.
+      if (kind === "note") {
+        // The card OVERRIDES the type on this branch: `thumbMedia` sends the
+        // literal `"note"` even for a `.mark`, so `strategyFor("mark")` is never
+        // consulted and its `glyph` answer is unreachable rather than wrong.
+        // What must hold is that the type actually sent has the strategy.
+        expect(strategyFor("note"), `${type} is sent to the facade as "note"`).toBe("note-page");
+        continue;
+      }
+      if (kind === "image") {
+        expect(strategy, `${type}: a raster image`).toBe("image-doc");
+        continue;
+      }
+      expect(
+        FACADE_THUMB_TYPES.has(type.trim().toLowerCase()),
+        `"${type}" has strategy "${strategy}" — FACADE_THUMB_TYPES must agree`,
+      ).toBe(strategy !== "glyph");
+    }
+  });
+
+  it("the set never claims a type `fileKind` already routes elsewhere", () => {
+    for (const type of FACADE_THUMB_TYPES) {
+      expect(fileKind(type), `${type} is dispatched by fileKind, not by the set`).toBe("file");
+    }
   });
 });
 
@@ -173,12 +254,13 @@ describe("thumbnail facade", () => {
 
   it("the glyph path draws client-side and makes NO network call", async () => {
     const t = build();
-    const blob = await t.thumbs.getThumbnail(fileSrc("h9"), "pdf");
-    expect(await tagOf(blob)).toBe("glyph:PDF:light");
+    const blob = await t.thumbs.getThumbnail(fileSrc("h9"), "doc");
+    expect(await tagOf(blob)).toBe("glyph:DOC:light");
     expect(t.painter.glyph).toHaveBeenCalledTimes(1);
     expect(t.net.bytes).not.toHaveBeenCalled();
     expect(t.net.text).not.toHaveBeenCalled();
     expect(t.renderNote).not.toHaveBeenCalled();
+    expect(t.renderPdfPage).not.toHaveBeenCalled();
   });
 
   it("a folder (null hash) is a folder glyph, no network", async () => {
@@ -215,6 +297,80 @@ describe("thumbnail facade", () => {
     const blob = await t.thumbs.getThumbnail({ fileHash: null, noteId: "n1", page: page("pageh") }, "note");
     expect(await tagOf(blob)).toBe("note");
     expect(t.net.bytes).not.toHaveBeenCalled();
+  });
+
+  it("a .pdf renders its page 0 — straight to the render, no cover probe first", async () => {
+    const t = build();
+    const blob = await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
+    expect(await tagOf(blob)).toBe("note"); // the fake painter's fromBitmap tag
+    expect(t.renderPdfPage).toHaveBeenCalledWith("p1", "pdfh", { bin: undefined });
+    // A PDF has no cover to try — not in the file, not in its `.mark` — so the
+    // arm must NOT spend a `/thumbnail/{hash}` round trip discovering that.
+    expect(t.net.bytes).not.toHaveBeenCalled();
+    expect(t.painter.fromBitmap).toHaveBeenCalledTimes(1);
+  });
+
+  it("a .pdf tile FREES the bitmap it was handed — it is the facade's, not a cache's", async () => {
+    const t = build();
+    await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
+    expect(t.pdfBitmaps).toHaveLength(1);
+    // `renderNote`'s bitmap belongs to the render cache and must be left alone;
+    // this one was transferred out of the worker and nothing else holds it.
+    expect(t.pdfBitmaps[0]!.closed).toBe(true);
+  });
+
+  it("a .pdf records page 0's OWN box as the tile's aspect (the masonry memo)", async () => {
+    const t = build();
+    await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
+    // The page's points (the cropped, rotated box), not the raster's pixels —
+    // which is what makes a landscape or `/Rotate 90` page lay out honestly.
+    expect(t.setDims).toHaveBeenCalledWith("pdfh", { w: 400, h: 600 });
+  });
+
+  it("a .pdf keys THEME-FREE: a theme toggle must not re-open the document", async () => {
+    let theme: Theme = "light";
+    const t = build({ theme: () => theme });
+    await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
+    theme = "dark";
+    await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
+    // MuPDF draws ink on white paper: the raster is the same in both themes, and
+    // re-opening a document (~1.5 MB of range requests) for a toggle would be by
+    // far the most expensive produce in the facade.
+    expect(t.renderPdfPage).toHaveBeenCalledTimes(1);
+    // …and evictTheme leaves it alone, for the same reason it spares an image.
+    t.thumbs.evictTheme("light");
+    await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
+    expect(t.renderPdfPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("a TRASHED .pdf renders off the bin-scoped route, so its tile is not a 404", async () => {
+    const t = build();
+    await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1", bin: true }, "pdf");
+    expect(t.renderPdfPage).toHaveBeenCalledWith("p1", "pdfh", { bin: true });
+  });
+
+  it("a .pdf that will not render falls back to the glyph, never an empty tile", async () => {
+    const t = build();
+    t.renderPdfPage.mockRejectedValueOnce(new Error("encrypted"));
+    const blob = await t.thumbs.getThumbnail({ fileHash: "bad", fileId: "p1" }, "pdf");
+    expect(await tagOf(blob)).toBe("glyph:PDF:light");
+    expect(t.setDims).not.toHaveBeenCalled();
+  });
+
+  it("a .pdf with no renderer at all (no JSPI) is the glyph, and nothing is attempted", async () => {
+    const t = build({ pdf: false });
+    const blob = await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
+    expect(await tagOf(blob)).toBe("glyph:PDF:light");
+    expect(t.net.bytes).not.toHaveBeenCalled();
+  });
+
+  it("a hashless or id-less .pdf has nothing to open → its own glyph", async () => {
+    const t = build();
+    const noHash = await t.thumbs.getThumbnail({ fileHash: null, fileId: "p1" }, "pdf");
+    const noId = await t.thumbs.getThumbnail({ fileHash: "h" }, "pdf");
+    expect(await tagOf(noHash)).toBe("glyph:PDF:light");
+    expect(await tagOf(noId)).toBe("glyph:PDF:light");
+    expect(t.renderPdfPage).not.toHaveBeenCalled();
   });
 
   it("a .spd fetches the embedded-thumbnail endpoint, then transcodes", async () => {
@@ -821,9 +977,28 @@ describe("facade persistent tier — the shared sn-thumbs store", () => {
   it("glyphs are never persisted — they regenerate instantly and earn no byte of the shared budget", async () => {
     const store = fakePersistentStore();
     const t = build({ persistent: store });
-    await t.thumbs.getThumbnail(fileSrc("g"), "pdf"); // → glyph
+    await t.thumbs.getThumbnail(fileSrc("g"), "doc"); // → glyph
     expect(store.get).not.toHaveBeenCalled();
     expect(store.put).not.toHaveBeenCalled();
+  });
+
+  it("a persisted .pdf tile is served WITHOUT the decoder — the wasm never loads twice", async () => {
+    // §5 of the plan, as a test. The tiers are `[hot memo] → sn-thumbs →
+    // produce`, and `produce` is the ONLY thing that reaches `renderPdfPage` —
+    // so on the second visit to a folder of PDFs the 5.3 MB module is not
+    // fetched at all. This is why the seam needs no gating and no idle delay.
+    const store = fakePersistentStore();
+    const s1 = build({ persistent: store });
+    await s1.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
+    expect(s1.renderPdfPage).toHaveBeenCalledTimes(1);
+    const [key] = store.put.mock.calls[0]!;
+    expect(key).toMatch(/^facade:v\d+:pdfh:pdf:b\d+$/); // theme-free, namespaced
+
+    // "New session": a fresh facade, the same store.
+    const s2 = build({ persistent: store });
+    const blob = await s2.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
+    expect(await tagOf(blob)).toBe("note"); // the persisted tile, verbatim
+    expect(s2.renderPdfPage).not.toHaveBeenCalled();
   });
 
   it("a 404 fallback persists NOTHING — not the caught failure, not the glyph it becomes", async () => {

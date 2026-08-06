@@ -2,8 +2,10 @@
 // through. Two tiers, keyed by (content hash, size, theme) via `keyOf`:
 //
 //   memory  — a byte-budgeted LRU of ImageBitmaps for instant re-blit; evicted
-//             bitmaps are `close()`d to actually reclaim memory (the 50 MB RSS
-//             budget is enforced structurally here).
+//             bitmaps are `close()`d, because dropping the reference alone
+//             leaves megabytes to a GC that has no idea what a bitmap weighs.
+//             The BUDGET here is the browser tab's, not the server's — see the
+//             note on `memoryBudgetBytes`.
 //   idb     — thumbnails only, persisted as a compressed WebP Blob for a warm
 //             cold-start (see `idb.ts` for why WebP rather than raw ImageData).
 //
@@ -45,7 +47,20 @@ export function cacheId(key: RenderKey, bucket: number = densityBucket()): strin
 }
 
 export interface RenderCacheOptions {
-  /** Memory LRU cap. Default 48 MB — under the app's 50 MB RSS budget. */
+  /**
+   * Memory LRU cap for decoded `ImageBitmap`s. Default 48 MB.
+   *
+   * NOT the project's 50 MB figure, which this used to cite: that is the
+   * SERVER's RSS ceiling on a Pi 1 B+, and nothing here runs on the Pi. The
+   * governing constraint on the client is a modern browser that must stay
+   * responsive on 3G — latency and bandwidth, plus a phone's own tab-memory
+   * pressure, which is hundreds of megabytes rather than fifty.
+   *
+   * So the number is inherited rather than derived, and it is honest to say so:
+   * 48 MB bounds a long scroll from growing without limit and has never been
+   * measured against a real device. If it is ever tuned, tune it as a browser
+   * cache — the persistent WebP tier below is the one with a real quota.
+   */
   memoryBudgetBytes?: number;
   /** Persistent thumbnail tier, or null to run memory-only (tests, no IDB). */
   persistent?: PersistentThumbStore | null;

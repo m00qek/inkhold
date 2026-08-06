@@ -891,8 +891,9 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // sample the wrong visit.
     const counts = () =>
       page.evaluate(
-        () => (globalThis as unknown as { __inkholdPdfThumbs?: { hits: number; renders: number } })
-          .__inkholdPdfThumbs ?? { hits: 0, renders: 0 },
+        () => (globalThis as unknown as {
+          __inkholdPdfThumbs?: { hits: number; renders: number; probe: number };
+        }).__inkholdPdfThumbs ?? { hits: 0, renders: 0, probe: 0 },
       );
     // WAIT FOR THE STRIP TO PAINT BEFORE READING THE COUNTERS, and do it as its
     // own step. Polling the counters straight after the reopen made this test's
@@ -907,6 +908,15 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     });
     await expect.poll(async () => (await counts()).hits, { timeout: 20_000 }).toBeGreaterThan(0);
     expect((await counts()).renders).toBe(0); // nothing was rendered twice
+
+    // AND THEY WERE ASKED FOR TOGETHER. A revisit is all hits — the blob is
+    // immutable, so its thumbnail is cached forever — and a hit is an IndexedDB
+    // read plus a `drawImage`: no decoder, no network, nothing to serialise for.
+    // They used to queue behind each other one round trip at a time anyway.
+    // `probe` is the largest batch the parallel pass asked for at once, so >1 is
+    // the whole claim; a return to the serial read would report 1 and paint
+    // pixel-identical rows.
+    expect((await counts()).probe).toBeGreaterThan(1);
     const ink = await region.locator(".filmstrip__thumb canvas").first().evaluate((c) => {
       const cv = c as HTMLCanvasElement;
       if (!cv.width) return -1;
@@ -1031,10 +1041,15 @@ test.describe("PDF export menu", () => {
     // The per-page PDF does NOT: an unannotated page is exactly the case where
     // lifting this page out of the document with its text still selectable is
     // the only useful thing the menu can do with it.
-    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(3);
+    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(4);
     await expect(pdfGroupItem(page, "Current view", "Flattened image")).toBeVisible();
     await expect(pdfGroupItem(page, "Current view", "PDF document")).toBeVisible();
     await expect(pdfGroupItem(page, "Whole document", "PDF document")).toBeVisible();
+    // AND THE ANNOTATED WHOLE-DOCUMENT ROW, which is about the DOCUMENT and not
+    // this page: the file has a `.mark` on its other page, so burning the ink
+    // into the whole thing is a real thing to ask for while standing on a page
+    // with none.
+    await expect(pdfGroupItem(page, "Whole document", "PDF with annotations")).toBeVisible();
     await expect(pdfMenu(page).getByRole("menuitem", { name: "Layered image" })).toBeHidden();
   });
 
@@ -1065,9 +1080,9 @@ test.describe("PDF export menu", () => {
       "This page — Original view",
       "Whole document",
     ]);
-    // Six per-page rows now — image, layers and PDF in each view — plus the raw
-    // file.
-    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(7);
+    // Six per-page rows now — image, layers and PDF in each view — plus the two
+    // whole-document ones.
+    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(8);
     await expect(pdfGroupItem(page, "Original view", "PDF document")).toBeVisible();
   });
 
@@ -1098,7 +1113,7 @@ test.describe("PDF export menu", () => {
     // one stays, because the document's authored state is always visible.
     await expect(pdfGroupItem(page, "Current view", "PDF document")).toBeHidden();
     await expect(pdfGroupItem(page, "Original view", "PDF document")).toBeVisible();
-    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(4);
+    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(5);
   });
 
   test("the raw PDF still downloads unchanged, from WHOLE DOCUMENT", async ({ page }) => {
@@ -1211,6 +1226,78 @@ test.describe("PDF export menu", () => {
 
     await region.getByRole("button", { name: "Download" }).click();
     await expect(pdfGroupItem(page, "Current view", "PDF document")).toBeEnabled();
+  });
+
+  test("the WHOLE document export appends to the original instead of rebuilding it", async ({
+    page,
+  }) => {
+    // THE ROW THAT LOSES NOTHING, and the one assertion that says so from
+    // outside: the exported file BEGINS with the original file, byte for byte.
+    // That is not a nicety — it is the mechanism. Nothing of the document is
+    // re-encoded, which is precisely why its text, its vectors, its bookmarks
+    // and its own `/Annots` are all still where they were. The per-page row
+    // beside it cannot make this claim: it grafts a page into a fresh document
+    // and `pdf_graft_page` copies a fixed list of keys, `/Annots` not among
+    // them.
+    //
+    // (That `/Annots` survive specifically is asserted against a fixture that
+    // has some, in `webapp/wasm/tests/pdf_decode_abi.mjs`. This fixture has
+    // none, so what is provable here is the property they survive BY.)
+    const region = await openMarkedPdf(page, true);
+    const row = await annotationsPanel(page, region);
+    // Layer 2 is the only band inside page 2's rect and it is device-hidden.
+    // The whole-document export takes the AUTHORED view — the panel's toggles
+    // belong to the page in front of you — so this toggle does NOT change what
+    // is burnt in, and the ink below comes from the bands that fall on page 1.
+    await row("Layer 2").click();
+
+    await region.getByRole("button", { name: "Download" }).click();
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      pdfGroupItem(page, "Whole document", "PDF with annotations").click(),
+    ]);
+    // The DOCUMENT's name, with no page number in it — this is not a page.
+    expect(download.suggestedFilename()).toBe("Appliance manual_annotated.pdf");
+
+    const bytes = await downloadBytes(download);
+    expect(bytes.length).toBeGreaterThan(PDF_BYTES.length);
+    // THE VERBATIM PREFIX. A rebuilt document would be a valid PDF of a
+    // plausible size with the ink in the right place and would fail only this.
+    expect(bytes.subarray(0, PDF_BYTES.length).equals(PDF_BYTES)).toBe(true);
+
+    const text = bytes.toString("latin1");
+    // BOTH pages, not one: the difference from the per-page row, which lifts a
+    // page out and leaves the rest behind.
+    expect(text).toContain("/Count 2");
+    // The delta carries the ink as an image at the MARK's own resolution, the
+    // same mask the per-page export builds — composed at `markExportSpace`, so
+    // no stroke is resampled on the way out.
+    expect(text).toContain("/Width 1404");
+    // …and the appended part re-states the page's /Resources with the ink's
+    // XObject in it, under a name that CARRIES THE PAGE NUMBER. The `Do` that
+    // references it is inside a deflated content stream, but this dictionary is
+    // written plain — and it is the half that matters, because a single fixed
+    // name is what would let two annotated pages sharing one /Resources
+    // dictionary overwrite each other's ink.
+    const delta = bytes.subarray(PDF_BYTES.length).toString("latin1");
+    expect(delta).toMatch(/\/InkholdInk\d+ \d+ 0 R/);
+
+    // AND THE COPY IS THE OPPOSITE OF THE PER-PAGE ROW'S. That one has to warn
+    // that the original's annotations are gone; this one says they are kept. A
+    // user who has read the first would otherwise reasonably assume the second
+    // loses them too.
+    const toast = page.locator(".toast");
+    await expect(toast).toContainText("Saved Appliance manual_annotated.pdf");
+    await expect(toast).toContainText("whole document");
+    await expect(toast).toContainText("preserved");
+    await expect(toast).not.toContainText("not carried over");
+
+    // The row survives its own run, and so does the document behind it: the
+    // export MUTATES the open PDF, so the worker reopens it — without that, the
+    // page on screen would come back with the ink burnt in AND the overlay on
+    // top of it, drawn twice.
+    await region.getByRole("button", { name: "Download" }).click();
+    await expect(pdfGroupItem(page, "Whole document", "PDF with annotations")).toBeEnabled();
   });
 
   test("the flattened PNG is the PAGE's rect at the INK's own resolution", async ({ page }) => {

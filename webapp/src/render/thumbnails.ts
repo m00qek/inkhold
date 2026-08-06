@@ -84,8 +84,13 @@ export interface ThumbSource {
  * (png/jpeg/webp/gif) whose ONLY pixels are the raw file itself — fetched
  * once, downscaled locally to the tier, and whose true source dims feed the
  * masonry aspect memo (docs/scratch/archive/masonry.md decision 5).
+ *
+ * `pdf-page` is `note-page` MINUS the cover probe: a PDF has no embedded
+ * thumbnail worth looking for and neither does its `.mark` sibling (both real
+ * captures put `COVER_0` at address 0 — see docs/scratch/pdf-thumbnails.md §0),
+ * so there is nothing to try before the render.
  */
-export type ThumbStrategy = "glyph" | "image" | "image-doc" | "note-page" | "text";
+export type ThumbStrategy = "glyph" | "image" | "image-doc" | "note-page" | "pdf-page" | "text";
 
 export interface Thumbnails {
   /**
@@ -95,6 +100,20 @@ export interface Thumbnails {
    * as `LazyEngine`/`RenderCache` take it.
    */
   getThumbnail(source: ThumbSource, fileType: string): Promise<Blob>;
+  /**
+   * The type's generic glyph, on its own — the facade's floor, made reachable.
+   *
+   * `getThumbnail` already falls back to this whenever a strategy has nothing to
+   * show. Exposing it lets a caller paint the floor FIRST and upgrade when the
+   * real thumbnail lands, which matters for a strategy that cannot answer
+   * quickly: a `.pdf` tile has to fetch 1.5 MB of MuPDF, compile it, open the
+   * document and render page 0 before it has a single pixel, and on 3G that is
+   * upwards of ten seconds during which the tile is BLANK.
+   *
+   * Drawn client-side in microseconds and memoised per `kind:theme:bucket`, so
+   * asking for it costs nothing after the first tile of a given type.
+   */
+  getGlyph(fileType: string): Promise<Blob>;
   /** Drop cached blobs for a theme (the caller repaints the other theme fresh). */
   evictTheme(theme: Theme): void;
 }
@@ -132,6 +151,25 @@ export interface ImageTileResult {
   sourceH: number;
 }
 
+/**
+ * {@link ThumbnailsDeps.renderPdfPage}'s answer: page 0's pixels, plus the page's
+ * own box so the tile can state its true shape.
+ *
+ * The bitmap is the CALLER'S to close — unlike `renderNote`'s, which belongs to
+ * the render cache. Nothing else holds a reference, so the `pdf-page` arm frees
+ * it the moment the encode has copied it.
+ */
+export interface PdfPageThumb {
+  bitmap: ImageBitmap;
+  /**
+   * Page 0's CROPPED, ROTATED box, in PDF points (`fz_bound_page` — so a
+   * `/Rotate 90` page reports its visual, swapped dimensions). Only the RATIO
+   * is consumed, by the masonry aspect memo; the numbers are the page's own.
+   */
+  pageW: number;
+  pageH: number;
+}
+
 /** The network, injected so tests drive 404s without a server. A miss (404 or a
  *  transport failure) is `null`, NOT a throw: the facade turns it into a glyph. */
 export interface ThumbNet {
@@ -161,6 +199,20 @@ export interface ThumbnailsDeps {
    */
   renderNote(noteId: Id, page: PageRef, theme: Theme): Promise<ImageBitmap>;
   /**
+   * Render a PDF's page 0 to a bitmap at the tier target. Wired in production to
+   * `render/pdfThumb.ts`, which drives the EXISTING `createPdfSession` one
+   * document at a time (open → size → render → close) — see that module for why
+   * the queue is serial and why the session is released when it drains.
+   *
+   * OPTIONAL, and its absence is a real state rather than a wiring slip: a
+   * browser without wasm exceptions cannot run the decoder at all, and a build
+   * that never wires it (a unit test, a surface with no PDF support) must still
+   * resolve a tile. Absent → the `pdf-page` arm falls to the glyph, exactly as a
+   * failed render does. No theme argument: MuPDF draws ink on white paper, and
+   * these pixels are the same in both themes (see the arm's theme-free key).
+   */
+  renderPdfPage?(fileId: Id, hash: Hash, opts?: { bin?: boolean }): Promise<PdfPageThumb>;
+  /**
    * Record an image document's true dims on first decode (the masonry aspect
    * memo — cache/dimsMemo.ts). Injectable for tests; defaults to the module's
    * persistent memo. Fire-and-forget at the call site: dims are advisory.
@@ -187,8 +239,14 @@ export interface ThumbnailsDeps {
  * true dims memoised); a `.txt` gets `text` so it stays a rich snippet rather
  * than collapsing to a static "TXT" glyph; a `.note` prefers its
  * server-extracted cover and falls back to rendering its page 0 (the try-then-
- * fallback lives inside the strategy); everything else — folder, pdf, doc,
- * unknown — is preview-less and gets `glyph`.
+ * fallback lives inside the strategy); a `.pdf` gets `pdf-page`, its page 0
+ * rendered through the same MuPDF wasm the viewer uses; everything else —
+ * folder, doc, epub, unknown — is preview-less and gets `glyph`.
+ *
+ * WHATEVER THIS RETURNS, `FACADE_THUMB_TYPES` (pages/galleryCards.ts) MUST
+ * AGREE: a real strategy here with the type missing there is a glyph tile with
+ * nothing to say why, and nothing type-checks the pair. `thumbnails.test.ts`
+ * asserts the two agree for every type in the app's vocabulary.
  */
 export function strategyFor(fileType: string): ThumbStrategy {
   const t = (fileType || "").trim().toLowerCase();
@@ -196,6 +254,7 @@ export function strategyFor(fileType: string): ThumbStrategy {
   if (t === "spd") return "image";
   if (PREVIEWABLE_IMAGE_TYPES.includes(t)) return "image-doc";
   if (t === "txt") return "text";
+  if (t === "pdf") return "pdf-page";
   return "glyph";
 }
 
@@ -227,6 +286,7 @@ const THUMB_CACHE_VERSION = 2;
 
 export function createThumbnails(deps: ThumbnailsDeps): Thumbnails {
   const { getTheme, net, painter, renderNote } = deps;
+  const renderPdfPage = deps.renderPdfPage;
   const coverMemo: CoverMemo = deps.coverMemo ?? { hasNoCover, setNoCover, noteTransientMiss };
   const recordDims = deps.setDims ?? memoSetDims;
   const persistent: PersistentThumbStore | null = deps.persistent ?? null;
@@ -236,8 +296,9 @@ export function createThumbnails(deps: ThumbnailsDeps): Thumbnails {
   // `<hash>:<theme>`): a tile's PIXELS depend on the density bucket its tier
   // target was computed for, so two buckets are two entries and a DPR change
   // re-produces rather than serving a wrong-density raster. The bucket is read
-  // per render call. Theme-free image documents key `<hash>:img:b<bucket>`,
-  // generic glyphs `glyph:<kind>:<theme>:b<bucket>`.
+  // per render call. Theme-free tiles key `<hash>:img:b<bucket>` (an image
+  // document) and `<hash>:pdf:b<bucket>` (a PDF's page 0); generic glyphs
+  // `glyph:<kind>:<theme>:b<bucket>`.
   // `Promise<Blob>` rather than `Blob` so concurrent requests for the same tile
   // (a scroll that reveals a card twice, a theme bump mid-flight) share one
   // fetch/render/encode instead of racing.
@@ -369,6 +430,54 @@ export function createThumbnails(deps: ThumbnailsDeps): Thumbnails {
         );
       }
 
+      case "pdf-page": {
+        // `note-page` MINUS THE COVER PROBE. A `.note` is worth asking
+        // `/thumbnail/{hash}` first because the user may have set one; a `.pdf`
+        // never has one to find — not in the file (the spec's `/Thumb` key is
+        // vanishingly rare in practice) and not in its `.mark` sibling, whose
+        // `COVER_0` is address 0 in both real captures. So there is nothing to
+        // try before the render, and this arm is straight to it.
+        //
+        // The pixels come from the SAME MuPDF wasm the viewer uses, through the
+        // injected seam — which opens ONE document at a time and closes it after
+        // (render/pdfThumb.ts). None of that runs on a revisit: a persistent
+        // `sn-thumbs` hit returns the stored WebP inside `memo` before `produce`
+        // is called, so the 5.3 MB module is fetched once per device, on the
+        // first PDF tile that is both visible and uncached, and never again.
+        if (source.fileHash === null || !source.fileId || !renderPdfPage) {
+          return glyph(fileType, theme, bucket);
+        }
+        const hash = source.fileHash;
+        const fileId = source.fileId;
+        const bin = source.bin;
+        // Keyed THEME-FREE (`hash:pdf:bucket`), like an image document and for
+        // the same reason: MuPDF draws ink on white paper, so the raster is
+        // identical in both themes and a theme toggle must not re-open the
+        // document and re-render it — by far the most expensive produce in the
+        // facade. That also (deliberately) exempts these entries from
+        // evictTheme. Keyed by the FILE md5: unlike a `.note` there is no
+        // server-supplied page hash, and the file hash is what determines the
+        // pixels. It cannot collide with the page strip's own page-0 raster,
+        // which lives under the render tier's `<md5>:p0:thumb:…` shape.
+        return memo(`${hash}:pdf:b${bucket}`, async () => {
+          const frame = await renderPdfPage(fileId, hash, { bin });
+          try {
+            // The masonry aspect, from page 0's own cropped/rotated box — the
+            // one moment the client holds it, exactly as `image-doc` records an
+            // image's true dims on first decode. Fire-and-forget: a layout hint
+            // must never sink a produced tile.
+            if (frame.pageW > 0 && frame.pageH > 0) {
+              void recordDims(hash, { w: frame.pageW, h: frame.pageH }).catch(() => {});
+            }
+            return await painter.fromBitmap(frame.bitmap);
+          } finally {
+            // OURS to free, unlike `renderNote`'s (which the render cache owns):
+            // the worker transferred it to us and nothing else holds it.
+            frame.bitmap.close();
+          }
+        }).catch(() => glyph(fileType, theme, bucket));
+      }
+
       case "image": {
         // `.spd` ships an embedded thumbnail the server extracts at ingest and
         // serves at `/thumbnail/{hash}`. Fetch, transcode, cache. A 404 (an
@@ -444,11 +553,17 @@ export function createThumbnails(deps: ThumbnailsDeps): Thumbnails {
 
   return {
     getThumbnail,
+    getGlyph(fileType: string): Promise<Blob> {
+      // Theme and bucket read per call, exactly as `getThumbnail` reads them:
+      // the glyph is themed, and a monitor hop must land in its own bucket.
+      return glyph(fileType, getTheme(), densityBucket());
+    },
     evictTheme(theme: Theme): void {
       // Themed keys carry `:<theme>:b<bucket>` (content and glyph alike); the
-      // theme-free image-doc keys (`:img:`) never match and survive — their
-      // pixels are correct in both themes, and re-fetching a photo per toggle
-      // is exactly what the theme-free key exists to avoid.
+      // theme-free keys never match and survive — an image document's (`:img:`)
+      // and a PDF page's (`:pdf:`) pixels are correct in both themes, and
+      // re-fetching a photo or re-opening a document per toggle is exactly what
+      // the theme-free key exists to avoid.
       const infix = `:${theme}:b`;
       for (const key of [...cache.keys()]) if (key.includes(infix)) cache.delete(key);
     },

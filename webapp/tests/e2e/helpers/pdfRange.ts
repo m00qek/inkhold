@@ -70,6 +70,14 @@ export async function serveRanges(
   page: Page,
   body: Buffer,
   shape?: LinkShape,
+  /**
+   * Which raw-file requests this serves. Defaults to EVERY `/file/…`, which is
+   * what a viewer spec wants (one document on screen, nothing else asking for
+   * bytes). A GALLERY spec needs the narrow form: the folder around the PDF is
+   * full of images and `.txt` files whose tiles fetch the same route, and
+   * handing them PDF bytes would break every other tile in the grid.
+   */
+  match: (url: URL) => boolean = (url) => url.pathname.startsWith("/file/"),
 ): Promise<{ count: () => number; bytes: () => number }> {
   let count = 0;
   let bytes = 0;
@@ -90,7 +98,7 @@ export async function serveRanges(
     await new Promise((r) => setTimeout(r, ms));
   };
   await page.route(
-    (url) => url.pathname.startsWith("/file/"),
+    (url) => match(url),
     async (route) => {
       count++;
       const header = route.request().headers()["range"];

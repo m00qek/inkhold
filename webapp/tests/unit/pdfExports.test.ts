@@ -363,6 +363,8 @@ function mount(state: PdfExportState, over: Partial<Parameters<typeof createPdfE
   });
   /** Every `{page, ink}` the decoder was asked for. */
   const grafts: { page: number; ink: PdfInkOverlay }[] = [];
+  /** Every whole-document export run, by the progress sink it was handed. */
+  const documentExports: ((done: number, total: number) => void)[] = [];
   /** Which `model()` options each export asked for — `withPage` is the interesting one. */
   const asked: (Parameters<Parameters<typeof createPdfExports>[0]["model"]>[0] | undefined)[] = [];
   const exports = createPdfExports({
@@ -377,6 +379,15 @@ function mount(state: PdfExportState, over: Partial<Parameters<typeof createPdfE
     exportPagePdf: (page, ink) => {
       grafts.push({ page, ink });
       return Promise.resolve(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    },
+    exportDocumentPdf: (onProgress) => {
+      documentExports.push(onProgress);
+      onProgress(1, 2);
+      onProgress(2, 2);
+      return Promise.resolve({
+        blob: new Blob([new Uint8Array([0x25, 0x50, 0x44, 0x46])]),
+        pages: 2,
+      });
     },
     state: () => state,
     makeCanvas: make,
@@ -399,11 +410,19 @@ function mount(state: PdfExportState, over: Partial<Parameters<typeof createPdfE
       .filter((g) => (g.querySelector(".menu__head")?.textContent ?? "").startsWith(head))
       .flatMap((g) => Array.from(g.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')))
       .find((b) => b.querySelector("span")!.textContent === label)!;
-  return { menu, exports, toast, release, rows, row, visibleRows, visibleHeads, grafts, asked };
+  return { menu, exports, toast, release, rows, row, visibleRows, visibleHeads, grafts, asked, documentExports };
 }
 
 /** The page in front of you, in the state most tests want it. */
-const PAGE: PdfExportState = { hasInk: false, tuned: false, pageVisible: true };
+const PAGE: PdfExportState = {
+  hasInk: false,
+  tuned: false,
+  pageVisible: true,
+  // No ink ANYWHERE in the document, which is the state that folds the
+  // whole-document annotated row away — it would otherwise emit a copy of the
+  // raw file beside it.
+  markedPages: 0,
+};
 
 describe("the PDF export menu", () => {
   it("offers the page's flattened image, its PDF, and the raw file on a bare page", () => {
@@ -488,7 +507,7 @@ describe("the PDF export menu", () => {
     //
     // Hiding the document is itself a divergence, so ORIGINAL is open — and its
     // PDF row stays, because the document's authored state is always visible.
-    const m = mount({ hasInk: true, tuned: true, pageVisible: false });
+    const m = mount({ hasInk: true, tuned: true, pageVisible: false, markedPages: 0 });
     expect(m.visibleRows()).toEqual([
       "Flattened image",
       "Layered image",
@@ -716,6 +735,136 @@ describe("the per-page PDF export", () => {
     m.row("This page — Current view", "PDF document").click();
     await new Promise((r) => setTimeout(r, 0));
     expect(m.grafts).toEqual([]);
+    expect(m.toast).not.toHaveBeenCalled();
+  });
+});
+
+// ============================================================================
+// 5. The whole-document row — the one export that loses nothing
+// ============================================================================
+//
+// Its entire reason for existing is what the per-page row above cannot do:
+// keep the ORIGINAL's own annotations. On this side of the wasm that claim is
+// tested where it is visible — in the copy, which must not read as the per-page
+// row at a larger scale, and in the row's own policy.
+
+describe("the whole-document PDF export", () => {
+  it("hides the row on a document with no ink anywhere", () => {
+    // Zero annotated pages means the export would be a byte-for-byte copy of
+    // the raw file in the same group. Hidden, not disabled — the house rule for
+    // a row that cannot mean anything.
+    const m = mount({ ...PAGE });
+    expect(m.visibleRows()).not.toContain("PDF with annotations");
+    expect(m.row("Whole document", "PDF with annotations").hidden).toBe(true);
+  });
+
+  it("shows it as soon as ANY page of the document is annotated", () => {
+    // `markedPages`, not `hasInk`: the focused page may be bare while page 40
+    // is covered in handwriting, and this row is about the document.
+    const m = mount({ ...PAGE, hasInk: false, markedPages: 3 });
+    expect(m.visibleRows()).toEqual([
+      "Flattened image",
+      "PDF document",
+      "PDF with annotations",
+      "PDF document",
+    ]);
+  });
+
+  it("re-reads `markedPages` on refresh, so a late `.mark` reveals the row", () => {
+    // The mark rides along AFTER the document opens (`pdfViewer.loadMark`), so
+    // the menu is built before anyone knows whether there is ink. A row decided
+    // once would stay hidden for the life of the document.
+    const st: PdfExportState = { ...PAGE };
+    const m = mount(st, { state: () => st });
+    expect(m.row("Whole document", "PDF with annotations").hidden).toBe(true);
+    st.markedPages = 7;
+    m.exports.refreshGroups();
+    expect(m.row("Whole document", "PDF with annotations").hidden).toBe(false);
+  });
+
+  it("names the file after the DOCUMENT, not after a page", async () => {
+    const m = mount({ ...PAGE, markedPages: 2 });
+    await clickAndSettle(m, "Whole document", "PDF with annotations");
+    const said = m.toast.mock.calls.map((c) => String(c[0]));
+    expect(said.at(-1)).toContain("Saved Appliance manual_annotated.pdf");
+    // Not the per-page scheme: there is no page number, because this is not a
+    // page. The stem keeps the original's name so the two sit together on disk.
+    expect(said.at(-1)).not.toMatch(/_p\d/);
+  });
+
+  it("says the original's annotations are KEPT — the opposite of the per-page row", async () => {
+    // THE ASSERTION THAT CARRIES THE FEATURE'S MEANING. Both rows produce a
+    // `.pdf` from the same document and a user who has read the per-page toast
+    // has been told annotations are lost; if this one said nothing, the sensible
+    // reading would be that it loses them too, and the whole reason for the
+    // second mechanism would be invisible.
+    const m = mount({ ...PAGE, markedPages: 2 });
+    await clickAndSettle(m, "Whole document", "PDF with annotations");
+    const said = String(m.toast.mock.calls.at(-1)![0]);
+    expect(said).toMatch(/preserved/i);
+    expect(said).toMatch(/highlights/i);
+    // …and it must NOT carry the per-page row's warning, which is the sentence
+    // this export exists to stop being true.
+    expect(said).not.toMatch(/not carried over/i);
+    // It says how much went in, and that it is the whole document.
+    expect(said).toContain("whole document");
+    expect(said).toContain("2 annotated pages");
+  });
+
+  it("counts a single annotated page in the singular", async () => {
+    const m = mount(
+      { ...PAGE, markedPages: 1 },
+      {
+        exportDocumentPdf: (onProgress) => {
+          onProgress(1, 1);
+          return Promise.resolve({ blob: new Blob([new Uint8Array([1])]), pages: 1 });
+        },
+      },
+    );
+    await clickAndSettle(m, "Whole document", "PDF with annotations");
+    expect(String(m.toast.mock.calls.at(-1)![0])).toContain("1 annotated page.");
+  });
+
+  it("reports progress per ANNOTATED page, before the file is saved", async () => {
+    // The sparse set, not the document's page count — seven of seventy-seven in
+    // the real corpus. And a first toast BEFORE any page number, because on a 3G
+    // link fetching the original is the longest step and it happens before there
+    // is anything to count.
+    const m = mount({ ...PAGE, markedPages: 2 });
+    await clickAndSettle(m, "Whole document", "PDF with annotations");
+    const said = m.toast.mock.calls.map((c) => String(c[0]));
+    expect(said[0]).toBe("Exporting Appliance manual.pdf — fetching the original…");
+    expect(said[1]).toBe("Exporting Appliance manual.pdf — page 1 of 2…");
+    expect(said[2]).toBe("Exporting Appliance manual.pdf — page 2 of 2…");
+    expect(said).toHaveLength(4);
+  });
+
+  it("toasts and re-enables the row when the decoder refuses the document", async () => {
+    // The refusals are real and specific: a PDF that had to be repaired to open,
+    // or one with junk before its `%PDF-` header, cannot take an incremental
+    // update at all. Falling back to grafting every page is NOT offered — that
+    // is the fidelity loss this row exists to avoid — so a refusal has to leave
+    // a working row and an honest message.
+    const m = mount(
+      { ...PAGE, markedPages: 2 },
+      {
+        exportDocumentPdf: () =>
+          Promise.reject(new Error("this PDF had to be repaired to open")),
+      },
+    );
+    const row = m.row("Whole document", "PDF with annotations");
+    row.click();
+    await vi.waitFor(() =>
+      expect(m.toast).toHaveBeenCalledWith("Couldn't build that export. Try again."),
+    );
+    expect(row.disabled).toBe(false);
+  });
+
+  it("does nothing at all when no document is open", async () => {
+    const m = mount({ ...PAGE, markedPages: 2 }, { docName: () => null });
+    m.row("Whole document", "PDF with annotations").click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(m.documentExports).toEqual([]);
     expect(m.toast).not.toHaveBeenCalled();
   });
 });

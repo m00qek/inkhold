@@ -58,7 +58,14 @@ test.describe("masonry icon gallery", () => {
       ["Whiteboard — sprint plan", 1872 / 1404], // landscape page-1 EFFECTIVE dims
       ["Kitchen sketch", 600 / 800], // .spd thumb dims
       ["readme", 3 / 4], // the .txt client constant
-      ["Appliance manual", 3 / 4], // glyph tile: the aspect-less fallback
+      // The `.pdf` states no shape. It RESERVES A4 portrait (0.707) and then
+      // learns from its tile — and here the mock serves PNG bytes, MuPDF refuses
+      // them, and what it learns from is the facade's GLYPH, drawn at the note
+      // sheet's 3:4. Both land inside this tolerance, which is the honest thing
+      // to assert about a tile with no served shape; `pdfThumbnail.spec.ts`
+      // covers the case where page 0 really renders and the tile takes the
+      // page's own (2:1) aspect, well outside it.
+      ["Appliance manual", 3 / 4],
       ["Panorama — coastline", 2.5], // 7.5 floored at the 2.5× wide clamp
       ["Receipt — long scroll", 1 / 2.5], // 0.13 capped at the 2.5× tall clamp
     ];
@@ -241,14 +248,21 @@ test.describe("reflow-free list rows", () => {
     expect(Math.abs(after.width - lead.width)).toBeLessThan(1);
   });
 
-  test("the 3:4 floor still stands for aspect-less rows", async ({ page }) => {
+  test("the 3:4 floor still stands for a row with nothing to state yet", async ({ page }) => {
     await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
     await openFilesList(page);
 
     const listH = await page.evaluate(() =>
       parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--preview-h-list")),
     );
-    // A pdf states no shape and never learns one — its glyph lead is the floor.
+    // A pdf states no shape on the wire — nothing indexes a `/MediaBox` — so its
+    // lead is RESERVED at A4 portrait (0.707) until page 0 renders, and the list
+    // class's 3:4 min-width then floors that to the same ~64px lead every
+    // aspect-less row has always had. Same number as before this type grew a
+    // preview, for a different reason, and the reason is the point: the tile is
+    // now an `<img>`, and an `<img>` with no `src` measures SQUARE (the 1×1 GIF
+    // the styles substitute for the broken-image icon). Left unpinned it
+    // reserved an 85px square for a document.
     const lead = card(page, "Appliance manual").locator(".thumb");
     await expect.poll(async () => (await lead.boundingBox())?.width ?? null).toBeCloseTo(listH * 0.75, 0);
   });

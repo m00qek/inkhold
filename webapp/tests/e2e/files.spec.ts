@@ -158,8 +158,15 @@ test.describe("non-.note files", () => {
     await expect
       .poll(() => noteImg.evaluate((e: HTMLImageElement) => e.src.startsWith("blob:")))
       .toBe(true);
-    // …and the pdf beside it keeps the blank sheet, deliberately: there is no
-    // cheap preview of a PDF, and the badge already says what it is.
-    await expect(card(page, "Apartment lease").locator(".thumb__img")).toHaveCount(0);
+    // …and the pdf beside it is a THIRD source in the same grid: also an <img>
+    // painted from a facade blob, but produced by rendering page 0 through the
+    // MuPDF wasm. `mockRawFiles` serves PNG bytes for every raw file, so MuPDF
+    // refuses them here and the tile lands on the facade's glyph — which is the
+    // point worth pinning: a PDF that will not render still paints, inside the
+    // same <img>, rather than leaving an empty tile. (`pdfThumbnail.spec.ts`
+    // renders real PDF bytes end to end.)
+    const pdfImg = card(page, "Apartment lease").locator(".thumb__img");
+    await expect(pdfImg).toHaveCount(1);
+    await expect.poll(() => pdfImg.evaluate((e: HTMLImageElement) => e.src.startsWith("blob:"))).toBe(true);
   });
 });

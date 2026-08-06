@@ -53,6 +53,29 @@ export interface PdfSession {
    * the other way). Reading it after this call yields a zero-length view.
    */
   exportPage(page: number, ink: PdfInkOverlay): Promise<Uint8Array>;
+  /**
+   * Draw `ink` into the OPEN document's page — one call per annotated page,
+   * then one {@link exportDocument}. `ink.alpha` is TRANSFERRED, as
+   * {@link exportPage}'s is.
+   *
+   * NOT A LOOP OVER `exportPage`. That one grafts the page into a fresh
+   * document, which drops its `/Annots`; doing it 77 times would lose every
+   * link and highlight the original carried. These two together keep them.
+   */
+  annotatePage(page: number, ink: PdfInkOverlay): Promise<void>;
+  /**
+   * Write the annotations as an incremental update and answer with THE DELTA —
+   * the bytes that belong after `original`. Concatenate, never parse:
+   * `new Blob([original, delta])`.
+   *
+   * `original` is lent to the worker so MuPDF's read-back of the file comes off
+   * the disk rather than the network; a Blob crosses by reference, so nothing
+   * is copied and the document never enters a JS heap.
+   *
+   * The document is reopened behind this call, so the session is usable
+   * afterwards — including when it rejects.
+   */
+  exportDocument(original: Blob): Promise<Uint8Array>;
   stats(): Promise<PdfSessionStats>;
   /** Drop the document; the worker (and its compiled module) stays warm. */
   close(): Promise<void>;
@@ -150,6 +173,20 @@ export function createPdfSession(makeWorker: PdfWorkerFactory = defaultWorker): 
     });
   }
 
+  /**
+   * REFUSED HERE, before the buffer is handed over. The mask is sized from a
+   * canvas on this side and the module reads `width * height` bytes from a
+   * pointer on the other: a buffer that disagrees with those numbers is an
+   * out-of-bounds read inside wasm, which is a torn-down instance and not a
+   * failed export. This is also the only door into the worker, so checking it
+   * per row would only make the second copy the untested one.
+   */
+  function checkInk(ink: PdfInkOverlay): void {
+    if (ink.width <= 0 || ink.height <= 0 || ink.alpha.length !== ink.width * ink.height) {
+      throw new Error("the ink overlay's size does not match its alpha buffer");
+    }
+  }
+
   /** The worker answers in kind; a mismatch is a protocol bug, not a state. */
   function expect<K extends PdfResponse["kind"]>(
     res: PdfResponse,
@@ -173,20 +210,27 @@ export function createPdfSession(makeWorker: PdfWorkerFactory = defaultWorker): 
       return { bitmap: res.bitmap, width: res.width, height: res.height };
     },
     async exportPage(page, ink) {
-      // REFUSED HERE, before the buffer is handed over. The mask is sized from a
-      // canvas on this side and the module reads `width * height` bytes from a
-      // pointer on the other: a buffer that disagrees with those numbers is an
-      // out-of-bounds read inside wasm, which is a torn-down instance and not a
-      // failed export. This is also the only door into the worker, so checking
-      // it twice would only make the second copy the untested one.
-      if (ink.width <= 0 || ink.height <= 0 || ink.alpha.length !== ink.width * ink.height) {
-        throw new Error("the ink overlay's size does not match its alpha buffer");
-      }
+      checkInk(ink);
       const res = expect(
         await send({ kind: "exportPage", page, ink }, [ink.alpha.buffer as ArrayBuffer]),
         "exportedPage",
       );
       return res.bytes;
+    },
+    async annotatePage(page, ink) {
+      checkInk(ink);
+      expect(
+        await send({ kind: "annotatePage", page, ink }, [ink.alpha.buffer as ArrayBuffer]),
+        "annotatedPage",
+      );
+    },
+    async exportDocument(original) {
+      // The Blob is NOT transferred. Transferring detaches it on this side, and
+      // this side is the one that concatenates it with the delta afterwards —
+      // and a Blob is a handle, so the clone costs nothing the transfer would
+      // have saved.
+      const res = expect(await send({ kind: "exportDocument", original }), "exportedDocument");
+      return res.delta;
     },
     async stats() {
       const res = expect(await send({ kind: "stats" }), "stats");

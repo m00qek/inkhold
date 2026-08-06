@@ -40,10 +40,14 @@
 
 import { el } from "../ui/dom";
 import { openDialog } from "../ui/confirm";
-import { pinAspect } from "../ui/tileAspect";
+import { learnsAspect, pinAspect, provisionalAspect } from "../ui/tileAspect";
 import { ICONS, svg } from "../ui/icons";
 import { createMenu } from "../ui/menu";
 import { labelPathSegments } from "./rail";
+// The SAME set the gallery's cards dispatch on, imported rather than restated:
+// this file used to keep an inline copy of a list like it, and it drifted the
+// day the PDF viewer shipped (see `hasDedicatedViewer`'s comment).
+import { FACADE_THUMB_TYPES } from "./galleryCards";
 import { fileKind, formatBytes, hasDedicatedViewer, rawFileUrl } from "../core/fileKind";
 // The image dims memo — the row lead's aspect source for images, which carry no
 // `thumbAspect` of their own (masonry.md decision 5). Null = unknown yet.
@@ -1041,13 +1045,17 @@ export function createBinView(opts: BinViewOptions): BinView {
    *    COVER come off `/thumbnail/{hash}` (content-addressed, so it serves
    *    trashed blobs too) before spending a client render, exactly as the
    *    gallery does. The bin-scoped page fetch is `createBinScope`'s job.
-   *  - an image, a `.spd` and a `.txt` get an engine-managed `<img>` the
-   *    facade fills with its tier-sized WebP — a `.spd`'s extracted embedded
-   *    thumbnail, a `.txt`'s rasterised snippet, an image fetched ONCE per
-   *    hash and downscaled (never the raw multi-MB photo per row). The
-   *    `bin: true` on the hint routes the raw-file strategies to the
-   *    bin-scoped endpoint, because the live `/file/{id}` 404s for anything
-   *    trashed.
+   *  - an image and every {@link FACADE_THUMB_TYPES} member — `.spd`, `.txt`,
+   *    `.pdf` — get an engine-managed `<img>` the facade fills with its
+   *    tier-sized WebP: a `.spd`'s extracted embedded thumbnail, a `.txt`'s
+   *    rasterised snippet, a `.pdf`'s page 0 rendered client-side, an image
+   *    fetched ONCE per hash and downscaled (never the raw multi-MB photo per
+   *    row). The `bin: true` on the hint routes the raw-file strategies —
+   *    including the PDF's byte ranges — to the bin-scoped endpoint, because
+   *    the live `/file/{id}` 404s for anything trashed. A trashed PDF that
+   *    will not render degrades to the facade's glyph inside the same `<img>`,
+   *    which is the whole reason it goes through the facade rather than 404ing
+   *    its way to a broken tile.
    *
    * THE FALLBACKS STAY HONEST, and each is a different fact:
    *  - a folder is a container, and gets the folder glyph;
@@ -1077,18 +1085,26 @@ export function createBinView(opts: BinViewOptions): BinView {
       bin: true,
       aspect: entry.thumbAspect,
     };
-    if (kind === "image" || type === "spd" || type === "txt") {
+    if (kind === "image" || FACADE_THUMB_TYPES.has(type)) {
       // `alt=""`: the row's own name already labels it, and the tile is
       // decoration on a labelled control rather than content of its own.
       const img = el("img", { loading: "lazy", decoding: "async", alt: "" }) as HTMLImageElement;
       const tile = el("div", { class: "bin__thumb is-image" }, img);
-      if (!preclampAspect(tile, entry) && kind === "image" && entry.fileHash) {
-        // An image states no `thumbAspect`; its aspect sources are the memo —
-        // which answers for every hash seen anywhere in the app before — and,
-        // on a hash's first-ever view, the decoded tile itself: the library
-        // row's single allowed reflow, mirrored here. Idempotent when both
-        // fire (they state the same shape), and the memo WRITE is the
-        // facade's (recorded on first decode), so later sessions pre-clamp.
+      if (!preclampAspect(tile, entry) && learnsAspect(type) && entry.fileHash) {
+        // An image and a `.pdf` state no `thumbAspect`; their aspect sources are
+        // the memo — which answers for every hash seen anywhere in the app
+        // before — and, on a hash's first-ever view, the decoded tile itself:
+        // the library row's single allowed reflow, mirrored here. Idempotent
+        // when both fire (they state the same shape), and the memo WRITE is the
+        // facade's (an image's dims on first decode, a PDF's page-0 box after
+        // its render), so later sessions pre-clamp.
+        //
+        // Until either answers, a `.pdf` stands on A4 portrait rather than on
+        // the CSS floor — an `<img>` with no `src` measures SQUARE (the 1×1 GIF
+        // the styles substitute for the broken-image icon), which is the one
+        // shape a document never is. See `provisionalAspect`.
+        const provisional = provisionalAspect(type);
+        if (provisional !== null) pinAspect(tile, provisional, true);
         const correct = (w: number, h: number): void => {
           if (tile.isConnected && w > 0 && h > 0) pinAspect(tile, w / h, true);
         };

@@ -82,6 +82,8 @@ const INERT_PDF_SEAM: PdfSeam = {
         height: 100,
       }),
     exportPage: () => Promise.reject(new Error("no ink_export_page in this stub")),
+    annotatePage: () => Promise.reject(new Error("no ink_annotate_page in this stub")),
+    exportDocument: () => Promise.reject(new Error("no ink_export_incremental in this stub")),
     stats: () => Promise.resolve({ mode: "whole" as const, cache: null }),
     close: () => Promise.resolve(),
     destroy: () => {},
@@ -548,6 +550,8 @@ describe(".pdf viewer, past the shared seam", () => {
           exports.push({ page, ink });
           return Promise.resolve(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
         },
+        annotatePage: () => Promise.resolve(),
+        exportDocument: () => Promise.resolve(new Uint8Array([0x0a])),
         stats: () => Promise.resolve({ mode: "whole" as const, cache: null }),
         close: () => Promise.resolve(),
         destroy: () => {},
@@ -574,6 +578,109 @@ describe(".pdf viewer, past the shared seam", () => {
     // page — 200 pt across it and 100 down, straight off `pageSize`.
     expect(exports[0]!.ink).toMatchObject({ width: 1, height: 1 });
     expect(exports[0]!.ink.matrix).toEqual([200, 0, 0, 100, 0, 0]);
+    v.destroy();
+  });
+
+  it("the whole-document export reads the original as a BLOB, never into memory", async () => {
+    // THE MEMORY ARGUMENT, at the only place in the app that could break it.
+    // The exported file CONTAINS the original, so the original has to be
+    // fetched — but `res.blob()` is disk-backed where `res.arrayBuffer()` would
+    // put 76 MB on the JS heap of a tab that also holds a wasm module and a
+    // page's worth of canvases. The stub Response below makes the wrong call
+    // impossible to take quietly: it throws.
+    //
+    // The ink itself cannot decode here (happy-dom has no 2D context and the
+    // `.mark` decoder never loads), so this also pins the OTHER half of the
+    // contract: a page whose handwriting will not decode is skipped, and an
+    // export where none of them decode refuses instead of saving the original
+    // back under a name that promises ink.
+    const took: string[] = [];
+    const original = new Blob([new Uint8Array([0x25, 0x50, 0x44, 0x46])]);
+    const fetched: string[] = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      fetched.push(String(input));
+      // ONLY the raw-file route is stubbed as a body. The `.mark` decoder's own
+      // `/note-decode.wasm` fetch goes through here too and DOES read an
+      // ArrayBuffer, legitimately — conflating the two would make `took` say
+      // nothing about the document.
+      if (!String(input).includes("/file/")) {
+        return Promise.resolve({ ok: false, status: 404 } as unknown as Response);
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        blob: () => {
+          took.push("blob");
+          return Promise.resolve(original);
+        },
+        arrayBuffer: () => {
+          took.push("arrayBuffer");
+          throw new Error("the original must never be read into the heap");
+        },
+      } as unknown as Response);
+    });
+    const lent: Blob[] = [];
+    const seam: PdfSeam = {
+      supported: () => true,
+      createSession: () => ({
+        open: () => Promise.resolve({ pageCount: 3, mode: "stream" as const }),
+        pageSize: () => Promise.resolve({ width: 200, height: 100 }),
+        render: () =>
+          Promise.resolve({
+            bitmap: { close: () => {} } as unknown as ImageBitmap,
+            width: 400,
+            height: 200,
+          }),
+        exportPage: () => Promise.reject(new Error("not this row")),
+        annotatePage: () => Promise.resolve(),
+        exportDocument: (blob: Blob) => {
+          lent.push(blob);
+          return Promise.resolve(new Uint8Array([0x0a]));
+        },
+        stats: () => Promise.resolve({ mode: "stream" as const, cache: null }),
+        close: () => Promise.resolve(),
+        destroy: () => {},
+      }),
+    };
+    const toast = vi.fn();
+    const api = {
+      getNoteMeta: () =>
+        Promise.resolve(
+          meta({
+            id: "mark-1",
+            fileType: "mark",
+            pages: [
+              { index: 0, hash: "h1", width: 1404, height: 1872, sourcePage: 1, layers: [] },
+              { index: 1, hash: "h2", width: 1404, height: 1872, sourcePage: 3, layers: [] },
+            ] as unknown as NoteMeta["pages"],
+          }),
+        ),
+      getPageBytes: () => Promise.resolve(new ArrayBuffer(8)),
+    } as unknown as ViewerDeps["api"];
+    const v = createPdfViewer(deps({ api, toast }), seam);
+    document.body.append(v.el);
+    const m = meta({ id: "n-1", fileType: "pdf", annotationsId: "mark-1" } as Partial<NoteMeta>);
+    await v.open(synthesizeSummary(m), Promise.resolve(m), 0, FOLDER, "");
+    // The mark rides along after the open; wait for the row it reveals.
+    (v.el.querySelector('[aria-label="Download"]') as HTMLButtonElement).click();
+    const rowOf = (label: string) =>
+      Array.from(v.el.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+        (b) => b.querySelector("span")?.textContent === label,
+      )!;
+    await vi.waitFor(() => expect(rowOf("PDF with annotations").hidden).toBe(false));
+
+    rowOf("PDF with annotations").click();
+    await vi.waitFor(() =>
+      expect(toast).toHaveBeenCalledWith("Couldn't build that export. Try again."),
+    );
+
+    // The raw-file route, and taken as a Blob and only as a Blob.
+    expect(fetched[0]).toContain("/file/n-1");
+    expect(took).toEqual(["blob"]);
+    // Nothing was lent to the decoder and nothing was saved: every annotated
+    // page failed to decode, so there was no export to make.
+    expect(lent).toEqual([]);
+    fetchSpy.mockRestore();
     v.destroy();
   });
 });
