@@ -12,6 +12,14 @@
 // size, and the handle discipline — a closed handle must come back as a rejected
 // integer rather than crash.
 //
+// The last section is the EXPORT ROUND TRIP: `ink_export_page` grafts a page
+// into a one-page PDF with ink over it, and the produced bytes go straight back
+// through the same module to be rendered. The assertion that carries the weight
+// is a PIXEL DIFF against the source page — identical everywhere the ink is not,
+// inked everywhere it is. A stub cannot fake it, and a placement that ignores
+// the page's own transform fails it (which is how the `/Rotate 90` bug was
+// caught; that case has a fixture of its own below).
+//
 // Usage: node pdf_decode_abi.mjs <pdf-decode.wasm> <fixture.pdf>
 
 import { WASI } from "node:wasi";
@@ -80,6 +88,8 @@ for (const name of [
   "ink_render_width",
   "ink_render_height",
   "ink_close",
+  "ink_export_page",
+  "ink_export_free",
   "memory",
 ]) {
   check(e[name] !== undefined, `export \`${name}\` is present`);
@@ -231,6 +241,322 @@ const sdoc2 = e.ink_open_stream(BigInt(pdf.length));
 check(sdoc2 >= 1, "the module still opens a stream afterwards", `got ${sdoc2}`);
 e.ink_close(sdoc2);
 check(e.ink_open_stream(0n) < 0, "a zero length is refused");
+
+// ============================================================================
+// The export round trip (`ink_export_page`)
+// ============================================================================
+//
+// Export a page, then REOPEN THE PRODUCED BYTES THROUGH THIS SAME MODULE and
+// render them. Three things are asserted, in rising order of what they can
+// catch:
+//
+//   1. the export is one page, at the source page's exact point size — a graft
+//      that lost the geometry, or brought its siblings along, fails here;
+//   2. every pixel the ink does not touch is BYTE-IDENTICAL to the source page —
+//      which is the whole claim of a structure-preserving export, and is what a
+//      "write a fresh raster at A4 width" implementation cannot pass;
+//   3. the ink is dark exactly where the caller's matrix said, in DISPLAY space.
+//
+// (3) is why the `/Rotate 90` fixture below exists. Ink placed without inverting
+// the page's own transform lands 90 degrees out — and note that it would still
+// pass a plain "the dark pixel count went up by the ink's area" check, because
+// the same number of pixels is inked, just in the wrong place.
+
+/** Render `page` and COPY the pixels out — the module's buffer is reused. */
+function renderCopy(handle, page, scale) {
+  const packed = e.ink_render(handle, page, scale);
+  if (packed <= 0n) return null;
+  const at = Number(packed >> 32n);
+  const n = Number(packed & 0xffffffffn);
+  return {
+    w: e.ink_render_width(),
+    h: e.ink_render_height(),
+    px: new Uint8Array(new Uint8Array(e.memory.buffer, at, n)),
+  };
+}
+
+/**
+ * A minimal one-page PDF, assembled here rather than committed as a fixture:
+ * the point of these is the PAGE DICTIONARY (`/Rotate`, an off-origin box), and
+ * a generator makes the thing under test visible at the call site. Every byte is
+ * ASCII, so a JS string's length is the byte length the xref needs.
+ */
+function tinyPdf(mediaBox, extra, content) {
+  const bodies = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox.join(" ")}]${extra}` +
+      " /Contents 4 0 R /Resources << >> >>",
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+  ];
+  let out = "%PDF-1.4\n";
+  const offsets = [];
+  bodies.forEach((body, i) => {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${body}\nendobj\n`;
+  });
+  const xrefAt = out.length;
+  out += `xref\n0 ${bodies.length + 1}\n0000000000 65535 f \n`;
+  for (const at of offsets) out += `${String(at).padStart(10, "0")} 00000 n \n`;
+  out += `trailer\n<< /Size ${bodies.length + 1} /Root 1 0 R >>\n`;
+  out += `startxref\n${xrefAt}\n%%EOF\n`;
+  return Buffer.from(out, "latin1");
+}
+
+function openBytes(bytes) {
+  const at = e.ink_alloc(bytes.length);
+  new Uint8Array(e.memory.buffer, at, bytes.length).set(bytes);
+  return e.ink_open(at, bytes.length);
+}
+
+/** `w*h` coverage bytes, `value` inside `[x0,x1) x [y0,y1)` and 0 elsewhere. */
+function coverage(w, h, boxes) {
+  const a = new Uint8Array(w * h);
+  for (const [x0, y0, x1, y1, value] of boxes) {
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) a[y * w + x] = value;
+  }
+  return a;
+}
+
+/** Export `page` with `alpha` over it, and copy the produced PDF out. */
+function exportPage(handle, page, alpha, w, h, m) {
+  const at = e.ink_alloc(alpha.length);
+  if (!at) return null;
+  new Uint8Array(e.memory.buffer, at, alpha.length).set(alpha);
+  const packed = e.ink_export_page(handle, page, at, w, h, ...m);
+  let bytes = null;
+  if (packed > 0n) {
+    // AFTER the call: the export can grow linear memory and detach the old view.
+    bytes = Buffer.from(
+      new Uint8Array(e.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
+    );
+  }
+  e.ink_free(at, alpha.length);
+  e.ink_export_free();
+  return { packed, bytes };
+}
+
+/** Is `(x,y)` inside any of `boxes`, each grown (or shrunk) by `slack`? */
+function within(boxes, x, y, slack) {
+  return boxes.some(
+    ([x0, y0, x1, y1]) =>
+      x >= x0 - slack && x < x1 + slack && y >= y0 - slack && y < y1 + slack,
+  );
+}
+
+/**
+ * The round trip proper.
+ *
+ * `t.inked` lists every display-space box the coverage bitmap paints into, in
+ * pixels at scale 1; `t.solid` is the subset painted at full coverage. Outside
+ * `inked` the page must be untouched; inside `solid` the result must be dark.
+ *
+ * ONE PIXEL OF SLACK ON EACH BOUNDARY, and no more. An image's edge is
+ * anti-aliased into the pixel it half-covers, so a box's outline is neither
+ * fully inked nor fully clean; the slack exempts that one row. Widening it
+ * further would start hiding the misplacement the test is here to catch — a
+ * quarter-page error has to stay a failure.
+ */
+function roundTrip(label, t) {
+  const src = openBytes(t.source);
+  check(src >= 1, `${label}: source opens`, `got ${src}`);
+  if (src < 1) return;
+  const before = renderCopy(src, 0, 1);
+  check(before !== null, `${label}: source renders`);
+
+  // The painted region must start out BLANK in the source, or "the ink is dark
+  // there" proves nothing. This is a check on the fixture, not on the module.
+  let blank = true;
+  for (let y = 0; y < before.h; y++) {
+    for (let x = 0; x < before.w; x++) {
+      if (within(t.inked, x, y, 1) && before.px[(y * before.w + x) * 4] < 250) blank = false;
+    }
+  }
+  check(blank, `${label}: the painted region is blank in the source page`);
+
+  const alpha = coverage(t.alphaW, t.alphaH, t.coverage);
+  const { packed, bytes } = exportPage(src, 0, alpha, t.alphaW, t.alphaH, t.matrix);
+  check(packed > 0n, `${label}: ink_export_page succeeded`, `got ${packed}`);
+  if (packed <= 0n) return;
+  check(bytes.subarray(0, 5).toString("latin1") === "%PDF-", `${label}: the bytes are a PDF`);
+
+  // Reopen through the same module. The source stays open so its pixels can be
+  // diffed against, which also proves the export does not disturb it.
+  const out = openBytes(bytes);
+  check(out >= 1, `${label}: the export reopens`, `got ${out}`);
+  if (out < 1) return;
+
+  equal(e.ink_page_count(out), 1, `${label}: the export is exactly one page`);
+  const scratchPt = e.ink_alloc(8);
+  equal(e.ink_page_size(out, 0, scratchPt, scratchPt + 4), 0, `${label}: the export has a size`);
+  const sizes = new DataView(e.memory.buffer);
+  equal(sizes.getFloat32(scratchPt, true), before.w, `${label}: exported page width (pt)`);
+  equal(sizes.getFloat32(scratchPt + 4, true), before.h, `${label}: exported page height (pt)`);
+  e.ink_free(scratchPt, 8);
+
+  const after = renderCopy(out, 0, 1);
+  check(after !== null && after.w === before.w && after.h === before.h,
+    `${label}: the export renders at the source's dimensions`);
+
+  // THE ASSERTION THAT MATTERS. Outside the ink: byte-identical to the source
+  // page. Inside the solid ink: dark. Both are counted rather than
+  // short-circuited so a failure reports how wrong it is.
+  let disturbed = 0;
+  let missing = 0;
+  for (let y = 0; y < before.h; y++) {
+    for (let x = 0; x < before.w; x++) {
+      const o = (y * before.w + x) * 4;
+      if (!within(t.inked, x, y, 1)) {
+        if (after.px[o] !== before.px[o]) disturbed += 1;
+      } else if (within(t.solid, x, y, -1) && after.px[o] > 64) {
+        missing += 1;
+      }
+    }
+  }
+  equal(disturbed, 0, `${label}: the page is untouched outside the ink`);
+  equal(missing, 0, `${label}: the ink is dark everywhere it was painted`);
+  e.ink_close(out);
+  e.ink_close(src);
+  return { before, after };
+}
+
+// --- Upright, with a half-tone patch ---------------------------------------
+// The committed fixture's page 0: 200x100 pt, a 60x40 black rectangle at
+// (20,20) in PDF (bottom-left) coordinates, i.e. display x 20..80, y 40..80.
+//
+// The coverage bitmap is 100x50 — deliberately NOT the page's pixel size — so
+// the matrix has real work to do: `2 0 0 2 0 0` maps its pixels onto the full
+// 200x100 display box. The solid patch lands at display x 20..80, y 10..30,
+// clear of the rectangle.
+const upright = roundTrip("upright", {
+  source: fs.readFileSync(pdfPath),
+  alphaW: 100,
+  alphaH: 50,
+  coverage: [
+    [10, 5, 40, 15, 255], // solid ink            -> display x 20..80, y 10..30
+    [45, 5, 50, 15, 128], // half coverage        -> display x 90..100, y 10..30
+  ],
+  matrix: [2, 0, 0, 2, 0, 0],
+  inked: [
+    [20, 10, 80, 30],
+    [90, 10, 100, 30],
+  ],
+  solid: [[20, 10, 80, 30]],
+});
+
+// ANTI-ALIASING SURVIVES. The ink is a /DeviceGray image with an 8-bit /SMask
+// rather than a 1-bit /ImageMask precisely so the pen's 16 grey levels come
+// through; a stencil would render this patch solid black. Display x 90..100,
+// y 10..30 is the alpha-128 column.
+if (upright) {
+  const at = (x, y) => upright.after.px[(y * upright.after.w + x) * 4];
+  const grey = at(95, 20);
+  check(grey > 96 && grey < 160, "half coverage renders as mid grey (8-bit SMask)", `got ${grey}`);
+  check(at(95, 5) === 255, "the alpha-0 margin above it is untouched", `got ${at(95, 5)}`);
+}
+
+// --- /Rotate 90 -------------------------------------------------------------
+// The failure this guards: `ink_page_size` reports the CROPPED, ROTATED box,
+// while a content stream is written in unrotated MediaBox space. A 200x100 page
+// with /Rotate 90 displays as 100x200, and its rectangle displays at x 20..60,
+// y 20..80. Placing the ink without inverting the page's own transform put it 90
+// degrees out — with exactly the same number of inked pixels, so only a
+// positional check catches it.
+const rotated = tinyPdf([0, 0, 200, 100], " /Rotate 90", "0 0 0 rg\n20 20 60 40 re f");
+const rdoc = openBytes(rotated);
+check(rdoc >= 1, "the /Rotate 90 fixture opens", `got ${rdoc}`);
+const rscratch = e.ink_alloc(8);
+e.ink_page_size(rdoc, 0, rscratch, rscratch + 4);
+const rdv = new DataView(e.memory.buffer);
+equal(rdv.getFloat32(rscratch, true), 100, "/Rotate 90 swaps the reported width");
+equal(rdv.getFloat32(rscratch + 4, true), 200, "/Rotate 90 swaps the reported height");
+e.ink_free(rscratch, 8);
+e.ink_close(rdoc);
+
+roundTrip("rotated", {
+  source: rotated,
+  alphaW: 50,
+  alphaH: 100,
+  coverage: [[5, 50, 25, 70, 255]],
+  matrix: [2, 0, 0, 2, 0, 0],
+  inked: [[10, 100, 50, 140]],
+  solid: [[10, 100, 50, 140]],
+});
+
+// --- An off-origin /MediaBox with a /CropBox inside it -----------------------
+// `pdf_page_transform_box(…, FZ_CROP_BOX)` is what makes display space start at
+// the CROP box's corner rather than the user-space origin. Here the media box
+// starts at (50,30) and the crop box takes a 120x60 window out of it, so a
+// caller placing ink at display (0,0) means the crop box's top-left — not
+// user-space (0,0), which is off the page entirely.
+const cropped = tinyPdf(
+  [50, 30, 250, 130],
+  " /CropBox [70 50 190 110]",
+  "0 0 0 rg\n80 60 30 20 re f",
+);
+roundTrip("cropped", {
+  source: cropped,
+  alphaW: 60,
+  alphaH: 30,
+  coverage: [[10, 2, 50, 12, 255]],
+  matrix: [2, 0, 0, 2, 0, 0],
+  inked: [[20, 4, 100, 24]],
+  solid: [[20, 4, 100, 24]],
+});
+
+// --- Refusals ---------------------------------------------------------------
+// A non-PDF has no PDF page to graft, and the caller's fallback is the
+// rasterising exporter — which needs a sentence to explain itself with, so the
+// refusal carries a message rather than only a code.
+const html = Buffer.from("<html><body><p>a document MuPDF opens but cannot graft</p></body></html>");
+const hdoc = openBytes(html);
+check(hdoc >= 1, "MuPDF opens the HTML document", `got ${hdoc}`);
+const alphaAt = e.ink_alloc(16);
+new Uint8Array(e.memory.buffer, alphaAt, 16).fill(255);
+equal(e.ink_export_page(hdoc, 0, alphaAt, 4, 4, 1, 0, 0, 1, 0, 0), -2n, "a non-PDF is refused");
+const refusal = Buffer.from(
+  new Uint8Array(e.memory.buffer, e.ink_error_ptr(), e.ink_error_len()),
+).toString("utf8");
+check(/PDF/.test(refusal), "the refusal says why", refusal);
+e.ink_close(hdoc);
+
+// Argument hygiene: a zero-sized bitmap, a null pointer, an out-of-range page
+// and a non-finite matrix all have to be rejected BEFORE MuPDF sees them. A NaN
+// in particular would reach the content stream as the literal `nan` and produce
+// a file no reader can parse — a silently broken export, worse than a refused
+// one.
+//
+// AGAINST A LIVE, EXPORTABLE DOCUMENT. Aiming these at a closed handle would
+// have proved nothing: every one of them would come back -1 from the handle
+// lookup alone, and the argument checks could all be deleted with the suite
+// still green. (They were, and it was.)
+const argdoc = openBytes(fs.readFileSync(pdfPath));
+check(argdoc >= 1, "a live handle for the argument checks", `got ${argdoc}`);
+check(
+  e.ink_export_page(argdoc, 0, alphaAt, 4, 4, 1, 0, 0, 1, 0, 0) > 0n,
+  "...and it does export when the arguments are good",
+);
+e.ink_export_free();
+equal(e.ink_export_page(argdoc, 0, alphaAt, 0, 4, 1, 0, 0, 1, 0, 0), -1n, "a zero width is refused");
+equal(e.ink_export_page(argdoc, 0, alphaAt, 4, 0, 1, 0, 0, 1, 0, 0), -1n, "a zero height is refused");
+equal(e.ink_export_page(argdoc, 0, 0, 4, 4, 1, 0, 0, 1, 0, 0), -1n, "a null coverage pointer is refused");
+equal(e.ink_export_page(argdoc, -1, alphaAt, 4, 4, 1, 0, 0, 1, 0, 0), -1n, "a negative page is refused");
+equal(e.ink_export_page(argdoc, 0, alphaAt, 4, 4, NaN, 0, 0, 1, 0, 0), -1n, "a NaN matrix is refused");
+equal(
+  e.ink_export_page(argdoc, 0, alphaAt, 4, 4, 1, 0, 0, Infinity, 0, 0),
+  -1n,
+  "an infinite matrix is refused",
+);
+// A page MuPDF cannot load is the shim's refusal, not the ABI's, so it comes
+// back as -2 with a message rather than -1.
+equal(e.ink_export_page(argdoc, 99, alphaAt, 4, 4, 1, 0, 0, 1, 0, 0), -2n, "a missing page is refused");
+e.ink_close(argdoc);
+equal(e.ink_export_page(argdoc, 0, alphaAt, 4, 4, 1, 0, 0, 1, 0, 0), -1n, "a dead handle is refused");
+e.ink_free(alphaAt, 16);
+
+// `ink_export_free` is idempotent and safe with nothing outstanding.
+e.ink_export_free();
+e.ink_export_free();
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);

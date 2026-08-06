@@ -65,7 +65,13 @@ test.describe("non-.note files", () => {
     // `pdfViewer.spec.ts`'s.
     const region = page.getByRole("region", { name: "PDF viewer" });
     await region.getByRole("button", { name: "Download" }).click();
-    const raw = region.getByRole("menuitem", { name: "PDF document" });
+    // BY GROUP, not by label. "PDF document" also names the per-page export rows
+    // now (which graft this page into a new one-page document); the untouched
+    // bytes are the WHOLE DOCUMENT group's row, and that is what this is about.
+    const raw = region
+      .locator(".menu__pop > div")
+      .filter({ has: page.locator(".menu__head", { hasText: "Whole document" }) })
+      .getByRole("menuitem", { name: "PDF document" });
     await expect(raw).toBeVisible();
     const [download] = await Promise.all([page.waitForEvent("download"), raw.click()]);
     expect(download.url()).toMatch(/\/file\/n-doc-lease\?v=[0-9a-f]{32}&download=1$/);

@@ -14,9 +14,11 @@
  */
 
 #include <mupdf/fitz.h>
+#include <mupdf/pdf.h> /* the export path builds a PDF, not just reads one */
 
 #include <stdio.h> /* EOF, SEEK_CUR, SEEK_END — for the callback stream */
 #include <stdlib.h>
+#include <string.h> /* strlen, for the ink's content-stream fragment */
 
 /* Resource store cap. MuPDF's default (FZ_STORE_DEFAULT) is 256 MB, which is a
  * server number: it is the cache of decoded images/fonts, and on a page-at-a-time
@@ -34,9 +36,8 @@ static fz_context *g_ctx;
  * sentence already; this keeps the most recent one for the browser to log. */
 static char g_error[256];
 
-static void ink_record_error(fz_context *ctx)
+static void ink_set_error(const char *msg)
 {
-	const char *msg = fz_caught_message(ctx);
 	size_t i = 0;
 
 	if (!msg)
@@ -46,6 +47,15 @@ static void ink_record_error(fz_context *ctx)
 		i++;
 	}
 	g_error[i] = 0;
+}
+
+/* Only valid inside an `fz_catch` — `fz_caught_message` reads the context's
+ * current exception. A refusal we decide ourselves (see `ink_shim_export_page`,
+ * which turns down anything that is not a PDF) goes through `ink_set_error`
+ * instead, so the browser gets a sentence either way. */
+static void ink_record_error(fz_context *ctx)
+{
+	ink_set_error(fz_caught_message(ctx));
 }
 
 /* NUL-terminated; valid until the next failing call. Never NULL. */
@@ -409,6 +419,359 @@ void ink_shim_shrink_store(void)
 		fz_shrink_store(g_ctx, 0);
 }
 
+/* --- Structure-preserving single-page export ----------------------------- */
+
+/* Export ONE page as a one-page PDF holding the ORIGINAL page plus our ink.
+ *
+ * WHY THIS EXISTS BESIDE `webapp/src/export/pdf.ts`. That writer rasterises: it
+ * emits a new document made of grayscale images at A4 width. The pixels are
+ * right and the text layer it fakes is searchable, but the page's real text is
+ * gone, its vectors are gone, and its geometry has been replaced by "A4 wide,
+ * aspect preserved". `pdf_graft_page` instead deep-copies the page's own
+ * /Contents, /Resources and boxes into a fresh document, so what comes out is
+ * the publisher's page — selectable text, embedded fonts, vectors, page size —
+ * with the `.mark` ink drawn over it.
+ *
+ * KNOWN LIMITATION: /Annots ARE SILENTLY DROPPED. `pdf_graft_mapped_page`
+ * (`source/pdf/pdf-graft.c`) copies a fixed list and nothing else: /Contents,
+ * /Resources, /MediaBox, /CropBox, /BleedBox, /TrimBox, /ArtBox, /Rotate,
+ * /UserUnit. So LINKS, form fields and any highlights the source PDF already
+ * carried do not survive into the exported page, and neither does a page-level
+ * /Group (transparency group). That is defensible — an /Annot can reference
+ * other pages, which a one-page document no longer has — but it is a real loss
+ * and nothing in the file warns about it, so it is stated here. OUR ink is not
+ * affected: it goes into the content stream, not into an annotation.
+ */
+
+/* Build the ink as an image XObject in `dst`. Returns a reference the caller
+ * must `pdf_drop_obj`. `alpha` is w*h coverage bytes, 255 = full ink.
+ *
+ * /DEVICEGRAY + AN 8-BIT /SMASK, NOT A 1-BIT /IMAGEMASK. A stencil mask is the
+ * obvious encoding for "black ink or nothing" and is about ten times smaller —
+ * but the real ink is anti-aliased with 16 grey levels, and at export resolution
+ * a stencil is visibly staircased. That would be a REGRESSION against the
+ * rasterising exporter that ships today. So: an all-black image whose /SMask
+ * carries the coverage.
+ *
+ * WHAT IT COSTS, deflated: ~7.6 KB over the bare page on a real annotated page,
+ * and 29.9 KB on a synthetic worst case (1240x1754 coverage — A4 at 150 dpi —
+ * with 150,000 pixels inked by 30 full-width feathered strokes). It scales with
+ * how much was written, and both ends of that are small beside the page.
+ *
+ * THE BLACK PLANE IS 1 BIT PER COMPONENT, THE MASK IS 8. Both are w x h, which
+ * matters: a /SMask whose dimensions differ from the base image's is resampled
+ * to them, so a cheap 1x1 black base would throw the ink's resolution away.
+ * Keeping the dimensions equal and shrinking the base's DEPTH instead costs
+ * w*h/8 transient bytes rather than w*h — 329 KB instead of 2.6 MB on a
+ * 1404x1872 page — and all-zero 1-bit DeviceGray samples are black under the
+ * default /Decode, so the result is identical. Both streams deflate to almost
+ * nothing at write time (`do_compress_images`), so the file is the same size.
+ */
+static pdf_obj *ink_shim_add_ink_image(fz_context *ctx, pdf_document *dst,
+	const unsigned char *alpha, int w, int h)
+{
+	size_t plane = (size_t)((w + 7) / 8) * (size_t)h;
+	size_t coverage = (size_t)w * (size_t)h;
+	unsigned char *black_bytes = NULL;
+	fz_buffer *black = NULL;
+	fz_buffer *soft = NULL;
+	pdf_obj *image = NULL;
+	pdf_obj *mask = NULL;
+
+	fz_var(black_bytes);
+	fz_var(black);
+	fz_var(soft);
+	fz_var(image);
+	fz_var(mask);
+	fz_try(ctx)
+	{
+		black_bytes = fz_calloc(ctx, plane, 1);
+		black = fz_new_buffer_from_data(ctx, black_bytes, plane);
+		black_bytes = NULL; /* the buffer owns it now */
+		soft = fz_new_buffer_from_copied_data(ctx, alpha, coverage);
+
+		mask = pdf_add_new_dict(ctx, dst, 6);
+		pdf_dict_put(ctx, mask, PDF_NAME(Type), PDF_NAME(XObject));
+		pdf_dict_put(ctx, mask, PDF_NAME(Subtype), PDF_NAME(Image));
+		pdf_dict_put_int(ctx, mask, PDF_NAME(Width), w);
+		pdf_dict_put_int(ctx, mask, PDF_NAME(Height), h);
+		pdf_dict_put_int(ctx, mask, PDF_NAME(BitsPerComponent), 8);
+		pdf_dict_put(ctx, mask, PDF_NAME(ColorSpace), PDF_NAME(DeviceGray));
+		pdf_update_stream(ctx, dst, mask, soft, 0);
+
+		image = pdf_add_new_dict(ctx, dst, 7);
+		pdf_dict_put(ctx, image, PDF_NAME(Type), PDF_NAME(XObject));
+		pdf_dict_put(ctx, image, PDF_NAME(Subtype), PDF_NAME(Image));
+		pdf_dict_put_int(ctx, image, PDF_NAME(Width), w);
+		pdf_dict_put_int(ctx, image, PDF_NAME(Height), h);
+		pdf_dict_put_int(ctx, image, PDF_NAME(BitsPerComponent), 1);
+		pdf_dict_put(ctx, image, PDF_NAME(ColorSpace), PDF_NAME(DeviceGray));
+		pdf_dict_put(ctx, image, PDF_NAME(SMask), mask);
+		pdf_update_stream(ctx, dst, image, black, 0);
+	}
+	fz_always(ctx)
+	{
+		fz_free(ctx, black_bytes); /* non-NULL only if the buffer could not be made */
+		fz_drop_buffer(ctx, black);
+		fz_drop_buffer(ctx, soft);
+		pdf_drop_obj(ctx, mask);
+	}
+	fz_catch(ctx)
+	{
+		pdf_drop_obj(ctx, image);
+		fz_rethrow(ctx);
+	}
+	return image;
+}
+
+/* Add `text` to `dst` as a content stream object. Returns a reference the caller
+ * must drop (or push with `pdf_array_push_drop`). Uncompressed: `do_compress`
+ * deflates it at write time, and these fragments are a few dozen bytes. */
+static pdf_obj *ink_shim_add_ops(fz_context *ctx, pdf_document *dst, const char *text)
+{
+	fz_buffer *buf = fz_new_buffer_from_copied_data(ctx,
+		(const unsigned char *)text, strlen(text));
+	pdf_obj *obj = NULL;
+
+	fz_try(ctx)
+		obj = pdf_add_stream(ctx, dst, buf, NULL, 0);
+	fz_always(ctx)
+		fz_drop_buffer(ctx, buf);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+	return obj;
+}
+
+/* Put the ink into the page's own /Contents, as `[ (q) original… (Q + ink) ]`.
+ *
+ * A CONTENT STREAM RATHER THAN AN ANNOTATION. Both were prototyped and they
+ * render identically, so the tie-breakers are what a viewer can do to them: an
+ * annotation can be hidden by a "show/hide annotations" toggle, may not print
+ * depending on its flags, and is discarded by anything that flattens. Ink the
+ * user drew is part of the page, so it goes in the page.
+ *
+ * THE BRACKETING `q`/`Q` protects the ink from whatever graphics state the
+ * original content leaves behind — a stray `cm`, a clip, a non-default blend
+ * mode — because the ink's `cm` below is RELATIVE to the CTM in force when it
+ * runs. It covers one level of imbalance, which is what a stream that forgets a
+ * `Q` produces; `do_sanitize` (see the write options) re-parses and rebalances
+ * the concatenation on the way out, which covers the rest. The bulletproof
+ * variant is to wrap the original in a Form XObject, whose `Do` saves and
+ * restores unconditionally — it was not taken because it means decompressing and
+ * concatenating the original content into one buffer (heap we would rather not
+ * spend) and because the array form is what was verified end to end. If ink ever
+ * turns up displaced on a real document, that is the thing to try.
+ *
+ * PDF concatenates the streams of a /Contents array into ONE stream, with
+ * whitespace between them, so splitting our additions into their own objects
+ * costs nothing and leaves the original's bytes untouched and unparsed. */
+static void ink_shim_wrap_contents(fz_context *ctx, pdf_document *dst,
+	pdf_obj *page_obj, pdf_obj *image, const char *tail)
+{
+	pdf_obj *resources;
+	pdf_obj *xobjects;
+	pdf_obj *old;
+	pdf_obj *contents = NULL;
+
+	resources = pdf_dict_get(ctx, page_obj, PDF_NAME(Resources));
+	if (!pdf_is_dict(ctx, resources))
+		resources = pdf_dict_put_dict(ctx, page_obj, PDF_NAME(Resources), 2);
+	xobjects = pdf_dict_get(ctx, resources, PDF_NAME(XObject));
+	if (!pdf_is_dict(ctx, xobjects))
+		xobjects = pdf_dict_put_dict(ctx, resources, PDF_NAME(XObject), 1);
+	pdf_dict_puts(ctx, xobjects, "InkholdInk", image);
+
+	old = pdf_dict_get(ctx, page_obj, PDF_NAME(Contents));
+	fz_var(contents);
+	fz_try(ctx)
+	{
+		contents = pdf_new_array(ctx, dst, 4);
+		pdf_array_push_drop(ctx, contents, ink_shim_add_ops(ctx, dst, "q\n"));
+		/* The old streams are pushed BEFORE /Contents is replaced: pushing keeps
+		 * a reference, and the only one holding them until then is `page_obj`. */
+		if (pdf_is_array(ctx, old)) {
+			int i, n = pdf_array_len(ctx, old);
+			for (i = 0; i < n; i++)
+				pdf_array_push(ctx, contents, pdf_array_get(ctx, old, i));
+		} else if (old) {
+			pdf_array_push(ctx, contents, old);
+		}
+		pdf_array_push_drop(ctx, contents, ink_shim_add_ops(ctx, dst, tail));
+		pdf_dict_put(ctx, page_obj, PDF_NAME(Contents), contents);
+	}
+	fz_always(ctx)
+		pdf_drop_obj(ctx, contents);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+}
+
+/* Export page `number` of `doc` as a one-page PDF with `alpha` (w*h coverage
+ * bytes) drawn over it. `a`..`f` map the ALPHA IMAGE'S OWN PIXEL SPACE — (0,0)
+ * at its top-left pixel, (w,h) at its bottom-right, y downwards — onto the page
+ * in DISPLAY SPACE, the top-left-origin cropped-and-rotated box the viewer
+ * already draws in. Covering the whole page is therefore `pageW/w, 0, 0,
+ * pageH/h, 0, 0`. Returns a buffer the caller must drop, or NULL (message in
+ * `ink_shim_error`).
+ *
+ * ON THE STREAMED PATH THIS CAN SUSPEND: the graft reads the source document,
+ * which pulls through `ink_host_read`. That is the same proven arrangement as
+ * everything else here — no Zig frame is on the stack inside the `fz_try`.
+ */
+fz_buffer *ink_shim_export_page(fz_document *doc, int number,
+	const unsigned char *alpha, int w, int h,
+	float a, float b, float c, float d, float e, float f)
+{
+	fz_context *ctx = g_ctx;
+	pdf_document *src;
+	pdf_document *dst = NULL;
+	pdf_obj *image = NULL;
+	pdf_page *page = NULL;
+	fz_buffer *out_buf = NULL;
+	fz_output *out = NULL;
+
+	if (!ctx || !doc || !alpha || w <= 0 || h <= 0)
+		return NULL;
+
+	/* REFUSE ANYTHING THAT IS NOT A PDF. `pdf_specifics` answers NULL for EPUB,
+	 * CBZ, XPS and friends, and there is no page to graft out of a document that
+	 * has no PDF objects. The caller's fallback is the rasterising exporter, and
+	 * it needs a sentence to show for why. */
+	src = pdf_specifics(ctx, doc);
+	if (!src) {
+		ink_set_error("only a PDF can be exported with its page structure intact");
+		return NULL;
+	}
+
+	fz_var(dst);
+	fz_var(image);
+	fz_var(page);
+	fz_var(out_buf);
+	fz_var(out);
+	fz_try(ctx)
+	{
+		fz_rect box;
+		fz_matrix display, unit, place;
+		char tail[256];
+		pdf_write_options opts = pdf_default_write_options;
+
+		dst = pdf_create_document(ctx);
+		pdf_graft_page(ctx, dst, 0, src, number);
+		image = ink_shim_add_ink_image(ctx, dst, alpha, w, h);
+
+		/* PLACEMENT, AND THE BUG IT EXISTS TO AVOID. A content stream is written
+		 * in the page's UNROTATED, MediaBox-origin user space. Every coordinate
+		 * the viewer — and therefore the caller — works in is display space: the
+		 * CROPPED, ROTATED box `fz_bound_page` reports, y downwards. Placing the
+		 * ink naively drew it 90 degrees out on a `/Rotate 90` page, and it would
+		 * also have been offset on any page whose /CropBox or /MediaBox does not
+		 * start at the origin. `pdf_page_transform_box` produces exactly the
+		 * matrix MuPDF applies when it renders, so its INVERSE takes display
+		 * space back to user space, and all three cases fall out of the one call.
+		 *
+		 * FZ_CROP_BOX IS DOCUMENTATION HERE, NOT A CHOICE. Read
+		 * `pdf_page_obj_transform_box` (`source/pdf/pdf-page.c`): the box
+		 * argument selects only the RECT it hands back, and the matrix is built
+		 * under a comment reading "Always use CropBox to set origin to top left".
+		 * Passing FZ_MEDIA_BOX yields a different `box` and an IDENTICAL `place`.
+		 * So the crop box is what display space is anchored to whatever we ask
+		 * for — which is also what `fz_bound_page`, and therefore `ink_render`
+		 * and `ink_page_size`, already agree on. Naming it keeps the call site
+		 * honest about which box the ink is being placed against.
+		 *
+		 * `unit` is the other half: `Do` paints an image into the UNIT SQUARE
+		 * with the image's first row along the top edge, so a caller who thinks
+		 * in image pixels needs (u,v) -> (u*w, (1-v)*h) in front of their matrix.
+		 * MuPDF's `fz_concat(A, B)` means "A, then B". */
+		page = pdf_load_page(ctx, dst, 0);
+		pdf_page_transform_box(ctx, page, &box, &place, FZ_CROP_BOX);
+		display = fz_make_matrix(a, b, c, d, e, f);
+		unit = fz_make_matrix((float)w, 0, 0, -(float)h, 0, (float)h);
+		place = fz_concat(fz_concat(unit, display), fz_invert_matrix(place));
+
+		fz_snprintf(tail, sizeof(tail),
+			"Q\nq %g %g %g %g %g %g cm /InkholdInk Do Q\n",
+			place.a, place.b, place.c, place.d, place.e, place.f);
+		ink_shim_wrap_contents(ctx, dst, pdf_lookup_page_obj(ctx, dst, 0), image, tail);
+
+		/* WRITE OPTIONS, AND WHY THE CLEANING IS NOT OPTIONAL. `do_clean` +
+		 * `do_sanitize` re-parse every content stream and rebuild each one's
+		 * /Resources from what it actually references; `do_garbage = 3` then
+		 * drops whatever that detached and de-duplicates the rest.
+		 *
+		 * That matters because a page's /Resources are frequently SHARED. One
+		 * real document gives all 26 pages the same dictionary, so grafting a
+		 * single page dragged the whole document's fonts with it: 175 KB, cut to
+		 * 53 KB by the cleaning, pixel-identical either way. A synthetic case —
+		 * two pages sharing a resource dict with two fat form XObjects, one of
+		 * them unused by the page being exported — pins down which option does
+		 * what:
+		 *
+		 *     compress only .................... 20,547 B
+		 *     + garbage 3, no clean/sanitize ... 20,547 B  (nothing to collect:
+		 *                                        the copied /Resources still
+		 *                                        references the unused form)
+		 *     + clean/sanitize, no garbage ..... 20,724 B  (BIGGER)
+		 *     all three ........................ 10,724 B
+		 *
+		 * So: TAKE ALL THREE OR NONE. Cleaning alone rewrites tidy content into
+		 * longer equivalents and has nothing to prune; collecting alone finds
+		 * nothing unreferenced. Only together do they pay. */
+		opts.do_compress = 1;
+		opts.do_compress_images = 1;
+		opts.do_compress_fonts = 1;
+		opts.do_clean = 1;
+		opts.do_sanitize = 1;
+		opts.do_garbage = 3;
+
+		out_buf = fz_new_buffer(ctx, 8192);
+		out = fz_new_output_with_buffer(ctx, out_buf);
+		pdf_write_document(ctx, dst, out, &opts);
+		fz_close_output(ctx, out);
+	}
+	fz_always(ctx)
+	{
+		fz_drop_output(ctx, out);
+		pdf_drop_page(ctx, page);
+		pdf_drop_obj(ctx, image);
+		pdf_drop_document(ctx, dst);
+	}
+	fz_catch(ctx)
+	{
+		ink_record_error(ctx);
+		fz_drop_buffer(ctx, out_buf);
+		return NULL;
+	}
+	return out_buf;
+}
+
+/* Buffer accessors: `fz_buffer` is opaque to Zig, as `fz_pixmap` is. */
+unsigned char *ink_shim_buffer_data(fz_buffer *buf)
+{
+	unsigned char *data = NULL;
+
+	if (g_ctx && buf)
+		fz_buffer_storage(g_ctx, buf, &data);
+	return data;
+}
+
+int ink_shim_buffer_len(fz_buffer *buf)
+{
+	size_t len;
+
+	if (!g_ctx || !buf)
+		return -1;
+	len = fz_buffer_storage(g_ctx, buf, NULL);
+	if (len > 0x7fffffff)
+		return -1;
+	return (int)len;
+}
+
+void ink_shim_drop_buffer(fz_buffer *buf)
+{
+	if (g_ctx)
+		fz_drop_buffer(g_ctx, buf);
+}
+
 /* --- JPX stubs (upstream bug workaround) --------------------------------- */
 
 /* MuPDF 1.28.1's `source/fitz/load-jpx.c` has a real bug: its
@@ -448,10 +811,11 @@ void fz_load_jpx_info(fz_context *ctx, const unsigned char *data, size_t size,
 
 /* --- wasi-libc gap ------------------------------------------------------- */
 
-/* MuPDF calls `mkstemp` only from the temporary-file path used when writing
- * output documents; the viewer never writes. wasi-libc has no filesystem-creating
- * `mkstemp`, so this stub keeps the module linkable and fails honestly if it
- * were ever reached. */
+/* MuPDF calls `mkstemp` only from the temporary-FILE path used when saving a
+ * document to a path. `ink_shim_export_page` does write a PDF, but into an
+ * `fz_output` over a memory buffer, which never goes near it. wasi-libc has no
+ * filesystem-creating `mkstemp`, so this stub keeps the module linkable and
+ * fails honestly if it were ever reached. */
 int mkstemp(char *template)
 {
 	(void)template;

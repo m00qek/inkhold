@@ -24,7 +24,7 @@ import {
 } from "./pdfDecode";
 import { BlockCache, type PdfCacheStats } from "./pdfBlocks";
 import { HttpError, fetchWhole, rangeFetcher } from "./pdfTransport";
-import type { PdfOpenMode, PdfRequest, PdfResponse } from "./pdfWorkerTypes";
+import type { PdfInkOverlay, PdfOpenMode, PdfRequest, PdfResponse } from "./pdfWorkerTypes";
 
 /**
  * The worker's global, typed by hand.
@@ -116,6 +116,13 @@ function callsFor(x: PdfDecoderExports): PdfCalls {
     pageCount: WebAssembly.promising(x.ink_page_count),
     pageSize: WebAssembly.promising(x.ink_page_size),
     render: WebAssembly.promising(x.ink_render),
+    // NOT OPTIONAL on this branch, whatever `PdfCalls` says. `ink_export_page`
+    // grafts a page, which walks the source document's xref and so can re-enter
+    // `ink.host_read`; unwrapped, the first suspension on a streamed document
+    // TRAPS the instance instead of waiting. `AsyncPdfDocument.exportPage` falls
+    // back to the raw export when this is absent — right for `syncCalls` on the
+    // non-JSPI branch above, where nothing suspends, and wrong here.
+    exportPage: WebAssembly.promising(x.ink_export_page),
   };
 }
 
@@ -173,6 +180,29 @@ async function render(page: number, scale: number): Promise<PdfResponse & { kind
 }
 
 /**
+ * ONE PAGE, AS A PDF — the original page's structure with the ink over it.
+ *
+ * NOT A RASTER, which is the entire reason this row exists: `render` above hands
+ * back pixels, and a PDF made from those pixels has no selectable text, no
+ * fonts and no vectors. This asks the module to GRAFT the source page — its own
+ * content streams and the resources they reference — into a fresh one-page
+ * document, then draw the ink over it as an image mask.
+ *
+ * The refusals are the module's to make and they surface as a thrown error,
+ * which `handle` turns into an `{ kind: "error" }` response: a source that is
+ * not a PDF at all, a page that will not graft, a document already closed.
+ */
+async function exportPage(page: number, ink: PdfInkOverlay): Promise<Uint8Array> {
+  if (!doc) throw new Error("no document is open");
+  // NO SIZE CHECK HERE, and two on either side of it. `pdfClient.ts` refuses a
+  // mismatched mask before the buffer is even handed over, and
+  // `AsyncPdfDocument.exportPage` refuses it again immediately before the
+  // pointer reaches wasm. A third copy in the middle would be the one no test
+  // reaches and the one that drifts.
+  return doc.exportPage(page, ink.alpha, ink.width, ink.height, ink.matrix);
+}
+
+/**
  * Requests run ONE AT A TIME, in arrival order.
  *
  * The alternative is a race with teeth: `ink_render` reuses a single pixmap and
@@ -199,6 +229,15 @@ function handle(req: PdfRequest): Promise<void> {
       case "render": {
         const out = await render(req.page, req.scale);
         ctx.postMessage({ ...out, id: req.id }, [out.bitmap]);
+        return;
+      }
+      case "exportPage": {
+        const bytes = await exportPage(req.page, req.ink);
+        // TRANSFERRED, like the rendered bitmap: a grafted page carries the
+        // source page's fonts and images, so this is not a small message.
+        ctx.postMessage({ kind: "exportedPage", id: req.id, bytes }, [
+          bytes.buffer as ArrayBuffer,
+        ]);
         return;
       }
       case "stats": {

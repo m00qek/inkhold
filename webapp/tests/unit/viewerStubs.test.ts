@@ -81,11 +81,32 @@ const INERT_PDF_SEAM: PdfSeam = {
         width: 200,
         height: 100,
       }),
+    exportPage: () => Promise.reject(new Error("no ink_export_page in this stub")),
     stats: () => Promise.resolve({ mode: "whole" as const, cache: null }),
     close: () => Promise.resolve(),
     destroy: () => {},
   }),
 };
+
+/**
+ * A viewer menu's raw-file row, BY GROUP rather than by label.
+ *
+ * The label alone is not unique any more: the PDF viewer offers "PDF document"
+ * in each per-page group as well, and those rows TRANSFORM the page (one grafts
+ * it into a new one-page document) where this one is the untouched bytes. A bare
+ * label search finds the first, which is a different row doing a different
+ * thing. Viewers whose menu has no group headings at all fall back to the whole
+ * popover, which is what `.spd` needs.
+ */
+function rawRowOf(root: ParentNode, label: string): HTMLButtonElement {
+  const groups = Array.from(root.querySelectorAll<HTMLElement>(".menu__pop > div"));
+  const whole = groups.find((g) =>
+    (g.querySelector(".menu__head")?.textContent ?? "").startsWith("Whole "),
+  );
+  return Array.from(
+    (whole ?? root).querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+  ).find((b) => b.textContent?.includes(label))!;
+}
 
 const FOLDER: ReaderOrigin = { kind: "folder", folderPath: "Note / Files" };
 
@@ -300,9 +321,7 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark, rawRow }) => {
       // `<a download>`. Open the menu and capture that anchor's href.
       expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
       trigger.click();
-      const raw = Array.from(v.el.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find((b) =>
-        b.textContent?.includes(rawRow),
-      )!;
+      const raw = rawRowOf(v.el, rawRow);
       expect(raw).toBeTruthy();
       expect(raw.disabled).toBe(false);
       expect(rawHrefOnClick(raw)).toMatch(/^\/file\/n-1\?v=b{32}&download=1$/);
@@ -325,9 +344,7 @@ describe.each(STUBS)("$name stub viewer", ({ make, type, mark, rawRow }) => {
 
     if (rawRow) {
       trigger.click();
-      const raw = Array.from(v.el.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find((b) =>
-        b.textContent?.includes(rawRow),
-      )!;
+      const raw = rawRowOf(v.el, rawRow);
       expect(rawHrefOnClick(raw)).toMatch(/^\/api\/controlplane\/bin\/file\/n-1\?v=b{32}&download=1$/);
     } else {
       const dl = trigger as HTMLAnchorElement;
@@ -366,9 +383,7 @@ describe.each(STUBS)("$name Download, with no address", ({ make, type, rawRow })
     const trigger = v.el.querySelector('[aria-label="Download"]') as HTMLElement;
     if (rawRow) {
       trigger.click();
-      const raw = Array.from(v.el.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find((b) =>
-        b.textContent?.includes(rawRow),
-      )!;
+      const raw = rawRowOf(v.el, rawRow);
       expect(raw.disabled).toBe(true);
       // Disabled is not enough on its own — a click must produce no navigation
       // either, since that is the failure the whole test is about.
@@ -381,6 +396,51 @@ describe.each(STUBS)("$name Download, with no address", ({ make, type, rawRow })
 });
 
 describe(".pdf viewer, past the shared seam", () => {
+  it("publishes the page it is on, so a PDF page has an address", async () => {
+    // The route `#/note/:id/page/:n` is shared with the reader and `open()` has
+    // always honoured it — but this viewer never wrote one BACK, so the half a
+    // person uses was missing: paging to 34 and reloading returned to page 1,
+    // and there was no address to send anyone. The reader has published its page
+    // since it existed.
+    const onPosition = vi.fn();
+    const v = createPdfViewer(deps({ onPosition }), INERT_PDF_SEAM);
+    document.body.append(v.el);
+    const m = meta({ id: "n-doc", fileType: "pdf" });
+    await v.open(synthesizeSummary(m), Promise.resolve(m), 0, FOLDER, "");
+
+    onPosition.mockClear();
+    // Paged with the ARROW KEY, not the pager button. Under happy-dom `paint()`
+    // returns at the null 2D context before it reaches `syncPager`, so the
+    // buttons keep the disabled state they had when the page count was still 0.
+    // The key routes through the same `go()`, which is what this is about.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(onPosition).toHaveBeenCalled();
+    const [id, page, query] = onPosition.mock.calls.at(-1)!;
+    expect(id).toBe("n-doc");
+    expect(page).toBe(1); // 0-based internally; the router writes it 1-based
+    expect(query).toBe(""); // a PDF has no find query to carry
+    v.destroy();
+  });
+
+  it("publishes the BIN address for a trashed file, not the live one", async () => {
+    // A trashed blob is not served from `#/note/:id`, so writing that address
+    // would make a reload 404 to the library. The reader's rule, inherited.
+    const onPosition = vi.fn();
+    const v = createPdfViewer(deps({ onPosition }), INERT_PDF_SEAM);
+    document.body.append(v.el);
+    const m = meta({ id: "n-gone", fileType: "pdf" });
+    await v.open(synthesizeSummary(m), Promise.resolve(m), 0, { kind: "bin", folderPath: null }, "");
+
+    onPosition.mockClear();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(onPosition.mock.calls.at(-1)![4]).toBe(true); // the `bin` flag
+    v.destroy();
+  });
+
   it("a new document resets the zoom READOUT, not just the scale behind it", async () => {
     // `open` sets the zoom state back to Fit and renders there. The stepper owns
     // its own label, so without an explicit reset the toolbar went on showing the
@@ -458,6 +518,62 @@ describe(".pdf viewer, past the shared seam", () => {
     // the fit scale the screen used, which in this layout is well under 1.
     expect(renders[0]).toEqual({ page: 0, scale: 2 });
     for (const s of onScreen) expect(s).not.toBe(2);
+    v.destroy();
+  });
+
+  it("the per-page PDF asks the DECODER for the page — it never rasters one", async () => {
+    // The row that keeps the page's own structure. Everything else in this menu
+    // draws pixels; this one hands the decoder a page INDEX and an ink mask and
+    // gets a document back, so a render here would be a full MuPDF raster built
+    // only to be discarded — and, worse, a sign that the export was quietly
+    // going through the image path after all.
+    const renders: number[] = [];
+    const exports: { page: number; ink: { width: number; height: number; matrix: readonly number[] } }[] = [];
+    const seam: PdfSeam = {
+      supported: () => true,
+      createSession: () => ({
+        open: () => Promise.resolve({ pageCount: 2, mode: "whole" as const }),
+        // 200 x 100 pt — the page's OWN units, which is what the mask's matrix
+        // has to map onto.
+        pageSize: () => Promise.resolve({ width: 200, height: 100 }),
+        render: (page: number) => {
+          renders.push(page);
+          return Promise.resolve({
+            bitmap: { close: () => {} } as unknown as ImageBitmap,
+            width: 400,
+            height: 200,
+          });
+        },
+        exportPage: (page, ink) => {
+          exports.push({ page, ink });
+          return Promise.resolve(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+        },
+        stats: () => Promise.resolve({ mode: "whole" as const, cache: null }),
+        close: () => Promise.resolve(),
+        destroy: () => {},
+      }),
+    };
+    const v = createPdfViewer(deps(), seam);
+    document.body.append(v.el);
+    const m = meta({ id: "n-1", fileType: "pdf" });
+    await v.open(synthesizeSummary(m), Promise.resolve(m), 0, FOLDER, "");
+
+    renders.length = 0;
+    const clicks = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    (v.el.querySelector('[aria-label="Download"]') as HTMLButtonElement).click();
+    const pdfRow = Array.from(v.el.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(
+      (b) => b.querySelector("span")?.textContent === "PDF document",
+    )!;
+    pdfRow.click();
+    await vi.waitFor(() => expect(exports).toHaveLength(1));
+    clicks.mockRestore();
+
+    expect(renders).toEqual([]);
+    expect(exports[0]!.page).toBe(0);
+    // No ink on this page, so the mask is the one clear pixel stretched over the
+    // page — 200 pt across it and 100 down, straight off `pageSize`.
+    expect(exports[0]!.ink).toMatchObject({ width: 1, height: 1 });
+    expect(exports[0]!.ink.matrix).toEqual([200, 0, 0, 100, 0, 0]);
     v.destroy();
   });
 });

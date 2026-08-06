@@ -626,6 +626,50 @@ describe("the shared quality downscale preserves thin lines (the panel-thumb bug
     expect(darkRows(naive, W, DST_H)).toBeLessThan(DST_H);
   });
 
+  it("a device PEN STROKE survives the filmstrip's 15.6x reduction, in ALPHA", () => {
+    // The PDF page-index composites a `.mark`'s handwriting onto a 120px-tall
+    // page raster, so the ink goes 1872 -> 120 — the deepest reduction any
+    // surface in this app asks for, and the one where "is it still there?" stops
+    // being obvious. Unlike a ruled template this source is TRANSPARENT: a mark
+    // layer decodes to alpha 0 everywhere it was not written on, which is what
+    // makes it an overlay, so what has to survive the average is the ALPHA and
+    // not a luminance.
+    //
+    // A Nomad panel is 1404px across ~118.64mm — 11.8 px/mm — so a fine nib is
+    // 2-3px and a broad one 5. The measured floor for the finest is alpha 34 of
+    // 255: over white paper that is luminance 221, a light grey wash. Present,
+    // and honest — a faithful area average of a stroke covering 1/15th of its
+    // destination pixel cannot be darker than that, and this asserts the
+    // arithmetic is doing it rather than dropping the row.
+    const W = 8;
+    const H = 1872;
+    const DST_H = 120;
+    /** A horizontal ink stroke `thick` px tall on transparent, at row 900. */
+    const stroke = (thick: number): Uint8ClampedArray => {
+      const buf = new Uint8ClampedArray(W * H * 4); // all zero: transparent
+      for (let y = 900; y < 900 + thick; y++) {
+        for (let x = 0; x < W; x++) buf[(y * W + x) * 4 + 3] = 255; // black, opaque
+      }
+      return buf;
+    };
+    const peakAlpha = (rgba: Uint8ClampedArray): number => {
+      let max = 0;
+      for (let y = 0; y < DST_H; y++) max = Math.max(max, rgba[(y * W + (W >> 1)) * 4 + 3]!);
+      return max;
+    };
+
+    // The naive sampler lands on row 15.6·dy and misses a 2px stroke outright —
+    // the whole annotation gone from the strip, which is the failure mode.
+    expect(peakAlpha(nearestDownscaleRows(stroke(2), W, H, DST_H))).toBe(0);
+
+    // The box filter keeps every nib, monotonically in its width.
+    expect(peakAlpha(boxDownscaleRgba(stroke(2), W, H, W, DST_H))).toBeGreaterThanOrEqual(34);
+    expect(peakAlpha(boxDownscaleRgba(stroke(3), W, H, W, DST_H))).toBeGreaterThanOrEqual(51);
+    expect(peakAlpha(boxDownscaleRgba(stroke(5), W, H, W, DST_H))).toBeGreaterThanOrEqual(68);
+    // …and paper stays paper: nothing bleeds into a row the pen never touched.
+    expect(boxDownscaleRgba(stroke(3), W, H, W, DST_H)[(10 * W + 4) * 4 + 3]).toBe(0);
+  });
+
   it("leaves an all-white source white and preserves aspect dims", () => {
     const W = 12;
     const H = 90;

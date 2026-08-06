@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { decodeLayerWithExports, decodeWithExports, type DecoderExports } from "../../src/render/wasm";
 import {
   enumerateSnpg,
+  inkRecordIndices,
   pairLayers,
   layerDisplayName,
   toPanelLayers,
@@ -118,6 +119,58 @@ wasmSuite("enumerateSnpg (real module)", () => {
     const wasm = loadDecoder();
     expect(enumerateSnpg(wasm, payload([], { count: 0 }))).toBeNull();
     expect(enumerateSnpg(wasm, payload(TWO_RECORDS, { count: 6 }))).toBeNull();
+  });
+});
+
+// --- inkRecordIndices --------------------------------------------------------
+//
+// Which records of a page are INK, as opposed to the paper under it. It is the
+// question a `.mark` asks that a `.note` never has to: a mark is an OVERLAY, so
+// the layers it does NOT contribute matter as much as the ones it does — the
+// document underneath is the paper, and drawing the device's own would hide it.
+
+describe("inkRecordIndices", () => {
+  const rec = (over: Partial<SnpgRecord> = {}): SnpgRecord => ({
+    slot: "main",
+    hidden: false,
+    rasterImage: false,
+    data: new Uint8Array(0),
+    ...over,
+  });
+
+  it("drops the background slot and keeps every ink layer, in wire order", () => {
+    expect(
+      inkRecordIndices([
+        rec({ slot: "background" }),
+        rec({ slot: "main" }),
+        rec({ slot: "layer3" }),
+      ]),
+    ).toEqual([1, 2]);
+  });
+
+  it("drops a DEVICE-HIDDEN layer — the page beside it does not show one either", () => {
+    expect(inkRecordIndices([rec({ slot: "main" }), rec({ slot: "layer2", hidden: true })])).toEqual([0]);
+  });
+
+  it("drops a raster-image background, whose `data` is an asset hash and not pixels", () => {
+    expect(
+      inkRecordIndices([rec({ slot: "background", rasterImage: true }), rec({ slot: "main" })]),
+    ).toEqual([1]);
+  });
+
+  it("answers empty for a page whose only records are paper", () => {
+    expect(inkRecordIndices([rec({ slot: "background" })])).toEqual([]);
+  });
+});
+
+wasmSuite("inkRecordIndices (the shipped mark payload)", () => {
+  it("picks Main and Layer Renamed out of the fixture — not the sheet, not the hidden one", () => {
+    // The fixture IS the `.mark` the PDF viewer composites (`fake.ts`'s
+    // `getPageBytes` hands this payload back for `n-files-manual.pdf.mark`), so
+    // this is the real answer for the real file: records 1 and 3. Record 0 is the
+    // white sheet the PDF replaces and record 2 is device-hidden.
+    const records = enumerateSnpg(loadDecoder(), layeredPagePayload(0)!)!.records;
+    expect(inkRecordIndices(records)).toEqual([1, 3]);
   });
 });
 

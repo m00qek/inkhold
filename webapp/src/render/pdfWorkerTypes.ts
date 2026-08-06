@@ -5,6 +5,7 @@
 // construction into its own bundle. Types only — nothing here survives compile.
 
 import type { PdfCacheStats } from "./pdfBlocks";
+import type { DisplayMatrix } from "./markGeometry";
 
 /**
  * How the document was opened.
@@ -15,10 +16,41 @@ import type { PdfCacheStats } from "./pdfBlocks";
  */
 export type PdfOpenMode = "stream" | "whole";
 
+/**
+ * The ink to burn onto one exported page: a COVERAGE MASK and where it goes.
+ *
+ * A mask rather than colour, because that is what the ink is. A `.mark`'s pen is
+ * one colour per stroke and the export draws it as the device drew it, so the
+ * only thing the page needs from this side is HOW MUCH ink covers each sample —
+ * 255 opaque, 0 clear. A full RGBA image would be four times the bytes to say
+ * the same thing (an A4 page's ink at the N6's own resolution is 2.5 MB as
+ * alpha and 9.9 MB as RGBA, on a 50 MB app-wide budget).
+ */
+export interface PdfInkOverlay {
+  /** `width * height` coverage bytes, row-major. 255 = full ink, 0 = clear. */
+  alpha: Uint8Array;
+  width: number;
+  height: number;
+  /**
+   * Where that image lands on the page, in DISPLAY space (top-left origin) —
+   * see `markExportMatrix`, which is the only thing that builds one.
+   */
+  matrix: DisplayMatrix;
+}
+
 export type PdfRequest =
   | { kind: "open"; id: number; url: string; size: number }
   | { kind: "pageSize"; id: number; page: number }
   | { kind: "render"; id: number; page: number; scale: number }
+  /**
+   * ONE PAGE, AS A PDF — the original page's own content streams grafted into a
+   * fresh document with `ink` drawn over them. Not a raster: what makes this row
+   * worth having is that the exported page keeps the text, fonts and vectors the
+   * source page had.
+   *
+   * `ink.alpha`'s buffer is TRANSFERRED into the worker (see `pdfClient.ts`).
+   */
+  | { kind: "exportPage"; id: number; page: number; ink: PdfInkOverlay }
   | { kind: "stats"; id: number }
   | { kind: "close"; id: number };
 
@@ -27,6 +59,8 @@ export type PdfResponse =
   | { kind: "pageSize"; id: number; width: number; height: number }
   /** `bitmap` is TRANSFERRED, so it crosses without copying the pixels. */
   | { kind: "rendered"; id: number; bitmap: ImageBitmap; width: number; height: number }
+  /** The produced PDF's bytes. TRANSFERRED, like `rendered`'s bitmap. */
+  | { kind: "exportedPage"; id: number; bytes: Uint8Array }
   | { kind: "stats"; id: number; stats: PdfCacheStats | null; mode: PdfOpenMode | null }
   | { kind: "closed"; id: number }
   /** `status` is the HTTP status when the failure was a fetch — 401/403 re-auth. */

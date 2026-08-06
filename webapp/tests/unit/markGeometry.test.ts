@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { fitPageInPanel, markExportSpace, placePanelOverPage } from "../../src/render/markGeometry";
+import {
+  fitPageInPanel,
+  markExportMatrix,
+  markExportSpace,
+  placePanelOverPage,
+} from "../../src/render/markGeometry";
 
 // The numbers here are the ones measured against the real capture — an N6
 // (1404x1872) annotating an A4 document (595.276 x 841.89 pt). Getting this
@@ -88,6 +93,39 @@ describe("placePanelOverPage", () => {
     expect(yOn(27.5)).toBeCloseTo(0, 2);
     expect(yOn(1844.5)).toBeCloseTo(1, 2);
   });
+
+  it("READS THE PAGE'S ASPECT, NOT ITS UNITS — points and pixels place alike", () => {
+    // The licence the filmstrip takes. A page-index thumbnail composites the ink
+    // onto a raster it may have taken straight out of the cache, where the page's
+    // size in POINTS is not in hand and asking the decoder for it is a worker
+    // round trip per row. It passes the raster's own pixel dims instead.
+    //
+    // That is exact rather than approximate, and this is why: the fit divides the
+    // panel by the page on both axes and keeps the smaller, so multiplying the
+    // page by any factor divides both quotients by that factor and leaves the
+    // winner — and the resulting rectangle — untouched. A4 at 120px is the same
+    // placement as A4 in points.
+    const canvas = { width: 85, height: 120 };
+    const inPoints = placePanelOverPage(NOMAD, A4, canvas);
+    // Equal to the last ULP for an exact rescale — the claim itself, with nothing
+    // else in the way. (Not `toEqual`: 7.3x and back leaves a 7e-15 crumb on the
+    // margin that is zero, which is float arithmetic and not a placement.)
+    const scaled = placePanelOverPage(
+      NOMAD,
+      { width: A4.width * 7.3, height: A4.height * 7.3 },
+      canvas,
+    );
+    for (const k of ["width", "height", "left", "top"] as const) {
+      expect(scaled[k]).toBeCloseTo(inPoints[k], 9);
+    }
+    // And ROUNDED pixel dims — what a raster really carries, A4 at 120px tall
+    // being 84.85 rounded to 85 — cost a quarter of a pixel across the whole
+    // placement. That is the entire error budget this shortcut spends.
+    const asPixels = placePanelOverPage(NOMAD, canvas, canvas);
+    for (const k of ["width", "height", "left", "top"] as const) {
+      expect(Math.abs(asPixels[k] - inPoints[k])).toBeLessThan(0.25);
+    }
+  });
 });
 
 // The EXPORT space. On screen the page and the ink stay two elements and the
@@ -165,6 +203,67 @@ describe("markExportSpace", () => {
       { width: -1, height: -1 },
     ]) {
       expect(markExportSpace(NOMAD, bad)).toEqual({ width: 0, height: 0, scale: 0, dx: 0, dy: 0 });
+    }
+  });
+});
+
+describe("markExportMatrix", () => {
+  it("takes the ink's own image back to the page's points, with no offset", () => {
+    // The export image IS the page rect — `markExportSpace` already took the
+    // panel's letterbox out — so the mapping is a pure scale. An offset here
+    // would correct the same margin twice and slide the handwriting off the
+    // page, which is the failure this whole module exists to prevent.
+    const space = markExportSpace(NOMAD, A4);
+    const m = markExportMatrix(space, A4);
+    expect(m[1]).toBe(0); // no shear
+    expect(m[2]).toBe(0);
+    expect(m[4]).toBe(0); // no translation
+    expect(m[5]).toBe(0);
+    // 595.276 pt across 1324 px, 841.89 pt down 1872.
+    expect(m[0]).toBeCloseTo(0.4496, 4);
+    expect(m[3]).toBeCloseTo(0.4497, 4);
+  });
+
+  it("lands the page's four corners on the page's four corners", () => {
+    // The claim stated where it can be read: apply the matrix to the image's
+    // extremes and they must be the page's own, to within a rounding of a pixel.
+    const space = markExportSpace(NOMAD, A4);
+    const [a, , , d] = markExportMatrix(space, A4);
+    expect(a * 0).toBeCloseTo(0, 6);
+    expect(a * space.width).toBeCloseTo(A4.width, 6);
+    expect(d * space.height).toBeCloseTo(A4.height, 6);
+  });
+
+  it("puts the ROUNDING into a 0.03% stretch of the ink, never into a shift", () => {
+    // `markExportSpace` rounds the image to whole pixels and the composition
+    // draws the page to FILL that rounded box, so inverting it PER AXIS
+    // reproduces the flattened PNG exactly. A single shared scale would leave
+    // the page's bottom edge up to a pixel short of the image's, and the ink
+    // near it correspondingly out of place.
+    const space = markExportSpace(NOMAD, A4);
+    const [a, , , d] = markExportMatrix(space, A4);
+    expect(a).not.toBe(d);
+    expect(Math.abs(a / d - 1)).toBeLessThan(0.0005);
+  });
+
+  it("is the identity-shaped mapping for a page the device itself exported", () => {
+    // A device-exported PDF whose points happen to be the panel's pixels: one
+    // point per pixel, and nothing to correct.
+    const panelPage = { width: 1404, height: 1872 };
+    expect(markExportMatrix(markExportSpace(NOMAD, panelPage), panelPage)).toEqual([
+      1, 0, 0, 1, 0, 0,
+    ]);
+  });
+
+  it("answers a degenerate image with a ZERO matrix rather than an Infinity", () => {
+    // An overlay that collapses to a point draws nothing, which is a far better
+    // failure than a non-finite number crossing into wasm.
+    for (const bad of [
+      { width: 0, height: 3 },
+      { width: 4, height: 0 },
+      { width: -1, height: -1 },
+    ]) {
+      expect(markExportMatrix(bad, A4)).toEqual([0, 0, 0, 0, 0, 0]);
     }
   });
 });

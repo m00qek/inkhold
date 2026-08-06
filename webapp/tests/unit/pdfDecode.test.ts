@@ -191,6 +191,113 @@ describe("AsyncPdfDocument, whole-file", () => {
   });
 });
 
+describe("AsyncPdfDocument.exportPage — one page, structure intact", () => {
+  // The PDF-level behaviour (the graft, the placement matrix, the ink's
+  // encoding) is proved in `webapp/wasm/tests/pdf_decode_abi.mjs`, which can
+  // diff rendered pixels against the source page. What is proved HERE is the
+  // wrapper: the alpha reaches wasm through a pointer that survives a heap
+  // growth, the produced bytes are copied out rather than aliased, and both the
+  // scratch buffer and the module's own copy are released whichever way the call
+  // ends. Those are the things a leak or a detached-ArrayBuffer bug lives in.
+
+  /** Full-page coverage: every byte inked, so "did it draw" needs no geometry. */
+  const solid = (w: number, h: number): Uint8Array => new Uint8Array(w * h).fill(255);
+
+  it("produces a one-page PDF at the source page's size, with the ink on it", async () => {
+    const doc = await openWhole();
+    try {
+      const size = await doc.pageSize(0);
+      const before = await doc.render(0, 1);
+      const w = 40;
+      const h = 20;
+      const bytes = await doc.exportPage(0, solid(w, h), w, h, [
+        size.width / w,
+        0,
+        0,
+        size.height / h,
+        0,
+        0,
+      ]);
+      expect(new TextDecoder().decode(bytes.subarray(0, 5))).toBe("%PDF-");
+
+      // Back through the same module. One page, same point size — and darker
+      // than the source everywhere, because the coverage was solid.
+      const out = await AsyncPdfDocument.openWhole(exports, syncCalls(exports), bytes);
+      try {
+        expect(await out.pageCount()).toBe(1);
+        expect(await out.pageSize(0)).toEqual(size);
+        const after = await out.render(0, 1);
+        expect(after.width).toBe(before.width);
+        expect(after.height).toBe(before.height);
+        let lighter = 0;
+        for (let i = 0; i < after.rgba.length; i += 4) {
+          if (after.rgba[i] > before.rgba[i]) lighter += 1;
+        }
+        expect(lighter).toBe(0);
+        // ...and it is INK, not a black page: solid coverage over a white page
+        // has to come out black rather than merely different.
+        let dark = 0;
+        for (let i = 0; i < after.rgba.length; i += 4) if (after.rgba[i] < 64) dark += 1;
+        expect(dark).toBe(after.width * after.height);
+      } finally {
+        out.close();
+      }
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("rejects an alpha buffer that does not match its own dimensions", async () => {
+    const doc = await openWhole();
+    try {
+      // The module reads `w * h` bytes from a raw pointer, so a short buffer is
+      // an out-of-bounds read inside wasm — caught here, before the call.
+      await expect(doc.exportPage(0, solid(10, 10), 20, 20, [1, 0, 0, 1, 0, 0])).rejects.toThrow(
+        /alpha/,
+      );
+      await expect(doc.exportPage(0, solid(4, 4), 0, 4, [1, 0, 0, 1, 0, 0])).rejects.toThrow();
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("surfaces MuPDF's own refusal, and frees the scratch either way", async () => {
+    const doc = await openWhole();
+    try {
+      // A page that does not exist. The message has to come back out — the
+      // caller's fallback is the rasterising exporter, and "it failed" is not a
+      // reason to show anyone.
+      await expect(doc.exportPage(99, solid(4, 4), 4, 4, [1, 0, 0, 1, 0, 0])).rejects.toThrow();
+      // The failed call must not have wedged anything or leaked the scratch: a
+      // good export straight afterwards is the check that proves both.
+      const bytes = await doc.exportPage(0, solid(4, 4), 4, 4, [50, 0, 0, 25, 0, 0]);
+      expect(bytes.length).toBeGreaterThan(0);
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("returns bytes we own — a later export cannot change them", async () => {
+    const doc = await openWhole();
+    try {
+      // The module's buffer is reused, so a view onto wasm memory would mutate
+      // under the caller. This is the assertion that the copy is real.
+      const first = await doc.exportPage(0, solid(4, 4), 4, 4, [50, 0, 0, 25, 0, 0]);
+      const snapshot = new Uint8Array(first);
+      await doc.exportPage(1, solid(8, 8), 8, 8, [37, 0, 0, 18, 0, 0]);
+      expect(first).toEqual(snapshot);
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("a closed document refuses to export", async () => {
+    const doc = await openWhole();
+    doc.close();
+    await expect(doc.exportPage(0, solid(4, 4), 4, 4, [1, 0, 0, 1, 0, 0])).rejects.toThrow(/closed/);
+  });
+});
+
 describe("ink_open_stream — the same document, pulled through `ink.host_read`", () => {
   // The C stream in `pdf_shim.c` is the part of the range design that cannot be
   // tested from JS alone: its `next`/`seek` callbacks have to keep `stm->pos`,

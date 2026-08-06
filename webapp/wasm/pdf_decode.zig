@@ -42,6 +42,19 @@
 //!   i32  ink_render_width() / ink_render_height() — the last render's pixel
 //!        dimensions. Read them AFTER the `ink_render` that produced the buffer.
 //!
+//! Export:
+//!   i64  ink_export_page(i32 doc, i32 page, u8* alpha, u32 w, u32 h,
+//!                        f32 a, f32 b, f32 c, f32 d, f32 e, f32 f)
+//!        — a ONE-PAGE PDF holding `page` grafted whole (its text stays
+//!        selectable, its fonts and vectors stay vectors, its page size is
+//!        unchanged) with `alpha` drawn over it as ink. `alpha` is `w*h`
+//!        coverage bytes, 255 = full ink, 0 = transparent. `a..f` map the alpha
+//!        image's OWN PIXEL SPACE — (0,0) top-left, y downwards — onto the page
+//!        in DISPLAY space, the same top-left-origin cropped-and-rotated box
+//!        `ink_page_size` reports; covering the page is `w_pt/w, 0, 0, h_pt/h,
+//!        0, 0`. Returns `(ptr << 32) | len` of the produced PDF, or negative.
+//!   void ink_export_free()             — release that buffer.
+//!
 //! Diagnostics:
 //!   u8*  ink_error_ptr() / u32 ink_error_len() — UTF-8 bytes of the most recent
 //!        MuPDF error message (length 0 if nothing has failed).
@@ -73,6 +86,7 @@ const std = @import("std");
 // ---- pdf_shim.c ----
 const Document = opaque {};
 const Pixmap = opaque {};
+const Buffer = opaque {};
 
 extern fn ink_shim_context() ?*anyopaque;
 extern fn ink_shim_open(data: ?*anyopaque, len: u32) ?*Document;
@@ -86,6 +100,22 @@ extern fn ink_shim_pixmap_height(pix: *Pixmap) c_int;
 extern fn ink_shim_pixmap_components(pix: *Pixmap) c_int;
 extern fn ink_shim_pixmap_stride(pix: *Pixmap) c_int;
 extern fn ink_shim_drop_pixmap(pix: *Pixmap) void;
+extern fn ink_shim_export_page(
+    doc: *Document,
+    number: c_int,
+    alpha: [*]const u8,
+    w: c_int,
+    h: c_int,
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    e: f32,
+    f: f32,
+) ?*Buffer;
+extern fn ink_shim_buffer_data(buf: *Buffer) ?[*]u8;
+extern fn ink_shim_buffer_len(buf: *Buffer) c_int;
+extern fn ink_shim_drop_buffer(buf: *Buffer) void;
 extern fn ink_shim_drop_document(doc: *Document) void;
 extern fn ink_shim_shrink_store() void;
 extern fn ink_shim_error() [*:0]const u8;
@@ -109,6 +139,11 @@ var documents: [max_documents]?*Document = @splat(null);
 var last_pixmap: ?*Pixmap = null;
 var last_width: i32 = 0;
 var last_height: i32 = 0;
+
+/// The last export, held for exactly as long as it takes JS to copy the bytes
+/// out. Same one-at-a-time posture as `last_pixmap`, for the same reason: an
+/// exported page is megabytes and nobody needs two.
+var last_export: ?*Buffer = null;
 
 // ---- Buffers ----
 
@@ -207,6 +242,10 @@ export fn ink_close(handle: i32) void {
     }
     dropLastRender();
     ink_shim_shrink_store();
+    // NOT `ink_export_free()`. An exported PDF is a finished artefact that owes
+    // the document nothing, and the natural call order is export, close, then
+    // hand the bytes to the UI — freeing here would pull the buffer out from
+    // under that. It is bounded anyway: one buffer, replaced by the next export.
 }
 
 // ---- Rendering ----
@@ -275,6 +314,106 @@ export fn ink_render_width() i32 {
 
 export fn ink_render_height() i32 {
     return last_height;
+}
+
+// ---- Export ----
+
+/// Export one page, structure intact, with `alpha` inked over it.
+///
+/// WHAT THIS IS FOR. The rasterising exporter turns a page into a picture of a
+/// page: text stops being selectable, vectors stop being vectors, the geometry
+/// becomes A4. This one grafts the ORIGINAL page into a fresh one-page document
+/// and draws the ink on top, so all of that survives. `pdf_shim.c` explains the
+/// PDF-level choices, including the one thing that does NOT survive (/Annots).
+///
+/// `alpha` is `w*h` coverage bytes in wasm memory, 255 = full ink. `a`..`f` are
+/// a DISPLAY-space matrix (top-left origin, y down, points) applied to the alpha
+/// image's own pixel space — so the page-covering case is `w_pt/w, 0, 0, h_pt/h,
+/// 0, 0`, and rotation, a /CropBox offset and an off-origin /MediaBox are all
+/// handled on the far side.
+///
+/// Returns `(ptr << 32) | len` of the produced PDF — valid until the next
+/// `ink_export_page` or `ink_export_free`, so COPY IT OUT — or negative:
+/// -1 bad arguments or a dead handle, -2 the export failed (`ink_error_ptr` says
+/// why; not a PDF, or MuPDF refused the page), -3 the produced buffer cannot be
+/// described by the packed return.
+///
+/// LIKE `ink_open_stream`, EVERY CALL HERE CAN SUSPEND: grafting reads the
+/// source document, which on the streamed path pulls through `ink.host_read`.
+/// Nothing in Zig sits on that stack — the shim owns the `fz_try`.
+export fn ink_export_page(
+    handle: i32,
+    page: i32,
+    alpha: ?[*]const u8,
+    w: u32,
+    h: u32,
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    e: f32,
+    f: f32,
+) i64 {
+    const doc = lookup(handle) orelse return -1;
+    const bytes = alpha orelse return -1;
+    if (page < 0 or w == 0 or h == 0) return -1;
+    if (w > std.math.maxInt(c_int) or h > std.math.maxInt(c_int)) return -1;
+    // `w * h` is the length of a buffer JS already allocated, so it fits — but
+    // the shim would multiply it out inside an `fz_try`, and an overflow there
+    // is a wildly undersized allocation followed by a read off the end of the
+    // heap rather than an exception. Refuse it here instead.
+    _ = std.math.mul(u32, w, h) catch return -1;
+    for ([_]f32{ a, b, c, d, e, f }) |v| {
+        // A NaN or an infinity reaches the content stream as the literal "nan",
+        // which makes the page unparseable to every reader — a silently broken
+        // export, which is worse than a refused one.
+        if (!std.math.isFinite(v)) return -1;
+    }
+
+    // Drop the previous export FIRST, for the same reason `ink_render` does:
+    // holding two page-sized buffers while the second is built is the difference
+    // between an export and an out-of-memory tab.
+    ink_export_free();
+
+    const buf = ink_shim_export_page(
+        doc,
+        page,
+        bytes,
+        @intCast(w),
+        @intCast(h),
+        a,
+        b,
+        c,
+        d,
+        e,
+        f,
+    ) orelse return -2;
+    const written = ink_shim_buffer_len(buf);
+    const data = ink_shim_buffer_data(buf);
+    if (written <= 0 or data == null) {
+        ink_shim_drop_buffer(buf);
+        return -3;
+    }
+    const len: u64 = @intCast(written);
+    const ptr: u64 = @intFromPtr(data.?);
+    // The packed return has to stay POSITIVE — negative is the error channel —
+    // which holds for any wasm heap under 2 GiB. Checked, not assumed.
+    if (ptr > std.math.maxInt(i32)) {
+        ink_shim_drop_buffer(buf);
+        return -3;
+    }
+
+    last_export = buf;
+    return @intCast((ptr << 32) | len);
+}
+
+/// Release the buffer `ink_export_page` returned. Idempotent, and safe to call
+/// without ever having exported.
+export fn ink_export_free() void {
+    if (last_export) |buf| {
+        last_export = null;
+        ink_shim_drop_buffer(buf);
+    }
 }
 
 // ---- Diagnostics ----

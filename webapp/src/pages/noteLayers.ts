@@ -13,7 +13,10 @@
 // `style.display`, mirroring spdViewer; a toggle costs no decode. The canvases
 // are BASE resolution (the payload's own dims, ~10.5 MB RGBA each), which is
 // affordable for THE focused page only — filmstrip/thumbnails/neighbours stay
-// on the composite path, by scope pin.
+// on the composite path, by scope pin. The ONE exception is `inkRaster`, which a
+// filmstrip does drive per page: it decodes a layer, reduces it and drops it
+// before asking for the next, so it never holds a stack and never touches the
+// one `present` has mounted. See its own note for why the two cannot share.
 //
 // DEGRADE, NEVER BREAK. Every checkpoint that can fail — a v1/hostile payload,
 // a slot mismatch between records and the VO list, a missing `decode_layer`
@@ -160,6 +163,34 @@ export function pairLayers(records: readonly SnpgRecord[], vos: readonly PageLay
     out.push({ index, record, vo });
   }
   return out;
+}
+
+/**
+ * The wire positions of the records that carry INK a reader would see — the
+ * input to any flattening of a page that is an OVERLAY on something else (a
+ * `.mark` over the PDF it annotates), rather than a page in its own right.
+ *
+ * Three kinds of record are dropped, and each for a reason the screen already
+ * states somewhere:
+ *
+ *  - the BACKGROUND slot, because over a PDF that layer is the device's paper
+ *    and the document IS the paper. Compositing it is a second opaque sheet
+ *    (`pdfViewer.ts`'s `suppressBackground` hides the same record on screen).
+ *  - a RASTER-IMAGE background, which is a background by another route: its
+ *    `data` is a template asset hash, not pixels, and it would need a fetch of
+ *    its own to draw something that must not be drawn.
+ *  - a DEVICE-HIDDEN record (wire flag bit1). `present` seeds each layer's
+ *    visibility from the authored flag, so a hidden layer is not on the page —
+ *    and a thumbnail that showed it would put strokes in the filmstrip that are
+ *    nowhere in the document beside it.
+ *
+ * Pure, and separate from the decode, so "which layers is a mark's ink?" can be
+ * asserted against a real payload without a canvas.
+ */
+export function inkRecordIndices(records: readonly SnpgRecord[]): number[] {
+  return records.flatMap((r, i) =>
+    r.slot === "background" || r.rasterImage || r.hidden ? [] : [i],
+  );
 }
 
 /**
@@ -370,6 +401,33 @@ export interface NoteLayersController {
    * has consumed the canvases. Null when no stack is up.
    */
   exportModel(): Promise<{ model: LayeredExportModel; release: () => void } | null>;
+  /**
+   * ONE page's ink, small — the whole authored stack minus its paper, flattened
+   * into a `dst`-sized canvas. For a THUMBNAIL, where the page it annotates is
+   * 120px and a stack of full-resolution canvases is not on offer.
+   *
+   * DELIBERATELY OUTSIDE `present`. That call mounts the stack, holds ONE page
+   * at a time and is what the screen is looking at; driving it per thumbnail
+   * would evict the page the reader is on and re-decode it on the way back. This
+   * decodes, downscales and throws the big pixels away — it touches no state the
+   * screen owns, so a filmstrip and an open page can want different pages of the
+   * same mark at once. It shares the decoder INSTANCE, which is the point: one
+   * wasm module and one linear memory for the viewer, not two.
+   *
+   * WHAT IS DROPPED, and why it matches the page beside it: the BACKGROUND slot
+   * (over a PDF that layer is the device's paper, and the document is the paper —
+   * `pdfViewer.ts`'s `suppressBackground` says the same on screen) and any
+   * DEVICE-HIDDEN record (`present` seeds visibility from the authored flag, so
+   * showing one here would put ink in the strip that is not on the page).
+   *
+   * Null when there is nothing to draw: an unpresentable payload, a module too
+   * old for `decode_layer`, no ink records, or no 2D context. The caller shows
+   * the bare page — a missing overlay is not a broken thumbnail.
+   *
+   * The canvas is the CALLER'S to free (`width = 0`), like every other canvas
+   * this module hands out.
+   */
+  inkRaster(bytes: ArrayBuffer, dst: { width: number; height: number }): Promise<HTMLCanvasElement | null>;
   /** Drop the stack and its canvases (page change, mode change, teardown). */
   release(): void;
 }
@@ -572,6 +630,57 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
         model: buildNoteExportModel(stack.width, stack.height, stack.views, canvases),
         release: () => canvases.forEach(zeroCanvas),
       };
+    },
+
+    async inkRaster(
+      bytes: ArrayBuffer,
+      dst: { width: number; height: number },
+    ): Promise<HTMLCanvasElement | null> {
+      const w = Math.max(1, Math.round(dst.width));
+      const h = Math.max(1, Math.round(dst.height));
+      let out: HTMLCanvasElement | null = null;
+      try {
+        const wasm = await decoder();
+        if (typeof wasm.decode_layer !== "function") return null;
+        const u8 = new Uint8Array(bytes);
+        const enumerated = enumerateSnpg(wasm, u8);
+        if (!enumerated) return null;
+        out = document.createElement("canvas");
+        out.width = w;
+        out.height = h;
+        const ctx = out.getContext("2d"); // null in happy-dom — degrade, don't throw
+        if (!ctx) {
+          zeroCanvas(out);
+          return null;
+        }
+        const ink = inkRecordIndices(enumerated.records);
+        if (ink.length === 0) {
+          zeroCanvas(out);
+          return null;
+        }
+        for (const index of ink) {
+          // ONE LAYER RESIDENT AT A TIME. A payload's layer is the panel's own
+          // ~1404x1872 (10.5 MB of RGBA, and `layerCanvas` holds a second copy
+          // while it blits), so the loop that `present` runs — decode them all,
+          // then stack — is 40 MB against a 50 MB app budget for a picture that
+          // ends up 120 px wide. Each is reduced and released before the next is
+          // asked for, which puts the peak at one layer whatever the page holds.
+          const full = layerCanvas(decodeLayerWithExports(wasm, u8, index));
+          // The SHARED quality downscale, for the reason it exists: this is a
+          // ~15x reduction, and one bilinear `drawImage` step at that ratio skips
+          // most source rows — it would drop the thinnest strokes outright and
+          // moire the rest. `buildNoteLayerThumb` reduces the same pixels the
+          // same way for the panel's own previews.
+          await drawDownscaledInto(ctx, full, w, h, 0, 0);
+          zeroCanvas(full);
+        }
+        return out;
+      } catch {
+        // A decode error, a hostile payload, an OOM: the page still stands on its
+        // own, exactly as it does when `present` answers null.
+        if (out) zeroCanvas(out);
+        return null;
+      }
     },
 
     release,

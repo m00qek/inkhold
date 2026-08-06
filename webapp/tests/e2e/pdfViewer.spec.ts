@@ -1,6 +1,7 @@
 import { test, expect, type Download, type Locator, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { inflateSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { signedIn, freezeMotion } from "./helpers/app";
 
@@ -19,6 +20,27 @@ import { signedIn, freezeMotion } from "./helpers/app";
 
 const PDF_PATH = fileURLToPath(new URL("../../wasm/tests/fixtures/two-page.pdf", import.meta.url));
 const PDF_BYTES = readFileSync(PDF_PATH);
+
+/**
+ * A second two-page fixture whose pages are 351 x 468 pt — EXACTLY the device
+ * panel's 1404 x 1872 aspect.
+ *
+ * It exists because the default fixture cannot show what the mark does. Its page
+ * 2 is 300 x 150 (landscape 2:1), so the page-rect inside the panel is only rows
+ * 585..1287, and of the mark's three ink bands (200–400 Main, 800–1100 the
+ * device-HIDDEN Layer 2, 1400–1500 Layer Renamed) the only one that lands on the
+ * page is the hidden one. Every visible stroke falls in the dead margin and is
+ * clipped — on the page AND in the filmstrip — so a viewer that composited no
+ * ink at all would look identical.
+ *
+ * At the panel's own aspect the letterbox vanishes (fit = the whole panel at
+ * (0,0)), so all three bands map onto the page and each becomes a band of
+ * thumbnail rows a pixel probe can name. Served per test through `servePdf`, so
+ * nothing about the shared fixtures moves.
+ */
+const PANEL_PDF_BYTES = readFileSync(
+  fileURLToPath(new URL("../../wasm/tests/fixtures/two-page-panel.pdf", import.meta.url)),
+);
 
 async function servePdf(page: Page, body: Buffer = PDF_BYTES): Promise<void> {
   await page.route(
@@ -231,6 +253,36 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // ever appeared to admit it.
     await expect.poll(clearOfPanel, { timeout: 20_000 }).toBeGreaterThanOrEqual(-1);
     expect(await ratio()).toBeCloseTo(atFit, 1);
+  });
+
+  test("a page is an ADDRESS: paging rewrites the URL, and a reload lands there", async ({
+    page,
+  }) => {
+    // The route `#/note/:id/page/:n` is shared with the reader and this viewer
+    // has always honoured it on the way IN — but it never wrote one back, so the
+    // half a person actually uses was missing: paging to 34 and reloading came
+    // back to page 1, and there was no address to send anyone. The reader has
+    // published its page since it existed.
+    await signedIn(page);
+    await servePdf(page);
+    await page.goto("/#/note/n-files-manual");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+    await expect(region.getByText("1 / 2")).toBeVisible();
+
+    await region.getByRole("button", { name: "Next page" }).click();
+    await expect(region.getByText("2 / 2")).toBeVisible();
+    // ONE-BASED in the URL, 0-based internally — the router's convention.
+    await expect(page).toHaveURL(/#\/note\/n-files-manual\/page\/2$/);
+
+    // And the address is REAL: a reload opens the page it names, which is the
+    // whole point of writing it. A URL that only decorates the address bar would
+    // pass the assertion above and fail this one.
+    await page.reload();
+    await freezeMotion(page);
+    await expect(region.getByText("2 / 2")).toBeVisible({ timeout: 20_000 });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
   });
 
   test("refuses a corrupt PDF with MuPDF's own words, and does not wedge", async ({ page }) => {
@@ -613,6 +665,138 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     expect(clear).toBe(true);
   });
 
+  // --- the filmstrip shows the ink -----------------------------------------
+  //
+  // THE BUG: a PDF with a paired `.mark` painted the handwriting on the page and
+  // the STRIP went on showing the bare document. For a sparse mark — the device
+  // stores only the pages that were written on, 7 of 77 in the real capture —
+  // the strip is precisely where you want to see which pages you wrote on, and
+  // it was the one place that did not say.
+  //
+  // THE FIXTURE'S GEOMETRY, on `two-page-panel.pdf` (see its constant): the page
+  // is the panel's own aspect, so the panel maps onto the 90x120 thumbnail 1:1
+  // and every panel row `r` is thumbnail row `r/15.6`. That puts the mark's
+  // bands at:
+  //     Main            panel 200–400   -> thumb rows 12.8–25.6
+  //     Layer 2 HIDDEN  panel 800–1100  -> thumb rows 51.3–70.5
+  //     Layer Renamed   panel 1400–1500 -> thumb rows 89.7–96.2
+  // and the PDF's OWN drawing (identical on both pages) at rows 30.0–45.1, 28%
+  // of the width. Probes below stay inside those bands.
+
+  /** Every row of a thumbnail canvas as a fraction of dark pixels, 0..1. */
+  async function thumbRowInk(canvas: Locator): Promise<number[]> {
+    return canvas.evaluate((c) => {
+      const cv = c as HTMLCanvasElement;
+      if (!cv.width || !cv.height) return [];
+      const d = cv.getContext("2d")!.getImageData(0, 0, cv.width, cv.height).data;
+      const rows: number[] = [];
+      for (let y = 0; y < cv.height; y++) {
+        let dark = 0;
+        for (let x = 0; x < cv.width; x++) {
+          const i = (y * cv.width + x) * 4;
+          if (d[i + 3]! > 10 && d[i]! < 128) dark++;
+        }
+        rows.push(dark / cv.width);
+      }
+      return rows;
+    });
+  }
+
+  /** The mean darkness over an inclusive band of thumbnail rows. */
+  const band = (rows: number[], from: number, to: number): number =>
+    rows.length === 0 ? -1 : rows.slice(from, to + 1).reduce((a, b) => a + b, 0) / (to - from + 1);
+
+  /** Open the marked PDF against the panel-aspect fixture, with Pages open. */
+  async function openStrip(page: Page): Promise<Locator> {
+    await signedIn(page);
+    await servePdf(page, PANEL_PDF_BYTES);
+    await page.goto("/#/note/n-files-manual");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+    const pages = region.getByRole("button", { name: "Pages", exact: true });
+    if ((await pages.getAttribute("aria-pressed")) !== "true") await pages.click();
+    await expect(region.locator(".filmstrip__thumb:not(.is-loading)")).toHaveCount(2, {
+      timeout: 20_000,
+    });
+    return region;
+  }
+
+  test("the STRIP carries the mark's handwriting, on the row that was written on", async ({
+    page,
+  }) => {
+    const region = await openStrip(page);
+    const thumb = (n: number) => region.locator(".filmstrip__page").nth(n).locator("canvas");
+
+    // PAGE 2 IS THE ANNOTATED ONE — the mark names it `sourcePage: 2`, and a
+    // viewer that ignored that would put this ink on page 1 and look plausible.
+    // Polled: the mark may land after the row's first paint, and the repaint is
+    // exactly what this feature owes (see the reopen test below).
+    await expect
+      .poll(async () => band(await thumbRowInk(thumb(1)), 15, 23), { timeout: 20_000 })
+      .toBeGreaterThan(0.9);
+    const inked = await thumbRowInk(thumb(1));
+    // Both visible ink bands, where the device wrote them.
+    expect(band(inked, 91, 95)).toBeGreaterThan(0.9);
+    // …and NOT the device-HIDDEN layer, whose band is untouched paper. The page
+    // beside the strip does not show it either — a thumbnail that did would put
+    // strokes in the filmstrip that are nowhere in the document.
+    expect(band(inked, 55, 66)).toBeLessThan(0.05);
+    // AND THE DOCUMENT SURVIVES UNDER THE INK. The mark is an overlay, not a
+    // second sheet: the PDF's own drawing is still there, at its own width.
+    expect(band(inked, 33, 42)).toBeGreaterThan(0.2);
+    expect(band(inked, 33, 42)).toBeLessThan(0.4);
+
+    // PAGE 1 CARRIES NONE OF IT. A mark holds only the pages written on, so an
+    // unannotated row must be the bare document — and this fixture's two pages
+    // are drawn identically, so the ink bands are the only difference there is.
+    const plain = await thumbRowInk(thumb(0));
+    expect(band(plain, 15, 23)).toBeLessThan(0.05);
+    expect(band(plain, 91, 95)).toBeLessThan(0.05);
+    expect(band(plain, 33, 42)).toBeGreaterThan(0.2);
+  });
+
+  test("the composited row is a CACHE ENTRY of its own, and survives a late mark", async ({
+    page,
+  }) => {
+    // TWO CLAIMS, because they are the same mechanism seen from both ends.
+    //
+    // The key. A row that now holds ink is a picture of TWO blobs, so it is keyed
+    // by both (`pdfViewer.ts`'s `thumbKey`). Under the bare `${md5}:p${i}` an
+    // ink-free entry written a moment before the mark landed would be served for
+    // the life of the store, which is the stale-thumbnail bug this replaces.
+    //
+    // The race. `loadMark` does not block the document, and on a REOPEN the strip
+    // is served from IndexedDB while the mark's metadata is a fresh request — so
+    // the second visit is the late-mark case, reproducibly. The row must end up
+    // inked anyway.
+    await openStrip(page);
+    await page.goto("/#/");
+    await page.goto("/#/note/n-files-manual");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+    await expect(page.locator("#pdf-pages-panel")).toBeVisible(); // chrome state survives
+
+    const thumb = region.locator(".filmstrip__page").nth(1).locator("canvas");
+    await expect
+      .poll(async () => band(await thumbRowInk(thumb), 15, 23), { timeout: 20_000 })
+      .toBeGreaterThan(0.9);
+
+    // AND IT COST NOTHING TO GET BACK. `renders` counts MuPDF page rasters and
+    // `inked` counts mark pages fetched-and-decoded; both are zero because the
+    // composite came back from `sn-thumbs` whole. Painting alone proves nothing
+    // here — a second visit that rebuilt every thumbnail from scratch would look
+    // exactly the same, which is why these counters exist at all.
+    const counts = await page.evaluate(
+      () =>
+        (globalThis as unknown as { __inkholdPdfThumbs?: { renders: number; inked: number } })
+          .__inkholdPdfThumbs ?? { renders: -1, inked: -1 },
+    );
+    expect(counts.renders).toBe(0);
+    expect(counts.inked).toBe(0);
+  });
+
   test("leaving the document DROPS the mark's canvases, rather than hiding them", async ({
     page,
   }) => {
@@ -710,6 +894,17 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
         () => (globalThis as unknown as { __inkholdPdfThumbs?: { hits: number; renders: number } })
           .__inkholdPdfThumbs ?? { hits: 0, renders: 0 },
       );
+    // WAIT FOR THE STRIP TO PAINT BEFORE READING THE COUNTERS, and do it as its
+    // own step. Polling the counters straight after the reopen made this test's
+    // budget cover the whole cold path — a wasm compile and the app's boot —
+    // rather than the cache read it is about, and under a saturated machine
+    // (the full suite, not this file alone) that ran out: the failure was
+    // `hits` still 0 at the timeout, with nothing yet painted to have hit
+    // anything. It passed in isolation every time, which is the signature of a
+    // budget problem rather than a behaviour one.
+    await expect(region.locator(".filmstrip__thumb:not(.is-loading)").first()).toBeVisible({
+      timeout: 30_000,
+    });
     await expect.poll(async () => (await counts()).hits, { timeout: 20_000 }).toBeGreaterThan(0);
     expect((await counts()).renders).toBe(0); // nothing was rendered twice
     const ink = await region.locator(".filmstrip__thumb canvas").first().evaluate((c) => {
@@ -765,6 +960,33 @@ async function downloadBytes(download: Download): Promise<Buffer> {
   return readFile(path);
 }
 
+/**
+ * Every deflated stream in a PDF, inflated.
+ *
+ * Blunt on purpose: it tries each `stream…endstream` span and keeps the ones
+ * that inflate. Walking the xref to find object N properly would be a PDF parser
+ * in a test file, and what the assertions below need is only "is this content in
+ * here, at this size" — a claim that does not care which object number carries
+ * it. Streams under another filter (the ink's 1-bit stencil is CCITT) simply
+ * fail to inflate and drop out.
+ */
+function inflatedStreams(pdf: Buffer): Buffer[] {
+  const out: Buffer[] = [];
+  for (let at = pdf.indexOf("stream"); at >= 0; at = pdf.indexOf("stream", at + 6)) {
+    let from = at + 6;
+    if (pdf[from] === 0x0d) from++;
+    if (pdf[from] === 0x0a) from++;
+    const end = pdf.indexOf("endstream", from);
+    if (end < 0) continue;
+    try {
+      out.push(inflateSync(pdf.subarray(from, end)));
+    } catch {
+      // Not deflated (or not a stream at all) — not this test's business.
+    }
+  }
+  return out;
+}
+
 /** Open the annotated fixture; `page2` walks to the one page that has ink. */
 async function openMarkedPdf(page: Page, page2: boolean): Promise<Locator> {
   await signedIn(page);
@@ -793,7 +1015,7 @@ async function annotationsPanel(page: Page, region: Locator) {
 }
 
 test.describe("PDF export menu", () => {
-  test("a page with no ink offers its flattened image and the raw file, and no more", async ({
+  test("a page with no ink offers its flattened image, its own PDF and the raw file", async ({
     page,
   }) => {
     const region = await openMarkedPdf(page, false);
@@ -806,8 +1028,12 @@ test.describe("PDF export menu", () => {
       "Whole document",
     ]);
     // The layered ORA folds away — an ORA of a bare page has nothing to layer.
-    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(2);
+    // The per-page PDF does NOT: an unannotated page is exactly the case where
+    // lifting this page out of the document with its text still selectable is
+    // the only useful thing the menu can do with it.
+    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(3);
     await expect(pdfGroupItem(page, "Current view", "Flattened image")).toBeVisible();
+    await expect(pdfGroupItem(page, "Current view", "PDF document")).toBeVisible();
     await expect(pdfGroupItem(page, "Whole document", "PDF document")).toBeVisible();
     await expect(pdfMenu(page).getByRole("menuitem", { name: "Layered image" })).toBeHidden();
   });
@@ -839,8 +1065,10 @@ test.describe("PDF export menu", () => {
       "This page — Original view",
       "Whole document",
     ]);
-    // Four per-page rows now, plus the raw file.
-    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(5);
+    // Six per-page rows now — image, layers and PDF in each view — plus the raw
+    // file.
+    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(7);
+    await expect(pdfGroupItem(page, "Original view", "PDF document")).toBeVisible();
   });
 
   test("turning the PAGE off is itself enough to offer the ORIGINAL view", async ({ page }) => {
@@ -862,7 +1090,15 @@ test.describe("PDF export menu", () => {
       "Whole document",
     ]);
     await expect(pdfMenu(page).getByRole("menuitem", { name: "Layered image" })).toBeHidden();
-    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(3);
+
+    // AND THE CURRENT VIEW'S PDF ROW GOES WITH IT. "Show me the ink alone" is a
+    // thing a `.png` can answer — with transparency, which is what that row is
+    // for. A PDF of this page cannot: the page's own content streams are what
+    // gets grafted, so there is no "the page, without the page". The ORIGINAL
+    // one stays, because the document's authored state is always visible.
+    await expect(pdfGroupItem(page, "Current view", "PDF document")).toBeHidden();
+    await expect(pdfGroupItem(page, "Original view", "PDF document")).toBeVisible();
+    await expect(pdfMenu(page).locator(".menu__item:visible")).toHaveCount(4);
   });
 
   test("the raw PDF still downloads unchanged, from WHOLE DOCUMENT", async ({ page }) => {
@@ -875,6 +1111,106 @@ test.describe("PDF export menu", () => {
       pdfGroupItem(page, "Whole document", "PDF document").click(),
     ]);
     expect(download.url()).toContain("/file/");
+  });
+
+  test("the per-page PDF is the PAGE ITSELF, with the ink drawn over it", async ({ page }) => {
+    // THE ONE EXPORT THAT IS NOT A PICTURE. Every other row in this menu
+    // rasterises: a PNG of the page, an ORA of the page's layers, and both of
+    // them turn a document into pixels. This one asks the decoder to GRAFT the
+    // source page — its own content streams and the resources they reference —
+    // into a fresh one-page document and stencil the ink on top, so the text,
+    // the fonts and the vectors survive the round trip.
+    //
+    // Every assertion below is about that difference, because a rasterised
+    // export would pass a weaker test perfectly: it would be a valid PDF, of
+    // roughly the right size, with the ink in roughly the right place.
+    const region = await openMarkedPdf(page, true);
+    // Layer 2's band (panel rows 800–1100) is the only ink inside this page's
+    // rect, and it is device-hidden — so without this toggle the mask is
+    // legitimately empty and "the ink landed" has nothing to say.
+    const row = await annotationsPanel(page, region);
+    await row("Layer 2").click();
+
+    await region.getByRole("button", { name: "Download" }).click();
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      pdfGroupItem(page, "Current view", "PDF document").click(),
+    ]);
+    // The reader's naming, with the 1-BASED page the pager shows — the same
+    // helper the `.png` and `.ora` rows go through.
+    expect(download.suggestedFilename()).toBe("Appliance manual_p2_current.pdf");
+
+    const bytes = await downloadBytes(download);
+    expect(bytes.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+    const text = bytes.toString("latin1");
+    // THE SOURCE PAGE'S OWN GEOMETRY, in points. A raster export would carry
+    // whatever box the writer chose for a 1404x702 image; this is page 2 of the
+    // fixture, 300x150 pt, unchanged.
+    expect(text).toContain("/MediaBox[0 0 300 150]");
+    // …and ONE page, not the document.
+    expect(text).toContain("/Count 1");
+
+    const streams = inflatedStreams(bytes);
+    const content = streams.find((s) => s.includes("Do"))?.toString("latin1") ?? "";
+    // THE PAGE'S OWN VECTOR DRAWING, still a vector. The fixture's page 2 is the
+    // operator `10 10 20 20 re f` — a filled rectangle — and it is present in
+    // the exported page's content stream verbatim. Nothing that rasterised the
+    // page could produce this line.
+    expect(content).toContain("10 10 20 20 re f");
+    // The ink goes on top, as an image scaled to the whole page: `300 0 0 150`
+    // is the matrix this app computed (`markExportMatrix`) arriving intact.
+    expect(content).toMatch(/300 0 0 150 0 0 cm\s*\/\w+ Do/);
+    // The mask crossed at the INK's own resolution, not the page's 300x150 pt —
+    // the whole point of composing at `markExportSpace` is that the handwriting
+    // is never resampled on the way out.
+    expect(text).toContain("/Width 1404");
+    expect(text).toContain("/Height 702");
+
+    // AND THE INK IS IN THE RIGHT ROWS, which "there is an image" does not say.
+    // Layer 2's band is panel rows 800–1100 and the page-rect starts at panel
+    // row 585, so the coverage must run from export row 215 to 514 — and Main
+    // (200–400) and Layer Renamed (1400–1500) fall outside the page entirely
+    // and must contribute nothing. This is the same claim the transparent PNG
+    // test makes about the same page, asked of the soft mask instead.
+    const soft = streams.find((s) => s.length === 1404 * 702);
+    expect(soft).toBeTruthy();
+    let firstRow = -1;
+    let lastRow = -1;
+    for (let i = 0; i < soft!.length; i++) {
+      if (soft![i] === 0) continue;
+      const r = Math.floor(i / 1404);
+      if (firstRow < 0) firstRow = r;
+      lastRow = r;
+    }
+    expect(firstRow).toBe(215);
+    expect(lastRow).toBe(514);
+  });
+
+  test("the per-page PDF row always answers, and never wedges itself", async ({ page }) => {
+    // THE TOAST IS PART OF THE FEATURE, not decoration. A per-page PDF looks
+    // exactly like the document it came from, and two things about it are
+    // invisible until they bite: it is ONE page, and grafting does not copy the
+    // source page's `/Annots`, so links and pre-existing highlights are gone.
+    // Nobody traces a link that has quietly stopped working back to the export
+    // that dropped it, which is why the row says so at the moment it happens.
+    //
+    // And the row must survive its own run. `menu.item` disables a row while it
+    // works and re-enables it in a `finally`; if that ever stops holding, one
+    // export would be the last one this viewer ever performs.
+    const region = await openMarkedPdf(page, true);
+    await region.getByRole("button", { name: "Download" }).click();
+    await Promise.all([
+      page.waitForEvent("download"),
+      pdfGroupItem(page, "Current view", "PDF document").click(),
+    ]);
+
+    const toast = page.locator(".toast");
+    await expect(toast).toContainText("Saved Appliance manual_p2_current.pdf");
+    await expect(toast).toContainText("this page only");
+    await expect(toast).toContainText("not carried over");
+
+    await region.getByRole("button", { name: "Download" }).click();
+    await expect(pdfGroupItem(page, "Current view", "PDF document")).toBeEnabled();
   });
 
   test("the flattened PNG is the PAGE's rect at the INK's own resolution", async ({ page }) => {

@@ -150,6 +150,50 @@ export interface ExportSpace {
  * something the user drew, and if it ever needs to change, this is the function
  * that decides it.
  */
+/**
+ * A 2x3 affine matrix, in the PDF/PostScript ordering `[a, b, c, d, e, f]`:
+ *
+ *     x' = a·x + c·y + e
+ *     y' = b·x + d·y + f
+ *
+ * DISPLAY SPACE — top-left origin, y DOWN. That is the space `pageSize()`
+ * reports and the space the raster is in, and it is NOT the PDF's own
+ * bottom-left user space. Everything the page carries between the two (a
+ * `/Rotate`, a `/CropBox` whose origin is not zero) lives inside the decoder's
+ * own display transform, so nothing here has to know about it: this maps onto
+ * the page AS THE READER SEES IT, which is the only page this app ever measures.
+ */
+export type DisplayMatrix = readonly [number, number, number, number, number, number];
+
+/**
+ * Where an exported INK IMAGE goes on the page it annotates — the inverse of the
+ * composition {@link markExportSpace} sets up, expressed as a matrix a renderer
+ * can consume.
+ *
+ * NO TRANSLATION, and that is the claim worth stating: `markExportSpace` has
+ * ALREADY un-shifted the ink by the panel's letterbox margin (`dx`/`dy`), so the
+ * image's pixel (0,0) IS the page's top-left corner and its extent IS the page
+ * rect. A second offset here would correct the same margin twice — which is
+ * exactly the bug that reads as "the handwriting is a few millimetres off" and
+ * survives every test that only asks whether ink is present.
+ *
+ * PER-AXIS SCALE, rather than the single `k` that {@link placePanelOverPage} takes
+ * from width alone. The reasoning is opposite there and here. On screen the two
+ * halves are separate elements and one shared ratio is what stops a rounded
+ * canvas from SKEWING the overlay. In an export they are already one rectangle:
+ * `markExportSpace` rounds the image to whole pixels and `composeMarkExportModel`
+ * draws the page to FILL that rounded box, so inverting it per-axis reproduces
+ * the flattened PNG exactly. For A4 on an N6 the two axes differ by 0.02%.
+ *
+ * Degenerate input answers with the ZERO matrix rather than an `Infinity`: an
+ * overlay that collapses to a point draws nothing, and "no ink" is a far better
+ * failure than a non-finite number crossing into wasm.
+ */
+export function markExportMatrix(image: Size, pagePt: Size): DisplayMatrix {
+  if (image.width <= 0 || image.height <= 0) return [0, 0, 0, 0, 0, 0];
+  return [pagePt.width / image.width, 0, 0, pagePt.height / image.height, 0, 0];
+}
+
 export function markExportSpace(panel: Size, pagePt: Size): ExportSpace {
   const fit = fitPageInPanel(panel, pagePt);
   if (fit.width <= 0 || fit.height <= 0) return { width: 0, height: 0, scale: 0, dx: 0, dy: 0 };

@@ -10,9 +10,12 @@ import type { PdfResponse } from "../../src/render/pdfWorkerTypes";
 
 class FakeWorker extends EventTarget {
   readonly sent: unknown[] = [];
+  /** The transfer list of each message, in step with `sent`. */
+  readonly transfers: Transferable[][] = [];
   terminated = false;
-  postMessage(msg: unknown): void {
+  postMessage(msg: unknown, transfer: Transferable[] = []): void {
     this.sent.push(msg);
+    this.transfers.push(transfer);
   }
   terminate(): void {
     this.terminated = true;
@@ -98,6 +101,69 @@ describe("a healthy PDF session", () => {
     const { id } = worker.sent[0] as { id: number };
     worker.reply({ kind: "closed", id });
     await expect(sizing).rejects.toThrow(/expected pageSize/);
+  });
+
+  it("refuses a wrong-kind reply to an EXPORT too, rather than downloading undefined", async () => {
+    // The same guard, on the one call whose payload leaves the app as a FILE: a
+    // reply of another shape has no `bytes`, and reading through it would save an
+    // empty `.pdf` that looks exactly like a successful export until it is opened.
+    const { worker, s } = session();
+    const exporting = s.exportPage(0, {
+      alpha: new Uint8Array(1),
+      width: 1,
+      height: 1,
+      matrix: [1, 0, 0, 1, 0, 0],
+    });
+    const { id } = worker.sent[0] as { id: number };
+    worker.reply({ kind: "closed", id });
+    await expect(exporting).rejects.toThrow(/expected exportedPage/);
+  });
+
+  it("HANDS OVER the ink mask rather than copying it, and answers with the PDF's bytes", async () => {
+    // The mask is `width * height` bytes — 2.5 MB for an A4 page at the ink's own
+    // resolution, against a 50 MB app-wide budget — so it crosses the thread
+    // boundary by transfer, exactly as a rendered bitmap crosses back. Without
+    // the transfer list it is structured-CLONED, which costs the same megabytes
+    // twice and leaves a detached-looking buffer nobody freed.
+    const { worker, s } = session();
+    const alpha = new Uint8Array(12);
+    const exporting = s.exportPage(3, { alpha, width: 4, height: 3, matrix: [2, 0, 0, 2, 0, 0] });
+    const req = worker.sent[0] as { id: number; kind: string; page: number };
+    expect(req.kind).toBe("exportPage");
+    expect(req.page).toBe(3);
+    expect(worker.transfers[0]).toEqual([alpha.buffer]);
+
+    worker.reply({ kind: "exportedPage", id: req.id, bytes: new Uint8Array([0x25, 0x50]) });
+    await expect(exporting).resolves.toEqual(new Uint8Array([0x25, 0x50]));
+  });
+
+  it("refuses a mask whose buffer disagrees with its own dimensions", async () => {
+    // The module reads `width * height` bytes from the pointer it is given, so a
+    // short buffer is an out-of-bounds read inside wasm — a torn-down instance,
+    // not a failed export. Nothing is posted at all.
+    const { worker, s } = session();
+    const bad = { alpha: new Uint8Array(5), width: 4, height: 3, matrix: [1, 0, 0, 1, 0, 0] as const };
+    await expect(s.exportPage(0, bad)).rejects.toThrow(/does not match/);
+    for (const dims of [{ width: 0, height: 3 }, { width: 4, height: -1 }]) {
+      await expect(s.exportPage(0, { ...bad, ...dims })).rejects.toThrow(/does not match/);
+    }
+    expect(worker.sent).toEqual([]);
+  });
+
+  it("surfaces a decoder that refuses the export, rather than resolving with nothing", async () => {
+    // The wasm can refuse — a source that is not a PDF, a page it cannot graft.
+    // The menu turns a rejection into a toast; a quiet resolve would download an
+    // empty file called `<page>.pdf`.
+    const { worker, s } = session();
+    const exporting = s.exportPage(0, {
+      alpha: new Uint8Array(1),
+      width: 1,
+      height: 1,
+      matrix: [1, 0, 0, 1, 0, 0],
+    });
+    const { id } = worker.sent[0] as { id: number };
+    worker.reply({ kind: "error", id, message: "cannot graft page 1", status: null });
+    await expect(exporting).rejects.toThrow(/cannot graft/);
   });
 
   it("destroy() terminates the worker and fails anything outstanding", async () => {

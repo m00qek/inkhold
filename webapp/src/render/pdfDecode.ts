@@ -47,6 +47,34 @@ export interface PdfDecoderExports {
   ink_render(handle: number, page: number, scale: number): bigint;
   ink_render_width(): number;
   ink_render_height(): number;
+  /**
+   * One page as a ONE-PAGE PDF: the source page grafted in whole — its own
+   * content streams, fonts, vectors and page size — with `alpha` drawn over it
+   * as ink. `alpha` is a pointer to `w * h` coverage bytes (255 = full ink).
+   *
+   * `a`..`f` place the ALPHA IMAGE'S OWN PIXEL SPACE (top-left origin, y down)
+   * onto the page in DISPLAY space — the same space `ink_page_size` reports and
+   * `markExportMatrix` builds for. A `/Rotate`, a `/CropBox` offset and an
+   * off-origin `/MediaBox` are all resolved inside the module.
+   *
+   * Packed `(ptr << 32) | len`, or negative. Like `ink_open_stream`, this can
+   * SUSPEND: grafting walks the source document's xref.
+   */
+  ink_export_page(
+    handle: number,
+    page: number,
+    alpha: number,
+    w: number,
+    h: number,
+    a: number,
+    b: number,
+    c: number,
+    d: number,
+    e: number,
+    f: number,
+  ): bigint;
+  /** Release the buffer `ink_export_page` returned. Idempotent. */
+  ink_export_free(): void;
   ink_close(handle: number): void;
   ink_error_ptr(): number;
   ink_error_len(): number;
@@ -314,6 +342,29 @@ export interface PdfCalls {
   pageCount(handle: number): number | Promise<number>;
   pageSize(handle: number, page: number, wPtr: number, hPtr: number): number | Promise<number>;
   render(handle: number, page: number, scale: number): bigint | Promise<bigint>;
+  /**
+   * OPTIONAL IN THE TYPE, MANDATORY ON THE JSPI PATH. `ink_export_page` grafts a
+   * page, which walks the source document's xref and so can re-enter
+   * `ink.host_read`; on a streamed document an unwrapped call TRAPS the instance
+   * the moment it suspends rather than waiting. It is optional here only so that
+   * a caller building a `PdfCalls` by hand — and every non-JSPI caller, where
+   * nothing suspends — is not forced to name a call it will never make.
+   * {@link AsyncPdfDocument.exportPage} falls back to the raw export when it is
+   * absent, which is right for `syncCalls` and wrong for a promising wrapper.
+   */
+  exportPage?(
+    handle: number,
+    page: number,
+    alpha: number,
+    w: number,
+    h: number,
+    a: number,
+    b: number,
+    c: number,
+    d: number,
+    e: number,
+    f: number,
+  ): bigint | Promise<bigint>;
 }
 
 /** `PdfCalls` straight through to the exports — no JSPI, nothing suspends. */
@@ -324,6 +375,8 @@ export function syncCalls(x: PdfDecoderExports): PdfCalls {
     pageCount: (h) => x.ink_page_count(h),
     pageSize: (h, p, w, hp) => x.ink_page_size(h, p, w, hp),
     render: (h, p, s) => x.ink_render(h, p, s),
+    exportPage: (h, p, ink, w, ih, a, b, c, d, e, f) =>
+      x.ink_export_page(h, p, ink, w, ih, a, b, c, d, e, f),
   };
 }
 
@@ -414,6 +467,58 @@ export class AsyncPdfDocument {
       height: x.ink_render_height(),
       rgba: new Uint8ClampedArray(new Uint8Array(x.memory.buffer, ptr, len)),
     };
+  }
+
+  /**
+   * Export one page as a PDF, with the page's own structure intact.
+   *
+   * THE DIFFERENCE FROM `render`. `render` gives pixels, and a PDF built from
+   * pixels is a picture of a page: no selectable text, no fonts, no vectors, and
+   * whatever page size the writer chose. This asks the module to GRAFT the
+   * source page into a fresh one-page document and draw the ink over it, so all
+   * of that survives. What does not survive is the source page's `/Annots` —
+   * links and pre-existing highlights — because `pdf_graft_page` does not copy
+   * them; see `webapp/wasm/pdf_shim.c`.
+   *
+   * `alpha` is `width * height` coverage bytes, 255 = full ink. `matrix` maps
+   * that image's OWN PIXEL SPACE onto the page in display space — build it with
+   * `markExportMatrix`, never by hand.
+   *
+   * The bytes are COPIED OUT of wasm memory before returning, and both the
+   * scratch buffer and the module's own copy are released on every path: the
+   * export is page-sized, and one left behind is one that stays resident.
+   */
+  async exportPage(
+    page: number,
+    alpha: Uint8Array,
+    width: number,
+    height: number,
+    matrix: readonly [number, number, number, number, number, number],
+  ): Promise<Uint8Array> {
+    const x = this.x;
+    const handle = this.alive();
+    if (width <= 0 || height <= 0 || alpha.length !== width * height) {
+      // The module reads `width * height` bytes from a raw pointer, so a short
+      // buffer is an out-of-bounds read inside wasm rather than a bad export.
+      throw new Error("the ink overlay's size does not match its alpha buffer");
+    }
+    const ptr = x.ink_alloc(alpha.length);
+    if (!ptr) throw new Error("out of wasm memory building the export's ink");
+    try {
+      new Uint8Array(x.memory.buffer, ptr, alpha.length).set(alpha);
+      const [a, b, c, d, e, f] = matrix;
+      const call = this.c.exportPage ?? x.ink_export_page;
+      const packed = await call(handle, page, ptr, width, height, a, b, c, d, e, f);
+      if (packed < 0n) throw new Error(lastError(x, `could not export page ${page}`));
+      // Re-read `memory` here and not before: the export allocates, so the
+      // buffer this view is taken from may have been replaced mid-call.
+      return new Uint8Array(
+        new Uint8Array(x.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
+      );
+    } finally {
+      x.ink_free(ptr, alpha.length);
+      x.ink_export_free();
+    }
   }
 
   /** Idempotent. After this every method throws rather than using a stale handle. */

@@ -5,7 +5,14 @@
 
 import type { PdfPageSize } from "./pdfDecode";
 import type { PdfCacheStats } from "./pdfBlocks";
-import type { PdfOpenMode, PdfRequest, PdfResponse } from "./pdfWorkerTypes";
+import type { PdfInkOverlay, PdfOpenMode, PdfRequest, PdfResponse } from "./pdfWorkerTypes";
+
+/**
+ * Re-exported so a PAGE never imports the worker protocol directly: this module
+ * is the main thread's whole view of the decoder, and `pages/` should meet it
+ * here or not at all.
+ */
+export type { PdfInkOverlay } from "./pdfWorkerTypes";
 
 /** A rendered page, ready for `drawImage`. CLOSE IT once drawn. */
 export interface PdfFrame {
@@ -36,6 +43,16 @@ export interface PdfSession {
   open(url: string, size: number): Promise<{ pageCount: number; mode: PdfOpenMode }>;
   pageSize(page: number): Promise<PdfPageSize>;
   render(page: number, scale: number): Promise<PdfFrame>;
+  /**
+   * One page as a PDF of its own, with `ink` drawn over it — the page's own
+   * content streams, not a picture of them.
+   *
+   * `ink.alpha`'s buffer is TRANSFERRED and is DETACHED here: it is several
+   * megabytes that would otherwise be structured-cloned across the boundary, and
+   * the caller has no further use for it (the same handoff `render` gets back
+   * the other way). Reading it after this call yields a zero-length view.
+   */
+  exportPage(page: number, ink: PdfInkOverlay): Promise<Uint8Array>;
   stats(): Promise<PdfSessionStats>;
   /** Drop the document; the worker (and its compiled module) stays warm. */
   close(): Promise<void>;
@@ -119,12 +136,17 @@ export function createPdfSession(makeWorker: PdfWorkerFactory = defaultWorker): 
     pending.clear();
   });
 
-  function send(req: Unsent<PdfRequest>): Promise<PdfResponse> {
+  /**
+   * `transfer` HANDS OVER the listed buffers rather than cloning them — the same
+   * economy the worker uses for a rendered bitmap, in the other direction. Only
+   * the ink overlay uses it; every other request is a handful of numbers.
+   */
+  function send(req: Unsent<PdfRequest>, transfer?: Transferable[]): Promise<PdfResponse> {
     if (dead) return Promise.reject(new Error("this PDF session is closed"));
     const id = nextId++;
     return new Promise<PdfResponse>((resolve, reject) => {
       pending.set(id, { resolve, reject });
-      worker.postMessage({ ...req, id } as PdfRequest);
+      worker.postMessage({ ...req, id } as PdfRequest, transfer ?? []);
     });
   }
 
@@ -149,6 +171,22 @@ export function createPdfSession(makeWorker: PdfWorkerFactory = defaultWorker): 
     async render(page, scale) {
       const res = expect(await send({ kind: "render", page, scale }), "rendered");
       return { bitmap: res.bitmap, width: res.width, height: res.height };
+    },
+    async exportPage(page, ink) {
+      // REFUSED HERE, before the buffer is handed over. The mask is sized from a
+      // canvas on this side and the module reads `width * height` bytes from a
+      // pointer on the other: a buffer that disagrees with those numbers is an
+      // out-of-bounds read inside wasm, which is a torn-down instance and not a
+      // failed export. This is also the only door into the worker, so checking
+      // it twice would only make the second copy the untested one.
+      if (ink.width <= 0 || ink.height <= 0 || ink.alpha.length !== ink.width * ink.height) {
+        throw new Error("the ink overlay's size does not match its alpha buffer");
+      }
+      const res = expect(
+        await send({ kind: "exportPage", page, ink }, [ink.alpha.buffer as ArrayBuffer]),
+        "exportedPage",
+      );
+      return res.bytes;
     },
     async stats() {
       const res = expect(await send({ kind: "stats" }), "stats");

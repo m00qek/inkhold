@@ -52,7 +52,12 @@ import {
 import type { LayeredExportModel } from "../export/layered";
 import { markExportSpace, placePanelOverPage } from "../render/markGeometry";
 import { supportsWasmExceptions } from "../render/pdfDecode";
-import { PdfLoadError, createPdfSession, type PdfSession } from "../render/pdfClient";
+import {
+  PdfLoadError,
+  createPdfSession,
+  type PdfInkOverlay,
+  type PdfSession,
+} from "../render/pdfClient";
 
 /**
  * Zoom steps, RELATIVE TO FIT — every step multiplies the scale that fits the
@@ -153,8 +158,14 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
    * on hardware nobody tests on. Two mutations of this file (closing a bitmap the
    * cache owns, and skipping the read-through entirely) passed the whole suite
    * before this existed.
+   *
+   * `inked` counts the rows that were COMPOSITED with a `.mark`'s handwriting,
+   * and is here for the same reason: on the one fixture this app has, every
+   * stroke inside the page's rect belongs to a device-hidden layer, so the ink
+   * lands in the dead margin and the composite is pixel-identical to the bare
+   * page. A viewer that never asked for the ink at all would look exactly right.
    */
-  const thumbCounts = { hits: 0, renders: 0 };
+  const thumbCounts = { hits: 0, renders: 0, inked: 0 };
   function publishThumbCounts(): void {
     (globalThis as unknown as { __inkholdPdfThumbs?: typeof thumbCounts }).__inkholdPdfThumbs = {
       ...thumbCounts,
@@ -245,7 +256,8 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     toast: deps.toast,
     docName: () => meta?.name ?? null,
     pageIndex: () => pageIndex,
-    model: () => pageExportModel(),
+    model: (opts) => pageExportModel(opts),
+    exportPagePdf: (page, ink) => exportPagePdf(page, ink),
     state: () => exportState(),
   });
 
@@ -407,6 +419,13 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
    * ALSO interleave their range fetches, so a page the user is actually reading
    * would wait behind six thumbnails. One at a time keeps the viewer's own
    * render first in line.
+   *
+   * AND AN ANNOTATED ROW IS COMPOSITED HERE, which is the second reason the
+   * queue has to stay serial. A mark page decodes at the DEVICE PANEL's own
+   * resolution — ~10.5 MB of RGBA per layer, whatever size the thumbnail ends up
+   * — so two of these in flight is 20 MB of transient against a 50 MB budget for
+   * the whole app. `inkRaster` reduces and releases one layer at a time, and
+   * this loop guarantees one page at a time; the peak is a single layer.
    */
   /**
    * A thumbnail's identity in the SHARED cache (`sn-thumbs` — see
@@ -417,6 +436,10 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
    * one is synthesised. It is still honestly content-addressed: the md5 pins the
    * bytes, the index pins the page, and a blob is immutable, so the entry can
    * never go stale.
+   *
+   * THE BARE PAGE, and only that. A row that also carries a `.mark`'s
+   * handwriting is a picture of TWO blobs and is keyed by both — see
+   * {@link thumbKey}, which is what every caller should ask.
    *
    * `size: "thumb"` is not decoration — it is what admits the entry to the
    * PERSISTENT tier (`renderCache.ts:125`), which is the whole reason for doing
@@ -429,8 +452,107 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
    * thumbnail per page per theme, inside the same budget; the alternative is a
    * mechanism silently doing the wrong thing.
    */
-  function thumbKey(index: number): RenderKey {
+  function pageThumbKey(index: number): RenderKey {
     return { hash: `${docHash}:p${index}` as Hash, size: "thumb", theme: deps.getTheme() };
+  }
+
+  /**
+   * A thumbnail's identity when a `.mark` writes on that page — the PDF's md5,
+   * the page, AND the mark page's own content hash.
+   *
+   * WITHOUT the second half this feature is a caching bug rather than a feature.
+   * A row's picture now depends on two blobs, and `PageRef.hash` is the one
+   * thing that moves when the handwriting does — so under the bare
+   * `${md5}:p${i}` key an ink-free entry written a moment before the mark landed
+   * would be served for the rest of the session (and out of IndexedDB, for the
+   * rest of the store's life), and re-annotating a page on the device would show
+   * yesterday's strokes. The composite is a different picture, so it is a
+   * different key.
+   *
+   * The ink-free key is NOT retired: it still names the bare page, which is what
+   * a row painted before the mark arrives really is, and `paintThumbs` reads it
+   * back as the base to composite ON rather than re-rendering the page.
+   */
+  function thumbKey(index: number): RenderKey {
+    const ref = markPages.get(index);
+    if (!ref) return pageThumbKey(index);
+    return { hash: `${docHash}:p${index}+${ref.hash}` as Hash, size: "thumb", theme: deps.getTheme() };
+  }
+
+  /** A cache read that can never sink a thumbnail. */
+  async function cachedThumb(key: RenderKey): Promise<ImageBitmap | undefined> {
+    try {
+      return await deps.cache.get(key);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * An annotated page's thumbnail: the page raster with the mark's ink over it,
+   * as ONE bitmap. Null when there is no ink to add — no mark bytes, a payload
+   * that would not decode, or no canvas — and the caller then shows the page
+   * alone, which is what the on-screen overlay does with the same failures.
+   *
+   * A NEW BITMAP RATHER THAN A DRAW ON THE ROW. The row's canvas is recycled by
+   * the virtual list and is not what the cache stores; composing into a bitmap
+   * keeps "what the strip shows" and "what the cache holds under the inked key"
+   * the same picture, which is the whole point of {@link thumbKey}.
+   *
+   * `page` is left ALONE — it may be the cache's, and the cache closes what it
+   * owns.
+   */
+  async function compositeInk(page: ImageBitmap, ref: PageRef): Promise<ImageBitmap | null> {
+    const id = markId;
+    if (!id || page.width <= 0 || page.height <= 0) return null;
+    // THE SAME ARITHMETIC THE PAGE USES, at 120px (`render/markGeometry.ts`).
+    // The ink is in device PANEL pixels and the page is a letterboxed sub-rect
+    // of that panel, so the whole panel is placed oversized and shifted until
+    // its page-rect lands on the raster; the canvas edge clips the overhang the
+    // way `.pdf-stage` does on screen.
+    //
+    // The raster's own pixels stand in for the page's POINTS, which is exact
+    // rather than approximate: `fitPageInPanel` divides the panel by the page on
+    // both axes and takes the smaller, so scaling the page by any factor leaves
+    // the fit unchanged. That is what saves a `pageSize` round trip on the path
+    // where the page raster came out of the cache.
+    const place = placePanelOverPage(
+      { width: ref.width, height: ref.height },
+      { width: page.width, height: page.height },
+      { width: page.width, height: page.height },
+    );
+    if (place.width < 1 || place.height < 1) return null;
+    let bytes: ArrayBuffer;
+    try {
+      bytes = await deps.api.getPageBytes(id, ref);
+    } catch {
+      return null;
+    }
+    const ink = await markCtl.inkRaster(bytes, place);
+    if (!ink) return null;
+    try {
+      const sheet = el("canvas") as HTMLCanvasElement;
+      sheet.width = page.width;
+      sheet.height = page.height;
+      const ctx = sheet.getContext("2d");
+      if (!ctx) return null;
+      ctx.drawImage(page, 0, 0);
+      // WHOLE PIXELS. A stroke reduced to this size is a pixel or two wide and a
+      // fractional offset would resample it into a smear — the same reasoning
+      // `markExportSpace` states about `dx`/`dy`.
+      ctx.drawImage(ink, Math.round(place.left), Math.round(place.top));
+      const out = await createImageBitmap(sheet);
+      sheet.width = 0;
+      sheet.height = 0;
+      return out;
+    } catch {
+      return null;
+    } finally {
+      // The ink canvas is ours by contract (`inkRaster`); free it eagerly rather
+      // than at a GC that has no idea what a canvas weighs.
+      ink.width = 0;
+      ink.height = 0;
+    }
   }
 
   async function paintThumbs(): Promise<void> {
@@ -444,6 +566,14 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
         const s = open_ ? session : null;
         if (!s || !row) continue;
         const mine = generation;
+        // THE INK THIS ROW IS DUE, resolved ONCE, and the key that follows from
+        // it. Everything below awaits, and `loadMark` can fill `markPages` in
+        // mid-flight — reading either again at each step would let the row be
+        // fetched under one identity and stored under another. The change is
+        // caught at the bottom instead, where there is a finished picture to
+        // leave up while the second pass runs.
+        const ref = markPages.get(i);
+        const key = thumbKey(i);
 
         // READ-THROUGH. A row that scrolls out and back is recycled by the
         // virtual list, so without this every return trip would re-render the
@@ -451,12 +581,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
         // bitmap it returns (`renderCache.ts:113`: callers blit synchronously
         // and never close it), so this path draws and stops there.
         if (docHash) {
-          let hit: ImageBitmap | undefined;
-          try {
-            hit = await deps.cache.get(thumbKey(i));
-          } catch {
-            hit = undefined; // a cache failure must never sink a thumbnail
-          }
+          const hit = await cachedThumb(key);
           if (mine !== generation) return;
           const cur = thumbRows.get(i);
           if (hit) {
@@ -479,27 +604,79 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
           }
         }
 
-        let frame;
-        try {
-          const size = await s.pageSize(i);
+        // THE PAGE UNDER THE INK. For an annotated row the ink-free twin is a
+        // legitimate entry of its own — written by whatever painted this row
+        // before the mark landed, and by every reopen where the strip is quicker
+        // than the mark's metadata — and it is the page at exactly the size this
+        // thumbnail wants. Reading it back is what makes the late-mark repaint
+        // cost a decode instead of a second MuPDF render and, on a cold block, a
+        // second range fetch. It is the CACHE'S bitmap: never closed here.
+        let base: ImageBitmap | undefined;
+        if (ref && docHash) {
+          base = await cachedThumb(pageThumbKey(i));
           if (mine !== generation) return;
-          const scale = THUMB_PX / Math.max(size.width, size.height);
-          if (size.height > 0) {
-            const a = size.width / size.height;
-            thumbAspects.set(i, a);
-            row.setAspect(a);
-          }
-          frame = await s.render(i, scale);
-        } catch {
-          // A page that will not render is left as an empty frame, not an error
-          // card: the strip is navigation, and a broken thumbnail must not stop
-          // you reaching the page it stands for.
-          row.setLoading(false);
-          thumbPainted.add(i);
-          continue;
+          if (base && thumbRows.get(i) !== row) continue; // recycled; it is queued afresh
         }
-        thumbCounts.renders++;
-        publishThumbCounts();
+
+        let frame;
+        if (base) {
+          thumbCounts.hits++;
+          publishThumbCounts();
+        } else {
+          try {
+            const size = await s.pageSize(i);
+            if (mine !== generation) return;
+            const scale = THUMB_PX / Math.max(size.width, size.height);
+            if (size.height > 0) {
+              const a = size.width / size.height;
+              thumbAspects.set(i, a);
+              row.setAspect(a);
+            }
+            frame = await s.render(i, scale);
+          } catch {
+            // A page that will not render is left as an empty frame, not an error
+            // card: the strip is navigation, and a broken thumbnail must not stop
+            // you reaching the page it stands for.
+            row.setLoading(false);
+            thumbPainted.add(i);
+            continue;
+          }
+          thumbCounts.renders++;
+          publishThumbCounts();
+        }
+
+        // THE INK, for a page that has any. A failure here is a MISSING OVERLAY,
+        // not a broken row — the same rule `paintMark` states for the page on
+        // screen — so the bare page stands and is stored under its own key.
+        let thumb = base ?? frame!.bitmap;
+        let ours = base === undefined; // the cache owns what it handed back
+        let inked = false;
+        // The bare page, once a composite has REPLACED it on the row. It is a
+        // legitimate thumbnail of its own and it cost a MuPDF render, so it goes
+        // into the cache under its own key rather than being closed: that is what
+        // makes every later repaint of this row — a reopen where the strip beats
+        // the mark's metadata, or a mark the device has rewritten — a decode
+        // instead of a second render and, on a cold block, a second range fetch.
+        let bare: ImageBitmap | null = null;
+        if (ref) {
+          const composed = await compositeInk(thumb, ref);
+          if (composed) {
+            if (ours) bare = thumb;
+            thumb = composed;
+            ours = true;
+            inked = true;
+            thumbCounts.inked++;
+            publishThumbCounts();
+          }
+          // DELIBERATELY NO SUPERSEDED CHECK HERE. Fetching and decoding a mark
+          // page is the longest await in this loop, so leaving the document
+          // mid-composite is the COMMON way out of it — and the write-through
+          // below is built for exactly that: pixels that are valid for this page
+          // forever are handed over first, and only then does the paint find out
+          // it has been overtaken. An early return here threw away a MuPDF render
+          // the app had already paid for, which showed up as a page rendered a
+          // second time on the next visit.
+        }
 
         // WRITE-THROUGH, and deliberately BEFORE the superseded check: the
         // render already happened and its pixels are valid for this page
@@ -507,13 +684,27 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
         // that is not wasted. Ownership passes here — from this point the
         // bitmap must NOT be closed, because the cache's LRU closes it on
         // eviction and a double close would poison the entry.
+        //
+        // UNDER THE KEY THE PIXELS ACTUALLY ARE. A page whose ink would not
+        // fetch or decode is stored as what it is — the bare page — so the inked
+        // key is never occupied by an ink-free picture that would then be served
+        // in preference to ever trying again. And a base that came OUT of the
+        // cache is not put back: it is already there, under that same key.
+        const writeKey = ref && !inked ? pageThumbKey(i) : key;
         let owned = false;
-        if (docHash) {
+        if (docHash && ours) {
           try {
-            await deps.cache.put(thumbKey(i), frame.bitmap);
+            await deps.cache.put(writeKey, thumb);
             owned = true;
           } catch {
             owned = false; // it never entered the cache, so it is still ours
+          }
+        }
+        if (bare) {
+          try {
+            await deps.cache.put(pageThumbKey(i), bare);
+          } catch {
+            bare.close(); // it never entered the cache, so it is still ours
           }
         }
 
@@ -521,15 +712,26 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
         // window and its canvas being recycled under us. The pixels have nowhere
         // legitimate to go; close them only if the cache did not take them.
         if (mine !== generation || thumbRows.get(i) !== row) {
-          if (!owned) frame.bitmap.close();
+          if (ours && !owned) thumb.close();
           if (mine !== generation) return;
           continue;
         }
-        row.canvas.width = frame.width;
-        row.canvas.height = frame.height;
-        row.canvas.getContext("2d")?.drawImage(frame.bitmap, 0, 0);
-        if (!owned) frame.bitmap.close();
+        row.canvas.width = thumb.width;
+        row.canvas.height = thumb.height;
+        row.canvas.getContext("2d")?.drawImage(thumb, 0, 0);
+        if (ours && !owned) thumb.close();
         row.setLoading(false);
+        // DID THIS ROW'S IDENTITY MOVE WHILE IT WAS BEING PAINTED? `loadMark`
+        // resolves on its own schedule, so a page can acquire ink between the
+        // read at the top and the draw here — and nothing else would ever repaint
+        // it. The pixels above are the best thing to show meanwhile (a page
+        // without its ink beats a skeleton), so they stay up and the row goes
+        // round again; the second pass finds the page it just cached and adds the
+        // handwriting to it.
+        if (thumbKey(i).hash !== key.hash) {
+          thumbQueue.push(i);
+          continue;
+        }
         thumbPainted.add(i);
       }
     } finally {
@@ -537,10 +739,34 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     }
   }
 
+  /**
+   * A `.mark` landed after the strip had already painted: the rows it writes on
+   * are now the wrong picture, so send them round again.
+   *
+   * ONLY THE FINISHED ONES. A row still in the queue has not read its key yet
+   * and will pick up the new one for free; a row outside the strip's window has
+   * no canvas to correct and is queued afresh when it scrolls back. And the old
+   * pixels are deliberately left up rather than reset to the loading treatment —
+   * the page without its ink is a truthful thing to look at for the moment the
+   * repaint takes, and a strip that flashes back to skeletons the instant the
+   * mark arrives looks like a fault.
+   */
+  function repaintInkedThumbs(): void {
+    let any = false;
+    for (const i of markPages.keys()) {
+      if (!thumbPainted.has(i)) continue;
+      thumbPainted.delete(i);
+      thumbQueue.push(i);
+      any = true;
+    }
+    if (any) void paintThumbs();
+  }
+
   /** Forget every thumbnail: a new document, or none. */
   function resetThumbs(): void {
     thumbCounts.hits = 0;
     thumbCounts.renders = 0;
+    thumbCounts.inked = 0;
     publishThumbCounts();
     pagesPanel.clear(); // unmounts each row, which unobserves and dequeues it
     thumbRows.clear();
@@ -895,6 +1121,11 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     const ink = inkForExport(pageIndex);
     return {
       hasInk: ink !== null,
+      // Read off the CANVAS, not off a variable of our own — the panel's toggle
+      // writes it there (`layersPanel.onToggle`) and `pdfRow()` reads it back the
+      // same way, so there is one answer to "is the document showing?" rather
+      // than two that can drift.
+      pageVisible: canvas.style.visibility !== "hidden",
       // The document is a layer like any other and its authored state is
       // visible, so hiding its row IS a divergence — turning the page off and
       // exporting the ink alone is one of the two things this panel is for.
@@ -925,8 +1156,9 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
    * against a 50 MB app-wide budget — which is what `release()` is for. The
    * SOURCES are freed here, as soon as they have been drawn in.
    */
-  async function pageExportModel(): Promise<{
+  async function pageExportModel(opts?: { withPage?: boolean }): Promise<{
     model: LayeredExportModel;
+    pagePt: { width: number; height: number };
     release: () => void;
   } | null> {
     const s = session;
@@ -947,16 +1179,35 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     // handwriting moves by a whole-pixel translation and is never resampled.
     // WITHOUT it there is no panel to agree with, so the round number stands in.
     const space = ink ? markExportSpace({ width: ink.ref.width, height: ink.ref.height }, size) : null;
-    let frame;
-    try {
-      frame = await s.render(page, space ? space.scale : plainExportScale(size));
-    } catch {
-      return null;
+    // THE PDF ROW ASKS FOR NO PAGE AT ALL. It is not exporting a picture of the
+    // page — the decoder grafts the page's own content streams — so a raster here
+    // would be a full MuPDF render (10 MB for A4 at the ink's resolution) built
+    // only to be thrown away. The model still comes back at the SAME dimensions,
+    // because those are the ink's space and the alpha has to land in it.
+    const wantPage = opts?.withPage ?? true;
+    let frame = null;
+    if (wantPage) {
+      try {
+        frame = await s.render(page, space ? space.scale : plainExportScale(size));
+      } catch {
+        return null;
+      }
+      if (mine !== generation) {
+        frame.bitmap.close();
+        return null;
+      }
     }
-    if (mine !== generation) {
-      frame.bitmap.close();
-      return null;
-    }
+    // The unannotated page's space, WITHOUT a render to measure. MuPDF's own
+    // rounding may differ from this by a pixel, which matters to nothing that
+    // takes this path: with no ink the overlay is a single transparent pixel
+    // stretched over the page, and the document layer under it is blank.
+    const plainScale = plainExportScale(size);
+    const plainSpace = {
+      width: Math.max(1, Math.round(size.width * plainScale)),
+      height: Math.max(1, Math.round(size.height * plainScale)),
+      dx: 0,
+      dy: 0,
+    };
 
     // The ink's FRESH light-theme canvases, at the mark's own panel resolution.
     let snapshot: Awaited<ReturnType<typeof markCtl.exportModel>> = null;
@@ -970,13 +1221,17 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       const model = composeMarkExportModel({
         // The rendered frame's own dims stand in when there is no ink: there is
         // no letterbox to correct for, so the page IS the export.
-        space: space ?? { width: frame.width, height: frame.height, dx: 0, dy: 0 },
-        page: frame.bitmap,
+        space: space ?? (frame ? { width: frame.width, height: frame.height, dx: 0, dy: 0 } : plainSpace),
+        page: frame?.bitmap ?? null,
         pageVisible: canvas.style.visibility !== "hidden",
         ink: inkExportLayers(ink, snapshot?.model ?? null),
       });
       return {
         model,
+        // The page in its OWN units, which is what places the ink on it: the
+        // export image is one rectangle of pixels and the decoder needs to know
+        // how many points wide that rectangle is (`markExportMatrix`).
+        pagePt: { width: size.width, height: size.height },
         release: () => {
           for (const l of model.layers) {
             l.canvas.width = 0;
@@ -988,9 +1243,28 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       // Composition COPIES both halves, so the sources are dead the moment it
       // returns. Dropping them here rather than at GC keeps the peak at one
       // extra stack instead of two.
-      frame.bitmap.close();
+      frame?.bitmap.close();
       snapshot?.release();
     }
+  }
+
+  /**
+   * Hand one page and its ink to the decoder, and get a PDF back.
+   *
+   * The generation is NOT re-checked after the call, deliberately. Everything
+   * else in this file paints, so a superseded answer has to be dropped before it
+   * reaches the screen; this DOWNLOADS. The bytes were correct for the page the
+   * user asked about, they are named after that page, and turning to page 5
+   * while page 4's export is being built is not a reason to silently throw page
+   * 4's file away.
+   */
+  async function exportPagePdf(page: number, ink: PdfInkOverlay): Promise<Uint8Array> {
+    const s = session;
+    // Thrown, not answered with null: this is reached only by clicking a row, and
+    // the menu's own mechanics turn a rejection into a toast. Returning nothing
+    // would be a click that does nothing at all.
+    if (!s || !open_) throw new Error("no document is open");
+    return s.exportPage(page, ink);
   }
 
   /**
@@ -1029,11 +1303,33 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     next.disabled = pageIndex >= pageCount - 1;
   }
 
+  /**
+   * Publish the page to the address bar, so a PDF page is a place you can link
+   * to and reload into.
+   *
+   * The route has always been able to CARRY one — `#/note/:id/page/:n` is shared
+   * with the reader and `open()` honours it — but this viewer never wrote one
+   * back, so the half of the contract a person actually uses was missing: paging
+   * to 34 and reloading returned to page 1, and there was no address to send
+   * anyone. The reader has published its page since it existed
+   * (`reader.ts`'s `syncUrl`); this is the same rule, minus the two things a PDF
+   * has none of — a find query and a history preview.
+   *
+   * A BIN origin publishes the `#/bin/note/:id/page/:n` form, exactly as the
+   * reader does: a trashed file's blob is not served from the live route, so
+   * writing the live address would make a reload 404 to the library.
+   */
+  function syncUrl(): void {
+    if (!open_ || !meta) return;
+    deps.onPosition?.(meta.id, pageIndex, "", undefined, fromBin || undefined);
+  }
+
   async function go(to: number): Promise<void> {
     if (!open_ || to < 0 || to >= pageCount || to === pageIndex) return;
     pageIndex = to;
     syncPager();
     pagesPanel.setCurrent(to);
+    syncUrl();
     await paint();
   }
 
@@ -1082,6 +1378,10 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     }
     // The page on screen was painted before this landed, so give it its ink.
     if (open_ && markPages.has(pageIndex)) void paint();
+    // And so was the STRIP, which is the one place that answers "which pages did
+    // I write on" — leaving it ink-free until each row happens to be recycled
+    // would mean the answer depends on how you scrolled.
+    repaintInkedThumbs();
   }
 
   // --- open / teardown ----------------------------------------------------
@@ -1270,6 +1570,11 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       return;
     }
     pageIndex = Math.min(pageIndex, pageCount - 1);
+    // The page count is only known now, so this is the first moment the address
+    // can be honest. It matters for the CLAMP above: a link to page 500 of a
+    // 77-page document opens the last page, and the URL should say the page you
+    // are on rather than the one you asked for.
+    syncUrl();
 
     // The strip reserves every row's shape from PAGE 0's aspect before anything
     // is painted, so it does not reflow as thumbnails land. A page of a
