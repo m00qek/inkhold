@@ -311,7 +311,14 @@ pub const Worker = struct {
 
     /// Jobs completed. Test observability today; the natural source for a
     /// pending count in the admin console later.
-    done: std.atomic.Value(u64) = .init(0),
+    ///
+    /// `usize`, NOT `u64`, and the difference is not cosmetic: a 32-bit target
+    /// has no lock-free 64-bit atomic, so `Value(u64)` is a hard compile error
+    /// there ("expected 32-bit integer type or smaller"). That took out all four
+    /// release artifacts — including `arm-linux-musleabihf`, which IS the Pi 1
+    /// this server is designed for — while every test on the 64-bit builder
+    /// stayed green. A counter of completed jobs has no use for the extra range.
+    done: std.atomic.Value(usize) = .init(0),
 
     pub fn start(self: *Worker) !void {
         self.thread = try std.Thread.spawn(.{}, loop, .{self});
@@ -535,7 +542,7 @@ test "a second drain finds nothing — the query excludes finished work, so the 
 
     var w: Worker = .{ .gpa = testing.allocator, .db = f.db, .blobs = f.files.blobs, .lock = &f.lock, .io = testing.io };
     w.drain();
-    try std.testing.expectEqual(@as(u64, 0), w.done.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), w.done.load(.acquire));
 }
 
 test "`pending_sql` and `needsDerive` agree — the two expressions of one predicate" {
@@ -659,7 +666,7 @@ test "a file that is not a PDF records a verdict, so it is never probed twice" {
 
     var w: Worker = .{ .gpa = testing.allocator, .db = f.db, .blobs = f.files.blobs, .lock = &f.lock, .io = testing.io };
     w.drain();
-    try std.testing.expectEqual(@as(u64, 0), w.done.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), w.done.load(.acquire));
 }
 
 test "`pending_sql` and `needsProbe` agree, on both sides of the work" {
