@@ -185,16 +185,25 @@ test.describe("find in note", () => {
     // word without smearing: no fill (a wash would obscure the ink it points
     // at) and a stroke that does not scale with the box.
     const path = ovals(page).first().locator("path");
-    const drawn = await path.evaluate((el) => {
-      const cs = getComputedStyle(el);
-      return {
-        fill: cs.fill,
-        strokeWidth: cs.strokeWidth,
-        vectorEffect: cs.vectorEffect,
-        d: el.getAttribute("d") ?? "",
-        preserve: el.closest("svg")!.getAttribute("preserveAspectRatio"),
-      };
-    });
+    const read = () =>
+      path.evaluate((el) => {
+        const cs = getComputedStyle(el);
+        return {
+          fill: cs.fill,
+          strokeWidth: cs.strokeWidth,
+          vectorEffect: cs.vectorEffect,
+          d: el.getAttribute("d") ?? "",
+          preserve: el.closest("svg")!.getAttribute("preserveAspectRatio"),
+        };
+      });
+    // POLLED, because a single sample is not stable here. The oval layer is
+    // rebuilt as the find results settle, so `.first()` can resolve an element
+    // that is being replaced — and `getComputedStyle` on one that is no longer
+    // rendered returns EMPTY STRINGS rather than throwing. That failed as
+    // `Expected: "none", Received: ""` under parallel load and passed alone,
+    // which reads like a styling bug and is a sampling one.
+    await expect.poll(async () => (await read()).fill, { timeout: 10_000 }).not.toBe("");
+    const drawn = await read();
     expect(drawn.fill).toBe("none");
     expect(drawn.vectorEffect).toBe("non-scaling-stroke");
     expect(drawn.preserve).toBe("none");
@@ -481,6 +490,15 @@ test.describe("find in note", () => {
       pageBefore.width,
     );
     await expect(ovals(page)).toHaveCount(2);
+
+    // WAIT FOR THE OVAL, not just the page. The page growing and the ovals being
+    // re-measured against it are two separate frames, so sampling the loop the
+    // moment the PAGE is wide enough can still catch its old pixel size — which
+    // fails as "the loop did not grow" while the code under test is fine, and
+    // only under load, because that is when the two frames separate.
+    await expect
+      .poll(async () => (await ovals(page).first().boundingBox())!.width, { timeout: 10_000 })
+      .toBeGreaterThan(before.width);
 
     const after = (await ovals(page).first().boundingBox())!;
     const pageAfter = (await page.locator(".page").boundingBox())!;

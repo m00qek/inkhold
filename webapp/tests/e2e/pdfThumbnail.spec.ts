@@ -89,6 +89,58 @@ test.describe("a .pdf's gallery tile is its page 0", () => {
       .toBeCloseTo(PAGE0_ASPECT, 1);
   });
 
+  // THE DEFECT THIS FILE SPENT A WHILE MISREADING AS ITS OWN FLAKE.
+  //
+  // `render/lazy.ts` races the produce against `PLACEHOLDER_AFTER_MS` (200 ms)
+  // and paints the type's generic glyph into the tile's `<img>` if the produce
+  // loses — then repaints THE SAME ELEMENT with the real pixels. `applyTileAspect`
+  // listened with `{ once: true }`, so the glyph's `load` won: it pinned the
+  // glyph's 3:4 and removed the listener, and the real pixels arrived to nothing.
+  //
+  // The test above only reproduces that when the machine happens to be busy
+  // enough to lose the race, which is why it read as load flake for a whole
+  // session. This one MAKES it lose, by charging the bytes a latency well past
+  // the placeholder timer — so the glyph is guaranteed, and the assertion is
+  // about what the tile settles on afterwards.
+  test("a tile that showed the interim glyph STILL ends at page 0's aspect", async ({ page }) => {
+    await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+    // 300 ms per request, effectively unlimited throughput: the delay is the
+    // point, not the bandwidth.
+    await serveRanges(page, PDF, { latencyMs: 300, bytesPerSecond: 1e9 }, (url) =>
+      url.pathname === "/file/n-files-manual",
+    );
+    await page.goto("/");
+    await railSettled(page);
+    await page.locator(".card--folder", { hasText: "Files" }).click();
+    await expect(card(page, "Meeting notes — Q3")).toBeVisible();
+    await freezeMotion(page);
+
+    const tile = manual(page).locator(".thumb");
+
+    // The glyph really did get painted — otherwise this asserts nothing about
+    // the second `load`, and the test would pass for the wrong reason.
+    await expect
+      .poll(
+        async () => {
+          const box = await tile.boundingBox();
+          return box && box.height > 0 ? box.width / box.height : null;
+        },
+        { timeout: 5_000, message: "the interim glyph's aspect" },
+      )
+      .toBeLessThan(1.5);
+
+    // ...and the real pixels still correct it.
+    await expect
+      .poll(
+        async () => {
+          const box = await tile.boundingBox();
+          return box && box.height > 0 ? box.width / box.height : null;
+        },
+        { timeout: 20_000, message: "the pdf tile's settled aspect" },
+      )
+      .toBeCloseTo(PAGE0_ASPECT, 1);
+  });
+
   test("costs ONE document open, and none at all on the way back", async ({ page }) => {
     // The serial queue opens, renders and CLOSES per file; the facade's memo then
     // answers every later paint. So leaving the folder and coming back must not

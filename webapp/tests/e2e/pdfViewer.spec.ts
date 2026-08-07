@@ -952,8 +952,15 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     await expect(region.locator(".filmstrip__thumb:not(.is-loading)").first()).toBeVisible({
       timeout: 30_000,
     });
+    // ONE SAMPLE, asserted twice. Reading the counters again for `renders` polls
+    // a DIFFERENT moment than the one that satisfied `hits`, so the two
+    // assertions could describe different states of the world — and any work
+    // landing between them shows up as a failure in the second with the first
+    // already green. Settle first, then take a single reading.
     await expect.poll(async () => (await counts()).hits, { timeout: 20_000 }).toBeGreaterThan(0);
-    expect((await counts()).renders).toBe(0); // nothing was rendered twice
+    const settled = await counts();
+    expect(settled.hits).toBeGreaterThan(0);
+    expect(settled.renders).toBe(0); // nothing was rendered twice
 
     // AND THEY WERE ASKED FOR TOGETHER. A revisit is all hits — the blob is
     // immutable, so its thumbnail is cached forever — and a hit is an IndexedDB

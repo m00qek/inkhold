@@ -392,11 +392,28 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
     }
     // The decoded tile is the truth when the memo has none yet. Idempotent
     // against the memo racing it — both state the same shape. For a `.pdf` this
-    // is the facade's WebP, whose raster carries page 0's aspect; if the render
-    // failed it is the glyph instead, which is the 3:4 the tile already had.
+    // is the facade's WebP, whose raster carries page 0's aspect.
+    //
+    // EVERY `load`, NOT THE FIRST ONE, and that is the whole of a defect this
+    // spent a while being read as e2e flake. The same `<img>` is painted TWICE
+    // whenever a tile is slow: `render/lazy.ts` races the produce against
+    // `PLACEHOLDER_AFTER_MS` and paints the type's generic glyph if the produce
+    // loses, then repaints the element with the real pixels when they land.
+    //
+    // With `{ once: true }` the glyph's `load` won — it pinned the glyph's 3:4
+    // and REMOVED the listener, so the real pixels arrived to nothing and the
+    // tile kept a shape it had already been told was a guess. It reproduced only
+    // under parallel load, because that is the only time the produce loses a
+    // 200 ms race, and passed in isolation for the same reason.
+    //
+    // The old comment here said the glyph appears "if the render failed". It
+    // also appears when the render is merely SLOW, which is the case that bit.
+    // Correcting on every load is right in both: the real pixels are always
+    // painted last, so the final call is the honest one, and a render that truly
+    // failed leaves the glyph's shape — which is what it had anyway.
     if (media instanceof HTMLImageElement) {
       if (media.complete && media.naturalWidth > 0) correct(media.naturalWidth, media.naturalHeight);
-      else media.addEventListener("load", () => correct(media.naturalWidth, media.naturalHeight), { once: true });
+      media.addEventListener("load", () => correct(media.naturalWidth, media.naturalHeight));
     }
   }
 
