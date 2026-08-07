@@ -1630,7 +1630,16 @@ pub const ControlPlaneService = struct {
         const fb = try fallbackFirst(arena, entry.md5);
         return .{
             .page = fb.page,
-            .count = fb.count,
+            // THE ROW'S COUNT WINS WHEN IT HAS ONE. `first` is set only for an
+            // indexable `.note`, so a `.pdf` always lands here — and
+            // `fallbackFirst` hardcodes 1, which is why every PDF card read
+            // "1 page" no matter how long the document was. The probe
+            // (`pdf_index.zig`) fills `page_count` in for exactly this, and it
+            // was being thrown away one line after being read.
+            //
+            // Still 1 for a `.spd` or a `.txt`, whose `page_count` is 0: those
+            // have no pages to count and the fallback is the honest answer.
+            .count = if (count > 0) count else fb.count,
             .file_type = file_type,
             .has_recognized_text = has_text,
             .aspect = aspect,

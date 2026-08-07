@@ -21,6 +21,7 @@ const ratelimit = @import("../http/ratelimit.zig");
 const dltokensmod = @import("../http/download_tokens.zig");
 const filesmod = @import("../services/files.zig");
 const noteindex = @import("../services/note_index.zig");
+const deferredmod = @import("../services/deferred.zig");
 const notesearch = @import("../services/search/query.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
@@ -8131,6 +8132,50 @@ const aspect_png = "\x89PNG\r\n\x1a\n" ++
     "\x00\x00\x00\x0d" ++ "IHDR" ++
     "\x00\x00\x01\x40" ++ "\x00\x00\x00\xf0" ++ // 320 × 240
     "\x08\x02\x00\x00\x00" ++ ("p" ** 16);
+
+test "a PDF's tree entry carries its REAL page count and shape, not the 1-page fallback" {
+    // Every PDF card read "1 page" whatever the document was. `summaryFor` sets
+    // `first` only for an indexable `.note`, so a `.pdf` always takes the
+    // fallback return — and `fallbackFirst` hardcodes a count of 1, throwing away
+    // the `page_count` the probe had just written one line above.
+    //
+    // THREE pages on purpose: a one-page fixture would pass either way.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+    const web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+
+    _ = try putSeed(f, admin, null, "doc.pdf", @embedFile("../pdf/testdata/three-page.pdf"));
+    // A `.txt` alongside, whose `page_count` IS 0 and which must keep the
+    // fallback: the fix must not hand a page count to something with no pages.
+    _ = try putSeed(f, admin, null, "readme.txt", "plain text");
+
+    var lock: std.Io.Mutex = .init;
+    deferredmod.drainNow(gpa, f.db, f.files.blobs, &lock, std.testing.io);
+
+    const Aspect = struct { w: i64, h: i64 };
+    const Row = struct { name: []const u8, pageCount: i64 = 0, thumbAspect: ?Aspect = null };
+
+    const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/tree", &web, "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    var p = try std.json.parseFromSlice(struct { entries: []const Row }, gpa, resp.body, .{ .ignore_unknown_fields = true });
+    defer p.deinit();
+
+    for (p.value.entries) |e| {
+        if (std.mem.eql(u8, e.name, "doc.pdf")) {
+            try std.testing.expectEqual(@as(i64, 3), e.pageCount);
+            try std.testing.expectEqual(@as(i64, 200), e.thumbAspect.?.w);
+            try std.testing.expectEqual(@as(i64, 100), e.thumbAspect.?.h);
+        } else {
+            try std.testing.expectEqualStrings("readme.txt", e.name);
+            try std.testing.expectEqual(@as(i64, 1), e.pageCount); // no pages: the fallback stands
+        }
+    }
+}
 
 test "thumbAspect over HTTP: tree and bin serve the aspect fact, and omit it where unknown" {
     const f = try Fixture.init();
