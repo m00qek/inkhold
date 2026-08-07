@@ -64,6 +64,23 @@
 
    The card treatment moved here from `.pdf-page` with it: clipping on the
    canvas's own box would have cut its shadow off. */
+/* AND IT CARRIES THE CHECKER, which is what "Document off" looks like. Turning
+   that row off in the Annotations panel sets the canvas's `visibility: hidden`,
+   which keeps its box — so the stage still has the page's exact rectangle and
+   whatever is painted here shows through it. Without this the desk showed
+   through instead and the ink floated on it, as though the page had been
+   removed rather than hidden.
+
+   The checker is UNCONDITIONAL: nothing toggles it, because `.pdf-page` is an
+   opaque canvas over the top (its own `--sheet` fill plus the raster) and hides
+   it completely whenever the page is visible. That is exactly how the `.spd`
+   viewer works, where the white base is the Reference Layer's own canvas rather
+   than a fill on the wrap — the same mechanism, now the same tokens
+   (`--checker-*`, 00-tokens.css).
+
+   It goes on THIS box and not on `.pdf-page` so the card treatment above still
+   clips and shadows one sheet: a checker on the canvas would be the page rather
+   than what is behind it, and would square off the rounded corners. */
 .pdf-stage {
   position: relative;
   display: grid;
@@ -75,6 +92,10 @@
   box-shadow:
     0 2px 3px var(--shadow),
     0 26px 50px -28px var(--shadow);
+  background-color: var(--checker-base);
+  background-image: var(--checker-image);
+  background-size: var(--checker-cell) var(--checker-cell);
+  background-position: 0 0, var(--checker-offset) var(--checker-offset);
 }
 
 /* The ink layer. `pointer-events: none` so it never eats a click meant for the

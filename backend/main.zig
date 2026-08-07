@@ -57,6 +57,7 @@ test {
     _ = routes;
     _ = cli;
     _ = @import("expiring.zig");
+    _ = @import("pdf/probe.zig");
     _ = @import("http/router.zig");
     _ = @import("http/static.zig");
     _ = @import("http/json.zig");

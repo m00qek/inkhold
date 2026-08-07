@@ -298,6 +298,52 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     await expect(page.locator(".pdf-page")).toBeHidden();
   });
 
+  // Turning Document off used to leave the stage empty, so the DESK showed
+  // through and the ink floated on it — as though the page had been removed
+  // rather than hidden. The checker is the app's own way of saying "nothing
+  // here, and that is the point", and `.spd` already said it that way.
+  test("hiding the Document layer shows the transparent checker, not the desk", async ({ page }) => {
+    await signedIn(page);
+    await servePdf(page);
+    await page.goto("/#/note/n-files-manual");
+    await freezeMotion(page);
+
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+
+    await region.getByRole("button", { name: "Annotations" }).click();
+    await region.locator(".pdf-layer", { hasText: "Document" }).locator(".pdf-layer__eye").click();
+
+    await expect(page.locator(".pdf-page")).toBeHidden();
+
+    // THE BOX SURVIVES, and that is the whole mechanism: `visibility: hidden`
+    // keeps the canvas's layout, so the stage still has the page's exact
+    // rectangle for the checker to fill. `display: none` would collapse it and
+    // the checker would have nothing to show in.
+    //
+    // Measured against the canvas AS IT IS NOW rather than against a reading
+    // taken before the toggle: opening the Annotations panel narrows the page
+    // and re-rasters it, so a "before" box is sometimes captured mid-flight and
+    // the comparison flakes on the panel's relayout instead of on this feature.
+    const box = await page.evaluate(() => {
+      const stage = document.querySelector(".pdf-stage") as HTMLElement;
+      const canvas = document.querySelector(".pdf-page") as HTMLElement;
+      const s = stage.getBoundingClientRect();
+      const c = canvas.getBoundingClientRect();
+      return { sw: s.width, sh: s.height, cw: c.width, ch: c.height };
+    });
+    expect(box.sw).toBeGreaterThan(50);
+    expect(box.sh).toBeGreaterThan(50);
+    expect(box.cw).toBeCloseTo(box.sw, 0);
+    expect(box.ch).toBeCloseTo(box.sh, 0);
+
+    // And what shows through is the checker.
+    const bg = await page
+      .locator(".pdf-stage")
+      .evaluate((el) => getComputedStyle(el).backgroundImage);
+    expect(bg).toContain("linear-gradient");
+  });
+
   test("the page index lists every page, jumps, and tracks the current one", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);

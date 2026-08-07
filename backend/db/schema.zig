@@ -60,7 +60,14 @@ const sqlite = @import("sqlite.zig");
 /// it. Additive and nullable, so every existing row is valid the moment the
 /// step lands; `index_version` is bumped alongside so the values arrive as
 /// blobs are re-read.
-pub const version: i64 = 8;
+///
+/// v9 adds `note_index.pdf_probe`, the verdict from `backend/pdf/probe.c`.
+/// Additive and nullable, so every existing row is valid the moment the step
+/// lands, and NULL is exactly "never probed" — which is what the deferred
+/// worker's discovery query asks for. No `index_version` bump: a bump would
+/// re-index every note in the library to fill in some PDFs, where a
+/// query-shaped job store just finds them.
+pub const version: i64 = 9;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -74,7 +81,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 /// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
 /// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
 /// missed on a bump). The comptime check below makes the drift a build error.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9 };
 
 comptime {
     if (steps.len != version) @compileError(
@@ -473,6 +480,31 @@ const ddl_v8 =
     \\ALTER TABLE note_page_index ADD COLUMN links_offset INTEGER;
     \\ALTER TABLE note_page_index ADD COLUMN links_length INTEGER;
     \\ALTER TABLE note_page_index ADD COLUMN links_hash TEXT;
+;
+
+/// What a PDF is, as far as the server needs to know: how many pages, what
+/// shape page 1 is, and whether it opens at all
+/// (`backend/pdf/probe.zig`, `docs/scratch/pdf-index.md`).
+///
+/// `page_count`, `width` and `height` already exist on this table and are already
+/// SERVED — `controlplane.aspectOf` reads them, the gallery card renders them.
+/// A PDF simply had no row worth reading, which is why the masonry guesses 3:4
+/// and corrects from decoded pixels. Only a producer was missing.
+///
+/// `pdf_probe` is the verdict, and it exists so a file that will never open is
+/// never probed twice:
+///
+///   NULL  never probed — what the discovery query looks for
+///   0     probed, shape recorded
+///   1     unopenable (not a PDF, or damaged past repair)
+///   2     encrypted — opens, but needs a password
+///   3     no pages, or a page 1 with a degenerate box
+///
+/// Storing the failure is not optional. `deferred.Tenant.run`'s contract says a
+/// tenant that cannot record its own dead ends will be handed the same blob for
+/// ever, and `txt_index`'s over-cap marker is the same idea.
+const ddl_v9 =
+    \\ALTER TABLE note_index ADD COLUMN pdf_probe INTEGER;
 ;
 
 test "migrate creates the v1 schema and is idempotent" {

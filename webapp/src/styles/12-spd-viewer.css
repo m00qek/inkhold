@@ -71,14 +71,14 @@
   position: relative;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 6px 20px rgba(0, 0, 0, 0.08);
   line-height: 0;
-  /* A light-neutral checker (two 45deg gradients), the universal "transparent"
-     backdrop. Sits under every layer canvas. */
-  background-color: #f4f4f4;
-  background-image:
-    linear-gradient(45deg, #d8d8d8 25%, transparent 25%, transparent 75%, #d8d8d8 75%),
-    linear-gradient(45deg, #d8d8d8 25%, transparent 25%, transparent 75%, #d8d8d8 75%);
-  background-size: 22px 22px;
-  background-position: 0 0, 11px 11px;
+  /* The universal "transparent" backdrop, now shared with the PDF viewer's
+     hidden Document layer — the values live in 00-tokens.css (`--checker-*`).
+     Sits under every layer canvas; the white base is the Reference Layer's OWN
+     canvas, so hiding that layer goes see-through onto this. */
+  background-color: var(--checker-base);
+  background-image: var(--checker-image);
+  background-size: var(--checker-cell) var(--checker-cell);
+  background-position: 0 0, var(--checker-offset) var(--checker-offset);
 }
 /* Each layer's own canvas: base-res backing, stretched to the wrap so zoom is a
    single CSS resize with no re-raster. Stacked in DOM order (topmost last). */

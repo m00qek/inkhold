@@ -105,6 +105,30 @@
   --preview-h-list: 85px;
   --preview-h-panel: 101px;
   --preview-h-filmstrip: 124px;
+
+  /* THE "TRANSPARENT" CHECKER — the app's one way of saying "nothing here, and
+     that is the point". It was `.spd`'s private detail, described in its own
+     comment as "the universal transparent backdrop" while only one viewer used
+     it; the PDF viewer's hidden Document layer is the second, so it moves here
+     rather than being pasted into a second file.
+
+     Both viewers get it the same way: the checker is on the box UNDER the
+     content, and the content's own opaque canvas covers it until it is hidden.
+     Nothing toggles the checker itself.
+
+     THEME-INDEPENDENT, AND THAT IS A DECISION rather than an oversight inherited
+     from where it came from. It sits under authored content that never inverts —
+     a PDF page is the author's, and `.spd`'s reference layer is white — so a
+     checker that went dark would read as the page having changed colour instead
+     of as the page being absent. It stays light-neutral in both themes, which is
+     also why it is here and not in either palette below. */
+  --checker-base: #f4f4f4;
+  --checker-square: #d8d8d8;
+  --checker-cell: 22px;
+  --checker-offset: 11px;
+  --checker-image:
+    linear-gradient(45deg, var(--checker-square) 25%, transparent 25%, transparent 75%, var(--checker-square) 75%),
+    linear-gradient(45deg, var(--checker-square) 25%, transparent 25%, transparent 75%, var(--checker-square) 75%);
 }
 
 /* Light: ink on paper, on a warm desk. */

@@ -82,6 +82,7 @@ const notesearch = @import("search/maintain.zig");
 const thumbnail = @import("thumbnail.zig");
 const spdindex = @import("spd_index.zig");
 const txtindex = @import("txt_index.zig");
+const deferredmod = @import("deferred.zig");
 
 const md5_len = blobstore.md5_hex_len;
 
@@ -205,6 +206,12 @@ pub const Files = struct {
     /// releases the db lock before calling in. (`std.Io.Mutex`, like the
     /// db lock itself — NOT reentrant.)
     thumb_repair: std.Io.Mutex = .init,
+    /// The post-upload worker to wake after a commit, or null when there is
+    /// none (every test that does not spin one up, and the CLI). Set by
+    /// `app.run` once both exist. Waking is advisory: the worker's discovery
+    /// query is the source of truth and its idle tick finds anything a missed
+    /// signal left behind, so a null here costs latency and never correctness.
+    deferred: ?*deferredmod.Worker = null,
 
     /// Hot-cache versioning bounds (docs/scratch/hot-cache-versioning.md). Left
     /// at the compiled default by `init` (keep = 5); production overwrites it
@@ -930,15 +937,22 @@ pub const Files = struct {
         // it is called: with a fresh parse in hand its own verdict decides;
         // with a current row, `needsDerive` reads the stored verdict (and
         // the `kind = 1` memo) instead. See `txt_index.zig`.
-        var txt_derived: ?txtindex.Derived = null;
-        defer if (txt_derived) |*d| d.deinit();
-        if (txtindex.wants(name)) {
-            const chunkable = if (parsed) |p|
-                !p.indexable
-            else
-                txtindex.needsDerive(self.db, md5) catch false;
-            if (chunkable) txt_derived = txtindex.deriveStored(self.gpa, self.blobs, md5) catch null;
-        }
+        // NOT DERIVED HERE ANY MORE — `services/deferred.zig` owns it now.
+        //
+        // This was the one step on the ingest path that scaled with the file
+        // while the client held the connection: 15-19 s for a 5 MB `.txt` on the
+        // deployment target, 48-60 s at the 16 MiB cap. It is also why N
+        // concurrent uploads meant N concurrent derives, which is the shape that
+        // cannot survive a bigger format.
+        //
+        // The upload now returns as soon as the bytes and the rows are safe, and
+        // the worker picks the blob up from its discovery query. Nothing is
+        // enqueued: `deferred.txt_tenant` asks the database what is outstanding,
+        // so a crash between the two loses nothing.
+        //
+        // `deferred.notify` is called after the COMMIT below — before it, the
+        // worker could look, find nothing, and sleep on work that was about to
+        // exist.
 
         // Thumbnail bytes reach disk BEFORE the commit that references them (the
         // blob pattern: a crash can only orphan a derived file, which is
@@ -1001,17 +1015,6 @@ pub const Files = struct {
         // a missing one), and a failed upload is worse than a missing preview.
         // The upsert is one atomic statement.
         if (spd_derived) |d| spdindex.store(self.db, md5, d, ts) catch {};
-
-        // `.txt` segment rows (`kind = 1`), inside the transaction like the
-        // note index — and `try`, NOT best-effort like the `.spd` row above:
-        // `txt_index.store` interleaves FTS 'delete'/insert with the row
-        // writes, and committing a half-applied diff would corrupt the
-        // postings, which is worse than a failed upload. Runs after
-        // `noteindex.store` (the `note_index` row is the segments' FK) and
-        // before the `files` row write, so `mintPageForHolders` inside it
-        // reaches every EXISTING holder while this owner's own segment rows
-        // are minted by the search block below once their row exists.
-        if (txt_derived) |d| try txtindex.store(self.db, md5, d, ts);
 
         if (existing) |e| {
             file_id = e.id;
@@ -1127,6 +1130,10 @@ pub const Files = struct {
         try self.addUsed(user_id, delta);
 
         try self.db.exec("COMMIT;");
+        // AFTER the commit, never before: the worker's first act is to query for
+        // outstanding work, and a signal sent inside the transaction would race
+        // it into finding nothing and going back to sleep.
+        if (self.deferred) |w| w.signal();
         if (gc_old) self.removeBlobFiles(&old_md5.?);
         for (gc_hist.items) |*m| self.removeBlobFiles(m);
 

@@ -1301,6 +1301,11 @@ pub const ControlPlaneService = struct {
     const IndexRow = struct {
         indexable: bool,
         page_count: i64,
+        /// The blob's own page dimensions. For a `.note` these are the device
+        /// panel; for a `.pdf` they are page 1's rotated, cropped box in points,
+        /// written by `pdf_index.zig`. Zero when nothing has measured them.
+        width: i64,
+        height: i64,
         /// The signature's 4-byte file-type marker — "note", or "mark" for the
         /// PDF-annotation sibling. NULL for the ASA family (no marker) and for
         /// a row written before schema v6.
@@ -1338,7 +1343,7 @@ pub const ControlPlaneService = struct {
         // count `indexRowEnsuring`'s read-first ordering exists to protect.
         var r = (try self.files.db.row(
             "SELECT n.indexable, n.page_count, n.recognized_page_count, n.equipment, n.width, " ++
-                "n.cover_w, n.cover_h, sp.thumb_w, sp.thumb_h, sp.surface_w, sp.surface_h, n.filetype FROM note_index n " ++
+                "n.cover_w, n.cover_h, sp.thumb_w, sp.thumb_h, sp.surface_w, sp.surface_h, n.filetype, n.height FROM note_index n " ++
                 "LEFT JOIN spd_index sp ON sp.blob_md5 = n.blob_md5 AND sp.index_version = ?3 " ++
                 "WHERE n.blob_md5 = ?1 AND n.index_version = ?2;",
             &.{ .{ .text = md5 }, .{ .int = noteindex.index_version }, .{ .int = spdindex.index_version } },
@@ -1347,6 +1352,8 @@ pub const ControlPlaneService = struct {
         return .{
             .indexable = r.int(0) != 0,
             .page_count = r.int(1),
+            .width = r.int(4),
+            .height = r.int(12),
             .filetype = blk: {
                 if (r.isNull(11)) break :blk null;
                 const t = r.text(11);
@@ -1390,8 +1397,14 @@ pub const ControlPlaneService = struct {
             const p = first_page orelse return null;
             return positivePair(p.width, p.height);
         }
+        // A `.pdf`'s shape, from `pdf_index.zig`. WIDENED rather than folded into
+        // `indexable`, which means "is this a real `.note`" and is asked that way
+        // by every other caller: a row with a positive width/height has a shape
+        // worth serving, whatever produced it. Before this, a PDF reached here
+        // with nothing to offer and the gallery guessed 3:4.
         return positivePair(row.spd_surface_w, row.spd_surface_h) orelse
-            positivePair(row.spd_thumb_w, row.spd_thumb_h);
+            positivePair(row.spd_thumb_w, row.spd_thumb_h) orelse
+            positivePair(row.width, row.height);
     }
 
     /// `{w, h}` only when BOTH are known and positive: the field's contract is

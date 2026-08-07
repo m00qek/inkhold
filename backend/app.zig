@@ -27,6 +27,7 @@ const sqlite = @import("db/sqlite.zig");
 const schema = @import("db/schema.zig");
 const authsvc = @import("services/auth/service.zig");
 const filesmod = @import("services/files.zig");
+const deferred = @import("services/deferred.zig");
 const settingsmod = @import("services/settings.zig");
 const ratelimit = @import("http/ratelimit.zig");
 const dltokens = @import("http/download_tokens.zig");
@@ -129,6 +130,28 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     // `db_lock`'s (see http/lock_stats.zig): every write happens under the lock
     // next to it, so the two must be born and shared together.
     var lock_stats_table: lockstats.LockStats = .{};
+
+    // Post-upload processing, off the connection (`services/deferred.zig`).
+    //
+    // Declared AFTER `db_lock` because it borrows it, and STOPPED before the
+    // connection closes: `db.close()` is deferred further up, and defers unwind
+    // last-registered-first, so this join always runs first. A worker still
+    // inside a transaction when the connection went away would be the one bug
+    // this ordering exists to make impossible.
+    var worker: deferred.Worker = .{
+        .gpa = gpa,
+        .db = db,
+        .blobs = blob_store,
+        .lock = &db_lock,
+        .io = io,
+    };
+    try worker.start();
+    defer worker.stop();
+
+    // The ingest path wakes it after each commit. Advisory only — the worker's
+    // discovery query is the source of truth, and its idle tick picks up
+    // anything a missed signal or a restart left behind.
+    files_svc.deferred = &worker;
 
     var ctx: Context = .{
         .gpa = gpa,

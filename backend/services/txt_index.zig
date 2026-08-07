@@ -558,6 +558,7 @@ const testing = std.testing;
 const schema = @import("../db/schema.zig");
 const thumbstore = @import("../store/thumbs.zig");
 const filesvc = @import("files.zig");
+const deferredmod = @import("deferred.zig");
 const nb = @import("note_builder");
 
 /// Asserts every segment's byte range replays exactly (`seg == blob[offset..]
@@ -797,9 +798,18 @@ const Fixture = struct {
     }
 
     /// Puts `bytes` as a file, returning its id and (owned) md5 hex.
+    ///
+    /// THEN DRAINS THE DEFERRED WORKER, because segment derivation is no longer
+    /// part of an upload: `putFile` returns as soon as the bytes and the rows
+    /// are safe, and `services/deferred.zig` produces the `kind = 1` rows
+    /// afterwards. Every assertion below is about the state once that has
+    /// happened, so the fixture models the real sequence rather than pretending
+    /// the upload still does the work.
     fn put(f: *Fixture, user_id: u64, name: []const u8, bytes: []const u8) !struct { id: u64, md5: [32]u8 } {
         var r = std.Io.Reader.fixed(bytes);
         const e = try f.files.putFile(user_id, null, name, &r, null);
+        var lock: std.Io.Mutex = .init;
+        deferredmod.drainNow(testing.allocator, f.db, f.files.blobs, &lock, testing.io);
         defer testing.allocator.free(e.name);
         defer if (e.md5) |m| testing.allocator.free(m);
         var md5: [32]u8 = undefined;
@@ -1411,8 +1421,14 @@ test "BENCH note: a ~5 MB synthetic .txt ingests in one link (figure printed)" {
     const paragraphs = try f.count("SELECT COUNT(*) FROM note_page_index WHERE kind = 1;");
     try testing.expectEqual(paragraphs, @as(i64, @intCast(k)));
     try testing.expectEqual(paragraphs, try f.count("SELECT COUNT(*) FROM segment_fts_docsize;"));
-    std.debug.print(
-        "\n[bench] txt first ingest: {d} bytes, {d} paragraphs, {d} ms\n",
+    // `std.log.debug`, NOT `std.debug.print`. Any console output from a test
+    // binary makes the Zig build runner print a bogus `failed command:` line
+    // against a truncated step name while the build still exits 0 — which has
+    // now been misdiagnosed twice as a real failure. Debug level is filtered out
+    // at the default `testing.log_level`, so the number is still one
+    // `testing.log_level = .debug` away when somebody wants it.
+    std.log.debug(
+        "[bench] txt first ingest: {d} bytes, {d} paragraphs, {d} ms",
         .{ blob.items.len, paragraphs, t0.durationTo(t1).toMilliseconds() },
     );
 

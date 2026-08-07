@@ -177,12 +177,23 @@ fn linkSqlite(b: *std.Build, mod: *std.Build.Module) void {
 /// PDF.js here. What IS turned off is everything with no viewer story and a real
 /// cost: SVG, Markdown (would pull in cmark-gfm), MOBI, Office, barcodes, the
 /// JS interpreter (mujs), brotli, and every document *writer*.
-const mupdf_wasm_flags = [_][]const u8{
+/// The wasm target's own flags. Everything BELOW this is shared with the native
+/// build (`mupdf_trim_flags`) — the split exists so the measured decisions
+/// cannot drift between the two targets, which is the one thing that would make
+/// the browser and the server disagree about a document.
+const mupdf_wasm_only = [_][]const u8{
     // --- The wasm exception-handling contract. See `buildMupdfWasm`. ---
     "-fwasm-exceptions",
     "-mllvm",
     "-wasm-enable-sjlj",
 
+    // wasi-libc has no `mkstemp` and clang 21 makes an implicit declaration a
+    // hard error. `pdf_shim.c` supplies a stub; this lets the reference compile.
+    // Native libc has the real thing, so this is wasm-only.
+    "-Wno-implicit-function-declaration",
+};
+
+const mupdf_trim_flags = [_][]const u8{
     "-DNDEBUG",
 
     // --- Fonts and encodings ---
@@ -209,14 +220,18 @@ const mupdf_wasm_flags = [_][]const u8{
     "-DHAVE_LCMS2MT",
     "-DLCMS2MT_PREFIX=lcms2mt_",
 
-    // wasi-libc has no `mkstemp` and clang 21 makes an implicit declaration a
-    // hard error. `pdf_shim.c` supplies a stub; this lets the reference compile.
-    "-Wno-implicit-function-declaration",
-
     // Upstream's warnings are upstream's business — MuPDF and its thirdparty
     // tree are noisy under clang and none of it is ours to fix.
     "-w",
 };
+
+/// What `buildMupdfWasm` compiles with: the target's contract plus the shared trim.
+const mupdf_wasm_flags = mupdf_wasm_only ++ mupdf_trim_flags;
+
+/// What `buildMupdfNative` compiles with: the shared trim and nothing else. The
+/// server needs no exception-handling contract (ordinary `setjmp`/`longjmp`) and
+/// no `mkstemp` stub.
+const mupdf_native_flags = mupdf_trim_flags;
 
 /// Per-library build flags, mirroring MuPDF's own `Makelists` (`*_BUILD_CFLAGS`).
 const mupdf_freetype_flags = [_][]const u8{
@@ -380,6 +395,115 @@ fn isExcludedMupdfSource(path: []const u8) bool {
 /// The consequence for the browser: the module carries a `tag` section and needs
 /// Wasm exceptions — **Chrome 95+, Firefox 131+, Safari 18.4+**. That is a floor
 /// no other part of Inkhold imposes, and Phase 2 must feature-detect it.
+/// Include order mirrors MuPDF's `THIRD_CFLAGS`, which are applied to its own
+/// sources too. `include/mupdf` goes LAST and exists only for HarfBuzz, which
+/// takes its Unicode tables from MuPDF's bundled `ucdn.h`. Shared by both
+/// targets — a divergence here is a divergence in what the two builds parse.
+const mupdf_includes = [_][]const u8{
+    "include",
+    "thirdparty/freetype/include",
+    "scripts/freetype",
+    "thirdparty/gumbo-parser/src",
+    "thirdparty/harfbuzz/src",
+    "thirdparty/libjpeg",
+    "scripts/libjpeg",
+    "thirdparty/lcms2/include",
+    "thirdparty/zlib",
+    "thirdparty/jbig2dec",
+    "include/mupdf",
+};
+
+/// MuPDF's own source directories. `source/svg` is excluded (FZ_ENABLE_SVG=0);
+/// `source/tools`, `source/tests` and `source/helpers` are the CLI, the test
+/// harness and the pthread/OpenSSL helpers.
+///
+/// The NATIVE build keeps the same set as the wasm one deliberately, even though
+/// it registers only the PDF handler: `--gc-sections` already drops what nothing
+/// reaches (measured — registering every handler cost only 0.4 MB), so trimming
+/// the source list would buy almost nothing and would be a second, subtly
+/// different MuPDF.
+const mupdf_source_dirs = [_][]const u8{
+    "source/fitz",
+    "source/pdf",
+    "source/xps",
+    "source/html",
+    "source/cbz",
+    "source/reflow",
+};
+
+const MupdfGroup = struct { name: []const u8, extra: []const []const u8 };
+const mupdf_third_groups = [_]MupdfGroup{
+    .{ .name = "FREETYPE", .extra = &mupdf_freetype_flags },
+    .{ .name = "GUMBO", .extra = &mupdf_gumbo_flags },
+    .{ .name = "LIBJPEG", .extra = &.{} },
+    .{ .name = "LCMS2", .extra = &.{} },
+    .{ .name = "ZLIB", .extra = &mupdf_zlib_flags },
+    .{ .name = "JBIG2DEC", .extra = &mupdf_jbig2dec_flags },
+};
+
+/// Adds MuPDF's own sources, its fonts and its thirdparty tree to `mod`, with
+/// `flags`. The ONE description of what MuPDF is, for both targets; only the
+/// flags and the per-target shim differ.
+fn addMupdfSources(
+    b: *std.Build,
+    dep: *std.Build.Dependency,
+    mod: *std.Build.Module,
+    flags: []const []const u8,
+) void {
+    for (&mupdf_includes) |inc| mod.addIncludePath(dep.path(inc));
+
+    for (&mupdf_source_dirs) |sub| {
+        mod.addCSourceFiles(.{
+            .root = dep.path(""),
+            .files = mupdfDirSources(b, dep, sub, ".c"),
+            .flags = flags,
+        });
+    }
+    // The 14 URW base-35 faces, pre-hexdumped in the tarball's `generated/`.
+    // Everything else under `resources/fonts` is dropped by TOFU/TOFU_CJK.
+    mod.addCSourceFiles(.{
+        .root = dep.path(""),
+        .files = mupdfDirSources(b, dep, "generated/resources/fonts/urw", ".c"),
+        .flags = flags,
+    });
+    for (&mupdf_third_groups) |group| {
+        mod.addCSourceFiles(.{
+            .root = dep.path(""),
+            .files = mupdfListedSources(b, dep, &.{group.name}),
+            .flags = concatFlags(b, flags, group.extra),
+        });
+    }
+    mod.addCSourceFiles(.{
+        .root = dep.path(""),
+        .files = mupdfListedSources(b, dep, &.{"HARFBUZZ"}),
+        .flags = concatFlags(b, flags, &mupdf_harfbuzz_flags),
+    });
+}
+
+/// MuPDF for the SERVER (`backend/pdf/probe.c`) — page count, page-1 box, and
+/// whether the file opens at all. See `docs/scratch/pdf-index.md`.
+///
+/// Everything about what MuPDF *is* comes from `addMupdfSources`, shared with the
+/// wasm build. What differs is only what a native target needs: no
+/// exception-handling contract (ordinary `setjmp`/`longjmp` works), no wasm
+/// setjmp runtime, and our own shim instead of the browser's ABI.
+fn buildMupdfNative(
+    b: *std.Build,
+    dep: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const mod = b.createModule(.{ .target = target, .optimize = optimize });
+    mod.link_libc = true;
+    mod.link_libcpp = true; // HarfBuzz is C++
+    addMupdfSources(b, dep, mod, &mupdf_native_flags);
+    mod.addCSourceFile(.{
+        .file = b.path("backend/pdf/probe.c"),
+        .flags = &mupdf_native_flags,
+    });
+    return b.addLibrary(.{ .name = "mupdf-native", .root_module = mod, .linkage = .static });
+}
+
 fn buildMupdfWasm(b: *std.Build, dep: *std.Build.Dependency) *std.Build.Step.Compile {
     const eh_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
@@ -391,70 +515,7 @@ fn buildMupdfWasm(b: *std.Build, dep: *std.Build.Dependency) *std.Build.Step.Com
     // HarfBuzz is C++ (`.cc`); this is what puts libc++'s headers on the compile.
     mod.link_libcpp = true;
 
-    // Include order mirrors MuPDF's `THIRD_CFLAGS`, which are applied to its own
-    // sources too. `include/mupdf` goes LAST and exists only for HarfBuzz, which
-    // takes its Unicode tables from MuPDF's bundled `ucdn.h`.
-    for ([_][]const u8{
-        "include",
-        "thirdparty/freetype/include",
-        "scripts/freetype",
-        "thirdparty/gumbo-parser/src",
-        "thirdparty/harfbuzz/src",
-        "thirdparty/libjpeg",
-        "scripts/libjpeg",
-        "thirdparty/lcms2/include",
-        "thirdparty/zlib",
-        "thirdparty/jbig2dec",
-        "include/mupdf",
-    }) |inc| mod.addIncludePath(dep.path(inc));
-
-    // --- MuPDF's own sources ---
-    // `source/svg` is excluded (FZ_ENABLE_SVG=0); `source/tools`, `source/tests`
-    // and `source/helpers` are the CLI, the test harness and the pthread/OpenSSL
-    // helpers — none of which a browser module has any use for.
-    for ([_][]const u8{
-        "source/fitz",
-        "source/pdf",
-        "source/xps",
-        "source/html",
-        "source/cbz",
-        "source/reflow",
-    }) |sub| {
-        mod.addCSourceFiles(.{
-            .root = dep.path(""),
-            .files = mupdfDirSources(b, dep, sub, ".c"),
-            .flags = &mupdf_wasm_flags,
-        });
-    }
-    // The 14 URW base-35 faces, pre-hexdumped in the tarball's `generated/`.
-    // Everything else under `resources/fonts` is dropped by TOFU/TOFU_CJK.
-    mod.addCSourceFiles(.{
-        .root = dep.path(""),
-        .files = mupdfDirSources(b, dep, "generated/resources/fonts/urw", ".c"),
-        .flags = &mupdf_wasm_flags,
-    });
-
-    // --- Thirdparty, per `Makelists` ---
-    const Group = struct { name: []const u8, extra: []const []const u8 };
-    for ([_]Group{
-        .{ .name = "FREETYPE", .extra = &mupdf_freetype_flags },
-        .{ .name = "GUMBO", .extra = &mupdf_gumbo_flags },
-        .{ .name = "LIBJPEG", .extra = &.{} },
-        .{ .name = "LCMS2", .extra = &.{} },
-        .{ .name = "ZLIB", .extra = &mupdf_zlib_flags },
-        .{ .name = "JBIG2DEC", .extra = &mupdf_jbig2dec_flags },
-    }) |group| {
-        mod.addCSourceFiles(.{
-            .root = dep.path(""),
-            .files = mupdfListedSources(b, dep, &.{group.name}),
-            .flags = concatFlags(b, &mupdf_wasm_flags, group.extra),
-        });
-    }
-    mod.addCSourceFiles(.{
-        .root = dep.path(""),
-        .files = mupdfListedSources(b, dep, &.{"HARFBUZZ"}),
-        .flags = concatFlags(b, &mupdf_wasm_flags, &mupdf_harfbuzz_flags),
-    });
+    addMupdfSources(b, dep, mod, &mupdf_wasm_flags);
 
     // --- Ours ---
     mod.addCSourceFile(.{
@@ -635,6 +696,9 @@ pub fn build(b: *std.Build) void {
     serve_mod.addImport("spd", spd_mod); // native .spd parser for thumbnail extraction
     serve_mod.addOptions("build_options", build_options); // `--version`
     linkSqlite(b, serve_mod);
+    // MuPDF for the server's PDF probe (`backend/pdf/probe.c`). ~6.7 MB of
+    // binary, measured — see `docs/scratch/pdf-index.md` §3.
+    serve_mod.linkLibrary(buildMupdfNative(b, mupdf_dep, target, optimize));
     const serve_exe = b.addExecutable(.{ .name = "inkhold", .root_module = serve_mod });
     b.installArtifact(serve_exe);
     const run_serve = b.addRunArtifact(serve_exe);
@@ -666,6 +730,9 @@ pub fn build(b: *std.Build) void {
     backend_test_mod.addImport("note_builder", note_builder_mod);
     backend_test_mod.addOptions("build_options", build_options); // cli.zig's `--version`
     linkSqlite(b, backend_test_mod);
+    // The same MuPDF the server links, so `pdf/probe.zig`'s tests exercise the
+    // real library rather than a stub.
+    backend_test_mod.linkLibrary(buildMupdfNative(b, mupdf_dep, target, optimize));
     // Real device captures, for the `.note` index golden test. Wired in as named
     // imports because @embedFile cannot reach outside its module's directory.
     for ([_][]const u8{ "sample.note", "sample-2.note", "layers_edited.note" }) |fixture| {
