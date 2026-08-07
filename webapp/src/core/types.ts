@@ -135,6 +135,26 @@ export interface PageRef {
    */
   textHash: Hash | null;
   /**
+   * Content hash of this page's `EXTERNALLINKINFO` block — the links a PDF used
+   * as this page's template brought with it (`parsers/note/note-format.md` §14,
+   * decoded by parsers/note/src/links.zig) — or `null` when the page has no such
+   * block, which is every page of every note that was not built on an imported
+   * PDF.
+   *
+   * The same arrangement as {@link textHash}, and for the same two reasons.
+   * `linksHash !== null` IS the "this page has links" signal, so the reader
+   * fetches for the page in front of it and asks nothing at all about the rest —
+   * which matters here more than it does for text: the capture that established
+   * the format carries 51,256 records over 1702 pages, so a per-page fetch is
+   * the only shape that can serve it. And it is a SEPARATE hash from
+   * {@link hash}, because `hash` covers the layer bitmaps only: re-importing a
+   * template can change a page's links while leaving every stroke alone.
+   *
+   * Nullable in the domain, optional on the wire — the server omits null
+   * optionals, so the HTTP client normalizes `undefined` → `null` at the seam.
+   */
+  linksHash: Hash | null;
+  /**
    * The page's layers for the reader's layers panel, or `null`/absent when the
    * server sent none — in which case there is NO panel and the page renders as
    * the single device-authored composite, exactly as before layers existed.

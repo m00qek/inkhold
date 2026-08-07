@@ -499,6 +499,108 @@ describe("createHttpApi", () => {
     });
   });
 
+  // A `.note`'s OWN links — the rectangles a PDF used as a page's template
+  // brought with it (`note-format.md` §14). The seam matters more than usual
+  // here because two consumers read it: the reader's link layer and the PDF
+  // exporter, both through this one call and one record shape.
+  describe("getPageLinks", () => {
+    const linked = (linksHash: string | null): PageRef => ({
+      index: 3,
+      hash: "c".repeat(32), // the STROKE hash — deliberately constant below
+      width: 1404,
+      height: 1872,
+      textHash: null,
+      linksHash,
+    });
+
+    it("GETs /note/{id}/page/{index}/links?v={linksHash} and returns the records", async () => {
+      const links = [
+        { x: 819, y: 614, w: 187, h: 28, page: -1, uri: "https://onplanners.com/x?a=1,2" },
+        { x: 96, y: 1680, w: 420, h: 72, page: 11, uri: "none" },
+      ];
+      const { fn, calls } = recordingFetch(() => jsonResponse({ links }));
+      vi.stubGlobal("fetch", fn);
+
+      const got = await createHttpApi().getPageLinks("7", linked("l".repeat(32)));
+      expect(calls[0]).toBe("/note/7/page/3/links?v=" + "l".repeat(32));
+      expect(got.links).toEqual(links);
+    });
+
+    // The same cache-key guard the transcript has, for the same reason: a
+    // re-imported template can change a page's links while leaving every stroke —
+    // and therefore `hash` — identical. Keyed by `hash`, both requests would
+    // collapse onto one URL.
+    it("changes the fetch URL when linksHash changes, even though the page hash does not", async () => {
+      const { fn, calls } = recordingFetch(() => jsonResponse({ links: [] }));
+      vi.stubGlobal("fetch", fn);
+
+      const before = linked("1".repeat(32));
+      const after = linked("2".repeat(32));
+      expect(before.hash).toBe(after.hash);
+
+      const client = createHttpApi();
+      await client.getPageLinks("7", before);
+      await client.getPageLinks("7", after);
+
+      expect(calls[0]).not.toBe(calls[1]);
+      expect(calls[0]).toContain("v=" + "1".repeat(32));
+      expect(calls[1]).toContain("v=" + "2".repeat(32));
+    });
+
+    // THE COMMON CASE BY A WIDE MARGIN, and the whole reason the hash rides on
+    // the page list: a note that was not built on a PDF template has no page
+    // with links, and the reader must not ask about a single one of them.
+    it("returns no links WITHOUT a request when the page has no link block", async () => {
+      const { fn, calls } = recordingFetch(() => jsonResponse({ links: [{ x: 1, y: 1, w: 1, h: 1, page: 0, uri: "none" }] }));
+      vi.stubGlobal("fetch", fn);
+
+      expect(await createHttpApi().getPageLinks("7", linked(null))).toEqual({ links: [] });
+      expect(calls).toHaveLength(0);
+    });
+
+    it("treats an omitted `links` field as no links", async () => {
+      vi.stubGlobal("fetch", recordingFetch(() => jsonResponse({})).fn);
+      expect(await createHttpApi().getPageLinks("7", linked("l".repeat(32)))).toEqual({ links: [] });
+    });
+
+    // Device-authored values reaching the DOM as `href`s and a PDF as
+    // annotations: a record that is not a record is dropped at the seam, by the
+    // same validator the wasm decoder's payload goes through.
+    it("drops malformed records rather than passing them to the layer", async () => {
+      vi.stubGlobal(
+        "fetch",
+        recordingFetch(() =>
+          jsonResponse({
+            links: [
+              { x: 1, y: 2, w: 3, h: 4, page: -1, uri: "https://ok.example/" },
+              { x: 1, y: 2, w: 3, h: 4, page: -1 }, // no uri
+              { x: 1, y: 2, w: 0, h: 4, page: -1, uri: "https://ok.example/" }, // empty rect
+              { x: 1, y: 2, w: 3, h: 4, page: 1.5, uri: "https://ok.example/" }, // fractional target
+              { x: "1", y: 2, w: 3, h: 4, page: -1, uri: "https://ok.example/" }, // not a number
+            ],
+          }),
+        ).fn,
+      );
+
+      const got = await createHttpApi().getPageLinks("7", linked("l".repeat(32)));
+      expect(got.links).toEqual([{ x: 1, y: 2, w: 3, h: 4, page: -1, uri: "https://ok.example/" }]);
+    });
+
+    it("maps a stale-version 404 to a STALE_PAGE ApiError, so the reader refetches its metadata", async () => {
+      vi.stubGlobal("fetch", recordingFetch(() => jsonResponse({}, { status: 404 })).fn);
+      const err = await createHttpApi().getPageLinks("7", linked("l".repeat(32))).catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.code).toBe("STALE_PAGE");
+    });
+
+    it("maps a 401 to UNAUTHORIZED so a dead session reaches the shell", async () => {
+      vi.stubGlobal("fetch", recordingFetch(() => jsonResponse({ success: false }, { status: 401 })).fn);
+      const err = await createHttpApi().getPageLinks("7", linked("l".repeat(32))).catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.code).toBe("UNAUTHORIZED");
+    });
+  });
+
   // The transcript search. Two things are load-bearing beyond plain mapping:
   // the blank-query short-circuit (search-as-you-type empties the box constantly,
   // and a request per emptying is pure waste), and the `snippet` field — the one

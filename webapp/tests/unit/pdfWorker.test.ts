@@ -47,6 +47,8 @@ function fakeExports(): PdfDecoderExports {
     ink_open_stream: fn("ink_open_stream"),
     ink_page_count: fn("ink_page_count"),
     ink_page_size: fn("ink_page_size"),
+    ink_page_links: fn("ink_page_links"),
+    ink_links_free: fn("ink_links_free"),
     ink_render: fn("ink_render"),
     ink_close: fn("ink_close"),
     ink_export_page: fn("ink_export_page"),
@@ -89,12 +91,14 @@ describe("the JSPI call table", () => {
    * `pageCount` walks the page tree and `pageSize` loads a page — both read
    * bytes on a document that is still mostly unfetched, which is why the list is
    * longer than the obvious two. `exportIncremental` reads the ENTIRE original
-   * back through the host to write its delta.
+   * back through the host to write its delta. `pageLinks` loads the page AND
+   * resolves each internal destination, which is a second walk of the xref.
    */
   const MUST_SUSPEND: [string, string][] = [
     ["openStream", "ink_open_stream"],
     ["pageCount", "ink_page_count"],
     ["pageSize", "ink_page_size"],
+    ["pageLinks", "ink_page_links"],
     ["render", "ink_render"],
     ["exportPage", "ink_export_page"],
     ["annotatePage", "ink_annotate_page"],

@@ -575,6 +575,58 @@ test "a PAGE key with no readable number is Corrupt, not silently renumbered" {
     try std.testing.expectError(error.Corrupt, note.parse(gpa, bad));
 }
 
+// --- EXTERNALLINKINFO: a PDF template's links, through the container ---------
+
+test "a page's links come off its own EXTERNALLINKINFO address" {
+    const gpa = std.testing.allocator;
+    // A PDF-template page (the shape §14 describes: `PAGESTYLE` names the
+    // imported document) carrying one internal jump and one web link, and an
+    // ordinary page beside it carrying no block at all.
+    const bytes = try builder.serialize(gpa, .{
+        .pages = &.{
+            .{ .style = "user_pdf_planner_2", .links = &.{
+                .{ .target_page = 1701, .x = 901, .y = 192, .w = 407, .h = 50 },
+                .{ .target_id = "P2026", .uri = "https://onplanners.com/", .x = 53, .y = 464, .w = 297, .h = 121 },
+            } },
+            .{ .style = "style_5mm_dots" },
+        },
+    });
+    defer gpa.free(bytes);
+
+    var doc = try note.parse(gpa, bytes);
+    defer doc.deinit();
+
+    var page_links = (try note.links.forPage(gpa, doc, 0)).?;
+    defer page_links.deinit();
+    try std.testing.expectEqual(@as(usize, 2), page_links.items.len);
+
+    // Field 1 is the page the links are ON — the builder writes the page's own
+    // footer number, which is what every record of the real capture carries.
+    try std.testing.expectEqual(@as(u32, 1), page_links.items[0].source_page);
+    try std.testing.expectEqual(@as(u32, 1701), page_links.items[0].target_page);
+    try std.testing.expectEqual(note.links.Kind.internal, page_links.items[0].kind);
+    try std.testing.expectEqualStrings("none", page_links.items[0].uri);
+    try std.testing.expectEqual(note.links.Kind.web, page_links.items[1].kind);
+    try std.testing.expectEqualStrings("https://onplanners.com/", page_links.items[1].uri);
+    try std.testing.expectEqual(@as(i32, 53), page_links.items[1].x);
+}
+
+test "a page with no EXTERNALLINKINFO reads as null — no block, no read" {
+    // Address 0 is the state of every page of every ordinary `.note`. A caller
+    // has to be able to tell "no link block" from "an empty link block",
+    // because only the first costs nothing to answer.
+    const gpa = std.testing.allocator;
+    const bytes = try builder.serialize(gpa, .{ .pages = &.{ .{ .style = "style_5mm_dots" }, .{} } });
+    defer gpa.free(bytes);
+
+    var doc = try note.parse(gpa, bytes);
+    defer doc.deinit();
+    try std.testing.expectEqual(@as(u32, 0), doc.pages[0].linksAddress());
+    try std.testing.expect((try note.links.forPage(gpa, doc, 0)) == null);
+    // And a page index past the end is null too, never an out-of-range read.
+    try std.testing.expect((try note.links.forPage(gpa, doc, 9)) == null);
+}
+
 // --- the REAL capture -------------------------------------------------------
 
 test "GOLDEN: the .mark capture — same container, sparse footer, MARK layers" {

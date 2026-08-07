@@ -54,6 +54,7 @@ pub const layerinfo = @import("layerinfo.zig"); // per-page LAYERINFO panel stat
 pub const decoder = @import("decoder.zig"); // RATTA_RLE: decode / decodeInto
 pub const render = @import("render.zig"); // layer compositing -> grayscale
 pub const recognition = @import("recognition.zig"); // RECOGNTEXT (OCR) blobs
+pub const links = @import("links.zig"); // EXTERNALLINKINFO (a PDF template's links)
 pub const page_payload = @import("page_payload.zig"); // SNPG wire format
 pub const renderPageGray = render.renderPageGray;
 pub const Image = render.Image;
@@ -69,5 +70,6 @@ test {
     _ = decoder;
     _ = render;
     _ = recognition;
+    _ = links;
     _ = page_payload;
 }

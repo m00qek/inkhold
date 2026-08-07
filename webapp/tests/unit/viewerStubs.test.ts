@@ -73,6 +73,7 @@ const INERT_PDF_SEAM: PdfSeam = {
   createSession: () => ({
     open: () => Promise.resolve({ pageCount: 2, mode: "whole" as const }),
     pageSize: () => Promise.resolve({ width: 200, height: 100 }),
+    pageLinks: () => Promise.resolve([]),
     render: () =>
       Promise.resolve({
         // Only `close()` is ever reached: `paint` closes the bitmap and returns
@@ -487,6 +488,7 @@ describe(".pdf viewer, past the shared seam", () => {
       createSession: () => ({
         open: () => Promise.resolve({ pageCount: 2, mode: "whole" as const }),
         pageSize: () => Promise.resolve({ width: 200, height: 100 }),
+        pageLinks: () => Promise.resolve([]),
         render: (page: number, scale: number) => {
           renders.push({ page, scale });
           return Promise.resolve({
@@ -538,6 +540,7 @@ describe(".pdf viewer, past the shared seam", () => {
         // 200 x 100 pt — the page's OWN units, which is what the mask's matrix
         // has to map onto.
         pageSize: () => Promise.resolve({ width: 200, height: 100 }),
+        pageLinks: () => Promise.resolve([]),
         render: (page: number) => {
           renders.push(page);
           return Promise.resolve({
@@ -625,6 +628,7 @@ describe(".pdf viewer, past the shared seam", () => {
       createSession: () => ({
         open: () => Promise.resolve({ pageCount: 3, mode: "stream" as const }),
         pageSize: () => Promise.resolve({ width: 200, height: 100 }),
+        pageLinks: () => Promise.resolve([]),
         render: () =>
           Promise.resolve({
             bitmap: { close: () => {} } as unknown as ImageBitmap,

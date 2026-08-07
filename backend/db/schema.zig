@@ -54,7 +54,13 @@ const sqlite = @import("sqlite.zig");
 /// v5 adds `upload_sessions.received_bytes`, the running total that makes the
 /// device upload cap per-SESSION rather than per-part. Additive, same shape as
 /// v2/v3, and defaulted so every existing row is immediately valid.
-pub const version: i64 = 7;
+///
+/// v8 adds the three `note_page_index` columns that locate a page's
+/// `EXTERNALLINKINFO` block — the links a PDF used as a template brought with
+/// it. Additive and nullable, so every existing row is valid the moment the
+/// step lands; `index_version` is bumped alongside so the values arrive as
+/// blobs are re-read.
+pub const version: i64 = 8;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -68,7 +74,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 /// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
 /// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
 /// missed on a bump). The comptime check below makes the drift a build error.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8 };
 
 comptime {
     if (steps.len != version) @compileError(
@@ -444,6 +450,29 @@ const ddl_v6 =
 /// and 0 is a transient state rather than a permanent one.
 const ddl_v7 =
     \\ALTER TABLE note_page_index ADD COLUMN source_page INTEGER NOT NULL DEFAULT 0;
+;
+
+/// Where a page's `EXTERNALLINKINFO` block lives, and what is in it — the link
+/// rectangles a PDF imported as this page's template kept
+/// (`parsers/note/note-format.md` §14, decoded by `parsers/note/src/links.zig`).
+///
+/// The RANGE, not the records. It is the same arrangement `recogn_offset` /
+/// `recogn_length` make for the rich recognition form, and for the same reason:
+/// the corpus that established the format is one 1703-page notebook carrying
+/// **51,256 records**, which is emphatically not something to hold in a table or
+/// ship in `noteMeta`. The serve path re-reads one page's block — a KB-scale
+/// ranged read into an address-based container — and decodes it there.
+///
+/// `links_hash` is the md5 of the block's content and is the `?v=` version of
+/// `GET /note/{id}/page/{n}/links`, exactly as `text_hash` versions the
+/// transcript. NULL means the page has no link block at all, which is every page
+/// of every note that was not built on a PDF template — so non-NULL is also the
+/// "this page has links" signal the page list carries, and a client that checks
+/// it never asks about a page that has none.
+const ddl_v8 =
+    \\ALTER TABLE note_page_index ADD COLUMN links_offset INTEGER;
+    \\ALTER TABLE note_page_index ADD COLUMN links_length INTEGER;
+    \\ALTER TABLE note_page_index ADD COLUMN links_hash TEXT;
 ;
 
 test "migrate creates the v1 schema and is idempotent" {

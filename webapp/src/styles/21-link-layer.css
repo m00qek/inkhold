@@ -1,0 +1,52 @@
+/*
+ * THE DOCUMENT'S OWN LINKS — one layer, two viewers.
+ *
+ * `pages/pdfLinkLayer.ts` renders real `<a>` elements over a rendered page, and
+ * it is used by BOTH the PDF viewer (a `.pdf`'s own link annotations) and the
+ * reader (the links a PDF used as a `.note`'s template brought with it,
+ * `note-format.md` §14). The two differ only in the unit the rects arrive in —
+ * points there, device panel pixels here — which is arithmetic the component
+ * does and not anything this file can see. So the styling lives on its own
+ * rather than inside either viewer's stylesheet.
+ *
+ * Both hosts (`.pdf-stage`, `.page`) are `position: relative` with
+ * `overflow: hidden`, which is what the absolute placement and the focus rule
+ * below both assume.
+ */
+
+/* Stacked ABOVE the ink, in both viewers. The ink overlays are already
+   `pointer-events: none` and so never eat a click — but a link UNDER a scribble
+   is exactly the case that occurs, because people annotate around the things
+   they care about. The host itself is transparent to the pointer; only the
+   anchors take a hit, so the layer covering the whole page costs it nothing. */
+.pdf-links {
+  position: absolute;
+  pointer-events: none;
+}
+
+/* NO VISUAL BOX BY DEFAULT, and that is a decision rather than an omission. The
+   document's own design already indicates where its links are — a colour, an
+   underline, a planner's month tabs — and drawing our own rectangles over them
+   would be the viewer talking over the document. What the reader gets instead
+   is what a link on the web gets: the cursor, the browser's own preview of the
+   target in the status bar, and a tint under the pointer. */
+.pdf-links a {
+  position: absolute;
+  display: block;
+  border-radius: 2px;
+  pointer-events: auto;
+  background: transparent;
+  transition: background-color 0.12s ease;
+}
+.pdf-links a:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+/* FOCUS MUST BE VISIBLE — it is the one state a keyboard user has, and these
+   anchors have no text to carry it. The global `:focus-visible` rule
+   (02-app-shell-rail) supplies the accent outline; what is added here is the
+   fill, because both page hosts are `overflow: hidden` and an outline on a link
+   at the page's edge is clipped away by them. */
+.pdf-links a:focus-visible {
+  outline-offset: 0;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}

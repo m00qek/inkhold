@@ -584,3 +584,148 @@ describe("annotatePage + exportIncremental — the whole document, appended to",
     }
   });
 });
+
+describe("pageLinks — the document's own links, as far as the client", () => {
+  // The COORDINATE claims and the shim's own refusals are asserted in
+  // `webapp/wasm/tests/pdf_decode_abi.mjs`, against fixtures with an off-origin
+  // box and a `/Rotate 90`. What is asserted here is the rest of the chain:
+  // that the JSON the module writes survives the ABI boundary as typed records,
+  // in the same units `pageSize` reports, with the module's buffer released on
+  // every path.
+
+  /** A two-page PDF whose page 0 carries `annots`. Two, so a target resolves. */
+  function linkedPdf(annots: string[]): Uint8Array {
+    const refs = annots.map((_, i) => `${6 + i} 0 R`).join(" ");
+    const objs = [
+      "<< /Type /Catalog /Pages 2 0 R >>",
+      "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R" +
+        ` /Resources << >> /Annots [${refs}] >>`,
+      "<< /Length 9 >>\nstream\n0 0 0 rg\n\nendstream",
+      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << >> >>",
+      ...annots,
+    ];
+    let out = "%PDF-1.4\n";
+    const offsets: number[] = [];
+    for (const [i, body] of objs.entries()) {
+      offsets.push(out.length);
+      out += `${i + 1} 0 obj\n${body}\nendobj\n`;
+    }
+    const startxref = out.length;
+    out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+    for (const off of offsets) out += `${String(off).padStart(10, "0")} 00000 n \n`;
+    out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${startxref}\n%%EOF\n`;
+    return new TextEncoder().encode(out);
+  }
+
+  const annot = (rect: number[], action: string): string =>
+    `<< /Type /Annot /Subtype /Link /Rect [${rect.join(" ")}] /Border [0 0 0]` +
+    ` /A << ${action} >> >>`;
+
+  const open = (bytes: Uint8Array): Promise<AsyncPdfDocument> =>
+    AsyncPdfDocument.openWhole(exports, syncCalls(exports), bytes);
+
+  it("hands over typed records in the same units pageSize reports", async () => {
+    const doc = await open(
+      linkedPdf([
+        annot([20, 20, 80, 60], "/S /URI /URI (https://example.invalid/a)"),
+        annot([100, 20, 160, 60], "/S /GoTo /D [5 0 R /XYZ 0 100 0]"),
+      ]),
+    );
+    try {
+      expect(await doc.pageSize(0)).toEqual({ width: 200, height: 100 });
+      const links = await doc.pageLinks(0);
+      expect(links).toHaveLength(2);
+      // Top-left origin, y down, POINTS — the annot at PDF y 20..60 on a 100pt
+      // page displays at y 40..80.
+      expect(links[0]).toEqual({
+        x: 20,
+        y: 40,
+        w: 60,
+        h: 40,
+        page: -1,
+        uri: "https://example.invalid/a",
+      });
+      // RESOLVED IN THE MODULE. The client never sees `5 0 R`.
+      expect(links[1]!.page).toBe(1);
+      expect(links[1]!.x).toBe(100);
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("never lets a `javascript:` uri reach the client at all", async () => {
+    // The shim drops it, so the payload does not carry it; `linkTarget` refuses
+    // it a second time before it could become an href. This is the first gate.
+    const doc = await open(
+      linkedPdf([
+        annot([20, 20, 80, 60], "/S /URI /URI (javascript:alert\\(1\\))"),
+        annot([100, 20, 160, 60], "/S /URI /URI (data:text/html,<script>x</script>)"),
+        annot([20, 70, 80, 90], "/S /URI /URI (https://example.invalid/ok)"),
+      ]),
+    );
+    try {
+      const links = await doc.pageLinks(0);
+      expect(links.map((l) => l.uri)).toEqual(["https://example.invalid/ok"]);
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("answers [] for a page with no links — that is not a failure", async () => {
+    // Most pages have none, and a viewer that threw here would take the PAGE
+    // down with it.
+    const doc = await open(linkedPdf([annot([20, 20, 80, 60], "/S /URI /URI (https://a.invalid/)")]));
+    try {
+      expect(await doc.pageLinks(1)).toEqual([]);
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("answers [] rather than throwing for a page the module refuses", async () => {
+    const doc = await openWhole();
+    try {
+      expect(await doc.pageLinks(99)).toEqual([]);
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("releases the module's buffer, so the same page answers the same twice", async () => {
+    // One buffer at a time, replaced by the next call: a second read of the
+    // same page must not see a stale pointer or an accumulated payload.
+    const doc = await open(linkedPdf([annot([20, 20, 80, 60], "/S /URI /URI (https://a.invalid/)")]));
+    try {
+      const first = await doc.pageLinks(0);
+      const second = await doc.pageLinks(0);
+      expect(second).toEqual(first);
+      expect(second).toHaveLength(1);
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("falls back to the raw export when PdfCalls does not name pageLinks", async () => {
+    // `PdfCalls.pageLinks` is OPTIONAL, for a caller building the table by hand
+    // — which is right on the non-JSPI path, where nothing suspends, and wrong
+    // on the JSPI one (`pdfWorker.test.ts` asserts the wrapper is there).
+    const bare = { ...syncCalls(exports), pageLinks: undefined };
+    const doc = await AsyncPdfDocument.openWhole(
+      exports,
+      bare,
+      linkedPdf([annot([20, 20, 80, 60], "/S /URI /URI (https://a.invalid/)")]),
+    );
+    try {
+      expect((await doc.pageLinks(0))[0]!.uri).toBe("https://a.invalid/");
+    } finally {
+      doc.close();
+    }
+  });
+
+  it("a closed document throws rather than using a stale handle", async () => {
+    const doc = await openWhole();
+    doc.close();
+    await expect(doc.pageLinks(0)).rejects.toThrow(/closed/);
+  });
+});

@@ -11,6 +11,7 @@
 
 import type { Api } from "../api/types";
 import type { Id, NoteMeta, PageRef, WordBox } from "../core/types";
+import type { PdfLink } from "../render/pdfLinks";
 import type { NoteRenderer } from "../render/types";
 import { buildPdf, placeWords, type PdfPage } from "./pdf";
 
@@ -134,6 +135,65 @@ export function toGray(rgba: Uint8ClampedArray, width: number, height: number): 
 }
 
 /**
+ * THE ONE INTEGRATION POINT with the reader half of `.note` links.
+ *
+ * `Api` gains `getPageLinks(id, page): Promise<PageLinks>` alongside
+ * `getPageText` — same shape, same per-page immutable URL, same lazy fetch
+ * (docs/scratch/note-links.md §1). It is PROBED rather than called outright, and
+ * that is not defensiveness about the endpoint: an `Api` is also what the reader's
+ * own stubs and any older client hand this exporter, and the answer for one that
+ * cannot serve links is a PDF without annotations — never a failed export.
+ *
+ * The signature is stated here rather than imported so this file keeps compiling
+ * either side of that change; the shape is checked at the seam, once, and a
+ * mismatch degrades exactly like a missing endpoint.
+ */
+type PageLinksFn = (id: Id, page: PageRef) => Promise<{ links: readonly PdfLink[] }>;
+
+/**
+ * The page's links, or none — **never a rejection**. Same posture as the
+ * transcript below it: a links request that fails must not cost someone their
+ * export, because a PDF whose planner tabs do nothing is still the pages.
+ *
+ * `raster` is the size of the image the links are about to be placed on, when
+ * the caller has one that might not be the page at its native size. A link's
+ * rect is DEVICE PANEL PIXELS, so it only means anything over the page as the
+ * device drew it — and the layered exports hand over the layer model's
+ * EFFECTIVE dims, which for a landscape page is the panel on its side. Rather
+ * than guess at a rotation, those links are refused here, before the request is
+ * even made: a page with no annotations is honest, and annotations a quarter
+ * turn out of place are not.
+ *
+ * EXPORTED FOR ITS TEST, which is the only way to pin the probe and that rule:
+ * everything around them needs a 2D context and lives in the Playwright layer.
+ */
+export async function pageLinks(
+  api: Api,
+  id: Id,
+  page: PageRef,
+  raster?: { width: number; height: number },
+): Promise<readonly PdfLink[]> {
+  if (raster && (raster.width !== page.width || raster.height !== page.height)) return [];
+  const get = (api as unknown as { getPageLinks?: PageLinksFn }).getPageLinks;
+  if (typeof get !== "function") return [];
+  try {
+    const got = await get.call(api, id, page);
+    return got?.links ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** The page's transcript, or none — see {@link pageLinks} for the posture. */
+async function pageWords(api: Api, id: Id, page: PageRef): Promise<WordBox[]> {
+  try {
+    return (await api.getPageText(id, page)).words;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * The page's text layer, or null when it must not be drawn.
  *
  * Two independent reasons to return null, and they are checked in this order
@@ -175,17 +235,16 @@ async function pdfPageOf(deps: ExporterDeps, meta: NoteMeta, page: PageRef): Pro
 
   // The words are free when the page has no recognition (`textHash === null`
   // short-circuits in the client) and an immutable cache hit otherwise — the
-  // OCR panel already asked for this exact URL if it was ever opened.
-  let words: WordBox[] = [];
-  try {
-    words = (await deps.api.getPageText(meta.id, page)).words;
-  } catch {
-    // A failed transcript must not cost the user their export. The PDF
-    // degrades to raster-only, which the result already knows how to say.
-    words = [];
-  }
+  // OCR panel already asked for this exact URL if it was ever opened. The links
+  // are the same lazy per-page fetch, and the two go out TOGETHER: they are
+  // independent, and on the 3G link this app is built for, a 1703-page export
+  // would otherwise pay both round trips end to end, per page.
+  const [words, links] = await Promise.all([
+    pageWords(deps.api, meta.id, page),
+    pageLinks(deps.api, meta.id, page),
+  ]);
 
-  return { width, height, gray, textLayer: textLayerFor(meta, words, width, height) };
+  return { width, height, gray, links, textLayer: textLayerFor(meta, words, width, height) };
 }
 
 export function createExporter(deps: ExporterDeps): Exporter {
@@ -201,6 +260,10 @@ export function createExporter(deps: ExporterDeps): Exporter {
     async pagePdf(meta: NoteMeta, page: PageRef): Promise<PdfResult> {
       const pdfPage = await pdfPageOf(deps, meta, page);
       return {
+        // NO `pageCount`, and that is the whole of §2.5: one page is not the
+        // document, so an internal link in it — a month tab, an index row —
+        // points at a page this file does not contain. They are dropped and the
+        // external links are kept. See `PdfOptions.pageCount`.
         blob: await buildPdf([pdfPage]),
         filename: exportFilename(meta.name, page.index, "pdf"),
         kind: pdfPage.textLayer ? "searchable" : "raster",
@@ -220,15 +283,19 @@ export function createExporter(deps: ExporterDeps): Exporter {
       // not care which layers were drawn into the image above. Free on a page with
       // no recognition; an immutable cache hit otherwise. A failure degrades to a
       // raster-only PDF rather than costing the user their export.
-      let words: WordBox[] = [];
-      try {
-        words = (await deps.api.getPageText(meta.id, page)).words;
-      } catch {
-        words = [];
-      }
+      const words = await pageWords(deps.api, meta.id, page);
+
+      // THE LINKS ARE NOT POSITIONAL IN THE SAME WAY the words are: they are
+      // device panel pixels, and this image is at the layer model's EFFECTIVE
+      // dims. Handing `pageLinks` the raster it is about to place them on is
+      // what makes it refuse the one case where those two differ — see there.
+      const links = await pageLinks(deps.api, meta.id, page, { width, height });
+
       const textLayer = textLayerFor(meta, words, width, height);
       return {
-        blob: await buildPdf([{ width, height, gray, textLayer }]),
+        // One page, so no `pageCount` and no internal links — the same rule
+        // `pagePdf` above states.
+        blob: await buildPdf([{ width, height, gray, links, textLayer }]),
         kind: (textLayer ? "searchable" : "raster") as PdfKind,
       };
     },
@@ -258,7 +325,11 @@ export function createExporter(deps: ExporterDeps): Exporter {
         }
       }
 
-      const blob = await buildPdf(stream());
+      // `pageCount` is what makes this the export that keeps INTERNAL links: the
+      // document is the note, in note order, so note page `k` is document page
+      // `k` and a link to it resolves — even to a page 1700 pages further on
+      // that has not been written yet.
+      const blob = await buildPdf(stream(), { pageCount: total });
       return {
         blob,
         filename: documentFilename(meta.name, "pdf"),

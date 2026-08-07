@@ -44,6 +44,9 @@ import { relativeTime, absoluteTime } from "../ui/relativeTime";
 import { createLayersPanel } from "./layersPanel";
 import { createSidePanel, sidePanelState } from "../ui/sidePanel";
 import { createPageIndex } from "./pageIndex";
+import { createPdfLinkLayer } from "./pdfLinkLayer";
+import type { PdfLink } from "../render/pdfLinks";
+import { binNotePageHref, notePageHref } from "../router";
 import { DEFAULT_PAGE_DIMS, skeletonPage } from "../core/noteSkeleton";
 import {
   buildNoteLayerThumb,
@@ -269,7 +272,13 @@ export function createReader(deps: ReaderDeps): Reader {
   // carries layers and every record decodes. Any failure keeps the composite:
   // the stack degrades, the reader never breaks.
   const noteLayerCtl = createNoteLayersController({ getTemplate: createTemplateProvider(api) });
-  const pageEl = el("div", { class: "page" }, pageCanvas, noteLayerCtl.el);
+  // The page's OWN links, as real anchors — the SAME component the PDF viewer
+  // uses (`pages/pdfLinkLayer.ts`), because a link is a link whichever container
+  // it came out of. Mounted LAST, so it stacks ABOVE both the composite canvas
+  // and the layer stack: a link under a scribble is exactly the case that
+  // occurs, because people annotate around the things they care about.
+  const linkLayer = createPdfLinkLayer();
+  const pageEl = el("div", { class: "page" }, pageCanvas, noteLayerCtl.el, linkLayer.el);
 
   // The recognized-text aside sits BESIDE the page inside .page-wrap (per the
   // mockup), which is what makes opening it narrow the page rather than overlay
@@ -872,6 +881,9 @@ export function createReader(deps: ReaderDeps): Reader {
     if (!open || meta?.id !== noteId) return; // closed / moved on while fetching
     meta = fresh;
     // New hashes mean the cached word boxes are history — `setNote` drops them.
+    // The links memo is keyed by hash so a moved page could not serve a stale
+    // set anyway, but the entries under the OLD hashes are dead weight.
+    linksByPage.clear();
     find.setNote(fresh.id, fresh.pages);
     buildFilmstrip();
     void showPage(pageIndex);
@@ -1024,6 +1036,81 @@ export function createReader(deps: ReaderDeps): Reader {
       box.style.transform = `rotate(${oval.rotateDeg}deg)`;
       pageEl.append(box);
     }
+  }
+
+  /**
+   * A page's links, once fetched — keyed by index AND version, so a metadata
+   * refetch that moved a page's `linksHash` can never serve the old set.
+   *
+   * MEMOISED because the placement is recomputed on every relayout: a zoom step,
+   * a panel toggle and a stage resize all re-run `showPage`, and the response is
+   * `no-cache` (correctly — it is a struct, and `?v=` versions the block, not the
+   * shape). Without this, dragging a window edge would fire a request per frame
+   * for a page whose links have not moved.
+   */
+  const linksByPage = new Map<string, readonly PdfLink[]>();
+
+  /**
+   * Put the page's own links over it, as real anchors, or take them away.
+   *
+   * THE GEOMETRY IS THE SIMPLE CASE, and it is worth saying why rather than
+   * inheriting it silently from the PDF viewer. `EXTERNALLINKINFO` rects are in
+   * DEVICE PANEL PIXELS, and a `.note` page IS the panel — the same space its ink
+   * is in — so there is no page-rect mapping and no letterbox to undo, unlike a
+   * `.mark` over the PDF it annotates. Passing the page's native dims as `pagePt`
+   * makes `placeLink`'s one uniform scale exactly the canvas-to-panel scale the
+   * reader already computes for the ink, and nothing here re-derives it.
+   *
+   * THE OLD LINKS COME DOWN FIRST, before anything is awaited: a page's links are
+   * page-specific, and leaving the previous page's anchors up over a new page
+   * would offer targets belonging to a page you are no longer on — the one
+   * failure here that is worse than having no links at all.
+   *
+   * A FAILURE IS A MISSING LAYER, NOT A BROKEN PAGE. The page reads perfectly
+   * without its links, so nothing here touches the paint or the placeholder; a
+   * stale `?v=` still goes to the failure sink, which refetches the metadata.
+   */
+  async function paintLinks(index: number, token: number): Promise<void> {
+    linkLayer.clear();
+    const m = meta;
+    if (!m || mode !== "note") return;
+    const page = m.pages[index];
+    if (!page) return;
+    // NO REQUEST for a page with no link block, which is every page of every
+    // note that was not built on an imported PDF template. This is the whole
+    // reason the hash rides on the page list.
+    if (page.linksHash === null) return;
+
+    const key = `${page.index}:${page.linksHash}`;
+    let links = linksByPage.get(key);
+    if (links === undefined) {
+      try {
+        links = (await api.getPageLinks(m.id, page)).links;
+      } catch (e) {
+        dispatchApiFailure(failures, e, m.id, page);
+        return;
+      }
+      linksByPage.set(key, links);
+    }
+    // The page turned (or the note closed) while we were fetching.
+    if (token !== paintToken || pageIndex !== index || !open) return;
+    if (links.length === 0) return;
+
+    linkLayer.setLinks(links, {
+      // PANEL PIXELS as the page's own space, and the page box's CSS pixels as
+      // the canvas — `placeLink` divides one by the other and that ratio IS the
+      // scale the ink was drawn at.
+      pagePt: { width: page.width, height: page.height },
+      canvas: { width: pageEl.clientWidth, height: pageEl.clientHeight },
+      // A REAL ROUTE, so following a link leaves you somewhere you can share and
+      // reload into. A file opened from the recycle bin keeps the bin form, or
+      // the jump would 404 back to the library.
+      hrefForPage: (target) => (fromBin ? binNotePageHref(m.id, target) : notePageHref(m.id, target)),
+      // The same path the pager and the arrow keys take, so a link to page 12 is
+      // a page turn rather than a reopen. `goToPage` publishes the address, so
+      // the URL still ends up where the href pointed.
+      onJump: (target) => goToPage(target),
+    });
   }
 
   const find = createFindController({
@@ -1203,6 +1290,10 @@ export function createReader(deps: ReaderDeps): Reader {
     const isNote = next === "note";
     stage.hidden = !isNote;
     fileStage.hidden = isNote;
+    // Hiding the stage already takes the anchors out of the tab order, but a
+    // link layer left standing over a file that is not a note is a claim about
+    // the wrong document; drop it outright.
+    if (!isNote) linkLayer.clear();
     // The page index rides inside the stage now, so hiding the stage already
     // removes it; this keeps the toggle's pressed/expanded state honest and the
     // panel shut for a non-note (it has no pages to index).
@@ -1501,6 +1592,11 @@ export function createReader(deps: ReaderDeps): Reader {
     const token = ++paintToken;
     const noteId: Id = meta.id;
 
+    // The links, in parallel with the raster: placement depends on the page BOX
+    // (sized just above) and not on the pixels, so they can land before the ink
+    // does. Not awaited — a slow links fetch must never delay a page turn.
+    void paintLinks(pageIndex, token);
+
     // Immediately draw the thumbnail (if available) stretched and blurred, or —
     // when there is none to blur — the ruled sheet, so the previous page does
     // not linger and the new one is visibly ON ITS WAY.
@@ -1794,6 +1890,10 @@ export function createReader(deps: ReaderDeps): Reader {
     fileImg.onerror = null;
     fileImg.removeAttribute("src");
     fileBody.replaceChildren();
+    // Nothing focusable may survive a closed reader, and the next note's links
+    // are not this one's.
+    linkLayer.clear();
+    linksByPage.clear();
     meta = null;
   }
 

@@ -47,6 +47,9 @@ function pagesFor(id: Id, count: number, recognized: boolean): PageRef[] {
     width: 1404,
     height: 1872,
     textHash: recognized && index % 3 !== 2 ? `${id}-t${index}` : null,
+    // No trashed fixture was built on a PDF template, so none has links — and
+    // there is no bin-scoped links route to serve them if one did.
+    linksHash: null,
     // A `.note` page: its number is always `index + 1`, so there is nothing
     // to carry (see `PageRef.sourcePage`).
     sourcePage: null,

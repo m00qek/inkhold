@@ -204,6 +204,15 @@ pub const Page = struct {
         return @intCast(self.block.getInt("RECOGNTEXT") orelse 0);
     }
 
+    /// Address of the page's `EXTERNALLINKINFO` block — the link rectangles a
+    /// PDF used as this page's template brought with it (`note-format.md` §14,
+    /// decoded by `links.zig`). **0 is the overwhelming default**: a page on a
+    /// built-in style has no links to preserve, so every page of every ordinary
+    /// `.note` reads 0 here and costs no read.
+    pub fn linksAddress(self: Page) u32 {
+        return @intCast(self.block.getInt("EXTERNALLINKINFO") orelse 0);
+    }
+
     pub fn layer(self: Page, slot: LayerSlot) ?Layer {
         for (self.layers) |l| {
             if (l.slot == slot) return l;

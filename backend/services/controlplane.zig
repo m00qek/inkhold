@@ -82,6 +82,24 @@ pub const PageRefVO = struct {
     width: i64,
     height: i64,
     textHash: ?[]const u8 = null,
+    /// The md5 of the page's `EXTERNALLINKINFO` block — the links a PDF used as
+    /// this page's template brought with it (`note-format.md` §14) — or null
+    /// when the page has none, which is every page of every note that was not
+    /// built on an imported PDF.
+    ///
+    /// The same arrangement as `textHash`, for the same two reasons. It is the
+    /// `?v=` of `GET /note/{id}/page/{n}/links`, and it is a SEPARATE hash from
+    /// `hash` because `hash` covers the layer bitmaps only: a re-import that
+    /// changed a page's links while leaving its strokes alone would not move it.
+    /// And non-null IS the "this page has links" signal — one field rather than
+    /// a boolean beside a hash, so the two cannot disagree — which is what lets
+    /// a client skip the request entirely for the overwhelming majority of pages
+    /// instead of asking every page whether it has links.
+    ///
+    /// The RECORDS are deliberately not here. The capture that established the
+    /// format carries 51,256 of them across 1702 pages; a page list holding them
+    /// would be megabytes on note-open to serve the one page on screen.
+    linksHash: ?[]const u8 = null,
     /// The page's own number from the container footer, 1-based — as distinct
     /// from `index`, its position, which is what addresses the page's bytes.
     ///
@@ -481,6 +499,53 @@ pub const PageTextVO = struct {
 /// is checked against.
 pub const PageText = struct { hash: [32]u8, vo: PageTextVO };
 
+/// One link rectangle on a page, in the shape the client's `render/pdfLinks.ts`
+/// already speaks — the SAME record a PDF's own links arrive as, so the reader's
+/// link layer and the PDF exporter each consume one shape rather than two.
+///
+/// `x`/`y`/`w`/`h` are **device panel pixels**, origin top-left, y down. That is
+/// the `.note`'s own space and needs no mapping: a `.note` page IS the panel
+/// (§9.1), so the only transform left on the client is the canvas-to-panel
+/// scale it already computes for the ink. (A `.pdf`'s links arrive in POINTS
+/// instead; the field names match because the arithmetic downstream — one
+/// uniform scale from the raster's width — is identical either way.)
+///
+/// `page` is the **0-based** target of an internal jump, or **-1 for an external
+/// one**. §14 stores a 1-based page number and the literal `none`; the
+/// conversion happens here, at the boundary, so exactly one place knows both
+/// spellings.
+pub const LinkVO = struct {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    page: i64,
+    uri: []const u8,
+};
+
+/// A page's links. An object rather than a bare array because a top-level JSON
+/// array is a shape that can never gain a field, and this one may want the
+/// panel dims it was authored against.
+pub const PageLinksVO = struct { links: []const LinkVO = &.{} };
+
+/// `pageLinks`'s result: the body plus the stored `links_hash` the request's
+/// `?v=` is checked against.
+pub const PageLinks = struct { hash: [32]u8, vo: PageLinksVO };
+
+/// The schemes a link may carry out of a device file, and the only ones — the
+/// same allowlist the browser applies in `render/pdfLinks.ts`, stated again on
+/// this side because the export path reads this endpoint too and a file that
+/// leaves this machine must not carry a target we would refuse to follow
+/// ourselves. Anchored at index 0 and case-folded, so neither `JavaScript:` nor
+/// a leading-space variant can pass as "not a scheme we forbid".
+fn allowedLinkScheme(uri: []const u8) bool {
+    for ([_][]const u8{ "http://", "https://", "mailto:" }) |scheme| {
+        if (uri.len < scheme.len) continue;
+        if (std.ascii.eqlIgnoreCase(uri[0..scheme.len], scheme)) return true;
+    }
+    return false;
+}
+
 pub const ControlPlaneService = struct {
     files: *Files,
 
@@ -656,27 +721,25 @@ pub const ControlPlaneService = struct {
     /// `foo.mark`: the extension is appended, not replaced, which is what two
     /// real captures show.
     ///
-    /// One statement, and it rides the `files_live_name` UNIQUE index
-    /// (`user_id, COALESCE(parent_id,0), name`) — an exact index hit rather than
-    /// a scan of the folder, which matters on the hardware this runs on.
+    /// **The lookup itself is `Files.liveMarkIdFor`**, which is also the half of
+    /// `Files.pairOf` that carries a mark through trash/restore/purge/move. This
+    /// used to be a second hand-written copy of the query, reaching into
+    /// `files.db` from here; a rule the tree's owner enforces on every mutation
+    /// cannot also be re-derived by a reader that does not know when it changed.
     ///
-    /// LIVE ONLY, deliberately. A trashed PDF's mark is not looked up: the two
-    /// are independent rows and trashing one does not trash the other, so a bin
-    /// preview that composited annotations would be showing a live file's ink on
-    /// a deleted document. The bin answers "is this the file I meant?", and the
-    /// PDF alone answers that.
+    /// The gate is looser than the pairing rule on purpose. Pairing keys off the
+    /// NAME (`%.pdf` + `.mark`), because that is what a listing and an UPDATE can
+    /// agree on; this keys off the DESCRIBED type, so a PDF verified by content
+    /// but named without the extension still finds its ink to show. The looser
+    /// side is the read-only one, which is the safe direction for them to differ.
+    ///
+    /// LIVE ONLY, deliberately. A trashed PDF is looked up in the bin's own scope
+    /// (`noteMetaIn` passes `.live` only), so a bin preview can never composite a
+    /// live file's ink onto a deleted document — and now that a pair is trashed
+    /// together, a trashed PDF has no live mark to find anyway.
     fn annotationsIdFor(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, entry: Entry) !?[]const u8 {
-        const name = try std.fmt.allocPrint(arena, "{s}.mark", .{entry.name});
-        var s = try self.files.db.prepare(
-            "SELECT id FROM files WHERE user_id = ?1 AND COALESCE(parent_id, 0) = COALESCE(?2, 0) " ++
-                "AND name = ?3 AND is_folder = 0 AND deleted = 0;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindIntOpt(2, if (entry.parent_id) |pid| @intCast(pid) else null);
-        s.bindText(3, name);
-        if (!try s.step()) return null;
-        return try idStr(arena, @intCast(s.columnInt(0)));
+        const found = (try self.files.liveMarkIdFor(user_id, entry.parent_id, entry.name)) orelse return null;
+        return try idStr(arena, found);
     }
 
     fn noteMetaIn(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, scope: ReadScope) !?NoteMetaVO {
@@ -1068,6 +1131,134 @@ pub const ControlPlaneService = struct {
         return out;
     }
 
+    /// `GET /note/{id}/page/{n}/links` — the links a PDF used as this page's
+    /// template brought with it, plus the `links_hash` the caller's `?v=` must
+    /// match. Null when the note/page doesn't exist, isn't owned by `user_id`,
+    /// or **has no `EXTERNALLINKINFO` block** — which is every page of every
+    /// note that was not built on an imported PDF, and which the handler 404s
+    /// exactly as it does a stale `?v=`, for the same reason `pageText` does: a
+    /// page with no hash has no version a request could ever match, and a
+    /// client following the contract (`PageRef.linksHash` null → no request)
+    /// never asks.
+    pub fn pageLinks(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, n: u64) !?PageLinks {
+        const entry = (try self.lookup(.live, user_id, id)) orelse return null;
+        defer freeEntry(self.files.gpa, entry);
+        if (entry.is_folder) return null;
+        const md5 = entry.md5 orelse return null;
+        return self.pageLinksForMd5(arena, md5, n);
+    }
+
+    /// `pageLinks` keyed directly by a blob md5. ONE ranged read of the page's
+    /// own block — the container is address-based and the indexer stored where
+    /// that block is, so serving one page's links never opens the note. The
+    /// note's `page_count` rides along on the same row because an internal jump
+    /// is only a link if it lands on a page that exists.
+    pub fn pageLinksForMd5(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8, n: u64) !?PageLinks {
+        if (md5.len != blobstore.md5_hex_len) return null;
+
+        self.backfill(md5); // a cold blob has no rows to read yet
+
+        var r = (try self.files.db.row(
+            "SELECT p.links_hash, p.links_offset, p.links_length, i.page_count " ++
+                "FROM note_page_index p JOIN note_index i ON i.blob_md5 = p.blob_md5 " ++
+                "WHERE p.blob_md5 = ?1 AND p.page_index = ?2 AND p.links_hash IS NOT NULL;",
+            &.{ .{ .text = md5 }, .{ .int = @intCast(n) } },
+        )) orelse return null;
+        defer r.finalize();
+
+        const stored = r.text(0);
+        if (stored.len != 32) return null; // a malformed row is not a servable version
+
+        var out: PageLinks = .{ .hash = undefined, .vo = .{} };
+        @memcpy(&out.hash, stored);
+        if (r.isNull(1) or r.isNull(2)) return out; // hash without a range: nothing to read
+        out.vo.links = (self.linksAt(arena, md5, r.int(1), r.int(2), r.int(3)) catch null) orelse &.{};
+        return out;
+    }
+
+    /// Upper bound on an `EXTERNALLINKINFO` block we will read. The heaviest
+    /// page in the capture that established the format holds 123 records in
+    /// about 11 KB; this is two orders of magnitude of headroom and still a hard
+    /// ceiling on what one request can allocate out of a blob whose contents an
+    /// untrusted device chose.
+    const max_links_bytes: i64 = 1 << 20;
+
+    /// Upper bound on the links one page may SERVE, as opposed to hold. Each one
+    /// becomes a real focusable anchor in the reader, so this is a DOM bound as
+    /// much as a byte bound — 123 is the corpus's worst page, and a file that
+    /// wants ten thousand hit targets over one page is doing something the
+    /// reader has no business reproducing.
+    const max_links_per_page: usize = 1024;
+
+    /// Decode the stored `EXTERNALLINKINFO` range into the client's link shape.
+    ///
+    /// **Best-effort, and the caller turns any error into "no links".** A page
+    /// that renders without its links is a page; a page that fails to render
+    /// because a link block went bad is not.
+    ///
+    /// Three conversions happen here and nowhere else, because this is the seam
+    /// where §14's spelling meets the client's:
+    ///
+    ///  1. **1-based page number → 0-based index**, and a target outside the
+    ///     note is dropped rather than clamped. (The two agree by construction
+    ///     for a notebook, whose footer numbers its pages 1..N with no gaps;
+    ///     a `.mark`'s numbering is sparse, but a mark annotates a PDF and has
+    ///     no imported template, so it carries no link records at all.)
+    ///  2. **`none` → external**, spelled `page = -1`, which is what the client's
+    ///     `PdfLink` means by external.
+    ///  3. **The scheme allowlist**, applied HERE as well as in the browser. The
+    ///     device file is untrusted input and this is the first gate; the
+    ///     client's `linkTarget` is the last one. Duplicating it is deliberate —
+    ///     the exporter reads this same endpoint, and a `javascript:` URI that
+    ///     only the viewer refused would still have reached a PDF someone else
+    ///     opens.
+    ///
+    /// A record with an empty rect is dropped for the same reason the PDF
+    /// decoder drops it: it is not a hit area, and an anchor of no size is a
+    /// tab stop that cannot be seen or clicked.
+    fn linksAt(
+        self: ControlPlaneService,
+        arena: std.mem.Allocator,
+        md5: []const u8,
+        offset: i64,
+        length: i64,
+        page_count: i64,
+    ) !?[]const LinkVO {
+        if (length <= 0 or length > max_links_bytes or offset < 0) return null;
+
+        const buf = try arena.alloc(u8, @intCast(length));
+        const content = try self.files.blobs.readRange(md5, @intCast(offset), @intCast(length), buf);
+
+        var parsed = try sn.links.parse(arena, content);
+        defer parsed.deinit();
+
+        var out: std.ArrayList(LinkVO) = .empty;
+        for (parsed.items) |l| {
+            if (out.items.len == max_links_per_page) break;
+            if (l.w <= 0 or l.h <= 0) continue;
+            const target: i64 = switch (l.kind) {
+                .web => -1,
+                .internal => blk: {
+                    if (l.target_page == 0 or l.target_page > page_count) continue;
+                    break :blk @as(i64, l.target_page) - 1;
+                },
+            };
+            if (target < 0 and !allowedLinkScheme(l.uri)) continue;
+            try out.append(arena, .{
+                .x = @floatFromInt(l.x),
+                .y = @floatFromInt(l.y),
+                .w = @floatFromInt(l.w),
+                .h = @floatFromInt(l.h),
+                .page = target,
+                // Duped: the record borrows `parsed`, which is deinit'd on the
+                // way out of this function even though the arena outlives it.
+                .uri = try arena.dupe(u8, l.uri),
+            });
+        }
+        if (out.items.len == 0) return null;
+        return out.items;
+    }
+
     /// Writes the planned page's SNPG bytes to `out`, streaming each layer's
     /// block straight out of the blob in `blobstore.chunk_len` windows. Exactly
     /// `plan.plan.content_length` bytes.
@@ -1286,7 +1477,7 @@ pub const ControlPlaneService = struct {
     /// query, nothing proportional to the note.
     fn pageRefAt(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8, n: u64) !?PageRefVO {
         var r = (try self.files.db.row(
-            "SELECT content_hash, width, height, text_hash, layers FROM note_page_index " ++
+            "SELECT content_hash, width, height, text_hash, layers, links_hash FROM note_page_index " ++
                 "WHERE blob_md5 = ?1 AND page_index = ?2;",
             &.{ .{ .text = md5 }, .{ .int = @intCast(n) } },
         )) orelse return null;
@@ -1298,6 +1489,7 @@ pub const ControlPlaneService = struct {
             .height = r.int(2),
             .textHash = if (r.isNull(3)) null else try arena.dupe(u8, r.text(3)),
             .layers = try layerVOsFromBlob(arena, r.blob(4)),
+            .linksHash = if (r.isNull(5)) null else try arena.dupe(u8, r.text(5)),
         };
     }
 
@@ -1308,7 +1500,8 @@ pub const ControlPlaneService = struct {
     fn pageRefsFromIndex(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8) ![]const PageRefVO {
         var out: std.ArrayList(PageRefVO) = .empty;
         var s = try self.files.db.prepare(
-            "SELECT page_index, content_hash, width, height, text_hash, layers, source_page FROM note_page_index " ++
+            "SELECT page_index, content_hash, width, height, text_hash, layers, source_page, links_hash " ++
+                "FROM note_page_index " ++
                 "WHERE blob_md5 = ?1 ORDER BY page_index;",
         );
         defer s.finalize();
@@ -1328,6 +1521,7 @@ pub const ControlPlaneService = struct {
                     const n = s.columnInt(6);
                     break :blk if (n == 0 or n == s.columnInt(0) + 1) null else n;
                 },
+                .linksHash = if (s.columnIsNull(7)) null else try arena.dupe(u8, s.columnText(7)),
             });
         }
         return out.items;
@@ -1970,6 +2164,140 @@ test "recognized text: noteMeta carries textHash, and pageText serves the transc
     try f.db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(2, 'x@y.z', '0123456789abcdef0123456789abcdef', 0);");
     try f.db.exec("INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(2, 0, 100000000);");
     try testing.expect((try svc.pageText(a, 2, id, 0)) == null);
+}
+
+test "template links: noteMeta carries linksHash, and pageLinks serves the records under it" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+
+    // A three-page note in the shape §14 describes — the device rasterises an
+    // imported PDF into each page's style and keeps that page's link rectangles
+    // beside it. Page 0 has links, page 1 has none at all.
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+    const bytes = try nb.serialize(gpa, .{
+        .header = &.{.{ .key = "APPLY_EQUIPMENT", .value = "N6" }},
+        .pages = &.{
+            .{
+                .style = "user_pdf_planner_1",
+                .layers = &.{.{ .slot = .main, .bitmap = &bmp }},
+                .links = &.{
+                    // An internal jump to page 3 of 3 — 1-based on the wire.
+                    .{ .target_page = 3, .x = 901, .y = 192, .w = 407, .h = 50 },
+                    // A web link whose URL carries both a comma and an `=`.
+                    .{ .uri = "https://onplanners.com/g?a=1,2&b=3", .x = 53, .y = 464, .w = 297, .h = 121 },
+                    // Refused: the scheme allowlist is applied on this side too,
+                    // because the exporter reads this endpoint.
+                    .{ .uri = "javascript:alert(1)", .x = 10, .y = 10, .w = 50, .h = 50 },
+                    // Refused: a target page this note does not have.
+                    .{ .target_page = 99, .x = 20, .y = 20, .w = 50, .h = 50 },
+                    // Refused: an empty rect is not a hit area.
+                    .{ .target_page = 2, .x = 30, .y = 30, .w = 0, .h = 40 },
+                },
+            },
+            .{ .style = "style_white", .layers = &.{.{ .slot = .main, .bitmap = &bmp }} },
+            .{ .style = "user_pdf_planner_3", .layers = &.{.{ .slot = .main, .bitmap = &bmp }} },
+        },
+    });
+    defer gpa.free(bytes);
+    const id = try seedBytes(&f, null, "planner.note", bytes);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+
+    // The page list advertises the version, and ONLY for the page that has one.
+    // That is what lets the reader skip the request for every other page rather
+    // than ask each one in turn whether it has links.
+    const meta = (try svc.noteMeta(a, 1, id)).?;
+    try testing.expectEqual(@as(usize, 32), meta.pages[0].linksHash.?.len);
+    try testing.expect(meta.pages[1].linksHash == null);
+    // NOT the content hash: a re-imported template can change a page's links
+    // without touching a stroke, so the two must move independently.
+    try testing.expect(!std.mem.eql(u8, meta.pages[0].hash, meta.pages[0].linksHash.?));
+
+    const pl = (try svc.pageLinks(a, 1, id, 0)).?;
+    try testing.expectEqualStrings(meta.pages[0].linksHash.?, &pl.hash);
+
+    // Two of the five records survive; the other three are each refused for
+    // their own stated reason.
+    try testing.expectEqual(@as(usize, 2), pl.vo.links.len);
+
+    // THE 1-BASED → 0-BASED CONVERSION, which happens here and nowhere else:
+    // the record says page 3, the client's `PdfLink` means index 2.
+    const jump = pl.vo.links[0];
+    try testing.expectEqual(@as(i64, 2), jump.page);
+    try testing.expectEqual(@as(f64, 901), jump.x);
+    try testing.expectEqual(@as(f64, 192), jump.y);
+    try testing.expectEqual(@as(f64, 407), jump.w);
+    try testing.expectEqual(@as(f64, 50), jump.h);
+
+    // `none` → EXTERNAL is spelled -1, and the URL survives its comma and `=`
+    // intact — the whole reason §14 base64s every field separately.
+    const web = pl.vo.links[1];
+    try testing.expectEqual(@as(i64, -1), web.page);
+    try testing.expectEqualStrings("https://onplanners.com/g?a=1,2&b=3", web.uri);
+
+    // A page with no link block has no version to be asked for, so the read is a
+    // miss — which the handler turns into the same 404 as a stale `?v=`.
+    try testing.expect((try svc.pageLinks(a, 1, id, 1)) == null);
+    // ...as are an out-of-range page, an unknown note, a folder and a non-note.
+    try testing.expect((try svc.pageLinks(a, 1, id, 99)) == null);
+    try testing.expect((try svc.pageLinks(a, 1, 99999, 0)) == null);
+    const dir = try f.files.createFolder(1, null, "D");
+    defer gpa.free(dir.name);
+    try testing.expect((try svc.pageLinks(a, 1, dir.id, 0)) == null);
+    const pdf = try seedBytes(&f, null, "x.pdf", "%PDF-1.7 nope");
+    try testing.expect((try svc.pageLinks(a, 1, pdf, 0)) == null);
+
+    // OWNERSHIP: index rows are keyed by blob md5 and blobs are deduplicated, so
+    // the scoping can only come from the `files` lookup — assert it does.
+    try f.db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(2, 'x@y.z', '0123456789abcdef0123456789abcdef', 0);");
+    try f.db.exec("INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(2, 0, 100000000);");
+    try testing.expect((try svc.pageLinks(a, 2, id, 0)) == null);
+}
+
+test "template links: a block of nothing but unreadable records serves no links, not a failure" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+
+    // The page HAS a link block, so it has a version and the route answers 200 —
+    // but nothing in the block is a record. A page renders perfectly without its
+    // links, so this must degrade to "no links" rather than cost the page.
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+    const bytes = try nb.serialize(gpa, .{
+        .pages = &.{.{
+            .style = "user_pdf_x_1",
+            .layers = &.{.{ .slot = .main, .bitmap = &bmp }},
+            .links = &.{.{ .target_page = 1, .w = 10, .h = 10 }},
+        }},
+    });
+    defer gpa.free(bytes);
+    const id = try seedBytes(&f, null, "junk.note", bytes);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+
+    // Overwrite the block's content in place with the same number of bytes of
+    // nonsense, so the stored range still validates and only the CONTENT is bad.
+    const meta = (try svc.noteMeta(a, 1, id)).?;
+    try testing.expect(meta.pages[0].linksHash != null);
+    var r = (try f.db.row(
+        "SELECT links_offset, links_length FROM note_page_index WHERE page_index = 0;",
+        &.{},
+    )).?;
+    const off: usize = @intCast(r.int(0));
+    const len: usize = @intCast(r.int(1));
+    r.finalize();
+    @memset(bytes[off .. off + len], '!');
+    const junked = try seedBytes(&f, null, "junked.note", bytes);
+
+    const pl = (try svc.pageLinks(a, 1, junked, 0)).?;
+    try testing.expectEqual(@as(usize, 0), pl.vo.links.len);
 }
 
 test "recognized text: a stored transcript that is NULL serializes to an empty body, not an error" {

@@ -2303,6 +2303,62 @@ pub fn controlplanePageText(ctx: *Context, req: *Request, params: Params) anyerr
     });
 }
 
+/// GET /note/{id}/page/{n}/links?v={linksHash} -> the links a PDF used as this
+/// page's template brought with it: `{ links: [ {x,y,w,h,page,uri} ] }`, a raw VO
+/// with no `{success}` envelope.
+///
+/// The sibling of `controlplanePageText` in every respect that matters, and
+/// deliberately so — same URL shape, same versioning discipline, same 404
+/// contract, same cost profile:
+///
+///   * **Versioned by `links_hash`**, the md5 of the page's `EXTERNALLINKINFO`
+///     block, so the URL turns over exactly when the links do and never when the
+///     strokes change.
+///   * **`no-cache`, not `immutable`**, for the rule the text route learned the
+///     hard way: `?v=` versions the block's BYTES, not the JSON struct they are
+///     wrapped in. `LinkVO` is a Zig struct and can gain a field on any deploy;
+///     a year-long immutable cache entry on a URL that cannot change is how the
+///     old shape outlives the new one, silently.
+///   * **404 means "your metadata is stale, refetch it"** — no such note/page, a
+///     `?v=` that doesn't match, or a page with no link block at all. The last
+///     falls out rather than being special-cased: with no `links_hash` there is
+///     no `?v=` that could match, and a client following the contract
+///     (`PageRef.linksHash` null ⇒ no request) never asks. That is the common
+///     case by a wide margin — an ordinary `.note` has no imported template and
+///     therefore no page with links.
+///
+/// The links are decoded HERE rather than stored: one KB-scale ranged read of a
+/// block the indexer already located (`links_offset`/`links_length`), never a
+/// note parse. Per-page and not per-document on purpose — the corpus behind §14
+/// is one notebook with 51,256 records in it.
+///
+/// The URIs are **device-authored content**. The scheme allowlist is applied on
+/// this side (`allowedLinkScheme`) as well as in the browser, because the PDF
+/// exporter reads this same endpoint and a refused link must not survive into a
+/// file that leaves the machine.
+pub fn controlplanePageLinks(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    const caller = ctx.caller.?; // controlplane scope
+    const files = ctx.files orelse return serverError(ctx, req);
+    const id = reply.pathId(params) orelse return badRequest(ctx, req);
+    const n = std.fmt.parseInt(u64, params.get("n") orelse return badRequest(ctx, req), 10) catch
+        return badRequest(ctx, req);
+    // Capture `?v=` before responding (responding invalidates the head strings).
+    const v = reply.queryParam(req.head.target, "v");
+
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    var svc = controlplane.ControlPlaneService.init(files);
+
+    const pl = (svc.pageLinks(arena.allocator(), caller.user_id, id, n) catch return serverError(ctx, req)) orelse
+        return reply.notFound(req);
+    if (v == null or !std.ascii.eqlIgnoreCase(v.?, &pl.hash)) return reply.notFound(req);
+
+    // NOT `immutable` — see the header comment.
+    try json.respondWith(ctx.gpa, req, .ok, pl.vo, &.{
+        .{ .name = "cache-control", .value = "no-cache" },
+    });
+}
+
 /// The response headers shared by both shapes of this endpoint. `no-store` and
 /// `nosniff` are hygiene; `x-accel-buffering: no` is the load-bearing one — a
 /// buffering reverse proxy would hold each frame back until its buffer filled,

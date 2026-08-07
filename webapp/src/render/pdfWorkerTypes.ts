@@ -6,6 +6,7 @@
 
 import type { PdfCacheStats } from "./pdfBlocks";
 import type { DisplayMatrix } from "./markGeometry";
+import type { PdfLink } from "./pdfLinks";
 
 /**
  * How the document was opened.
@@ -41,6 +42,14 @@ export interface PdfInkOverlay {
 export type PdfRequest =
   | { kind: "open"; id: number; url: string; size: number }
   | { kind: "pageSize"; id: number; page: number }
+  /**
+   * The page's OWN links — the `/Annots` the document was authored with, not
+   * anything the app adds. Cheap next to a render: `fz_load_links` reads the
+   * page object the renderer has already fetched for that page, so on a
+   * range-served document this costs no new traffic on a page you are looking
+   * at.
+   */
+  | { kind: "pageLinks"; id: number; page: number }
   | { kind: "render"; id: number; page: number; scale: number }
   /**
    * ONE PAGE, AS A PDF — the original page's own content streams grafted into a
@@ -83,6 +92,8 @@ export type PdfRequest =
 export type PdfResponse =
   | { kind: "opened"; id: number; pageCount: number; mode: PdfOpenMode }
   | { kind: "pageSize"; id: number; width: number; height: number }
+  /** Plain data — small, and structured-cloned like every other reply. */
+  | { kind: "pageLinks"; id: number; links: PdfLink[] }
   /** `bitmap` is TRANSFERRED, so it crosses without copying the pixels. */
   | { kind: "rendered"; id: number; bitmap: ImageBitmap; width: number; height: number }
   /** The produced PDF's bytes. TRANSFERRED, like `rendered`'s bitmap. */

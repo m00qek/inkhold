@@ -274,6 +274,15 @@ pub const routes = [_]router.Route{
     // NOT `manual_db_lock`: it is pure DB and KB-scale, so the whole-handler lock
     // costs microseconds — the streaming argument above simply does not apply.
     .{ .method = .GET, .path = "/note/:id/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.controlplanePageText },
+    // A page's OWN links — the rectangles a PDF used as its template brought
+    // with it (`note-format.md` §14). The exact shape and lifetime of the text
+    // route above: `?v={linksHash}` from the page list, KB-scale, one ranged
+    // read into an address-based container, and `no-cache` for the same reason —
+    // it is a struct serialised to JSON, and `?v=` versions the block, not the
+    // struct. NOT per-document: the capture that established the format carries
+    // 51,256 records over 1702 pages, so this is fetched for the page on screen
+    // and no other.
+    .{ .method = .GET, .path = "/note/:id/page/:n/links", .scopes = &.{.controlplane}, .handler = controlplane.controlplanePageLinks },
     // Live freshness push (SSE): a HELD connection that emits the caller's
     // syncVersion whenever it changes, plus a heartbeat comment frame.
     //

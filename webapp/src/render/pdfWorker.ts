@@ -165,6 +165,10 @@ export function callsFor(x: PdfDecoderExports, useJspi: boolean = jspi): PdfCall
     openStream: WebAssembly.promising(x.ink_open_stream),
     pageCount: WebAssembly.promising(x.ink_page_count),
     pageSize: WebAssembly.promising(x.ink_page_size),
+    // Listing a page's links LOADS the page, and resolving an internal
+    // destination walks the xref a second time — both read bytes, so both
+    // suspend on a document that is still mostly unfetched.
+    pageLinks: WebAssembly.promising(x.ink_page_links),
     render: WebAssembly.promising(x.ink_render),
     // NOT OPTIONAL on this branch, whatever `PdfCalls` says. `ink_export_page`
     // grafts a page, which walks the source document's xref and so can re-enter
@@ -359,6 +363,11 @@ function handle(req: PdfRequest): Promise<void> {
         if (!doc) throw new Error("no document is open");
         const size = await doc.pageSize(req.page);
         ctx.postMessage({ kind: "pageSize", id: req.id, ...size });
+        return;
+      }
+      case "pageLinks": {
+        if (!doc) throw new Error("no document is open");
+        ctx.postMessage({ kind: "pageLinks", id: req.id, links: await doc.pageLinks(req.page) });
         return;
       }
       case "render": {

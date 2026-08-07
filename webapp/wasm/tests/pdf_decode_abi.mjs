@@ -88,6 +88,8 @@ for (const name of [
   "ink_open_stream",
   "ink_page_count",
   "ink_page_size",
+  "ink_page_links",
+  "ink_links_free",
   "ink_render",
   "ink_render_width",
   "ink_render_height",
@@ -1002,6 +1004,264 @@ if (delta) {
   fixture = savedFixture;
 }
 
+// ============================================================================
+// The page's own LINKS (`ink_page_links`)
+// ============================================================================
+//
+// The claim is not "a link exists" — a shim that returned a plausible-looking
+// array would pass that, and so would one whose rects are in the wrong space.
+// Every assertion below is on COORDINATES or on an exact uri, because the two
+// ways this feature goes wrong are both invisible to a presence check:
+//
+//   1. THE PAGE BOX ORIGIN. `ink_page_size` hands over `fz_bound_page`'s EXTENT
+//      and throws its origin away, so a page whose box does not start at (0,0)
+//      would put link rects in a space the client has never heard of. The
+//      `cropped` fixture below has its media box at (50,30) and takes a 120x60
+//      crop out of it; the link rects have to be measured from the CROP box's
+//      top-left, which is the only origin `ink_page_size` describes.
+//
+//   2. ROTATION. `fz_bound_page` reports the TRANSFORMED box, so a /Rotate 90
+//      page reports its rotated extent and its links must land in that same
+//      rotated space. This is where the export put ink ninety degrees out, with
+//      exactly the right number of inked pixels — so it is verified on a
+//      fixture rather than reasoned about.
+//
+// And the third thing, which is not geometry: the uri comes out of a file that
+// arrived by device sync. `javascript:` — and `file:` and `data:` — must not
+// survive at all, not survive with a flag for someone downstream to check.
+
+/** The links on `page`, parsed. Throws if the payload is not valid JSON. */
+function pageLinks(handle, page) {
+  const packed = e.ink_page_links(handle, page);
+  if (packed < 0n) return packed;
+  const json = Buffer.from(
+    new Uint8Array(e.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
+  ).toString("utf8");
+  e.ink_links_free();
+  return { json, links: JSON.parse(json) };
+}
+
+/**
+ * A TWO-PAGE PDF whose first page carries `annots` — two, so an internal link
+ * has somewhere to go and a resolved target of 1 is distinguishable from a
+ * shim that answers 0 for everything.
+ */
+function linkedPdf(mediaBox, extra, annots) {
+  const refs = annots.map((_, i) => `${6 + i} 0 R`).join(" ");
+  return buildPdf([
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox.join(" ")}]${extra}` +
+      ` /Contents 4 0 R /Resources << >> /Annots [${refs}] >>`,
+    "<< /Length 9 >>\nstream\n0 0 0 rg\n\nendstream",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox.join(" ")}]${extra}` +
+      " /Contents 4 0 R /Resources << >> >>",
+    ...annots,
+  ]);
+}
+
+function linkAnnot(rect, action) {
+  return `<< /Type /Annot /Subtype /Link /Rect [${rect.join(" ")}] /Border [0 0 0]` +
+    ` /A << ${action} >> >>`;
+}
+
+/** One of each: two we follow, one internal, and four we refuse. */
+const LINK_ANNOTS = [
+  linkAnnot([20, 20, 80, 60], "/S /URI /URI (https://example.invalid/a)"),
+  linkAnnot([100, 20, 160, 60], "/S /GoTo /D [5 0 R /XYZ 0 100 0]"),
+  linkAnnot([20, 70, 80, 90], "/S /URI /URI (javascript:alert\\(1\\))"),
+  linkAnnot([100, 70, 160, 90], "/S /URI /URI (mailto:someone@example.invalid)"),
+  linkAnnot([0, 0, 10, 10], "/S /URI /URI (file:///etc/passwd)"),
+  linkAnnot([10, 0, 20, 10], "/S /URI /URI (data:text/html,<script>x</script>)"),
+  linkAnnot([20, 0, 30, 10], "/S /URI /URI (JavaScript:alert\\(2\\))"),
+];
+
+/* --- upright: the rects, the resolved target, and what does NOT survive ---- */
+{
+  const doc = openBytes(linkedPdf([0, 0, 200, 100], "", LINK_ANNOTS));
+  check(doc >= 1, "links: the fixture opens", `got ${doc}`);
+  const got = pageLinks(doc, 0);
+  check(typeof got === "object", "links: ink_page_links succeeds", `got ${got}`);
+
+  // THE ALLOWLIST. Seven annotations in, three out: https, the internal GoTo,
+  // and mailto. `javascript:` (both spellings), `file:` and `data:` are not
+  // dropped to a neutered href — they produce no record at all, so nothing
+  // downstream can render an affordance that lies about where it goes.
+  equal(got.links.length, 3, "links: four refused schemes leave no record");
+  check(
+    !/javascript/i.test(got.json) && !/file:/.test(got.json) && !/data:/.test(got.json),
+    "links: no refused uri survives ANYWHERE in the payload",
+    got.json,
+  );
+
+  // PDF's origin is bottom-left and this space's is top-left, so the annot at
+  // (20,20)-(80,60) on a 100pt-tall page displays at y 100-60 = 40.
+  const ext = got.links.find((l) => l.uri.startsWith("https:"));
+  check(ext !== undefined, "links: the external link is there");
+  equal(ext.x, 20, "links: external x");
+  equal(ext.y, 40, "links: external y (PDF y-up -> display y-down)");
+  equal(ext.w, 60, "links: external w");
+  equal(ext.h, 40, "links: external h");
+  equal(ext.page, -1, "links: an external link resolves to no page");
+  equal(ext.uri, "https://example.invalid/a", "links: the external uri survives intact");
+
+  // RESOLVED IN C. The client never sees `5 0 R`; it sees the page number.
+  const internal = got.links.find((l) => l.page >= 0);
+  check(internal !== undefined, "links: the internal link is there");
+  equal(internal.page, 1, "links: the internal link resolves to page 1 (0-based)");
+  equal(internal.x, 100, "links: internal x");
+  equal(internal.y, 40, "links: internal y");
+
+  const mail = got.links.find((l) => l.uri.startsWith("mailto:"));
+  check(mail !== undefined, "links: mailto is allowed");
+  equal(mail.y, 10, "links: mailto y (PDF 70..90 on a 100pt page -> display 10..30)");
+
+  // THE SPACE THE RECTS ARE IN IS THE SPACE `ink_page_size` REPORTS. Stated as
+  // an assertion rather than as a comment, because it is the whole contract:
+  // the client's transform is one scale, and that is only true if these agree.
+  const at = e.ink_alloc(8);
+  e.ink_page_size(doc, 0, at, at + 4);
+  const sz = new DataView(e.memory.buffer);
+  equal(sz.getFloat32(at, true), 200, "links: the page measures 200pt wide");
+  equal(sz.getFloat32(at + 4, true), 100, "links: the page measures 100pt tall");
+  check(
+    got.links.every((l) => l.x >= 0 && l.y >= 0 && l.x + l.w <= 200 && l.y + l.h <= 100),
+    "links: every rect lies inside the page ink_page_size describes",
+    got.json,
+  );
+  e.ink_free(at, 8);
+
+  // Page 1 has no /Annots at all. `[]` is a SUCCESS — "no links" and "could not
+  // read this page" are different answers and the caller acts differently.
+  const empty = pageLinks(doc, 1);
+  equal(empty.json, "[]", "links: a page with no annotations answers []");
+
+  // The same document over the CALLBACK STREAM. Listing links loads the page
+  // and resolving the internal destination walks the xref again, so both go
+  // through `ink_host_read` on this path — and the answer has to be identical.
+  fixture = linkedPdf([0, 0, 200, 100], "", LINK_ANNOTS);
+  const sdocL = e.ink_open_stream(BigInt(fixture.length));
+  check(sdocL >= 1, "links: the fixture opens as a stream", `got ${sdocL}`);
+  equal(pageLinks(sdocL, 0).json, got.json, "links: the streamed answer is byte-identical");
+  e.ink_close(sdocL);
+  fixture = savedFixture;
+
+  e.ink_close(doc);
+  equal(e.ink_page_links(doc, 0), -1n, "links: a dead handle is refused");
+}
+
+/* --- TRAP 1: a page box that does not start at (0,0) ----------------------- */
+// Media box at (50,30), crop box (70,50)-(190,110) inside it. `ink_page_size`
+// reports 120x60 — the crop box's extent, its origin discarded — so a link rect
+// must be measured from the CROP BOX'S TOP-LEFT, which in PDF coordinates is
+// (70,110). The annot at (80,60)-(110,80) is therefore at display x 80-70 = 10,
+// y 110-80 = 30, 30 wide and 20 tall. Any implementation that measures from
+// user-space (0,0) puts it at x 80, y -50: off the page, and the same "a link
+// exists" check passes either way.
+{
+  const cropAnnots = [
+    linkAnnot([80, 60, 110, 80], "/S /URI /URI (https://example.invalid/crop)"),
+  ];
+  const doc = openBytes(linkedPdf([50, 30, 250, 130], " /CropBox [70 50 190 110]", cropAnnots));
+  check(doc >= 1, "cropped links: the fixture opens", `got ${doc}`);
+  const at = e.ink_alloc(8);
+  e.ink_page_size(doc, 0, at, at + 4);
+  const sz = new DataView(e.memory.buffer);
+  equal(sz.getFloat32(at, true), 120, "cropped links: the page measures the CROP box's width");
+  equal(sz.getFloat32(at + 4, true), 60, "cropped links: ...and its height");
+  e.ink_free(at, 8);
+
+  const got = pageLinks(doc, 0);
+  equal(got.links.length, 1, "cropped links: one link", got.json);
+  equal(got.links[0].x, 10, "cropped links: x is measured from the crop box's left edge");
+  equal(got.links[0].y, 30, "cropped links: y is measured from the crop box's TOP edge");
+  equal(got.links[0].w, 30, "cropped links: w");
+  equal(got.links[0].h, 20, "cropped links: h");
+  e.ink_close(doc);
+}
+
+/* --- TRAP 2: /Rotate 90 ---------------------------------------------------- */
+// A 200x100 page with /Rotate 90 DISPLAYS as 100x200, and `ink_page_size` says
+// so. The link rects have to be in that same rotated space, or the client scales
+// them against a width they were never measured in. The annot at (20,20)-(80,60)
+// lands at display x 20..60, y 20..80 — note that its extent is 40x60 where the
+// unrotated one is 60x40, so a shim that forgot the rotation produces a box of
+// the wrong SHAPE as well as the wrong place.
+{
+  const rotAnnots = [linkAnnot([20, 20, 80, 60], "/S /URI /URI (https://example.invalid/rot)")];
+  const doc = openBytes(linkedPdf([0, 0, 200, 100], " /Rotate 90", rotAnnots));
+  check(doc >= 1, "rotated links: the fixture opens", `got ${doc}`);
+  const at = e.ink_alloc(8);
+  e.ink_page_size(doc, 0, at, at + 4);
+  const sz = new DataView(e.memory.buffer);
+  equal(sz.getFloat32(at, true), 100, "rotated links: /Rotate 90 swaps the reported width");
+  equal(sz.getFloat32(at + 4, true), 200, "rotated links: ...and the height");
+  e.ink_free(at, 8);
+
+  const got = pageLinks(doc, 0);
+  equal(got.links.length, 1, "rotated links: one link", got.json);
+  equal(got.links[0].x, 20, "rotated links: x, in the ROTATED space");
+  equal(got.links[0].y, 20, "rotated links: y, in the ROTATED space");
+  equal(got.links[0].w, 40, "rotated links: the rect is 40 wide, not 60");
+  equal(got.links[0].h, 60, "rotated links: the rect is 60 tall, not 40");
+  e.ink_close(doc);
+}
+
+/* --- a hostile uri, and the numbers JSON will not take --------------------- */
+// Two ways the payload stops being parseable, both of which take the whole
+// page's links down rather than one link:
+//
+//   - a uri carrying a quote, a backslash or a control byte, which would close
+//     the string and let the file write its own fields;
+//   - MuPDF's own `%g`, which writes 0.5 as `.5` (printf.c, `fmtfloat`) — legal
+//     nowhere in JSON. One half-point edge would be enough, so the shim formats
+//     its own numbers and this fixture has a rect on half-points.
+{
+  // x0 = 0.5 ON PURPOSE: `%g` writes a value BELOW ONE as `.5`, and only below
+  // one — a rect at 10.5 comes out fine and would let the bug through.
+  const nasty = linkAnnot(
+    [0.5, 10.25, 30.5, 20.75],
+    // PDF literal-string escapes: `\\` is one backslash, `\001` is one control
+    // byte. The decoded uri is: https://x.invalid/?a="b"\<SOH>
+    String.raw`/S /URI /URI (https://x.invalid/?a="b"\\\001)`,
+  );
+  const doc = openBytes(linkedPdf([0, 0, 200, 100], "", [nasty]));
+  check(doc >= 1, "hostile links: the fixture opens", `got ${doc}`);
+  const got = pageLinks(doc, 0); // JSON.parse inside — a bad payload throws here
+  equal(got.links.length, 1, "hostile links: the link survives escaping", got.json);
+  equal(
+    got.links[0].uri,
+    'https://x.invalid/?a="b"\\\u0001',
+    "hostile links: the quote, the backslash and the control byte round-trip",
+  );
+  check(
+    got.json.includes('\\"') && got.json.includes("\\\\") && got.json.includes("\\u0001"),
+    "hostile links: they are ESCAPED in the payload, not passed through",
+    got.json,
+  );
+  // Display y of the PDF rect 10.25..20.75 on a 100pt page is 79.25..89.75.
+  equal(got.links[0].x, 0.5, "hostile links: a sub-1 x is a valid JSON number, not `.5`");
+  equal(got.links[0].y, 79.25, "hostile links: a quarter-point y survives too");
+  equal(got.links[0].w, 30, "hostile links: w");
+  equal(got.links[0].h, 10.5, "hostile links: h");
+  e.ink_close(doc);
+}
+
+/* --- refusals and hygiene -------------------------------------------------- */
+{
+  const doc = openBytes(fs.readFileSync(pdfPath));
+  equal(e.ink_page_links(doc, 99), -2n, "links: a missing page is refused");
+  check(e.ink_error_len() > 0, "links: ...with a message");
+  equal(e.ink_page_links(doc, -1), -1n, "links: a negative page is refused");
+  equal(e.ink_page_links(doc + 100, 0), -1n, "links: an out-of-range handle is refused");
+  // A document with no links at all still answers, and answers `[]`.
+  equal(pageLinks(doc, 0).json, "[]", "links: a link-free document answers []");
+  e.ink_close(doc);
+  // Idempotent, and safe with nothing outstanding — a viewer calls this on every
+  // page turn including the ones that failed.
+  e.ink_links_free();
+  e.ink_links_free();
+}
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);

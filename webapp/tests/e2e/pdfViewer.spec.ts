@@ -1467,3 +1467,244 @@ test.describe("PDF export menu", () => {
     expect(originalSeen).toBe(0);
   });
 });
+
+// ===========================================================================
+// The document's OWN links
+// ===========================================================================
+//
+// What only a browser can prove: that MuPDF's `/Annots` come back through the
+// worker as REAL ANCHORS at the right place on the page — with an href a
+// browser will preview and navigate, an accessible name over a raster that has
+// no text, and a stacking order that survives a scribble drawn over the link.
+//
+// The rects themselves are pinned at the numbers in `pdf_decode_abi.mjs` (an
+// off-origin box and a `/Rotate 90` fixture, asserted by coordinates); what is
+// asserted here is that those numbers survive the wire and land on the canvas.
+
+/**
+ * A two-page PDF carrying links, at the SAME page sizes as the shared fixture
+ * (200x100 and 300x150 pt) so the paired `.mark`'s placement is unchanged and
+ * page 2 still comes with ink over it.
+ *
+ * Built here rather than committed because the thing under test is the PAGE
+ * DICTIONARY — an `/Annots` array — and a generator makes it visible at the
+ * call site. Every byte is ASCII, so a string offset is a byte offset.
+ */
+function linkedPdfBytes(): Buffer {
+  const objs = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+    // Page 1, 200x100 pt: an external link, an internal one to page 2, and a
+    // `javascript:` one that must never become an anchor.
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R" +
+      " /Resources << >> /Annots [7 0 R 8 0 R 9 0 R] >>",
+    "<< /Length 26 >>\nstream\n0 0 0 rg\n10 10 40 30 re f\nendstream",
+    // Page 2, 300x150 pt — the page the fixture's `.mark` writes on.
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 150] /Contents 6 0 R" +
+      " /Resources << >> /Annots [10 0 R] >>",
+    "<< /Length 27 >>\nstream\n0 0 0 rg\n10 10 60 40 re f\nendstream",
+    "<< /Type /Annot /Subtype /Link /Rect [20 20 80 60] /Border [0 0 0]" +
+      " /A << /S /URI /URI (https://example.invalid/a) >> >>",
+    "<< /Type /Annot /Subtype /Link /Rect [100 20 160 60] /Border [0 0 0]" +
+      " /A << /S /GoTo /D [5 0 R /XYZ 0 150 0] >> >>",
+    "<< /Type /Annot /Subtype /Link /Rect [20 70 80 90] /Border [0 0 0]" +
+      " /A << /S /URI /URI (javascript:alert\\(1\\)) >> >>",
+    "<< /Type /Annot /Subtype /Link /Rect [50 50 150 100] /Border [0 0 0]" +
+      " /A << /S /URI /URI (https://example.invalid/two) >> >>",
+  ];
+  let out = "%PDF-1.4\n";
+  const offsets: number[] = [];
+  for (const [i, body] of objs.entries()) {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${body}\nendobj\n`;
+  }
+  const startxref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+  for (const off of offsets) out += `${String(off).padStart(10, "0")} 00000 n \n`;
+  out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${startxref}\n%%EOF\n`;
+  return Buffer.from(out, "latin1");
+}
+
+async function openLinkedPdf(page: Page): Promise<Locator> {
+  await signedIn(page);
+  await servePdf(page, linkedPdfBytes());
+  await page.goto("/#/note/n-files-manual");
+  await freezeMotion(page);
+  const region = page.getByRole("region", { name: "PDF viewer" });
+  await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+  return region;
+}
+
+test.describe("PDF links", () => {
+  test("lands each anchor on its own rect, labelled, and drops `javascript:`", async ({ page }) => {
+    await openLinkedPdf(page);
+    const layer = page.locator(".pdf-links");
+    await expect(layer.locator("a")).toHaveCount(2, { timeout: 20_000 });
+
+    // THREE annotations on this page and TWO anchors. The `javascript:` one is
+    // not rendered with a neutered href — it produces no element at all, so
+    // there is nothing over that part of the page that looks clickable.
+    const hrefs = await layer.locator("a").evaluateAll((as) =>
+      as.map((a) => (a as HTMLAnchorElement).getAttribute("href")),
+    );
+    expect(hrefs.some((h) => h?.startsWith("javascript:"))).toBe(false);
+
+    // The EXTERNAL one: a new tab, severed from this one.
+    const ext = layer.locator('a[href="https://example.invalid/a"]');
+    await expect(ext).toHaveAttribute("target", "_blank");
+    await expect(ext).toHaveAttribute("rel", "noopener noreferrer");
+    await expect(ext).toHaveAttribute("aria-label", "https://example.invalid/a");
+
+    // The INTERNAL one: the app's own route, in this tab, so following it
+    // leaves you somewhere you can share and reload into.
+    const internal = layer.locator('a[href="#/note/n-files-manual/page/2"]');
+    await expect(internal).toHaveCount(1);
+    await expect(internal).toHaveAttribute("aria-label", "Go to page 2");
+    await expect(internal).not.toHaveAttribute("target", "_blank");
+
+    // AND IT IS WHERE THE DOCUMENT PUT IT. The annot is at PDF (20,20)-(80,60)
+    // on a 100pt-tall page, so it displays at x 20..80, y 40..80 — a fifth of
+    // the way across and two fifths down, whatever scale Fit chose. Asserted as
+    // a FRACTION of the canvas, which is what makes it independent of the
+    // viewport the test happens to run in.
+    const geo = await page.evaluate(() => {
+      const c = (document.querySelector(".pdf-page") as HTMLElement).getBoundingClientRect();
+      const a = (
+        document.querySelector('.pdf-links a[href="https://example.invalid/a"]') as HTMLElement
+      ).getBoundingClientRect();
+      return {
+        left: (a.left - c.left) / c.width,
+        top: (a.top - c.top) / c.height,
+        width: a.width / c.width,
+        height: a.height / c.height,
+      };
+    });
+    expect(geo.left).toBeCloseTo(20 / 200, 2);
+    expect(geo.top).toBeCloseTo(40 / 100, 2);
+    expect(geo.width).toBeCloseTo(60 / 200, 2);
+    expect(geo.height).toBeCloseTo(40 / 100, 2);
+  });
+
+  test("following an internal link is a real navigation to that page", async ({ page }) => {
+    const region = await openLinkedPdf(page);
+    await expect(region.getByText("1 / 2")).toBeVisible();
+    await page.locator('.pdf-links a[href="#/note/n-files-manual/page/2"]').click();
+    await expect(region.getByText("2 / 2")).toBeVisible({ timeout: 20_000 });
+    // A REAL ADDRESS, not a scroll: the URL is the page, so this is shareable
+    // and survives a reload.
+    expect(page.url()).toContain("#/note/n-files-manual/page/2");
+    // And the page under it is page 2's — a link that moved the counter over a
+    // stale canvas would pass everything above.
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+    await expect(page.locator(".pdf-links a")).toHaveCount(1, { timeout: 20_000 });
+    await expect(page.locator('.pdf-links a[href="https://example.invalid/two"]')).toHaveCount(1);
+  });
+
+  test("the layer follows the raster through a zoom, and through a panel", async ({ page }) => {
+    // The same trigger the ink overlay uses: the placement is computed from the
+    // canvas's REAL size after the raster lands, so a zoom step and a panel
+    // toggle are both free — nothing re-decodes, and nothing drifts.
+    const region = await openLinkedPdf(page);
+    const anchor = page.locator('.pdf-links a[href="https://example.invalid/a"]');
+    await expect(anchor).toBeVisible({ timeout: 20_000 });
+
+    // NULL WHILE THE LAYER IS DOWN, rather than throwing. Every repaint takes
+    // the old anchors away before it asks for the new ones — a page's links are
+    // page-specific and a round trip is not instant — so a measurement taken in
+    // that window has to WAIT rather than fail.
+    const measure = async (): Promise<{ canvas: number; left: number; width: number } | null> =>
+      page.evaluate(() => {
+        const canvas = document.querySelector(".pdf-page") as HTMLElement | null;
+        const a = document.querySelector(
+          '.pdf-links a[href="https://example.invalid/a"]',
+        ) as HTMLElement | null;
+        if (!canvas || !a) return null;
+        const c = canvas.getBoundingClientRect();
+        const r = a.getBoundingClientRect();
+        return { canvas: c.width, left: (r.left - c.left) / c.width, width: r.width / c.width };
+      });
+    const settled = async () => {
+      let seen: { canvas: number; left: number; width: number } | null = null;
+      await expect.poll(async () => (seen = await measure()) !== null).toBe(true);
+      return seen!;
+    };
+
+    const fit = await settled();
+    await region.getByRole("button", { name: "Zoom in" }).click();
+    await expect(region.locator(".zoom", { hasText: "150%" })).toBeVisible();
+    await expect.poll(async () => (await measure())?.canvas ?? 0).toBeGreaterThan(fit.canvas * 1.2);
+    const zoomed = await settled();
+    // The box grew WITH the page: the same fraction of a bigger canvas.
+    expect(zoomed.left).toBeCloseTo(fit.left, 2);
+    expect(zoomed.width).toBeCloseTo(fit.width, 2);
+    expect(zoomed.width * zoomed.canvas).toBeGreaterThan(fit.width * fit.canvas * 1.2);
+
+    // A panel NARROWS the page rather than covering it, so Fit is a different
+    // scale with it open — and the anchors have to move with it.
+    await region.getByRole("button", { name: "Zoom out" }).click();
+    await region.getByRole("button", { name: "Pages" }).click();
+    await expect(page.locator("#pdf-pages-panel")).toBeVisible();
+    await expect.poll(async () => (await measure())?.canvas ?? 0).toBeLessThan(fit.canvas);
+    const narrowed = await settled();
+    expect(narrowed.left).toBeCloseTo(fit.left, 2);
+    expect(narrowed.width).toBeCloseTo(fit.width, 2);
+  });
+
+  test("a link UNDER a scribble is still the thing you click", async ({ page }) => {
+    // The case that will occur, because people annotate around the things they
+    // care about. `.pdf-mark` is `pointer-events: none` so ink never eats a
+    // click — but that is one property away from being wrong, and the ordering
+    // is what actually decides it. Both are asserted.
+    await signedIn(page);
+    await servePdf(page, linkedPdfBytes());
+    await page.goto("/#/note/n-files-manual");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+    await region.getByRole("button", { name: "Next page" }).click();
+    await expect(region.getByText("2 / 2")).toBeVisible();
+    await expect(page.locator(".pdf-mark canvas").first()).toBeAttached({ timeout: 20_000 });
+    const anchor = page.locator('.pdf-links a[href="https://example.invalid/two"]');
+    await expect(anchor).toBeVisible({ timeout: 20_000 });
+
+    const stacked = await page.evaluate(() => {
+      const stage = document.querySelector(".pdf-stage") as HTMLElement;
+      const kids = Array.from(stage.children).map((k) => k.className.split(" ")[0]);
+      const a = document.querySelector(
+        '.pdf-links a[href="https://example.invalid/two"]',
+      ) as HTMLElement;
+      const box = a.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      const mark = document.querySelector(".pdf-mark") as HTMLElement;
+      const m = mark.getBoundingClientRect();
+      return {
+        kids,
+        hitIsTheLink: hit === a,
+        // Is the ink really over this link? Without that, the hit test proves
+        // nothing about stacking at all.
+        markCoversIt:
+          !mark.hidden &&
+          m.left <= box.left &&
+          m.top <= box.top &&
+          m.right >= box.right &&
+          m.bottom >= box.bottom,
+      };
+    });
+    expect(stacked.markCoversIt).toBe(true);
+    // The link layer is LAST in the stage, so it paints (and hit-tests) above
+    // the ink whatever `pointer-events` says.
+    expect(stacked.kids).toEqual(["pdf-page", "note-stack", "pdf-links"]);
+    expect(stacked.hitIsTheLink).toBe(true);
+  });
+
+  test("leaving the page takes its links with it", async ({ page }) => {
+    // Every anchor here is a live address into the document that is going away.
+    // Left up, they would sit over the next thing on screen still pointing at
+    // the last one — and they would still be in the tab order.
+    const region = await openLinkedPdf(page);
+    await expect(page.locator(".pdf-links a")).toHaveCount(2, { timeout: 20_000 });
+    await page.keyboard.press("Escape");
+    await expect(region).toBeHidden();
+    await expect(page.locator(".pdf-links a")).toHaveCount(0);
+  });
+});

@@ -5,6 +5,7 @@
 
 import type { PdfPageSize } from "./pdfDecode";
 import type { PdfCacheStats } from "./pdfBlocks";
+import type { PdfLink } from "./pdfLinks";
 import type { PdfInkOverlay, PdfOpenMode, PdfRequest, PdfResponse } from "./pdfWorkerTypes";
 
 /**
@@ -42,6 +43,15 @@ export class PdfLoadError extends Error {
 export interface PdfSession {
   open(url: string, size: number): Promise<{ pageCount: number; mode: PdfOpenMode }>;
   pageSize(page: number): Promise<PdfPageSize>;
+  /**
+   * The page's OWN links — the ones the document was authored with.
+   *
+   * Rects in the page's display space (points), so the caller's transform is
+   * the raster's scale and nothing else. A page with none answers `[]`, which
+   * is why this returns a list rather than throwing: no links is the common
+   * case and is not a failure.
+   */
+  pageLinks(page: number): Promise<PdfLink[]>;
   render(page: number, scale: number): Promise<PdfFrame>;
   /**
    * One page as a PDF of its own, with `ink` drawn over it — the page's own
@@ -204,6 +214,10 @@ export function createPdfSession(makeWorker: PdfWorkerFactory = defaultWorker): 
     async pageSize(page) {
       const res = expect(await send({ kind: "pageSize", page }), "pageSize");
       return { width: res.width, height: res.height };
+    },
+    async pageLinks(page) {
+      const res = expect(await send({ kind: "pageLinks", page }), "pageLinks");
+      return res.links;
     },
     async render(page, scale) {
       const res = expect(await send({ kind: "render", page, scale }), "rendered");

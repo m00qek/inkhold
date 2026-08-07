@@ -18,6 +18,8 @@
 // because the document may be a STREAM pulling blocks over the network as MuPDF
 // walks it (`docs/scratch/pdf-ranges.md`), and on that path any call can suspend.
 
+import { parsePageLinks, type PdfLink } from "./pdfLinks";
+
 // ============================================================================
 // The decoder C-ABI. Pointers are byte offsets into `memory`; every pointer must
 // be RE-READ after the call that produced it (linear memory can grow) and copied
@@ -43,6 +45,17 @@ export interface PdfDecoderExports {
   ink_open_stream(totalLen: bigint): number;
   ink_page_count(handle: number): number;
   ink_page_size(handle: number, page: number, wPtr: number, hPtr: number): number;
+  /**
+   * The page's own links, as UTF-8 JSON — packed `(ptr << 32) | len`, or
+   * negative. An empty page answers `[]`, which is a SUCCESS.
+   *
+   * The rects are in the same space `ink_page_size` reports, and a uri whose
+   * scheme is not http/https/mailto never appears at all. Reads the page, so
+   * like the rest of these it can SUSPEND.
+   */
+  ink_page_links(handle: number, page: number): bigint;
+  /** Release the buffer `ink_page_links` returned. Idempotent. */
+  ink_links_free(): void;
   /** Packed (ptr << 32) | len, or negative on failure. */
   ink_render(handle: number, page: number, scale: number): bigint;
   ink_render_width(): number;
@@ -375,6 +388,15 @@ export interface PdfCalls {
   pageSize(handle: number, page: number, wPtr: number, hPtr: number): number | Promise<number>;
   render(handle: number, page: number, scale: number): bigint | Promise<bigint>;
   /**
+   * OPTIONAL IN THE TYPE, MANDATORY ON THE JSPI PATH, for the same reason
+   * `pageSize` is not optional at all: listing a page's links LOADS the page,
+   * and resolving an internal destination walks the xref again. Unwrapped on a
+   * streamed document that traps the instance on its first suspension.
+   * {@link AsyncPdfDocument.pageLinks} falls back to the raw export when it is
+   * absent, which is right for `syncCalls` and wrong for a promising wrapper.
+   */
+  pageLinks?(handle: number, page: number): bigint | Promise<bigint>;
+  /**
    * OPTIONAL IN THE TYPE, MANDATORY ON THE JSPI PATH. `ink_export_page` grafts a
    * page, which walks the source document's xref and so can re-enter
    * `ink.host_read`; on a streamed document an unwrapped call TRAPS the instance
@@ -429,6 +451,7 @@ export function syncCalls(x: PdfDecoderExports): PdfCalls {
     openStream: (total) => x.ink_open_stream(total),
     pageCount: (h) => x.ink_page_count(h),
     pageSize: (h, p, w, hp) => x.ink_page_size(h, p, w, hp),
+    pageLinks: (h, p) => x.ink_page_links(h, p),
     render: (h, p, s) => x.ink_render(h, p, s),
     exportPage: (h, p, ink, w, ih, a, b, c, d, e, f) =>
       x.ink_export_page(h, p, ink, w, ih, a, b, c, d, e, f),
@@ -510,6 +533,36 @@ export class AsyncPdfDocument {
       return { width: d.getFloat32(scratch, true), height: d.getFloat32(scratch + 4, true) };
     } finally {
       x.ink_free(scratch, 8);
+    }
+  }
+
+  /**
+   * The page's own links, in the page's DISPLAY space (points).
+   *
+   * AN EMPTY LIST IS AN ANSWER, not a failure: most pages have no links, and
+   * this must not throw for them. What it will not do is invent one — a page
+   * the decoder refuses answers with `[]` too, because the caller's only
+   * response to either is the same (draw no link layer) and a viewer that
+   * threw here would take the PAGE down with it.
+   *
+   * The bytes are copied out and parsed before the module's buffer is released,
+   * on every path — it is small, but it is one at a time, and the next page's
+   * links would otherwise be waiting on this one.
+   */
+  async pageLinks(page: number): Promise<PdfLink[]> {
+    const x = this.x;
+    const call = this.c.pageLinks ?? x.ink_page_links;
+    try {
+      const packed = await call(this.alive(), page);
+      if (packed < 0n) return [];
+      // `memory.buffer` is re-read HERE and not captured: the call allocates,
+      // and on the JSPI path it also suspended — the same window, longer name.
+      const json = new TextDecoder().decode(
+        new Uint8Array(x.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
+      );
+      return parsePageLinks(json);
+    } finally {
+      x.ink_links_free();
     }
   }
 

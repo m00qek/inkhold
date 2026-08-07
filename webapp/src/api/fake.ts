@@ -4,7 +4,8 @@
 // deliberately synchronous data behind async signatures + a tiny latency, so
 // loading states and lazy behaviour are exercised realistically.
 
-import type { Api } from "./types";
+import type { Api, PageLinks } from "./types";
+import type { PdfLink } from "../render/pdfLinks";
 // The bin half of this fake, in its own module — see the `--- BIN WRITES ---`
 // marker below and `binFake.ts`'s header for why it is not inline.
 import { createBinFake, BIN_SEED_NOTES } from "./binFake";
@@ -105,6 +106,18 @@ export function fakeFileHash(id: Id): string {
  */
 const RECOGNIZED_FROM: Record<string, number> = {};
 
+/**
+ * The PDF-TEMPLATE fixture: the one note whose pages were rasterised from an
+ * imported PDF and kept that document's own links (`note-format.md` §14).
+ *
+ * Chosen rather than invented, for the reason `n-late-ocr` states in reverse:
+ * every listing count and section head in the e2e suite is asserted literally,
+ * so a NEW note in a real folder rewrites unrelated expectations. This one is
+ * seven pages long, which is what an internal page jump needs to be worth
+ * looking at.
+ */
+const LINKED_NOTE_ID: Id = "n-proj-beta";
+
 function fakeTextHash(noteId: Id, index: number, recognized: boolean, from = 0): string | null {
   if (!recognized || index < from || index % 3 === 2) return null;
   return fakeHash(`${noteId}:${index}:recogntext`);
@@ -125,6 +138,10 @@ function pages(
     width: dims?.w ?? 1404,
     height: dims?.h ?? 1872,
     textHash: fakeTextHash(noteId, index, recognized, recognizedFrom),
+    // Non-null ONLY for the PDF-template fixture, exactly as the real page list
+    // has it: a note on a built-in style has no links to preserve, so the field
+    // is null for every page of every other note and the reader never asks.
+    linksHash: noteId === LINKED_NOTE_ID ? fakeHash(`${noteId}:${index}:links`) : null,
     // A `.note` page: its number is always `index + 1`, so there is nothing
     // to carry (see `PageRef.sourcePage`).
     sourcePage: null,
@@ -161,6 +178,28 @@ function fakeText(name: string, index: number): string {
     ...(index % 2 === 1 ? ["Marginalia: the witches of Endor, again."] : []),
   ];
   return lines.join("\n");
+}
+
+/**
+ * A page's links, in the shape the real endpoint serves: **device panel pixels**
+ * (the `.note` page IS the panel), a 0-based target for an internal jump and
+ * `-1` with a real URL for an external one.
+ *
+ * Two per page, placed where a digital planner puts them — a header tab and a
+ * footer nav — and NOT vertically centred, so a placement that lost the y
+ * offset would be visible rather than symmetric enough to pass.
+ *
+ * The refused schemes are absent on purpose: the SERVER applies the allowlist,
+ * so a `javascript:` record never reaches a client, and a fake that emitted one
+ * would be testing the browser's last-ditch gate instead of the seam.
+ */
+function fakePageLinks(page: PageRef, pageCount: number): PdfLink[] {
+  // Wrap, so the last page still links somewhere real — and never to itself.
+  const target = (page.index + 1) % pageCount;
+  return [
+    { x: 980, y: 96, w: 340, h: 64, page: -1, uri: "https://example.com/planner?utm=fixture&a=1,2" },
+    { x: 96, y: 1680, w: 420, h: 72, page: target, uri: "none" },
+  ];
 }
 
 // --- the transcript search fixture ------------------------------------------
@@ -1112,6 +1151,9 @@ function markMeta(): NoteMeta {
         width: 1404,
         height: 1872,
         textHash: null,
+        // A `.mark` annotates a PDF and imports no template of its own, so it
+        // carries no `EXTERNALLINKINFO` — the PDF's links come from the PDF.
+        linksHash: null,
         sourcePage: PDF_MARK_SOURCE_PAGE,
         layers,
       },
@@ -1229,6 +1271,16 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       if (page.textHash === null) return { text: "", words: [] };
       const text = fakeText(summary.name, page.index);
       return { text, words: fakeWords(text) };
+    },
+
+    async getPageLinks(id: Id, page: PageRef): Promise<PageLinks> {
+      await delay(latency);
+      const summary = noteSummary(id);
+      if (!summary) throw new Error(`no such note: ${id}`);
+      // Mirrors the real endpoint's short-circuit: a page with no link block has
+      // no version to ask for, and the answer is empty rather than an error.
+      if (page.linksHash === null) return { links: [] };
+      return { links: fakePageLinks(page, summary.pageCount) };
     },
 
     async searchText(query: string, limit?: number, cursor?: string): Promise<SearchResults> {
@@ -1371,13 +1423,17 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
         annotationsId: null,
         id,
         name: summary.name,
+        // A version preview carries NO links: there is no per-version links
+        // route (unlike the transcript, which has one), so claiming a hash here
+        // would send the reader to an address that cannot answer. The real
+        // client's `historyScope` nulls it for the same reason.
         pages: pages(
           id,
           count,
           summary.hasRecognizedText,
           { w: summary.firstPage.width, h: summary.firstPage.height },
           RECOGNIZED_FROM[String(id)],
-        ),
+        ).map((p) => ({ ...p, linksHash: null })),
         fileType: summary.fileType,
         fileHash: md5,
         size: fakeSize(id, count),

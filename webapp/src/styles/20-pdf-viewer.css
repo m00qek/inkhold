@@ -90,6 +90,10 @@
   height: 100%;
 }
 
+/* The link layer that used to live here is now `21-link-layer.css`: the
+   component (`pages/pdfLinkLayer.ts`) is shared with the `.note` reader, so its
+   styling is not the PDF viewer's to own. */
+
 /* The page itself. A PDF page is paper: it gets the sheet colour and a soft
    edge, exactly as the reader's `.page` does, so a document reads as a document
    and not as a bitmap floating on the desk.

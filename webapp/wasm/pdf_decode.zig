@@ -31,6 +31,15 @@
 //!   i32  ink_page_count(i32 doc)       — page count, or negative on error.
 //!   i32  ink_page_size(i32 doc, i32 page, f32* w, f32* h) — page size in POINTS
 //!        (1/72"). 0 on success, negative on error; `*w`/`*h` untouched on error.
+//!   i64  ink_page_links(i32 doc, i32 page) — the page's links as UTF-8 JSON.
+//!        Returns `(ptr << 32) | len`, or negative on error. The payload is an
+//!        array of `{x,y,w,h,page,uri}`: the rect in the SAME space
+//!        `ink_page_size` reports (top-left origin, y down, points), `page` the
+//!        resolved 0-based target of an INTERNAL link or -1 for an external one,
+//!        and `uri` what MuPDF read. A uri whose scheme is not http/https/mailto
+//!        is DROPPED, never described — see `pdf_shim.c`. An empty page answers
+//!        `[]`. Valid until the next `ink_page_links` or `ink_links_free`.
+//!   void ink_links_free()              — release that buffer. Idempotent.
 //!   void ink_close(i32 doc)            — release the document. A stale or
 //!        out-of-range handle is ignored, not dereferenced.
 //!
@@ -107,6 +116,7 @@ extern fn ink_shim_open(data: ?*anyopaque, len: u32) ?*Document;
 extern fn ink_shim_open_stream(total: i64) ?*Document;
 extern fn ink_shim_page_count(doc: *Document) c_int;
 extern fn ink_shim_page_size(doc: *Document, number: c_int, w: *f32, h: *f32) c_int;
+extern fn ink_shim_page_links(doc: *Document, number: c_int) ?*Buffer;
 extern fn ink_shim_render(doc: *Document, number: c_int, scale: f32) ?*Pixmap;
 extern fn ink_shim_pixmap_samples(pix: *Pixmap) [*]u8;
 extern fn ink_shim_pixmap_width(pix: *Pixmap) c_int;
@@ -172,6 +182,13 @@ var last_height: i32 = 0;
 /// out. Same one-at-a-time posture as `last_pixmap`, for the same reason: an
 /// exported page is megabytes and nobody needs two.
 var last_export: ?*Buffer = null;
+
+/// The last page's links, as JSON. Its own slot rather than sharing
+/// `last_export`: the two have unrelated lifetimes — a viewer reads the links of
+/// the page it is looking at while an export of that page is still being built —
+/// and a shared slot would free one out from under the other. It is hundreds of
+/// bytes, so one at a time costs nothing.
+var last_links: ?*Buffer = null;
 
 // ---- Buffers ----
 
@@ -253,6 +270,45 @@ export fn ink_page_size(handle: i32, page: i32, w: *f32, h: *f32) i32 {
     const doc = lookup(handle) orelse return -1;
     if (page < 0) return -1;
     return ink_shim_page_size(doc, page, w, h);
+}
+
+/// The links on `page`, as UTF-8 JSON: `(ptr << 32) | len`, or negative.
+///
+/// -1 a dead handle or a negative page, -2 the shim refused (`ink_error_ptr`
+/// says why — a page that will not load is the realistic one), -3 the produced
+/// buffer cannot be described by the packed return.
+///
+/// The payload is documented at the top of this file and built in `pdf_shim.c`,
+/// which also states the two coordinate traps it exists to close and the scheme
+/// allowlist it enforces. An empty page answers `[]`, which is a SUCCESS: "this
+/// page has no links" and "we could not read this page" are different answers
+/// and the caller acts differently on them.
+///
+/// COPY THE BYTES OUT: they are valid only until the next `ink_page_links`.
+///
+/// LIKE EVERY OTHER DOCUMENT CALL, THIS CAN SUSPEND — loading the page and
+/// resolving an internal destination both walk the xref, which on the streamed
+/// path pulls through `ink.host_read`.
+export fn ink_page_links(handle: i32, page: i32) i64 {
+    const doc = lookup(handle) orelse return -1;
+    if (page < 0) return -1;
+
+    // Drop the previous answer FIRST, so one page's links are resident at a
+    // time — the same posture `ink_render` and `ink_export_page` take, for a
+    // far smaller buffer.
+    ink_links_free();
+
+    const buf = ink_shim_page_links(doc, page) orelse return -2;
+    return holdBuffer(&last_links, buf);
+}
+
+/// Release the buffer `ink_page_links` returned. Idempotent, and safe to call
+/// without ever having asked for links.
+export fn ink_links_free() void {
+    if (last_links) |buf| {
+        last_links = null;
+        ink_shim_drop_buffer(buf);
+    }
 }
 
 /// Release a document. Idempotent, and safe for any integer.
@@ -365,9 +421,10 @@ fn inkArgsOk(page: i32, w: u32, h: u32, a: f32, b: f32, c: f32, d: f32, e: f32, 
     return true;
 }
 
-/// Take ownership of a produced buffer and pack it for JS: `(ptr << 32) | len`,
-/// or -3 if it cannot be described that way. Replaces `last_export`.
-fn holdExport(buf: *Buffer) i64 {
+/// Take ownership of a produced buffer, park it in `slot`, and pack it for JS:
+/// `(ptr << 32) | len`, or -3 if it cannot be described that way. Whatever `slot`
+/// held is the caller's to have released first.
+fn holdBuffer(slot: *?*Buffer, buf: *Buffer) i64 {
     const written = ink_shim_buffer_len(buf);
     const data = ink_shim_buffer_data(buf);
     if (written <= 0 or data == null) {
@@ -382,7 +439,7 @@ fn holdExport(buf: *Buffer) i64 {
         ink_shim_drop_buffer(buf);
         return -3;
     }
-    last_export = buf;
+    slot.* = buf;
     return @intCast((ptr << 32) | len);
 }
 
@@ -444,7 +501,7 @@ export fn ink_export_page(
         e,
         f,
     ) orelse return -2;
-    return holdExport(buf);
+    return holdBuffer(&last_export, buf);
 }
 
 /// Draw `alpha` onto `page` of the OPEN document, in place — the first half of
@@ -520,7 +577,7 @@ export fn ink_export_incremental(handle: i32) i64 {
     ink_export_free();
 
     const buf = ink_shim_export_incremental(doc) orelse return -2;
-    return holdExport(buf);
+    return holdBuffer(&last_export, buf);
 }
 
 /// Release the buffer an export returned. Idempotent, and safe to call

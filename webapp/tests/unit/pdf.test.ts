@@ -5,10 +5,12 @@ import {
   pdfChunks,
   placeWords,
   toWinAnsi,
+  type PdfOptions,
   type PdfPage,
   type TextLayer,
 } from "../../src/export/pdf";
 import type { WordBox } from "../../src/core/types";
+import type { PdfLink } from "../../src/render/pdfLinks";
 
 // The PDF writer. It is pure — pixels in, bytes out — so everything here runs in
 // Node with no canvas, and the assertions are about the FILE, not about a
@@ -297,12 +299,16 @@ interface Collected {
 }
 
 /** Drain `pdfChunks`, noting when each page's image stream is written out. */
-async function collect(pages: AsyncIterable<PdfPage>, log?: string[]): Promise<Collected> {
+async function collect(
+  pages: AsyncIterable<PdfPage>,
+  log?: string[],
+  opts?: PdfOptions,
+): Promise<Collected> {
   const chunks: Uint8Array[] = [];
   const images: Uint8Array[] = [];
   let expectImage = false;
 
-  for await (const chunk of pdfChunks(pages)) {
+  for await (const chunk of pdfChunks(pages, opts)) {
     if (expectImage) {
       images.push(chunk);
       expectImage = false;
@@ -443,6 +449,216 @@ describe("buildPdf, streaming a whole document", () => {
 
   it("refuses an empty source rather than writing a page-less PDF", async () => {
     await expect(buildPdf([])).rejects.toThrow(/no pages/);
+  });
+});
+
+// --- the links ---------------------------------------------------------------
+//
+// A `.note` has no original to preserve, so unlike the PDF viewer's incremental
+// update, this export has to CREATE its annotations. `pdfAnnots.test.ts` covers
+// the transform and the refusals at the numbers; what matters here is what
+// reaches the FILE — that the annotations are inline, that a forward reference
+// resolves, and that a page with no links still writes the bytes it always did.
+
+/** A link on a 1404x1872 page, in the panel pixels `EXTERNALLINKINFO` uses. */
+const LINK: PdfLink = { x: 100, y: 60, w: 400, h: 90, page: -1, uri: "https://example.com/" };
+
+/** A small page carrying `links`. */
+function linkedPage(links: readonly PdfLink[]): PdfPage {
+  return { width: SW, height: SH, gray: new Uint8Array(SW * SH).fill(0xff), links };
+}
+
+/** Three pages whose FIRST carries `links`. */
+async function* pagesWith(links: readonly PdfLink[]): AsyncGenerator<PdfPage> {
+  yield linkedPage(links);
+  yield linkedPage([]);
+  yield linkedPage([]);
+}
+
+/** {@link LINK}'s rect shrunk to fit a {@link SW}x{@link SH} page. */
+const SMALL: PdfLink = { ...LINK, x: 4, y: 2, w: 20, h: 8 };
+
+/** Three pages, one external and one internal link on the first. */
+function linkedPages(): AsyncGenerator<PdfPage> {
+  return pagesWith([SMALL, { ...SMALL, x: 30, page: 2, uri: "" }]);
+}
+
+/** {@link recordingPages}, with a link on every page. */
+async function* linkedRecordingPages(n: number, log: string[]): AsyncGenerator<PdfPage> {
+  for await (const page of recordingPages(n, log)) {
+    yield { ...page, links: [{ ...LINK, x: 1, y: 1, w: 8, h: 4, page: 0, uri: "" }] };
+  }
+}
+
+describe("the link annotations", () => {
+  it("writes a page with no links EXACTLY as it did before links existed", async () => {
+    // The regression that would otherwise go unnoticed: nearly every notebook in
+    // the corpus has no links at all, and none of them may change by a byte.
+    const bare = await bytesOf([{ width: W, height: H, gray: blank() }]);
+    for (const links of [[], null, undefined]) {
+      const same = await bytesOf([{ width: W, height: H, gray: blank(), links }]);
+      expect(same).toEqual(bare);
+    }
+    expect(text(bare)).not.toContain("/Annots");
+  });
+
+  it("puts the annotations INLINE in the page dictionary, keeping three objects a page", async () => {
+    // The load-bearing consequence. Annotation OBJECTS would make the object
+    // count per page depend on that page's links, and `pageObj(i) = 4 + 3i` — the
+    // thing that lets a page be written before the page count is known — would
+    // stop being true.
+    const { bytes } = await collect(linkedPages(), undefined, { pageCount: 3 });
+    const s = text(bytes);
+    expect(s).toMatch(/\/Type \/Page\b[^\n]*\/Annots \[ << \/Type \/Annot/);
+    // Not one annotation object anywhere: every `N 0 obj` is a page, a content
+    // stream, an image, the tree, the font or the catalog.
+    expect(s).not.toMatch(/\d+ 0 obj\n<< \/Type \/Annot/);
+    expect(/\/Size (\d+)/.exec(s)?.[1]).toBe(String(4 + 3 * 3));
+  });
+
+  it("keeps the cross-reference table correct with annotations in the page dicts", async () => {
+    const { bytes } = await collect(linkedPages(), undefined, { pageCount: 3 });
+    const s = text(bytes);
+    const rows = [...s.matchAll(/^(\d{10}) 00000 n $/gm)].map((m) => Number(m[1]));
+    expect(rows).toHaveLength(4 + 3 * 3 - 1);
+    rows.forEach((offset, i) => {
+      expect(s.slice(offset)).toMatch(new RegExp(`^${i + 1} 0 obj`));
+    });
+  });
+
+  // THE FORWARD REFERENCE, at the scale that motivated the whole feature: the
+  // teacher planner is 1703 pages and its links span the year. Page 2 naming
+  // page 1701's object BEFORE page 1701 has been written is only legal because
+  // the xref that resolves it is written last — and it is the reason the writer
+  // can stay streaming while carrying links.
+  it("resolves a link from page 2 to page 1701, written 1699 pages early", async () => {
+    const N = 1703;
+    const target = 1700; // 0-based: the 1701st page
+    async function* planner(): AsyncGenerator<PdfPage> {
+      for (let i = 0; i < N; i++) {
+        const links = i === 1 ? [{ ...LINK, x: 1, y: 1, w: 4, h: 4, page: target, uri: "" }] : [];
+        yield { width: 8, height: 12, gray: new Uint8Array(8 * 12).fill(0xff), links };
+      }
+    }
+    const { bytes } = await collect(planner(), undefined, { pageCount: N });
+    const s = text(bytes);
+
+    const obj = 4 + 3 * target; // 5104
+    expect(s).toContain(`/Dest [ ${obj} 0 R /XYZ null null null ]`);
+    // …and that object number is a page that really is in the file, at the
+    // offset the table gives for it.
+    const rows = [...s.matchAll(/^(\d{10}) 00000 n $/gm)].map((m) => Number(m[1]));
+    expect(s.slice(rows[obj - 1]!)).toMatch(new RegExp(`^${obj} 0 obj\\n<< /Type /Page`));
+  });
+
+  it("drops an internal link whose page is past the end of the document", async () => {
+    // A planner whose links outlive the pages it was exported with. A dangling
+    // reference is an object number the xref has no row for — a file a strict
+    // reader refuses — so the link goes instead.
+    const { bytes } = await collect(
+      pagesWith([{ ...SMALL, page: 9, uri: "" }, SMALL]),
+      undefined,
+      { pageCount: 3 },
+    );
+    const s = text(bytes);
+    expect(s).not.toContain("/Dest");
+    expect(s).toContain("/URI (https://example.com/)");
+  });
+
+  it("keeps a link's page and object aligned across a long document", async () => {
+    // Every page links to the page after it — the index that is easiest to get
+    // off by one, asserted along the whole file rather than at one point.
+    const N = 12;
+    async function* chain(): AsyncGenerator<PdfPage> {
+      for (let i = 0; i < N; i++) {
+        yield {
+          width: 8,
+          height: 12,
+          gray: new Uint8Array(8 * 12).fill(0xff),
+          links: [{ ...LINK, x: 1, y: 1, w: 4, h: 4, page: (i + 1) % N, uri: "" }],
+        };
+      }
+    }
+    const { bytes } = await collect(chain(), undefined, { pageCount: N });
+    const dests = [...text(bytes).matchAll(/\/Dest \[ (\d+) 0 R/g)].map((m) => Number(m[1]));
+    expect(dests).toEqual(Array.from({ length: N }, (_, i) => 4 + 3 * ((i + 1) % N)));
+  });
+
+  // §2.5: one page is not the document. The per-page export contains ONE page,
+  // so a month tab in it points at a page that is not in the file at all.
+  it("drops internal links from a SINGLE-PAGE export and keeps the external ones", async () => {
+    const bytes = await bytesOf([
+      {
+        width: W,
+        height: H,
+        gray: blank(),
+        links: [{ ...LINK, page: 4, uri: "" }, LINK, { ...LINK, page: 0, uri: "" }],
+      },
+    ]);
+    const s = text(bytes);
+    expect(s).not.toContain("/Dest");
+    // Not even a link to page 0 — the exported page is note page 7 sitting at
+    // document index 0, so "page 0" is a different page that is also not here.
+    expect((s.match(/\/Subtype \/Link/g) ?? []).length).toBe(1);
+    expect(s).toContain("/A << /S /URI /URI (https://example.com/) >>");
+  });
+
+  it("writes no annotation at all for a refused scheme", async () => {
+    const bytes = await bytesOf([
+      { width: W, height: H, gray: blank(), links: [{ ...LINK, uri: "javascript:alert(1)" }] },
+    ]);
+    const s = text(bytes);
+    expect(s).not.toContain("/Annots");
+    expect(s).not.toContain("javascript");
+  });
+
+  it("escapes a URI containing a bracket, so the page dictionary stays parseable", async () => {
+    const bytes = await bytesOf([
+      {
+        width: W,
+        height: H,
+        gray: blank(),
+        links: [{ ...LINK, uri: "https://e.com/a(b)?x=1" }],
+      },
+    ]);
+    expect(text(bytes)).toContain("/URI (https://e.com/a\\(b\\)?x=1)");
+  });
+
+  it("carries links and the invisible text layer on the same page", async () => {
+    // Both live in the page's neighbourhood — one in the dictionary, one in the
+    // content stream — and neither may cost the other.
+    const bytes = await bytesOf([
+      {
+        width: W,
+        height: H,
+        gray: blank(),
+        textLayer: { pxPerMm: PX_PER_MM, words: WORDS },
+        links: [LINK],
+      },
+    ]);
+    const s = text(bytes);
+    expect(s).toContain("/Annots [ <<");
+    expect(s).toContain("(alpha) Tj");
+  });
+
+  // The memory guarantee is not allowed to weaken because a page has links: the
+  // annotations are built from the page in hand and written with it, so the
+  // interleaving is exactly what it was.
+  it("still pulls one page at a time when every page carries links", async () => {
+    const log: string[] = [];
+    await collect(linkedRecordingPages(4, log), log, { pageCount: 4 });
+    expect(log).toEqual([
+      "request 0", "write 0", "release 0",
+      "request 1", "write 1", "release 1",
+      "request 2", "write 2", "release 2",
+      "request 3", "write 3", "release 3",
+    ]);
+  });
+
+  it("refuses to finish a document shorter than the caller promised", async () => {
+    // Otherwise every internal link in it points past the end of the file, and
+    // the damage is invisible until someone else opens it.
+    await expect(buildPdf(recordingPages(2, []), { pageCount: 5 })).rejects.toThrow(/promised 5/);
   });
 });
 

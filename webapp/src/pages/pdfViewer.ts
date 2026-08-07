@@ -35,6 +35,8 @@ import {
 } from "./viewerChrome";
 import type { ReaderOrigin, Viewer, ViewerDeps } from "./viewer";
 import { createPageIndex, type PageIndexRow } from "./pageIndex";
+import { createPdfLinkLayer } from "./pdfLinkLayer";
+import { binNotePageHref, notePageHref } from "../router";
 import { createBinViewerActions } from "../ui/binViewerActions";
 import { createLayersPanel } from "./layersPanel";
 import {
@@ -211,7 +213,16 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   // replaces the page) and hides the PDF completely here.
   const markCtl = createNoteLayersController({ backdrop: null });
   markCtl.el.classList.add("pdf-mark");
-  const stage = el("div", { class: "pdf-stage" }, canvas, markCtl.el);
+  /**
+   * The document's OWN links, as anchors — LAST in the stage, so above the ink.
+   *
+   * `.pdf-mark` is `pointer-events: none` and so never eats a click, but a link
+   * under a scribble is precisely the case that occurs: people annotate around
+   * the things they care about. Stacking order is what decides it, and the
+   * order here is the order in the DOM.
+   */
+  const linkLayer = createPdfLinkLayer();
+  const stage = el("div", { class: "pdf-stage" }, canvas, markCtl.el, linkLayer.el);
   const body = createViewerBody({ mark: "PDF" });
 
   const zoomStepper = createZoomStepper<Zoom>({
@@ -1036,11 +1047,66 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     frame.bitmap.close();
     body.main.replaceChildren(stage);
     syncPager();
+    void paintLinks(page, size);
     // The export rows depend on what `paintMark` finds — whether this page has
     // ink at all, and whether any of it is toggled — so they are reconciled
     // AFTER it settles, on every path out of it (a page with no mark, a mark
     // that would not decode, a fetch that failed, and the happy one).
     void paintMark(page, size).finally(() => downloads.refreshGroups());
+  }
+
+  /**
+   * Make the page's OWN links clickable — the `/Annots` the document was
+   * authored with, not anything this app adds.
+   *
+   * The same lifecycle as {@link paintMark}, and for the same reason: the
+   * placement is computed from the canvas's REAL size, which is the one thing
+   * that changes on every zoom step and every panel toggle. So this runs after
+   * the raster lands, on every paint, and a zoom is free of any re-decode.
+   *
+   * THE OLD LINKS COME DOWN FIRST, before anything is awaited. A page's links
+   * are page-specific and the round trip is not instant, so leaving the previous
+   * page's anchors up over the new page would offer targets that belong to a
+   * page you are no longer on — the one failure here that is worse than having
+   * no links at all.
+   *
+   * A FAILURE IS A MISSING LAYER, NOT A BROKEN PAGE, exactly as `paintMark` has
+   * it: the document still reads perfectly without its links, so nothing here
+   * ever touches `body.showPlaceholder`.
+   */
+  async function paintLinks(
+    page: number,
+    pageSizePt: { width: number; height: number },
+  ): Promise<void> {
+    const mine = generation;
+    const s = session;
+    const m = meta;
+    linkLayer.clear();
+    if (!s || !open_ || !m) return;
+    let links;
+    try {
+      links = await s.pageLinks(page);
+    } catch {
+      return;
+    }
+    // `pageIndex !== page` as well as the generation, for the reason `paintMark`
+    // spells out: the counter moves when the DOCUMENT is released and never on
+    // a page turn, so every page of one document shares it.
+    if (mine !== generation || pageIndex !== page || links.length === 0) return;
+    const dpr = Math.min(globalThis.devicePixelRatio || 1, 2);
+    linkLayer.setLinks(links, {
+      pagePt: pageSizePt,
+      canvas: { width: canvas.width / dpr, height: canvas.height / dpr },
+      // A REAL ROUTE, so following a link leaves you somewhere you can share and
+      // reload into — the router already owns this address and `syncUrl` above
+      // already publishes it. A file open from the recycle bin keeps the bin
+      // form, or the jump would 404 back to the library.
+      hrefForPage: (p) => (fromBin ? binNotePageHref(m.id, p) : notePageHref(m.id, p)),
+      // The same path the pager and the arrow keys take, so a link to page 12
+      // repaints rather than reopening the document. `go` publishes the address
+      // itself, so the URL still ends up where the href pointed.
+      onJump: (p) => void go(p),
+    });
   }
 
   /**
@@ -1622,6 +1688,10 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     // decoded stack still survives paging within a document.
     markCtl.release();
     markCtl.el.hidden = true;
+    // The links belonged to a page of a document that is going away, and every
+    // one of them is a live address into it. Left up, they would sit over the
+    // next document's first page pointing at the last one's.
+    linkLayer.clear();
     layersToggle.hidden = true;
     layersPanel.el.hidden = true;
     layersOpen = false;

@@ -8,9 +8,11 @@
 //   getNoteMeta  → GET  /api/controlplane/file/metadata/{id}  (generic per-item meta)
 //   getPageBytes → GET  /note/{id}/page/{n}?v={hash}        (immutable, HTTP-cached)
 //   getPageText  → GET  /note/{id}/page/{n}/text?v={textHash} (immutable, HTTP-cached)
+//   getPageLinks → GET  /note/{id}/page/{n}/links?v={linksHash}
 //   searchText   → GET  /api/controlplane/search?q={terms}&limit={n}&cursor={c}
 //   searchInNote → GET  /api/controlplane/note/{id}/search?q={terms}
 
+import type { PdfLink } from "../render/pdfLinks";
 import type {
   Hash,
   Id,
@@ -24,6 +26,23 @@ import type {
   TxtSearchBatch,
   TxtSearchResults,
 } from "../core/types";
+
+/**
+ * One page's links, as {@link Api.getPageLinks} answers.
+ *
+ * An OBJECT around the array rather than the bare array, mirroring the wire: a
+ * top-level JSON array is a shape that can never gain a field, and this one may
+ * yet want to say what panel it was authored against.
+ *
+ * `PdfLink` is the record `render/pdfLinks.ts` already defines and
+ * `pages/pdfLinkLayer.ts` already renders — deliberately the same type for a
+ * `.note`'s links and a `.pdf`'s, so the layer, the allowlist and the exporter
+ * are written once. See {@link Api.getPageLinks} for the one thing that differs
+ * between them (the unit the rect is in).
+ */
+export interface PageLinks {
+  links: readonly PdfLink[];
+}
 
 export interface Api {
   /** List one folder's immediate children. `null` = the user's root. */
@@ -74,6 +93,33 @@ export interface Api {
    * round-trips.
    */
   getPageText(id: Id, page: PageRef): Promise<PageText>;
+
+  /**
+   * The links a PDF used as this page's template brought with it — the
+   * rectangles the device kept when it rasterised the imported document into
+   * the page's background (`parsers/note/note-format.md` §14).
+   *
+   * ONE SHAPE FOR BOTH KINDS OF DOCUMENT. The records come back as
+   * {@link PdfLink}, the very record a PDF's own links arrive as from the wasm
+   * decoder, so the reader's link layer and the PDF exporter each consume one
+   * shape rather than one per container. The server does the conversion (§14
+   * stores a 1-based page number and the literal `none`; `PdfLink` means a
+   * 0-based target and `-1` for external), so exactly one place knows both
+   * spellings.
+   *
+   * **`x`/`y`/`w`/`h` are DEVICE PANEL PIXELS here**, where a PDF's are points.
+   * That is not an inconsistency to paper over — it is the page's own space in
+   * both cases, and it is why the geometry is SIMPLER for a `.note`: the page IS
+   * the panel, so there is no page-rect mapping and no letterbox, just the
+   * canvas-to-panel scale the reader already computes for the ink.
+   *
+   * LAZY BY CONTRACT, and keyed by `page.linksHash` rather than `page.hash` —
+   * the same discipline as {@link getPageText}, for the same reasons. Returns an
+   * empty result WITHOUT a request when `linksHash` is null, which is every page
+   * of every note not built on a PDF template. Per page and never per document:
+   * the capture behind §14 carries 51,256 records over 1702 pages.
+   */
+  getPageLinks(id: Id, page: PageRef): Promise<PageLinks>;
 
   /**
    * Full-text search over the RECOGNISED transcript of every page of the

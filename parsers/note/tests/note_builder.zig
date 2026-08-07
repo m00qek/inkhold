@@ -58,6 +58,31 @@ pub const PageSpec = struct {
     /// The full recognition shape: elements, each with positioned words. Takes
     /// precedence over `recogn_labels` when both are set.
     recogn_elements: ?[]const ElementSpec = null,
+    /// The links a PDF template brought with it. When non-empty, an
+    /// `EXTERNALLINKINFO` block in the device's exact encoding is emitted and
+    /// referenced from the page — `null`/empty omits the key entirely, which is
+    /// what every page of an ordinary `.note` looks like.
+    links: []const LinkSpec = &.{},
+};
+
+/// One `EXTERNALLINKINFO` record (`note-format.md` §14). Defaults describe an
+/// internal page jump; set `uri` and the record becomes a web link, because a
+/// record's kind and its URI are the same fact stated twice on the wire and a
+/// fixture that could state them inconsistently would be a fixture bug waiting
+/// to look like a decoder bug. `source_page` defaults to the page's own number.
+pub const LinkSpec = struct {
+    source_page: ?u32 = null,
+    /// Field 2 — the TARGET page's `PAGEID`.
+    target_id: []const u8 = "P00000000000000000000AAAAAAAAAAAA",
+    /// Field 3 — the target page NUMBER, 1-based.
+    target_page: u32 = 1,
+    /// Fields 4–7, device panel pixels.
+    x: i32 = 0,
+    y: i32 = 0,
+    w: i32 = 10,
+    h: i32 = 10,
+    /// `null` = an internal jump, which stores the literal `none`.
+    uri: ?[]const u8 = null,
 };
 
 /// One recognized word. `box` is in MILLIMETRES (see `recognition.zig`);
@@ -135,6 +160,12 @@ pub fn serialize(gpa: std.mem.Allocator, spec: Spec) ![]u8 {
         if (elements) |els| {
             const addr = try appendFramed(&buf, gpa, try recognText(t, els));
             try kvs.append(t, .{ .key = "RECOGNTEXT", .value = try numStr(t, addr) });
+        }
+
+        if (page.links.len != 0) {
+            const number = page.number orelse @as(u32, @intCast(pi + 1));
+            const addr = try appendFramed(&buf, gpa, try externalLinkInfo(t, page.links, number));
+            try kvs.append(t, .{ .key = "EXTERNALLINKINFO", .value = try numStr(t, addr) });
         }
 
         for (page.layers) |layer| {
@@ -261,6 +292,38 @@ fn recognText(a: std.mem.Allocator, elements: []const ElementSpec) ![]u8 {
     const out = try a.alloc(u8, enc.calcSize(doc.items.len));
     _ = enc.encode(out, doc.items);
     return out;
+}
+
+/// The content of an `EXTERNALLINKINFO` block, in the device's exact shape:
+/// nine base64 fields per record with a TRAILING comma, records with a TRAILING
+/// pipe (`note-format.md` §14.1, and `links.zig`'s header on why both trailers
+/// matter). Written as bytes rather than through the decoder's own helpers so a
+/// decoder that changed its mind about the grammar would fail here.
+fn externalLinkInfo(a: std.mem.Allocator, specs: []const LinkSpec, page_number: u32) ![]u8 {
+    const enc = std.base64.standard.Encoder;
+    var out: std.ArrayList(u8) = .empty;
+    for (specs) |s| {
+        const uri = s.uri orelse "none";
+        const fields = [_][]const u8{
+            try numStr(a, s.source_page orelse page_number),
+            s.target_id,
+            try numStr(a, s.target_page),
+            try std.fmt.allocPrint(a, "{d}", .{s.x}),
+            try std.fmt.allocPrint(a, "{d}", .{s.y}),
+            try std.fmt.allocPrint(a, "{d}", .{s.w}),
+            try std.fmt.allocPrint(a, "{d}", .{s.h}),
+            if (s.uri == null) "0" else "1",
+            uri,
+        };
+        for (fields) |f| {
+            const buf = try a.alloc(u8, enc.calcSize(f.len));
+            _ = enc.encode(buf, f);
+            try out.appendSlice(a, buf);
+            try out.append(a, ',');
+        }
+        try out.append(a, '|');
+    }
+    return out.toOwnedSlice(a);
 }
 
 test "serialize produces a buffer parseable by the parser" {

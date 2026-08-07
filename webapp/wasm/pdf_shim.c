@@ -324,6 +324,251 @@ int ink_shim_page_size(fz_document *doc, int number, float *w, float *h)
 	return 0;
 }
 
+/* --- Links on a page ------------------------------------------------------ */
+
+/* WHY JSON AND NOT A PACKED STRUCT ARRAY. A page carries a handful of records
+ * whose only interesting field is a VARIABLE-LENGTH STRING, and this project
+ * already moves JSON across boundaries where the shape is irregular (LAYERINFO,
+ * RECOGNTEXT and HIGHLIGHTINFO are all base64 JSON inside the container itself).
+ * A binary record format plus a string blob would be more code on both sides for
+ * a payload measured in hundreds of bytes. `docs/scratch/pdf-links.md` §1.
+ *
+ * A URI THAT IS NOT http/https/mailto NEVER APPEARS HERE. The uri is
+ * attacker-controlled text out of a file that arrived by device sync, and
+ * `javascript:` above all — but also `file:` and `data:` — has no business
+ * becoming a link. It is DROPPED rather than emitted with a flag, so nothing
+ * downstream can forget to check. The client refuses the same set again before
+ * it builds an `<a href>`; the duplication is deliberate, because these are two
+ * different trust boundaries and the browser only ever sees the second one.
+ */
+
+/* Longer than this and the link is dropped rather than truncated: a truncated
+ * URI is a link that goes somewhere other than where it says, which is worse
+ * than no link. Real http URLs do not approach this. */
+#define INK_MAX_URI 4096
+
+/* Rects come out of a file we did not write. An infinite one (`fz_infinite_rect`
+ * is what a malformed /Rect degrades to) would reach the client as a box the
+ * size of the universe, and MuPDF's own float formatter turns a NaN into 0 and
+ * an infinity into FLT_MAX rather than refusing — so the refusing happens here.
+ * 1e6 pt is 350 metres; the largest page PDF allows is 14400. */
+static int ink_finite(float v)
+{
+	return v > -1e6f && v < 1e6f;
+}
+
+/* Append `v` as a JSON number.
+ *
+ * NOT `%g`, AND THIS IS NOT A STYLE PREFERENCE. MuPDF has its own printf, and
+ * its `fmtfloat` (`source/fitz/printf.c`) writes 0.5 as `.5` — which C's printf
+ * would never do and which JSON.parse rejects outright. One link rect with a
+ * half-point edge would make the whole page's payload unparseable. So the number
+ * is written here: a sign, an integer part, and at most three decimals. A
+ * thousandth of a point is 0.35 microns, which is far below anything a rect
+ * needs to be right about. */
+static void ink_json_number(fz_context *ctx, fz_buffer *out, float v)
+{
+	int neg = v < 0;
+	long long scaled = (long long)((neg ? -v : v) * 1000.0f + 0.5f);
+	long long whole = scaled / 1000;
+	int frac = (int)(scaled % 1000);
+	char digits[24];
+	int n = 0;
+
+	if (neg && scaled != 0)
+		fz_append_byte(ctx, out, '-');
+	if (whole == 0) {
+		fz_append_byte(ctx, out, '0');
+	} else {
+		while (whole > 0 && n < (int)sizeof(digits)) {
+			digits[n++] = (char)('0' + (int)(whole % 10));
+			whole /= 10;
+		}
+		while (n > 0)
+			fz_append_byte(ctx, out, digits[--n]);
+	}
+	if (frac != 0) {
+		/* Trailing zeros are legal JSON but noise on the wire, and the payload
+		 * is read by a human as often as by a parser. `10.5`, not `10.500`. */
+		fz_append_byte(ctx, out, '.');
+		fz_append_byte(ctx, out, (char)('0' + frac / 100));
+		if (frac % 100 != 0) {
+			fz_append_byte(ctx, out, (char)('0' + (frac / 10) % 10));
+			if (frac % 10 != 0)
+				fz_append_byte(ctx, out, (char)('0' + frac % 10));
+		}
+	}
+}
+
+/* Append `s` as a JSON string literal.
+ *
+ * Escapes the two characters JSON reserves and every C0 control, which is what
+ * keeps a hostile uri from closing the string and writing its own fields. Bytes
+ * at or above 0x80 pass through: MuPDF hands back UTF-8 (a /URI is read with
+ * `pdf_to_text_string`), and anything malformed becomes U+FFFD in the browser's
+ * `TextDecoder` rather than breaking the parse. */
+static void ink_json_string(fz_context *ctx, fz_buffer *out, const char *s)
+{
+	static const char hex[] = "0123456789abcdef";
+
+	fz_append_byte(ctx, out, '"');
+	for (; *s; s++) {
+		unsigned char c = (unsigned char)*s;
+		if (c == '"' || c == '\\') {
+			fz_append_byte(ctx, out, '\\');
+			fz_append_byte(ctx, out, (char)c);
+		} else if (c < 0x20 || c == 0x7f) {
+			fz_append_string(ctx, out, "\\u00");
+			fz_append_byte(ctx, out, hex[(c >> 4) & 15]);
+			fz_append_byte(ctx, out, hex[c & 15]);
+		} else {
+			fz_append_byte(ctx, out, (char)c);
+		}
+	}
+	fz_append_byte(ctx, out, '"');
+}
+
+/* Is `uri`'s scheme one a viewer may follow? http, https, mailto and nothing
+ * else — see the section header. Case-insensitive, because a scheme is, and
+ * anchored at byte zero, so a leading space or a `\njavascript:` cannot sneak
+ * past the way it can past a naive "contains". */
+static int ink_allowed_scheme(const char *uri)
+{
+	static const char *const allowed[] = { "http://", "https://", "mailto:" };
+	size_t i, j;
+
+	for (i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+		for (j = 0; allowed[i][j]; j++) {
+			char c = uri[j];
+			if (c >= 'A' && c <= 'Z')
+				c = (char)(c - 'A' + 'a');
+			if (c != allowed[i][j])
+				break; /* stops at the NUL too — never reads past it */
+		}
+		if (allowed[i][j] == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* The links on `number`, as a UTF-8 JSON array. NULL on failure.
+ *
+ *     [{"x":72,"y":118.5,"w":180,"h":12,"page":11,"uri":"#page=12"}]
+ *
+ * `x,y,w,h` are in THE SAME SPACE `ink_shim_page_size` reports — top-left
+ * origin, y down, points — so the client's whole transform is one uniform
+ * scale. Two things have to be true for that, and both are load-bearing:
+ *
+ *  1. THE BOX ORIGIN. `ink_shim_page_size` hands over `fz_bound_page`'s EXTENT
+ *     and throws its origin away, so a page whose box does not start at (0,0)
+ *     would put link rects in a space the client has never heard of.
+ *     `box.x0`/`box.y0` are subtracted here so the two agree BY CONSTRUCTION.
+ *     For a PDF this is arithmetic on zero — `pdf_page_obj_transform_box`
+ *     translates the crop box's corner to the origin, under a comment reading
+ *     "Always use CropBox to set origin to top left" — but `fz_bound_page` is a
+ *     document-type-agnostic call and nothing promises that of an EPUB or an
+ *     XPS page. Agreeing by luck is how the export put ink ninety degrees out.
+ *
+ *  2. ROTATION. `fz_bound_page` reports the TRANSFORMED box, and
+ *     `pdf_load_link_annots` (`source/pdf/pdf-link.c:768`) builds link rects
+ *     through the very same `pdf_page_transform`. So a /Rotate 90 page reports
+ *     its rotated extent and its links land in that rotated space. Verified on
+ *     a fixture rather than reasoned about (`pdf_decode_abi.mjs`).
+ *
+ * `page` is the resolved 0-based target of an INTERNAL link, or -1 for an
+ * external one. Resolved HERE, with `fz_resolve_link`, because this is where the
+ * document is; making the client resolve would be a round trip per link.
+ *
+ * A link is DROPPED — never emitted degraded — when its uri is empty, longer
+ * than `INK_MAX_URI`, of a scheme we will not follow, or (for an internal one)
+ * points at a page that does not resolve; and when its rect is empty or not
+ * finite. An empty page answers `[]`.
+ *
+ * ON THE STREAMED PATH THIS CAN SUSPEND: loading the page and resolving a
+ * destination both walk the xref, which pulls through `ink_host_read`. Same
+ * proven arrangement as everything else here — no Zig frame inside the `fz_try`.
+ */
+fz_buffer *ink_shim_page_links(fz_document *doc, int number)
+{
+	fz_context *ctx = g_ctx;
+	fz_page *page = NULL;
+	fz_link *links = NULL;
+	fz_buffer *out = NULL;
+
+	if (!ctx || !doc || number < 0)
+		return NULL;
+	fz_var(page);
+	fz_var(links);
+	fz_var(out);
+	fz_try(ctx)
+	{
+		fz_link *link;
+		fz_rect box;
+		int first = 1;
+
+		out = fz_new_buffer(ctx, 256);
+		page = fz_load_page(ctx, doc, number);
+		box = fz_bound_page(ctx, page);
+		links = fz_load_links(ctx, page);
+		fz_append_byte(ctx, out, '[');
+		for (link = links; link; link = link->next) {
+			float x = link->rect.x0 - box.x0;
+			float y = link->rect.y0 - box.y0;
+			float w = link->rect.x1 - link->rect.x0;
+			float h = link->rect.y1 - link->rect.y0;
+			int target = -1;
+
+			if (!link->uri || !link->uri[0])
+				continue;
+			if (strlen(link->uri) > INK_MAX_URI)
+				continue;
+			if (!(w > 0) || !(h > 0))
+				continue;
+			if (!ink_finite(x) || !ink_finite(y) || !ink_finite(w) || !ink_finite(h))
+				continue;
+			if (fz_is_external_link(ctx, link->uri)) {
+				if (!ink_allowed_scheme(link->uri))
+					continue;
+			} else {
+				fz_location loc = fz_resolve_link(ctx, doc, link->uri, NULL, NULL);
+				if (loc.chapter < 0 || loc.page < 0)
+					continue;
+				target = fz_page_number_from_location(ctx, doc, loc);
+				if (target < 0)
+					continue;
+			}
+
+			if (!first)
+				fz_append_byte(ctx, out, ',');
+			first = 0;
+			fz_append_string(ctx, out, "{\"x\":");
+			ink_json_number(ctx, out, x);
+			fz_append_string(ctx, out, ",\"y\":");
+			ink_json_number(ctx, out, y);
+			fz_append_string(ctx, out, ",\"w\":");
+			ink_json_number(ctx, out, w);
+			fz_append_string(ctx, out, ",\"h\":");
+			ink_json_number(ctx, out, h);
+			fz_append_printf(ctx, out, ",\"page\":%d,\"uri\":", target);
+			ink_json_string(ctx, out, link->uri);
+			fz_append_byte(ctx, out, '}');
+		}
+		fz_append_byte(ctx, out, ']');
+	}
+	fz_always(ctx)
+	{
+		fz_drop_link(ctx, links);
+		fz_drop_page(ctx, page);
+	}
+	fz_catch(ctx)
+	{
+		ink_record_error(ctx);
+		fz_drop_buffer(ctx, out);
+		return NULL;
+	}
+	return out;
+}
+
 /* Render one page at `scale` into a fresh RGBA pixmap. NULL on failure.
  *
  * WHY THE PIXMAP IS CLEARED TO 0xFF RATHER THAN RENDERED WITHOUT ALPHA. The

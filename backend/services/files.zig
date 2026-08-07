@@ -223,41 +223,168 @@ pub const Files = struct {
 
     // ---- reads ----
 
-    /// The one rule that hides a row from the control-plane's view of a folder: a
-    /// `.mark` whose PDF is sitting right there.
+    /// What the device appends — never substitutes — to a PDF's FULL name to name
+    /// the file its ink goes in: `foo.pdf` -> `foo.pdf.mark`
+    /// (`parsers/note/note-format.md` §13.2).
+    pub const mark_ext = ".mark";
+
+    /// THE PAIRING RULE, as SQL, generated once for whichever listing applies it.
+    /// `a` is the alias the outer query gave `files`; `deleted` is the state the
+    /// two members must SHARE ("0" for the library, "1" for the bin).
     ///
     /// The device writes annotations to a SEPARATE file named after the PDF's full
-    /// name plus `.mark` (`foo.pdf` -> `foo.pdf.mark`,
-    /// `parsers/note/note-format.md` §13.2). That file is not a document — it is a
-    /// layer belonging to one — and listing it beside its PDF shows the household
-    /// two entries for one thing, the second of which opens as a page of
-    /// disembodied handwriting.
+    /// name plus `.mark`. That file is not a document — it is a layer belonging to
+    /// one — and listing it beside its PDF shows the household two entries for one
+    /// thing, the second of which opens as a page of disembodied handwriting. So a
+    /// pair is ONE row wherever files are listed, and the row is the PDF's.
     ///
-    /// An ORPHANED mark still lists. If the PDF is gone (or trashed — this joins on
-    /// `deleted = 0`), the mark is the only remaining trace of that ink, and hiding
-    /// it would make it unreachable through the UI while it went on consuming quota.
+    /// **Both members must be in the SAME state**, which is why `deleted` is a
+    /// parameter rather than a literal `0`. A live PDF and a trashed mark are not
+    /// a pair — the mark is in the bin as a thing of its own, and the bin is where
+    /// it must stay reachable. This is also exactly the state `pairOf` matches, so
+    /// what a listing folds away is precisely what a mutation carries: nothing can
+    /// be hidden here and left behind there (the bug this rule used to have — a
+    /// trashed PDF un-hid its mark, conjuring a file the user never made).
     ///
-    /// SHARED BY `list` AND `childCount`, which is the whole reason it is a
-    /// constant. `childCount`'s contract is that it agrees with the listing beside
-    /// it — its own doc calls a disagreement "the one place the bin leaked back into
-    /// view" — and two copies of a predicate this fiddly would not stay equal.
+    /// An ORPHANED mark still lists. With no PDF beside it in the same state, the
+    /// mark is the only remaining trace of that ink; hiding it would make it
+    /// unreachable through the UI while it went on consuming quota. It has no pair,
+    /// so it also travels alone — one rule, no exception.
     ///
-    /// NOT applied to search or the bin, which still surface a paired mark —
-    /// see `docs/scratch/code-review-4.md` §4.3 for what that costs.
+    /// SHARED BY `list`, `childCount`, `liveSubtreeCount` and the bin listing,
+    /// which is the whole reason it is generated rather than typed out. A count
+    /// that disagreed with the listing beside it is "the one place the bin leaked
+    /// back into view", and copies of a predicate this fiddly do not stay equal.
     ///
-    /// Cost is one index seek per `.mark` in the folder, and none for anything else:
-    /// the `LIKE` fails first for every other row, and the `EXISTS` rides the
-    /// `files_live_name` UNIQUE index. `LIKE` is ASCII-case-insensitive in SQLite,
-    /// so `Foo.PDF.mark` is caught too; the stem match stays exact, because that is
-    /// what pairs the two files on disk.
-    const hide_paired_mark =
-        \\ AND NOT (f.name LIKE '%.pdf.mark' AND EXISTS (
-        \\   SELECT 1 FROM files p
-        \\    WHERE p.user_id = f.user_id
-        \\      AND COALESCE(p.parent_id, 0) = COALESCE(f.parent_id, 0)
-        \\      AND p.name = substr(f.name, 1, length(f.name) - 5)
-        \\      AND p.is_folder = 0 AND p.deleted = 0))
-    ;
+    /// NOT applied to search, which still surfaces a paired mark as a hit of its
+    /// own — see `docs/scratch/code-review-4.md` §4.3 for what that costs.
+    ///
+    /// Cost is one index seek per `.mark` in the folder, and none for anything
+    /// else: the suffix tests fail first for every other row, and the `EXISTS`
+    /// rides the `files_live_name` UNIQUE index. `LIKE` is ASCII-case-insensitive
+    /// in SQLite, so a `Foo.PDF.mark` is caught too; the `.mark` tail is matched
+    /// case-SENSITIVELY (`substr(name, -5)`) and the stem exactly, because those
+    /// are the two things `pairOf` can look up by equality — the predicate and the
+    /// lookup have to admit the same set or the gap between them is a bug.
+    fn hidePairedMark(comptime a: []const u8, comptime deleted: []const u8) []const u8 {
+        return " AND NOT (" ++ a ++ ".name LIKE '%.pdf.mark' AND substr(" ++ a ++ ".name, -5) = '" ++ mark_ext ++ "'" ++
+            " AND EXISTS (SELECT 1 FROM files p" ++
+            " WHERE p.user_id = " ++ a ++ ".user_id" ++
+            " AND COALESCE(p.parent_id, 0) = COALESCE(" ++ a ++ ".parent_id, 0)" ++
+            " AND p.name = substr(" ++ a ++ ".name, 1, length(" ++ a ++ ".name) - 5)" ++
+            " AND p.is_folder = 0 AND p.deleted = " ++ deleted ++ "))";
+    }
+
+    /// The rule over LIVE rows — the library's view of a folder.
+    const hide_paired_mark = hidePairedMark("f", "0");
+
+    /// The same rule over TRASHED rows — the bin's view. A trashed pair is one
+    /// row there too, so Restore and Delete-permanently are offered once, on the
+    /// document, and there is no way to reach half a pair.
+    const hide_paired_bin_mark = hidePairedMark("f", "1");
+
+    /// True when `name` names a PDF — the extension matched the way SQLite's
+    /// `LIKE '%.pdf%'` matches it, ASCII-case-insensitively, so `Plan.PDF` counts.
+    pub fn isPdfName(name: []const u8) bool {
+        return name.len > 4 and std.ascii.eqlIgnoreCase(name[name.len - 4 ..], ".pdf");
+    }
+
+    /// True when `name` names a mark of a PDF — the `.mark` tail exact (it is what
+    /// `pairOf` appends and looks up by equality), the `.pdf` before it not.
+    pub fn isMarkName(name: []const u8) bool {
+        return std.mem.endsWith(u8, name, mark_ext) and isPdfName(name[0 .. name.len - mark_ext.len]);
+    }
+
+    /// The other half of a pair. `id` is the PARTNER's row; `entry_is_mark` says
+    /// which way round the two are, because every derived name is anchored on the
+    /// PDF: the mark's name IS the PDF's plus `.mark`, so the PDF's name has to be
+    /// settled first and the mark's follows from it.
+    const Paired = struct { id: u64, entry_is_mark: bool };
+
+    /// The row paired with `id` — the `.mark` beside a `.pdf`, or the `.pdf`
+    /// beside a `.mark` — or null when it has none.
+    ///
+    /// **THE ENTRY POINT FOR THE TWO-WAY RULE, AND THE ONLY ONE.** A pair is one
+    /// object in the user's mind (the document and the writing on it), so acting
+    /// on either member acts on both; but that is applied ONCE, here, over a
+    /// resolved set of ids, and never as "each row's handler also handles its
+    /// partner" — which would carry the operation from A to B and straight back
+    /// to A. `trash`, `restore`, `purge` and `move` each call this exactly once,
+    /// then work a flat id set with the rule already spent.
+    ///
+    /// SAME STATE ONLY, which is what makes the rule self-limiting: `deleted` is
+    /// read off the entry and required of the partner. A live PDF does not drag a
+    /// trashed mark out of the bin, and a trashed PDF does not reach into the
+    /// library. It is also, deliberately, the same set `hidePairedMark` folds
+    /// away, so a mark is hidden from a listing IF AND ONLY IF the row it is
+    /// hidden behind will carry it.
+    ///
+    /// Folders never pair. Two statements, both index hits: the row by id, then
+    /// the sibling on `files_live_name` (`user_id, COALESCE(parent_id,0), name`).
+    fn pairOf(self: Files, user_id: u64, id: u64) !?Paired {
+        var parent_id: ?u64 = null;
+        var deleted: i64 = 0;
+        var name: []u8 = undefined;
+        {
+            var r = (try self.db.row(
+                "SELECT parent_id, name, is_folder, deleted FROM files WHERE id = ?1 AND user_id = ?2;",
+                &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
+            )) orelse return null;
+            defer r.finalize();
+            if (r.int(2) != 0) return null; // a folder is never half of a pair
+            const pid = r.int(0);
+            parent_id = if (pid == 0) null else @intCast(pid);
+            // Copied, not read into a fixed buffer. A length cap here would be a
+            // HOLE: the SQL predicate has none, so a name too long for the buffer
+            // would still be hidden behind its PDF and then left behind by every
+            // mutation — the conjuring bug, restricted to long names.
+            name = try self.gpa.dupe(u8, r.text(1));
+            deleted = r.int(3);
+        }
+        defer self.gpa.free(name);
+
+        // The partner's name, derived by the rule and nothing else.
+        const entry_is_mark = isMarkName(name);
+        var owned_want: ?[]u8 = null;
+        defer if (owned_want) |w| self.gpa.free(w);
+        var want: []const u8 = undefined;
+        if (entry_is_mark) {
+            want = name[0 .. name.len - mark_ext.len];
+        } else if (isPdfName(name)) {
+            owned_want = try std.fmt.allocPrint(self.gpa, "{s}" ++ mark_ext, .{name});
+            want = owned_want.?;
+        } else return null;
+
+        var s = try self.db.prepare(
+            "SELECT id FROM files WHERE user_id = ?1 AND COALESCE(parent_id, 0) = COALESCE(?2, 0) " ++
+                "AND name = ?3 AND is_folder = 0 AND deleted = ?4;",
+        );
+        defer s.finalize();
+        s.bindInt(1, @intCast(user_id));
+        bindOpt(s, 2, parent_id);
+        s.bindText(3, want);
+        s.bindInt(4, deleted);
+        if (!try s.step()) return null;
+        return .{ .id = @intCast(s.columnInt(0)), .entry_is_mark = entry_is_mark };
+    }
+
+    /// The id of the LIVE `.mark` sitting beside a file called `name` in
+    /// `parent_id`, or null. The PDF-to-mark half of `pairOf`, exposed because the
+    /// control-plane's `annotationsId` needs it for a file the pairing rule would
+    /// not claim: a PDF verified by its CONTENT but named without the extension
+    /// still has ink to show. Same statement, same index.
+    pub fn liveMarkIdFor(self: Files, user_id: u64, parent_id: ?u64, name: []const u8) !?u64 {
+        var s = try self.db.prepare(
+            "SELECT id FROM files WHERE user_id = ?1 AND COALESCE(parent_id, 0) = COALESCE(?2, 0) " ++
+                "AND name = ?3 || '" ++ mark_ext ++ "' AND is_folder = 0 AND deleted = 0;",
+        );
+        defer s.finalize();
+        s.bindInt(1, @intCast(user_id));
+        bindOpt(s, 2, parent_id);
+        s.bindText(3, name);
+        if (!try s.step()) return null;
+        return @intCast(s.columnInt(0));
+    }
 
     /// Lists the live entries directly under `parent_id` (null = root) for a user.
     /// Caller owns the result — free via `freeEntries`.
@@ -707,7 +834,7 @@ pub const Files = struct {
                 if (!c.is_folder) return error.NameConflict;
                 return (try self.get(user_id, c.id)) orelse error.NotFound;
             }
-            const final = try self.freeName(user_id, parent, name);
+            const final = try self.freeName(user_id, parent, name, null);
             defer self.gpa.free(final);
             return self.createFolder(user_id, parent, final);
         }
@@ -1038,7 +1165,7 @@ pub const Files = struct {
         // this too — this only moves the error ahead of the `freeName` scan).
         try self.assertFolder(user_id, parent_id);
 
-        const final = try self.freeName(user_id, parent_id, name);
+        const final = try self.freeName(user_id, parent_id, name, null);
         defer self.gpa.free(final);
         return self.linkBlob(user_id, parent_id, final, md5, size);
     }
@@ -1069,6 +1196,23 @@ pub const Files = struct {
     ///   - **Cycle guard.** A folder cannot move into itself or one of its own
     ///     descendants (`error.InvalidMove`): that would sever the subtree from the
     ///     root and orphan it.
+    ///
+    ///   - **A PAIR MOVES AND RENAMES AS ONE** (`pairOf`). The pairing IS the name
+    ///     plus the folder, so this is the operation that can break it silently:
+    ///     renaming `foo.pdf` to `bar.pdf` without its mark leaves `foo.pdf.mark`
+    ///     behind — the ink stops appearing on the document AND the abandoned mark
+    ///     surfaces in the listing as a file nobody made, the same conjuring the
+    ///     bin bug did. So the two rows move together, in this one transaction,
+    ///     under one `bumpSync`, and the mark's new name is derived from the PDF's
+    ///     FINAL one (autorename included).
+    ///   - **A rename that could not leave them a pair is REFUSED**
+    ///     (`error.InvalidMove`), in either direction: a paired `.pdf` may only be
+    ///     renamed to another `.pdf`, and a paired mark only to a `.pdf.mark`.
+    ///     Fixing it up is not available — there is no name for `foo.pdf.mark`
+    ///     that pairs with a PDF called `foo.txt` — and silently unpairing them is
+    ///     the bug. The browser cannot reach this: its rename dialog holds the
+    ///     extension immutable and never offers the (hidden) mark. The device and
+    ///     the API can, and both settle a refusal without retrying.
     ///
     /// `error.NotFound` if `id` is absent, foreign, or already trashed (a bin row is
     /// not live and is not moved). Other errors: NameConflict / InvalidMove /
@@ -1104,17 +1248,53 @@ pub const Files = struct {
         // parent must never reach the folder itself. (A file has no subtree.)
         if (is_folder and try self.wouldCycle(user_id, new_parent_id, id)) return error.InvalidMove;
 
+        // The rule, spent ONCE — see `pairOf`. Everything below works from these
+        // two ids and one anchor name; nothing re-enters the rule per row.
+        const partner = try self.pairOf(user_id, id);
+
+        // The PDF's requested name, which anchors both. A paired mark's request is
+        // read as a request about its document, minus the `.mark`.
+        var pdf_want: []const u8 = new_name;
+        if (partner) |p| {
+            if (p.entry_is_mark) {
+                if (!isMarkName(new_name)) return error.InvalidMove;
+                pdf_want = new_name[0 .. new_name.len - mark_ext.len];
+            } else if (!isPdfName(new_name)) return error.InvalidMove;
+        }
+
         // Resolve the destination name against the live siblings there.
-        var owned_name: ?[]u8 = null;
-        defer if (owned_name) |n| self.gpa.free(n);
-        var final_name: []const u8 = new_name;
-        if (try self.liveChild(user_id, new_parent_id, new_name)) |occ| {
+        var owned_pdf: ?[]u8 = null; // the PDF's name, when autorename produced one
+        defer if (owned_pdf) |n| self.gpa.free(n);
+        var owned_mark: ?[]u8 = null; // the mark's, always derived from the PDF's
+        defer if (owned_mark) |n| self.gpa.free(n);
+        var final_name: []const u8 = new_name; // the ENTRY's, whichever member it is
+        var pdf_final: []const u8 = pdf_want; // the anchor the mark's is built from
+        if (partner) |p| {
+            const pdf_id = if (p.entry_is_mark) p.id else id;
+
+            // The pair already sits at the destination under these names: the PDF
+            // occupies its own target, so the mark occupies its own too. A true
+            // no-op — touch nothing, bump nothing.
+            if (try self.liveChild(user_id, new_parent_id, pdf_want)) |occ| {
+                if (occ.id == pdf_id) return (try self.get(user_id, id)) orelse error.NotFound;
+            }
+
+            // BOTH targets must be free, and of the same ` (n)`: a suffix free for
+            // the document but taken for its ink would move a pair apart.
+            if (!try self.nameFree(user_id, new_parent_id, pdf_want, mark_ext)) {
+                if (!autorename) return error.NameConflict; // never clobber, never unpair
+                owned_pdf = try self.freeName(user_id, new_parent_id, pdf_want, mark_ext);
+                pdf_final = owned_pdf.?;
+            }
+            owned_mark = try std.fmt.allocPrint(self.gpa, "{s}" ++ mark_ext, .{pdf_final});
+            final_name = if (p.entry_is_mark) owned_mark.? else pdf_final;
+        } else if (try self.liveChild(user_id, new_parent_id, new_name)) |occ| {
             // The occupant IS this row — it already sits at the destination under
             // this exact name. A true no-op: touch nothing, bump nothing.
             if (occ.id == id) return (try self.get(user_id, id)) orelse error.NotFound;
             if (!autorename) return error.NameConflict; // never clobber the occupant
-            owned_name = try self.freeName(user_id, new_parent_id, new_name);
-            final_name = owned_name.?;
+            owned_pdf = try self.freeName(user_id, new_parent_id, new_name, null);
+            final_name = owned_pdf.?;
         }
 
         const ts = self.now();
@@ -1129,6 +1309,21 @@ pub const Files = struct {
             s.bindText(2, final_name);
             s.bindInt(3, ts);
             s.bindInt(4, @intCast(id));
+            s.bindInt(5, @intCast(user_id));
+            _ = try s.step();
+        }
+        if (partner) |p| {
+            // The partner's name is NOT its own: the PDF wears `pdf_final` and the
+            // mark wears `pdf_final ++ .mark`, so whichever row is the partner, its
+            // name falls out of the anchor rather than out of what it had before.
+            var s = try self.db.prepare(
+                "UPDATE files SET parent_id = ?1, name = ?2, updated_at = ?3 WHERE id = ?4 AND user_id = ?5;",
+            );
+            defer s.finalize();
+            bindOpt(s, 1, new_parent_id);
+            s.bindText(2, if (p.entry_is_mark) pdf_final else owned_mark.?);
+            s.bindInt(3, ts);
+            s.bindInt(4, @intCast(p.id));
             s.bindInt(5, @intCast(user_id));
             _ = try s.step();
         }
@@ -1201,7 +1396,7 @@ pub const Files = struct {
         var final_name: []const u8 = new_name;
         if (try self.liveChild(user_id, new_parent_id, new_name)) |_| {
             if (!autorename) return error.NameConflict;
-            owned_name = try self.freeName(user_id, new_parent_id, new_name);
+            owned_name = try self.freeName(user_id, new_parent_id, new_name, null);
             final_name = owned_name.?;
         }
 
@@ -1346,6 +1541,12 @@ pub const Files = struct {
     /// ("deletes the folder and the 2 notes inside it") — the same obligation
     /// restore carries in the other direction. Counted BEFORE `trash` runs, since
     /// afterwards there is nothing live left to count.
+    ///
+    /// A paired `.mark` below the entry counts as NOTHING, because the folder the
+    /// user is looking at never showed it: this figure is a sentence about what
+    /// they can see, and "the 3 files inside it" over a folder listing two would
+    /// be the same disagreement `childCount` exists to avoid. The mark is still
+    /// tombstoned — it rides along with its PDF — it just is not a second thing.
     pub fn liveSubtreeCount(self: Files, user_id: u64, id: u64) !usize {
         var r = (try self.db.row(live_subtree_count_sql, &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } })) orelse return 0;
         defer r.finalize();
@@ -1365,26 +1566,45 @@ pub const Files = struct {
     /// gated on `deleted = 0` serves all three: it tombstones whatever is still
     /// live below the id, leaves already-trashed rows (and their original,
     /// earlier `deleted_at`) untouched, and lands both callers in the same state.
+    ///
+    /// **A PAIR GOES TOGETHER** (`pairOf`): trashing a PDF takes its `.mark` with
+    /// it, and trashing a mark takes its PDF. Before this the mark was left
+    /// behind AND un-hidden by the PDF's departure, so a delete CONJURED a file
+    /// the household had never seen. Both tombstones land in this ONE transaction
+    /// under ONE `bumpSync` — one user-visible change, and no instant at which
+    /// half a pair is in the bin.
     pub fn trash(self: Files, user_id: u64, id: u64) !void {
         if (!try self.exists(user_id, id)) return error.NotFound;
 
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
 
-        var changed: i64 = 0;
-        {
-            var s = try self.db.prepare(subtree_trash_sql);
-            defer s.finalize();
-            s.bindInt(1, @intCast(id));
-            s.bindInt(2, @intCast(user_id));
-            s.bindInt(3, self.now());
-            _ = try s.step();
-            changed = self.db.changes();
-        }
+        // The rule, spent ONCE, before anything is written: what follows is a flat
+        // set of roots, so nothing can carry the operation back the way it came.
+        const partner = try self.pairOf(user_id, id);
+
+        const ts = self.now();
+        var changed = try self.trashSubtree(user_id, id, ts);
+        if (partner) |p| changed += try self.trashSubtree(user_id, p.id, ts);
+
         // Only a real state change moves the counter: a retry that tombstoned
         // nothing must not invalidate every cached listing in the browser.
         if (changed > 0) try self.bumpSync(user_id);
         try self.db.exec("COMMIT;");
+    }
+
+    /// Tombstones the subtree rooted at `id` at `ts`, reporting how many rows it
+    /// actually changed. Inside an open transaction only. The pair's two roots
+    /// share one `ts`, so their retention clocks start together and the bin groups
+    /// them as the single deletion they are.
+    fn trashSubtree(self: Files, user_id: u64, id: u64, ts: i64) !i64 {
+        var s = try self.db.prepare(subtree_trash_sql);
+        defer s.finalize();
+        s.bindInt(1, @intCast(id));
+        s.bindInt(2, @intCast(user_id));
+        s.bindInt(3, ts);
+        _ = try s.step();
+        return self.db.changes();
     }
 
     /// What a `restore` actually did — which is routinely MORE than the caller
@@ -1433,11 +1653,25 @@ pub const Files = struct {
     /// The blob was never released, so there is nothing to re-fetch and nothing to
     /// re-index: the md5-keyed `note_index` rows are still there, and the file is
     /// searchable again the moment `deleted` goes back to 0.
+    ///
+    /// **A PAIR COMES BACK TOGETHER** (`pairOf`), and the collision case is where
+    /// that gets interesting. `foo.pdf` restoring onto an occupied name becomes
+    /// `foo (2).pdf` — and the pairing IS the name, so the mark must land on
+    /// `foo (2).pdf.mark` or a document has come back with its ink detached. Two
+    /// things make that hold: the PDF is restored FIRST whichever member was
+    /// asked for (its name anchors the mark's), and its free-name search skips
+    /// any candidate whose `.mark` twin is taken, so the suffix the two settle on
+    /// is free for both. Without the second rule `foo (2).pdf` could pair with a
+    /// pre-existing orphan `foo (2).pdf.mark` and adopt someone else's ink.
     pub fn restore(self: Files, user_id: u64, id: u64) !Restored {
         if (!try self.exists(user_id, id)) return error.NotFound;
 
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
+
+        // The rule, spent ONCE — see `pairOf`. Read before any row is made live,
+        // because it matches on the state both members are in NOW (trashed).
+        const partner = try self.pairOf(user_id, id);
 
         var ancestors: usize = 0;
         var descendants: usize = 0;
@@ -1458,14 +1692,37 @@ pub const Files = struct {
             var i = chain.items.len;
             while (i > 0) {
                 i -= 1;
-                const r = try self.restoreRow(user_id, chain.items[i]);
+                const r = try self.restoreRow(user_id, chain.items[i], .{});
                 self.gpa.free(r.name);
                 if (r.was_trashed) ancestors += 1;
             }
         }
 
-        // 2. The entry itself. Its (possibly renamed) name is what we report.
-        const self_row = try self.restoreRow(user_id, id);
+        // 2. The entry itself — and its pair, PDF first. Whichever member the
+        //    caller named, the PDF settles on a name that leaves `<name>.mark`
+        //    free, then the mark is restored AS that name: the pair survives the
+        //    rename that a collision forces. We report the name of the row the
+        //    caller actually asked about, which is the one they will look for.
+        const self_row = blk: {
+            const p = partner orelse break :blk try self.restoreRow(user_id, id, .{});
+
+            const pdf_id = if (p.entry_is_mark) p.id else id;
+            const mark_id = if (p.entry_is_mark) id else p.id;
+
+            const pdf_row = try self.restoreRow(user_id, pdf_id, .{ .pair = mark_ext });
+            errdefer self.gpa.free(pdf_row.name);
+
+            const want = try std.fmt.allocPrint(self.gpa, "{s}" ++ mark_ext, .{pdf_row.name});
+            defer self.gpa.free(want);
+            const mark_row = try self.restoreRow(user_id, mark_id, .{ .name = want });
+
+            if (p.entry_is_mark) {
+                self.gpa.free(pdf_row.name);
+                break :blk mark_row;
+            }
+            self.gpa.free(mark_row.name);
+            break :blk pdf_row;
+        };
         errdefer self.gpa.free(self_row.name);
 
         // 3. Every trashed descendant, shallowest first — same reason as the
@@ -1483,7 +1740,7 @@ pub const Files = struct {
                 while (try s.step()) try kids.append(self.gpa, @intCast(s.columnInt(0)));
             }
             for (kids.items) |kid| {
-                const r = try self.restoreRow(user_id, kid);
+                const r = try self.restoreRow(user_id, kid, .{});
                 self.gpa.free(r.name);
                 if (r.was_trashed) descendants += 1;
             }
@@ -1507,6 +1764,13 @@ pub const Files = struct {
     /// refcounts drop, blobs that reach 0 lose their `note_index` /
     /// `note_page_index` / `note_page_fts` rows and are removed from disk, and the
     /// bytes come off the user's quota. Irreversible.
+    ///
+    /// **A PAIR IS DESTROYED TOGETHER** (`pairOf`). The bin shows one row for the
+    /// two, so leaving the mark behind would strand bytes nothing could ever reach
+    /// again — still charged against the quota, with no row left to purge them
+    /// from. Both blobs are decref'd and both refunds settled in the one pass
+    /// `releaseIds` already makes, so the quota identity holds without a second
+    /// accounting path.
     pub fn purge(self: Files, user_id: u64, id: u64) !void {
         if (!try self.existsTrashed(user_id, id)) return error.NotFound;
 
@@ -1525,6 +1789,7 @@ pub const Files = struct {
             s.bindInt(2, @intCast(user_id));
             while (try s.step()) try ids.append(self.gpa, @intCast(s.columnInt(0)));
         }
+        try self.addPairs(user_id, &ids);
 
         try self.releaseIds(user_id, ids.items, &gc);
         try self.bumpSync(user_id);
@@ -1533,14 +1798,30 @@ pub const Files = struct {
         for (gc.items) |*m| self.removeBlobFiles(m); // GC on disk after the commit
     }
 
-    /// Permanently destroys everything in a user's bin. Returns the number of
-    /// entries removed. Irreversible; same release path as `purge`.
+    /// Permanently destroys everything in a user's bin. Irreversible; same release
+    /// path as `purge`. Needs no pair closure of its own — it takes the WHOLE bin,
+    /// so a pair is in it entirely or not at all.
+    ///
+    /// Returns the number of entries the BIN LISTING showed, not the number of
+    /// rows destroyed. The toast reads "Bin emptied — 2 items" over a screen the
+    /// user just counted, and a hidden `.mark` counted there would make it say 3.
+    /// Taken before the release, since afterwards there is nothing left to count.
     pub fn emptyBin(self: Files, user_id: u64) !usize {
         var gc: std.ArrayList([md5_len]u8) = .empty;
         defer gc.deinit(self.gpa);
 
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
+
+        const shown: usize = blk: {
+            var r = (try self.db.row(
+                "SELECT COUNT(*) FROM files f WHERE f.user_id = ?1 AND f.deleted = 1" ++
+                    hide_paired_bin_mark ++ ";",
+                &.{.{ .int = @intCast(user_id) }},
+            )) orelse break :blk 0;
+            defer r.finalize();
+            break :blk @intCast(r.int(0));
+        };
 
         var ids: std.ArrayList(u64) = .empty;
         defer ids.deinit(self.gpa);
@@ -1556,7 +1837,7 @@ pub const Files = struct {
         try self.db.exec("COMMIT;");
 
         for (gc.items) |*m| self.removeBlobFiles(m);
-        return ids.items.len;
+        return shown;
     }
 
     /// Retention: purges every entry trashed more than `max_age_s` ago, for every
@@ -1614,6 +1895,11 @@ pub const Files = struct {
             s.bindInt(2, cutoff);
             while (try s.step()) try ids.append(self.gpa, @intCast(s.columnInt(0)));
         }
+        // A pair expires as one thing even if its two `deleted_at` stamps differ
+        // (a pre-fix bin, where the mark was trashed on its own day). Otherwise
+        // the PDF is swept away and the mark it was hiding APPEARS in the bin —
+        // the conjured-file bug, wearing a retention job as a disguise.
+        try self.addPairs(user_id, &ids);
 
         try self.releaseIds(user_id, ids.items, &gc);
         if (ids.items.len > 0) try self.bumpSync(user_id);
@@ -1963,23 +2249,54 @@ pub const Files = struct {
     /// time, and must be: it turns on whether the parent is CURRENTLY the root or
     /// still live, a fact about rows not in this response, not a property frozen at
     /// trash time. Column order matches the old query so `listBin` is untouched.
+    ///
+    /// **A TRASHED PAIR IS ONE ROW HERE TOO** (`hide_paired_bin_mark`), the PDF's,
+    /// exactly as in the library. Two rows would offer Restore twice for one
+    /// document and let the user restore half a pair — a document whose ink stayed
+    /// in the bin renders blank and gives no sign why. With one row that cannot be
+    /// expressed: `restore`/`purge` carry the other member, so the filter is the
+    /// truth about what the actions do rather than a cosmetic tidy-up.
+    ///
+    /// **And the size reported is the PAIR's.** `bin.ts` calls this column "bytes
+    /// a purge of this one frees", and purging frees both blobs; showing only the
+    /// PDF's would make the bin's headline figure and its per-row promise both
+    /// understate what the button does. The correlated sum fires only for a row
+    /// whose name is a PDF's — for anything else there is no hidden mark to add,
+    /// and a mark that ISN'T hidden has its own row carrying its own bytes.
     const bin_listing_sql =
-        \\SELECT id, parent_id, name, is_folder, md5, size,
-        \\       COALESCE(deleted_at, 0), COALESCE(deleted_path, ''),
-        \\       (parent_id IS NULL OR NOT EXISTS (
-        \\          SELECT 1 FROM files p WHERE p.id = files.parent_id AND p.deleted = 1))
-        \\FROM files WHERE user_id = ?1 AND deleted = 1
-        \\ORDER BY COALESCE(deleted_at, 0) DESC, id DESC;
+        \\SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5,
+        \\       f.size + COALESCE((SELECT m.size FROM files m
+        \\                           WHERE m.user_id = f.user_id
+        \\                             AND COALESCE(m.parent_id, 0) = COALESCE(f.parent_id, 0)
+        \\                             AND m.name = f.name || '.mark'
+        \\                             AND m.is_folder = 0 AND m.deleted = 1
+        \\                             AND f.name LIKE '%.pdf'), 0),
+        \\       COALESCE(f.deleted_at, 0), COALESCE(f.deleted_path, ''),
+        \\       (f.parent_id IS NULL OR NOT EXISTS (
+        \\          SELECT 1 FROM files p WHERE p.id = f.parent_id AND p.deleted = 1))
+        \\FROM files f WHERE f.user_id = ?1 AND f.deleted = 1
+    ++ hide_paired_bin_mark ++
+        \\
+        \\ORDER BY COALESCE(f.deleted_at, 0) DESC, f.id DESC;
     ;
 
     /// The live subtree rooted at ?1 (the entry included), counted. Both arms are
     /// gated on `deleted = 0`, so it counts exactly what `trash` will tombstone
     /// and never a row that is already in the bin.
+    ///
+    /// The recursive arm also drops a paired `.mark`: this figure is a SENTENCE to
+    /// the user ("and the 2 notes inside it") about a folder they are looking at,
+    /// so it counts what that folder showed them. `trash` still tombstones the
+    /// mark — it rides with its PDF — it simply is not a second item. The anchor
+    /// arm is left alone: an id someone acted on DIRECTLY is one thing by
+    /// definition, whichever member of a pair it happens to be.
     const live_subtree_count_sql =
         \\WITH RECURSIVE sub(id) AS (
         \\  SELECT id FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 0
         \\  UNION
         \\  SELECT f.id FROM files f JOIN sub ON f.parent_id = sub.id WHERE f.deleted = 0
+    ++ hide_paired_mark ++
+        \\
         \\)
         \\SELECT COUNT(*) FROM sub;
     ;
@@ -1995,6 +2312,28 @@ pub const Files = struct {
     /// we have not yet looked at, and a row that is gone can no longer tell us
     /// which blob it was holding. Blobs that reached refcount 0 are appended to
     /// `gc` for the caller to remove from disk AFTER the commit.
+    /// Closes `ids` under the pairing rule: every row in it that is half of a pair
+    /// brings the other half in, once. The set is already cascade-closed when this
+    /// runs, so this only ever adds a SIBLING — a mark beside a PDF or a PDF
+    /// beside a mark, both of them files, neither with a subtree of its own.
+    ///
+    /// The reason it exists rather than being folded into `pairOf`'s callers: a
+    /// destroy path works from an id SET, and closing the set once is what keeps
+    /// the rule non-recursive. Adding B for A and then A for B is a no-op here,
+    /// because a member already present is skipped.
+    ///
+    /// O(n) `pairOf` probes over a set that is a bin subtree — small by
+    /// construction, and each probe is two index hits.
+    fn addPairs(self: Files, user_id: u64, ids: *std.ArrayList(u64)) !void {
+        const n = ids.items.len; // snapshot: added rows are pairs already
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const p = (try self.pairOf(user_id, ids.items[i])) orelse continue;
+            if (std.mem.indexOfScalar(u64, ids.items, p.id) != null) continue;
+            try ids.append(self.gpa, p.id);
+        }
+    }
+
     fn releaseIds(self: Files, user_id: u64, ids: []const u64, gc: *std.ArrayList([md5_len]u8)) !void {
         // One entry per doomed ROW, duplicates included: `blobs.refcount` counts
         // referencing rows, so every row must decref exactly once. The quota
@@ -2183,13 +2522,31 @@ pub const Files = struct {
     /// the ancestor and descendant passes report only rows they actually changed.
     const RestoredRow = struct { name: []u8, was_trashed: bool, renamed: bool };
 
+    /// How `restoreRow` should choose the name it lands on. Both fields serve the
+    /// `.mark` pairing and nothing else; `.{}` is the ordinary restore.
+    const RestoreName = struct {
+        /// Restore under THIS name rather than the one the row was trashed under.
+        /// The mark's name is not its own to keep: it is the PDF's plus `.mark`,
+        /// so when a collision renames the PDF the mark is restored as the new
+        /// name + `.mark` instead of the stale one it carried into the bin.
+        name: ?[]const u8 = null,
+        /// Only settle on a candidate whose `candidate ++ pair` twin is ALSO free.
+        /// Set on the PDF so the ` (n)` it takes is one the mark can take too —
+        /// otherwise `foo (2).pdf` could land beside a pre-existing orphan
+        /// `foo (2).pdf.mark` and adopt ink that is not its own.
+        pair: ?[]const u8 = null,
+    };
+
     /// Makes one row live again, renaming it if a live sibling has taken its name
     /// in the meantime. The returned `name` is owned by `gpa`.
     ///
     /// A row that is ALREADY live is left completely alone (its name is simply
     /// reported back), which is what makes the ancestor and descendant passes of
     /// `restore` safe to run over rows that were never trashed.
-    fn restoreRow(self: Files, user_id: u64, id: u64) !RestoredRow {
+    ///
+    /// `opts` exists ONLY for the `.mark` pairing, whose two rows cannot each pick
+    /// a name on their own without drifting apart — see `RestoreName`.
+    fn restoreRow(self: Files, user_id: u64, id: u64, opts: RestoreName) !RestoredRow {
         var parent_id: ?u64 = null;
         var deleted = false;
         var name: []u8 = undefined;
@@ -2207,7 +2564,7 @@ pub const Files = struct {
         defer self.gpa.free(name);
         if (!deleted) return .{ .name = try self.gpa.dupe(u8, name), .was_trashed = false, .renamed = false };
 
-        const final = try self.freeName(user_id, parent_id, name);
+        const final = try self.freeName(user_id, parent_id, opts.name orelse name, opts.pair);
         errdefer self.gpa.free(final);
 
         // `deleted_path` is cleared with the tombstone: it is the NULL-for-live
@@ -2240,8 +2597,14 @@ pub const Files = struct {
     /// `BuJo (3).note`, never `BuJo (2) (2).note`. Round-tripping through the bin
     /// is a normal thing to do repeatedly, and without this the name grows a
     /// parenthesis every time.
-    fn freeName(self: Files, user_id: u64, parent_id: ?u64, wanted: []const u8) ![]u8 {
-        if (try self.liveChild(user_id, parent_id, wanted) == null) return self.gpa.dupe(u8, wanted);
+    ///
+    /// `pair`, when given, is a suffix (`.mark`) whose TWIN must be free as well:
+    /// a candidate is accepted only if neither `cand` nor `cand ++ pair` is taken
+    /// by a live sibling. That is what keeps an annotated PDF and its ink on the
+    /// same ` (n)` — the pairing is the name, so a suffix free for one but not the
+    /// other would restore or move a pair that is no longer a pair.
+    fn freeName(self: Files, user_id: u64, parent_id: ?u64, wanted: []const u8, pair: ?[]const u8) ![]u8 {
+        if (try self.nameFree(user_id, parent_id, wanted, pair)) return self.gpa.dupe(u8, wanted);
 
         // A leading dot is part of the name, not an extension separator.
         const dot = std.mem.lastIndexOfScalar(u8, wanted, '.');
@@ -2253,10 +2616,20 @@ pub const Files = struct {
         while (n < 10_000) : (n += 1) {
             const cand = try std.fmt.allocPrint(self.gpa, "{s} ({d}){s}", .{ stem, n, ext });
             errdefer self.gpa.free(cand);
-            if (try self.liveChild(user_id, parent_id, cand) == null) return cand;
+            if (try self.nameFree(user_id, parent_id, cand, pair)) return cand;
             self.gpa.free(cand);
         }
         return error.NameConflict;
+    }
+
+    /// Is `cand` available in `parent_id` — and, when `pair` is given, its twin
+    /// `cand ++ pair` too? The single acceptance test `freeName` iterates on.
+    fn nameFree(self: Files, user_id: u64, parent_id: ?u64, cand: []const u8, pair: ?[]const u8) !bool {
+        if (try self.liveChild(user_id, parent_id, cand) != null) return false;
+        const suffix = pair orelse return true;
+        const twin = try std.fmt.allocPrint(self.gpa, "{s}{s}", .{ cand, suffix });
+        defer self.gpa.free(twin);
+        return (try self.liveChild(user_id, parent_id, twin)) == null;
     }
 
     /// The `parent_id` of a row in ANY state (live or trashed), or null at the
@@ -6034,7 +6407,7 @@ test "an ORPHANED .mark still lists — it is the only trace of that ink left" {
     try testing.expectEqual(@as(i64, 2), try f.files.childCount(1, docs.id));
 }
 
-test "a TRASHED pdf un-hides its mark, and a folder of the same name never pairs" {
+test "trashing a pdf takes its mark with it — a delete must not CONJURE a file" {
     var f = try Fixture.init();
     defer f.deinit();
     const docs = try f.files.createFolder(1, null, "Docs");
@@ -6046,25 +6419,608 @@ test "a TRASHED pdf un-hides its mark, and a folder of the same name never pairs
     defer freeEntry(mk);
     try testing.expectEqual(@as(i64, 1), try f.files.childCount(1, docs.id));
 
-    // Trash the PDF. The mark does not follow it — they are independent rows —
-    // so it becomes the orphan case and comes back into view rather than
-    // becoming unreachable.
+    // THE REPORTED BUG. Trashing the PDF used to leave the mark live — and
+    // worse, the PDF's departure UN-HID it, so deleting one thing made a file
+    // the household had never seen appear in its place. The folder must simply
+    // be empty.
     try f.files.trash(1, pdf.id);
     const rows = try f.files.list(1, docs.id);
     defer Files.freeEntries(testing.allocator, rows);
-    try testing.expectEqual(@as(usize, 1), rows.len);
-    try testing.expectEqualStrings("manual.pdf.mark", rows[0].name);
+    try testing.expectEqual(@as(usize, 0), rows.len);
+    try testing.expectEqual(@as(i64, 0), try f.files.childCount(1, docs.id));
+
+    // Read from the RAW table, not the API: both rows are tombstoned, and with
+    // the same `deleted_at`, so the bin groups them as the one deletion they are.
+    var r = (try f.db.row(
+        "SELECT COUNT(*), COUNT(DISTINCT deleted_at) FROM files WHERE deleted = 1 AND id IN (?1, ?2);",
+        &.{ .{ .int = @intCast(pdf.id) }, .{ .int = @intCast(mk.id) } },
+    )).?;
+    defer r.finalize();
+    try testing.expectEqual(@as(i64, 2), r.int(0));
+    try testing.expectEqual(@as(i64, 1), r.int(1));
+}
+
+test "a folder named like a PDF never pairs, so the mark beside it keeps its row" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
 
     // A FOLDER named `x.pdf` is not a document to annotate.
     const sub = try f.files.createFolder(1, docs.id, "plan.pdf");
     testing.allocator.free(sub.name);
     const plan_mk = try putBytes(&f, 1, docs.id, "plan.pdf.mark", "dddd");
     defer freeEntry(plan_mk);
-    const rows2 = try f.files.list(1, docs.id);
-    defer Files.freeEntries(testing.allocator, rows2);
+
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
     var saw_mark = false;
-    for (rows2) |r| if (std.mem.eql(u8, r.name, "plan.pdf.mark")) {
+    for (rows) |r| if (std.mem.eql(u8, r.name, "plan.pdf.mark")) {
         saw_mark = true;
     };
     try testing.expect(saw_mark);
+
+    // And trashing that folder leaves the mark alone: it was never its pair.
+    try f.files.trash(1, sub.id);
+    const still = (try f.files.get(1, plan_mk.id)) orelse return error.Missing;
+    freeEntry(still);
+}
+
+// ---- the .mark pairing through the file lifecycle ----
+//
+// A PDF and the `.mark` holding its ink are ONE object to the household: the
+// document and the writing on it. Every operation below therefore carries the
+// pair, in BOTH directions and in ONE transaction — and an ORPHAN (a mark whose
+// PDF is gone, or a PDF that was never written on) has no pair, so it behaves
+// exactly as any other file. That is one rule, not a rule plus an exception,
+// and these tests pin both halves of it.
+
+/// A `.pdf` + `.pdf.mark` pair in `parent`, with distinct bytes so the quota
+/// arithmetic can tell them apart. Caller frees both entries.
+const MarkPair = struct { pdf: Entry, mark: Entry };
+fn putPair(f: *Fixture, parent: ?u64, stem: []const u8, pdf_bytes: []const u8, mark_bytes: []const u8) !MarkPair {
+    var buf: [128]u8 = undefined;
+    const pdf_name = try std.fmt.bufPrint(&buf, "{s}.pdf", .{stem});
+    const pdf = try putBytes(f, 1, parent, pdf_name, pdf_bytes);
+    errdefer freeEntry(pdf);
+    var buf2: [128]u8 = undefined;
+    const mark_name = try std.fmt.bufPrint(&buf2, "{s}.pdf.mark", .{stem});
+    const mark = try putBytes(f, 1, parent, mark_name, mark_bytes);
+    return .{ .pdf = pdf, .mark = mark };
+}
+
+/// The row's `deleted` flag straight from the table — never through the API,
+/// whose whole job here is to fold the two rows into one.
+fn deletedFlagOf(f: *Fixture, id: u64) !i64 {
+    var r = (try f.db.row("SELECT deleted FROM files WHERE id = ?1;", &.{.{ .int = @intCast(id) }})) orelse return -1;
+    defer r.finalize();
+    return r.int(0);
+}
+
+/// The row's name straight from the table. Returns "" when the row is gone.
+fn nameOf(f: *Fixture, arena: std.mem.Allocator, id: u64) ![]const u8 {
+    var r = (try f.db.row("SELECT name FROM files WHERE id = ?1;", &.{.{ .int = @intCast(id) }})) orelse return "";
+    defer r.finalize();
+    return arena.dupe(u8, r.text(0));
+}
+
+test "trashing the MARK takes its PDF too — the rule runs both ways" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    // The device and the API can both reach the mark directly even though the
+    // library hides it. Acting on it acts on the document it belongs to.
+    try f.files.trash(1, p.mark.id);
+    try testing.expectEqual(@as(i64, 1), try deletedFlagOf(&f, p.pdf.id));
+    try testing.expectEqual(@as(i64, 1), try deletedFlagOf(&f, p.mark.id));
+    try testing.expectEqual(@as(i64, 0), try f.files.childCount(1, docs.id));
+}
+
+test "a pair is ONE user-visible change: one sync bump for two rows" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    // The counter invalidates every cached listing in the browser, so a pair
+    // moving must cost exactly one invalidation, not two.
+    const before = try f.files.syncVersion(1);
+    try f.files.trash(1, p.pdf.id);
+    try testing.expectEqual(before + 1, try f.files.syncVersion(1));
+
+    const after_trash = try f.files.syncVersion(1);
+    (try f.files.restore(1, p.pdf.id)).deinit(testing.allocator);
+    try testing.expectEqual(after_trash + 1, try f.files.syncVersion(1));
+
+    // And the carry does not re-enter: trashing the mark carries the PDF, whose
+    // handler does NOT then carry the mark back round. One bump, two rows.
+    const after_restore = try f.files.syncVersion(1);
+    try f.files.trash(1, p.mark.id);
+    try testing.expectEqual(after_restore + 1, try f.files.syncVersion(1));
+}
+
+test "restore brings the pair back together, from either member" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    try f.files.trash(1, p.pdf.id);
+    var r = try f.files.restore(1, p.pdf.id);
+    defer r.deinit(testing.allocator);
+    try testing.expectEqualStrings("manual.pdf", r.name);
+    try testing.expect(!r.renamed);
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, p.mark.id));
+    try testing.expectEqualStrings("manual.pdf.mark", try nameOf(&f, a, p.mark.id));
+
+    // Restoring the MARK is the same operation seen from the other side, and it
+    // reports the name of the row the caller actually asked about.
+    try f.files.trash(1, p.mark.id);
+    var r2 = try f.files.restore(1, p.mark.id);
+    defer r2.deinit(testing.allocator);
+    try testing.expectEqualStrings("manual.pdf.mark", r2.name);
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, p.pdf.id));
+}
+
+test "restore under a name COLLISION renames both, so the pair survives it" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    try f.files.trash(1, p.pdf.id);
+    // The device re-syncs a fresh `manual.pdf` into the folder while the old one
+    // sits in the bin — the ordinary way a restore collides.
+    const fresh = try putBytes(&f, 1, docs.id, "manual.pdf", "cccc");
+    defer freeEntry(fresh);
+
+    var r = try f.files.restore(1, p.pdf.id);
+    defer r.deinit(testing.allocator);
+    try testing.expect(r.renamed);
+    try testing.expectEqualStrings("manual (2).pdf", r.name);
+
+    // THE TRAP. The pairing IS the name, so a mark still called `manual.pdf.mark`
+    // would now belong to the FRESH pdf and the restored one would render blank.
+    try testing.expectEqualStrings("manual (2).pdf.mark", try nameOf(&f, a, p.mark.id));
+
+    // Which the listing confirms end-to-end: two documents, no loose mark.
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqualStrings("manual (2).pdf", rows[0].name);
+    try testing.expectEqualStrings("manual.pdf", rows[1].name);
+}
+
+test "restore skips a suffix whose .mark twin is taken, rather than adopting it" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    try f.files.trash(1, p.pdf.id);
+    const fresh = try putBytes(&f, 1, docs.id, "manual.pdf", "cccc");
+    defer freeEntry(fresh);
+    // An ORPHAN mark already holding the name the ` (2)` suffix would produce.
+    // Restoring onto `manual (2).pdf` would silently ADOPT this stranger's ink.
+    const squatter = try putBytes(&f, 1, docs.id, "manual (2).pdf.mark", "dddd");
+    defer freeEntry(squatter);
+
+    var r = try f.files.restore(1, p.pdf.id);
+    defer r.deinit(testing.allocator);
+    try testing.expectEqualStrings("manual (3).pdf", r.name);
+    try testing.expectEqualStrings("manual (3).pdf.mark", try nameOf(&f, a, p.mark.id));
+    // The squatter is untouched, and still visible: it is nobody's pair.
+    try testing.expectEqualStrings("manual (2).pdf.mark", try nameOf(&f, a, squatter.id));
+}
+
+test "purge destroys the pair, refunding and decref'ing BOTH blobs" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+    const pdf_md5 = dupeMd5(p.pdf.md5.?);
+    const mark_md5 = dupeMd5(p.mark.md5.?);
+
+    // Both blobs charge quota while the pair is in the bin — trashing refunds
+    // nothing, which is the invariant the whole bin rests on.
+    try f.files.trash(1, p.pdf.id);
+    try testing.expectEqual(@as(i64, 10), try f.used(1));
+    try f.expectQuotaBalanced(1);
+
+    // Purge the ONE row the bin shows. The mark's bytes must come back too — a
+    // mark left behind would be unreachable AND still charged, with no row left
+    // to purge it from.
+    try f.files.purge(1, p.pdf.id);
+    try testing.expectEqual(@as(i64, 0), try f.used(1));
+    try f.expectQuotaBalanced(1);
+    try f.expectPartition(1);
+    try testing.expectEqual(@as(i64, -1), try blobRefcount(&f, &pdf_md5));
+    try testing.expectEqual(@as(i64, -1), try blobRefcount(&f, &mark_md5));
+    try testing.expect(!f.files.blobs.has(&pdf_md5));
+    try testing.expect(!f.files.blobs.has(&mark_md5));
+    try testing.expectEqual(@as(i64, 0), try countOf(&f, "SELECT COUNT(*) FROM files WHERE is_folder = 0;"));
+}
+
+test "purging from the MARK destroys the PDF too" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const p = try putPair(&f, null, "manual", "aaaa", "bbbbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    try f.files.trash(1, p.mark.id);
+    try f.files.purge(1, p.mark.id);
+    try testing.expectEqual(@as(i64, 0), try countOf(&f, "SELECT COUNT(*) FROM files;"));
+    try testing.expectEqual(@as(i64, 0), try f.used(1));
+    try f.expectQuotaBalanced(1);
+}
+
+test "an ORPHANED mark has no pair, so it travels entirely alone" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+
+    // No `lease.pdf` anywhere, and a namesake PDF in ANOTHER folder — the
+    // pairing is same-folder, so neither of these marks has a partner.
+    const orphan = try putBytes(&f, 1, docs.id, "lease.pdf.mark", "aaaa");
+    defer freeEntry(orphan);
+    const away = try putBytes(&f, 1, null, "away.pdf", "bbbb");
+    defer freeEntry(away);
+    const away_mk = try putBytes(&f, 1, docs.id, "away.pdf.mark", "cccc");
+    defer freeEntry(away_mk);
+    const bystander = try putBytes(&f, 1, docs.id, "notes.note", "dddd");
+    defer freeEntry(bystander);
+
+    // Trashing an orphan mark is a legitimate thing to do on its own, and it
+    // must not reach across the tree at the namesake PDF.
+    try f.files.trash(1, orphan.id);
+    try f.files.trash(1, away_mk.id);
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, away.id));
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, bystander.id));
+
+    // Restore and purge are just as narrow.
+    (try f.files.restore(1, orphan.id)).deinit(testing.allocator);
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, orphan.id));
+    try f.files.purge(1, away_mk.id);
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, away.id));
+    const survivor = (try f.files.get(1, away.id)) orelse return error.Missing;
+    freeEntry(survivor);
+    try f.expectQuotaBalanced(1);
+
+    // And a rename of the orphan touches nothing else: three files left, the
+    // namesake PDF among them, none of them renamed by that.
+    const moved = try f.files.move(1, orphan.id, null, "elsewhere.mark", false);
+    defer freeEntry(moved);
+    try testing.expectEqual(@as(i64, 3), try countOf(&f, "SELECT COUNT(*) FROM files WHERE is_folder = 0;"));
+}
+
+test "a PDF with NO mark behaves exactly as it did before any of this" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const lone = try putBytes(&f, 1, docs.id, "solo.pdf", "aaaa");
+    defer freeEntry(lone);
+
+    try f.files.trash(1, lone.id);
+    try testing.expectEqual(@as(i64, 4), try f.used(1)); // trash refunds nothing
+    var r = try f.files.restore(1, lone.id);
+    defer r.deinit(testing.allocator);
+    try testing.expectEqualStrings("solo.pdf", r.name);
+    try testing.expect(!r.renamed);
+
+    // A plain rename, and a plain rename OUT of `.pdf`: with no ink to keep
+    // consistent there is no invariant to protect, so neither is refused.
+    const renamed = try f.files.move(1, lone.id, null, "solo.txt", false);
+    defer freeEntry(renamed);
+    try testing.expectEqualStrings("solo.txt", renamed.name);
+
+    try f.files.trash(1, lone.id);
+    try f.files.purge(1, lone.id);
+    try testing.expectEqual(@as(i64, 0), try f.used(1));
+    try f.expectQuotaBalanced(1);
+}
+
+test "renaming a pdf renames its mark, and moving it moves its mark" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const other = try f.files.createFolder(1, null, "Other");
+    defer testing.allocator.free(other.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    // RENAME. Without the carry the mark is orphaned in place: the ink stops
+    // appearing on the document AND the abandoned row surfaces in the listing.
+    const renamed = try f.files.move(1, p.pdf.id, docs.id, "handbook.pdf", false);
+    defer freeEntry(renamed);
+    try testing.expectEqualStrings("handbook.pdf.mark", try nameOf(&f, a, p.mark.id));
+
+    // RELOCATE. The pairing is name + FOLDER, so a move breaks it just as a
+    // rename does.
+    const moved = try f.files.move(1, p.pdf.id, other.id, "handbook.pdf", false);
+    defer freeEntry(moved);
+    var pr = (try f.db.row("SELECT parent_id FROM files WHERE id = ?1;", &.{.{ .int = @intCast(p.mark.id) }})).?;
+    defer pr.finalize();
+    try testing.expectEqual(@as(i64, @intCast(other.id)), pr.int(0));
+
+    // Docs is empty and Other holds one visible document.
+    try testing.expectEqual(@as(i64, 0), try f.files.childCount(1, docs.id));
+    try testing.expectEqual(@as(i64, 1), try f.files.childCount(1, other.id));
+}
+
+test "renaming the MARK renames its pdf, and a name that cannot pair is refused" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try putPair(&f, null, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    const renamed = try f.files.move(1, p.mark.id, null, "handbook.pdf.mark", false);
+    defer freeEntry(renamed);
+    try testing.expectEqualStrings("handbook.pdf.mark", renamed.name);
+    try testing.expectEqualStrings("handbook.pdf", try nameOf(&f, a, p.pdf.id));
+
+    // REFUSED, both directions. There is no name for a mark that pairs with a
+    // PDF called `handbook.txt`, and none for a PDF that pairs with `notes.txt`
+    // — so rather than silently leaving two files that are no longer a pair, the
+    // rename does not happen at all. Nothing moved.
+    try testing.expectError(error.InvalidMove, f.files.move(1, p.pdf.id, null, "handbook.txt", false));
+    try testing.expectError(error.InvalidMove, f.files.move(1, p.mark.id, null, "notes.txt", false));
+    try testing.expectEqualStrings("handbook.pdf", try nameOf(&f, a, p.pdf.id));
+    try testing.expectEqualStrings("handbook.pdf.mark", try nameOf(&f, a, p.mark.id));
+}
+
+test "a paired move takes a suffix that is free for BOTH, or refuses to clobber" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const other = try f.files.createFolder(1, null, "Other");
+    defer testing.allocator.free(other.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    // An orphan mark squats on the destination's `manual.pdf.mark`. The PDF's own
+    // target is free, so a rename that looked only at it would drop our ink on
+    // top of a stranger's name.
+    const squatter = try putBytes(&f, 1, other.id, "manual.pdf.mark", "cccc");
+    defer freeEntry(squatter);
+
+    // Without autorename: refused, and nothing is clobbered.
+    try testing.expectError(error.NameConflict, f.files.move(1, p.pdf.id, other.id, "manual.pdf", false));
+    try testing.expectEqualStrings("manual.pdf.mark", try nameOf(&f, a, squatter.id));
+
+    // With it: the pair takes the same ` (2)`, both halves free.
+    const moved = try f.files.move(1, p.pdf.id, other.id, "manual.pdf", true);
+    defer freeEntry(moved);
+    try testing.expectEqualStrings("manual (2).pdf", moved.name);
+    try testing.expectEqualStrings("manual (2).pdf.mark", try nameOf(&f, a, p.mark.id));
+    try testing.expectEqualStrings("manual.pdf.mark", try nameOf(&f, a, squatter.id));
+
+    // A move that changes nothing is still a no-op for the pair.
+    const noop = try f.files.move(1, p.pdf.id, other.id, "manual (2).pdf", false);
+    defer freeEntry(noop);
+    try testing.expectEqualStrings("manual (2).pdf.mark", try nameOf(&f, a, p.mark.id));
+}
+
+test "the BIN shows one row for a trashed pair, sized as the pair" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    try f.files.trash(1, p.pdf.id);
+    const rows = try f.files.listBin(a, 1);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("manual.pdf", rows[0].name);
+    // 4 + 6: the column is "bytes a purge of this one frees", and purging frees
+    // both. Showing 4 would make the promise and the button disagree.
+    try testing.expectEqual(@as(u64, 10), rows[0].size);
+    try testing.expectEqualStrings("/Docs/manual.pdf", rows[0].path);
+
+    // An ORPHANED mark keeps its own bin row — it is nobody's second half, and a
+    // hidden row nothing could restore or purge would be the worse bug.
+    const orphan = try putBytes(&f, 1, docs.id, "lease.pdf.mark", "cc");
+    defer freeEntry(orphan);
+    try f.files.trash(1, orphan.id);
+    const rows2 = try f.files.listBin(a, 1);
+    try testing.expectEqual(@as(usize, 2), rows2.len);
+    try testing.expect((try binRow(a, &f, 1, orphan.id)) != null);
+    try testing.expectEqual(@as(u64, 2), (try binRow(a, &f, 1, orphan.id)).?.size);
+}
+
+test "emptyBin reports what the bin SHOWED and strands no half of a pair" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try putPair(&f, null, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+    const solo = try putBytes(&f, 1, null, "notes.note", "cc");
+    defer freeEntry(solo);
+
+    try f.files.trash(1, p.pdf.id);
+    try f.files.trash(1, solo.id);
+    try testing.expectEqual(@as(usize, 2), (try f.files.listBin(arena.allocator(), 1)).len);
+
+    // "Bin emptied — 2 items" over a screen showing two rows. Three rows really
+    // go, but the third was never a thing the household was shown.
+    try testing.expectEqual(@as(usize, 2), try f.files.emptyBin(1));
+    try testing.expectEqual(@as(i64, 0), try countOf(&f, "SELECT COUNT(*) FROM files;"));
+    try testing.expectEqual(@as(i64, 0), try f.used(1));
+    try f.expectQuotaBalanced(1);
+}
+
+test "the retention sweep expires a pair as one, never half of it" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const p = try putPair(&f, null, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    try f.files.trash(1, p.pdf.id);
+    // Backdate ONLY the PDF, the shape a pre-fix bin left behind (the mark was
+    // trashed on its own day). Sweeping the PDF alone would leave the mark to
+    // APPEAR in the bin — the conjuring bug wearing a retention job as a
+    // disguise — and to sit there charged until its own clock ran out.
+    try f.db.exec("UPDATE files SET deleted_at = 0 WHERE name = 'manual.pdf';");
+
+    _ = try f.files.sweepBin(1);
+    try testing.expectEqual(@as(i64, 0), try countOf(&f, "SELECT COUNT(*) FROM files;"));
+    try testing.expectEqual(@as(i64, 0), try f.used(1));
+    try f.expectQuotaBalanced(1);
+}
+
+test "a trash fanout counts what the folder SHOWED, mark included in the deed" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+    const note = try putBytes(&f, 1, docs.id, "notes.note", "cccc");
+    defer freeEntry(note);
+
+    // The folder lists two items, so "deletes the folder and the 2 files inside
+    // it" is the honest sentence — three would count a row nobody was shown.
+    try testing.expectEqual(@as(usize, 3), try f.files.liveSubtreeCount(1, docs.id));
+    try f.files.trash(1, docs.id);
+    try testing.expectEqual(@as(i64, 4), try countOf(&f, "SELECT COUNT(*) FROM files WHERE deleted = 1;"));
+}
+
+test "a folder move carries a pair inside it without touching their names" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const dest = try f.files.createFolder(1, null, "Dest");
+    defer testing.allocator.free(dest.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    // The tree is an adjacency list, so a folder's subtree follows for free —
+    // and a folder is never half of a pair, so nothing extra fires here.
+    const moved = try f.files.move(1, docs.id, dest.id, "Docs", false);
+    defer freeEntry(moved);
+    try testing.expectEqualStrings("manual.pdf", try nameOf(&f, a, p.pdf.id));
+    try testing.expectEqualStrings("manual.pdf.mark", try nameOf(&f, a, p.mark.id));
+    try testing.expectEqual(@as(i64, 1), try f.files.childCount(1, docs.id));
+}
+
+test "a LIVE mark beside a TRASHED pdf is not a pair — the shape a pre-fix bin left" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const p = try putPair(&f, docs.id, "manual", "aaaa", "bbbbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    // Every database written before this fix holds rows in exactly this state:
+    // the PDF was trashed on its own and the mark stayed live. Tombstone only
+    // the PDF, the way the old `trash` did.
+    try f.db.exec("UPDATE files SET deleted = 1, deleted_at = 1, deleted_path = '/Docs/manual.pdf' WHERE name = 'manual.pdf';");
+
+    // They are NOT a pair now — the two members are in different places — so the
+    // mark is an orphan: it lists (the only trace of that ink) and it keeps its
+    // own bytes. PURGING the trashed PDF must not reach across and destroy a
+    // LIVE file, which is what a state-blind pairing lookup would do.
+    try testing.expectEqual(@as(i64, 1), try f.files.childCount(1, docs.id));
+    try f.files.purge(1, p.pdf.id);
+    try testing.expectEqualStrings("manual.pdf.mark", try nameOf(&f, a, p.mark.id));
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, p.mark.id));
+    try testing.expectEqual(@as(i64, 6), try f.used(1)); // only the PDF's 4 refunded
+    try f.expectQuotaBalanced(1);
+    try f.expectPartition(1);
+
+    // And the orphan is reachable on its own from here on: trash, restore, purge
+    // all act on it and nothing else.
+    try f.files.trash(1, p.mark.id);
+    try testing.expectEqual(@as(usize, 1), (try f.files.listBin(a, 1)).len);
+    try f.files.purge(1, p.mark.id);
+    try testing.expectEqual(@as(i64, 0), try f.used(1));
+    try f.expectQuotaBalanced(1);
+}
+
+test "restoring a trashed pdf leaves a LIVE mark of the same name alone" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try putPair(&f, null, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+    try f.db.exec("UPDATE files SET deleted = 1, deleted_at = 1, deleted_path = '/manual.pdf' WHERE name = 'manual.pdf';");
+
+    // The mark never left, so there is nothing to bring back with the PDF — and
+    // nothing to rename. Restoring simply re-pairs them by name, which is the
+    // right outcome and the one the old data needs.
+    var r = try f.files.restore(1, p.pdf.id);
+    defer r.deinit(testing.allocator);
+    try testing.expectEqualStrings("manual.pdf", r.name);
+    try testing.expect(!r.renamed);
+    try testing.expectEqualStrings("manual.pdf.mark", try nameOf(&f, a, p.mark.id));
+    const rows = try f.files.list(1, null);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("manual.pdf", rows[0].name);
 }

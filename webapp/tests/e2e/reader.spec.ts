@@ -552,4 +552,131 @@ test.describe("reader", () => {
       ).toBeHidden();
     });
   });
+  // A `.note`'s OWN links — the rectangles a PDF used as a page's template
+  // brought with it (`parsers/note/note-format.md` §14). The fake serves them
+  // for ONE fixture (`n-proj-beta`, seven pages), exactly as the real page list
+  // carries `linksHash` for only the pages that have a link block.
+  //
+  // Rendered by the SAME component the PDF viewer uses (`pages/pdfLinkLayer.ts`),
+  // so the anchors, the allowlist, the accessible names and the modifier-click
+  // rule are not reimplemented here — what these tests pin is the wiring and the
+  // GEOMETRY, which is the part that is specific to a `.note`: the rects are
+  // device panel pixels and the page IS the panel, so there is no letterbox and
+  // no page-rect mapping, just the scale the ink is already drawn at.
+  test.describe("template links", () => {
+    const layer = (page: Page) => page.locator(".page .pdf-links");
+
+    test("puts each link on its own rect, as a real anchor, labelled", async ({ page }) => {
+      await signedIn(page);
+      await page.goto("/#/note/n-proj-beta");
+      await expect(page.locator(".pager__count")).toHaveText("1 / 7");
+      await expect(layer(page).locator("a")).toHaveCount(2, { timeout: 10_000 });
+
+      // The EXTERNAL one: a new tab, severed from this one, and named by its URL
+      // because the page underneath is a raster with no text to borrow.
+      const ext = layer(page).locator('a[href^="https://example.com/planner"]');
+      await expect(ext).toHaveAttribute("target", "_blank");
+      await expect(ext).toHaveAttribute("rel", "noopener noreferrer");
+      await expect(ext).toHaveAttribute("aria-label", /^https:\/\/example\.com\/planner/);
+
+      // ABOVE THE INK, and that is DOM order rather than a z-index: the page's
+      // canvases (the composite, and every canvas of a layered page's stack)
+      // take pointer events, so a link layer mounted under them would be a link
+      // you cannot click on exactly the pages people annotate most.
+      await expect(
+        page.locator(".page > *:last-child").evaluate((n) => n.className),
+      ).resolves.toContain("pdf-links");
+
+      // The INTERNAL one: this app's own route, in this tab.
+      const internal = layer(page).locator('a[href="#/note/n-proj-beta/page/2"]');
+      await expect(internal).toHaveCount(1);
+      await expect(internal).toHaveAttribute("aria-label", "Go to page 2");
+      await expect(internal).not.toHaveAttribute("target", "_blank");
+
+      // AND IT IS WHERE THE FILE PUT IT. The fixture's external rect is
+      // (980,96) 340×64 in PANEL PIXELS on a 1404×1872 page, so it lands at
+      // those fractions of the page box whatever size Fit chose. Asserted as
+      // fractions, which is what makes this independent of the viewport — and
+      // the rect is deliberately NOT centred on either axis, so a placement that
+      // dropped an offset could not pass by symmetry.
+      const geo = await page.evaluate(() => {
+        const box = (document.querySelector(".page") as HTMLElement).getBoundingClientRect();
+        const a = (
+          document.querySelector('.page .pdf-links a[href^="https://example.com/planner"]') as HTMLElement
+        ).getBoundingClientRect();
+        return {
+          left: (a.left - box.left) / box.width,
+          top: (a.top - box.top) / box.height,
+          width: a.width / box.width,
+          height: a.height / box.height,
+        };
+      });
+      expect(geo.left).toBeCloseTo(980 / 1404, 2);
+      expect(geo.top).toBeCloseTo(96 / 1872, 2);
+      expect(geo.width).toBeCloseTo(340 / 1404, 2);
+      expect(geo.height).toBeCloseTo(64 / 1872, 2);
+    });
+
+    test("following an internal link is a page turn, at a real address", async ({ page }) => {
+      await signedIn(page);
+      await page.goto("/#/note/n-proj-beta");
+      await expect(page.locator(".pager__count")).toHaveText("1 / 7");
+
+      await layer(page).locator('a[href="#/note/n-proj-beta/page/2"]').click();
+      await expect(page.locator(".pager__count")).toHaveText("2 / 7");
+      // A REAL ADDRESS, not a scroll: shareable, and it survives a reload.
+      expect(page.url()).toContain("#/note/n-proj-beta/page/2");
+      // The layer followed the turn — page 2's jump goes to page 3, so the
+      // previous page's anchor is gone rather than left offering a stale target.
+      await expect(layer(page).locator('a[href="#/note/n-proj-beta/page/3"]')).toHaveCount(1, {
+        timeout: 10_000,
+      });
+      await expect(layer(page).locator('a[href="#/note/n-proj-beta/page/2"]')).toHaveCount(0);
+    });
+
+    test("a note with no imported template has no layer at all", async ({ page }) => {
+      // The overwhelming case: a note on a built-in style has nothing to
+      // preserve, so there is no link block, no request and nothing focusable.
+      await signedIn(page);
+      await page.goto("/#/note/n-doc-attn");
+      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".page canvas")).toBeVisible();
+      await expect(layer(page).locator("a")).toHaveCount(0);
+    });
+
+    test("the layer follows the page box through a zoom step", async ({ page }) => {
+      await signedIn(page);
+      await page.goto("/#/note/n-proj-beta");
+      const anchor = layer(page).locator('a[href^="https://example.com/planner"]');
+      await expect(anchor).toBeVisible({ timeout: 10_000 });
+
+      // NULL WHILE THE LAYER IS DOWN rather than throwing: every repaint takes
+      // the old anchors away before placing the new ones, so a measurement in
+      // that window has to wait.
+      const measure = async (): Promise<{ page: number; left: number; width: number } | null> =>
+        page.evaluate(() => {
+          const box = document.querySelector(".page") as HTMLElement | null;
+          const a = document.querySelector(
+            '.page .pdf-links a[href^="https://example.com/planner"]',
+          ) as HTMLElement | null;
+          if (!box || !a) return null;
+          const b = box.getBoundingClientRect();
+          const r = a.getBoundingClientRect();
+          return { page: b.width, left: (r.left - b.left) / b.width, width: r.width / b.width };
+        });
+
+      const before = await measure();
+      expect(before).not.toBeNull();
+
+      await page.getByRole("button", { name: "Zoom in" }).click();
+      // The page box actually grew...
+      await expect.poll(async () => (await measure())?.page ?? 0, { timeout: 10_000 }).toBeGreaterThan(
+        before!.page,
+      );
+      // ...and the anchor is still on the same part of it.
+      const after = await measure();
+      expect(after!.left).toBeCloseTo(before!.left, 2);
+      expect(after!.width).toBeCloseTo(before!.width, 2);
+    });
+  });
 });

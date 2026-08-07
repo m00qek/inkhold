@@ -4382,6 +4382,148 @@ fn seedRecognizedElements(
     return e.id;
 }
 
+/// A note whose page 0 was rasterised from an imported PDF template and kept
+/// that page's links (`note-format.md` §14), page 1 an ordinary page with none.
+fn seedLinkedNote(f: *Fixture, user_id: u64, name: []const u8) !u64 {
+    const nb = @import("note_builder");
+    const bytes = try nb.serialize(gpa, .{ .pages = &.{
+        .{
+            .style = "user_pdf_planner_1",
+            .layers = &.{.{ .slot = .main, .bitmap = "AAAA" }},
+            .links = &.{
+                .{ .target_page = 2, .x = 901, .y = 192, .w = 407, .h = 50 },
+                .{ .uri = "https://onplanners.com/g?a=1,2", .x = 53, .y = 464, .w = 297, .h = 121 },
+                .{ .uri = "javascript:alert(1)", .x = 10, .y = 10, .w = 50, .h = 50 },
+            },
+        },
+        .{ .layers = &.{.{ .slot = .main, .bitmap = "BBBB" }} },
+    } });
+    defer gpa.free(bytes);
+
+    var r = std.Io.Reader.fixed(bytes);
+    const e = try f.files.putFile(user_id, null, name, &r, null);
+    defer gpa.free(e.name);
+    if (e.md5) |m| gpa.free(m);
+    return e.id;
+}
+
+test "control-plane page links: raw VO, versioned by linksHash, revalidated, 404 where there are none" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+    const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    const id = try seedLinkedNote(f, admin, "planner.note");
+    const plain_id = try seedNoteHttp(f, admin, null, "plain.note", &.{"AAAA"});
+
+    // --- the page list carries `linksHash` for the page that has links, and
+    //     OMITS it everywhere else. That omission is what stops the reader from
+    //     asking about pages that have nothing — which is nearly all of them.
+    var links_hash: [32]u8 = undefined;
+    {
+        var pbuf: [96]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/file/metadata/{d}", .{id});
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        var p = try std.json.parseFromSlice(struct {
+            pages: []const struct { hash: []const u8, linksHash: ?[]const u8 = null },
+        }, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expectEqual(@as(usize, 32), p.value.pages[0].linksHash.?.len);
+        try std.testing.expect(p.value.pages[1].linksHash == null);
+        @memcpy(&links_hash, p.value.pages[0].linksHash.?);
+    }
+    {
+        var pbuf: [96]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/file/metadata/{d}", .{plain_id});
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "linksHash") == null);
+    }
+
+    // --- the happy path: `{ links: [...] }`, no `{success}` envelope, revalidated.
+    {
+        var pbuf: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/links?v={s}", .{ id, links_hash[0..] });
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        // Serialised from a struct, so `?v=` versions its content and not its
+        // shape — the rule `/text` learned the hard way.
+        try expectHeaderContains(resp.head, "cache-control: no-cache");
+        try std.testing.expect(std.mem.indexOf(u8, resp.head, "immutable") == null);
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "success") == null);
+
+        var p = try std.json.parseFromSlice(struct {
+            links: []const struct { x: f64, y: f64, w: f64, h: f64, page: i64, uri: []const u8 },
+        }, gpa, resp.body, .{});
+        defer p.deinit();
+        // The `javascript:` record never crossed the wire: the allowlist is
+        // applied server-side too, because the exporter reads this endpoint.
+        try std.testing.expectEqual(@as(usize, 2), p.value.links.len);
+        // 1-based page 2 → index 1; `none` → external, spelled -1.
+        try std.testing.expectEqual(@as(i64, 1), p.value.links[0].page);
+        try std.testing.expectEqual(@as(f64, 901), p.value.links[0].x);
+        try std.testing.expectEqual(@as(i64, -1), p.value.links[1].page);
+        try std.testing.expectEqualStrings("https://onplanners.com/g?a=1,2", p.value.links[1].uri);
+    }
+
+    // --- 404, one rule, four ways in: a stale version, a page with no link
+    //     block, an out-of-range page, and no such note.
+    const stale = "0" ** 32;
+    const cases = [_]struct { id: u64, page: []const u8, v: []const u8 }{
+        .{ .id = id, .page = "0", .v = stale },
+        .{ .id = id, .page = "1", .v = &links_hash }, // the ordinary page
+        .{ .id = plain_id, .page = "0", .v = &links_hash },
+        .{ .id = id, .page = "9", .v = &links_hash },
+        .{ .id = 99999, .page = "0", .v = &links_hash },
+    };
+    for (cases) |c| {
+        var pbuf: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/{s}/links?v={s}", .{ c.id, c.page, c.v });
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
+        try std.testing.expectEqual(@as(u16, 404), resp.status);
+    }
+    // A missing `?v=` is the same stale case, not a 400.
+    {
+        var pbuf: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/links", .{id});
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
+        try std.testing.expectEqual(@as(u16, 404), resp.status);
+    }
+
+    // --- scope: no session → 401; a device token → 403 (cross-face).
+    {
+        var pbuf: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/links?v={s}", .{ id, links_hash[0..] });
+        const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", path, &.{}, ""), &obuf);
+        try std.testing.expectEqual(@as(u16, 401), resp.status);
+    }
+    {
+        const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "admin", "adminpw1", "SN9");
+        var pbuf: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/links?v={s}", .{ id, links_hash[0..] });
+        const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", path, &.{
+            .{ .name = "x-access-token", .value = &dev_tok },
+        }, ""), &obuf);
+        try std.testing.expectEqual(@as(u16, 403), resp.status);
+    }
+
+    // --- ownership: the row is keyed by blob md5 and shared by dedup, so a
+    //     second account holding byte-identical content must not reach this one.
+    {
+        const bob = try f.svc.createUser(admin, "bob", false);
+        const bob_tok = try onboardWeb(ctx, "bob", bob.temp_password.slice(), "bpass111");
+        var pbuf: [128]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/links?v={s}", .{ id, links_hash[0..] });
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &bob_tok, "");
+        try std.testing.expectEqual(@as(u16, 404), resp.status);
+    }
+}
+
 test "control-plane page text: raw VO, versioned by textHash, revalidated, 404 on stale or unrecognized" {
     const f = try Fixture.init();
     defer f.deinit();
@@ -5411,6 +5553,7 @@ const non_immutable_routes = [_][]const u8{
     "/api/user/password",
     "/api/user/query",
     "/api/version",
+    "/note/:id/page/:n/links",
     "/note/:id/page/:n/text",
     "/oss/get/:id",
     "/oss/put/:innerName",

@@ -64,6 +64,7 @@ describe("a PDF session whose worker dies", () => {
 
     await expect(within(s.open("/file/y", 100))).rejects.toThrow(/closed/);
     await expect(within(s.pageSize(0))).rejects.toThrow(/closed/);
+    await expect(within(s.pageLinks(0))).rejects.toThrow(/closed/);
     await expect(within(s.render(0, 1))).rejects.toThrow(/closed/);
     await expect(within(s.stats())).rejects.toThrow(/closed/);
   });
@@ -93,6 +94,29 @@ describe("a healthy PDF session", () => {
     worker.reply({ kind: "error", id, message: "nope", status: 401 });
     await expect(opening).rejects.toBeInstanceOf(PdfLoadError);
     await expect(opening).rejects.toMatchObject({ status: 401 });
+  });
+
+  it("asks for a page's links and hands the records straight back", async () => {
+    // Plain data, no transfer list: a page's links are a handful of records,
+    // where the ink mask beside them is megabytes.
+    const { worker, s } = session();
+    const asking = s.pageLinks(4);
+    const req = worker.sent[0] as { id: number; kind: string; page: number };
+    expect(req.kind).toBe("pageLinks");
+    expect(req.page).toBe(4);
+    expect(worker.transfers[0]).toEqual([]);
+    const links = [{ x: 1, y: 2, w: 3, h: 4, page: -1, uri: "https://a.invalid/" }];
+    worker.reply({ kind: "pageLinks", id: req.id, links });
+    await expect(asking).resolves.toEqual(links);
+  });
+
+  it("refuses a wrong-kind reply to a links request rather than reading `undefined`", async () => {
+    // Without the guard this resolves to `undefined` and the layer iterates it.
+    const { worker, s } = session();
+    const asking = s.pageLinks(0);
+    const { id } = worker.sent[0] as { id: number };
+    worker.reply({ kind: "closed", id });
+    await expect(asking).rejects.toThrow(/expected pageLinks/);
   });
 
   it("refuses a reply of the wrong kind rather than reading another shape's fields", async () => {

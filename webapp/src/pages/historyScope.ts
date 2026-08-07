@@ -128,6 +128,11 @@ export function versionMeta(base: NoteMeta, md5: string): NoteMeta {
       width: p.width,
       height: p.height,
       textHash: p.textHash,
+      // A VERSION PREVIEW SHOWS NO LINKS, and that is a route fact rather than a
+      // choice: the transcript has a per-version endpoint and links do not, so a
+      // hash here would send the reader to `/note/:id/page/:n/links?v=` with a
+      // version's hash — an address that can only 404. Null is "do not ask".
+      linksHash: null,
       sourcePage: p.sourcePage,
       layers: null,
     })),

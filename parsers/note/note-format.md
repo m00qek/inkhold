@@ -962,6 +962,7 @@ Recorded because "this is not known" is a fact worth looking up.
 | What does the per-point `flags` array in a stroke mean? | **?** — constant `1` across all 23,789 points in the corpus, so it carries no information here and cannot be decoded from it. |
 | How does `thickness` map to a rendered stroke width in pixels? | **C** to ±10% for the four observed pens ([§10.4](#104-rendering-fill-the-contours-do-not-model-the-pen)) — and not needed, since each stroke carries the device's own fill contour. |
 | Do `LAYERPATH`, `LAYERVECTORGRAPH` and `LAYERRECOGN` mean what their names suggest? | **?** — observed in a third-party spec, never read. |
+| `EXTERNALLINKINFO`'s field 2 — is it the destination page's id? | **C** — YES. It equals the `PAGEID` of the page field 3 names, for **all 51,256 records** of the corpus, checked against the id each page block actually carries ([§14.1](#141-encoding)). |
 | Keyword, title and link blocks — what encodes their images, and does it vary by version? | **?** — unexamined. The COVER branch is settled (a complete PNG, [§5](#5-keyword-title-link-and-cover-objects)); whether that holds across versions/devices, and what `COVER_1` files look like, is not. |
 | Does an eraser's radius scale with `thickness`? | **?** — fitted at ~4.5 px for one `thickness` on one page ([§10.2](#102-erasure)). |
 | Is a `.mark`'s canvas extent genuinely PER-STROKE, or per-device with outliers? | **?** — three distinct extents appear within one file ([§10.3](#103-coordinate-transform)); reading it per stroke is correct either way. |
@@ -1108,3 +1109,102 @@ transform for that page, with no fitting against ink required.
 
 The field name `mupdfRectList` is worth noting on its own: the device's PDF
 engine is MuPDF, which is also what Inkhold renders with.
+
+---
+
+## 14. `EXTERNALLINKINFO` — the links a PDF template brought with it
+
+**C**, from a single but overwhelming capture: a 1703-page notebook built on a
+commercial digital planner (`Supernote-Teacher-Planner-digital-vertical`),
+imported as a PDF template on an N6. **1702 of its 1703 pages carry links, 51,256
+records in all** — 48,047 internal page jumps and 3,209 web URLs.
+
+**A PDF used as a template keeps its links.** The device rasterises each PDF page
+into a per-page style (`<PAGESTYLE:user_pdf_<pdf name>_<n>>`, with
+`PAGESTYLEMD5` naming the template blob) and records that page's link rectangles
+separately, in a page-level `EXTERNALLINKINFO` block. Address `0` means the page
+has none, which is the case for every other file in the corpus — an ordinary
+`.note` on a built-in style has nothing to preserve.
+
+### 14.1 Encoding
+
+Decoded by `src/links.zig`, which needs its own decoder rather than the JSON
+path — this key's encoding is the odd one out among the page's content blocks.
+Not base64 JSON, unlike its neighbours `LAYERINFO`, `RECOGNTEXT` and
+`HIGHLIGHTINFO`. It is a length-prefixed content block holding **records
+separated by `|`**, each a list of **comma-separated base64 fields**:
+
+```
+Mg==,UDIwMjYw…,MQ==,ODE5,NjE0,MTg3,Mjg=,MQ==,aHR0cHM6…,|…
+```
+
+**Both separators are TRAILING, not infix**, and a decoder has to expect it:
+every record ends with a `,` (so it splits into TEN fields, the last empty) and
+every block ends with a `|` (so it ends with an empty record). This holds for all
+51,256 records — the field count is exactly 10 for every one of them. Reading it
+as "nine fields, skip what does not parse" is the only shape that survives
+contact with a real file.
+
+Every field — including the plain integers — is base64. Decoded:
+
+| # | Field | Meaning | |
+|---|---|---|---|
+| 1 | `2` | the page these links are ON, 1-based | **C** |
+| 2 | `P20260804145314013102EjfmKbJyxu7V` | a `PAGEID`-shaped id | **I** — see below |
+| 3 | `1` | the TARGET page, 1-based, for an internal link | **C** |
+| 4–7 | `819, 614, 187, 28` | **the rect: x, y, w, h in DEVICE PANEL PIXELS** | **C** |
+| 8 | `1` | kind: `1` = web, `0` = internal page jump | **C** |
+| 9 | `https://…` or `none` | the URL, or `none` for an internal link | **C** |
+
+**The rect is in panel pixels, the same space as the ink** ([§9.1](#91-page-dimensions-in-pixels)) —
+across all 51,256 records the extremes are `x+w = 1401` and `y+h = 1865`, both
+just inside the N6's 1404 × 1872. So a link needs no coordinate transform to sit
+on a `.note` page: the page IS the panel. (Placing one on the PDF *it came from*
+would need [§13.3](#133-geometry-panel-pixels-to-page)'s mapping, as ink does.)
+
+**Field 2 is `C`: it is the TARGET page's `PAGEID`.** Checked the way the guess
+asked for — against the `PAGEID` each page block actually carries — it matches
+for **every one of the 51,256 records**, so it is the stable form of field 3's
+number and the field to prefer if page numbers are ever rewritten underneath.
+(On an external record field 3 is always `1` and field 2 is page 1's id
+accordingly: both are filler when there is a URL.)
+
+Two more facts the same sweep established, both of which a decoder has to be
+built for:
+
+- **Field 1 is always the containing page's own number** — no record in the
+  corpus disagrees with the block it sits in. It is a redundancy, not
+  information, which makes it the one field that can be checked against
+  something known.
+- **`kind` is a claim, not a guarantee.** Two records say `1` (web) and carry the
+  URI `none` — a web link with nowhere to go. They are the argument for letting
+  the URI decide and refusing anything the scheme allowlist does not accept,
+  rather than trusting field 8 and synthesising a jump to page 1.
+
+### 14.2 The template travels with the file
+
+**The PDF page's pixels are IN the note**, not referenced out of it. Every one of
+the 1703 pages carries a `BGLAYER` whose `LAYERPROTOCOL` is `RATTA_RLE` — the
+same encoding as ink — and whose `LAYERBITMAP` is a real content block, 258–695
+KB on the pages sampled. **376 MB of the 385 MB file, 98% of it, is background
+raster.** The `PAGESTYLEMD5` is distinct per page (1698 values over 1703 pages),
+so it identifies THAT page's rendered template rather than the source document.
+
+Two consequences worth stating:
+
+- **The file stands alone.** The template blob named by `PAGESTYLEMD5` is not in
+  the corpus at all — the device never synced it — and nothing needs it: an
+  existing reader composites `BGLAYER` under the ink and gets the planner,
+  which is why these files have always rendered correctly here.
+- **Links are the only part that is NOT in the picture.** The pixels of a link
+  are baked into the background like everything else; what
+  [§14.1](#141-encoding) adds is the geometry and the destination. So honouring
+  them is purely additive — nothing about the existing render changes.
+
+### 14.3 Why this matters
+
+A digital planner is mostly links: month tabs, day cells, an index. A reader that
+renders the pages and drops the links reproduces the picture of a planner and not
+the planner. Everything needed to honour them is already in the file, in the
+same coordinate space as everything else on the page.
+

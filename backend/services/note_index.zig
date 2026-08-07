@@ -110,7 +110,12 @@ const Allocator = std.mem.Allocator;
 // 1270 page's stored EFFECTIVE dims flip to landscape (were wrongly portrait,
 // which sheared the decode). Re-derive heals the stored dims for existing notes;
 // the SNPG serve path already reads them live, so its geometry fixes on rebuild.
-pub const index_version: i64 = 14;
+// v15: a page's `EXTERNALLINKINFO` range (`links_offset`/`links_length`) and the
+// md5 of its content (`links_hash`) — the links a PDF used as this page's
+// template brought with it (note-format.md §14). NULL on every page that has no
+// such block, which is every page of every note not built on a PDF template, so
+// re-deriving changes nothing for them.
+pub const index_version: i64 = 15;
 
 /// Chunk used when hashing a layer's bytes out of a ranged source. Bounds the
 /// memory a content hash costs, independent of how large the layer is. Shared
@@ -245,6 +250,14 @@ pub const PageRow = struct {
     text_hash: ?[32]u8 = null,
     recogn_offset: ?u32 = null,
     recogn_length: ?u32 = null,
+    /// The page's `EXTERNALLINKINFO` content range, and the md5 of what is in
+    /// it. All three are null together, and null is the overwhelming case: only
+    /// a page rasterised from an imported PDF template carries link records at
+    /// all. The RANGE is stored rather than the records — see the schema's
+    /// `ddl_v8` for why 51,256 records is not a thing to keep in a table.
+    links_offset: ?u32 = null,
+    links_length: ?u32 = null,
+    links_hash: ?[32]u8 = null,
     /// `recognition.plainText()`; null when the page has no finished text.
     text: ?[]const u8 = null,
     /// The custom IMAGE template's asset hash (`PAGESTYLEMD5`), set only when
@@ -394,6 +407,26 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
                     defer gpa.free(plain);
                     row.text = try a.dupe(u8, plain);
                 } else |_| {} // undecodable RECOGNTEXT: keep the range, drop the text
+            }
+
+            // The links a PDF template brought with it. RANGE + HASH ONLY — the
+            // records are decoded at serve time, one page at a time, out of the
+            // block this points at. The block is read here for exactly one
+            // reason (its md5, which is the serve URL's `?v=`), and it is
+            // KB-scale: the corpus's heaviest page is 123 records, ~11 KB.
+            const links_addr = page.linksAddress();
+            if (links_addr != 0) {
+                const held = src.blockHeld(gpa, links_addr) catch break :derive null;
+                defer held.deinit(gpa);
+                // A zero-length block is a page with no links, and it must not
+                // claim a hash: `links_hash != NULL` is the page list's "this
+                // page has links" signal, and a signal that is right about a
+                // page with nothing to show is what stops a pointless request.
+                if (held.bytes.len != 0) {
+                    row.links_offset = @intCast(links_addr + 4);
+                    row.links_length = @intCast(held.bytes.len);
+                    row.links_hash = md5Hex(held.bytes);
+                }
             }
             pages[i] = row;
         }
@@ -657,14 +690,15 @@ const upsert_note_sql =
 const upsert_page_sql =
     \\INSERT INTO note_page_index(blob_md5, page_index, content_hash, width, height, layers,
     \\                            recogn_status, text_hash, recogn_offset, recogn_length, text, bg_hash,
-    \\                            source_page)
-    \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+    \\                            source_page, links_offset, links_length, links_hash)
+    \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
     \\ON CONFLICT(blob_md5, page_index) DO UPDATE SET
     \\  content_hash=excluded.content_hash, width=excluded.width, height=excluded.height,
     \\  layers=excluded.layers, recogn_status=excluded.recogn_status,
     \\  text_hash=excluded.text_hash, recogn_offset=excluded.recogn_offset,
     \\  recogn_length=excluded.recogn_length, text=excluded.text, bg_hash=excluded.bg_hash,
-    \\  source_page=excluded.source_page;
+    \\  source_page=excluded.source_page, links_offset=excluded.links_offset,
+    \\  links_length=excluded.links_length, links_hash=excluded.links_hash;
 ;
 
 /// The one format-specific write `reconcilePage` hands the note adapter: the
@@ -691,6 +725,9 @@ const PageUpsert = struct {
         s.bindTextOpt(11, self.page.text);
         s.bindTextOpt(12, self.page.bg_hash);
         s.bindInt(13, self.page.source_page);
+        s.bindIntOpt(14, if (self.page.links_offset) |v| @intCast(v) else null);
+        s.bindIntOpt(15, if (self.page.links_length) |v| @intCast(v) else null);
+        if (self.page.links_hash) |*h| s.bindText(16, h) else s.bindNull(16);
         _ = try s.step();
     }
 };
@@ -1390,6 +1427,9 @@ fn expectSameParsed(want: Parsed, got: Parsed) !void {
             try testing.expectEqual(wl.is_current, gl.is_current);
         }
         try testing.expectEqual(w.recogn_status, g.recogn_status);
+        try testing.expectEqual(w.links_offset, g.links_offset);
+        try testing.expectEqual(w.links_length, g.links_length);
+        try testing.expectEqual(w.links_hash, g.links_hash);
         try testing.expectEqual(w.recogn_offset, g.recogn_offset);
         try testing.expectEqual(w.recogn_length, g.recogn_length);
         try testing.expectEqual(w.text_hash == null, g.text_hash == null);

@@ -20,5 +20,8 @@ export function skeletonPage(
 ): PageRef {
   // `sourcePage: null` — a skeleton stands in for a `.note` page, whose number
   // is always `index + 1` (see `PageRef.sourcePage`).
-  return { index, hash: "", width: dims.w, height: dims.h, textHash: null, sourcePage: null };
+  // `linksHash: null` for the same reason as `textHash`: a skeleton page states
+  // nothing it has not been told, and null is the "do not ask" reading — the
+  // real hash arrives with the metadata.
+  return { index, hash: "", width: dims.w, height: dims.h, textHash: null, linksHash: null, sourcePage: null };
 }

@@ -9,7 +9,8 @@
 
 import { challengeHash, md5Hex } from "./crypto";
 import { historyFileUrl } from "../core/fileKind";
-import type { Api } from "./types";
+import { parsePageLinks } from "../render/pdfLinks";
+import type { Api, PageLinks } from "./types";
 import type {
   Coverage,
   Entry,
@@ -583,6 +584,10 @@ function normalizePage(p: PageRef): PageRef {
     width: p.width,
     height: p.height,
     textHash: p.textHash ?? null,
+    // Same absent-optional shape as `textHash`, and the same meaning: non-null
+    // is "this page has links", so a null here is what stops the reader asking
+    // about the pages that have none — which is nearly all of them.
+    linksHash: p.linksHash ?? null,
     // Same absent-optional shape as `textHash`: the server omits it wherever it
     // would be `index + 1`, which is every page of every notebook. A page
     // number is 1-based, so 0 (or anything below it) is not a page and is
@@ -1042,6 +1047,43 @@ export function createHttpApi(): Api {
       // empty one, which the panel renders as its honest "no recognized text" state,
       // and absent `words` is a page with nothing placeable on it.
       return { text: body?.text ?? "", words: normalizeWords(body?.words) };
+    },
+
+    async getPageLinks(id: Id, page: PageRef): Promise<PageLinks> {
+      // No link block on this page: there is no version to ask for, so there is
+      // no request. This is the common case by a wide margin — only a page
+      // rasterised from an imported PDF template carries links at all — and it
+      // is why the hash rides on the page list.
+      if (page.linksHash === null) return { links: [] };
+
+      // The sibling of the page-text route, versioned by `linksHash` so the URL
+      // turns over exactly when the links do. `rawFetch` rather than
+      // `request()`, matching `getPageText`: that is what makes a 404 a real
+      // STALE_PAGE ("your metadata is old, refetch it") instead of an opaque
+      // server error.
+      const url = `/note/${encodeURIComponent(id)}/page/${page.index}/links?v=${encodeURIComponent(page.linksHash)}`;
+      const res = await rawFetch(url);
+
+      // VALIDATED THROUGH THE SAME DOOR AS THE PDF DECODER'S OWN PAYLOAD.
+      // `parsePageLinks` is a string-in, links-out parser that drops any record
+      // that is not one, and this is the same shape from a different source — a
+      // device file rather than a wasm decoder. Reusing it means one set of
+      // rules about what counts as a link, and it costs a re-serialise of a body
+      // that is kilobytes.
+      const text = await res.text();
+      const raw: unknown = (() => {
+        try {
+          return JSON.parse(text) as unknown;
+        } catch {
+          return null;
+        }
+      })();
+      if (raw !== null && typeof raw === "object" && (raw as { success?: boolean }).success === false) {
+        const b = raw as { errorCode?: string; errorMsg?: string };
+        throw new ApiError(b.errorCode ?? "ERROR", b.errorMsg ?? "Something went wrong.", res.status);
+      }
+      const list = (raw as { links?: unknown } | null)?.links;
+      return { links: parsePageLinks(JSON.stringify(list ?? [])) };
     },
 
     async searchText(query: string, limit?: number, cursor?: string, signal?: AbortSignal): Promise<SearchResults> {

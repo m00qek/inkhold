@@ -35,6 +35,8 @@
 
 import type { WordBox } from "../core/types";
 import { isUsableScale, withinPage, wordBoxPx } from "../core/wordBox";
+import type { PdfLink } from "../render/pdfLinks";
+import { annotsEntry } from "./pdfAnnots";
 
 /** A4 width in PostScript points (210 mm). Pages are sized to this. */
 const A4_WIDTH_PT = 595.28;
@@ -74,6 +76,17 @@ export interface PdfPage {
    * mis-scaled one is not.
    */
   textLayer?: TextLayer | null;
+  /**
+   * The page's links, in **this page's own device pixels** (`width`/`height`
+   * above) — the space `EXTERNALLINKINFO` records them in, since a `.note` page
+   * IS the device panel. Absent or empty for a page with none, which is the
+   * common case and must cost the file nothing.
+   *
+   * An INTERNAL link (`page >= 0`) names a **0-based page of the note**, and is
+   * only ever written when {@link PdfOptions.pageCount} says that page is in the
+   * document being built — see there.
+   */
+  links?: readonly PdfLink[] | null;
 }
 
 export interface TextLayer {
@@ -190,6 +203,30 @@ async function deflate(bytes: Uint8Array): Promise<Uint8Array> {
 export type PdfPageSource = Iterable<PdfPage> | AsyncIterable<PdfPage>;
 
 /**
+ * What the writer cannot learn from the pages themselves.
+ *
+ * There is exactly one such thing, and it exists only because of internal links:
+ * a link to note page `k` becomes a reference to that page's object, and writing
+ * a reference to an object that never gets written leaves a file whose xref is a
+ * lie. A streaming writer does not know how many pages are coming, so the CALLER
+ * — which is iterating `meta.pages` and knows — states it.
+ */
+export interface PdfOptions {
+  /**
+   * How many pages this document will contain, when the source is the WHOLE note
+   * in note order (so document page `i` is note page `i`). Internal links are
+   * kept exactly for targets inside it.
+   *
+   * **OMIT IT FOR ANY EXPORT THAT IS NOT THE WHOLE NOTE**, and the single-page
+   * exports do: their one page is note page 7 sitting at document index 0, so
+   * every internal link in it points at a page that is not in the file. Absent
+   * means "no internal link can be resolved", which drops them all and keeps the
+   * external ones — the honest outcome for a page lifted out of its notebook.
+   */
+  pageCount?: number;
+}
+
+/**
  * The page's content stream: the raster, then the invisible words.
  *
  * PDF's origin is BOTTOM-LEFT and the boxes are top-left, so every Y is flipped.
@@ -253,7 +290,10 @@ const pageObj = (i: number): number => 4 + 3 * i;
  * Nothing here retains a page: `p` goes out of scope with each iteration, so the
  * caller's buffer is collectable the moment its compressed form exists.
  */
-export async function* pdfChunks(pages: PdfPageSource): AsyncGenerator<Uint8Array> {
+export async function* pdfChunks(
+  pages: PdfPageSource,
+  opts: PdfOptions = {},
+): AsyncGenerator<Uint8Array> {
   const enc = new TextEncoder();
   const offsets: number[] = [];
   let pos = 0;
@@ -276,6 +316,17 @@ export async function* pdfChunks(pages: PdfPageSource): AsyncGenerator<Uint8Arra
     yield* emit("\nendstream\nendobj\n");
   };
 
+  // THE FORWARD REFERENCE, and the only reason it is legal: an internal link
+  // resolves a note page to an object number by arithmetic alone, so page 2 can
+  // point at page 1701 before page 1701 has been written — the xref that says
+  // where that object landed is written last. A target outside the document
+  // resolves to null and the link is dropped rather than dangling.
+  const pageObjOf = (index: number): number | null => {
+    const total = opts.pageCount;
+    if (total === undefined || !Number.isInteger(index)) return null;
+    return index >= 0 && index < total ? pageObj(index) : null;
+  };
+
   yield* emit("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
   yield* obj(1, "<< /Type /Catalog /Pages 2 0 R >>");
 
@@ -296,12 +347,22 @@ export async function* pdfChunks(pages: PdfPageSource): AsyncGenerator<Uint8Arra
     // dead by the time the next one is asked for.
     const image = await deflate(p.gray);
 
+    // INLINE, and empty for a page with no links — see `annotsEntry`. This is
+    // what keeps a page at exactly three objects whatever its links, which is
+    // what `pageObj` depends on and therefore what the forward reference above
+    // depends on.
+    const annots = annotsEntry(p.links, {
+      panel: { width: p.width, height: p.height },
+      page: { width: pw, height: ph },
+      pageObjOf,
+    });
+
     yield* obj(
       pageObj(i),
       `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pw} ${ph}]` +
         ` /Resources << /XObject << /Im0 ${pageObj(i) + 2} 0 R >>` +
         ` /Font << /F1 ${FONT_OBJ} 0 R >> >>` +
-        ` /Contents ${pageObj(i) + 1} 0 R >>`,
+        ` /Contents ${pageObj(i) + 1} 0 R${annots} >>`,
     );
     yield* streamObj(pageObj(i) + 1, `<< /Length ${content.length} >>`, content);
     yield* streamObj(
@@ -314,6 +375,14 @@ export async function* pdfChunks(pages: PdfPageSource): AsyncGenerator<Uint8Arra
   }
 
   if (n === 0) throw new Error("buildPdf: no pages");
+
+  // A source that yielded FEWER pages than the caller promised would leave every
+  // internal link aimed past the end of the file — an object number the xref has
+  // no row for, which is a document a strict reader refuses to open. Failing here
+  // costs the export; not failing here costs the file, silently.
+  if (opts.pageCount !== undefined && n < opts.pageCount) {
+    throw new Error(`buildPdf: promised ${opts.pageCount} pages, got ${n}`);
+  }
 
   // The page tree, now that the count is known. `/Kids` is the one thing that
   // grows with the notebook, and it is ~10 bytes per page.
@@ -347,8 +416,8 @@ export async function* pdfChunks(pages: PdfPageSource): AsyncGenerator<Uint8Arra
  * entire finished file — the raster of every page — into the heap, alongside the
  * chunks it was copied from.
  */
-export async function buildPdf(pages: PdfPageSource): Promise<Blob> {
+export async function buildPdf(pages: PdfPageSource, opts?: PdfOptions): Promise<Blob> {
   const parts: BlobPart[] = [];
-  for await (const chunk of pdfChunks(pages)) parts.push(chunk as BlobPart);
+  for await (const chunk of pdfChunks(pages, opts)) parts.push(chunk as BlobPart);
   return new Blob(parts, { type: "application/pdf" });
 }
