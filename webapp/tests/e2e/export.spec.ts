@@ -168,7 +168,7 @@ test.describe("export menu", () => {
     expect(pdf).toContain(" Tj");
 
     // And the toolbar says which of the two kinds it produced.
-    await expect(page.locator(".toast")).toContainText("selectable");
+    await expect(page.locator(".toast")).toContainText("can be selected and searched");
   });
 
   // THE ASYMMETRY THIS DESIGN IS BUILT AROUND. This note's device has no verified
@@ -192,8 +192,8 @@ test.describe("export menu", () => {
     expect(pdf).not.toContain("3 Tr");
     expect(pdf).not.toContain(" Tj");
 
-    // And it does not pretend otherwise.
-    await expect(page.locator(".toast")).toContainText("image only");
+    // And it does not pretend otherwise — in the terms the reader asked in.
+    await expect(page.locator(".toast")).toContainText("cannot be selected or searched");
   });
 
   // THE WHOLE NOTEBOOK, written page by page. The memory invariant that makes
@@ -243,7 +243,7 @@ test.describe("export menu", () => {
     expect((pdf.match(/Do Q\nendstream/g) ?? []).length).toBe(6);
 
     await expect(page.locator(".toast")).toContainText("20 pages");
-    await expect(page.locator(".toast")).toContainText("selectable");
+    await expect(page.locator(".toast")).toContainText("can be selected and searched");
   });
 
   // The same asymmetry as the single page, applied to a whole document: an
@@ -267,7 +267,7 @@ test.describe("export menu", () => {
     expect(pdf).not.toContain(" Tj");
 
     await expect(page.locator(".toast")).toContainText("3 pages");
-    await expect(page.locator(".toast")).toContainText("image only");
+    await expect(page.locator(".toast")).toContainText("cannot be selected or searched");
   });
 
   test("the menu is not offered for files that are not notes", async ({ page }) => {

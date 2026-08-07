@@ -395,7 +395,7 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
     const filename = noteLayerExportFilename(name, page, which, "pdf");
     download(filename, new Blob([bytes as BlobPart], { type: "application/pdf" }));
     // TWO THINGS THE USER MUST NOT DISCOVER BY SURPRISE, in the honest-reporting
-    // tone of the reader's "text is selectable" / "image only" toasts.
+    // tone of the reader's selectable/not-selectable toasts (`savedPdfMessage`).
     //
     // ONE PAGE. The row sits under "This page", but the file that lands on disk
     // is a `.pdf` like the one it came from and nothing about it says it is a

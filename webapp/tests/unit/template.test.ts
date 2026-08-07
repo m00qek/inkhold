@@ -88,6 +88,52 @@ describe("createTemplateProvider (fetch + decode once per hash)", () => {
     expect(getTemplate).toHaveBeenCalledTimes(1);
   });
 
+  // A NOTE BUILT ON A PDF gives nearly every page its own template — the file
+  // that found this has 1698 distinct templates over 1703 pages. An `ImageBitmap`
+  // is a native allocation the collector cannot reclaim, so an unbounded memo
+  // asked the browser for ~17.8 GB of them and the whole-document export died on
+  // `createImageBitmap: The ImageBitmap could not be allocated`.
+  it("CLOSES what it evicts, so a template per page cannot exhaust the browser", async () => {
+    const closed: number[] = [];
+    const bitmapClosing = (id: number): ImageBitmap =>
+      ({ width: id, height: id, close: () => closed.push(id) }) as unknown as ImageBitmap;
+
+    const getTemplate = vi.fn(async (_id: string, hash: string) => new Blob([hash]));
+    let n = 0;
+    const decode = vi.fn(async (_b: Blob) => bitmapClosing(++n));
+    const provider = createTemplateProvider({ getTemplate }, decode, 3);
+
+    for (const h of ["A", "B", "C", "D", "E"]) await provider("n", h);
+    // Let the eviction's `.then(close)` settle.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Cap 3, five distinct templates: the two oldest are gone AND released.
+    expect(closed).toEqual([1, 2]);
+  });
+
+  it("evicts least-RECENTLY-used, so the template every page shares survives", async () => {
+    const closed: number[] = [];
+    const bitmapClosing = (id: number): ImageBitmap =>
+      ({ width: id, height: id, close: () => closed.push(id) }) as unknown as ImageBitmap;
+
+    const getTemplate = vi.fn(async (_id: string, hash: string) => new Blob([hash]));
+    let n = 0;
+    const decode = vi.fn(async (_b: Blob) => bitmapClosing(++n));
+    const provider = createTemplateProvider({ getTemplate }, decode, 3);
+
+    const shared = await provider("n", "SHARED"); // id 1
+    await provider("n", "B");
+    await provider("n", "C");
+    await provider("n", "SHARED"); // a hit — freshens it
+    await provider("n", "D"); // evicts B (id 2), NOT the shared one
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(closed).toEqual([2]);
+    // And it is still the same live bitmap, not re-fetched.
+    expect(await provider("n", "SHARED")).toBe(shared);
+    expect(getTemplate).toHaveBeenCalledTimes(4); // SHARED, B, C, D
+  });
+
   it("caches a failed fetch as null (no repeated round-trips)", async () => {
     const getTemplate = vi.fn(async () => {
       throw new Error("404");

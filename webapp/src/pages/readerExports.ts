@@ -15,7 +15,7 @@
  */
 
 import { el } from "../ui/dom";
-import { createExporter, download, type Exporter } from "../export/exporter";
+import { createExporter, download, savedPdfMessage, type Exporter } from "../export/exporter";
 import { exportFlatPng, exportOra, flattenLayers, type ExportWhich } from "../export/layered";
 import { noteLayerExportFilename, type NoteLayersController, type NoteLayerStack } from "./noteLayers";
 import type { ViewerExportMenu } from "./viewerChrome";
@@ -76,11 +76,7 @@ export function createReaderExports(deps: ReaderExportsDeps): ReaderExports {
       toast(`Exporting ${m.name} — page ${done} of ${total}…`),
     );
     download(filename, blob);
-    toast(
-      kind === "searchable"
-        ? `Saved ${filename} — ${m.pages.length} pages, text on recognised pages is selectable`
-        : `Saved ${filename} — ${m.pages.length} pages, image only (no verified text placement for this device)`,
-    );
+    toast(savedPdfMessage(filename, kind, m.pages.length));
   }
 
   // THE PER-VIEW EXPORTS of the current page — Flat PNG, Layered ORA and per-page
@@ -148,12 +144,10 @@ export function createReaderExports(deps: ReaderExportsDeps): ReaderExports {
     const say = (filename: string, kind: "searchable" | "raster") =>
       // SAY WHICH ONE THEY GOT. A searchable PDF and a raster-only one look
       // identical until someone tries to select text, and the difference is
-      // decided by whether this device's millimetre scale has been verified.
-      toast(
-        kind === "searchable"
-          ? `Saved ${filename} — text is selectable`
-          : `Saved ${filename} — image only (no verified text placement for this device)`,
-      );
+      // decided by whether this device's millimetre scale has been verified —
+      // which is why the message answers "can I select the text" and leaves the
+      // calibration out of it (`savedPdfMessage`).
+      toast(savedPdfMessage(filename, kind));
     const snapshot = await layers.exportModel();
     if (!snapshot) {
       const { blob, filename, kind } = await exporter.pagePdf(m, page);

@@ -339,6 +339,39 @@ export function createExporter(deps: ExporterDeps): Exporter {
   };
 }
 
+/**
+ * What to say when a PDF export lands.
+ *
+ * ONE OWNER, because this sentence was written three times — the reader's
+ * per-page export, the reader's whole-document export and the library card's —
+ * and three copies of a sentence are three chances for the same action to be
+ * described differently depending on where it was started.
+ *
+ * IT SAYS WHAT THE USER GOT, NOT HOW IT WAS DECIDED. The old raster wording was
+ * "image only (no verified text placement for this device)", which names an
+ * internal calibration nobody can act on and does not answer the only question
+ * being asked: can I select the text in this file? So the answer leads, in the
+ * same verbs both ways ("selected and searched"), and the reason is left out —
+ * a toast is not the place to explain how recognition is scaled.
+ *
+ * The searchable case is deliberately hedged. `kind` is an honest OR across the
+ * document: it means SOME page carries text, which for a notebook where
+ * recognition was run on a few pages is exactly right, so promising selectable
+ * text outright would overclaim on all the others.
+ *
+ * @param pages Page count for a whole-document export; omit for a single page.
+ */
+export function savedPdfMessage(filename: string, kind: PdfKind, pages?: number): string {
+  const scope = pages === undefined ? "" : ` — ${pages} ${pages === 1 ? "page" : "pages"}`;
+  if (kind === "searchable") {
+    return `Saved ${filename}${scope}. Recognised handwriting can be selected and searched.`;
+  }
+  // "It is an image" would be a lie about a 1703-page export, and the kind of
+  // small wrongness that makes the rest of a message read as boilerplate.
+  const what = pages === undefined || pages === 1 ? "The page is an image" : "The pages are images";
+  return `Saved ${filename}${scope}. ${what}, so the text cannot be selected or searched.`;
+}
+
 /** Hand a generated blob to the browser as a download, then release it. */
 export function download(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);

@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
-import { documentFilename, exportFilename, pageLinks, toGray } from "../../src/export/exporter";
+import {
+  documentFilename,
+  exportFilename,
+  pageLinks,
+  savedPdfMessage,
+  toGray,
+} from "../../src/export/exporter";
 import type { Api } from "../../src/api/types";
 import type { Id, PageRef } from "../../src/core/types";
 import type { PdfLink } from "../../src/render/pdfLinks";
@@ -134,5 +140,41 @@ describe("toGray", () => {
   it("returns exactly one byte per pixel", () => {
     const rgba = new Uint8ClampedArray(7 * 5 * 4).fill(0x80);
     expect(toGray(rgba, 7, 5)).toHaveLength(35);
+  });
+});
+
+// The sentence a finished export leaves behind. It was written three times — the
+// reader's per-page row, the reader's whole-document row and the library card's —
+// so it has one owner now, and these are the two things that owner has to get
+// right: the question it answers, and the grammar of the count.
+describe("savedPdfMessage", () => {
+  it("answers whether the text can be selected, not how that was decided", () => {
+    // The old raster wording was "image only (no verified text placement for
+    // this device)" — an internal calibration nobody can act on, in place of the
+    // only question being asked.
+    const raster = savedPdfMessage("notes.pdf", "raster");
+    expect(raster).toContain("cannot be selected or searched");
+    expect(raster).not.toMatch(/verified|placement|device|raster/i);
+
+    const searchable = savedPdfMessage("notes.pdf", "searchable");
+    expect(searchable).toContain("can be selected and searched");
+  });
+
+  it("names the file in both, and says nothing about a count for a single page", () => {
+    expect(savedPdfMessage("page-p3.pdf", "searchable")).toContain("page-p3.pdf");
+    expect(savedPdfMessage("page-p3.pdf", "searchable")).not.toMatch(/\bpages\b/);
+  });
+
+  it("counts pages, and does not say '1 pages'", () => {
+    expect(savedPdfMessage("n.pdf", "raster", 1703)).toContain("1703 pages");
+    expect(savedPdfMessage("n.pdf", "raster", 1)).toContain("1 page.");
+    expect(savedPdfMessage("n.pdf", "raster", 1)).not.toContain("1 pages");
+  });
+
+  it("does not call a 1703-page export 'an image'", () => {
+    // Small wrongness is what makes the rest of a message read as boilerplate.
+    expect(savedPdfMessage("n.pdf", "raster", 1703)).toContain("The pages are images");
+    expect(savedPdfMessage("n.pdf", "raster", 1)).toContain("The page is an image");
+    expect(savedPdfMessage("n.pdf", "raster")).toContain("The page is an image");
   });
 });

@@ -19,7 +19,7 @@
 import { el } from "../ui/dom";
 import { createMenu, DEFAULT_SECTION_TITLE, type MenuItemSpec, type MenuSection } from "../ui/menu";
 import { rawFileUrl, canPreviewHistory } from "../core/fileKind";
-import { download, type Exporter } from "../export/exporter";
+import { download, savedPdfMessage, type Exporter } from "../export/exporter";
 import { exportSpdPng, exportSpdOra } from "./spdExport";
 import { buildSpdExportModel } from "../export/spdModel";
 import type { Api } from "../api/types";
@@ -88,6 +88,22 @@ export function createCardActions(ctx: CardActionsCtx): CardActions {
   const { api, exporter, toast } = ctx;
 
   /**
+   * Is a whole-document export already running?
+   *
+   * A DOCUMENT EXPORT IS NOT A CLICK, IT IS A JOB. The menu item that starts one
+   * closes the instant it is chosen, so there is no control left to disable —
+   * which was taken to mean no guard was needed. It is not the same thing: with
+   * nothing holding the door, a second choice from a reopened menu starts a
+   * SECOND full export beside the first, and the two then compete for memory.
+   *
+   * That is not a theoretical race. A 1703-page notebook builds ~243 MB of PDF,
+   * held as heap chunks until the Blob exists, and takes long enough that
+   * clicking again is the natural thing to do when nothing has downloaded yet.
+   * Running that twice at once is how you turn a slow export into a failed one.
+   */
+  let exportingDocument = false;
+
+  /**
    * Save the file's ORIGINAL bytes, unchanged — the `.note`/`.spd`/original-file
    * download. Navigates to the versioned raw-file endpoint with the attachment
    * flag; its `Content-Disposition` names the file. A hashless entry has no
@@ -135,7 +151,8 @@ export function createCardActions(ctx: CardActionsCtx): CardActions {
       const blob = kind === "png" ? await exportSpdPng(model, "original") : await exportSpdOra(model, "original");
       const base = note.name.replace(/\.spd$/i, "") || "sketch";
       download(`${base}.${kind}`, blob);
-    } catch {
+    } catch (e) {
+      console.error("Sketch export failed", { file: note.name, kind, error: e });
       toast("Couldn't build that export. Try again.");
     }
   }
@@ -156,6 +173,13 @@ export function createCardActions(ctx: CardActionsCtx): CardActions {
    * and result are reported through the toast instead.
    */
   async function exportDocument(note: NoteSummary): Promise<void> {
+    // SAY SO RATHER THAN QUEUE IT. The one already running is the one the user
+    // wants; starting a second would only make both slower and might sink both.
+    if (exportingDocument) {
+      toast("An export is already running — it will download when it finishes.");
+      return;
+    }
+    exportingDocument = true;
     try {
       const meta = await api.getNoteMeta(note.id);
       if (meta.pages.length === 0) {
@@ -166,14 +190,17 @@ export function createCardActions(ctx: CardActionsCtx): CardActions {
         toast(`Exporting ${meta.name} — page ${done} of ${total}…`),
       );
       download(filename, blob);
-      toast(
-        kind === "searchable"
-          ? `Saved ${filename} — ${meta.pages.length} pages, text on recognised pages is selectable`
-          : `Saved ${filename} — ${meta.pages.length} pages, image only (no verified text placement for this device)`,
-      );
+      toast(savedPdfMessage(filename, kind, meta.pages.length));
     } catch (e) {
       if (ctx.handled(e)) return;
+      // THE TOAST IS NOT A DIAGNOSIS. "Try again" is all the user can act on,
+      // but discarding `e` left nothing behind for anyone else either — a failed
+      // export was unreportable, because the one fact that would explain it never
+      // reached the console. Whatever the toast says, the reason goes here.
+      console.error("Whole-document PDF export failed", { file: note.name, error: e });
       toast("Couldn't build that export. Try again.");
+    } finally {
+      exportingDocument = false;
     }
   }
 

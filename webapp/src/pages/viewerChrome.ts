@@ -220,7 +220,10 @@ export function createViewerExportMenu(opts: {
     btn.disabled = true;
     try {
       await run();
-    } catch {
+    } catch (e) {
+      // The toast is what the user can act on; this is what anyone diagnosing it
+      // can. Swallowing `e` outright made a failed export unreportable.
+      console.error("Export failed", e);
       opts.toast("Couldn't build that export. Try again.");
     } finally {
       btn.disabled = false;
