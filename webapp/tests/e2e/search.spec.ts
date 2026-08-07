@@ -189,11 +189,12 @@ test.describe("universal search", () => {
   // past, and the destination was never the question — the row now opens the note
   // with the query still running and Next walks the rest.
   //
-  // The counter is asserted over BOTH shapes in one test, because the singular is
-  // the whole tell that a count was written rather than interpolated, and the old
-  // version of this test was vacuous for exactly that reason: it asserted a rule
-  // about single-page matches over a query whose fixture produced none.
-  test("the row counts the pages it reached, and gets the singular right", async ({ page }) => {
+  // Both shapes are asserted in one test, because what a single-page group does
+  // is the whole tell. It used to say "Matches on 1 page"; global search names
+  // DOCUMENTS now, so a group of one is the ordinary case and that line would
+  // ride nearly every row while claiming a reach the row does not know. It says
+  // nothing instead, and find-in-note — which the row opens — gives the count.
+  test("the row counts the pages it reached, and says nothing when it reached one", async ({ page }) => {
     await signedIn(page);
     await page.goto("/");
 
@@ -202,14 +203,12 @@ test.describe("universal search", () => {
     await searchBox(page).fill("page 4");
     await expect(results(page)).not.toHaveCount(0);
 
-    const singles = await matchLine(results(page)).allInnerTexts();
-    // Non-vacuity FIRST: without a real one-page match the singular below would
-    // pass while proving nothing, which is how the test this replaces passed
-    // against the bug it was written for.
-    expect(singles.length).toBeGreaterThan(0);
-    expect(singles.every((t) => t === "Matches on 1 page")).toBe(true);
+    // Non-vacuity FIRST: there really are rows here, so "no count line" is the
+    // rule being observed and not an empty result set passing by default.
+    expect(await results(page).count()).toBeGreaterThan(0);
+    await expect(matchLine(results(page))).toHaveCount(0);
 
-    // …and the plural, over a query that really does span pages.
+    // …and the count still appears over a query that really does span pages.
     await searchBox(page).fill("Aurora");
     const many = matchLine(results(page).filter({ hasText: "Project Aurora" }));
     await expect(many).toHaveText(/^Matches on [2-9]\d* pages$/);
@@ -266,9 +265,11 @@ test.describe("universal search", () => {
     await searchBox(page).fill("Endor");
     await expect(results(page)).not.toHaveCount(0);
 
+    // The EXCERPT is the subject: it is on every row without exception, because
+    // it is the answer to "why is this here". The count line beside it is not —
+    // a single-page group deliberately carries none.
     for (const row of await results(page).all()) {
       await expect(row.locator(".hit__snippet")).toBeVisible();
-      await expect(matchLine(row)).toBeVisible();
     }
   });
 
@@ -589,10 +590,11 @@ test.describe("universal search", () => {
       await expect(moreButton(page)).toBeVisible();
 
       // The 20-hit window splits this note's two matching pages across the
-      // boundary: its row is painted knowing one page…
+      // boundary: its row is painted knowing one page, which a row says nothing
+      // about…
       const row = results(page).filter({ hasText: "Archive note 17" });
       await expect(row).toHaveCount(1);
-      await expect(matchLine(row)).toHaveText("Matches on 1 page");
+      await expect(matchLine(row)).toHaveCount(0);
 
       await moreButton(page).click();
 

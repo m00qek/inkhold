@@ -2,7 +2,7 @@
 //! them as `kind = 1` rows in `note_page_index`, so library search returns
 //! `.txt` paragraphs interleaved with note pages through the exact machinery
 //! that already serves them (`segment_search` + `segment_fts` — see
-//! `docs/scratch/txt-search.md`, the segment seam's first tenant).
+//! `docs/scratch/archive/txt-search.md`, the segment seam's first tenant).
 //!
 //! ## Paragraphs, not fixed chunks (plan decisions 1–2)
 //!
@@ -1114,7 +1114,21 @@ fn globalFilePages(f: *Fixture, user_id: u64, name: []const u8, q: []const u8) !
     return pages.items;
 }
 
-test "FIND-IN-TXT PARITY: the in-doc paragraph set equals global search filtered to the file (the non-negotiable)" {
+/// The `.txt` twin of `query.zig`'s `expectDocParity`, asserted wherever global↔
+/// in-doc set equality used to be. Global search names FILES now, one hit per
+/// band, so it is a strict subset of in-doc by design; what must survive is
+/// presence in both directions (named exactly when in-doc finds something),
+/// every named paragraph being one in-doc returns, and no repeats. Completeness
+/// inside a file is in-doc's claim alone.
+fn expectFileParity(global: []const i64, in_doc: []const i64) !void {
+    try testing.expectEqual(in_doc.len == 0, global.len == 0);
+    for (global, 0..) |g, i| {
+        try testing.expect(std.mem.indexOfScalar(i64, in_doc, g) != null);
+        try testing.expect(std.mem.indexOfScalar(i64, global[i + 1 ..], g) == null);
+    }
+}
+
+test "FIND-IN-TXT DOCUMENT PARITY (the non-negotiable): global names the file iff in-doc finds it, on a paragraph in-doc returns" {
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -1138,8 +1152,15 @@ test "FIND-IN-TXT PARITY: the in-doc paragraph set equals global search filtered
         const d = try f.a().alloc(i64, r.segments.len);
         for (r.segments, d) |seg, *o| o.* = seg.segment;
         std.sort.pdq(i64, d, {}, std.sort.asc(i64));
-        try testing.expectEqualSlices(i64, g, d);
+        // The band is canonical, so the file is named exactly once however many
+        // of its paragraphs matched — and that paragraph is one in-doc returns.
+        try testing.expect(d.len > 0);
+        try testing.expectEqual(@as(usize, 1), g.len);
+        try expectFileParity(g, d);
     }
+    // The negative, on both sides: a term the file lacks names it in neither.
+    try testing.expectEqual(@as(usize, 0), (try globalFilePages(&f, 1, "doc.txt", "zzzptl ")).len);
+    try testing.expectEqual(@as(usize, 0), (try f.txtSearch(1, put.id, "zzzptl ")).segments.len);
 }
 
 test "FIND-IN-TXT BATCHED PARITY (the non-negotiable): the UNION of SMALL batches == global ∩ file, boundary-clean" {
@@ -1157,7 +1178,13 @@ test "FIND-IN-TXT BATCHED PARITY (the non-negotiable): the UNION of SMALL batche
     const put = try f.put(1, "doc.txt", blob.items);
 
     for ([_][]const u8{ "common ", "rare5 ", "zzzptl " }) |q| {
-        const g = try globalFilePages(&f, 1, "doc.txt", q);
+        // The UNBATCHED in-doc result is the oracle for the batched drain — the
+        // half of this pin that never depended on global, and now does not
+        // mention it. Global re-anchors to document parity below.
+        const whole = try f.txtSearch(1, put.id, q);
+        const d = try f.a().alloc(i64, whole.segments.len);
+        for (whole.segments, d) |seg, *o| o.* = seg.segment;
+        std.sort.pdq(i64, d, {}, std.sort.asc(i64));
 
         // Drain in-doc at batch 3, checking each batch is BOUNDED and no paragraph
         // is dropped or duplicated across the cursor boundary.
@@ -1175,7 +1202,13 @@ test "FIND-IN-TXT BATCHED PARITY (the non-negotiable): the UNION of SMALL batche
             cursor = r.cursor orelse break;
         }
         std.sort.pdq(i64, got.items, {}, std.sort.asc(i64));
-        try testing.expectEqualSlices(i64, g, got.items);
+        try testing.expectEqualSlices(i64, d, got.items);
+
+        // One canonical band ⇒ global names the file once, on a paragraph the
+        // batches also produced (or not at all, for a term it lacks).
+        const g = try globalFilePages(&f, 1, "doc.txt", q);
+        try testing.expectEqual(@as(usize, if (d.len == 0) 0 else 1), g.len);
+        try expectFileParity(g, got.items);
     }
 }
 
@@ -1357,8 +1390,11 @@ test "v5→v6 HEAL: a pre-existing .txt mints segments on ensure, name looked up
     try testing.expectEqual(@as(i64, 2), try f.count("SELECT COUNT(*) FROM note_page_index WHERE kind = 1;"));
     try testing.expectEqual(@as(i64, 2), try f.count("SELECT COUNT(*) FROM segment_search;"));
     try testing.expectEqual(@as(i64, 2), try f.count("SELECT COUNT(*) FROM segment_fts_docsize;"));
+    // Searchable again, kind-tagged. ONE hit for one file — the library-wide
+    // read names documents — and the counts just above are what pin that BOTH
+    // paragraphs were minted, which is what the heal is actually about.
     const res = try f.search_(1, "healed");
-    try testing.expectEqual(@as(usize, 2), res.hits.len);
+    try testing.expectEqual(@as(usize, 1), res.hits.len);
     try testing.expectEqual(@as(?i64, kind_txt), res.hits[0].kind);
 
     // Repeated ensures are no-ops: same rows, same rowids, same next_seq.

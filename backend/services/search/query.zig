@@ -5,7 +5,7 @@
 //! primitives) — is the SOLE owner of the `segment_fts` FTS5 table and its
 //! `segment_search` rows; nothing outside it may touch them.
 //! (`search_partition.zig` owns the mask arithmetic and the sequence allocator;
-//! docs/scratch/search-architecture.md is the design.)
+//! docs/scratch/archive/search-architecture.md is the design.)
 //!
 //! ## The shape: one segment row per (owner, segment), rowid-masked
 //!
@@ -57,13 +57,28 @@ const foldTerms = fuzzy.foldTerms;
 const maintain = @import("maintain.zig");
 const fts_predicate = maintain.fts_predicate;
 
-/// Default and maximum number of hits one search returns — deliberately the
-/// SAME number: results are a keyset-paginated stream (see `Results.cursor`), so
-/// a bigger first page buys nothing that "more" does not, and the
-/// early-termination query is O(limit), so the cap is also what keeps a broad
-/// term from scanning past its page.
+/// Default and maximum number of DOCUMENTS one library-wide search returns —
+/// deliberately the SAME number: results are a keyset-paginated stream (see
+/// `Results.cursor`), so a bigger first page buys nothing that "more" does not,
+/// and the early-termination query is O(limit), so the cap is also what keeps a
+/// broad term from scanning past its page.
+///
+/// DOCUMENTS, not pages, since the document loop (`collectDocs`): a page holds
+/// one hit per matching document rather than 20 segments that can all belong to
+/// one notebook. `hits.len` can still exceed this only by FANOUT — two `files`
+/// rows of one blob are two real library entries and both surface.
 pub const default_limit: i64 = 20;
 pub const max_limit: i64 = default_limit;
+
+/// The most library entries ONE segment rowid may contribute to a page. Fanout
+/// is genuine — a user holding two copies of a notebook has two files, and a hit
+/// on the shared blob belongs to both — so the document loop takes the whole
+/// group at the matched rowid before it jumps past the band.
+///
+/// The cap is what keeps that from being unbounded: past it the group's tail is
+/// dropped rather than letting one segment own the page. Only reachable by
+/// holding 20+ copies of the same matching note, and bounded either way.
+const max_fanout: i64 = max_limit;
 
 /// In-document keyset batch size. The find-in-note / find-in-txt entry points
 /// (`searchNotePages`, `searchTxtSegments`) return ONE batch of this many
@@ -159,11 +174,12 @@ pub const Results = struct {
     /// Keyset resumption token: present ONLY when more results may exist, and
     /// NEVER a total — a total would cost counting every match, the exact work
     /// early termination exists to avoid (the UI says "20+", not "20 of N").
-    /// Opaque to the client (it encodes the last masked rowid of this page);
-    /// passing it back as `?cursor=` resumes the stream exactly where it
-    /// stopped, stable under concurrent ingest because new rows only ever mint
-    /// HIGHER sequences. Omitted from the JSON when null (this face drops null
-    /// optionals), which is exactly the "no more results" signal.
+    /// Opaque to the client (it encodes the START of the last document's band —
+    /// the jump target, which is where the next scan already begins); passing it
+    /// back as `?cursor=` resumes the stream exactly where it stopped, stable
+    /// under concurrent ingest because new rows only ever mint HIGHER sequences.
+    /// Omitted from the JSON when null (this face drops null optionals), which
+    /// is exactly the "no more results" signal.
     cursor: ?[]const u8 = null,
 };
 
@@ -175,9 +191,10 @@ pub const Results = struct {
 ///     is early termination's other half: with `ORDER BY rowid DESC LIMIT n`
 ///     the posting walk stops after n in-partition matches — O(limit), not
 ///     O(matches) — and DESC order correlates with per-partition recency. The
-///     keyset cursor folds into the SAME two bounds (`?3 = min(hi, last-1)`),
-///     so page 2 resumes exactly where page 1 stopped, and there is one plan
-///     to pin rather than two.
+///     library-wide read rebinds `?3` in a loop to walk DOCUMENTS rather than
+///     segments (`collectDocs`), and the keyset cursor folds into the SAME two
+///     bounds (`?3 = min(hi, cursor - 1)`), so page 2 resumes exactly where
+///     page 1 stopped and there is one plan to pin rather than two.
 ///   - `JOIN segment_search s` / `JOIN note_page_index p` — the masked rowid
 ///     back to the SHARED text row (dedup intact: one copy of the text).
 ///   - `JOIN files f ON f.md5 = p.blob_md5` + `f.user_id = ?4` + `f.deleted =
@@ -212,10 +229,14 @@ const search_from_where =
     \\   AND p.recogn_status = 1
 ;
 
+/// `p.blob_md5` rides along for `bandStart`'s guard — it is what makes the
+/// validation lookup decisive (see there). It costs nothing: `note_page_index`
+/// is already joined, and the FROM/WHERE/ORDER BY/LIMIT shape is untouched, so
+/// the pinned `M1><` plan is unaffected by the extra column.
 const search_sql =
     \\SELECT f.id, f.name, p.page_index,
     \\       snippet(segment_fts, 0, ?6, ?7, '…', 16),
-    \\       p.id, s.id, f.updated_at, p.kind
+    \\       p.id, s.id, f.updated_at, p.kind, p.blob_md5
 ++ "\n" ++ search_from_where ++ "\n" ++
     \\ ORDER BY segment_fts.rowid DESC
     \\ LIMIT ?5;
@@ -223,6 +244,26 @@ const search_sql =
 
 /// Searches `user_id`'s recognized pages for `raw_query`. Everything returned is
 /// allocated in `arena` (the handler owns it).
+///
+/// ## What this read ANSWERS: which DOCUMENTS match, not which pages
+///
+/// A page of results names up to `limit` documents, one hit each, and seeks past
+/// the rest of every band it names (`collectDocs` has the mechanism and the
+/// reason). The contract that replaced global↔in-doc result equality is three
+/// statements, and the tests pin each:
+///
+///   - **Document parity.** A document appears in the drained stream IFF its
+///     in-doc search for the same query is non-empty — exactly once per band,
+///     never fabricated, never omitted.
+///   - **Representative honesty.** The page reported for a document is a page
+///     in-doc search also returns: a member of the set, not an arbitrary index.
+///   - **In-doc owns completeness.** This read does not claim, and no longer
+///     implies, HOW MANY pages of a document matched. `searchNotePages` is the
+///     authority on that, and the only one.
+///
+/// The excerpt is unchanged by all of it: within a band `rowid DESC` yields the
+/// document's last matching page first, which is already the page whose snippet
+/// the grouped row showed.
 ///
 /// This is the LIBRARY-WIDE exported read; `searchNotePages` and
 /// `searchTxtSegments` are the two in-document ones. All THREE build on the one
@@ -283,15 +324,16 @@ pub fn searchPages(
         resumed = true;
     }
 
-    // The primary pass, unwidened, fetching ONE row past the page so "more may
-    // exist" is a fact rather than a guess. `usedFuzzy` stays false here, and
-    // the vocabulary is not consulted at all — the flag is a report of what
-    // ran, not a guess after the fact.
-    const rows = try runSearch(arena, db, match, user_id, lo, hi, @intCast(capped + 1), marks);
-    if (rows.len > 0) {
-        const page = trimPage(rows, capped);
+    // The primary pass, unwidened: one hit per DOCUMENT, seeking past the rest
+    // of each band (`collectDocs`). `usedFuzzy` stays false here, and the
+    // vocabulary is not consulted at all — the flag is a report of what ran, not
+    // a guess after the fact.
+    const page = try collectDocs(arena, db, match, user_id, lo, hi, capped, marks);
+    if (page.any) {
+        // Minted from the JUMP TARGET, not from the last kept row: after the
+        // last document the next scan bound is already known exactly.
         const cur: ?[]const u8 = if (page.more and page.kept.len > 0)
-            try encodeCursor(arena, page.resume_before)
+            try encodeCursor(arena, page.next)
         else
             null;
         displaySort(page.kept);
@@ -306,8 +348,10 @@ pub fn searchPages(
     const expansion = (try buildFuzzyMatch(arena, db, query, still_typing, max_fuzzy_terms, .corpus)) orelse
         return noHits(db, user_id, query, false);
 
-    var fuzzy_rows = try runSearch(arena, db, expansion.match, user_id, lo, hi, @intCast(capped + 1), marks);
-    if (fuzzy_rows.len > capped) fuzzy_rows = fuzzy_rows[0..capped]; // no cursor: a fallback, not a stream
+    // The same document loop — it is capped and cursorless here, so it simply
+    // stops at `capped` documents and hands out no way to resume.
+    const widened = try collectDocs(arena, db, expansion.match, user_id, lo, hi, capped, marks);
+    const fuzzy_rows = widened.kept;
     displaySort(fuzzy_rows);
     try rankExactFirst(arena, db, query, still_typing, lo, hi, fuzzy_rows);
     // The expansion having RUN is what the flag reports, so it is true even when
@@ -316,36 +360,151 @@ pub fn searchPages(
     return .{ .query = query, .hits = try hitsOf(arena, fuzzy_rows), .usedFuzzy = true };
 }
 
-/// One display page cut out of the raw (rowid-descending) scan.
-const Page = struct {
+/// One page of the DOCUMENT stream.
+const DocPage = struct {
     kept: []Row,
-    /// Whether anything below the page remained — decided by the +1 row the
-    /// scan over-fetched, never by counting.
+    /// Whether the scan matched ANYTHING in range, which is not the same
+    /// question as `kept.len > 0`: `limit = 0` keeps nothing and must still not
+    /// widen into the typo fallback. "No room on the page" is not "no matches".
+    any: bool,
+    /// Whether anything remained below the last jump — decided by one `LIMIT 1`
+    /// probe, never by counting.
     more: bool,
-    /// The next page's exclusive upper bound: it scans `rowid <= resume_before
-    /// - 1`. Meaningless when `more` is false.
-    resume_before: i64,
+    /// The next page's exclusive upper bound: it scans `rowid <= next - 1`.
+    /// Meaningless when `more` is false.
+    next: i64,
 };
 
-/// Cuts the ≤(cap+1) scanned rows down to one page. The subtlety is FANOUT: a
-/// user holding two files of one blob gets two joined rows for one segment
-/// rowid, and a keyset cursor is strictly rowid-based — so a segment group is
-/// never silently split across a page boundary. A straddling group is held
-/// back whole for the next page (the cursor re-admits it), except in the
-/// pathological case where one group alone overfills the page: then the page
-/// keeps what fits and the group's tail is dropped — bounded, and only
-/// reachable by holding 20+ copies of the same matching note.
-fn trimPage(rows: []Row, cap: usize) Page {
-    if (rows.len <= cap) return .{ .kept = rows, .more = false, .resume_before = 0 };
-    if (cap == 0) return .{ .kept = rows[0..0], .more = true, .resume_before = 0 };
-    const boundary = rows[cap].seg_rowid;
-    if (rows[cap - 1].seg_rowid == boundary) {
-        var i = cap;
-        while (i > 0 and rows[i - 1].seg_rowid == boundary) i -= 1;
-        if (i > 0) return .{ .kept = rows[0..i], .more = true, .resume_before = boundary + 1 };
-        return .{ .kept = rows[0..cap], .more = true, .resume_before = boundary };
+/// Walks the corpus DOCUMENT by document: one scan per document kept, each
+/// rebinding the SAME statement's upper bound to below the band the last hit
+/// belongs to.
+///
+/// ## Why a loop of seeks, and not one long walk
+///
+/// A document's segments are ONE contiguous rowid run — `maintain.flipOwnerBlob`
+/// states the invariant outright, `rowid ASC == reading order` after every edit,
+/// and `holderBandCanonical` heals any legacy band that isn't. So
+/// `ORDER BY rowid DESC` does not interleave documents: it walks them one at a
+/// time, last page to first within each. A term appearing on 300 pages of one
+/// planner therefore owned fifteen consecutive pages of results — all rendering
+/// as the SAME row, since the client groups hits by note — which is what "no
+/// results until I click More a few times" was actually reporting. It was never
+/// an empty window; it was one document owning every window.
+///
+/// Because the band is contiguous, "stop searching this document" is not a
+/// per-row test over its remaining postings: it is MOVING THE UPPER BOUND below
+/// the band's start, the keyset move the query already makes. The planner's
+/// other 299 postings are never visited, they are stepped over — a page costs
+/// ~`want + 1` posting seeks instead of one walk through thousands.
+///
+/// THE SQL NEVER CHANGES. Same clause, same `ORDER BY … DESC`, same `LIMIT`,
+/// the same statement rebound with new bounds — so the pinned `M1><` pushdown
+/// still holds and there is no second plan to pin.
+///
+/// `want` is a count of DOCUMENTS; `kept` can be longer through fanout.
+fn collectDocs(
+    arena: std.mem.Allocator,
+    db: sqlite.Db,
+    match: []const u8,
+    user_id: u64,
+    lo: i64,
+    hi_from: i64,
+    want: usize,
+    marks: Marks,
+) !DocPage {
+    var sc = try Scan.open(db, match, user_id, marks);
+    defer sc.close();
+
+    var kept: std.ArrayList(Row) = .empty;
+    var hi = hi_from;
+    var any = false;
+    var docs: usize = 0;
+    while (docs < want) : (docs += 1) {
+        // TWO rows, not one: the second is what says whether this rowid fans out
+        // — and asking for two costs one spare `snippet()` per document, where a
+        // `want`-sized fetch would generate (and discard) a page's worth for
+        // every document on the page.
+        const rows = try sc.rows(arena, lo, hi, 2);
+        if (rows.len == 0) return .{ .kept = kept.items, .any = any, .more = false, .next = 0 };
+        any = true;
+        const head = rows[0];
+        // FANOUT: every row at the matched rowid, before the jump takes the band
+        // away. Re-read scoped to that ONE rowid (`[R, R]`), so completing the
+        // group is a seek and not a scan.
+        const group = if (rows.len > 1 and rows[1].seg_rowid == head.seg_rowid)
+            try sc.rows(arena, head.seg_rowid, head.seg_rowid, max_fanout)
+        else
+            rows[0..1];
+        try kept.appendSlice(arena, group);
+
+        // THE JUMP.
+        const band = try bandStart(&sc, lo, head);
+        hi = band - 1;
+        // The partition is exhausted exactly here, so there is nothing left to
+        // probe and no cursor to mint.
+        if (hi < lo) return .{ .kept = kept.items, .any = true, .more = false, .next = 0 };
     }
-    return .{ .kept = rows[0..cap], .more = true, .resume_before = rows[cap - 1].seg_rowid };
+    // `more` stays a FACT rather than a guess, as this module insists: ONE seek
+    // below the final jump. A count would cost every remaining match, which is
+    // the work early termination exists to avoid — the UI says "20+", never
+    // "20 of N".
+    const probe = try sc.rows(arena, lo, hi, 1);
+    return .{
+        .kept = kept.items,
+        .any = any or probe.len > 0,
+        .more = probe.len > 0,
+        .next = hi + 1,
+    };
+}
+
+/// Is the candidate rowid the first page OF THIS BLOB? `segment_search.id` and
+/// `note_page_index.id` are both primary keys, so this is two seeks.
+const band_start_sql =
+    \\SELECT 1 FROM segment_search s
+    \\  JOIN note_page_index p ON p.id = s.segment_id
+    \\ WHERE s.id = ?1 AND p.blob_md5 = ?2 AND p.page_index = 0;
+;
+
+/// The first masked rowid of the band `hit` belongs to — the jump target — or
+/// `hit.seg_rowid` itself when that cannot be established, in which case the
+/// caller steps by one instead of jumping (exactly today's behaviour).
+///
+/// A canonical band is laid down as `first + ROW_NUMBER() OVER (ORDER BY
+/// page_index) - 1` (`maintain.mintOwnerBlobSearch`), so inside it
+/// `rowid = first + page_index` and the candidate is `R - page_index`, free.
+///
+/// ## Why the arithmetic is CHECKED and never trusted
+///
+/// `maintain.mintPageForHolders` mints a fresh TAIL rowid for a page a later
+/// re-parse added to a blob other holders already hold. That rowid has no
+/// arithmetic relation to its `page_index`, so `R - page_index` can land far
+/// below the band — and a jump to a wrong, LOW target silently skips other
+/// documents' matches. That is the one failure mode here that loses results
+/// without saying so, which is why correctness never rests on the invariant:
+/// the invariant only buys the speed, and a band that does not hold it degrades
+/// to a step.
+///
+/// Two conditions must BOTH hold:
+///
+///   - **The candidate is at or above the scan's own floor.** Sequences are
+///     allocated per partition, so a canonical band lies wholly inside one and a
+///     candidate below `lo` cannot be a real band start. Jumping there would end
+///     the scan and discard the rest of the partition unannounced.
+///   - **`segment_search` at the candidate resolves to page 0 OF THE SAME
+///     BLOB.** Same-blob is what makes this decisive rather than suggestive:
+///     `note_page_index` is `UNIQUE(blob_md5, page_index)` and a holder has one
+///     segment row per segment, so at most ONE rowid in the partition is this
+///     blob's page 0. Finding it at exactly `R - page_index` IS the canonical
+///     relationship, not a coincidence shaped like one.
+fn bandStart(sc: *Scan, lo: i64, hit: Row) !i64 {
+    const candidate = hit.seg_rowid - hit.hit.pageIndex;
+    if (hit.hit.pageIndex < 0 or candidate < lo) return hit.seg_rowid;
+    // Page 0 IS the band start, whatever else is true of the band — no lookup
+    // can add anything, and this is the common case (a one-page document, or a
+    // term that matched the first page).
+    if (candidate == hit.seg_rowid) return candidate;
+    if (!try sc.isBandStart(candidate, hit.blob_md5)) return hit.seg_rowid;
+    return candidate;
 }
 
 /// The masked rowid as an opaque token: 16 lowercase hex digits. Hex on
@@ -421,53 +580,87 @@ fn coverageOf(db: sqlite.Db, user_id: u64) !Coverage {
 
 /// One result row, plus what `Hit` does not carry: the `note_page_index.id`
 /// the re-ranker needs, the masked segment rowid the keyset cursor is built
-/// from, and `files.updated_at` for the display sort. All internal — `Hit` is
-/// the wire shape and stays exactly as it was.
+/// from, `files.updated_at` for the display sort, and the blob the document
+/// loop's band guard validates against. All internal — `Hit` is the wire shape
+/// and stays exactly as it was.
 const Row = struct {
     hit: Hit,
     page_id: i64,
     seg_rowid: i64,
     updated_at: i64,
+    blob_md5: []const u8,
 };
 
-fn runSearch(
-    arena: std.mem.Allocator,
-    db: sqlite.Db,
-    match: []const u8,
-    user_id: u64,
-    lo: i64,
-    hi: i64,
-    limit: i64,
+/// The two statements the document loop runs, PREPARED ONCE and rebound per
+/// iteration.
+///
+/// This is what makes a loop of seeks cheaper than one long walk rather than
+/// merely different: re-preparing the search each time would re-parse the MATCH
+/// expression and re-plan the four-way join on every document, which measured
+/// several times the cost of the seek it wraps. `sqlite3_reset` leaves bindings
+/// in place, so the match, the user id and the snippet markers are bound once at
+/// open and only the bounds and the limit move.
+const Scan = struct {
+    search: sqlite.Stmt,
+    band: sqlite.Stmt,
     marks: Marks,
-) ![]Row {
-    var s = try db.prepare(search_sql);
-    defer s.finalize();
-    s.bindText(1, match);
-    s.bindInt(2, lo);
-    s.bindInt(3, hi);
-    s.bindInt(4, @intCast(user_id));
-    s.bindInt(5, limit);
-    s.bindText(6, &marks.open);
-    s.bindText(7, &marks.close);
 
-    var rows: std.ArrayList(Row) = .empty;
-    while (try s.step()) {
-        try rows.append(arena, .{
-            .hit = .{
-                .noteId = try std.fmt.allocPrint(arena, "{d}", .{s.columnInt(0)}),
-                .noteName = try arena.dupe(u8, s.columnText(1)),
-                .pageIndex = s.columnInt(2),
-                .snippet = try escapeSnippet(arena, s.columnText(3), marks),
-                // 0 (a note page) serializes as ABSENT — see `Hit.kind`.
-                .kind = if (s.columnInt(7) == 0) null else s.columnInt(7),
-            },
-            .page_id = s.columnInt(4),
-            .seg_rowid = s.columnInt(5),
-            .updated_at = s.columnInt(6),
-        });
+    fn open(db: sqlite.Db, match: []const u8, user_id: u64, marks: Marks) !Scan {
+        var search = try db.prepare(search_sql);
+        errdefer search.finalize();
+        const band = try db.prepare(band_start_sql);
+        // The invariant parameters. `bindText` copies (SQLITE_TRANSIENT), so
+        // neither `match` nor `marks` has to outlive this call.
+        search.bindText(1, match);
+        search.bindInt(4, @intCast(user_id));
+        search.bindText(6, &marks.open);
+        search.bindText(7, &marks.close);
+        return .{ .search = search, .band = band, .marks = marks };
     }
-    return rows.items;
-}
+
+    fn close(sc: *Scan) void {
+        sc.search.finalize();
+        sc.band.finalize();
+    }
+
+    /// One pass over `[lo, hi]`, newest first, at most `limit` rows.
+    fn rows(sc: *Scan, arena: std.mem.Allocator, lo: i64, hi: i64, limit: i64) ![]Row {
+        const s = sc.search;
+        s.reset();
+        s.bindInt(2, lo);
+        s.bindInt(3, hi);
+        s.bindInt(5, limit);
+
+        var out: std.ArrayList(Row) = .empty;
+        while (try s.step()) {
+            try out.append(arena, .{
+                .hit = .{
+                    .noteId = try std.fmt.allocPrint(arena, "{d}", .{s.columnInt(0)}),
+                    .noteName = try arena.dupe(u8, s.columnText(1)),
+                    .pageIndex = s.columnInt(2),
+                    .snippet = try escapeSnippet(arena, s.columnText(3), sc.marks),
+                    // 0 (a note page) serializes as ABSENT — see `Hit.kind`.
+                    .kind = if (s.columnInt(7) == 0) null else s.columnInt(7),
+                },
+                .page_id = s.columnInt(4),
+                .seg_rowid = s.columnInt(5),
+                .updated_at = s.columnInt(6),
+                .blob_md5 = try arena.dupe(u8, s.columnText(8)),
+            });
+        }
+        return out.items;
+    }
+
+    /// Whether `candidate` is the first page OF `blob_md5` — the band guard's
+    /// one lookup, both halves of it primary-key seeks.
+    fn isBandStart(sc: *Scan, candidate: i64, blob_md5: []const u8) !bool {
+        const s = sc.band;
+        s.reset();
+        s.bindInt(1, candidate);
+        s.bindText(2, blob_md5);
+        return s.step();
+    }
+};
 
 fn hitsOf(arena: std.mem.Allocator, rows: []const Row) ![]const Hit {
     const hits = try arena.alloc(Hit, rows.len);
@@ -1696,6 +1889,26 @@ const Fixture = struct {
         return f.putSpec(user_id, name, .{ .pages = pages });
     }
 
+    /// `n` SEPARATE single-page notes, each matching `term`, ids returned in
+    /// mint order (so ascending masked rowid, and the stream walks them
+    /// backwards). This is the fixture for paginating DOCUMENTS — `putPages`
+    /// makes one document with many pages, which is now ONE result.
+    ///
+    /// Each page's text is made DISTINCT deliberately: identical bytes are
+    /// identical content, so they would deduplicate to one blob and fan a single
+    /// band out across `n` files — a different arrangement, tested separately.
+    fn putNotes(f: *Fixture, user_id: u64, prefix: []const u8, n: usize, term: []const u8) ![]u64 {
+        const ids = try f.a().alloc(u64, n);
+        for (ids, 0..) |*id, i| {
+            id.* = try f.putNote(
+                user_id,
+                try std.fmt.allocPrint(f.a(), "{s}{d:0>2}.note", .{ prefix, i }),
+                &.{try std.fmt.allocPrint(f.a(), "{s} {s}{d}", .{ term, prefix, i })},
+            );
+        }
+        return ids;
+    }
+
     /// The number of documents actually in the FTS index.
     ///
     /// NOT `SELECT COUNT(*) FROM segment_fts` — on an external-content table
@@ -1825,6 +2038,14 @@ const Fixture = struct {
         defer s.finalize();
         _ = try s.step();
         return s.columnInt(0);
+    }
+
+    /// The blob a file is backed by — what `maintain`'s writers are keyed on.
+    fn noteMd5(f: *Fixture, note_id: u64) ![]const u8 {
+        var r = (try f.db.row("SELECT md5 FROM files WHERE id = ?1;", &.{.{ .int = @intCast(note_id) }})) orelse
+            return error.NoFile;
+        defer r.finalize();
+        return f.a().dupe(u8, r.text(0));
     }
 };
 
@@ -2355,28 +2576,33 @@ test "results carry the file id and page index needed to open the hit, ranked an
     var f = try Fixture.init();
     defer f.deinit();
 
+    // TWO documents, not two pages of one: a page of results names documents,
+    // so "two hits" has to come from two files. The match sits on page 2 of the
+    // first, so `pageIndex` is a real coordinate here and not always 0.
     _ = try f.putSpec(1, "many.note", .{ .pages = &.{
-        .{ .layers = &.{.{ .slot = .main, .bitmap = "AAAA" }}, .recogn_status = 1, .recogn_labels = &.{"target one"} },
-        .{ .layers = &.{.{ .slot = .main, .bitmap = "BBBB" }}, .recogn_status = 1, .recogn_labels = &.{"nothing here"} },
+        .{ .layers = &.{.{ .slot = .main, .bitmap = "AAAA" }}, .recogn_status = 1, .recogn_labels = &.{"nothing here"} },
+        .{ .layers = &.{.{ .slot = .main, .bitmap = "BBBB" }}, .recogn_status = 1, .recogn_labels = &.{"still nothing"} },
         .{ .layers = &.{.{ .slot = .main, .bitmap = "CCCC" }}, .recogn_status = 1, .recogn_labels = &.{"target three"} },
     } });
+    _ = try f.putNote(1, "other.note", &.{"target one"});
 
     const r = try f.search(1, "target");
     try testing.expectEqualStrings("target", r.query);
     try testing.expectEqual(@as(usize, 2), r.hits.len);
-    // Both hits name the same file but different pages, in page order.
-    try testing.expectEqualStrings(r.hits[0].noteId, r.hits[1].noteId);
-    try testing.expectEqual(@as(i64, 0), r.hits[0].pageIndex);
-    try testing.expectEqual(@as(i64, 2), r.hits[1].pageIndex);
+    // Two documents, two rows — and each carries the page that opens it.
+    try testing.expect(!std.mem.eql(u8, r.hits[0].noteId, r.hits[1].noteId));
+    const many = hitNamed(r.hits, "many.note").?;
+    try testing.expectEqual(@as(i64, 2), many.pageIndex);
+    try testing.expectEqual(@as(i64, 0), hitNamed(r.hits, "other.note").?.pageIndex);
 
     // The id is the FILE id, resolvable through the normal note endpoints.
-    const id = try std.fmt.parseInt(u64, r.hits[0].noteId, 10);
+    const id = try std.fmt.parseInt(u64, many.noteId, 10);
     const entry = (try f.files.get(1, id)).?;
     defer testing.allocator.free(entry.name);
     defer if (entry.md5) |m| testing.allocator.free(m);
     try testing.expectEqualStrings("many.note", entry.name);
 
-    // The limit is honoured and clamped.
+    // The limit is honoured and clamped — counting DOCUMENTS.
     try testing.expectEqual(@as(usize, 1), (try searchPages(f.a(), testing.io, f.db, 1, "target", 1, null)).hits.len);
     try testing.expectEqual(@as(usize, 0), (try searchPages(f.a(), testing.io, f.db, 1, "target", 0, null)).hits.len);
     try testing.expectEqual(@as(usize, 2), (try searchPages(f.a(), testing.io, f.db, 1, "target", 1_000_000, null)).hits.len);
@@ -2410,8 +2636,12 @@ test "keyset: page 2 resumes exactly, stable under concurrent ingest, and the st
     var f = try Fixture.init();
     defer f.deinit();
 
-    const noisy = try f.putPages(1, "n.note", 30, &.{"target"});
-    _ = noisy;
+    // THIRTY NOTES, one matching page each. The stream pages DOCUMENTS, so 30
+    // results means 30 documents — where this fixture used to be one 30-page
+    // note, which conflated "many pages" with "many results". That conflation is
+    // exactly what the document loop removes; what the test is about (a keyset
+    // resuming exactly across 30 results) is unchanged.
+    const ids = try f.putNotes(1, "n", 30, "target");
 
     const p1 = try f.search(1, "target ");
     try testing.expectEqual(@as(usize, 20), p1.hits.len);
@@ -2424,18 +2654,17 @@ test "keyset: page 2 resumes exactly, stable under concurrent ingest, and the st
     const p2 = try f.searchFrom(1, "target ", p1.cursor.?);
     try testing.expectEqual(@as(usize, 10), p2.hits.len);
     try testing.expect(p2.cursor == null); // the stream is over — said by absence
-    for (p2.hits) |h| try testing.expectEqualStrings("n.note", h.noteName);
+    for (p2.hits) |h| try testing.expect(!std.mem.eql(u8, h.noteName, "mid-stream.note"));
 
-    // Exact resumption: the two pages partition the 30 matching pages — no
+    // Exact resumption: the two pages partition the 30 matching documents — no
     // overlap, nothing skipped.
     var found = [_]bool{false} ** 30;
-    for (p1.hits) |h| {
-        try testing.expect(!found[@intCast(h.pageIndex)]);
-        found[@intCast(h.pageIndex)] = true;
-    }
-    for (p2.hits) |h| {
-        try testing.expect(!found[@intCast(h.pageIndex)]);
-        found[@intCast(h.pageIndex)] = true;
+    for ([_][]const Hit{ p1.hits, p2.hits }) |hits| {
+        for (hits) |h| {
+            const at = std.mem.indexOfScalar(u64, ids, try std.fmt.parseInt(u64, h.noteId, 10)).?;
+            try testing.expect(!found[at]);
+            found[at] = true;
+        }
     }
     for (found) |seen| try testing.expect(seen);
 
@@ -2454,7 +2683,8 @@ test "keyset: page 2 resumes exactly, stable under concurrent ingest, and the st
 test "the cursor rides the wire only when more may exist, is validated on the way in, and cannot cross partitions" {
     var f = try Fixture.init();
     defer f.deinit();
-    _ = try f.putPages(1, "n.note", 25, &.{"target"});
+    // 25 DOCUMENTS — the stream's unit (see the keyset test above).
+    _ = try f.putNotes(1, "n", 25, "target");
     _ = try f.putNote(2, "theirs.note", &.{"target secret"});
 
     // More exists → cursor present on the wire; NO total anywhere.
@@ -2484,6 +2714,187 @@ test "the cursor rides the wire only when more may exist, is validated on the wa
     const forged = try encodeCursor(f.a(), partition.rowidOf(p2, 999));
     const crossed = try f.searchFrom(1, "target ", forged);
     try testing.expectEqual(@as(usize, 0), crossed.hits.len);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — the document loop: one hit per band, and the guarded jump past it
+// ---------------------------------------------------------------------------
+
+test "THE OWNING-DOCUMENT TEST: a 40-page match is ONE row, and the notes it used to bury are on the same page" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // The reported bug, reproduced exactly. Five small notes go in FIRST, then
+    // the planner — so the planner owns the newest (highest) rowids and the
+    // recency-ordered scan reaches its band before anything else. Its 40
+    // matching pages used to fill the whole 20-row page twice over, and the
+    // client groups hits by note, so the user saw ONE row, clicked "More", and
+    // got the same one row again: "no results yet" meant "no OTHER documents".
+    const small = try f.putNotes(1, "small", 5, "target");
+    const planner = try f.putPages(1, "planner.note", 40, &.{"target"});
+
+    const r = try f.search(1, "target ");
+
+    // Six documents, six rows — the planner contributes exactly one.
+    try testing.expectEqual(@as(usize, 6), r.hits.len);
+    var planner_hits: usize = 0;
+    for (r.hits) |h| {
+        if (std.mem.eql(u8, h.noteName, "planner.note")) planner_hits += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), planner_hits);
+
+    // And every note the planner used to bury is on the SAME page, not pages
+    // deep behind a "More results" control.
+    for (0..small.len) |i| {
+        const name = try std.fmt.allocPrint(f.a(), "small{d:0>2}.note", .{i});
+        try testing.expect(hitNamed(r.hits, name) != null);
+    }
+    // Six is everything there is, so the stream is over and says so.
+    try testing.expect(r.cursor == null);
+
+    // Completeness did not vanish, it MOVED: in-doc still has all 40 pages, and
+    // is now the only thing claiming to know that number.
+    try testing.expectEqual(@as(usize, 40), (try f.searchNote(1, planner, "target ")).pages.len);
+}
+
+test "THE JUMP NEVER SKIPS A NEIGHBOUR: the band below an emitted one is still reached" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // Two multi-page bands laid down back to back, so the second band's LAST
+    // rowid is exactly one below the first band's start: there is no gap for a
+    // sloppy jump to land in harmlessly. An off-by-one in `bandStart` swallows
+    // `first.note` whole and says nothing.
+    const first = try f.putLabeled(1, "first.note", &.{ "target a0", "target a1", "target a2" });
+    const second = try f.putLabeled(1, "second.note", &.{ "target b0", "target b1", "target b2" });
+
+    const fi = try f.noteSegIds(first);
+    const si = try f.noteSegIds(second);
+    try testing.expectEqual(fi[fi.len - 1] + 1, si[0]); // genuinely adjacent
+
+    const r = try f.search(1, "target ");
+    try testing.expectEqual(@as(usize, 2), r.hits.len);
+    // Each named once, each on its own last matching page (rowid DESC within
+    // the band), and the older band is NOT swallowed by the newer one's jump.
+    try testing.expectEqual(@as(i64, 2), hitNamed(r.hits, "first.note").?.pageIndex);
+    try testing.expectEqual(@as(i64, 2), hitNamed(r.hits, "second.note").?.pageIndex);
+}
+
+test "A NON-CANONICAL BAND DEGRADES TO A STEP: an appended page's fresh tail rowid never skips its neighbours" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // `doc.note` (6 matching pages), then three separate notes ABOVE its band.
+    const doc = try f.putLabeled(1, "doc.note", &.{
+        "target p0", "target p1", "target p2", "target p3", "target p4", "target p5",
+    });
+    _ = try f.putNotes(1, "mid", 3, "target");
+    const md5 = try f.noteMd5(doc);
+
+    // A later re-parse finds a SEVENTH page. `mintPageForHolders` gives it a
+    // FRESH TAIL rowid — above everything, with no arithmetic relation to its
+    // `page_index` of 6. Unguarded, `R - page_index` would land inside the
+    // original band and the jump would step over all three `mid` notes AND the
+    // rest of `doc`'s own band, losing four results without a word.
+    {
+        var s = try f.db.prepare(
+            "INSERT INTO note_page_index(blob_md5, page_index, content_hash, width, height, layers, recogn_status, text) " ++
+                "VALUES(?1, 6, 'appended', 0, 0, x'', 1, ?2);",
+        );
+        defer s.finalize();
+        s.bindText(1, md5);
+        s.bindText(2, "target appended later");
+        _ = try s.step();
+    }
+    try maintain.mintPageForHolders(f.db, md5, 6, 0);
+
+    const appended = try f.noteSegRowid(doc, 6);
+    const band = try f.noteSegIds(doc);
+    try testing.expect(appended > band[0] + 6); // genuinely out of band
+
+    const r = try f.search(1, "target ");
+
+    // The guard refused the jump and stepped by one instead, so nothing below
+    // the appended page was skipped: all three `mid` notes are here.
+    for (0..3) |i| {
+        const name = try std.fmt.allocPrint(f.a(), "mid{d:0>2}.note", .{i});
+        try testing.expect(hitNamed(r.hits, name) != null);
+    }
+    // `doc.note` surfaces twice — the appended page is its own one-page run, and
+    // the original band is a second. That is the documented cost of the
+    // degraded path (the client merges by note id), never a lost result.
+    var doc_hits: usize = 0;
+    for (r.hits) |h| {
+        if (std.mem.eql(u8, h.noteName, "doc.note")) doc_hits += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), doc_hits);
+    try testing.expectEqual(@as(usize, 5), r.hits.len);
+}
+
+test "KEYSET ACROSS THE JUMP: page 2 resumes below the last band, with no repeat and no gap" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const a = try f.putLabeled(1, "a.note", &.{ "target a0", "target a1", "target a2" });
+    const b = try f.putLabeled(1, "b.note", &.{ "target b0", "target b1", "target b2" });
+    const c = try f.putLabeled(1, "c.note", &.{ "target c0", "target c1", "target c2" });
+    _ = a;
+    _ = c;
+
+    // Two DOCUMENTS per page, so the boundary falls in the middle of the stream
+    // rather than at its end.
+    const p1 = try searchPages(f.a(), testing.io, f.db, 1, "target ", 2, null);
+    try testing.expectEqual(@as(usize, 2), p1.hits.len);
+    try testing.expect(p1.cursor != null);
+
+    // The cursor is the JUMP TARGET — the start of the last emitted band — not
+    // the last kept row. That is what makes page 2 resume below the whole band
+    // instead of walking back through its remaining pages.
+    try testing.expectEqual((try f.noteSegIds(b))[0], decodeCursor(p1.cursor.?).?);
+
+    const p2 = try searchPages(f.a(), testing.io, f.db, 1, "target ", 2, p1.cursor.?);
+    try testing.expectEqual(@as(usize, 1), p2.hits.len);
+    try testing.expect(p2.cursor == null); // exhausted, said by absence
+
+    // The two pages partition the three documents: nothing twice, nothing lost.
+    for ([_][]const u8{ "a.note", "b.note", "c.note" }) |name| {
+        const in_p1 = hitNamed(p1.hits, name) != null;
+        const in_p2 = hitNamed(p2.hits, name) != null;
+        try testing.expect(in_p1 != in_p2);
+    }
+}
+
+test "FANOUT: two files of one blob both surface from the single band they share" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // A copy of a notebook is the SAME content, so it deduplicates to one blob
+    // and one segment band — but it is a second library entry, and a hit on the
+    // shared page belongs to both. The loop therefore takes every row at the
+    // matched rowid BEFORE it jumps; taking only the first would drop a real
+    // file, and jumping first would drop it silently.
+    const spec: nb.Spec = .{ .pages = &.{
+        .{ .layers = &.{.{ .slot = .main, .bitmap = "AAAA" }}, .recogn_status = 1, .recogn_labels = &.{"target one"} },
+        .{ .layers = &.{.{ .slot = .main, .bitmap = "BBBB" }}, .recogn_status = 1, .recogn_labels = &.{"target two"} },
+    } };
+    _ = try f.putSpec(1, "original.note", spec);
+    _ = try f.putSpec(1, "copy.note", spec);
+    _ = try f.putNote(1, "other.note", &.{"target elsewhere"});
+
+    // One band for the shared blob (segment rows are per owner×segment), plus
+    // the single page of `other.note`.
+    try testing.expectEqual(@as(i64, 3), try f.count("SELECT COUNT(*) FROM segment_search;"));
+
+    const r = try f.search(1, "target ");
+    try testing.expectEqual(@as(usize, 3), r.hits.len);
+    const original = hitNamed(r.hits, "original.note").?;
+    const copy = hitNamed(r.hits, "copy.note").?;
+    // Both files, at the SAME page — one segment, fanned out by the `files`
+    // join — and they are different library entries.
+    try testing.expectEqual(original.pageIndex, copy.pageIndex);
+    try testing.expect(!std.mem.eql(u8, original.noteId, copy.noteId));
+    // And the jump past the shared band still left the next document reachable.
+    try testing.expect(hitNamed(r.hits, "other.note") != null);
 }
 
 test "MASK FOR SPEED, JOIN FOR CORRECTNESS: a forged segment row cannot cross users" {
@@ -3185,29 +3596,32 @@ test "THE CROWDING TEST: a note whose hits are pushed out of the library result 
 
     // `noisy.note` matches on 30 pages, `quiet.note` on 3. This is exactly the
     // arrangement in which a per-note counter built on the library-wide search
-    // reports a total that is silently wrong: 33 matches, a 20-hit page.
+    // reports a total that is silently wrong: 33 matches, and a page that names
+    // two rows.
     //
     // (Pre-partitioning, bm25 ranked noisy's one-word pages above ALL of
-    // quiet's and the page was 20×noisy. Selection is now recency-ordered
-    // early termination — the 20 most recent matching segments — so the page
-    // holds quiet's 3 newest pages plus 17 of noisy's, per decision 6 of
-    // search-architecture.md. The truncation, which is what this test is
-    // about, is unchanged: 13 matching pages are not in the answer.)
+    // quiet's and the page was 20×noisy. Then it was recency-ordered early
+    // termination — 17 of noisy's pages plus quiet's 3. The truncation this
+    // test is about is now DOCUMENT-level and total: each file contributes one
+    // hit and 31 of the 33 matching pages are not in the answer, which is the
+    // point — the library-wide read says WHICH documents, never how much of
+    // one.)
     const noisy = try f.putPages(1, "noisy.note", 30, &.{"target"});
     const quiet = try f.putPages(1, "quiet.note", 3, &.{ "target here", "target again" });
 
-    // The library-wide search truncates — and says "more", never a total.
+    // The library-wide search names both documents, once each — and there is
+    // nothing below them, so it says so by omitting the cursor. Never a total.
     const wide = try f.search(1, "target ");
-    try testing.expectEqual(@as(usize, @intCast(default_limit)), wide.hits.len);
-    try testing.expect(wide.cursor != null);
+    try testing.expectEqual(@as(usize, 2), wide.hits.len);
+    try testing.expect(wide.cursor == null);
     var noisy_hits: usize = 0;
     var quiet_hits: usize = 0;
     for (wide.hits) |h| {
         if (std.mem.eql(u8, h.noteName, "noisy.note")) noisy_hits += 1;
         if (std.mem.eql(u8, h.noteName, "quiet.note")) quiet_hits += 1;
     }
-    try testing.expectEqual(@as(usize, 17), noisy_hits);
-    try testing.expectEqual(@as(usize, 3), quiet_hits);
+    try testing.expectEqual(@as(usize, 1), noisy_hits);
+    try testing.expectEqual(@as(usize, 1), quiet_hits);
 
     // Scoped, `quiet.note` reports every page it has, and a count per page: two
     // words per page, because that is how many ovals the reader will draw.
@@ -3353,13 +3767,45 @@ fn globalDocPages(f: *Fixture, user_id: u64, note_name: []const u8, q: []const u
     return pages.items;
 }
 
-/// The pages `searchNotePages` returns for `q`, already page-ordered, as a bare
-/// index list for set comparison.
+/// The pages `searchNotePages` returns for `q`, sorted, as a bare index list.
+/// Sorted rather than left in `rowid ASC` order because a HAND-SCATTERED band
+/// (the legacy multi-range shape) makes rowid order and page order differ, and
+/// these are set comparisons.
 fn inDocPages(f: *Fixture, user_id: u64, note_id: u64, q: []const u8) ![]i64 {
     const r = try f.searchNote(user_id, note_id, q);
     const out = try f.a().alloc(i64, r.pages.len);
     for (r.pages, out) |p, *o| o.* = p.pageIndex;
+    std.sort.pdq(i64, out, {}, std.sort.asc(i64));
     return out;
+}
+
+/// The hit for `name`, or null. The per-document assertions read by name rather
+/// than by index because the display sort, not the scan, decides row order.
+fn hitNamed(hits: []const Hit, name: []const u8) ?Hit {
+    for (hits) |h| if (std.mem.eql(u8, h.noteName, name)) return h;
+    return null;
+}
+
+/// THE REPLACEMENT FOR GLOBAL↔IN-DOC SET EQUALITY, asserted wherever that
+/// equality used to be. Global search names DOCUMENTS now, so it is a strict
+/// subset of in-doc BY DESIGN — the properties that must survive, and do, are:
+///
+///   - **Document parity.** Global names the document exactly when in-doc finds
+///     something. Both directions: never fabricated, never omitted.
+///   - **Representative honesty.** Every page global names is a page in-doc also
+///     returns — a member of the set, not an arbitrary index.
+///   - **No repeats.** A page is never named twice in one drained stream.
+///
+/// What is deliberately NOT asserted is completeness, which is now in-doc's
+/// alone: global does not claim how many pages of a document matched. The count
+/// of global's entries is left to the caller, because it is "once per BAND" — a
+/// canonical document is one band, a hand-scattered one is several.
+fn expectDocParity(global: []const i64, in_doc: []const i64) !void {
+    try testing.expectEqual(in_doc.len == 0, global.len == 0);
+    for (global, 0..) |g, i| {
+        try testing.expect(std.mem.indexOfScalar(i64, in_doc, g) != null);
+        try testing.expect(std.mem.indexOfScalar(i64, global[i + 1 ..], g) == null);
+    }
 }
 
 test "IN-DOC SCOPE: the derived ranges ARE the document's segment span, far narrower than the partition" {
@@ -3420,10 +3866,17 @@ test "EXPLAIN PIN (in-doc): the note-scoped query still pushes its rowid bracket
     }
 }
 
-test "IDENTICAL RESULTS: the in-doc hit set equals global search filtered to the note (the non-negotiable)" {
+test "DOCUMENT PARITY (the non-negotiable): global names the note iff in-doc finds it, once, on a page in-doc returns" {
     var f = try Fixture.init();
     defer f.deinit();
 
+    // This pin used to assert global∩doc EQUALS the in-doc set. One hit per
+    // document retires that equality deliberately — global is a strict subset by
+    // design, and the excerpt it shows is a representative, not an inventory.
+    // What replaces it is `expectDocParity` (see there): presence in both
+    // directions, and every page named being a real one. Completeness within a
+    // document is now in-doc's claim and nobody else's.
+    //
     // A noisy note that crowds the library result, so the parity has to survive
     // global truncation (globalDocPages drains the stream to defeat it).
     _ = try f.putPages(1, "noisy.note", 30, &.{"common"});
@@ -3436,15 +3889,23 @@ test "IDENTICAL RESULTS: the in-doc hit set equals global search filtered to the
     });
 
     // common (frequent, crowded), alpha (rare), avaliacao (diacritic-folded),
-    // "avali" (prefix, still-typing). For EACH, in-doc == global∩doc, exactly.
+    // "avali" (prefix, still-typing). For EACH: in-doc finds the doc, and global
+    // names it exactly ONCE — the band is canonical, so one band is one hit —
+    // on a page in-doc also returns.
     for ([_][]const u8{ "common ", "alpha ", "avaliacao ", "avali" }) |q| {
         const g = try globalDocPages(&f, 1, "doc.note", q);
         const d = try inDocPages(&f, 1, doc, q);
-        try testing.expectEqualSlices(i64, g, d);
+        try testing.expect(d.len > 0);
+        try testing.expectEqual(@as(usize, 1), g.len);
+        try expectDocParity(g, d);
     }
     // And a term the doc does NOT carry is empty on both sides — parity includes
-    // the negative.
-    try testing.expectEqualSlices(i64, try globalDocPages(&f, 1, "doc.note", "zzzptl "), try inDocPages(&f, 1, doc, "zzzptl "));
+    // the negative, which is the "iff" half a subset relation alone would lose.
+    try expectDocParity(
+        try globalDocPages(&f, 1, "doc.note", "zzzptl "),
+        try inDocPages(&f, 1, doc, "zzzptl "),
+    );
+    try testing.expectEqual(@as(usize, 0), (try globalDocPages(&f, 1, "doc.note", "zzzptl ")).len);
 }
 
 /// The UNION of every SMALL batch of an in-doc search, sorted, with a duplicate
@@ -3484,11 +3945,18 @@ test "BATCHED IDENTICAL RESULTS (the non-negotiable): the UNION of in-doc batche
 
     // SINGLE-RANGE (canonical band): for a common term (12 pages, batch 3 ⇒ 4+
     // batches), a rare per-page term, and a term the doc lacks, the batched union
-    // equals global filtered to the doc — no drop or dup at any boundary.
+    // equals the UNBATCHED in-doc result — no drop or dup at any boundary. This
+    // half is the one that matters most here and it is unchanged in substance:
+    // it never depended on global, and now does not mention it.
     for ([_][]const u8{ "common ", "alpha3 ", "zzzptl " }) |q| {
-        const g = try globalDocPages(&f, 1, "doc.note", q);
+        const d = try inDocPages(&f, 1, doc, q);
         const bd = try batchedInDocPages(&f, 1, doc, q, 3);
-        try testing.expectEqualSlices(i64, g, bd);
+        try testing.expectEqualSlices(i64, d, bd);
+        // The GLOBAL half re-anchors to document parity: one canonical band, so
+        // one hit, on a page the batches also produced.
+        const g = try globalDocPages(&f, 1, "doc.note", q);
+        try testing.expectEqual(@as(usize, if (d.len == 0) 0 else 1), g.len);
+        try expectDocParity(g, bd);
     }
 
     // MULTI-RANGE (hand-scattered band): scatter pages 1,4,7,10 to tail rowids so
@@ -3497,9 +3965,15 @@ test "BATCHED IDENTICAL RESULTS (the non-negotiable): the UNION of in-doc batche
     try f.scatterPages(1, doc, &.{ 1, 4, 7, 10 });
     try testing.expect((try docSegmentRanges(f.a(), f.db, doc, 1, (try partitionBounds(&f, 1)).lo, (try partitionBounds(&f, 1)).hi, false)).len > 1);
     for ([_][]const u8{ "common ", "alpha7 " }) |q| {
-        const g = try globalDocPages(&f, 1, "doc.note", q);
+        const d = try inDocPages(&f, 1, doc, q);
         const bd = try batchedInDocPages(&f, 1, doc, q, 2);
-        try testing.expectEqualSlices(i64, g, bd);
+        try testing.expectEqualSlices(i64, d, bd);
+        // Parity holds per BAND, which is what a scattered document tests: the
+        // four hand-scattered pages are their own one-page bands, so global may
+        // name this document several times. Every one of them must still be a
+        // page in-doc returns, and none of them twice.
+        const g = try globalDocPages(&f, 1, "doc.note", q);
+        try expectDocParity(g, bd);
     }
 }
 

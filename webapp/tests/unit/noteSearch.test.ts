@@ -517,10 +517,7 @@ describe("createNoteSearch", () => {
 
   // The result row's quiet metadata — what replaced the strip of page chips.
   describe("pageSummary", () => {
-    it("gets its singular right", () => {
-      // The tell that a count was interpolated rather than written is
-      // "Matches on 1 pages", so this is the branch, not decoration.
-      expect(pageSummary(1)).toBe("Matches on 1 page");
+    it("gets its plural right", () => {
       expect(pageSummary(2)).toBe("Matches on 2 pages");
       expect(pageSummary(20)).toBe("Matches on 20 pages");
     });
@@ -532,6 +529,15 @@ describe("createNoteSearch", () => {
       expect(pageSummary(-1)).toBeNull();
     });
 
+    // Global search names DOCUMENTS: one hit per note, so a group of one is the
+    // ordinary case. "Matches on 1 page" would ride nearly every row, and for a
+    // notebook the query reached on three hundred pages it would state a reach
+    // the row does not know. The claim moves to find-in-note, which does.
+    it("says nothing for a single-page group, because it would not be true", () => {
+      expect(pageSummary(1)).toBeNull();
+      expect(pageSummary(1, 1)).toBeNull();
+    });
+
     // IT COUNTS PAGES, NOT MATCHES, and that is the load-bearing part. The
     // library-wide route returns one row per matching page with an excerpt and no
     // tally; only the note-scoped route find uses carries `matches`. A row
@@ -539,11 +545,10 @@ describe("createNoteSearch", () => {
     // query would be a second source of truth for one number — so the row says
     // what it knows and leaves the tally to the one place that has it.
     it("never claims a match count it was not given", () => {
-      for (const n of [1, 3, 12]) expect(pageSummary(n)).not.toMatch(/match(es)? /);
+      for (const n of [3, 12]) expect(pageSummary(n)).not.toMatch(/match(es)? /);
     });
 
     it("switches the unit for a .txt: paragraphs, not pages", () => {
-      expect(pageSummary(1, 1)).toBe("Matches in 1 paragraph");
       expect(pageSummary(3, 1)).toBe("Matches in 3 paragraphs");
       expect(pageSummary(0, 1)).toBeNull();
     });

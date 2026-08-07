@@ -427,8 +427,28 @@ export function groupHits(hits: readonly SearchHit[]): NoteHits[] {
  * matched, and "Matches on 0 pages" would make the reader parse a number to
  * learn that the title above it was the whole answer.
  *
- * Singulars are the point of the branch, not decoration — "Matches on 1 pages"
- * is the tell that a count was interpolated rather than written.
+ * ## `null` for ONE page too, since global search names documents
+ *
+ * The server returns one hit per document now (it seeks past the rest of the
+ * band rather than paginating through it), so a group of one is the ordinary
+ * case and this line would read "Matches on 1 page" on nearly every row. That is
+ * noise where it is merely redundant, and for a notebook the query reached on
+ * three hundred pages it is a LIE — it states a reach the row does not know.
+ * Note the count was never a total even before: it only ever counted the hits
+ * inside the fetched window.
+ *
+ * So the row stops claiming to know, and the claim moves to the one place that
+ * does: opening the result starts find-in-note on the same query, which gives
+ * the honest note-wide tally and every page with it.
+ *
+ * A group larger than one still says so. That happens when a document genuinely
+ * surfaced more than once in the stream — an appended-page run, or a band a past
+ * edit left non-canonical — and the number is then a real floor on what was
+ * reached, the same floor it always was.
+ *
+ * Singulars are kept for the `.txt`/paragraph reading and as the tell that a
+ * count was written rather than interpolated, even though only the plural branch
+ * is now reachable.
  *
  * `kind` switches the UNIT with the source type: a `.note`'s hits are PAGES, a
  * `.txt`'s are PARAGRAPHS. The wording is otherwise identical — one quiet line
@@ -436,7 +456,7 @@ export function groupHits(hits: readonly SearchHit[]): NoteHits[] {
  * the query reach") is the same; only what a segment IS differs.
  */
 export function pageSummary(pages: number, kind = 0): string | null {
-  if (pages <= 0) return null;
+  if (pages <= 1) return null;
   if (kind === 1) return `Matches in ${pages} ${pages === 1 ? "paragraph" : "paragraphs"}`;
   return `Matches on ${pages} ${pages === 1 ? "page" : "pages"}`;
 }
