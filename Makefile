@@ -91,6 +91,12 @@ server/8089/serve.zon:
 	  '    .cred_key_path = "cred.key",' \
 	  '    .data_dir = "data",' \
 	  '    .web_dir = "../../webapp/dist",' \
+	  '' \
+	  '    // Login of the administrator created on the FIRST run only, with a' \
+	  '    // temporary password printed to this terminal. Must be an email:' \
+	  '    // the sign-in form will not submit anything else. Changing it after' \
+	  '    // that first run renames nothing — the account already exists.' \
+	  '    .admin_email = "admin@home.lan",' \
 	  '}' > $@
 	@echo ">>> Created $@ (host 0.0.0.0, port $(PORT)). Edit it to taste."
 

@@ -125,6 +125,20 @@ on every interface, so there is nothing to edit to get going.
 It also prints the first-run admin password described below — keep that terminal
 where you can read it.
 
+The config it writes is **`server/8089/serve.zon`**, and it is written once and
+never regenerated, because it names a live database. That is the file to edit.
+`serve-run.zon` beside it is derived and disposable: every `make serve` rebuilds
+it from `serve.zon` with only the port substituted, so changes made there are
+lost on the next run.
+
+To start it again later, either works — `make serve` rebuilds first, the binary
+does not:
+
+```sh
+make serve
+./zig-out/bin/inkhold --config=server/8089/serve.zon
+```
+
 ## First run
 
 Whichever way you started it, the first start does the same three things.
@@ -133,9 +147,11 @@ Whichever way you started it, the first start does the same three things.
 TLS, all from the same program — **8089 by default**. Change it with `.port` in
 your config, or `make serve PORT=9000`.
 
-**It creates an `admin` account and prints a temporary password to the terminal.**
-That password is shown once. Note it down: you will be asked to change it the
-first time you sign in.
+**It creates an `admin@home.lan` account and prints a temporary password to the
+terminal.** That password is shown once. Note it down: you will be asked to
+change it the first time you sign in. Sign in with the full address, not just
+`admin`. To use a different one, set `.admin_email` in your config **before** the
+first start — afterwards the account exists and changing it renames nothing.
 
 **It serves the browser app at `http://<LAN-IP>:<port>`.** Open that and sign in.
 `make lan-ip` prints the address; without the repository, `hostname -I` will do.
@@ -178,7 +194,11 @@ are optional; omitted ones use defaults:
 **`host`** — the one worth getting right: `127.0.0.1` (the default) is reachable
 only from the machine itself. Use `0.0.0.0`, or your server's LAN address.
 
-Then `port`, `db_path`, `data_dir`, `web_dir`, `cred_key_path`, `admin_email`,
+**`admin_email`** — has to be an email. Sign-in will not accept anything else, so
+the server refuses to start rather than create an administrator you could not log
+in as. It applies on the **first run only**.
+
+Then `port`, `db_path`, `data_dir`, `web_dir`, `cred_key_path`,
 `max_connections`, and `tls` (`enabled`, `cert_path`, `key_path`, `cipher_suites`).
 
 ## TLS

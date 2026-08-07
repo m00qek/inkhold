@@ -306,6 +306,33 @@ pub fn execute(
             // CREATED if it is not there. First run is a real case.
             var loaded = try config.loadFileOrDefault(gpa, io, inv.configPath());
             defer loaded.deinit();
+
+            // REFUSE TO MINT AN ACCOUNT NOBODY CAN SIGN IN AS. The first-run
+            // bootstrap creates the admin from this field, and the sign-in form
+            // is `type="email"`, so a value that is not an email produces an
+            // install with a working password for an unusable login — and there
+            // is no `users create` or `users rename` to climb out with. Caught
+            // here, before the database is opened, because the failure it
+            // replaces was silent and terminal (inkhold-beta#11).
+            if (!config.looksLikeEmail(loaded.config.admin_email)) {
+                try err.print(
+                    \\{[b]s}`admin_email` is not an email address:{[r]s} {[e]s}
+                    \\  {[d]s}(as `admin_email` in {[cfg]s}){[r]s}
+                    \\
+                    \\{[b]s}Nothing was created.{[r]s} Sign-in requires an email, so the first-run
+                    \\administrator would be an account you could not log in as. Set it to
+                    \\something like {[b]s}admin@home.lan{[r]s} and start again.
+                    \\
+                , .{
+                    .b = st.bold,
+                    .d = st.dim,
+                    .r = st.reset,
+                    .e = loaded.config.admin_email,
+                    .cfg = inv.configPath(),
+                });
+                return exit_failed;
+            }
+
             try app.run(gpa, io, loaded.config, &routes.routes);
             return exit_ok;
         },

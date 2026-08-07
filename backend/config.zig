@@ -76,7 +76,18 @@ pub const Config = struct {
     /// alongside the device sync API — one port for everything. See http/static.zig.
     web_dir: []const u8 = "",
     /// Email/login of the auto-created first-run administrator.
-    admin_email: []const u8 = "admin",
+    ///
+    /// IT HAS TO BE AN EMAIL, and the default used to be `"admin"`, which is not
+    /// one. The sign-in field is `type="email"`, so the browser refused to submit
+    /// the very account the server had just minted: a fresh `make serve` install
+    /// printed a temporary password for an account nothing could log in as, and
+    /// the CLI has no create-or-rename command to undo it. `config.example.zon`
+    /// always said `admin@home.lan`, so only the path that takes the DEFAULT —
+    /// `make serve`, which is what the README's quick start tells a new user to
+    /// run — was broken. Reported from a clean build (inkhold-beta#11).
+    ///
+    /// `looksLikeEmail` rejects the rest at startup rather than at first sign-in.
+    admin_email: []const u8 = "admin@home.lan",
     /// Maximum connections in flight at once. Serve mode runs a thread per
     /// connection, so this is what bounds thread (and therefore memory) growth
     /// under a connection flood: `max_connections * http.transport.conn_stack_size`
@@ -117,6 +128,24 @@ pub const Loaded = struct {
         self.arena.deinit();
     }
 };
+
+/// Is `s` shaped like an email — something `<input type="email">` will submit?
+///
+/// DELIBERATELY THE BROWSER'S RULE, not RFC 5322. The only thing that matters is
+/// whether the sign-in form will accept the identity the server minted, so this
+/// mirrors the HTML5 constraint: a non-empty local part, one `@`, a non-empty
+/// domain, and no whitespace. Note it does NOT require a dot — `admin@home` is a
+/// valid HTML5 email and a perfectly good household login, and rejecting it here
+/// would refuse an account the browser would have accepted.
+pub fn looksLikeEmail(s: []const u8) bool {
+    const at = std.mem.indexOfScalar(u8, s, '@') orelse return false;
+    if (at == 0 or at + 1 == s.len) return false;
+    // A SECOND `@` is not an email. `indexOfScalar` finds the first, so without
+    // this `a@b@c` would pass on the strength of its first one.
+    if (std.mem.indexOfScalarPos(u8, s, at + 1, '@') != null) return false;
+    for (s) |c| if (std.ascii.isWhitespace(c)) return false;
+    return true;
+}
 
 pub const ParseError = error{ OutOfMemory, ParseZon };
 
@@ -281,10 +310,33 @@ test "defaults fill in for a minimal config" {
     try std.testing.expectEqualStrings("certs/cert.pem", loaded.config.tls.cert_path);
     try std.testing.expectEqualStrings("inkhold.db", loaded.config.db_path);
     try std.testing.expectEqualStrings("data", loaded.config.data_dir);
-    try std.testing.expectEqualStrings("admin", loaded.config.admin_email);
+    // AN EMAIL, because the sign-in field is `type="email"` and will not submit
+    // anything else. The default was `"admin"`, which locked a fresh `make serve`
+    // install out of the account it had just created (inkhold-beta#11).
+    try std.testing.expectEqualStrings("admin@home.lan", loaded.config.admin_email);
+    try std.testing.expect(looksLikeEmail(loaded.config.admin_email));
     // Hot-cache versioning defaults.
     try std.testing.expectEqual(@as(u32, 5), loaded.config.history.keep);
     try std.testing.expectEqual(@as(u64, 500_000_000), loaded.config.history.max_bytes);
+}
+
+test "looksLikeEmail accepts what the sign-in field accepts, and nothing else" {
+    // THE ONE THAT MATTERS: the old default. It reached the database, printed a
+    // password, and then could never be typed into a `type="email"` field.
+    try std.testing.expect(!looksLikeEmail("admin"));
+
+    // No dot required — `admin@home` is a valid HTML5 email and a fine household
+    // login. Rejecting it would refuse an account the browser would have taken.
+    try std.testing.expect(looksLikeEmail("admin@home"));
+    try std.testing.expect(looksLikeEmail("admin@home.lan"));
+    try std.testing.expect(looksLikeEmail("a@b"));
+
+    try std.testing.expect(!looksLikeEmail(""));
+    try std.testing.expect(!looksLikeEmail("@home.lan")); // no local part
+    try std.testing.expect(!looksLikeEmail("admin@")); // no domain
+    try std.testing.expect(!looksLikeEmail("a@b@c")); // the second `@`
+    try std.testing.expect(!looksLikeEmail("admin home@lan")); // whitespace
+    try std.testing.expect(!looksLikeEmail("admin@home lan"));
 }
 
 test "history bounds parse from a partial config" {
