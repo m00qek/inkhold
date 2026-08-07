@@ -1,4 +1,4 @@
-// THE NAME-CONFLICT PROMPT (docs/scratch/upload.md) — what the interface asks
+// THE NAME-CONFLICT PROMPT — what the interface asks
 // when a dropped file is already in the folder.
 //
 // WHY IT ASKS AT ALL, since the server can silently auto-rename: the main use of

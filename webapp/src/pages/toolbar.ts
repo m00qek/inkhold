@@ -3,7 +3,7 @@
 // the library: the controls are DATA ({@link ToolbarSpec}), and one painter turns
 // them into a semantic `role="toolbar"` with two zones. The reader is its first
 // consumer; a `.spd`/`.txt`/image viewer plugs in by handing a different `view`
-// array and the SAME `file` array (see `docs/scratch/toolbar.md`).
+// array and the SAME `file` array.
 //
 // THE CORE IDEA, AS STRUCTURE. Two `role="group"`s divided by a decorative
 // divider: the LEFT/`view` zone is contextual — "how do I look at *this*" — and
@@ -45,7 +45,7 @@ export interface ToolbarButton {
   title?: string;
   /**
    * Icon with no visible text — the collapsed end of the width lever the
-   * responsive pass will drive (`toolbar.md`: icon+label ⟷ icon-only is a width
+   * responsive pass will drive (icon+label ⟷ icon-only is a width
    * lever, not a taste). The `aria-label` stays either way, so the control keeps
    * its name when the words are gone.
    */
@@ -180,7 +180,7 @@ export function createToolbar(spec: ToolbarSpec): Toolbar {
   root.append(el("span", { class: "toolbar__spacer" }));
   root.append(zone("toolbar__group", spec.viewLabel, spec.view));
   // Decorative only: a CSS divider, hidden from assistive tech, carrying no text.
-  // `toolbar.md` is emphatic that this is not an ornament and not a `|` — it is
+  // This is emphatically not an ornament and not a `|` — it is
   // the load-bearing landmark that keeps the universal zone in a predictable spot.
   root.append(el("span", { class: "toolbar__sep", "aria-hidden": "true" }));
   root.append(zone("toolbar__group toolbar__group--file", spec.fileLabel, spec.file));

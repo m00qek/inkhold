@@ -6,7 +6,7 @@
 //! Some file types ship a ready-made preview image *inside* the file, so the
 //! server can hand the library a thumbnail WITHOUT rendering a single pixel —
 //! the one thing this project's "client renders, server does not rasterise"
-//! rule forbids (see `docs/explanation/client-side-rendering.md`). Two such
+//! rule forbids. Two such
 //! types exist today:
 //!
 //!   - a `.spd` (an SQLite drawing): `SELECT value FROM config WHERE
@@ -119,8 +119,8 @@ fn extensionOf(name: []const u8) ?[]const u8 {
 /// The formats an embedded thumbnail can be derived FROM, recognized by a
 /// blob's own leading bytes. The on-demand repair dispatches on this: the
 /// `/thumbnail/{hash}` URL carries only an md5, so the blob's magic — not a
-/// filename — decides which extractor could serve it (plan decision 3 in
-/// docs/scratch/archive/notes-with-covers.md). `.none` means neither format claims the
+/// filename — decides which extractor could serve it.
+/// `.none` means neither format claims the
 /// bytes and the serve path 404s WITHOUT deriving anything.
 pub const SourceKind = enum { spd, note, none };
 

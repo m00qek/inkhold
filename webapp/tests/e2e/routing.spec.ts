@@ -3,7 +3,7 @@ import { mockApi } from "./helpers/mockApi";
 import { signedIn, cardButton, railSettled } from "./helpers/app";
 
 // THE RULE, END TO END: every place has a URL; every navigation pushes and every
-// adjustment replaces. See docs/explanation/routing.md.
+// adjustment replaces.
 //
 // These tests are deliberately about the RULE rather than about the route table.
 // A spec that only checked `#/folder/:id` appears in the address bar would pass

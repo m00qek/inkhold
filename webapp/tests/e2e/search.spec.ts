@@ -522,7 +522,7 @@ test.describe("universal search", () => {
 
   // KEYSET PAGING. The server clamps a search response at 20 hits and NEVER
   // serves a total — the early-terminating query stops at the page boundary
-  // precisely so it does not count the rest (search-architecture.md decision
+  // precisely so it does not count the rest (decision
   // 6). What it serves instead is an opaque cursor, present exactly while more
   // hits may exist; the UI's whole vocabulary for that is a "+" floor in the
   // header and one "More results" control that spends the cursor.

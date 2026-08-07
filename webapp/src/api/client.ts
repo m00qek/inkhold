@@ -1,5 +1,5 @@
 // Typed wrappers over the Zig server's HTTP API (see backend/server.zig and
-// docs/auth.md). Sessions are carried by the HttpOnly `sn_session` cookie, so we
+// ). Sessions are carried by the HttpOnly `sn_session` cookie, so we
 // never touch a token in JS — every call just sends credentials with the request.
 //
 // Response shape: every body is an envelope `{ success, errorCode?, errorMsg? }`
@@ -138,7 +138,7 @@ export class RateLimitError extends ApiError {
 // --- request budgets ---------------------------------------------------------
 //
 // WHAT THIS GUARDS AGAINST IS A STALL, NOT SLOWNESS, and the whole policy falls
-// out of that distinction (docs/scratch/ui-on-slow-connection.md §2.1). A
+// out of that distinction. A
 // connection that neither delivers nor errors leaves every surface in its
 // loading state forever — the bin's "Loading…", the admin's, search's
 // "Searching…" — because `NETWORK` only fires on an actual rejection. But a
@@ -1750,7 +1750,7 @@ export function createHttpApi(): Api {
       // `XMLHttpRequest`, AND THIS IS THE ONE PLACE IT IS RIGHT. Every other call
       // on this seam is `fetch`; this one needs bytes SENT, and `xhr.upload`'s
       // progress events are the only portable source of them — a `fetch` request
-      // body cannot be observed (ui-on-slow-connection.md §2.1). The consequence
+      // body cannot be observed. The consequence
       // is that the envelope/status handling `request()` owns has to be restated
       // below; it is kept deliberately parallel to it, statuses in the same order.
       return new Promise<Entry>((resolve, reject) => {

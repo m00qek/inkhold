@@ -1,6 +1,6 @@
 //! The `.note` blob index: parse a container once, at ingest, and keep the
 //! per-page facts the hot read paths need in SQLite (`note_index` +
-//! `note_page_index`). See `docs/scratch/new-indexing.md` for the design.
+//! `note_page_index`). See for the design.
 //!
 //! ## Two halves, on purpose
 //!
@@ -96,7 +96,7 @@ const Allocator = std.mem.Allocator;
 ///   meaning. v9 rows re-derive lazily on their next `ensureIndexed`/repair
 ///   touch (a v9 row has NULL `cover_offset`, so it serves no cover until it
 ///   heals). The raster/SNPG/text goldens are untouched.
-/// - **11** → custom IMAGE templates (docs/scratch/custom-template.md): a page
+/// - **11** → custom IMAGE templates: a page
 ///   whose custom-style background does NOT decode as RATTA_RLE
 ///   (`decoder.decodesToExactly`) is a browser-native image. Its background
 ///   record in the `layers` blob gains a `raster_image` flag (packed bit3),
@@ -740,7 +740,7 @@ const PageUpsert = struct {
 /// (it is not; `segment_search.id` is), but because `segment_search.segment_id`
 /// REFERENCES it.
 ///
-/// This IS the "re-parse of the SAME blob" search path (search-architecture.md
+/// This IS the "re-parse of the SAME blob" search path (
 /// step 2): segment rows and their masked rowids — the owners' recency — are
 /// untouched. The stored text is DIFFED per page, and only a page whose text
 /// actually changed refreshes its postings, IN PLACE ('delete' old before the
@@ -2579,7 +2579,7 @@ test "eager indexing at ingest does not disturb the file tree it rides along wit
 }
 
 // ---------------------------------------------------------------------------
-// Custom image templates (docs/scratch/custom-template.md)
+// Custom image templates
 // ---------------------------------------------------------------------------
 
 /// PNG magic + a little IHDR — bytes that cannot decode as a RATTA_RLE stream of

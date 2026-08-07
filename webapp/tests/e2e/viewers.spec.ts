@@ -58,7 +58,7 @@ for (const c of CASES) {
 
       const moveBin = page.locator(c.cls).getByRole("button", { name: "Move to bin" });
       await expect(moveBin).toBeVisible();
-      // QUIET, NEVER RED — trashing is recoverable (`toolbar.md`).
+      // QUIET, NEVER RED — trashing is recoverable.
       await expect(moveBin).not.toHaveClass(/is-danger/);
 
       await moveBin.click();

@@ -5,7 +5,7 @@
 // makes and the only one that runs while `#app` is still empty. That rejection
 // used to be a discarded promise: no catch on the arm, no global handler, and
 // nothing mounted. The result was a permanently blank page — the degenerate
-// case of the failure class docs/scratch/ui-on-slow-connection.md audits, where
+// case of the failure class audits, where
 // a screen that has no data claims something anyway. Claiming *nothing at all*
 // is the worst version of it: no explanation, and no way forward.
 //

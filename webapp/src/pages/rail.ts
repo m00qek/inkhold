@@ -62,7 +62,7 @@ export interface Category {
    *
    * A CAPABILITY STATED AS DATA, beside the rest of the category, rather than a
    * name test at the call site. It is the one meaningful placement rule the
-   * device has (docs/scratch/upload.md §4): an image or PDF is usable as a
+   * device has: an image or PDF is usable as a
    * template only if it sits here, which turns dropping one in from a generic
    * upload into "add a template" — different dropzone copy, a different toast.
    * Callers ask {@link RailController.categoryFor} and read this flag, so

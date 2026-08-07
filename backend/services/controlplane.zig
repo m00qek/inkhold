@@ -9,8 +9,8 @@
 //!
 //! `listing` and `noteMeta` are **pure DB reads**: every fact they emit —
 //! page count, per-page content hash, per-page dimensions, whether the blob is
-//! even a `.note` — comes from `note_index` / `note_page_index` (see
-//! `note_index.zig` and `docs/scratch/new-indexing.md`). They open no file.
+//! even a `.note` — comes from `note_index` / `note_page_index`
+//! and `note_index.zig`. They open no file.
 //! Previously each of them read and parsed a whole `.note` per request, and a
 //! listing did so **once per note in the folder**.
 //!
@@ -44,8 +44,7 @@
 //!
 //! Nothing on this path is proportional to the note or the page. `readBlob` —
 //! which buffered up to 64 MiB of note to emit one page — is gone with the last
-//! of its callers, which is what makes the memory claim in
-//! `docs/scratch/new-indexing.md` § Streaming true without qualification.
+//! of its callers, which is what makes the memory claim
 
 const std = @import("std");
 const Files = @import("files.zig").Files;
@@ -153,7 +152,7 @@ pub const LayerVO = struct {
 /// The frozen shape of the preview a listing row will render: the source
 /// image's own pixel dims, served WITH the listing so the masonry layout can
 /// reserve every tile's height before a single image byte arrives (decision 3
-/// of `docs/scratch/archive/masonry.md` — reflow-free needs the aspect first).
+/// of — reflow-free needs the aspect first).
 ///
 /// Optional everywhere it appears, and ABSENT — never null, never 0×anything —
 /// when the server holds no aspect fact: the client falls back to its own
@@ -215,7 +214,7 @@ pub const EntryVO = struct {
     /// (orientation applied — a landscape note serves 1872×1404); a `.spd`'s
     /// embedded-thumbnail dims. Omitted for folders, images, `.txt` and every
     /// other type — those shapes are the client's concern (decision 5 of
-    /// `docs/scratch/archive/masonry.md`).
+    /// ).
     thumbAspect: ?AspectVO = null,
     /// FOLDER-ONLY, and optional for the same reason every field above is: a note
     /// row must keep serializing to exactly the `NoteSummary` shape it does today,
@@ -998,7 +997,7 @@ pub const ControlPlaneService = struct {
     /// at index time and stored, so nothing here opens a `.note`. It is the one
     /// blob-derived thing held whole in memory, and deliberately so — a page of
     /// handwriting transcribes to KB-scale text, not blob data (see the carve-outs
-    /// in `docs/scratch/new-indexing.md` § "Scope of the claim").
+    /// in).
     pub fn pageText(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, n: u64) !?PageText {
         return self.pageTextIn(arena, user_id, id, n, .live);
     }
@@ -1073,7 +1072,7 @@ pub const ControlPlaneService = struct {
         // The word boxes: the one thing on this path that is not a pure DB read.
         // `recogn_offset`/`recogn_length` were stored by the indexer for exactly
         // this — "for lazily fetching the rich form (elements + bounding boxes)"
-        // (`db/schema.zig`, `docs/scratch/new-indexing.md` §103) — so this is a
+        // (`db/schema.zig`) — so this is a
         // single KB-scale ranged read, not a note parse. Read it BEFORE the
         // statement is finalized only in the sense that the offsets are copied
         // out first; nothing below borrows the row.
@@ -1374,7 +1373,7 @@ pub const ControlPlaneService = struct {
         };
     }
 
-    /// Decision 3 of `docs/scratch/archive/masonry.md`, in one place: the aspect fact a
+    /// The masonry aspect decision, in one place: the aspect fact a
     /// listing row serves, or null for "omit the field".
     ///
     /// A `.note` (an indexable row): the device-rendered cover's dims when one
@@ -2877,7 +2876,7 @@ test "bin: a trashed note carries its real first page; a folder and an unparseab
     try testing.expect(seen_note);
 }
 
-// ---- thumbAspect (decision 3 of docs/scratch/archive/masonry.md) ----
+// ---- thumbAspect (decision 3 of) ----
 
 /// A minimal PNG whose IHDR carries 320×240 — dims `thumbnail.imageDims` can
 /// decode. The same fixture `spd_index.zig`'s own tests use.

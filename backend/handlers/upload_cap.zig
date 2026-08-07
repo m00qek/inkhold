@@ -34,7 +34,7 @@ const std = @import("std");
 /// part's CONTENT bytes: `multipart.streamPart` strips the framing (the `--
 /// boundary` prologue and the closing delimiter) before the sink ever sees them,
 /// so the ~150–164 bytes of envelope the device wraps a `/oss/put` body in
-/// (docs/reference/device-protocol-endpoints.md, from the live capture) are
+/// (from the live capture) are
 /// already gone and a slack of ZERO would be arithmetically correct.
 ///
 /// It is not zero because the device protocol is FROZEN: we cannot renegotiate

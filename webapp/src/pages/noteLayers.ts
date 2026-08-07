@@ -2,7 +2,7 @@
 // `PageLayer[]` off `NoteMetaVO` + the SNPG v2 payload) and the two shared
 // components the `.spd` viewer already feeds: the layers panel
 // (pages/layersPanel.ts) and the layered-export core (export/layered.ts). The
-// decision record is docs/scratch/archive/note-layers-panel.md: per-layer decode with
+// decision is: per-layer decode with
 // stacked canvases (the `.spd` mechanism), identity by SLOT, view-only tuning.
 //
 // THE RENDER MODEL. The focused page becomes a stack of per-layer canvases,

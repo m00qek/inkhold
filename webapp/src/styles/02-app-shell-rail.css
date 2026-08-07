@@ -198,7 +198,7 @@
 
 /* The rail footer is a NAMEPLATE: who you are, and a chevron saying it opens.
    Nothing else. The theme toggle and sign out both moved onto the account page
-   (docs/scratch/user-options.md §7), and this row is the whole reason they had
+   and this row is the whole reason they had
    to — it was full, and it is the arithmetic below that says so.
 
    WHAT THE ROW HAD TO FIT BEFORE, with two 30px buttons in it:

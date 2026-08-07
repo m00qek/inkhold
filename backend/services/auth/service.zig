@@ -155,7 +155,7 @@ pub const DeviceInfo = struct {
     /// **"Last seen", not "last synced"** — the newest `sessions.last_used_at`
     /// across this serial's `device`-audience sessions, i.e. the last REQUEST the
     /// tablet made. That is usually a sync and is NOT the same claim, and
-    /// user-options.md §7 decided the narrower word against the data rather than
+    /// the account screen chose the narrower word against the data rather than
     /// the wish. Maintained lazily on a 60 s granularity (see `caller`), so it is
     /// accurate to about a minute.
     ///
@@ -318,7 +318,7 @@ pub const Service = struct {
     /// The ADMIN's reset, aimed at somebody else — and only ever at somebody else.
     ///
     /// **An admin may not reset their OWN password here.** This is the verb that
-    /// started `user-options.md`: a beta tester opened the console, saw "Reset
+    /// started: a beta tester opened the console, saw "Reset
     /// password" on their own row, pressed it, and locked themselves out of their
     /// own server. Every verb under `/api/admin` points OUTWARD by design, and
     /// this one pointed outward at everybody except the person holding it.
@@ -336,7 +336,7 @@ pub const Service = struct {
     }
 
     /// **THE MECHANISM, with no policy in it** — the same split `changePassword`
-    /// uses (docs/scratch/user-options.md §4): the function that DOES the thing
+    /// uses: the function that DOES the thing
     /// takes no actor, and whoever calls it is responsible for having decided
     /// that they may.
     ///
@@ -344,8 +344,7 @@ pub const Service = struct {
     /// That is not a hole: `inkhold reset-password` is authorised by read/write
     /// access to the data directory, which on a self-hosted server already
     /// implies `minicloud.db` AND `cred.key` — i.e. the caller could decrypt
-    /// every credential with `sqlite3` and more patience. See
-    /// docs/scratch/cli-recovery.md §2.
+    /// every credential with `sqlite3` and more patience.
     ///
     /// **Nothing over HTTP may call this directly.** The admin-checked
     /// `resetPassword` above is the only route in from a request, and it is
@@ -379,7 +378,7 @@ pub const Service = struct {
     /// the verb that first needs it.** Only promotion is exposed today
     /// (`inkhold make-admin`), so the demotion branch is unreachable from the
     /// CLI — but the console's promote/demote pair is the next thing to be built
-    /// on this (cli-recovery.md §8), and a demote that could take the count to
+    /// on this, and a demote that could take the count to
     /// zero would create precisely the lockout this whole feature exists to
     /// prevent. It mirrors `deleteUser`'s guard exactly, for exactly that reason.
     ///
@@ -453,7 +452,7 @@ pub const Service = struct {
     ///
     /// **The self case is what lets the account screen exist at all.** A non-admin
     /// cannot see their own device bindings today, because the only listing is
-    /// admin-only (user-options.md §5) — and the fix must NOT be a second,
+    /// admin-only — and the fix must NOT be a second,
     /// self-scoped copy of the query with its own idea of ownership. Two places
     /// deciding who owns a device is how they come to disagree. So the self-service
     /// routes call the SAME `listUserDevices` / `adminUnlinkDevice` with the caller
@@ -640,7 +639,7 @@ pub const Service = struct {
         };
     }
 
-    // ---- the caller's own account (user-options.md §7 "Signing in") ----
+    // ---- the caller's own account ----
 
     /// Everything the account screen's identity block reads about the CALLER.
     /// `email` / `name` are owned copies — free via `freeAccount`.
@@ -968,7 +967,7 @@ pub const Service = struct {
     /// and before `issueSession`, and it must stay there.** A wrong current
     /// password must leave the account exactly as it was, sessions included —
     /// otherwise a typo signs a person out of every browser and device, which is
-    /// the lockout this whole feature exists to prevent (docs/scratch/user-options.md §1).
+    /// the lockout this whole feature exists to prevent.
     pub fn changePassword(self: *Service, user_id: u64, current_md5: ?[]const u8, new_md5: []const u8) Error!Session {
         if (new_md5.len != password.md5_len) return error.InvalidPassword;
         {
@@ -1764,7 +1763,7 @@ test "an admin may not delete themselves — and the sole admin is told the othe
 }
 
 test "an admin may NOT reset their own password from the console" {
-    // The incident that started user-options.md: a beta tester saw "Reset
+    // The incident that started: a beta tester saw "Reset
     // password" against their own row, pressed it, and locked themselves out of
     // their own server. Every verb in that console points OUTWARD; this one
     // pointed outward at everybody except the person holding it.
@@ -2167,7 +2166,7 @@ test "setAdmin promotes and demotes, reports whether the flag moved, and will no
     // The guard, BEFORE there is a second admin: the last one cannot be demoted.
     // Same shape as `deleteUser`'s — demoting your way to zero admins is the same
     // lockout as deleting your way there, and this is the one that has no HTTP
-    // route yet (docs/scratch/cli-recovery.md §5 wrote it with the mechanism
+    // route yet (the mechanism
     // rather than waiting for the console verb that will first need it).
     try std.testing.expectError(error.LastAdmin, svc.setAdmin(admin, false));
 
@@ -2339,7 +2338,7 @@ test "admin device unlink: A's admin action can NEVER reach B's binding by id co
 
     // A NON-admin reaches their OWN row through these same two calls, and nothing
     // else. That is the self-service half of the account screen: until it existed,
-    // a household member could not see their own bindings at all (user-options.md
+    // a household member could not see their own bindings at all (
     // §5), and the fix must not be a second self-scoped copy of the query with its
     // own idea of ownership — so the SAME functions widen by exactly one case.
     // Alice is not an admin.

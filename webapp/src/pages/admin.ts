@@ -1,4 +1,4 @@
-// The admin console (docs/scratch/admin-console.md, U1–U8): the elevation gate,
+// The admin console (U1–U8): the elevation gate,
 // and the household as A LIST OF PEOPLE.
 //
 // Split the way `noteSearch.ts` and `rail.ts` are split — all of the state and
@@ -1127,7 +1127,7 @@ export function createAdminView(opts: {
     const name = displayName(user.email);
     const added = accountAge(user.createdAt);
     // NO "RESET PASSWORD" ON YOUR OWN ROW. This is the button that started
-    // `user-options.md`: a beta tester opened the console, saw it against their
+    // a beta tester opened the console, saw it against their
     // own name, pressed it, and locked themselves out of their own server.
     //
     // Every verb in this console points OUTWARD — reset THEIR password, set

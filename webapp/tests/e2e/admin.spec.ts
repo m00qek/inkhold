@@ -327,7 +327,7 @@ test.describe("admin: actions", () => {
   });
 
   test("YOUR OWN row has no reset button — it points at the account page instead", async ({ page }) => {
-    // THE BUTTON THAT STARTED user-options.md. A beta tester opened this console,
+    // THE BUTTON THAT STARTED. A beta tester opened this console,
     // saw "Reset password" against their own name, pressed it, and locked
     // themselves out of their own server. Every verb here points OUTWARD; this
     // one pointed outward at everybody except the person holding it.

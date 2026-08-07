@@ -2,12 +2,12 @@
 //
 // NOTHING HERE ROUND-TRIPS TO THE SERVER FOR PIXELS. The SPA already decodes
 // pages through the WASM renderer, and moving rasterisation into the browser is
-// this project's settled architecture (docs/explanation/client-side-rendering.md)
+// this project's settled architecture
 // — asking a 50 MB-budget server to render a page it just streamed would undo it.
 //
 // Exports are DOWNLOAD-ONLY. They do not land in the device's `EXPORT/` folder,
 // which is what keeps them clear of the `absence = deletion` reconciliation
-// question entirely (docs/explanation/reconciliation-and-sync-safety.md).
+// question entirely.
 
 import type { Api } from "../api/types";
 import type { Id, NoteMeta, PageRef, WordBox } from "../core/types";
@@ -139,7 +139,7 @@ export function toGray(rgba: Uint8ClampedArray, width: number, height: number): 
  *
  * `Api` gains `getPageLinks(id, page): Promise<PageLinks>` alongside
  * `getPageText` — same shape, same per-page immutable URL, same lazy fetch
- * (docs/scratch/note-links.md §1). It is PROBED rather than called outright, and
+ * pattern. It is PROBED rather than called outright, and
  * that is not defensiveness about the endpoint: an `Api` is also what the reader's
  * own stubs and any older client hand this exporter, and the answer for one that
  * cannot serve links is a PDF without annotations — never a failed export.

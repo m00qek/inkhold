@@ -1,14 +1,14 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { signedIn, mockThumbnailBackend, imgPainted, freezeMotion, railSettled } from "./helpers/app";
 
-// The masonry icon gallery + the reflow-free row rider (masonry.md step 2).
+// The masonry icon gallery + the reflow-free row rider.
 //
 // The `Files` fixture folder is the whole test bed: one entry per aspect source
 // (a cover note, a landscape note whose page-1 dims serve 1872×1404, a `.spd`
 // with its thumb dims, a `.txt` on the client constant, an image with NO served
 // aspect) plus both clamp extremes (a 7.5:1 panorama and a 0.13:1 scroll).
 //
-// What must hold, per docs/scratch/archive/masonry.md:
+// What must hold:
 //  - ICON mode is uniform `--tile-w-icon` columns; each tile's HEIGHT is its
 //    own aspect — pre-set from `thumbAspect` before any image bytes arrive;
 //  - the sort order READS LEFT-TO-RIGHT (the §D rule — `column-count`-style

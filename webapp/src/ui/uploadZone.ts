@@ -1,4 +1,4 @@
-// THE UPLOAD ZONE (docs/scratch/upload.md §7) — the drag/drop target over a
+// THE UPLOAD ZONE — the drag/drop target over a
 // surface, the queue behind it, and the progress rows it draws.
 //
 // THREE PIECES, SEPARATED ON PURPOSE, because only one of them is about uploads:
@@ -9,7 +9,7 @@
 //      server are described identically.
 //   2. `createTransferList` — the progress ROWS: a name, a bar, a state, a
 //      Cancel. It knows nothing about uploading. `.spd`/`.txt` DOWNLOAD progress
-//      (ui-on-slow-connection.md §2.5) is bytes RECEIVED through a completely
+//      is bytes RECEIVED through a completely
 //      different transport, but it is the same component on screen — so it is a
 //      seam that takes rows and hands back clicks, and that is all.
 //   3. `createUploadZone` — the drag target + the queue model that feeds (2).
@@ -634,7 +634,7 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
   function showOverlay(): void {
     const dest = deps.destination();
     if (!dest) return;
-    // THE MYSTYLE MOMENT (upload.md §7). Dropping an image or PDF into MyStyle is
+    // THE MYSTYLE MOMENT. Dropping an image or PDF into MyStyle is
     // not a generic upload — it is adding a template you can then write on, a
     // capability that otherwise needs a cable. The interface knows where it is,
     // so it says so. Confirmed real: a template placed here does reach the device.

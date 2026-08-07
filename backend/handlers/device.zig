@@ -391,7 +391,7 @@ pub fn bindEquipment(ctx: *Context, req: *Request, params: Params) anyerror!void
 /// observation — no capture has ever shown the device displaying THIS field.
 /// Changing it blind would misreport free space to a device, which is worse
 /// than the present uncertainty, so it stays as-is until someone observes the
-/// screen that reads it. See docs/scratch/backlog.md.
+/// screen that reads it.
 pub fn userQuery(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;

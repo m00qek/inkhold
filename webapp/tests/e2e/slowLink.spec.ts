@@ -10,7 +10,7 @@ import { layeredPageLayers, layeredPagePayload } from "../../src/api/layeredFixt
 // WHAT IS ON SCREEN WHILE A REQUEST IS STILL IN FLIGHT.
 //
 // Every case here is a state that is invisible on localhost and obvious on a
-// throttled link (docs/scratch/ui-on-slow-connection.md, found under 20× CPU +
+// throttled link (found under 20× CPU +
 // Slow 3G). They share one rule: LOADING and KNOWN-EMPTY are different states,
 // and the empty or negative one must not be claimed until the data that could
 // disprove it has arrived.

@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { TILE_W, TILE_LEEWAY, densityBucket, thumbTargetWidth } from "../../src/render/types";
 import { downscalePlan } from "../../src/render/thumbnails";
 
-// The pristine raster tier's arithmetic (docs/scratch/archive/masonry.md decision 4):
+// The pristine raster tier's arithmetic:
 // density buckets, the width-normalized target, and the pure downscale plan
 // every producer follows — never-upscale and the resample-quality selection.
 

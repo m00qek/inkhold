@@ -165,7 +165,7 @@ describe("strategyFor", () => {
     expect(strategyFor("note")).toBe("note-page");
     expect(strategyFor("spd")).toBe("image");
     // Plain raster documents are the LOCAL-ONLY branch: raw bytes fetched once,
-    // downscaled client-side, true dims memoised (masonry.md decision 5).
+    // downscaled client-side, true dims memoised.
     expect(strategyFor("png")).toBe("image-doc");
     expect(strategyFor("JPG")).toBe("image-doc");
     expect(strategyFor("webp")).toBe("image-doc");
@@ -173,7 +173,7 @@ describe("strategyFor", () => {
     expect(strategyFor("txt")).toBe("text");
     // A `.pdf` renders its page 0 client-side through the MuPDF wasm — the same
     // decoder the viewer uses. No cover branch: it has none, and neither does
-    // its `.mark` sibling (docs/scratch/pdf-thumbnails.md §0).
+    // its `.mark` sibling.
     expect(strategyFor("pdf")).toBe("pdf-page");
     expect(strategyFor("epub")).toBe("glyph");
     expect(strategyFor("")).toBe("glyph");

@@ -62,7 +62,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     try schema.migrate(db);
 
     // The credential-encryption key (loaded/generated before the service opens, so
-    // every credential path has it). Held outside the DB — see auth.md §5b.
+    // every credential path has it). Held outside the DB, deliberately.
     const cred_key = try loadOrCreateCredKey(gpa, io, cfg.cred_key_path, rng);
 
     var svc = authsvc.Service.init(gpa, io, db, cred_key);
@@ -341,7 +341,7 @@ test "a failed session sweep warns and lets the boot continue, sweeps after it i
 /// Load the 32-byte credential-encryption key from `path`, or generate + persist a
 /// fresh one (0600) on first run. The key lives OUTSIDE the DB so a stolen backup
 /// cannot decrypt `users.cred_enc`; LOSING it makes every credential unrecoverable
-/// (forced resets), which is why a fresh key is loudly logged. See auth.md §5b.
+/// (forced resets), which is why a fresh key is loudly logged.
 pub fn loadOrCreateCredKey(gpa: std.mem.Allocator, io: Io, path: []const u8, rng: std.Random) ![passwordmod.cred_key_len]u8 {
     if (try loadCredKey(gpa, io, path)) |key| return key;
 

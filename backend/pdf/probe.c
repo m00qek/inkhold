@@ -1,6 +1,5 @@
 /* What the server needs to know about a PDF, and nothing more: how many pages,
  * the shape of page 1, and whether the file opens at all.
- * See `docs/scratch/pdf-index.md`.
  *
  * WHY THIS IS C AT ALL — the same reason `webapp/wasm/pdf_shim.c` is. `fz_try`
  * and `fz_catch` are `setjmp`/`longjmp`, and a Zig frame between them is
@@ -26,7 +25,7 @@
  *
  * Registering THIS handler alone rather than calling
  * `fz_register_document_handlers` is what keeps the other formats out of the
- * link: measured at 0.4 MB of binary (`pdf-index.md` §3). The server indexes
+ * link: measured at 0.4 MB of binary. The server indexes
  * PDFs; the browser is the one that needs EPUB and CBZ. */
 extern fz_document_handler pdf_document_handler;
 
@@ -37,7 +36,7 @@ struct ink_pdf_info {
      * extent and a non-zero `/CropBox` origin is already accounted for.
      *
      * This is the whole reason we do not read `/MediaBox` ourselves. The export
-     * put ink ninety degrees out on a rotated page, and `pdf-links.md` §2
+     * put ink ninety degrees out on a rotated page, and the link work
      * records both traps; a raw MediaBox read looks right on most files and is
      * wrong on exactly the ones that matter. */
     float width;
@@ -85,10 +84,16 @@ int ink_pdf_probe(int fd, struct ink_pdf_info *out)
     out->width = 0;
     out->height = 0;
 
-    /* FZ_STORE_DEFAULT, deliberately: it is what the measurement in
-     * `pdf-index.md` §3.1 used (13.2 MB peak on a 1,703-page document), so the
-     * shipped code and the recorded number describe the same thing. Tuning the
-     * store down is a separate change with its own measurement. */
+    /* FZ_STORE_DEFAULT (256 MB) is a CEILING, not an allocation: the store grows
+     * as MuPDF caches parsed objects and evicts at the limit. It is left at the
+     * default here because this probe never gets near it — measured at 8.78 MB
+     * peak on ARM for a 1,703-page document, 13.2 MB on x86.
+     *
+     * A TEXT PASS IS THE OPPOSITE CASE, and if one is ever added it must cap the
+     * store: §9.6 measured a 76 MB file peaking at 55 MB with the default and
+     * 16.5 MB with a 4 MB cap. That is the difference between fitting inside the
+     * 50 MB budget and blowing it with one file. Opening and bounding a page is
+     * simply not the operation that fills the store. */
     fz_context *ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
     if (!ctx) return INK_PDF_NO_CONTEXT;
 
@@ -168,7 +173,7 @@ int ink_pdf_probe(int fd, struct ink_pdf_info *out)
  * typed replacements for the browser; this file does the same for the server.
  *
  * DUPLICATED ON PURPOSE. Sharing them would mean a common C file linked into two
- * targets with different contracts, which is the coupling `pdf-index.md` argues
+ * targets with different contracts, which is the coupling argues
  * against for the sake of ten lines. MuPDF stays unpatched, and a JPX image
  * degrades to "unsupported" the way upstream intended. */
 

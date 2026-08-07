@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { FIXTURE, REAL, openPageOne, report } from "./helpers/pdfRange";
 
-// RANGE-SERVED PDFs, end to end — `docs/scratch/pdf-ranges.md` §7.
+// RANGE-SERVED PDFs, end to end —
 //
 // The acceptance is not "it renders", which `pdfViewer.spec.ts` already proves.
 // It is an ARITHMETIC claim: page 1 of a 76 MB document must cost a handful of

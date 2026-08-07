@@ -1,7 +1,7 @@
 // A minimal STORE-only zip writer (local headers + CRC32 + central directory +
 // EOCD) — the project forbids runtime deps, so no JSZip. Split out of the `.spd`
 // export (pages/spdExport.ts) into the shared export core so the `.note` layered
-// export can reuse it (docs/scratch/archive/note-layers-panel.md). It is the part most
+// export can reuse it. It is the part most
 // likely to be subtly wrong, hence the unit tests that unzip its output.
 //
 // STORE-only is deliberate: the payloads are PNGs (already compressed), and the

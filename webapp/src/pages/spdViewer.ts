@@ -4,7 +4,7 @@
 // parser, compiled to `spd-decode.wasm`) and renders it as a STACK OF PER-LAYER
 // CANVASES: the WASM extracts, the browser rasterises (`createImageBitmap`) each
 // tile once onto its layer's own canvas, and the browser compositor blends the
-// stack. See `docs/reference/spd-format.md` and the ABI header in
+// stack. See `parsers/spd/spd-format.md` and the ABI header in
 // `webapp/wasm/spd_decode.zig`.
 //
 // THE RENDER MODEL (a light compositor you tune before exporting). Every layer
@@ -22,7 +22,7 @@
 // {@link SpdExportModel} — the shared layered-export model (`export/layered.ts`)
 // under its `.spd` name — for `spdExport.ts`. Both components were extracted
 // from this viewer so the `.note` reader can reuse them
-// (docs/scratch/archive/note-layers-panel.md); the format-specific parts stay here:
+// the format-specific parts stay here:
 // the wasm `spd_layer_*` state, the 0..255 wire opacity, and the Reference
 // Layer special case.
 //
@@ -81,7 +81,7 @@ export interface LayerView {
 
 /**
  * The export snapshot types are the SHARED layered-export model now
- * (src/export/layered.ts — the extraction note-layers-panel.md decides); the
+ * (src/export/layered.ts — the extraction decided); the
  * `.spd`-named aliases remain because they are this viewer's seam vocabulary:
  * one layer with both states (opacity normalised to 0..1), and the snapshot
  * with base dimensions and the layers BOTTOM-to-TOP.
@@ -108,8 +108,8 @@ const ZOOMS = ["Fit", "100%", "150%"] as const;
 
 // ============================================================================
 // The `.spd` THUMB PAINTER. The panel itself (rows, eyes, opacity steppers,
-// hold-to-ramp) is the shared component now (`layersPanel.ts` — extracted per
-// docs/scratch/archive/note-layers-panel.md); what stays here is the one thing only the
+// hold-to-ramp) is the shared component now (`layersPanel.ts`);
+// what stays here is the one thing only the
 // `.spd` side knows: how a layer's pixels become a preview, including the blank
 // Reference Layer special case.
 // ============================================================================
@@ -313,7 +313,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
     if (meta) deps.onMoveToBin?.(meta);
   });
   // The BIN-ORIGIN controls, swapped in for Move to bin when the sketch is open
-  // from the recycle bin (`toolbar.md`'s context swap — see `open()`; mirrors the
+  // from the recycle bin (the toolbar's context swap — see `open()`; mirrors the
   // reader). The SAME `|— retention —| ⋯` cluster the bin ROW shows, built by the
   // shared `createBinViewerActions`: Restore neutral, Delete permanently the one
   // red item, its confirm carried through `onPurge` to the bin controller.
@@ -731,7 +731,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       header.setName(summary.name);
       header.setSubtitle(summary.fileType.toUpperCase());
       header.setBackWord(backWord(origin));
-      // THE CONTEXT SWAP (`toolbar.md`): a live sketch's file action is Move to
+      // THE CONTEXT SWAP: a live sketch's file action is Move to
       // bin; one open FROM the bin is already trashed, so it gets Restore and
       // Delete permanently instead; a HISTORY preview is read-only with just
       // Restore-this-version on the banner (no bin controls, no Move to bin) and a
@@ -745,7 +745,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       previewViewOnly = previewing && origin.viewOnly === true;
       moveBin.hidden = fromBin || previewing;
       // Versions — shown in a history PREVIEW and, now, from the BIN: a trashed
-      // sketch's version history is view-only but browsable (bin-parity.md). Still
+      // sketch's version history is view-only but browsable. Still
       // hidden on a plain live open (its entry point is the card ⋯ menu).
       versionsBtn.hidden = !previewing && !fromBin;
       binActions.setBinMode(fromBin, fromBin ? origin.retention ?? null : null);

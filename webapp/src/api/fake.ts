@@ -745,7 +745,7 @@ function note(id: Id, name: string, pageCount: number, updatedAt: number, opts: 
     // is the WHOLE-FILE md5, not a per-page content hash.
     fileHash: fakeHash(`${id}:file`),
     hasRecognizedText,
-    // The serving rule the real listing applies (masonry.md decision 3):
+    // The serving rule the real listing applies:
     //  - `.note` → cover dims when a cover exists (`opts.thumbAspect`), else
     //    page 1's EFFECTIVE dims — so a landscape note serves an honest 1872×1404;
     //  - `.spd` → its thumb dims, which only `opts.thumbAspect` can supply;
@@ -791,7 +791,7 @@ function fakeSize(id: Id, pageCount: number): number {
   return 40_000 + pageCount * 90_000 + (id.length % 7) * 1_337;
 }
 
-// --- the upload fixture (docs/scratch/upload.md) ------------------------------
+// --- the upload fixture ------------------------------
 
 /**
  * How much room the fixture account has left. A file bigger than this is refused
@@ -1009,7 +1009,7 @@ const CHILDREN: Record<string, Entry[]> = {
   // its page, the png is a native <img>, the `.spd` shows its extracted embedded
   // thumbnail, the `.txt` a rasterised snippet; the `.pdf` keeps the glyph.
   //
-  // The folder is ALSO the masonry fixture (masonry.md): every `thumbAspect`
+  // The folder is ALSO the masonry fixture: every `thumbAspect`
   // source and both clamp extremes are on one screen, so the aspect-truth,
   // order-pin, reflow and clamp e2e all read from here.
   files: [
@@ -1061,7 +1061,7 @@ ALL_NOTES["n-late-ocr"] = note("n-late-ocr", "Recognised from page two", 4, NOW 
 // The recycle-bin fixture's own notes, kept in a SEPARATE map from the live
 // library. Keyed the same way, so every PER-ID transcript / search / version-
 // history generator answers for a TRASHED id exactly as for a live one — the fake
-// mirror of "a trashed file's md5-keyed data is fully retained" (bin-parity.md).
+// mirror of "a trashed file's md5-keyed data is fully retained".
 // Deliberately NOT in `ALL_NOTES`: the library-wide enumerations (`searchPass`,
 // `fixtureCoverage`) walk `ALL_NOTES`, and a trashed note must not surface in a
 // live-wide search (the real server excludes `deleted = 1`). `noteSummary(id)`
@@ -1614,7 +1614,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     // --- UPLOAD (control-plane) ---
     //
-    // The web → cloud half of docs/scratch/upload.md, fixture-side. It MUTATES
+    // The web → cloud half of, fixture-side. It MUTATES
     // the fixture tree — the uploaded file appears in `CHILDREN[dest]` and in
     // `ALL_NOTES` — so the row the gallery reconciles is the row a later
     // `listFolder` returns, exactly as the real endpoint behaves.
@@ -1946,7 +1946,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     // --- ACCOUNT (self-service) ---
     //
-    // THE REFERENCE IMPLEMENTATION of this surface (docs/scratch/user-options.md
+    // THE REFERENCE IMPLEMENTATION of this surface (
     // §5–§7): where the intended behaviour is written down, and what the
     // endpoints are built to match. `changePassword` mirrors the real route,
     // which now REQUIRES and VERIFIES the current password of a control-plane

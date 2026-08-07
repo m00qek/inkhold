@@ -1,5 +1,5 @@
 //! SyncService: projects `files` rows into the device-sync VOs — the hash-diff
-//! **read path** (see docs/sync-design.md §3). The sync is hash-based: the device
+//! **read path**. The sync is hash-based: the device
 //! pulls the server's md5 summary (`query/summary/hash`), diffs it against its
 //! local files, and fetches per-id detail (`query/summary/id`) for what it wants.
 //! The server is therefore largely stateless for reads — no per-device cursors —

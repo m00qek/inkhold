@@ -1,5 +1,5 @@
 /* ================= LIBRARY GALLERY ================= */
-/* ICON mode is a MASONRY of uniform columns (masonry.md decisions 1-2): every
+/* ICON mode is a MASONRY of uniform columns: every
    tile shares one WIDTH (`--tile-w-icon`) and takes its own height from its
    thumbnail's aspect — portrait notes tall, landscape .spd short. The mechanism
    is CSS grid row-span masonry: fixed-width columns over a small fixed row unit
@@ -339,7 +339,7 @@
      down and the clamps move back to the width axis: min-width is the portrait
      3:4 fallback (~64px, the old lead), max-width the 2.5×-height cap.
 
-     THE REFLOW RIDER (masonry.md step 2): where the entry's shape is known,
+     THE REFLOW RIDER: where the entry's shape is known,
      library.ts pre-sets an inline `aspect-ratio` — PRE-CLAMPED to
      min(aspect, 2.5), so an extreme panorama reserves its final LETTERBOXED
      width up front instead of snapping narrower when the max-width bites at

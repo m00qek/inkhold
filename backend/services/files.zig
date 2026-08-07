@@ -51,7 +51,7 @@
 //! same content are each charged for it.
 //!
 //! **A reference is anything that keeps the bytes on disk**, which since
-//! docs/scratch/user-options.md §6 means `files` rows (live OR trashed) AND
+//! the storage accounting landed means `files` rows (live OR trashed) AND
 //! `file_history` rows. That is the same rule the trashed-file paragraph above
 //! states, applied consistently: a retained version survives the GC gate on the
 //! strength of its history row alone, so it occupies disk the account is
@@ -213,7 +213,7 @@ pub const Files = struct {
     /// signal left behind, so a null here costs latency and never correctness.
     deferred: ?*deferredmod.Worker = null,
 
-    /// Hot-cache versioning bounds (docs/scratch/hot-cache-versioning.md). Left
+    /// Hot-cache versioning bounds. Left
     /// at the compiled default by `init` (keep = 5); production overwrites it
     /// from `Config.history` in http/transport.zig. `keep = 0` disables
     /// versioning: no `file_history` rows are written and supersede prunes the
@@ -264,7 +264,7 @@ pub const Files = struct {
     /// back into view", and copies of a predicate this fiddly do not stay equal.
     ///
     /// NOT applied to search, which still surfaces a paired mark as a hit of its
-    /// own — see `docs/scratch/code-review-4.md` §4.3 for what that costs.
+    /// own — see costs.
     ///
     /// Cost is one index seek per `.mark` in the folder, and none for anything
     /// else: the suffix tests fail first for every other row, and the `EXISTS`
@@ -1044,7 +1044,7 @@ pub const Files = struct {
 
         try self.bumpSync(user_id); // an upload/replace changed the tree
 
-        // ---- search segment maintenance (docs/scratch/search-architecture.md) ----
+        // ---- search segment maintenance ----
         // The owner's segment rows follow the content they hold, in THIS
         // transaction — search atomically sees exactly one version. A new
         // VERSION of a note is a new blob, and when this row was both the
@@ -2690,7 +2690,7 @@ pub const Files = struct {
     }
 
     /// The five-way storage split behind the account screen's Storage section
-    /// (docs/scratch/user-options.md §7). Every figure is a sum over DISTINCT
+    /// Every figure is a sum over DISTINCT
     /// blobs — `used_bytes` counts distinct blobs, so a naive sum of `files.size`
     /// would double-count the user's deduplicated copies and the lines would not
     /// add up to the meter they sit under.
@@ -2800,7 +2800,7 @@ pub const Files = struct {
     }
 
     /// How many versions of each file this user keeps, and the ceiling they may
-    /// choose within (docs/scratch/user-options.md §7).
+    /// choose within.
     ///
     /// `keep` is the EFFECTIVE value the eviction path uses; `max_keep` is the
     /// admin's configured value, which is both the default (a user who has never
@@ -3437,7 +3437,7 @@ pub const Files = struct {
 
     /// Which extractor a blob's OWN magic selects — the `/thumbnail/{hash}`
     /// URL carries only an md5, so the name-based ingest gates cannot apply
-    /// here (plan decision 3 in docs/scratch/archive/notes-with-covers.md). Reads the
+    /// here (the cover-thumbnail decision). Reads the
     /// blob's first `thumbnail.source_probe_len` bytes; a missing or empty
     /// blob is `.none` (nothing to derive).
     fn thumbSourceKind(self: Files, md5: []const u8) thumbnail.SourceKind {
@@ -3638,7 +3638,7 @@ const Fixture = struct {
     /// reference and keeps real bytes alive. Folders reference no blob and
     /// weigh nothing.
     ///
-    /// **And retained versions count** (user-options.md §6). A `file_history` row
+    /// **And retained versions count**. A `file_history` row
     /// keeps its blob alive through the GC gate exactly as a trashed file does, so
     /// the same rule applies: if the bytes occupy disk, the user is charged. This
     /// is the audit's whole claim, and adding history to it is what made the

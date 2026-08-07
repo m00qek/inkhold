@@ -203,7 +203,7 @@ const FuzzyToken = struct {
 /// without changing which corrections it can find — a correction absent from a
 /// document cannot MATCH inside it, so the document's own term set is
 /// result-identical to the whole corpus for a search scoped to that document
-/// (docs/scratch/in-doc-search.md, entry 8b).
+/// (entry 8b).
 pub const VocabSource = union(enum) {
     /// The whole-corpus vocabulary — `fts5vocab(row)` over every term the FTS
     /// index holds. Global search (`searchPages`) keeps this source.

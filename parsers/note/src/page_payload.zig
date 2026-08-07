@@ -89,7 +89,7 @@ pub const FLAG_HIDDEN: u8 = 0x02;
 /// /note/{id}/template/{hash}` and draws with `createImageBitmap`. The RLE
 /// decoders (`decodeRgba`/`decodeLayerRgba`) never feed a `bit2` record's data
 /// to `decoder.decodeInto` — they skip it, so the browser can underlay the
-/// image itself. See `docs/scratch/custom-template.md`.
+/// image itself.
 pub const FLAG_RASTER_IMAGE: u8 = 0x04;
 
 const TRANSPARENT: u8 = 0xff;

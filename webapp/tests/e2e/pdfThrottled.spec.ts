@@ -3,7 +3,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { FAST_3G, REAL, openPageOne, serveRanges, statsOf, inkFraction } from "./helpers/pdfRange";
 import { signedIn, freezeMotion } from "./helpers/app";
 
-// THE ACCEPTANCE, UNDER THE PROFILE IT IS JUDGED BY — `pdf-ranges.md` §7.
+// THE ACCEPTANCE, UNDER THE PROFILE IT IS JUDGED BY —
 //
 // 20x CPU slowdown + Fast 3G, driven over CDP exactly as the doc records it. An
 // unthrottled dev box makes almost any implementation of this look fine,

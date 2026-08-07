@@ -248,7 +248,7 @@ export function openThumbStore(opts: ThumbStoreOptions = {}): PersistentThumbSto
 // A second, tiny persistent store: `hash → {w, h}` — the TRUE source dimensions
 // of a plain image document, recorded the first time the thumbnail facade
 // decodes it, and read by the masonry layout so an image tile lays out at its
-// real aspect BEFORE any bytes arrive (docs/scratch/archive/masonry.md decision 5).
+// real aspect BEFORE any bytes arrive.
 //
 // Its OWN database (`sn-dims`), not a second object store in `sn-thumbs`: adding
 // a store there would need a version bump, and the thumb store's connection

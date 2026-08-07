@@ -1,6 +1,6 @@
 //! WASI-reactor entry points for the browser PDF viewer.
 //!
-//! This is the `.spd` arrangement applied to PDF (`docs/scratch/pdf-viewer.md` §2):
+//! This is the `.spd` arrangement applied to PDF:
 //! a thin Zig module over a compiled-in C library — here MuPDF 1.28.1, pinned in
 //! `build.zig.zon` and built by `zig build wasm-pdf-decode` — rendering client
 //! side so the 50 MB server budget never sees a rasteriser.
@@ -88,7 +88,7 @@
 //!        from `off`; return the count written, or negative to fail the read.
 //!        Declared in `pdf_shim.c`, and REQUIRED AT INSTANTIATION even by a
 //!        caller that only uses `ink_open` — a declared import the embedder
-//!        omits is a link error. `docs/scratch/pdf-ranges.md` §4.
+//!        omits is a link error.
 //!
 //! ## Handles, not pointers
 //!

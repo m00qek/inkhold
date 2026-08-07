@@ -12,7 +12,7 @@ import { readFile } from "node:fs/promises";
 const NOTE = "/#/note/n-doc-attn"; // 20 pages, recognized, known hardware
 const UNSCALED = "/#/note/n-doc-unscaled"; // recognized, but no verified mm scale
 
-// The reader's export trigger is labelled "Download" now (`toolbar.md`: the verb
+// The reader's export trigger is labelled "Download" now (the verb
 // a user knows), though it still opens the same export menu.
 const exportBtn = (page: Page) => page.locator(".reader__bar").getByRole("button", { name: "Download" });
 // Scoped to the reader's bar AND to the EXPORT pop specifically: the bar now

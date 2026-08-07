@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 //
-// The upload feature's pure logic and its queue (docs/scratch/upload.md), as
+// The upload feature's pure logic and its queue, as
 // units:
 //   - the ACCEPT LIST and the extension reading behind it (`core/fileKind`);
 //   - the PRE-FLIGHT — the gate that refuses a file BEFORE any bytes move, and

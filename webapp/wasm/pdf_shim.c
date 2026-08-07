@@ -23,7 +23,7 @@
 /* Resource store cap. MuPDF's default (FZ_STORE_DEFAULT) is 256 MB, which is a
  * server number: it is the cache of decoded images/fonts, and on a page-at-a-time
  * browser viewer it buys almost nothing while being the one allocation that can
- * grow a wasm heap without bound. `mupdf.md` §9 measured 4 MB as enough to bound
+ * grow a wasm heap without bound. as enough to bound
  * a 1,450-page book; 16 MB leaves room for one large photographic page's
  * resources to survive a re-render at a new zoom. */
 #define INK_STORE_LIMIT (16 << 20)
@@ -127,7 +127,7 @@ fz_document *ink_shim_open(void *data, unsigned int len)
 	return doc;
 }
 
-/* --- The callback stream (`docs/scratch/pdf-ranges.md` §4) ---------------- */
+/* --- The callback stream ------------------------------------------------- */
 
 /* Fill `dst` with `len` bytes from `off`; return the count written, or <0.
  *
@@ -139,8 +139,8 @@ fz_document *ink_shim_open(void *data, unsigned int len)
  *
  * On the JSPI path the JS side is wrapped in `WebAssembly.Suspending`, so this
  * ordinary-looking synchronous call MAY SUSPEND THE WHOLE WASM STACK and resume
- * when a `fetch` settles. That is safe inside `fz_try`: proven in
- * `pdf-ranges.md` §4.1 against this very module. */
+ * when a `fetch` settles. That is safe inside `fz_try`: proven
+ * against this very module. */
 __attribute__((import_module("ink"), import_name("host_read")))
 extern int ink_host_read(long long off, unsigned char *dst, int len);
 
@@ -331,7 +331,7 @@ int ink_shim_page_size(fz_document *doc, int number, float *w, float *h)
  * already moves JSON across boundaries where the shape is irregular (LAYERINFO,
  * RECOGNTEXT and HIGHLIGHTINFO are all base64 JSON inside the container itself).
  * A binary record format plus a string blob would be more code on both sides for
- * a payload measured in hundreds of bytes. `docs/scratch/pdf-links.md` §1.
+ * a payload measured in hundreds of bytes.
  *
  * A URI THAT IS NOT http/https/mailto NEVER APPEARS HERE. The uri is
  * attacker-controlled text out of a file that arrived by device sync, and

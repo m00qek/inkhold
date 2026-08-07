@@ -50,7 +50,7 @@ import { labelPathSegments } from "./rail";
 import { FACADE_THUMB_TYPES } from "./galleryCards";
 import { fileKind, formatBytes, hasDedicatedViewer, rawFileUrl } from "../core/fileKind";
 // The image dims memo — the row lead's aspect source for images, which carry no
-// `thumbAspect` of their own (masonry.md decision 5). Null = unknown yet.
+// `thumbAspect` of their own. Null = unknown yet.
 import { getDims } from "../cache/dimsMemo";
 import type { Api } from "../api/types";
 import type { LazyEngine, LazySlotInput } from "../render/lazy";

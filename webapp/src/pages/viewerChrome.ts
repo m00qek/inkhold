@@ -4,7 +4,7 @@
 // stepper, the download/export menu, the placeholder body, and the find debounce.
 // This module owns the INVARIANT parts of that surface; each viewer parameterises
 // only what legitimately differs (its readout class, its value model, its menu
-// content). See docs/design/viewer-chrome-refactor.md.
+// content).
 //
 // `svg()` is NOT re-implemented here — it is the ONE impl in `ui/icons.ts`, which
 // this file re-exports so a viewer takes both the glyphs and the wrapper from a
@@ -320,7 +320,7 @@ export interface VersionBanner {
    *
    * `viewOnly` (a TRASHED file's version preview) SUPPRESSES the Restore button:
    * the bin's version history is browse + preview, not restore-a-version (restore
-   * the file first — bin-parity.md). The WHEN line stays either way.
+   * the file first —). The WHEN line stays either way.
    */
   setVersion(version: { createdAt: number } | null, viewOnly?: boolean): void;
 }

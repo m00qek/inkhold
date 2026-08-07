@@ -158,7 +158,7 @@ fn linkSqlite(b: *std.Build, mod: *std.Build.Module) void {
 // Nothing below patches MuPDF. The two shims are ours (`webapp/wasm/pdf_shim.c`).
 
 /// Compile-time trim for the wasm build. Measured, not guessed —
-/// `docs/scratch/mupdf.md` §9.5 ranked object sizes to find these:
+/// object sizes were ranked to find these:
 ///
 ///   * `NO_CJK` (-881 KB) is the single biggest win and the one nobody guesses.
 ///     It drops `pdf-cmap-load.c`'s embedded Adobe predefined-CMap tables — an
@@ -481,7 +481,7 @@ fn addMupdfSources(
 }
 
 /// MuPDF for the SERVER (`backend/pdf/probe.c`) — page count, page-1 box, and
-/// whether the file opens at all. See `docs/scratch/pdf-index.md`.
+/// whether the file opens at all.
 ///
 /// Everything about what MuPDF *is* comes from `addMupdfSources`, shared with the
 /// wasm build. What differs is only what a native target needs: no
@@ -572,7 +572,7 @@ pub fn build(b: *std.Build) void {
     const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
 
     // ---- WebAssembly single-page decoder (Option-3 NoteRenderer seam) ----
-    // Consumes one page's "SNPG" payload (see docs/wasm-note-decoder.md) and
+    // Consumes one page's "SNPG" payload and
     // outputs RGBA8888. References only `page_payload`, so no container/parser
     // code is compiled in. Separate from the whole-file `wasm` module above.
     const note_decode_mod = b.createModule(.{
@@ -650,7 +650,7 @@ pub fn build(b: *std.Build) void {
     spd_decode_step.dependOn(&b.addInstallArtifact(spd_decode, .{}).step);
 
     // ---- WebAssembly PDF decoder (MuPDF) ----
-    // `docs/scratch/pdf-viewer.md` §2. Same shape as `.spd` above — a thin Zig
+    //  `.spd` above — a thin Zig
     // module over a compiled-in C library, reactor-model, memory-only ABI — but
     // the library is MuPDF, so the C build is the interesting part and lives in
     // `buildMupdfWasm` above. The link deliberately uses the PLAIN `wasi_target`
@@ -697,7 +697,7 @@ pub fn build(b: *std.Build) void {
     serve_mod.addOptions("build_options", build_options); // `--version`
     linkSqlite(b, serve_mod);
     // MuPDF for the server's PDF probe (`backend/pdf/probe.c`). ~6.7 MB of
-    // binary, measured — see `docs/scratch/pdf-index.md` §3.
+    // binary, measured.
     serve_mod.linkLibrary(buildMupdfNative(b, mupdf_dep, target, optimize));
     const serve_exe = b.addExecutable(.{ .name = "inkhold", .root_module = serve_mod });
     b.installArtifact(serve_exe);

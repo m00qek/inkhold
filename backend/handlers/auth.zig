@@ -32,7 +32,7 @@ const RandomCodeVO = struct { success: bool = true, randomCode: []const u8, time
 /// Android app logs in with `equipmentNo: null` but `equipment: 2`, supplying its
 /// serial per-request instead — so `equipmentNo != null` misses it. `equipment`
 /// is type-loose on the wire (the app sends the int `2`, the web the string
-/// `"1"`), hence `json.LooseInt`. See docs/design/login-in-app.md.
+/// `"1"`), hence `json.LooseInt`.
 const LoginReq = struct {
     account: []const u8,
     password: []const u8,
@@ -150,7 +150,7 @@ pub fn loginNew(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// `currentPassword`, because a live session is a longer-lived thing than a
 /// password prompt — a borrowed laptop, an unlocked screen — and without the
 /// demand anyone who reaches a signed-in window can lock the owner out of their
-/// own household cloud (docs/scratch/user-options.md §4). A `pending` caller must
+/// own household cloud. A `pending` caller must
 /// NOT be made to supply one: the only credential it could offer is the temporary
 /// password it proved seconds ago.
 ///

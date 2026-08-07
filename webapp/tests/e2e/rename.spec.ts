@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { signedIn, cardButton, railSettled } from "./helpers/app";
 
-// Rename a file or folder from the card ⋯ menu (docs/scratch/rename.md). The
+// Rename a file or folder from the card ⋯ menu. The
 // action opens a small `<dialog>`: an editable stem, Rename/Cancel, an inline
 // collision line. These drive it end to end against the in-memory fake `Api`,
 // which renames the fixture entry in place and rejects a sibling clash with the

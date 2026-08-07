@@ -17,7 +17,6 @@
 // first belongs in HISTORY. The rule, its route table and its two exceptions are
 // written down outside this file, because a rule that lives only in a code
 // comment gets broken by the next person adding a destination in a hurry:
-// `docs/explanation/routing.md`.
 //
 // Reader visibility is a function of the route, and so is which folder the
 // gallery is listing: the URL never lies about what is on screen, because the
@@ -69,7 +68,7 @@ export type Route =
   /** The library root — the top of the device's tree. */
   | { name: "library" }
   /**
-   * YOUR OWN ACCOUNT (docs/scratch/user-options.md §7) — password, sessions,
+   * YOUR OWN ACCOUNT — password, sessions,
    * devices, storage, appearance.
    *
    * A PLACE, not a menu, and so a route: it is easy to link to, a reload lands
@@ -87,7 +86,7 @@ export type Route =
    * A folder listing. The id is the device's own, which is what makes this a
    * durable link: folder ids are assigned by the device and never reissued
    * (relocating a row would invalidate the id the device knows, so nothing
-   * does — see docs/scratch/recycle-bin.md). Opaque, but stable, which is the
+   * does). Opaque, but stable, which is the
    * only property a key in a URL has to have.
    */
   | { name: "folder"; id: Id }

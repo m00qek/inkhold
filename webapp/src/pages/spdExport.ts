@@ -1,7 +1,7 @@
 // The `.spd` EXPORT — now an ADAPTER over the shared layered-export core
 // (src/export/layered.ts + src/export/zip.ts), where the flatten, the ORA
 // `stack.xml` builder and the STORE-only zip writer moved so the `.note` reader
-// can export the same matrix (docs/scratch/archive/note-layers-panel.md §Exports).
+// can export the same matrix.
 //
 // What is `.spd` about this file is the MODEL FEEDING, and that lives in the
 // viewer: `spdViewer.ts`'s `exportModel()` snapshots the per-layer canvas stack

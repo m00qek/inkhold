@@ -1,4 +1,4 @@
-// The BLOCK CACHE behind `ink.host_read` — `docs/scratch/pdf-ranges.md` §3.
+// The BLOCK CACHE behind `ink.host_read` —
 //
 // MuPDF reads in small bites: a few hundred bytes of trailer, a couple of
 // kilobytes of xref, an object here and there. Turning each of those into an
@@ -36,7 +36,7 @@ export type RangeFetcher = (start: number, end: number) => Promise<RangeResult>;
 /**
  * 32 KB — NOT the 512 KB the plan guessed, and the difference is measured.
  *
- * `pdf-ranges.md` §3 reasoned about latency: a 512 KB block is ~2.7 s of 3G
+ * a 512 KB block is ~2.7 s of 3G
  * transfer against 0.15 s of round trip, ~5% overhead, where 64 KB would be 30%.
  * That arithmetic is right and it is about the wrong thing, because it assumes
  * the bytes in a block get USED. Recording every read MuPDF makes for page 1 of
@@ -148,7 +148,7 @@ export interface PdfCacheStats {
   ranges: ReadonlyArray<readonly [number, number]>;
   /**
    * Every read MuPDF asked for, as `[offset, length]` — the answer to
-   * `pdf-ranges.md` §6.2, "does MuPDF re-read the same ranges pathologically?".
+   * "does MuPDF re-read the same ranges pathologically?".
    *
    * Capped at {@link LOG_LIMIT}; see {@link logTruncated} before drawing any
    * conclusion from its length or from a statistic over it.

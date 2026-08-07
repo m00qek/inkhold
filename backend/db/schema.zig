@@ -22,8 +22,8 @@
 //!                        recognized text, cover memo).
 //!   spd_index         — the per-blob `.spd` index.
 //!   search_partitions / segment_search / segment_text / segment_fts / doc_terms
-//!                     — partitioned per-owner full-text search (see
-//!                        docs/scratch/search-architecture.md).
+//!                     — partitioned per-owner full-text search.
+//!
 //!   settings          — server-wide config (today: the bin retention window).
 //! Still to come with the sync-core slice: a change log.
 
@@ -33,13 +33,13 @@ const sqlite = @import("sqlite.zig");
 /// Current schema version. Bump + add a migration step when the schema changes.
 ///
 /// v2 adds `file_history` — the append-only version log behind hot-cache
-/// versioning (docs/scratch/hot-cache-versioning.md). It is a pure additive
+/// versioning. It is a pure additive
 /// step: a fresh database lays the v1 baseline then applies `ddl_v2`, and an
 /// already-migrated v1 install applies only `ddl_v2`, so the two end
 /// byte-identical (the same authored `file_history` object either way).
 ///
 /// v3 adds the two `users` columns the account screen needs
-/// (docs/scratch/user-options.md §8). Same additive shape as v2: the new columns
+/// Same additive shape as v2: the new columns
 /// live ONLY in `ddl_v3`, never folded back into `ddl_v1`, so a fresh database
 /// reaches them by running v1 → v2 → v3 exactly as an existing install does —
 /// which is what makes the two byte-identical, rather than a second authored
@@ -348,7 +348,7 @@ const ddl_v2 =
     \\CREATE INDEX file_history_md5 ON file_history(md5);
 ;
 
-// v3 — the two columns the account screen (docs/scratch/user-options.md §8)
+// v3 — the two columns the account screen
 // found missing. Both are ADDITIVE and both are deliberately NULLable, because
 // NULL is a meaning here rather than a placeholder:
 //
@@ -370,7 +370,7 @@ const ddl_v3 =
     \\ALTER TABLE users ADD COLUMN history_keep INTEGER;
 ;
 
-// v4 — retained versions count against quota (docs/scratch/user-options.md §6).
+// v4 — retained versions count against quota.
 //
 // A version kept in `file_history` occupies disk: its blob survives the GC gate
 // on the strength of that row alone (`reapIfUnreferenced`'s keep-alive). Until
@@ -484,7 +484,7 @@ const ddl_v8 =
 
 /// What a PDF is, as far as the server needs to know: how many pages, what
 /// shape page 1 is, and whether it opens at all
-/// (`backend/pdf/probe.zig`, `docs/scratch/pdf-index.md`).
+/// (`backend/pdf/probe.zig`).
 ///
 /// `page_count`, `width` and `height` already exist on this table and are already
 /// SERVED — `controlplane.aspectOf` reads them, the gallery card renders them.

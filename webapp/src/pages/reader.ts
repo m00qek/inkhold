@@ -170,7 +170,7 @@ export interface ReaderOrigin {
   /**
    * For a HISTORY origin whose file is TRASHED: the preview is VIEW-ONLY. The
    * banner's Restore-this-version is suppressed (restore the FILE first, then a
-   * version — see bin-parity.md's decision) and raw-based viewers fetch the
+   * version) and raw-based viewers fetch the
    * version's bytes through the bin-scoped history route. The version LIST,
    * `Viewing`/`Current` and click-to-preview all stay; only per-version restore
    * is removed. Absent (falsy) for a live file's history preview.
@@ -398,7 +398,7 @@ export function createReader(deps: ReaderDeps): Reader {
   });
   const zoomEl = zoomStepper.el;
   // "Download", not "Export": the verb a user knows for "get this file onto my
-  // machine" (`toolbar.md`). It opens the same export menu — only the label
+  // machine". It opens the same export menu — only the label
   // changed — so the internal `export*` names stay, and the non-note modes' plain
   // `downloadLink` below is the same action for a file with no menu to offer.
   //
@@ -408,7 +408,7 @@ export function createReader(deps: ReaderDeps): Reader {
   // per-page current/original groups plus the whole-notebook group — is injected
   // into `exportMenu.pop` below.
   //
-  // ICON-ONLY, deliberately overriding `toolbar.md`'s "icon+label for the
+  // ICON-ONLY, deliberately overriding the toolbar's "icon+label for the
   // consequential" default: the user's explicit call. The trigger's `aria-label`
   // and `title` carry "Download"; the pressed/active look while the menu is open
   // is driven off `aria-expanded` in CSS (see `10-toolbar.css`). Do not "fix" the
@@ -457,7 +457,7 @@ export function createReader(deps: ReaderDeps): Reader {
     html: svg(VIEWER_IC.pages, 1.7),
   }) as HTMLButtonElement;
   // "Move to bin" — a UNIVERSAL file action (right zone), beside Download.
-  // QUIET AND NEUTRAL, never red (`toolbar.md`: "adopt the wording, drop the
+  // QUIET AND NEUTRAL, never red ("adopt the wording, drop the
   // red"): trashing is recoverable and red is reserved for purge, so this is a
   // plain `.btn` (`--ink`), not `is-danger`. LABELLED, not icon-only: a bare
   // trash glyph reads as danger, the exact signal this must not send. Wired to
@@ -486,7 +486,7 @@ export function createReader(deps: ReaderDeps): Reader {
     html: svg(VIEWER_IC.restore, 1.7),
   });
   // The BIN-ORIGIN controls, swapped in for Move to bin when the note is open
-  // from the recycle bin (`toolbar.md`'s context swap, wired in `open()`). No
+  // from the recycle bin ('s context swap, wired in `open`). No
   // longer two bare buttons: a trashed file gets the SAME `|— retention —| ⋯`
   // cluster the bin ROW shows, so its controls are identical in either place —
   // the shared `createBinViewerActions` builds the countdown + the "…" menu
@@ -638,7 +638,7 @@ export function createReader(deps: ReaderDeps): Reader {
   // The bar, painted from the shared viewer toolbar (see `pages/toolbar.ts`) so a
   // future `.spd`/`.txt`/image viewer reuses its skeleton and semantics. Back and
   // the title are LEADING — navigation, outside the two zones. The contextual zone
-  // maps the reader's view controls in `toolbar.md`'s order (paging, the zoom
+  // maps the reader's view controls in 's order (paging, the zoom
   // slot, find, recognised text); the universal zone holds Download — the export
   // menu in note mode, the plain `downloadLink` in the others, mutually hidden by
   // `setMode` — and "Move to bin" beside it. Move to bin is UNIVERSAL (any file
@@ -1952,7 +1952,7 @@ export function createReader(deps: ReaderDeps): Reader {
       // BACK NAMES ITS DESTINATION. `folder` with no known path is the whole
       // library, which is where `onBack` actually goes.
       header.setBackWord(backWord(origin));
-      // THE CONTEXT SWAP (`toolbar.md`): a LIVE file's one file action is Move
+      // THE CONTEXT SWAP: a LIVE file's one file action is Move
       // to bin; a file open FROM the recycle bin is already trashed — re-trashing
       // it is nonsense and would call the control-plane on a deleted id — so its
       // two actions are Restore and Delete permanently instead. `hidden` drops
@@ -1970,7 +1970,7 @@ export function createReader(deps: ReaderDeps): Reader {
       // "Versions" — reopen the file's version list. Shown for a real `.note`
       // (`fileType === "note"`, not merely note-shaped, mirroring the card ⋯ menu's
       // gate) whether LIVE or open from the BIN — a trashed note's history is
-      // view-only but fully browsable (bin-parity.md) — AND in a history preview of
+      // view-only but fully browsable — AND in a history preview of
       // ANY previewable kind, so you can pick another version without leaving.
       // Hidden on a LIVE non-note (its history entry point is the card menu, not a
       // reader toolbar it never opens live). The `fromBin` gate is deliberately

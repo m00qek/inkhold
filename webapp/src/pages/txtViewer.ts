@@ -307,7 +307,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
     if (meta) deps.onMoveToBin?.(meta);
   });
   // The BIN-ORIGIN controls, swapped in for Move to bin when the file is open
-  // from the recycle bin (`toolbar.md`'s context swap — see `open()`; mirrors the
+  // from the recycle bin (the toolbar's context swap — see `open()`; mirrors the
   // reader). The SAME `|— retention —| ⋯` cluster the bin ROW shows, built by the
   // shared `createBinViewerActions`: Restore neutral, Delete permanently the one
   // red item, its confirm carried through `onPurge` to the bin controller.
@@ -824,7 +824,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
       header.setName(summary.name);
       header.setSubtitle(summary.fileType.toUpperCase());
       header.setBackWord(backWord(origin));
-      // THE CONTEXT SWAP (`toolbar.md`): a live file's file action is Move to
+      // THE CONTEXT SWAP: a live file's file action is Move to
       // bin; one open FROM the bin is already trashed, so it gets Restore and
       // Delete permanently instead; a HISTORY preview is read-only with just
       // Restore-this-version on the banner and a Versions control to reopen the
@@ -837,7 +837,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
       previewViewOnly = previewing && origin.viewOnly === true;
       moveBin.hidden = fromBin || previewing;
       // Versions — shown in a history PREVIEW and, now, from the BIN: a trashed
-      // `.txt`'s version history is view-only but browsable (bin-parity.md). Still
+      // `.txt`'s version history is view-only but browsable. Still
       // hidden on a plain live open (its entry point is the card ⋯ menu).
       versionsBtn.hidden = !previewing && !fromBin;
       binActions.setBinMode(fromBin, fromBin ? origin.retention ?? null : null);

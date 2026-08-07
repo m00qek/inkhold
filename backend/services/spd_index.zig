@@ -1,7 +1,7 @@
 //! The `.spd` blob index: open the SQLite drawing once, at ingest, and keep the
 //! scalar facts the gallery needs in the `spd_index` table — while the SAME
 //! parser open lifts the embedded thumbnail out into the `thumbs/` derived
-//! store. See `docs/scratch/archive/spd_index.md` for the design.
+//! store. See for the design.
 //!
 //! ## Two halves, on purpose (the `note_index` shape)
 //!

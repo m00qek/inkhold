@@ -16,7 +16,7 @@
 // rail row, a gallery folder card, the breadcrumb, the search box, the bin — does
 // nothing but `go()` a URL, and the four `show*` methods below are the ONLY
 // writers of the state that URL describes. See `router.ts` for the rule and
-// docs/explanation/routing.md for why addressability and history are separate.
+//  for why addressability and history are separate.
 
 import { el } from "../ui/dom";
 import { ICONS, svg, type IconName } from "../ui/icons";
@@ -668,7 +668,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   });
 
   // THE FOOTER IS A NAMEPLATE NOW, and both of the buttons that used to sit
-  // beside it have moved onto the account page (docs/scratch/user-options.md
+  // beside it have moved onto the account page (
   // §7). Neither was deleted — sign out is the last row of "Signing in", and the
   // theme toggle is Appearance.
   //
@@ -1027,7 +1027,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   });
   lockAdminBtn.addEventListener("click", () => void admin?.lock());
 
-  // UPLOAD — the discoverable half of the drop target (docs/scratch/upload.md
+  // UPLOAD — the discoverable half of the drop target (
   // §7). Dragging a file onto the gallery is the hero interaction, but a gesture
   // nobody is told about is not a feature, and it is unavailable by touch and by
   // keyboard; so the same capability sits in the toolbar as a labelled control.
@@ -1345,7 +1345,7 @@ export function createAppShell(deps: AppDeps): AppShell {
         return txtViewer;
       // MuPDF, rastered in the browser (`render/pdfDecode.ts`). A `.mark` does
       // NOT come here — it parses as a note and the reader paints it; pairing
-      // the two is still ahead (`docs/scratch/pdf-viewer.md` §6).
+      // the two is still ahead.
       case "pdf":
         return pdfViewer;
       default:
@@ -1464,7 +1464,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     restore: (noteId, version, noteName) => restoreVersion(noteId, version, noteName),
   });
   /**
-   * Rename a live file or folder (docs/scratch/rename.md). Opens the dialog
+   * Rename a live file or folder. Opens the dialog
    * prefilled from the entry's name + type; the dialog owns the field, the
    * keyboard flow and the collision loop, and calls back here to do the write.
    *
@@ -1578,7 +1578,7 @@ export function createAppShell(deps: AppDeps): AppShell {
 
   /**
    * THE DROP TARGET over the gallery, plus the queue behind it
-   * (docs/scratch/upload.md §7). The zone owns the drag feedback, the pre-flight,
+   * The zone owns the drag feedback, the pre-flight,
    * the per-file progress rows and the toasts; this shell owns only what the zone
    * cannot know — where a drop lands, how much room is left, and what to do with
    * a file once it exists.
@@ -2174,7 +2174,7 @@ root,
       if (mine !== routeToken) return; // navigated away while fetching
       const type = base.fileType.trim().toLowerCase();
       // A version preview of a TRASHED file is VIEW-ONLY: the banner's Restore is
-      // suppressed (restore the FILE first, then a version — bin-parity.md) and the
+      // suppressed (restore the FILE first, then a version) and the
       // raw-based viewers fetch the version's bytes off the bin-scoped history
       // route. The version LIST, Viewing/Current and click-to-preview all stay.
       const viewOnly = bin.isTrashed(noteId);

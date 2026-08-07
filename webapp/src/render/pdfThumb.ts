@@ -1,5 +1,5 @@
 // PAGE 0 OF A PDF, AS A LIBRARY TILE — the `renderPdfPage` seam behind the
-// thumbnail facade's `pdf-page` strategy (docs/scratch/pdf-thumbnails.md §9.3).
+// thumbnail facade's `pdf-page` strategy.
 //
 // It is the PDF twin of the `renderNote` seam wired in `pages/library.ts`: the
 // facade asks for a bitmap of page 0 at the tier target and encodes it to WebP;

@@ -573,7 +573,7 @@ test.describe("recycle bin", () => {
     await expect(binRow(page).locator(".nav__count")).toHaveText("3");
   });
 
-  // --- viewer parity: a trashed note reads like a live one (bin-parity.md) ------
+  // --- viewer parity: a trashed note reads like a live one ------
   //
   // A trashed file's transcript + history are RETAINED (md5-keyed, `deleted = 1`),
   // so the bin viewer draws the same recognized-text ovals, finds in-note, and

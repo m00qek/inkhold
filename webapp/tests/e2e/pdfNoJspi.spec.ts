@@ -4,7 +4,7 @@ import { FIXTURE, openPageOne } from "./helpers/pdfRange";
 
 // The FALLBACK, exercised rather than assumed.
 //
-// `docs/scratch/pdf-ranges.md` §6.1 leaves Firefox's and Safari's JSPI status
+//  Safari's JSPI status
 // open, so "download the whole file and open it from a buffer" is not a legacy
 // branch kept for politeness — it is what some real browser is on today, and a
 // path that is never run is a path that is broken.

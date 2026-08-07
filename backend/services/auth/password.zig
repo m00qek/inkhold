@@ -1,4 +1,4 @@
-//! Password hashing + verification (the pinned Supernote scheme; see docs/auth.md).
+//! Password hashing + verification (the pinned Supernote scheme).
 //!
 //! Stored credential = `md5_hex(plaintext)` (32 lowercase hex). The login
 //! challenge (device and web both use it) is `sha256_hex(stored_md5 + randomCode)`.
@@ -14,7 +14,7 @@ const XChaCha = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
 pub const md5_len = 32;
 pub const sha256_len = 64;
 
-// ---- encrypt-at-rest of the md5 credential (docs/design/auth.md §5b) ----
+// ---- encrypt-at-rest of the md5 credential ----
 //
 // The fixed device protocol needs `md5(pw)` RECOVERABLE to answer
 // `sha256(md5+code)`, so it cannot be one-way hashed — bcrypt/argon2 are

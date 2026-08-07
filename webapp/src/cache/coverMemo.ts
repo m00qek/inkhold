@@ -8,7 +8,7 @@
 // NEW hash — which is a natural memo miss that probes fresh. A recorded 404
 // for the old hash can never become wrong; at worst it lingers for bytes
 // nobody references anymore. This is what turns "one cheap 404 per md5 per
-// SESSION" (archive/notes-with-covers.md decision 5) into "one per md5 EVER".
+// SESSION" into "one per md5 EVER".
 //
 // Only DEFINITIVE misses (a real 404) are persisted. A transport failure or
 // server error answers nothing about the content — callers record those with

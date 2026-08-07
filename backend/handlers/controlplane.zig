@@ -55,7 +55,7 @@ pub fn controlplaneUsage(ctx: *Context, req: *Request, params: Params) anyerror!
     try json.respond(ctx.gpa, req, .ok, UsageVO{ .used_bytes = cap.used, .total_bytes = cap.total }, null);
 }
 
-// ---- the account screen (docs/scratch/user-options.md §7) ----
+// ---- the account screen ----
 //
 // "Administering other people and managing yourself are different surfaces, and
 // the second one does not exist yet" (§2). These four routes are that second
@@ -388,7 +388,7 @@ fn serverAddress(buf: []u8, cfg: config.Config) []const u8 {
 /// new" is not a secret, and the whole first-run experience turns on knowing it
 /// pre-auth (the login page switches to its terminal-guidance rendering, and the
 /// connect step shows the LAN address the household should point their Supernote
-/// at — which the browser cannot compute itself). See docs/design/login-in-app.md.
+/// at — which the browser cannot compute itself).
 pub fn controlplaneServerInfo(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?; // set at startup, present on every route incl. public
@@ -611,7 +611,7 @@ pub fn controlplaneRename(ctx: *Context, req: *Request, params: Params) anyerror
 
 /// The extensions a web upload accepts. This list is the FEATURE — the point of
 /// the endpoint is getting a file onto the Nomad, so what the DEVICE can open is
-/// what we take (docs/scratch/upload.md §3):
+/// what we take:
 ///
 ///   - the device's own native set: `.note`, PDF, EPUB, Word, text, PNG/JPG/WebP,
 ///     CBZ, FB2, XPS;
@@ -711,7 +711,7 @@ fn onConflictFromTarget(target: []const u8) OnConflict {
 /// decides what happens when that name is already taken — see `OnConflict`.
 ///
 /// **This does not speak the device protocol, and does not need to.** The Nomad
-/// pulls down whatever the server says it holds (upload.md §2, confirmed on a
+/// pulls down whatever the server says it holds (confirmed on a
 /// real device), so the whole job is: put the blob in the store and leave the
 /// tree in the state a sync reads. That is precisely what the device's own
 /// `upload/finish` does at the end of its three-step dance, so this shares its
@@ -1808,7 +1808,7 @@ fn inlineTypeOf(name: []const u8) ?InlineType {
 /// plain sized body rather than chunked), and the bytes are pumped straight from
 /// the blob through a fixed `blobstore.chunk_len` read buffer into a fixed
 /// `blobstore.chunk_len` write buffer. Peak cost is those two buffers whatever the
-/// file weighs — the claim in docs/explanation/resource-budget-and-streaming.md
+/// file weighs — the streaming-memory claim
 /// holds here too. `streamExact64` bounds the pump by `Content-Length` itself, so
 /// a blob that grew under us cannot overrun the declared length.
 pub fn controlplaneFile(ctx: *Context, req: *Request, params: Params) anyerror!void {
@@ -1880,7 +1880,7 @@ fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []const u8
 
     // RANGE. The client half of this is the PDF viewer, which pulls a document
     // through MuPDF's stream a window at a time instead of downloading 76 MB to
-    // paint page 1 (`docs/scratch/pdf-ranges.md`). It costs the server nothing
+    // paint page 1. It costs the server nothing
     // it was not already paying: the same fixed-buffer pump over
     // `blobs.readRange`, for FEWER bytes and a shorter-held connection than the
     // whole-file reply. Blobs are immutable and content-addressed, so there is

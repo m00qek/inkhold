@@ -32,7 +32,7 @@
   gap: 14px;
 }
 
-/* THE DIVIDER IS LOAD-BEARING, NOT ORNAMENTAL (`toolbar.md`): it is what makes
+/* THE DIVIDER IS LOAD-BEARING, NOT ORNAMENTAL: it is what makes
    the universal zone land in a predictable spot however wide the contextual zone
    grows. A CSS rule, `aria-hidden`, carrying no text — never a `|` glyph, which a
    screen reader would read aloud and which would drift with the font. Hidden when

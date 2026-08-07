@@ -1,4 +1,4 @@
-// YOUR OWN ACCOUNT (docs/scratch/user-options.md §7, approved 2026-07-30).
+// YOUR OWN ACCOUNT (approved 2026-07-30).
 //
 // WHY THIS PAGE EXISTS AT ALL. Administering other people and managing yourself
 // are different surfaces, and until now only the first one existed. Every
@@ -27,7 +27,7 @@
 // section states LOADING and KNOWN-EMPTY as different things: "no devices
 // linked" is a claim, and a claim painted from data that has not arrived yet is
 // worse than a spinner because the reader believes it
-// (docs/scratch/ui-on-slow-connection.md, taxonomy 1).
+// (taxonomy 1).
 //
 // WHAT IS DELIBERATELY NOT HERE: quota (an admin decides it) and deleting your
 // own account (in a household the admin does that, and self-delete is a footgun

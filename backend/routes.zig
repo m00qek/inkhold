@@ -17,7 +17,7 @@ pub const api_version = auth.api_version;
 
 /// The route table. `scopes` lists who may call each route (`&.{.public}` = no
 /// auth; `&.{.controlplane}` etc. = allowed audiences). Crossing faces → 403;
-/// `rate_limit` → 429; see docs/auth.md. Every route declares its scopes.
+/// `rate_limit` → 429. Every route declares its scopes.
 pub const routes = [_]router.Route{
     .{ .method = .GET, .path = "/api/version", .scopes = &.{.public}, .handler = auth.version },
 
@@ -46,7 +46,7 @@ pub const routes = [_]router.Route{
 
     // --- Device / sync (the device face) ---
     // Pre-login, unauthenticated device calls: the device clears its binding and
-    // probes account/server before it holds a token (see docs/sync-design.md §2),
+    // probes account/server before it holds a token,
     // so these are public + lenient.
     // Pre-auth + IP-rate-limited (like the login routes): throttle unlink-abuse
     // and account enumeration (check/exists distinguishes USER_NOT_FOUND).
@@ -63,7 +63,7 @@ pub const routes = [_]router.Route{
     // comment there; this is the only route that may do this.
     .{ .method = .POST, .path = "/api/terminal/user/bindEquipment", .scopes = &.{ .device, .public }, .handler = device.bindEquipment },
     .{ .method = .POST, .path = "/api/user/query", .scopes = &.{.device}, .handler = device.userQuery },
-    // The official Android app's two extra post-login calls (docs/design/login-in-app.md):
+    // The official Android app's two extra post-login calls:
     // `bind/status` confirms the account is paired; `capacity/query` is the storage
     // figure in the app's own envelope. Both device-scope, identified by the token.
     .{ .method = .POST, .path = "/api/equipment/bind/status", .scopes = &.{.device}, .handler = device.bindStatus },
@@ -132,7 +132,7 @@ pub const routes = [_]router.Route{
     // — hence `.public`, unlike every other route on this face. Reports the
     // server's own LAN address (which the browser cannot determine itself) and
     // whether this is a brand-new server. On a single-household LAN tool "this
-    // server is new" is not a secret; see handlers/controlplane.zig + login-in-app.md.
+    // server is new" is not a secret; see handlers/controlplane.zig.
     .{ .method = .GET, .path = "/api/controlplane/server-info", .scopes = &.{.public}, .handler = controlplane.controlplaneServerInfo },
     // Control-plane device-management unlink (scoped to the caller's account).
     // Distinct from the device's pre-login `/api/terminal/equipment/unlink` above.
@@ -142,7 +142,7 @@ pub const routes = [_]router.Route{
     // The signed-in user's own storage usage, for the rail's quota bar.
     .{ .method = .GET, .path = "/api/controlplane/usage", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneUsage },
 
-    // --- The account screen: managing YOURSELF (docs/scratch/user-options.md) ---
+    // --- The account screen: managing YOURSELF ---
     //
     // The counterpart of `/api/admin/*`, and the distinction is the point: every
     // verb under `/api/admin` is aimed at ANOTHER account and names it with an
@@ -190,7 +190,7 @@ pub const routes = [_]router.Route{
     // it answers about paragraphs + byte ranges rather than pages + counts —
     // different fields for a different viewer.
     .{ .method = .GET, .path = "/api/controlplane/note/:id/txt-search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTxtSearch },
-    // --- Hot-cache versioning: "history of this file" (docs/scratch/hot-cache-versioning.md) ---
+    // --- Hot-cache versioning: "history of this file" ---
     // All note-scoped by `:id` (the same ownership gate the siblings above use);
     // the per-version routes gate `:md5` on being a RETAINED version of THAT file
     // (`Files.historyVersion`) — a stranger's md5, or one not in this file's
@@ -365,7 +365,7 @@ pub const routes = [_]router.Route{
     // entry. It does NOT speak the device protocol — the Nomad pulls down
     // whatever the tree says we hold — so it is the device's `upload/finish`
     // tree-link (`Files.placeUpload` → `Files.linkBlob`) without the three-step
-    // apply/put/finish dance. See docs/scratch/upload.md.
+    // apply/put/finish dance.
     //
     // `?onConflict=rename|replace` (default, and fallback for anything
     // unrecognised: `rename`) picks what happens when the name is taken — keep

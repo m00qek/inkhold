@@ -149,7 +149,7 @@ function engineThumbImg(name: string): HTMLImageElement {
 
 /**
  * A tile's aspect from the sources that answer SYNCHRONOUSLY, in priority
- * order (masonry.md step 2): the listing's `thumbAspect` fact, then the
+ * order: the listing's `thumbAspect` fact, then the
  * `.txt` client constant. `null` means "not known yet" — an image waiting on
  * the memo, or a glyph tile with no shape of its own — and the CSS 3:4
  * fallback stands.

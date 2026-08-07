@@ -8,7 +8,7 @@
 // The plaintext password is hashed here in the browser and never leaves it.
 //
 // MD5 is cryptographically broken; it is used only for wire-compatibility with
-// Ratta's protocol, on a trusted LAN (see docs/auth.md). Do not use it for
+// Ratta's protocol, on a trusted LAN. Do not use it for
 // anything security-sensitive.
 //
 // Algorithm: the classic RFC 1321 reference, adapted to operate directly on a

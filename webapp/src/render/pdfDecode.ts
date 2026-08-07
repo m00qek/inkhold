@@ -9,14 +9,13 @@
 // cannot be decoded from its own bytes because pages share a resource graph
 // (fonts, colour spaces, XObjects) through the xref. So this opens a document
 // once and keeps a handle, where `render/wasm.ts` takes a page's byte range per
-// call. That is also why a PDF renderer does not implement `NoteRenderer` — see
-// `docs/scratch/pdf-viewer.md` §0.
+// call. That is also why a PDF renderer does not implement `NoteRenderer`
 //
 // TWO WAYS TO OPEN, and both stay. `PdfDocument` takes the whole file and is
 // entirely synchronous — what a caller that already holds the bytes wants, and
 // what the tests exercise under Node. `AsyncPdfDocument` awaits every call,
 // because the document may be a STREAM pulling blocks over the network as MuPDF
-// walks it (`docs/scratch/pdf-ranges.md`), and on that path any call can suspend.
+// walks it, and on that path any call can suspend.
 
 import { parsePageLinks, type PdfLink } from "./pdfLinks";
 

@@ -146,7 +146,7 @@ describe("the Signing in copy", () => {
       // The tablet is the part that matters and the line used to omit it: its
       // session dies with the browsers', but unlike a browser it cannot sign
       // itself back in — it authenticates with the password it has stored. So
-      // sync stops until somebody walks over to it (user-options.md §9.1).
+      // sync stops until somebody walks over to it.
       const text = passwordChangeConsequence([dev("Supernote Nomad")]);
       expect(text).toContain("Supernote Nomad will stop syncing");
       expect(text).toContain("enter the new password on the device");

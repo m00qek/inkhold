@@ -11,7 +11,7 @@ import { fileKind } from "../core/fileKind";
 /**
  * The list/row lead's width cap: 2.5× its fixed height, the same clamp every
  * preview class puts on its free axis. A ROW tile's aspect is PRE-CLAMPED with
- * it (masonry.md step 2's rider), so an extreme panorama reserves its final
+ * it ('s rider), so an extreme panorama reserves its final
  * LETTERBOXED width up front rather than snapping narrower when the CSS cap
  * bites at load. The icon masonry leaves the raw aspect in place: there the
  * clamp moves the FREE axis in CSS and the box is final either way.

@@ -9,7 +9,7 @@ import {
 // The block cache is where the range design either works or does not, and it is
 // testable without a browser, a worker or wasm — it is a cache over a function
 // that returns bytes. What is asserted here is the ARITHMETIC of requests:
-// MuPDF's reads are small and many, and the whole plan (`docs/scratch/pdf-ranges.md`
+// MuPDF's reads are small and many, and the whole plan (
 // §1) rests on those turning into a handful of round trips rather than hundreds.
 
 /** A document of `total` bytes whose byte at `i` is `i % 251`, plus a fetch log. */

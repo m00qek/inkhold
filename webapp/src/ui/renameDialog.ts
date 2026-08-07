@@ -1,4 +1,4 @@
-// The RENAME dialog (docs/scratch/rename.md) — a small native-`<dialog>` that
+// The RENAME dialog — a small native-`<dialog>` that
 // renames a file or folder. It mirrors the shared `confirm.ts` scaffold (a native
 // `<dialog>` for the modal focus trap, Escape-to-dismiss and page inertness for
 // free) but does NOT reuse `openDialog`, for two reasons the shape turns on:
@@ -53,7 +53,7 @@ export interface RenameValidation {
   /**
    * The interface-voice helper/error line, or null when there is nothing to say
    * (a valid change, or an unchanged stem — disabled but not an error). Exactly
-   * the copy from rename.md.
+   * the copy the rename dialog was specified with.
    */
   message: string | null;
 }

@@ -212,7 +212,7 @@ describe("createHttpApi", () => {
       });
     });
 
-    // The tile-shape fact the masonry lays out from (masonry.md decision 3).
+    // The tile-shape fact the masonry lays out from.
     // ABSENT for most entries by design (only `.note`/`.spd` state a shape), and
     // the layout consumes it as a RATIO — so anything that cannot be a shape
     // must normalize to `undefined` (the CSS fallback), never reach
@@ -1030,7 +1030,7 @@ describe("dispatchApiFailure", () => {
   });
 });
 
-// --- the account face (docs/scratch/user-options.md §7) ---
+// --- the account face ---
 //
 // Four routes, and the thing they have in common is what is being pinned here
 // as much as the mapping: NOT ONE OF THEM TAKES A TARGET. Every verb under

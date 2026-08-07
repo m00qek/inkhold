@@ -43,7 +43,7 @@ export interface CardActionsCtx {
   /** The ONE soft-delete path (`bin.trash`) every surface shares. */
   onTrash: (entry: Entry) => void;
   /**
-   * Open the rename dialog for `entry` (docs/scratch/rename.md). The shell owns
+   * Open the rename dialog for `entry`. The shell owns
    * the dialog, the `api.rename` call, the optimistic listing update and the
    * toast; this seam only says which entry the ⋯ menu's Rename was chosen on.
    */

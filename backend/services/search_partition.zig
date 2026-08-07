@@ -1,5 +1,5 @@
 //! Search rowid masking: the partition table and the sequence allocator behind
-//! `segment_search.id` (see docs/scratch/search-architecture.md, decisions 2-4).
+//! `segment_search.id` (see, decisions 2-4).
 //!
 //! ## The rowid layout — 15-bit partition, 48-bit sequence
 //!

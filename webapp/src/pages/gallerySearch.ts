@@ -172,7 +172,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   }
 
   /**
-   * What the results header says. THE HARD RULE (search-architecture.md
+   * What the results header says. THE HARD RULE (
    * decision 6): the server never counts its matches — the query terminates at
    * the page boundary precisely so it does not — so when a cursor says more may
    * exist, the header speaks in FLOORS ("3+ notes · 20+ pages"), never in a

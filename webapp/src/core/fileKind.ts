@@ -100,7 +100,7 @@ export function hasDedicatedViewer(fileType: string): boolean {
 
 // --- UPLOAD (web → cloud → device) -------------------------------------------
 //
-// What the WEB may send INTO the tree (docs/scratch/upload.md §3). A different
+// What the WEB may send INTO the tree. A different
 // question from `fileKind` above — that one asks what the browser can DO with a
 // file already in the library; this one asks what the NOMAD can open once the
 // file gets there, because the device is the reader for most of these and the

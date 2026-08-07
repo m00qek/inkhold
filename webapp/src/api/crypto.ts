@@ -1,5 +1,5 @@
 // The login credential math, done entirely in the browser so the plaintext
-// password never crosses the network. See docs/auth.md.
+// password never crosses the network.
 //
 //   stored credential = md5_hex(password)
 //   login challenge   = sha256_hex(md5_hex(password) + randomCode)

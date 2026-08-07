@@ -12,8 +12,8 @@
 //! | 16 MB `.txt` (`max_file_bytes`) | ~1.2 s | **48-60 s** |
 //!
 //! A minute of held connection for a file the user is allowed to upload today.
-//! This is a repair for shipped behaviour, not groundwork — see
-//! `docs/scratch/search-index.md`, which measured it.
+//! This is a repair for shipped behaviour, not groundwork; it was measured first.
+//!
 //!
 //! ## The job store is a QUERY, not a queue
 //!
@@ -211,7 +211,7 @@ fn runTxt(job: Job) anyerror!void {
 /// AFTER `.txt` on purpose. A note or a text file is what somebody just synced
 /// and is about to look for; a PDF's tile shape can wait a beat. The cost is
 /// also the other way round: probing a 1,703-page document is 13.2 MB and walks
-/// its page tree (`pdf-index.md` §3.1), where a text file is a scan.
+/// its page tree, where a text file is a scan.
 const pdf_tenant: Tenant = .{
     .name = "pdf",
     .priority = 2,

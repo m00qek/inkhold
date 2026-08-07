@@ -13,7 +13,7 @@ import type { PdfLink } from "./pdfLinks";
  *
  * `stream` is the JSPI path: MuPDF pulls blocks through `ink.host_read` as it
  * needs them. `whole` is the fallback for an engine without JSPI — correct
- * everywhere, just not fast (`docs/scratch/pdf-ranges.md` §3).
+ * everywhere, just not fast.
  */
 export type PdfOpenMode = "stream" | "whole";
 

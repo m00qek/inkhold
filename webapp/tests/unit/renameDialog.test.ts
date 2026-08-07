@@ -1,4 +1,4 @@
-// The rename feature's pure logic (docs/scratch/rename.md), as units:
+// The rename feature's pure logic, as units:
 //   - extension PEEL by the entry's own fileType (single-dot, multi-dot,
 //     wrong-ext, folder), the same case-insensitive rule the `.spd` export uses;
 //   - stem VALIDATION (empty, illegal `/`, unchanged);

@@ -1,7 +1,7 @@
 // The layers panel, shared across file formats — the FORMAT-NEUTRAL half of the
 // `.spd` viewer's panel, split out (like toolbar.ts before it) so the `.note`
 // reader can grow the SAME panel without a second implementation (the extraction
-// `docs/scratch/archive/note-layers-panel.md` decides). What lives here is everything a
+// decided). What lives here is everything a
 // layers panel is regardless of format: a semantic `<aside>` holding a real
 // `<ul>` of layer rows, each with a LEADING thumbnail, a name, a visibility eye,
 // and — only when the layer carries opacity — a draggable FILL BAR.
@@ -26,7 +26,7 @@
 //   - Whether opacity EXISTS. The fill bar renders only when the layer model
 //     carries `opacity` — data-driven, no format flags. `.spd` layers do
 //     (0..255 on the wire, 0..1 here); `.note` layers have none
-//     (device-confirmed, note-layers-panel.md) and simply omit the field, so the
+//     (device-confirmed) and simply omit the field, so the
 //     row is just thumb + name + eye.
 //
 // STATE MODEL. The panel is handed the CURRENT view state and owns its own DOM

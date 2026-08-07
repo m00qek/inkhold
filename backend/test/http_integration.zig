@@ -301,7 +301,7 @@ test "control-plane first login is limited, change-password revokes it and unloc
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/equipment/unlink", &web_tok, "{\"equipmentNo\":\"X\"}", 401);
 }
 
-// ---- self-service password change (docs/scratch/user-options.md §4) ----
+// ---- self-service password change ----
 //
 // The endpoint was built for the FORCED first-login change, where a `pending`
 // token is the proof of identity, and it took the new password and nothing else.
@@ -1152,7 +1152,7 @@ test "sync supersede RETAINS the prior version: history row, old blob kept, and 
     try std.testing.expectEqual(@as(i64, 1), try countRows(f, "SELECT COUNT(*) FROM file_history;"));
     try std.testing.expectEqual(@as(i64, @intCast(v1.len)), try countRows(f, "SELECT size FROM file_history;"));
     try std.testing.expect(f.files.blobs.has(&old_md5));
-    // And it is CHARGED (user-options.md §6). The retained version occupies disk
+    // And it is CHARGED. The retained version occupies disk
     // — its blob survives the GC gate on the strength of that history row alone —
     // so the owner pays for it, exactly as they pay for a trashed file. Usage is
     // the current blob PLUS the retained one; the meter used to read only the
@@ -5889,7 +5889,7 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
         try expectHeaderContains(resp.head, try std.fmt.bufPrint(&lbuf, "etag: \"{s}\"", .{png.md5[0..]}));
     }
 
-    // --- RANGE: the PDF viewer's transport (docs/scratch/pdf-ranges.md) ---
+    // --- RANGE: the PDF viewer's transport ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ png.id, png.md5[0..] });
         var lbuf: [80]u8 = undefined;
@@ -7823,7 +7823,7 @@ test "web upload onConflict=replace: quota releases the old charge only when not
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
     // The old charge is NOT released, because the bytes did not leave the disk:
-    // the retained version keeps them, so the owner keeps paying (user-options.md
+    // the retained version keeps them, so the owner keeps paying (
     // §6). That the blob is still there is exactly what makes it restorable — and
     // exactly why charging for it is the honest reading of the meter.
     try std.testing.expectEqual(old_len + new_len, try usedBytes(f, admin));
@@ -7848,7 +7848,7 @@ test "web upload onConflict=replace: quota releases the old charge only when not
     try std.testing.expectEqual(before + @as(i64, "third distinct payload".len), try usedBytes(f, admin));
 }
 
-// ---- the account screen (docs/scratch/user-options.md §7) ----
+// ---- the account screen ----
 
 test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real session" {
     // The frontend reads these two bodies field by field, so pin the WIRE rather

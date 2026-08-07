@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { railSettled, signedIn } from "./helpers/app";
 
-// YOUR OWN ACCOUNT (src/pages/account.ts, docs/scratch/user-options.md §7).
+// YOUR OWN ACCOUNT (src/pages/account.ts).
 //
 // WHAT EACH TEST PINS, so a later refactorer can tell whether one has quietly
 // stopped biting:

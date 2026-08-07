@@ -3,7 +3,7 @@ import { signedIn, imgInkFraction, imgPainted, freezeMotion } from "./helpers/ap
 
 // THE THEME CONTROL MOVED. It used to be an icon button in the rail's footer;
 // it is now the Appearance section of the account page, as a two-option control
-// (docs/scratch/user-options.md §7). The argument for keeping it one click away
+// The argument for keeping it one click away
 // — people flip it often — did not survive the fact that the app already follows
 // `prefers-color-scheme`: it is a set-once override, it was already listed under
 // Appearance, and leaving it in the rail meant one control in two places.

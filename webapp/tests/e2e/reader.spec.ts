@@ -267,7 +267,7 @@ test.describe("reader", () => {
         await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
         // "Move to bin" is now the icon+label control in the file zone — Download
-        // and recognised-text went icon-only (`toolbar.md` override), so this is
+        // and recognised-text went icon-only, so this is
         // the button that still carries a visible word beside its glyph, which is
         // exactly what a "label AND icon" legibility test wants. Scoped to the bar
         // so the rail's "Recycle bin" row does not stand in for it.
@@ -520,7 +520,7 @@ test.describe("reader", () => {
       const moveBin = page.locator(".reader__bar").getByRole("button", { name: "Move to bin" });
       await expect(moveBin).toBeVisible();
       // QUIET, NEVER RED: trash is recoverable, red is reserved for purge
-      // (`toolbar.md`). It must not carry the danger styling.
+      // It must not carry the danger styling.
       await expect(moveBin).not.toHaveClass(/is-danger/);
 
       await moveBin.click();

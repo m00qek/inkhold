@@ -1,4 +1,4 @@
-// Custom image templates (docs/scratch/custom-template.md) — the browser half.
+// Custom image templates — the browser half.
 //
 // A `.note` page can have a browser-native IMAGE as its background layer
 // (PNG/JPG/JPEG/WEBP) instead of a built-in RATTA_RLE template. The WASM decoder

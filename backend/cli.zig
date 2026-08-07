@@ -1,6 +1,6 @@
 //! The command line: `serve` plus the three recovery verbs.
 //!
-//! See docs/scratch/cli-recovery.md. The short version: a single-admin install
+//! The short version: a single-admin install
 //! that loses its one password has no way back in over HTTP — there is nobody
 //! left to issue a reset. These verbs are authorised by READ/WRITE ACCESS TO THE
 //! DATA DIRECTORY, which on a self-hosted server is proof of ownership and is
@@ -156,7 +156,7 @@ pub fn parse(args: []const []const u8) ParseError!Invocation {
     return error.MissingOrUnknownSubcommand;
 }
 
-/// The help text, verbatim from docs/scratch/cli-recovery.md §3. The Recovery
+/// The help text, verbatim from the recovery-CLI design. The Recovery
 /// and Notes paragraphs are not padding: this is read by somebody who cannot
 /// sign in, and the two facts they need are that filesystem access is the
 /// authorisation and that nothing here will ever create a database.
@@ -476,7 +476,7 @@ fn openFailure(e: anyerror) !u8 {
 /// `inkhold users` — the diagnosis. Address, admin flag, pending-change flag,
 /// and the count that actually matters: how many admins are there?
 ///
-/// **Addresses only, no ids** (cli-recovery.md open question 2). The address is
+/// **Addresses only, no ids.** The address is
 /// what a person knows and what every other verb here takes; the id is what the
 /// admin HTTP API takes, and printing both invites the wrong one to be typed
 /// into the wrong tool.

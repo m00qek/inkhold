@@ -1,4 +1,4 @@
-// The SELF-SERVICE account surface's wire types (docs/scratch/user-options.md
+// The SELF-SERVICE account surface's wire types (
 // §5–§7): what a person may see and change about their OWN account, as opposed
 // to what an admin may do to somebody else's.
 //

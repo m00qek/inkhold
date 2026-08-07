@@ -6,7 +6,7 @@
 //
 // Extracted from the `.spd` export (pages/spdExport.ts, now the `.spd` adapter)
 // so the `.note` reader's layer work can reuse the whole matrix — the reason is
-// `docs/scratch/archive/note-layers-panel.md` §Exports. The core is format-neutral by
+//  format-neutral by
 // construction; a format adapter only has to fill the model:
 //   - `.spd`: opacity is the wire's 0..255 normalised to 0..1; `current` is the
 //     live panel tuning, `authored` the file's own state.

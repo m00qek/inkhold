@@ -276,7 +276,7 @@
   object-fit: contain;
   display: block;
 }
-/* THE REFLOW RIDER (masonry.md step 2), the bin's copy of the list row's rule
+/* THE REFLOW RIDER, the bin's copy of the list row's rule
    in 04: where the row's entry states its shape (`BinEntry.thumbAspect`, or the
    image dims memo), bin.ts pre-sets an inline `aspect-ratio` — PRE-CLAMPED to
    min(aspect, 2.5), the class's width cap — and marks the tile `has-aspect`.

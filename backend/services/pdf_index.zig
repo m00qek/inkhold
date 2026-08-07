@@ -18,7 +18,6 @@
 //! (`store`). Nothing here takes a lock — that discipline belongs to
 //! `services/deferred.zig`, where the threading is.
 //!
-//! See `docs/scratch/pdf-index.md`.
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");

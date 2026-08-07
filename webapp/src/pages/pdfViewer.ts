@@ -12,10 +12,10 @@
 // `render/pdfWorker.ts`); this asks for a page and receives an `ImageBitmap` to
 // draw. That is why every step here is `await`ed — a page size can now cost a
 // round trip — and why there is no longer a size ceiling: a 76 MB document
-// costs the blocks page 1 is written in (`docs/scratch/pdf-ranges.md`).
+// costs the blocks page 1 is written in.
 //
 // WHAT THIS IS NOT, YET. No `.mark` annotation overlay — that is the point of
-// the exercise (`docs/scratch/pdf-viewer.md` §6) and it is gated on the pairing
+// the exercise and it is gated on the pairing
 // work, not on this file. A plain PDF viewer is worth having on its own.
 
 import { el } from "../ui/dom";
@@ -358,7 +358,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   // independent byte range and its thumbnail is one decode. A PDF page is a walk
   // through a shared resource graph: rendering page 40's thumbnail can pull
   // fonts, colour spaces and images from anywhere in the file, over the network,
-  // one suspended round trip at a time (`docs/scratch/pdf-ranges.md` §5.7). So
+  // one suspended round trip at a time. So
   // the paint is gated TWICE — on the row being inside the strip's window (the
   // component's job) and on it actually being on screen (the observer's).
 
@@ -1042,7 +1042,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     }
     // `drawImage` of a TRANSFERRED bitmap, not `putImageData`: the pixels were
     // handed over from the worker rather than copied, which is the point of
-    // rendering there (`docs/scratch/pdf-ranges.md` §3).
+    // rendering there.
     ctx.drawImage(frame.bitmap, 0, 0);
     frame.bitmap.close();
     body.main.replaceChildren(stage);
@@ -1803,7 +1803,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     // viewer really did have to pull the whole file across the wire and into
     // wasm memory before it could paint anything. With range-served blocks it
     // does not: page 1 costs the blocks page 1 is written in, whatever the file
-    // measures (`docs/scratch/pdf-ranges.md` §5.6). The placeholder below still
+    // measures. The placeholder below still
     // catches the genuine failures — a corrupt file, an encrypted one, a browser
     // that cannot run the module.
     session ??= seam.createSession();

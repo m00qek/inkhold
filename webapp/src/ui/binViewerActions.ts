@@ -36,7 +36,7 @@ export interface BinViewerActionsDeps {
    * Open the trashed file's version history — the bin's CARD-parity entry point to
    * the same view-only history the reader's Versions button opens. Given the "…"
    * trigger as its anchor. Omitted → no "Version history" row (a viewer whose kind
-   * never previews history). See bin-parity.md.
+   * never previews history).
    */
   onHistory?: (meta: NoteMeta, anchor: HTMLElement) => void;
 }

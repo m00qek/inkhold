@@ -1,13 +1,13 @@
 // The LAYERED `.note` fixture — the one note in the fake tree whose pages carry
 // `layers` in their `NoteMetaVO` refs and whose page-bytes are REAL SNPG v2
-// payloads (docs/reference/control-plane-endpoints.md §The SNPG page payload),
+// payloads,
 // decodable by the actual `note-decode.wasm` the dev server ships. That is
 // what lets the reader's layers panel run END TO END in dev and e2e — fake
 // data plane, real decoder — the way the `.spd` viewer's e2e drives the real
 // `spd-decode.wasm` against a committed fixture.
 //
 // The layer cast mirrors the settled capture (`layers_edited.note`,
-// docs/scratch/archive/note-layers-panel.md §RESOLVED): a nameless background and main
+// ): a nameless background and main
 // layer (the panel derives slot defaults), a DEVICE-HIDDEN Layer 2 whose
 // record still ships on the wire flagged `hidden` (the panel must be able to
 // toggle it ON), and a renamed top layer ("Layer Renamed") that is the

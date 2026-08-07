@@ -2,7 +2,7 @@
 //!
 //! This is the SAME parser the backend uses (`parsers/spd/`), compiled to WASM
 //! instead of re-implemented in JS — the one governing rule of the `.spd`
-//! integration plan (`docs/scratch/archive/spd-integration.md`): the reverse-engineered
+//! integration plan: the reverse-engineered
 //! format is parsed in exactly one place, so the `tid` mapping and WAL handling
 //! cannot silently drift between the two faces.
 //!

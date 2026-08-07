@@ -148,7 +148,7 @@ export interface Api {
    * (and limit) must be the ones the cursor came from, since the cursor only
    * means anything relative to that result stream. No call on this surface
    * ever learns how many results there are in all; the server's query stops
-   * at the page boundary by design (search-architecture.md decision 6).
+   * at the page boundary by design.
    *
    * `signal` CANCELS THE REQUEST, not just its paint. The box searches as you
    * type and every keystroke supersedes the last, so without it the abandoned
@@ -308,7 +308,7 @@ export interface Api {
 
   // --- ADMIN WRITES ---
   //
-  // The admin console (docs/scratch/admin-console.md, U1–U8). Every method below
+  // The admin console (U1–U8). Every method below
   // is `require_admin` on the server — `is_admin` AND a live elevation — except
   // the two that manage the elevation itself, so any of them may answer 428
   // ELEVATION_REQUIRED at any moment. `pages/admin.ts` is what turns that into
@@ -568,7 +568,7 @@ export interface Api {
 
   // --- RENAME (control-plane) ---
   //
-  // Rename a LIVE file or folder in place (docs/scratch/rename.md). A rename is a
+  // Rename a LIVE file or folder in place. A rename is a
   // `move` whose destination is the entry's current parent, so the server reuses
   // the device-sync path's name / collision / sync-version logic; this seam only
   // carries the new full name (extension included) and hands the updated entry
@@ -595,7 +595,7 @@ export interface Api {
 
   // --- UPLOAD (control-plane) ---
   //
-  // Put a file INTO the library from the browser (docs/scratch/upload.md), which
+  // Put a file INTO the library from the browser, which
   // closes the one arrow the app was missing: web → cloud → device. The device
   // half is CONFIRMED — a file placed straight into the tree is pulled down by
   // the Nomad on its next sync — so this seam's job is only to leave the tree in
@@ -615,7 +615,7 @@ export interface Api {
    * queue's progress bar is drawn from. It is the reason this is the one call on
    * this seam implemented with `XMLHttpRequest` rather than `fetch`: only
    * `xhr.upload.onprogress` reports bytes sent portably — a `fetch` request body
-   * cannot be observed (ui-on-slow-connection.md §2.1). Download progress is the
+   * cannot be observed. Download progress is the
    * opposite direction and a different transport; the two share the progress UI
    * and nothing else.
    *
@@ -646,8 +646,8 @@ export interface Api {
 
   // --- ACCOUNT (self-service) ---
   //
-  // The surface a person has over their OWN account
-  // (docs/scratch/user-options.md §5–§7). Everything else account-shaped in this
+  // The surface a person has over their OWN account.
+  // Everything else account-shaped in this
   // app is an ADMIN verb aimed at somebody else — reset THEIR password, unlink
   // THEIR device, set THEIR quota — and a person who needed one of these for
   // themselves has, until now, had to point one of those at their own row. That

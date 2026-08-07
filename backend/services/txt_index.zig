@@ -1,8 +1,8 @@
 //! The `.txt` blob index: split a text blob into PARAGRAPH segments and store
 //! them as `kind = 1` rows in `note_page_index`, so library search returns
 //! `.txt` paragraphs interleaved with note pages through the exact machinery
-//! that already serves them (`segment_search` + `segment_fts` — see
-//! `docs/scratch/archive/txt-search.md`, the segment seam's first tenant).
+//! that already serves them (`segment_search` + `segment_fts`),
+//! the segment seam's first tenant.
 //!
 //! ## Paragraphs, not fixed chunks (plan decisions 1–2)
 //!

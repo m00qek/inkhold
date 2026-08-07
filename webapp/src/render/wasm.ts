@@ -1,7 +1,7 @@
 // The real `NoteRenderer` (P5) — the WASM `.note` page decoder behind the render
 // seam. It takes one page's SNPG bytes (from `Api.getPageBytes`), runs them
 // through the freestanding `note-decode.wasm` module (built from
-// `webapp/wasm/note_decode.zig`; see docs/wasm-note-decoder.md), and wraps the
+// `webapp/wasm/note_decode.zig`), and wraps the
 // resulting RGBA into an `ImageBitmap`.
 //
 // The decoder commits to NO theme — it emits opaque grayscale, black ink on a
@@ -21,7 +21,7 @@ import { thumbTargetWidth } from "./types";
 import type { RenderSize } from "../core/types";
 import { compositeTemplateUnderInk, type TemplateProvider } from "./template";
 
-/** The freestanding decoder's C-ABI exports (see docs/wasm-note-decoder.md). */
+/** The freestanding decoder's C-ABI exports. */
 export interface DecoderExports {
   memory: WebAssembly.Memory;
   alloc(len: number): number;

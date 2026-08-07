@@ -1,5 +1,5 @@
 // The PDF WORKER — MuPDF, the block cache and every `ink_*` call, off the main
-// thread. `docs/scratch/pdf-ranges.md` §3.
+// thread.
 //
 // TWO REASONS IT IS A WORKER, and only one of them is JSPI. Rastering a 77-page
 // A4 document on the main thread janks the UI for as long as it takes; and
@@ -41,7 +41,7 @@ interface WorkerScope {
 const ctx = globalThis as unknown as WorkerScope;
 
 /**
- * Is JSPI here? (`pdf-ranges.md` §2.2 measured it present in Chromium 149, in a
+ * Is JSPI here? (measured present in Chromium 149, in a
  * non-secure, non-isolated context — which is what a household box on
  * `http://<lan-ip>` has to work in.)
  *

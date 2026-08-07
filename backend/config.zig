@@ -18,12 +18,12 @@ pub const Tls = struct {
 /// Hot-cache versioning ("history of this file"). A synced edit RETAINS the
 /// superseded version instead of pruning it: the old blob stays on disk, a
 /// `file_history` row records it, and only the search rows are dropped (the
-/// render index rides along with the retained blob). See
-/// docs/scratch/hot-cache-versioning.md. Bounded two ways, both required.
+/// render index rides along with the retained blob).
+/// Bounded two ways, both required.
 pub const History = struct {
     /// Recent versions kept hot, per file (the single K, H6) — now the DEFAULT
     /// and the CEILING for the per-user `users.history_keep`, rather than the
-    /// only value (docs/scratch/user-options.md §7). A user who has never chosen
+    /// only value. A user who has never chosen
     /// gets this; a user who has is clamped to it, so lowering it here takes
     /// effect for everyone immediately and no household member can set the whole
     /// install's disk policy. `keep = 0` disables versioning cleanly — back to
@@ -66,7 +66,7 @@ pub const Config = struct {
     /// ideally outside the backup path) so a stolen `inkhold.db` yields no
     /// recoverable credentials. Generated + persisted 0600 on first run if absent.
     /// **Losing this file makes every stored credential unrecoverable → forced
-    /// password resets** — back it up. See docs/design/auth.md §5b.
+    /// password resets** — back it up.
     cred_key_path: []const u8 = "cred.key",
     /// Directory for the content-addressed blob store and render cache.
     data_dir: []const u8 = "data",

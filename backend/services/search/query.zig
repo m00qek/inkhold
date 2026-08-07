@@ -5,7 +5,7 @@
 //! primitives) — is the SOLE owner of the `segment_fts` FTS5 table and its
 //! `segment_search` rows; nothing outside it may touch them.
 //! (`search_partition.zig` owns the mask arithmetic and the sequence allocator;
-//! docs/scratch/archive/search-architecture.md is the design.)
+//! the partitioned-search design is what this implements.)
 //!
 //! ## The shape: one segment row per (owner, segment), rowid-masked
 //!

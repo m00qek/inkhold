@@ -3,7 +3,7 @@ import { signedIn, cardButton, railSettled } from "./helpers/app";
 import { mockApi } from "./helpers/mockApi";
 import { recordText } from "./helpers/recordText";
 
-// Uploading a file from the web (docs/scratch/upload.md): the drop target over
+// Uploading a file from the web: the drop target over
 // the gallery, the toolbar's Upload button, the per-file progress rows, and the
 // two refusals that must happen BEFORE any bytes move. These drive it end to end
 // against the in-memory fake `Api`, which mutates the fixture tree, reports

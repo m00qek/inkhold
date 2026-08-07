@@ -8,7 +8,7 @@ export type Id = string;
 
 /**
  * A content hash (md5 hex). Two flavours appear in the protocol (see the device
- * `SummaryInfoVO`, docs/sync-design.md): a whole-file hash and a per-page
+ * `SummaryInfoVO`): a whole-file hash and a per-page
  * CONTENT hash. Page/render caching keys off the *content* hash so an edit
  * elsewhere in a note doesn't invalidate an unchanged page.
  */
@@ -70,7 +70,7 @@ export const LAYER_SLOTS: readonly LayerSlot[] = ["main", "layer1", "layer2", "l
 
 /**
  * One layer of one page, as `NoteMetaVO.pages[].layers` carries it — the layer
- * PANEL's model (docs/reference/control-plane-endpoints.md `LayerVO`). Entries
+ * PANEL's model (`LayerVO`). Entries
  * are in SNPG record order (bottom-to-top) and pair with the page payload's
  * records BY SLOT, never by position.
  *
@@ -260,7 +260,7 @@ export interface NoteSummary {
   /**
    * The pixel dimensions of the tile this entry will preview as — what lets the
    * gallery lay a tile out at its FINAL shape before any image bytes arrive
-   * (docs/scratch/archive/masonry.md decision 3). Integers, from the server's own index:
+   * Integers, from the server's own index:
    *
    *  - `.note` → its cover's dims when a cover exists, else PAGE 1's effective
    *    dims (a landscape note honestly reads 1872×1404);
@@ -521,7 +521,7 @@ export interface SearchResults {
    * one honest end-of-results signal there is. NO TOTAL IS EVER SERVED — the
    * early-terminating query stops at the page boundary precisely so it never
    * counts the rest, and the UI must never fabricate a count it was not given
-   * (search-architecture.md decision 6). The string is not to be parsed,
+   * The string is not to be parsed,
    * compared or stored beyond handing it straight back: its shape belongs to
    * the server and changes with the index's layout.
    */

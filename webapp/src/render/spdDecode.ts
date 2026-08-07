@@ -9,7 +9,7 @@
 // module — not a page — had to reach INTO `pages/` to get them; now both import
 // down here and the dependency arrow points the right way.
 //
-// See `docs/reference/spd-format.md` and the ABI header in
+// See `parsers/spd/spd-format.md` and the ABI header in
 // `webapp/wasm/spd_decode.zig`.
 
 // ============================================================================

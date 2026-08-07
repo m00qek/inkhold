@@ -1,4 +1,4 @@
-// The thumbnail facade (§C of docs/scratch/archive/thumbnails.md). ONE content-addressed
+// The thumbnail facade. ONE content-addressed
 // entry point every library surface calls to get a small preview for any file —
 // a `.note` page, an `.spd` drawing, an image, a `.txt` — without the caller
 // learning whether the pixels came from a client render, an extracted embedded
@@ -83,11 +83,11 @@ export interface ThumbSource {
  * at `/thumbnail/{hash}`), while `image-doc` is a plain raster document
  * (png/jpeg/webp/gif) whose ONLY pixels are the raw file itself — fetched
  * once, downscaled locally to the tier, and whose true source dims feed the
- * masonry aspect memo (docs/scratch/archive/masonry.md decision 5).
+ * masonry aspect memo.
  *
  * `pdf-page` is `note-page` MINUS the cover probe: a PDF has no embedded
  * thumbnail worth looking for and neither does its `.mark` sibling (both real
- * captures put `COVER_0` at address 0 — see docs/scratch/pdf-thumbnails.md §0),
+ * captures put `COVER_0` at address 0 —),
  * so there is nothing to try before the render.
  */
 export type ThumbStrategy = "glyph" | "image" | "image-doc" | "note-page" | "pdf-page" | "text";
@@ -507,7 +507,7 @@ export function createThumbnails(deps: ThumbnailsDeps): Thumbnails {
 
       case "image-doc": {
         // A plain raster document (png/jpeg/webp/gif) — LOCAL-ONLY thumbnail
-        // (docs/scratch/archive/masonry.md decision 5). The raw bytes (a multi-MB photo
+        // The raw bytes (a multi-MB photo
         // for a ~245px tile, before this branch existed re-decoded per paint)
         // are fetched ONCE per hash per session, decoded at the pristine-tier
         // size, and the WebP tile is what every later paint serves. The decode

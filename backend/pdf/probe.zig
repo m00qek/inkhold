@@ -6,7 +6,6 @@
 //! point and converts its result into a Zig error union — no MuPDF type ever
 //! appears here.
 //!
-//! See `docs/scratch/pdf-index.md`.
 
 const std = @import("std");
 
@@ -131,7 +130,7 @@ test "ROTATION IS APPLIED — /Rotate 90 reports the rotated box, not the MediaB
     // 200x100 MediaBox with `/Rotate 90`, so the honest answer is 100x200. A
     // hand-rolled parser reading `/MediaBox` would say 200x100 and be wrong in
     // the one way this project has already been wrong twice: the export put ink
-    // ninety degrees out on a rotated page, and `pdf-links.md` §2 records the
+    // ninety degrees out on a rotated page, and the link work records the
     // same trap for link rects.
     const shape = probePath("backend/pdf/testdata/rotate90.pdf") catch |e| switch (e) {
         Error.Unopenable => return error.SkipZigTest,

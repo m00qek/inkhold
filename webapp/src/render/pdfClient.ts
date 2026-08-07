@@ -97,7 +97,7 @@ export interface PdfSession {
  * The most recent `stats()` answer, also published as `__inkholdPdfStats`.
  *
  * A DIAGNOSTIC SURFACE, not a test hook — though the acceptance test in
- * `docs/scratch/pdf-ranges.md` §7 is exactly this question. "How many requests
+ * for range-served PDFs is exactly this question. "How many requests
  * and how many bytes did page 1 of that document cost?" has no other answer on
  * a real device, and the whole design is a bet about that number: on a 3G link
  * a bad access pattern is the difference between three seconds and thirty.

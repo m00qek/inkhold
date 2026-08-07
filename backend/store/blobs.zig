@@ -36,8 +36,7 @@ pub const md5_hex_len = 32;
 /// on that stack (two of them on the streaming paths: one read, one write). A
 /// configured megabyte-scale chunk would be an immediate stack overflow, which is
 /// strictly worse than whatever tuning would buy. Making it configurable means
-/// first moving the buffers to the heap and clamping the value; see
-/// `docs/scratch/new-indexing.md` § "Chunk size".
+/// first moving the buffers to the heap and clamping the value
 pub const chunk_len = 64 * 1024;
 
 /// The longest `uploadId` a multipart chunk may carry. It names a temp file, so
