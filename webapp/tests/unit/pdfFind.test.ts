@@ -39,6 +39,8 @@ interface Built {
   find: ReturnType<typeof createPdfFindController>;
   states: PdfFindState[];
   marks: { words: PdfWord[]; current: number }[];
+  /** Every filmstrip badge map the controller published, in order. */
+  badges: ReadonlyMap<number, number>[];
   view: PdfFindView;
   words: ReturnType<typeof vi.fn>;
   searchInNoteStream: ReturnType<typeof vi.fn>;
@@ -67,17 +69,19 @@ function build(
 
   const states: PdfFindState[] = [];
   const marks: { words: PdfWord[]; current: number }[] = [];
+  const badges: ReadonlyMap<number, number>[] = [];
   const view: PdfFindView = {
     setOpen: vi.fn(),
     setState: vi.fn((s: PdfFindState) => void states.push(s)),
     setPageMarks: vi.fn((w: PdfWord[], current: number) => void marks.push({ words: w, current })),
+    setPageCounts: vi.fn((c: ReadonlyMap<number, number>) => void badges.push(new Map(c))),
     showPage: vi.fn(),
     setStepEnabled: vi.fn(),
     focusField: vi.fn(),
   };
   const failures: ApiFailureSink = { onSessionExpired: vi.fn(), onStalePage: vi.fn() };
   const find = createPdfFindController({ api, view, failures, words, debounceMs: 0 });
-  return { find, states, marks, view, words, searchInNoteStream };
+  return { find, states, marks, badges, view, words, searchInNoteStream };
 }
 
 const last = <T>(xs: T[]): T | undefined => xs[xs.length - 1];
@@ -123,6 +127,40 @@ describe("matchWords", () => {
 });
 
 describe("the honesty rule", () => {
+  it("badges every matching page with the SERVER's count, including one it cannot locate", () => {
+    // The filmstrip indicator: which pages hold matches, and how many. It reads
+    // from the same `counts` the counter does, which is the whole point — a
+    // badge derived from the located BOXES would show nothing on a page whose
+    // words MuPDF could not name, quietly contradicting a counter that says the
+    // match is there. Page 3 below is exactly that page: the server counted two,
+    // the client can place none.
+    return (async () => {
+      const b = build({
+        pages: [match(0, 1, ["ledger"]), match(3, 2, ["ledger"])],
+        words: { 0: [word("ledger", 0)] }, // page 3 yields nothing placeable
+      });
+      b.find.setDocument("n-book");
+      b.find.setPage(0);
+      b.find.open();
+      b.find.setQuery("ledger");
+      await flush();
+      await flush();
+
+      expect(last(b.badges)).toEqual(
+        new Map([
+          [0, 1],
+          [3, 2],
+        ]),
+      );
+
+      // And emptying the box takes them away rather than leaving stale numbers
+      // sitting on pages nobody is searching any more.
+      b.find.setQuery("");
+      await flush();
+      expect(last(b.badges)).toEqual(new Map());
+    })();
+  });
+
   it("A PAGE THE SERVER MATCHED BUT THE CLIENT CANNOT LOCATE STILL READS AS A MATCH", () => {
     // §9's first test, and the one most likely to be undone by accident: it is
     // undone by ANY change that derives the counter from the boxes.

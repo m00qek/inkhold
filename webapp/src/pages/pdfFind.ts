@@ -157,6 +157,17 @@ export interface PdfFindView {
    * the counter is set separately and by the server's numbers.
    */
   setPageMarks(words: PdfWord[], current: number): void;
+  /**
+   * Filmstrip badges, keyed by 0-based page index. Empty clears them.
+   *
+   * The counts are the SERVER's, not the locator's: a page the index matched
+   * but whose words this client could not place still carries its number. The
+   * badge answers "which pages is it on, and how often" — a question the server
+   * has already answered exactly — while the marks answer "where on this page",
+   * which is best-effort. Deriving the badge from the marks would quietly turn
+   * an unplaceable match into a page with no matches.
+   */
+  setPageCounts(counts: ReadonlyMap<number, number>): void;
   /** Stepping crossed a page boundary — turn the page as it goes. */
   showPage(index: number): void;
   /**
@@ -288,8 +299,18 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
     return -1;
   }
 
+  function countsMap(): Map<number, number> {
+    return new Map(counts.map((p) => [p.pageIndex, p.matches]));
+  }
+
+  /** The badges follow `counts`, so this is called wherever `counts` moves. */
+  function publishCounts(): void {
+    view.setPageCounts(countsMap());
+  }
+
   function clearPainted(): void {
     view.setPageMarks([], -1);
+    view.setPageCounts(new Map());
     view.setStepEnabled(false);
   }
 
@@ -368,6 +389,7 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
     if (batch.usedFuzzy && !optedIn) {
       landedCounts = true;
       counts = [];
+      publishCounts();
       fuzzy = true;
       at = -1;
       view.setStepEnabled(false);
@@ -387,6 +409,7 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
 
     landedCounts = true;
     counts = batch.pages;
+    publishCounts();
     fuzzy = batch.usedFuzzy;
 
     const n = total();
@@ -448,6 +471,7 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
     if (heldFuzzy === null || !open) return;
     optedIn = true;
     counts = heldFuzzy;
+    publishCounts();
     heldFuzzy = null;
     fuzzy = true;
     settled = true;

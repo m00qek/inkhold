@@ -1379,6 +1379,10 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
         syncUrl();
       },
       setPageMarks: paintFindMarks,
+      // The same strip the reader badges, through the same call — `pageIndex` is
+      // shared, and it HOLDS the counts, so a row built later by a scroll still
+      // arrives wearing the badge it is due.
+      setPageCounts: (counts) => pagesPanel.setBadges(counts),
       showPage: (index) => void go(index),
       setStepEnabled(enabled) {
         findPrev.disabled = !enabled;
