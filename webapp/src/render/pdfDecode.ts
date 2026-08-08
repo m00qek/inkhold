@@ -18,6 +18,7 @@
 // walks it, and on that path any call can suspend.
 
 import { parsePageLinks, type PdfLink } from "./pdfLinks";
+import { parsePageWords, type PdfWord } from "./pdfText";
 
 // ============================================================================
 // The decoder C-ABI. Pointers are byte offsets into `memory`; every pointer must
@@ -55,6 +56,19 @@ export interface PdfDecoderExports {
   ink_page_links(handle: number, page: number): bigint;
   /** Release the buffer `ink_page_links` returned. Idempotent. */
   ink_links_free(): void;
+  /**
+   * The page's WORDS and where they sit, as UTF-8 JSON — packed
+   * `(ptr << 32) | len`, or negative. A page with no text answers `[]`, which is
+   * a SUCCESS.
+   *
+   * The boxes are in the same space `ink_page_size` reports. NO NEEDLE CROSSES
+   * HERE: the module locates, it does not match — see `render/pdfText.ts`.
+   * Building the structured text RUNS the page, so this SUSPENDS more readily
+   * than anything else in this interface.
+   */
+  ink_page_words(handle: number, page: number): bigint;
+  /** Release the buffer `ink_page_words` returned. Idempotent. */
+  ink_words_free(): void;
   /** Packed (ptr << 32) | len, or negative on failure. */
   ink_render(handle: number, page: number, scale: number): bigint;
   ink_render_width(): number;
@@ -396,6 +410,15 @@ export interface PdfCalls {
    */
   pageLinks?(handle: number, page: number): bigint | Promise<bigint>;
   /**
+   * OPTIONAL IN THE TYPE, MANDATORY ON THE JSPI PATH, and the most emphatically
+   * of any of them: extracting a page's words RUNS the page, so it pulls the
+   * fonts, the images and every content stream the page references. Unwrapped on
+   * a streamed document it traps the instance on its first suspension.
+   * {@link AsyncPdfDocument.pageWords} falls back to the raw export when it is
+   * absent, which is right for `syncCalls` and wrong for a promising wrapper.
+   */
+  pageWords?(handle: number, page: number): bigint | Promise<bigint>;
+  /**
    * OPTIONAL IN THE TYPE, MANDATORY ON THE JSPI PATH. `ink_export_page` grafts a
    * page, which walks the source document's xref and so can re-enter
    * `ink.host_read`; on a streamed document an unwrapped call TRAPS the instance
@@ -451,6 +474,7 @@ export function syncCalls(x: PdfDecoderExports): PdfCalls {
     pageCount: (h) => x.ink_page_count(h),
     pageSize: (h, p, w, hp) => x.ink_page_size(h, p, w, hp),
     pageLinks: (h, p) => x.ink_page_links(h, p),
+    pageWords: (h, p) => x.ink_page_words(h, p),
     render: (h, p, s) => x.ink_render(h, p, s),
     exportPage: (h, p, ink, w, ih, a, b, c, d, e, f) =>
       x.ink_export_page(h, p, ink, w, ih, a, b, c, d, e, f),
@@ -562,6 +586,37 @@ export class AsyncPdfDocument {
       return parsePageLinks(json);
     } finally {
       x.ink_links_free();
+    }
+  }
+
+  /**
+   * The page's WORDS, in the page's DISPLAY space (points) — find-in-PDF's
+   * locator.
+   *
+   * AN EMPTY LIST IS AN ANSWER, not a failure, exactly as it is for links, and
+   * here it is load-bearing rather than merely tidy: a page of scanned images
+   * has no words, and a page the server MATCHED can still yield none the client
+   * can name. Either way the page stays a match with no box drawn
+   * (`pdf-in-doc-search.md` §6) — so this must not throw, or an unlocatable page
+   * would take the whole find down with it.
+   *
+   * The bytes are copied out and parsed before the module's buffer is released,
+   * on every path: it is one page's worth and only one is resident at a time.
+   */
+  async pageWords(page: number): Promise<PdfWord[]> {
+    const x = this.x;
+    const call = this.c.pageWords ?? x.ink_page_words;
+    try {
+      const packed = await call(this.alive(), page);
+      if (packed < 0n) return [];
+      // `memory.buffer` is re-read HERE and not captured: the call allocates,
+      // and on the JSPI path it also suspended — the same window, longer name.
+      const json = new TextDecoder().decode(
+        new Uint8Array(x.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
+      );
+      return parsePageWords(json);
+    } finally {
+      x.ink_words_free();
     }
   }
 

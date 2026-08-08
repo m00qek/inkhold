@@ -7,6 +7,7 @@
 import type { PdfCacheStats } from "./pdfBlocks";
 import type { DisplayMatrix } from "./markGeometry";
 import type { PdfLink } from "./pdfLinks";
+import type { PdfWord } from "./pdfText";
 
 /**
  * How the document was opened.
@@ -50,6 +51,16 @@ export type PdfRequest =
    * at.
    */
   | { kind: "pageLinks"; id: number; page: number }
+  /**
+   * The page's WORDS and where they sit — find-in-PDF's locator.
+   *
+   * NOT cheap the way `pageLinks` is: this RUNS the page through a
+   * structured-text device, so on a range-served document it can pull bytes a
+   * render of the same page would also have pulled. That is why it is asked for
+   * only when find is open and only for the page on screen, and why the answer
+   * is cached per page on the main thread rather than re-requested per keystroke.
+   */
+  | { kind: "pageWords"; id: number; page: number }
   | { kind: "render"; id: number; page: number; scale: number }
   /**
    * ONE PAGE, AS A PDF — the original page's own content streams grafted into a
@@ -94,6 +105,8 @@ export type PdfResponse =
   | { kind: "pageSize"; id: number; width: number; height: number }
   /** Plain data — small, and structured-cloned like every other reply. */
   | { kind: "pageLinks"; id: number; links: PdfLink[] }
+  /** Plain data — one page's worth, structured-cloned like the rest. */
+  | { kind: "pageWords"; id: number; words: PdfWord[] }
   /** `bitmap` is TRANSFERRED, so it crosses without copying the pixels. */
   | { kind: "rendered"; id: number; bitmap: ImageBitmap; width: number; height: number }
   /** The produced PDF's bytes. TRANSFERRED, like `rendered`'s bitmap. */

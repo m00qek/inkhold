@@ -98,6 +98,122 @@
   background-position: 0 0, var(--checker-offset) var(--checker-offset);
 }
 
+/* THE FIND BAR. The reader's bar and the `.txt` viewer's, a third time, and it
+   carries its OWN class for exactly the reason `.txtbar` does: all four viewers
+   are mounted at once, so a shared class would put several `.findbar`s in the
+   DOM and the reader's find tests — which query `.findbar` globally — would see
+   them. Same tokens, same look, a separate name so the bars never collide. */
+.pdfbar {
+  display: flex;
+  align-items: center;
+  /* Match .findbar: anchor field + count + nav to the right edge. */
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--desk);
+}
+.pdfbar[hidden] {
+  display: none;
+}
+.pdfbar__field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  max-width: 340px;
+}
+.pdfbar__field svg {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 14px;
+  height: 14px;
+  color: var(--ink-faint);
+  pointer-events: none;
+}
+.pdfbar input {
+  width: 100%;
+  padding: 7px 12px 7px 33px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-size: var(--fs-body);
+}
+.pdfbar input::placeholder {
+  color: var(--ink-faint);
+}
+.pdfbar input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+/* Full `--ink` because it IS the answer being read — tabular so the number does
+   not jitter as the stream's floor climbs to the exact count. */
+.pdfbar__count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  color: var(--ink);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* Everything that is NOT a live count of matches reads dimmer — "Searching…",
+   "No matches", the error. A streaming floor is a live count and stays full
+   weight, exactly as the reader's counter does. */
+.pdfbar__count.is-none {
+  color: var(--ink-faint);
+}
+/* The manual-fuzzy OPT-IN affordance — the reader's `.findbar__ask` treatment,
+   so "search similar" reads the same in every viewer that offers it. */
+.pdfbar__ask {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-family: var(--font-text);
+  font-size: var(--fs-caption);
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.pdfbar__ask:hover {
+  text-decoration: none;
+}
+.pdfbar .icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Find's marks, UNDER the ink — see `pages/pdfHighlightLayer.ts` for why the
+   PDF gets a precise highlight where the reader's `.note` find gets an oval, and
+   why this sits below the handwriting rather than over it.
+
+   The wash is the `.txt` viewer's `<mark>`, at the same two weights: this app
+   already has one vocabulary for "the query is here", and a third would only
+   make the two viewers look like different products. Current is heavier rather
+   than a different hue — the same distinction the ovals draw with stroke weight
+   (07-find-in-note.css). */
+.pdf-find-marks {
+  position: absolute;
+  pointer-events: none;
+}
+.pdf-find-mark {
+  position: absolute;
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  border-radius: 2px;
+  /* A hair of bleed on each side. A glyph's box hugs its outline, so an exact
+     rect reads as a stripe that starts fractionally inside the first letter;
+     this is the printed equivalent of `findOvals`'s GROW, and it is small
+     because — unlike a recogniser's rectangle — this box is not a guess. */
+  outline: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.pdf-find-mark.is-current {
+  background: color-mix(in srgb, var(--accent) 42%, transparent);
+  outline-color: color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
 /* The ink layer. `pointer-events: none` so it never eats a click meant for the
    page, and no background of its own — `decode_layer` returns alpha 0 wherever
    the device wrote nothing, which is what makes this an overlay rather than a

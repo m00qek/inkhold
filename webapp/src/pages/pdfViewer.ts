@@ -36,6 +36,13 @@ import {
 import type { ReaderOrigin, Viewer, ViewerDeps } from "./viewer";
 import { createPageIndex, type PageIndexRow } from "./pageIndex";
 import { createPdfLinkLayer } from "./pdfLinkLayer";
+import { createPdfHighlightLayer } from "./pdfHighlightLayer";
+import {
+  createPdfFindController,
+  pdfCountIsNone,
+  pdfCountText,
+  type PdfFindController,
+} from "./pdfFind";
 import { binNotePageHref, notePageHref } from "../router";
 import { createBinViewerActions } from "../ui/binViewerActions";
 import { createLayersPanel } from "./layersPanel";
@@ -55,6 +62,7 @@ import {
 import type { LayeredExportModel } from "../export/layered";
 import { markExportMatrix, markExportSpace, placePanelOverPage } from "../render/markGeometry";
 import { supportsWasmExceptions } from "../render/pdfDecode";
+import type { PdfWord } from "../render/pdfText";
 import {
   PdfLoadError,
   createPdfSession,
@@ -153,6 +161,16 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   /** The open document's md5 — half of a thumbnail's cache identity. */
   let docHash = "";
   /**
+   * The point size of the page currently on the canvas.
+   *
+   * Held because find repaints on its OWN schedule — a keystroke, a step, a
+   * batch landing — and every one of those has to place boxes against the page
+   * that is actually drawn. Reading it from the session each time would be a
+   * round trip per keystroke; reading it from `pageIndex` would be a size for a
+   * page the raster has not caught up with yet.
+   */
+  let pageSizePtNow: { width: number; height: number } | null = null;
+  /**
    * Where the strip's thumbnails came from, published on `__inkholdPdfThumbs`.
    *
    * Instrumented for the same reason the block cache is: the caching is
@@ -222,7 +240,23 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
    * order here is the order in the DOM.
    */
   const linkLayer = createPdfLinkLayer();
-  const stage = el("div", { class: "pdf-stage" }, canvas, markCtl.el, linkLayer.el);
+  /**
+   * Find's marks, BETWEEN the page and the ink.
+   *
+   * Under the handwriting because the handwriting is the person's own and our
+   * mark is ours: a wash over somebody's pen stroke would be this app editing
+   * their annotation. Over the page because that is what it is pointing at.
+   * Stacking is DOM order in `.pdf-stage`, so this line IS the decision.
+   */
+  const findLayer = createPdfHighlightLayer();
+  const stage = el(
+    "div",
+    { class: "pdf-stage" },
+    canvas,
+    findLayer.el,
+    markCtl.el,
+    linkLayer.el,
+  );
   const body = createViewerBody({ mark: "PDF" });
 
   const zoomStepper = createZoomStepper<Zoom>({
@@ -900,6 +934,66 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   }
   layersToggle.addEventListener("click", () => setLayersOpen(!layersOpen));
 
+  // --- find (view zone) -----------------------------------------------------
+  // The reader's find-toggle precedent, a third time: an icon-only `.btn` whose
+  // open look rides on `aria-pressed`. Enabled for every PDF, like the `.txt`
+  // viewer's and unlike the reader's — the reader gates on the device having
+  // recognised the note, and there is no equivalent flag to gate on here (see
+  // `pdfFind.ts`, on the missing `unrecognised` state).
+  const findToggle = el("button", {
+    class: "btn",
+    type: "button",
+    "aria-pressed": "false",
+    "aria-label": "Find in this file",
+    title: "Find in this file (Ctrl+F)",
+    html: svg(VIEWER_IC.find, 1.8),
+  }) as HTMLButtonElement;
+
+  const findInput = el("input", {
+    type: "text",
+    autocomplete: "off",
+    placeholder: "Find in this file",
+    "aria-label": "Find in this file",
+  }) as HTMLInputElement;
+  const findCount = el("span", { class: "pdfbar__count", role: "status", "aria-live": "polite" });
+  const findAsk = el("button", {
+    class: "pdfbar__ask",
+    type: "button",
+    hidden: true,
+    text: "Search similar",
+  }) as HTMLButtonElement;
+  const findPrev = el("button", {
+    class: "icon-btn",
+    type: "button",
+    "aria-label": "Previous match",
+    title: "Previous match",
+    html: svg(VIEWER_IC.prev, 1.9),
+  }) as HTMLButtonElement;
+  const findNext = el("button", {
+    class: "icon-btn",
+    type: "button",
+    "aria-label": "Next match",
+    title: "Next match",
+    html: svg(VIEWER_IC.next, 1.9),
+  }) as HTMLButtonElement;
+  const findClose = el("button", {
+    class: "icon-btn",
+    type: "button",
+    "aria-label": "Close find",
+    title: "Close find",
+    html: svg(VIEWER_IC.close, 1.9),
+  }) as HTMLButtonElement;
+  const findBar = el(
+    "div",
+    { class: "pdfbar", hidden: true },
+    el("span", { class: "pdfbar__field", html: svg(VIEWER_IC.find, 1.8) }, findInput),
+    findCount,
+    findAsk,
+    findPrev,
+    findNext,
+    findClose,
+  );
+
   const toolbar = createToolbar({
     label: "PDF viewer",
     viewLabel: "PDF controls",
@@ -913,6 +1007,10 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     view: [
       { kind: "custom", key: "pager", el: pager, focus: [prev, next] },
       { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus },
+      // Find sits where the reader puts it — pager, zoom, find — for the same
+      // reason the pager was moved before zoom: the app's two paged viewers must
+      // not put the same control in different places.
+      { kind: "custom", key: "find", el: findToggle, focus: [findToggle] },
       { kind: "custom", key: "pages", el: pagesToggle, focus: [pagesToggle] },
       // Shown only where there is something to show: a PDF with no `.mark`
       // beside it has one layer, and a panel listing it alone is a control that
@@ -939,6 +1037,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     "section",
     { class: "viewer viewer--pdf", "aria-label": "PDF viewer", hidden: true },
     toolbar.el,
+    findBar,
     main,
   );
 
@@ -1047,6 +1146,12 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     frame.bitmap.close();
     body.main.replaceChildren(stage);
     syncPager();
+    // The marks are placed against the page that is NOW on the canvas, so this
+    // is the one place the size may be published — and find repaints from here
+    // rather than the other way round, which is what makes a zoom step or a
+    // panel toggle move the highlights with the page for free.
+    pageSizePtNow = size;
+    find.repaint();
     void paintLinks(page, size);
     // The export rows depend on what `paintMark` finds — whether this page has
     // ink at all, and whether any of it is toggled — so they are reconciled
@@ -1217,6 +1322,92 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   function suppressBackground(views: readonly { index: number; slot: string }[] | undefined): void {
     for (const v of views ?? []) if (v.slot === "background") markCtl.setVisible(v.index, false);
   }
+
+  // --- find in this PDF ------------------------------------------------------
+  // The controller owns the debounce/race/state logic (`pdfFind.ts`); this is
+  // only the DOM half of it — the counter's words and the marks on the page.
+
+  /**
+   * Put the marks over the page that is drawn.
+   *
+   * The words arrive in the page's POINTS and land through `placePageRect`, the
+   * same mapping `placeLink` uses for the document's own links and the same fit
+   * `placePanelOverPage` inverts for the `.mark` ink. One page, one page→screen
+   * transform: that is what stops a highlight and the handwriting over it from
+   * drifting apart on a rotated document.
+   *
+   * A page with no size yet (nothing rastered) takes the layer DOWN rather than
+   * guessing at one — a box placed against a page that is not on screen is a box
+   * in the wrong place.
+   */
+  function paintFindMarks(words: PdfWord[], current: number): void {
+    const size = pageSizePtNow;
+    if (!size || words.length === 0) {
+      findLayer.clear();
+      return;
+    }
+    const dpr = Math.min(globalThis.devicePixelRatio || 1, 2);
+    findLayer.setMarks(words, {
+      pagePt: size,
+      canvas: { width: canvas.width / dpr, height: canvas.height / dpr },
+      current,
+    });
+  }
+
+  const find: PdfFindController = createPdfFindController({
+    api: deps.api,
+    failures: { onSessionExpired: deps.onSessionExpired },
+    // THE LOCATOR, and the one seam that makes this testable without a worker.
+    // A page that will not read is a page with no boxes: the count above it is
+    // the server's and stays exactly as it was.
+    words: async (page) => (session && open_ ? session.pageWords(page) : []),
+    view: {
+      setOpen(isOpen) {
+        findBar.hidden = !isOpen;
+        root.classList.toggle("is-finding", isOpen);
+        findToggle.setAttribute("aria-pressed", String(isOpen));
+        if (!isOpen) findLayer.clear();
+      },
+      setState(state) {
+        findCount.textContent = pdfCountText(state);
+        findCount.classList.toggle("is-none", pdfCountIsNone(state));
+        // The opt-in affordance appears in exactly one state: the exact find is
+        // empty AND a typo-tolerant one would find something.
+        findAsk.hidden = state.kind !== "fuzzyPrompt";
+        // The address bar follows the query, so a find is a place you can send
+        // someone — the half of the deep-link contract this viewer never held up.
+        syncUrl();
+      },
+      setPageMarks: paintFindMarks,
+      showPage: (index) => void go(index),
+      setStepEnabled(enabled) {
+        findPrev.disabled = !enabled;
+        findNext.disabled = !enabled;
+      },
+      focusField() {
+        findInput.focus();
+        findInput.select();
+      },
+    },
+  });
+
+  findToggle.addEventListener("click", () => find.toggle());
+  findClose.addEventListener("click", () => {
+    find.close();
+    findInput.value = "";
+  });
+  findInput.addEventListener("input", () => find.setQuery(findInput.value));
+  findInput.addEventListener("keydown", (e) => {
+    // Enter steps, Shift+Enter steps back — what every find bar does, and the
+    // only way to walk matches without leaving the field.
+    if (e.key === "Enter") {
+      e.preventDefault();
+      find.step(e.shiftKey ? -1 : 1);
+    }
+  });
+  findPrev.addEventListener("click", () => find.step(-1));
+  findNext.addEventListener("click", () => find.step(1));
+  findAsk.addEventListener("click", () => find.searchSimilar());
 
   /** The panel row standing for the page itself. */
   function pdfRow(): { id: number; name: string; visible: boolean } {
@@ -1585,16 +1776,23 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
    * back, so the half of the contract a person actually uses was missing: paging
    * to 34 and reloading returned to page 1, and there was no address to send
    * anyone. The reader has published its page since it existed
-   * (`reader.ts`'s `syncUrl`); this is the same rule, minus the two things a PDF
-   * has none of — a find query and a history preview.
+   * (`reader.ts`'s `syncUrl`); this is now the same rule minus only the history
+   * preview, which a PDF really has none of.
+   *
+   * THE QUERY RIDES IT NOW. It used to pass `""` unconditionally, under a comment
+   * saying a PDF has no find query — true when it was written and untrue from the
+   * moment PDF text indexing shipped. Without it a global-search hit on a PDF
+   * opened the right page and then dropped the search on the first page turn, so
+   * the address you could copy was never the screen you were looking at.
    *
    * A BIN origin publishes the `#/bin/note/:id/page/:n` form, exactly as the
    * reader does: a trashed file's blob is not served from the live route, so
-   * writing the live address would make a reload 404 to the library.
+   * writing the live address would make a reload 404 to the library. No query
+   * rides a bin URL — the route pins the file and the page only.
    */
   function syncUrl(): void {
     if (!open_ || !meta) return;
-    deps.onPosition?.(meta.id, pageIndex, "", undefined, fromBin || undefined);
+    deps.onPosition?.(meta.id, pageIndex, fromBin ? "" : find.query(), undefined, fromBin || undefined);
   }
 
   async function go(to: number): Promise<void> {
@@ -1602,6 +1800,10 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     pageIndex = to;
     syncPager();
     pagesPanel.setCurrent(to);
+    // BEFORE `syncUrl`, so the address carries the page AND the query together,
+    // and before the raster, so the marks are already the new page's when it
+    // lands rather than one paint behind.
+    find.setPage(to);
     syncUrl();
     await paint();
   }
@@ -1618,7 +1820,26 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   // reader is the point here, and a divergence would be its own inconsistency.
   function onKey(e: KeyboardEvent): void {
     if (root.hidden) return;
-    if (e.key === "Escape") return deps.onBack();
+    // Ctrl+F BEFORE the input guard: the whole point of it is to reach the field
+    // from anywhere, including from inside the field (where it re-focuses rather
+    // than closing, as every other find bar does).
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      find.open();
+      return;
+    }
+    // ESCAPE CLOSES FIND FIRST, then leaves. Escape out of the viewer while a
+    // search is open would throw away the search AND the document in one press,
+    // and there would be no way to keep the document — the same order the `.txt`
+    // viewer and the reader take.
+    if (e.key === "Escape") {
+      if (find.isOpen()) {
+        find.close();
+        findInput.value = "";
+        return;
+      }
+      return deps.onBack();
+    }
     // Paging keys belong to the page, not to the field someone is typing in.
     if (e.target instanceof HTMLInputElement) return;
     if (e.key === "ArrowRight") void go(pageIndex + 1);
@@ -1692,6 +1913,14 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     // one of them is a live address into it. Left up, they would sit over the
     // next document's first page pointing at the last one's.
     linkLayer.clear();
+    // And the search belonged to that document too — its counts, its per-page
+    // word cache and its marks. `reset` closes the bar, so the field is cleared
+    // beside it or the next document would open showing the last one's query
+    // over a counter that says nothing.
+    find.reset();
+    findInput.value = "";
+    findLayer.clear();
+    pageSizePtNow = null;
     layersToggle.hidden = true;
     layersPanel.el.hidden = true;
     layersOpen = false;
@@ -1721,7 +1950,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     metaPromise: Promise<NoteMeta>,
     page: number,
     origin: ReaderOrigin,
-    _query: string,
+    query: string,
   ): Promise<void> {
     release();
     const mine = generation;
@@ -1853,6 +2082,21 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       return;
     }
     pageIndex = Math.min(pageIndex, pageCount - 1);
+    // PRIME FIND FROM THE ROUTE. A `?q=` deep link is how a global-search hit on
+    // a PDF arrives here, and until now this argument was named `_query` and
+    // ignored: the viewer opened the right page with nothing marked and no way
+    // to re-run the search that sent you. It is set AFTER the clamp, so the bar
+    // and the page agree about where find has landed.
+    //
+    // A BIN origin carries no query — `router.ts` drops it there — so this is a
+    // no-op for a trashed file rather than a branch.
+    find.setDocument(m.id);
+    find.setPage(pageIndex);
+    if (query !== "") {
+      findInput.value = query;
+      find.open();
+      find.setQuery(query);
+    }
     // The page count is only known now, so this is the first moment the address
     // can be honest. It matters for the CLAMP above: a link to page 500 of a
     // 77-page document opens the last page, and the URL should say the page you
@@ -1893,6 +2137,9 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     },
     destroy(): void {
       release();
+      // `release` already resets it; this is the belt for the case where the
+      // viewer is destroyed without ever having been opened.
+      find.reset();
       document.removeEventListener("keydown", onKey);
       exportMenu.destroy(); // its outside-click + Escape listeners are on `document`
       pagesPanel.destroy();

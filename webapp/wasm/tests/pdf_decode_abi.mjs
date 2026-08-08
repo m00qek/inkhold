@@ -90,6 +90,8 @@ for (const name of [
   "ink_page_size",
   "ink_page_links",
   "ink_links_free",
+  "ink_page_words",
+  "ink_words_free",
   "ink_render",
   "ink_render_width",
   "ink_render_height",
@@ -1261,6 +1263,182 @@ const LINK_ANNOTS = [
   // page turn including the ones that failed.
   e.ink_links_free();
   e.ink_links_free();
+}
+
+// ============================================================================
+// The page's WORDS (`ink_page_words`) — find-in-PDF's locator
+// ============================================================================
+//
+// What this proves is not "there is text on the page". It is the three things
+// the highlight is built on, each of which fails invisibly to a presence check:
+//
+//   1. THE SPACE. The boxes are in the same top-left-origin, y-down, points
+//      space `ink_page_size` and `ink_page_links` report — so the viewer's whole
+//      transform is the raster's scale, and one mapping serves the ink, the
+//      links and the highlight alike. Verified on the /Rotate 90 fixture, where
+//      a horizontal word becomes a TALL box: a shim that reported unrotated
+//      coordinates gives a box of the wrong SHAPE as well as the wrong place.
+//
+//   2. THE SPLIT. The runs are split as the index tokenises, near enough:
+//      punctuation is a boundary and an accented letter is not. `avaliação` has
+//      to arrive as ONE word or the Portuguese household's fold has nothing to
+//      compare against.
+//
+//   3. NO MATCHING HAPPENS HERE. There is no needle in the ABI — the server
+//      decided what matched and the client folds. That is asserted by what is
+//      absent (no query argument) and by the payload carrying every word on the
+//      page rather than a selected few.
+
+/** The words on `page`, parsed. Throws if the payload is not valid JSON. */
+function pageWords(handle, page) {
+  const packed = e.ink_page_words(handle, page);
+  if (packed < 0n) return packed;
+  const json = Buffer.from(
+    new Uint8Array(e.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
+  ).toString("utf8");
+  e.ink_words_free();
+  return { json, words: JSON.parse(json) };
+}
+
+/**
+ * A two-page PDF whose FIRST page carries `text` in 12pt Helvetica and whose
+ * second is blank — so "a page with words" and "a page with none" come out of
+ * one fixture. `/WinAnsiEncoding` is named explicitly: without it a base-14
+ * Type1 font is read in StandardEncoding, where byte 0xE7 is not `ç`, and the
+ * accented-word assertion would be testing the encoding rather than the split.
+ */
+function textPdf(mediaBox, extra, text) {
+  const content = `BT /F1 12 Tf 10 50 Td (${text}) Tj ET`;
+  return buildPdf([
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox.join(" ")}]${extra}` +
+      " /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox.join(" ")}]${extra}` +
+      " /Contents 7 0 R /Resources << >> >>",
+    "<< /Length 9 >>\nstream\n0 0 0 rg\n\nendstream",
+  ]);
+}
+
+// `\347` is ç and `\343` is ã in WinAnsi; the parentheses are escaped because a
+// PDF literal string counts them.
+const WORDS_TEXT = String.raw`Marmalade, avalia\347\343o \(quince\) page-range`;
+
+let uprightWords = null;
+{
+  const doc = openBytes(textPdf([0, 0, 300, 100], "", WORDS_TEXT));
+  check(doc >= 1, "words: the fixture opens", `got ${doc}`);
+  const got = pageWords(doc, 0);
+  check(typeof got === "object", "words: ink_page_words succeeds", `got ${got}`);
+
+  // THE SPLIT. Five runs out of one line: the comma, the parentheses and the
+  // hyphen are boundaries; the cedilla and the tilde are not.
+  equal(
+    got.words.map((w) => w.t).join(" "),
+    "Marmalade avaliação quince page range",
+    "words: punctuation splits a run and an accented letter does not",
+  );
+
+  // THE SPACE. Every box lies inside the page `ink_page_size` describes, and the
+  // text sits at PDF y 50 on a 100pt page — display y ~41..50 for a 12pt face.
+  const at = e.ink_alloc(8);
+  e.ink_page_size(doc, 0, at, at + 4);
+  const sz = new DataView(e.memory.buffer);
+  equal(sz.getFloat32(at, true), 300, "words: the page measures 300pt wide");
+  equal(sz.getFloat32(at + 4, true), 100, "words: the page measures 100pt tall");
+  e.ink_free(at, 8);
+  check(
+    got.words.every((w) => w.x >= 0 && w.y >= 0 && w.x + w.w <= 300 && w.y + w.h <= 100),
+    "words: every box lies inside the page ink_page_size describes",
+    got.json,
+  );
+  const first = got.words[0];
+  check(first.x >= 9 && first.x <= 11, "words: the first run starts at the text's own x", first.x);
+  check(
+    first.y > 35 && first.y + first.h < 55,
+    "words: y is measured DOWN from the top (PDF y 50 -> display ~41)",
+    `${first.y}..${first.y + first.h}`,
+  );
+  // Reading order, left to right — what makes a match index mean something.
+  check(
+    got.words.every((w, i) => i === 0 || w.x > got.words[i - 1].x),
+    "words: the runs arrive in reading order",
+    got.json,
+  );
+  uprightWords = got.words;
+
+  // A page with no text answers `[]`, which is a SUCCESS — a scan has no words
+  // and that is an answer, not a fault.
+  equal(pageWords(doc, 1).json, "[]", "words: a page with no text answers []");
+
+  // Over the CALLBACK STREAM the answer must be identical: building the
+  // structured text RUNS the page, so every font and content stream it names is
+  // pulled through `ink_host_read` on that path.
+  fixture = textPdf([0, 0, 300, 100], "", WORDS_TEXT);
+  const swords = e.ink_open_stream(BigInt(fixture.length));
+  check(swords >= 1, "words: the fixture opens as a stream", `got ${swords}`);
+  equal(pageWords(swords, 0).json, got.json, "words: the streamed answer is byte-identical");
+  e.ink_close(swords);
+  fixture = savedFixture;
+
+  e.ink_close(doc);
+  equal(e.ink_page_words(doc, 0), -1n, "words: a dead handle is refused");
+}
+
+/* --- /Rotate 90: a horizontal word becomes a TALL box ---------------------- */
+// The same trap the links and the export both fell into. `ink_page_size` reports
+// the rotated extent, so a word box measured in unrotated space is scaled
+// against a width it was never measured in — and the failure is invisible to any
+// check that only asks whether a box exists.
+if (uprightWords) {
+  const doc = openBytes(textPdf([0, 0, 300, 100], " /Rotate 90", WORDS_TEXT));
+  check(doc >= 1, "rotated words: the fixture opens", `got ${doc}`);
+  const at = e.ink_alloc(8);
+  e.ink_page_size(doc, 0, at, at + 4);
+  const sz = new DataView(e.memory.buffer);
+  equal(sz.getFloat32(at, true), 100, "rotated words: /Rotate 90 swaps the reported width");
+  equal(sz.getFloat32(at + 4, true), 300, "rotated words: ...and the height");
+  e.ink_free(at, 8);
+
+  const got = pageWords(doc, 0);
+  equal(
+    got.words.map((w) => w.t).join(" "),
+    uprightWords.map((w) => w.t).join(" "),
+    "rotated words: the same runs, in the same order",
+  );
+  const up = uprightWords[0];
+  const rot = got.words[0];
+  check(up.w > up.h, "rotated words: the upright box is wide", `${up.w}x${up.h}`);
+  check(rot.h > rot.w, "rotated words: the rotated box is TALL", `${rot.w}x${rot.h}`);
+  check(
+    Math.abs(rot.w - up.h) < 0.5 && Math.abs(rot.h - up.w) < 0.5,
+    "rotated words: the box's axes are swapped, not merely different",
+    `upright ${up.w}x${up.h}, rotated ${rot.w}x${rot.h}`,
+  );
+  check(
+    got.words.every((w) => w.x >= 0 && w.y >= 0 && w.x + w.w <= 100 && w.y + w.h <= 300),
+    "rotated words: every box lies inside the ROTATED page",
+    got.json,
+  );
+  e.ink_close(doc);
+}
+
+/* --- refusals and hygiene -------------------------------------------------- */
+{
+  const doc = openBytes(fs.readFileSync(pdfPath));
+  equal(e.ink_page_words(doc, 99), -2n, "words: a missing page is refused");
+  check(e.ink_error_len() > 0, "words: ...with a message");
+  equal(e.ink_page_words(doc, -1), -1n, "words: a negative page is refused");
+  equal(e.ink_page_words(doc + 100, 0), -1n, "words: an out-of-range handle is refused");
+  // The committed fixture is two filled rectangles and no text at all.
+  equal(pageWords(doc, 0).json, "[]", "words: a text-free document answers []");
+  e.ink_close(doc);
+  // Idempotent, and safe with nothing outstanding — find calls this on every page
+  // turn including the ones that failed.
+  e.ink_words_free();
+  e.ink_words_free();
 }
 
 if (failures > 0) {

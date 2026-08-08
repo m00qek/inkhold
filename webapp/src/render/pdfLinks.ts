@@ -5,14 +5,20 @@
 // at the numbers rather than by looking at a screenshot. `pages/pdfLinkLayer.ts`
 // is what turns these into anchors.
 //
-// A SIBLING OF `markGeometry.ts`, NOT PART OF IT. That file is about one hard
-// problem — reconstructing the device panel's fit over the page it annotates —
-// and this is a different and far simpler one: the rects arrive already in the
-// page's own display space (`webapp/wasm/pdf_shim.c` makes that true), so the
-// only transform left is the raster's scale. Mixing the two would suggest they
-// share a difficulty they do not.
+// A SIBLING OF `markGeometry.ts` — its PAYLOAD is, at least. The two hard
+// problems stay apart: that file reconstructs the device panel's fit over the
+// page it annotates, and this one has no fitting to do, because the rects arrive
+// already in the page's own display space (`webapp/wasm/pdf_shim.c` makes that
+// true) and the only transform left is the raster's scale.
+//
+// THAT SCALE NOW LIVES THERE, and the reason is arithmetic rather than taxonomy:
+// find's highlights are a second thing drawn in the page's own points, and one
+// page must have ONE page→screen mapping or the two overlays drift apart on a
+// rotated document. `placePageRect` is that mapping; what stays here is the
+// payload, the allowlist and the labels — which is where the difficulty actually
+// is on this side.
 
-import type { Size } from "./markGeometry";
+import { placePageRect, type Size } from "./markGeometry";
 
 /**
  * One link on a page, exactly as `ink_page_links` describes it.
@@ -135,22 +141,14 @@ export interface LinkBox {
 /**
  * Where `link` lands on a page drawn at `canvas` CSS pixels.
  *
- * ONE UNIFORM SCALE, and no letterbox correction — which is what makes this
- * simpler than the `.mark` overlay rather than a variation on it. The rect is
- * already in the page's own display space and the canvas IS that page rendered
- * whole, so `canvas.width / pagePt.width` is the entire transform.
- *
- * TAKEN FROM WIDTH ALONE, for the reason `placePanelOverPage` states about its
- * own `k`: the raster preserves the page's aspect, so the height ratio is the
- * same number, and deriving it from one axis means a canvas whose height MuPDF
- * rounded by a pixel cannot skew every box on the page.
- *
- * A degenerate page or canvas answers with a zero box, which draws nothing —
- * the same posture `markExportMatrix` takes, and better than an `Infinity`
- * reaching a style property.
+ * THE SHARED MAPPING, not one of its own. It used to be the two lines
+ * `placePageRect` now holds, which was right while links were the only thing
+ * this app drew in the page's own points. Find's highlights are the second, and
+ * a second copy of `canvas.width / pagePt.width` is exactly how two overlays on
+ * one page come to disagree — so the arithmetic moved to `markGeometry.ts`,
+ * beside the transform that places the `.mark` ink on the same canvas, and both
+ * callers name it.
  */
 export function placeLink(link: PdfLink, pagePt: Size, canvas: Size): LinkBox {
-  if (pagePt.width <= 0 || canvas.width <= 0) return { left: 0, top: 0, width: 0, height: 0 };
-  const k = canvas.width / pagePt.width;
-  return { left: link.x * k, top: link.y * k, width: link.w * k, height: link.h * k };
+  return placePageRect(link, pagePt, canvas);
 }

@@ -1744,9 +1744,15 @@ test.describe("PDF links", () => {
       };
     });
     expect(stacked.markCoversIt).toBe(true);
-    // The link layer is LAST in the stage, so it paints (and hit-tests) above
-    // the ink whatever `pointer-events` says.
-    expect(stacked.kids).toEqual(["pdf-page", "note-stack", "pdf-links"]);
+    // THE WHOLE STACK, BOTTOM TO TOP, and each position is a decision:
+    //   the page;
+    //   find's highlights, UNDER the ink — the handwriting is the person's own
+    //     and our mark must not cover it (`pdfHighlightLayer.ts`);
+    //   the `.mark`'s ink;
+    //   the links LAST, so they paint and hit-test above the ink whatever
+    //     `pointer-events` says — a link under a scribble is exactly the case
+    //     that occurs, because people annotate around what they care about.
+    expect(stacked.kids).toEqual(["pdf-page", "pdf-find-marks", "note-stack", "pdf-links"]);
     expect(stacked.hitIsTheLink).toBe(true);
   });
 

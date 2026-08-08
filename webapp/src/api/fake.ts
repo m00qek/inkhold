@@ -262,6 +262,35 @@ const TXT_CONTENT: Record<Id, string> = {
     "See you Sunday. More zephyrine steeped, brighter.",
 };
 
+// --- the `.pdf` fixture content ---------------------------------------------
+//
+// The text a `.pdf` fixture's PAGES hold — the segment seam's THIRD tenant, and
+// the shape `pdf_text.zig` writes: one indexed segment per page, `kind = 2`,
+// addressed by the PDF page number. Library search returns them as `kind = 2`
+// hits and find-in-PDF marks inside them.
+//
+// NOT DERIVED FROM `hasRecognizedText`, and that is the point rather than a
+// shortcut: a PDF is not a note, has no on-device recognition and never appears
+// in the "unsearchable notes" denominator. Whether its text is indexed is a fact
+// about the SERVER's pass over the blob, which is exactly what this table stands
+// in for — the same way `TXT_CONTENT` stands in for the `.txt` chunker.
+//
+// `marmalade` lives ONLY here (no note transcript, no `.txt` paragraph, no file
+// name), so a search for it exercises the pure `.pdf` path end to end.
+//
+// e2e serves a REAL PDF carrying these same lines as the raw `/file/:id` body,
+// so what MuPDF locates in the browser is what this fixture says matched. If the
+// two ever drift, the deep-link test fails with marks missing rather than
+// quietly proving nothing.
+const PDF_CONTENT: Record<Id, string[]> = {
+  "n-files-manual": [
+    "Marmalade kettle descaling",
+    "Marmalade drum bearing service",
+    "Filter mesh rinse programme",
+    "Marmalade spare parts",
+  ],
+};
+
 /** One paragraph of a `.txt` fixture, with its BYTE range — the real index's row. */
 interface TxtSeg {
   ordinal: number;
@@ -340,6 +369,24 @@ function searchPass(q: string): SearchHit[] {
           pageIndex: seg.ordinal,
           snippet: markedSnippet(seg.text, at, q.length),
           kind: 1,
+        });
+      }
+      continue;
+    }
+    // A `.pdf`'s hits are its PAGES (kind = 2) — the seam's third tenant. One
+    // hit per matching page, `pageIndex` the PDF page number, so the deep link
+    // opens the PDF viewer at it with the query primed.
+    const pdfPages = PDF_CONTENT[summary.id];
+    if (pdfPages) {
+      for (const [pageIndex, text] of pdfPages.entries()) {
+        const at = text.toLowerCase().indexOf(q);
+        if (at < 0) continue;
+        hits.push({
+          noteId: summary.id,
+          noteName: summary.name,
+          pageIndex,
+          snippet: markedSnippet(text, at, q.length),
+          kind: 2,
         });
       }
       continue;
@@ -524,6 +571,14 @@ function notePageTerms(noteId: Id): { pageIndex: number; terms: string[] }[] {
   // reroute) scans its retained transcript too. Library-WIDE search never reaches
   // here for a trashed id — it walks `ALL_NOTES` and the row is not in it.
   const summary = noteSummary(noteId);
+  // A `.pdf`'s indexed pages, which is the SAME ROUTE a note's pages come
+  // through — `searchNotePages` is keyed on the document's blob and not on its
+  // format, so the server needs no branch here and neither does the fixture.
+  // What differs is only where the text comes from.
+  const pdfPages = PDF_CONTENT[noteId];
+  if (pdfPages) {
+    return pdfPages.map((text, pageIndex) => ({ pageIndex, terms: termsOf(text) }));
+  }
   if (!summary || !summary.hasRecognizedText) return [];
   const out: { pageIndex: number; terms: string[] }[] = [];
   for (const page of pages(noteId, summary.pageCount, true)) {

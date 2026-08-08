@@ -169,6 +169,10 @@ export function callsFor(x: PdfDecoderExports, useJspi: boolean = jspi): PdfCall
     // destination walks the xref a second time — both read bytes, so both
     // suspend on a document that is still mostly unfetched.
     pageLinks: WebAssembly.promising(x.ink_page_links),
+    // Extracting a page's WORDS runs the page — every font, every image, every
+    // content stream it references — so of everything in this table it is the
+    // most certain to suspend on a range-served document.
+    pageWords: WebAssembly.promising(x.ink_page_words),
     render: WebAssembly.promising(x.ink_render),
     // NOT OPTIONAL on this branch, whatever `PdfCalls` says. `ink_export_page`
     // grafts a page, which walks the source document's xref and so can re-enter
@@ -368,6 +372,11 @@ function handle(req: PdfRequest): Promise<void> {
       case "pageLinks": {
         if (!doc) throw new Error("no document is open");
         ctx.postMessage({ kind: "pageLinks", id: req.id, links: await doc.pageLinks(req.page) });
+        return;
+      }
+      case "pageWords": {
+        if (!doc) throw new Error("no document is open");
+        ctx.postMessage({ kind: "pageWords", id: req.id, words: await doc.pageWords(req.page) });
         return;
       }
       case "render": {

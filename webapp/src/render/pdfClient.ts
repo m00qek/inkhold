@@ -6,6 +6,7 @@
 import type { PdfPageSize } from "./pdfDecode";
 import type { PdfCacheStats } from "./pdfBlocks";
 import type { PdfLink } from "./pdfLinks";
+import type { PdfWord } from "./pdfText";
 import type { PdfInkOverlay, PdfOpenMode, PdfRequest, PdfResponse } from "./pdfWorkerTypes";
 
 /**
@@ -52,6 +53,17 @@ export interface PdfSession {
    * case and is not a failure.
    */
   pageLinks(page: number): Promise<PdfLink[]>;
+  /**
+   * The page's WORDS and their boxes, in the page's display space (points) —
+   * what find-in-PDF points at.
+   *
+   * A page with none answers `[]`, and that stays an answer rather than an
+   * error: a scanned page has no words, and a page the SERVER matched can still
+   * yield none this side can name. The count on screen is the server's either
+   * way (`pdf-in-doc-search.md` §6), so an empty list costs a box and never a
+   * match.
+   */
+  pageWords(page: number): Promise<PdfWord[]>;
   render(page: number, scale: number): Promise<PdfFrame>;
   /**
    * One page as a PDF of its own, with `ink` drawn over it — the page's own
@@ -218,6 +230,10 @@ export function createPdfSession(makeWorker: PdfWorkerFactory = defaultWorker): 
     async pageLinks(page) {
       const res = expect(await send({ kind: "pageLinks", page }), "pageLinks");
       return res.links;
+    },
+    async pageWords(page) {
+      const res = expect(await send({ kind: "pageWords", page }), "pageWords");
+      return res.words;
     },
     async render(page, scale) {
       const res = expect(await send({ kind: "render", page, scale }), "rendered");

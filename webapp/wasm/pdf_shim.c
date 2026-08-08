@@ -569,6 +569,238 @@ fz_buffer *ink_shim_page_links(fz_document *doc, int number)
 	return out;
 }
 
+/* --- Words on a page ------------------------------------------------------ */
+
+/* WHY WORDS AND NOT A SEARCH. MuPDF has `fz_search_page`, needle in, quads out,
+ * and it would be less code than everything below. It is the wrong shape here,
+ * and the reason is `pdf-in-doc-search.md` §6: the SERVER decides what matched.
+ * Its tokenizer is SQLite's `unicode61 remove_diacritics 2` — a fold MuPDF's
+ * matcher does not implement — so a household writing Portuguese would have the
+ * index count `avaliação` for a query of `avaliacao` and the page's own renderer
+ * fail to find a single one of them. Two matchers, two answers, and the one on
+ * screen would be the wrong one.
+ *
+ * So this hands over the page's WORDS and where they sit, and the fold happens
+ * in TypeScript, in the same `fold()` the `.note` and `.txt` find controllers
+ * already share. Client and server then agree by construction rather than by
+ * luck: the client is a locator, never a judge of membership.
+ *
+ * `x,y,w,h` are in THE SAME SPACE `ink_shim_page_size` and `ink_shim_page_links`
+ * report — top-left origin, y down, points — with the page box's own origin
+ * subtracted, for the two reasons `ink_shim_page_links` spells out at length
+ * (the box origin, and `/Rotate` being already resolved by `fz_bound_page`).
+ *
+ *     [{"t":"Marmalade","x":10,"y":38,"w":52.7,"h":11.6}]
+ */
+
+/* Longer than this and the run is BROKEN, not dropped: the pieces are still
+ * locatable words and the client re-tokenises anyway. No real word approaches
+ * it; a run that does is a CJK paragraph with no spaces in it. */
+#define INK_MAX_WORD_BYTES 192
+
+/* A page contributing more words than this stops contributing them. It costs
+ * BOXES, never MATCHES — the count on screen is the server's and is unaffected,
+ * which is the honesty rule (§6) applied at the C boundary. 20,000 words is
+ * about thirty times a dense typeset page. */
+#define INK_MAX_WORDS 20000
+
+/* Is `c` part of a word?
+ *
+ * AN APPROXIMATION OF `unicode61`, AND DELIBERATELY THE CHEAP HALF OF IT. The
+ * index splits on everything that is not a letter or a digit, which needs
+ * Unicode character classes; this splits on an explicit table of the separators
+ * that actually occur in the household's documents and treats everything else —
+ * every accented letter, every digit — as a word character.
+ *
+ * THE INVARIANT THAT MAKES THAT SAFE: this decides where a BOX ends, never
+ * whether a word MATCHES. The client re-tokenises each run with the index's own
+ * rule before comparing it with the server's terms (`render/pdfText.ts`), so a
+ * separator missed here yields a box that is a little too wide and a separator
+ * invented here yields two boxes instead of one. Neither can invent or lose a
+ * match. */
+static int ink_word_char(int c)
+{
+	if (c <= 0x20 || c == 0x7f)
+		return 0; /* ASCII space and controls */
+	if ((c >= 0x21 && c <= 0x2f) || (c >= 0x3a && c <= 0x40) ||
+	    (c >= 0x5b && c <= 0x60) || (c >= 0x7b && c <= 0x7e))
+		return 0; /* ASCII punctuation */
+	if (c == 0xa0 || c == 0x202f || c == 0x205f || c == 0x3000)
+		return 0; /* the non-breaking and ideographic spaces */
+	if (c >= 0x2000 && c <= 0x200a)
+		return 0; /* en/em/thin/hair spaces */
+	if (c == 0x2028 || c == 0x2029)
+		return 0; /* line and paragraph separators */
+	if (c >= 0x2010 && c <= 0x2027)
+		return 0; /* dashes, quotes, bullets, ellipsis */
+	if (c == 0xab || c == 0xbb || c == 0x2039 || c == 0x203a)
+		return 0; /* guillemets — Portuguese and French quotation */
+	return 1;
+}
+
+/* One word run being accumulated: its UTF-8 bytes and the union of its glyph
+ * quads. `n == 0` means "no run open", which is why the flush below is safe to
+ * call after every character. */
+struct ink_word {
+	char text[INK_MAX_WORD_BYTES + 8]; /* +8: one rune never straddles the cap */
+	int n;
+	fz_rect box;
+};
+
+/* Emit the open run, if there is one, and close it.
+ *
+ * A run is DROPPED rather than emitted degraded when its rect is empty or not
+ * finite — the same rule links take, and for the same reason: a box the size of
+ * the universe reaches the client as a highlight over the whole document. */
+static void ink_flush_word(fz_context *ctx, fz_buffer *out, struct ink_word *w,
+			   fz_point origin, int *first, int *count)
+{
+	float x, y, bw, bh;
+
+	if (w->n == 0)
+		return;
+	w->text[w->n] = 0;
+	w->n = 0;
+	if (*count >= INK_MAX_WORDS)
+		return;
+
+	x = w->box.x0 - origin.x;
+	y = w->box.y0 - origin.y;
+	bw = w->box.x1 - w->box.x0;
+	bh = w->box.y1 - w->box.y0;
+	if (!(bw > 0) || !(bh > 0))
+		return;
+	if (!ink_finite(x) || !ink_finite(y) || !ink_finite(bw) || !ink_finite(bh))
+		return;
+
+	if (!*first)
+		fz_append_byte(ctx, out, ',');
+	*first = 0;
+	(*count)++;
+	fz_append_string(ctx, out, "{\"t\":");
+	ink_json_string(ctx, out, w->text);
+	fz_append_string(ctx, out, ",\"x\":");
+	ink_json_number(ctx, out, x);
+	fz_append_string(ctx, out, ",\"y\":");
+	ink_json_number(ctx, out, y);
+	fz_append_string(ctx, out, ",\"w\":");
+	ink_json_number(ctx, out, bw);
+	fz_append_string(ctx, out, ",\"h\":");
+	ink_json_number(ctx, out, bh);
+	fz_append_byte(ctx, out, '}');
+}
+
+/* Walk one list of blocks, emitting its words. RECURSIVE over
+ * `FZ_STEXT_BLOCK_STRUCT`, which is where a tagged PDF keeps its text: a walk
+ * that only visited `FZ_STEXT_BLOCK_TEXT` at the top level would find nothing at
+ * all in a document produced by anything modern, and "no boxes" is exactly the
+ * silent half-failure §6 is about.
+ *
+ * Depth is bounded by `depth`, because the tree comes out of a file we did not
+ * write and this recurses on the C stack — which in wasm is a fixed 64 KB. */
+static void ink_words_in_blocks(fz_context *ctx, fz_buffer *out, fz_stext_block *first_block,
+				fz_point origin, int depth, int *first, int *count)
+{
+	fz_stext_block *block;
+	fz_stext_line *line;
+	fz_stext_char *ch;
+	struct ink_word w;
+
+	if (depth <= 0)
+		return;
+	w.n = 0;
+	for (block = first_block; block; block = block->next) {
+		if (block->type == FZ_STEXT_BLOCK_STRUCT) {
+			if (block->u.s.down)
+				ink_words_in_blocks(ctx, out, block->u.s.down->first_block,
+						    origin, depth - 1, first, count);
+			continue;
+		}
+		if (block->type != FZ_STEXT_BLOCK_TEXT)
+			continue;
+		for (line = block->u.t.first_line; line; line = line->next) {
+			for (ch = line->first_char; ch; ch = ch->next) {
+				fz_rect r;
+
+				if (!ink_word_char(ch->c)) {
+					ink_flush_word(ctx, out, &w, origin, first, count);
+					continue;
+				}
+				if (w.n > INK_MAX_WORD_BYTES)
+					ink_flush_word(ctx, out, &w, origin, first, count);
+				r = fz_rect_from_quad(ch->quad);
+				w.box = w.n == 0 ? r : fz_union_rect(w.box, r);
+				w.n += fz_runetochar(w.text + w.n, ch->c);
+			}
+			/* A LINE ENDS A WORD. MuPDF joins nothing across lines, so
+			 * carrying a run over would union two rects on different
+			 * baselines into a box spanning the gap between them. This is
+			 * also where a hyphenated word legitimately becomes two, which
+			 * is the §6 window and is why the count is not derived here. */
+			ink_flush_word(ctx, out, &w, origin, first, count);
+		}
+	}
+	ink_flush_word(ctx, out, &w, origin, first, count);
+}
+
+/* The words on `number`, as a UTF-8 JSON array. NULL on failure.
+ *
+ * An empty page answers `[]`, which is a SUCCESS — a page of scanned images has
+ * no words and that is an answer, not a fault.
+ *
+ * ON THE STREAMED PATH THIS CAN SUSPEND, and more deeply than anything else
+ * here: building the structured text RUNS the page, so every font, every image
+ * and every content stream it references is pulled through `ink_host_read`. No
+ * Zig frame inside the `fz_try`, as everywhere else in this file. */
+fz_buffer *ink_shim_page_words(fz_document *doc, int number)
+{
+	fz_context *ctx = g_ctx;
+	fz_page *page = NULL;
+	fz_stext_page *text = NULL;
+	fz_buffer *out = NULL;
+
+	if (!ctx || !doc || number < 0)
+		return NULL;
+	fz_var(page);
+	fz_var(text);
+	fz_var(out);
+	fz_try(ctx)
+	{
+		fz_stext_options opts;
+		fz_point origin;
+		fz_rect box;
+		int first = 1;
+		int count = 0;
+
+		out = fz_new_buffer(ctx, 1024);
+		page = fz_load_page(ctx, doc, number);
+		box = fz_bound_page(ctx, page);
+		origin.x = box.x0;
+		origin.y = box.y0;
+		fz_init_stext_options(ctx, &opts);
+		/* IMAGES OFF (the default) and no other flag. Ligatures are EXPANDED,
+		 * which is what the index sees too — `ﬁ` in a content stream is `fi`
+		 * in the extracted text on both sides, so the fold has the same
+		 * letters to work with. */
+		text = fz_new_stext_page_from_page(ctx, page, &opts);
+		fz_append_byte(ctx, out, '[');
+		ink_words_in_blocks(ctx, out, text->first_block, origin, 16, &first, &count);
+		fz_append_byte(ctx, out, ']');
+	}
+	fz_always(ctx)
+	{
+		fz_drop_stext_page(ctx, text);
+		fz_drop_page(ctx, page);
+	}
+	fz_catch(ctx)
+	{
+		ink_record_error(ctx);
+		fz_drop_buffer(ctx, out);
+		return NULL;
+	}
+	return out;
+}
+
 /* Render one page at `scale` into a fresh RGBA pixmap. NULL on failure.
  *
  * WHY THE PIXMAP IS CLEARED TO 0xFF RATHER THAN RENDERED WITHOUT ALPHA. The

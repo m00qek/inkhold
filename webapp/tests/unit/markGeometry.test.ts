@@ -3,8 +3,10 @@ import {
   fitPageInPanel,
   markExportMatrix,
   markExportSpace,
+  placePageRect,
   placePanelOverPage,
 } from "../../src/render/markGeometry";
+import { placeLink } from "../../src/render/pdfLinks";
 
 // The numbers here are the ones measured against the real capture — an N6
 // (1404x1872) annotating an A4 document (595.276 x 841.89 pt). Getting this
@@ -265,5 +267,99 @@ describe("markExportMatrix", () => {
     ]) {
       expect(markExportMatrix(bad, A4)).toEqual([0, 0, 0, 0, 0, 0]);
     }
+  });
+});
+
+describe("placePageRect — the one page→screen mapping", () => {
+  // The page-in-points to canvas-in-CSS-pixels transform, shared by the
+  // document's own links (`placeLink`) and find's highlights
+  // (`pages/pdfHighlightLayer.ts`). It lives here rather than beside either
+  // because there are two of them and one page must have one mapping.
+
+  it("scales a rect by the raster's own ratio and nothing else", () => {
+    // No letterbox: the canvas IS the page rendered whole, unlike the panel.
+    const box = placePageRect({ x: 10, y: 20, w: 30, h: 5 }, A4, { width: 1190.552, height: 1683.78 });
+    expect(box.left).toBeCloseTo(20, 6);
+    expect(box.top).toBeCloseTo(40, 6);
+    expect(box.width).toBeCloseTo(60, 6);
+    expect(box.height).toBeCloseTo(10, 6);
+  });
+
+  it("A ROTATED PAGE'S HIGHLIGHT LANDS WHERE THE INK LANDS", () => {
+    // §9's second test, and the reason `placeLink`'s two lines moved into this
+    // file. The `.mark` overlay places the DEVICE PANEL over the page through
+    // `placePanelOverPage`; a highlight places a rect already in the page's own
+    // points. They are different jobs, and they have to agree to the pixel about
+    // where the PAGE is, or the mark and the handwriting it sits under drift
+    // apart — visibly, and only on documents that are rotated.
+    //
+    // The fixture is `probe.zig`'s `rotate90.pdf`: a 200x100 MediaBox with
+    // /Rotate 90, which the decoder reports as 100x200 because `fz_bound_page`
+    // hands over the TRANSFORMED box. Both mappings therefore take the same
+    // rotated `pagePt`, which is what makes agreement structural rather than
+    // arithmetic luck.
+    const rotated = { width: 100, height: 200 };
+    const canvas = { width: 400, height: 800 }; // the page at 4x
+    const panel = placePanelOverPage(NOMAD, rotated, canvas);
+
+    // Where the page's four corners land, according to the INK's mapping: the
+    // panel's inner page-rect, expressed on the canvas.
+    const fit = fitPageInPanel(NOMAD, rotated);
+    const inkX = (pagePtX: number) =>
+      panel.left + ((fit.left + (pagePtX / rotated.width) * fit.width) / NOMAD.width) * panel.width;
+    const inkY = (pagePtY: number) =>
+      panel.top + ((fit.top + (pagePtY / rotated.height) * fit.height) / NOMAD.height) * panel.height;
+
+    // …and according to the HIGHLIGHT's. Same page, same canvas, same answer.
+    for (const [x, y] of [
+      [0, 0],
+      [50, 100],
+      [100, 200],
+      [12.5, 137.5],
+    ]) {
+      const box = placePageRect({ x, y, w: 1, h: 1 }, rotated, canvas);
+      expect(box.left).toBeCloseTo(inkX(x), 4);
+      expect(box.top).toBeCloseTo(inkY(y), 4);
+    }
+
+    // And the box is TALL where the unrotated one is wide — the shape a word set
+    // horizontally takes on a /Rotate 90 page, which is what a mapping that
+    // ignored the rotation would get wrong while still producing a box.
+    const upright = placePageRect({ x: 10, y: 10, w: 60, h: 12 }, { width: 200, height: 100 }, { width: 800, height: 400 });
+    const sideways = placePageRect({ x: 10, y: 10, w: 12, h: 60 }, rotated, { width: 400, height: 800 });
+    expect(upright.width).toBeGreaterThan(upright.height);
+    expect(sideways.height).toBeGreaterThan(sideways.width);
+  });
+
+  it("is the SAME function `placeLink` uses, so links and highlights cannot drift", () => {
+    // Stated as an assertion because it is the whole reason the arithmetic
+    // moved: a second copy of `canvas.width / pagePt.width` beside the highlight
+    // would pass every test either module has and disagree the first time one of
+    // them was tuned.
+    const rect = { x: 7.5, y: 11.25, w: 33, h: 9 };
+    const pagePt = { width: 200, height: 100 };
+    const canvas = { width: 617, height: 308.5 }; // a canvas MuPDF rounded
+    const viaLink = placeLink({ ...rect, page: -1, uri: "https://a.invalid/" }, pagePt, canvas);
+    const viaRect = placePageRect(rect, pagePt, canvas);
+    expect(viaRect).toEqual(viaLink);
+  });
+
+  it("answers with a zero box for a degenerate page or canvas, never an Infinity", () => {
+    // A non-finite number reaching a style property is a box the size of the
+    // document; nothing drawn is the better failure, and it is the posture
+    // `markExportMatrix` already takes.
+    const rect = { x: 1, y: 2, w: 3, h: 4 };
+    expect(placePageRect(rect, { width: 0, height: 100 }, { width: 10, height: 10 })).toEqual({
+      left: 0,
+      top: 0,
+      width: 0,
+      height: 0,
+    });
+    expect(placePageRect(rect, { width: 100, height: 100 }, { width: 0, height: 10 })).toEqual({
+      left: 0,
+      top: 0,
+      width: 0,
+      height: 0,
+    });
   });
 });

@@ -40,6 +40,16 @@
 //!        is DROPPED, never described — see `pdf_shim.c`. An empty page answers
 //!        `[]`. Valid until the next `ink_page_links` or `ink_links_free`.
 //!   void ink_links_free()              — release that buffer. Idempotent.
+//!   i64  ink_page_words(i32 doc, i32 page) — the page's WORDS and where they
+//!        sit, as UTF-8 JSON. Returns `(ptr << 32) | len`, or negative on error.
+//!        The payload is an array of `{t,x,y,w,h}` — the word's UTF-8 text and
+//!        its box in the SAME space `ink_page_size` reports. Find-in-PDF's whole
+//!        client side: the server says WHICH pages matched and which folded
+//!        terms it counted, and this is what lets the viewer point at them. The
+//!        module does NOT match — see `pdf_shim.c`, which states why the fold
+//!        stays on the JS side. An empty page answers `[]`. Valid until the next
+//!        `ink_page_words` or `ink_words_free`.
+//!   void ink_words_free()              — release that buffer. Idempotent.
 //!   void ink_close(i32 doc)            — release the document. A stale or
 //!        out-of-range handle is ignored, not dereferenced.
 //!
@@ -117,6 +127,7 @@ extern fn ink_shim_open_stream(total: i64) ?*Document;
 extern fn ink_shim_page_count(doc: *Document) c_int;
 extern fn ink_shim_page_size(doc: *Document, number: c_int, w: *f32, h: *f32) c_int;
 extern fn ink_shim_page_links(doc: *Document, number: c_int) ?*Buffer;
+extern fn ink_shim_page_words(doc: *Document, number: c_int) ?*Buffer;
 extern fn ink_shim_render(doc: *Document, number: c_int, scale: f32) ?*Pixmap;
 extern fn ink_shim_pixmap_samples(pix: *Pixmap) [*]u8;
 extern fn ink_shim_pixmap_width(pix: *Pixmap) c_int;
@@ -189,6 +200,13 @@ var last_export: ?*Buffer = null;
 /// and a shared slot would free one out from under the other. It is hundreds of
 /// bytes, so one at a time costs nothing.
 var last_links: ?*Buffer = null;
+
+/// The last page's words, as JSON. Its own slot for the reason `last_links` has
+/// one, plus a sharper version of it: find asks for a page's words while the
+/// reader is following that page's links, and a shared slot would free one out
+/// from under the other. This one is the larger of the two — a dense typeset
+/// page is tens of kilobytes — which is exactly why only ONE is ever resident.
+var last_words: ?*Buffer = null;
 
 // ---- Buffers ----
 
@@ -307,6 +325,46 @@ export fn ink_page_links(handle: i32, page: i32) i64 {
 export fn ink_links_free() void {
     if (last_links) |buf| {
         last_links = null;
+        ink_shim_drop_buffer(buf);
+    }
+}
+
+/// The words on `page` and where they sit, as UTF-8 JSON: `(ptr << 32) | len`,
+/// or negative.
+///
+/// -1 a dead handle or a negative page, -2 the shim refused (`ink_error_ptr`
+/// says why), -3 the produced buffer cannot be described by the packed return.
+///
+/// THE MODULE IS A LOCATOR, NOT A MATCHER. No needle crosses this boundary: the
+/// server decided which pages matched and named the folded terms it counted, and
+/// the client compares those against these words with the SAME fold the `.note`
+/// and `.txt` find controllers use. `pdf_shim.c` states why that split is load
+/// bearing rather than tidy. An empty page answers `[]`, which is a SUCCESS —
+/// "this page has no text" and "we could not read this page" are different
+/// answers and the caller acts differently on them.
+///
+/// COPY THE BYTES OUT: they are valid only until the next `ink_page_words`.
+///
+/// THIS SUSPENDS MORE READILY THAN ANYTHING ELSE HERE. Building the structured
+/// text RUNS the page, so on the streamed path it pulls every font and content
+/// stream the page references through `ink.host_read`.
+export fn ink_page_words(handle: i32, page: i32) i64 {
+    const doc = lookup(handle) orelse return -1;
+    if (page < 0) return -1;
+
+    // Drop the previous answer FIRST, so one page's words are resident at a
+    // time — the same posture every other buffer here takes.
+    ink_words_free();
+
+    const buf = ink_shim_page_words(doc, page) orelse return -2;
+    return holdBuffer(&last_words, buf);
+}
+
+/// Release the buffer `ink_page_words` returned. Idempotent, and safe to call
+/// without ever having asked for words.
+export fn ink_words_free() void {
+    if (last_words) |buf| {
+        last_words = null;
         ink_shim_drop_buffer(buf);
     }
 }

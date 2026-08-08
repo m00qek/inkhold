@@ -94,6 +94,51 @@ export function placePanelOverPage(panel: Size, pagePt: Size, canvas: Size): Pla
   };
 }
 
+/** A rectangle in the page's DISPLAY space — top-left origin, y down, POINTS. */
+export interface PageRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Where a rect measured in the PAGE's own points lands on the page drawn at
+ * `canvas` CSS pixels.
+ *
+ * THE ONE PAGE→SCREEN MAPPING, and it is here rather than beside either of its
+ * callers because there are now two of them. The document's own links
+ * (`pdfLinks.placeLink`) and find's highlights (`pages/pdfFind.ts`) both start
+ * from a rect the decoder already resolved into display space, and both have to
+ * land on the same pixels as the `.mark` ink that {@link placePanelOverPage}
+ * puts over the same canvas. Two arithmetics for one page is precisely how a
+ * highlight and the handwriting it sits under drift apart on a rotated document
+ * — so there is one, and everything that draws on a PDF page comes through it.
+ *
+ * NO LETTERBOX CORRECTION, which is what makes this simpler than the `.mark`
+ * overlay rather than a variation on it. A `.mark` is in DEVICE PANEL pixels and
+ * the page is only part of that panel, so the panel has to be fitted; a rect that
+ * is already in the page's own space needs no fitting, because the canvas IS the
+ * page rendered whole. Both facts come from the same place — `fz_bound_page`'s
+ * transformed box, which is what `pageSize()` reports — so a `/Rotate`, an
+ * off-origin `/MediaBox` and a `/CropBox` are resolved before either of them
+ * sees a number.
+ *
+ * TAKEN FROM WIDTH ALONE, for the reason {@link placePanelOverPage} states about
+ * its own `k`: the raster preserves the page's aspect, so the height ratio is
+ * the same number, and deriving it from one axis means a canvas whose height
+ * MuPDF rounded by a pixel cannot skew every box on the page.
+ *
+ * A degenerate page or canvas answers with a zero box, which draws nothing — the
+ * same posture {@link markExportMatrix} takes, and better than an `Infinity`
+ * reaching a style property.
+ */
+export function placePageRect(rect: PageRect, pagePt: Size, canvas: Size): Placement {
+  if (pagePt.width <= 0 || canvas.width <= 0) return { width: 0, height: 0, left: 0, top: 0 };
+  const k = canvas.width / pagePt.width;
+  return { left: rect.x * k, top: rect.y * k, width: rect.w * k, height: rect.h * k };
+}
+
 /** The one coordinate space a page and the ink on it can be exported in. */
 export interface ExportSpace {
   /** The export image, in whole pixels. */
