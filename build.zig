@@ -225,6 +225,36 @@ const mupdf_trim_flags = [_][]const u8{
     "-w",
 };
 
+/// UBSan OFF — for the VENDORED tree only, and never for `backend/pdf/*.c`,
+/// which is ours and keeps every check. `addMupdfSources` appends this; the two
+/// files we wrote do not get it.
+///
+/// **Not a preference. A crash.** `zig cc` compiles C at Debug and ReleaseSafe
+/// with `-fsanitize=undefined -fsanitize-trap=undefined`, so a violation is a
+/// `ud2`: the process dies with "Illegal instruction" and no message, and there
+/// is nothing to catch. MuPDF and its eight thirdparty trees were never written
+/// to be UBSan-clean, and at least two sites are reachable from a single text
+/// extraction:
+///
+///   - x86-64 traps in lcms2's `cmsPipelineEval16` — upstream casts an
+///     interpolation routine to the pipeline's own function-pointer type
+///     (`cmsopt.c:781`, differing only in `const _cms_interp_struc*` versus
+///     `const void*`) and then calls through it. Identical ABI, formally UB.
+///   - armv6 traps at a DIFFERENT site in the same call chain
+///     (`cmsxform.c:2740`, transform creation), so it is not one cast and a
+///     per-category opt-out does not travel across targets. `-fsanitize=function`
+///     is not even emitted on 32-bit ARM.
+///
+/// **Found the hard way, and worth stating.** The probe never reaches the colour
+/// pipeline — it opens, counts and bounds a page — so this lay dormant from the
+/// day MuPDF was linked in. The TEXT pass interprets page content, which converts
+/// colours: every text test died at ReleaseSafe while every one of them passed at
+/// Debug, and ReleaseSafe is what `make serve` and every release artifact build.
+/// A blanket per-file `-fno-sanitize=undefined` was the alternative to shipping a
+/// server that segfaults on the first PDF; scoping it to code we do not maintain
+/// is the part that keeps it honest.
+const mupdf_vendor_only = [_][]const u8{"-fno-sanitize=undefined"};
+
 /// What `buildMupdfWasm` compiles with: the target's contract plus the shared trim.
 const mupdf_wasm_flags = mupdf_wasm_only ++ mupdf_trim_flags;
 
@@ -452,11 +482,16 @@ fn addMupdfSources(
 ) void {
     for (&mupdf_includes) |inc| mod.addIncludePath(dep.path(inc));
 
+    // The one place the vendored opt-out is applied — see `mupdf_vendor_only`.
+    // Every `addCSourceFiles` below is upstream's code; `backend/pdf/*.c` is
+    // added by the CALLER with `flags` and never sees this.
+    const vflags = concatFlags(b, flags, &mupdf_vendor_only);
+
     for (&mupdf_source_dirs) |sub| {
         mod.addCSourceFiles(.{
             .root = dep.path(""),
             .files = mupdfDirSources(b, dep, sub, ".c"),
-            .flags = flags,
+            .flags = vflags,
         });
     }
     // The 14 URW base-35 faces, pre-hexdumped in the tarball's `generated/`.
@@ -464,19 +499,19 @@ fn addMupdfSources(
     mod.addCSourceFiles(.{
         .root = dep.path(""),
         .files = mupdfDirSources(b, dep, "generated/resources/fonts/urw", ".c"),
-        .flags = flags,
+        .flags = vflags,
     });
     for (&mupdf_third_groups) |group| {
         mod.addCSourceFiles(.{
             .root = dep.path(""),
             .files = mupdfListedSources(b, dep, &.{group.name}),
-            .flags = concatFlags(b, flags, group.extra),
+            .flags = concatFlags(b, vflags, group.extra),
         });
     }
     mod.addCSourceFiles(.{
         .root = dep.path(""),
         .files = mupdfListedSources(b, dep, &.{"HARFBUZZ"}),
-        .flags = concatFlags(b, flags, &mupdf_harfbuzz_flags),
+        .flags = concatFlags(b, vflags, &mupdf_harfbuzz_flags),
     });
 }
 
@@ -499,6 +534,14 @@ fn buildMupdfNative(
     addMupdfSources(b, dep, mod, &mupdf_native_flags);
     mod.addCSourceFile(.{
         .file = b.path("backend/pdf/probe.c"),
+        .flags = &mupdf_native_flags,
+    });
+    // The text pass (`backend/pdf/text.zig`). A SECOND file rather than more of
+    // `probe.c`, because the two have opposite store contracts — the probe runs
+    // at `FZ_STORE_DEFAULT` and never approaches it, the text pass caps at 4 MB
+    // and is the reason the 50 MB budget closes. See the header of each.
+    mod.addCSourceFile(.{
+        .file = b.path("backend/pdf/text.c"),
         .flags = &mupdf_native_flags,
     });
     return b.addLibrary(.{ .name = "mupdf-native", .root_module = mod, .linkage = .static });

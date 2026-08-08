@@ -58,6 +58,7 @@ test {
     _ = cli;
     _ = @import("expiring.zig");
     _ = @import("pdf/probe.zig");
+    _ = @import("pdf/text.zig");
     _ = @import("http/router.zig");
     _ = @import("http/static.zig");
     _ = @import("http/json.zig");
@@ -85,6 +86,7 @@ test {
     _ = @import("services/search/maintain.zig");
     _ = @import("services/search/fuzzy.zig");
     _ = @import("services/txt_index.zig");
+    _ = @import("services/pdf_text.zig");
     _ = @import("services/search_partition.zig");
     _ = @import("services/auth/password.zig");
     _ = @import("services/auth/service.zig");

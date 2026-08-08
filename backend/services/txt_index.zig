@@ -307,7 +307,17 @@ pub fn deriveStored(gpa: Allocator, blobs: blobstore.BlobStore, md5: []const u8)
 /// `bytes` if it is valid UTF-8 (copied verbatim), else a copy with every
 /// invalid byte replaced by U+FFFD. Never touches the blob — the recorded
 /// ranges keep addressing the raw bytes.
-fn sanitizeUtf8(a: Allocator, bytes: []const u8) ![]const u8 {
+///
+/// PUBLIC because it is the segment seam's SEARCHABLE-TEXT LENS, not a `.txt`
+/// detail: every tenant of `note_page_index.text` passes its bytes through this
+/// one function, so what the index holds is UTF-8 by construction whatever
+/// produced it. `pdf_text.zig` is the second caller, and it is not a formality —
+/// MuPDF's own `fz_runetochar` encodes U+0000 as the OVERLONG `C0 80` and passes
+/// unpaired surrogates straight through, so a hostile or merely odd PDF can
+/// hand us bytes SQLite would store and FTS5 would tokenize as mojibake.
+/// It lives here rather than in a new module because the first tenant defined
+/// the rule and there is exactly one copy of it.
+pub fn sanitizeUtf8(a: Allocator, bytes: []const u8) ![]const u8 {
     if (std.unicode.utf8ValidateSlice(bytes)) return a.dupe(u8, bytes);
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
@@ -333,7 +343,11 @@ fn sanitizeUtf8(a: Allocator, bytes: []const u8) ![]const u8 {
     return out.items;
 }
 
-fn md5Hex(data: []const u8) [32]u8 {
+/// Lowercase-hex md5 of a segment's indexed text — the value that fills both
+/// `text_hash` and `content_hash` on a seam row (see the column contract below).
+/// Public for the same reason `sanitizeUtf8` is: it is the seam's rule about
+/// what a segment row carries, and `pdf_text.zig` fills the same two columns.
+pub fn md5Hex(data: []const u8) [32]u8 {
     var digest: [Md5.digest_length]u8 = undefined;
     Md5.hash(data, &digest, .{});
     const hex = "0123456789abcdef";

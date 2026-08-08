@@ -55,10 +55,21 @@ pub fn wants(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name[dot + 1 ..], "pdf");
 }
 
-/// The blobs still owing a probe, as `(md5, name, size)` — `deferred.Tenant`'s
+/// The blobs still owing PDF work, as `(md5, name, size)` — `deferred.Tenant`'s
 /// contract. Bound parameter 1 is `noteindex.index_version`.
 ///
-/// Mirrors `needsProbe`, and the two are asserted to agree in this file's tests.
+/// TWO QUESTIONS, ONE TENANT, asked in order. A PDF owes a PROBE (page count and
+/// the page-1 box, ~1 s) and then a TEXT PASS (`pdf_text.zig`, ~2 minutes on the
+/// target). They are one tenant rather than two because `deferred.Worker.drain`
+/// offers each blob at most once per pass — its forward-progress guard — so a
+/// second tenant asking about the same md5 would be refused as "no progress" and
+/// the text would wait for the idle tick. One job brings the PDF fully up to
+/// date instead.
+///
+/// The text half is gated on `pdf_probe = 0`: text is never asked of a file
+/// whose first answer is missing or negative. Mirrors `needsProbe` and
+/// `pdf_text.needsText` between them, and all three are asserted to agree in the
+/// tests.
 ///
 /// `LIKE '%_.pdf'` IS `wants`: `_` is LIKE's single-character wildcard, so the
 /// pattern demands at least one character before the dot — the rule that makes a
@@ -78,20 +89,38 @@ pub const pending_sql =
     \\   AND LOWER(f.name) LIKE '%_.pdf'
     \\   AND ni.index_version = ?1
     \\   AND ni.indexable = 0
-    \\   AND ni.pdf_probe IS NULL
+    \\   AND (ni.pdf_probe IS NULL
+    \\        OR (ni.pdf_probe = 0 AND ni.page_count = 0)
+    \\        OR (ni.pdf_probe = 0 AND ni.pdf_text IS NULL))
     \\ ORDER BY b.size ASC
     \\ LIMIT 1;
 ;
 
 /// Whether this blob still needs probing — the authority the discovery query
 /// approximates. False once any verdict is recorded, including a failure.
+/// ASKS THE DATA, NOT ONLY THE MEMO — the `txt_index.needsDerive` posture, and
+/// the reason this survives a heal. The shape lives in the NOTE columns
+/// (`page_count`/`width`/`height`, written by `store` below), so an
+/// `index_version` bump overwrites it with the note parser's own values, which
+/// for a PDF are zero. The verdict on the same row survives that. A memo alone
+/// would therefore read "already probed" over a shape the heal had just
+/// erased, and the blob would never be offered again — a PDF stuck at 0 pages
+/// with no way back short of editing the database.
+///
+/// So `ok` with no `page_count` is treated as outstanding work. It is not
+/// ambiguous: a document that really has no pages is `no_pages`, never `ok`.
+/// A terminal verdict (unopenable/encrypted/no_pages) stored no shape in the
+/// first place, so it has nothing to lose and is deliberately NOT retried.
 pub fn needsProbe(db: sqlite.Db, blob_md5: []const u8) !bool {
     var r = (try db.row(
-        "SELECT pdf_probe FROM note_index WHERE blob_md5 = ?1 AND index_version = ?2 AND indexable = 0;",
+        "SELECT pdf_probe, page_count FROM note_index " ++
+            "WHERE blob_md5 = ?1 AND index_version = ?2 AND indexable = 0;",
         &.{ .{ .text = blob_md5 }, .{ .int = noteindex.index_version } },
     )) orelse return false; // no current row: the note half heals first
     defer r.finalize();
-    return r.intOpt(0) == null;
+    const verdict = r.intOpt(0);
+    if (verdict == null) return true;
+    return verdict == @as(?i64, @intFromEnum(Verdict.ok)) and r.int(1) == 0;
 }
 
 /// Record a successful probe. Call inside the caller's transaction.

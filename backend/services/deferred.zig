@@ -55,7 +55,9 @@ const blobstore = @import("../store/blobs.zig");
 const txtindex = @import("txt_index.zig");
 const noteindex = @import("note_index.zig");
 const pdfindex = @import("pdf_index.zig");
+const pdftext = @import("pdf_text.zig");
 const pdfprobe = @import("../pdf/probe.zig");
+const pdftextpass = @import("../pdf/text.zig");
 
 const log = std.log.scoped(.deferred);
 
@@ -136,6 +138,13 @@ pub const Job = struct {
         defer self.lock.unlock(self.io);
         return pdfindex.needsProbe(self.db, self.md5);
     }
+
+    /// And its second question — the text pass.
+    fn pdfNeedsText(self: Job) !bool {
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
+        return pdftext.needsText(self.db, self.md5);
+    }
 };
 
 /// `.txt` paragraph segments (`txt_index.zig`) — the first tenant.
@@ -205,13 +214,18 @@ fn runTxt(job: Job) anyerror!void {
     try job.db.exec("COMMIT;");
 }
 
-/// A `.pdf`'s shape (`pdf_index.zig`) — page count, the page-1 box, and whether
-/// the file opens at all.
+/// A `.pdf`'s shape (`pdf_index.zig`) and then its TEXT (`pdf_text.zig`) — page
+/// count, the page-1 box, whether the file opens at all, and what it says.
 ///
-/// AFTER `.txt` on purpose. A note or a text file is what somebody just synced
-/// and is about to look for; a PDF's tile shape can wait a beat. The cost is
-/// also the other way round: probing a 1,703-page document is 13.2 MB and walks
-/// its page tree, where a text file is a scan.
+/// AFTER `.txt` on purpose, and now for a second reason as well. A note or a
+/// text file is what somebody just synced and is about to look for; a PDF's tile
+/// shape can wait a beat. The costs run the same way round: probing a
+/// 1,703-page document is 13.2 MB and walks its page tree, and the text pass
+/// behind it is ~2 minutes on the deployment target — the biggest and least
+/// urgent job this worker has.
+///
+/// ONE tenant asking two questions, not two tenants — see `pdf_index.pending_sql`
+/// for why the forward-progress guard makes that the only shape that works.
 const pdf_tenant: Tenant = .{
     .name = "pdf",
     .priority = 2,
@@ -220,6 +234,11 @@ const pdf_tenant: Tenant = .{
 };
 
 fn runPdf(job: Job) anyerror!void {
+    try runPdfProbe(job);
+    try runPdfText(job);
+}
+
+fn runPdfProbe(job: Job) anyerror!void {
     // 1. Ask under the lock. The discovery query said so, but an upload or a
     //    heal may have answered it since.
     if (!try job.pdfNeedsProbe()) return;
@@ -252,6 +271,95 @@ fn runPdf(job: Job) anyerror!void {
         try pdfindex.store(job.db, job.md5, sh);
         try job.db.exec("COMMIT;");
     }
+}
+
+/// The PDF text pass — the tenant's second question, and the ONLY job here that
+/// does not fit the three-step shape.
+///
+/// The three steps assume the write is one transaction. That is right for a
+/// `.txt` and wrong for a book: `mupdf.md` §9.8 measured **13.9-24.4 s** of held
+/// `db_lock` for a single-transaction write of a 1,450-page document, which on
+/// one core is the whole machine. So the write is CHUNKED, and this function is
+/// the same discipline applied per chunk — parse off the lock, write under it,
+/// release — around a range of masked rowids RESERVED up front so the chunking
+/// cannot break search's contiguous-band invariant (`pdf_text.zig`,
+/// `search/maintain.zig`).
+///
+/// `Tenant.run`'s contract permits exactly this: the lock is passed in rather
+/// than taken around the call, and "one transaction" was `runTxt`'s own choice,
+/// stated in its comment, never a rule this file imposes.
+///
+/// **Every early return leaves the blob outstanding**, and that is safe because
+/// a re-run drops the partial band and reserves afresh — it never patches holes.
+/// A crash between chunks is the same story: `pdf_text` is still NULL, so the
+/// discovery query offers the blob again.
+fn runPdfText(job: Job) anyerror!void {
+    // 1. Ask under the lock, as every tenant does.
+    if (!try job.pdfNeedsText()) return;
+
+    // 2. Open OFF the lock. Everything expensive is on this side of it.
+    const file = job.blobs.open(job.md5) catch return; // blob gone: nothing to record
+    defer file.close(job.io);
+    var ex = pdftextpass.Extractor.open(file) catch |e| {
+        const v = pdftext.Verdict.of(e) orelse return; // transient — try again later
+        // The probe already said this file opens. If the text pass disagrees,
+        // that is a verdict about the file: unrecorded, the discovery query
+        // would hand back the same document for ever.
+        job.lock.lockUncancelable(job.io);
+        defer job.lock.unlock(job.io);
+        try job.db.exec("BEGIN IMMEDIATE;");
+        errdefer job.db.exec("ROLLBACK;") catch {};
+        try pdftext.storeVerdict(job.db, job.md5, v);
+        try job.db.exec("COMMIT;");
+        return;
+    };
+    defer ex.close();
+
+    const doc_pages = ex.pages;
+    const to_index = @min(doc_pages, pdftext.max_pages);
+
+    // 3. RESERVE, under the lock and in its own transaction. Cheap — one
+    //    `next_seq` bump per holder — and it is what makes every chunk below
+    //    land at `first_rowid + page_index` however long the pass takes.
+    const bands = blk: {
+        job.lock.lockUncancelable(job.io);
+        defer job.lock.unlock(job.io);
+        if (!try pdftext.needsText(job.db, job.md5)) return; // raced while opening
+        try job.db.exec("BEGIN IMMEDIATE;");
+        errdefer job.db.exec("ROLLBACK;") catch {};
+        const b = try pdftext.reserve(job.gpa, job.db, job.md5, to_index, job.now);
+        try job.db.exec("COMMIT;");
+        break :blk b;
+    };
+    defer job.gpa.free(bands);
+
+    // 4. Chunk by chunk: extract off the lock, commit under it.
+    var at: u32 = 0;
+    var any_text = false;
+    while (at < to_index) {
+        var chunk = (try pdftext.nextChunk(job.gpa, &ex, at)) orelse break;
+        defer chunk.deinit();
+        for (chunk.pages) |p| {
+            if (p.text.len != 0) any_text = true;
+        }
+        job.lock.lockUncancelable(job.io);
+        defer job.lock.unlock(job.io);
+        try job.db.exec("BEGIN IMMEDIATE;");
+        errdefer job.db.exec("ROLLBACK;") catch {};
+        try pdftext.storeChunk(job.db, job.md5, bands, chunk);
+        try job.db.exec("COMMIT;");
+        at = chunk.to();
+    }
+
+    // 5. Finish LAST, in its own transaction: the per-document term sets, the
+    //    late-holder repair, and only then the verdict that says this document
+    //    is indexed.
+    job.lock.lockUncancelable(job.io);
+    defer job.lock.unlock(job.io);
+    try job.db.exec("BEGIN IMMEDIATE;");
+    errdefer job.db.exec("ROLLBACK;") catch {};
+    try pdftext.finish(job.db, job.md5, bands, at, pdftext.verdictFor(doc_pages, at, any_text), job.now);
+    try job.db.exec("COMMIT;");
 }
 
 /// Every tenant, in one named place so the SET of them can be tested rather
@@ -346,6 +454,7 @@ pub const Worker = struct {
     }
 
     fn loop(self: *Worker) void {
+        nice19();
         while (!self.stopping.load(.acquire)) {
             // Read the epoch BEFORE draining. A signal that arrives while we are
             // working then leaves the word changed, so the wait below returns
@@ -425,6 +534,35 @@ pub const Worker = struct {
         return nextJob(self.gpa, self.db);
     }
 };
+
+/// Drops the CALLING THREAD to nice 19 — the other half of the scheduling
+/// answer, and the half `search-index.md` §4 got the wrong way round.
+///
+/// **MEASURED on the Pi** (`mupdf.md` §9.8). A CPU-bound background pass against
+/// the single ARM1176 core doubles foreground latency at nice 0 (19.8 → 40.0 ms
+/// p50); at nice 19 it costs **1.4 ms** (19.8 → 21.2). That one call is the
+/// whole reason the PDF parse does not have to be resumable — and resumability
+/// would be expensive, because each reopen costs ~1 s and yielding often would
+/// add tens of seconds per document.
+///
+/// It applies to the PARSE, which is CPU and off the lock. It does nothing for
+/// the WRITE, which is a lock; that half is chunked instead (`runPdfText`).
+///
+/// ON THE WORKER THREAD ONLY, which is exactly the scope wanted: nice on Linux
+/// is per-TASK, not per-process, and `who = 0` means the calling thread. The
+/// request threads keep their priority. `drainNow` deliberately does NOT call
+/// this — it runs on the caller's thread, and a test or a startup sweep is not
+/// background work.
+///
+/// A RAW SYSCALL because Zig 0.16's std has no wrapper: `setpriority` appears in
+/// `std/os/linux/syscalls.zig` as a NUMBER only, with no `std.os.linux.
+/// setpriority` function to call. Best-effort — the return value is ignored,
+/// because a worker that cannot lower its own priority should still do the work.
+fn nice19() void {
+    if (@import("builtin").os.tag != .linux) return;
+    const PRIO_PROCESS = 0; // …which, for `who = 0`, means this THREAD
+    _ = std.os.linux.syscall3(.setpriority, PRIO_PROCESS, 0, 19);
+}
 
 /// Run every outstanding job to completion, ON THIS THREAD.
 ///
@@ -714,6 +852,119 @@ test "a blob whose FILE is gone cannot spin the worker" {
     try std.testing.expect(w.done.load(.acquire) <= 1);
     // And still outstanding, so a later tick can retry once the blob is back.
     try std.testing.expect(try pdfindex.needsProbe(f.db, &md5));
+}
+
+/// 120 pages of text, one line each — three chunks at `pdf_text.chunk_pages`,
+/// so a single job here really does cross two chunk boundaries.
+const book_pdf = @embedFile("../pdf/testdata/text-120-page.pdf");
+/// Three bare `/MediaBox` pages: a scan, minus the image.
+const scan_pdf = @embedFile("../pdf/testdata/three-page.pdf");
+
+test "ONE JOB answers both of the .pdf tenant's questions — the shape, then the text" {
+    // The forward-progress guard offers a blob at most once per drain, so a
+    // tenant that only probed would leave the text waiting for the idle tick.
+    // One drain has to leave the document fully indexed.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const md5 = try f.put("book.pdf", book_pdf);
+    f.drain();
+
+    var r = (try f.db.row(
+        "SELECT page_count, pdf_probe, pdf_text FROM note_index WHERE blob_md5 = ?1;",
+        &.{.{ .text = &md5 }},
+    )).?;
+    defer r.finalize();
+    try std.testing.expectEqual(@as(i64, 120), r.int(0));
+    try std.testing.expectEqual(@as(?i64, 0), r.intOpt(1)); // pdfindex.Verdict.ok
+    try std.testing.expectEqual(@as(?i64, 0), r.intOpt(2)); // pdftext.Verdict.ok
+
+    var pages = (try f.db.row(
+        "SELECT COUNT(*) FROM note_page_index WHERE blob_md5 = ?1 AND kind = 2;",
+        &.{.{ .text = &md5 }},
+    )).?;
+    defer pages.finalize();
+    try std.testing.expectEqual(@as(i64, 120), pages.int(0));
+}
+
+test "a second drain finds nothing for a finished PDF either — text is done work, not outstanding" {
+    // The same "the worker cannot spin" property the `.txt` tenant is pinned
+    // for, over the question that was added to this one.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    _ = try f.put("book.pdf", book_pdf);
+    f.drain();
+
+    var w: Worker = .{ .gpa = testing.allocator, .db = f.db, .blobs = f.files.blobs, .lock = &f.lock, .io = testing.io };
+    w.drain();
+    try std.testing.expectEqual(@as(usize, 0), w.done.load(.acquire));
+}
+
+test "`pending_sql`, `needsProbe` and `needsText` agree on both sides of the text pass" {
+    // Three expressions of one predicate now, which is a real cost; this is what
+    // stops them drifting into disagreeing about whether a PDF is done.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const md5 = try f.put("book.pdf", book_pdf);
+    try std.testing.expect(try pdfindex.needsProbe(f.db, &md5));
+    try std.testing.expect(!try pdftext.needsText(f.db, &md5)); // never before the probe
+
+    f.drain();
+
+    try std.testing.expect(!try pdfindex.needsProbe(f.db, &md5));
+    try std.testing.expect(!try pdftext.needsText(f.db, &md5));
+    try std.testing.expectEqual(@as(?Found, null), try nextJob(testing.allocator, f.db));
+}
+
+test "a SCANNED PDF records its verdict and is never offered again" {
+    // `Tenant.run`'s contract, over the one dead end this pass can reach that is
+    // not a broken file: a document that opens perfectly and says nothing. Left
+    // unrecorded, the worker re-reads a 1,450-page scan every idle tick.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const md5 = try f.put("scan.pdf", scan_pdf);
+    f.drain();
+
+    {
+        var r = (try f.db.row("SELECT pdf_text FROM note_index WHERE blob_md5 = ?1;", &.{.{ .text = &md5 }})).?;
+        defer r.finalize();
+        try std.testing.expectEqual(@as(?i64, 1), r.intOpt(0)); // pdftext.Verdict.no_text
+    }
+
+    var w: Worker = .{ .gpa = testing.allocator, .db = f.db, .blobs = f.files.blobs, .lock = &f.lock, .io = testing.io };
+    w.drain();
+    try std.testing.expectEqual(@as(usize, 0), w.done.load(.acquire));
+}
+
+test "NICE 19 IS PER-THREAD — the worker yields the core, the request threads do not" {
+    // The scheduling half of the answer (`mupdf.md` §9.8): a CPU-bound pass at
+    // nice 0 doubles foreground latency on the single ARM1176 core, at nice 19 it
+    // costs 1.4 ms. The property that makes that safe is that nice on Linux is
+    // per-TASK — so this asserts BOTH halves: the spawned thread really moved,
+    // and the thread that spawned it did not.
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    // The kernel returns `20 - nice`, so nice 19 reads back as 1 and the
+    // suite's own (nice 0) thread reads back as 20.
+    const nice = struct {
+        fn read() usize {
+            return std.os.linux.syscall2(.getpriority, 0, 0);
+        }
+        fn lowerAndRead(out: *usize) void {
+            nice19();
+            out.* = read();
+        }
+    };
+    const before = nice.read();
+
+    var worker_nice: usize = 0;
+    const t = try std.Thread.spawn(.{}, nice.lowerAndRead, .{&worker_nice});
+    t.join();
+
+    try std.testing.expectEqual(@as(usize, 1), worker_nice); // nice 19
+    try std.testing.expectEqual(before, nice.read()); // this thread is untouched
 }
 
 test "the tenant table is ordered by priority, so `nextJob` can take the first match" {

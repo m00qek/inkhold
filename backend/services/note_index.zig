@@ -669,6 +669,23 @@ pub fn unpackLayers(blob: []const u8, buf: *[max_layers]LayerRef) Error![]const 
 // Write — inside the caller's transaction.
 // ---------------------------------------------------------------------------
 
+// NEITHER `pdf_text` NOR `pdf_probe` IS RESET HERE, and that is deliberate in
+// both directions.
+//
+// This upsert used to clear `pdf_text`, because `store` ended by deleting every
+// `note_page_index` row at or past the parsed page count — which for a blob the
+// note parser REJECTED (a PDF) is zero, so a note re-index wiped the PDF's
+// `kind = 2` segments outright and the memo had to be reset to admit it. That
+// delete is now scoped to `kind = 0` (see `store`), so the segments survive, the
+// memo stays TRUE, and clearing it would force a full re-extraction — minutes
+// of work per book on the target — for a heal that touched none of its rows.
+//
+// `pdf_probe` is a different hole and is closed on the READER's side instead:
+// the shape lives in the note columns and this statement really does overwrite
+// it, so `pdf_index.needsProbe` treats "verdict `ok`, `page_count` zero" as
+// outstanding work rather than trusting the memo. Asking the data is the
+// `txt_index.needsDerive` posture, and it keeps knowledge of PDFs out of the
+// note half — which is the coupling that made both holes possible.
 const upsert_note_sql =
     \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, signature,
     \\                       signature_version, equipment, width, height, rle_variant,
@@ -792,9 +809,15 @@ pub fn store(db: sqlite.Db, blob_md5: []const u8, p: Parsed, now: i64) !void {
     // drop any tail left over from the previous shape — every owner's segment
     // rows for it first (postings while the text still resolves, then the rows,
     // then the pages; the segment FK makes any other order a loud error).
+    // BOTH statements are scoped to `kind = 0` — the note half's own rows. The
+    // table has three tenants, and for a blob the note parser REJECTED (a PDF,
+    // a `.txt`) `page_count` is zero, so an unscoped tail delete is not a tail
+    // delete at all: it is "drop every segment anyone wrote for this blob".
     try search.dropTailSearch(db, blob_md5, p.note.page_count);
     {
-        var s = try db.prepare("DELETE FROM note_page_index WHERE blob_md5 = ?1 AND page_index >= ?2;");
+        var s = try db.prepare(
+            "DELETE FROM note_page_index WHERE blob_md5 = ?1 AND page_index >= ?2 AND kind = 0;",
+        );
         defer s.finalize();
         s.bindText(1, blob_md5);
         s.bindInt(2, p.note.page_count);

@@ -67,7 +67,12 @@ const sqlite = @import("sqlite.zig");
 /// worker's discovery query asks for. No `index_version` bump: a bump would
 /// re-index every note in the library to fill in some PDFs, where a
 /// query-shaped job store just finds them.
-pub const version: i64 = 9;
+///
+/// v10 adds `note_index.pdf_text`, the verdict from the PDF TEXT pass
+/// (`backend/services/pdf_text.zig`) — the seam's third tenant, `kind = 2`.
+/// Additive and nullable on the same reasoning as v9, and with no
+/// `index_version` bump for the same reason.
+pub const version: i64 = 10;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -81,7 +86,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 /// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
 /// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
 /// missed on a bump). The comptime check below makes the drift a build error.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10 };
 
 comptime {
     if (steps.len != version) @compileError(
@@ -505,6 +510,37 @@ const ddl_v8 =
 /// ever, and `txt_index`'s over-cap marker is the same idea.
 const ddl_v9 =
     \\ALTER TABLE note_index ADD COLUMN pdf_probe INTEGER;
+;
+
+/// Whether a PDF's TEXT has been extracted into segments, and what came of it
+/// (`backend/services/pdf_text.zig`). The segment seam's third tenant:
+/// `kind = 2` rows in `note_page_index`, one per page, reaching library search
+/// through the same `segment_search`/`segment_fts` machinery `.note` pages and
+/// `.txt` paragraphs already use.
+///
+/// A separate column from `pdf_probe` because they are separate questions asked
+/// in order: the probe is ~1 s and answers "what shape is this", the text pass
+/// is ~2 minutes on the target and answers "what does it say". A PDF that never
+/// probed is never offered for text.
+///
+///   NULL  never extracted — what the discovery query looks for
+///   0     extracted, every page
+///   1     opens but yields NO text at all (a scan). A RESULT, not a failure:
+///         recorded so the worker does not re-read a 1,450-page scanned book
+///         every idle tick for ever.
+///   2     extracted, TRUNCATED at `pdf_text.max_pages`. Recorded rather than
+///         inferred, because "indexed, and incomplete" is exactly the state
+///         nothing else on this row can express — `page_count` is the
+///         document's, not the index's.
+///   3     the text pass could not open a file the probe could. A verdict, for
+///         the same reason every `pdf_probe` failure is one.
+///
+/// The memo is reset by `note_index`'s upsert, because the note half's heal
+/// DELETES the `kind = 2` rows this column claims exist — see the comment
+/// there. A marker that outlived its rows would report a searchable document
+/// that no longer is.
+const ddl_v10 =
+    \\ALTER TABLE note_index ADD COLUMN pdf_text INTEGER;
 ;
 
 test "migrate creates the v1 schema and is idempotent" {

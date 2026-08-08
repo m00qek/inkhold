@@ -117,13 +117,20 @@ pub fn insertPagePostings(db: sqlite.Db, blob_md5: []const u8, ordinal: i64) !vo
 /// A re-parse yielded FEWER pages: every owner's segment rows for the dropped
 /// tail go — postings first (the text still resolves), then the rows, so the
 /// `note_page_index` tail delete that follows cannot orphan an FK.
+///
+/// **SCOPED TO `kind = 0`, and that is load-bearing.** `note_page_index` holds
+/// three tenants now — note pages (0), `.txt` paragraphs (1), PDF pages (2) —
+/// and this is the NOTE half's cleanup. Unscoped it reaches a blob the note
+/// parser REJECTED, whose page count is therefore zero, and deletes every
+/// segment another tenant wrote: a PDF's whole text index, dropped by a note
+/// re-parse that had nothing to do with it. A tenant owns its own rows.
 pub fn dropTailSearch(db: sqlite.Db, blob_md5: []const u8, page_count: i64) !void {
     {
         var s = try db.prepare(
             "INSERT INTO segment_fts(segment_fts, rowid, txt) " ++
                 "SELECT 'delete', s.id, p.text FROM note_page_index p " ++
                 "JOIN segment_search s ON s.segment_id = p.id " ++
-                "WHERE p.blob_md5 = ?1 AND p.page_index >= ?2 AND " ++ fts_predicate ++ ";",
+                "WHERE p.blob_md5 = ?1 AND p.page_index >= ?2 AND p.kind = 0 AND " ++ fts_predicate ++ ";",
         );
         defer s.finalize();
         s.bindText(1, blob_md5);
@@ -132,7 +139,7 @@ pub fn dropTailSearch(db: sqlite.Db, blob_md5: []const u8, page_count: i64) !voi
     }
     var s = try db.prepare(
         "DELETE FROM segment_search WHERE segment_id IN " ++
-            "(SELECT id FROM note_page_index WHERE blob_md5 = ?1 AND page_index >= ?2);",
+            "(SELECT id FROM note_page_index WHERE blob_md5 = ?1 AND page_index >= ?2 AND kind = 0);",
     );
     defer s.finalize();
     s.bindText(1, blob_md5);
@@ -428,16 +435,24 @@ pub fn flipOwnerBlob(
 // Canonical-order heal — retire legacy edit-scatter on an index_version bump
 // ---------------------------------------------------------------------------
 
-/// Whether one holder's segment band for `blob_md5` is already canonical:
-/// contiguous masked rowids in strict `page_index` order (`rowid ASC ==
-/// reading order`). An empty band (a blob a user does not hold yet, or a first
-/// ingest whose mint has not run) is vacuously canonical — nothing to re-mint.
+/// The shape of one holder's segment band for `blob_md5`: how many rows it has,
+/// and whether those rows are contiguous masked rowids in strict `page_index`
+/// order (`rowid ASC == reading order`). An empty band (a blob a user does not
+/// hold yet, or a first ingest whose mint has not run) is vacuously canonical —
+/// nothing to re-mint.
 ///
 /// Every band minted since the whole-doc-band re-mint landed is canonical, so
 /// this is the guard that keeps the heal a NO-OP on the common path: only a
 /// band a PAST incremental flip scattered (an old tail rowid out of page order)
 /// answers false and pays the re-mint.
-fn holderBandCanonical(db: sqlite.Db, user_id: u64, blob_md5: []const u8) !bool {
+///
+/// `rows` exists for the CHUNKED writer (`finishOwnerBlobBands`), where
+/// contiguity is not the whole question: a band that is contiguous but SHORT is
+/// a holder who arrived between two chunks, and that is not something the
+/// canonical test can see.
+const BandShape = struct { rows: i64, canonical: bool };
+
+fn holderBandShape(db: sqlite.Db, user_id: u64, blob_md5: []const u8) !BandShape {
     var s = try db.prepare(
         "SELECT s.id FROM search_partitions sp " ++
             "JOIN segment_search s ON s.id BETWEEN (sp.id << 48) AND ((sp.id + 1) << 48) - 1 " ++
@@ -447,15 +462,17 @@ fn holderBandCanonical(db: sqlite.Db, user_id: u64, blob_md5: []const u8) !bool 
     defer s.finalize();
     s.bindInt(1, @intCast(user_id));
     s.bindText(2, blob_md5);
+    var out: BandShape = .{ .rows = 0, .canonical = true };
     var prev: ?i64 = null;
     while (try s.step()) {
         const id = s.columnInt(0);
+        out.rows += 1;
         if (prev) |pv| {
-            if (id != pv + 1) return false; // a gap or a step down: scattered
+            if (id != pv + 1) out.canonical = false; // a gap or a step down: scattered
         }
         prev = id;
     }
-    return true;
+    return out;
 }
 
 /// The `index_version` heal's canonical-order pass: re-mint any holder's
@@ -483,12 +500,195 @@ pub fn recanonicalizeHolders(db: sqlite.Db, blob_md5: []const u8, now: i64) !voi
     holders.bindText(1, blob_md5);
     while (try holders.step()) {
         const uid: u64 = @intCast(holders.columnInt(0));
-        if (try holderBandCanonical(db, uid, blob_md5)) {
+        if ((try holderBandShape(db, uid, blob_md5)).canonical) {
             // Segments already in reading order — leave them, but keep the
             // document's fuzzy pool current (backfill / refold).
             if (try partition.active(db, uid)) |pid| try writeDocTerms(db, pid, blob_md5);
             continue;
         }
+        try dropOwnerBlobSearch(db, uid, blob_md5);
+        try mintOwnerBlobSearch(db, uid, blob_md5, now);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reserved bands — a document written in CHUNKS, still one contiguous run
+// ---------------------------------------------------------------------------
+
+// `mintOwnerBlobSearch` gets contiguity by laying the whole band down in ONE
+// statement, inside one transaction. For a `.note` or a `.txt` that is right;
+// for a 1,450-page PDF it is a **13.9-24.4 s hold of the global `db_lock`**
+// (`mupdf.md` §9.8, measured on the Pi), which is the whole machine for half a
+// minute. The write has to be chunked, and `nice` cannot help with a lock.
+//
+// **But chunking must not become "mint per chunk".** A document's segments are
+// ONE CONTIGUOUS ROWID RUN IN PAGE ORDER — `flipOwnerBlob` states the invariant
+// outright and the library-wide search now DEPENDS on the arithmetic behind it
+// (`query.bandStart` jumps to `R - page_index`). Separate `allocSeq` calls per
+// chunk would interleave a concurrent ingest's band into the middle of this
+// one, and the invariant would be gone.
+//
+// So: **reserve the range once, fill it in chunks.** Contiguity comes from the
+// reservation, not from doing it in one statement, and every chunk boundary
+// becomes a safe place to be interrupted. What that costs, stated plainly:
+//
+//   - **A partial band is visible to search.** By design — eventually
+//     consistent, and a half-indexed book beats an unindexed one.
+//   - **A crash mid-document leaves allocated-but-unfilled rowids.** They are
+//     holes, not corruption: `segment_search` simply has no row there, and the
+//     jump guard already refuses to jump when the candidate is not this blob's
+//     page 0, so it degrades to a step.
+//   - **A re-run never patches holes.** `reserveOwnerBlobBands` drops the old
+//     band first and reserves afresh, the way `flipOwnerBlob` does.
+//
+// These functions exist HERE, rather than as a caller writing `segment_search`
+// itself, because this module is declared the sole owner of those rows (see the
+// header, and `query.zig`'s). A reservation-shaped entry point keeps that true.
+
+/// One owner's reserved band: `count` masked rowids from `first_rowid`, to be
+/// filled as `first_rowid + page_index`.
+pub const Band = struct {
+    partition_id: i64,
+    first_rowid: i64,
+    count: i64,
+};
+
+/// Reserves a contiguous run of `page_count` masked rowids for EVERY current
+/// holder of `blob_md5`, dropping whatever band they had first.
+///
+/// The drop is not optional and not separable: a reservation that landed on top
+/// of a previous partial run would leave two overlapping notions of where this
+/// document's pages live. It runs while the blob's `note_page_index` rows still
+/// hold the text their postings were built from (`dropOwnerBlobSearch`'s
+/// contract), so the caller must reserve BEFORE rewriting any page row.
+///
+/// Returns one `Band` per holder, allocated in `gpa` and owned by the caller.
+/// An empty slice means nobody holds the blob — a legitimate state (an orphaned
+/// blob, or a `files` row deleted mid-pass) in which there is nothing to fill.
+///
+/// MUST run inside the caller's transaction: `allocSeq` reads and bumps
+/// `next_seq`, and two writers reading the same value would hand out the same
+/// band twice.
+pub fn reserveOwnerBlobBands(
+    gpa: std.mem.Allocator,
+    db: sqlite.Db,
+    blob_md5: []const u8,
+    page_count: i64,
+    now: i64,
+) ![]Band {
+    std.debug.assert(page_count > 0);
+    var out: std.ArrayList(Band) = .empty;
+    errdefer out.deinit(gpa);
+
+    // Follows `mintPageForHolders`' pattern: the cursor is on `files` while the
+    // inner statements write `segment_search`/`search_partitions`, so nothing
+    // disturbs it.
+    var holders = try db.prepare("SELECT DISTINCT user_id FROM files WHERE md5 = ?1 AND is_folder = 0;");
+    defer holders.finalize();
+    holders.bindText(1, blob_md5);
+    while (try holders.step()) {
+        const uid: u64 = @intCast(holders.columnInt(0));
+        try dropOwnerBlobSearch(db, uid, blob_md5);
+        const part = try partition.ensureActive(db, uid, now);
+        const first = try partition.allocSeq(db, part, page_count);
+        try out.append(gpa, .{
+            .partition_id = part,
+            .first_rowid = partition.rowidOf(part, first),
+            .count = page_count,
+        });
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// Lays down the segment rows and postings for pages `[from_page, to_page)` of
+/// a reserved band — one chunk's worth, in the caller's transaction.
+///
+/// The adapter has ALREADY written those pages' `note_page_index` rows in this
+/// same transaction (the FK requires it, and the postings are read through
+/// them). This adds the masked rowid at exactly `first_rowid + page_index`,
+/// which is what makes the band contiguous across however many transactions it
+/// took to fill.
+///
+/// Idempotent it is NOT: the reservation is fresh, so a page filled twice would
+/// collide on `segment_search`'s primary key — which is the loud failure the
+/// alternative (a silent duplicate posting) does not give you.
+pub fn fillBandChunk(
+    db: sqlite.Db,
+    bands: []const Band,
+    blob_md5: []const u8,
+    from_page: i64,
+    to_page: i64,
+) !void {
+    std.debug.assert(to_page > from_page);
+    for (bands) |b| {
+        std.debug.assert(to_page <= b.count);
+        {
+            var s = try db.prepare(
+                "INSERT INTO segment_search(id, segment_id) " ++
+                    "SELECT ?2 + p.page_index, p.id FROM note_page_index p " ++
+                    "WHERE p.blob_md5 = ?1 AND p.page_index >= ?3 AND p.page_index < ?4;",
+            );
+            defer s.finalize();
+            s.bindText(1, blob_md5);
+            s.bindInt(2, b.first_rowid);
+            s.bindInt(3, from_page);
+            s.bindInt(4, to_page);
+            _ = try s.step();
+        }
+        // The postings, bounded by the chunk's OWN rowid range. The band is
+        // reserved exclusively to this blob, so the range cannot reach a row
+        // that is not part of this chunk.
+        var s = try db.prepare(
+            "INSERT INTO segment_fts(rowid, txt) " ++
+                "SELECT s.id, p.text FROM segment_search s " ++
+                "JOIN note_page_index p ON p.id = s.segment_id " ++
+                "WHERE s.id BETWEEN ?1 AND ?2 AND " ++ fts_predicate ++ ";",
+        );
+        defer s.finalize();
+        s.bindInt(1, b.first_rowid + from_page);
+        s.bindInt(2, b.first_rowid + to_page - 1);
+        _ = try s.step();
+    }
+}
+
+/// Closes a chunked write: the per-document term sets, and the repair for a
+/// holder the reservation could not have known about.
+///
+/// Runs in its OWN transaction, LAST — after every chunk has committed — so
+/// "this document is indexed" becomes true only when it is. `writeDocTerms` is
+/// the same call `mintOwnerBlobSearch` makes; it is here rather than exported
+/// because filling a reserved band is the only other way a band comes into
+/// existence, and both live in this module.
+///
+/// ## The late holder
+///
+/// A chunked write is not atomic, so a SECOND user can upload the same content
+/// between two chunks. Their `files` row runs `mintOwnerBlobSearch`, which
+/// counts the `note_page_index` rows that exist AT THAT MOMENT and mints a band
+/// for the pages written so far — contiguous, and short. Contiguity alone
+/// cannot detect that, which is why `holderBandShape` also counts.
+///
+/// The repair is the whole-band path (`dropOwnerBlobSearch` + a fresh
+/// `mintOwnerBlobSearch`), and it pays the multi-second hold this file exists
+/// to avoid. That is the right trade for a race this narrow: it is correct, it
+/// is the code that already exists, and the common case — the holder set did
+/// not move — is one indexed count per holder and nothing else.
+pub fn finishOwnerBlobBands(
+    db: sqlite.Db,
+    bands: []const Band,
+    blob_md5: []const u8,
+    page_count: i64,
+    now: i64,
+) !void {
+    for (bands) |b| try writeDocTerms(db, b.partition_id, blob_md5);
+
+    var holders = try db.prepare("SELECT DISTINCT user_id FROM files WHERE md5 = ?1 AND is_folder = 0;");
+    defer holders.finalize();
+    holders.bindText(1, blob_md5);
+    while (try holders.step()) {
+        const uid: u64 = @intCast(holders.columnInt(0));
+        const shape = try holderBandShape(db, uid, blob_md5);
+        if (shape.canonical and shape.rows == page_count) continue;
         try dropOwnerBlobSearch(db, uid, blob_md5);
         try mintOwnerBlobSearch(db, uid, blob_md5, now);
     }
