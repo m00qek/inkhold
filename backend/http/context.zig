@@ -10,6 +10,7 @@ const download_tokens = @import("download_tokens.zig");
 const event_streams = @import("event_streams.zig");
 const files = @import("../services/files.zig");
 const lock_stats = @import("lock_stats.zig");
+const reader_pool = @import("../db/reader_pool.zig");
 
 /// Name of the HttpOnly session cookie carrying a control-plane session token.
 pub const session_cookie_name = "sn_session";
@@ -90,6 +91,16 @@ pub const Context = struct {
     /// pointer; null in the single-threaded integration tests, which drive
     /// `handle()` directly and need no lock. See transport.dispatchLocked.
     db_lock: ?*std.Io.Mutex = null,
+    /// Bounded pool of `SQLITE_OPEN_READONLY` connections that `read_only` routes
+    /// run on instead of holding `db_lock` (see db/reader_pool.zig). Shared across
+    /// threads via this pointer.
+    ///
+    /// **Null means "no pool", not "broken"**: `borrowReader` then answers null
+    /// exactly as an exhausted pool does, and dispatch falls back to the writer
+    /// under `db_lock` — which is the whole server before this existed. That is
+    /// what keeps the single-threaded integration harness and the CLI working
+    /// with no pool at all.
+    readers: ?*reader_pool.Pool = null,
     /// Per-route hold-time histogram for `db_lock`, reported by
     /// `GET /api/admin/health`. Shared across threads via this pointer, and safe
     /// without synchronization of its own for one reason only: it is written
@@ -111,6 +122,16 @@ pub const Context = struct {
     /// own narrow ones — can share one field: they are mutually exclusive, since
     /// the mutex is not reentrant.
     lock_started: ?std.Io.Timestamp = null,
+    /// When the currently-held reader lease was taken. The `lock_started` twin
+    /// for the pooled path, and a SEPARATE field on purpose: a `read_only`
+    /// request takes a short `db_lock` window for `resolveCaller` and then holds
+    /// a reader across the handler, so the two really can be live at once — which
+    /// is precisely the thing that is not true of the lock.
+    read_started: ?std.Io.Timestamp = null,
+    /// How long the current lease took to borrow, carried from `borrowReader` to
+    /// `returnReader` so the whole borrow is one sample. Thread-local like
+    /// `lock_started`.
+    read_wait_ns: u64 = 0,
     /// Set per request by the router before the handler runs.
     caller: ?Caller = null,
 
@@ -152,5 +173,51 @@ pub const Context = struct {
             }
         }
         if (self.db_lock) |l| l.unlock(self.io);
+    }
+
+    /// Borrow a pooled reader for ONE operation, or null when there is no pool or
+    /// every reader is busy. Null means "use the writer under `db_lock`" — see
+    /// `db/reader_pool.zig`; it is never an error.
+    ///
+    /// Paired with `returnReader` for the same reason `lockDb`/`unlockDb` are
+    /// paired: measuring at the one pair of functions that take the resource is
+    /// what makes every borrow visible without touching a handler. Without it a
+    /// pooled route would simply VANISH from the per-route histogram, which reads
+    /// as a fix and is a blind spot (see http/lock_stats.zig).
+    pub fn borrowReader(self: *Context) ?reader_pool.Lease {
+        const pool = self.readers orelse {
+            // No pool configured is not a fallback anybody can tune, so it is not
+            // counted as one: `fallback_count` must mean "the pool was too small".
+            return null;
+        };
+        const t0 = if (self.lock_stats != null) std.Io.Clock.awake.now(self.io) else null;
+        const lease = pool.acquire() orelse {
+            if (self.lock_stats) |st| st.recordFallback(self.route_idx);
+            return null;
+        };
+        if (t0) |start| {
+            // Wait is carried to `returnReader` rather than recorded here: one
+            // borrow must be ONE sample in the route's distribution, and a second
+            // record with a zero hold would put a phantom 0 ns window in the
+            // histogram every time a reader was taken.
+            const waited = start.untilNow(self.io, .awake).toNanoseconds();
+            self.read_wait_ns = @intCast(@max(waited, 0));
+            self.read_started = std.Io.Clock.awake.now(self.io);
+        }
+        return lease;
+    }
+
+    /// Return a reader borrowed by `borrowReader`, recording the whole borrow —
+    /// wait plus hold — as one window. Exactly one call per non-null borrow.
+    pub fn returnReader(self: *Context, lease: reader_pool.Lease) void {
+        if (self.lock_stats) |st| {
+            if (self.read_started) |t0| {
+                const held = t0.untilNow(self.io, .awake).toNanoseconds();
+                st.recordRead(self.route_idx, self.read_wait_ns, @intCast(@max(held, 0)));
+                self.read_started = null;
+                self.read_wait_ns = 0;
+            }
+        }
+        (self.readers orelse return).release(lease);
     }
 };

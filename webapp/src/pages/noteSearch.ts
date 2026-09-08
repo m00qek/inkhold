@@ -84,7 +84,7 @@ export interface NoteSearchDeps {
   failures: ApiFailureSink;
   /** Quiet period before a query is sent, ms. Default 220. */
   debounceMs?: number;
-  /** Max hits requested. Default 20 — the server's own default and a sane page. */
+  /** Max hits requested. Default 10 — the server's own default and a sane page. */
   limit?: number;
 }
 
@@ -118,7 +118,7 @@ export interface NoteSearchController {
 export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
   const { api, view, failures } = deps;
   const debounceMs = deps.debounceMs ?? 220;
-  const limit = deps.limit ?? 20;
+  const limit = deps.limit ?? 10;
 
   let timer: ReturnType<typeof setTimeout> | undefined;
 

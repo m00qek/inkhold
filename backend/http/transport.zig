@@ -371,6 +371,18 @@ pub fn handle(ctx: *Context, routes: []const router.Route, req: *router.Request)
 /// themselves around each of their own (short) DB touches, so a multi-MB transfer
 /// no longer serializes every other request behind it.
 ///
+/// `read_only` policy (the pooled reads): the same short `resolveCaller` window,
+/// then the handler runs against a BORROWED `SQLITE_OPEN_READONLY` connection
+/// with no lock held at all. WAL serves concurrent readers natively, so a 3.41 s
+/// search stops being a barrier the whole household queues behind and becomes one
+/// slow request for the person who asked for it. When the pool is empty the
+/// request falls back to the writer under the lock, i.e. to exactly the behaviour
+/// of every other route — which is what makes the pool a pure optimisation.
+///
+/// No-match policy (a 404, or a static SPA asset): the same shape, minus the
+/// reader. Neither `static.serve` nor the 404 touches the database, and serving a
+/// multi-hundred-KB bundle under the one global DB lock was pure loss.
+///
 /// Skipped entirely when `db_lock` is unset (the integration tests drive handle()
 /// directly and are single-threaded).
 fn dispatchLocked(ctx: *Context, routes: []const router.Route, req: *router.Request) !void {
@@ -397,6 +409,13 @@ fn dispatchLocked(ctx: *Context, routes: []const router.Route, req: *router.Requ
     // renewal would need a window of its own), where the next reader has to
     // remember it exists. This one cannot be got wrong.
     std.debug.assert(!(manual and admin_route));
+    // Likewise by construction: `read_only` pairs with neither flag, because a
+    // manual handler would lock the writer while reading the reader it was
+    // leased, and an admin route's elevation renewal is an UPDATE. `routes.zig`
+    // refuses to compile either pairing (`router.readOnlyConflict`); this assert
+    // is the same rule for the synthetic tables tests build.
+    const read_only = if (route) |r| r.read_only else false;
+    std.debug.assert(!(read_only and (manual or admin_route)));
     if (manual) {
         const caller = blk: {
             ctx.lockDb();
@@ -405,11 +424,69 @@ fn dispatchLocked(ctx: *Context, routes: []const router.Route, req: *router.Requ
         };
         return router.dispatch(routes, ctx, req, caller);
     }
+    if (read_only or route == null) {
+        // The session read is a DB touch like any other and still belongs under
+        // the lock — it runs on the WRITER, before any reader is borrowed, so the
+        // auth service's own in-memory state is never reached through a copy.
+        const caller = blk: {
+            ctx.lockDb();
+            defer ctx.unlockDb();
+            break :blk if (ctx.service) |svc| resolveCaller(svc, req) else null;
+        };
+        if (route == null) return router.dispatch(routes, ctx, req, caller); // 404 / static: no DB at all
+        return dispatchReadOnly(ctx, routes, req, caller);
+    }
     ctx.lockDb();
     defer ctx.unlockDb();
     const caller = if (ctx.service) |svc| resolveCaller(svc, req) else null;
     if (admin_route) renewElevation(ctx, req);
     try router.dispatch(routes, ctx, req, caller);
+}
+
+/// Run a `read_only` route's handler against a borrowed reader, or — when the
+/// pool is empty or absent — under `db_lock` on the writer, exactly as every
+/// other route runs.
+///
+/// **The services are swapped, not just the connection.** Handlers reach the
+/// database only through `ctx.files` / `ctx.service`, each of which carries its
+/// own `sqlite.Db`; pointing them at reader-bound copies for the duration of the
+/// dispatch is what actually routes the reads. The copies are stack locals here
+/// so their lifetime is exactly the lease's, and the originals are restored
+/// before returning because a `Context` outlives the request (keep-alive reuses
+/// it for the next one on the same connection).
+fn dispatchReadOnly(
+    ctx: *Context,
+    routes: []const router.Route,
+    req: *router.Request,
+    caller: ?router.Caller,
+) !void {
+    const lease = ctx.borrowReader() orelse {
+        // Pool empty (or no pool at all): degrade to today's behaviour for this
+        // one request. Never worse, never an error — the property that lets the
+        // pool's size be a tuning decision.
+        ctx.lockDb();
+        defer ctx.unlockDb();
+        return router.dispatch(routes, ctx, req, caller);
+    };
+    defer ctx.returnReader(lease);
+
+    const saved_files = ctx.files;
+    const saved_service = ctx.service;
+    defer {
+        ctx.files = saved_files;
+        ctx.service = saved_service;
+    }
+    var ro_files: filesmod.Files = undefined;
+    var ro_service: authsvc.Service = undefined;
+    if (saved_files) |f| {
+        ro_files = f.readerView(lease.db);
+        ctx.files = &ro_files;
+    }
+    if (saved_service) |s| {
+        ro_service = s.readerView(lease.db);
+        ctx.service = &ro_service;
+    }
+    return router.dispatch(routes, ctx, req, caller);
 }
 
 /// Slide the caller's admin elevation forward, because they are using the admin

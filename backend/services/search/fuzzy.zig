@@ -449,9 +449,50 @@ pub const doc_terms_select_sql =
 /// see an arbitrary string the way the index saw its own text. Shared by the
 /// fuzzy fold and by find-in-note's counting, so there is one tokenizer
 /// declaration rather than two that could drift.
+///
+/// ## `content=''` IS NOT A SPACE SAVING — IT IS WHAT LETS THE TABLE BE TRUNCATED
+///
+/// This table is created ONCE per connection, and the connections here are
+/// long-lived: the writer for the process's lifetime, each reader-pool
+/// connection likewise. `DELETE FROM` does not empty an FTS5 index — FTS5
+/// records a deletion as a new entry in a new segment — so whatever the biggest
+/// thing ever folded here was, every later fold on that connection went on
+/// paying for it until a merge happened to reclaim it. `foldRows` runs ONCE PER
+/// MATCHING PAGE of an in-document search, so that cost is multiplied by the
+/// pages a find-in-note returns.
+///
+/// The failure mode is "find-in-note gets slower the longer the server has been
+/// up", which no test here could see (every one opens a fresh connection) and no
+/// benchmark could see (every one restarts the server first). It was real:
+/// `writeDocTerms` folds WHOLE DOCUMENTS through this same table, so one ingest,
+/// re-mint or `.note` heal on the writer connection took a 300-word page fold
+/// from **0.4 ms to 13.9 ms and did not give it back**, with the first search
+/// after it paying **160-194 ms in a single `countMatches`**; a second
+/// whole-document fold made it 35.1 ms. FTS5's automerge did reclaim it
+/// eventually, but only after several hundred more folds and not reliably within
+/// two thousand. `optimizations.md` entry 11b.
+///
+/// The fix is that the table is CONTENTLESS, which is the precondition for
+/// `'delete-all'` (`fold_reset_sql`) — the one FTS5 operation that truncates the
+/// index rather than appending tombstones to it. Every caller resets with that,
+/// so the table is genuinely empty at the start of every fold, whatever ran
+/// before it and however long ago the process started. Contentless costs nothing
+/// here: the fold's entire output is its `fts5vocab`, and no caller ever reads
+/// the text back. The floor is 0.15 ms and stays there — truncating also took
+/// 2.6x off a reader that had never folded a document at all, because a one-row
+/// `DELETE` is a tombstone too. *Emptied is not the same as empty.*
 pub const fold_ddl =
-    "CREATE VIRTUAL TABLE IF NOT EXISTS temp.token_fold USING fts5(t, tokenize='" ++ fts_tokenizer ++ "');" ++
+    "CREATE VIRTUAL TABLE IF NOT EXISTS temp.token_fold USING fts5(t, content='', tokenize='" ++ fts_tokenizer ++ "');" ++
     "CREATE VIRTUAL TABLE IF NOT EXISTS temp.token_fold_vocab USING fts5vocab('temp','token_fold','row');";
+
+/// Empties `token_fold` FOR REAL. `DELETE FROM` would not: FTS5 writes a
+/// deletion as a new entry in a new segment, so the terms stay in the index —
+/// and the cost of scanning them stays with them — until a merge reclaims them.
+/// `'delete-all'` truncates the shadow tables and reinitialises the index, which
+/// is why the table above is `content=''`: the command is refused on an ordinary
+/// content table, and the content is never read back here anyway (the fold's
+/// whole output is its `fts5vocab`).
+pub const fold_reset_sql = "INSERT INTO temp.token_fold(token_fold) VALUES('delete-all');";
 
 /// Tokenizes `text` and returns a LIVE statement over its `(term, doc, cnt)`
 /// vocabulary. The caller steps it and MUST finalize it.
@@ -460,7 +501,7 @@ pub const fold_ddl =
 /// avoid materialising a page's whole vocabulary just to add up a few terms.
 pub fn foldRows(db: sqlite.Db, text: []const u8) !sqlite.Stmt {
     try db.exec(fold_ddl);
-    try db.exec("DELETE FROM temp.token_fold;");
+    try db.exec(fold_reset_sql);
     {
         var s = try db.prepare("INSERT INTO temp.token_fold(rowid, t) VALUES(1, ?1);");
         defer s.finalize();

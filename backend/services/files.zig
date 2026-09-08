@@ -220,8 +220,42 @@ pub const Files = struct {
     /// old blob exactly as it did before this feature.
     history: config.History = .{},
 
+    /// True on a REpooled-reader VIEW of this service (see `readerView`). Nothing
+    /// reads it to change a query — the connection itself refuses writes — but
+    /// the one path that mutates state OUTSIDE the database consults it, because
+    /// SQLite cannot refuse that on our behalf.
+    read_only: bool = false,
+
     pub fn init(gpa: std.mem.Allocator, io: std.Io, db: sqlite.Db, blobs: blobstore.BlobStore, thumbs: thumbstore.ThumbStore) Files {
         return .{ .gpa = gpa, .io = io, .db = db, .blobs = blobs, .thumbs = thumbs };
+    }
+
+    /// This service bound to a POOLED READ-ONLY connection, for the duration of
+    /// one `read_only` route (`http/transport.zig`). A VALUE, deliberately: the
+    /// borrowed connection belongs to one request, so a view that outlived it —
+    /// or that two requests shared — would be exactly the aliasing the pool
+    /// exists to prevent.
+    ///
+    /// Three fields do not travel, and each would be a bug if it did:
+    ///
+    ///   - `deferred` is dropped. Waking the post-upload worker is a WRITE
+    ///     someone else performs; a read has no business asking for it, and the
+    ///     wake is advisory anyway (the worker's discovery query is the truth).
+    ///   - `thumb_repair` is re-initialized rather than copied. Copying a
+    ///     `std.Io.Mutex` copies its futex word, so a view made while another
+    ///     thread held the gate would start out "locked" with nobody able to
+    ///     unlock it. It is a fresh gate that gates nothing — which is safe only
+    ///     because `repairDerivedThumb` refuses on a read-only view, and because
+    ///     the one route that repairs is `manual_db_lock` and therefore cannot be
+    ///     `read_only` at all (`router.readOnlyConflict`).
+    ///   - `read_only` is set, which is what makes that refusal possible.
+    pub fn readerView(self: *const Files, db: sqlite.Db) Files {
+        var v = self.*;
+        v.db = db;
+        v.read_only = true;
+        v.deferred = null;
+        v.thumb_repair = .init;
+        return v;
     }
 
     fn now(self: Files) i64 {
@@ -3503,6 +3537,13 @@ pub const Files = struct {
     /// same parse-outside-lock rule as `note_index.ensureIndexed`), and the
     /// lock order is fixed as repair mutex → db lock (see `thumb_repair`).
     pub fn repairDerivedThumb(self: *Files, lk: anytype, md5: []const u8) void {
+        // A pooled-reader view holds a fresh, unshared `thumb_repair` gate, so
+        // running here would drop the single-flight bound that keeps N concurrent
+        // derives from blowing the RSS budget — and the writes below would fail
+        // on the connection anyway. Unreachable in practice (the `/thumbnail`
+        // route is `manual_db_lock`, which cannot also be `read_only`); this is
+        // the guard that keeps it unreachable if that ever changes.
+        if (self.read_only) return;
         self.thumb_repair.lockUncancelable(self.io);
         defer self.thumb_repair.unlock(self.io);
 

@@ -683,9 +683,14 @@ pub fn unpackLayers(blob: []const u8, buf: *[max_layers]LayerRef) Error![]const 
 // `pdf_probe` is a different hole and is closed on the READER's side instead:
 // the shape lives in the note columns and this statement really does overwrite
 // it, so `pdf_index.needsProbe` treats "verdict `ok`, `page_count` zero" as
-// outstanding work rather than trusting the memo. Asking the data is the
-// `txt_index.needsDerive` posture, and it keeps knowledge of PDFs out of the
-// note half — which is the coupling that made both holes possible.
+// outstanding work rather than trusting the memo. Asking the data rather than
+// the memo keeps knowledge of PDFs out of the note half — which is the coupling
+// that made both holes possible.
+//
+// `txt_index` is left alone here for the `pdf_text` reason exactly: the
+// `kind = 1` rows survive the scoped delete, so its memo (`txt_index`, schema
+// v11) stays true and the paragraphs are not re-derived by a note heal that
+// touched none of them.
 const upsert_note_sql =
     \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, signature,
     \\                       signature_version, equipment, width, height, rle_variant,

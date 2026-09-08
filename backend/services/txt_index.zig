@@ -57,14 +57,46 @@
 //!
 //! ## The derived-state marker
 //!
-//! "Was this blob ever chunked?" must be answerable without re-deriving, and
-//! segments alone cannot answer it — an empty file and an over-cap skip both
-//! yield zero. So a derivation that produced no segments writes ONE marker row
-//! (`kind = 1`, `recogn_status = 0`, `text` NULL): invisible to the FTS
-//! predicate and to every query, but present, so `needsDerive` memoizes the
-//! way `indexable = 0` memoizes an unparseable blob. `mintOwnerBlobSearch`
-//! counts it and mints a phantom ~24-byte segment row per owner — harmless,
-//! postings-free.
+//! A derivation that produced no segments (an empty file, or the over-cap
+//! skip) still writes ONE marker row (`kind = 1`, `recogn_status = 0`, `text`
+//! NULL): invisible to the FTS predicate and to every query, but present, so
+//! every "count this blob's rows" arithmetic in `search/maintain.zig` stays
+//! uniform and the document has a band like any other. It gets a phantom
+//! ~24-byte segment row per owner — harmless, postings-free.
+//!
+//! It is NOT the memo. It was, until the write became chunked; the memo is now
+//! a column, for the reason below.
+//!
+//! ## The write is CHUNKED, and `note_index.txt_index` is the memo
+//!
+//! A 1,703-segment document written in ONE transaction holds the global
+//! `db_lock` for 137 ms here and **13.9 s on the Pi** (`mupdf.md` §9.8 measured
+//! exactly this segment write), and `max_file_bytes` allows ten times that many
+//! paragraphs. So the deferred write is chunked (`deferred.runTxt`), which is
+//! only safe because the rowid range is RESERVED UP FRONT — a document's
+//! segments are ONE CONTIGUOUS ROWID RUN IN PAGE ORDER and library search
+//! inverts that arithmetic (`search/maintain.zig`'s reserved bands, and
+//! `pdf_text.zig`, which met all of this first).
+//!
+//! **Chunking is what forced a memo COLUMN** (schema v11, `Verdict` below).
+//! "Does the blob have `kind = 1` rows?" was a fine question while the write
+//! was one transaction and is the wrong one now: it answers "finished" as soon
+//! as the first chunk commits, so a write interrupted between chunks would look
+//! like completed work for ever — silently, and permanently. The verdict is
+//! written LAST, in the transaction that closes the document.
+//!
+//! **Chunks are filled in READING ORDER, from ordinal 0**, and that is not an
+//! arbitrary direction. `query.bandStart` collapses a document to one hit by
+//! jumping to `rowid - ordinal` and checking that ordinal 0 of the same blob is
+//! there; until it is, every matching paragraph of the document is its own hit.
+//! Filling forward means a document being written right now — or one a crash
+//! left half written — still reports as ONE document, incomplete rather than
+//! multiplied across the result page.
+//!
+//! There is a SECOND writer, and the memo is what serializes it: the listing
+//! path's lazy heal (`ensureIndexed`) writes the same documents in one
+//! transaction, so every chunk re-asks `needsDerive` to find out whether the
+//! work is still its own.
 //!
 //! ## Known edges, recorded
 //!
@@ -77,9 +109,11 @@
 //!     mints segments for every current holder — the `.dat` holder's file
 //!     becomes searchable too. Same posture as `.note` (verified content
 //!     over claimed name); the `files` join still scopes who sees what.
-//!   - A future `index_version` bump re-mints txt segments wholesale (the
-//!     note-half heal wipes them via its tail drop before this module
-//!     re-derives): segment recency resets, exactly like a re-index.
+//!   - A future `index_version` bump re-derives and re-mints txt segments
+//!     wholesale: `needsDerive` asks the memo on a row at the CURRENT version,
+//!     so a bumped row is outstanding again whatever its verdict says, and the
+//!     re-derive reserves a fresh band. Segment recency resets, exactly like a
+//!     re-index.
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
@@ -106,6 +140,20 @@ pub const max_segment_bytes: usize = 8 * 1024;
 /// larger file is skipped WHOLE, with a logged warning — never silently
 /// truncated to a searchable prefix that lies about covering the file.
 pub const max_file_bytes: u64 = 16 * 1024 * 1024;
+
+/// How much of a document ONE write transaction takes on. **A DUAL cap**, and
+/// both halves matter: `mupdf.md` §9.8 measured that neither rows nor bytes
+/// alone predicts the hold, because indexed text volume costs as much as row
+/// count. ~50 segments or ~40 KB of text, whichever comes first — the value
+/// `pdf_text.zig` ships, adopted here rather than re-derived so the two tenants
+/// of one lock hold it for comparable spans.
+///
+/// **Re-measured for paragraphs rather than assumed** (the bench at the bottom
+/// of this file): a `.txt` paragraph is smaller and cheaper than a PDF page, so
+/// the segment cap is what bites on ordinary prose and the byte cap only on
+/// documents of near-`max_segment_bytes` blocks. Both are held.
+pub const chunk_segments: usize = 50;
+pub const chunk_bytes: usize = 40 * 1024;
 
 /// Does this filename name a `.txt`? Case-insensitive, and the same
 /// extension rules as `thumbnail.wants`/`controlplane.extensionOf`: a
@@ -404,110 +452,197 @@ const upsert_marker_sql =
     \\  text_hash=NULL, recogn_offset=NULL, recogn_length=NULL, text=NULL;
 ;
 
-/// The one format-specific write `reconcilePage` hands the `.txt` adapter: a
-/// paragraph-row upsert (`kind = 1`, the byte range, `text_hash` doubling as
+/// One paragraph row (`kind = 1`, the byte range, `text_hash` doubling as
 /// `content_hash` — see the column contract above). `ordinal` is the segment
-/// index the driver diffed on, bound as `page_index`.
-const SegUpsert = struct {
-    blob_md5: []const u8,
-    seg: Segment,
-    pub fn upsert(self: @This(), db: sqlite.Db, ordinal: i64) !void {
-        var s = try db.prepare(upsert_segment_sql);
-        defer s.finalize();
-        s.bindText(1, self.blob_md5);
-        s.bindInt(2, ordinal);
-        s.bindText(3, &self.seg.text_hash); // content_hash — see the contract above
-        s.bindText(4, &self.seg.text_hash);
-        s.bindInt(5, @intCast(self.seg.offset));
-        s.bindInt(6, self.seg.len);
-        s.bindText(7, self.seg.text);
-        _ = try s.step();
-    }
-};
-
-/// Writes `d`'s segment rows for `blob_md5`. Call inside the caller's
-/// transaction, AFTER the blob's `note_index` row exists (the FK; on the
-/// ingest path `noteindex.store` has just written it, on the heal path
-/// `ensureIndexed` gates on it being current).
-///
-/// This is `note_index.store`'s exact re-derive discipline, per segment: the
-/// stored text is DIFFED first, postings are refreshed IN PLACE only where it
-/// actually changed ('delete' while the old row still resolves, insert after
-/// the rewrite, at the same masked rowids for every partition holding the
-/// blob), and a segment the blob did not have before mints a fresh masked
-/// rowid for every CURRENT holder (`mintPageForHolders` — which is also what
-/// makes the v5→v6 heal self-serve: the healed blob's holders all gain their
-/// segment rows here, no re-upload). On first ingest nobody holds the blob
-/// yet, so every search call degenerates to a no-op and the ingesting owner's
-/// rows are minted by `mintOwnerBlobSearch` once their `files` row exists.
-pub fn store(db: sqlite.Db, blob_md5: []const u8, d: Derived, now: i64) !void {
-    if (d.segments.len == 0) {
-        // Nothing indexable (empty/whitespace-only file, or the over-cap
-        // skip): the marker memoizes "derived, nothing to index" so the
-        // derivation — and the over-cap log line — happen once per blob.
-        var old_exists = false;
-        var had_text = false;
-        {
-            if (try db.row("SELECT text FROM note_page_index WHERE blob_md5 = ?1 AND page_index = 0;", &.{.{ .text = blob_md5 }})) |r| {
-                defer r.finalize();
-                old_exists = true;
-                had_text = r.text(0).len != 0;
-            }
-        }
-        if (old_exists and had_text) try search.deletePagePostings(db, blob_md5, 0);
-        {
-            var s = try db.prepare(upsert_marker_sql);
-            defer s.finalize();
-            s.bindText(1, blob_md5);
-            s.bindText(2, &md5Hex(""));
-            _ = try s.step();
-        }
-        // Holders gain a phantom segment row for the marker (its postings
-        // insert is predicate-filtered to nothing) — cheap, and it keeps
-        // `mintOwnerBlobSearch`'s "count all rows" arithmetic uniform.
-        if (!old_exists) try search.mintPageForHolders(db, blob_md5, 0, now);
-        try dropTail(db, blob_md5, 1);
-        return;
-    }
-
-    for (d.segments, 0..) |seg, i| {
-        // The per-segment re-derive discipline lives once in
-        // `search.reconcilePage`; the adapter hands it the new text to diff on
-        // and the paragraph-row upsert.
-        try search.reconcilePage(db, blob_md5, @intCast(i), seg.text, now, SegUpsert{
-            .blob_md5 = blob_md5,
-            .seg = seg,
-        });
-    }
-    try dropTail(db, blob_md5, @intCast(d.segments.len));
+/// index, bound as `page_index`, and it is also the segment's offset into the
+/// reserved band.
+fn upsertSegment(db: sqlite.Db, blob_md5: []const u8, ordinal: i64, seg: Segment) !void {
+    var s = try db.prepare(upsert_segment_sql);
+    defer s.finalize();
+    s.bindText(1, blob_md5);
+    s.bindInt(2, ordinal);
+    s.bindText(3, &seg.text_hash); // content_hash — see the contract above
+    s.bindText(4, &seg.text_hash);
+    s.bindInt(5, @intCast(seg.offset));
+    s.bindInt(6, seg.len);
+    s.bindText(7, seg.text);
+    _ = try s.step();
 }
 
-/// A re-derive yielded fewer segments (an `index_version` bump changing the
-/// chunking — same-blob content never shrinks by itself): the tail goes,
-/// search rows first so the FK cannot trip.
-fn dropTail(db: sqlite.Db, blob_md5: []const u8, from: i64) !void {
-    try search.dropTailSearch(db, blob_md5, from);
+/// How many `note_page_index` rows this derivation writes: one per segment, or
+/// the single marker row when it produced none. **Never zero**, which is what
+/// makes it a legal band length — `reserveOwnerBlobBands` asserts as much, and a
+/// zero-length band would be a document with no address.
+pub fn rowCount(d: Derived) usize {
+    return @max(d.segments.len, 1);
+}
+
+/// One past the last row of the chunk starting at `from` — the dual cap
+/// (`chunk_segments` / `chunk_bytes`) applied to this document. ALWAYS takes at
+/// least one row, so a paragraph larger than the byte cap forms its own chunk
+/// rather than stalling the loop.
+pub fn chunkEnd(d: Derived, from: usize) usize {
+    const rows = rowCount(d);
+    std.debug.assert(from < rows);
+    if (d.segments.len == 0) return rows; // the marker: one row, one chunk
+    var bytes: usize = 0;
+    var at = from;
+    while (at < rows and at - from < chunk_segments) {
+        bytes += d.segments[at].text.len;
+        at += 1;
+        if (bytes >= chunk_bytes) break;
+    }
+    return at;
+}
+
+/// Opens a document's write: drops whatever band the blob's holders had and
+/// reserves one contiguous run of `rowCount(d)` masked rowids each, then clears
+/// any tail a SHORTER re-derive would strand.
+///
+/// Runs in the caller's transaction, BEFORE any segment row is rewritten — the
+/// drop's FTS 'delete' reads the text through the rows it is about to replace.
+/// Returns the bands, owned by the caller.
+///
+/// **A re-run never patches holes.** A partial band left by an interrupted
+/// chunked write is dropped here and reserved afresh, exactly as
+/// `flipOwnerBlob` does for a new version; patching would have to reason about
+/// which rowids were filled, and the reservation is what makes that unnecessary.
+pub fn reserve(
+    gpa: Allocator,
+    db: sqlite.Db,
+    blob_md5: []const u8,
+    row_count: usize,
+    now: i64,
+) ![]search.Band {
+    const bands = try search.reserveOwnerBlobBands(gpa, db, blob_md5, @intCast(row_count), now);
+    errdefer gpa.free(bands);
+    // The tail of a longer previous derivation (an `index_version` bump that
+    // changed the chunking, or an interrupted run at a different length). Its
+    // segment rows are already gone — the drop above took every one of this
+    // blob's — so this is just the page rows.
     var s = try db.prepare("DELETE FROM note_page_index WHERE blob_md5 = ?1 AND page_index >= ?2;");
     defer s.finalize();
     s.bindText(1, blob_md5);
-    s.bindInt(2, from);
+    s.bindInt(2, @intCast(row_count));
     _ = try s.step();
+    return bands;
+}
+
+/// Writes rows `[from, to)`: the paragraph rows, then the reserved band's
+/// segment rows and postings for exactly those ordinals. One transaction's
+/// worth, and a safe place to be interrupted.
+///
+/// Call inside the caller's transaction, AFTER the blob's `note_index` row
+/// exists (the FK; on the ingest path `noteindex.store` has just written it, on
+/// the heal path `ensureIndexed` gates on it being current).
+pub fn storeChunk(
+    db: sqlite.Db,
+    blob_md5: []const u8,
+    bands: []const search.Band,
+    d: Derived,
+    from: usize,
+    to: usize,
+) !void {
+    if (d.segments.len == 0) {
+        // Nothing indexable (empty/whitespace-only file, or the over-cap skip):
+        // the marker gives the document a band like any other. Its segment row
+        // is minted like the rest and carries no postings (the FTS insert is
+        // predicate-filtered to nothing), which keeps every "count all rows"
+        // arithmetic in `search/maintain.zig` uniform. What stops the derivation
+        // — and the over-cap log line — repeating is the VERDICT, not this row.
+        std.debug.assert(from == 0 and to == 1);
+        var s = try db.prepare(upsert_marker_sql);
+        defer s.finalize();
+        s.bindText(1, blob_md5);
+        s.bindText(2, &md5Hex(""));
+        _ = try s.step();
+    } else {
+        for (d.segments[from..to], from..) |seg, ordinal| {
+            try upsertSegment(db, blob_md5, @intCast(ordinal), seg);
+        }
+    }
+    try search.fillBandChunk(db, bands, blob_md5, @intCast(from), @intCast(to));
+}
+
+/// Closes a document's write: the per-document term sets, the repair for a
+/// holder that arrived between two chunks and could not have been in the
+/// reservation, and THEN the verdict. Its own transaction, LAST, so "this
+/// blob's paragraphs are indexed" is true only when they are.
+pub fn finish(
+    db: sqlite.Db,
+    blob_md5: []const u8,
+    bands: []const search.Band,
+    d: Derived,
+    now: i64,
+) !void {
+    try search.finishOwnerBlobBands(db, bands, blob_md5, @intCast(rowCount(d)), now);
+    try storeVerdict(db, blob_md5, verdictFor(d));
+}
+
+/// The whole write, in the CALLER'S ONE TRANSACTION — reserve, one chunk over
+/// every row, finish. The shape for a caller that has no lock to release and
+/// nothing to gain from being interruptible: the lazy heal (`ensureIndexed`)
+/// and the tests.
+///
+/// `deferred.runTxt` drives the SAME three primitives across a transaction per
+/// chunk instead. There is one row-writing path either way, which is the point:
+/// a second expression of it could disagree about what a segment row carries.
+pub fn store(gpa: Allocator, db: sqlite.Db, blob_md5: []const u8, d: Derived, now: i64) !void {
+    const rows = rowCount(d);
+    const bands = try reserve(gpa, db, blob_md5, rows, now);
+    defer gpa.free(bands);
+    try storeChunk(db, blob_md5, bands, d, 0, rows);
+    try finish(db, blob_md5, bands, d, now);
 }
 
 // ---------------------------------------------------------------------------
 // The gate + lazy heal
 // ---------------------------------------------------------------------------
 
-/// Whether this blob still needs a `.txt` derivation. False — the memo —
-/// only when a CURRENT `note_index` row exists AND either the note parser
-/// verified the bytes (`indexable = 1`: a real `.note` is never chunked,
-/// whatever it is called) or `kind = 1` rows already hang off it (real
-/// segments, or the zero-segment marker). A missing/stale row is `true`: the
-/// note half heals first and this question is asked again after.
+/// `note_index.txt_index` (schema v11). NULL (absent) means never derived.
+pub const Verdict = enum(i64) {
+    /// The blob's paragraphs are in the index.
+    ok = 0,
+    /// Over `max_file_bytes` and skipped WHOLE. A RESULT, not a failure, and
+    /// recorded rather than inferred: an over-cap file and an empty one both
+    /// derive to zero segments, and only this tells them apart afterwards.
+    over_cap = 1,
+};
+
+/// The verdict a completed derivation earns. One expression of the rule rather
+/// than a branch at each call site, and testable without a blob.
+pub fn verdictFor(d: Derived) Verdict {
+    return if (d.skipped_over_cap) .over_cap else .ok;
+}
+
+/// Record the outcome. Call inside the caller's transaction, LAST — the memo
+/// must not be true before the segments are.
+pub fn storeVerdict(db: sqlite.Db, blob_md5: []const u8, v: Verdict) !void {
+    var s = try db.prepare("UPDATE note_index SET txt_index = ?2 WHERE blob_md5 = ?1;");
+    defer s.finalize();
+    s.bindText(1, blob_md5);
+    s.bindInt(2, @intFromEnum(v));
+    _ = try s.step();
+}
+
+/// Whether this blob still needs a `.txt` derivation. False — the memo — only
+/// when a CURRENT `note_index` row exists AND either the note parser verified
+/// the bytes (`indexable = 1`: a real `.note` is never chunked, whatever it is
+/// called) or a verdict is recorded. A missing/stale row is `true`: the note
+/// half heals first and this question is asked again after.
+///
+/// **The verdict COLUMN, not "does the blob have segment rows".** The write is
+/// chunked, so rows exist from the first commit onwards while the document is
+/// still half written; the column is set last. Reading rows here would call an
+/// interrupted write finished for ever, silently — see the module docs.
+///
+/// It is also the CONCURRENCY question. The lazy heal and the deferred worker
+/// are two writers of the same document, and this is what each of them re-asks
+/// under the lock to find out whether the work is still theirs to do.
 pub fn needsDerive(db: sqlite.Db, blob_md5: []const u8) !bool {
     var r = (try db.row(
-        "SELECT indexable, EXISTS(SELECT 1 FROM note_page_index np WHERE np.blob_md5 = ?1 AND np.kind = 1) " ++
-            "FROM note_index WHERE blob_md5 = ?1 AND index_version = ?2;",
+        "SELECT indexable, txt_index IS NOT NULL FROM note_index " ++
+            "WHERE blob_md5 = ?1 AND index_version = ?2;",
         &.{ .{ .text = blob_md5 }, .{ .int = noteindex.index_version } },
     )) orelse return true;
     defer r.finalize();
@@ -528,6 +663,15 @@ pub fn needsDerive(db: sqlite.Db, blob_md5: []const u8) !bool {
 /// `controlplane.backfill` runs it immediately before this). A stale
 /// `note_index` row returns early here rather than deriving segments the
 /// note heal's tail-drop would immediately wipe.
+///
+/// ONE TRANSACTION, AND THAT IS A KNOWN COST, NOT AN OVERSIGHT. This holds the
+/// connection for the whole document — 4 min 28 s of held `db_lock` for a
+/// 15.65 MB `.txt` on the deployment target, the largest single hold on record
+/// (`run-on-rpi-32bit.md`, 2026-08-09 §5). Chunking it was built, measured on
+/// the Pi, and REVERTED: it halved write throughput on a smaller file and took
+/// the peak from 9 % to 44 % over the memory budget (`optimizations.md`
+/// entry 13). Do not re-propose it — the open direction is to stop healing
+/// synchronously here at all.
 pub fn ensureIndexed(
     gpa: Allocator,
     db: sqlite.Db,
@@ -556,11 +700,18 @@ pub fn ensureIndexed(
 
     try db.exec("BEGIN IMMEDIATE;");
     errdefer db.exec("ROLLBACK;") catch {};
-    try store(db, md5, d, now);
-    // Canonical-order heal (index_version 8), the `.txt` half: re-mint any
-    // holder's paragraph band a past flip left out of order. No-op on the
-    // contiguous bands the whole-doc-band re-mint now produces.
-    try search.recanonicalizeHolders(db, md5, now);
+    // ASKED AGAIN UNDER THE WRITE LOCK, because the derive above ran without
+    // it and the deferred worker writes the same documents. Its write is
+    // chunked, so "somebody else finished this while I was deriving" is no
+    // longer a narrow window — and re-storing over a band another writer just
+    // laid down would re-mint recency for nothing.
+    if (try needsDerive(db, md5)) {
+        try store(gpa, db, md5, d, now);
+        // Canonical-order heal (index_version 8), the `.txt` half: re-mint any
+        // holder's paragraph band a past flip left out of order. No-op on the
+        // contiguous bands the reserved-band write now produces.
+        try search.recanonicalizeHolders(db, md5, now);
+    }
     try db.exec("COMMIT;");
 }
 
@@ -768,6 +919,11 @@ test "the ranged (blob-store) source derives identically to the slice source" {
 // Tests — ingest, search integration, lifecycle
 // ---------------------------------------------------------------------------
 
+/// What an upload gives a test: the `files` row's id and the blob's md5 hex.
+/// Named rather than anonymous because three fixture helpers return it and Zig
+/// gives every anonymous struct literal its own distinct type.
+const Put = struct { id: u64, md5: [32]u8 };
+
 const Fixture = struct {
     db: sqlite.Db,
     files: filesvc.Files,
@@ -775,7 +931,20 @@ const Fixture = struct {
     arena: std.heap.ArenaAllocator,
 
     fn init() !Fixture {
-        var db = try sqlite.Db.openMemory();
+        return initAt(false);
+    }
+
+    /// `on_disk` opens a REAL database file under the test's temp dir, with the
+    /// production pragma set (WAL and all) — because an in-memory `COMMIT` has
+    /// no journal and no fsync, and the commit is half of what a chunked write
+    /// costs. Only the bench asks for it.
+    fn initAt(on_disk: bool) !Fixture {
+        const tmp = testing.tmpDir(.{});
+        var path_buf: [128]u8 = undefined;
+        var db = if (on_disk)
+            try sqlite.Db.open(try std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}/bench.db", .{tmp.sub_path}))
+        else
+            try sqlite.Db.openMemory();
         try schema.migrate(db);
         for ([_]u8{ 1, 2 }) |uid| {
             var s = try db.prepare(
@@ -789,7 +958,6 @@ const Fixture = struct {
             c.bindInt(1, uid);
             _ = try c.step();
         }
-        const tmp = testing.tmpDir(.{});
         const store_ = try blobstore.BlobStore.init(testing.io, tmp.dir);
         const thumbs_dir = try tmp.dir.createDirPathOpen(testing.io, "thumbs", .{});
         const thumbs = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
@@ -819,16 +987,53 @@ const Fixture = struct {
     /// afterwards. Every assertion below is about the state once that has
     /// happened, so the fixture models the real sequence rather than pretending
     /// the upload still does the work.
-    fn put(f: *Fixture, user_id: u64, name: []const u8, bytes: []const u8) !struct { id: u64, md5: [32]u8 } {
+    fn put(f: *Fixture, user_id: u64, name: []const u8, bytes: []const u8) !Put {
+        const up = try f.putRaw(user_id, name, bytes);
+        f.drain();
+        return up;
+    }
+
+    /// Upload ONLY — no worker. The tests that drive the chunked write by hand
+    /// cannot drain: the tenant would index the very document they are half-way
+    /// through.
+    fn putRaw(f: *Fixture, user_id: u64, name: []const u8, bytes: []const u8) !Put {
         var r = std.Io.Reader.fixed(bytes);
         const e = try f.files.putFile(user_id, null, name, &r, null);
-        var lock: std.Io.Mutex = .init;
-        deferredmod.drainNow(testing.allocator, f.db, f.files.blobs, &lock, testing.io);
         defer testing.allocator.free(e.name);
         defer if (e.md5) |m| testing.allocator.free(m);
         var md5: [32]u8 = undefined;
         @memcpy(&md5, e.md5.?[0..32]);
         return .{ .id = e.id, .md5 = md5 };
+    }
+
+    /// Uploaded and derived through the real LAZY HEAL rather than the worker —
+    /// a second document with a real band, for a test that must not drain.
+    fn putHealed(f: *Fixture, user_id: u64, name: []const u8, bytes: []const u8) !Put {
+        const up = try f.putRaw(user_id, name, bytes);
+        try ensureIndexed(testing.allocator, f.db, f.files.blobs, &up.md5, name, 100);
+        return up;
+    }
+
+    fn drain(f: *Fixture) void {
+        var lock: std.Io.Mutex = .init;
+        deferredmod.drainNow(testing.allocator, f.db, f.files.blobs, &lock, testing.io);
+    }
+
+    /// The blob's segment rowids in ordinal order, for one owner — the band, as
+    /// the jump arithmetic sees it.
+    fn band(f: *Fixture, user_id: u64, md5: []const u8) ![]i64 {
+        var out: std.ArrayList(i64) = .empty;
+        var s = try f.db.prepare(
+            "SELECT s.id FROM search_partitions sp " ++
+                "JOIN segment_search s ON s.id BETWEEN (sp.id << 48) AND ((sp.id + 1) << 48) - 1 " ++
+                "JOIN note_page_index p ON p.id = s.segment_id " ++
+                "WHERE sp.user_id = ?1 AND p.blob_md5 = ?2 ORDER BY p.page_index;",
+        );
+        defer s.finalize();
+        s.bindInt(1, @intCast(user_id));
+        s.bindText(2, md5);
+        while (try s.step()) try out.append(f.a(), s.columnInt(0));
+        return out.items;
     }
 
     fn search_(f: *Fixture, user_id: u64, q: []const u8) !notesearch.Results {
@@ -1389,10 +1594,15 @@ test "v5→v6 HEAL: a pre-existing .txt mints segments on ensure, name looked up
     // and NO kind=1 rows, exactly what a database indexed before this
     // feature holds. Postings and segment rows go the way a v5 database
     // simply never had them.
+    //
+    // `txt_index` goes with them, and that is not the simulation being bent to
+    // fit: the schema v11 backfill sets the memo only where segment rows exist,
+    // so "no rows, memo present" is a state no real database is ever in. Left
+    // set, this would be simulating a HEALED file and asserting it heals again.
     try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('delete-all');");
     try f.db.exec("DELETE FROM segment_search;");
     try f.db.exec("DELETE FROM note_page_index;");
-    try f.db.exec("UPDATE note_index SET index_version = 5;");
+    try f.db.exec("UPDATE note_index SET index_version = 5, txt_index = NULL;");
     try testing.expectEqual(@as(usize, 0), (try f.search_(1, "healed")).hits.len);
 
     // The heal, in `controlplane.backfill`'s order: the note half first
@@ -1438,6 +1648,536 @@ test "purge and GC: txt segments ride the existing lifecycle untouched" {
     try testing.expectEqual(@as(i64, 0), try f.count("SELECT COUNT(*) FROM segment_search;"));
     try testing.expectEqual(@as(i64, 0), try f.count("SELECT COUNT(*) FROM segment_fts_docsize;"));
     try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('integrity-check');");
+}
+
+// ---------------------------------------------------------------------------
+// Tests — the chunked write, and the invariants it must not break
+// ---------------------------------------------------------------------------
+
+/// `n` short paragraphs, each carrying `rutabaga` and its own `leafNNN` — so
+/// "this document matches everywhere" and "this hit is paragraph N" are both
+/// assertable. 120 of them is THREE chunks at `chunk_segments`, which is the
+/// only reason the corpus is this long: a one-chunk document cannot exercise a
+/// chunk boundary.
+fn manyParagraphs(a: Allocator, n: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (0..n) |i| {
+        if (i != 0) try out.appendSlice(a, "\n\n");
+        try out.print(a, "paragraph {d} rutabaga leaf{d:0>3}", .{ i, i });
+    }
+    return out.items;
+}
+
+/// Runs the chunked write over a stored `.txt`, stopping after `max_chunks`
+/// commits — which is how a crash between chunks is staged. Returns the bands
+/// and how many rows actually landed.
+///
+/// This is `deferred.runTxt`'s loop with the lock discipline removed (there is
+/// one thread here): reserve in one transaction, each chunk in its own, the
+/// verdict in a last one. `deferred.zig` runs the same sequence with the lock
+/// taken and released around each.
+fn runPipeline(
+    f: *Fixture,
+    md5: []const u8,
+    max_chunks: usize,
+    now: i64,
+) !struct { bands: []search.Band, rows: usize, finished: bool } {
+    var d = (try deriveStored(testing.allocator, f.files.blobs, md5)).?;
+    defer d.deinit();
+    const rows = rowCount(d);
+
+    try f.db.exec("BEGIN IMMEDIATE;");
+    const bands = try reserve(f.a(), f.db, md5, rows, now);
+    try f.db.exec("COMMIT;");
+
+    var at: usize = 0;
+    var chunks: usize = 0;
+    while (at < rows and chunks < max_chunks) : (chunks += 1) {
+        const end = chunkEnd(d, at);
+        try f.db.exec("BEGIN IMMEDIATE;");
+        try storeChunk(f.db, md5, bands, d, at, end);
+        try f.db.exec("COMMIT;");
+        at = end;
+    }
+    if (at < rows) return .{ .bands = bands, .rows = at, .finished = false }; // "crashed"
+
+    try f.db.exec("BEGIN IMMEDIATE;");
+    try finish(f.db, md5, bands, d, now);
+    try f.db.exec("COMMIT;");
+    return .{ .bands = bands, .rows = rows, .finished = true };
+}
+
+/// FTS5's own audit of the external-content index: every posting resolves to the
+/// text it claims to come from. The one assertion that catches a posting written
+/// at a rowid whose row later changed underneath it.
+fn expectFtsClean(f: *Fixture) !void {
+    try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('integrity-check');");
+}
+
+test "THE BAND IS STILL CONTIGUOUS after a chunked write — the arithmetic the jump rests on" {
+    // The load-bearing property. `query.bandStart` jumps to `R - page_index` and
+    // validates it against ordinal 0 of the same blob; that is only ever right
+    // while a document's segments are ONE contiguous rowid run in ordinal order.
+    // Three commits produced this band, and it has to look exactly like one
+    // statement produced it.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const corpus = try manyParagraphs(f.a(), 120);
+    const put = try f.putRaw(1, "book.txt", corpus);
+    const r = try runPipeline(&f, &put.md5, 99, 100);
+    try testing.expect(r.finished);
+    try testing.expectEqual(@as(usize, 120), r.rows);
+
+    const ids = try f.band(1, &put.md5);
+    try testing.expectEqual(@as(usize, 120), ids.len);
+    for (ids, 0..) |id, i| {
+        // Not merely "sorted": `rowid = first + ordinal`, exactly, which is the
+        // equation the jump inverts.
+        try testing.expectEqual(r.bands[0].first_rowid + @as(i64, @intCast(i)), id);
+    }
+    try testing.expect(!try needsDerive(f.db, &put.md5)); // and the verdict is in
+    // ONE hit for the whole document: the band collapses, which is what ordinal
+    // 0 being present makes possible.
+    try testing.expectEqual(@as(usize, 1), (try f.search_(1, "rutabaga")).hits.len);
+    try expectFtsClean(&f);
+}
+
+test "AN INGEST BETWEEN CHUNKS DOES NOT INTERLEAVE — this is what the reservation buys" {
+    // Minting per chunk would allocate fresh sequences each time, so a file
+    // uploaded halfway through this one would land IN THE MIDDLE of its band and
+    // the jump would step over a document that had not been reported yet.
+    // Reserving up front makes the interloper land above the whole band.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const corpus = try manyParagraphs(f.a(), 120);
+    const put = try f.putRaw(1, "book.txt", corpus);
+
+    var d = (try deriveStored(testing.allocator, f.files.blobs, &put.md5)).?;
+    defer d.deinit();
+    const rows = rowCount(d);
+
+    try f.db.exec("BEGIN IMMEDIATE;");
+    const bands = try reserve(f.a(), f.db, &put.md5, rows, 100);
+    try f.db.exec("COMMIT;");
+
+    var at: usize = 0;
+    var interloper: [32]u8 = undefined;
+    while (at < rows) {
+        const end = chunkEnd(d, at);
+        try f.db.exec("BEGIN IMMEDIATE;");
+        try storeChunk(f.db, &put.md5, bands, d, at, end);
+        try f.db.exec("COMMIT;");
+        at = end;
+        // Exactly one upload, right after the first chunk commits.
+        if (at == chunk_segments) {
+            interloper = (try f.putHealed(1, "between.txt", "an interloping paragraph\n")).md5;
+        }
+    }
+    try f.db.exec("BEGIN IMMEDIATE;");
+    try finish(f.db, &put.md5, bands, d, 100);
+    try f.db.exec("COMMIT;");
+
+    const ids = try f.band(1, &put.md5);
+    try testing.expectEqual(@as(usize, 120), ids.len);
+    for (ids, 0..) |id, i| try testing.expectEqual(bands[0].first_rowid + @as(i64, @intCast(i)), id);
+
+    // And the interloper is entirely OUTSIDE the book's range, not inside it.
+    const other = try f.band(1, &interloper);
+    try testing.expect(other.len > 0);
+    for (other) |id| try testing.expect(id > ids[ids.len - 1]);
+    try expectFtsClean(&f);
+}
+
+test "a crash between chunks leaves search CORRECT, not complete — holes never skip a neighbour" {
+    // The chunked write's stated failure mode: allocated-but-unfilled rowids.
+    // They are holes, and the jump guard already refuses to jump when the
+    // candidate is not this blob's ordinal 0 — so a half-written file degrades
+    // to a step and cannot swallow the document below it.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const corpus = try manyParagraphs(f.a(), 120);
+    const put = try f.putRaw(1, "book.txt", corpus);
+    // A second document that WILL be sitting below the book's band, and that
+    // matches the same term. If the holes made the jump land wrong, this is what
+    // would vanish.
+    _ = try f.putHealed(1, "neighbour.txt", "a rutabaga in the neighbour file\n");
+
+    const r = try runPipeline(&f, &put.md5, 1, 100); // one chunk of three, then "crash"
+    try testing.expect(!r.finished);
+    try testing.expectEqual(@as(usize, chunk_segments), r.rows);
+
+    const ids = try f.band(1, &put.md5);
+    try testing.expectEqual(@as(usize, chunk_segments), ids.len); // the filled prefix only
+
+    // Both documents still surface, ONCE each. The book is searchable for the
+    // paragraphs that landed — and it still collapses to a single hit, because
+    // the prefix starts at ordinal 0, which is the whole reason chunks are
+    // filled in reading order. Filled from anywhere else, the 50 stranded
+    // paragraphs would each be their own hit and crowd the neighbour off the
+    // page: correct, and useless.
+    const hits = try f.search_(1, "rutabaga");
+    var book: usize = 0;
+    var neighbour: usize = 0;
+    for (hits.hits) |h| {
+        if (std.mem.eql(u8, h.noteName, "book.txt")) book += 1;
+        if (std.mem.eql(u8, h.noteName, "neighbour.txt")) neighbour += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), book);
+    try testing.expectEqual(@as(usize, 1), neighbour); // NOT skipped, NOT crowded out
+    try expectFtsClean(&f);
+}
+
+test "an interrupted write is still OUTSTANDING — rows are not the memo, the verdict is" {
+    // What makes "correct but incomplete" a state the server LEAVES rather than
+    // one it keeps. Before the write was chunked, "the blob has `kind = 1` rows"
+    // was a sound memo; the moment a write can be interrupted between chunks it
+    // stops being one, and the failure is silent and permanent — a file half
+    // indexed for ever, never offered again. Nothing else here would catch it.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const corpus = try manyParagraphs(f.a(), 120);
+    const put = try f.putRaw(1, "book.txt", corpus);
+
+    const partial = try runPipeline(&f, &put.md5, 1, 100);
+    try testing.expect(!partial.finished);
+    // Rows exist — the old memo would say "done" — and no verdict does.
+    try testing.expectEqual(@as(i64, chunk_segments), try f.count(
+        "SELECT COUNT(*) FROM note_page_index WHERE kind = 1;",
+    ));
+    try testing.expectEqual(@as(i64, 1), try f.count(
+        "SELECT COUNT(*) FROM note_index WHERE txt_index IS NULL;",
+    ));
+    try testing.expect(try needsDerive(f.db, &put.md5));
+
+    // …so the worker's own discovery query offers the file again, which is the
+    // second expression of the same predicate and has to agree with it.
+    const found = (try deferredmod.nextJob(testing.allocator, f.db)).?;
+    defer testing.allocator.free(found.name);
+    try testing.expectEqualStrings(&put.md5, &found.md5);
+
+    // And the re-run finishes it: one band, complete, and no longer offered.
+    f.drain();
+    try testing.expectEqual(@as(usize, 120), (try f.band(1, &put.md5)).len);
+    try testing.expect(!try needsDerive(f.db, &put.md5));
+    try testing.expectEqual(@as(?deferredmod.Found, null), try deferredmod.nextJob(testing.allocator, f.db));
+}
+
+test "a re-run after a partial write DROPS and re-reserves — one band, no duplicates, clean FTS" {
+    // Never patch holes. The re-run is the same code path as the first run, and
+    // the only way that is safe is if reserving starts by dropping.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const corpus = try manyParagraphs(f.a(), 120);
+    const put = try f.putRaw(1, "book.txt", corpus);
+    _ = try runPipeline(&f, &put.md5, 1, 100);
+    const first_band_start = (try f.band(1, &put.md5))[0];
+
+    const full = try runPipeline(&f, &put.md5, 99, 200);
+    try testing.expect(full.finished);
+
+    const ids = try f.band(1, &put.md5);
+    try testing.expectEqual(@as(usize, 120), ids.len);
+    try testing.expect(ids[0] > first_band_start); // a FRESH reservation, not the old one
+    for (ids, 0..) |id, i| try testing.expectEqual(full.bands[0].first_rowid + @as(i64, @intCast(i)), id);
+
+    // No row survived twice — the shape a "patch the holes" implementation would
+    // leave behind, and the shape that would double every hit.
+    try testing.expectEqual(@as(i64, 0), try f.count(
+        "SELECT COUNT(*) FROM (SELECT s.segment_id FROM segment_search s " ++
+            "JOIN note_page_index p ON p.id = s.segment_id " ++
+            "GROUP BY s.segment_id HAVING COUNT(*) > 1);",
+    ));
+    // One hit for the one file, and find-in-txt still sees every paragraph.
+    try testing.expectEqual(@as(usize, 1), (try f.search_(1, "rutabaga")).hits.len);
+    try testing.expectEqual(@as(usize, 120), (try f.txtSearch(1, put.id, "rutabaga ")).segments.len);
+    try expectFtsClean(&f);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — the per-document TERM SET, folded one chunk at a time
+// ---------------------------------------------------------------------------
+//
+// `search.finishOwnerBlobBands` used to re-fold the WHOLE document's text
+// through the FTS tokenizer in the closing transaction — O(file) where every
+// chunk is O(cap), and on the Pi 87-100 % of a chunked write. It now reads a
+// per-blob accumulator the chunks filled. These are the four properties that
+// says nothing about the RESULT: it must be the same set, it must not merge
+// with another document's, it must not appear before the write finishes, and
+// the fuzzy ladder must still draw from it.
+
+/// One document's term set for one owner, in a stable order — the `doc_terms`
+/// rows as a comparable value.
+fn docTerms(f: *Fixture, user_id: u64, md5: []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var s = try f.db.prepare(
+        "SELECT dt.term FROM doc_terms dt JOIN search_partitions sp ON sp.id = dt.partition_id " ++
+            "WHERE sp.user_id = ?1 AND dt.blob_md5 = ?2 ORDER BY dt.term;",
+    );
+    defer s.finalize();
+    s.bindInt(1, @intCast(user_id));
+    s.bindText(2, md5);
+    while (try s.step()) try out.append(f.a(), try f.a().dupe(u8, s.columnText(0)));
+    return out.items;
+}
+
+test "the term set a CHUNKED write lands is the one the single-statement fold lands, term for term" {
+    // The non-negotiable. `doc_terms` is the in-doc fuzzy candidate pool, so a
+    // term the chunked fold dropped is a correction the viewer stops offering,
+    // and one it invented is a correction offered into nothing. Neither surfaces
+    // as an error anywhere — only as worse search results — which is why this is
+    // asserted as EQUALITY of the whole set rather than as a count.
+    //
+    // The ORACLE is the single-statement fold itself, still live on the
+    // whole-document paths: `search.recanonicalizeHolders` rewrites `doc_terms`
+    // for a band it leaves otherwise untouched, by re-folding the blob's entire
+    // text (`writeDocTerms`). So the same blob, in the same partition, gets its
+    // term set computed both ways and the two are compared directly.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const corpus = try manyParagraphs(f.a(), 120);
+    const put = try f.putRaw(1, "book.txt", corpus);
+    // The chunked write as the deferred worker drives it — reserve, a
+    // transaction per chunk, finish (`runPipeline` is `deferred.runTxt`'s loop).
+    const written = try runPipeline(&f, &put.md5, 99, 100);
+    try testing.expect(written.finished);
+
+    const accumulated = try docTerms(&f, 1, &put.md5);
+    try testing.expect(accumulated.len > 100); // a real vocabulary, not two empty sets
+
+    try f.db.exec("BEGIN IMMEDIATE;");
+    try search.recanonicalizeHolders(f.db, &put.md5, 100);
+    try f.db.exec("COMMIT;");
+    const refolded = try docTerms(&f, 1, &put.md5);
+
+    try testing.expectEqual(accumulated.len, refolded.len);
+    for (accumulated, refolded) |a_, b| try testing.expectEqualStrings(a_, b);
+}
+
+test "the WORKER's chunked write and the read-path heal land the SAME term set, as they land the same rows" {
+    // The two writers of a `.txt`, compared on the pool as they already are on
+    // the band: the read path's lazy heal (`ensureIndexed`) writes a document in
+    // ONE transaction and the deferred worker writes the same document one chunk
+    // at a time, and a divergence here would mean which of them reached a
+    // document first decided what its typo corrections are.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // The same 120 paragraphs twice, differing in ONE byte's case: two blobs
+    // (different md5) that tokenize to the same vocabulary, so the two term sets
+    // are comparable term for term. Two owners, so each has its own partition.
+    const corpus = try manyParagraphs(f.a(), 120);
+    const twin = try f.a().dupe(u8, corpus);
+    twin[0] = std.ascii.toUpper(twin[0]);
+    const one = try f.putRaw(1, "one.txt", corpus);
+    const many = try f.putRaw(2, "many.txt", twin);
+
+    try ensureIndexed(testing.allocator, f.db, f.files.blobs, &one.md5, "one.txt", 100);
+    const written = try runPipeline(&f, &many.md5, 99, 100);
+    try testing.expect(written.finished);
+
+    const whole = try docTerms(&f, 1, &one.md5);
+    const chunked = try docTerms(&f, 2, &many.md5);
+    try testing.expect(whole.len > 100);
+    try testing.expectEqual(whole.len, chunked.len);
+    for (whole, chunked) |a_, b| try testing.expectEqualStrings(a_, b);
+}
+
+test "TWO documents filling between each other's chunks keep their own terms — the accumulator is keyed by blob" {
+    // THE HAZARD THIS DESIGN EXISTS FOR, driven rather than reasoned about. The
+    // fold accumulates across chunks on the SINGLE WRITER CONNECTION, and two
+    // documents really can be mid-fill at once: `deferred.runTxt` releases the
+    // lock between chunks, and anything that writes another `.txt` in that gap —
+    // the read path's `ensureIndexed`, a second worker pass — folds into the same
+    // temp table. If the accumulator were per-connection rather than per-blob,
+    // the two documents' terms would MERGE — and merged pools are wrong search
+    // results, not a crash, so nothing else here would notice.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // Two documents with DISJOINT vocabularies, so contamination is visible as a
+    // term appearing where it cannot have come from.
+    var alpha: std.ArrayList(u8) = .empty;
+    var beta: std.ArrayList(u8) = .empty;
+    for (0..120) |i| {
+        if (i != 0) {
+            try alpha.appendSlice(f.a(), "\n\n");
+            try beta.appendSlice(f.a(), "\n\n");
+        }
+        try alpha.print(f.a(), "rutabaga alfa{d:0>3} verdejante", .{i});
+        try beta.print(f.a(), "quiabo beta{d:0>3} crepuscular", .{i});
+    }
+    const a_put = try f.putRaw(1, "alpha.txt", alpha.items);
+    const b_put = try f.putRaw(1, "beta.txt", beta.items);
+
+    var a_d = (try deriveStored(testing.allocator, f.files.blobs, &a_put.md5)).?;
+    defer a_d.deinit();
+    var b_d = (try deriveStored(testing.allocator, f.files.blobs, &b_put.md5)).?;
+    defer b_d.deinit();
+    const rows = rowCount(a_d);
+    try testing.expectEqual(rows, rowCount(b_d));
+
+    try f.db.exec("BEGIN IMMEDIATE;");
+    const a_bands = try reserve(f.a(), f.db, &a_put.md5, rows, 100);
+    try f.db.exec("COMMIT;");
+    try f.db.exec("BEGIN IMMEDIATE;");
+    const b_bands = try reserve(f.a(), f.db, &b_put.md5, rows, 100);
+    try f.db.exec("COMMIT;");
+
+    // STRICTLY ALTERNATING chunks — the interleaving the released lock permits,
+    // at the finest grain it can happen at.
+    var at: usize = 0;
+    while (at < rows) {
+        const end = chunkEnd(a_d, at);
+        for ([_]struct { md5: [32]u8, bands: []search.Band, d: Derived }{
+            .{ .md5 = a_put.md5, .bands = a_bands, .d = a_d },
+            .{ .md5 = b_put.md5, .bands = b_bands, .d = b_d },
+        }) |w| {
+            try f.db.exec("BEGIN IMMEDIATE;");
+            try storeChunk(f.db, &w.md5, w.bands, w.d, at, end);
+            try f.db.exec("COMMIT;");
+        }
+        at = end;
+    }
+    // And the closes interleave too, which is the other order that could merge.
+    try f.db.exec("BEGIN IMMEDIATE;");
+    try finish(f.db, &a_put.md5, a_bands, a_d, 100);
+    try f.db.exec("COMMIT;");
+    try f.db.exec("BEGIN IMMEDIATE;");
+    try finish(f.db, &b_put.md5, b_bands, b_d, 100);
+    try f.db.exec("COMMIT;");
+
+    const a_terms = try docTerms(&f, 1, &a_put.md5);
+    const b_terms = try docTerms(&f, 1, &b_put.md5);
+    for ([_]struct { terms: []const []const u8, mine: []const u8, theirs: []const u8 }{
+        .{ .terms = a_terms, .mine = "rutabaga", .theirs = "quiabo" },
+        .{ .terms = b_terms, .mine = "quiabo", .theirs = "rutabaga" },
+    }) |c| {
+        var saw_mine = false;
+        for (c.terms) |t| {
+            try testing.expect(!std.mem.eql(u8, t, c.theirs)); // NOT the other document's
+            if (std.mem.eql(u8, t, c.mine)) saw_mine = true;
+        }
+        try testing.expect(saw_mine);
+    }
+    // Every ordinal's own word is in its own pool and in no other: 120 + 120
+    // distinct `alfaNNN`/`betaNNN` with nothing crossing over.
+    try testing.expectEqual(@as(i64, 0), try f.count(
+        "SELECT COUNT(*) FROM doc_terms WHERE term LIKE 'beta%' AND blob_md5 = " ++
+            "(SELECT md5 FROM files WHERE name = 'alpha.txt');",
+    ));
+    try testing.expectEqual(@as(i64, 0), try f.count(
+        "SELECT COUNT(*) FROM doc_terms WHERE term LIKE 'alfa%' AND blob_md5 = " ++
+            "(SELECT md5 FROM files WHERE name = 'beta.txt');",
+    ));
+    try testing.expectEqual(@as(i64, 120), try f.count(
+        "SELECT COUNT(*) FROM doc_terms WHERE term LIKE 'alfa%';",
+    ));
+    try testing.expectEqual(@as(i64, 120), try f.count(
+        "SELECT COUNT(*) FROM doc_terms WHERE term LIKE 'beta%';",
+    ));
+    try expectFtsClean(&f);
+}
+
+test "an interrupted write lands NO doc_terms — the term set arrives with the verdict, or not at all" {
+    // The accumulator is filled per chunk but drained only by the close, so a
+    // document that never closed has no pool. The alternative — writing terms as
+    // they are folded — would leave a document claiming a vocabulary it only
+    // half has, which the fuzzy ladder cannot tell from a complete one.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const corpus = try manyParagraphs(f.a(), 120);
+    const put = try f.putRaw(1, "book.txt", corpus);
+
+    // One chunk of three, then "crash" — the write stops between two commits,
+    // exactly where an abandoned worker pass stops.
+    const partial = try runPipeline(&f, &put.md5, 1, 100);
+    try testing.expect(!partial.finished);
+
+    // Rows landed (the band's filled prefix) and NO terms did.
+    try testing.expectEqual(@as(usize, chunk_segments), (try f.band(1, &put.md5)).len);
+    try testing.expectEqual(@as(usize, 0), (try docTerms(&f, 1, &put.md5)).len);
+    try testing.expect(try needsDerive(f.db, &put.md5));
+
+    // And the re-run lands the whole set, from a fresh accumulator — the partial
+    // fold the interrupted run left is dropped by `reserve`, not added to.
+    const again = try runPipeline(&f, &put.md5, 99, 200);
+    try testing.expect(again.finished);
+    const terms = try docTerms(&f, 1, &put.md5);
+    try testing.expect(terms.len > 100);
+    for (terms, 0..) |t, i| {
+        if (i == 0) continue;
+        try testing.expect(!std.mem.eql(u8, terms[i - 1], t)); // distinct, no duplicates
+    }
+    try expectFtsClean(&f);
+}
+
+test "in-doc fuzzy still corrects from the document's own pool after a chunked write (entry 8b)" {
+    // `doc_terms` exists for exactly one reader — the typo ladder for a search
+    // INSIDE an open document — so the property that says the chunked fold works
+    // is that a typo still finds the word. Asserted through the real batched
+    // entry point, on a document written chunk by chunk by the worker's loop.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const corpus = try manyParagraphs(f.a(), 120);
+    const put = try f.putRaw(1, "book.txt", corpus);
+    const written = try runPipeline(&f, &put.md5, 99, 100);
+    try testing.expect(written.finished);
+
+    // "rutabga" is not in the document; "rutabaga" is in every paragraph. The
+    // ladder can only get from one to the other through this document's pool.
+    const typo = try f.txtSearch(1, put.id, "rutabga ");
+    try testing.expect(typo.usedFuzzy);
+    try testing.expectEqual(@as(usize, 120), typo.segments.len);
+    // The exact term still behaves as it did, with no correction needed.
+    const exact = try f.txtSearch(1, put.id, "rutabaga ");
+    try testing.expect(!exact.usedFuzzy);
+    try testing.expectEqual(@as(usize, 120), exact.segments.len);
+}
+
+test "the dual cap is a decision with stated values, and a chunk always takes at least one row" {
+    // Pinned so a change to either half is a change to the plan and not a typo,
+    // and so the "at least one row" rule — what stops a paragraph bigger than
+    // the byte cap stalling the loop — is a test rather than a reading of the
+    // while condition.
+    try testing.expectEqual(@as(usize, 50), chunk_segments);
+    try testing.expectEqual(@as(usize, 40 * 1024), chunk_bytes);
+
+    const gpa = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    // Ordinary prose: the SEGMENT cap bites first, at exactly 50.
+    var small = try deriveSlice(gpa, try manyParagraphs(arena.allocator(), 120));
+    defer small.deinit();
+    try testing.expectEqual(@as(usize, 50), chunkEnd(small, 0));
+    try testing.expectEqual(@as(usize, 100), chunkEnd(small, 50));
+    try testing.expectEqual(@as(usize, 120), chunkEnd(small, 100)); // a short last chunk
+
+    // Cap-sized paragraphs: the BYTE cap bites first — five 8 KB blocks, not 50.
+    var blob: std.ArrayList(u8) = .empty;
+    defer blob.deinit(gpa);
+    for (0..20) |i| {
+        if (i != 0) try blob.appendSlice(gpa, "\n\n");
+        try blob.appendNTimes(gpa, 'a' + @as(u8, @intCast(i)), max_segment_bytes);
+    }
+    var fat = try deriveSlice(gpa, blob.items);
+    defer fat.deinit();
+    try testing.expectEqual(@as(usize, 20), fat.segments.len);
+    try testing.expectEqual(@as(usize, chunk_bytes / max_segment_bytes), chunkEnd(fat, 0));
+
+    // And the marker's one row is its own chunk — the degenerate document.
+    var empty = try deriveSlice(gpa, "");
+    defer empty.deinit();
+    try testing.expectEqual(@as(usize, 1), rowCount(empty));
+    try testing.expectEqual(@as(usize, 1), chunkEnd(empty, 0));
 }
 
 test "BENCH note: a ~5 MB synthetic .txt ingests in one link (figure printed)" {
@@ -1487,4 +2227,145 @@ test "BENCH note: a ~5 MB synthetic .txt ingests in one link (figure printed)" {
     // matches only paragraph 17 — not 170, 171, … — AND "sextant" is in the
     // same paragraph.
     try testing.expectEqual(@as(usize, 1), (try f.search_(1, "sextant 17 ")).hits.len);
+}
+
+// ---------------------------------------------------------------------------
+// The bench — what chunking the write actually bought
+// ---------------------------------------------------------------------------
+
+// The number this whole change is about is a LOCK HOLD, and `http/lock_stats.zig`
+// cannot take it: it records HTTP route windows (`Context.unlockDb` is its only
+// call site, deliberately) and the deferred worker is not a route. So it is a
+// bench test here, driving the REAL statements against a REAL database file at
+// the production pragma set — the same shape, and for the same reason, as
+// `pdf_text.zig`'s.
+//
+// `std.log.INFO`, and that is not a stylistic drift from the sibling bench: above
+// Debug, `std.options.log_level` is `.info` and every `std.log.debug` call is
+// COMPILED OUT, so `pdf_text.zig`'s "run it in ReleaseSafe with
+// `testing.log_level = .debug`" prints nothing at all. The figures below have to
+// be taken in ReleaseSafe — a Debug build is 6-10x slower under the same
+// statements and would report a hold no deployment ever pays. Silent by default
+// all the same: `testing.log_level` starts at `.warn`, so taking the measurement
+// is one line (`testing.log_level = .debug`) and never suite noise.
+//
+// TAKEN 2026-08-08, x86 Ryzen 7840U, NVMe, ReleaseSafe. Before is HEAD's
+// single-transaction `store` over the SAME corpora:
+//
+// | subject | segments | before, ONE txn | worst chunk | closing txn | whole write |
+// |---|---:|---:|---:|---:|---:|
+// | planner density, 630 KB | 1,703 | 155 ms | 11 ms | 30 ms | 111 ms |
+// | cookbook density, 2.1 MB | 1,461 | 190 ms | 13 ms | 97 ms | 218 ms |
+// | at `max_file_bytes`, 15.7 MB | 14,000 | 1,600 ms | 38 ms | 905 ms | 1,967 ms |
+//
+// **The chunks did what they were meant to: 11-38 ms, flat in the file's size.**
+// The longest hold left was the CLOSING transaction, because
+// `search.finishOwnerBlobBands` re-folded the whole document's text through the
+// FTS tokenizer to build `doc_terms` in ONE statement — O(file), where a chunk is
+// O(cap). RE-TAKEN 2026-08-09, same box, after that fold moved into the chunks
+// (`optimizations.md` entry 11's residue, closed in `search/maintain.zig` for
+// both tenants), three runs:
+//
+// | subject | segments | worst chunk | closing txn | whole write |
+// |---|---:|---:|---:|---:|
+// | at `max_file_bytes`, 15.7 MB | 14,000 | 37-40 ms | **901 -> 237-248 ms** | 1,943 -> 1,996-2,019 ms |
+//
+// The close is now the `doc_terms` DELETE + INSERT and the holder band-shape
+// scan, and nothing that reads the document's text. The chunk is unmoved and the
+// whole write is ~3 % dearer.
+
+/// `n` paragraphs of `chars` bytes each, prose-shaped enough for the postings to
+/// be realistic. Two densities are measured, because `mupdf.md` §9.8 found text
+/// VOLUME costs as much as row count: 284 chars/paragraph is planner density —
+/// the document whose 1,703-segment single-transaction write is the 13.87 s
+/// figure on the Pi — and 1,412 is cookbook density, its 24.43 s.
+fn benchBlob(a: Allocator, n: usize, chars: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (0..n) |i| {
+        const start = out.items.len;
+        var k: usize = 0;
+        while (out.items.len - start < chars) : (k += 1) {
+            try out.print(a, "paragraph {d} line {d}: braise the shallots until the fond " ++
+                "lifts, then deglaze with cider vinegar and reduce by half {d}. ", .{ i, k, i * 100 + k });
+        }
+        try out.appendSlice(a, "\n\n");
+    }
+    return out.items;
+}
+
+test "BENCH note: the longest lock hold of a .txt write, one transaction against chunked (figures printed)" {
+    var f = try Fixture.initAt(true); // a real file: the COMMIT has to be real
+    defer f.deinit();
+
+    for ([_]struct { name: []const u8, n: usize, chars: usize }{
+        .{ .name = "planner.txt", .n = 1703, .chars = 284 },
+        .{ .name = "cookbook.txt", .n = 1461, .chars = 1412 },
+        .{ .name = "cap.txt", .n = 14000, .chars = 1024 }, // ~15.7 MB, just under the cap
+    }) |subject| {
+        const blob = try benchBlob(f.a(), subject.n, subject.chars);
+        const put = try f.putRaw(1, subject.name, blob);
+        var d = (try deriveStored(testing.allocator, f.files.blobs, &put.md5)).?;
+        defer d.deinit();
+        const rows = rowCount(d);
+
+        // BEFORE: the whole document in one transaction — `store`, which is
+        // still the shape the lazy heal uses and was the shape the worker used.
+        const t0 = std.Io.Clock.awake.now(testing.io);
+        try f.db.exec("BEGIN IMMEDIATE;");
+        try store(f.a(), f.db, &put.md5, d, 100);
+        try f.db.exec("COMMIT;");
+        const t1 = std.Io.Clock.awake.now(testing.io);
+        // AFTER: the same document through the chunked driver, worst SINGLE
+        // transaction — which is the number that matters, because the hold is
+        // what every other request queues behind.
+        try f.db.exec("BEGIN IMMEDIATE;");
+        const bands = try reserve(f.a(), f.db, &put.md5, rows, 200);
+        try f.db.exec("COMMIT;");
+        var worst_ns: u64 = 0;
+        var total_ns: u64 = 0;
+        var chunks: usize = 0;
+        var at: usize = 0;
+        while (at < rows) {
+            const end = chunkEnd(d, at);
+            const c0 = std.Io.Clock.awake.now(testing.io);
+            try f.db.exec("BEGIN IMMEDIATE;");
+            try storeChunk(f.db, &put.md5, bands, d, at, end);
+            try f.db.exec("COMMIT;");
+            const c1 = std.Io.Clock.awake.now(testing.io);
+            const held: u64 = @intCast(c0.durationTo(c1).toNanoseconds());
+            if (held > worst_ns) worst_ns = held;
+            total_ns += held;
+            chunks += 1;
+            at = end;
+        }
+        // The closing transaction is a hold too, and it is reported SEPARATELY
+        // because it is not chunk-shaped: `finishOwnerBlobBands` re-folds the
+        // whole document's text into `doc_terms` in one statement, so it scales
+        // with the FILE where every chunk above scales with the cap. On a big
+        // enough document it, and not a chunk, is the longest hold left.
+        const fin0 = std.Io.Clock.awake.now(testing.io);
+        try f.db.exec("BEGIN IMMEDIATE;");
+        try finish(f.db, &put.md5, bands, d, 200);
+        try f.db.exec("COMMIT;");
+        const fin1 = std.Io.Clock.awake.now(testing.io);
+        const finish_ns: u64 = @intCast(fin0.durationTo(fin1).toNanoseconds());
+        total_ns += finish_ns;
+
+        const one_txn_ms = t0.durationTo(t1).toMilliseconds();
+        const worst_ms = worst_ns / std.time.ns_per_ms;
+        const finish_ms = finish_ns / std.time.ns_per_ms;
+        const total_ms = total_ns / std.time.ns_per_ms;
+        std.log.info(
+            "[bench] txt {s}: {d} bytes, {d} segments — ONE TRANSACTION {d} ms; " ++
+                "CHUNKED {d} chunks, worst chunk {d} ms, finish {d} ms, total {d} ms",
+            .{ subject.name, blob.len, rows, one_txn_ms, chunks, worst_ms, finish_ms, total_ms },
+        );
+
+        // The bench is also an assertion: the document survived a single-shot
+        // write and a chunked re-write and still has exactly one contiguous band.
+        const ids = try f.band(1, &put.md5);
+        try testing.expectEqual(rows, ids.len);
+        for (ids, 0..) |id, i| try testing.expectEqual(ids[0] + @as(i64, @intCast(i)), id);
+    }
+    try expectFtsClean(&f);
 }

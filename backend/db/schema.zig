@@ -72,7 +72,13 @@ const sqlite = @import("sqlite.zig");
 /// (`backend/services/pdf_text.zig`) — the seam's third tenant, `kind = 2`.
 /// Additive and nullable on the same reasoning as v9, and with no
 /// `index_version` bump for the same reason.
-pub const version: i64 = 10;
+///
+/// v11 adds `note_index.txt_index`, the same memo for the `.txt` derivation —
+/// needed because that write is now CHUNKED, and "the blob has segment rows"
+/// stops meaning "the blob is fully indexed" the moment a write can be
+/// interrupted between chunks. Additive, nullable, with a one-statement
+/// backfill so no existing `.txt` is re-derived.
+pub const version: i64 = 11;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -86,7 +92,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 /// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
 /// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
 /// missed on a bump). The comptime check below makes the drift a build error.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11 };
 
 comptime {
     if (steps.len != version) @compileError(
@@ -316,6 +322,14 @@ const ddl_v1 =
     \\CREATE UNIQUE INDEX files_live_name
     \\  ON files(user_id, COALESCE(parent_id, 0), name) WHERE deleted = 0;
     \\
+    \\-- LOAD-BEARING BY NAME. Full-text search NAMES this index — `INDEXED BY
+    \\-- files_md5` on the `files` join in `search/query.zig` — so dropping or
+    \\-- renaming it does not make search slow, it makes the statement fail to
+    \\-- prepare. That is the trade taken deliberately: without the directive
+    \\-- SQLite reaches `files` through `files_user_parent (user_id=?)` and every
+    \\-- row a search returns re-walks the caller's entire library (measured 7.8x
+    \\-- on a ten-document page, and growing with the library rather than the
+    \\-- query). A loud failure is the price of not depending on `ANALYZE`.
     \\CREATE INDEX files_md5 ON files(md5);
     \\
     \\CREATE INDEX files_user_parent ON files(user_id, parent_id, deleted);
@@ -541,6 +555,36 @@ const ddl_v9 =
 /// that no longer is.
 const ddl_v10 =
     \\ALTER TABLE note_index ADD COLUMN pdf_text INTEGER;
+;
+
+/// Whether a `.txt` blob's paragraph segments have been derived
+/// (`backend/services/txt_index.zig`), and what came of it — the seam's FIRST
+/// tenant finally getting the memo its siblings have.
+///
+///   NULL  never derived — what the discovery query looks for
+///   0     derived; the `kind = 1` rows are in the index
+///   1     skipped: over `txt_index.max_file_bytes`, indexed as nothing and
+///         SAID so rather than left looking like an empty file
+///
+/// **It replaces "does the blob have any `kind = 1` row?", and the reason is
+/// the CHUNKED write.** That predicate answered "finished" the moment the first
+/// chunk committed, so an interrupted write would look like completed work for
+/// ever. A memo written LAST, in the transaction that closes the document, is
+/// true only when the segments are — which is exactly `pdf_text`'s rule, and
+/// this column is its twin.
+///
+/// The `UPDATE` is a DATA step in the same version, on the same reasoning as
+/// v4: every blob that already has segments is already derived, and saying so
+/// here is one statement, where leaving it to the self-heal would re-derive
+/// every `.txt` in the library once for no new rows.
+///
+/// Additive and nullable, and NO `index_version` bump: this changes how the
+/// derivation is remembered, not what it produces.
+const ddl_v11 =
+    \\ALTER TABLE note_index ADD COLUMN txt_index INTEGER;
+    \\UPDATE note_index SET txt_index = 0
+    \\ WHERE EXISTS (SELECT 1 FROM note_page_index np
+    \\                WHERE np.blob_md5 = note_index.blob_md5 AND np.kind = 1);
 ;
 
 test "migrate creates the v1 schema and is idempotent" {

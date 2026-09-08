@@ -23,8 +23,10 @@
 //! MASK FOR SPEED, JOIN FOR CORRECTNESS. The partition range only scopes the
 //! scan; a forged or miscomputed rowid must be stopped by the `files` join
 //! (`user_id = ? AND deleted = 0`) — the mask is never the access check. Every
-//! read is built on the ONE `search_from_where` clause below, so the join
-//! cannot be forgotten in a second entry point; the `search/` package boundary
+//! read is built on the ONE `fromWhere` clause below, so the join cannot be
+//! forgotten in a second entry point — an entry point may vary the `files`
+//! ACCESS PATH and nothing else, and the predicates that decide visibility are
+//! below that parameter, in the single copy; the `search/` package boundary
 //! is what keeps the FTS table's reads and writes from leaking into a fourth
 //! file where it could be. There are exactly THREE exported reads — `searchPages`
 //! (library-wide), `searchNotePages` and `searchTxtSegments` (in-document) — and
@@ -67,7 +69,16 @@ const fts_predicate = maintain.fts_predicate;
 /// one hit per matching document rather than 20 segments that can all belong to
 /// one notebook. `hits.len` can still exceed this only by FANOUT — two `files`
 /// rows of one blob are two real library entries and both surface.
-pub const default_limit: i64 = 20;
+///
+/// **TEN, chosen for the row height.** A result row carries a thumbnail, a name,
+/// a path and an excerpt, so ten of them is already more than a phone screen
+/// holds — a larger page is scrolling nobody asked for, and "more" is one tap.
+/// It is also the cheapest lever available on search cost, which is LINEAR in
+/// this number (~85 ms per document on the Pi, `search-single-scan.md` §1):
+/// halving the page halves the query. That is a smaller page rather than a
+/// cheaper one, and it does not replace the single-scan fix — it just costs
+/// nothing to have in the meantime.
+pub const default_limit: i64 = 10;
 pub const max_limit: i64 = default_limit;
 
 /// The most library entries ONE segment rowid may contribute to a page. Fanout
@@ -76,8 +87,10 @@ pub const max_limit: i64 = default_limit;
 /// group at the matched rowid before it jumps past the band.
 ///
 /// The cap is what keeps that from being unbounded: past it the group's tail is
-/// dropped rather than letting one segment own the page. Only reachable by
-/// holding 20+ copies of the same matching note, and bounded either way.
+/// dropped rather than letting one segment own the page. Tied to `max_limit` on
+/// purpose: one rowid must never own more than a page, whatever a page is. Only
+/// reachable by holding `max_limit`+ copies of the same matching note, and
+/// bounded either way.
 const max_fanout: i64 = max_limit;
 
 /// In-document keyset batch size. The find-in-note / find-in-txt entry points
@@ -215,19 +228,75 @@ pub const Results = struct {
 /// security boundary and warn that "a second entry point would be a place to
 /// forget it". A scoped query cannot narrow the join, it can only add to it.
 ///
+/// `files_access` is the ONLY thing an entry point may vary, and it varies
+/// nothing about MEANING: it is the access-path directive on the `files` join
+/// and nothing else. Every predicate that decides visibility — `user_id`,
+/// `deleted`, `is_folder` — is below it, in the one copy, out of reach.
+///
 /// `?1` MATCH, `?2`/`?3` partition bounds, `?4` the caller's user id.
-const search_from_where =
+fn fromWhere(comptime files_access: []const u8) []const u8 {
+    return
     \\  FROM segment_fts
     \\  JOIN segment_search s ON s.id = segment_fts.rowid
     \\  JOIN note_page_index p ON p.id = s.segment_id
-    \\  JOIN files f ON f.md5 = p.blob_md5
-    \\ WHERE segment_fts MATCH ?1
-    \\   AND segment_fts.rowid BETWEEN ?2 AND ?3
-    \\   AND f.user_id = ?4
-    \\   AND f.deleted = 0
-    \\   AND f.is_folder = 0
-    \\   AND p.recogn_status = 1
-;
+    \\  JOIN files f
+    ++ files_access ++ " ON f.md5 = p.blob_md5\n" ++
+        \\ WHERE segment_fts MATCH ?1
+        \\   AND segment_fts.rowid BETWEEN ?2 AND ?3
+        \\   AND f.user_id = ?4
+        \\   AND f.deleted = 0
+        \\   AND f.is_folder = 0
+        \\   AND p.recogn_status = 1
+    ;
+}
+
+/// The LIBRARY-WIDE clause: the `files` row is reached BY BLOB, and says so.
+///
+/// ## Why the plan is stated and not left to the planner
+///
+/// Without this directive SQLite picks `files_user_parent (user_id=?)` — an
+/// index whose first column selects the caller's ENTIRE library — and re-walks
+/// that list for every row the search returns. Search then costs
+/// `rows × files_owned`: measured, adding 400 files carrying not one posting
+/// took a ten-document page from 8,811 to 48,811 VM steps, for identical
+/// results. With the directive the same page is 1,128 and does not move when
+/// the library grows.
+///
+/// `ANALYZE` finds the same plan, and was rejected on purpose. The right access
+/// path here follows from the DATA MODEL rather than from a sample of it: `md5`
+/// is content-addressed and so near-unique, while `user_id` is by definition the
+/// whole library — that is true of an empty install and a full one alike. A
+/// statistics table would have to be maintained, would go stale between runs,
+/// and would make the plan depend on WHICH data happened to be present, which is
+/// the opposite of what the plan pins in this file exist to guarantee.
+///
+/// ## The cost of stating it
+///
+/// `INDEXED BY` is not a hint, it is a requirement: if `files_md5` is ever
+/// dropped or renamed this statement fails to prepare, loudly, at startup rather
+/// than quietly getting slow. That is the intended trade and `schema.zig` says
+/// so where the index is defined.
+const search_from_where = fromWhere(" INDEXED BY files_md5");
+
+/// The IN-DOCUMENT clause: the same one, with the access path left to the
+/// planner — because for these reads the planner is right and `files_md5` would
+/// be wrong.
+///
+/// `searchNotePages` and `searchTxtSegments` add `f.id = ?5`, and SQLite plans
+/// `f` FIRST, as `SEARCH f USING INTEGER PRIMARY KEY (rowid=?)`: one point
+/// lookup of the one file, done ONCE, before the FTS scan starts. Forcing
+/// `files_md5` moves `f` to the INNER loop and buys a per-row index seek that
+/// nothing asked for. MEASURED on a 30-page document: 408 steps by primary key
+/// against 590 forced through `files_md5`.
+///
+/// The bigger loss is the short-circuit. With `f` outer, a note id that is
+/// someone else's, trashed or imaginary resolves to no row and the FTS scan
+/// never runs — 19 steps. Forced inner, the scan runs to completion and every
+/// row is discarded afterwards: 18,024 steps for the same empty answer. The
+/// range derivation in `docSegmentRanges` usually spares us that, but it is
+/// documented as "a mask for speed" and correctness is NOT allowed to rest on
+/// it, so neither is cost.
+const scoped_from_where = fromWhere("");
 
 /// `p.blob_md5` rides along for `bandStart`'s guard — it is what makes the
 /// validation lookup decisive (see there). It costs nothing: `note_page_index`
@@ -267,7 +336,7 @@ const search_sql =
 ///
 /// This is the LIBRARY-WIDE exported read; `searchNotePages` and
 /// `searchTxtSegments` are the two in-document ones. All THREE build on the one
-/// `search_from_where` clause above — its `files` join is a security boundary,
+/// `fromWhere` clause above — its `files` join is a security boundary,
 /// and funnelling every read through the single clause is what keeps a new
 /// entry point from being a place to forget it. An empty or all-punctuation
 /// query returns no hits rather than matching everything.
@@ -373,6 +442,15 @@ const DocPage = struct {
     /// The next page's exclusive upper bound: it scans `rowid <= next - 1`.
     /// Meaningless when `more` is false.
     next: i64,
+    /// What this page COST, in SQLite VM steps across both of the loop's
+    /// statements — the whole walk, not one execution of it.
+    ///
+    /// Here so a test can assert the cost rather than infer it. Steps and not
+    /// milliseconds because a clock assertion on a loaded machine is a flake
+    /// generator, while this counter is deterministic for a given plan and a
+    /// given row set (`sqlite.Stmt.vmSteps`). Two `sqlite3_stmt_status` reads
+    /// per page is not a cost worth guarding with a build flag.
+    vm_steps: i64,
 };
 
 /// Walks the corpus DOCUMENT by document: one scan per document kept, each
@@ -425,7 +503,7 @@ fn collectDocs(
         // `want`-sized fetch would generate (and discard) a page's worth for
         // every document on the page.
         const rows = try sc.rows(arena, lo, hi, 2);
-        if (rows.len == 0) return .{ .kept = kept.items, .any = any, .more = false, .next = 0 };
+        if (rows.len == 0) return .{ .kept = kept.items, .any = any, .more = false, .next = 0, .vm_steps = sc.steps() };
         any = true;
         const head = rows[0];
         // FANOUT: every row at the matched rowid, before the jump takes the band
@@ -442,7 +520,7 @@ fn collectDocs(
         hi = band - 1;
         // The partition is exhausted exactly here, so there is nothing left to
         // probe and no cursor to mint.
-        if (hi < lo) return .{ .kept = kept.items, .any = true, .more = false, .next = 0 };
+        if (hi < lo) return .{ .kept = kept.items, .any = true, .more = false, .next = 0, .vm_steps = sc.steps() };
     }
     // `more` stays a FACT rather than a guess, as this module insists: ONE seek
     // below the final jump. A count would cost every remaining match, which is
@@ -454,6 +532,7 @@ fn collectDocs(
         .any = any or probe.len > 0,
         .more = probe.len > 0,
         .next = hi + 1,
+        .vm_steps = sc.steps(),
     };
 }
 
@@ -558,7 +637,7 @@ fn noHits(db: sqlite.Db, user_id: u64, query: []const u8, used_fuzzy: bool) !Res
 /// a `.note` container out of — rather than a filename ending in `.note`. A PDF
 /// or a PNG is not an unsearchable note, it is not a note.
 ///
-/// "Unsearchable" is the exact complement of what `search_from_where` can reach:
+/// "Unsearchable" is the exact complement of what the search clause can reach:
 /// a note with no page row carrying finished recognition text. Same predicate
 /// constant as the index sync, so the two cannot drift into disagreeing about
 /// which pages count.
@@ -660,6 +739,14 @@ const Scan = struct {
         s.bindText(2, blob_md5);
         return s.step();
     }
+
+    /// VM steps both statements have run since they were prepared — i.e. for the
+    /// whole document loop, since `Scan.open` prepares once and the loop only
+    /// resets. `vmSteps` is cumulative and `reset` does not zero it, which is
+    /// exactly what makes this the page's total rather than the last seek's.
+    fn steps(sc: *Scan) i64 {
+        return sc.search.vmSteps() + sc.band.vmSteps();
+    }
 };
 
 fn hitsOf(arena: std.mem.Allocator, rows: []const Row) ![]const Hit {
@@ -738,7 +825,7 @@ pub const NoteResults = struct {
 
 const note_search_sql =
     \\SELECT p.page_index, p.text, s.id
-++ "\n" ++ search_from_where ++ "\n" ++
+++ "\n" ++ scoped_from_where ++ "\n" ++
     \\   AND f.id = ?5
     \\ ORDER BY p.page_index;
 ;
@@ -751,7 +838,7 @@ const note_search_sql =
 /// learn "more may exist" as a fact rather than a guess).
 const note_keyset_sql =
     \\SELECT p.page_index, p.text, s.id
-++ "\n" ++ search_from_where ++ "\n" ++
+++ "\n" ++ scoped_from_where ++ "\n" ++
     \\   AND f.id = ?5
     \\ ORDER BY segment_fts.rowid ASC
     \\ LIMIT ?6;
@@ -784,7 +871,7 @@ const Range = struct { lo: i64, hi: i64 };
 
 /// The most disjoint ranges an in-doc search scans as separate `M1><` passes
 /// before it stops per-range scoping and falls back to a single partition-wide
-/// bracket (today's `search_from_where` behaviour, correct but O(library)).
+/// bracket (the bare `scoped_from_where` behaviour, correct but O(library)).
 /// Since the whole-doc-band re-mint (Phase 1) a note is ONE contiguous range
 /// after every edit — scatter now only survives as legacy state a past
 /// incremental flip left behind (retired by the `index_version` heal on first
@@ -919,7 +1006,7 @@ fn scopedRuns(
 ///
 /// ## The boundary is the same one
 ///
-/// It runs through `search_from_where`, so `f.user_id`/`f.deleted`/`f.is_folder`
+/// It runs through `scoped_from_where`, so `f.user_id`/`f.deleted`/`f.is_folder`
 /// still decide visibility; `f.id = ?3` only narrows further. A note belonging to
 /// someone else, a trashed note and a note id that never existed are therefore
 /// indistinguishable from each other and from a note with no matches — all four
@@ -1071,14 +1158,14 @@ pub const TxtResults = struct {
     cursor: ?[]const u8 = null,
 };
 
-/// The `.txt` read: `search_from_where` like every other read of this table (so
+/// The `.txt` read: `scoped_from_where` like every other read of this table (so
 /// the `files` join it cannot narrow is the SAME security boundary), narrowed
 /// to one file and to `kind = 1` chunk rows, carrying the byte range the viewer
 /// needs. `f.id = ?5`, `p.kind = 1` are additions to the shared clause, never
 /// relaxations of it.
 const txt_search_sql =
     \\SELECT p.page_index, p.recogn_offset, p.recogn_length, p.text, s.id
-++ "\n" ++ search_from_where ++ "\n" ++
+++ "\n" ++ scoped_from_where ++ "\n" ++
     \\   AND f.id = ?5
     \\   AND p.kind = 1
     \\ ORDER BY p.page_index;
@@ -1089,7 +1176,7 @@ const txt_search_sql =
 /// bound — the `.txt` analog of `note_keyset_sql`.
 const txt_keyset_sql =
     \\SELECT p.page_index, p.recogn_offset, p.recogn_length, p.text, s.id
-++ "\n" ++ search_from_where ++ "\n" ++
+++ "\n" ++ scoped_from_where ++ "\n" ++
     \\   AND f.id = ?5
     \\   AND p.kind = 1
     \\ ORDER BY segment_fts.rowid ASC
@@ -1103,7 +1190,7 @@ const txt_keyset_sql =
 /// The exact shape of `searchNotePages`, and for the exact same reasons: it is
 /// NOT `searchPages` filtered (that is ranked and clamped, so a per-file
 /// counter built on it is silently incomplete), it runs through
-/// `search_from_where` (so a foreign, trashed or non-existent file is one
+/// `scoped_from_where` (so a foreign, trashed or non-existent file is one
 /// indistinguishable empty answer), and it tolerates typos through the same
 /// two-phase fallback — exact first, the vocabulary consulted only when that
 /// found nothing, `usedFuzzy` reporting what ran. It differs from the note-
@@ -1144,7 +1231,7 @@ pub fn searchTxtSegments(
 // ---------------------------------------------------------------------------
 
 // `searchNotePages` (`.note` pages) and `searchTxtSegments` (`.txt` paragraphs)
-// are the SAME in-document keyset search — same `search_from_where`, per-range
+// are the SAME in-document keyset search — same `scoped_from_where`, per-range
 // `M1><` scan and fuzzy fallback — differing only by the two SQL constants (a
 // `.txt` read carries the byte range and filters `kind = 1`) and the wire shape.
 // So the machinery is written ONCE, parameterised by a comptime `txt` flag; the
@@ -1196,7 +1283,7 @@ fn segRowidOrder(_: void, a: SegRow, b: SegRow) bool {
 /// `txt_search_sql` VERBATIM, one `M1><` pass per document range in `runs`, all
 /// rows in ordinal order. The exact path is batched by `runKeyset`; this stays
 /// complete because the fuzzy fallback is a one-shot nicety, not a stream. Built
-/// on `search_from_where` like every other read, so the `files` join it cannot
+/// on `scoped_from_where` like every other read, so the `files` join it cannot
 /// narrow is the same one; rows from disjoint ranges are re-ordered by ordinal
 /// at the end so the caller still gets reading order.
 fn runScoped(
@@ -1725,9 +1812,20 @@ const Fixture = struct {
     files: filesvc.Files,
     tmp: testing.TmpDir,
     arena: std.heap.ArenaAllocator,
+    path: [128]u8 = undefined,
+    path_len: usize = 0,
 
     fn init() !Fixture {
-        var db = try sqlite.Db.openMemory();
+        return initAt(false);
+    }
+
+    fn initAt(on_disk: bool) !Fixture {
+        const tmp0 = testing.tmpDir(.{});
+        var path_buf: [128]u8 = undefined;
+        var db = if (on_disk)
+            try sqlite.Db.open(try std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}/bench.db", .{tmp0.sub_path}))
+        else
+            try sqlite.Db.openMemory();
         try schema.migrate(db);
         for ([_]u8{ 1, 2 }) |uid| {
             var s = try db.prepare(
@@ -1741,16 +1839,27 @@ const Fixture = struct {
             c.bindInt(1, uid);
             _ = try c.step();
         }
-        const tmp = testing.tmpDir(.{});
+        const tmp = tmp0;
         const store = try blobstore.BlobStore.init(testing.io, tmp.dir);
         const thumbs_dir = try tmp.dir.createDirPathOpen(testing.io, "thumbs", .{});
         const thumbs = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
-        return .{
+        var f: Fixture = .{
             .db = db,
             .files = filesvc.Files.init(testing.allocator, testing.io, db, store, thumbs),
             .tmp = tmp,
             .arena = std.heap.ArenaAllocator.init(testing.allocator),
         };
+        if (on_disk) {
+            f.path_len = (try std.fmt.bufPrint(&f.path, ".zig-cache/tmp/{s}/bench.db", .{tmp.sub_path})).len;
+        }
+        return f;
+    }
+
+    /// The on-disk fixture's database path, for a SECOND connection (the reader
+    /// pool's shape). Empty on the in-memory default.
+    fn dbPath(f: *Fixture) [:0]const u8 {
+        f.path[f.path_len] = 0;
+        return f.path[0..f.path_len :0];
     }
 
     fn deinit(f: *Fixture) void {
@@ -2612,24 +2721,142 @@ test "results carry the file id and page index needed to open the hit, ranked an
 // Tests — partitioning, keyset pagination, and the version-flip lifecycle
 // ---------------------------------------------------------------------------
 
-test "PLAN PIN: both partition bounds are pushed into the FTS index (M1><)" {
+test "PLAN PIN: both partition bounds are pushed into the FTS index (M1><), and `files` is reached by blob" {
     var f = try Fixture.init();
     defer f.deinit();
     _ = try f.putNote(1, "n.note", &.{"alpha"});
 
+    // TWO halves of one plan, pinned together because they fail in the same
+    // silent way: the query still answers correctly and just costs more.
+    //
     // The trailing `><` in FTS5's virtual-table index string is both range
     // bounds claimed BY the FTS index — the partition pushed into the scan,
     // not filtered after it. If this string ever changes, early termination
     // has silently regressed to an install-wide scan.
+    //
+    // `files_md5` is the other half. The statement now STATES it (`INDEXED BY`),
+    // so this cannot drift while the statement is unchanged — what it catches is
+    // someone rewriting the join and losing the directive, which puts `f` back on
+    // `files_user_parent` and makes every returned row re-walk the caller's whole
+    // library. That is the whole reason the access path is written in the SQL
+    // instead of being left to `ANALYZE`: what the query states, a pin can check.
     var s = try f.db.prepare("EXPLAIN QUERY PLAN " ++ search_sql);
     defer s.finalize();
-    var pinned = false;
+    var fts_pinned = false;
+    var files_pinned = false;
     while (try s.step()) {
         const detail = s.columnText(3);
         if (std.mem.indexOf(u8, detail, "segment_fts") != null and
-            std.mem.indexOf(u8, detail, "M1><") != null) pinned = true;
+            std.mem.indexOf(u8, detail, "M1><") != null) fts_pinned = true;
+        if (std.mem.indexOf(u8, detail, "SEARCH f ") != null and
+            std.mem.indexOf(u8, detail, "files_md5") != null) files_pinned = true;
     }
-    try testing.expect(pinned);
+    try testing.expect(fts_pinned);
+    try testing.expect(files_pinned);
+}
+
+test "PLAN PIN (in-doc): the scoped reads reach `files` by PRIMARY KEY, and must NOT be forced onto files_md5" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    _ = try f.putNote(1, "n.note", &.{"alpha"});
+
+    // The counterpart to the pin above, and the reason `fromWhere` takes an
+    // access path at all. These two statements add `f.id = ?5`, so SQLite plans
+    // `f` FIRST as a rowid lookup: ONE probe of the one file, before the FTS scan
+    // starts — and when that probe finds nothing (a foreign, trashed or
+    // imaginary note id) the scan never runs at all.
+    //
+    // `INDEXED BY files_md5` would forbid exactly that plan, moving `f` to the
+    // inner loop: a per-row index seek in the ordinary case (measured 408 → 590
+    // steps on a 30-page document) and a FULL partition scan in the empty one
+    // (19 → 18,024). Same rows out, an order of magnitude more work to say no.
+    inline for (.{ note_search_sql, note_keyset_sql, txt_search_sql, txt_keyset_sql }) |sql| {
+        var s = try f.db.prepare("EXPLAIN QUERY PLAN " ++ sql);
+        defer s.finalize();
+        var by_pk = false;
+        while (try s.step()) {
+            const detail = s.columnText(3);
+            if (std.mem.indexOf(u8, detail, "SEARCH f ") != null and
+                std.mem.indexOf(u8, detail, "INTEGER PRIMARY KEY") != null) by_pk = true;
+        }
+        try testing.expect(by_pk);
+    }
+}
+
+/// The VM steps one page of the DOCUMENT stream costs — the whole loop, both of
+/// its statements, as `DocPage.vm_steps` totals them. Calls `collectDocs`
+/// directly rather than `searchPages` because the count has to be the page's,
+/// not a fuzzy fallback's or a coverage query's as well.
+fn pageSteps(f: *Fixture, user_id: u64, q: []const u8) !i64 {
+    const match = (try buildMatch(f.a(), q, false)) orelse return error.EmptyQuery;
+    const pid = (try partition.active(f.db, user_id)) orelse return error.NoPartition;
+    const page = try collectDocs(
+        f.a(),
+        f.db,
+        match,
+        user_id,
+        partition.base(pid),
+        partition.last(pid),
+        @intCast(default_limit),
+        Marks.init(testing.io),
+    );
+    return page.vm_steps;
+}
+
+test "WORK PIN: a search page costs what the QUERY costs, and stops costing what the LIBRARY costs" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // FORTY documents of THIRTY pages — 1,200 postings, and enough documents
+    // that a ten-document page is a real page rather than the whole corpus.
+    // Every page's text is distinct, so each is its own posting; `rarium`
+    // appears on exactly one page of one document.
+    for (0..40) |i| {
+        const labels = try f.a().alloc([]const u8, 30);
+        for (labels, 0..) |*l, j| l.* = if (i == 0 and j == 7)
+            try std.fmt.allocPrint(f.a(), "ubiquitous rarium d{d}p{d}", .{ i, j })
+        else
+            try std.fmt.allocPrint(f.a(), "ubiquitous d{d}p{d}", .{ i, j });
+        _ = try f.putLabeled(1, try std.fmt.allocPrint(f.a(), "m{d:0>3}.note", .{i}), labels);
+    }
+
+    const ubiquitous_before = try pageSteps(&f, 1, "ubiquitous ");
+    const rare_before = try pageSteps(&f, 1, "rarium ");
+
+    // FOUR HUNDRED more files and NOT ONE more posting: bytes the indexer cannot
+    // parse as a `.note`, so they are `files` rows and nothing else. They are
+    // invisible to this search by construction — every one of them SHOULD be
+    // free.
+    //
+    // Before `INDEXED BY files_md5` they were not: `f` was reached through
+    // `files_user_parent (user_id=?)`, so each row the search returned re-walked
+    // the caller's entire file list, and these 400 cost 40,000 VM steps for
+    // results that did not change (8,811 → 48,811 on this fixture, and
+    // 468 → 4,468 for the rare term that matches ONE page).
+    for (0..400) |i| {
+        _ = try f.putBytes(
+            1,
+            try std.fmt.allocPrint(f.a(), "bulk{d:0>4}.bin", .{i}),
+            try std.fmt.allocPrint(f.a(), "filler-{d}", .{i}),
+        );
+    }
+
+    // A SLOPE, not a ceiling — the regression was never "search is slow", it was
+    // "search grows with the library", and only a slope says that. The bound is
+    // 8 steps for 400 files rather than 0: reaching `files` by blob is still a
+    // b-tree descent, and a b-tree that grows deep enough costs one more step
+    // per level. MEASURED here: exactly +1 at 400 files and still +1 at 2,400,
+    // against +40,000 before. Anything linear cannot hide under this.
+    try testing.expect((try pageSteps(&f, 1, "ubiquitous ")) - ubiquitous_before <= 8);
+    try testing.expect((try pageSteps(&f, 1, "rarium ")) - rare_before <= 8);
+
+    // And the level itself, loosely, so a plan that reverted to the per-row walk
+    // could not pass by growing flat from a bad starting point. MEASURED 1,128
+    // and 77 on this fixture; the bounds are far enough above them that a SQLite
+    // upgrade reshuffling opcodes cannot fail them, and far enough below the
+    // 8,811 they replaced that the old plan cannot pass.
+    try testing.expect(ubiquitous_before < 3_000);
+    try testing.expect(rare_before < 300);
 }
 
 test "keyset: page 2 resumes exactly, stable under concurrent ingest, and the stream ends without a cursor" {
@@ -2641,32 +2868,48 @@ test "keyset: page 2 resumes exactly, stable under concurrent ingest, and the st
     // note, which conflated "many pages" with "many results". That conflation is
     // exactly what the document loop removes; what the test is about (a keyset
     // resuming exactly across 30 results) is unchanged.
-    const ids = try f.putNotes(1, "n", 30, "target");
+    // Sized FROM the page constant rather than to a number, so changing the page
+    // size is a change to one constant and not to this test's expectations.
+    const page: usize = @intCast(default_limit);
+    const total = page * 3;
+    const ids = try f.putNotes(1, "n", total, "target");
 
     const p1 = try f.search(1, "target ");
-    try testing.expectEqual(@as(usize, 20), p1.hits.len);
+    try testing.expectEqual(page, p1.hits.len);
     try testing.expect(p1.cursor != null);
 
     // Concurrent ingest between the pages: the new note mints HIGHER
     // sequences, so the open cursor's window cannot shift under the reader.
     _ = try f.putNote(1, "mid-stream.note", &.{"target arrives late"});
 
-    const p2 = try f.searchFrom(1, "target ", p1.cursor.?);
-    try testing.expectEqual(@as(usize, 10), p2.hits.len);
-    try testing.expect(p2.cursor == null); // the stream is over — said by absence
-    for (p2.hits) |h| try testing.expect(!std.mem.eql(u8, h.noteName, "mid-stream.note"));
-
-    // Exact resumption: the two pages partition the 30 matching documents — no
-    // overlap, nothing skipped.
-    var found = [_]bool{false} ** 30;
-    for ([_][]const Hit{ p1.hits, p2.hits }) |hits| {
-        for (hits) |h| {
-            const at = std.mem.indexOfScalar(u64, ids, try std.fmt.parseInt(u64, h.noteId, 10)).?;
-            try testing.expect(!found[at]);
-            found[at] = true;
+    // Drain the rest. Every page is FULL until the stream ends, and the end is
+    // said by the cursor's absence — the two properties this test exists for.
+    var seen_ids: std.ArrayList(u64) = .empty;
+    defer seen_ids.deinit(f.a());
+    for (p1.hits) |h| try seen_ids.append(f.a(), try std.fmt.parseInt(u64, h.noteId, 10));
+    var cursor = p1.cursor;
+    while (cursor) |c| {
+        const pn = try f.searchFrom(1, "target ", c);
+        try testing.expect(pn.hits.len <= page);
+        if (pn.cursor != null) try testing.expectEqual(page, pn.hits.len); // full until the end
+        for (pn.hits) |h| {
+            try testing.expect(!std.mem.eql(u8, h.noteName, "mid-stream.note"));
+            try seen_ids.append(f.a(), try std.fmt.parseInt(u64, h.noteId, 10));
         }
+        cursor = pn.cursor;
     }
-    for (found) |seen| try testing.expect(seen);
+
+    // Exact resumption: the pages partition the matching documents — no overlap,
+    // nothing skipped.
+    try testing.expectEqual(total, seen_ids.items.len);
+    const found = try f.a().alloc(bool, total);
+    @memset(found, false);
+    for (seen_ids.items) |id| {
+        const at = std.mem.indexOfScalar(u64, ids, id).?;
+        try testing.expect(!found[at]);
+        found[at] = true;
+    }
+    for (found) |ok| try testing.expect(ok);
 
     // A FRESH page 1 does see the mid-stream note — recency selection.
     const fresh = try f.search(1, "target ");
@@ -2684,20 +2927,25 @@ test "the cursor rides the wire only when more may exist, is validated on the wa
     var f = try Fixture.init();
     defer f.deinit();
     // 25 DOCUMENTS — the stream's unit (see the keyset test above).
-    _ = try f.putNotes(1, "n", 25, "target");
+    // A page and a half, expressed in pages: the last page is the remainder, so
+    // the numbers below follow the constant instead of restating it.
+    const page: usize = @intCast(default_limit);
+    const total = page * 2 + page / 2;
+    _ = try f.putNotes(1, "n", total, "target");
     _ = try f.putNote(2, "theirs.note", &.{"target secret"});
 
     // More exists → cursor present on the wire; NO total anywhere.
     const r = try f.search(1, "target ");
-    try testing.expectEqual(@as(usize, 20), r.hits.len);
+    try testing.expectEqual(page, r.hits.len);
     const body = try std.json.Stringify.valueAlloc(testing.allocator, r, .{ .emit_null_optional_fields = false });
     defer testing.allocator.free(body);
     try testing.expect(std.mem.indexOf(u8, body, "\"cursor\":\"") != null);
     try testing.expect(std.mem.indexOf(u8, body, "total") == null);
 
     // The stream's last page omits the field entirely — absence IS the signal.
-    const done = try f.searchFrom(1, "target ", r.cursor.?);
-    try testing.expectEqual(@as(usize, 5), done.hits.len);
+    var done = try f.searchFrom(1, "target ", r.cursor.?);
+    while (done.cursor) |c| done = try f.searchFrom(1, "target ", c);
+    try testing.expectEqual(total % page, done.hits.len); // the remainder page
     try testing.expect(done.cursor == null);
     const done_body = try std.json.Stringify.valueAlloc(testing.allocator, done, .{ .emit_null_optional_fields = false });
     defer testing.allocator.free(done_body);
@@ -4473,6 +4721,238 @@ test "EXPLAIN PIN (entry 8b): the doc-scoped fuzzy pool read is an index SEEK, n
             std.mem.indexOf(u8, detail, "blob_md5=") != null) seeks_doc_terms = true;
     }
     try testing.expect(seeks_doc_terms);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — the shared fold table does not accumulate (optimizations.md 11b)
+// ---------------------------------------------------------------------------
+
+/// How much INDEX STORAGE `temp.token_fold` is currently carrying, counted in
+/// rows of its `%_data` shadow table — one per segment b-tree node, plus the
+/// structure and averages records FTS5 always keeps.
+///
+/// A count rather than a stopwatch on purpose: the defect below is a TIME
+/// regression, and a timing assertion is exactly the kind that fails on a loaded
+/// CI box for reasons that have nothing to do with the bug. Segment rows are what
+/// the vocabulary scan walks, so counting them measures the same thing
+/// deterministically.
+fn foldStorageRows(f: *Fixture) !i64 {
+    var r = (try f.db.row("SELECT COUNT(*) FROM temp.token_fold_data;", &.{})).?;
+    defer r.finalize();
+    return r.int(0);
+}
+
+test "a whole-document fold leaves the shared fold table EMPTY rather than emptied, so in-document search cannot decay with uptime" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // What one small fold costs on a connection that has folded nothing else.
+    // This is the number find-in-note pays per matching page, and it must not
+    // depend on anything that happened earlier on the connection.
+    _ = try fuzzy.foldTerms(f.a(), f.db, "caligrafia");
+    const virgin = try foldStorageRows(&f);
+    try testing.expect(virgin > 0); // the fold really did index something
+
+    // A whole document through the SAME table — the mint's `writeDocTerms`, on
+    // the writer connection, exactly as an ingest, a re-mint or an `index_version`
+    // heal runs it. 60 pages of distinct words is a vocabulary far larger than
+    // any single fold's.
+    const pages = try f.a().alloc([]const u8, 60);
+    for (pages, 0..) |*p, i| {
+        var out: std.ArrayList(u8) = .empty;
+        for (0..80) |w| try out.print(f.a(), "termo{d}x{d} ", .{ i, w });
+        p.* = out.items;
+    }
+    _ = try f.putLabeled(1, "big.note", pages);
+
+    // The very next fold must find the table as clean as the first one did.
+    // Under `DELETE FROM` it did not: FTS5 keeps a deleted entry in a new
+    // segment, so the whole document stayed in the index — and stayed in the
+    // scan — until some later merge happened to reclaim it. Measured at the time,
+    // that took a 300-word page fold from 0.15 ms to 13.9 ms PERMANENTLY, with
+    // 160-194 ms on the first search after the fold.
+    _ = try fuzzy.foldTerms(f.a(), f.db, "caligrafia");
+    try testing.expectEqual(virgin, try foldStorageRows(&f));
+
+    // And it is still the same tokenizer over the same string: the reset is not
+    // allowed to have cost the fold its meaning.
+    const terms = try fuzzy.foldTerms(f.a(), f.db, "calígrafa reunião");
+    try testing.expectEqual(@as(usize, 2), terms.len);
+    try testing.expectEqualStrings("caligrafa", terms[0]);
+    try testing.expectEqualStrings("reuniao", terms[1]);
+}
+
+test "the counting pass still counts with the index's own tokenizer after a document has been folded on the same connection" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // The whole reason `countMatches` folds at all (rather than scanning the
+    // string) is that it must see a page exactly as `segment_fts` saw it. Pin
+    // that ACROSS a whole-document fold, because the truncating reset is the
+    // thing standing between the two folds now.
+    const note = try f.putNote(1, "n.note", &.{"a calígrafa escreveu à mão, calígrafa outra vez"});
+    _ = try f.putNote(1, "other.note", &.{"palavras completamente diferentes aqui"});
+
+    const r = try f.searchNote(1, note, "caligrafa ");
+    try testing.expectEqual(@as(usize, 1), r.pages.len);
+    // Two instances, both reached through `remove_diacritics 2` — an ASCII query
+    // counting an accented transcript is the case a hand-rolled folding table
+    // would get wrong.
+    try testing.expectEqual(@as(i64, 2), r.pages[0].matches);
+}
+
+// ---------------------------------------------------------------------------
+// The bench — what a long-lived connection was doing to find-in-note
+// ---------------------------------------------------------------------------
+
+// The defect entry 11b closes is a TIME defect that only a long-lived connection
+// shows, so the pin above counts segments (deterministic, cheap, CI-safe) and
+// this reports the milliseconds. It runs BOTH shapes side by side rather than
+// citing the old one: `temp.token_fold` as it is now (contentless, truncated by
+// `'delete-all'`) against a twin that is an ordinary content table emptied by
+// `DELETE FROM`, each fed the same whole document and then the same page fold on
+// the same connection.
+//
+// `std.log.INFO` and a REAL database file at the production pragma set, for the
+// reasons `txt_index.zig`'s benches state: above Debug `std.log.debug` is
+// compiled out, `testing.log_level` starts at `.warn` so this is silent in the
+// suite, and the figures have to be taken in ReleaseSafe because a Debug build is
+// 6-10x slower under the same statements.
+//
+// TAKEN 2026-08-09, x86 Ryzen 7840U, NVMe, ReleaseSafe, three runs. The subject
+// is entry 11a's: ~120,000 distinct terms, the vocabulary of a 15.7 MB `.txt`.
+// One fold of a ~300-word page transcript, i.e. ONE `countMatches` call:
+//
+// | fold table | first call after the document | steady | worst |
+// |---|---:|---:|---:|
+// | writer, `DELETE FROM` a content table | **92.9-94.0 ms** | **16.3-16.4 ms** | 94.0 ms |
+// | writer, `'delete-all'` a contentless one | 0.38-0.57 ms | **0.24 ms** | 0.96 ms |
+// | reader, `DELETE FROM`, NEVER poisoned | 0.20-0.21 ms | **0.39-0.40 ms** | 0.67 ms |
+// | reader, `'delete-all'`, never poisoned | 0.21-0.28 ms | **0.15 ms** | 0.28 ms |
+//
+// Three things to read off it. **The first call after an ingest was ~94 ms** —
+// one `countMatches`, and a find-in-note batch makes up to 20 of them. **The
+// steady state after it was 16 ms and did not come back**: 68x the 0.24 ms this
+// same connection now pays, and the whole of that difference is the vocabulary
+// scan walking a document nobody deleted so much as tombstoned. **And the last
+// two rows are the surprise** — a reader that never folds a document, only its
+// own one-row page folds, was still paying 2.6x, because a one-row `DELETE` is a
+// tombstone too and `countMatches` writes one per page it counts.
+//
+// FTS5's automerge does reclaim it, eventually and unpredictably: at 200 reps
+// instead of 40 the "before" steady state reads 2.7 ms, because the merge landed
+// somewhere past the 120th fold and dragged the mean down with it. That is what
+// "bounded" would have meant here, and it is not a bound a lock hold can be
+// built on.
+
+const bench_decay_fold_ddl =
+    "CREATE VIRTUAL TABLE IF NOT EXISTS temp.decay_fold USING fts5(t, tokenize='" ++ fts_tokenizer ++ "');" ++
+    "CREATE VIRTUAL TABLE IF NOT EXISTS temp.decay_fold_vocab USING fts5vocab('temp','decay_fold','row');";
+
+/// One fold of `text` through `table`, emptied by `reset` first — the shape
+/// `fuzzy.foldRows` has, parameterised by the two things the bench varies.
+fn benchFold(db: sqlite.Db, comptime table: []const u8, reset: [:0]const u8, text: []const u8) !u64 {
+    const t0 = std.Io.Clock.awake.now(testing.io);
+    try db.exec(reset);
+    {
+        var s = try db.prepare("INSERT INTO temp." ++ table ++ "(rowid, t) VALUES(1, ?1);");
+        defer s.finalize();
+        s.bindText(1, text);
+        _ = try s.step();
+    }
+    var s = try db.prepare("SELECT term, cnt FROM temp." ++ table ++ "_vocab;");
+    defer s.finalize();
+    var terms: usize = 0;
+    while (try s.step()) terms += 1;
+    const t1 = std.Io.Clock.awake.now(testing.io);
+    std.mem.doNotOptimizeAway(terms);
+    return @intCast(t0.durationTo(t1).toNanoseconds());
+}
+
+/// `reps` folds of `text`, reported as first / steady / worst — the FIRST is
+/// reported apart because it is the one that pays for whatever the whole-document
+/// fold left in the table, and a mean would hide it.
+fn benchFoldSeries(
+    db: sqlite.Db,
+    comptime table: []const u8,
+    reset: [:0]const u8,
+    text: []const u8,
+    reps: usize,
+    label: []const u8,
+) !void {
+    const first = try benchFold(db, table, reset, text);
+    var total: u64 = 0;
+    var worst: u64 = first;
+    for (1..reps) |_| {
+        const ns = try benchFold(db, table, reset, text);
+        total += ns;
+        worst = @max(worst, ns);
+    }
+    std.log.info("[bench] fold {s}: first {d} us, steady {d} us over {d}, worst {d} us", .{
+        label, first / std.time.ns_per_us, total / (reps - 1) / std.time.ns_per_us, reps - 1, worst / std.time.ns_per_us,
+    });
+}
+
+/// Puts a whole document's worth of text into `table`, one row per page, exactly
+/// as `writeDocTerms`' fold statement does — and LEAVES IT THERE, which is what
+/// `writeDocTerms` also does and what the next caller of the table inherits.
+fn benchPoison(a: std.mem.Allocator, db: sqlite.Db, comptime table: []const u8, pages: usize, words: usize) !void {
+    var s = try db.prepare("INSERT INTO temp." ++ table ++ "(t) VALUES(?1);");
+    defer s.finalize();
+    for (0..pages) |p| {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(a);
+        for (0..words) |w| try out.print(a, "termo{d}x{d} ", .{ p, w });
+        s.reset();
+        s.bindText(1, out.items);
+        _ = try s.step();
+    }
+}
+
+test "BENCH note: a page fold on a connection that has folded a whole document, truncated against merely deleted (figures printed)" {
+    var f = try Fixture.initAt(true); // a real file: the temp store has to be real
+    defer f.deinit();
+
+    // The subject is entry 11a's: ~150,000 distinct terms, the vocabulary of the
+    // 15.7 MB `.txt` at `max_file_bytes`. Written straight into the fold table
+    // rather than ingested, because what poisons the table is the fold, not the
+    // document — the production path (`putLabeled` -> mint -> `writeDocTerms`) is
+    // what the pinning test above drives.
+    const poison_pages = 120;
+    const poison_words = 1000;
+
+    // A page transcript to fold afterwards, ~300 words, as `countMatches` folds
+    // one per matching page.
+    var page: std.ArrayList(u8) = .empty;
+    for (0..300) |w| try page.print(f.a(), "palavra{d} ", .{w});
+
+    const reps = 40;
+
+    // SHIPPED: contentless, truncated by `'delete-all'`.
+    try f.db.exec(fuzzy.fold_ddl);
+    try benchPoison(f.a(), f.db, "token_fold", poison_pages, poison_words);
+    try benchFoldSeries(f.db, "token_fold", fuzzy.fold_reset_sql, page.items, reps, "SHIPPED (truncated), writer");
+
+    // BEFORE: an ordinary content table emptied with `DELETE FROM`, fed the same
+    // document — so the comparison is a measurement rather than a memory.
+    try f.db.exec(bench_decay_fold_ddl);
+    try benchPoison(f.a(), f.db, "decay_fold", poison_pages, poison_words);
+    try benchFoldSeries(f.db, "decay_fold", "DELETE FROM temp.decay_fold;", page.items, reps, "BEFORE (deleted), writer");
+
+    // A reader-pool connection: its own temp schema, and it never folds a whole
+    // document — so this is the floor, and it is what every in-doc search on a
+    // pooled reader should already have been getting.
+    var ro = try sqlite.Db.openReadOnly(f.dbPath());
+    defer ro.close();
+    try ro.exec(fuzzy.fold_ddl);
+    try benchFoldSeries(ro, "token_fold", fuzzy.fold_reset_sql, page.items, reps, "SHIPPED (truncated), reader — never poisoned");
+
+    // The same reader under the old shape, with NO document ever folded through
+    // it — the part of the cost that was never about `writeDocTerms` at all. A
+    // one-row DELETE still leaves a tombstone, and a fold-per-matching-page loop
+    // leaves one per page it counted.
+    try ro.exec(bench_decay_fold_ddl);
+    try benchFoldSeries(ro, "decay_fold", "DELETE FROM temp.decay_fold;", page.items, reps, "BEFORE (deleted), reader — never poisoned");
 }
 
 // ---------------------------------------------------------------------------

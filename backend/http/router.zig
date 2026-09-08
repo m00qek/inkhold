@@ -67,7 +67,56 @@ pub const Route = struct {
     /// `transport.handle` still holds the lock around `resolveCaller` (a session
     /// read) before dispatching unlocked. See transport.zig.
     manual_db_lock: bool = false,
+    /// This handler only ever READS the database, so dispatch may run it on a
+    /// pooled `SQLITE_OPEN_READONLY` connection instead of holding `db_lock`
+    /// across it. See `db/reader_pool.zig` and `transport.dispatchLocked`.
+    ///
+    /// **DEFAULTS TO FALSE, and stays false whenever there is any doubt.** A
+    /// route nobody classified is merely slow; a route wrongly classified writes
+    /// through a connection that refuses writes, which is at best a 500 and at
+    /// worst — for the read-modify-write set (`upload/finish`, purge, restore,
+    /// elevate, login) — a half-applied operation. HTTP method is not the signal:
+    /// the device face POSTs pure reads, and `download_v3` looks like a write
+    /// while minting its token in memory.
+    ///
+    /// "Reads" means the DATABASE and the SERVICES both: the pooled request gets
+    /// reader-bound COPIES of `Files` and the auth `Service` (see their
+    /// `readerView`), so a handler that mutates in-memory service state would
+    /// mutate a copy nobody else can see. The two places that could — the login
+    /// challenge table and the thumbnail repair gate — refuse outright on a
+    /// reader view rather than silently succeeding.
+    ///
+    /// Whether a flagged route is really read-only is not left to review: the
+    /// audit in `backend/test/reader_pool.zig` drives every one of them against a
+    /// genuinely read-only connection, so a misclassification is a red test.
+    ///
+    /// Mutually exclusive with BOTH flags above; `readOnlyConflict` explains why
+    /// and `routes.zig` refuses to compile the combination.
+    read_only: bool = false,
 };
+
+/// The index of the first route that is `read_only` together with a flag it
+/// cannot be combined with, or null. Comptime-usable, like `manualAdminRoute`.
+///
+/// **`read_only` + `manual_db_lock`** — a manual handler takes `ctx.lockDb()`
+/// around its own DB touches. Under a reader lease those touches would run on
+/// the READER while the lock says "writer", so the handler would be locking one
+/// connection and using another: the lock stops meaning anything, silently. A
+/// streaming route that wants a reader needs the reader threaded through its own
+/// brackets, which is a different change from this flag.
+///
+/// **`read_only` + `require_admin`** — `dispatchLocked` slides the admin
+/// elevation window (`renewElevation`) on the automatic path, and that renewal is
+/// an UPDATE on the session row. On a reader it fails; skipped, admins get a
+/// surprise 428 mid-session. Either way the symptom points nowhere near the flag.
+/// Admin GETs therefore keep the writer, which costs a household nothing: they
+/// are rare and small.
+pub fn readOnlyConflict(rs: []const Route) ?usize {
+    for (rs, 0..) |r, i| {
+        if (r.read_only and (r.manual_db_lock or r.require_admin)) return i;
+    }
+    return null;
+}
 
 /// The index of the first route that is BOTH `manual_db_lock` and
 /// `require_admin`, or null when there is none. Usable at comptime (the route
@@ -411,4 +460,36 @@ test "manualAdminRoute finds the flag pair that would silently stop renewing ele
     try std.testing.expectEqual(@as(?usize, 1), manualAdminRoute(&banned));
 
     try std.testing.expect(manualAdminRoute(&[_]Route{}) == null);
+}
+
+test "readOnlyConflict refuses the two pairings that would make the lock a lie" {
+    const h = struct {
+        fn f(_: *Context, _: *Request, _: Params) anyerror!void {}
+    }.f;
+
+    // `read_only` alone is the whole point, and each of the other two alone is
+    // already legal — so only the PAIRS may be refused.
+    const legal = [_]Route{
+        .{ .method = .GET, .path = "/api/controlplane/tree", .scopes = &.{.controlplane}, .handler = h, .read_only = true },
+        .{ .method = .GET, .path = "/oss/get/:id", .scopes = &.{.public}, .handler = h, .manual_db_lock = true },
+        .{ .method = .GET, .path = "/api/admin/health", .scopes = &.{.controlplane}, .handler = h, .require_admin = true },
+    };
+    try std.testing.expect(readOnlyConflict(&legal) == null);
+
+    // A manual handler brackets its own `ctx.lockDb()` — which would lock the
+    // writer while the handler read the reader it was leased.
+    const manual = [_]Route{
+        .{ .method = .GET, .path = "/api/version", .scopes = &.{.public}, .handler = h },
+        .{ .method = .GET, .path = "/file/:id", .scopes = &.{.controlplane}, .handler = h, .manual_db_lock = true, .read_only = true },
+    };
+    try std.testing.expectEqual(@as(?usize, 1), readOnlyConflict(&manual));
+
+    // An admin route renews elevation, which is an UPDATE — impossible on a
+    // reader, and skipping it hands admins a surprise 428.
+    const admin = [_]Route{
+        .{ .method = .GET, .path = "/api/admin/users", .scopes = &.{.controlplane}, .handler = h, .require_admin = true, .read_only = true },
+    };
+    try std.testing.expectEqual(@as(?usize, 0), readOnlyConflict(&admin));
+
+    try std.testing.expect(readOnlyConflict(&[_]Route{}) == null);
 }

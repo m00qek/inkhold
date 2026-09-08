@@ -44,6 +44,10 @@ pub const Error = error{
     /// A quota that is not a byte count (negative). Note that a quota BELOW
     /// current usage is not this: see `setUserQuota`.
     InvalidQuota,
+    /// A mutation was attempted on a pooled READER view of this service (see
+    /// `readerView`) — i.e. a route that writes is marked `read_only`. Only ever
+    /// a wiring bug, never anything a caller did.
+    ReadOnlyService,
 } || sqlite.Error || std.mem.Allocator.Error;
 
 /// Default per-user quota for a household (10 GiB). An alias: the value is
@@ -193,12 +197,34 @@ pub const Service = struct {
     /// public `random/code` route cannot grow the table without bound. A field, not
     /// a constant, so tests can drive the full case without minting 4096 codes.
     max_challenges: usize = 4096,
+    /// True on a pooled-reader VIEW of this service (see `readerView`).
+    read_only: bool = false,
 
     const Challenge = struct { code: [code_len]u8, expires: i64 };
     const User = struct { id: u64, password_md5: [password.md5_len]u8, is_admin: bool, must_change: bool };
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, db: sqlite.Db, cred_key: [password.cred_key_len]u8) Service {
         return .{ .gpa = gpa, .io = io, .db = db, .cred_key = cred_key };
+    }
+
+    /// This service bound to a POOLED READ-ONLY connection, for the duration of
+    /// one `read_only` route (`http/transport.zig`). A value, for the same
+    /// lifetime reason as `Files.readerView`.
+    ///
+    /// **`challenges` does not travel, and that is the interesting part.** It is
+    /// the one thing this service owns that is NOT in the database, so it is the
+    /// one thing `SQLITE_OPEN_READONLY` cannot protect: a misclassified
+    /// `random/code` route would mint a challenge into a copy that dies with the
+    /// request, and the user's next login would fail with `NoChallenge` — a
+    /// silent break with nothing pointing at the flag that caused it. An empty
+    /// map plus the refusal in `getRandomCode` turns that into an immediate,
+    /// attributable failure on the route itself.
+    pub fn readerView(self: *const Service, db: sqlite.Db) Service {
+        var v = self.*;
+        v.db = db;
+        v.read_only = true;
+        v.challenges = .empty;
+        return v;
     }
 
     /// Encrypt an md5 credential for storage in `users.cred_enc` (fresh nonce).
@@ -874,6 +900,13 @@ pub const Service = struct {
     /// unknown account would turn this route into an enumeration oracle, and
     /// `check/exists` is the one place that distinction is deliberately made.
     pub fn getRandomCode(self: *Service, account: []const u8) Error![code_len]u8 {
+        // A challenge is state this service owns OUTSIDE the database, so the
+        // read-only connection a pooled view carries cannot refuse it — minting
+        // one here would succeed into a copy that dies with the request and break
+        // the next login for no visible reason. Refuse instead, on the route that
+        // was misclassified. (`random/code` is a write and must never carry
+        // `read_only`; this is what makes that a 500 rather than a mystery.)
+        if (self.read_only) return error.ReadOnlyService;
         // Length bound first: without it the entry cap would not bound bytes.
         if (account.len > max_account_len) return error.OutOfMemory;
 

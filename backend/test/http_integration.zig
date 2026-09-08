@@ -27,6 +27,8 @@ const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
 const uploadcap = @import("../handlers/upload_cap.zig");
 const eventstreams = @import("../http/event_streams.zig");
+const readerpool = @import("../db/reader_pool.zig");
+const lockstats = @import("../http/lock_stats.zig");
 const sn = @import("supernote");
 
 const Context = context.Context;
@@ -206,15 +208,43 @@ const Fixture = struct {
     files: filesmod.Files,
     tmp: std.testing.TmpDir,
     ctx: Context,
+    /// Set only by `initPooled`. A reader pool needs a database FILE — a second
+    /// connection to `:memory:` opens a different, empty database — so the pooled
+    /// fixture is on disk while the default one stays in memory.
+    path_buf: [128]u8 = undefined,
+    pool: ?readerpool.Pool = null,
+    db_lock: std.Io.Mutex = .init,
+    stats: lockstats.LockStats = .{},
 
     fn init() !*Fixture {
+        return initWith(false, readerpool.default_size);
+    }
+
+    /// The fixture the reader pool needs: an on-disk database, a real `db_lock`,
+    /// the per-route histogram, and `readers` of the requested size. `readers = 0`
+    /// is the "pool always empty" case, i.e. the server this change replaced.
+    fn initPooled(readers: usize) !*Fixture {
+        return initWith(true, readers);
+    }
+
+    fn initWith(on_disk: bool, readers: usize) !*Fixture {
         const f = try gpa.create(Fixture);
-        f.db = try sqlite.Db.openMemory();
-        try schema.migrate(f.db);
+        f.pool = null;
+        f.db_lock = .init;
+        f.stats = .{};
+        f.tmp = std.testing.tmpDir(.{});
+        if (on_disk) {
+            const path = try std.fmt.bufPrintZ(&f.path_buf, ".zig-cache/tmp/{s}/inkhold.db", .{f.tmp.sub_path});
+            f.db = try sqlite.Db.open(path);
+            try schema.migrate(f.db);
+            f.pool = try readerpool.Pool.open(gpa, path, readers);
+        } else {
+            f.db = try sqlite.Db.openMemory();
+            try schema.migrate(f.db);
+        }
         f.svc = authsvc.Service.init(gpa, std.testing.io, f.db, @splat(0xA5));
         f.limiter = ratelimit.Limiter.init(gpa);
         f.dltokens = dltokensmod.DownloadTokens.init(gpa);
-        f.tmp = std.testing.tmpDir(.{});
         const store = try blobstore.BlobStore.init(std.testing.io, f.tmp.dir);
         const thumbs_dir = try f.tmp.dir.createDirPathOpen(std.testing.io, "thumbs", .{});
         const thumbs = try thumbstore.ThumbStore.init(std.testing.io, thumbs_dir);
@@ -229,6 +259,14 @@ const Fixture = struct {
             .download_tokens = &f.dltokens,
             .client_ip = "203.0.113.7", // a stable test client IP
         };
+        if (f.pool) |*p| {
+            // Only the pooled fixture runs with a real lock and a stats table:
+            // the in-memory one is what almost every test here uses, and giving
+            // it a lock would change the path they exercise.
+            f.ctx.readers = p;
+            f.ctx.db_lock = &f.db_lock;
+            f.ctx.lock_stats = &f.stats;
+        }
         return f;
     }
 
@@ -236,11 +274,30 @@ const Fixture = struct {
         f.svc.deinit();
         f.limiter.deinit();
         f.dltokens.deinit();
+        // Readers before the writer: they coordinate through the `-shm` file the
+        // writer keeps alive, which is the same order `app.run` gets from its
+        // defers.
+        if (f.pool) |*p| p.close(gpa);
         f.db.close();
         f.tmp.cleanup();
         gpa.destroy(f);
     }
+
+    /// The histogram slot for `path` in `table`. Tests assert on windows, so they
+    /// need the same route index dispatch attributes them to.
+    fn slotFor(f: *Fixture, table: []const router.Route, path: []const u8) *const lockstats.Slot {
+        for (table, 0..) |r, i| {
+            if (std.mem.eql(u8, r.path, path)) return &f.stats.slots[i];
+        }
+        unreachable;
+    }
 };
+
+/// A slot's carried (seconds, remainder) total as plain nanoseconds — the pair
+/// exists because ARMv6 has no 64-bit atomic, not because callers care.
+fn nsOfSlot(s: *const lockstats.Slot) u64 {
+    return @as(u64, s.total_s) * std.time.ns_per_s + s.total_ns_rem;
+}
 
 // ---- tests ----
 
@@ -9184,4 +9241,548 @@ test "server-info: public, reports the LAN address, and firstRun flips once onbo
         try std.testing.expect(!p.value.firstRun);
         try std.testing.expect(p.value.address.len != 0);
     }
+}
+
+// ---- the reader pool ----
+//
+// These drive SYNTHETIC route tables rather than the real one, because what is
+// under test is the DISPATCH POLICY: `read_only` says "run this handler on a
+// pooled reader instead of holding `db_lock`", and that claim is about the
+// mechanism, not about any particular route. The real table's classification is
+// audited separately (see the `read_only` pin further down).
+
+/// A handler that only reads, through the same `ctx.files` every real handler
+/// uses — so a pooled dispatch is exercised end to end rather than simulated.
+fn poolReadHandler(ctx: *Context, req: *router.Request, _: router.Params) anyerror!void {
+    const files = ctx.files.?;
+    _ = files.syncVersion(1) catch return serverErrorish(req);
+    try req.respond("{\"success\":true}", .{ .status = .ok });
+}
+
+fn serverErrorish(req: *router.Request) anyerror!void {
+    try req.respond("{\"success\":false}", .{ .status = .internal_server_error });
+}
+
+test "a read_only route runs on a pooled reader and a plain route does not, and the histogram says which" {
+    // §6's trap, as a test. A pooled read takes no `db_lock`, so without the
+    // reader window it would simply disappear from the per-route histogram —
+    // "global search: 3.41 s" would become "global search: absent", which reads
+    // like a fix. Both routes must appear, and the report must distinguish them.
+    const f = try Fixture.initPooled(2);
+    defer f.deinit();
+
+    const table = [_]router.Route{
+        .{ .method = .GET, .path = "/pooled", .scopes = &.{.public}, .handler = poolReadHandler, .read_only = true },
+        .{ .method = .GET, .path = "/locked", .scopes = &.{.public}, .handler = poolReadHandler },
+    };
+
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+    for ([_][]const u8{ "/pooled", "/locked" }) |path| {
+        var in = std.Io.Reader.fixed(try buildRequest(&reqbuf, "GET", path, &.{}, ""));
+        var out = std.Io.Writer.fixed(&obuf);
+        var server = std.http.Server.init(&in, &out);
+        var req = try server.receiveHead();
+        try transport.handle(&f.ctx, &table, &req);
+        try std.testing.expectEqual(@as(u16, 200), (try parseResponse(obuf[0..out.end])).status);
+    }
+
+    const pooled = f.slotFor(&table, "/pooled");
+    const locked = f.slotFor(&table, "/locked");
+
+    // The pooled route is still attributed — it did not vanish — and its window
+    // is marked as a reader window rather than as lock occupancy.
+    try std.testing.expect(pooled.count > 0);
+    try std.testing.expectEqual(@as(u64, 1), pooled.read_count);
+    try std.testing.expectEqual(@as(u64, 0), pooled.fallback_count);
+    try std.testing.expect(pooled.read_total_s > 0 or pooled.read_total_ns_rem > 0);
+
+    // The plain route recorded a window too, and NONE of it is a reader window.
+    try std.testing.expect(locked.count > 0);
+    try std.testing.expectEqual(@as(u64, 0), locked.read_count);
+
+    // `totals` is the ceiling arithmetic's denominator, so it must count only
+    // time actually spent holding the one lock — the pooled read's hold is
+    // subtracted back out even though the route keeps it in its distribution.
+    const t = f.stats.totals();
+    try std.testing.expect(t.count > 0);
+    try std.testing.expect(t.total_ns < nsOfSlot(pooled) + nsOfSlot(locked) + std.time.ns_per_s);
+
+    // Every borrow was returned: a leaked lease starves the pool into permanent
+    // fallback while the server goes on answering 200.
+    try std.testing.expectEqual(@as(usize, 2), f.pool.?.available());
+}
+
+test "a read_only route falls back to the write lock when every reader is busy, and says so" {
+    // §4's decision, driven: exhaustion must degrade to exactly the pre-pool
+    // behaviour — never a wait, never a 503 — which is the property that makes
+    // the pool's size a tuning knob rather than a correctness one.
+    const f = try Fixture.initPooled(1);
+    defer f.deinit();
+
+    const table = [_]router.Route{
+        .{ .method = .GET, .path = "/pooled", .scopes = &.{.public}, .handler = poolReadHandler, .read_only = true },
+    };
+
+    // Hold the pool's only reader, as a concurrent request would.
+    const held = f.pool.?.acquire().?;
+    try std.testing.expect(f.pool.?.acquire() == null);
+
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+    var in = std.Io.Reader.fixed(try buildRequest(&reqbuf, "GET", "/pooled", &.{}, ""));
+    var out = std.Io.Writer.fixed(&obuf);
+    var server = std.http.Server.init(&in, &out);
+    var req = try server.receiveHead();
+    try transport.handle(&f.ctx, &table, &req);
+
+    // Answered normally, on the writer.
+    try std.testing.expectEqual(@as(u16, 200), (try parseResponse(obuf[0..out.end])).status);
+    const s = f.slotFor(&table, "/pooled");
+    try std.testing.expectEqual(@as(u64, 1), s.fallback_count);
+    try std.testing.expectEqual(@as(u64, 0), s.read_count);
+    try std.testing.expect(s.count > 0); // recorded as an ordinary lock window
+
+    f.pool.?.release(held);
+    // And the lock is not left behind by the fallback path.
+    try std.testing.expect(f.db_lock.tryLock());
+    f.db_lock.unlock(std.testing.io);
+}
+
+test "a pool of zero is the server without a pool: every read falls back and nothing breaks" {
+    const f = try Fixture.initPooled(0);
+    defer f.deinit();
+    const table = [_]router.Route{
+        .{ .method = .GET, .path = "/pooled", .scopes = &.{.public}, .handler = poolReadHandler, .read_only = true },
+    };
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+    var in = std.Io.Reader.fixed(try buildRequest(&reqbuf, "GET", "/pooled", &.{}, ""));
+    var out = std.Io.Writer.fixed(&obuf);
+    var server = std.http.Server.init(&in, &out);
+    var req = try server.receiveHead();
+    try transport.handle(&f.ctx, &table, &req);
+    try std.testing.expectEqual(@as(u16, 200), (try parseResponse(obuf[0..out.end])).status);
+    try std.testing.expectEqual(@as(u64, 1), f.slotFor(&table, "/pooled").fallback_count);
+}
+
+/// Shared state for the blocking test below: the handler announces that it is
+/// inside, then parks until the test lets it go.
+const SlowRead = struct {
+    var inside: std.atomic.Value(bool) = .init(false);
+    var let_go: std.atomic.Value(bool) = .init(false);
+
+    fn reset() void {
+        inside.store(false, .seq_cst);
+        let_go.store(false, .seq_cst);
+    }
+
+    fn handler(ctx: *Context, req: *router.Request, _: router.Params) anyerror!void {
+        _ = ctx.files.?.syncVersion(1) catch {};
+        inside.store(true, .seq_cst);
+        while (!let_go.load(.seq_cst)) std.Thread.yield() catch {};
+        try req.respond("{\"success\":true}", .{ .status = .ok });
+    }
+
+    fn drive(ctx: *Context, table: []const router.Route) void {
+        var obuf: [4096]u8 = undefined;
+        var reqbuf: [1024]u8 = undefined;
+        const bytes = buildRequest(&reqbuf, "GET", table[0].path, &.{}, "") catch return;
+        var in = std.Io.Reader.fixed(bytes);
+        var out = std.Io.Writer.fixed(&obuf);
+        var server = std.http.Server.init(&in, &out);
+        var req = server.receiveHead() catch return;
+        transport.handle(ctx, table, &req) catch {};
+    }
+};
+
+test "a long-running READ does not block a concurrent WRITE, which is the entire point of the pool" {
+    // The feature's reason for existing, stated as the only thing that can
+    // actually prove it: while a `read_only` handler is mid-flight, `db_lock` —
+    // the lock every WRITE needs — must be free, and a write must be able to
+    // complete. "It compiles and the old tests pass" says nothing about this.
+    //
+    // Deterministic rather than timed: the reader parks INSIDE the handler and
+    // waits to be released, so `tryLock` is asked the question at a moment that
+    // is known to be mid-read.
+    const f = try Fixture.initPooled(2);
+    defer f.deinit();
+
+    const pooled = [_]router.Route{
+        .{ .method = .GET, .path = "/slow-read", .scopes = &.{.public}, .handler = SlowRead.handler, .read_only = true },
+    };
+    SlowRead.reset();
+    var ctx_copy = f.ctx; // a connection thread gets its own Context, as in serve mode
+    const t = try std.Thread.spawn(.{}, SlowRead.drive, .{ &ctx_copy, @as([]const router.Route, &pooled) });
+    while (!SlowRead.inside.load(.seq_cst)) std.Thread.yield() catch {};
+
+    // Mid-read, the write lock is free — and a real write goes through.
+    try std.testing.expect(f.db_lock.tryLock());
+    try f.db.exec("INSERT INTO users(id, email, password_md5, cred_enc, is_admin, created_at) VALUES(42,'w@h','','',0,0);");
+    f.db_lock.unlock(std.testing.io);
+
+    SlowRead.let_go.store(true, .seq_cst);
+    t.join();
+
+    var r = (try f.db.row("SELECT COUNT(*) FROM users WHERE id = 42;", &.{})).?;
+    defer r.finalize();
+    try std.testing.expectEqual(@as(i64, 1), r.int(0));
+}
+
+test "the SAME handler without read_only DOES block the write, which is what the flag changes" {
+    // The control. Without it the test above proves only that the lock happened
+    // to be free, not that the flag is what freed it — same handler, same
+    // fixture, same moment, one field different.
+    const f = try Fixture.initPooled(2);
+    defer f.deinit();
+
+    const locked = [_]router.Route{
+        .{ .method = .GET, .path = "/slow-read", .scopes = &.{.public}, .handler = SlowRead.handler },
+    };
+    SlowRead.reset();
+    var ctx_copy = f.ctx;
+    const t = try std.Thread.spawn(.{}, SlowRead.drive, .{ &ctx_copy, @as([]const router.Route, &locked) });
+    while (!SlowRead.inside.load(.seq_cst)) std.Thread.yield() catch {};
+
+    // The whole-handler lock is held for the read's entire duration: every write
+    // on the server is queued behind it. That is the status quo the pool exists
+    // to end.
+    try std.testing.expect(!f.db_lock.tryLock());
+
+    SlowRead.let_go.store(true, .seq_cst);
+    t.join();
+    try std.testing.expect(f.db_lock.tryLock()); // and released afterwards
+    f.db_lock.unlock(std.testing.io);
+}
+
+test "an SSE stream borrows no reader, so eight open tabs cannot exhaust the pool" {
+    // Entry 4's deadlock, expressed as a test rather than a comment. A stream
+    // that borrowed for its LIFETIME (minutes) while using microseconds of
+    // connection would let a handful of browser tabs starve every read on the
+    // server. Two things stop it, and both are asserted: the route is
+    // `manual_db_lock`, which `router.readOnlyConflict` makes impossible to
+    // combine with `read_only`; and dispatch borrows per OPERATION, so nothing
+    // holds a lease across a handler that parks.
+    const f = try Fixture.initPooled(2);
+    defer f.deinit();
+    const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
+    _ = admin;
+    const tok = try onboardWeb(&f.ctx, "admin", "temp0000", "adminpw1");
+
+    for (app.routes) |r| {
+        if (std.mem.eql(u8, r.path, "/api/controlplane/events")) {
+            try std.testing.expect(!r.read_only);
+            try std.testing.expect(r.manual_db_lock);
+        }
+    }
+
+    var obuf: [8192]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+    const resp = try requestWithCookie(&f.ctx, &obuf, &reqbuf, "GET", "/api/controlplane/events", &tok, "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+
+    // The pool is untouched: no lease was taken, so none can have been kept.
+    try std.testing.expectEqual(@as(usize, 2), f.pool.?.available());
+}
+
+// ---- the read_only audit (§5) ----
+//
+// The classification is the dangerous half of the reader pool: a route wrongly
+// flagged runs its writes through a connection that refuses them. So it is
+// MECHANICALLY CHECKED rather than read through once, twice over, because the two
+// checks catch different mistakes:
+//
+//   1. **Against a real reader.** SQLite answers `SQLITE_READONLY` to any write,
+//      so a misclassified route surfaces as a 5xx here rather than as corruption.
+//   2. **Against the writer, with a row-mutation hook armed.** That catches the
+//      write check (1) cannot see: a heal or a bump whose failure is swallowed by
+//      a `catch {}`, which on a reader would answer 200 with quietly degraded
+//      data. `ControlPlaneService`'s lazy index backfill is exactly that shape,
+//      and it is why the whole listing/metadata family is NOT flagged.
+//
+// A flagged route with no probe below fails the coverage assertion, so the audit
+// grows with the table instead of decaying beside it.
+
+/// One request that reaches a `read_only` route's handler. `route` is the
+/// route's DECLARED path (the coverage key); `path` is the concrete URL.
+const ReadOnlyProbe = struct {
+    route: []const u8,
+    path: []const u8,
+    method: []const u8,
+    body: []const u8 = "",
+    face: enum { none, device, web } = .none,
+};
+
+/// Drives every probe and asserts none of them fails with a 5xx. A 404 is fine —
+/// what is under test is that the handler ran to a decision without needing to
+/// write, not that the fixture happens to hold the row it asked for.
+fn driveReadOnlyProbes(f: *Fixture, probes: []const ReadOnlyProbe, web_tok: []const u8, dev_tok: []const u8) !void {
+    var obuf: [1 << 16]u8 = undefined;
+    var reqbuf: [4096]u8 = undefined;
+    for (probes) |p| {
+        var cookie_buf: [128]u8 = undefined;
+        const headers: []const Header = switch (p.face) {
+            .none => &.{.{ .name = "content-type", .value = "application/json" }},
+            .web => &.{
+                .{ .name = "content-type", .value = "application/json" },
+                .{ .name = "cookie", .value = try std.fmt.bufPrint(&cookie_buf, "{s}={s}", .{ context.session_cookie_name, web_tok }) },
+            },
+            .device => &.{
+                .{ .name = "content-type", .value = "application/json" },
+                .{ .name = "x-access-token", .value = dev_tok },
+                .{ .name = "equipmentno", .value = "SN-AUDIT" },
+            },
+        };
+        const req = try buildRequest(&reqbuf, p.method, p.path, headers, p.body);
+        const resp = try roundtrip(&f.ctx, req, &obuf);
+        if (resp.status >= 500) {
+            std.debug.print("read_only route {s} {s} answered {d}: {s}\n", .{ p.method, p.path, resp.status, resp.body });
+            return error.ReadOnlyRouteFailed;
+        }
+    }
+}
+
+/// Builds the probe list against seeded rows. Paths are arena-owned.
+fn readOnlyProbes(a: std.mem.Allocator, note_id: u64, ver_id: u64, ver_md5: []const u8, trashed_id: u64, trashed_md5: []const u8) ![]const ReadOnlyProbe {
+    var out: std.ArrayList(ReadOnlyProbe) = .empty;
+    const fixed = [_]ReadOnlyProbe{
+        .{ .route = "/api/version", .path = "/api/version", .method = "GET" },
+        .{ .route = "/api/file/query/server", .path = "/api/file/query/server", .method = "GET" },
+        .{ .route = "/api/controlplane/usage", .path = "/api/controlplane/usage", .method = "GET", .face = .web },
+        .{ .route = "/api/controlplane/account/storage", .path = "/api/controlplane/account/storage", .method = "GET", .face = .web },
+        .{ .route = "/api/user/query", .path = "/api/user/query", .method = "POST", .body = "{}", .face = .device },
+        .{ .route = "/api/equipment/bind/status", .path = "/api/equipment/bind/status", .method = "POST", .body = "{}", .face = .device },
+        .{ .route = "/api/file/capacity/query", .path = "/api/file/capacity/query", .method = "POST", .body = "{}", .face = .device },
+        .{ .route = "/api/file/2/users/get_space_usage", .path = "/api/file/2/users/get_space_usage", .method = "POST", .body = "{}", .face = .device },
+        .{ .route = "/api/file/query/summary/hash", .path = "/api/file/query/summary/hash", .method = "POST", .body = "{\"page\":0,\"size\":50}", .face = .device },
+        .{ .route = "/api/file/query/summary/group", .path = "/api/file/query/summary/group", .method = "POST", .body = "{\"page\":0,\"size\":50}", .face = .device },
+        .{ .route = "/api/file/3/files/query/by/path_v3", .path = "/api/file/3/files/query/by/path_v3", .method = "POST", .body = "{\"path\":\"/audit.note\"}", .face = .device },
+        .{ .route = "/api/controlplane/search", .path = "/api/controlplane/search?q=hello", .method = "GET", .face = .web },
+    };
+    try out.appendSlice(a, &fixed);
+
+    // The id- and md5-bearing routes, against rows that really exist — a probe
+    // that 404s before reaching the DB work would audit nothing.
+    try out.append(a, .{
+        .route = "/api/file/query/summary/id",
+        .path = "/api/file/query/summary/id",
+        .method = "POST",
+        .body = try std.fmt.allocPrint(a, "{{\"ids\":[{d}]}}", .{note_id}),
+        .face = .device,
+    });
+    try out.append(a, .{
+        .route = "/api/file/3/files/query_v3",
+        .path = "/api/file/3/files/query_v3",
+        .method = "POST",
+        .body = try std.fmt.allocPrint(a, "{{\"id\":\"{d}\"}}", .{note_id}),
+        .face = .device,
+    });
+    try out.append(a, .{
+        .route = "/api/controlplane/note/:id/search",
+        .path = try std.fmt.allocPrint(a, "/api/controlplane/note/{d}/search?q=hello", .{note_id}),
+        .method = "GET",
+        .face = .web,
+    });
+    try out.append(a, .{
+        .route = "/api/controlplane/note/:id/txt-search",
+        .path = try std.fmt.allocPrint(a, "/api/controlplane/note/{d}/txt-search?q=hello", .{note_id}),
+        .method = "GET",
+        .face = .web,
+    });
+    try out.append(a, .{
+        .route = "/api/controlplane/note/:id/history/:md5/search",
+        .path = try std.fmt.allocPrint(a, "/api/controlplane/note/{d}/history/{s}/search?q=hello", .{ ver_id, ver_md5 }),
+        .method = "GET",
+        .face = .web,
+    });
+    try out.append(a, .{
+        .route = "/api/controlplane/bin/note/:id/search",
+        .path = try std.fmt.allocPrint(a, "/api/controlplane/bin/note/{d}/search?q=hello", .{trashed_id}),
+        .method = "GET",
+        .face = .web,
+    });
+    try out.append(a, .{
+        .route = "/api/controlplane/bin/note/:id/history/:md5/search",
+        .path = try std.fmt.allocPrint(a, "/api/controlplane/bin/note/{d}/history/{s}/search?q=hello", .{ trashed_id, trashed_md5 }),
+        .method = "GET",
+        .face = .web,
+    });
+    return out.items;
+}
+
+/// Seeds the rows the probes need and returns a fixture ready to audit.
+const AuditData = struct {
+    web_tok: [32]u8,
+    dev_tok: [32]u8,
+    note_id: u64,
+    ver_id: u64,
+    ver_md5: [32]u8,
+    trashed_id: u64,
+    trashed_md5: [32]u8,
+};
+
+fn seedAuditData(f: *Fixture) !AuditData {
+    const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
+    const web_tok = try onboardWeb(&f.ctx, "admin", "temp0000", "adminpw1");
+    var obuf: [8192]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+    const dev_tok = try deviceLogin(&f.ctx, &obuf, &reqbuf, "admin", "adminpw1", "SN-AUDIT");
+
+    const note_id = try seedRecognizedNote(f, admin, "audit.note", &.{"hello"});
+
+    // A file with a RETAINED version: the same name uploaded twice.
+    _ = try seedRecognizedVersion(f, admin, "versioned.note", "aaaa", &.{"hello"});
+    const ver_id = try seedRecognizedVersion(f, admin, "versioned.note", "bbbb", &.{"hello"});
+    const ver_md5 = try soleHistoryMd5(f, ver_id);
+
+    // The same, then trashed — so the bin's own search and its view-only history
+    // search each have something real to answer about. A probe that 404s before
+    // reaching the DB work would audit nothing.
+    _ = try seedRecognizedVersion(f, admin, "trashed.note", "cccc", &.{"hello"});
+    const trashed_id = try seedRecognizedVersion(f, admin, "trashed.note", "dddd", &.{"hello"});
+    const trashed_md5 = try soleHistoryMd5(f, trashed_id);
+    try f.files.trash(admin, trashed_id);
+
+    return .{
+        .web_tok = web_tok,
+        .dev_tok = dev_tok,
+        .note_id = note_id,
+        .ver_id = ver_id,
+        .ver_md5 = ver_md5,
+        .trashed_id = trashed_id,
+        .trashed_md5 = trashed_md5,
+    };
+}
+
+test "every read_only route has a probe, so the audit grows with the table instead of decaying" {
+    // The coverage half. Without it a new `read_only` route would simply not be
+    // audited, and the two tests below would keep passing while the claim they
+    // check stopped covering the table.
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const probes = try readOnlyProbes(arena.allocator(), 1, 1, "0" ** 32, 1, "0" ** 32);
+
+    for (app.routes) |r| {
+        if (!r.read_only) continue;
+        var covered = false;
+        for (probes) |p| {
+            if (std.mem.eql(u8, p.route, r.path)) covered = true;
+        }
+        if (!covered) {
+            std.debug.print("read_only route '{s}' has no probe in readOnlyProbes\n", .{r.path});
+            return error.UnauditedReadOnlyRoute;
+        }
+    }
+
+    // And nothing claims to probe a route that is not flagged — a stale probe
+    // would make the coverage count look healthier than it is.
+    for (probes) |p| {
+        var found = false;
+        for (app.routes) |r| {
+            if (std.mem.eql(u8, p.route, r.path) and r.read_only) found = true;
+        }
+        if (!found) {
+            std.debug.print("probe names '{s}', which is not a read_only route\n", .{p.route});
+            return error.StaleReadOnlyProbe;
+        }
+    }
+}
+
+test "every read_only route answers correctly through a genuinely read-only connection" {
+    // §5's check. The pool is real, so each of these runs on a connection SQLite
+    // will not let write — a misclassified route fails here instead of failing on
+    // a household's database.
+    const f = try Fixture.initPooled(2);
+    defer f.deinit();
+    const d = try seedAuditData(f);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const probes = try readOnlyProbes(arena.allocator(), d.note_id, d.ver_id, &d.ver_md5, d.trashed_id, &d.trashed_md5);
+    try driveReadOnlyProbes(f, probes, &d.web_tok, &d.dev_tok);
+
+    // They really did run on readers, rather than all falling back and proving
+    // nothing: at least one pooled window was recorded, and every lease came back.
+    var pooled: u64 = 0;
+    for (&f.stats.slots) |*s| pooled += s.read_count;
+    try std.testing.expect(pooled >= probes.len);
+    try std.testing.expectEqual(@as(usize, 2), f.pool.?.available());
+}
+
+test "no read_only route mutates a row, including through a write whose failure would be swallowed" {
+    // The check a read-only connection CANNOT make. `ControlPlaneService`'s lazy
+    // index backfill writes on the read path and discards its own error, so on a
+    // reader it would answer 200 with degraded data — the exact silent
+    // misclassification this whole flag has to avoid. Driving the same routes
+    // against the WRITER with `sqlite3_update_hook` armed makes any row mutation
+    // visible whether it succeeded, failed or was ignored.
+    //
+    // Pool size 0 so every route takes the writer path: the hook can only watch
+    // the connection it is armed on.
+    const f = try Fixture.initPooled(0);
+    defer f.deinit();
+    const d = try seedAuditData(f);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const probes = try readOnlyProbes(arena.allocator(), d.note_id, d.ver_id, &d.ver_md5, d.trashed_id, &d.trashed_md5);
+
+    var watch: sqlite.WriteWatch = .{ .db = f.db };
+    watch.arm();
+    defer watch.disarm();
+    // One probe at a time, so a failure NAMES the route. A single aggregate count
+    // would say "something wrote" and leave the next person to bisect by hand.
+    for (probes) |p| {
+        const before = watch.mutations;
+        const one = [_]ReadOnlyProbe{p};
+        try driveReadOnlyProbes(f, &one, &d.web_tok, &d.dev_tok);
+        if (watch.mutations != before) {
+            std.debug.print("read_only route '{s}' mutated {d} row(s) (last table: {s})\n", .{ p.route, watch.mutations - before, watch.lastTable() });
+            return error.ReadOnlyRouteWrote;
+        }
+    }
+}
+
+test "the read-modify-write routes are NOT read_only, and the default is what protects them" {
+    // The category where a mistake is corruption rather than slowness: each of
+    // these reads a row, decides on it, and writes back — `upload/finish` (decref
+    // + `addUsed`), purge, restore, elevate, login. They must hold the write lock
+    // across every statement, and the flag defaulting to FALSE is what makes that
+    // the outcome of forgetting rather than of remembering. Pinned by name so
+    // "someone flags it while sweeping through the table" is a red test.
+    const must_write = [_][]const u8{
+        "/api/file/2/files/upload/finish",
+        "/api/controlplane/bin/:id", // purge — the only route reaching decref
+        "/api/controlplane/bin", // empty bin
+        "/api/controlplane/bin/:id/restore",
+        "/api/admin/elevate",
+        "/api/official/user/account/login/new",
+        "/api/official/user/account/login/equipment",
+        "/api/official/user/query/random/code",
+        "/api/user/password",
+        "/api/controlplane/entry/:id",
+        "/api/controlplane/entry/:id/rename",
+    };
+    for (must_write) |path| {
+        var seen = false;
+        for (app.routes) |r| {
+            if (!std.mem.eql(u8, r.path, path)) continue;
+            seen = true;
+            if (r.read_only) {
+                std.debug.print("read-modify-write route '{s} {s}' is flagged read_only\n", .{ @tagName(r.method), r.path });
+                return error.WriteRouteMarkedReadOnly;
+            }
+        }
+        try std.testing.expect(seen); // the pin must not silently name a route that no longer exists
+    }
+
+    // The flag's default, stated where it can be checked: an undeclared route is
+    // slow, never wrong.
+    const undeclared: router.Route = .{
+        .method = .GET,
+        .path = "/x",
+        .scopes = &.{.public},
+        .handler = poolReadHandler,
+    };
+    try std.testing.expect(!undeclared.read_only);
 }

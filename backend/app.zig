@@ -24,6 +24,7 @@ const router = @import("http/router.zig");
 const transport = @import("http/transport.zig");
 const Context = @import("http/context.zig").Context;
 const sqlite = @import("db/sqlite.zig");
+const reader_pool = @import("db/reader_pool.zig");
 const schema = @import("db/schema.zig");
 const authsvc = @import("services/auth/service.zig");
 const filesmod = @import("services/files.zig");
@@ -60,6 +61,18 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     var db = try sqlite.Db.open(db_path);
     defer db.close();
     try schema.migrate(db);
+
+    // Read-only connections for the `read_only` routes, opened AFTER the writer
+    // has created the file and established WAL — a reader can do neither. Closed
+    // BEFORE the writer (defers unwind last-first), which also matters: the
+    // readers coordinate through the `-shm` file the writer keeps alive.
+    //
+    // Failing to open one is fatal rather than degraded, deliberately: it means
+    // the database file is not readable by the process that just wrote it, which
+    // is a broken install and not a load condition. Exhaustion at RUNTIME is the
+    // thing that must degrade, and it does — see `db/reader_pool.zig`.
+    var readers = try reader_pool.Pool.open(gpa, db_path, reader_pool.default_size);
+    defer readers.close(gpa);
 
     // The credential-encryption key (loaded/generated before the service opens, so
     // every credential path has it). Held outside the DB, deliberately.
@@ -163,6 +176,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
         .download_tokens = &download_tokens,
         .event_streams = &event_streams,
         .db_lock = &db_lock,
+        .readers = &readers,
         .lock_stats = &lock_stats_table,
     };
 

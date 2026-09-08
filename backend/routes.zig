@@ -18,8 +18,34 @@ pub const api_version = auth.api_version;
 /// The route table. `scopes` lists who may call each route (`&.{.public}` = no
 /// auth; `&.{.controlplane}` etc. = allowed audiences). Crossing faces → 403;
 /// `rate_limit` → 429. Every route declares its scopes.
+///
+/// ## `read_only` — what it claims, and what it is not
+///
+/// A `read_only` route runs on a pooled `SQLITE_OPEN_READONLY` connection with
+/// no `db_lock` held, so a slow read stops being a barrier the whole household
+/// queues behind (see db/reader_pool.zig). The flag is a CLAIM ABOUT THE WHOLE
+/// CALL PATH, not about the HTTP method — the device face POSTs pure reads, and
+/// `download_v3` looks like a write while minting its token in memory.
+///
+/// **The claim is checked, not reviewed.** `test/http_integration.zig` drives
+/// every flagged route twice: once against a real read-only connection (a write
+/// fails loudly there) and once against the writer with a row-mutation hook armed
+/// (which catches a write that a `catch {}` would otherwise swallow). A flagged
+/// route with no probe fails the same test, so the audit grows with the table.
+///
+/// **The category that is NOT flagged, and why.** Every control-plane route that
+/// reads a `.note`/`.spd`/`.txt` INDEX — listings, `file/metadata`, page text,
+/// page links, the bin, history metadata — is a SELF-HEALING read: a missing or
+/// stale `note_index` row is backfilled on the read path
+/// (`ControlPlaneService.indexRowEnsuring` → `noteindex.ensureIndexed`), and that
+/// backfill is a write. Its failure is swallowed by design, so on a reader it
+/// would not error — it would quietly serve a note as an unindexed placeholder.
+/// A silent wrong answer is worse than a slow one, so the whole family keeps the
+/// writer until the heal has somewhere else to happen. Search is exempt because
+/// it reads the FTS directly and never heals (`search_partition.active` is
+/// explicitly the read-only half of that module).
 pub const routes = [_]router.Route{
-    .{ .method = .GET, .path = "/api/version", .scopes = &.{.public}, .handler = auth.version },
+    .{ .method = .GET, .path = "/api/version", .scopes = &.{.public}, .handler = auth.version, .read_only = true },
 
     // --- Auth (public: these establish a session) ---
     // Login + code issuance are pre-auth, so they are rate-limited by IP to blunt
@@ -52,7 +78,7 @@ pub const routes = [_]router.Route{
     // and account enumeration (check/exists distinguishes USER_NOT_FOUND).
     .{ .method = .POST, .path = "/api/terminal/equipment/unlink", .scopes = &.{.public}, .handler = device.unlinkEquipmentLenient, .rate_limit = .{ .max = 20, .window_s = 60, .by = .ip } },
     .{ .method = .POST, .path = "/api/official/user/check/exists/server", .scopes = &.{.public}, .handler = device.checkExists, .rate_limit = .{ .max = 20, .window_s = 60, .by = .ip } },
-    .{ .method = .GET, .path = "/api/file/query/server", .scopes = &.{.public}, .handler = device.queryServer },
+    .{ .method = .GET, .path = "/api/file/query/server", .scopes = &.{.public}, .handler = device.queryServer, .read_only = true },
     // Post-login device sync + file API (device token via x-access-token).
     // `.public` ALONGSIDE `.device`, uniquely on this route: the Nomad sends this
     // call before it has stored the token its login just handed it, so requiring
@@ -62,21 +88,21 @@ pub const routes = [_]router.Route{
     // which is the token's evidence taken from the sessions table. See the long
     // comment there; this is the only route that may do this.
     .{ .method = .POST, .path = "/api/terminal/user/bindEquipment", .scopes = &.{ .device, .public }, .handler = device.bindEquipment },
-    .{ .method = .POST, .path = "/api/user/query", .scopes = &.{.device}, .handler = device.userQuery },
+    .{ .method = .POST, .path = "/api/user/query", .scopes = &.{.device}, .handler = device.userQuery, .read_only = true },
     // The official Android app's two extra post-login calls:
     // `bind/status` confirms the account is paired; `capacity/query` is the storage
     // figure in the app's own envelope. Both device-scope, identified by the token.
-    .{ .method = .POST, .path = "/api/equipment/bind/status", .scopes = &.{.device}, .handler = device.bindStatus },
-    .{ .method = .POST, .path = "/api/file/capacity/query", .scopes = &.{.device}, .handler = device.capacityQuery },
+    .{ .method = .POST, .path = "/api/equipment/bind/status", .scopes = &.{.device}, .handler = device.bindStatus, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/capacity/query", .scopes = &.{.device}, .handler = device.capacityQuery, .read_only = true },
     // Storage figure the device displays, and the gate its "select folders to
     // sync" screen reads — a real Nomad calls it ~4× per sync session, so a 404
     // here breaks that screen. Served from the caller's `capacity` row.
-    .{ .method = .POST, .path = "/api/file/2/users/get_space_usage", .scopes = &.{.device}, .handler = device.getSpaceUsage },
+    .{ .method = .POST, .path = "/api/file/2/users/get_space_usage", .scopes = &.{.device}, .handler = device.getSpaceUsage, .read_only = true },
     .{ .method = .POST, .path = "/api/file/2/files/synchronous/start", .scopes = &.{.device}, .handler = device.syncStart },
     .{ .method = .POST, .path = "/api/file/2/files/synchronous/end", .scopes = &.{.device}, .handler = device.syncEnd },
-    .{ .method = .POST, .path = "/api/file/query/summary/hash", .scopes = &.{.device}, .handler = device.summaryHash },
-    .{ .method = .POST, .path = "/api/file/query/summary/id", .scopes = &.{.device}, .handler = device.summaryById },
-    .{ .method = .POST, .path = "/api/file/query/summary/group", .scopes = &.{.device}, .handler = device.summaryGroup },
+    .{ .method = .POST, .path = "/api/file/query/summary/hash", .scopes = &.{.device}, .handler = device.summaryHash, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/query/summary/id", .scopes = &.{.device}, .handler = device.summaryById, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/query/summary/group", .scopes = &.{.device}, .handler = device.summaryGroup, .read_only = true },
     // File enumeration (advertise our files to the device) + raw download path.
     // list_folder is the download trigger; download_v3 returns a URL-authed link
     // and /oss/get streams the bytes. /oss/get is .public because the device sends
@@ -89,8 +115,8 @@ pub const routes = [_]router.Route{
     // it before the VO build + `json.respond`. Audited: it touches the DB nowhere
     // else. Was the default whole-handler lock held for the entire ~1 s walk.
     .{ .method = .POST, .path = "/api/file/2/files/list_folder", .scopes = &.{.device}, .handler = device.listFolder, .manual_db_lock = true },
-    .{ .method = .POST, .path = "/api/file/3/files/query/by/path_v3", .scopes = &.{.device}, .handler = device.queryByPathV3 },
-    .{ .method = .POST, .path = "/api/file/3/files/query_v3", .scopes = &.{.device}, .handler = device.queryV3 },
+    .{ .method = .POST, .path = "/api/file/3/files/query/by/path_v3", .scopes = &.{.device}, .handler = device.queryByPathV3, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/3/files/query_v3", .scopes = &.{.device}, .handler = device.queryV3, .read_only = true },
     .{ .method = .POST, .path = "/api/file/3/files/download_v3", .scopes = &.{.device}, .handler = device.downloadV3 },
     // The device's only delete — for FILES as much as folders, despite the name.
     // It soft-deletes into the recycle bin (see the handler); leaving it
@@ -140,7 +166,7 @@ pub const routes = [_]router.Route{
     // Browse/read endpoints for the SPA (see webapp/src/core/types.ts).
     .{ .method = .GET, .path = "/api/controlplane/tree", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTree },
     // The signed-in user's own storage usage, for the rail's quota bar.
-    .{ .method = .GET, .path = "/api/controlplane/usage", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneUsage },
+    .{ .method = .GET, .path = "/api/controlplane/usage", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneUsage, .read_only = true },
 
     // --- The account screen: managing YOURSELF ---
     //
@@ -158,7 +184,7 @@ pub const routes = [_]router.Route{
     // index-assisted scans of the caller's own rows (0.65 ms measured on the live
     // beta database), which is ordinary whole-handler-lock work, not streaming.
     .{ .method = .GET, .path = "/api/controlplane/account", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneAccount },
-    .{ .method = .GET, .path = "/api/controlplane/account/storage", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneAccountStorage },
+    .{ .method = .GET, .path = "/api/controlplane/account/storage", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneAccountStorage, .read_only = true },
     // Self-service device unlink. Distinct from the caller-scoped
     // `/api/controlplane/equipment/unlink` above: this one asserts the binding is
     // the caller's and 404s when it is not, instead of answering 200 for a serial
@@ -180,16 +206,16 @@ pub const routes = [_]router.Route{
     // reads (`/note/:id/page`, `/search`, `/template`, `/history/...`) stay below.
     .{ .method = .GET, .path = "/api/controlplane/file/metadata/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneNote },
     // Full-text search over the caller's recognized (on-device OCR) page text.
-    .{ .method = .GET, .path = "/api/controlplane/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearch },
+    .{ .method = .GET, .path = "/api/controlplane/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearch, .read_only = true },
     // Find-in-note: EVERY matching page of ONE note, with a count per page. Its
     // own route rather than a parameter on `/search` because the contract is
     // different — complete and unranked, where `/search` is ranked and clamped.
-    .{ .method = .GET, .path = "/api/controlplane/note/:id/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneNoteSearch },
+    .{ .method = .GET, .path = "/api/controlplane/note/:id/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneNoteSearch, .read_only = true },
     // Find-in-txt: EVERY matching `.txt` paragraph of ONE file, with a count and
     // byte range per paragraph. Its own route (not a kind on `/search`) because
     // it answers about paragraphs + byte ranges rather than pages + counts —
     // different fields for a different viewer.
-    .{ .method = .GET, .path = "/api/controlplane/note/:id/txt-search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTxtSearch },
+    .{ .method = .GET, .path = "/api/controlplane/note/:id/txt-search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTxtSearch, .read_only = true },
     // --- Hot-cache versioning: "history of this file" ---
     // All note-scoped by `:id` (the same ownership gate the siblings above use);
     // the per-version routes gate `:md5` on being a RETAINED version of THAT file
@@ -218,7 +244,7 @@ pub const routes = [_]router.Route{
     // `manual_db_lock` because it STREAMS (like `/file/:id`), and `immutable`
     // because `:md5` pins the whole blob (like `/history/:md5/page/:n`).
     .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/raw", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistoryRaw, .manual_db_lock = true },
-    .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistorySearch },
+    .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistorySearch, .read_only = true },
     .{ .method = .POST, .path = "/api/controlplane/note/:id/history/:md5/restore", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistoryRestore },
     // Immutable per-page byte payload (versioned by content hash; browser-cached).
     // `manual_db_lock` for the same reason as the /oss routes above: the lookup and
@@ -325,7 +351,7 @@ pub const routes = [_]router.Route{
     // `deleted = 1`). Both non-immutable JSON, both pure-DB (no `manual_db_lock`);
     // a live id on either is a 404, like the sibling bin gates.
     .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinPageText },
-    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinNoteSearch },
+    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinNoteSearch, .read_only = true },
     // View-only version history for a TRASHED note (bin-parity phase 2): the same
     // history handlers as the live `/note/:id/history/...` routes, delegated with the
     // trashed scope (`deleted = 1`), reachable because `file_history` follows a file
@@ -339,7 +365,7 @@ pub const routes = [_]router.Route{
     .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/page/:n", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistoryPage, .manual_db_lock = true },
     .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistoryPageText },
     .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/raw", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistoryRaw, .manual_db_lock = true },
-    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistorySearch },
+    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistorySearch, .read_only = true },
     .{ .method = .GET, .path = "/api/controlplane/bin/file/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinFile, .manual_db_lock = true },
     // Restore reports what it ACTUALLY did — the ancestor chain, the descendants,
     // and any auto-rename — because that routinely exceeds what was asked.
@@ -471,6 +497,18 @@ comptime {
     if (router.manualAdminRoute(&routes)) |i| {
         @compileError("route '" ++ routes[i].path ++ "' is both manual_db_lock and require_admin; " ++
             "dispatchLocked's manual branch never renews admin elevation (see router.manualAdminRoute)");
+    }
+}
+
+// No route may be `read_only` together with `manual_db_lock` or `require_admin`.
+// A manual handler brackets its own `ctx.lockDb()`, which under a reader lease
+// would lock the writer while the handler read a different connection — the lock
+// silently stops meaning anything. An admin route renews its elevation window
+// with an UPDATE, which a reader refuses. See `router.readOnlyConflict`.
+comptime {
+    if (router.readOnlyConflict(&routes)) |i| {
+        @compileError("route '" ++ routes[i].path ++ "' is read_only together with manual_db_lock or " ++
+            "require_admin; neither combination can be made to hold (see router.readOnlyConflict)");
     }
 }
 

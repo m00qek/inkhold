@@ -765,7 +765,7 @@ test "find-in-PDF's whole server side is the note-scoped route unchanged: kind =
     //
     // The `indexable = 1` gate this file's header warns every reader about lives
     // in `coverage_sql` — the unsearchable-notes DENOMINATOR — and not in
-    // `search_from_where`, which is what `searchNotePages` runs. Asserted below
+    // `scoped_from_where`, which is what `searchNotePages` runs. Asserted below
     // rather than argued: the flag really is off for this document and the pages
     // really do come back anyway, so a future reader who moves that predicate
     // into the shared clause breaks this test rather than the feature.
@@ -901,6 +901,83 @@ test "TWO HOLDERS get one contiguous band each, in their own partitions" {
             try partition.active(f.db, uid),
         );
     }
+    try expectFtsClean(&f);
+}
+
+/// One document's term set for one owner, in a stable order — the `doc_terms`
+/// rows as a comparable value.
+fn docTerms(f: *Fixture, user_id: u64, md5: []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var s = try f.db.prepare(
+        "SELECT dt.term FROM doc_terms dt JOIN search_partitions sp ON sp.id = dt.partition_id " ++
+            "WHERE sp.user_id = ?1 AND dt.blob_md5 = ?2 ORDER BY dt.term;",
+    );
+    defer s.finalize();
+    s.bindInt(1, @intCast(user_id));
+    s.bindText(2, md5);
+    while (try s.step()) try out.append(f.a(), try f.a().dupe(u8, s.columnText(0)));
+    return out.items;
+}
+
+test "A PDF'S TERM SET FROM A CHUNKED WRITE IS THE ONE THE SINGLE-STATEMENT FOLD LANDS" {
+    // Both tenants share `search/maintain.zig`, so the chunked fold that closed
+    // `optimizations.md` entry 11's residue was measured on a 16 MB `.txt` and
+    // has to be right for a book. Pinned HERE rather than inherited from
+    // `txt_index.zig`: a PDF page is a different row shape (NULL byte ranges, a
+    // blank page carrying `recogn_status = 0`) and it is that shape the fold's
+    // predicate has to agree with.
+    //
+    // The oracle is the single-statement fold itself, still live on the
+    // whole-document paths: `search.recanonicalizeHolders` rewrites `doc_terms`
+    // for a band it leaves otherwise untouched, by re-folding the blob's entire
+    // text. Same blob, same partition, computed both ways.
+    var f = try Fixture.init();
+    defer f.deinit();
+    const md5 = try f.putRaw(1, "book.pdf", book_pdf);
+
+    // A blank page in the middle: it gets a row, carries no text, and must
+    // contribute nothing to the pool from either direction.
+    const pages = [_]Page{
+        .{ .index = 0, .text = "rutabaga verdejante no primeiro" },
+        .{ .index = 1, .text = "" },
+        .{ .index = 2, .text = "quiabo crepuscular no terceiro" },
+        .{ .index = 3, .text = "caligrafia e rutabaga outra vez" },
+    };
+    try f.db.exec("BEGIN IMMEDIATE;");
+    const bands = try reserve(f.a(), f.db, &md5, pages.len, 100);
+    try f.db.exec("COMMIT;");
+    // One page per chunk — the finest interruption grain there is, and the one
+    // that would expose a fold that only ever saw its last chunk.
+    for (0..pages.len) |i| {
+        try f.db.exec("BEGIN IMMEDIATE;");
+        try storeChunk(f.db, &md5, bands, .{
+            .arena = std.heap.ArenaAllocator.init(testing.allocator),
+            .from = @intCast(i),
+            .pages = pages[i .. i + 1],
+        });
+        try f.db.exec("COMMIT;");
+    }
+    try f.db.exec("BEGIN IMMEDIATE;");
+    try finish(f.db, &md5, bands, pages.len, .ok, 100);
+    try f.db.exec("COMMIT;");
+
+    const accumulated = try docTerms(&f, 1, &md5);
+    try f.db.exec("BEGIN IMMEDIATE;");
+    try search.recanonicalizeHolders(f.db, &md5, 100);
+    try f.db.exec("COMMIT;");
+    const refolded = try docTerms(&f, 1, &md5);
+
+    try testing.expectEqual(refolded.len, accumulated.len);
+    for (accumulated, refolded) |a_, b| try testing.expectEqualStrings(a_, b);
+    // And it is the document's whole vocabulary, from the first chunk and the
+    // last alike — not just whatever the closing transaction happened to see.
+    var saw_first = false;
+    var saw_last = false;
+    for (accumulated) |t| {
+        if (std.mem.eql(u8, t, "verdejante")) saw_first = true;
+        if (std.mem.eql(u8, t, "caligrafia")) saw_last = true;
+    }
+    try testing.expect(saw_first and saw_last);
     try expectFtsClean(&f);
 }
 
@@ -1096,4 +1173,106 @@ fn pageCountOf(f: *Fixture, md5: []const u8) !i64 {
     var r = (try f.db.row("SELECT page_count FROM note_index WHERE blob_md5 = ?1;", &.{.{ .text = md5 }})).?;
     defer r.finalize();
     return r.int(0);
+}
+
+// ---------------------------------------------------------------------------
+// The bench — the CLOSING transaction, which is not chunk-shaped
+// ---------------------------------------------------------------------------
+
+// The sweep above sizes a CHUNK. This one measures the hold a chunk cannot
+// bound: `search.finishOwnerBlobBands`, which lands the document's `doc_terms`.
+//
+// It exists because the residue `optimizations.md` entry 11 recorded was found
+// on the `.txt` tenant and fixed in `search/maintain.zig`, which BOTH tenants
+// call — so the PDF side needs its own before/after rather than inheriting a
+// `.txt` figure. A 1,450-page book carries ~2 MB of text where a `.txt` may
+// carry 16 MB, which is exactly why the closing fold was invisible here.
+//
+// `std.log.INFO`, not `std.log.debug`, and that is not drift from the sweep
+// above: outside a Debug build `std.options.log_level` is `.info` and every
+// `std.log.debug` call is COMPILED OUT, so the sweep's own advice ("run it in
+// ReleaseSafe with `testing.log_level = .debug`") prints nothing at all — which
+// is what `txt_index.zig`'s benches found and why they say info. Silent by
+// default all the same: `testing.log_level` starts at `.warn`, so taking the
+// measurement is one line and never suite noise.
+//
+// TAKEN 2026-08-09, x86 Ryzen 7840U, NVMe, ReleaseSafe, 1,450 pages at cookbook
+// density (2,113 KB of indexed text), three runs each:
+//
+// | | worst chunk | CLOSING txn | whole write |
+// |---|---:|---:|---:|
+// | fold in the close (before) | 7-8 ms | **48-50 ms** | 142-143 ms |
+// | fold per chunk (after) | 10-11 ms | **23 ms** | 189-194 ms |
+//
+// The longest hold is the close in both arms, and it halves. The whole write is
+// ~35 % dearer, which is the honest shape of the trade HERE: a book carries
+// 2 MB of text, so there is little fold to move, and 29 chunks each pay ~1.6 ms
+// for their own. The `.txt` tenant, where the fold is 16 MB, gets the same
+// per-chunk cost and 5.6x off its longest hold (`txt_index.zig`'s bench).
+
+test "BENCH note: what the CLOSING transaction of a PDF write costs (figures printed)" {
+    var f = try Fixture.initAt(true); // a real file: the COMMIT has to be real
+    defer f.deinit();
+    const md5 = try f.putRaw(1, "book.pdf", book_pdf);
+
+    // The harshest document on record is 1,703 pages; 1,450 is the figure
+    // `mupdf.md` §9.8 and this module's header both quote.
+    const doc_pages: u32 = 1450;
+    const pages = try benchPages(f.a(), doc_pages);
+    var text_bytes: usize = 0;
+    for (pages) |p| text_bytes += p.text.len;
+
+    try f.db.exec("BEGIN IMMEDIATE;");
+    const bands = try reserve(f.a(), f.db, &md5, doc_pages, 100);
+    try f.db.exec("COMMIT;");
+
+    var worst_ns: u64 = 0;
+    var total_ns: u64 = 0;
+    var chunks: u32 = 0;
+    var at: u32 = 0;
+    while (at < doc_pages) {
+        const end = @min(at + chunk_pages, doc_pages);
+        const t0 = std.Io.Clock.awake.now(testing.io);
+        try f.db.exec("BEGIN IMMEDIATE;");
+        try storeChunk(f.db, &md5, bands, .{
+            .arena = std.heap.ArenaAllocator.init(testing.allocator),
+            .from = at,
+            .pages = pages[at..end],
+        });
+        try f.db.exec("COMMIT;");
+        const t1 = std.Io.Clock.awake.now(testing.io);
+        const held: u64 = @intCast(t0.durationTo(t1).toNanoseconds());
+        if (held > worst_ns) worst_ns = held;
+        total_ns += held;
+        chunks += 1;
+        at = end;
+    }
+
+    const fin0 = std.Io.Clock.awake.now(testing.io);
+    try f.db.exec("BEGIN IMMEDIATE;");
+    try finish(f.db, &md5, bands, doc_pages, .ok, 200);
+    try f.db.exec("COMMIT;");
+    const fin1 = std.Io.Clock.awake.now(testing.io);
+    const finish_ns: u64 = @intCast(fin0.durationTo(fin1).toNanoseconds());
+    total_ns += finish_ns;
+
+    std.log.info(
+        "[bench] pdf close: {d} pages, {d} KB text — {d} chunks, worst chunk {d} ms, " ++
+            "CLOSING TXN {d} ms, total {d} ms",
+        .{
+            doc_pages,                      text_bytes / 1024,
+            chunks,                         worst_ns / std.time.ns_per_ms,
+            finish_ns / std.time.ns_per_ms, total_ns / std.time.ns_per_ms,
+        },
+    );
+
+    // The bench is also an assertion: one contiguous band, and a term set that
+    // is the document's own vocabulary rather than a fragment of it.
+    const ids = try f.band(1, &md5);
+    try testing.expectEqual(@as(usize, doc_pages), ids.len);
+    for (ids, 0..) |id, i| try testing.expectEqual(ids[0] + @as(i64, @intCast(i)), id);
+    var terms = (try f.db.row("SELECT COUNT(*) FROM doc_terms WHERE blob_md5 = ?1;", &.{.{ .text = &md5 }})).?;
+    defer terms.finalize();
+    try testing.expect(terms.int(0) > 1000);
+    try expectFtsClean(&f);
 }

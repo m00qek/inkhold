@@ -44,6 +44,16 @@ pub const Error = error{
 /// test asserting the error. Single-threaded test affordance, not a knob.
 pub var log_exec_errors: bool = true;
 
+/// Page cache a POOLED READER gets, in KiB (the pragma takes it negative).
+///
+/// Half the writer's 2 MB, and the number to turn if the trade ever looks wrong:
+/// a reader re-reads pages the writer would have kept, which costs I/O, and the
+/// pool multiplies whatever this is by its size. 1 MB × 3 readers ≈ 3 MB of page
+/// cache — file-backed and reclaimable, which is the half of the RSS figure the
+/// kernel does not charge us for (run-on-rpi-32bit.md). It is a lazily-filled
+/// CEILING, not an upfront allocation.
+pub const reader_cache_size_kib = 1000;
+
 pub const Db = struct {
     handle: *c.sqlite3,
 
@@ -68,6 +78,54 @@ pub const Db = struct {
         // that number with nothing actually wrong. RssAnon is reported alongside so
         // the "memory this process owns" figure stays honest once this is on.
         try db.exec("PRAGMA mmap_size = 33554432;"); // 32 MB
+        return db;
+    }
+
+    /// Opens an EXISTING database read-only — the connection kind the reader pool
+    /// hands out (`db/reader_pool.zig`).
+    ///
+    /// Three differences from `open`, each of them load-bearing:
+    ///
+    ///   - `sqlite3_open_v2` with `SQLITE_OPEN_READONLY`, so SQLite itself refuses
+    ///     any write with `SQLITE_READONLY`. That is what turns a misclassified
+    ///     `read_only` route from silent corruption into a loud failure, and it is
+    ///     the property the route audit test in `backend/test/reader_pool.zig`
+    ///     rests on. It also means this NEVER creates the file: a missing database
+    ///     is `error.Open` rather than a fresh empty one that would answer every
+    ///     query with nothing.
+    ///   - `SQLITE_OPEN_NOMUTEX`. The build is `SQLITE_THREADSAFE=1` (serialized),
+    ///     which puts a mutex inside every connection; a pooled reader is borrowed
+    ///     exclusively for one operation, so that mutex is pure overhead. **This
+    ///     is only safe while the pool's borrow really is exclusive** — see
+    ///     `reader_pool.Pool.acquire`.
+    ///   - **No `journal_mode`.** WAL is a property of the DATABASE, set once by
+    ///     the writer; a read-only connection cannot set it and would fail here on
+    ///     the pragma rather than on the first query.
+    ///
+    /// `cache_size` is deliberately smaller than the writer's (see
+    /// `reader_cache_size_kib`). `busy_timeout` is kept: a WAL reader does not
+    /// contend for the write lock, but a checkpoint can briefly block it.
+    ///
+    /// **Operational note:** a read-only connection to a WAL database still needs
+    /// the `-shm` file to exist and be writable — SQLite coordinates readers
+    /// through shared memory. The writer holds the database open, so that is
+    /// always true here; it would NOT be true of a genuinely read-only mount.
+    pub fn openReadOnly(path: [:0]const u8) Error!Db {
+        var handle: ?*c.sqlite3 = null;
+        const flags = c.SQLITE_OPEN_READONLY | c.SQLITE_OPEN_NOMUTEX;
+        if (c.sqlite3_open_v2(path.ptr, &handle, flags, null) != c.SQLITE_OK) {
+            if (handle) |h| _ = c.sqlite3_close(h);
+            return error.Open;
+        }
+        const db: Db = .{ .handle = handle.? };
+        errdefer db.close();
+        try db.exec("PRAGMA busy_timeout = 5000;");
+        try db.exec(std.fmt.comptimePrint("PRAGMA cache_size = -{d};", .{reader_cache_size_kib}));
+        // Same 32 MB window as the writer, and cheaper here than it looks: the
+        // kernel page cache holds ONE physical copy of the mapped file across
+        // every connection that maps it, so N readers do not cost N times the
+        // pages. See optimizations.md 7a.
+        try db.exec("PRAGMA mmap_size = 33554432;");
         return db;
     }
 
@@ -266,6 +324,84 @@ test "CursorWatch sees a DELETE issued inside an open cursor, and not one issued
     }
 }
 
+/// Counts row mutations in ONE attached database, for the `read_only` route
+/// audit (`test/http_integration.zig`).
+///
+/// **Why it exists alongside a read-only connection rather than instead of it.**
+/// `SQLITE_OPEN_READONLY` catches a write that is ATTEMPTED and propagated. It
+/// cannot catch one whose failure is swallowed — the lazy index backfill on the
+/// control-plane read paths discards its own error by design, so on a reader it
+/// would answer 200 with quietly degraded data. Armed on the WRITER while the
+/// same routes run, this sees the mutation whichever way it goes.
+///
+/// **`database` is not decoration.** `temp` is per-connection scratch and is
+/// writable even on a read-only connection — `search/fuzzy.zig` tokenizes through
+/// a `temp.token_fold` table on every in-document search, which is a legitimate
+/// write that must not read as a misclassification. Watching `main` alone is the
+/// difference between an audit that means something and one that has to be
+/// switched off.
+pub const WriteWatch = struct {
+    db: Db,
+    /// Which attached database to count mutations in. `temp` and any other
+    /// attachment are ignored.
+    database: []const u8 = "main",
+    mutations: usize = 0,
+    /// The last table mutated, so a failure names something. Truncated, and only
+    /// ever read after `mutations` is non-zero.
+    last_table: [64]u8 = @splat(0),
+    last_len: usize = 0,
+
+    pub fn arm(self: *WriteWatch) void {
+        _ = c.sqlite3_update_hook(self.db.handle, onRow, self);
+    }
+
+    pub fn disarm(self: *WriteWatch) void {
+        _ = c.sqlite3_update_hook(self.db.handle, null, null);
+    }
+
+    pub fn lastTable(self: *const WriteWatch) []const u8 {
+        return self.last_table[0..self.last_len];
+    }
+
+    fn onRow(user: ?*anyopaque, _: c_int, database: [*c]const u8, table: [*c]const u8, _: c.sqlite3_int64) callconv(.c) void {
+        const self: *WriteWatch = @ptrCast(@alignCast(user.?));
+        if (!std.mem.eql(u8, self.database, std.mem.span(database))) return;
+        self.mutations += 1;
+        const t = std.mem.span(table);
+        self.last_len = @min(t.len, self.last_table.len);
+        @memcpy(self.last_table[0..self.last_len], t[0..self.last_len]);
+    }
+};
+
+test "WriteWatch counts mutations in main and ignores the temp scratch a reader may still write" {
+    var db = try Db.openMemory();
+    defer db.close();
+    try db.exec("CREATE TABLE t(k INTEGER);");
+    try db.exec("CREATE TEMP TABLE scratch(k INTEGER);");
+
+    var w: WriteWatch = .{ .db = db };
+    w.arm();
+    defer w.disarm();
+
+    // A pure read moves nothing.
+    {
+        var s = try db.prepare("SELECT COUNT(*) FROM t;");
+        defer s.finalize();
+        _ = try s.step();
+    }
+    try std.testing.expectEqual(@as(usize, 0), w.mutations);
+
+    // `temp` is per-connection scratch — the in-document search tokenizes through
+    // one on every query — so it must NOT read as a write to the database.
+    try db.exec("INSERT INTO temp.scratch(k) VALUES(1),(2);");
+    try std.testing.expectEqual(@as(usize, 0), w.mutations);
+
+    // A real row in `main` does.
+    try db.exec("INSERT INTO t(k) VALUES(1);");
+    try std.testing.expectEqual(@as(usize, 1), w.mutations);
+    try std.testing.expectEqualStrings("t", w.lastTable());
+}
+
 /// Every `Stmt.bind*` routes its SQLite return code through here.
 ///
 /// It ASSERTS rather than returning an error, deliberately. A bind fails for two
@@ -372,6 +508,24 @@ pub const Stmt = struct {
     /// could not tell it from "absent").
     pub fn columnFloatOpt(self: Stmt, col: c_int) ?f64 {
         return if (self.columnIsNull(col)) null else self.columnFloat(col);
+    }
+
+    /// Virtual-machine steps this statement has run since it was prepared or last
+    /// reset — the work SQLite ACTUALLY did, counted rather than timed.
+    ///
+    /// For plan pins. A wall-clock assertion on a query is a flake generator on a
+    /// loaded machine; this counter is deterministic for a given plan and a given
+    /// row set, so a test can say "this must not grow with the library" and mean
+    /// exactly that.
+    ///
+    /// **CUMULATIVE for the statement's lifetime, NOT per-execution.** `reset()`
+    /// does not zero it — `sqlite3VdbeRewind` never touches `aCounter`; only
+    /// `sqlite3_stmt_status`'s own reset flag clears it, which this call does not
+    /// pass. A test that resets and re-steps expecting a fresh count reads the
+    /// running total and passes for the wrong reason. Prepare a new statement per
+    /// measurement, as `sync.zig`'s pin does.
+    pub fn vmSteps(self: Stmt) i64 {
+        return c.sqlite3_stmt_status(self.stmt, c.SQLITE_STMTSTATUS_VM_STEP, 0);
     }
 
     pub fn reset(self: Stmt) void {

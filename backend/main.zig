@@ -71,6 +71,7 @@ test {
     _ = @import("http/byte_range.zig");
     _ = @import("db/sqlite.zig");
     _ = @import("db/schema.zig");
+    _ = @import("db/reader_pool.zig");
     _ = @import("store/blobs.zig");
     _ = @import("store/blob_source.zig");
     _ = @import("store/thumbs.zig");

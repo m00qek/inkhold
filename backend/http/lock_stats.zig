@@ -1,6 +1,7 @@
-//! Per-route hold-time statistics for the one global `db_lock`.
+//! Per-route DB-window statistics: `db_lock` hold times, and the reader-pool
+//! windows that replaced some of them.
 //!
-//! The server serializes every DB touch behind a single mutex (see
+//! The server serializes every write behind a single mutex (see
 //! `transport.dispatchLocked`), so the sustained request ceiling of the whole
 //! process is `1 / mean_hold_time` — one number, set by whichever route holds the
 //! lock longest. That makes the hold time the most load-bearing figure in the
@@ -8,21 +9,44 @@
 //! FTS search differ by orders of magnitude, and a global mean hides the route
 //! that actually sets the ceiling. Hence per-route attribution.
 //!
-//! ## Why this costs nothing, and why that is not an accident
+//! ## A pooled read is still a window, and that is the point
 //!
-//! **Every write here happens while `db_lock` is already held.** `record` is
-//! called from inside the critical section, just before the unlock — so the
-//! mutual exclusion these counters need is the exclusion the caller is already
-//! paying for. No atomics, no second mutex, no sharding. A stats table with a
-//! lock of its own would serialize on precisely the thing being measured and
-//! would report its own contention as the server's.
+//! **The instrumentation that proved the win is the instrumentation the reader
+//! pool invalidates.** A route that moves to a pooled reader stops taking
+//! `db_lock`, so without this it would stop appearing here entirely — "global
+//! search: 3.41 s" would become "global search: absent", which reads like a fix
+//! and is a blind spot. So `recordRead` feeds a pooled read's DURATION into the
+//! same per-route histogram as a lock hold: the distribution answers "what does
+//! this route cost", which is the question, and stays comparable across the
+//! change. What separates the two is counted alongside it (`read_count`), and
+//! `totals` — the *lock* occupancy that sets the ceiling — subtracts the reader
+//! share so it keeps meaning what it says.
 //!
-//! That invariant is the whole safety argument for the plain (non-atomic) fields
-//! below, so it is not negotiable: **`record` may only be called with `db_lock`
-//! held**. `Context.unlockDb` is the single call site, which is what keeps it
-//! true — it records and *then* unlocks. Reads (`summarize`) run from the health
-//! handler, which is an ordinary whole-handler-locked route, so it reads under
-//! the same lock.
+//! ## Why the counters are atomic
+//!
+//! They used to be plain fields, on the strength of one invariant: every write
+//! happened with `db_lock` already held, so the mutual exclusion they needed was
+//! the exclusion the caller was already paying for. A pooled read holds NO lock,
+//! which is its entire purpose, so that argument is gone.
+//!
+//! The replacement is relaxed atomics — but they must be **32-bit** ones, and
+//! that is not a style choice. ARM1176JZF-S is ARMv6, which has no `ldrexd`, so
+//! `@atomicLoad(u64, …)` is a compile error and a `u64` counter cannot be made
+//! atomic on the deployment target AT ALL. The first version of this file used
+//! `u64` and could not be built for the Pi.
+//!
+//! So every field here is `u32`, and the two that would overflow one — the time
+//! TOTALS — are carried as milliseconds plus a microsecond remainder. A read can
+//! land between the two halves of a carry, which costs at most 1 ms of skew on a
+//! cumulative figure: comfortably inside "a figure from a moment ago", and
+//! nothing like the garbage a torn 64-bit read produces on a 32-bit machine.
+//! Deliberately NOT a mutex of the counters' own: it would have to be taken on
+//! the reader path, where a stall waiting on anything shared is exactly what the
+//! pool exists to prevent, and a stats table that serializes reports its own
+//! contention as the server's. Relaxed ordering is right because nothing is
+//! published through these fields — a percentile is a summary, not a
+//! synchronization edge, and the worst a torn read can do is report a figure from
+//! a moment ago.
 //!
 //! ## Why a histogram and not a sample log
 //!
@@ -68,21 +92,110 @@ const min_octave = 4; // 2^4 = 16 = linear_buckets
 
 const bucket_count = linear_buckets + (max_octave - min_octave + 1) * sub_count;
 
-/// One route's accumulated hold times. Plain fields, no atomics — see the
-/// module header: every write happens under `db_lock`.
+/// One route's accumulated DB windows. Plain integer fields, updated with
+/// relaxed atomics — see the module header for why they stopped being able to
+/// rely on `db_lock`.
 pub const Slot = struct {
-    /// Samples recorded. **A sample is one LOCK WINDOW, not one request.** They
-    /// are the same thing for an ordinary route (the lock spans the whole
-    /// handler), but a `manual_db_lock` route contributes several short windows
-    /// per request — the `resolveCaller` session read plus each of the handler's
-    /// own bracketed DB touches. That is deliberate: what contends is a window,
-    /// and the claim those routes make ("the windows are short") is a claim about
-    /// windows.
-    count: u64 = 0,
-    total_ns: u64 = 0,
-    max_ns: u64 = 0,
+    /// Samples recorded. **A sample is one DB WINDOW, not one request.** They are
+    /// the same thing for an ordinary route (the lock spans the whole handler),
+    /// but a `manual_db_lock` route contributes several short windows per request
+    /// — the `resolveCaller` session read plus each of the handler's own
+    /// bracketed DB touches — and a `read_only` route contributes the
+    /// `resolveCaller` lock window PLUS its pooled-reader window. That is
+    /// deliberate: what costs is a window, and the claim those routes make ("the
+    /// windows are short") is a claim about windows.
+    count: u32 = 0,
+    /// Cumulative window time, carried: `total_s * 1000 + total_us`
+    /// microseconds. Two `u32`s rather than one `u64` because of ARMv6 — see the
+    /// header. `total_us` is kept under 1000 by the carry in `addTime`.
+    total_s: u32 = 0,
+    total_ns_rem: u32 = 0,
+    /// A single sample's maximum, in MICROSECONDS. `u32` spans 71 minutes, which
+    /// no single window approaches; nanosecond resolution on a max buys nothing a
+    /// report would show.
+    max_us: u32 = 0,
     buckets: [bucket_count]u32 = @splat(0),
+
+    // ---- the reader-pool share of the above, plus what only it can say ----
+
+    /// How many of `count` ran on a POOLED READER rather than under `db_lock`.
+    /// The subtrahend that keeps `totals` honest about lock occupancy, and the
+    /// field that says whether a `read_only` route is actually being pooled.
+    read_count: u32 = 0,
+    /// How much of `total_ns` those windows account for.
+    read_total_s: u32 = 0,
+    read_total_ns_rem: u32 = 0,
+    /// Time spent BORROWING a reader, summed. Near zero by construction —
+    /// `Pool.acquire` is one CAS and never waits — so this is not the interesting
+    /// number; it is here because a future acquire that ever did block would
+    /// otherwise hide inside the hold time, which is the one place it must not.
+    /// The figure that matters is `fallback_count` below.
+    wait_total_s: u32 = 0,
+    wait_total_ns_rem: u32 = 0,
+    wait_max_us: u32 = 0,
+    /// Reads that found the pool EMPTY and fell back to the writer under
+    /// `db_lock`. Correct, and exactly as slow as before the pool existed — so a
+    /// route whose fallbacks climb is the signal to raise `default_size`, and the
+    /// only way to tell "the pool is sized right" from "the pool is never used".
+    fallback_count: u32 = 0,
 };
+
+/// `p.* +|= v`, atomically. Saturating rather than wrapping for the same reason
+/// the non-atomic version was: a counter that wraps reports a catastrophically
+/// slow route as a fast one.
+fn satAdd(p: *u32, v: u32) void {
+    var cur = @atomicLoad(u32, p, .monotonic);
+    while (true) {
+        cur = @cmpxchgWeak(u32, p, cur, cur +| v, .monotonic, .monotonic) orelse return;
+    }
+}
+
+/// Add `ns` to a carried (seconds, nanosecond-remainder) pair. Carrying at ONE
+/// SECOND keeps the total exact — no rounding at all — which matters because a
+/// total is a sum over many samples and a per-sample truncation would compound.
+/// `u32` seconds spans 136 years.
+///
+/// The two stores are independent, so a reader landing between them sees at most
+/// one second less than the truth on a cumulative figure. That is the cost of
+/// having no 64-bit atomic on the target, and it is what the header means by "a
+/// figure from a moment ago".
+fn addTime(secs: *u32, rem: *u32, ns: u64) void {
+    satAdd(secs, @intCast(@min(ns / std.time.ns_per_s, std.math.maxInt(u32))));
+    const add: u32 = @intCast(ns % std.time.ns_per_s);
+    if (add == 0) return;
+    var cur = @atomicLoad(u32, rem, .monotonic);
+    while (true) {
+        const next = cur +| add;
+        const store: u32 = if (next >= std.time.ns_per_s) next - std.time.ns_per_s else next;
+        cur = @cmpxchgWeak(u32, rem, cur, store, .monotonic, .monotonic) orelse {
+            if (next >= std.time.ns_per_s) satAdd(secs, 1);
+            return;
+        };
+    }
+}
+
+fn nsOf(secs: u32, rem: u32) u64 {
+    return @as(u64, secs) * std.time.ns_per_s + rem;
+}
+
+/// A counter read. Every field above is written with `@atomicRmw` from threads
+/// holding no common lock, so reading one as a plain field would be a data race
+/// in the language even where it is benign on the hardware.
+fn load(p: *const u32) u32 {
+    return @atomicLoad(u32, p, .monotonic);
+}
+
+/// `p.* = @max(p.*, v)`, atomically.
+fn atomicMax(p: *u32, v: u32) void {
+    var cur = @atomicLoad(u32, p, .monotonic);
+    while (cur < v) {
+        cur = @cmpxchgWeak(u32, p, cur, v, .monotonic, .monotonic) orelse return;
+    }
+}
+
+fn usFromNs(ns: u64) u32 {
+    return @intCast(@min(ns / std.time.ns_per_us, std.math.maxInt(u32)));
+}
 
 pub const LockStats = struct {
     /// Indexed by route index; `slots[max_routes]` is the overflow slot shared by
@@ -90,14 +203,45 @@ pub const LockStats = struct {
     /// matched, e.g. a 404's `resolveCaller`).
     slots: [max_routes + 1]Slot = @splat(.{}),
 
-    /// Add one lock-window sample. **Caller must hold `db_lock`.**
+    /// Add one `db_lock` hold sample. Called from `Context.unlockDb` with the
+    /// lock still held.
     pub fn record(self: *LockStats, route_idx: ?usize, ns: u64) void {
-        const i = if (route_idx) |r| @min(r, max_routes) else max_routes;
-        const s = &self.slots[i];
-        s.count += 1;
-        s.total_ns +|= ns;
-        if (ns > s.max_ns) s.max_ns = ns;
-        s.buckets[bucketOf(ns)] +|= 1;
+        _ = self.window(route_idx, ns);
+    }
+
+    /// Add one POOLED READER window: the same duration sample as `record`, plus
+    /// the borrow's own cost and the fact that this window took no lock.
+    ///
+    /// Called from `Context.returnReader` with NO lock held — which is why every
+    /// field it touches is updated atomically.
+    pub fn recordRead(self: *LockStats, route_idx: ?usize, wait_ns: u64, hold_ns: u64) void {
+        const s = self.window(route_idx, hold_ns);
+        satAdd(&s.read_count, 1);
+        addTime(&s.read_total_s, &s.read_total_ns_rem, hold_ns);
+        addTime(&s.wait_total_s, &s.wait_total_ns_rem, wait_ns);
+        atomicMax(&s.wait_max_us, usFromNs(wait_ns));
+    }
+
+    /// Note that a read found the pool empty and used the writer instead. The
+    /// window it then takes is recorded by `record` like any other lock hold, so
+    /// this counts only the DECISION — how often the pool was too small.
+    pub fn recordFallback(self: *LockStats, route_idx: ?usize) void {
+        satAdd(&self.slotOf(route_idx).fallback_count, 1);
+    }
+
+    fn slotOf(self: *LockStats, route_idx: ?usize) *Slot {
+        return &self.slots[if (route_idx) |r| @min(r, max_routes) else max_routes];
+    }
+
+    /// The shared half of `record`/`recordRead`: one duration into the route's
+    /// distribution. Returns the slot so the caller can add its own detail.
+    fn window(self: *LockStats, route_idx: ?usize, ns: u64) *Slot {
+        const s = self.slotOf(route_idx);
+        satAdd(&s.count, 1);
+        addTime(&s.total_s, &s.total_ns_rem, ns);
+        atomicMax(&s.max_us, usFromNs(ns));
+        satAdd(&s.buckets[bucketOf(ns)], 1);
+        return s;
     }
 
     /// A route's summary, or null when it has never been called — an untouched
@@ -105,28 +249,51 @@ pub const LockStats = struct {
     /// read as "measured, and fast".
     pub fn summarize(self: *const LockStats, route_idx: usize) ?Summary {
         const s = &self.slots[@min(route_idx, max_routes)];
-        if (s.count == 0) return null;
+        const count = load(&s.count);
+        if (count == 0) return null;
+        // Back to nanoseconds at the BOUNDARY, so `Summary` and every reader of
+        // it keep the units they always had; the microsecond storage is an
+        // implementation detail forced by the target's atomics, not a change to
+        // what this reports.
+        const max_ns = @as(u64, load(&s.max_us)) * std.time.ns_per_us;
+        const total_ns = nsOf(load(&s.total_s), load(&s.total_ns_rem));
         return .{
-            .count = s.count,
-            .mean_ns = s.total_ns / s.count,
+            .count = count,
+            .mean_ns = total_ns / count,
             // Clamped to the exact max: a bucket's upper bound can exceed the
             // largest sample actually seen, and "p95 = 90 us, max = 89 us" reads
             // as a bug in the table rather than as bucket rounding.
-            .p50_ns = @min(percentile(s, 50), s.max_ns),
-            .p95_ns = @min(percentile(s, 95), s.max_ns),
-            .max_ns = s.max_ns,
+            .p50_ns = @min(percentile(s, 50), max_ns),
+            .p95_ns = @min(percentile(s, 95), max_ns),
+            .max_ns = max_ns,
+            .read_count = load(&s.read_count),
+            .read_total_ns = nsOf(load(&s.read_total_s), load(&s.read_total_ns_rem)),
+            .wait_total_ns = nsOf(load(&s.wait_total_s), load(&s.wait_total_ns_rem)),
+            .wait_max_ns = @as(u64, load(&s.wait_max_us)) * std.time.ns_per_us,
+            .fallback_count = load(&s.fallback_count),
         };
     }
 
-    /// Total samples and total time under the lock, across every route. The
+    /// Total samples and total time **under the lock**, across every route. The
     /// denominator of the ceiling arithmetic: the lock is one resource, so the
     /// aggregate occupancy is what says how much of it is left.
+    ///
+    /// Pooled-reader windows are SUBTRACTED here even though they are counted in
+    /// each slot. They are real work and belong in a route's distribution, but
+    /// they occupy no lock — leaving them in would inflate the one figure that
+    /// exists to answer "how much of the global serialization point is spoken
+    /// for", and would do it by exactly the amount the pool just freed up.
     pub fn totals(self: *const LockStats) struct { count: u64, total_ns: u64 } {
         var count: u64 = 0;
         var total_ns: u64 = 0;
         for (&self.slots) |*s| {
-            count += s.count;
-            total_ns +|= s.total_ns;
+            // Saturating: the two loads are independent, so a `recordRead` that
+            // lands between them can momentarily show a reader share larger than
+            // the count it was counted in. A stat is not worth an underflow.
+            count += load(&s.count) -| load(&s.read_count);
+            const all_ns = nsOf(load(&s.total_s), load(&s.total_ns_rem));
+            const read_ns = nsOf(load(&s.read_total_s), load(&s.read_total_ns_rem));
+            total_ns +|= all_ns -| read_ns;
         }
         return .{ .count = count, .total_ns = total_ns };
     }
@@ -143,6 +310,14 @@ pub const Summary = struct {
     p50_ns: u64,
     p95_ns: u64,
     max_ns: u64,
+    /// The reader-pool share of the figures above (see `Slot`). `read_count == 0`
+    /// on a `read_only` route means it is falling back every time — which is
+    /// correct but is not the feature working.
+    read_count: u64 = 0,
+    read_total_ns: u64 = 0,
+    wait_total_ns: u64 = 0,
+    wait_max_ns: u64 = 0,
+    fallback_count: u64 = 0,
 };
 
 /// The JSON shape the health endpoint emits per route: the summary plus the
@@ -152,11 +327,25 @@ pub const RouteReport = struct {
     method: []const u8,
     path: []const u8,
     manual: bool,
+    /// Whether the route is declared `read_only`, i.e. whether its windows are
+    /// expected to be pooled reads. Alongside `reader_windows` it is what tells
+    /// "this route no longer holds the lock" from "this route stopped being
+    /// called", which are the same absence in a lock-only report.
+    read_only: bool,
     count: u64,
     mean_ns: u64,
     p50_ns: u64,
     p95_ns: u64,
     max_ns: u64,
+    /// How many of `count` ran on a pooled reader, and for how long in total.
+    reader_windows: u64,
+    reader_ns: u64,
+    /// How often the pool was empty and the read used the writer instead. The
+    /// pool-sizing signal.
+    reader_fallbacks: u64,
+    /// Longest single borrow (not hold). Expected to be microseconds; anything
+    /// else means `Pool.acquire` stopped being wait-free.
+    reader_wait_max_ns: u64,
 };
 
 /// Fills `out` with a report row per route that has been called at least once,
@@ -175,11 +364,16 @@ pub fn report(
             .method = @tagName(r.method),
             .path = r.path,
             .manual = r.manual_db_lock,
+            .read_only = r.read_only,
             .count = s.count,
             .mean_ns = s.mean_ns,
             .p50_ns = s.p50_ns,
             .p95_ns = s.p95_ns,
             .max_ns = s.max_ns,
+            .reader_windows = s.read_count,
+            .reader_ns = s.read_total_ns,
+            .reader_fallbacks = s.fallback_count,
+            .reader_wait_max_ns = s.wait_max_ns,
         };
         n += 1;
     }
@@ -212,13 +406,13 @@ fn percentile(s: *const Slot, p: u64) u64 {
     // Ceiling rank: the smallest bucket whose cumulative count reaches p% of the
     // samples. Floor would let p95 of 20 samples land on the 19th, which is p95's
     // whole point missed by one.
-    const target = (s.count * p + 99) / 100;
+    const target = (load(&s.count) * p + 99) / 100;
     var seen: u64 = 0;
-    for (&s.buckets, 0..) |c, i| {
-        seen += c;
+    for (&s.buckets, 0..) |*c, i| {
+        seen += @atomicLoad(u32, c, .monotonic);
         if (seen >= target) return bucketUpper(i);
     }
-    return s.max_ns;
+    return @as(u64, load(&s.max_us)) * std.time.ns_per_us;
 }
 
 // ---- tests ----
@@ -268,10 +462,16 @@ test "summarize: percentiles track the distribution, and an untouched route is a
 
     // A percentile never reads above the largest sample: bucket rounding must not
     // produce a p95 that exceeds a max the same table is reporting.
+    // 2 us, not 1.5: the max is stored in MICROSECONDS. A `u32` of nanoseconds
+    // saturates at 4.29 s, which would silently under-report exactly the windows
+    // that matter most — a 6.1 s reader window has been measured on the Pi — and
+    // ARMv6 has no 64-bit atomic to max with. Sub-microsecond resolution on a
+    // MAX buys nothing: the smallest window this server has ever recorded is
+    // 21 us. The totals beside it stay exact (`addTime` carries at one second).
     var one: LockStats = .{};
-    one.record(9, 1_500);
+    one.record(9, 2_000);
     const s1 = one.summarize(9).?;
-    try testing.expectEqual(@as(u64, 1_500), s1.max_ns);
+    try testing.expectEqual(@as(u64, 2_000), s1.max_ns);
     try testing.expect(s1.p95_ns <= s1.max_ns);
 
     // A different slot is untouched and stays that way.

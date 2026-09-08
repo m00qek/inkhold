@@ -159,6 +159,12 @@ pub const Job = struct {
 /// before the dot — which is exactly the rule that makes a bare `.txt` a
 /// leading-dot name with no extension rather than a text file.
 ///
+/// `ni.txt_index IS NULL` mirrors `needsDerive`'s memo exactly, and for its
+/// reason: the write below is CHUNKED, so `kind = 1` rows exist from the first
+/// commit onwards while the document is still half written. Asking about rows
+/// here — which this query used to do — would call an interrupted write
+/// finished and leave the file half indexed for ever.
+///
 /// The `note_index` join is the ORDER CONTRACT (`txt_index.ensureIndexed`): the
 /// note half heals first, so a blob whose row is missing or stale is not
 /// offered here at all. It becomes visible on a later pass, once that row is
@@ -177,9 +183,7 @@ const txt_tenant: Tenant = .{
     \\   AND LOWER(f.name) LIKE '%_.txt'
     \\   AND ni.index_version = ?1
     \\   AND ni.indexable = 0
-    \\   AND NOT EXISTS (
-    \\         SELECT 1 FROM note_page_index np
-    \\          WHERE np.blob_md5 = f.md5 AND np.kind = 1)
+    \\   AND ni.txt_index IS NULL
     \\ ORDER BY b.size ASC
     \\ LIMIT 1;
     ,
@@ -193,6 +197,13 @@ fn runTxt(job: Job) anyerror!void {
     //
     // `txt_index` itself stays lock-agnostic — it knows about paragraphs, not
     // about threading — so the discipline lives here, where the threading does.
+    //
+    // THE WRITE IS CHUNKED, for the reason `runPdfText` is: a 1,703-segment
+    // document written in one transaction held the global `db_lock` 137 ms on
+    // the dev box and **13.9 s on the Pi** (`mupdf.md` §9.8 measured exactly
+    // this segment write), and `txt_index.max_file_bytes` allows ten times that
+    // many paragraphs. So step 3 becomes reserve / chunk / finish, and the same
+    // parse-off-the-lock, write-under-it discipline is applied per chunk.
 
     // 1. Re-check under the lock. The discovery query said so a moment ago, but
     //    an upload may have healed it since; `needsDerive` is the authority.
@@ -202,15 +213,65 @@ fn runTxt(job: Job) anyerror!void {
     //    with the file and the whole reason this is not on the upload path.
     var d = (try txtindex.deriveStored(job.gpa, job.blobs, job.md5)) orelse return;
     defer d.deinit();
+    const rows = txtindex.rowCount(d);
 
-    // 3. Write under the lock, in ONE transaction. A crash here commits nothing
-    //    and the discovery query simply finds the blob again.
+    // 3. RESERVE, under the lock and in its own transaction: one contiguous run
+    //    of masked rowids per holder, so every chunk below lands at
+    //    `first_rowid + ordinal` however many transactions it takes. Minting per
+    //    chunk instead would let a concurrent ingest's band interleave into the
+    //    middle of this one, and the jump arithmetic library search rests on
+    //    would be gone (`search/maintain.zig`, reserved bands).
+    const bands = blk: {
+        job.lock.lockUncancelable(job.io);
+        defer job.lock.unlock(job.io);
+        if (!try txtindex.needsDerive(job.db, job.md5)) return; // raced while deriving
+        try job.db.exec("BEGIN IMMEDIATE;");
+        errdefer job.db.exec("ROLLBACK;") catch {};
+        const b = try txtindex.reserve(job.gpa, job.db, job.md5, rows, job.now);
+        try job.db.exec("COMMIT;");
+        break :blk b;
+    };
+    defer job.gpa.free(bands);
+
+    // 4. Chunk by chunk, IN READING ORDER, each in its own transaction with the
+    //    lock taken and released around it.
+    //
+    //    Forward from ordinal 0 on purpose: `query.bandStart` collapses a
+    //    document to one hit by jumping to `rowid - ordinal` and finding
+    //    ordinal 0 of the same blob there. Fill from the front and a document
+    //    half-way through its write reports as ONE document, incomplete; fill
+    //    from anywhere else and every paragraph written so far is its own hit,
+    //    crowding the result page for as long as the write takes.
+    var at: usize = 0;
+    while (at < rows) {
+        const end = txtindex.chunkEnd(d, at);
+        job.lock.lockUncancelable(job.io);
+        defer job.lock.unlock(job.io);
+        // STILL OURS TO WRITE? The listing path's lazy heal
+        // (`txt_index.ensureIndexed`) writes the same document, and between two
+        // chunks it can do the whole of it. Its write drops the band this one
+        // reserved, so carrying on would lay a second band over the first.
+        // Cheap — one indexed single-row select — and it is only ever false
+        // because somebody else has already finished the work.
+        if (!try txtindex.needsDerive(job.db, job.md5)) return;
+        try job.db.exec("BEGIN IMMEDIATE;");
+        errdefer job.db.exec("ROLLBACK;") catch {};
+        try txtindex.storeChunk(job.db, job.md5, bands, d, at, end);
+        try job.db.exec("COMMIT;");
+        at = end;
+    }
+
+    // 5. Finish LAST, in its own transaction: the per-document term sets, the
+    //    late-holder repair, and only then the verdict that says this blob's
+    //    paragraphs are indexed. Every early return above leaves the blob
+    //    outstanding, which is safe because a re-run drops the partial band and
+    //    reserves afresh — it never patches holes.
     job.lock.lockUncancelable(job.io);
     defer job.lock.unlock(job.io);
-    if (!try txtindex.needsDerive(job.db, job.md5)) return; // raced while deriving
+    if (!try txtindex.needsDerive(job.db, job.md5)) return;
     try job.db.exec("BEGIN IMMEDIATE;");
     errdefer job.db.exec("ROLLBACK;") catch {};
-    try txtindex.store(job.db, job.md5, d, job.now);
+    try txtindex.finish(job.db, job.md5, bands, d, job.now);
     try job.db.exec("COMMIT;");
 }
 
@@ -703,6 +764,103 @@ test "`pending_sql` and `needsDerive` agree — the two expressions of one predi
 
     try std.testing.expect(!try txtindex.needsDerive(f.db, &md5));
     try std.testing.expectEqual(@as(?Found, null), try nextJob(testing.allocator, f.db));
+}
+
+/// 120 paragraphs, one line each — THREE chunks at `txt_index.chunk_segments`,
+/// so a single job here really does cross two chunk boundaries.
+fn manyParagraphs(a: std.mem.Allocator, n: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (0..n) |i| {
+        if (i != 0) try out.appendSlice(a, "\n\n");
+        try out.print(a, "paragraph {d} rutabaga leaf{d:0>3}", .{ i, i });
+    }
+    return out.items;
+}
+
+test "THE .txt WRITE FILLS IN READING ORDER and records its verdict LAST" {
+    // The shipped driver's write ORDER, asserted against the driver itself
+    // rather than against a test helper that imitates it. Both halves matter
+    // and both are silent when wrong:
+    //
+    //   - **forward from ordinal 0**, because `query.bandStart` needs ordinal 0
+    //     to collapse a document to one hit; a document filled from anywhere
+    //     else reports every written paragraph separately for the duration of
+    //     its own write;
+    //   - **the verdict after every row**, because it is the memo, and a memo
+    //     that lands first calls an interrupted write finished for ever.
+    //
+    // TRIGGERS are the only honest observer of order from outside the
+    // transactions — one records each paragraph row as it lands, the other the
+    // moment the verdict is stamped.
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.db.exec(
+        \\CREATE TABLE probe(seq INTEGER PRIMARY KEY AUTOINCREMENT, ordinal INTEGER);
+        \\CREATE TRIGGER probe_ins AFTER INSERT ON note_page_index WHEN NEW.kind = 1
+        \\BEGIN INSERT INTO probe(ordinal) VALUES(NEW.page_index); END;
+        \\CREATE TRIGGER probe_verdict AFTER UPDATE OF txt_index ON note_index
+        \\WHEN NEW.txt_index IS NOT NULL
+        \\BEGIN INSERT INTO probe(ordinal) VALUES(-1); END;
+    );
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const md5 = try f.put("book.txt", try manyParagraphs(arena.allocator(), 120));
+    f.drain();
+
+    // Reading order, ordinal 0 first — whatever the chunk boundaries were.
+    {
+        var r = (try f.db.row("SELECT ordinal FROM probe ORDER BY seq LIMIT 1;", &.{})).?;
+        defer r.finalize();
+        try std.testing.expectEqual(@as(i64, 0), r.int(0));
+    }
+    {
+        var r = (try f.db.row(
+            "SELECT COUNT(*) FROM probe a JOIN probe b ON b.seq = a.seq + 1 " ++
+                "WHERE a.ordinal >= 0 AND b.ordinal >= 0 AND b.ordinal <> a.ordinal + 1;",
+            &.{},
+        )).?;
+        defer r.finalize();
+        try std.testing.expectEqual(@as(i64, 0), r.int(0)); // never a step back
+    }
+    // And the verdict is the very last thing that happened.
+    {
+        var r = (try f.db.row("SELECT ordinal FROM probe ORDER BY seq DESC LIMIT 1;", &.{})).?;
+        defer r.finalize();
+        try std.testing.expectEqual(@as(i64, -1), r.int(0));
+    }
+
+    // Every paragraph was written exactly once, in however many transactions.
+    try std.testing.expectEqual(@as(i64, 120), try f.segmentCount(&md5));
+    {
+        var r = (try f.db.row(
+            "SELECT COUNT(*), COUNT(DISTINCT ordinal) FROM probe WHERE ordinal >= 0;",
+            &.{},
+        )).?;
+        defer r.finalize();
+        try std.testing.expectEqual(@as(i64, 120), r.int(0));
+        try std.testing.expectEqual(@as(i64, 120), r.int(1));
+    }
+
+    // And what the chunks add up to is ONE contiguous band in ordinal order —
+    // the invariant the reservation exists to keep across those transactions.
+    var s = try f.db.prepare(
+        "SELECT s.id FROM search_partitions sp " ++
+            "JOIN segment_search s ON s.id BETWEEN (sp.id << 48) AND ((sp.id + 1) << 48) - 1 " ++
+            "JOIN note_page_index p ON p.id = s.segment_id " ++
+            "WHERE sp.user_id = 1 AND p.blob_md5 = ?1 ORDER BY p.page_index;",
+    );
+    defer s.finalize();
+    s.bindText(1, &md5);
+    var n: i64 = 0;
+    var first: i64 = 0;
+    while (try s.step()) : (n += 1) {
+        if (n == 0) first = s.columnInt(0);
+        try std.testing.expectEqual(first + n, s.columnInt(0));
+    }
+    try std.testing.expectEqual(@as(i64, 120), n);
+    try std.testing.expect(!try txtindex.needsDerive(f.db, &md5));
+    try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('integrity-check');");
 }
 
 test "a trashed .txt is not offered — the bin is not a work queue" {

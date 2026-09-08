@@ -88,6 +88,14 @@ const HealthVO = struct {
 const DbLockVO = struct {
     /// Lock windows recorded since start. Not requests: a `manual_db_lock` route
     /// contributes several windows per request (`"manual": true` marks them).
+    ///
+    /// **Pooled reads are excluded here and included per route.** A `read_only`
+    /// route runs on its own connection and occupies the lock for nothing but its
+    /// session lookup, so counting its work in the aggregate would overstate the
+    /// one figure that says how much of the global serialization point is left —
+    /// by exactly the amount the reader pool freed. Each route's row still
+    /// reports the work (`reader_windows` / `reader_ns`), because a route whose
+    /// cost stops being visible is a blind spot, not a fix.
     windows: u64,
     /// Total time the lock has been held, summed. `windows / total_held_ns` is
     /// the ceiling in requests per second — the whole point of the endpoint.
