@@ -97,5 +97,6 @@ test {
     _ = @import("handlers/device.zig");
     _ = @import("handlers/controlplane.zig");
     _ = @import("handlers/admin.zig");
+    _ = @import("http/gzip_stitch.zig");
     _ = @import("test/http_integration.zig");
 }
