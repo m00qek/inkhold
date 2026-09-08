@@ -163,8 +163,29 @@ docker-image-host: docker-context
 	docker buildx build --file docker/Dockerfile --load \
 		--build-arg VERSION=$(TAG) --tag $(IMAGE):$(TAG) docker
 
+# THE CPU BASELINE, where the target alone is not specific enough.
+#
+# `arm-linux-musleabihf` defaults to ARMv7 with VFPv3, and the oldest machine
+# this project advertises -- the Pi 1 B+ and the original Zero, which every ARM
+# measurement in this repo was taken on -- is an ARM1176: ARMv6, VFPv2. The
+# default artifact therefore died on the hardware it was built for with
+# `Illegal instruction`, VERIFIED on the real board before and after this line
+# existed. Nothing warns you: the ELF loads, the first NEON-era instruction
+# faults, and the exit code is 132.
+#
+# The cost is real and is accepted deliberately: an ARMv6 binary gives up
+# ARMv7's instructions on a Pi 2 or a 32-bit Pi 3/4. Those machines have a
+# 64-bit artifact (`aarch64-linux-musl`) and, on a 32-bit OS, still run this
+# one -- ARMv6 code runs on every later ARM. An ARMv7 build runs on NONE of the
+# older ones, so this is the direction that loses nobody.
+#
+# Empty for every other target: `x86_64-linux-musl` and friends have a baseline
+# that already matches what they claim.
+CPU_arm-linux-musleabihf = arm1176jzf_s
+ZIG_CPU = $(if $(CPU_$(TARGET)),-Dcpu=$(CPU_$(TARGET)))
+
 release-artifact: $(WEB)/node_modules/.package-lock.json
-	zig build -Doptimize=ReleaseSafe -Dtarget=$(TARGET)
+	zig build -Doptimize=ReleaseSafe -Dtarget=$(TARGET) $(ZIG_CPU)
 	npm --prefix $(WEB) run build
 	mkdir -p release-tmp/webapp
 	cp zig-out/bin/inkhold release-tmp/
