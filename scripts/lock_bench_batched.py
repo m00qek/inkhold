@@ -129,6 +129,13 @@ def discover(c):
 # Terms chosen by measured document frequency in the seeded corpus, because an
 # FTS timing is meaningless without saying how selective the query was. See the
 # report: rank-1 matches ~100% of pages, the tail ~0.1%.
+#
+# Selectivity here is stated per ACCOUNT, but because `phase_search` sends a
+# prefix term (see its docstring) what these timings actually track is the term's
+# posting count across the WHOLE index, not the caller's share of it — MEASURED
+# at ~30 us per whole-index posting, linear (docs/scratch/search-baseline.md
+# §3b). The classes still order correctly; the reason they do is not the one the
+# names suggest.
 SEARCH_TERMS = {
     "ubiquitous": ["reuniao"],        # ~100% of pages
     "common": ["meeting"],            # ~33%
@@ -171,7 +178,27 @@ def phase_note(c, folders, notes, rounds, rng):
 
 
 def phase_search(c, folders, notes, rounds, rng, term_class="mid"):
-    """Library-wide FTS at ONE selectivity, so the histogram is attributable."""
+    """Library-wide FTS at ONE selectivity, so the histogram is attributable.
+
+    THIS IS A PREFIX BENCHMARK, and every global-search figure this script has
+    ever produced is a prefix figure. The `q=` below carries NO TRAILING SPACE,
+    and the server reads a trailing space as "the user finished this word"
+    (`isStillTyping`, backend/services/search/query.zig); without one the last
+    token becomes an FTS5 prefix term. So `q=reuniao` measures `reuniao*`, not
+    `reuniao`.
+
+    That is the RIGHT query to measure — the SPA trims on both sides of its own
+    boundary, so a prefix term is the only kind a browser can send (see
+    docs/scratch/search-baseline.md). Keep it. But it must not be confused with
+    the completed-term cost, because on the Pi the two differ by 10.0x: 810.3 ms
+    p50 here against 80.6 ms for the same page with the term completed, of which
+    95% is FTS posting expansion. Anything in optimizations.md or
+    run-on-rpi-32bit.md that came through this script is the left-hand number.
+
+    Appending a space (`q=reuniao+`) would measure the other query. Do that in a
+    separate class rather than by editing this one, or the historical series
+    stops being comparable with itself.
+    """
     terms = SEARCH_TERMS[term_class]
     for _ in range(rounds):
         c.request("GET", f"/api/controlplane/search?q={quote(rng.choice(terms))}&limit=20")

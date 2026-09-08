@@ -18,6 +18,23 @@
 //! FTS5 pushes both bounds into its index (the pinned `M1><` plan), so a
 //! search costs what YOUR library costs, not what the install costs.
 //!
+//! **That last sentence is VERIFIED for a COMPLETED term and MEASURED FALSE for
+//! a PREFIX one** — and the SPA only ever sends prefix terms, so both halves
+//! have to be stated (`docs/scratch/search-baseline.md` §3a/§3c, on the Pi).
+//! Completed, cost is flat in density exactly as claimed: `bracarento7880` (10
+//! postings in the caller's partition) and `reuniao` (4,588) cost the same
+//! 80-odd ms page. Prefix, the SAME term at the SAME page size costs **627.0 ms
+//! for the owner at the TOP of the rowid space and 808.9 ms for the owner at the
+//! BOTTOM** — a 29 % spread made entirely of other people's postings, falling
+//! ~60 ms per partition of ~4,500 postings that no longer has to be passed.
+//! `ORDER BY rowid DESC` starts at the global maximum and walks DOWN into the
+//! caller's bracket, and `segment_fts` carries no `prefix=` option
+//! (`db/schema.zig`), so there is no prefix index to seek in. The mask bounds
+//! the ANSWER; it does not bound the expansion the scan does on the way to it.
+//! The failure mode, named because the sentence above invites it: read
+//! unconditionally, it promises that a housemate's 50,000 pages cannot slow your
+//! search — and for the query the browser actually sends, they do.
+//!
 //! ## The join is the security boundary — and the package is what guards it
 //!
 //! MASK FOR SPEED, JOIN FOR CORRECTNESS. The partition range only scopes the
@@ -59,6 +76,16 @@ const foldTerms = fuzzy.foldTerms;
 const maintain = @import("maintain.zig");
 const fts_predicate = maintain.fts_predicate;
 
+/// THE `.mark` PAIRING RULE, borrowed rather than rewritten. `files.zig` owns it
+/// (`Files.hidePairedMark`) because that is where a pair is HIDDEN from a listing
+/// and CARRIED through trash/restore/purge/move, and those two must admit exactly
+/// the same set. Search is the third listing and was the one that never got it:
+/// `backlog.md`'s "a paired `.pdf.mark` still appears in search as a file of its
+/// own" is this constant's only reason to exist. A second copy of the predicate
+/// here is how the two would drift, which is precisely the bug the generator was
+/// written to prevent.
+const hide_paired_mark = @import("../files.zig").Files.hidePairedMark("f", "0");
+
 /// Default and maximum number of DOCUMENTS one library-wide search returns —
 /// deliberately the SAME number: results are a keyset-paginated stream (see
 /// `Results.cursor`), so a bigger first page buys nothing that "more" does not,
@@ -74,10 +101,25 @@ const fts_predicate = maintain.fts_predicate;
 /// a path and an excerpt, so ten of them is already more than a phone screen
 /// holds — a larger page is scrolling nobody asked for, and "more" is one tap.
 /// It is also the cheapest lever available on search cost, which is LINEAR in
-/// this number (~85 ms per document on the Pi, `search-single-scan.md` §1):
-/// halving the page halves the query. That is a smaller page rather than a
-/// cheaper one, and it does not replace the single-scan fix — it just costs
-/// nothing to have in the meantime.
+/// this number: halving the page halves the query. That is a smaller page rather
+/// than a cheaper one, and it does not replace the single-scan fix — it just
+/// costs nothing to have in the meantime.
+///
+/// **The slope, MEASURED on the Pi** (`docs/scratch/search-baseline.md`
+/// §3a/§3c). This comment used to say "~85 ms per document"; that figure is real
+/// but it is not the per-document cost of the page described here:
+///
+///   * **completed term — 9.5 ms + 7.1 ms per document**;
+///   * **prefix term — 73 ms + 73.5 ms per document.**
+///
+/// The ~85 ms came from `scripts/lock_bench_batched.py`, which sends
+/// `?q=reuniao` with NO trailing space, so it was always the PREFIX slope — and
+/// so is every historical HTTP figure for global search in `optimizations.md`
+/// and `run-on-rpi-32bit.md`. The lever is real under either query, because the
+/// prefix expansion is charged once per seek and a page pays `limit + 1` seeks.
+/// What the old sentence got wrong is the MECHANISM: it attributed to the page
+/// size a cost that is ~90 % the prefix expansion. Anyone reasoning "10
+/// documents × 85 ms" about a completed query is wrong by an order of magnitude.
 pub const default_limit: i64 = 10;
 pub const max_limit: i64 = default_limit;
 
@@ -276,7 +318,28 @@ fn fromWhere(comptime files_access: []const u8) []const u8 {
 /// dropped or renamed this statement fails to prepare, loudly, at startup rather
 /// than quietly getting slow. That is the intended trade and `schema.zig` says
 /// so where the index is defined.
-const search_from_where = fromWhere(" INDEXED BY files_md5");
+///
+/// ## And the pairing rule, which only the LIBRARY-WIDE read applies
+///
+/// A `.mark` is a layer of the document beside it, not a document: the library
+/// listing, `childCount`, `liveSubtreeCount` and the bin all fold it away, and
+/// this read is the third listing — it was returning `Trip notes.pdf.mark` as a
+/// hit of its own, a file the household has never been shown and cannot open.
+/// `hide_paired_mark` is `files.zig`'s own generator, parameterised on this
+/// clause's `f` alias.
+///
+/// **NOT on `scoped_from_where`, deliberately.** An in-document search is scoped
+/// by an id the caller already holds; if something did open a mark, finding text
+/// inside the thing you are looking at is not the leak. This is a LISTING filter,
+/// and it belongs on the reads that produce listings.
+///
+/// It costs nothing measurable here: the `EXISTS` fires only for a row whose name
+/// ends in `.mark`, and every row reaching it has already survived the FTS scan
+/// and the `files_md5` seek. Two pins guard it — the one below checks the
+/// sibling seek is indexed, and the older "both partition bounds are pushed into
+/// the FTS index" pin reads THIS statement, so a clause that talked the planner
+/// out of `M1><` or off `files_md5` fails there.
+const search_from_where = fromWhere(" INDEXED BY files_md5") ++ hide_paired_mark;
 
 /// The IN-DOCUMENT clause: the same one, with the access path left to the
 /// planner — because for these reads the planner is right and `files_md5` would
@@ -450,6 +513,19 @@ const DocPage = struct {
     /// generator, while this counter is deterministic for a given plan and a
     /// given row set (`sqlite.Stmt.vmSteps`). Two `sqlite3_stmt_status` reads
     /// per page is not a cost worth guarding with a build flag.
+    ///
+    /// **IT IS BLIND TO FTS PREFIX EXPANSION, WHICH IS 95 % OF THE REAL PAGE.**
+    /// MEASURED on the Pi (`docs/scratch/search-baseline.md` §3b): `reuniao `
+    /// completed and `reuniao` as a prefix cost **exactly 1,129 steps each**, in
+    /// every one of eleven term/depth/owner configurations — while the wall
+    /// clock is **80.6 ms and 810.3 ms, 10.0×**. The work happens inside the
+    /// virtual table's own `xFilter`/`xNext`, which is ONE VM step however much
+    /// it does. So this counter remains exactly what it is used for — a
+    /// deterministic statement about WHICH PLAN ran over WHICH ROW SET, and the
+    /// pins built on it stand — but it is not a cost metric, and the failure
+    /// mode is concrete because it has already happened: concluding "steps
+    /// unchanged ⇒ cost unchanged". Only a wall clock on the target
+    /// (`backend/search_bench.zig`, `zig build bench`) answers that.
     vm_steps: i64,
 };
 
@@ -502,6 +578,21 @@ fn collectDocs(
         // — and asking for two costs one spare `snippet()` per document, where a
         // `want`-sized fetch would generate (and discard) a page's worth for
         // every document on the page.
+        //
+        // WHAT THE SPARE SNIPPET COSTS, MEASURED, so that removing it is not
+        // re-proposed as a win (`docs/scratch/search-baseline.md` §4c): a
+        // ten-document page scans 21 rows and SQLite computes 21 snippets, of
+        // which 11 are thrown away. On the Pi that is **7.9 ms of an 81 ms
+        // completed page (9.9 %)** and **12.7 ms of an 810 ms prefix page
+        // (1.6 %)** — real and reproducible (two independent methods agree to
+        // 0.4 %, and it is 6x the noise floor), simply the wrong order of
+        // magnitude to matter. It also does NOT halve the scan, which is the
+        // second thing intuition gets wrong here: it removes 10 of 21 rows and
+        // saves 9.9 %, because the seek that positions the cursor at the band is
+        // paid once per document whatever the LIMIT is, and that seek is 54 % of
+        // the completed page and 95 % of the prefix one. And with a single row
+        // the loop cannot detect fanout at all, so the one-row variant is a COST
+        // PROBE in the bench, never a candidate design.
         const rows = try sc.rows(arena, lo, hi, 2);
         if (rows.len == 0) return .{ .kept = kept.items, .any = any, .more = false, .next = 0, .vm_steps = sc.steps() };
         any = true;
@@ -641,12 +732,20 @@ fn noHits(db: sqlite.Db, user_id: u64, query: []const u8, used_fuzzy: bool) !Res
 /// a note with no page row carrying finished recognition text. Same predicate
 /// constant as the index sync, so the two cannot drift into disagreeing about
 /// which pages count.
+///
+/// **And a paired `.mark` is not one of the user's files** (`hide_paired_mark`,
+/// the same rule the hit query now applies). A mark IS a `.note` container, so
+/// the indexer calls it indexable and it landed in this count — always on the
+/// unsearchable side, because ink carries no recognised text. The empty state
+/// reads this out as a sentence: "N of your M files have no recognised text",
+/// over a file the household has never seen in any listing. Both halves of the
+/// fraction were wrong.
 const coverage_sql =
     "SELECT COUNT(*), SUM(CASE WHEN EXISTS (" ++
     "SELECT 1 FROM note_page_index WHERE blob_md5 = f.md5 AND recogn_status = 1 AND " ++ fts_predicate ++
     ") THEN 0 ELSE 1 END) " ++
     "FROM files f " ++
-    "WHERE f.user_id = ?1 AND f.deleted = 0 AND f.is_folder = 0 " ++
+    "WHERE f.user_id = ?1 AND f.deleted = 0 AND f.is_folder = 0" ++ hide_paired_mark ++ " " ++
     "AND EXISTS (SELECT 1 FROM note_index WHERE blob_md5 = f.md5 AND indexable = 1);";
 
 fn coverageOf(db: sqlite.Db, user_id: u64) !Coverage {
@@ -754,6 +853,528 @@ fn hitsOf(arena: std.mem.Allocator, rows: []const Row) ![]const Hit {
     for (rows, hits) |r, *h| h.* = r.hit;
     return hits;
 }
+
+// ---------------------------------------------------------------------------
+// MEASUREMENT INSTRUMENTATION — not a production path
+// ---------------------------------------------------------------------------
+
+/// BENCH ONLY, driven by `backend/bench/search_bench.zig` (`zig build bench`).
+/// **Nothing in the server reaches this**: no route, no handler and no other
+/// module names it, and it changes no behaviour of anything above — it is here
+/// rather than in the bench executable purely because the thing being measured
+/// (`collectDocs`, `Scan`, `search_sql`, `bandStart`) is file-private, and a
+/// copy of it living somewhere else would measure a copy.
+///
+/// It answers two questions the `WORK PIN` test cannot: what one page of the
+/// document stream costs in WALL CLOCK on the deployment target, and where
+/// inside a document that time goes. See `docs/scratch/search-baseline.md`.
+pub const bench = struct {
+    /// What one page of the document stream cost, as the loop itself saw it.
+    pub const Page = struct {
+        /// Documents kept (`kept.len` minus fanout duplicates).
+        docs: usize,
+        /// Rows kept — more than `docs` only through fanout.
+        rows: usize,
+        /// `DocPage.vm_steps`: both statements, the whole walk.
+        vm_steps: i64,
+        /// How many of those rows would have fired `bandStart`'s validation
+        /// lookup — a head row whose `page_index` is not 0.
+        band_lookups: usize,
+        /// Rows beyond one per document: how often fanout actually fired.
+        fanouts: usize,
+        /// Serialized excerpt weight, post-escaping — what the wire carries.
+        snippet_bytes: usize,
+        more: bool,
+        next: i64,
+        cursor: ?[]const u8,
+    };
+
+    /// One page, through the REAL `collectDocs` on the REAL statements. The query
+    /// is read exactly as `searchPages` reads it, trailing space and all — so a
+    /// term WITHOUT one is the per-keystroke PREFIX search, as on the wire.
+    pub fn page(
+        arena: std.mem.Allocator,
+        io: std.Io,
+        db: sqlite.Db,
+        user_id: u64,
+        raw_query: []const u8,
+        want: usize,
+        cursor: ?[]const u8,
+    ) !Page {
+        const bounds = try boundsOf(db, user_id, cursor);
+        const match = (try buildMatch(arena, raw_query, isStillTyping(raw_query))) orelse return error.EmptyQuery;
+        const p = try collectDocs(arena, db, match, user_id, bounds.lo, bounds.hi, want, Marks.init(io));
+
+        var docs: usize = 0;
+        var band_lookups: usize = 0;
+        var snippet_bytes: usize = 0;
+        var last: i64 = -1;
+        for (p.kept) |r| {
+            snippet_bytes += r.hit.snippet.len;
+            if (r.seg_rowid == last) continue;
+            last = r.seg_rowid;
+            docs += 1;
+            // `bandStart` short-circuits on page 0 and only then pays for
+            // `band_start_sql`; everything else it can decide by arithmetic.
+            if (r.hit.pageIndex > 0 and r.seg_rowid - r.hit.pageIndex >= bounds.lo) band_lookups += 1;
+        }
+        return .{
+            .docs = docs,
+            .rows = p.kept.len,
+            .vm_steps = p.vm_steps,
+            .band_lookups = band_lookups,
+            .fanouts = p.kept.len - docs,
+            .snippet_bytes = snippet_bytes,
+            .more = p.more,
+            .next = p.next,
+            .cursor = if (p.more and p.kept.len > 0) try encodeCursor(arena, p.next) else null,
+        };
+    }
+
+    /// The `[lo, hi]` bracket `searchPages` would scan, cursor folded in.
+    fn boundsOf(db: sqlite.Db, user_id: u64, cursor: ?[]const u8) !struct { lo: i64, hi: i64 } {
+        const part = (try partition.active(db, user_id)) orelse return error.NoPartition;
+        const lo = partition.base(part);
+        var hi = partition.last(part);
+        if (cursor) |c| {
+            const rid = decodeCursor(c) orelse return error.InvalidCursor;
+            if (partition.partitionOf(rid) != part) return error.InvalidCursor;
+            hi = @min(hi, rid - 1);
+        }
+        return .{ .lo = lo, .hi = hi };
+    }
+
+    /// One `sc.rows()` call the loop made, recorded so every VARIANT below can
+    /// replay the IDENTICAL sequence of seeks. Without this a variant would be
+    /// measured on its own walk and the difference would include the walk.
+    pub const Seek = struct { lo: i64, hi: i64, limit: i64 };
+
+    /// One `bandStart` validation lookup the loop made.
+    pub const BandProbe = struct { candidate: i64, md5: []const u8 };
+
+    /// The loop's exact I/O trace: the seeks it issued, in order, and the band
+    /// lookups it fired. Produced by replaying `collectDocs`' own logic.
+    pub const Trace = struct { seeks: []const Seek, bands: []const BandProbe };
+
+    /// Re-walks the document loop recording what it asked for. Byte-identical
+    /// logic to `collectDocs` — deliberately a transcription rather than a call,
+    /// because what is wanted is the loop's REQUESTS, which it does not report.
+    /// The bench asserts the transcription's `vm_steps` equals the real one, so
+    /// a drift between the two is a failed run rather than a quiet lie.
+    pub fn trace(
+        arena: std.mem.Allocator,
+        io: std.Io,
+        db: sqlite.Db,
+        user_id: u64,
+        raw_query: []const u8,
+        want: usize,
+        cursor: ?[]const u8,
+        vm_steps: *i64,
+    ) !Trace {
+        const bounds = try boundsOf(db, user_id, cursor);
+        const match = (try buildMatch(arena, raw_query, isStillTyping(raw_query))) orelse return error.EmptyQuery;
+        var sc = try Scan.open(db, match, user_id, Marks.init(io));
+        defer sc.close();
+
+        var seeks: std.ArrayList(Seek) = .empty;
+        var bands: std.ArrayList(BandProbe) = .empty;
+        var hi = bounds.hi;
+        var docs: usize = 0;
+        while (docs < want) : (docs += 1) {
+            try seeks.append(arena, .{ .lo = bounds.lo, .hi = hi, .limit = 2 });
+            const rows = try sc.rows(arena, bounds.lo, hi, 2);
+            if (rows.len == 0) break;
+            const head = rows[0];
+            if (rows.len > 1 and rows[1].seg_rowid == head.seg_rowid) {
+                try seeks.append(arena, .{ .lo = head.seg_rowid, .hi = head.seg_rowid, .limit = max_fanout });
+                _ = try sc.rows(arena, head.seg_rowid, head.seg_rowid, max_fanout);
+            }
+            const candidate = head.seg_rowid - head.hit.pageIndex;
+            var band = head.seg_rowid;
+            if (head.hit.pageIndex >= 0 and candidate >= bounds.lo) {
+                if (candidate == head.seg_rowid) {
+                    band = candidate;
+                } else {
+                    try bands.append(arena, .{ .candidate = candidate, .md5 = head.blob_md5 });
+                    if (try sc.isBandStart(candidate, head.blob_md5)) band = candidate;
+                }
+            }
+            hi = band - 1;
+            if (hi < bounds.lo) break;
+        }
+        if (docs >= want) {
+            try seeks.append(arena, .{ .lo = bounds.lo, .hi = hi, .limit = 1 });
+            _ = try sc.rows(arena, bounds.lo, hi, 1);
+        }
+        vm_steps.* = sc.steps();
+        return .{ .seeks = seeks.items, .bands = bands.items };
+    }
+
+    /// The scan statements the decomposition compares. Only the SNIPPET column
+    /// and the join set change; the FROM/WHERE/ORDER BY/LIMIT and therefore the
+    /// pinned `M1><` pushdown are the same in all but `fts_only`.
+    pub const Variant = enum {
+        /// `search_sql` exactly as production runs it, escaping included.
+        prod,
+        /// `search_sql`, but the excerpt is duped rather than `escapeSnippet`d
+        /// — `prod` minus this is the Zig-side escaping.
+        raw_snippet,
+        /// `search_sql` with `snippet(...)` replaced by `''`. `raw_snippet`
+        /// minus this is what SQLite's `snippet()` costs.
+        no_snippet,
+        /// The FTS posting seek ALONE: no `segment_search`, no
+        /// `note_page_index`, no `files`. `no_snippet` minus this is the
+        /// four-way join.
+        fts_only,
+        /// `search_sql` again, but every seek's `LIMIT` clamped to 1 — the
+        /// counterfactual in which the loop does NOT over-fetch the spare row
+        /// it uses to detect fanout. `prod` minus this is what the spare row
+        /// costs, snippet included. It is a COST probe, not a proposal: with
+        /// one row the loop could not detect fanout at all.
+        prod_one_row,
+    };
+
+    fn variantSql(comptime v: Variant) []const u8 {
+        return switch (v) {
+            .prod, .raw_snippet, .prod_one_row => search_sql,
+            .no_snippet =>
+            \\SELECT f.id, f.name, p.page_index,
+            \\       '',
+            \\       p.id, s.id, f.updated_at, p.kind, p.blob_md5
+            ++ "\n" ++ search_from_where ++ "\n" ++
+                \\ ORDER BY segment_fts.rowid DESC
+                \\ LIMIT ?5;
+            ,
+            .fts_only =>
+            \\SELECT segment_fts.rowid
+            \\  FROM segment_fts
+            \\ WHERE segment_fts MATCH ?1
+            \\   AND segment_fts.rowid BETWEEN ?2 AND ?3
+            \\ ORDER BY segment_fts.rowid DESC
+            \\ LIMIT ?5;
+            ,
+        };
+    }
+
+    /// Replays `seeks` through one variant statement and returns its VM steps.
+    /// Every variant sees the SAME bounds in the SAME order, so the difference
+    /// between two of them is the column work and nothing else.
+    pub fn replay(
+        arena: std.mem.Allocator,
+        io: std.Io,
+        db: sqlite.Db,
+        user_id: u64,
+        raw_query: []const u8,
+        comptime v: Variant,
+        seeks: []const Seek,
+    ) !i64 {
+        const match = (try buildMatch(arena, raw_query, isStillTyping(raw_query))) orelse return error.EmptyQuery;
+        const marks = Marks.init(io);
+        var s = try db.prepare(variantSql(v));
+        defer s.finalize();
+        s.bindText(1, match);
+        // A variant that drops a column drops its parameters with it, and
+        // `bindText` asserts on an index the statement does not have.
+        if (v != .fts_only) s.bindInt(4, @intCast(user_id));
+        if (v != .no_snippet and v != .fts_only) {
+            s.bindText(6, &marks.open);
+            s.bindText(7, &marks.close);
+        }
+
+        for (seeks) |k| {
+            s.reset();
+            s.bindInt(2, k.lo);
+            s.bindInt(3, k.hi);
+            s.bindInt(5, if (v == .prod_one_row) @min(k.limit, 1) else k.limit);
+            while (try s.step()) {
+                if (v == .fts_only) {
+                    std.mem.doNotOptimizeAway(s.columnInt(0));
+                    continue;
+                }
+                // The same materialization `Scan.rows` does, so a variant is
+                // never cheaper merely because the bench skipped the copying.
+                const row: Row = .{
+                    .hit = .{
+                        .noteId = try std.fmt.allocPrint(arena, "{d}", .{s.columnInt(0)}),
+                        .noteName = try arena.dupe(u8, s.columnText(1)),
+                        .pageIndex = s.columnInt(2),
+                        .snippet = if (v == .prod)
+                            try escapeSnippet(arena, s.columnText(3), marks)
+                        else
+                            try arena.dupe(u8, s.columnText(3)),
+                        .kind = if (s.columnInt(7) == 0) null else s.columnInt(7),
+                    },
+                    .page_id = s.columnInt(4),
+                    .seg_rowid = s.columnInt(5),
+                    .updated_at = s.columnInt(6),
+                    .blob_md5 = try arena.dupe(u8, s.columnText(8)),
+                };
+                std.mem.doNotOptimizeAway(row.seg_rowid);
+            }
+        }
+        return s.vmSteps();
+    }
+
+    /// Replays only `bandStart`'s validation lookups — the `band_start_sql`
+    /// half of the loop, isolated.
+    pub fn replayBands(db: sqlite.Db, bands: []const BandProbe) !i64 {
+        var s = try db.prepare(band_start_sql);
+        defer s.finalize();
+        for (bands) |b| {
+            s.reset();
+            s.bindInt(1, b.candidate);
+            s.bindText(2, b.md5);
+            std.mem.doNotOptimizeAway(try s.step());
+        }
+        return s.vmSteps();
+    }
+
+    /// What one ZERO-HIT library-wide search costs, phase by phase. Feeds
+    /// `docs/scratch/wasm-fuzzy-bench.md`; `search-baseline.md` §7 records this
+    /// whole shape as UNMEASURED because every query it timed returned hits on
+    /// the primary pass, so `buildFuzzyMatch` never ran.
+    pub const Fuzzy = struct {
+        /// The unwidened `collectDocs` — the pass that has to come back empty
+        /// before anything below it is paid for at all.
+        primary_ns: u64,
+        /// `buildFuzzyMatch` with `.corpus`: the WHOLE-VOCABULARY SCAN plus the
+        /// per-token fold that precedes it. This is the term the scaling
+        /// assumption in `fuzzy.zig` is about.
+        scan_ns: u64,
+        /// `collectDocs` again on the widened expression — the re-MATCH.
+        rematch_ns: u64,
+        /// `rankExactFirst` over whatever the re-MATCH returned.
+        rank_ns: u64,
+        /// Wall clock across all four, so the parts can be checked against the
+        /// whole rather than assumed to add up.
+        total_ns: u64,
+        /// Whether an expansion was produced at all. False means the fallback
+        /// found nothing to offer and `searchPages` returns without re-running.
+        expanded: bool,
+        /// Vocabulary terms spliced into the expression.
+        alts: usize,
+        /// Bytes of MATCH expression the re-MATCH had to parse.
+        match_len: usize,
+        /// Rows the widened search kept.
+        widened_rows: usize,
+    };
+
+    /// The zero-hit path, run for real with a clock between its phases. Errors
+    /// with `error.NotZeroHit` when the primary pass finds something — a query
+    /// that hits never reaches the fallback, so timing it would be a lie.
+    pub fn fuzzyPage(
+        arena: std.mem.Allocator,
+        io: std.Io,
+        db: sqlite.Db,
+        user_id: u64,
+        raw_query: []const u8,
+        want: usize,
+    ) !Fuzzy {
+        const query = try arena.dupe(u8, trimQuery(raw_query));
+        const still_typing = isStillTyping(raw_query);
+        const match = (try buildMatch(arena, query, still_typing)) orelse return error.EmptyQuery;
+        const marks = Marks.init(io);
+        const bounds = try boundsOf(db, user_id, null);
+
+        const t0 = std.Io.Clock.awake.now(io);
+        const first = try collectDocs(arena, db, match, user_id, bounds.lo, bounds.hi, want, marks);
+        const t1 = std.Io.Clock.awake.now(io);
+        if (first.any) return error.NotZeroHit;
+
+        const expansion = try buildFuzzyMatch(arena, db, query, still_typing, max_fuzzy_terms, .corpus);
+        const t2 = std.Io.Clock.awake.now(io);
+
+        var rematch_ns: u64 = 0;
+        var rank_ns: u64 = 0;
+        var alts: usize = 0;
+        var match_len: usize = 0;
+        var widened_rows: usize = 0;
+        if (expansion) |e| {
+            alts = e.alts.len;
+            match_len = e.match.len;
+            const w = try collectDocs(arena, db, e.match, user_id, bounds.lo, bounds.hi, want, marks);
+            const t3 = std.Io.Clock.awake.now(io);
+            widened_rows = w.kept.len;
+            displaySort(w.kept);
+            try rankExactFirst(arena, db, query, still_typing, bounds.lo, bounds.hi, w.kept);
+            const t4 = std.Io.Clock.awake.now(io);
+            rematch_ns = @intCast(t2.durationTo(t3).toNanoseconds());
+            rank_ns = @intCast(t3.durationTo(t4).toNanoseconds());
+        }
+        const tend = std.Io.Clock.awake.now(io);
+
+        return .{
+            .primary_ns = @intCast(t0.durationTo(t1).toNanoseconds()),
+            .scan_ns = @intCast(t1.durationTo(t2).toNanoseconds()),
+            .rematch_ns = rematch_ns,
+            .rank_ns = rank_ns,
+            .total_ns = @intCast(t0.durationTo(tend).toNanoseconds()),
+            .expanded = expansion != null,
+            .alts = alts,
+            .match_len = match_len,
+            .widened_rows = widened_rows,
+        };
+    }
+};
+
+/// BENCH ONLY, driven by `backend/indoc_bench.zig` (`zig build indoc-bench`).
+/// **Nothing in the server reaches this**: no route, no handler and no other
+/// module names it, and it changes no behaviour of anything above.
+///
+/// It exists to cost `client-side-search-impl.md` §7.3 — whether the two live
+/// in-doc reads (`searchNotePages`, `searchTxtSegments`) could adopt
+/// `searchHistoryPages`' shape and stop reading `segment_fts`, which is what
+/// makes phase 2's deletion reachable without any client work. The scan shape
+/// itself is `searchHistoryPages`, already public and already shipped; what is
+/// here is only what that function cannot answer on its own:
+///
+///   * `scanTxt` — the same scan with the `kind = 1` filter the `.txt` read
+///     needs. `searchHistoryPages` has none (a `.note` blob holds only kind-0
+///     rows), so pointing it at a `.txt` would count the whole-document row as
+///     well as the paragraphs and answer a different question.
+///   * `scanStepped` — the same answer with the rows STEPPED rather than
+///     accumulated, to establish whether the whole-document arena the scan
+///     holds is structural or an implementation detail. The shipped comment in
+///     `searchHistoryPages` asserts the rows must be collected first; this is
+///     the experiment that says whether that is true.
+///
+/// Both report a summary rather than the rows, because the bench compares
+/// COUNTS (its fidelity gate) and times, not wire shapes.
+pub const indoc_bench = struct {
+    /// What one scan found, in the terms both shapes can be compared on.
+    pub const Scanned = struct {
+        /// Rows the outer `SELECT` returned — the pages the scan READ, which is
+        /// the whole document and the reason the shape is in question.
+        rows_read: usize,
+        /// Bytes of `text` those rows carried — the scan's input size.
+        text_bytes: usize,
+        /// Pages with at least one match — the answer, comparable to a drained
+        /// `searchNotePages` stream's page count.
+        pages: usize,
+        /// Word instances matched across them — the second half of the answer.
+        matches: i64,
+        /// `countMatches` calls, i.e. `temp.token_fold` round trips. The scan
+        /// pays one per page READ; the FTS path pays one per page MATCHED.
+        folds: usize,
+    };
+
+    /// `searchHistoryPages` VERBATIM, summarised — the `.note`/PDF scan.
+    pub fn scanNote(arena: std.mem.Allocator, db: sqlite.Db, md5: []const u8, raw_query: []const u8) !Scanned {
+        // The row-reading half is re-stated rather than called, because
+        // `searchHistoryPages` discards `rows_read`/`text_bytes` and those two
+        // are the whole point of the measurement. The SQL, the order, the dupe
+        // and the count are byte-identical to it; `scanFidelity` in the bench
+        // asserts the answers agree.
+        return scan(arena, db, md5, raw_query, false);
+    }
+
+    /// The same scan with the paragraph filter `searchTxtSegments` applies.
+    pub fn scanTxt(arena: std.mem.Allocator, db: sqlite.Db, md5: []const u8, raw_query: []const u8) !Scanned {
+        return scan(arena, db, md5, raw_query, true);
+    }
+
+    const scan_note_sql = "SELECT page_index, text FROM note_page_index " ++
+        "WHERE blob_md5 = ?1 AND text IS NOT NULL ORDER BY page_index;";
+    const scan_txt_sql = "SELECT page_index, text FROM note_page_index " ++
+        "WHERE blob_md5 = ?1 AND text IS NOT NULL AND kind = 1 ORDER BY page_index;";
+
+    /// COLLECT-then-count, exactly as `searchHistoryPages` does it: every page's
+    /// transcript is duped into `arena` before any counting runs.
+    fn scan(
+        arena: std.mem.Allocator,
+        db: sqlite.Db,
+        md5: []const u8,
+        raw_query: []const u8,
+        comptime txt: bool,
+    ) !Scanned {
+        const query = try arena.dupe(u8, trimQuery(raw_query));
+        const terms = try queryTerms(arena, db, query, isStillTyping(raw_query));
+        if (terms.len == 0) return .{ .rows_read = 0, .text_bytes = 0, .pages = 0, .matches = 0, .folds = 0 };
+
+        const ScanRow = struct { index: i64, text: []const u8 };
+        var rows: std.ArrayList(ScanRow) = .empty;
+        var text_bytes: usize = 0;
+        {
+            var s = try db.prepare(if (txt) scan_txt_sql else scan_note_sql);
+            defer s.finalize();
+            s.bindText(1, md5);
+            while (try s.step()) {
+                const t = try arena.dupe(u8, s.columnText(1));
+                text_bytes += t.len;
+                try rows.append(arena, .{ .index = s.columnInt(0), .text = t });
+            }
+        }
+
+        var out: Scanned = .{
+            .rows_read = rows.items.len,
+            .text_bytes = text_bytes,
+            .pages = 0,
+            .matches = 0,
+            .folds = 0,
+        };
+        for (rows.items) |row| {
+            const counted = try countMatches(arena, db, row.text, terms);
+            out.folds += 1;
+            if (counted.matches > 0) {
+                out.pages += 1;
+                out.matches += counted.matches;
+            }
+        }
+        return out;
+    }
+
+    /// The SAME answer with the rows STEPPED — one page's transcript alive at a
+    /// time, counted inside the open cursor rather than after it closes.
+    ///
+    /// `searchHistoryPages` says this cannot be done, because `countMatches`
+    /// runs its own statements on this connection "(and would invalidate the
+    /// borrowed `columnText`)". Two claims are folded together there: the temp
+    /// `token_fold` writes, and the borrow. The borrow one is answerable — a
+    /// `sqlite3_column_text` pointer is invalidated by stepping, resetting or
+    /// finalizing ITS OWN statement, not by traffic on other statements — so the
+    /// text is passed straight to `countMatches` with no dupe. Whether the write
+    /// half holds is what running this measures; the bench's fidelity gate
+    /// (identical pages/matches against `scan`) is what makes it an answer
+    /// rather than an assumption.
+    pub fn scanStepped(
+        arena: std.mem.Allocator,
+        gpa: std.mem.Allocator,
+        db: sqlite.Db,
+        md5: []const u8,
+        raw_query: []const u8,
+        txt: bool,
+    ) !Scanned {
+        const query = try arena.dupe(u8, trimQuery(raw_query));
+        const terms = try queryTerms(arena, db, query, isStillTyping(raw_query));
+        if (terms.len == 0) return .{ .rows_read = 0, .text_bytes = 0, .pages = 0, .matches = 0, .folds = 0 };
+
+        var out: Scanned = .{ .rows_read = 0, .text_bytes = 0, .pages = 0, .matches = 0, .folds = 0 };
+
+        // The per-page scratch: `countMatches` allocates the matched terms, and
+        // a scan that accumulated THOSE across a whole document would have moved
+        // the unboundedness rather than removed it. Reset per page; only a
+        // MATCHING page's answer is kept, and there are few of those.
+        var scratch = std.heap.ArenaAllocator.init(gpa);
+        defer scratch.deinit();
+
+        var s = try db.prepare(if (txt) scan_txt_sql else scan_note_sql);
+        defer s.finalize();
+        s.bindText(1, md5);
+        while (try s.step()) {
+            const text = s.columnText(1);
+            out.rows_read += 1;
+            out.text_bytes += text.len;
+            _ = scratch.reset(.retain_capacity);
+            const counted = try countMatches(scratch.allocator(), db, text, terms);
+            out.folds += 1;
+            if (counted.matches > 0) {
+                out.pages += 1;
+                out.matches += counted.matches;
+            }
+        }
+        return out;
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Note-scoped query — find-in-note's counter and filmstrip badges
@@ -1712,6 +2333,28 @@ pub fn buildMatch(arena: std.mem.Allocator, query: []const u8, still_typing: boo
 /// for the whole word "cal" and stops matching the "calig…" they have moved on
 /// from. Read from the RAW query deliberately — `trimQuery` has to strip that
 /// space before tokenizing, which destroys the signal.
+///
+/// ## THE SIGNAL NEVER ARRIVES: this is ALWAYS true for library-wide search
+///
+/// VERIFIED — the SPA trims the query on BOTH sides of its own boundary before
+/// it reaches the wire: `Api.searchText` does `query.trim()`
+/// (`webapp/src/api/client.ts`) and `setQuery` does `raw.trim()`
+/// (`webapp/src/pages/noteSearch.ts`); both sites carry a comment saying so.
+/// There is no keystroke, no pause and no Enter that makes the browser send a
+/// completed term, so **every library-wide search on the wire is a PREFIX
+/// query** and the completed-term path below is reachable only from tests, the
+/// bench and a hand-made request.
+///
+/// What that costs, MEASURED on the Pi (`docs/scratch/search-baseline.md`): the
+/// same page is **810.3 ms p50 as a prefix against 80.6 ms completed, 10.0×**,
+/// while `DocPage.vm_steps` is IDENTICAL (1,129) either way — so no test and no
+/// pin in this file can see the difference. The prefix penalty is linear in the
+/// term's WHOLE-INDEX posting count at ~30 µs per posting, which is why it is
+/// also the one thing the partition mask does not scope (see the module header).
+///
+/// NOT changed here, deliberately. Whether the fix is to stop trimming once the
+/// box settles, to declare `prefix=` on `segment_fts`, or to do neither is an
+/// open decision with a UX half — `docs/scratch/backlog.md` carries it.
 fn isStillTyping(raw: []const u8) bool {
     if (raw.len == 0) return false;
     return switch (raw[raw.len - 1]) {
@@ -2787,6 +3430,11 @@ test "PLAN PIN (in-doc): the scoped reads reach `files` by PRIMARY KEY, and must
 /// its statements, as `DocPage.vm_steps` totals them. Calls `collectDocs`
 /// directly rather than `searchPages` because the count has to be the page's,
 /// not a fuzzy fallback's or a coverage query's as well.
+///
+/// `false` for `still_typing`, so every caller measures the COMPLETED term. That
+/// is the right choice for a slope over library size — and it is also why this
+/// helper cannot see the prefix expansion the browser actually pays for: the two
+/// queries cost the same steps and 10x the wall clock. See `DocPage.vm_steps`.
 fn pageSteps(f: *Fixture, user_id: u64, q: []const u8) !i64 {
     const match = (try buildMatch(f.a(), q, false)) orelse return error.EmptyQuery;
     const pid = (try partition.active(f.db, user_id)) orelse return error.NoPartition;
@@ -2804,6 +3452,15 @@ fn pageSteps(f: *Fixture, user_id: u64, q: []const u8) !i64 {
 }
 
 test "WORK PIN: a search page costs what the QUERY costs, and stops costing what the LIBRARY costs" {
+    // WHAT THIS PIN DOES NOT SEE, stated here because "the WORK PIN is green"
+    // has already been read as "the page did not get dearer". VM steps are a
+    // deterministic statement about the plan and the row set, and that is
+    // precisely the regression below — a per-row walk of the library — so the
+    // pin is the right instrument and stays. But `DocPage.vm_steps` is BLIND to
+    // FTS prefix expansion: MEASURED on the Pi, the completed and prefix forms
+    // of the same term cost exactly 1,129 steps and 80.6 ms against 810.3 ms
+    // (`docs/scratch/search-baseline.md` §3b). Nothing this test asserts can
+    // move when that 10x does, in either direction.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -5001,6 +5658,81 @@ test "an empty result quantifies the unsearchable, and a non-empty one does not 
     const none = (try f.search(9, "anything ")).coverage.?;
     try testing.expectEqual(@as(i64, 0), none.notes);
     try testing.expectEqual(@as(i64, 0), none.unsearchable);
+}
+
+test "a paired .mark is not a hit of its own, and is not in the coverage denominator" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // THE REPORTED BUG (`backlog.md`, "a paired `.pdf.mark` still appears in
+    // search as a file of its own"). A mark IS a `.note` container — that is how
+    // the device stores ink — so the indexer parses it, calls it indexable and
+    // indexes whatever recognition it carries. Search was the third listing and
+    // the only one never given the pairing predicate.
+    _ = try f.putBytes(1, "Trip notes.pdf", "a pdf, as far as anyone here cares");
+    _ = try f.putNote(1, "Trip notes.pdf.mark", &.{"skiathos"});
+    _ = try f.putNote(1, "real.note", &.{"skiathos"});
+
+    // ONE hit, the document the household can actually open. Two would offer a
+    // result for a file that appears in no listing and opens as a page of
+    // disembodied handwriting.
+    const hits = try f.search(1, "skiathos ");
+    try testing.expectEqual(@as(usize, 1), hits.hits.len);
+    try testing.expectEqualStrings("real.note", hits.hits[0].noteName);
+
+    // And the empty state's sentence. "N of your M files have no recognised
+    // text" was counting the mark in M — always on the unsearchable side, since
+    // ink carries none — so both halves of the fraction were wrong.
+    const cov = (try f.search(1, "zzzzzzzzz ")).coverage.?;
+    try testing.expectEqual(@as(i64, 1), cov.notes);
+    try testing.expectEqual(@as(i64, 0), cov.unsearchable);
+}
+
+test "the pairing rule search applies is not PDF-only — any document's mark is folded" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // The device annotates formats this server does not render, and appends
+    // `.mark` to the FULL name whatever the format is. A whitelist of extensions
+    // would let this one through, which is exactly why the rule is relational.
+    _ = try f.putBytes(1, "novel.epub", "an epub, unparseable here");
+    _ = try f.putNote(1, "novel.epub.mark", &.{"marginalia"});
+    // An ORPHAN mark, by contrast, is the only trace of its ink left and must
+    // stay findable — hiding it would make it unreachable while it went on
+    // costing quota. This is the half of the rule a blanket "hide `.mark`" loses.
+    _ = try f.putNote(1, "gone.epub.mark", &.{"marginalia"});
+
+    const hits = try f.search(1, "marginalia ");
+    try testing.expectEqual(@as(usize, 1), hits.hits.len);
+    try testing.expectEqualStrings("gone.epub.mark", hits.hits[0].noteName);
+}
+
+test "PLAN PIN: hiding paired marks costs an indexed sibling seek, not a scan" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    _ = try f.putNote(1, "n.note", &.{"alpha"});
+
+    // The pairing predicate is a correlated `EXISTS` on `files`, which is the
+    // shape that turns cheap into O(library) if it ever loses its index. It must
+    // ride `files_live_name (user_id, COALESCE(parent_id,0), name) WHERE deleted
+    // = 0` — the same index `Files.pairOf` looks the sibling up by, which is what
+    // makes the predicate and the lookup cost the same as well as mean the same.
+    //
+    // Pinned on BOTH library-wide statements. The other half of the risk — that a
+    // new `EXISTS` talks the planner out of `M1><` or off `files_md5` — is
+    // already pinned by "both partition bounds are pushed into the FTS index",
+    // which reads `search_sql` itself and so now covers this clause too.
+    inline for (.{ search_sql, coverage_sql }) |sql| {
+        var s = try f.db.prepare("EXPLAIN QUERY PLAN " ++ sql);
+        defer s.finalize();
+        var sibling_indexed = false;
+        while (try s.step()) {
+            const detail = s.columnText(3);
+            if (std.mem.indexOf(u8, detail, "SEARCH p ") != null and
+                std.mem.indexOf(u8, detail, "files_live_name (") != null) sibling_indexed = true;
+        }
+        try testing.expect(sibling_indexed);
+    }
 }
 
 test "the fallback cannot cross the user boundary the primary pass enforces" {

@@ -78,7 +78,12 @@ const sqlite = @import("sqlite.zig");
 /// stops meaning "the blob is fully indexed" the moment a write can be
 /// interrupted between chunks. Additive, nullable, with a one-statement
 /// backfill so no existing `.txt` is re-derived.
-pub const version: i64 = 11;
+///
+/// v12 adds `files_bin_name`, the bin's copy of `files_live_name`'s key. Pure
+/// DDL, no backfill: it changes what the `.mark` pairing rule COSTS over trashed
+/// rows (measured 221,780 -> 4,500 VM steps on one bin listing), not what any
+/// read answers.
+pub const version: i64 = 12;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -92,7 +97,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 /// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
 /// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
 /// missed on a bump). The comptime check below makes the drift a build error.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12 };
 
 comptime {
     if (steps.len != version) @compileError(
@@ -319,6 +324,10 @@ const ddl_v1 =
     \\
     \\CREATE INDEX files_deleted_at ON files(deleted_at) WHERE deleted = 1;
     \\
+    \\-- Uniqueness for a folder's live children, and the key the `.mark` pairing
+    \\-- rule looks a sibling up by (`Files.hidePairedMark` / `pairOf` — a plan pin
+    \\-- names it). `files_bin_name` in v12 is the same key over TRASHED rows,
+    \\-- non-unique because the bin can legitimately hold two rows under one name.
     \\CREATE UNIQUE INDEX files_live_name
     \\  ON files(user_id, COALESCE(parent_id, 0), name) WHERE deleted = 0;
     \\
@@ -585,6 +594,39 @@ const ddl_v11 =
     \\UPDATE note_index SET txt_index = 0
     \\ WHERE EXISTS (SELECT 1 FROM note_page_index np
     \\                WHERE np.blob_md5 = note_index.blob_md5 AND np.kind = 1);
+;
+
+/// v12 — `files_bin_name`, the bin's half of `files_live_name`.
+///
+/// LOAD-BEARING BY SHAPE, and the shape is the `.mark` pairing rule: `(user_id,
+/// COALESCE(parent_id, 0), name) WHERE deleted = 1`, the exact key
+/// `Files.hidePairedMark` and the bin listing's pair-size subquery look a sibling
+/// up by. `files_live_name` is the same key over LIVE rows and is what makes that
+/// lookup one seek in the library; the bin had no counterpart, so every sibling
+/// probe over trashed rows fell back to `files_user_parent (user_id=?)` — an
+/// index whose first column selects the caller's ENTIRE library, re-walked once
+/// per bin row.
+///
+/// MEASURED on one bin listing, 400 live files + 40 trashed ones: 221,780 VM
+/// steps without this index, 4,500 with it — against 3,940 for the OLD,
+/// PDF-gated rule on the same data, which is the honest comparison. The old rule
+/// hid the cost rather than avoiding it: it gated the probe on `name LIKE
+/// '%.pdf'`, so a household whose bin held no PDFs never paid, and one whose bin
+/// held PDFs paid the full scan. Making the rule format-agnostic (any file can
+/// carry ink, because the device annotates formats this server does not render)
+/// means every bin row probes — which is what turned a latent O(bin x library)
+/// into a measured one, and what makes the index the fix rather than a tuning.
+///
+/// NOT UNIQUE, unlike its live twin. Two rows may sit in the bin under the same
+/// name in the same folder — trash `foo.pdf`, let the device sync a fresh one,
+/// trash that too — and the uniqueness the live index enforces is exactly what
+/// makes the bin need its own: it is the constraint that cannot hold here.
+///
+/// Pure DDL, no backfill, no `index_version` bump: this changes what a read
+/// costs, not what it answers.
+const ddl_v12 =
+    \\CREATE INDEX files_bin_name
+    \\  ON files(user_id, COALESCE(parent_id, 0), name) WHERE deleted = 1;
 ;
 
 test "migrate creates the v1 schema and is idempotent" {

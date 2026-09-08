@@ -210,6 +210,20 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
 
   return {
     setQuery(raw: string): void {
+      // The FIRST of the two trims that make every library-wide search a PREFIX
+      // query — `Api.searchText` does the second, and carries the long note.
+      // Trailing whitespace is the server's "this word is finished" signal
+      // (`isStillTyping`, `backend/services/search/query.zig`); this strips it
+      // before the query is ever compared, debounced or sent, so a settled box
+      // is indistinguishable here from a mid-word one. MEASURED on the Pi: the
+      // prefix page costs 810.3 ms p50 against 80.6 ms completed, 10.0x
+      // (`docs/scratch/search-baseline.md`).
+      //
+      // The trim is also load-bearing for the identity check below: without it
+      // typing a trailing space would re-fire a search for the same question.
+      // Whichever way the trailing space is eventually handled, that has to keep
+      // holding. NOT changed here — the open decision is in
+      // `docs/scratch/backlog.md`.
       const query = raw.trim();
       if (query === active) return; // same question; leave the answer in progress alone
       active = query;

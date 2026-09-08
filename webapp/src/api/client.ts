@@ -1091,6 +1091,24 @@ export function createHttpApi(): Api {
       // blank `q` with an empty 200, but search-as-you-type empties this box on
       // every backspace-to-nothing, and a request per emptying is pure waste.
       // Trimmed, so a box holding only spaces is the same nothing.
+      //
+      // THIS `trim()` IS ALSO WHAT MAKES EVERY LIBRARY-WIDE SEARCH A PREFIX
+      // QUERY, and that is not what it was written for. The server reads a
+      // TRAILING SPACE as "the user finished this word" (`isStillTyping` in
+      // `backend/services/search/query.zig`); without one it turns the last
+      // token into an FTS5 prefix term. Trimming here — and again in
+      // `noteSearch.setQuery` — strips that signal on every request, so there is
+      // no keystroke, no pause and no Enter that makes this client ask for a
+      // completed term. MEASURED on the Pi (`docs/scratch/search-baseline.md`):
+      // the same page of 10 costs 810.3 ms p50 as a prefix against 80.6 ms
+      // completed, 10.0x, and 95% of it is the FTS posting scan. The server's
+      // `vm_steps` counter is IDENTICAL (1,129) for both, so no backend test
+      // sees it.
+      //
+      // NOT CHANGED HERE, deliberately. Sending the space once the box settles
+      // is a UX decision (it changes what a half-typed word matches), and the
+      // alternatives are a `prefix=` index on `segment_fts` or doing nothing.
+      // The open decision lives in `docs/scratch/backlog.md`.
       const q = query.trim();
       if (q === "") return { query: "", hits: [], usedFuzzy: false, coverage: null };
 

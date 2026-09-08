@@ -264,56 +264,114 @@ pub const Files = struct {
 
     // ---- reads ----
 
-    /// What the device appends — never substitutes — to a PDF's FULL name to name
-    /// the file its ink goes in: `foo.pdf` -> `foo.pdf.mark`
+    /// What the device appends — never substitutes — to a document's FULL name to
+    /// name the file its ink goes in: `foo.pdf` -> `foo.pdf.mark`
     /// (`parsers/note/note-format.md` §13.2).
     pub const mark_ext = ".mark";
+
+    /// `mark_ext.len` as a SQL literal, so the `substr` offsets below cannot drift
+    /// from the string they are slicing off.
+    const mark_len = std.fmt.comptimePrint("{d}", .{mark_ext.len});
 
     /// THE PAIRING RULE, as SQL, generated once for whichever listing applies it.
     /// `a` is the alias the outer query gave `files`; `deleted` is the state the
     /// two members must SHARE ("0" for the library, "1" for the bin).
     ///
-    /// The device writes annotations to a SEPARATE file named after the PDF's full
-    /// name plus `.mark`. That file is not a document — it is a layer belonging to
-    /// one — and listing it beside its PDF shows the household two entries for one
-    /// thing, the second of which opens as a page of disembodied handwriting. So a
-    /// pair is ONE row wherever files are listed, and the row is the PDF's.
+    /// The device writes annotations to a SEPARATE file named after the annotated
+    /// document's full name plus `.mark`. That file is not a document — it is a
+    /// layer belonging to one — and listing it beside its document shows the
+    /// household two entries for one thing, the second of which opens as a page of
+    /// disembodied handwriting. So a pair is ONE row wherever files are listed,
+    /// and the row is the document's.
+    ///
+    /// **RELATIONAL, NOT A FORMAT WHITELIST.** A row is a paired mark iff a
+    /// SIBLING file exists whose `name || '.mark'` is this row's name. Nothing
+    /// here asks what the document is. The rule used to require `%.pdf.mark`,
+    /// which quietly made it PDF-only: the device also annotates formats this
+    /// server does not render (EPUB is the obvious one, and the set is open), and
+    /// an annotated `book.epub` syncs a `book.epub.mark` that the old predicate
+    /// did not recognise — so it listed as a file of its own, did not travel with
+    /// its document through trash/restore/move, and surfaced in search. Enumerating
+    /// the extensions we happen to know about is the same bug with more entries;
+    /// the sibling's existence is the only fact that decides it, and that stays
+    /// correct for formats nobody has thought of yet.
+    ///
+    /// The one thing the rule refuses is a CHAIN: the document may not itself end
+    /// in `.mark` (`substr(p.name, -5) <> '.mark'`). Without that, `a`, `a.mark`
+    /// and `a.mark.mark` would hide as a chain of pairs while `pairOf` — which
+    /// matches one partner, not a chain — carried only two of the three, and the
+    /// leftover would be un-hidden by the very delete that was meant to take it.
+    /// A mark is not a document, so nothing is annotating one.
+    ///
+    /// **NEITHER HALF IS EVER A FOLDER** (`is_folder = 0` on both sides). The
+    /// document side has always said so; the MARK side did not, and that was a
+    /// live divergence from `pairOf`, which returns null for a folder outright. A
+    /// folder called `plan.pdf.mark` beside a file `plan.pdf` was therefore hidden
+    /// from every listing — with its whole subtree unreachable behind it — and
+    /// then left where it stood by the delete that took `plan.pdf`, at which point
+    /// it reappeared. That is the conjuring bug exactly, wearing a folder. It
+    /// predates the format-agnostic rewrite (`%.pdf.mark` had the same hole) but
+    /// only for folders named after a PDF; the relational rule made it every
+    /// extension, which is what turned it up. Ink is a file.
     ///
     /// **Both members must be in the SAME state**, which is why `deleted` is a
-    /// parameter rather than a literal `0`. A live PDF and a trashed mark are not
-    /// a pair — the mark is in the bin as a thing of its own, and the bin is where
-    /// it must stay reachable. This is also exactly the state `pairOf` matches, so
-    /// what a listing folds away is precisely what a mutation carries: nothing can
-    /// be hidden here and left behind there (the bug this rule used to have — a
-    /// trashed PDF un-hid its mark, conjuring a file the user never made).
+    /// parameter rather than a literal `0`. A live document and a trashed mark are
+    /// not a pair — the mark is in the bin as a thing of its own, and the bin is
+    /// where it must stay reachable. This is also exactly the state `pairOf`
+    /// matches, so what a listing folds away is precisely what a mutation carries:
+    /// nothing can be hidden here and left behind there (the bug this rule used to
+    /// have — a trashed PDF un-hid its mark, conjuring a file the user never made).
     ///
-    /// An ORPHANED mark still lists. With no PDF beside it in the same state, the
-    /// mark is the only remaining trace of that ink; hiding it would make it
+    /// An ORPHANED mark still lists. With no document beside it in the same state,
+    /// the mark is the only remaining trace of that ink; hiding it would make it
     /// unreachable through the UI while it went on consuming quota. It has no pair,
     /// so it also travels alone — one rule, no exception.
     ///
-    /// SHARED BY `list`, `childCount`, `liveSubtreeCount` and the bin listing,
-    /// which is the whole reason it is generated rather than typed out. A count
-    /// that disagreed with the listing beside it is "the one place the bin leaked
-    /// back into view", and copies of a predicate this fiddly do not stay equal.
-    ///
-    /// NOT applied to search, which still surfaces a paired mark as a hit of its
-    /// own — see costs.
+    /// SHARED BY `list`, `childCount`, `liveSubtreeCount`, the bin listing and —
+    /// since the leak `backlog.md` reported — library-wide search and its coverage
+    /// count (`search/query.zig`). That is the whole reason it is generated rather
+    /// than typed out, and why it is `pub`: a count that disagreed with the listing
+    /// beside it is "the one place the bin leaked back into view", and copies of a
+    /// predicate this fiddly do not stay equal.
     ///
     /// Cost is one index seek per `.mark` in the folder, and none for anything
-    /// else: the suffix tests fail first for every other row, and the `EXISTS`
-    /// rides the `files_live_name` UNIQUE index. `LIKE` is ASCII-case-insensitive
-    /// in SQLite, so a `Foo.PDF.mark` is caught too; the `.mark` tail is matched
-    /// case-SENSITIVELY (`substr(name, -5)`) and the stem exactly, because those
-    /// are the two things `pairOf` can look up by equality — the predicate and the
-    /// lookup have to admit the same set or the gap between them is a bug.
-    fn hidePairedMark(comptime a: []const u8, comptime deleted: []const u8) []const u8 {
-        return " AND NOT (" ++ a ++ ".name LIKE '%.pdf.mark' AND substr(" ++ a ++ ".name, -5) = '" ++ mark_ext ++ "'" ++
+    /// else: the suffix test fails first for every other row, and the `EXISTS`
+    /// rides the `files_live_name` UNIQUE index. Dropping the `%.pdf.mark` gate
+    /// did not widen that — `.mark` was always the selective half of it. The tail
+    /// is matched case-SENSITIVELY (`substr(name, -5)`) and the stem exactly,
+    /// because those are the two things `pairOf` can look up by equality — the
+    /// predicate and the lookup have to admit the same set or the gap between them
+    /// is a bug. A row named exactly `.mark` has an empty stem, which matches no
+    /// name, so it is an orphan and lists — same answer in both.
+    pub fn hidePairedMark(comptime a: []const u8, comptime deleted: []const u8) []const u8 {
+        return " AND NOT (" ++ a ++ ".is_folder = 0" ++
+            " AND substr(" ++ a ++ ".name, -" ++ mark_len ++ ") = '" ++ mark_ext ++ "'" ++
             " AND EXISTS (SELECT 1 FROM files p" ++
             " WHERE p.user_id = " ++ a ++ ".user_id" ++
             " AND COALESCE(p.parent_id, 0) = COALESCE(" ++ a ++ ".parent_id, 0)" ++
-            " AND p.name = substr(" ++ a ++ ".name, 1, length(" ++ a ++ ".name) - 5)" ++
+            " AND p.name = substr(" ++ a ++ ".name, 1, length(" ++ a ++ ".name) - " ++ mark_len ++ ")" ++
+            " AND substr(p.name, -" ++ mark_len ++ ") <> '" ++ mark_ext ++ "'" ++
             " AND p.is_folder = 0 AND p.deleted = " ++ deleted ++ "))";
+    }
+
+    /// The rule read from the DOCUMENT's side: a boolean SQL expression, true when
+    /// the row aliased `a` has a live `.mark` companion. Same equality as
+    /// `hidePairedMark` and `liveMarkIdFor`, generated from the same place so the
+    /// three cannot drift — "does this file carry ink" and "is this file the ink"
+    /// are one fact asked from two ends.
+    ///
+    /// Nothing in the backend consumes it yet. It exists because
+    /// `client-side-search.md` §3 wants "anything with a `.mark` companion" as a
+    /// tier-2 signal, and the moment that is written as its own SQL there are two
+    /// copies of the pairing rule to keep equal. `is_folder = 0` on both sides: a
+    /// folder is never half of a pair.
+    pub fn hasPairedMark(comptime a: []const u8) []const u8 {
+        return "(" ++ a ++ ".is_folder = 0 AND substr(" ++ a ++ ".name, -" ++ mark_len ++ ") <> '" ++ mark_ext ++ "'" ++
+            " AND EXISTS (SELECT 1 FROM files m" ++
+            " WHERE m.user_id = " ++ a ++ ".user_id" ++
+            " AND COALESCE(m.parent_id, 0) = COALESCE(" ++ a ++ ".parent_id, 0)" ++
+            " AND m.name = " ++ a ++ ".name || '" ++ mark_ext ++ "'" ++
+            " AND m.is_folder = 0 AND m.deleted = 0))";
     }
 
     /// The rule over LIVE rows — the library's view of a folder.
@@ -324,16 +382,21 @@ pub const Files = struct {
     /// document, and there is no way to reach half a pair.
     const hide_paired_bin_mark = hidePairedMark("f", "1");
 
-    /// True when `name` names a PDF — the extension matched the way SQLite's
-    /// `LIKE '%.pdf%'` matches it, ASCII-case-insensitively, so `Plan.PDF` counts.
-    pub fn isPdfName(name: []const u8) bool {
-        return name.len > 4 and std.ascii.eqlIgnoreCase(name[name.len - 4 ..], ".pdf");
-    }
-
-    /// True when `name` names a mark of a PDF — the `.mark` tail exact (it is what
-    /// `pairOf` appends and looks up by equality), the `.pdf` before it not.
-    pub fn isMarkName(name: []const u8) bool {
-        return std.mem.endsWith(u8, name, mark_ext) and isPdfName(name[0 .. name.len - mark_ext.len]);
+    /// The name of the document `name` would be the ink for — `foo.epub.mark` ->
+    /// `foo.epub` — or null when it could not be anybody's mark. THE ZIG SIDE OF
+    /// `hidePairedMark`, and it must admit exactly the same set: the `.mark` tail
+    /// exact (it is what the rule appends and looks up by equality), the stem
+    /// non-empty (a bare `.mark` names nothing, and no row is named "") and the
+    /// stem not itself a mark (no chains — see there).
+    ///
+    /// What the stem's EXTENSION looks like is deliberately not asked. Whether the
+    /// mark is actually paired is a question about the folder rather than the
+    /// name, and only `pairOf` and the SQL answer that.
+    pub fn markStemOf(name: []const u8) ?[]const u8 {
+        if (!std.mem.endsWith(u8, name, mark_ext)) return null;
+        const stem = name[0 .. name.len - mark_ext.len];
+        if (stem.len == 0 or std.mem.endsWith(u8, stem, mark_ext)) return null;
+        return stem;
     }
 
     /// The other half of a pair. `id` is the PARTNER's row; `entry_is_mark` says
@@ -384,17 +447,22 @@ pub const Files = struct {
         }
         defer self.gpa.free(name);
 
-        // The partner's name, derived by the rule and nothing else.
-        const entry_is_mark = isMarkName(name);
+        // The partner's name, derived by the rule and nothing else. No format is
+        // consulted in either direction: ANY file may be the document, because the
+        // device annotates formats this server does not render (`hidePairedMark`).
+        const entry_is_mark = std.mem.endsWith(u8, name, mark_ext);
         var owned_want: ?[]u8 = null;
         defer if (owned_want) |w| self.gpa.free(w);
         var want: []const u8 = undefined;
         if (entry_is_mark) {
-            want = name[0 .. name.len - mark_ext.len];
-        } else if (isPdfName(name)) {
+            // A name ending in `.mark` is never the DOCUMENT half — the rule
+            // refuses chains — so the only partner it can have is the document it
+            // is named after, and `markStemOf` is null when there is no such name.
+            want = markStemOf(name) orelse return null;
+        } else {
             owned_want = try std.fmt.allocPrint(self.gpa, "{s}" ++ mark_ext, .{name});
             want = owned_want.?;
-        } else return null;
+        }
 
         var s = try self.db.prepare(
             "SELECT id FROM files WHERE user_id = ?1 AND COALESCE(parent_id, 0) = COALESCE(?2, 0) " ++
@@ -1234,6 +1302,14 @@ pub const Files = struct {
     ///     the paths cannot disagree about what a renamed sibling looks like);
     ///     without it, `error.NameConflict` and nothing moves — we never clobber the
     ///     occupant, because a silent overwrite would be lossy.
+    ///   - **Adoption is a name conflict too**, and settled the same way. A row
+    ///     with no pair may not land on a name that makes it half of one: not on
+    ///     `handbook.pdf` while an orphan `handbook.pdf.mark` sits there, and not
+    ///     on `report.pdf.mark` while `report.pdf` does. Acquiring a stranger's
+    ///     annotations silently is the same class of bug as conjuring a file, and
+    ///     `restore` already refuses it on its own path. Folders are exempt: they
+    ///     never pair. See the branch itself for the reasoning and for the one
+    ///     place `restore` deliberately behaves differently.
     ///   - **Cycle guard.** A folder cannot move into itself or one of its own
     ///     descendants (`error.InvalidMove`): that would sever the subtree from the
     ///     root and orphan it.
@@ -1244,16 +1320,24 @@ pub const Files = struct {
     ///     behind — the ink stops appearing on the document AND the abandoned mark
     ///     surfaces in the listing as a file nobody made, the same conjuring the
     ///     bin bug did. So the two rows move together, in this one transaction,
-    ///     under one `bumpSync`, and the mark's new name is derived from the PDF's
-    ///     FINAL one (autorename included).
+    ///     under one `bumpSync`, and the mark's new name is derived from the
+    ///     DOCUMENT's FINAL one (autorename included).
     ///   - **A rename that could not leave them a pair is REFUSED**
-    ///     (`error.InvalidMove`), in either direction: a paired `.pdf` may only be
-    ///     renamed to another `.pdf`, and a paired mark only to a `.pdf.mark`.
-    ///     Fixing it up is not available — there is no name for `foo.pdf.mark`
-    ///     that pairs with a PDF called `foo.txt` — and silently unpairing them is
-    ///     the bug. The browser cannot reach this: its rename dialog holds the
-    ///     extension immutable and never offers the (hidden) mark. The device and
-    ///     the API can, and both settle a refusal without retrying.
+    ///     (`error.InvalidMove`), in either direction, and the pairing rule decides
+    ///     what "could not" means. Since the rule stopped being PDF-only that is a
+    ///     much smaller set than it used to be: a paired document may be renamed to
+    ///     ANY name that does not itself end in `.mark`, because the mark simply
+    ///     follows it (`foo.pdf` + `foo.pdf.mark` -> `foo.epub` + `foo.epub.mark`),
+    ///     and only a name that would make the document a mark is refused. A paired
+    ///     MARK may only be renamed to another name a mark can hold (`markStemOf`),
+    ///     because its stem has to name its document. The old rule refused
+    ///     `foo.pdf` -> `foo.txt` on the grounds that no name for the mark would
+    ///     pair with it; that was true only while pairing meant `%.pdf.mark`, and
+    ///     keeping it would have made an annotated EPUB unrenameable. Silently
+    ///     unpairing them is still the bug, and is still what this refuses. The
+    ///     browser cannot reach the refusal: its rename dialog holds the extension
+    ///     immutable and never offers the (hidden) mark. The device and the API
+    ///     can, and both settle a refusal without retrying.
     ///
     /// `error.NotFound` if `id` is absent, foreign, or already trashed (a bin row is
     /// not live and is not moved). Other errors: NameConflict / InvalidMove /
@@ -1293,14 +1377,19 @@ pub const Files = struct {
         // two ids and one anchor name; nothing re-enters the rule per row.
         const partner = try self.pairOf(user_id, id);
 
-        // The PDF's requested name, which anchors both. A paired mark's request is
-        // read as a request about its document, minus the `.mark`.
+        // The DOCUMENT's requested name, which anchors both. A paired mark's
+        // request is read as a request about its document, minus the `.mark`.
         var pdf_want: []const u8 = new_name;
         if (partner) |p| {
             if (p.entry_is_mark) {
-                if (!isMarkName(new_name)) return error.InvalidMove;
-                pdf_want = new_name[0 .. new_name.len - mark_ext.len];
-            } else if (!isPdfName(new_name)) return error.InvalidMove;
+                pdf_want = markStemOf(new_name) orelse return error.InvalidMove;
+            } else if (std.mem.endsWith(u8, new_name, mark_ext)) {
+                // The document may take any name at all EXCEPT one ending in
+                // `.mark`: that would make the pair a chain, which the rule
+                // refuses, so the two rows would come out of this transaction no
+                // longer paired.
+                return error.InvalidMove;
+            }
         }
 
         // Resolve the destination name against the live siblings there.
@@ -1329,13 +1418,54 @@ pub const Files = struct {
             }
             owned_mark = try std.fmt.allocPrint(self.gpa, "{s}" ++ mark_ext, .{pdf_final});
             final_name = if (p.entry_is_mark) owned_mark.? else pdf_final;
-        } else if (try self.liveChild(user_id, new_parent_id, new_name)) |occ| {
+        } else {
             // The occupant IS this row — it already sits at the destination under
-            // this exact name. A true no-op: touch nothing, bump nothing.
-            if (occ.id == id) return (try self.get(user_id, id)) orelse error.NotFound;
-            if (!autorename) return error.NameConflict; // never clobber the occupant
-            owned_pdf = try self.freeName(user_id, new_parent_id, new_name, null);
-            final_name = owned_pdf.?;
+            // this exact name. A true no-op: touch nothing, bump nothing. Checked
+            // FIRST, because `nameFree` would see the row's own name as taken.
+            if (try self.liveChild(user_id, new_parent_id, new_name)) |occ| {
+                if (occ.id == id) return (try self.get(user_id, id)) orelse error.NotFound;
+            }
+
+            // ADOPTING SOMEONE ELSE'S INK IS A NAME CONFLICT, and is settled as
+            // one. This row has no pair (`partner` is null), so any pairing that
+            // exists at the destination is a pairing it is walking into: rename
+            // `notes.txt` to `handbook.pdf` where an orphan `handbook.pdf.mark`
+            // is sitting, and the file silently acquires annotations belonging to
+            // a document deleted months ago. The mark side is not symmetric and
+            // is caught by the same call: renaming an orphan `stray.epub.mark` to
+            // `report.pdf.mark` makes it `report.pdf`'s ink, which the chain
+            // refusal above does NOT cover — that only runs for a row that is
+            // already half of a pair.
+            //
+            // **The posture is `restore`'s, deliberately.** `restore` treats the
+            // same hazard as a name collision — `RestoreName.pair` makes its
+            // free-name search skip any ` (n)` whose `.mark` twin is taken rather
+            // than land on it — and the paired arm of THIS function already does
+            // the same with `nameFree(pdf_want, mark_ext)`. So the third path uses
+            // the third copy of one rule: refuse without `autorename`, take the
+            // next suffix free of a pairing with it. Two paths that disagreed
+            // about what a stranger's `.mark` means would be the drift the whole
+            // generated-predicate design exists to prevent.
+            //
+            // **Where the two paths genuinely differ, and why.** `restore`'s
+            // UNPAIRED arm has no guard at all and re-pairs on purpose (see
+            // "restoring a trashed pdf leaves a LIVE mark of the same name
+            // alone"): a restore returns a row to the name it already had, so the
+            // ink it meets there is its own, and reuniting them is the outcome
+            // the pre-fix data needs. A move has no such claim — the name is one
+            // the caller just chose — so there is no ink here that is "its own"
+            // to come back to.
+            //
+            // FOLDERS ARE EXEMPT. A folder is never half of a pair (`pairOf`
+            // returns null for one, and the SQL requires `is_folder = 0`), so a
+            // folder called `Docs` beside a file `Docs.mark` adopts nothing and
+            // must not be refused for it.
+            const pair_guard: ?[]const u8 = if (is_folder) null else mark_ext;
+            if (!try self.nameFree(user_id, new_parent_id, new_name, pair_guard)) {
+                if (!autorename) return error.NameConflict; // never clobber, never adopt
+                owned_pdf = try self.freeName(user_id, new_parent_id, new_name, pair_guard);
+                final_name = owned_pdf.?;
+            }
         }
 
         const ts = self.now();
@@ -2291,19 +2421,24 @@ pub const Files = struct {
     /// still live, a fact about rows not in this response, not a property frozen at
     /// trash time. Column order matches the old query so `listBin` is untouched.
     ///
-    /// **A TRASHED PAIR IS ONE ROW HERE TOO** (`hide_paired_bin_mark`), the PDF's,
-    /// exactly as in the library. Two rows would offer Restore twice for one
-    /// document and let the user restore half a pair — a document whose ink stayed
-    /// in the bin renders blank and gives no sign why. With one row that cannot be
-    /// expressed: `restore`/`purge` carry the other member, so the filter is the
-    /// truth about what the actions do rather than a cosmetic tidy-up.
+    /// **A TRASHED PAIR IS ONE ROW HERE TOO** (`hide_paired_bin_mark`), the
+    /// document's, exactly as in the library. Two rows would offer Restore twice
+    /// for one document and let the user restore half a pair — a document whose
+    /// ink stayed in the bin renders blank and gives no sign why. With one row
+    /// that cannot be expressed: `restore`/`purge` carry the other member, so the
+    /// filter is the truth about what the actions do rather than a cosmetic
+    /// tidy-up.
     ///
     /// **And the size reported is the PAIR's.** `bin.ts` calls this column "bytes
     /// a purge of this one frees", and purging frees both blobs; showing only the
-    /// PDF's would make the bin's headline figure and its per-row promise both
-    /// understate what the button does. The correlated sum fires only for a row
-    /// whose name is a PDF's — for anything else there is no hidden mark to add,
-    /// and a mark that ISN'T hidden has its own row carrying its own bytes.
+    /// document's would make the bin's headline figure and its per-row promise
+    /// both understate what the button does. The gate on the correlated sum is the
+    /// pairing rule's own no-chain clause and nothing else: it used to read
+    /// `f.name LIKE '%.pdf'`, which meant an annotated EPUB's row understated its
+    /// purge by the size of its ink. A row that ends in `.mark` is never the
+    /// document half, and for anything else with no hidden mark the subquery finds
+    /// nothing and adds 0; a mark that ISN'T hidden has its own row carrying its
+    /// own bytes.
     const bin_listing_sql =
         \\SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5,
         \\       f.size + COALESCE((SELECT m.size FROM files m
@@ -2311,7 +2446,8 @@ pub const Files = struct {
         \\                             AND COALESCE(m.parent_id, 0) = COALESCE(f.parent_id, 0)
         \\                             AND m.name = f.name || '.mark'
         \\                             AND m.is_folder = 0 AND m.deleted = 1
-        \\                             AND f.name LIKE '%.pdf'), 0),
+        \\                             AND f.is_folder = 0
+        \\                             AND substr(f.name, -5) <> '.mark'), 0),
         \\       COALESCE(f.deleted_at, 0), COALESCE(f.deleted_path, ''),
         \\       (f.parent_id IS NULL OR NOT EXISTS (
         \\          SELECT 1 FROM files p WHERE p.id = f.parent_id AND p.deleted = 1))
@@ -2663,11 +2799,32 @@ pub const Files = struct {
         return error.NameConflict;
     }
 
-    /// Is `cand` available in `parent_id` — and, when `pair` is given, its twin
-    /// `cand ++ pair` too? The single acceptance test `freeName` iterates on.
+    /// Is `cand` available in `parent_id` — and, when `pair` is given, would a row
+    /// landing on it leave the `.mark` pairing alone? The single acceptance test
+    /// `freeName` iterates on.
+    ///
+    /// `pair` asks ONE question from whichever side `cand`'s name puts it on:
+    /// **is the other half of a pair already sitting here?**
+    ///
+    ///   - `cand` is a DOCUMENT's name (the ordinary case): the other half would be
+    ///     `cand ++ pair`, so that must be free.
+    ///   - `cand` is a MARK's name (`markStemOf` says so): the other half is its
+    ///     STEM, so no live file may hold that.
+    ///
+    /// The two arms are the same fact, and both callers want the same answer for
+    /// both of the reasons a caller can have. A row bringing its OWN mark needs
+    /// `cand ++ pair` free or the pair is split across two ` (n)` suffixes; a row
+    /// bringing NOTHING needs it free or it silently adopts a stranger's ink. The
+    /// caller does not have to know which of those it is — it passes `mark_ext`
+    /// and gets "this name is not half of somebody else's pair".
+    ///
+    /// The mark-side arm is why this is not simply "the twin must be free":
+    /// renaming an ORPHAN mark onto `report.pdf.mark` makes it `report.pdf`'s ink,
+    /// which the twin test cannot see because the pairing runs the other way.
     fn nameFree(self: Files, user_id: u64, parent_id: ?u64, cand: []const u8, pair: ?[]const u8) !bool {
         if (try self.liveChild(user_id, parent_id, cand) != null) return false;
         const suffix = pair orelse return true;
+        if (markStemOf(cand)) |stem| return (try self.liveChild(user_id, parent_id, stem)) == null;
         const twin = try std.fmt.allocPrint(self.gpa, "{s}{s}", .{ cand, suffix });
         defer self.gpa.free(twin);
         return (try self.liveChild(user_id, parent_id, twin)) == null;
@@ -6847,14 +7004,35 @@ test "renaming the MARK renames its pdf, and a name that cannot pair is refused"
     try testing.expectEqualStrings("handbook.pdf.mark", renamed.name);
     try testing.expectEqualStrings("handbook.pdf", try nameOf(&f, a, p.pdf.id));
 
-    // REFUSED, both directions. There is no name for a mark that pairs with a
-    // PDF called `handbook.txt`, and none for a PDF that pairs with `notes.txt`
-    // — so rather than silently leaving two files that are no longer a pair, the
-    // rename does not happen at all. Nothing moved.
-    try testing.expectError(error.InvalidMove, f.files.move(1, p.pdf.id, null, "handbook.txt", false));
+    // THE EXTENSION OF THE DOCUMENT IS NO LONGER PART OF THE RULE, so changing it
+    // is no longer a refusal: `handbook.txt` is a perfectly good document name and
+    // `handbook.txt.mark` is a perfectly good mark for it. This assertion was
+    // `expectError(InvalidMove)` while pairing meant `%.pdf.mark`; keeping it
+    // would have made an annotated `book.epub` unrenameable, which is the same
+    // PDF-only assumption wearing a different hat. What must not happen is the
+    // pair coming apart — so the mark follows.
+    const retyped = try f.files.move(1, p.pdf.id, null, "handbook.txt", false);
+    defer freeEntry(retyped);
+    try testing.expectEqualStrings("handbook.txt", retyped.name);
+    try testing.expectEqualStrings("handbook.txt.mark", try nameOf(&f, a, p.mark.id));
+
+    // REFUSED, both directions, for the two names that genuinely cannot pair.
+    // A mark whose name does not end in `.mark` has no stem to name its document
+    // with; a document whose name DOES end in `.mark` would make the pair a chain,
+    // which the rule refuses (`hidePairedMark`) — so the two rows would leave this
+    // transaction no longer a pair. Rather than that, nothing moves at all.
     try testing.expectError(error.InvalidMove, f.files.move(1, p.mark.id, null, "notes.txt", false));
-    try testing.expectEqualStrings("handbook.pdf", try nameOf(&f, a, p.pdf.id));
-    try testing.expectEqualStrings("handbook.pdf.mark", try nameOf(&f, a, p.mark.id));
+    try testing.expectError(error.InvalidMove, f.files.move(1, p.pdf.id, null, "notes.mark", false));
+    try testing.expectEqualStrings("handbook.txt", try nameOf(&f, a, p.pdf.id));
+    try testing.expectEqualStrings("handbook.txt.mark", try nameOf(&f, a, p.mark.id));
+
+    // And it is still ONE row in the listing after all that — the assertion that
+    // says the rename really did keep them paired rather than merely renaming two
+    // files that happen to sit beside each other.
+    const rows = try f.files.list(1, null);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("handbook.txt", rows[0].name);
 }
 
 test "a paired move takes a suffix that is free for BOTH, or refuses to clobber" {
@@ -7071,4 +7249,409 @@ test "restoring a trashed pdf leaves a LIVE mark of the same name alone" {
     defer Files.freeEntries(testing.allocator, rows);
     try testing.expectEqual(@as(usize, 1), rows.len);
     try testing.expectEqualStrings("manual.pdf", rows[0].name);
+}
+
+// ---- the pairing rule is FORMAT-AGNOSTIC ----
+//
+// The device appends `.mark` to the annotated document's FULL name, and it
+// annotates formats this server does not render — EPUB is the obvious one and
+// the set is open, since the rule has to keep working for formats nobody here
+// has thought of. The predicate used to require `%.pdf.mark`, which made every
+// one of those a file listing on its own, travelling on its own, and surfacing
+// in search on its own. These tests pin the general rule and, just as important,
+// the two things it must NOT swallow: an orphan, and a chain.
+
+test "a mark of a format we do not render is folded away exactly like a PDF's" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+
+    // An annotated EPUB, which the old `%.pdf.mark` predicate did not recognise:
+    // the household saw two rows for one book, the second of which opens as a
+    // page of disembodied handwriting.
+    const book = try putBytes(&f, 1, docs.id, "novel.epub", "aaaa");
+    defer freeEntry(book);
+    const ink = try putBytes(&f, 1, docs.id, "novel.epub.mark", "bbbbbb");
+    defer freeEntry(ink);
+
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("novel.epub", rows[0].name);
+    try testing.expectEqual(@as(i64, 1), try f.files.childCount(1, docs.id));
+
+    // AND IT TRAVELS. The listing folding a row away while a mutation left it
+    // behind is the conjuring bug: deleting the book would make a file the
+    // household has never seen appear in its place.
+    try f.files.trash(1, book.id);
+    try testing.expectEqual(@as(i64, 1), try deletedFlagOf(&f, ink.id));
+    try testing.expectEqual(@as(i64, 0), try f.files.childCount(1, docs.id));
+
+    // The bin shows ONE row, sized as the pair — "bytes a purge of this one
+    // frees" is 4 + 6, and the `f.name LIKE '%.pdf'` gate on that sum used to
+    // make an annotated EPUB understate its own purge by the size of its ink.
+    const bin = try f.files.listBin(a, 1);
+    try testing.expectEqual(@as(usize, 1), bin.len);
+    try testing.expectEqualStrings("novel.epub", bin[0].name);
+    try testing.expectEqual(@as(u64, 10), bin[0].size);
+
+    // Back together, and still one row.
+    (try f.files.restore(1, ink.id)).deinit(testing.allocator);
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, book.id));
+    try testing.expectEqual(@as(i64, 1), try f.files.childCount(1, docs.id));
+
+    // And a MOVE carries it, with the mark's name still derived from the
+    // document's — the pairing is the name plus the folder, so a move is the
+    // other operation that can break it silently.
+    const other = try f.files.createFolder(1, null, "Other");
+    defer testing.allocator.free(other.name);
+    const moved = try f.files.move(1, book.id, other.id, "saga.epub", false);
+    defer freeEntry(moved);
+    try testing.expectEqualStrings("saga.epub.mark", try nameOf(&f, a, ink.id));
+    try testing.expectEqual(@as(i64, 0), try f.files.childCount(1, docs.id));
+    try testing.expectEqual(@as(i64, 1), try f.files.childCount(1, other.id));
+}
+
+test "an orphan mark of a format we do not render still lists, and travels alone" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+
+    // No `novel.epub` beside it. Generalising the rule must not turn into "hide
+    // anything ending in `.mark`": with no document to fold behind, this row is
+    // the only remaining trace of that ink, and hiding it would make it
+    // unreachable through the UI while it went on consuming quota.
+    const orphan = try putBytes(&f, 1, docs.id, "novel.epub.mark", "aaaa");
+    defer freeEntry(orphan);
+    // A document with the right name in the WRONG folder does not adopt it: the
+    // pairing is same-folder, so a namesake elsewhere must not make it vanish.
+    const elsewhere = try putBytes(&f, 1, null, "novel.epub", "bbbb");
+    defer freeEntry(elsewhere);
+
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("novel.epub.mark", rows[0].name);
+
+    // And it travels alone — trashing it must not reach across to the namesake.
+    try f.files.trash(1, orphan.id);
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, elsewhere.id));
+}
+
+test "a mark of a mark is nobody's pair — the rule refuses to CHAIN" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+
+    // `a.note` + `a.note.mark` is an ordinary pair. `a.note.mark.mark` is the
+    // shape the format-agnostic rule invites and must refuse: a mark is not a
+    // document, so nothing annotates one. If it chained, the listing would hide
+    // this row behind a row that is itself hidden, and `pairOf` — which returns
+    // ONE partner — would leave it behind on every mutation, un-hidden by the
+    // very delete meant to take it. That is the conjuring bug with three rows.
+    const doc = try putBytes(&f, 1, docs.id, "a.note", "aaaa");
+    defer freeEntry(doc);
+    const mk = try putBytes(&f, 1, docs.id, "a.note.mark", "bbbb");
+    defer freeEntry(mk);
+    const chain = try putBytes(&f, 1, docs.id, "a.note.mark.mark", "cccc");
+    defer freeEntry(chain);
+
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqualStrings("a.note", rows[0].name);
+    try testing.expectEqualStrings("a.note.mark.mark", rows[1].name);
+
+    // Trashing the document takes its mark and NOTHING else — the chain row was
+    // visible before and is visible after, which is the whole point of refusing.
+    try f.files.trash(1, doc.id);
+    try testing.expectEqual(@as(i64, 1), try deletedFlagOf(&f, mk.id));
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, chain.id));
+    try testing.expectEqual(@as(i64, 1), try f.files.childCount(1, docs.id));
+
+    // A row named exactly `.mark` has an empty stem, which names nothing, so it
+    // is an orphan in both the SQL and `markStemOf` — the two must agree or the
+    // gap between them is the bug.
+    try testing.expect(Files.markStemOf(".mark") == null);
+    try testing.expect(Files.markStemOf("a.note.mark.mark") == null);
+    try testing.expectEqualStrings("a.note", Files.markStemOf("a.note.mark").?);
+}
+
+test "PLAN PIN: the pairing rule is an indexed sibling seek in the library AND the bin" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // The predicate is a correlated `EXISTS` on `files` evaluated per row, so its
+    // access path is the whole cost story: an index seek per `.mark` in the
+    // folder, or a walk of the caller's entire library per row. It is pinned by
+    // INDEX NAME because that is what the statement depends on — `files_live_name
+    // (user_id, COALESCE(parent_id,0), name) WHERE deleted = 0` for the library,
+    // and `files_bin_name`, its v12 twin, for the bin.
+    //
+    // The bin half is why v12 exists. Trashed rows had no name index at all, so
+    // every sibling probe fell back to `files_user_parent (user_id=?)` — an index
+    // whose first column selects the whole library. That cost was LATENT while
+    // the rule gated on `%.pdf`: a bin holding no PDFs never probed. Making the
+    // rule format-agnostic makes every bin row probe, which took one bin listing
+    // from 3,940 VM steps to 221,780 on a 400-file library with 40 rows in the
+    // bin. With `files_bin_name` the same listing is 4,500.
+    // The needles carry the trailing " (" that opens the plan's key list, so a
+    // rename to `files_bin_name_2` does not satisfy a pin written for
+    // `files_bin_name`. A bare substring match would make these pass for the
+    // wrong reason, which is the only way a plan pin can fail at its job.
+    const pins = .{
+        .{ "SELECT f.id FROM files f WHERE f.user_id = ?1 AND f.deleted = 0" ++ Files.hide_paired_mark ++ ";", "files_live_name (" },
+        .{ "SELECT f.id FROM files f WHERE f.user_id = ?1 AND f.deleted = 1" ++ Files.hide_paired_bin_mark ++ ";", "files_bin_name (" },
+    };
+    inline for (pins) |pin| {
+        var s = try f.db.prepare("EXPLAIN QUERY PLAN " ++ pin[0]);
+        defer s.finalize();
+        var indexed = false;
+        while (try s.step()) {
+            const detail = s.columnText(3);
+            if (std.mem.indexOf(u8, detail, "SEARCH p ") != null and
+                std.mem.indexOf(u8, detail, pin[1]) != null) indexed = true;
+        }
+        try testing.expect(indexed);
+    }
+
+    // And the bin listing's PAIR-SIZE subquery, the other correlated read on that
+    // statement: it fires for every non-mark row now that the `%.pdf` gate is
+    // gone, so it is the one that most needed the index.
+    var s = try f.db.prepare("EXPLAIN QUERY PLAN " ++ Files.bin_listing_sql);
+    defer s.finalize();
+    var sized = false;
+    var hidden = false;
+    while (try s.step()) {
+        const detail = s.columnText(3);
+        if (std.mem.indexOf(u8, detail, "files_bin_name (") == null) continue;
+        if (std.mem.indexOf(u8, detail, "SEARCH m ") != null) sized = true;
+        if (std.mem.indexOf(u8, detail, "SEARCH p ") != null) hidden = true;
+    }
+    try testing.expect(sized);
+    try testing.expect(hidden);
+}
+
+// ---- a move must not ADOPT ink it did not arrive with ----
+//
+// The pairing IS the name plus the folder, so a rename can create a pair as
+// easily as it can break one. `restore` has guarded that since the pair rule
+// landed (`RestoreName.pair`); `move` checked only whether the exact name was
+// taken, and an orphan `.mark` is not the exact name. Going format-agnostic
+// widened the hole from `.pdf` to every extension, which is what made it worth
+// closing now: renaming `notes.txt` to `handbook.pdf` could hand the file
+// annotations belonging to a document deleted months ago.
+
+test "a rename must not let an unpaired file adopt an orphan mark" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+
+    // The ink of a document that is long gone — nobody's pair, and visible in
+    // the listing precisely because it is nobody's pair.
+    const stray = try putBytes(&f, 1, docs.id, "handbook.pdf.mark", "aaaa");
+    defer freeEntry(stray);
+    // An ordinary unannotated file the user wants to rename.
+    const plain = try putBytes(&f, 1, docs.id, "notes.txt", "bbbb");
+    defer freeEntry(plain);
+
+    // REFUSED. `handbook.pdf` is free — no row holds that name — so the old
+    // `liveChild(new_name)` test saw nothing and let the rename through, and the
+    // file came out the other side wearing somebody else's annotations. The
+    // household is never told, because the mark then STOPS listing: it is a pair
+    // now, so it folds behind its new "document" and the evidence disappears.
+    try testing.expectError(error.NameConflict, f.files.move(1, plain.id, docs.id, "handbook.pdf", false));
+    try testing.expectEqualStrings("notes.txt", try nameOf(&f, a, plain.id));
+
+    // With `autorename`, the same suffix rule `restore` uses steps over it — the
+    // next ` (n)` that is free of a pairing as well as of a name.
+    const renamed = try f.files.move(1, plain.id, docs.id, "handbook.pdf", true);
+    defer freeEntry(renamed);
+    try testing.expectEqualStrings("handbook (2).pdf", renamed.name);
+
+    // The orphan is untouched and STILL VISIBLE, which is the assertion that says
+    // no pair was formed: a mark that had been adopted would have folded away.
+    try testing.expectEqualStrings("handbook.pdf.mark", try nameOf(&f, a, stray.id));
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqualStrings("handbook (2).pdf", rows[0].name);
+    try testing.expectEqualStrings("handbook.pdf.mark", rows[1].name);
+
+    // A no-op is still a no-op. The guard runs where the collision test used to,
+    // so a row asked to stay exactly where it is must not read its own name as a
+    // conflict with itself.
+    const noop = try f.files.move(1, plain.id, docs.id, "handbook (2).pdf", false);
+    defer freeEntry(noop);
+    try testing.expectEqualStrings("handbook (2).pdf", noop.name);
+}
+
+test "a MOVE into another folder adopts nothing either — the pairing is name plus folder" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const other = try f.files.createFolder(1, null, "Other");
+    defer testing.allocator.free(other.name);
+
+    // Same name, different folder: the file keeps its name and simply arrives
+    // where a stranger's ink is already waiting under it. Nothing about the
+    // REQUEST looks like a conflict, which is what makes this the quiet case.
+    const plain = try putBytes(&f, 1, docs.id, "lease.pdf", "aaaa");
+    defer freeEntry(plain);
+    const stray = try putBytes(&f, 1, other.id, "lease.pdf.mark", "bbbb");
+    defer freeEntry(stray);
+
+    try testing.expectError(error.NameConflict, f.files.move(1, plain.id, other.id, "lease.pdf", false));
+    const moved = try f.files.move(1, plain.id, other.id, "lease.pdf", true);
+    defer freeEntry(moved);
+    try testing.expectEqualStrings("lease (2).pdf", moved.name);
+    try testing.expectEqualStrings("lease.pdf.mark", try nameOf(&f, a, stray.id));
+    try testing.expectEqual(@as(i64, 2), try f.files.childCount(1, other.id));
+}
+
+test "an orphan MARK cannot be renamed into somebody's ink — the direction that is not symmetric" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+
+    // A document with no annotations, and an orphan mark from somewhere else.
+    const doc = try putBytes(&f, 1, docs.id, "report.pdf", "aaaa");
+    defer freeEntry(doc);
+    const stray = try putBytes(&f, 1, docs.id, "stray.epub.mark", "bbbb");
+    defer freeEntry(stray);
+
+    // THE ASYMMETRY, and the reason this needs its own assertion. The chain
+    // refusal in `move` only runs for a row that is ALREADY half of a pair; this
+    // row is an orphan, so it never reaches it. And the twin test cannot see the
+    // hazard either, because the pairing runs the other way — the row that would
+    // acquire ink is the one NOT being moved. `nameFree` answers it from the
+    // mark's side: the stem `report.pdf` is live, so this name is not free.
+    try testing.expectError(error.NameConflict, f.files.move(1, stray.id, docs.id, "report.pdf.mark", false));
+    try testing.expectEqualStrings("stray.epub.mark", try nameOf(&f, a, stray.id));
+
+    // With `autorename` the suffix goes where `freeName` always puts it — before
+    // the last extension — so the result is an orphan still, under a name whose
+    // stem names nothing. Odd-looking on purpose: it is the ONE suffix rule, not
+    // a special case invented for marks.
+    const renamed = try f.files.move(1, stray.id, docs.id, "report.pdf.mark", true);
+    defer freeEntry(renamed);
+    try testing.expectEqualStrings("report.pdf (2).mark", renamed.name);
+
+    // Both rows still list — no pair was formed, so nothing folded away.
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqual(@as(i64, 2), try f.files.childCount(1, docs.id));
+}
+
+test "a FOLDER is exempt from the adoption guard, because a folder never pairs" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+
+    // `plan.pdf.mark` is a file; `Archive` is a folder about to be renamed onto
+    // the name that would pair with it IF a folder could pair. It cannot — the
+    // rule requires `is_folder = 0` on the document side and `pairOf` returns
+    // null for a folder — so refusing here would be a guard inventing a conflict
+    // that no listing and no mutation would ever act on.
+    const mk = try putBytes(&f, 1, docs.id, "plan.pdf.mark", "aaaa");
+    defer freeEntry(mk);
+    const dir = try f.files.createFolder(1, docs.id, "Archive");
+    testing.allocator.free(dir.name);
+
+    const renamed = try f.files.move(1, dir.id, docs.id, "plan.pdf", false);
+    defer freeEntry(renamed);
+    try testing.expectEqualStrings("plan.pdf", renamed.name);
+
+    // And the mark keeps its own row beside it, exactly as the folder-pairing
+    // test upstream asserts for a folder that was born with the name.
+    try testing.expectEqualStrings("plan.pdf.mark", try nameOf(&f, a, mk.id));
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+}
+
+test "a PAIRED move is unchanged by the adoption guard — it still carries its own ink" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try putPair(&f, null, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    // The guard is on the UNPAIRED branch only. A row that arrives holding its
+    // own mark is not adopting anything, and `nameFree`'s twin test means the
+    // same thing there that it always did — this is the regression guard against
+    // the new arm leaking into the path that was already correct.
+    const renamed = try f.files.move(1, p.pdf.id, null, "guide.epub", false);
+    defer freeEntry(renamed);
+    try testing.expectEqualStrings("guide.epub", renamed.name);
+    try testing.expectEqualStrings("guide.epub.mark", try nameOf(&f, a, p.mark.id));
+
+    const rows = try f.files.list(1, null);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+}
+
+test "a FOLDER named like a mark is not ink — it lists, and nothing carries it" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+
+    // The mirror of "a folder named like a PDF never pairs": that one has the
+    // folder on the DOCUMENT side, which the rule has always excluded. This has
+    // it on the MARK side, which it did not — and `pairOf` returns null for a
+    // folder either way, so the listing and the mutations disagreed.
+    const doc = try putBytes(&f, 1, docs.id, "plan.pdf", "aaaa");
+    defer freeEntry(doc);
+    const dir = try f.files.createFolder(1, docs.id, "plan.pdf.mark");
+    testing.allocator.free(dir.name);
+    // Something inside it, because the cost of hiding a FOLDER is not one row:
+    // the whole subtree goes with it, reachable by id and by nothing else.
+    const buried = try putBytes(&f, 1, dir.id, "buried.note", "bbbb");
+    defer freeEntry(buried);
+
+    const rows = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqualStrings("plan.pdf.mark", rows[0].name); // folders first
+    try testing.expectEqualStrings("plan.pdf", rows[1].name);
+    try testing.expectEqual(@as(i64, 2), try f.files.childCount(1, docs.id));
+
+    // AND NOTHING CARRIES IT, which is the half that made hiding it a bug rather
+    // than a cosmetic wrong: trashing `plan.pdf` used to leave the folder live
+    // and un-hidden, so a delete made a directory the household had never seen
+    // appear in its place, with somebody's notes inside.
+    try f.files.trash(1, doc.id);
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, dir.id));
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, buried.id));
+    const rows2 = try f.files.list(1, docs.id);
+    defer Files.freeEntries(testing.allocator, rows2);
+    try testing.expectEqual(@as(usize, 1), rows2.len);
+    try testing.expectEqualStrings("plan.pdf.mark", rows2[0].name);
 }

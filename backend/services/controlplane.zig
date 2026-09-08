@@ -726,11 +726,14 @@ pub const ControlPlaneService = struct {
     /// `files.db` from here; a rule the tree's owner enforces on every mutation
     /// cannot also be re-derived by a reader that does not know when it changed.
     ///
-    /// The gate is looser than the pairing rule on purpose. Pairing keys off the
-    /// NAME (`%.pdf` + `.mark`), because that is what a listing and an UPDATE can
-    /// agree on; this keys off the DESCRIBED type, so a PDF verified by content
-    /// but named without the extension still finds its ink to show. The looser
-    /// side is the read-only one, which is the safe direction for them to differ.
+    /// The gate is looser than the pairing rule on purpose, and stays so now that
+    /// the pairing rule is format-agnostic. Pairing keys off the NAME — a sibling
+    /// exists whose `name || '.mark'` is this row's — because that is what a
+    /// listing and an UPDATE can agree on; this keys off the DESCRIBED type, so a
+    /// PDF verified by content but named without the extension still finds its ink
+    /// to show. The looser side is the read-only one, which is the safe direction
+    /// for them to differ, and they must NOT be converged: making this one ask the
+    /// name would lose exactly the case it exists for.
     ///
     /// LIVE ONLY, deliberately. A trashed PDF is looked up in the bin's own scope
     /// (`noteMetaIn` passes `.live` only), so a bin preview can never composite a
