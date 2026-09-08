@@ -35,11 +35,14 @@ searching, and exporting everything from any device on your network.
 
 - **Sync your Supernote** — upload, download, capacity, folder moves/renames, and
   conflict resolution, all speaking the device's own protocol.
-- **Read notebooks in the browser** — notebooks, sketches, and text files, with
-  per-layer viewing and in-note find. Pages render *in your browser* (a small
-  WebAssembly decoder), so the server only moves bytes.
-- **Search your handwriting** — full-text search across every note, powered by the
-  on-device OCR text your Supernote already produces.
+- **Read it in the browser** — notebooks, sketches, PDFs, images and text files,
+  with per-layer viewing and in-document find. Pages render *in your browser*
+  (small WebAssembly decoders), so the server only moves bytes.
+- **Search your handwriting** — and your PDFs and text files, full-text across
+  the whole library. Handwriting is searchable because your Supernote does the
+  OCR on-device; the other formats carry their own text. The index is built and
+  queried *in your browser* too, so the Pi never runs a query — and a typo still
+  finds the word you meant.
 - **Recover mistakes** — a recycle bin with a retention window, and per-file
   **version history** so you can look back at earlier states of a note.
 - **Export** — any note to PDF (with a searchable text layer), a flat PNG, or a
@@ -118,7 +121,7 @@ git clone <this-repo> inkhold && cd inkhold
 make serve
 ```
 
-`make serve` builds the WebAssembly page decoder, the browser app and the server,
+`make serve` builds the WebAssembly modules, the browser app and the server,
 then **starts it**. On first use it writes the config for you, already listening
 on every interface, so there is nothing to edit to get going.
 
@@ -173,7 +176,7 @@ Honest gaps, so you know before you try:
 | | |
 |---|---|
 | **Data Sync — To-Do and Digest** | The tablet's To-Do and Digest data does not sync. Inkhold implements the file-sync protocol; these ride a separate one that has not been reverse-engineered. Notes, folders, and the other synced types are unaffected. |
-| **PDF previews** | A `.pdf` in the library shows a document glyph rather than a rendered first page. It still uploads, syncs and downloads — you just cannot see inside it from the browser. `.note`, `.spd`, images and text all render. |
+| **EPUB and Office files** | An `.epub` or a `.doc` uploads, syncs and downloads, but the browser has no viewer for it and its text is not searchable. Notebooks, PDFs, sketches, images and text files all render; notebooks, PDFs and text files are all searchable. |
 | **The Supernote mobile app** | Deliberately out of scope: it expects the server to render pages, which is the one thing Inkhold pushes to the browser instead. The device syncs directly; the app does not. |
 
 ### Devices
