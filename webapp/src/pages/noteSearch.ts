@@ -3,34 +3,63 @@
 // debounce/race/failure logic with the DOM injected as a {@link SearchView}, so
 // it is exercisable on plain Node while library.ts keeps only the wiring.
 //
+// THE ENGINE IS INJECTED, behind `search/localSearch.ts`'s one result shape, and
+// this file never reads `LocalSearch.ready`. There is one engine to read it
+// about since §6 step 6, but the rule predates that and outlives it: a branch
+// here on how an answer was obtained is a second rendering path, and the second
+// path is the one that rots.
+//
 // The two things this file exists to get right:
 //
-//   DEBOUNCE — a backend FTS query per keystroke is waste. Typing "roadmap"
-//   would be seven queries for one intent, six of them already obsolete when
-//   they land. So keystrokes coalesce into one request after a quiet moment.
+//   DEBOUNCE — the query no longer leaves the machine (`golden-search.md` §4.6),
+//   so a keystroke no longer wastes a REQUEST; it wastes a FRAME. The index
+//   answers out of wasm, and the pathological short prefix — `con*`, a
+//   1,359-term expansion over 5,642 pages — MEASURED 37.9 ms on the whole
+//   library (§8.1). Seven of those on the way to "roadmap" is visible jank for
+//   six answers nobody reads, so keystrokes still coalesce into one run after a
+//   quiet moment. See {@link DEFAULT_DEBOUNCE_MS} for why the number moved.
 //
-//   STALENESS — even debounced, requests can overtake each other: a slow query
-//   for "road" resolving after a fast one for "roadmap" would paint the WRONG,
+//   STALENESS — even debounced, runs can overtake each other: a slow query for
+//   "road" resolving after a fast one for "roadmap" would paint the WRONG,
 //   OLDER results and leave them there, because nothing later is coming to
-//   correct them. Every request therefore carries a token, and a response whose
+//   correct them. Every run therefore carries a token, and a response whose
 //   token has moved on is dropped rather than painted. Same guard the reader and
 //   the OCR panel use for their own paints — this is the third instance of the
 //   pattern, not a new invention.
 
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
-import type { Api } from "../api/types";
-import type { Coverage, Id, SearchHit } from "../core/types";
+import type { LocalHit, LocalSearch } from "../search/localSearch";
 
 /**
- * The floor a LIBRARY-WIDE query must clear before a request is made. One or two
- * characters matches very nearly the whole index — broad-term cost on the wire
- * and noise on screen — and answers nothing anyone was asking, so the box simply
- * does not fire below it. Mirrors the backend's `min_global_query_len` (defense
- * in depth lives on both sides). This is the GLOBAL floor ONLY: in-document find
- * (find-in-note, the `.txt` viewer's find bar) is exempt by design and searches a
- * one-character string happily — it lives in the viewers, not in this controller.
+ * The floor a LIBRARY-WIDE query must clear before it is run. One or two
+ * characters matches very nearly the whole index — noise on screen, and now the
+ * expensive case as well (§4.6's 37.9 ms is a two-to-three character prefix) —
+ * so the box simply does not fire below it. This is the GLOBAL floor ONLY:
+ * in-document find (find-in-note, the `.txt` viewer's find bar) is exempt by
+ * design and searches a one-character string happily — it lives in the viewers,
+ * not in this controller.
  */
 export const MIN_GLOBAL_QUERY_LEN = 3;
+
+/**
+ * The quiet period before a query runs, ms.
+ *
+ * NOT the 220 ms this box was born with. That number bought one backend FTS
+ * query per PAUSE instead of one per keystroke, and there is no backend query
+ * left to buy (§4.6: "the existing justification is gone and the number must not
+ * be inherited silently"). What replaces it is a smaller argument for a smaller
+ * number: the run is local but not free, it happens on the main thread, and its
+ * worst case is a short common prefix — exactly what a box sees on the way to a
+ * longer word.
+ *
+ * So the value is chosen to sit under the ~150 ms at which a response stops
+ * reading as immediate, while still swallowing the middle of a typed burst
+ * (~100 ms between keys at speed). Zero was the other candidate and is rejected
+ * for the same 37.9 ms: at zero the box would run the most expensive query it
+ * ever runs on every one of the first three keystrokes, and the results area
+ * would flicker through three answers to questions nobody finished asking.
+ */
+export const DEFAULT_DEBOUNCE_MS = 120;
 
 /**
  * What the results area can be showing. These are deliberately distinct states
@@ -40,32 +69,28 @@ export const MIN_GLOBAL_QUERY_LEN = 3;
  * broken search gets mistaken for an empty one.
  */
 export type SearchState =
-  /** The box is empty — no request was made and nothing is claimed. */
+  /** The box is empty — no query was run and nothing is claimed. */
   | { kind: "idle" }
   | { kind: "searching"; query: string }
   | {
       kind: "results";
       query: string;
-      hits: SearchHit[];
       /**
-       * The service answered approximately. Carried through the state rather
-       * than left on the wire because the view has to SAY so — once, above the
-       * results — and a response that quietly presented close matches as exact
-       * ones is the defect this field exists to close.
+       * The ranked DOCUMENTS that matched — most matching pages first, then
+       * recency ({@link rankDocuments}). One row per document and never one per
+       * page, which is what §4.3 buys by dropping excerpts.
+       *
+       * THERE IS NOTHING ELSE IN THIS STATE, and the absences are the design:
+       * no cursor (a client holding the whole index has already paid for every
+       * match, so there is nothing left to spend), no `usedFuzzy` (the shape
+       * carries no expansion to report), and no `Coverage` (nothing counts the
+       * unsearchable now that no server interprets the query).
+       *
+       * `LocalResults.totalPages` is not carried either: it is the sum of these
+       * documents' page counts, so the view would be storing a number it can
+       * add up. The renderer counts what it paints.
        */
-      usedFuzzy: boolean;
-      /** Zero-hit only; see {@link Coverage}. `null` whenever the server did not say. */
-      coverage: Coverage | null;
-      /**
-       * The server's opaque continuation, present exactly when more hits MAY
-       * exist beyond the ones in `hits` — see {@link SearchResults.cursor}.
-       * Carried through the state because its PRESENCE is what the view renders
-       * (the "More results" control exists precisely while there is a cursor to
-       * spend); its VALUE is only ever handed back via {@link
-       * NoteSearchController.loadMore}, never parsed. NO TOTAL accompanies it,
-       * ever — the results header must speak in "N+" floors, not counts.
-       */
-      cursor?: string;
+      documents: readonly LocalHit[];
     }
   | { kind: "error"; query: string };
 
@@ -74,51 +99,52 @@ export interface SearchView {
 }
 
 export interface NoteSearchDeps {
-  api: Api;
   view: SearchView;
+  /**
+   * The engine. One, never two — see the file header. Defaults to
+   * {@link noLocalSearch} so a test about the debounce need not fake an index.
+   */
+  search?: LocalSearch;
   /**
    * Where UNAUTHORIZED goes. Never swallow it: an expired session that surfaced
    * as "no results" would be indistinguishable from a genuinely unmatched query,
    * which is the exact bug class the ApiFailureSink was introduced to remove.
+   *
+   * A LIBRARY-WIDE QUERY NO LONGER LEAVES THE MACHINE, so the sink is unlikely
+   * to fire from here — an engine that answers out of wasm and IndexedDB has no
+   * session to have expired. It stays because the alternative is a `catch` that
+   * turns whatever a future engine throws into a results-area message, which is
+   * exactly the collapse the sink exists to prevent, and because routing an
+   * error it never sees costs one call.
    */
   failures: ApiFailureSink;
-  /** Quiet period before a query is sent, ms. Default 220. */
+  /** Quiet period before a query runs, ms. Default {@link DEFAULT_DEBOUNCE_MS}. */
   debounceMs?: number;
-  /** Max hits requested. Default 10 — the server's own default and a sane page. */
-  limit?: number;
 }
 
 export interface NoteSearchController {
   /** The search box changed. Cheap, idempotent, and safe to call per keystroke. */
   setQuery(raw: string): void;
-  /**
-   * Spend the current results' cursor: fetch the next page and paint the SAME
-   * `results` state grown by it — hits appended in arrival order, the new
-   * page's cursor (or none) replacing the spent one. A no-op when there is no
-   * cursor to spend or a fetch for one is already in flight, so a double-click
-   * on the control cannot request the same page twice.
-   *
-   * The returned promise settles when the attempt is over — it is the view's
-   * hook for its own loading affordance — and it NEVER rejects: UNAUTHORIZED
-   * routes to the failure sink like every other call, and any other failure
-   * deliberately leaves the painted results standing. A failed "more" must not
-   * become an error screen over twenty perfectly good hits; the control simply
-   * re-arms and the retry is free.
-   *
-   * `usedFuzzy` and `coverage` keep the FIRST page's answer: whether the search
-   * was approximate was decided when it ran, and every page continues that same
-   * search — a notice that flickered per page would be describing the transport,
-   * not the results.
-   */
-  loadMore(): Promise<void>;
   /** Drop the pending timer, orphan any in-flight response, and clear the view. */
   reset(): void;
 }
 
+/**
+ * The engine a box has when nobody handed it one: never ready, and answers every
+ * query with nothing.
+ *
+ * It exists so this controller has no `search === undefined` branch and so a
+ * test that is about the debounce does not have to build an index.
+ */
+export const noLocalSearch: LocalSearch = {
+  ready: false,
+  search: (query) => Promise.resolve({ query, totalPages: 0, documents: [], expansions: [] }),
+};
+
 export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
-  const { api, view, failures } = deps;
-  const debounceMs = deps.debounceMs ?? 220;
-  const limit = deps.limit ?? 10;
+  const { view, failures } = deps;
+  const engine = deps.search ?? noLocalSearch;
+  const debounceMs = deps.debounceMs ?? DEFAULT_DEBOUNCE_MS;
 
   let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -130,41 +156,23 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
   let token = 0;
 
   /**
-   * The trimmed query currently pending, in flight, or painted. Its job is to
+   * The trimmed query currently pending, running, or painted. Its job is to
    * make `setQuery` idempotent: the gallery calls it on every `input` event, and
    * events that do not change the *effective* query (typing a trailing space,
-   * a re-render echoing the value back) must not cancel and re-issue a request
+   * a re-render echoing the value back) must not cancel and re-issue a query
    * that is already on its way to answering exactly this question.
    */
   let active: string | null = null;
 
   /**
-   * The last `results` state painted, kept so `loadMore` knows what it is
-   * growing: the query the cursor belongs to, the hits to append after, and the
-   * cursor itself. `null` whenever nothing pageable is on screen — before the
-   * first response, after `reset`, and from the moment a new query is typed
-   * (cleared in {@link cancelPending}), so a late "More" click against a search
-   * being replaced spends nothing.
-   */
-  let painted: Extract<SearchState, { kind: "results" }> | null = null;
-
-  /** One page fetch at a time — the double-click guard `loadMore` promises. */
-  let fetchingMore = false;
-
-  /**
-   * The request the current {@link token} owns, so a superseded one can be
-   * ABORTED rather than merely ignored.
+   * The run the current {@link token} owns, so a superseded one can be ABORTED
+   * rather than merely ignored.
    *
    * Dropping a response on the token is what stops it painting; it does nothing
-   * about the request itself, which carries on to completion holding one of the
-   * browser's ~6 connections per origin. Typing an eight-letter query past the
-   * 220 ms debounce is a handful of those, all for answers already superseded,
-   * all competing with the gallery's own listings and thumbnails on exactly the
-   * link where that is felt. Note-scoped find has threaded a signal since it was
-   * written; this is the same thing on the library-wide half.
-   *
-   * ONE CONTROLLER FOR BOTH ARMS: the first page and a "More" page belong to the
-   * same search, and the events that supersede one supersede the other.
+   * about the work itself. That mattered on the wire (a superseded request held
+   * one of the browser's ~6 connections) and it still matters locally, for the
+   * other half of §4.6's number: an abandoned `con*` is 37.9 ms of main thread
+   * an engine that honours the signal can give back.
    */
   let inflight: AbortController | null = null;
 
@@ -173,30 +181,21 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
       clearTimeout(timer);
       timer = undefined;
     }
-    // Orphans anything already awaiting a response: its captured token is stale
-    // from here on, so it will drop itself when it resolves — and gives the
-    // connection back, which the token alone cannot do.
+    // Orphans anything already awaiting an answer: its captured token is stale
+    // from here on, so it will drop itself when it resolves — and lets an engine
+    // that watches the signal stop early, which the token alone cannot do.
     token++;
     inflight?.abort();
     inflight = null;
-    painted = null;
   }
 
   async function run(query: string, mine: number): Promise<void> {
     const ac = new AbortController();
     inflight = ac;
     try {
-      const results = await api.searchText(query, limit, undefined, ac.signal);
+      const results = await engine.search(query, ac.signal);
       if (mine !== token) return; // a later keystroke superseded us — drop it
-      painted = {
-        kind: "results",
-        query,
-        hits: results.hits,
-        usedFuzzy: results.usedFuzzy,
-        coverage: results.coverage,
-        cursor: results.cursor,
-      };
-      view.setState(painted);
+      view.setState({ kind: "results", query, documents: results.documents });
     } catch (e) {
       if (mine !== token) return;
       // A dead session belongs to the shell, not to the results area. Routing it
@@ -210,78 +209,35 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
 
   return {
     setQuery(raw: string): void {
-      // The FIRST of the two trims that make every library-wide search a PREFIX
-      // query — `Api.searchText` does the second, and carries the long note.
-      // Trailing whitespace is the server's "this word is finished" signal
-      // (`isStillTyping`, `backend/services/search/query.zig`); this strips it
-      // before the query is ever compared, debounced or sent, so a settled box
-      // is indistinguishable here from a mid-word one. MEASURED on the Pi: the
-      // prefix page costs 810.3 ms p50 against 80.6 ms completed, 10.0x
-      // (`docs/scratch/search-baseline.md`).
-      //
-      // The trim is also load-bearing for the identity check below: without it
-      // typing a trailing space would re-fire a search for the same question.
-      // Whichever way the trailing space is eventually handled, that has to keep
-      // holding. NOT changed here — the open decision is in
-      // `docs/scratch/backlog.md`.
+      // Trailing whitespace is the only thing the trim is still load-bearing
+      // for: the identity check below. Without it, typing a space would re-fire
+      // a search for the same question. (It used to carry a second job — the
+      // server read a trailing space as "this word is finished" and the prefix
+      // page cost 810 ms against 80 ms completed. The query now folds through
+      // the index's own tokenizer, raw, so that half is gone.)
       const query = raw.trim();
       if (query === active) return; // same question; leave the answer in progress alone
       active = query;
       cancelPending();
 
       if (query.length < MIN_GLOBAL_QUERY_LEN) {
-        // No request at all — see `Api.searchText`. Empty, or below the global
-        // floor (`MIN_GLOBAL_QUERY_LEN`): a 1–2 char library-wide query is broad-
-        // term cost and noise, so the box idles exactly as it does when empty
-        // rather than firing search-as-you-type. In-doc find is not gated here —
-        // it is the viewers' own, and this controller never runs it.
+        // No run at all — see `MIN_GLOBAL_QUERY_LEN`. Empty, or below the global
+        // floor: a 1–2 char library-wide query is noise on screen and the
+        // costliest thing the index does, so the box idles exactly as it does
+        // when empty rather than searching as you type. In-doc find is not gated
+        // here — it is the viewers' own, and this controller never runs it.
         view.setState({ kind: "idle" });
         return;
       }
 
-      // Announced immediately, sent later: the user gets feedback on the
-      // keystroke while the network still only sees one query per pause.
+      // Announced immediately, run later: the user gets feedback on the
+      // keystroke while the engine still only sees one query per pause.
       view.setState({ kind: "searching", query });
       const mine = token;
       timer = setTimeout(() => {
         timer = undefined;
         void run(query, mine);
       }, debounceMs);
-    },
-
-    async loadMore(): Promise<void> {
-      const current = painted;
-      if (fetchingMore || current === null || current.cursor === undefined) return;
-      fetchingMore = true;
-      // The same staleness token every paint honours: a keystroke or reset
-      // while this page is in flight orphans it, exactly as it orphans a
-      // first-page response.
-      const mine = token;
-      const ac = new AbortController();
-      inflight = ac;
-      try {
-        const results = await api.searchText(current.query, limit, current.cursor, ac.signal);
-        if (mine !== token) return;
-        painted = {
-          ...current,
-          // Arrival order IS the order — the server display-sorts within a page
-          // and the keyset walks pages in rank order, so appending preserves
-          // both. Re-sorting here would shuffle rows the user is looking at.
-          hits: [...current.hits, ...results.hits],
-          // The next page's cursor, or `undefined` when the stream is done —
-          // which is what makes the "More" control disappear honestly.
-          cursor: results.cursor,
-        };
-        view.setState(painted);
-      } catch (e) {
-        if (mine !== token) return;
-        if (dispatchApiFailure(failures, e)) return;
-        // Deliberately NOT `view.setState({kind:"error"})`: the results already
-        // on screen are real and stay. See the interface doc — the control
-        // re-arms when this promise settles, and the retry costs a click.
-      } finally {
-        fetchingMore = false;
-      }
     },
 
     reset(): void {
@@ -292,177 +248,68 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
   };
 }
 
-// --- grouping ---------------------------------------------------------------
-//
-// `searchText` ranks and returns PAGES, one row per matching page. Left as-is
-// that lets one verbose note own the whole list: a notebook matching on six
-// pages is six rows, and everything else is pushed off the end of the limit's
-// window. The note is the unit people think in ("which notebook was that in?"),
-// so the client groups the pages back up under it. The group's best-ranked page
-// is where the row's link lands and where its excerpt comes from; the rest
-// become a count (see {@link pageSummary}) rather than a strip of destinations —
-// the row opens the note with the query still running, and Next walks them.
-
-// --- the resolved term a deep link carries (in-doc-search Phase 3, route 2) ---
-//
-// When a GLOBAL search matched FUZZILY, the word actually in the document is not
-// the one the user typed — it is the correction. The server already tells us
-// which word it was: `SearchHit.snippet` is HTML with the matched words wrapped
-// in `<mark>`, and on a fuzzy hit those marks are the CORRECTED spelling. So the
-// deep link into the viewer can carry that resolved term instead of the typo,
-// and the in-doc find on open runs it EXACT — the corrected word really is in the
-// doc — with NO in-doc fuzzy scan (the residual Pi tail this route removes). The
-// query and matching are untouched; only which term the LINK carries changes.
-
-/** Reverse the server's snippet escaping for a single marked word. Only the five
- *  entities `note_search.escapeSnippet` emits appear, and a `<mark>` body never
- *  itself contains markup, so this is the exact inverse of what produced it. */
-function unescapeEntities(s: string): string {
-  return s
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, "&"); // last, so `&amp;lt;` restores to `&lt;`, not `<`
-}
+// --- the query a deep link carries -------------------------------------------
 
 /**
- * The words a hit's snippet actually MARKED — the terms the server counted on
- * that page, in appearance order, deduped case-insensitively. On a fuzzy hit
- * these are the corrected spellings; on an exact hit they are the query's own
- * words. Empty when the snippet carried no `<mark>` (a name-only match, or a hit
- * with no excerpt).
- */
-export function markedTerms(snippet: string): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const re = /<mark>([\s\S]*?)<\/mark>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(snippet)) !== null) {
-    const term = unescapeEntities(m[1]!).trim();
-    if (term === "") continue;
-    const key = term.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(term);
-  }
-  return out;
-}
-
-/**
- * The query a global-search HIT should deep-link the viewer's find with.
+ * The query a global-search HIT should deep-link the viewer's find with: the
+ * typed query, verbatim.
  *
- * On an EXACT search it is the typed query, verbatim — nothing to resolve. On a
- * FUZZY search it is the RESOLVED term(s) pulled from the hit's own marked
- * snippet, so the viewer opens searching the word that is really there (exact,
- * cheap) rather than re-fuzzing the typo inside the document. Falls back to the
- * typed query whenever a hit carries no usable marks — a name-only match, or a
- * snippet the server did not mark — which is the honest "search what they typed".
+ * ## Why this is a named function and not just `q`
+ *
+ * It used to resolve the word that actually matched. On a fuzzy search the term
+ * in the document is the CORRECTION, not the typo, and the server had already
+ * marked it — so the link carried `reunião` where the user typed `reunaio`, and
+ * the viewer's find ran it exact instead of re-fuzzing inside the document.
+ * That machinery read the marks back out of the excerpt's HTML, and §4.3 drops
+ * excerpts, so the marks are gone with it.
+ *
+ * ## The decision, and its cost
+ *
+ * DEEP-LINK WHAT THEY TYPED. The alternatives were to guess an expansion the row
+ * does not have, or to carry no query at all and open the viewer cold; the first
+ * invents a fact and the second discards one. What this loses, stated plainly
+ * rather than left to be discovered: until in-document search moves onto the same
+ * engine (§6 step 7), a typo that the global index expanded is handed to a find
+ * that must expand it again — the residual fuzzy scan that resolving the term
+ * once removed. It is one document rather than the corpus, and it is temporary.
+ *
+ * What the shape cannot do YET is the better version §4.3 asks for: the client
+ * did its own expansion, so it knows the matched term without parsing anything.
+ * `LocalHit` does not carry it, so this is the one place that changes when it
+ * does — hence a function with a name rather than `q` spliced into an href.
  */
-export function deepLinkQuery(typed: string, usedFuzzy: boolean, snippet: string | undefined): string {
-  if (!usedFuzzy || !snippet) return typed;
-  const terms = markedTerms(snippet);
-  return terms.length > 0 ? terms.join(" ") : typed;
-}
-
-/** One matching page of a note: where to jump, and the excerpt that says why. */
-export interface HitPage {
-  /** 0-based, exactly as {@link SearchHit.pageIndex}. */
-  pageIndex: number;
-  /** ⚠️ PRE-ESCAPED HTML — see {@link SearchHit.snippet}. */
-  snippet: string;
-}
-
-/** A note and every page of it the query matched, best-ranked note first. */
-export interface NoteHits {
-  noteId: Id;
-  /** PLAIN TEXT, device-authored — see {@link SearchHit.noteName}. */
-  noteName: string;
-  /** In the order the server ranked them; never empty. */
-  pages: HitPage[];
-  /**
-   * What this group's {@link HitPage.pageIndex}es COUNT — a `.txt` file's
-   * paragraphs (kind 1) or a `.note`'s pages (kind 0/absent). One value per
-   * group because a file is one type: every hit under a given file shares it.
-   * Absent reads as 0, tolerant like {@link SearchHit.kind}, so a group's items
-   * open the reader unless it is emphatically a `.txt` group.
-   */
-  kind: number;
+export function deepLinkQuery(typed: string): string {
+  return typed;
 }
 
 /**
- * Group page hits under their note, PRESERVING SERVER ORDER — a note takes the
- * position of its best-ranked page, and its pages keep the order they arrived
- * in. bm25 is the only ranking anything here has; re-sorting would throw it away
- * and put a client-side guess in its place.
+ * What a result row says about how much of the document the query reached — the
+ * quiet line beside the date, where the excerpt used to be.
  *
- * A repeated `(noteId, pageIndex)` collapses. The server does not emit one, but
- * a duplicate would otherwise become two chips pointing at the same page, which
- * reads as two matches.
- */
-export function groupHits(hits: readonly SearchHit[]): NoteHits[] {
-  const byNote = new Map<Id, NoteHits>();
-  for (const hit of hits) {
-    let group = byNote.get(hit.noteId);
-    if (!group) {
-      // `kind` is the group's, taken from the first hit that named the file —
-      // tolerant, so absent/0 is a note and only exactly 1 is a `.txt`. A file
-      // is one type, so later hits cannot disagree.
-      group = { noteId: hit.noteId, noteName: hit.noteName, pages: [], kind: hit.kind === 1 ? 1 : 0 };
-      byNote.set(hit.noteId, group);
-    }
-    if (group.pages.some((p) => p.pageIndex === hit.pageIndex)) continue;
-    group.pages.push({ pageIndex: hit.pageIndex, snippet: hit.snippet });
-  }
-  return [...byNote.values()];
-}
-
-/**
- * What a result row says about how much of the note the query reached — the
- * quiet line that replaced the strip of page chips.
- *
- * ## Why this counts PAGES and not matches
+ * ## THE RULE: this counts PAGES, and there is only ever one authority
  *
  * The obvious wording is "12 matches across 4 pages", and the number it needs
- * does not exist on this route. `SearchHit` is one row per matching PAGE with an
- * excerpt; only the note-scoped route (`PageMatch.matches`, what find-in-note
- * counts with) carries a tally, and asking it here would be one request per
- * result — precisely the fan-out the two-phase cost model exists to prevent.
+ * does not exist here — an index row is a page's term list, so a page either
+ * matched or did not and a per-page tally is not a thing the count can be made
+ * of. A row claiming "3 matches" beside a find counter reading "1 of 9" for the
+ * SAME query is a second source of truth for one number. So the row says what it
+ * actually knows, and the document-wide match tally is find's to give, from the
+ * same query, once you are inside.
  *
- * Counting `<mark>`s in the excerpt would produce a number, and it would be the
- * wrong one: `snippet()` marks the terms inside one small window, not the page.
- * A row claiming "3 matches" beside a find counter reading "1 of 9" for the SAME
- * query is exactly the second source of truth the one-way-authority rule forbids
- * — the count is the index's answer, and there is only ever one of it. So the row
- * says what it actually knows, and the note-wide tally is find's to give, from
- * the same query, once you are inside.
+ * ## It says so for ONE page too, now that the number is exact
+ *
+ * The old rule was silence below two, and every reason for it has expired. The
+ * server returned one hit per document and seeked past the rest of the band, so
+ * a count of one was the ordinary case and meant nothing; worse, the number only
+ * ever counted hits inside the fetched window, so for a notebook the query
+ * reached on three hundred pages it stated a reach the row did not know.
+ * `LocalHit.pages` is every matching page of that document — one is now a fact
+ * worth as much as forty, and it is the fact that separates a passing mention
+ * from the notebook the query is really about.
  *
  * `null` for a name-only match: there is nothing to say about pages when no page
  * matched, and "Matches on 0 pages" would make the reader parse a number to
  * learn that the title above it was the whole answer.
- *
- * ## `null` for ONE page too, since global search names documents
- *
- * The server returns one hit per document now (it seeks past the rest of the
- * band rather than paginating through it), so a group of one is the ordinary
- * case and this line would read "Matches on 1 page" on nearly every row. That is
- * noise where it is merely redundant, and for a notebook the query reached on
- * three hundred pages it is a LIE — it states a reach the row does not know.
- * Note the count was never a total even before: it only ever counted the hits
- * inside the fetched window.
- *
- * So the row stops claiming to know, and the claim moves to the one place that
- * does: opening the result starts find-in-note on the same query, which gives
- * the honest note-wide tally and every page with it.
- *
- * A group larger than one still says so. That happens when a document genuinely
- * surfaced more than once in the stream — an appended-page run, or a band a past
- * edit left non-canonical — and the number is then a real floor on what was
- * reached, the same floor it always was.
- *
- * Singulars are kept for the `.txt`/paragraph reading and as the tell that a
- * count was written rather than interpolated, even though only the plural branch
- * is now reachable.
  *
  * `kind` switches the UNIT with the source type: a `.note`'s hits are PAGES, a
  * `.txt`'s are PARAGRAPHS. The wording is otherwise identical — one quiet line
@@ -470,7 +317,7 @@ export function groupHits(hits: readonly SearchHit[]): NoteHits[] {
  * the query reach") is the same; only what a segment IS differs.
  */
 export function pageSummary(pages: number, kind = 0): string | null {
-  if (pages <= 1) return null;
+  if (pages < 1) return null;
   if (kind === 1) return `Matches in ${pages} ${pages === 1 ? "paragraph" : "paragraphs"}`;
   return `Matches on ${pages} ${pages === 1 ? "page" : "pages"}`;
 }
@@ -478,29 +325,26 @@ export function pageSummary(pages: number, kind = 0): string | null {
 /**
  * What the empty state says about how much of the library was searchable at all.
  *
- * "Only notes recognised on the device are searchable" is true and useless: it
- * leaves the reader unable to tell "it is not there" from "it might be there and
- * I cannot see it". `12 of your 40 notes have no recognised text` settles that.
+ * ## Why this stopped being able to count
  *
- * ABSENT COVERAGE IS NOT ZEROES. The server attaches the numbers only to a
- * zero-hit response, and only when it computed them; `null` therefore means "not
- * said", so the sentence degrades to the unquantified one rather than asserting
- * a confident "0 of your 0 notes" about a library nobody counted. `unsearchable:
- * 0` degrades too — there is nothing to warn about when everything is findable,
- * and "0 of your 40 notes have no recognised text" is a sentence that makes the
- * reader do arithmetic to learn that the answer is simply no.
+ * It used to quantify: `12 of your 40 notes have no recognised text` settles
+ * "it is not there" against "it might be there and I cannot see it", which the
+ * unquantified sentence cannot. The numbers came attached to a zero-hit
+ * response, and there is no longer a response — §4.3 leaves the server with no
+ * query-interpreting code, so nothing counts anything at query time.
  *
- * Lives here rather than in the shell so both branches are exercisable on plain
- * Node; the fake cannot express "the server did not say".
+ * THE SENTENCE THAT SURVIVES IS THE ONE THAT NEVER NEEDED A COUNT. Degrading to
+ * it is the same call the old `null` branch made for a server that did not say:
+ * better to say less than to assert a confident "0 of your 0 notes" about a
+ * library nobody counted.
+ *
+ * The count is recoverable — a document in the listing with no terms record is
+ * exactly an unsearchable one, and the client holds both — but that is a fact
+ * about the INDEX rather than about a query, and `LocalSearch` deliberately
+ * exposes only results. When something does expose it, this is where it lands.
  */
-export function coverageLine(coverage: Coverage | null): string {
-  if (!coverage || coverage.notes <= 0 || coverage.unsearchable <= 0) {
-    return "Only notes recognised on the device are searchable.";
-  }
-  return (
-    `${coverage.unsearchable} of your ${coverage.notes} notes have no recognised text, ` +
-    "so they cannot be searched by their handwriting."
-  );
+export function coverageLine(): string {
+  return "Only notes recognised on the device are searchable.";
 }
 
 /** `n document` / `n documents`, so the two sentences below agree on the noun. */
@@ -516,9 +360,9 @@ function documents(n: number): string {
  * They answer opposite questions. `coverageLine` is about notes whose text will
  * never exist — the device never recognised them, and no amount of waiting
  * changes that. This is about a file whose text is *on its way*, seconds or
- * minutes out. Merging the two numbers would tell somebody their half-minute-old
- * upload is permanently unsearchable, which is wrong and, worse, tells them to
- * stop waiting for the thing that is about to arrive.
+ * minutes out. Merging the two would tell somebody their half-minute-old upload
+ * is permanently unsearchable, which is wrong and, worse, tells them to stop
+ * waiting for the thing that is about to arrive.
  *
  * So the empty state says BOTH when both apply, pending first: it is the one
  * that changes what the reader should do next.
@@ -532,13 +376,21 @@ export function pendingLine(pending: number): string | null {
 }
 
 /**
- * The quiet line over a NON-EMPTY page of results.
+ * The quiet line over a NON-EMPTY list of results.
  *
  * THE CLAIM BEING REPAIRED IS COMPLETENESS. A list of results implies "this is
  * what there is"; while a derive is outstanding that is not true, and a reader
  * who does not know it reads a partial answer as a whole one. Anywhere the app
  * does not imply completeness — the gallery, a folder listing — silence is
  * correct and this says nothing.
+ *
+ * IT DID NOT RETIRE WITH THE CURSOR, and the distinction is the whole reason it
+ * still exists. "More results" said the ANSWER was cut short and could be
+ * resumed; a whole local index answers whole, so that control is gone. This says
+ * the CORPUS is not finished yet — a document still being derived is not in the
+ * manifest, so it is not in the index, so it cannot match. `pending-ness.md` is
+ * explicitly still live (§0), and the live channel's `event: index` frame is
+ * where the number comes from.
  *
  * Deliberately quieter than the empty state's version: over real results the
  * reader has something to be getting on with, and the line is a caveat rather

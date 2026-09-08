@@ -738,55 +738,6 @@ pub fn build(b: *std.Build) void {
     );
     sqlite_core_test_step.dependOn(&sqlite_core_abi_test.step);
 
-    // ---- THROWAWAY: the fuzzy-ladder-in-wasm harness (`zig build wasm-fuzzy-bench`) ----
-    // Exists only to produce `docs/scratch/wasm-fuzzy-bench.md`, and to settle by
-    // COMPILATION rather than by reading whether `client-side-search-impl.md`
-    // §9.3's "`fuzzy.zig` is portable as written" survives a build.
-    //
-    // Note what has to be imported for that to even be attempted: the SHIPPING
-    // `backend/services/search/fuzzy.zig` AND `backend/db/sqlite.zig`, the
-    // backend wrapper it depends on. §9.3 reads "it imports exactly `std` and
-    // `sqlite.zig`. Both exist in the wasm module this plan already builds" —
-    // but the `sqlite.zig` in that module is `parsers/spd/src/sqlite.zig`, a
-    // different file that exposes only the `@cImport`. Wiring the backend one in
-    // here is the honest version of the claim.
-    //
-    // Built with the SHIPPING `sqlite_core_wasm_flags`, so what it measures is
-    // the engine configuration the browser actually gets. Nothing shipping is
-    // touched; delete this block and `wasm_fuzzy_bench.zig` with the report.
-    const fuzzy_bench_mod = b.createModule(.{
-        // AT THE REPO ROOT deliberately: a Zig module cannot `@import` a file
-        // outside its root directory, and this harness has to reach BOTH
-        // `backend/services/search/fuzzy.zig` and `webapp/wasm/spd_decode.zig`
-        // to be the fused module the plan proposes. That is a real constraint
-        // on the port, not a harness quirk — recorded in the report.
-        .root_source_file = b.path("wasm_fuzzy_bench.zig"),
-        .target = wasi_target,
-        .optimize = .ReleaseSmall,
-    });
-    // `fuzzy.zig` and `db/sqlite.zig` come in by RELATIVE PATH from the harness,
-    // not as named modules: `fuzzy.zig` reaches its wrapper with
-    // `@import("../../db/sqlite.zig")`, and a named `sqlite` module would make
-    // that same file the root of a second module ("file exists in modules
-    // 'sqlite' and 'fuzzy'"). Pulling both into this root module is also the
-    // more honest test — it is the shipping file, not a copy.
-    fuzzy_bench_mod.addImport("spd", spd_mod);
-    fuzzy_bench_mod.link_libc = true;
-    fuzzy_bench_mod.addIncludePath(b.path("vendor/sqlite"));
-    fuzzy_bench_mod.addCSourceFile(.{
-        .file = b.path("vendor/sqlite/sqlite3.c"),
-        .flags = &sqlite_core_wasm_flags,
-    });
-    fuzzy_bench_mod.addCSourceFile(.{
-        .file = b.path("webapp/wasm/sqlite_vfs_null.c"),
-        .flags = &sqlite_core_wasm_flags,
-    });
-    const fuzzy_bench = b.addExecutable(.{ .name = "fuzzy-bench", .root_module = fuzzy_bench_mod });
-    fuzzy_bench.wasi_exec_model = .reactor;
-    fuzzy_bench.rdynamic = true;
-    const fuzzy_bench_step = b.step("wasm-fuzzy-bench", "THROWAWAY: build the fuzzy-ladder-in-wasm harness");
-    fuzzy_bench_step.dependOn(&b.addInstallArtifact(fuzzy_bench, .{}).step);
-
     // ---- WebAssembly PDF decoder (MuPDF) ----
     //  `.spd` above — a thin Zig
     // module over a compiled-in C library, reactor-model, memory-only ABI — but
@@ -844,30 +795,18 @@ pub fn build(b: *std.Build) void {
     const serve_step = b.step("serve", "Run the Inkhold server");
     serve_step.dependOn(&run_serve.step);
 
-    // ---- Search bench (`zig build bench`) — MEASUREMENT ONLY ----
+    // ---- The IN-DOCUMENT bench (`zig build indoc-bench`) — MEASUREMENT ONLY ----
     //
-    // A standalone executable that opens an EXISTING corpus READ-ONLY and times
-    // library-wide search on it. Deliberately its own artifact rather than a
-    // `test "BENCH …"`: the numbers wanted are the deployment target's, and a
-    // cross-compiled test binary cannot be `zig build test`-run from the dev box
-    // — this one is scp'd to the Pi and run there. It links the same vendored
-    // SQLite as the server so the pragmas, the page cache and FTS5 are the
-    // server's, not the host distro's. NOT installed by `zig build`; nothing in
-    // the server depends on it.
-    const bench_mod = b.createModule(.{
-        .root_source_file = b.path("backend/search_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    linkSqlite(b, bench_mod);
-    const bench_exe = b.addExecutable(.{ .name = "search-bench", .root_module = bench_mod });
-    const bench_step = b.step("bench", "Build the search bench (measurement only)");
-    bench_step.dependOn(&b.addInstallArtifact(bench_exe, .{}).step);
-
-    // The IN-DOCUMENT bench — same posture as `search-bench` above (standalone,
-    // read-only, never installed by `zig build`, nothing in the server depends
-    // on it), answering `client-side-search-impl.md` §7.3: what the two live
-    // in-doc reads cost against the shipped `segment_fts`-free scan shape.
+    // A standalone executable that opens an EXISTING corpus READ-ONLY. Its own
+    // artifact rather than a `test "BENCH …"` because the numbers wanted are the
+    // deployment target's, and a cross-compiled test binary cannot be
+    // `zig build test`-run from the dev box — this one is scp'd to the Pi and run
+    // there. It links the same vendored SQLite as the server so the pragmas, the
+    // page cache and FTS5 are the server's, not the host distro's. NOT installed
+    // by `zig build`; nothing in the server depends on it.
+    //
+    // It answers `client-side-search-impl.md` §7.3: what the two live in-doc
+    // reads cost against the shipped `segment_fts`-free scan shape.
     const indoc_mod = b.createModule(.{
         .root_source_file = b.path("backend/indoc_bench.zig"),
         .target = target,

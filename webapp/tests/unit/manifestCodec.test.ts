@@ -17,9 +17,9 @@ import { SearchWireError } from "../../src/search/wire";
 // satisfy the encoder turns this suite red — which is the whole reason the file
 // is checked in rather than generated at test time.
 //
-// Reaching across into `backend/` is deliberate, exactly as `termCodec.test.ts`
-// does. A copy under `webapp/` would be a second artifact, and two copies of a
-// golden vector is how a format drifts on one side without anything noticing.
+// Reaching across into `backend/` is deliberate. A copy under `webapp/` would be
+// a second artifact, and two copies of a golden vector is how a format drifts on
+// one side without anything noticing.
 const GOLDEN = new Uint8Array(
   readFileSync(
     fileURLToPath(

@@ -126,7 +126,7 @@ describe("SearchIndex build and query", () => {
       const r = index.query("reuniao ", 1);
       expect(r.total).toBe(2);
       expect(r.hits).toHaveLength(1);
-      expect(index.query("reuniao ", 0)).toEqual({ total: 2, hits: [] });
+      expect(index.query("reuniao ", 0)).toEqual({ total: 2, hits: [], expansions: [] });
     } finally {
       index.close();
     }
@@ -201,7 +201,7 @@ describe("SearchIndex query folding to nothing", () => {
     const index = await built();
     try {
       for (const junk of ["", "   ", "-", '"', '""', "...", "( )", "*", "^", "-- ", "()"]) {
-        expect({ junk, ...index.query(junk, 10) }).toEqual({ junk, total: 0, hits: [] });
+        expect({ junk, ...index.query(junk, 10) }).toEqual({ junk, total: 0, hits: [], expansions: [] });
       }
     } finally {
       index.close();
@@ -327,7 +327,7 @@ describe("SearchIndex lifecycle and refusals", () => {
       index.reset();
       expect(index.documentCount).toBe(0);
       expect(index.pageCount).toBe(0);
-      expect(index.query("caligrafia ", 10)).toEqual({ total: 0, hits: [] });
+      expect(index.query("caligrafia ", 10)).toEqual({ total: 0, hits: [], expansions: [] });
       index.build([BOOK]);
       expect(index.query("caligrafia ", 10).total).toBe(1);
     } finally {

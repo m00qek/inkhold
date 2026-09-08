@@ -21,7 +21,7 @@
 //!   note_index / note_page_index — the per-blob `.note` index (pages/segments,
 //!                        recognized text, cover memo).
 //!   spd_index         — the per-blob `.spd` index.
-//!   search_partitions / segment_search / segment_text / segment_fts / doc_terms
+//!   search_partitions / segment_search / segment_text / segment_fts
 //!                     — partitioned per-owner full-text search.
 //!
 //!   settings          — server-wide config (today: the bin retention window).
@@ -83,7 +83,11 @@ const sqlite = @import("sqlite.zig");
 /// DDL, no backfill: it changes what the `.mark` pairing rule COSTS over trashed
 /// rows (measured 221,780 -> 4,500 VM steps on one bin listing), not what any
 /// read answers.
-pub const version: i64 = 12;
+///
+/// v13 DROPS `doc_terms` — the first step that removes rather than adds, and the
+/// only one so far that is irreversible in DATA (a revert restores the table's
+/// DDL, not its rows; a re-derive would).
+pub const version: i64 = 13;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -97,7 +101,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 /// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
 /// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
 /// missed on a bump). The comptime check below makes the drift a build error.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12, ddl_v13 };
 
 comptime {
     if (steps.len != version) @compileError(
@@ -638,6 +642,30 @@ const ddl_v12 =
     \\  ON files(user_id, COALESCE(parent_id, 0), name) WHERE deleted = 1;
 ;
 
+/// v13 — `doc_terms` goes.
+///
+/// `golden-search.md` §5.3 states its only reason to exist: FTS5 is indexed
+/// `term -> documents`, and IN-DOCUMENT typo correction needed
+/// `document -> terms`. Its only reader was the fuzzy candidate pool, and §6
+/// step 6 moved that ladder into the browser's own engine — so this is a table
+/// nothing reads and one write path per document that nothing consumes. On the
+/// dev corpus it was 805,754 rows and ~47 MB.
+///
+/// **The baseline still CREATEs it, and that is deliberate.** `ddl_v1` is the
+/// exact text `sqlite_master` held when the long-way migrations stopped, and it
+/// is reproduced verbatim so a fresh database is byte-identical to a migrated
+/// one. Editing it would make the two diverge for every object AFTER the edit;
+/// creating the table and dropping it two steps later costs a fresh install one
+/// no-op and keeps that property intact.
+///
+/// Irreversible in DATA. A revert of this commit restores the DDL and an empty
+/// table; the rows come back only from a re-derive. That is acceptable because
+/// the rows are a pure function of `note_page_index.text` and of the tokenizer,
+/// both of which survive.
+const ddl_v13 =
+    \\DROP TABLE doc_terms;
+;
+
 test "migrate creates the v1 schema and is idempotent" {
     var db = try sqlite.Db.openMemory();
     defer db.close();
@@ -929,13 +957,18 @@ test "a step that fails partway leaves the database untouched, and still migrata
     sqlite.log_exec_errors = true;
 
     // Nothing the step did survived it: no half-built `users`, no version stamp.
+    // The probe is SCOPED, because a live statement over `sqlite_master` holds a
+    // schema read lock and `migrate` below now carries a `DROP TABLE` (v13),
+    // which SQLite refuses with SQLITE_LOCKED while one is open.
     try std.testing.expectEqual(@as(i64, 0), try userVersion(db));
-    var r = (try db.row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'users';",
-        &.{},
-    )) orelse return error.TestUnexpectedResult;
-    defer r.finalize();
-    try std.testing.expectEqual(@as(i64, 0), r.int(0));
+    {
+        var r = (try db.row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'users';",
+            &.{},
+        )) orelse return error.TestUnexpectedResult;
+        defer r.finalize();
+        try std.testing.expectEqual(@as(i64, 0), r.int(0));
+    }
 
     // Which is the whole point: the install still boots. If the rollback had left
     // the crippled one-column `users` behind, `migrate` would die here on "table

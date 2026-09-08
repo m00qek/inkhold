@@ -1,9 +1,7 @@
 //! The search package's WRITES: every mutation of segment_search + segment_fts,
 //! all inside the caller's transaction. The format adapters call in at ingest
 //! (note_index / txt_index) and files.zig calls in at the blob/account
-//! lifecycle; the reads live next door in `query.zig`. Imports `fuzzy.zig` only
-//! for the one tokenizer declaration (`fts_tokenizer`), and never imports
-//! `query.zig`.
+//! lifecycle; the reads live next door in `query.zig`, which this never imports.
 //!
 //! The lifecycle has exactly three paths (the in-doc-search plan's terms):
 //!   - a new VERSION is a new blob (`flipOwnerBlob`): the owner's whole segment
@@ -22,7 +20,6 @@
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
 const partition = @import("../search_partition.zig");
-const fuzzy = @import("fuzzy.zig");
 
 /// Which page rows carry searchable text. Shared by both sync statements below,
 /// and repeated verbatim by the v15 backfill in `schema.zig` (which cannot import
@@ -233,247 +230,6 @@ pub fn reconcilePage(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Per-document term set — the in-doc fuzzy candidate pool (entry 8b)
-// ---------------------------------------------------------------------------
-
-// `doc_terms` holds one row per (owner partition, blob, distinct folded term):
-// the document's OWN vocabulary, so the typo ladder for a search INSIDE an open
-// note draws its candidates from a primary-key SEEK over the note's few-hundred
-// terms instead of a SCAN of the whole corpus (the residual Pi tail entry 8b
-// closes). It is written by the SAME mint that lays down the segments and turns
-// over with them — mint writes it, `dropOwnerBlobSearch` deletes it, the flip
-// and the re-index heal do both — and it is folded through the SAME tokenizer
-// `segment_fts` uses (`fuzzy.fts_tokenizer`), never a second tokenization.
-// So a doc term is byte-identical to what the index matched, and the pool is
-// EXACTLY the terms a search in this document could hit: scoping it changes the
-// work, not the results.
-
-const doc_terms_fold_sql =
-    "INSERT INTO temp.token_fold(t) SELECT p.text FROM note_page_index p " ++
-    "WHERE p.blob_md5 = ?1 AND " ++ fts_predicate ++ ";";
-
-const doc_terms_insert_sql =
-    "INSERT INTO doc_terms(partition_id, blob_md5, term) " ++
-    "SELECT ?1, ?2, term FROM temp.token_fold_vocab;";
-
-/// (Re)writes one document's term set for one owner partition: the blob's
-/// distinct folded terms, computed through the index's own tokenizer. Idempotent
-/// — it clears the (partition, blob) rows first — so a fresh mint, a flip's
-/// re-mint and the heal's backfill all converge on the same set. A blob with no
-/// searchable text (an unrecognised note, a `.txt` marker) folds to nothing and
-/// leaves the document with an EMPTY pool, which is exactly right: an empty
-/// document offers no corrections. Uses the shared `token_fold` temp table,
-/// TRUNCATED before use (`fuzzy.fold_reset_sql`) so a prior fold cannot bleed in
-/// and so this document cannot be left behind for the next caller to pay for.
-fn writeDocTerms(db: sqlite.Db, partition_id: i64, blob_md5: []const u8) !void {
-    {
-        var s = try db.prepare("DELETE FROM doc_terms WHERE partition_id = ?1 AND blob_md5 = ?2;");
-        defer s.finalize();
-        s.bindInt(1, partition_id);
-        s.bindText(2, blob_md5);
-        _ = try s.step();
-    }
-    try db.exec(fuzzy.fold_ddl);
-    try db.exec(fuzzy.fold_reset_sql);
-    {
-        var s = try db.prepare(doc_terms_fold_sql);
-        defer s.finalize();
-        s.bindText(1, blob_md5);
-        _ = try s.step();
-    }
-    var s = try db.prepare(doc_terms_insert_sql);
-    defer s.finalize();
-    s.bindInt(1, partition_id);
-    s.bindText(2, blob_md5);
-    _ = try s.step();
-}
-
-// ---------------------------------------------------------------------------
-// The same term set, folded ONE CHUNK AT A TIME (optimizations.md entry 11)
-// ---------------------------------------------------------------------------
-
-// `writeDocTerms` above folds a WHOLE document in ONE statement. For a note or
-// a first ingest that is right — it runs in the same transaction as everything
-// else about that document. For the RESERVED-BAND path below it is the defect
-// that made chunking not work: every chunk is O(cap) and the closing
-// transaction, which calls it, is O(FILE). Measured — `optimizations.md`
-// entries 11 and 13, and `run-on-rpi-32bit.md`'s 2026-08-09 §4:
-//
-//   - dev box, 15.7 MB `.txt`: 905 ms of a 1,967 ms write, and the 849 ms
-//     longest hold of the chunked read-path heal IS this statement;
-//   - Pi, the same document: **87-100 % of the whole chunked write**, which is
-//     why chunking made the deferred worker's longest hold LONGER there
-//     (60.6 s -> 69.1 s, 7 min 40 s -> 9 min 57 s at the cap).
-//
-// So the chunked path folds each chunk's text AS THAT CHUNK IS WRITTEN and
-// accumulates the DISTINCT TERMS, leaving the close with a `doc_terms` DELETE +
-// INSERT that is O(vocabulary) instead of O(file). The result is the same set:
-// the fold table already takes ONE ROW PER PAGE (the fold statement is a
-// multi-row SELECT), so which pages happen to be in it at once cannot change
-// what any of them tokenizes to, and the union of the chunks' distinct terms is
-// the document's distinct terms. Pinned as equality against the single-statement
-// fold itself, which `recanonicalizeHolders` still runs — `txt_index.zig` and
-// `pdf_text.zig` each compare the two, term for term, on one blob.
-//
-// ## THE ACCUMULATOR IS KEYED BY BLOB, AND THAT IS THE WHOLE SAFETY ARGUMENT
-//
-// A temp table is per-CONNECTION state on the single writer connection, and TWO
-// band fills can be in flight at once: the deferred worker (`deferred.runTxt`,
-// `deferred.runPdfText`) takes `db_lock` PER CHUNK and can be interrupted
-// between chunks, and in that gap a request thread's read-path heal
-// (`txt_index.ensureIndexed`) folds another document into the same table. While
-// the fold happened entirely inside one transaction that was safe. Accumulating
-// across chunks makes the temp table shared mutable state between two writers,
-// and two documents' terms would silently MERGE — a `doc_terms` row is the
-// in-doc fuzzy candidate pool, so the failure mode is wrong search results, not
-// a crash.
-//
-// Two invariants keep that impossible, and neither of them is `needsDerive`
-// (which is re-asked per chunk but leaves a window between the ask and the
-// write):
-//
-//   - **`temp.doc_terms_acc` rows carry the blob they came from.** Interleaving
-//     two documents interleaves two disjoint key ranges. Interleaving two
-//     writers of the SAME blob is benign by construction: same content, same
-//     terms, and the accumulator is a SET.
-//   - **The fold table never outlives one lock hold.** `accumulateDocTerms`
-//     drops and recreates its own, inside the caller's chunk transaction, so
-//     there is no state for a chunk boundary to carry.
-//
-// A write that is abandoned between chunks leaves its accumulator rows behind.
-// They are inert — nothing reads them but a `finishOwnerBlobBands` for that same
-// blob — and `reserveOwnerBlobBands` clears the blob's rows before it reserves,
-// which is the same "a re-run never patches holes" discipline the band itself
-// follows. They also die with the connection.
-//
-// ## THE FOLD TABLE IS THIS WRITER'S OWN, AND IT IS RECREATED, NOT EMPTIED
-//
-// Neither half of that is decoration, and both were found by measurement.
-//
-// **`DELETE FROM` does not empty an FTS5 index.** FTS5 records a deletion as a
-// new entry in a new segment, so a table that has held a whole document's text
-// goes on costing what that document cost until a merge happens to reclaim it.
-// The writer connection is LONG-LIVED and `temp.token_fold` is shared with every
-// whole-document fold (`writeDocTerms`) and every in-document search
-// (`fuzzy.foldRows`), so what a per-chunk fold finds in it is whatever the last
-// caller left. Measured on the 15.7 MB subject, folding chunk by chunk into the
-// SHARED table after one whole-document fold on the same connection: the write
-// held **6,737 ms with a 354 ms worst chunk**, against 2,014 ms and 38 ms into a
-// table recreated per chunk — 3.4x SLOWER overall than not chunking the fold at
-// all. Instrumenting the three statements put **4,348 ms of the 5,225 ms in the
-// vocabulary drain alone**. Emptied is not the same as empty.
-//
-// So this path owns `temp.chunk_fold`, drops it and recreates it for every
-// chunk, and shares nothing. There is no prepared-statement cache for the DDL to
-// invalidate (entry 7b is recorded, not built), and the whole per-chunk fold —
-// DDL, tokenize, drain — measures ~1.6-1.9 ms on this box, flat in the size of
-// the document.
-//
-// **The shared table is no longer the hazard this describes** — entry 11b made
-// `fuzzy.fold_ddl`'s table contentless so that every caller can TRUNCATE it
-// (`fuzzy.fold_reset_sql`) instead of merely deleting from it. This path keeps
-// its own table anyway: owning it is what makes the accumulator's "the fold
-// table never outlives one lock hold" invariant above a property of this code
-// rather than of somebody else's discipline, and per-chunk DDL is already paid
-// for. Recorded, not done: the DROP/CREATE pair here could become the same
-// truncate, which would also lift the ban on running it under an open cursor
-// (dropping a virtual table with a live reference is `SQLITE_LOCKED`).
-
-const doc_terms_acc_ddl =
-    "CREATE TABLE IF NOT EXISTS temp.doc_terms_acc(" ++
-    "blob_md5 TEXT NOT NULL, term TEXT NOT NULL, " ++
-    "PRIMARY KEY (blob_md5, term)) WITHOUT ROWID;";
-
-/// A fold table of this writer's own, EMPTY by construction. Same tokenizer as
-/// `segment_fts` and as `fuzzy.fold_ddl` — declared from the one constant, so a
-/// doc term stays byte-identical to what the index matched.
-const chunk_fold_ddl =
-    "DROP TABLE IF EXISTS temp.chunk_fold_vocab;" ++
-    "DROP TABLE IF EXISTS temp.chunk_fold;" ++
-    "CREATE VIRTUAL TABLE temp.chunk_fold USING fts5(t, tokenize='" ++ fuzzy.fts_tokenizer ++ "');" ++
-    "CREATE VIRTUAL TABLE temp.chunk_fold_vocab USING fts5vocab('temp','chunk_fold','row');";
-
-const doc_terms_acc_fold_sql =
-    "INSERT INTO temp.chunk_fold(t) SELECT p.text FROM note_page_index p " ++
-    "WHERE p.blob_md5 = ?1 AND p.page_index >= ?2 AND p.page_index < ?3 AND " ++ fts_predicate ++ ";";
-
-const doc_terms_acc_drain_sql =
-    "INSERT OR IGNORE INTO temp.doc_terms_acc(blob_md5, term) " ++
-    "SELECT ?1, term FROM temp.chunk_fold_vocab;";
-
-const doc_terms_acc_insert_sql =
-    "INSERT INTO doc_terms(partition_id, blob_md5, term) " ++
-    "SELECT ?1, ?2, term FROM temp.doc_terms_acc WHERE blob_md5 = ?2;";
-
-/// Forgets whatever a previous (possibly abandoned) chunked write accumulated
-/// for this blob. Called by `reserveOwnerBlobBands`, so a fresh reservation and
-/// a fresh term set begin together.
-fn clearDocTermsAcc(db: sqlite.Db, blob_md5: []const u8) !void {
-    try db.exec(doc_terms_acc_ddl);
-    var s = try db.prepare("DELETE FROM temp.doc_terms_acc WHERE blob_md5 = ?1;");
-    defer s.finalize();
-    s.bindText(1, blob_md5);
-    _ = try s.step();
-}
-
-/// Folds pages `[from_page, to_page)` of `blob_md5` through the index's own
-/// tokenizer and adds their distinct terms to the blob's accumulator.
-///
-/// Runs inside the caller's CHUNK transaction, after the page rows exist —
-/// `fillBandChunk` calls it beside the postings that are built from the same
-/// rows, so the fold and the index can never disagree about what a chunk said.
-fn accumulateDocTerms(db: sqlite.Db, blob_md5: []const u8, from_page: i64, to_page: i64) !void {
-    try db.exec(chunk_fold_ddl);
-    try db.exec(doc_terms_acc_ddl);
-    {
-        var s = try db.prepare(doc_terms_acc_fold_sql);
-        defer s.finalize();
-        s.bindText(1, blob_md5);
-        s.bindInt(2, from_page);
-        s.bindInt(3, to_page);
-        _ = try s.step();
-    }
-    var s = try db.prepare(doc_terms_acc_drain_sql);
-    defer s.finalize();
-    s.bindText(1, blob_md5);
-    _ = try s.step();
-}
-
-/// `writeDocTerms`' twin for the chunked path: the same (partition, blob) rows,
-/// read out of the accumulator the chunks filled rather than re-folded. Same
-/// clear-first idempotence, and a blob whose chunks yielded no searchable text
-/// still lands an EMPTY pool — the accumulator simply has no rows for it.
-fn writeDocTermsFromAcc(db: sqlite.Db, partition_id: i64, blob_md5: []const u8) !void {
-    try db.exec(doc_terms_acc_ddl);
-    {
-        var s = try db.prepare("DELETE FROM doc_terms WHERE partition_id = ?1 AND blob_md5 = ?2;");
-        defer s.finalize();
-        s.bindInt(1, partition_id);
-        s.bindText(2, blob_md5);
-        _ = try s.step();
-    }
-    var s = try db.prepare(doc_terms_acc_insert_sql);
-    defer s.finalize();
-    s.bindInt(1, partition_id);
-    s.bindText(2, blob_md5);
-    _ = try s.step();
-}
-
-/// Drops one owner's term set for a blob across every partition they hold it in
-/// (one active, plus a superseded one transiently during a remint) — the
-/// `doc_terms` half of `dropOwnerBlobSearch`.
-fn dropDocTerms(db: sqlite.Db, user_id: u64, blob_md5: []const u8) !void {
-    var s = try db.prepare(
-        "DELETE FROM doc_terms WHERE blob_md5 = ?2 AND partition_id IN " ++
-            "(SELECT id FROM search_partitions WHERE user_id = ?1);",
-    );
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    s.bindText(2, blob_md5);
-    _ = try s.step();
-}
-
 /// Ingest: the owner's FIRST reference to this content mints one segment row
 /// per page — a batch of fresh sequences (ONE `next_seq` update, not one per
 /// segment) — and inserts the postings. Restore needs nothing (the rows never
@@ -514,9 +270,6 @@ pub fn mintOwnerBlobSearch(db: sqlite.Db, user_id: u64, blob_md5: []const u8, no
     s.bindInt(2, first_rowid);
     s.bindInt(3, first_rowid + count - 1);
     _ = try s.step();
-    // The document's own term set, alongside the segments it belongs to (entry
-    // 8b): the in-doc fuzzy pool for this note, in this owner's partition.
-    try writeDocTerms(db, part, blob_md5);
 }
 
 const owner_blob_fts_delete_sql =
@@ -555,8 +308,6 @@ pub fn dropOwnerBlobSearch(db: sqlite.Db, user_id: u64, blob_md5: []const u8) !v
         s.bindText(2, blob_md5);
         _ = try s.step();
     }
-    // The document's term set goes with its segments (entry 8b).
-    try dropDocTerms(db, user_id, blob_md5);
 }
 
 /// A new VERSION of a note is a NEW BLOB (content addressing is the
@@ -657,24 +408,15 @@ fn holderBandShape(db: sqlite.Db, user_id: u64, blob_md5: []const u8) !BandShape
 /// while the re-mint writes `segment_search`/`segment_fts`, so the inner
 /// statements never disturb it.
 ///
-/// This is ALSO where the per-document term set backfills (entry 8b): a holder
-/// whose band is already canonical keeps its segments untouched but has its
-/// `doc_terms` (re)written, so a legacy note carrying no term set yet gains one
-/// on its first `index_version` heal, and a re-parse that refolded the text
-/// refreshes the pool. That write does not touch `segment_fts`, so the heal's
-/// "no recency churn on an unedited note" property is unchanged.
 pub fn recanonicalizeHolders(db: sqlite.Db, blob_md5: []const u8, now: i64) !void {
     var holders = try db.prepare("SELECT DISTINCT user_id FROM files WHERE md5 = ?1 AND is_folder = 0;");
     defer holders.finalize();
     holders.bindText(1, blob_md5);
     while (try holders.step()) {
         const uid: u64 = @intCast(holders.columnInt(0));
-        if ((try holderBandShape(db, uid, blob_md5)).canonical) {
-            // Segments already in reading order — leave them, but keep the
-            // document's fuzzy pool current (backfill / refold).
-            if (try partition.active(db, uid)) |pid| try writeDocTerms(db, pid, blob_md5);
-            continue;
-        }
+        // Segments already in reading order: nothing to do, and nothing written —
+        // which is what keeps a plain heal of an unedited note off the index.
+        if ((try holderBandShape(db, uid, blob_md5)).canonical) continue;
         try dropOwnerBlobSearch(db, uid, blob_md5);
         try mintOwnerBlobSearch(db, uid, blob_md5, now);
     }
@@ -692,10 +434,11 @@ pub fn recanonicalizeHolders(db: sqlite.Db, blob_md5: []const u8, now: i64) !voi
 //
 // **But chunking must not become "mint per chunk".** A document's segments are
 // ONE CONTIGUOUS ROWID RUN IN PAGE ORDER — `flipOwnerBlob` states the invariant
-// outright and the library-wide search now DEPENDS on the arithmetic behind it
-// (`query.bandStart` jumps to `R - page_index`). Separate `allocSeq` calls per
-// chunk would interleave a concurrent ingest's band into the middle of this
-// one, and the invariant would be gone.
+// outright, and the in-document reads depend on it twice over: the document's
+// derived scan ranges (`query.docSegmentRanges`) are one run rather than several,
+// and `rowid ASC` is reading order, so a drained keyset needs no re-sort.
+// Separate `allocSeq` calls per chunk would interleave a concurrent ingest's band
+// into the middle of this one, and the invariant would be gone.
 //
 // So: **reserve the range once, fill it in chunks.** Contiguity comes from the
 // reservation, not from doing it in one statement, and every chunk boundary
@@ -746,11 +489,6 @@ pub fn reserveOwnerBlobBands(
     now: i64,
 ) ![]Band {
     std.debug.assert(page_count > 0);
-    // A fresh reservation gets a fresh term set: whatever an abandoned chunked
-    // write of this blob left in the accumulator is forgotten here, exactly as
-    // its partial band is dropped below. Patching either would mean reasoning
-    // about which chunks had committed.
-    try clearDocTermsAcc(db, blob_md5);
     var out: std.ArrayList(Band) = .empty;
     errdefer out.deinit(gpa);
 
@@ -794,14 +532,8 @@ pub fn fillBandChunk(
     to_page: i64,
 ) !void {
     std.debug.assert(to_page > from_page);
-    // Nobody holds the blob, so no band and no term set will exist: folding
-    // would only leave accumulator rows nothing ever drains.
+    // Nobody holds the blob, so no band will exist.
     if (bands.len == 0) return;
-    // The document's term set, one chunk's worth, folded HERE rather than
-    // re-folded whole in the closing transaction — the fold is per-blob-text and
-    // the postings beside it are read from the same rows. See the accumulator's
-    // block comment for why this is safe with two band fills interleaved.
-    try accumulateDocTerms(db, blob_md5, from_page, to_page);
     for (bands) |b| {
         std.debug.assert(to_page <= b.count);
         {
@@ -833,17 +565,11 @@ pub fn fillBandChunk(
     }
 }
 
-/// Closes a chunked write: the per-document term sets, and the repair for a
-/// holder the reservation could not have known about.
+/// Closes a chunked write: the repair for a holder the reservation could not
+/// have known about.
 ///
 /// Runs in its OWN transaction, LAST — after every chunk has committed — so
 /// "this document is indexed" becomes true only when it is.
-///
-/// The term set it lands is the one `mintOwnerBlobSearch` lands, arrived at
-/// differently: the chunks folded their own text as they were written, so this
-/// is a `doc_terms` DELETE + INSERT over the document's VOCABULARY rather than a
-/// re-fold of its whole TEXT. That is the difference between a closing hold that
-/// scales with the file and one that does not — see the accumulator above.
 ///
 /// ## The late holder
 ///
@@ -860,18 +586,10 @@ pub fn fillBandChunk(
 /// not move — is one indexed count per holder and nothing else.
 pub fn finishOwnerBlobBands(
     db: sqlite.Db,
-    bands: []const Band,
     blob_md5: []const u8,
     page_count: i64,
     now: i64,
 ) !void {
-    // Read out of the accumulator the chunks filled, NOT re-folded: that
-    // statement was O(FILE) and was the longest hold a chunked write had left
-    // (entry 11's residue, entry 13's 849 ms, the Pi's 87-100 %).
-    for (bands) |b| try writeDocTermsFromAcc(db, b.partition_id, blob_md5);
-    // Drained, so the accumulator holds only writes still in flight.
-    try clearDocTermsAcc(db, blob_md5);
-
     var holders = try db.prepare("SELECT DISTINCT user_id FROM files WHERE md5 = ?1 AND is_folder = 0;");
     defer holders.finalize();
     holders.bindText(1, blob_md5);
@@ -907,17 +625,6 @@ pub fn dropUserSearch(db: sqlite.Db, user_id: u64) !void {
                 "SELECT s.id FROM search_partitions sp " ++
                 "JOIN segment_search s ON s.id BETWEEN (sp.id << 48) AND ((sp.id + 1) << 48) - 1 " ++
                 "WHERE sp.user_id = ?1);",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        _ = try s.step();
-    }
-    {
-        // The user's per-document term sets, by partition (entry 8b) — before
-        // the mapping rows the subquery reads go.
-        var s = try db.prepare(
-            "DELETE FROM doc_terms WHERE partition_id IN " ++
-                "(SELECT id FROM search_partitions WHERE user_id = ?1);",
         );
         defer s.finalize();
         s.bindInt(1, @intCast(user_id));
@@ -966,39 +673,6 @@ pub fn remintUserSearch(db: sqlite.Db, user_id: u64, now: i64) !void {
         defer s.finalize();
         s.bindInt(1, partition.base(fresh));
         s.bindInt(2, partition.last(fresh));
-        _ = try s.step();
-    }
-    // The fresh generation's per-document term sets (entry 8b): one term set per
-    // distinct indexed blob the user holds, folded into the fresh partition. A
-    // per-blob loop rather than one bulk INSERT because each set is derived
-    // through the tokenizer (`writeDocTerms`), and the rebuild is off the hot
-    // path.
-    {
-        var blobs = try db.prepare(
-            "SELECT DISTINCT f.md5 FROM files f " ++
-                "JOIN note_page_index p ON p.blob_md5 = f.md5 " ++
-                "WHERE f.user_id = ?1 AND f.is_folder = 0;",
-        );
-        defer blobs.finalize();
-        blobs.bindInt(1, @intCast(user_id));
-        while (try blobs.step()) {
-            // Copied: `writeDocTerms` steps other statements on this connection,
-            // and the md5 is borrowed only until the cursor's next step.
-            var md5: [32]u8 = undefined;
-            const m = blobs.columnText(0);
-            @memcpy(md5[0..m.len], m);
-            try writeDocTerms(db, fresh, md5[0..m.len]);
-        }
-    }
-    {
-        // The old generations' term sets, alongside their segments below.
-        var s = try db.prepare(
-            "DELETE FROM doc_terms WHERE partition_id IN " ++
-                "(SELECT id FROM search_partitions WHERE user_id = ?1 AND id <> ?2);",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindInt(2, fresh);
         _ = try s.step();
     }
     // The old generation goes: postings first, then the rows; `activate`

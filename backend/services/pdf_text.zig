@@ -56,7 +56,7 @@
 //! A blank page still gets a row: the band arithmetic is `first + page_index`,
 //! so a missing row is a hole in the run. It carries `recogn_status = 0` and
 //! NULL text, which keeps it out of the FTS predicate and out of
-//! `search_from_where` — present, addressable, invisible to search. A document
+//! `scoped_from_where` — present, addressable, invisible to search. A document
 //! where EVERY page is like that is a scan, and that is a verdict
 //! (`Verdict.no_text`), not a failure: unrecorded, the worker would re-read a
 //! 1,450-page scanned book every idle tick for ever.
@@ -367,7 +367,7 @@ fn storePageRows(db: sqlite.Db, blob_md5: []const u8, pages: []const Page) !void
         s.bindInt(2, p.index);
         s.bindText(3, &hash); // content_hash — see the module's column contract
         // "Text present" is what `recogn_status = 1` means everywhere on this
-        // table, and `search_from_where` filters on it. A blank page says 0 and
+        // table, and `scoped_from_where` filters on it. A blank page says 0 and
         // carries NULL text, so it is present in the band and absent from search.
         s.bindInt(4, if (p.text.len == 0) 0 else 1);
         s.bindTextOpt(5, if (p.text.len == 0) null else &hash);
@@ -382,12 +382,11 @@ fn storePageRows(db: sqlite.Db, blob_md5: []const u8, pages: []const Page) !void
 pub fn finish(
     db: sqlite.Db,
     blob_md5: []const u8,
-    bands: []const search.Band,
     page_count: u32,
     v: Verdict,
     now: i64,
 ) !void {
-    try search.finishOwnerBlobBands(db, bands, blob_md5, page_count, now);
+    try search.finishOwnerBlobBands(db, blob_md5, page_count, now);
     // NEVER A SILENT TRUNCATION — the half of `txt_index`'s cap tradition worth
     // keeping. Once per blob, because the verdict written on the next line is
     // what stops the document being offered again.
@@ -471,6 +470,21 @@ const partition = @import("search_partition.zig");
 const book_pdf = @embedFile("../pdf/testdata/text-120-page.pdf");
 /// Three bare `/MediaBox` pages with no content stream — a scan, minus the image.
 const scan_pdf = @embedFile("../pdf/testdata/three-page.pdf");
+
+/// WHAT REPLACED LIBRARY-WIDE SEARCH IN THESE TESTS. `golden-search.md` §6 step 6
+/// deleted the server's global read, so a test that used to ask "which of my
+/// files does this word appear in?" asks every live file it owns, one at a time,
+/// through the in-document read. The `files` join those reads are built on is
+/// the same security boundary the deleted one carried.
+const FoundFile = struct {
+    noteId: u64,
+    noteName: []const u8,
+    /// The first matching ordinal — a page index for a `.note`/PDF, a paragraph
+    /// ordinal for a `.txt`.
+    pageIndex: i64,
+};
+
+const FoundFiles = struct { hits: []const FoundFile };
 
 const Fixture = struct {
     db: sqlite.Db,
@@ -586,8 +600,28 @@ const Fixture = struct {
         return out.items;
     }
 
-    fn search_(f: *Fixture, user_id: u64, q: []const u8) !notesearch.Results {
-        return notesearch.searchPages(f.a(), testing.io, f.db, user_id, q, notesearch.default_limit, null);
+    /// Which of `user_id`'s OWN live files contain `q` — see `FoundFile`.
+    fn search_(f: *Fixture, user_id: u64, q: []const u8) !FoundFiles {
+        var hits: std.ArrayList(FoundFile) = .empty;
+        var names: std.ArrayList(FoundFile) = .empty;
+        {
+            var s = try f.db.prepare(
+                "SELECT id, name FROM files WHERE user_id = ?1 AND deleted = 0 AND is_folder = 0 ORDER BY id;",
+            );
+            defer s.finalize();
+            s.bindInt(1, @intCast(user_id));
+            while (try s.step()) try names.append(f.a(), .{
+                .noteId = @intCast(s.columnInt(0)),
+                .noteName = try f.a().dupe(u8, s.columnText(1)),
+                .pageIndex = 0,
+            });
+        }
+        for (names.items) |cand| {
+            const r = try notesearch.searchNotePages(f.a(), f.db, user_id, cand.noteId, q, null, notesearch.max_batch);
+            if (r.pages.len == 0) continue;
+            try hits.append(f.a(), .{ .noteId = cand.noteId, .noteName = cand.noteName, .pageIndex = r.pages[0].pageIndex });
+        }
+        return .{ .hits = hits.items };
     }
 };
 
@@ -635,7 +669,7 @@ fn runPipeline(
 
     const v = verdictFor(doc_pages, to_index, any_text);
     try f.db.exec("BEGIN IMMEDIATE;");
-    try finish(f.db, md5, bands, to_index, v, now);
+    try finish(f.db, md5, to_index, v, now);
     try f.db.exec("COMMIT;");
     return .{ .bands = bands, .indexed = at, .verdict = v };
 }
@@ -647,12 +681,13 @@ fn expectFtsClean(f: *Fixture) !void {
     try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('integrity-check');");
 }
 
-test "THE BAND IS STILL CONTIGUOUS after a chunked write — the arithmetic the jump rests on" {
-    // The load-bearing property of this whole file. `query.bandStart` jumps to
-    // `R - page_index` and validates it against page 0 of the same blob; that is
-    // only ever right while a document's segments are ONE contiguous rowid run
-    // in page order. Three commits produced this band, and it has to look
-    // exactly like one statement produced it.
+test "THE BAND IS STILL CONTIGUOUS after a chunked write — the arithmetic the scan rests on" {
+    // The load-bearing property of this whole file. `query.docSegmentRanges`
+    // derives the document's own rowid ranges and runs one `M1><` pass per
+    // range, and `rowid ASC` is reading order only while a document's segments
+    // are ONE contiguous run in page order — so a scattered band costs a find
+    // extra passes and, past the range cap, the whole partition. Three commits
+    // produced this band, and it has to look exactly like one statement did.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -704,7 +739,7 @@ test "AN INGEST BETWEEN CHUNKS DOES NOT INTERLEAVE — this is what the reservat
         if (at == chunk_pages) interloper = try f.putTxt(1, "between.txt", "an interloping paragraph\n");
     }
     try f.db.exec("BEGIN IMMEDIATE;");
-    try finish(f.db, &md5, bands, ex.pages, .ok, 100);
+    try finish(f.db, &md5, ex.pages, .ok, 100);
     try f.db.exec("COMMIT;");
 
     const ids = try f.band(1, &md5);
@@ -785,9 +820,7 @@ test "a re-run after a partial write DROPS and re-reserves — one band, no dupl
     try expectFtsClean(&f);
 }
 
-test "DOCUMENT PARITY: an indexed PDF appears exactly once in the global stream, on a page in-doc also returns" {
-    // The invariant that replaced global↔in-doc equality
-    // (`search-one-hit-per-doc.md`), asserted for the seam's third tenant.
+test "AN INDEXED PDF IS SEARCHABLE END TO END: every page that matched, at its real page number" {
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -797,25 +830,16 @@ test "DOCUMENT PARITY: an indexed PDF appears exactly once in the global stream,
     try testing.expectEqual(@as(i64, 120), try indexedPages(f.db, &md5));
     try testing.expect(!try needsText(f.db, &md5));
 
+    // The document is reachable at all, as the caller's own file.
     const id = try f.fileId("book.pdf");
     const hits = try f.search_(1, "rutabaga"); // on all 120 pages
-    var count: usize = 0;
-    var reported: i64 = -1;
-    for (hits.hits) |h| {
-        if (!std.mem.eql(u8, h.noteName, "book.pdf")) continue;
-        count += 1;
-        reported = h.pageIndex;
-    }
-    try testing.expectEqual(@as(usize, 1), count); // exactly once, never 120 rows
+    try testing.expectEqual(@as(usize, 1), hits.hits.len);
+    try testing.expectEqualStrings("book.pdf", hits.hits[0].noteName);
 
-    // REPRESENTATIVE HONESTY: the page global named is a page in-doc returns.
+    // And the find inside it is COMPLETE — every page, which is the claim no
+    // ranked read could make.
     const in_doc = try notesearch.searchNotePages(f.a(), f.db, 1, id, "rutabaga", null, 500);
     try testing.expectEqual(@as(usize, 120), in_doc.pages.len);
-    var member = false;
-    for (in_doc.pages) |p| {
-        if (p.pageIndex == reported) member = true;
-    }
-    try testing.expect(member);
 
     // A word on exactly one page finds exactly that page, which is what makes
     // `page_index` the PDF PAGE NUMBER rather than an ordinal into something.
@@ -823,7 +847,7 @@ test "DOCUMENT PARITY: an indexed PDF appears exactly once in the global stream,
     try testing.expectEqual(@as(usize, 1), one.pages.len);
     try testing.expectEqual(@as(i64, 77), one.pages[0].pageIndex);
 
-    // And a term the document lacks appears on neither side.
+    // And a term the document lacks reaches it from neither direction.
     try testing.expectEqual(@as(usize, 0), (try notesearch.searchNotePages(f.a(), f.db, 1, id, "quokka", null, 500)).pages.len);
     for ((try f.search_(1, "quokka")).hits) |h| try testing.expect(!std.mem.eql(u8, h.noteName, "book.pdf"));
 }
@@ -837,12 +861,13 @@ test "find-in-PDF's whole server side is the note-scoped route unchanged: kind =
     // server COUNTED; without terms it would have to re-derive membership, which
     // is the one thing the division of labour forbids.
     //
-    // The `indexable = 1` gate this file's header warns every reader about lives
-    // in `coverage_sql` — the unsearchable-notes DENOMINATOR — and not in
-    // `scoped_from_where`, which is what `searchNotePages` runs. Asserted below
-    // rather than argued: the flag really is off for this document and the pages
-    // really do come back anyway, so a future reader who moves that predicate
-    // into the shared clause breaks this test rather than the feature.
+    // The `indexable = 1` gate this file's header warns every reader about is a
+    // COVERAGE predicate (the manifest's unsearchable-notes denominator,
+    // `index_export.zig`) and is not in `scoped_from_where`, which is what
+    // `searchNotePages` runs. Asserted below rather than argued: the flag really
+    // is off for this document and the pages really do come back anyway, so a
+    // future reader who moves that predicate into the shared clause breaks this
+    // test rather than the feature.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -943,7 +968,7 @@ test "TRUNCATION IS RECORDED — a capped document says so on the row, and says 
     try f.db.exec("BEGIN IMMEDIATE;");
     // Only the pages inside the cap are offered to the band.
     try storeChunk(f.db, &md5, bands, .{ .arena = chunk.arena, .from = 0, .pages = chunk.pages[0..capped] });
-    try finish(f.db, &md5, bands, capped, verdictFor(ex.pages, capped, true), 100);
+    try finish(f.db, &md5, capped, verdictFor(ex.pages, capped, true), 100);
     try f.db.exec("COMMIT;");
 
     try testing.expectEqual(@as(i64, capped), try indexedPages(f.db, &md5));
@@ -975,83 +1000,6 @@ test "TWO HOLDERS get one contiguous band each, in their own partitions" {
             try partition.active(f.db, uid),
         );
     }
-    try expectFtsClean(&f);
-}
-
-/// One document's term set for one owner, in a stable order — the `doc_terms`
-/// rows as a comparable value.
-fn docTerms(f: *Fixture, user_id: u64, md5: []const u8) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    var s = try f.db.prepare(
-        "SELECT dt.term FROM doc_terms dt JOIN search_partitions sp ON sp.id = dt.partition_id " ++
-            "WHERE sp.user_id = ?1 AND dt.blob_md5 = ?2 ORDER BY dt.term;",
-    );
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    s.bindText(2, md5);
-    while (try s.step()) try out.append(f.a(), try f.a().dupe(u8, s.columnText(0)));
-    return out.items;
-}
-
-test "A PDF'S TERM SET FROM A CHUNKED WRITE IS THE ONE THE SINGLE-STATEMENT FOLD LANDS" {
-    // Both tenants share `search/maintain.zig`, so the chunked fold that closed
-    // `optimizations.md` entry 11's residue was measured on a 16 MB `.txt` and
-    // has to be right for a book. Pinned HERE rather than inherited from
-    // `txt_index.zig`: a PDF page is a different row shape (NULL byte ranges, a
-    // blank page carrying `recogn_status = 0`) and it is that shape the fold's
-    // predicate has to agree with.
-    //
-    // The oracle is the single-statement fold itself, still live on the
-    // whole-document paths: `search.recanonicalizeHolders` rewrites `doc_terms`
-    // for a band it leaves otherwise untouched, by re-folding the blob's entire
-    // text. Same blob, same partition, computed both ways.
-    var f = try Fixture.init();
-    defer f.deinit();
-    const md5 = try f.putRaw(1, "book.pdf", book_pdf);
-
-    // A blank page in the middle: it gets a row, carries no text, and must
-    // contribute nothing to the pool from either direction.
-    const pages = [_]Page{
-        .{ .index = 0, .text = "rutabaga verdejante no primeiro" },
-        .{ .index = 1, .text = "" },
-        .{ .index = 2, .text = "quiabo crepuscular no terceiro" },
-        .{ .index = 3, .text = "caligrafia e rutabaga outra vez" },
-    };
-    try f.db.exec("BEGIN IMMEDIATE;");
-    const bands = try reserve(f.a(), f.db, &md5, pages.len, 100);
-    try f.db.exec("COMMIT;");
-    // One page per chunk — the finest interruption grain there is, and the one
-    // that would expose a fold that only ever saw its last chunk.
-    for (0..pages.len) |i| {
-        try f.db.exec("BEGIN IMMEDIATE;");
-        try storeChunk(f.db, &md5, bands, .{
-            .arena = std.heap.ArenaAllocator.init(testing.allocator),
-            .from = @intCast(i),
-            .pages = pages[i .. i + 1],
-        });
-        try f.db.exec("COMMIT;");
-    }
-    try f.db.exec("BEGIN IMMEDIATE;");
-    try finish(f.db, &md5, bands, pages.len, .ok, 100);
-    try f.db.exec("COMMIT;");
-
-    const accumulated = try docTerms(&f, 1, &md5);
-    try f.db.exec("BEGIN IMMEDIATE;");
-    try search.recanonicalizeHolders(f.db, &md5, 100);
-    try f.db.exec("COMMIT;");
-    const refolded = try docTerms(&f, 1, &md5);
-
-    try testing.expectEqual(refolded.len, accumulated.len);
-    for (accumulated, refolded) |a_, b| try testing.expectEqualStrings(a_, b);
-    // And it is the document's whole vocabulary, from the first chunk and the
-    // last alike — not just whatever the closing transaction happened to see.
-    var saw_first = false;
-    var saw_last = false;
-    for (accumulated) |t| {
-        if (std.mem.eql(u8, t, "verdejante")) saw_first = true;
-        if (std.mem.eql(u8, t, "caligrafia")) saw_last = true;
-    }
-    try testing.expect(saw_first and saw_last);
     try expectFtsClean(&f);
 }
 
@@ -1254,13 +1202,17 @@ fn pageCountOf(f: *Fixture, md5: []const u8) !i64 {
 // ---------------------------------------------------------------------------
 
 // The sweep above sizes a CHUNK. This one measures the hold a chunk cannot
-// bound: `search.finishOwnerBlobBands`, which lands the document's `doc_terms`.
+// bound: `search.finishOwnerBlobBands`, the closing transaction of the write.
 //
 // It exists because the residue `optimizations.md` entry 11 recorded was found
 // on the `.txt` tenant and fixed in `search/maintain.zig`, which BOTH tenants
 // call — so the PDF side needs its own before/after rather than inheriting a
 // `.txt` figure. A 1,450-page book carries ~2 MB of text where a `.txt` may
 // carry 16 MB, which is exactly why the closing fold was invisible here.
+//
+// The closing fold this measured is SMALLER since §6 step 6: `doc_terms` and the
+// whole-document term fold that landed it are gone, so what remains in the close
+// is the band shape alone. The figures below are from before that.
 //
 // `std.log.INFO`, not `std.log.debug`, and that is not drift from the sweep
 // above: outside a Debug build `std.options.log_level` is `.info` and every
@@ -1324,7 +1276,7 @@ test "BENCH note: what the CLOSING transaction of a PDF write costs (figures pri
 
     const fin0 = std.Io.Clock.awake.now(testing.io);
     try f.db.exec("BEGIN IMMEDIATE;");
-    try finish(f.db, &md5, bands, doc_pages, .ok, 200);
+    try finish(f.db, &md5, doc_pages, .ok, 200);
     try f.db.exec("COMMIT;");
     const fin1 = std.Io.Clock.awake.now(testing.io);
     const finish_ns: u64 = @intCast(fin0.durationTo(fin1).toNanoseconds());
@@ -1340,13 +1292,10 @@ test "BENCH note: what the CLOSING transaction of a PDF write costs (figures pri
         },
     );
 
-    // The bench is also an assertion: one contiguous band, and a term set that
-    // is the document's own vocabulary rather than a fragment of it.
+    // The bench is also an assertion: one contiguous band, and every page of it
+    // in the index rather than a prefix.
     const ids = try f.band(1, &md5);
     try testing.expectEqual(@as(usize, doc_pages), ids.len);
     for (ids, 0..) |id, i| try testing.expectEqual(ids[0] + @as(i64, @intCast(i)), id);
-    var terms = (try f.db.row("SELECT COUNT(*) FROM doc_terms WHERE blob_md5 = ?1;", &.{.{ .text = &md5 }})).?;
-    defer terms.finalize();
-    try testing.expect(terms.int(0) > 1000);
     try expectFtsClean(&f);
 }

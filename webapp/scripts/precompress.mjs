@@ -40,7 +40,7 @@ const COMPRESS = new Set([".js", ".css", ".html", ".svg", ".json", ".wasm", ".ma
  * Both are true and neither is enforceable by reading. A budget nobody checks is
  * not a budget, so it is checked here, where the number actually exists.
  *
- * ## sqlite-core.wasm — 366,000
+ * ## sqlite-core.wasm — 369,000
  *
  * MEASURED at 362,687 gzip (828,562 raw) when the pin was written — measured BY
  * THIS SCRIPT, which is the number that matters because this script is the gate.
@@ -69,8 +69,25 @@ const COMPRESS = new Set([".js", ".css", ".html", ".svg", ".json", ".wasm", ".ma
  * **Raising a ceiling is a legitimate act** — a feature may be worth its bytes.
  * Raising it without saying what bought the bytes is not; the number above is
  * the record.
+ *
+ * ### 366,000 → 369,000: the typo ladder (`golden-search.md` §6.1)
+ *
+ * `idx_fuzzy` and what it needs — the Damerau-Levenshtein distance, the 0/1/2
+ * rung table, the ranked `fts5vocab` scan with its bounded shortlist, and the
+ * `typed \t matched` record the UI renders — moved out of
+ * `backend/services/search/fuzzy.zig` and into the artifact. It cost **+3,171
+ * bytes** by this script's measure (362,687 → 365,858; 828,562 → 835,860 raw),
+ * which is five of the ABI additions the old headroom was sized against, and it
+ * is a whole capability rather than an ABI: without it a query the corpus
+ * misspells — which is most of them, the text being handwriting recognition —
+ * answers nothing at all once step 6 deletes the server's copy.
+ *
+ * The headroom stays 3,142 and the argument above is unchanged: still five
+ * ordinary ABI additions, still 4.7x below the +14,638 that one dropped
+ * `sqlite_core_wasm_flags` omission costs, so a flag-level regression still
+ * cannot hide inside it.
  */
-const CEILINGS = new Map([["sqlite-core.wasm", 366_000]]);
+const CEILINGS = new Map([["sqlite-core.wasm", 369_000]]);
 
 /** Recursively yield every file path under `dir`. */
 function* walk(dir) {

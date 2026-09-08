@@ -203,47 +203,41 @@ pub const routes = [_]router.Route{
     // Generic per-item metadata (page dims, `fileType`, `fileHash`) — EVERY
     // previewable kind fetches this on open, not just `.note`, so it lives under
     // `/file/metadata/` rather than the `/note/` noun. The genuinely note-only
-    // reads (`/note/:id/page`, `/search`, `/template`, `/history/...`) stay below.
+    // reads (`/note/:id/page`, `/note/:id/search`, `/template`, `/history/...`)
+    // stay below.
     .{ .method = .GET, .path = "/api/controlplane/file/metadata/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneNote },
-    // Full-text search over the caller's recognized (on-device OCR) page text.
-    .{ .method = .GET, .path = "/api/controlplane/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearch, .read_only = true },
-    // Find-in-note: EVERY matching page of ONE note, with a count per page. Its
-    // own route rather than a parameter on `/search` because the contract is
-    // different — complete and unranked, where `/search` is ranked and clamped.
+    // Find-in-note: EVERY matching page of ONE note, with a count per page.
+    // Complete and unranked — the client auto-drains its cursor to the exact
+    // count, which is why it is a route of its own and not a mode of something
+    // else. `golden-search.md` §6 step 7 retires it once `text/<md5>` can be
+    // searched in the browser.
     .{ .method = .GET, .path = "/api/controlplane/note/:id/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneNoteSearch, .read_only = true },
     // Find-in-txt: EVERY matching `.txt` paragraph of ONE file, with a count and
-    // byte range per paragraph. Its own route (not a kind on `/search`) because
-    // it answers about paragraphs + byte ranges rather than pages + counts —
-    // different fields for a different viewer.
+    // byte range per paragraph. Its own route because it answers about paragraphs
+    // + byte ranges rather than pages + counts — different fields for a different
+    // viewer. Retired alongside its `.note` twin in step 7.
     .{ .method = .GET, .path = "/api/controlplane/note/:id/txt-search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTxtSearch, .read_only = true },
-    // --- The client-side search index (`client-side-search-impl.md` §2.1) ---
+    // --- The client-side search index (`golden-search.md` §2/§3) ---
     //
-    // The two reads a browser needs in order to answer global search LOCALLY: the
-    // caller's complete live document set, and the inverted term payload for a
-    // batch of blobs. Both are BYTES rather than JSON — §9.2 measured the same
-    // manifest at 143 KB of JSON against 27 KB of raw md5s, and this server
-    // compresses no API response, so that 5.2x is what actually travels.
+    // GLOBAL SEARCH IS THE BROWSER'S. The server ships the caller's complete live
+    // document set (the manifest) and the per-document term records the stream
+    // stitches together, and interprets no query at all — §6 step 6 deleted the
+    // route that did.
     //
-    // ADDITIVE AND INERT. Nothing else changed to add them: `/search` above is
-    // untouched and the browser does not fetch these yet. Phase 1 §3 calls this
-    // "the natural place to stop and ship if phase 1 stalls".
+    // Both are BYTES rather than JSON — §9.2 measured the same manifest at 143 KB
+    // of JSON against 27 KB of raw md5s, and this server compresses no API
+    // response, so that 5.2x is what actually travels.
     //
-    // `read_only` for the same reason `/search` is, and it is the same argument
-    // rather than a new one: they read `files`, `doc_terms`, `note_index` and
-    // `note_page_index` directly and heal nothing. The self-healing family this
-    // section's header excludes is the one that calls `indexRowEnsuring`; neither
-    // of these does, and the read-only probe in `test/http_integration.zig`
-    // checks that claim on a connection where a write would fail loudly.
+    // The manifest is `read_only`: it reads `files`, `note_index` and
+    // `note_page_index` directly and heals nothing. The self-healing family this
+    // section's header excludes is the one that calls `indexRowEnsuring`; this
+    // does not, and the read-only probe in `test/http_integration.zig` checks that
+    // claim on a connection where a write would fail loudly.
     //
-    // Caching is the one thing that differs between them, and it is not a detail:
-    // the manifest is the caller's MUTABLE library and is `no-cache` + ETag (a
-    // conditional request per visit — see the handler for why that is the answer
-    // to §9.2's open refetch question), while the terms payload is
-    // content-addressed and `immutable`, but ONLY when the URL carries the
-    // `index_version` that is the other half of its cache key. That conditional
-    // is this file's own rule, stated below on `/note/:id/page/:n/text`.
+    // It is `no-cache` + ETag — the caller's library is mutable, so the answer is
+    // a conditional request per visit; see the handler for why that is the answer
+    // to §9.2's open refetch question rather than a polling cadence.
     .{ .method = .GET, .path = "/api/controlplane/search-index/manifest", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexManifest, .read_only = true },
-    .{ .method = .GET, .path = "/api/controlplane/search-index/terms", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexTerms, .read_only = true },
     // The stitched stream (`golden-search.md` §3.2/§3.3, build order step 2), and
     // it is the one route in this family that is NOT `read_only`.
     //

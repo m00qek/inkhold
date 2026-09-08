@@ -9,8 +9,11 @@
 //   getPageBytes → GET  /note/{id}/page/{n}?v={hash}        (immutable, HTTP-cached)
 //   getPageText  → GET  /note/{id}/page/{n}/text?v={textHash} (immutable, HTTP-cached)
 //   getPageLinks → GET  /note/{id}/page/{n}/links?v={linksHash}
-//   searchText   → GET  /api/controlplane/search?q={terms}&limit={n}&cursor={c}
 //   searchInNote → GET  /api/controlplane/note/{id}/search?q={terms}
+//
+// NO LIBRARY-WIDE SEARCH LIVES HERE ANY MORE (`golden-search.md` §6 step 6).
+// The browser holds the index and answers every global query itself; what is
+// left below is IN-DOCUMENT find, which §6 step 7 moves onto the same engine.
 
 import type { PdfLink } from "../render/pdfLinks";
 import type {
@@ -22,7 +25,6 @@ import type {
   NoteSearchResults,
   PageRef,
   PageText,
-  SearchResults,
   TxtSearchBatch,
   TxtSearchResults,
 } from "../core/types";
@@ -122,46 +124,6 @@ export interface Api {
   getPageLinks(id: Id, page: PageRef): Promise<PageLinks>;
 
   /**
-   * Full-text search over the RECOGNISED transcript of every page of the
-   * caller's notes, ranked best-first (bm25). This is the "handwritten" half of
-   * the search box's promise; the "typed" half (matching note *names*) stays a
-   * client-side filter over the listing already in hand.
-   *
-   * COVERAGE IS DELIBERATELY PARTIAL: only pages whose on-device recognition
-   * finished are indexed, so a note the user never recognised simply does not
-   * appear. That is settled — the gallery's OCR marker (`hasRecognizedText`) is
-   * what tells the user which notes are findable, and a "not searchable" row per
-   * missing note would be noise standing in for a signal that is already shown.
-   *
-   * A BLANK QUERY IS NOT AN ERROR: it resolves to zero hits without a request.
-   * The box searches as you type, so an emptied box is a normal state that must
-   * not round-trip and must not surface as a failure.
-   *
-   * Note the return is scoped by the SERVER to the caller's own, non-deleted
-   * notes — the transcript index is keyed by blob md5 and blobs are
-   * deduplicated across users, so that join is a security boundary, not a
-   * filter the client could ever re-implement.
-   *
-   * PAGED BY KEYSET, NEVER BY TOTAL: a response is at most 20 hits, and when
-   * more may exist it carries {@link SearchResults.cursor}. Fetching the next
-   * page is this same call with that cursor handed back verbatim — the query
-   * (and limit) must be the ones the cursor came from, since the cursor only
-   * means anything relative to that result stream. No call on this surface
-   * ever learns how many results there are in all; the server's query stops
-   * at the page boundary by design.
-   *
-   * `signal` CANCELS THE REQUEST, not just its paint. The box searches as you
-   * type and every keystroke supersedes the last, so without it the abandoned
-   * requests carried on to completion — each holding one of the browser's ~6
-   * connections per origin, against the gallery's own reads, for the whole of a
-   * round trip nobody would ever look at. Note-scoped find has taken a signal
-   * since it was written ({@link searchInNoteStream}); this is the same seam on
-   * the library-wide half. Optional, so a caller that has nothing to cancel (a
-   * unit test, the fake) passes nothing.
-   */
-  searchText(query: string, limit?: number, cursor?: string, signal?: AbortSignal): Promise<SearchResults>;
-
-  /**
    * Every matching page of ONE note, with a per-page match count — what
    * find-in-note's counter and its filmstrip badges are made of.
    *
@@ -172,11 +134,12 @@ export interface Api {
    * mutex the reader needs for its page bitmaps — a find could starve the pages
    * being read.
    *
-   * COMPLETE AND UNRANKED, unlike {@link searchText}, which is bm25-ordered and
-   * clamped: reused as a per-note counter that one is silently incomplete.
+   * COMPLETE AND UNRANKED. A ranked, clamped answer reused as a per-note counter
+   * is silently incomplete, and a wrong count that looks right is worse than a
+   * slow one.
    *
-   * A blank query resolves to zero pages without a request, exactly as
-   * {@link searchText} does — find searches as you type.
+   * A blank query resolves to zero pages without a request — find searches as
+   * you type, so backspacing to empty must cost nothing.
    */
   searchInNote(noteId: Id, query: string): Promise<NoteSearchResults>;
 

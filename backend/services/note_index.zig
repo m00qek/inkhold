@@ -81,11 +81,13 @@ const Allocator = std.mem.Allocator;
 ///   change — the raster/SNPG/text goldens are untouched; the bump only forces
 ///   `ensureIndexed` to run `recanonicalizeHolders`, a no-op on the already-
 ///   contiguous bands every note minted since the whole-doc-band re-mint has.
-/// - **9** → per-document term set (in-doc-search entry 8b): backfills each
-///   note's `doc_terms` (the in-doc fuzzy candidate pool) on the same
-///   `recanonicalizeHolders` heal — for a canonical band it writes only the
-///   term set, leaving the segments (and their recency) untouched. No
-///   stored-column change; the goldens are unmoved.
+/// - **9** → per-document term set (in-doc-search entry 8b): backfilled each
+///   note's `doc_terms` — the in-doc fuzzy candidate pool — on the same
+///   `recanonicalizeHolders` heal. **RETIRED**: `golden-search.md` §6 step 6
+///   moved the typo ladder into the browser and schema v13 dropped the table, so
+///   this bump now heals nothing that still exists. Kept in the list because the
+///   number is spent: a client that saw 9 must not see it again meaning
+///   something else. No stored-column change; the goldens are unmoved.
 /// - **10** → the COVER is served ON-DEMAND, streamed from the blob instead of
 ///   copied into `thumbs/`. `cover_offset`/`cover_length` memoize the cover
 ///   image block's byte offset + length INSIDE the blob and `cover_mime` its

@@ -74,6 +74,7 @@ import { createTxtViewer } from "./txtViewer";
 import { createPdfViewer } from "./pdfViewer";
 import type { Viewer, ViewerDeps } from "./viewer";
 import { createNoteSearch, MIN_GLOBAL_QUERY_LEN, type SearchState } from "./noteSearch";
+import { createSearchService } from "../search/searchService";
 // The three features pulled out of this god-file (Review-2 Pass-2 #3), each fed
 // an explicit context the controller builds — no hidden coupling back in.
 import { createGalleryCards, type GalleryCards } from "./galleryCards";
@@ -1166,51 +1167,61 @@ export function createAppShell(deps: AppDeps): AppShell {
       : null;
 
   // --- transcript search ----------------------------------------------------
-  // The debounce/staleness/failure logic lives in the controller (noteSearch.ts),
-  // along with the grouping and the snippet→text decode; this shell is only the
-  // DOM half of it. The same `failures` sink the gallery and the reader use, so
-  // an expired session mid-search reaches the composition root instead of quietly
-  // rendering as "no matches".
+  // The debounce/staleness/failure logic lives in the controller (noteSearch.ts);
+  // this shell is only the DOM half of it. The same `failures` sink the gallery
+  // and the reader use, so an expired session mid-search reaches the composition
+  // root instead of quietly rendering as "no matches".
+  //
+  // THE ENGINE IS THE SEAM `golden-search.md` §6 LANDS ON, and step 6 left ONE
+  // producer behind it: `src/search/searchService.ts` is the browser's own
+  // index and nothing else. NO `api` IS PASSED and that absence is the boundary
+  // — there is no library-wide search route left to call, so a query the index
+  // cannot answer fails here rather than quietly reaching the network.
   let searchState: SearchState = { kind: "idle" };
+  const searchService = createSearchService({
+    // THE OFFLINE STAND-IN FOR THE MANIFEST (`indexSearch.ts`'s header). A
+    // session that has never managed a sync has no manifest, which without this
+    // would leave a full local store unsearchable — the one case §4.4's "global
+    // search is fully offline" is actually about. The tree cache already names
+    // every note in the library, and `fileHash` is the same blob md5 the derived
+    // files are keyed by, so it can stand in wholesale.
+    //
+    // Read fresh on every call rather than captured: the cache fills during a
+    // background tree walk, so a snapshot taken here would be whatever was known
+    // at construction.
+    listing: () =>
+      [...folderCache.values()].flatMap((cached) =>
+        cached.entries.flatMap((e) =>
+          e.kind === "note" && e.fileHash
+            // `Id` is a string here and the manifest's `fileId` is a varint, so
+            // the numeric side is canonical and `gallerySearch` converts back
+            // with `String(doc.fileId)`. Converting here keeps one direction.
+            ? [{ md5: e.fileHash, fileId: Number(e.id), updatedAt: e.updatedAt }]
+            : [],
+        ),
+      ),
+  });
   const search = createNoteSearch({
-    api,
+    search: searchService,
     failures,
     view: {
       setState(next) {
-        const prev = searchState;
         searchState = next;
-        // ONLY the states that arrive from the NETWORK repaint from here.
+        // ONLY the states that arrive from the ENGINE repaint from here.
         // `idle` and `searching` are set synchronously inside `setQuery`/`reset`,
         // whose callers already render — repainting here too would paint the
         // same list twice on every keystroke.
         if (next.kind !== "results" && next.kind !== "error") return;
-        // A LATER PAGE of the same results (the "More results" control spent
-        // its cursor) APPENDS instead of repainting: the rows already on
-        // screen are exactly what the user is reading, and a full rebuild
-        // would replay their entrance animation, reset the lazy engine's
-        // observations and risk the scroll position — for a list whose shown
-        // prefix did not change. The guards make "same results, grown" a fact
-        // rather than a guess: same query, the previous hits a strict prefix
-        // of the next (the controller builds them by appending), and the
-        // painted DOM still the one this search drew.
-        const painted = gallerySearch.getPainted();
-        if (
-          next.kind === "results" &&
-          prev.kind === "results" &&
-          prev.query === next.query &&
-          next.hits.length > prev.hits.length &&
-          painted !== null &&
-          painted.query === next.query &&
-          painted.countEl.isConnected
-        ) {
-          gallerySearch.appendSearchResults(painted);
-          return;
-        }
-        // The results ARE the gallery now, so an arriving response repaints it
-        // rather than a box beneath it. That does reset the lazy engine — but
-        // the list it is repainting is precisely what changed, and every bitmap
-        // already drawn is still in the render cache, so the name matches that
-        // were on screen a moment ago come back off the cache, not off the wire.
+        // The results ARE the gallery now, so an arriving answer repaints it
+        // rather than a box beneath it. ONE PAINT PER ANSWER, because an answer
+        // is whole: the cursor's "More results" needed an append path so that
+        // growing the list did not replay every row's entrance animation, reset
+        // the lazy engine's observations and risk the scroll position — and
+        // there is no second page to append any more. The repaint does reset the
+        // lazy engine, but the list it is repainting is precisely what changed,
+        // and every bitmap already drawn is still in the render cache, so the
+        // name matches that were on screen a moment ago come back off the cache,
+        // not off the wire.
         renderGallery({ rail: false });
       },
     },
@@ -1522,7 +1533,6 @@ export function createAppShell(deps: AppDeps): AppShell {
     galleryEngine,
     imgLazy,
     getView: () => view,
-    getSearchState: () => searchState,
     labelFor: (folder) => rail.labelFor(folder),
     categoryIconFor: (folder) => rail.categoryIconFor(folder),
     pendingCategoryOf: (folder) => rail.pendingCategoryOf(folder),
@@ -1536,9 +1546,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   });
   const gallerySearch: GallerySearch = createGallerySearch({
     gallery,
-    galleryEngine,
     getSearchState: () => searchState,
-    loadMore: () => search.loadMore(),
     folders: folderCache,
     // The rail owns "has the tree walk landed" (`treeWalked`), and the name half
     // of a query is a function of exactly that walk — so the search renderer
@@ -1922,8 +1930,9 @@ root,
     // that closes it turns its mode off. That is the teardown hook bin.ts is
     // built around; it just has to be one line, here, rather than nowhere.
     setBinMode(false, 0);
-    // Results are always a list: a row is what has room for an excerpt and a
-    // strip of page chips, and a grid of covers could show neither.
+    // Results are always a list: a row is what has room for a path, a date and
+    // the count of pages the query reached, and a grid of covers has room for
+    // none of them.
     gallery.className = `gallery${searching || view === "list" ? " is-list" : ""}`;
     galleryEngine.reset();
     imgLazy?.disconnect(); // drop the previous repaint's native-image observations
@@ -2045,8 +2054,9 @@ root,
    *
    * Answered from `folderCache`, which its walk fills for the WHOLE
    * (household-sized) tree, because the question is asked from a search result
-   * and a `SearchHit` carries no folder: results are library-wide, so the note is
-   * very often somewhere the user has never navigated. The same container
+   * and a search result carries no folder — the index names documents by id and
+   * nothing else: results are library-wide, so the note is very often somewhere
+   * the user has never navigated. The same container
    * flattening the breadcrumb uses (`crumbPath`) is applied here, so the reader
    * says `Note` where the server said `NOTE / Note`.
    *
@@ -2564,6 +2574,22 @@ root,
   }
   const unsubscribe = live.subscribe(onBump, onIndex);
 
+  // THE INDEX'S OWN LIFECYCLE, on the same socket the gallery already listens to.
+  // §3.3 names two triggers — a derive completing (`event: index`) and the
+  // listing changing (`event: sync`) — and requires them COALESCED, because a
+  // device syncing a hundred notes must become a handful of conditional manifest
+  // requests rather than a hundred × ~127 ms on the Pi. `attachLive` owns that
+  // window; both frames already arrive here, so this is one subscription and no
+  // cross-component coordination.
+  //
+  // `syncNow` is fire-and-forget on purpose: it never rejects, a failure is for
+  // the next trigger to retry, and the search box keeps working from the server
+  // fallback meanwhile. Nothing here instantiates the engine — §4.2's promise is
+  // that a person who never searches never pays for it, and only `search()` can
+  // break that.
+  const detachSearchLive = searchService.attachLive(live);
+  void searchService.syncNow();
+
   // --- view / theme --------------------------------------------------------
   function setView(next: View): void {
     view = next;
@@ -2878,6 +2904,11 @@ root,
 
     destroy(): void {
       unsubscribe();
+      // The service holds a coalescing window and, once anybody has searched,
+      // the engine's linear memory. A shell torn down on sign-out that left
+      // either behind would accumulate one per sign-in cycle.
+      detachSearchLive();
+      searchService.dispose();
       // Shell-level window listeners registered at build time. Without these
       // removals they accumulate one set per sign-out/in cycle, each holding
       // the whole torn-down shell alive.

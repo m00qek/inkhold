@@ -1003,8 +1003,8 @@ pub fn controlplaneBinPageText(ctx: *Context, req: *Request, params: Params) any
 ///
 /// One COMPLETE response, no cursor (the history-search shape): it is a one-document
 /// scan of the retained `note_page_index`, not the FTS the live route drains. SAME
-/// `NoteSearchResults` VO (`{ query, pages: [{ pageIndex, matches, terms }],
-/// usedFuzzy }`) find-in-note serves, so the reader's find bar reuses its rendering.
+/// `NoteSearchResults` VO (`{ query, pages: [{ pageIndex, matches, terms }] }`)
+/// find-in-note serves, so the reader's find bar reuses its rendering.
 ///
 /// A live/missing id, or a folder, is a 404 — the same owned + `deleted = 1` gate the
 /// bin's other note routes share (a live id here is indistinguishable from a missing
@@ -1062,78 +1062,28 @@ pub fn controlplaneTree(ctx: *Context, req: *Request, params: Params) anyerror!v
     try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 
-/// GET /api/controlplane/search?q={terms}&limit={n}&cursor={token} -> full-text
-/// search over the recognized (on-device OCR) transcripts of the CALLER'S notes.
-///
-/// Responds `{ query, hits: [{ noteId, noteName, pageIndex, snippet, kind? }],
-/// usedFuzzy, cursor? }` — at most 20 hits, display-sorted (most recently
-/// updated note first). `snippet` is an HTML-safe excerpt with `<mark>` around
-/// the matched terms. `kind` is omitted for a `.note` page (0) and `1` for a
-/// `.txt` paragraph — `pageIndex` is a page ordinal for the former, a paragraph
-/// ordinal for the latter (see `notesearch.Hit`). `cursor` is an opaque resumption token, present ONLY
-/// when more results may exist; the client passes it back as `?cursor=` to
-/// fetch the next page. There is deliberately NO total anywhere in the
-/// response — counting every match is the exact work the early-terminating
-/// query avoids, so the UI says "20+", never "20 of N". A cursor that does not
-/// parse is a 400.
-///
-/// A missing/blank `q` is a 200 with no hits, not a 400: the browser searches as
-/// you type, and an emptied box is a normal state rather than a client error.
-/// `q` is the one query parameter on this face that is real user text, so it is
-/// percent-decoded (see `reply.percentDecode`).
-///
-/// Scoping lives entirely in `notesearch.searchPages`: the partition rowid
-/// range only makes the scan cheap — the `files` join on the caller's
-/// `user_id` remains the boundary, necessary because the text index is keyed
-/// by blob md5 and blobs are deduplicated across users.
-pub fn controlplaneSearch(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    _ = params;
-    const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
-
-    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena.deinit();
-
-    // Read the target BEFORE responding — responding invalidates head strings.
-    const raw_q = reply.queryParam(req.head.target, "q") orelse "";
-    const q = reply.percentDecode(arena.allocator(), raw_q) catch return serverError(ctx, req);
-    const limit: i64 = if (reply.queryParam(req.head.target, "limit")) |l|
-        std.fmt.parseInt(i64, l, 10) catch return badRequest(ctx, req)
-    else
-        notesearch.default_limit;
-    const cursor = reply.queryParam(req.head.target, "cursor");
-
-    const vo = notesearch.searchPages(arena.allocator(), files.io, files.db, caller.user_id, q, limit, cursor) catch |e| switch (e) {
-        error.InvalidCursor => return badRequest(ctx, req),
-        else => return serverError(ctx, req),
-    };
-    try json.respond(ctx.gpa, req, .ok, vo, null);
-}
-
 /// GET /api/controlplane/note/{id}/search?q={terms} -> EVERY page of one note
 /// that matches, with a match count per page.
 ///
-/// Responds `{ query, pages: [{ pageIndex, matches, terms }], usedFuzzy }`, in
-/// page order. This is find-in-note's counter and its filmstrip badges; the word
-/// rectangles the ovals are drawn from come separately from
-/// `/note/{id}/page/{n}/text`, lazily, for the page actually on screen — so a
-/// 200-page notebook costs one of these plus one page-text request per page
-/// looked at.
+/// Responds `{ query, pages: [{ pageIndex, matches, terms }] }`, in page order.
+/// This is find-in-note's counter and its filmstrip badges; the word rectangles
+/// the ovals are drawn from come separately from `/note/{id}/page/{n}/text`,
+/// lazily, for the page actually on screen — so a 200-page notebook costs one of
+/// these plus one page-text request per page looked at.
 ///
 /// `terms` names WHICH words each page matched, folded as the index holds them,
-/// so the client circles exactly what was counted instead of re-deriving it; and
-/// `usedFuzzy` reports the typo fallback, which runs here for the same reason it
-/// runs on `/search` — see `notesearch.searchNotePages`.
+/// so the client circles exactly what was counted instead of re-deriving it.
+/// EXACT matching only: the typo ladder is the browser's now (`golden-search.md`
+/// §6 step 6 moved it into `sqlite_core.wasm`), and step 7 is what brings it back
+/// to find-in-note, by moving find-in-note onto the same engine.
 ///
-/// ## Its own route, not a `noteId` on `/search`
+/// ## Its own route, and a sub-resource of the note
 ///
-/// The two answer different questions and therefore have different contracts.
-/// `/search` is ranked bm25 across the library; this is UNRANKED and reaches the
-/// EXACT per-note count by draining the keyset stream (bm25's window would drop
-/// the note being read below other notes' hits, so a rank on this face is a
-/// wrong count). It carries counts, not snippets/note names. As a sub-resource
-/// of a note it sits where the note's other reads already are, beside
-/// `/api/controlplane/file/metadata/{id}`.
+/// It is UNRANKED and reaches the EXACT per-note count by draining the keyset
+/// stream — bm25's window would drop the note being read below other notes'
+/// hits, so a rank on this face is a wrong count. It carries counts, not note
+/// names. As a sub-resource of a note it sits where the note's other reads
+/// already are, beside `/api/controlplane/file/metadata/{id}`.
 ///
 /// It IS keyset-batched (a `batch` stride, not a bm25 `limit`): the fairness win
 /// over the old one-shot complete scan, and — because rank plays no part —
@@ -1178,22 +1128,22 @@ pub fn controlplaneNoteSearch(ctx: *Context, req: *Request, params: Params) anye
 /// paragraph of one file that matches, with a per-paragraph count and byte
 /// range.
 ///
-/// Responds `{ query, segments: [{ segment, offset, length, matches, terms }],
-/// usedFuzzy }`, in ordinal (= byte) order. This is find-in-txt's counter and
-/// its prev/next paragraph jumps: the viewer already holds the whole file, so
-/// it marks matches inside the loaded text (client-side, from `terms`) and
-/// scrolls to a paragraph by its `offset`/`length` byte range.
+/// Responds `{ query, segments: [{ segment, offset, length, matches, terms }] }`,
+/// in ordinal (= byte) order. This is find-in-txt's counter and its prev/next
+/// paragraph jumps: the viewer already holds the whole file, so it marks matches
+/// inside the loaded text (client-side, from `terms`) and scrolls to a paragraph
+/// by its `offset`/`length` byte range.
 ///
 /// ## Its own route, not a `kind` on `/note/{id}/search`
 ///
-/// The note-scoped `/search` answers about `.note` PAGES (page index + count);
-/// this answers about `.txt` PARAGRAPHS (ordinal + BYTE RANGE + count). They
-/// carry different fields for different viewers, so a single route switching
-/// its response shape on the file's kind would make the contract invisible at
-/// the call site. It mirrors `/search`'s contract otherwise — complete,
-/// unranked, unlimited, typo-tolerant — through `notesearch.searchTxtSegments`.
+/// The note-scoped find answers about `.note` PAGES (page index + count); this
+/// answers about `.txt` PARAGRAPHS (ordinal + BYTE RANGE + count). They carry
+/// different fields for different viewers, so a single route switching its
+/// response shape on the file's kind would make the contract invisible at the
+/// call site. It mirrors its twin's contract otherwise — complete, unranked,
+/// unlimited, exact — through `notesearch.searchTxtSegments`.
 ///
-/// Same boundary as `/search`: the scoping is entirely in `searchTxtSegments`,
+/// Same boundary as its twin: the scoping is entirely in `searchTxtSegments`,
 /// whose `files` join makes a foreign, trashed and non-existent file one
 /// indistinguishable empty answer; a `.note` id here simply has no `kind = 1`
 /// rows and so also answers empty. A missing/blank `q` is a 200 with no
@@ -1495,8 +1445,8 @@ fn historyPage(ctx: *Context, req: *Request, params: Params, scope: controlplane
 
 /// GET /api/controlplane/note/{id}/history/{md5}/search?q={terms} -> the pages of
 /// a RETAINED version whose recognized text matches, `{ query, pages: [{
-/// pageIndex, matches, terms }], usedFuzzy }` — the same VO find-in-note serves,
-/// so the reader's find-in-preview reuses its rendering.
+/// pageIndex, matches, terms }] }` — the same VO find-in-note serves, so the
+/// reader's find-in-preview reuses its rendering.
 ///
 /// A ONE-DOCUMENT scan of that version's `note_page_index.text` (H8), NOT the FTS:
 /// retained versions are never in the shared index by design, so this reads the
@@ -2495,76 +2445,6 @@ pub fn controlplaneSearchIndexManifest(ctx: *Context, req: *Request, params: Par
     try req.respond(body.items, .{ .status = .ok, .extra_headers = &headers });
 }
 
-/// GET /api/controlplane/search-index/terms?md5=…&md5=…[&v=…] -> the front-coded
-/// inverted term payload for a batch of blobs the caller holds.
-///
-/// ## Authorization is a `files` join per request — §2.4
-///
-/// The BODY depends on md5 alone, which is what makes it cacheable and
-/// byte-identical between housemates; the RIGHT to receive it does not. That
-/// join lives in `index_export.writeTerms`, in one clause both its statements are
-/// built on, with `THE LEAK TEST` beside it. Nothing here re-decides it: an md5
-/// the caller does not hold is simply absent from the response, which is also
-/// what an md5 nobody holds looks like.
-///
-/// ## `immutable` ONLY when the URL carries the version
-///
-/// `routes.zig` states the rule this obeys: *"`immutable` is safe only when the
-/// cache key covers everything that can change"*, recorded there beside a route
-/// that shipped `immutable` once and pinned a year of stale content. A term set
-/// is content-addressed by `(md5, index_version)` (§4), and the md5 alone is only
-/// half of that — a version bump re-derives the same blob into different terms.
-///
-/// So `v` is the client's `index_version`, read off the manifest, and it is a
-/// pure cache-buster: it changes the URL and nothing about the answer. With it,
-/// the response is immutable for a year. Without it the response is identical
-/// bytes with `no-cache` and an ETag, which is correct and merely slower — the
-/// safe direction, and it keeps a hand-typed URL from poisoning a browser cache
-/// for a year.
-pub fn controlplaneSearchIndexTerms(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    _ = params;
-    const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
-
-    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    // READ THE TARGET BEFORE RESPONDING. Every md5 is copied out of the head
-    // here, because the head's strings do not survive the reply.
-    var md5s: std.ArrayList([]const u8) = .empty;
-    var it = queryValues(req.head.target, "md5");
-    while (it.next()) |raw| {
-        // A cap rather than a truncation: silently answering about the first 128
-        // of 200 would hand the client a payload that looks complete, and it
-        // would cache the missing ones as derived-and-empty for ever.
-        if (md5s.items.len == index_export.max_terms_md5s) return badRequest(ctx, req);
-        if (!index_export.isMd5Hex(raw)) return badRequest(ctx, req);
-        md5s.append(a, a.dupe(u8, raw) catch return serverError(ctx, req)) catch
-            return serverError(ctx, req);
-    }
-    const versioned = reply.queryParam(req.head.target, "v") != null;
-
-    var body: std.ArrayList(u8) = .empty;
-    index_export.writeTerms(a, a, &body, files.db, caller.user_id, md5s.items) catch
-        return serverError(ctx, req);
-
-    var etag_buf: [34]u8 = undefined;
-    const hex = index_export.bodyEtag(body.items);
-    const etag = std.fmt.bufPrint(&etag_buf, "\"{s}\"", .{hex}) catch return serverError(ctx, req);
-
-    const headers = [_]std.http.Header{
-        .{ .name = "content-type", .value = "application/octet-stream" },
-        .{ .name = "cache-control", .value = if (versioned)
-            "private, max-age=31536000, immutable"
-        else
-            "private, no-cache" },
-        .{ .name = "etag", .value = etag },
-        .{ .name = "x-content-type-options", .value = "nosniff" },
-    };
-    try req.respond(body.items, .{ .status = .ok, .extra_headers = &headers });
-}
-
 // ---------------------------------------------------------------------------
 // THE STITCHED STREAM — `golden-search.md` §3.2 and §3.3, build order step 2
 // ---------------------------------------------------------------------------
@@ -2771,35 +2651,6 @@ pub fn controlplaneSearchIndexStream(ctx: *Context, req: *Request, params: Param
         return error.StreamTruncated;
     body.end() catch {};
 }
-
-/// Every value of a REPEATED query parameter, in the order they appear.
-///
-/// `reply.queryParam` answers the FIRST match, which is right for every other
-/// route on this face — an id, a hash, a limit — and silently wrong here: a
-/// request naming 40 md5s would be answered about one, and the client would
-/// record the other 39 as documents with no terms. Repetition is the shape §2.1
-/// specifies (`?md5=…&md5=…`) because it is what a `URLSearchParams` builds
-/// without any encoding of our own.
-fn queryValues(target: []const u8, name: []const u8) QueryValues {
-    const q = std.mem.indexOfScalar(u8, target, '?') orelse target.len;
-    return .{ .name = name, .rest = target[@min(q + 1, target.len)..] };
-}
-
-const QueryValues = struct {
-    name: []const u8,
-    rest: []const u8,
-
-    fn next(self: *QueryValues) ?[]const u8 {
-        while (self.rest.len != 0) {
-            const amp = std.mem.indexOfScalar(u8, self.rest, '&') orelse self.rest.len;
-            const pair = self.rest[0..amp];
-            self.rest = self.rest[@min(amp + 1, self.rest.len)..];
-            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
-            if (std.mem.eql(u8, pair[0..eq], self.name)) return pair[eq + 1 ..];
-        }
-        return null;
-    }
-};
 
 /// The DEGRADED shape of `/api/controlplane/events`: one `event: sync` frame
 /// carrying the current version (plus an `event: index` frame when this server

@@ -48,6 +48,18 @@
 // on a keystroke. A query that folds to no terms is **zero results and not an
 // error**; that is the behaviour, not a fallback.
 //
+// ## ...and so does the TYPO LADDER, for the same reason twice over
+//
+// `query(text, limit, true)` reaches `idx_fuzzy`, which is `idx_query` plus a
+// fallback the module itself gates: it corrects only a query that matched
+// NOTHING. The ladder is not reimplemented here (§6.1 moved it out of
+// `backend/services/search/fuzzy.zig` and into the wasm) because the distance it
+// measures is between the query token and the vocabulary AS THE INDEX'S OWN
+// TOKENIZER SEES THEM — a TypeScript version would be a second opinion about
+// `remove_diacritics 2` and about which codepoints a Portuguese word is made of.
+// What crosses the boundary is only the ANSWER: which token was typed, and which
+// vocabulary term was searched in its place.
+//
 // ## Two versions, and they are not the same version
 //
 // A snapshot carries `schemaVersion` (the wasm's `idx_schema_version()` — the
@@ -55,6 +67,11 @@
 // Either can change with **nothing server-side moving**, which is precisely why
 // the server's `index_version` cannot stand in for them: it would still agree
 // while a stored image had become unreadable.
+
+// The ONE shape a substitution has, taken from the module that defines the
+// result shape rather than restated: a twin declaration here is how the engine
+// and the view end up disagreeing about what "matched" means.
+import type { Expansion } from "./localSearch";
 
 /** The `idx_*` half of `sqlite-core.wasm` (`webapp/wasm/sqlite_core.zig`). */
 export interface SearchCoreExports {
@@ -71,6 +88,11 @@ export interface SearchCoreExports {
   idx_add(rowid: number, ptr: number, len: number): number;
   idx_query(ptr: number, len: number, limit: number): number;
   idx_hit(i: number): number;
+  /** `idx_query` plus the typo ladder, which fires only on a total of 0. */
+  idx_fuzzy(ptr: number, len: number, limit: number): number;
+  /** `typed \t matched \n` pairs, rewritten by every query of either kind. */
+  idx_expansion_ptr(): number;
+  idx_expansion_len(): number;
   idx_serialize(): number;
   idx_image_ptr(): number;
   idx_image_alloc(len: number): number;
@@ -113,6 +135,13 @@ export interface QueryResult {
   total: number;
   /** bm25 rank order, capped at `limit`. Reordering is the caller's business. */
   hits: PageRef[];
+  /**
+   * What the typo ladder substituted. ALWAYS empty unless the query was asked
+   * with `fuzzy` and the exact pass found nothing — the wasm enforces that, so
+   * a non-empty list here means the results below are corrections and can be
+   * labelled as such ("matched **reunião**", §4.3).
+   */
+  expansions: Expansion[];
 }
 
 /** One document in a snapshot's rowid table. */
@@ -429,13 +458,34 @@ export class SearchIndex {
    * `limit` caps only what is returned. The total is the whole match count, and
    * stepping the whole rank-ordered result is 37.9 ms at the library's
    * pathological `con*` (5,642 pages) and 1.3–7.5 ms for ordinary queries (§8.1).
+   *
+   * `fuzzy` attaches the typo ladder, which the module runs ONLY when the query
+   * as typed matched nothing — a fallback, never a widening. MEASURED over the
+   * real library (24 documents, 23,964 pages, 63,577 distinct terms): a query
+   * that matches costs **1.42 ms against 1.37 ms** exact, i.e. the fallback is
+   * free when it does not fire, and a query that does not costs **71.3 ms p50**
+   * for the whole-vocabulary scan. That is the price of an answer where there
+   * was none — the same ladder is 6,133.8 ms p50 on the Pi
+   * (`wasm-fuzzy-bench.md`) — but it is paid on a keystroke, so a caller typing
+   * into a box wants it off the main thread if anything here ever is.
+   * `result.expansions` says what it substituted, and is empty when it did not
+   * fire.
    */
-  query(text: string, limit: number): QueryResult {
+  query(text: string, limit: number, fuzzy = false): QueryResult {
     this.assertOpen();
     if (!Number.isInteger(limit) || limit < 0) throw new RangeError(`bad limit ${limit}`);
     const len = this.stage(text);
-    const total = this.core.idx_query(this.scratchPtr, len, limit);
-    this.check("idx_query", total);
+    // OPT-IN, and it stays opt-in: `shadowCompare.test.ts` checks this engine
+    // against a frozen capture of what the SERVER answered, and the server was
+    // asked exact questions. A default that corrected typos would turn every
+    // zero-result query in that capture into a disagreement of our own making.
+    const call = fuzzy ? "idx_fuzzy" : "idx_query";
+    const total = fuzzy
+      ? this.core.idx_fuzzy(this.scratchPtr, len, limit)
+      : this.core.idx_query(this.scratchPtr, len, limit);
+    this.check(call, total);
+    // Read after the call that produced it, before anything can grow memory.
+    const expansions = this.expansions();
     const hits: PageRef[] = [];
     const n = Math.min(total, limit);
     for (let i = 0; i < n; i++) {
@@ -447,7 +497,34 @@ export class SearchIndex {
       if (!ref) throw new Error(`rowid ${rowid} is not in the index's rowid table`);
       hits.push(ref);
     }
-    return { total, hits };
+    return { total, hits, expansions };
+  }
+
+  /**
+   * What the ladder substituted, decoded from the module's `typed \t matched \n`
+   * record. Empty whenever the exact query answered — the wasm clears it on
+   * every query, so this cannot report a correction belonging to an earlier one.
+   *
+   * Neither half can contain a delimiter: `typed` is a whitespace-delimited
+   * token and `matched` is an fts5 term, and `unicode61` splits on tab and
+   * newline. A line that somehow lacks its tab is DROPPED rather than guessed
+   * at — a half-read pair would render as "matched **undefined**".
+   */
+  private expansions(): Expansion[] {
+    const n = this.core.idx_expansion_len();
+    if (n === 0) return [];
+    // Copied before anything else can grow linear memory and detach the view.
+    const raw = DECODER.decode(
+      new Uint8Array(this.core.memory.buffer, this.core.idx_expansion_ptr(), n).slice(),
+    );
+    const out: Expansion[] = [];
+    for (const line of raw.split("\n")) {
+      const tab = line.indexOf("\t");
+      if (tab > 0 && tab < line.length - 1) {
+        out.push({ typed: line.slice(0, tab), matched: line.slice(tab + 1) });
+      }
+    }
+    return out;
   }
 
   /** Serialize the database and the rowid table together. Both, or neither. */

@@ -263,12 +263,12 @@ fn runTxt(job: Job) anyerror!void {
     // 4. Chunk by chunk, IN READING ORDER, each in its own transaction with the
     //    lock taken and released around it.
     //
-    //    Forward from ordinal 0 on purpose: `query.bandStart` collapses a
-    //    document to one hit by jumping to `rowid - ordinal` and finding
-    //    ordinal 0 of the same blob there. Fill from the front and a document
-    //    half-way through its write reports as ONE document, incomplete; fill
-    //    from anywhere else and every paragraph written so far is its own hit,
-    //    crowding the result page for as long as the write takes.
+    //    Forward from ordinal 0 on purpose: `rowid ASC == ordinal order` is what
+    //    lets a find accumulate its keyset batches with no re-sort, and what
+    //    keeps the document's derived scan range (`query.docSegmentRanges`) a
+    //    single run. Fill from anywhere else and a document half-way through its
+    //    write is a scattered band, which costs a find one `M1><` pass per run
+    //    for as long as the write takes.
     var at: usize = 0;
     while (at < rows) {
         const end = txtindex.chunkEnd(d, at);
@@ -298,7 +298,7 @@ fn runTxt(job: Job) anyerror!void {
     if (!try txtindex.needsDerive(job.db, job.md5)) return;
     try job.db.exec("BEGIN IMMEDIATE;");
     errdefer job.db.exec("ROLLBACK;") catch {};
-    try txtindex.finish(job.db, job.md5, bands, d, job.now);
+    try txtindex.finish(job.db, job.md5, d, job.now);
     try job.db.exec("COMMIT;");
 }
 
@@ -479,7 +479,7 @@ fn runPdfText(job: Job) anyerror!void {
     defer job.lock.unlock(job.io);
     try job.db.exec("BEGIN IMMEDIATE;");
     errdefer job.db.exec("ROLLBACK;") catch {};
-    try pdftext.finish(job.db, job.md5, bands, at, pdftext.verdictFor(doc_pages, at, any_text), job.now);
+    try pdftext.finish(job.db, job.md5, at, pdftext.verdictFor(doc_pages, at, any_text), job.now);
     try job.db.exec("COMMIT;");
 }
 
@@ -1231,10 +1231,9 @@ test "THE .txt WRITE FILLS IN READING ORDER and records its verdict LAST" {
     // rather than against a test helper that imitates it. Both halves matter
     // and both are silent when wrong:
     //
-    //   - **forward from ordinal 0**, because `query.bandStart` needs ordinal 0
-    //     to collapse a document to one hit; a document filled from anywhere
-    //     else reports every written paragraph separately for the duration of
-    //     its own write;
+    //   - **forward from ordinal 0**, because `rowid ASC == ordinal order` is
+    //     what a find's keyset relies on; a document filled from anywhere else
+    //     is a scattered band for the duration of its own write;
     //   - **the verdict after every row**, because it is the memo, and a memo
     //     that lands first calls an interrupted write finished for ever.
     //

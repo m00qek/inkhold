@@ -81,50 +81,6 @@ describe("api client", () => {
     expect(err.code).toBe("NETWORK");
   });
 
-  // The search cursor at the seam: an opaque token that must survive the trip
-  // verbatim in both directions, with ABSENT (the `emit_null_optional_fields`
-  // omission) normalized to `undefined` — the same "one shape for the UI" rule
-  // as every optional on this surface.
-  describe("searchText cursor", () => {
-    const http = createHttpApi();
-    const searchResponse = (body: Record<string, unknown>) =>
-      routedFetch({ "/api/controlplane/search": () => jsonResponse(body) });
-
-    it("carries a served cursor through, and echoes a given one into the request", async () => {
-      const fetchStub = searchResponse({ query: "map", hits: [], usedFuzzy: false, cursor: "k-next" });
-      vi.stubGlobal("fetch", fetchStub);
-
-      const r = await http.searchText("map", 20, "k-prev");
-      expect(r.cursor).toBe("k-next");
-
-      const url = String((fetchStub as ReturnType<typeof vi.fn>).mock.calls[0]![0]);
-      // VERBATIM — the token belongs to the server; the client neither parses
-      // nor rewrites it, only hands it back.
-      expect(url).toContain("cursor=k-prev");
-    });
-
-    it("normalizes an absent cursor to undefined — the end-of-results reading", async () => {
-      vi.stubGlobal("fetch", searchResponse({ query: "map", hits: [], usedFuzzy: false }));
-      const r = await http.searchText("map");
-      expect(r.cursor).toBeUndefined();
-    });
-
-    it("degrades a malformed cursor to undefined rather than paging into nonsense", async () => {
-      for (const bad of ["", 7, null, {}] as const) {
-        vi.stubGlobal("fetch", searchResponse({ query: "map", hits: [], usedFuzzy: false, cursor: bad }));
-        expect((await http.searchText("map")).cursor).toBeUndefined();
-      }
-    });
-
-    it("sends no cursor parameter on a first page", async () => {
-      const fetchStub = searchResponse({ query: "map", hits: [], usedFuzzy: false });
-      vi.stubGlobal("fetch", fetchStub);
-      await http.searchText("map", 20);
-      const url = String((fetchStub as ReturnType<typeof vi.fn>).mock.calls[0]![0]);
-      expect(url).not.toContain("cursor=");
-    });
-  });
-
   describe("me()", () => {
     it("returns the profile on success", async () => {
       vi.stubGlobal(

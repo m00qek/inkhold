@@ -48,11 +48,12 @@ test.describe(".txt content search", () => {
     // A term that lives ONLY in the readme's paragraphs.
     await searchBox(page).fill("zephyrine");
 
-    // One result — the readme — with the marked excerpt and a PARAGRAPH-unit
-    // locator (not "pages").
+    // One result — the readme — with a PARAGRAPH-unit locator (not "pages") and
+    // NO excerpt: §6 step 6 deleted the snippet with the route that rendered it,
+    // so the count line is the row's whole claim.
     const row = results(page).filter({ hasText: "readme" }).first();
     await expect(row).toBeVisible();
-    await expect(row.locator(".hit__snippet mark").first()).toHaveText("zephyrine");
+    await expect(row.locator(".hit__snippet")).toHaveCount(0);
     await expect(row.locator(".card__matches")).toHaveText("Matches in 2 paragraphs");
 
     // Click it → the `.txt` VIEWER (not the reader) opens.

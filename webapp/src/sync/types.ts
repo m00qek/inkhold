@@ -14,7 +14,9 @@
  *
  * Both numbers describe the INDEX, not the files: `pending` is transient and
  * resolves without anyone doing anything, which is what makes it a different
- * claim from `Coverage.unsearchable` and why the two are never added together.
+ * claim from "this note has no recognised text and never will" — the two are
+ * never added together, and the empty state says them as separate sentences
+ * (`pendingLine` and `coverageLine`).
  */
 export interface IndexStatus {
   /** Documents of yours whose derive has not finished. Never negative. */

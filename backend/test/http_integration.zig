@@ -1876,7 +1876,7 @@ test "history search: one-document scan reads the OLD version's text, not the FT
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         var parsed = try std.json.parseFromSlice(
-            struct { query: []const u8, pages: []PageMatch, usedFuzzy: bool },
+            struct { query: []const u8, pages: []PageMatch },
             gpa,
             resp.body,
             .{ .ignore_unknown_fields = true },
@@ -1885,7 +1885,6 @@ test "history search: one-document scan reads the OLD version's text, not the FT
         try std.testing.expectEqual(@as(usize, 1), parsed.value.pages.len);
         try std.testing.expectEqual(@as(i64, 0), parsed.value.pages[0].pageIndex);
         try std.testing.expect(parsed.value.pages[0].matches >= 1);
-        try std.testing.expect(!parsed.value.usedFuzzy);
     }
 
     // A term that is in neither version returns no pages (not a 404 — the version
@@ -3668,13 +3667,33 @@ fn countTrashed(f: *Fixture, user_id: u64) !i64 {
     return s.columnInt(0);
 }
 
-/// How many recognized-page hits `q` finds for `user_id`, through the one
-/// exported search read (whose `files` join is the security boundary).
+/// How many of `user_id`'s OWN live files `q` is findable in.
+///
+/// `golden-search.md` §6 step 6 deleted the server's library-wide read, so this
+/// asks the in-document one about every file the caller holds. That read's
+/// `files` join is the same security boundary the deleted one carried, which is
+/// what keeps "0 hits after a delete" meaning what it meant.
 fn searchHits(f: *Fixture, user_id: u64, q: []const u8) !usize {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const r = try notesearch.searchPages(arena.allocator(), std.testing.io, f.db, user_id, q, 20, null);
-    return r.hits.len;
+    const a = arena.allocator();
+
+    var ids: std.ArrayList(u64) = .empty;
+    {
+        var s = try f.db.prepare(
+            "SELECT id FROM files WHERE user_id = ?1 AND deleted = 0 AND is_folder = 0 ORDER BY id;",
+        );
+        defer s.finalize();
+        s.bindInt(1, @intCast(user_id));
+        while (try s.step()) try ids.append(a, @intCast(s.columnInt(0)));
+    }
+
+    var n: usize = 0;
+    for (ids.items) |id| {
+        const r = try notesearch.searchNotePages(a, f.db, user_id, id, q, null, notesearch.max_batch);
+        if (r.pages.len != 0) n += 1;
+    }
+    return n;
 }
 
 test "device delete_folder_v3 soft-deletes: leaves listings and search, but the blob survives and the row restores to readable bytes" {
@@ -4900,92 +4919,6 @@ test "control-plane page text: word boxes in millimetres, separators skipped, sc
     }
 }
 
-test "control-plane OCR search: scope enforced, results are per-user, snippets are marked" {
-    const f = try Fixture.init();
-    defer f.deinit();
-    const ctx = &f.ctx;
-    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
-
-    var obuf: [16384]u8 = undefined;
-    var reqbuf: [2048]u8 = undefined;
-    const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
-
-    // A second account whose note has BYTE-IDENTICAL content, so the blob store
-    // dedups and both accounts' files point at one shared, md5-keyed transcript.
-    const bob = (try f.svc.createUser(admin, "bob", false)).id;
-    _ = try f.svc.changePassword(bob, null, &password.md5Hex("bpass111"));
-    const labels = &[_][]const u8{"reunião de avaliação trimestral"};
-    _ = try seedRecognizedNote(f, admin, "mine.note", labels);
-    _ = try seedRecognizedNote(f, bob, "theirs.note", labels);
-    // Deduped: one blob, one page row, one copy of the text.
-    {
-        var s = try f.db.prepare("SELECT COUNT(*) FROM note_page_index;");
-        defer s.finalize();
-        _ = try s.step();
-        try std.testing.expectEqual(@as(i64, 1), s.columnInt(0));
-    }
-
-    // --- scope: no session → 401; a device token → 403 (cross-face) ---
-    {
-        const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/search?q=trimestral", &.{}, "");
-        const resp = try roundtrip(ctx, req, &obuf);
-        try std.testing.expectEqual(@as(u16, 401), resp.status);
-    }
-    {
-        const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "bob", "bpass111", "SN9");
-        const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/search?q=trimestral", &.{
-            .{ .name = "x-access-token", .value = &dev_tok },
-        }, "");
-        const resp = try roundtrip(ctx, req, &obuf);
-        try std.testing.expectEqual(@as(u16, 403), resp.status);
-    }
-
-    const Body = struct {
-        query: []const u8,
-        hits: []const struct {
-            noteId: []const u8,
-            noteName: []const u8,
-            pageIndex: i64,
-            snippet: []const u8,
-        },
-    };
-
-    // --- the happy path: percent-encoded, diacritic-folded, marked ---
-    {
-        // "avaliacao" (unaccented) must find "avaliação".
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search?q=avaliacao", &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        var p = try std.json.parseFromSlice(Body, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expectEqualStrings("avaliacao", p.value.query);
-        // ONLY the caller's file, though the transcript row is shared with bob.
-        try std.testing.expectEqual(@as(usize, 1), p.value.hits.len);
-        try std.testing.expectEqualStrings("mine.note", p.value.hits[0].noteName);
-        try std.testing.expectEqual(@as(i64, 0), p.value.hits[0].pageIndex);
-        try std.testing.expect(std.mem.indexOf(u8, p.value.hits[0].snippet, "<mark>") != null);
-    }
-    {
-        // A percent-encoded, accented, multi-word query.
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search?q=reuni%C3%A3o+trimestral&limit=5", &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        var p = try std.json.parseFromSlice(Body, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expectEqualStrings("reunião trimestral", p.value.query);
-        try std.testing.expectEqual(@as(usize, 1), p.value.hits.len);
-    }
-
-    // A blank query is a normal empty result (search-as-you-type), not a 400.
-    for ([_][]const u8{ "/api/controlplane/search", "/api/controlplane/search?q=", "/api/controlplane/search?q=%20" }) |path| {
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        var p = try std.json.parseFromSlice(Body, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expectEqual(@as(usize, 0), p.value.hits.len);
-    }
-    // A non-numeric limit is a client error.
-    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search?q=x&limit=lots", &web_tok, "", 400);
-}
-
 /// One header's value, copied out of the response head. Needed because the
 /// conditional-request test has to send back the exact `ETag` the server minted:
 /// asserting that a header merely EXISTS would let a server that answered a
@@ -5106,94 +5039,6 @@ test "the search-index manifest is served as bytes, and an unchanged one answers
         const resp = try roundtrip(ctx, req, &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, resp.body[5..9], .little));
-    }
-}
-
-test "the search-index terms route serves a caller's own blobs and nothing else" {
-    const f = try Fixture.init();
-    defer f.deinit();
-    const ctx = &f.ctx;
-    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
-
-    var obuf: [65536]u8 = undefined;
-    var reqbuf: [4096]u8 = undefined;
-    var pbuf: [2048]u8 = undefined;
-    const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
-
-    const bob = (try f.svc.createUser(admin, "bob", false)).id;
-    _ = try f.svc.changePassword(bob, null, &password.md5Hex("bpass111"));
-
-    const mine = try seedRecognizedNote(f, admin, "mine.note", &.{"trimestral"});
-    const theirs = try seedRecognizedNote(f, bob, "theirs.note", &.{"confidencial"});
-    const mine_md5 = try fileMd5(f, mine);
-    const theirs_md5 = try fileMd5(f, theirs);
-
-    // --- the happy path ---
-    {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/terms?md5={s}", .{mine_md5});
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        try std.testing.expect(std.mem.startsWith(u8, resp.body, "TIDX"));
-        try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, resp.body[5..9], .little));
-        try std.testing.expect(std.mem.readInt(u32, resp.body[9..13], .little) > 0);
-        // No `?v=`, so no `immutable` — the cache key would be missing the half
-        // that changes when the terms are re-derived.
-        try expectHeaderContains(resp.head, "cache-control: private, no-cache");
-        try expectHeaderAbsentSubstring(resp.head, "immutable");
-    }
-
-    // --- THE AUTHORIZATION TEST, over HTTP. §2.4: the body depends on md5 alone,
-    //     and the right to receive it is a `files` join per request. An md5 is 32
-    //     characters a housemate can read off their own manifest, so this is the
-    //     whole boundary — and it is a SECOND entry point, which `query.zig`'s
-    //     module docs name as "a place to forget it".
-    {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/terms?md5={s}", .{theirs_md5});
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
-        // 200 with an EMPTY payload rather than 403: a status that distinguished
-        // "not yours" from "does not exist" would itself be an answer about
-        // somebody else's library.
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, resp.body[5..9], .little));
-        try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, resp.body[9..13], .little));
-    }
-    {
-        // Asking for BOTH gets exactly one document back. This is the shape that
-        // fails loudly if the `files` join is removed: without it the payload
-        // would carry two, and the housemate's whole vocabulary with them.
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/terms?md5={s}&md5={s}", .{ mine_md5, theirs_md5 });
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, resp.body[5..9], .little));
-        // And it is the CALLER's md5 that came back, not whichever sorted first.
-        var raw: [16]u8 = undefined;
-        for (&raw, 0..) |*b, i| b.* = try std.fmt.parseInt(u8, mine_md5[i * 2 ..][0..2], 16);
-        try std.testing.expectEqualSlices(u8, &raw, resp.body[13..29]);
-    }
-
-    // --- `?v=` is what earns `immutable`, and it changes nothing else ---
-    {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/terms?md5={s}&v=15", .{mine_md5});
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        try expectHeaderContains(resp.head, "cache-control: private, max-age=31536000, immutable");
-    }
-
-    // --- malformed input is a 400, never a silently narrower answer ---
-    for ([_][]const u8{
-        "/api/controlplane/search-index/terms?md5=nothex",
-        "/api/controlplane/search-index/terms?md5=0123456789ABCDEF0123456789ABCDEF",
-        "/api/controlplane/search-index/terms?md5=%27+OR+1%3D1+--",
-    }) |path| {
-        try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "", 400);
-    }
-
-    // --- no md5s at all is an empty payload, not an error: it is what a client
-    //     with nothing left to fetch would send, and it must be cheap.
-    {
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/terms", &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, resp.body[5..9], .little));
     }
 }
 
@@ -5415,13 +5260,43 @@ test "the search-index stream is ONE gzip member carrying every document, not a 
         try std.testing.expect(std.mem.indexOf(u8, plain, word) != null);
     }
 
-    // --- a SUBSET: position 0 only, which is the coalesced-refetch case -----
+    // --- SUBSETS: every position on its own, which is the coalesced-refetch
+    //     case and also the bitmap's addressing, asserted across the board.
+    //
+    // ONE POSITION AT A TIME rather than "position 0 returns one document",
+    // which is what this used to say and what made it FLAKY. The manifest orders
+    // by `updated_at DESC, id`, and the eight notes are seeded in a loop: when
+    // that loop straddles a second boundary the later ones sort FIRST, so the
+    // unlinked document can land at position 0 and the assertion saw the skip
+    // instead of a hit. Roughly one run in four.
+    //
+    // Asking for all eight singly needs no assumption about the order at all,
+    // and it claims MORE than the old line did: every position addresses exactly
+    // one document, and exactly one position — whichever it is — is the one
+    // whose file was unlinked.
     {
-        const one = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want=AQ", .{etag_hex});
-        const r = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", one, &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), r.status);
-        const p = try inflateStitched(a, try dechunk(a, r.body));
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, p, "{\"md5\":\""));
+        var served: usize = 0;
+        var skipped: usize = 0;
+        var pos: u32 = 0;
+        while (pos < rows) : (pos += 1) {
+            var bits = [_]u8{0} ** 8;
+            bits[pos >> 3] = @as(u8, 1) << @intCast(pos & 7);
+            var b64: [16]u8 = undefined;
+            const enc = std.base64.url_safe_no_pad.Encoder;
+            const want_one = enc.encode(&b64, bits[0 .. (rows + 7) / 8]);
+
+            const one = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want={s}", .{ etag_hex, want_one });
+            const r = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", one, &web_tok, "");
+            try std.testing.expectEqual(@as(u16, 200), r.status);
+            const p = try inflateStitched(a, try dechunk(a, r.body));
+            switch (std.mem.count(u8, p, "{\"md5\":\"")) {
+                0 => skipped += 1,
+                1 => served += 1,
+                else => return error.TestUnexpectedResult, // one bit, one document
+            }
+        }
+        try std.testing.expectEqual(words.len - 1, served);
+        try std.testing.expectEqual(@as(usize, 1), skipped);
     }
 
     // --- and asking for NOTHING is a valid empty gzip, not a malformed body --
@@ -6127,18 +6002,7 @@ test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the 
 /// addressing, same 404-on-miss. Trashing hides the row, never the bytes or the
 /// hash, so a cached preview can no more outlive what it described than the live
 /// history route's can.
-/// `/api/controlplane/search-index/terms` qualifies CONDITIONALLY, and it is the
-/// only route here that does. Its body is the front-coded term payload for a set
-/// of blobs, keyed by `(md5, index_version)` — content-addressed, like the rest
-/// of this list, but by TWO facts where the others are keyed by one. The md5s
-/// are in the URL; the version is not, unless the caller puts it there. So the
-/// handler answers `immutable` only when `?v=` is present and `no-cache` + ETag
-/// otherwise, which is exactly the rule this file's page-text note records: a
-/// cache key that does not cover everything that can change must not be
-/// `immutable`. The probe below drives BOTH halves, because a handler that
-/// answered `immutable` unconditionally would still pass the classification.
 const immutable_routes = [_][]const u8{
-    "/api/controlplane/search-index/terms",
     "/note/:id/page/:n",
     "/note/:id/template/:hash",
     "/file/:id",
@@ -6193,7 +6057,6 @@ const non_immutable_routes = [_][]const u8{
     "/api/controlplane/note/:id/history/:md5/search",
     "/api/controlplane/note/:id/search",
     "/api/controlplane/note/:id/txt-search",
-    "/api/controlplane/search",
     "/api/controlplane/search-index/manifest",
     // NO-STORE, which is stricter than everything else on this list and is the
     // skip rule's consequence rather than caution: two identical `(m, want)`
@@ -6271,7 +6134,7 @@ test "cache policy: every route is classified, and only the byte routes may be i
             return error.StaleCachePolicyEntry;
         }
     }
-    try std.testing.expectEqual(@as(usize, 11), immutable_routes.len);
+    try std.testing.expectEqual(@as(usize, 10), immutable_routes.len);
 }
 
 test "cache policy: the served responses match the classification, route by route" {
@@ -6338,7 +6201,6 @@ test "cache policy: the served responses match the classification, route by rout
         "/api/controlplane/bin",
         "/api/controlplane/account",
         "/api/controlplane/account/storage",
-        "/api/controlplane/search?q=Test",
         "/api/controlplane/events",
         "/api/admin/users",
         "/oss/get/1?t=deadbeefdeadbeefdeadbeefdeadbeef",
@@ -9361,7 +9223,7 @@ test "bin parity phase 1: page-text ovals + find-in-note serve a TRASHED note's 
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "immutable") == null);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "cursor") == null); // no cursor
         var p = try std.json.parseFromSlice(
-            struct { query: []const u8, pages: []PageMatch, usedFuzzy: bool },
+            struct { query: []const u8, pages: []PageMatch },
             gpa,
             resp.body,
             .{ .ignore_unknown_fields = true },
@@ -9370,7 +9232,6 @@ test "bin parity phase 1: page-text ovals + find-in-note serve a TRASHED note's 
         try std.testing.expectEqual(@as(usize, 1), p.value.pages.len);
         try std.testing.expectEqual(@as(i64, 0), p.value.pages[0].pageIndex);
         try std.testing.expect(p.value.pages[0].matches >= 1);
-        try std.testing.expect(!p.value.usedFuzzy);
     }
     // A term in neither version is a 200 with no pages (the box searches as you type).
     {
@@ -10324,14 +10185,10 @@ fn readOnlyProbes(a: std.mem.Allocator, note_id: u64, ver_id: u64, ver_md5: []co
         .{ .route = "/api/file/query/summary/hash", .path = "/api/file/query/summary/hash", .method = "POST", .body = "{\"page\":0,\"size\":50}", .face = .device },
         .{ .route = "/api/file/query/summary/group", .path = "/api/file/query/summary/group", .method = "POST", .body = "{\"page\":0,\"size\":50}", .face = .device },
         .{ .route = "/api/file/3/files/query/by/path_v3", .path = "/api/file/3/files/query/by/path_v3", .method = "POST", .body = "{\"path\":\"/audit.note\"}", .face = .device },
-        .{ .route = "/api/controlplane/search", .path = "/api/controlplane/search?q=hello", .method = "GET", .face = .web },
-        // The two client-side-search reads. `routes.zig` claims they heal
-        // nothing — they read `files`, `doc_terms` and the index tables directly
-        // and never call `indexRowEnsuring`, which is what puts the rest of the
-        // control-plane index family on the writer — and this is where that claim
-        // is checked rather than reviewed. The terms probe names a real md5 below,
-        // because an md5 the caller does not hold short-circuits on the ordinal
-        // table and would audit only half the handler.
+        // The manifest. `routes.zig` claims it heals nothing — it reads `files`
+        // and the index tables directly and never calls `indexRowEnsuring`, which
+        // is what puts the rest of the control-plane index family on the writer —
+        // and this is where that claim is checked rather than reviewed.
         .{ .route = "/api/controlplane/search-index/manifest", .path = "/api/controlplane/search-index/manifest", .method = "GET", .face = .web },
     };
     try out.appendSlice(a, &fixed);
@@ -10379,16 +10236,6 @@ fn readOnlyProbes(a: std.mem.Allocator, note_id: u64, ver_id: u64, ver_md5: []co
     try out.append(a, .{
         .route = "/api/controlplane/bin/note/:id/history/:md5/search",
         .path = try std.fmt.allocPrint(a, "/api/controlplane/bin/note/{d}/history/{s}/search?q=hello", .{ trashed_id, trashed_md5 }),
-        .method = "GET",
-        .face = .web,
-    });
-    // A REAL md5 of the caller's, so the handler runs both of its statements: an
-    // md5 nobody holds stops at the empty ordinal table and would audit half the
-    // route. `ver_md5` is a retained version of the caller's own note, which is
-    // held by a `files` row and therefore passes the §2.4 join.
-    try out.append(a, .{
-        .route = "/api/controlplane/search-index/terms",
-        .path = try std.fmt.allocPrint(a, "/api/controlplane/search-index/terms?md5={s}", .{ver_md5}),
         .method = "GET",
         .face = .web,
     });

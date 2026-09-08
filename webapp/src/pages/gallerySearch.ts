@@ -1,34 +1,28 @@
 // The library-wide (universal) SEARCH renderer, extracted from the library
 // shell. It merges the two halves of one query — names matched against the
-// cached tree, transcripts from the server — into a single note-grouped list,
-// paints it into the gallery (`renderSearch`), and grows it in place as later
-// pages arrive (`appendSearchResults`). The controller still owns the search
-// controller, the gallery element and the live search state; this module reads
-// them through {@link GallerySearchCtx} and calls back into the card factory
-// (`galleryCards.resultCard`) for each row.
+// cached tree, transcripts from the index — into a single document list and
+// paints it into the gallery (`renderSearch`). The controller still owns the
+// search controller, the gallery element and the live search state; this module
+// reads them through {@link GallerySearchCtx} and calls back into the card
+// factory (`galleryCards.resultCard`) for each row.
 //
 // ONE QUERY, ONE SCOPE, ONE LIST. The library used to answer a query twice: a
 // gallery filtered by NAME to the folder you were standing in, plus a separate
 // block of transcript matches from the WHOLE library. Both halves are
-// library-wide now, and both land in one list of notes.
+// library-wide now, and both land in one list of documents.
+//
+// THE LIST IS PAINTED ONCE AND WHOLE. There is no append path any more: the
+// index answers with every matching document at once, so there is no second page
+// to grow into and no cursor to spend (`golden-search.md` §4.3). What can still
+// change under a painted list is the CORPUS — a derive landing, a sync arriving
+// — and that is a repaint, not a growth.
 
 import { el } from "../ui/dom";
-import { coverageLine, groupHits, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
+import { coverageLine, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
 import type { Folder, Id, NoteSummary } from "../core/types";
-import type { LazyEngine } from "../render/lazy";
-
-/**
- * The one thing said when the service answered approximately, above the results
- * and never per row.
- *
- * WORD-FOR-WORD what find-in-note says beside its counter (`reader.ts`). The two
- * are the same claim about the same fallback in the same service, so a user who
- * has learned one sentence must not have to learn a second.
- */
-const FUZZY_NOTICE = "No exact match — showing close matches.";
 
 /** `n thing` / `n things`, with the plural only where it belongs. */
 function plural(n: number, one: string): string {
@@ -36,20 +30,14 @@ function plural(n: number, one: string): string {
 }
 
 /**
- * The search DOM the append path grows, recorded by the full paint. Alive
- * exactly while a painted results list is on screen; any full repaint of the
- * gallery replaces it (or nulls it, for the empty states). `cards` is keyed
- * by note because the LIST is keyed by note — a later page's hit for a note
- * already shown updates that note's row rather than minting a second one.
+ * What a row's page ordinals COUNT — a `.txt`'s paragraphs (1) or a `.note`'s
+ * pages (0). Read off the listing's own file type, the same source `viewerFor`
+ * routes on: the index names documents by id and says nothing about what kind of
+ * thing a document is, which is right — a second opinion about that is exactly
+ * the copy the manifest deliberately does not ship.
  */
-export interface PaintedSearch {
-  query: string;
-  /** The section head's count span — `isConnected` doubles as the liveness check. */
-  countEl: HTMLElement;
-  /** Every painted row, with how many pages it was painted knowing about. */
-  cards: Map<Id, { card: HTMLElement; pages: number }>;
-  /** The "More results" control's row, or null once the stream is exhausted. */
-  moreWrap: HTMLElement | null;
+function segmentKind(note: NoteSummary): number {
+  return note.fileType.trim().toLowerCase() === "txt" ? 1 : 0;
 }
 
 /**
@@ -59,15 +47,11 @@ export interface PaintedSearch {
  * reflects the state at paint time, exactly as the inline closures did.
  */
 export interface GallerySearchCtx {
-  /** The gallery `<section>` the results paint into (and grow within). */
+  /** The gallery `<section>` the results paint into. */
   gallery: HTMLElement;
-  /** The gallery's lazy render engine — the append path frees a swapped row's slot. */
-  galleryEngine: LazyEngine;
-  /** The live universal-search state (results/searching/error/coverage/fuzzy). */
+  /** The live universal-search state (results/searching/error). */
   getSearchState: () => SearchState;
-  /** Spend the server's keyset cursor for the next page ("More results"). */
-  loadMore: () => Promise<unknown>;
-  /** The whole-tree listing cache — the name half of the query reads it. */
+  /** The whole-tree listing cache — BOTH halves of a query read it (see `searchResults`). */
   folders: Pick<FolderCache, "values">;
   /**
    * Has the tree walk that FILLS {@link GallerySearchCtx.folders}
@@ -88,11 +72,10 @@ export interface GallerySearchCtx {
    * not said (an old server, or a client that fell back to polling).
    *
    * READ AT PAINT TIME, not captured, so the frame that arrives while results
-   * are on screen changes what the next repaint says. It is the ONLY source for
-   * a NON-EMPTY page: a search that found things does not pay for the aggregate
-   * (see `Coverage`), so the number can only come from the channel that pushes
-   * it for free. A zero-hit page prefers its own response's number, which is
-   * both fresher and guaranteed present.
+   * are on screen changes what the next repaint says. It is now the ONLY source
+   * for the number: a search answers out of the local index and no response
+   * accompanies it, so the zero-hit coverage block the server used to attach —
+   * the only other place this count ever came from — has nothing to ride on.
    */
   indexPending: () => number | null;
 }
@@ -100,27 +83,21 @@ export interface GallerySearchCtx {
 export interface GallerySearch {
   /** Paint the results list — THE GALLERY IS THE RESULTS. */
   renderSearch: (q: string) => void;
-  /** Grow the painted results in place with the page that just arrived. */
-  appendSearchResults: (p: PaintedSearch) => void;
-  /** The currently painted results (for the setState append fast-path), or null. */
-  getPainted: () => PaintedSearch | null;
 }
 
 export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
-  const { gallery, galleryEngine } = ctx;
-
-  let paintedSearch: PaintedSearch | null = null;
+  const { gallery } = ctx;
 
   /**
    * Every note in the cached tree, with the folder each one lives in.
    *
    * `prefetchTree` walks the WHOLE (household-sized) tree, so this really is the
-   * library and not just the folder in view — which is exactly what makes a
-   * library-wide name match possible on the client, with no round trip and no
-   * new endpoint. A note reachable from two listings (it is not, but the map
-   * makes it so) is counted once.
+   * library and not just the folder in view — which is what makes a library-wide
+   * name match possible on the client, with no round trip and no new endpoint.
+   * A note reachable from two listings (it is not, but the map makes it so) is
+   * counted once.
    */
-  function allCachedNotes(): { note: NoteSummary; folderPath: string | null }[] {
+  function allCachedNotes(): Map<Id, { note: NoteSummary; folderPath: string | null }> {
     const seen = new Map<Id, { note: NoteSummary; folderPath: string | null }>();
     for (const cached of ctx.folders.values()) {
       const names = crumbPath(cached.path).map((f) => ctx.labelFor(f));
@@ -130,54 +107,69 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         seen.set(e.id, { note: e, folderPath });
       }
     }
-    return [...seen.values()];
+    return seen;
   }
 
   /**
-   * Merge the two halves of one query into a single note-grouped list.
+   * Merge the two halves of one query into a single document list.
    *
-   * ORDER: notes whose NAME matched come first. They answer the query literally,
-   * and bm25 — the only ranking anything here has — ranks pages, so it has no
-   * opinion about a name it never read. Within each half the order is preserved:
-   * server rank for transcript hits, the tree's own order for names.
+   * THE LISTING IS THE OTHER HALF OF EVERY ROW, not just of the name matches.
+   * A `LocalHit` is an md5, a file id and a set of page ordinals — deliberately
+   * no name, because the app already holds the listing and shipping names in the
+   * index would be a second copy of them (§4.1). So a hit is JOINED to the
+   * cached tree, and a hit the tree does not name is DROPPED rather than rendered
+   * anonymously. That is not a workaround for the missing name: §2.7 says the
+   * local index may legitimately be a SUPERSET of the live library — an index
+   * built before a delete, a document another device removed — and that
+   * correctness comes from intersecting hits with the listing. The join is the
+   * intersection.
+   *
+   * The cost is a real one and it is bounded: while `prefetchTree` is still
+   * walking, a hit in a folder it has not reached yet is invisible. That is the
+   * same window `treeLoaded` already gates the "No matches" claim on, and it
+   * closes on its own.
+   *
+   * ORDER: documents whose NAME matched come first. They answer the query
+   * literally, and the index ranks by matching pages, which has no opinion about
+   * a name it never read. Within each half the order is preserved: rank order
+   * for transcript hits, the tree's own order for names. The renderer never
+   * re-sorts — `rankDocuments` already put them in matching-pages-then-recency
+   * order.
    */
   function searchResults(q: string): SearchResult[] {
     const searchState = ctx.getSearchState();
     const needle = q.toLowerCase();
+    const cached = allCachedNotes();
     const byId = new Map<Id, SearchResult>();
 
-    const grouped = searchState.kind === "results" ? groupHits(searchState.hits) : [];
-    for (const group of grouped) {
-      byId.set(group.noteId, {
-        noteId: group.noteId,
-        noteName: group.noteName,
-        note: null,
-        folderPath: null,
-        nameMatched: false,
-        pages: group.pages,
-        // The hit is the authority on what its segments are — a `.txt`'s
-        // paragraphs (kind 1) or a note's pages.
-        kind: group.kind,
-      });
+    if (searchState.kind === "results") {
+      for (const doc of searchState.documents) {
+        // KEYED ON `fileId`, WHICH IS WHAT THE LISTING CAN BE JOINED ON. The
+        // index knows a document by its md5 and carries the file id beside it;
+        // the listing is keyed by id, so the id is the side of the pair both
+        // halves of a row have.
+        //
+        // `files.id` arrives from the index as a number and from the listing as
+        // its decimal string (the seam stringifies every id — see `client.ts`).
+        // One spelling, chosen here, so the join cannot silently match nothing.
+        const noteId = String(doc.fileId);
+        const known = cached.get(noteId);
+        if (!known) continue;
+        byId.set(noteId, {
+          noteId,
+          note: known.note,
+          folderPath: known.folderPath,
+          nameMatched: known.note.name.toLowerCase().includes(needle),
+          pages: doc.pages,
+          kind: segmentKind(known.note),
+        });
+      }
     }
 
-    for (const { note, folderPath } of allCachedNotes()) {
-      const nameMatched = note.name.toLowerCase().includes(needle);
-      const existing = byId.get(note.id);
-      if (existing) {
-        // The listing is the better source for everything but the pages: it
-        // carries the thumbnail, the date and the folder the hit does not.
-        existing.note = note;
-        existing.folderPath = folderPath;
-        existing.nameMatched = nameMatched;
-        continue;
-      }
-      if (!nameMatched) continue;
-      // A NAME-ONLY match carries no segment hits, so its summary is null and
-      // its kind matters only for coherence — derive it from the file type the
-      // listing knows (`.txt` → paragraphs), the same source `viewerFor` routes on.
-      const kind = note.fileType.trim().toLowerCase() === "txt" ? 1 : 0;
-      byId.set(note.id, { noteId: note.id, noteName: note.name, note, folderPath, nameMatched: true, pages: [], kind });
+    for (const [noteId, { note, folderPath }] of cached) {
+      if (byId.has(noteId) || !note.name.toLowerCase().includes(needle)) continue;
+      // A NAME-ONLY match reached no page, so its summary is null.
+      byId.set(noteId, { noteId, note, folderPath, nameMatched: true, pages: [], kind: segmentKind(note) });
     }
 
     const all = [...byId.values()];
@@ -185,95 +177,25 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   }
 
   /**
-   * What the results header says. THE HARD RULE (
-   * decision 6): the server never counts its matches — the query terminates at
-   * the page boundary precisely so it does not — so when a cursor says more may
-   * exist, the header speaks in FLOORS ("3+ notes · 20+ pages"), never in a
-   * number that reads as a total. Only when the stream is exhausted (no cursor)
-   * are the counts complete, and then they are simply what is on screen.
-   */
-  function searchCountLabel(notes: number, pages: number, more: boolean): string {
-    if (more) return `${notes}+ notes · ${pages}+ pages`;
-    // BOTH numbers, because grouping made them different questions: how many
-    // notebooks to look in, and how much there is in them.
-    return pages > 0 ? `${plural(notes, "note")} · ${plural(pages, "page")}` : plural(notes, "note");
-  }
-
-  /**
-   * The keyset "more" — the ONE control the capped list offers, existing
-   * exactly while the server holds a cursor. A real `<button>` (keyboard
-   * reachable for free, `.btn` like every labelled control in the app), and its
-   * loading affordance is its own honest state: disabled with the label saying
-   * so while the page is in flight, re-armed when the attempt settles, GONE the
-   * moment a response returns no cursor — removed by the append path, which
-   * makes `isConnected` the natural "still relevant" guard here.
-   */
-  function moreControl(): HTMLElement {
-    const btn = el("button", { class: "btn hits__more-btn", type: "button", text: "More results" });
-    btn.addEventListener("click", () => {
-      btn.disabled = true;
-      btn.textContent = "Loading more…";
-      void ctx.loadMore().finally(() => {
-        if (btn.isConnected) {
-          btn.disabled = false;
-          btn.textContent = "More results";
-        }
-      });
-    });
-    return el("div", { class: "hits__more" }, btn);
-  }
-
-  /**
-   * Grow the painted results in place with the page that just arrived — the
-   * append half of the contract the setState fast-path enforces. Three moves,
-   * none of which touches a row the user is reading:
+   * What the results header says.
    *
-   *  - a note already on screen that the new page reached again has ITS row
-   *    rebuilt in place (`replaceWith`) — the meta line and excerpt may change,
-   *    but the row keeps its position, so nothing above or below shifts;
-   *  - notes new to the list append at the end, ahead of the More control,
-   *    which is exactly where the rank order puts them (later pages are
-   *    lower-ranked by construction);
-   *  - the header and the More control are updated to the new truth: floors
-   *    while a cursor remains, the control removed when none came back.
+   * IT COUNTS WHAT IT IS SHOWING, and that is the whole rule. The "N+" floors
+   * are gone with the cursor: the old header spoke in "3+ notes · 20+ pages"
+   * because the server terminated at a page boundary and never counted its
+   * matches, and a local index has already paid for every match it holds.
+   *
+   * `LocalResults.totalPages` is deliberately NOT the number rendered, even
+   * though it is exact. It counts matching pages across every document the
+   * ENGINE matched, and the list has already dropped any document the listing
+   * does not name (see `searchResults`), so a header built from it could exceed
+   * the rows underneath it. Summing the painted rows cannot: it is what is on
+   * screen.
+   *
+   * BOTH numbers, because grouping made them different questions: how many
+   * documents to look in, and how much there is in them.
    */
-  function appendSearchResults(p: PaintedSearch): void {
-    const q = p.query;
-    const results = searchResults(q);
-    const pages = results.reduce((n, r) => n + r.pages.length, 0);
-    const searchState = ctx.getSearchState();
-    const cursor = searchState.kind === "results" ? searchState.cursor : undefined;
-
-    p.countEl.textContent = searchCountLabel(results.length, pages, cursor !== undefined);
-
-    for (const [i, result] of results.entries()) {
-      const known = p.cards.get(result.noteId);
-      if (known) {
-        if (known.pages !== result.pages.length) {
-          // Free the old row's lazy slot before the swap — the engine was not
-          // reset (that is the point of appending), so its bookkeeping is ours.
-          const target = known.card.querySelector("canvas, img");
-          if (target instanceof HTMLCanvasElement || target instanceof HTMLImageElement) {
-            galleryEngine.remove(target);
-          }
-          const fresh = ctx.resultCard(result, 0, q);
-          known.card.replaceWith(fresh);
-          p.cards.set(result.noteId, { card: fresh, pages: result.pages.length });
-        }
-        continue;
-      }
-      const card = ctx.resultCard(result, i, q);
-      if (p.moreWrap) gallery.insertBefore(card, p.moreWrap);
-      else gallery.append(card);
-      p.cards.set(result.noteId, { card, pages: result.pages.length });
-    }
-
-    if (cursor === undefined && p.moreWrap) {
-      // Exhausted: the control disappears rather than disabling — a disabled
-      // "More" would be a promise the server just declined to make.
-      p.moreWrap.remove();
-      p.moreWrap = null;
-    }
+  function searchCountLabel(notes: number, pages: number): string {
+    return pages > 0 ? `${plural(notes, "note")} · ${plural(pages, "page")}` : plural(notes, "note");
   }
 
   /**
@@ -282,32 +204,22 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
    * hold.
    *
    * The name half is already in hand (the cached tree), so it paints on the
-   * keystroke and the transcript half grows the list a round-trip later. The
+   * keystroke and the transcript half joins it when the engine answers. The
    * states are kept distinct for the same reason they always were: "searching",
    * "the search failed" and "there is nothing" are three different things, and
    * collapsing the middle one into the last is how a broken search gets mistaken
    * for an empty one.
    */
   function renderSearch(q: string): void {
-    paintedSearch = null;
     const searchState = ctx.getSearchState();
     const results = searchResults(q);
     const pages = results.reduce((n, r) => n + r.pages.length, 0);
 
-    // How many documents are still being derived. The response's own number
-    // when it gave one (a zero-hit search carries it and it is the freshest
-    // thing there is), otherwise the live channel's last frame. Never both
-    // added together — they are the same number from two channels, not two.
-    const pending =
-      searchState.kind === "results" && searchState.coverage !== null
-        ? searchState.coverage.pending
-        : (ctx.indexPending() ?? 0);
+    // How many documents are still being derived. The live channel's last frame
+    // is the whole story now — a local answer carries no counts to prefer over
+    // it, because nothing on the server counts anything at query time.
+    const pending = ctx.indexPending() ?? 0;
 
-    // Said ONCE, above everything, and only where there is something to qualify:
-    // a notice over an empty list would explain nothing.
-    if (searchState.kind === "results" && searchState.usedFuzzy && results.length > 0) {
-      gallery.append(el("p", { class: "hits__notice", role: "status", text: FUZZY_NOTICE }));
-    }
     // THE COMPLETENESS CAVEAT, over real results only. The list implies "this is
     // what there is"; while a derive is outstanding that is not true, and a
     // reader who does not know it reads a partial answer as a whole one. The
@@ -318,18 +230,26 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     }
 
     if (results.length === 0) {
-      if (searchState.kind === "error") {
+      if (searchState.kind === "error" && ctx.treeLoaded()) {
         // Distinct from "no matches", deliberately: a failed search that rendered
         // as an empty one is indistinguishable from a query nobody wrote about.
+        //
+        // GATED ON THE WALK, like the negative below it. The index intersects
+        // its answer with the cached tree and RAISES while that cache is still
+        // empty, which is the ordinary state for a couple of hundred ms after
+        // boot — before §6 step 6 the server fallback answered through that
+        // window, and now nothing does. A query typed into it has not failed; it
+        // is early, and "Couldn't search" would be the same confident lie as
+        // "No matches".
         gallery.append(ctx.emptyState("Couldn't search", "The recognised text couldn't be searched. Keep typing to retry."));
       } else if (searchState.kind === "searching" || searchState.kind === "idle" || !ctx.treeLoaded()) {
         // THE NEGATIVE IS THE LAST THING SAID. Two halves answer this query and
-        // they resolve independently: the transcript half is one round trip, the
-        // NAME half is matched against the cached tree that `prefetchTree` fills
-        // one folder at a time. A transcript response with no hits therefore
-        // arrives, routinely, before the name half can have been computed
-        // against a complete library — and "No matches" painted then is a
-        // confident lie about notes whose titles do match.
+        // they resolve independently: the transcript half waits on the engine,
+        // and the NAME half is matched against the cached tree that
+        // `prefetchTree` fills one folder at a time. An empty transcript answer
+        // therefore arrives, routinely, before the name half can have been
+        // computed against a complete library — and "No matches" painted then is
+        // a confident lie about notes whose titles do match.
         //
         // So the walk gates the claim exactly as it gates a category's "is
         // empty" (`rail.loaded()`, and the pending-category branch in
@@ -343,34 +263,24 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         // help and the other says it will not, so the transient one has to lead
         // or the reader stops waiting for the thing that is about to arrive.
         const still = pendingLine(pending);
-        const why = coverageLine(searchState.kind === "results" ? searchState.coverage : null);
+        const why = coverageLine();
         gallery.append(ctx.emptyState(`No matches for “${q}”`, still ? `${still} ${why}` : why));
       }
       return;
     }
 
-    const cursor = searchState.kind === "results" ? searchState.cursor : undefined;
-    const countEl = el("span", { text: searchCountLabel(results.length, pages, cursor !== undefined) });
     gallery.append(
       el(
         "div",
         { class: "section-head" },
-        countEl,
+        el("span", { text: searchCountLabel(results.length, pages) }),
         // The transcript half is still on its way; the name half is already
         // painted. Saying so beats either a spinner over real results or silence.
         searchState.kind === "searching" ? el("span", { class: "hits__count", text: "Searching handwriting…" }) : null,
       ),
     );
-    const cards = new Map<Id, { card: HTMLElement; pages: number }>();
-    for (const [i, result] of results.entries()) {
-      const card = ctx.resultCard(result, i, q);
-      gallery.append(card);
-      cards.set(result.noteId, { card, pages: result.pages.length });
-    }
-    const moreWrap = cursor !== undefined ? moreControl() : null;
-    if (moreWrap) gallery.append(moreWrap);
-    paintedSearch = { query: q, countEl, cards, moreWrap };
+    for (const [i, result] of results.entries()) gallery.append(ctx.resultCard(result, i, q));
   }
 
-  return { renderSearch, appendSearchResults, getPainted: () => paintedSearch };
+  return { renderSearch };
 }

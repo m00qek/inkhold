@@ -1,10 +1,14 @@
 /* --- universal search results -----------------------------------------------
    THE `.hit` COMPONENT IS GONE. A result is not a thing of its own any more: it
-   is the library's own list row, asked a question, plus the two things the
-   question adds — the excerpt that matched and the pages it matched on. So there
-   are no row, name or page rules here; the row's rules are the card's, which is
-   what keeps a result and a listing aligned to the same grid by construction
-   rather than by two sets of numbers that drift.
+   is the library's own list row, asked a question, plus the one thing the
+   question adds — the pages it matched on. So there are no row, name or page
+   rules here; the row's rules are the card's, which is what keeps a result and a
+   listing aligned to the same grid by construction rather than by two sets of
+   numbers that drift.
+
+   THE EXCERPT'S RULES ARE GONE WITH THE EXCERPT (`golden-search.md` §4.3: they
+   are dropped, not deferred), and so is the "More results" row — a whole local
+   index answers whole, so there is no cursor and no control to style.
 
    Every rule below is scoped to its own component class — nothing here can
    outrank a component elsewhere, which is the reset bug (specificity (0,1,1)
@@ -50,42 +54,16 @@
   font-variant-numeric: tabular-nums;
 }
 
-.hit__snippet {
-  margin-top: 4px;
-  font-size: var(--fs-caption);
-  line-height: 1.55;
-  color: var(--ink-soft);
-  /* Two lines, then elide: the excerpt is a reason to click, not the reading. */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-/* Mirrors `.ocr__body mark` — the highlight in a result, in a title and in the
-   reader's transcript are one idea, so they look the same. Scoped under the
-   component class, so their (0,1,1) reach stops at this block. */
-.hit__snippet mark,
+/* Mirrors `.ocr__body mark` — the highlight in a title and in the reader's
+   transcript are one idea, so they look the same. Scoped under the component
+   class, so its (0,1,1) reach stops at this block. The title is now the app's
+   ONLY search highlight: the marked excerpt beside it was server-authored HTML,
+   and there is no longer a server interpreting the query. */
 .card__title mark {
   background: color-mix(in srgb, var(--accent) 24%, transparent);
   color: var(--ink);
   border-radius: 2px;
   padding: 0 1px;
-}
-
-/* The keyset "More results" row — the ONE control the capped list offers. It
-   exists exactly while the server holds a cursor (the JS removes it when none
-   comes back), so there is no "disabled because exhausted" look to design: an
-   absent control is the honest exhausted state. Full row in both gallery
-   layouts, same spanning idiom as `.empty` below; centred, because it belongs
-   to the whole list rather than to the row above it. The button itself is the
-   app's own `.btn` chip — outline, mono label, shared hover/disabled rules —
-   so its loading state (disabled + relabelled) needs no rules of its own. */
-.hits__more {
-  flex-basis: 100%;
-  grid-column: 1 / -1;
-  display: flex;
-  justify-content: center;
-  padding: 18px 0 6px;
 }
 
 .empty {

@@ -86,9 +86,9 @@
 //! written LAST, in the transaction that closes the document.
 //!
 //! **Chunks are filled in READING ORDER, from ordinal 0**, and that is not an
-//! arbitrary direction. `query.bandStart` collapses a document to one hit by
-//! jumping to `rowid - ordinal` and checking that ordinal 0 of the same blob is
-//! there; until it is, every matching paragraph of the document is its own hit.
+//! arbitrary direction: `rowid ASC == ordinal order` is what lets find-in-txt
+//! accumulate keyset batches with no re-sort, and what keeps the document's
+//! derived range (`query.docSegmentRanges`) a single run rather than several.
 //! Filling forward means a document being written right now — or one a crash
 //! left half written — still reports as ONE document, incomplete rather than
 //! multiplied across the result page.
@@ -425,7 +425,7 @@ pub fn md5Hex(data: []const u8) [32]u8 {
 //     "no records" (not an error), and `layerVOsFromBlob` maps that to "no
 //     panel" — but again, no reader reaches a kind = 1 row.
 //   - `recogn_status` = 1 on real segments ("text present" — decision 4: the
-//     FTS predicate and `search_from_where`'s `recogn_status = 1` pass with
+//     FTS predicate and `scoped_from_where`'s `recogn_status = 1` pass with
 //     no predicate change), 0 on the marker.
 
 const upsert_segment_sql =
@@ -442,7 +442,7 @@ const upsert_segment_sql =
 
 /// The derived-state marker (see the module docs): ordinal 0, no text, no
 /// range — `recogn_status = 0` keeps it out of the FTS predicate and out of
-/// `search_from_where`. `content_hash` is md5("") for want of content.
+/// `scoped_from_where`. `content_hash` is md5("") for want of content.
 const upsert_marker_sql =
     \\INSERT INTO note_page_index(blob_md5, kind, page_index, content_hash, width, height,
     \\                            layers, recogn_status)
@@ -601,11 +601,10 @@ pub fn storeChunk(
 pub fn finish(
     db: sqlite.Db,
     blob_md5: []const u8,
-    bands: []const search.Band,
     d: Derived,
     now: i64,
 ) !void {
-    try search.finishOwnerBlobBands(db, bands, blob_md5, @intCast(rowCount(d)), now);
+    try search.finishOwnerBlobBands(db, blob_md5, @intCast(rowCount(d)), now);
     try storeVerdict(db, blob_md5, verdictFor(d));
 }
 
@@ -622,7 +621,7 @@ pub fn store(gpa: Allocator, db: sqlite.Db, blob_md5: []const u8, d: Derived, no
     const bands = try reserve(gpa, db, blob_md5, rows, now);
     defer gpa.free(bands);
     try storeChunk(db, blob_md5, bands, d, 0, rows);
-    try finish(db, blob_md5, bands, d, now);
+    try finish(db, blob_md5, d, now);
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,6 +1007,22 @@ test "the ranged (blob-store) source derives identically to the slice source" {
 /// gives every anonymous struct literal its own distinct type.
 const Put = struct { id: u64, md5: [32]u8 };
 
+/// WHAT REPLACED LIBRARY-WIDE SEARCH IN THESE TESTS. `golden-search.md` §6 step 6
+/// deleted the server's global read, so a test that used to ask "which of my
+/// files does this word appear in?" asks every live file it owns, one at a time,
+/// through the in-document read. The `files` join those reads are built on is
+/// the same security boundary the deleted one carried, which is what keeps the
+/// isolation assertions below meaning what they meant.
+const FoundFile = struct {
+    noteId: u64,
+    noteName: []const u8,
+    /// The first matching ordinal — a page index for a `.note`/PDF, a paragraph
+    /// ordinal for a `.txt`.
+    pageIndex: i64,
+};
+
+const FoundFiles = struct { hits: []const FoundFile };
+
 const Fixture = struct {
     db: sqlite.Db,
     files: filesvc.Files,
@@ -1120,32 +1135,50 @@ const Fixture = struct {
         return out.items;
     }
 
-    fn search_(f: *Fixture, user_id: u64, q: []const u8) !notesearch.Results {
-        return notesearch.searchPages(f.a(), testing.io, f.db, user_id, q, notesearch.default_limit, null);
+    /// Which of `user_id`'s OWN live files contain `q` — see `FoundFile`.
+    fn search_(f: *Fixture, user_id: u64, q: []const u8) !FoundFiles {
+        var hits: std.ArrayList(FoundFile) = .empty;
+        var names: std.ArrayList(FoundFile) = .empty;
+        {
+            var s = try f.db.prepare(
+                "SELECT id, name FROM files WHERE user_id = ?1 AND deleted = 0 AND is_folder = 0 ORDER BY id;",
+            );
+            defer s.finalize();
+            s.bindInt(1, @intCast(user_id));
+            while (try s.step()) try names.append(f.a(), .{
+                .noteId = @intCast(s.columnInt(0)),
+                .noteName = try f.a().dupe(u8, s.columnText(1)),
+                .pageIndex = 0,
+            });
+        }
+        for (names.items) |cand| {
+            const r = try notesearch.searchNotePages(f.a(), f.db, user_id, cand.noteId, q, null, notesearch.max_batch);
+            if (r.pages.len == 0) continue;
+            try hits.append(f.a(), .{ .noteId = cand.noteId, .noteName = cand.noteName, .pageIndex = r.pages[0].pageIndex });
+        }
+        return .{ .hits = hits.items };
     }
 
     /// Find-in-txt DRAINED to completion: auto-continues the keyset until the
     /// cursor is absent, accumulating every paragraph — the client's auto-drain,
     /// so the complete-result assertions read the whole file through the batched
-    /// entry point exactly as the viewer will. `usedFuzzy` rides the first batch.
+    /// entry point exactly as the viewer will.
     fn txtSearch(f: *Fixture, user_id: u64, note_id: u64, q: []const u8) !notesearch.TxtResults {
         const arena = f.a();
         var segs: std.ArrayList(notesearch.TxtMatch) = .empty;
-        var used_fuzzy = false;
         var query: []const u8 = q;
         var cursor: ?[]const u8 = null;
         var first = true;
         while (true) {
             const r = try notesearch.searchTxtSegments(arena, f.db, user_id, note_id, q, cursor, notesearch.default_batch);
             if (first) {
-                used_fuzzy = r.usedFuzzy;
                 query = r.query;
                 first = false;
             }
             try segs.appendSlice(arena, r.segments);
             cursor = r.cursor orelse break;
         }
-        return .{ .query = query, .segments = segs.items, .usedFuzzy = used_fuzzy };
+        return .{ .query = query, .segments = segs.items };
     }
 
     fn count(f: *Fixture, sql: []const u8) !i64 {
@@ -1220,43 +1253,11 @@ test "a .txt upload mints kind=1 paragraph rows: ordinals, byte ranges, hashes, 
     try testing.expectEqual(@as(i64, 3), try f.count("SELECT COUNT(*) FROM segment_search;"));
     try testing.expectEqual(@as(i64, 3), try f.count("SELECT COUNT(*) FROM segment_fts_docsize;"));
 
-    // And the library search finds a paragraph, kind-tagged, snippet marked.
+    // And a find inside the file reaches the paragraph by its ordinal.
     const res = try f.search_(1, "beta");
     try testing.expectEqual(@as(usize, 1), res.hits.len);
     try testing.expectEqualStrings("doc.txt", res.hits[0].noteName);
     try testing.expectEqual(@as(i64, 1), res.hits[0].pageIndex); // the paragraph ordinal
-    try testing.expectEqual(@as(?i64, kind_txt), res.hits[0].kind);
-    try testing.expect(std.mem.indexOf(u8, res.hits[0].snippet, "<mark>beta</mark>") != null);
-}
-
-test "the wire shape: kind is OMITTED for a note-page hit and 1 for a .txt hit" {
-    var f = try Fixture.init();
-    defer f.deinit();
-
-    const note_bytes = try nb.serialize(testing.allocator, .{ .pages = &.{.{
-        .layers = &.{.{ .slot = .main, .bitmap = "AAAA" }},
-        .recogn_status = 1,
-        .recogn_labels = &.{"shared apple pie"},
-    }} });
-    defer testing.allocator.free(note_bytes);
-    var r = std.Io.Reader.fixed(note_bytes);
-    const e = try f.files.putFile(1, null, "old.note", &r, null);
-    testing.allocator.free(e.name);
-    if (e.md5) |m| testing.allocator.free(m);
-    _ = try f.put(1, "new.txt", "apple tart recipe\n");
-
-    const res = try f.search_(1, "apple");
-    try testing.expectEqual(@as(usize, 2), res.hits.len);
-    for (res.hits) |hit| {
-        const json = try std.json.Stringify.valueAlloc(f.a(), hit, .{ .emit_null_optional_fields = false });
-        if (std.mem.eql(u8, hit.noteName, "new.txt")) {
-            try testing.expect(std.mem.indexOf(u8, json, "\"kind\":1") != null);
-        } else {
-            // The kind-0 wire shape is byte-for-byte what it was before
-            // `.txt` hits existed: no `kind` key at all.
-            try testing.expect(std.mem.indexOf(u8, json, "kind") == null);
-        }
-    }
 }
 
 test "AND semantics are per-PARAGRAPH: adjacent paragraphs do not co-match, one paragraph does" {
@@ -1272,40 +1273,6 @@ test "AND semantics are per-PARAGRAPH: adjacent paragraphs do not co-match, one 
     const both = try f.search_(1, "wordgamma worddelta");
     try testing.expectEqual(@as(usize, 1), both.hits.len);
     try testing.expectEqualStrings("together.txt", both.hits[0].noteName);
-}
-
-test "mixed results: txt paragraphs interleave with note pages in recency order, kinds correct" {
-    var f = try Fixture.init();
-    defer f.deinit();
-
-    const note_bytes = try nb.serialize(testing.allocator, .{ .pages = &.{.{
-        .layers = &.{.{ .slot = .main, .bitmap = "AAAA" }},
-        .recogn_status = 1,
-        .recogn_labels = &.{"harvest schedule notes"},
-    }} });
-    defer testing.allocator.free(note_bytes);
-    var r = std.Io.Reader.fixed(note_bytes);
-    const note = try f.files.putFile(1, null, "field.note", &r, null);
-    testing.allocator.free(note.name);
-    if (note.md5) |m| testing.allocator.free(m);
-    const txt = try f.put(1, "journal.txt", "the harvest came early this year\n");
-
-    // Display order is files.updated_at, newest first — make it unambiguous.
-    try f.setUpdatedAt(note.id, 100);
-    try f.setUpdatedAt(txt.id, 200);
-    var res = try f.search_(1, "harvest");
-    try testing.expectEqual(@as(usize, 2), res.hits.len);
-    try testing.expectEqualStrings("journal.txt", res.hits[0].noteName);
-    try testing.expectEqual(@as(?i64, kind_txt), res.hits[0].kind);
-    try testing.expectEqualStrings("field.note", res.hits[1].noteName);
-    try testing.expectEqual(@as(?i64, null), res.hits[1].kind);
-
-    // Flip the recency: the note leads, the kinds ride their rows unchanged.
-    try f.setUpdatedAt(note.id, 300);
-    res = try f.search_(1, "harvest");
-    try testing.expectEqualStrings("field.note", res.hits[0].noteName);
-    try testing.expectEqual(@as(?i64, null), res.hits[0].kind);
-    try testing.expectEqual(@as(?i64, kind_txt), res.hits[1].kind);
 }
 
 test "isolation: another user never sees the txt segments, though the text rows are shared" {
@@ -1340,7 +1307,6 @@ test "FIND-IN-TXT: blob-scoped, complete, unranked, with an EXACT per-paragraph 
     // COMPLETE: both matching paragraphs, in ordinal order, and nothing from the
     // non-matching middle paragraph or the other file.
     try testing.expectEqual(@as(usize, 2), res.segments.len);
-    try testing.expect(!res.usedFuzzy);
 
     try testing.expectEqual(@as(i64, 0), res.segments[0].segment);
     try testing.expectEqual(@as(i64, 1), res.segments[0].matches); // "target" ×1
@@ -1365,7 +1331,7 @@ test "FIND-IN-TXT: same FTS as library search — a diacritic-folded / prefix te
     // case). Both the library search and find-in-txt fold it the same way.
     const put = try f.put(1, "notes.txt", "a linha sobre caf\u{00e9} aqui\n\nplain paragraph\n");
 
-    // Library search finds the file (parity anchor).
+    // The file is findable at all (the anchor for the paragraph assertions).
     try testing.expect((try f.search_(1, "cafe")).hits.len >= 1);
 
     // Find-in-txt finds the same paragraph, unaccented query.
@@ -1400,73 +1366,7 @@ test "FIND-IN-TXT: isolation — another user's identical text and a foreign fil
     try testing.expectEqual(@as(usize, 0), (try f.txtSearch(1, 999999, "private")).segments.len);
 }
 
-/// Every paragraph ordinal GLOBAL search returns for `name`/`q`, drained across
-/// the keyset stream so truncation cannot hide one, sorted — the parity anchor
-/// for find-in-txt, exactly as `globalDocPages` is for find-in-note.
-fn globalFilePages(f: *Fixture, user_id: u64, name: []const u8, q: []const u8) ![]i64 {
-    var pages: std.ArrayList(i64) = .empty;
-    var cursor: ?[]const u8 = null;
-    while (true) {
-        const r = try notesearch.searchPages(f.a(), testing.io, f.db, user_id, q, notesearch.default_limit, cursor);
-        for (r.hits) |h| {
-            if (std.mem.eql(u8, h.noteName, name)) try pages.append(f.a(), h.pageIndex);
-        }
-        if (r.cursor) |c| cursor = c else break;
-    }
-    std.sort.pdq(i64, pages.items, {}, std.sort.asc(i64));
-    return pages.items;
-}
-
-/// The `.txt` twin of `query.zig`'s `expectDocParity`, asserted wherever global↔
-/// in-doc set equality used to be. Global search names FILES now, one hit per
-/// band, so it is a strict subset of in-doc by design; what must survive is
-/// presence in both directions (named exactly when in-doc finds something),
-/// every named paragraph being one in-doc returns, and no repeats. Completeness
-/// inside a file is in-doc's claim alone.
-fn expectFileParity(global: []const i64, in_doc: []const i64) !void {
-    try testing.expectEqual(in_doc.len == 0, global.len == 0);
-    for (global, 0..) |g, i| {
-        try testing.expect(std.mem.indexOfScalar(i64, in_doc, g) != null);
-        try testing.expect(std.mem.indexOfScalar(i64, global[i + 1 ..], g) == null);
-    }
-}
-
-test "FIND-IN-TXT DOCUMENT PARITY (the non-negotiable): global names the file iff in-doc finds it, on a paragraph in-doc returns" {
-    var f = try Fixture.init();
-    defer f.deinit();
-
-    // A big decoy file crowds the library result so parity must survive
-    // truncation, plus a shared common word across many paragraphs.
-    var big: std.ArrayList(u8) = .empty;
-    for (0..30) |i| {
-        if (i != 0) try big.appendSlice(f.a(), "\n\n");
-        try big.appendSlice(f.a(), try std.fmt.allocPrint(f.a(), "decoy common line {d}", .{i}));
-    }
-    _ = try f.put(1, "big.txt", big.items);
-
-    // The file under test: a common term, a rare one, and an accented word the
-    // query reaches unaccented — same fold as global search.
-    const blob = "alpha common line\n\nbeta common\n\ngamma caf\u{00e9} common\n";
-    const put = try f.put(1, "doc.txt", blob);
-
-    for ([_][]const u8{ "common ", "alpha ", "cafe ", "caf" }) |q| {
-        const g = try globalFilePages(&f, 1, "doc.txt", q);
-        const r = try f.txtSearch(1, put.id, q);
-        const d = try f.a().alloc(i64, r.segments.len);
-        for (r.segments, d) |seg, *o| o.* = seg.segment;
-        std.sort.pdq(i64, d, {}, std.sort.asc(i64));
-        // The band is canonical, so the file is named exactly once however many
-        // of its paragraphs matched — and that paragraph is one in-doc returns.
-        try testing.expect(d.len > 0);
-        try testing.expectEqual(@as(usize, 1), g.len);
-        try expectFileParity(g, d);
-    }
-    // The negative, on both sides: a term the file lacks names it in neither.
-    try testing.expectEqual(@as(usize, 0), (try globalFilePages(&f, 1, "doc.txt", "zzzptl ")).len);
-    try testing.expectEqual(@as(usize, 0), (try f.txtSearch(1, put.id, "zzzptl ")).segments.len);
-}
-
-test "FIND-IN-TXT BATCHED PARITY (the non-negotiable): the UNION of SMALL batches == global ∩ file, boundary-clean" {
+test "FIND-IN-TXT BATCHED PARITY (the non-negotiable): the UNION of SMALL batches is the whole file, boundary-clean" {
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -1481,9 +1381,8 @@ test "FIND-IN-TXT BATCHED PARITY (the non-negotiable): the UNION of SMALL batche
     const put = try f.put(1, "doc.txt", blob.items);
 
     for ([_][]const u8{ "common ", "rare5 ", "zzzptl " }) |q| {
-        // The UNBATCHED in-doc result is the oracle for the batched drain — the
-        // half of this pin that never depended on global, and now does not
-        // mention it. Global re-anchors to document parity below.
+        // The UNBATCHED in-doc result is the oracle for the batched drain: the
+        // stride must not be able to change the answer.
         const whole = try f.txtSearch(1, put.id, q);
         const d = try f.a().alloc(i64, whole.segments.len);
         for (whole.segments, d) |seg, *o| o.* = seg.segment;
@@ -1496,7 +1395,7 @@ test "FIND-IN-TXT BATCHED PARITY (the non-negotiable): the UNION of SMALL batche
         var cursor: ?[]const u8 = null;
         while (true) {
             const r = try notesearch.searchTxtSegments(f.a(), f.db, 1, put.id, q, cursor, 3);
-            if (!r.usedFuzzy) try testing.expect(r.segments.len <= 3);
+            try testing.expect(r.segments.len <= 3);
             for (r.segments) |seg| {
                 const gop = try seen.getOrPut(f.a(), seg.segment);
                 try testing.expect(!gop.found_existing);
@@ -1506,12 +1405,6 @@ test "FIND-IN-TXT BATCHED PARITY (the non-negotiable): the UNION of SMALL batche
         }
         std.sort.pdq(i64, got.items, {}, std.sort.asc(i64));
         try testing.expectEqualSlices(i64, d, got.items);
-
-        // One canonical band ⇒ global names the file once, on a paragraph the
-        // batches also produced (or not at all, for a term it lacks).
-        const g = try globalFilePages(&f, 1, "doc.txt", q);
-        try testing.expectEqual(@as(usize, if (d.len == 0) 0 else 1), g.len);
-        try expectFileParity(g, got.items);
     }
 }
 
@@ -1643,7 +1536,7 @@ test "a real .note named .txt is never chunked: the parser's verdict wins over t
     // Searchable as the note it is, not as chunked container bytes.
     const res = try f.search_(1, "genuine");
     try testing.expectEqual(@as(usize, 1), res.hits.len);
-    try testing.expectEqual(@as(?i64, null), res.hits[0].kind);
+    try testing.expectEqualStrings("disguised.txt", res.hits[0].noteName);
 }
 
 test "content linked under a non-.txt name first derives when a .txt name arrives, for every holder" {
@@ -1698,12 +1591,10 @@ test "v5→v6 HEAL: a pre-existing .txt mints segments on ensure, name looked up
     try testing.expectEqual(@as(i64, 2), try f.count("SELECT COUNT(*) FROM note_page_index WHERE kind = 1;"));
     try testing.expectEqual(@as(i64, 2), try f.count("SELECT COUNT(*) FROM segment_search;"));
     try testing.expectEqual(@as(i64, 2), try f.count("SELECT COUNT(*) FROM segment_fts_docsize;"));
-    // Searchable again, kind-tagged. ONE hit for one file — the library-wide
-    // read names documents — and the counts just above are what pin that BOTH
-    // paragraphs were minted, which is what the heal is actually about.
+    // Searchable again. The counts just above are what pin that BOTH paragraphs
+    // were minted, which is what the heal is actually about.
     const res = try f.search_(1, "healed");
     try testing.expectEqual(@as(usize, 1), res.hits.len);
-    try testing.expectEqual(@as(?i64, kind_txt), res.hits[0].kind);
 
     // Repeated ensures are no-ops: same rows, same rowids, same next_seq.
     const rowid_before = try f.segRowidByText(1, "healed alpha");
@@ -1786,7 +1677,7 @@ fn runPipeline(
     if (at < rows) return .{ .bands = bands, .rows = at, .finished = false }; // "crashed"
 
     try f.db.exec("BEGIN IMMEDIATE;");
-    try finish(f.db, md5, bands, d, now);
+    try finish(f.db, md5, d, now);
     try f.db.exec("COMMIT;");
     return .{ .bands = bands, .rows = rows, .finished = true };
 }
@@ -1798,12 +1689,13 @@ fn expectFtsClean(f: *Fixture) !void {
     try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('integrity-check');");
 }
 
-test "THE BAND IS STILL CONTIGUOUS after a chunked write — the arithmetic the jump rests on" {
-    // The load-bearing property. `query.bandStart` jumps to `R - page_index` and
-    // validates it against ordinal 0 of the same blob; that is only ever right
-    // while a document's segments are ONE contiguous rowid run in ordinal order.
-    // Three commits produced this band, and it has to look exactly like one
-    // statement produced it.
+test "THE BAND IS STILL CONTIGUOUS after a chunked write — the arithmetic the scan rests on" {
+    // The load-bearing property. `query.docSegmentRanges` derives the file's own
+    // rowid ranges and runs one `M1><` pass per range, and `rowid ASC` is ordinal
+    // order only while a document's segments are ONE contiguous run — so a
+    // scattered band costs a find extra passes and, past the range cap, the whole
+    // partition. Three commits produced this band, and it has to look exactly
+    // like one statement did.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -1860,7 +1752,7 @@ test "AN INGEST BETWEEN CHUNKS DOES NOT INTERLEAVE — this is what the reservat
         }
     }
     try f.db.exec("BEGIN IMMEDIATE;");
-    try finish(f.db, &put.md5, bands, d, 100);
+    try finish(f.db, &put.md5, d, 100);
     try f.db.exec("COMMIT;");
 
     const ids = try f.band(1, &put.md5);
@@ -1994,238 +1886,6 @@ test "a re-run after a partial write DROPS and re-reserves — one band, no dupl
 // with another document's, it must not appear before the write finishes, and
 // the fuzzy ladder must still draw from it.
 
-/// One document's term set for one owner, in a stable order — the `doc_terms`
-/// rows as a comparable value.
-fn docTerms(f: *Fixture, user_id: u64, md5: []const u8) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    var s = try f.db.prepare(
-        "SELECT dt.term FROM doc_terms dt JOIN search_partitions sp ON sp.id = dt.partition_id " ++
-            "WHERE sp.user_id = ?1 AND dt.blob_md5 = ?2 ORDER BY dt.term;",
-    );
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    s.bindText(2, md5);
-    while (try s.step()) try out.append(f.a(), try f.a().dupe(u8, s.columnText(0)));
-    return out.items;
-}
-
-test "the term set a CHUNKED write lands is the one the single-statement fold lands, term for term" {
-    // The non-negotiable. `doc_terms` is the in-doc fuzzy candidate pool, so a
-    // term the chunked fold dropped is a correction the viewer stops offering,
-    // and one it invented is a correction offered into nothing. Neither surfaces
-    // as an error anywhere — only as worse search results — which is why this is
-    // asserted as EQUALITY of the whole set rather than as a count.
-    //
-    // The ORACLE is the single-statement fold itself, still live on the
-    // whole-document paths: `search.recanonicalizeHolders` rewrites `doc_terms`
-    // for a band it leaves otherwise untouched, by re-folding the blob's entire
-    // text (`writeDocTerms`). So the same blob, in the same partition, gets its
-    // term set computed both ways and the two are compared directly.
-    var f = try Fixture.init();
-    defer f.deinit();
-
-    const corpus = try manyParagraphs(f.a(), 120);
-    const put = try f.putRaw(1, "book.txt", corpus);
-    // The chunked write as the deferred worker drives it — reserve, a
-    // transaction per chunk, finish (`runPipeline` is `deferred.runTxt`'s loop).
-    const written = try runPipeline(&f, &put.md5, 99, 100);
-    try testing.expect(written.finished);
-
-    const accumulated = try docTerms(&f, 1, &put.md5);
-    try testing.expect(accumulated.len > 100); // a real vocabulary, not two empty sets
-
-    try f.db.exec("BEGIN IMMEDIATE;");
-    try search.recanonicalizeHolders(f.db, &put.md5, 100);
-    try f.db.exec("COMMIT;");
-    const refolded = try docTerms(&f, 1, &put.md5);
-
-    try testing.expectEqual(accumulated.len, refolded.len);
-    for (accumulated, refolded) |a_, b| try testing.expectEqualStrings(a_, b);
-}
-
-test "the WORKER's chunked write and the read-path heal land the SAME term set, as they land the same rows" {
-    // The two writers of a `.txt`, compared on the pool as they already are on
-    // the band: the read path's lazy heal (`ensureIndexed`) writes a document in
-    // ONE transaction and the deferred worker writes the same document one chunk
-    // at a time, and a divergence here would mean which of them reached a
-    // document first decided what its typo corrections are.
-    var f = try Fixture.init();
-    defer f.deinit();
-
-    // The same 120 paragraphs twice, differing in ONE byte's case: two blobs
-    // (different md5) that tokenize to the same vocabulary, so the two term sets
-    // are comparable term for term. Two owners, so each has its own partition.
-    const corpus = try manyParagraphs(f.a(), 120);
-    const twin = try f.a().dupe(u8, corpus);
-    twin[0] = std.ascii.toUpper(twin[0]);
-    const one = try f.putRaw(1, "one.txt", corpus);
-    const many = try f.putRaw(2, "many.txt", twin);
-
-    try ensureIndexed(testing.allocator, f.db, f.files.blobs, &one.md5, "one.txt", 100);
-    const written = try runPipeline(&f, &many.md5, 99, 100);
-    try testing.expect(written.finished);
-
-    const whole = try docTerms(&f, 1, &one.md5);
-    const chunked = try docTerms(&f, 2, &many.md5);
-    try testing.expect(whole.len > 100);
-    try testing.expectEqual(whole.len, chunked.len);
-    for (whole, chunked) |a_, b| try testing.expectEqualStrings(a_, b);
-}
-
-test "TWO documents filling between each other's chunks keep their own terms — the accumulator is keyed by blob" {
-    // THE HAZARD THIS DESIGN EXISTS FOR, driven rather than reasoned about. The
-    // fold accumulates across chunks on the SINGLE WRITER CONNECTION, and two
-    // documents really can be mid-fill at once: `deferred.runTxt` releases the
-    // lock between chunks, and anything that writes another `.txt` in that gap —
-    // the read path's `ensureIndexed`, a second worker pass — folds into the same
-    // temp table. If the accumulator were per-connection rather than per-blob,
-    // the two documents' terms would MERGE — and merged pools are wrong search
-    // results, not a crash, so nothing else here would notice.
-    var f = try Fixture.init();
-    defer f.deinit();
-
-    // Two documents with DISJOINT vocabularies, so contamination is visible as a
-    // term appearing where it cannot have come from.
-    var alpha: std.ArrayList(u8) = .empty;
-    var beta: std.ArrayList(u8) = .empty;
-    for (0..120) |i| {
-        if (i != 0) {
-            try alpha.appendSlice(f.a(), "\n\n");
-            try beta.appendSlice(f.a(), "\n\n");
-        }
-        try alpha.print(f.a(), "rutabaga alfa{d:0>3} verdejante", .{i});
-        try beta.print(f.a(), "quiabo beta{d:0>3} crepuscular", .{i});
-    }
-    const a_put = try f.putRaw(1, "alpha.txt", alpha.items);
-    const b_put = try f.putRaw(1, "beta.txt", beta.items);
-
-    var a_d = (try deriveStored(testing.allocator, f.files.blobs, &a_put.md5)).?;
-    defer a_d.deinit();
-    var b_d = (try deriveStored(testing.allocator, f.files.blobs, &b_put.md5)).?;
-    defer b_d.deinit();
-    const rows = rowCount(a_d);
-    try testing.expectEqual(rows, rowCount(b_d));
-
-    try f.db.exec("BEGIN IMMEDIATE;");
-    const a_bands = try reserve(f.a(), f.db, &a_put.md5, rows, 100);
-    try f.db.exec("COMMIT;");
-    try f.db.exec("BEGIN IMMEDIATE;");
-    const b_bands = try reserve(f.a(), f.db, &b_put.md5, rows, 100);
-    try f.db.exec("COMMIT;");
-
-    // STRICTLY ALTERNATING chunks — the interleaving the released lock permits,
-    // at the finest grain it can happen at.
-    var at: usize = 0;
-    while (at < rows) {
-        const end = chunkEnd(a_d, at);
-        for ([_]struct { md5: [32]u8, bands: []search.Band, d: Derived }{
-            .{ .md5 = a_put.md5, .bands = a_bands, .d = a_d },
-            .{ .md5 = b_put.md5, .bands = b_bands, .d = b_d },
-        }) |w| {
-            try f.db.exec("BEGIN IMMEDIATE;");
-            try storeChunk(f.db, &w.md5, w.bands, w.d, at, end);
-            try f.db.exec("COMMIT;");
-        }
-        at = end;
-    }
-    // And the closes interleave too, which is the other order that could merge.
-    try f.db.exec("BEGIN IMMEDIATE;");
-    try finish(f.db, &a_put.md5, a_bands, a_d, 100);
-    try f.db.exec("COMMIT;");
-    try f.db.exec("BEGIN IMMEDIATE;");
-    try finish(f.db, &b_put.md5, b_bands, b_d, 100);
-    try f.db.exec("COMMIT;");
-
-    const a_terms = try docTerms(&f, 1, &a_put.md5);
-    const b_terms = try docTerms(&f, 1, &b_put.md5);
-    for ([_]struct { terms: []const []const u8, mine: []const u8, theirs: []const u8 }{
-        .{ .terms = a_terms, .mine = "rutabaga", .theirs = "quiabo" },
-        .{ .terms = b_terms, .mine = "quiabo", .theirs = "rutabaga" },
-    }) |c| {
-        var saw_mine = false;
-        for (c.terms) |t| {
-            try testing.expect(!std.mem.eql(u8, t, c.theirs)); // NOT the other document's
-            if (std.mem.eql(u8, t, c.mine)) saw_mine = true;
-        }
-        try testing.expect(saw_mine);
-    }
-    // Every ordinal's own word is in its own pool and in no other: 120 + 120
-    // distinct `alfaNNN`/`betaNNN` with nothing crossing over.
-    try testing.expectEqual(@as(i64, 0), try f.count(
-        "SELECT COUNT(*) FROM doc_terms WHERE term LIKE 'beta%' AND blob_md5 = " ++
-            "(SELECT md5 FROM files WHERE name = 'alpha.txt');",
-    ));
-    try testing.expectEqual(@as(i64, 0), try f.count(
-        "SELECT COUNT(*) FROM doc_terms WHERE term LIKE 'alfa%' AND blob_md5 = " ++
-            "(SELECT md5 FROM files WHERE name = 'beta.txt');",
-    ));
-    try testing.expectEqual(@as(i64, 120), try f.count(
-        "SELECT COUNT(*) FROM doc_terms WHERE term LIKE 'alfa%';",
-    ));
-    try testing.expectEqual(@as(i64, 120), try f.count(
-        "SELECT COUNT(*) FROM doc_terms WHERE term LIKE 'beta%';",
-    ));
-    try expectFtsClean(&f);
-}
-
-test "an interrupted write lands NO doc_terms — the term set arrives with the verdict, or not at all" {
-    // The accumulator is filled per chunk but drained only by the close, so a
-    // document that never closed has no pool. The alternative — writing terms as
-    // they are folded — would leave a document claiming a vocabulary it only
-    // half has, which the fuzzy ladder cannot tell from a complete one.
-    var f = try Fixture.init();
-    defer f.deinit();
-
-    const corpus = try manyParagraphs(f.a(), 120);
-    const put = try f.putRaw(1, "book.txt", corpus);
-
-    // One chunk of three, then "crash" — the write stops between two commits,
-    // exactly where an abandoned worker pass stops.
-    const partial = try runPipeline(&f, &put.md5, 1, 100);
-    try testing.expect(!partial.finished);
-
-    // Rows landed (the band's filled prefix) and NO terms did.
-    try testing.expectEqual(@as(usize, chunk_segments), (try f.band(1, &put.md5)).len);
-    try testing.expectEqual(@as(usize, 0), (try docTerms(&f, 1, &put.md5)).len);
-    try testing.expect(try needsDerive(f.db, &put.md5));
-
-    // And the re-run lands the whole set, from a fresh accumulator — the partial
-    // fold the interrupted run left is dropped by `reserve`, not added to.
-    const again = try runPipeline(&f, &put.md5, 99, 200);
-    try testing.expect(again.finished);
-    const terms = try docTerms(&f, 1, &put.md5);
-    try testing.expect(terms.len > 100);
-    for (terms, 0..) |t, i| {
-        if (i == 0) continue;
-        try testing.expect(!std.mem.eql(u8, terms[i - 1], t)); // distinct, no duplicates
-    }
-    try expectFtsClean(&f);
-}
-
-test "in-doc fuzzy still corrects from the document's own pool after a chunked write (entry 8b)" {
-    // `doc_terms` exists for exactly one reader — the typo ladder for a search
-    // INSIDE an open document — so the property that says the chunked fold works
-    // is that a typo still finds the word. Asserted through the real batched
-    // entry point, on a document written chunk by chunk by the worker's loop.
-    var f = try Fixture.init();
-    defer f.deinit();
-
-    const corpus = try manyParagraphs(f.a(), 120);
-    const put = try f.putRaw(1, "book.txt", corpus);
-    const written = try runPipeline(&f, &put.md5, 99, 100);
-    try testing.expect(written.finished);
-
-    // "rutabga" is not in the document; "rutabaga" is in every paragraph. The
-    // ladder can only get from one to the other through this document's pool.
-    const typo = try f.txtSearch(1, put.id, "rutabga ");
-    try testing.expect(typo.usedFuzzy);
-    try testing.expectEqual(@as(usize, 120), typo.segments.len);
-    // The exact term still behaves as it did, with no correction needed.
-    const exact = try f.txtSearch(1, put.id, "rutabaga ");
-    try testing.expect(!exact.usedFuzzy);
-    try testing.expectEqual(@as(usize, 120), exact.segments.len);
-}
-
 test "the dual cap is a decision with stated values, and a chunk always takes at least one row" {
     // Pinned so a change to either half is a change to the plan and not a typo,
     // and so the "at least one row" rule — what stops a paragraph bigger than
@@ -2354,9 +2014,13 @@ test "BENCH note: a ~5 MB synthetic .txt ingests in one link (figure printed)" {
 // |---|---:|---:|---:|---:|
 // | at `max_file_bytes`, 15.7 MB | 14,000 | 37-40 ms | **901 -> 237-248 ms** | 1,943 -> 1,996-2,019 ms |
 //
-// The close is now the `doc_terms` DELETE + INSERT and the holder band-shape
+// The close was then the `doc_terms` DELETE + INSERT and the holder band-shape
 // scan, and nothing that reads the document's text. The chunk is unmoved and the
 // whole write is ~3 % dearer.
+//
+// SINCE `golden-search.md` §6 step 6 the close is SMALLER AGAIN and UNMEASURED:
+// `doc_terms` is gone with the ladder that read it, so the closing transaction
+// is the band-shape scan alone. Every figure above predates that.
 
 /// `n` paragraphs of `chars` bytes each, prose-shaped enough for the postings to
 /// be realistic. Two densities are measured, because `mupdf.md` §9.8 found text
@@ -2423,13 +2087,13 @@ test "BENCH note: the longest lock hold of a .txt write, one transaction against
             at = end;
         }
         // The closing transaction is a hold too, and it is reported SEPARATELY
-        // because it is not chunk-shaped: `finishOwnerBlobBands` re-folds the
-        // whole document's text into `doc_terms` in one statement, so it scales
-        // with the FILE where every chunk above scales with the cap. On a big
-        // enough document it, and not a chunk, is the longest hold left.
+        // because it is not chunk-shaped: it walks every holder's band. It used
+        // to re-fold the whole document's text into `doc_terms` as well, which is
+        // what made it scale with the FILE where every chunk scales with the cap;
+        // that fold retired with `doc_terms` in §6 step 6.
         const fin0 = std.Io.Clock.awake.now(testing.io);
         try f.db.exec("BEGIN IMMEDIATE;");
-        try finish(f.db, &put.md5, bands, d, 200);
+        try finish(f.db, &put.md5, d, 200);
         try f.db.exec("COMMIT;");
         const fin1 = std.Io.Clock.awake.now(testing.io);
         const finish_ns: u64 = @intCast(fin0.durationTo(fin1).toNanoseconds());

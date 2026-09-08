@@ -38,7 +38,6 @@ export const PDF_MARK_ID = "n-files-manual.pdf.mark";
 const PDF_MARK_SOURCE_PAGE = 2;
 import { canPreviewHistory, isAcceptedUpload, nextAvailableName, uploadExtension } from "../core/fileKind";
 import type {
-  Coverage,
   Entry,
   FileHistory,
   FileVersion,
@@ -53,8 +52,6 @@ import type {
   PageRef,
   PageText,
   RestoredVersion,
-  SearchHit,
-  SearchResults,
   TxtMatch,
   TxtSearchBatch,
   TxtSearchResults,
@@ -161,10 +158,10 @@ function fakeText(name: string, index: number): string {
     "  · ask about the vector question in the container",
     // Deliberately full of characters that are HTML syntax. The transcript is
     // DEVICE-AUTHORED text — whatever the handwriting recogniser produced — and
-    // the search snippet is the one string in this app that reaches `innerHTML`.
-    // Keeping angle brackets and an ampersand in the fixture means the escaping
-    // is exercised every time anyone searches in dev or in e2e, instead of only
-    // against a corpus that happens to be alphanumeric.
+    // it is rendered through `textContent` everywhere, now that the excerpt that
+    // used to reach `innerHTML` is gone (§6 step 6). Keeping angle brackets and
+    // an ampersand in the fixture is what would catch that regressing, against a
+    // corpus that would otherwise happen to be alphanumeric.
     "  · <draft> R&D budget — flag \"open\" items & re-check",
     "",
     "Follow-up: re-read the sync notes before Thursday,",
@@ -202,54 +199,11 @@ function fakePageLinks(page: PageRef, pageCount: number): PdfLink[] {
   ];
 }
 
-// --- the transcript search fixture ------------------------------------------
-//
-// Stands in for the backend's FTS5 index. Deliberately reproduces the two
-// properties of the real endpoint the UI has to be built against:
-//
-//   1. hits are PAGES (several per note, so the deep link has to carry a page),
-//   2. `snippet` is HTML-ESCAPED text with real `<mark>` markers spliced in —
-//      the same contract, and the same order of operations, as
-//      `note_search.escapeSnippet`: escape the transcript, THEN add the markers.
-//
-// Coverage matches the real thing too: only pages the fixture gave a `textHash`
-// are searchable, so an un-recognised note never appears.
-
-/** Escapes the four characters that matter, exactly as the backend does. */
-function escapeHtml(s: string): string {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-/** Characters of context either side of the match — SQLite's snippet() takes a
- *  token budget; a character window is the closest honest approximation. */
-const SNIPPET_CONTEXT = 32;
-
-/**
- * A `…`-elided window around `[at, at+len)`, escaped, with `<mark>` around the
- * match. The escaping is applied to each of the three pieces SEPARATELY and the
- * markers are concatenated in afterwards, which is the only ordering that
- * cannot escape its own markers.
- */
-function markedSnippet(text: string, at: number, len: number): string {
-  const from = Math.max(0, at - SNIPPET_CONTEXT);
-  const to = Math.min(text.length, at + len + SNIPPET_CONTEXT);
-  const lead = (from > 0 ? "…" : "") + text.slice(from, at);
-  const tail = text.slice(at + len, to) + (to < text.length ? "…" : "");
-  // Newlines would render as spaces inside the one-line result row anyway; flatten
-  // them so the excerpt reads as the single line of prose it is meant to be.
-  const flat = (s: string): string => escapeHtml(s.replace(/\s+/g, " "));
-  return `${flat(lead)}<mark>${escapeHtml(text.slice(at, at + len))}</mark>${flat(tail)}`;
-}
-
 // --- the `.txt` fixture content ---------------------------------------------
 //
 // The raw text a `.txt` fixture holds. Its paragraphs are what the segment seam
-// indexes: library search returns them as `kind = 1` hits, and the `.txt`
-// viewer's find scrolls to and marks inside them. `zephyrine` lives ONLY here
+// indexes, and what the `.txt` viewer's find scrolls to and marks inside.
+// `zephyrine` lives ONLY here
 // (no note transcript, no file name), so a search for it exercises the pure
 // `.txt` path end to end — one text hit, opening the `.txt` viewer.
 //
@@ -266,12 +220,12 @@ const TXT_CONTENT: Record<Id, string> = {
 //
 // The text a `.pdf` fixture's PAGES hold — the segment seam's THIRD tenant, and
 // the shape `pdf_text.zig` writes: one indexed segment per page, `kind = 2`,
-// addressed by the PDF page number. Library search returns them as `kind = 2`
-// hits and find-in-PDF marks inside them.
+// addressed by the PDF page number. Find-in-PDF marks inside them.
 //
 // NOT DERIVED FROM `hasRecognizedText`, and that is the point rather than a
-// shortcut: a PDF is not a note, has no on-device recognition and never appears
-// in the "unsearchable notes" denominator. Whether its text is indexed is a fact
+// shortcut: a PDF is not a note and has no on-device recognition, so it is not
+// what "only notes recognised on the device are searchable" is about. Whether
+// its text is indexed is a fact
 // about the SERVER's pass over the blob, which is exactly what this table stands
 // in for — the same way `TXT_CONTENT` stands in for the `.txt` chunker.
 //
@@ -340,117 +294,6 @@ function txtSegmentsOf(id: Id): TxtSeg[] {
 }
 
 /**
- * Case-insensitive substring search over every recognised page's transcript AND
- * every `.txt` paragraph, in a stable order. Not bm25 — ranking is the backend's
- * job and nothing in the UI depends on the ordering being anything but
- * deterministic.
- *
- * UNBOUNDED, deliberately: this is the fixture's whole result stream, the thing
- * the cursor pages over. The clamp lives in `searchText`, exactly as the real
- * service's LIMIT lives in the query and not in the index — and the stable
- * enumeration order here is what makes an offset cursor honest: the same query
- * always walks the same stream, so page N is the same twenty hits every time.
- */
-function searchPass(q: string): SearchHit[] {
-  const hits: SearchHit[] = [];
-  if (q === "") return hits;
-
-  for (const summary of Object.values(ALL_NOTES)) {
-    // A `.txt` file's hits are its PARAGRAPHS (kind = 1), not recognised pages —
-    // the segment seam's first non-note tenant. One hit per matching paragraph,
-    // `pageIndex` the paragraph ordinal, so the deep link opens the viewer at it.
-    if (summary.fileType === "txt") {
-      for (const seg of txtSegmentsOf(summary.id)) {
-        const at = seg.text.toLowerCase().indexOf(q);
-        if (at < 0) continue;
-        hits.push({
-          noteId: summary.id,
-          noteName: summary.name,
-          pageIndex: seg.ordinal,
-          snippet: markedSnippet(seg.text, at, q.length),
-          kind: 1,
-        });
-      }
-      continue;
-    }
-    // A `.pdf`'s hits are its PAGES (kind = 2) — the seam's third tenant. One
-    // hit per matching page, `pageIndex` the PDF page number, so the deep link
-    // opens the PDF viewer at it with the query primed.
-    const pdfPages = PDF_CONTENT[summary.id];
-    if (pdfPages) {
-      for (const [pageIndex, text] of pdfPages.entries()) {
-        const at = text.toLowerCase().indexOf(q);
-        if (at < 0) continue;
-        hits.push({
-          noteId: summary.id,
-          noteName: summary.name,
-          pageIndex,
-          snippet: markedSnippet(text, at, q.length),
-          kind: 2,
-        });
-      }
-      continue;
-    }
-    // The per-note rollup the gallery marker shows: no recognition, no hits.
-    if (!summary.hasRecognizedText) continue;
-    for (const page of pages(summary.id, summary.pageCount, true)) {
-      // …and within a recognised note, the pages the device skipped stay unfindable.
-      if (page.textHash === null) continue;
-      const text = fakeText(summary.name, page.index);
-      const at = text.toLowerCase().indexOf(q);
-      if (at < 0) continue;
-      hits.push({
-        noteId: summary.id,
-        noteName: summary.name,
-        pageIndex: page.index,
-        snippet: markedSnippet(text, at, q.length),
-      });
-    }
-  }
-  return hits;
-}
-
-/**
- * The library-wide search, with the same TWO-PHASE shape as the real service:
- * exact first, and only when that finds nothing is a widened pass paid for.
- *
- * The widening stands in for `buildFuzzyMatch`'s vocabulary expansion — a
- * fixture cannot do edit distance over an FTS index it does not have, so it
- * drops the query's last character, which is the typo a search-as-you-type box
- * actually produces. Short queries are left alone, exactly as the real service
- * refuses to guess at them.
- *
- * `usedFuzzy` reports THE FALLBACK HAVING RUN, not the fallback having worked —
- * matching `searchNotePages`, which sets it before it knows whether the widened
- * query matched anything.
- *
- * Returns the FULL stream (see `searchPass`); the caller slices a page out of
- * it. Which of the two phases answered is a pure function of the query, so a
- * cursor-resumed call re-derives the same stream and the same `usedFuzzy` —
- * paging never flips a search between exact and approximate mid-walk.
- */
-function searchFixture(query: string): { hits: SearchHit[]; usedFuzzy: boolean } {
-  const q = query.trim().toLowerCase();
-  const exact = searchPass(q);
-  if (exact.length > 0 || q.length < 4) return { hits: exact, usedFuzzy: false };
-  return { hits: searchPass(q.slice(0, -1)), usedFuzzy: true };
-}
-
-// --- cursor paging over the search fixture ----------------------------------
-//
-// The real service pages by KEYSET (masked rowid), which a fixture without
-// rowids cannot mint — but the CONTRACT it must reproduce is narrower than the
-// mechanism: an opaque token that, handed back with the same query, yields the
-// next ≤20 hits of the same deterministic stream, plus another token exactly
-// when more remain. An offset into the stable `searchFixture` stream satisfies
-// all of that. The prefix keeps the token visibly fake in a network log; the
-// UI must still treat it as opaque, which the e2e can only prove if nothing
-// works by parsing it.
-
-/** Hard page clamp — the server's own cap, applied whatever `limit` asks. */
-const SEARCH_PAGE_CAP = 20;
-
-/**
  * The in-doc STREAMING stride: how many matching pages/paragraphs one batch of a
  * streaming find carries. Deliberately SMALLER than the real server's 20 so the
  * fake's modest fixtures still stream across several batches — which is what lets
@@ -460,24 +303,6 @@ const SEARCH_PAGE_CAP = 20;
  */
 const FIND_STREAM_BATCH = 6;
 
-const CURSOR_PREFIX = "fake-search-v1:";
-
-function makeCursor(offset: number): string {
-  return `${CURSOR_PREFIX}${offset}`;
-}
-
-/**
- * The offset a cursor resumes at. A token this fake never minted restarts the
- * stream from the top rather than guessing — the shape a stale or foreign
- * cursor would take against the real service is ITS business; the fake only
- * promises determinism for the tokens it issued.
- */
-function parseCursor(cursor: string | undefined): number {
-  if (cursor === undefined || !cursor.startsWith(CURSOR_PREFIX)) return 0;
-  const n = Number(cursor.slice(CURSOR_PREFIX.length));
-  return Number.isInteger(n) && n > 0 ? n : 0;
-}
-
 // --- the note-scoped search fixture -----------------------------------------
 //
 // Stands in for `note_search.searchNotePages`, and it is TOKEN-BASED rather than
@@ -485,7 +310,8 @@ function parseCursor(cursor: string | undefined): number {
 // properties of tokens:
 //
 //   1. NO LIMIT and NO RANKING — a per-note counter that clamps is silently
-//      incomplete, which is the whole reason this is not `searchText` filtered;
+//      incomplete, which is why find has never been a library query filtered
+//      down to one document;
 //   2. every page names WHICH TERMS it matched, so the client circles exactly
 //      what was counted instead of re-deriving it from the query;
 //   3. a typo falls back to close matches, and the response says that it did.
@@ -726,27 +552,6 @@ function txtSearchFixture(id: Id, query: string): { segments: TxtMatch[]; usedFu
   const widened = txtFuzzyGroups(id, terms);
   if (widened === null) return { segments: [], usedFuzzy: false };
   return { segments: txtSearchPass(id, widened), usedFuzzy: true };
-}
-
-/**
- * The zero-hit coverage numbers, derived from the fixture rather than written
- * down, so the fake cannot claim a total its own tree contradicts.
- *
- * "Notes" is `.note` files only — a PDF or a PNG is not an unsearchable note, it
- * is not a note — matching the real query's `is_folder = 0` + parsed-container
- * rule.
- */
-function fixtureCoverage(): Coverage {
-  const notes = Object.values(ALL_NOTES).filter((n) => n.fileType === "note");
-  return {
-    notes: notes.length,
-    unsearchable: notes.filter((n) => !n.hasRecognizedText).length,
-    // The fixture library is fully derived — nothing was uploaded a moment ago,
-    // so nothing is mid-index. The pending SENTENCE is exercised by the unit
-    // tests, which can state the number directly; a fake that claimed work
-    // outstanding would leave a "still indexing" line on every mock screenshot.
-    pending: 0,
-  };
 }
 
 /**
@@ -1108,10 +913,10 @@ for (const entries of Object.values(CHILDREN)) {
  * `textHash: null`. The default fixture pattern always recognises page 1, which
  * is exactly why the bug was unrepresentable and shipped.
  *
- * Registered BY ID ONLY, deliberately outside `CHILDREN`: every listing count,
- * section head and search total in the e2e suite is asserted literally, so a
- * note added to a real folder would rewrite half a dozen unrelated expectations
- * for a fixture that exists to be opened by route.
+ * Registered BY ID ONLY, deliberately outside `CHILDREN`: every listing count
+ * and section head in the e2e suite is asserted literally, so a note added to a
+ * real folder would rewrite half a dozen unrelated expectations for a fixture
+ * that exists to be opened by route.
  */
 ALL_NOTES["n-late-ocr"] = note("n-late-ocr", "Recognised from page two", 4, NOW - 2 * DAY, {
   hasRecognizedText: true,
@@ -1122,10 +927,10 @@ ALL_NOTES["n-late-ocr"] = note("n-late-ocr", "Recognised from page two", 4, NOW 
 // library. Keyed the same way, so every PER-ID transcript / search / version-
 // history generator answers for a TRASHED id exactly as for a live one — the fake
 // mirror of "a trashed file's md5-keyed data is fully retained".
-// Deliberately NOT in `ALL_NOTES`: the library-wide enumerations (`searchPass`,
-// `fixtureCoverage`) walk `ALL_NOTES`, and a trashed note must not surface in a
-// live-wide search (the real server excludes `deleted = 1`). `noteSummary(id)`
-// unions the two for the per-id lookups that DO need the trashed rows.
+// Deliberately NOT in `ALL_NOTES`: the library-wide enumerations walk
+// `ALL_NOTES`, and a trashed note must not surface in a live-wide listing (the
+// real server excludes `deleted = 1`). `noteSummary(id)` unions the two for the
+// per-id lookups that DO need the trashed rows.
 const BIN_NOTES: Record<string, NoteSummary> = {};
 for (const s of BIN_SEED_NOTES) {
   BIN_NOTES[s.id] = note(s.id, s.name, s.pageCount, NOW, {
@@ -1341,39 +1146,6 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       // no version to ask for, and the answer is empty rather than an error.
       if (page.linksHash === null) return { links: [] };
       return { links: fakePageLinks(page, summary.pageCount) };
-    },
-
-    async searchText(query: string, limit?: number, cursor?: string): Promise<SearchResults> {
-      // Mirrors the real client's short-circuit: a blank box costs nothing, not
-      // even the fake's latency, so a search-as-you-type UI backspacing to empty
-      // settles immediately.
-      const q = query.trim();
-      if (q === "") return { query: "", hits: [], usedFuzzy: false, coverage: null };
-      await delay(latency);
-      // The full deterministic stream, then ONE page of it. Re-derived per call
-      // rather than remembered per cursor, which is precisely what makes the
-      // paging deterministic: the same (query, cursor) always answers the same
-      // slice, however many other searches ran in between.
-      const { hits: all, usedFuzzy } = searchFixture(q);
-      const pageSize = Math.min(Math.max(1, limit ?? SEARCH_PAGE_CAP), SEARCH_PAGE_CAP);
-      const offset = parseCursor(cursor);
-      const hits = all.slice(offset, offset + pageSize);
-      const more = offset + pageSize < all.length;
-      return {
-        query: q,
-        hits,
-        usedFuzzy,
-        // The real service attaches coverage ONLY to a zero-hit response, and the
-        // fake has to have the same shape or the empty state gets built against a
-        // field that is always there. An empty LATER page is not that state —
-        // coverage explains "nothing matched at all", which only the stream
-        // itself (not one slice of it) can claim.
-        coverage: all.length === 0 ? fixtureCoverage() : null,
-        // Present ONLY while more hits genuinely remain — absence is the one
-        // end-of-results signal the contract has, so an exhausted stream must
-        // omit it rather than hand back a token pointing at nothing.
-        ...(more ? { cursor: makeCursor(offset + pageSize) } : {}),
-      };
     },
 
     async searchInNote(noteId: Id, query: string): Promise<NoteSearchResults> {

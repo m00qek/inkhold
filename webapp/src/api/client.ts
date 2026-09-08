@@ -12,7 +12,6 @@ import { historyFileUrl } from "../core/fileKind";
 import { parsePageLinks } from "../render/pdfLinks";
 import type { Api, PageLinks } from "./types";
 import type {
-  Coverage,
   Entry,
   FileHistory,
   FileVersion,
@@ -28,8 +27,6 @@ import type {
   PageRef,
   PageText,
   RestoredVersion,
-  SearchHit,
-  SearchResults,
   TxtMatch,
   TxtSearchBatch,
   TxtSearchResults,
@@ -731,30 +728,6 @@ function normalizeEntry(e: Entry): Entry {
 }
 
 /**
- * Fill in the fields the server may omit on a search hit.
- *
- * Same `emit_null_optional_fields = false` hazard as everywhere else on this
- * face, and it matters more here than usual because `snippet` is the one string
- * on the whole surface that reaches `innerHTML`: an `undefined` snippet would
- * paint the literal text "undefined" as though it were a transcript excerpt.
- * `pageIndex` is the other load-bearing one — it is what the deep link opens the
- * reader at, and `undefined` there would be `#/note/x/page/NaN`.
- */
-function normalizeHit(h: SearchHit): SearchHit {
-  return {
-    noteId: h.noteId ?? "",
-    noteName: h.noteName ?? "",
-    pageIndex: h.pageIndex ?? 0,
-    snippet: h.snippet ?? "",
-    // TOLERANT by contract (see `SearchHit.kind`): the server OMITS kind 0, so
-    // absent is a note page; anything that is not exactly `1` also reads as a
-    // note page, so a future kind the client does not know degrades to the
-    // reader rather than to a broken result. `1` is the only `.txt` signal.
-    ...(h.kind === 1 ? { kind: 1 } : {}),
-  };
-}
-
-/**
  * One `.txt` paragraph match, with the fields the server may omit filled in.
  *
  * `segment`/`offset`/`length` are load-bearing — the viewer scrolls to the
@@ -787,27 +760,6 @@ function normalizeTxtMatches(segments: TxtMatch[] | undefined): TxtMatch[] {
     )
     .map(normalizeTxtMatch)
     .sort((a, b) => a.segment - b.segment);
-}
-
-/**
- * The zero-hit coverage numbers, or null.
- *
- * ABSENT IS NOT ZERO here, which is why this cannot be a `?? 0`: the server sends
- * `coverage` only on a response with no hits, and a fabricated `{notes: 0,
- * unsearchable: 0}` would render as the confident sentence "0 of your 0 notes
- * have no recognised text" over a library that has plenty. A partial object is
- * treated the same as an absent one for the same reason — half a claim is not a
- * claim.
- */
-function normalizeCoverage(c: Coverage | null | undefined): Coverage | null {
-  if (!c || typeof c.notes !== "number" || typeof c.unsearchable !== "number") return null;
-  if (!Number.isFinite(c.notes) || !Number.isFinite(c.unsearchable)) return null;
-  // `pending` DOES default, unlike the other two — see {@link Coverage.pending}.
-  // It drives a sentence shown only above zero, so a server too old to send it
-  // and a library with nothing outstanding produce the same screen; defaulting
-  // it asserts nothing. A negative or non-finite value is not a count.
-  const pending = typeof c.pending === "number" && Number.isFinite(c.pending) ? Math.max(0, Math.floor(c.pending)) : 0;
-  return { notes: c.notes, unsearchable: c.unsearchable, pending };
 }
 
 /**
@@ -901,16 +853,17 @@ async function drainNoteSearch(
     const r = await request<NoteSearchResults & { cursor?: string }>("GET", `${base}?${params.toString()}`);
     if (signal?.aborted) return;
     if (first) {
-      // `=== true`, strictly, exactly as `searchText` reads it: anything that is
-      // not literally `true` means "answered as typed". Read once, off the first
-      // batch — the fuzzy fallback is a one-shot.
+      // `=== true`, STRICTLY: the server omits null optionals, so anything that
+      // is not literally `true` means "answered as typed" — the reading that
+      // claims nothing. Read once, off the first batch; the fallback is a
+      // one-shot.
       usedFuzzy = r.usedFuzzy === true;
       outQuery = r.query ?? q;
       first = false;
     }
     if (Array.isArray(r.pages)) raw.push(...r.pages);
-    // ABSENT / malformed cursor is the "no more results" signal, exactly as
-    // `searchText` reads it — the walk ends honestly, never on `?cursor=`.
+    // ABSENT / malformed cursor is the "no more results" signal — the walk ends
+    // honestly, never on a `?cursor=undefined` request.
     const next = typeof r.cursor === "string" && r.cursor !== "" ? r.cursor : undefined;
     const done = !next;
     onBatch({ query: outQuery, pages: normalizePageMatches(raw), usedFuzzy, done });
@@ -1091,68 +1044,9 @@ export function createHttpApi(): Api {
       return { links: parsePageLinks(JSON.stringify(list ?? [])) };
     },
 
-    async searchText(query: string, limit?: number, cursor?: string, signal?: AbortSignal): Promise<SearchResults> {
-      // Short-circuit BEFORE the network, not after. The server does answer a
-      // blank `q` with an empty 200, but search-as-you-type empties this box on
-      // every backspace-to-nothing, and a request per emptying is pure waste.
-      // Trimmed, so a box holding only spaces is the same nothing.
-      //
-      // THIS `trim()` IS ALSO WHAT MAKES EVERY LIBRARY-WIDE SEARCH A PREFIX
-      // QUERY, and that is not what it was written for. The server reads a
-      // TRAILING SPACE as "the user finished this word" (`isStillTyping` in
-      // `backend/services/search/query.zig`); without one it turns the last
-      // token into an FTS5 prefix term. Trimming here — and again in
-      // `noteSearch.setQuery` — strips that signal on every request, so there is
-      // no keystroke, no pause and no Enter that makes this client ask for a
-      // completed term. MEASURED on the Pi (`docs/scratch/search-baseline.md`):
-      // the same page of 10 costs 810.3 ms p50 as a prefix against 80.6 ms
-      // completed, 10.0x, and 95% of it is the FTS posting scan. The server's
-      // `vm_steps` counter is IDENTICAL (1,129) for both, so no backend test
-      // sees it.
-      //
-      // NOT CHANGED HERE, deliberately. Sending the space once the box settles
-      // is a UX decision (it changes what a half-typed word matches), and the
-      // alternatives are a `prefix=` index on `segment_fts` or doing nothing.
-      // The open decision lives in `docs/scratch/backlog.md`.
-      const q = query.trim();
-      if (q === "") return { query: "", hits: [], usedFuzzy: false, coverage: null };
-
-      const params = new URLSearchParams({ q });
-      if (limit !== undefined) params.set("limit", String(limit));
-      // Handed back VERBATIM — the cursor is the server's own keyset token and
-      // its meaning lives entirely on that side of the wire. See `Api.searchText`.
-      if (cursor !== undefined) params.set("cursor", cursor);
-      // Raw VO like the rest of the control-plane surface (no `{success}`
-      // envelope), so `request()` passes it through while still turning a
-      // 401/403 into UNAUTHORIZED — which is what stops a dead session from
-      // looking like "no results".
-      // The signal reaches `fetch`, so a superseded keystroke gives the
-      // connection back rather than merely declining to paint what it returns.
-      const r = await request<SearchResults>("GET", `/api/controlplane/search?${params.toString()}`, undefined, signal);
-      return {
-        query: r.query ?? q,
-        // An absent `hits` is the empty result set, not a crash in `.map`.
-        hits: (r.hits ?? []).map(normalizeHit),
-        // `=== true` rather than `?? false`: this is the one field the server
-        // promises never to omit (see `SearchResults.usedFuzzy`), so anything
-        // that is not literally `true` means "not an approximate answer" — the
-        // reading that makes no claim. A server too old to send it therefore
-        // degrades to silence rather than to an accusation of guessing.
-        usedFuzzy: r.usedFuzzy === true,
-        coverage: normalizeCoverage(r.coverage),
-        // Same `emit_null_optional_fields = false` seam rule as every optional
-        // here: ABSENT means "no more results", normalized to `undefined` so
-        // the fake and the real client hand the UI one shape. Anything that is
-        // not a non-empty string degrades the same way — a malformed cursor
-        // must end paging honestly, never become a `?cursor=undefined` request
-        // or a "More" control pointing at nothing.
-        cursor: typeof r.cursor === "string" && r.cursor !== "" ? r.cursor : undefined,
-      };
-    },
-
     async searchInNote(noteId: Id, query: string): Promise<NoteSearchResults> {
-      // Same pre-network short-circuit as `searchText`, and for the same reason:
-      // find searches as you type, so backspacing to empty must cost nothing.
+      // Short-circuit BEFORE the network: find searches as you type, so
+      // backspacing to empty must cost nothing.
       const q = query.trim();
       if (q === "") return { query: "", pages: [], usedFuzzy: false };
 

@@ -3,10 +3,10 @@
 // owns "what a card looks like". Three public builders — `folderCard`,
 // `noteCard`, `resultCard` — plus the thumbnail/aspect/marks machinery they
 // share. Everything these touch arrives through the {@link GalleryCardsCtx} the
-// controller constructs (its engine, its lazy image observer, the live `view`
-// and search state as getters, the rail's `labelFor`, the masonry re-span, and
-// the overflow menu from `cardActions.ts`) or through an imported pure helper —
-// there is no hidden coupling back into the shell.
+// controller constructs (its engine, its lazy image observer, the live `view` as
+// a getter, the rail's `labelFor`, the masonry re-span, and the overflow menu
+// from `cardActions.ts`) or through an imported pure helper — there is no hidden
+// coupling back into the shell.
 
 import { el } from "../ui/dom";
 import { learnsAspect, pinAspect, provisionalAspect } from "../ui/tileAspect";
@@ -14,7 +14,7 @@ import { ICONS, svg, type IconName } from "../ui/icons";
 import { fileKind, rawFileUrl } from "../core/fileKind";
 import { getDims } from "../cache/dimsMemo";
 import { go, folderHref, noteHref, notePageHref } from "../router";
-import { pageSummary, deepLinkQuery, type HitPage, type SearchState } from "./noteSearch";
+import { pageSummary, deepLinkQuery } from "./noteSearch";
 import type { Entry, Folder, Hash, Id, NoteSummary } from "../core/types";
 import type { Category } from "./rail";
 import type { LazyEngine } from "../render/lazy";
@@ -58,28 +58,31 @@ function fmtDate(epochMs: number): string {
 /**
  * One note that matched, however it matched.
  *
- * `note` is null when the transcript index knows of a file the shell's cached
- * tree does not (the walk has not reached it, or a sync added it since). The
- * row still renders — the hit is real and the deep link works — it simply has
- * no thumbnail, no date and no path to show, which is honest about what is
- * known rather than a guess dressed up as a fact.
+ * `note` IS THE LISTING'S OWN RECORD AND IT IS NEVER NULL. A transcript hit
+ * carries a file id and page ordinals and no name at all — the index ships none,
+ * because the app already holds the listing (`golden-search.md` §4.1) — so a hit
+ * the cached tree cannot name is dropped before it becomes one of these rather
+ * than rendered as an anonymous row. That drop is also the §2.7 intersection:
+ * the local index may legitimately be a superset of the live library, and the
+ * listing is what says which documents still exist. See `gallerySearch.ts`.
  */
 export interface SearchResult {
   noteId: Id;
-  /** PLAIN TEXT, device-authored. */
-  noteName: string;
-  note: NoteSummary | null;
+  note: NoteSummary;
   /** The note's folder, `Note / Projects`-style, or null if unknown. */
   folderPath: string | null;
   /** The query appears in the NAME — which is what marks the title. */
   nameMatched: boolean;
-  /** Matching pages, best-ranked first. Empty for a name-only match. */
-  pages: HitPage[];
   /**
-   * What {@link pages}'s indexes count — 0 (a `.note`'s PAGES) or 1 (a
-   * `.txt`'s PARAGRAPHS). Only the summary wording turns on it; ROUTING is by
-   * the file's real `fileType` (`viewerFor`), so a `.txt` opens the `.txt`
-   * viewer whether or not this shell knew its kind.
+   * EVERY matching page ordinal, ascending — exact and complete, which is what
+   * lets the row state a count rather than a floor. Empty for a name-only match.
+   * The first is where the row's link lands.
+   */
+  pages: readonly number[];
+  /**
+   * What {@link pages} count — 0 (a `.note`'s PAGES) or 1 (a `.txt`'s
+   * PARAGRAPHS). Only the summary wording turns on it; ROUTING is by the file's
+   * real `fileType` (`viewerFor`), which is also where this is derived from.
    */
   kind: number;
 }
@@ -87,8 +90,13 @@ export interface SearchResult {
 /**
  * The state and callbacks the card factory needs from the shell. The controller
  * keeps owning all of it — this module reads the live bits through getters so a
- * card built now reflects the view/search state at build time, exactly as the
- * inline closures did.
+ * card built now reflects the view state at build time, exactly as the inline
+ * closures did.
+ *
+ * THE SEARCH STATE IS NO LONGER AMONG THEM. A result row used to read
+ * `usedFuzzy` off it to decide which term its deep link carried; excerpts are
+ * gone and with them the marks that named the corrected word, so a row is now a
+ * pure function of the {@link SearchResult} it is handed.
  */
 export interface GalleryCardsCtx {
   /** The gallery's lazy render engine — cards register their `<img>`/canvas here. */
@@ -97,8 +105,6 @@ export interface GalleryCardsCtx {
   imgLazy: IntersectionObserver | null;
   /** The live grid/list toggle. */
   getView: () => "grid" | "list";
-  /** The live universal-search state (a result row reads `usedFuzzy` off it). */
-  getSearchState: () => SearchState;
   /** The rail's category-aware folder label (never `folder.name` directly). */
   labelFor: (folder: Folder) => string;
   /**
@@ -243,14 +249,15 @@ function cardMarks(note: NoteSummary): HTMLElement {
  * The query's occurrences in a device-authored string, as DOM nodes — text
  * nodes and `<mark>` elements, never markup.
  *
- * The highlight IS the explanation: a marked title means the note matched by
- * name, a marked excerpt means it matched by handwriting, both means both. No
- * "why it matched" badge is needed and none would be as honest.
+ * The highlight IS the explanation: a marked title means the document matched by
+ * NAME, and an unmarked one with a count beside it matched by its text. No "why
+ * it matched" badge is needed and none would be as honest.
  *
- * Built as nodes rather than as an HTML string ON PURPOSE. `noteName` is raw
- * device text with no escaping pass behind it — the snippet's `innerHTML` is
- * safe precisely because the SERVER escaped around its own markers, and that
- * reasoning does not transfer to a string this client marks up itself.
+ * Built as nodes rather than as an HTML string ON PURPOSE — and it is now the
+ * only marking left, since the excerpt that used to carry the other half was
+ * server-authored HTML this app spliced in with `innerHTML`. A name is raw
+ * device text with no escaping pass behind it, so it is marked up structurally
+ * or not at all.
  */
 function markedText(text: string, q: string): Node[] {
   const needle = q.toLowerCase();
@@ -561,38 +568,35 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
    *
    * It reuses the row wholesale — same thumbnail, same badges, same title/meta
    * rhythm — and adds only what the question needs: the folder the note lives in
-   * (results are library-wide, so "where is this?" is a real question now), the
-   * excerpt that matched, and how far through the note the query reached.
+   * (results are library-wide, so "where is this?" is a real question now), and
+   * how far through the document the query reached.
    *
-   * THE PAGE CHIPS ARE GONE. A strip of per-page buttons made the row a menu of
-   * destinations, and the destination was never the question — "which notebook
-   * was that in?" is. Worse, it grew without bound: a note matching on twenty
-   * pages was twenty targets to read past. What is left is one quiet line of
-   * metadata beside the date (see `pageSummary`), and the row's own link, which
-   * now carries the QUERY as well as the best page — so clicking a result opens
-   * the note with find already running, and every matching page is one Next away
-   * inside the reader rather than one chip away outside it.
+   * THE EXCERPT IS GONE, and it is the load-bearing absence rather than a
+   * simplification. `golden-search.md` §4.3 drops excerpts instead of deferring
+   * them, which is what leaves the server with no query-interpreting code at all
+   * and makes search simply offline rather than offline-in-a-degraded-form. What
+   * the excerpt was actually for — "is this the one?" — is answered by the count
+   * beside the date and by landing on the first matching page.
+   *
+   * THE PAGE CHIPS WENT EARLIER, for their own reason. A strip of per-page
+   * buttons made the row a menu of destinations, and the destination was never
+   * the question — "which notebook was that in?" is. So what is left is one quiet
+   * line of metadata (see `pageSummary`) and the row's own link, which carries
+   * the QUERY as well as the first matching page: clicking a result opens the
+   * document with find already running, and every other matching page is one Next
+   * away inside the reader rather than one chip away outside it.
    */
   function resultCard(result: SearchResult, i: number, q: string): HTMLElement {
-    const searchState = ctx.getSearchState();
     const note = result.note;
-    const { node: media, target, thumbClass, thumb, alt } = note
-      ? thumbMedia(note)
-      : {
-          node: el("span", { class: "thumb__glyph", html: svg(ICONS.doc, 1.4) }),
-          target: null,
-          thumbClass: "thumb thumb--file",
-          thumb: undefined,
-          alt: undefined,
-        };
+    const { node: media, target, thumbClass, thumb, alt } = thumbMedia(note);
     const top = result.pages[0];
     // Kind-aware: a `.txt` result counts PARAGRAPHS, a `.note` counts PAGES.
     const matchLine = pageSummary(result.pages.length, result.kind);
 
     // A result row is a LIST row, so its lead gets the same pre-set aspect the
-    // library's rows do — known only where the cached tree knows the note.
+    // library's rows do.
     const tile = el("div", { class: thumbClass }, media);
-    if (note) applyTileAspect(tile, note, media, true);
+    applyTileAspect(tile, note, media, true);
 
     const open = el(
       "button",
@@ -601,12 +605,14 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
       el(
         "div",
         { class: "card__body" },
-        note ? cardMarks(note) : null,
+        cardMarks(note),
         el(
           "div",
           { class: "card__main" },
-          // Marked only where the NAME is what matched — see `markedText`.
-          el("div", { class: "card__title" }, ...(result.nameMatched ? markedText(result.noteName, q) : [document.createTextNode(result.noteName)])),
+          // Marked only where the NAME is what matched — see `markedText`. With
+          // the excerpt gone this is the app's only `<mark>`, and it is the one
+          // that was never server-authored.
+          el("div", { class: "card__title" }, ...(result.nameMatched ? markedText(note.name, q) : [document.createTextNode(note.name)])),
           el(
             "div",
             { class: "card__meta" },
@@ -614,51 +620,37 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
             // one shared rule). A bin row's home is not where you are standing
             // either; same question, so the same answer looks the same.
             result.folderPath ? el("span", { class: "card__path", text: result.folderPath }) : null,
-            result.folderPath && note ? el("span", { class: "dot" }) : null,
-            note ? el("span", { text: fmtDate(note.updatedAt) }) : null,
+            result.folderPath ? el("span", { class: "dot" }) : null,
+            el("span", { text: fmtDate(note.updatedAt) }),
             // How far the query reached, in the meta line rather than in a strip
             // of its own: it describes the row the same way the folder and the
             // date do. Null for a name-only match — see `pageSummary` for why it
             // counts pages and not matches.
-            matchLine && (result.folderPath || note) ? el("span", { class: "dot" }) : null,
+            matchLine ? el("span", { class: "dot" }) : null,
             matchLine ? el("span", { class: "card__matches", text: matchLine }) : null,
           ),
-          // THE ONE innerHTML OF SERVER DATA IN THIS APP, and it is deliberate.
-          // `snippet` arrives HTML-escaped by the backend with `<mark>`/`</mark>`
-          // spliced in AFTER that escaping (note_search.escapeSnippet), so the
-          // markup here is only ever those two tags. Escaping it again would show
-          // literal `&lt;mark&gt;`; passing any SIBLING field through here would be
-          // a real injection, which is why `noteName` above is textContent.
-          top ? el("div", { class: "hit__snippet", html: top.snippet }) : null,
         ),
       ),
     );
-    // Whole-row open goes to the best-ranked page, which is the one the visible
-    // excerpt came from — clicking the excerpt lands where the excerpt is — AND
-    // carries the query, so find is already running when you arrive. That is what
-    // replaces the chips: the other matching pages are reachable with Next
-    // instead of being enumerated out here.
+    // Whole-row open goes to the FIRST matching page — the rest are what the
+    // count is counted from — AND carries the query, so find is already running
+    // when you arrive. That is what replaces both the chips and the excerpt: the
+    // other matching pages are reachable with Next inside the reader instead of
+    // being enumerated, or previewed, out here.
     //
     // The query travels in the URL rather than in shell state precisely so this
     // is one link: it survives a reload, it can be shared, and the reader is
-    // primed by the same route it is opened by.
-    // THE DEEP LINK CARRIES THE RESOLVED TERM (in-doc-search Phase 3, route 2).
-    // On a fuzzy global search the word actually in the document is the
-    // correction, not the typo — and the server already marked it in this hit's
-    // excerpt, so the link carries that resolved term. The viewer's find then
-    // runs it EXACT on open (the corrected word really is there), skipping the
-    // in-doc fuzzy scan. On an exact search, and for a name-only row with no
-    // excerpt, this is just the typed query. The query/matching are unchanged;
-    // only which term the LINK hands the viewer differs.
-    const usedFuzzy = searchState.kind === "results" && searchState.usedFuzzy;
-    const linkQ = deepLinkQuery(q, usedFuzzy, top?.snippet);
+    // primed by the same route it is opened by. `deepLinkQuery` carries the
+    // decision about WHICH query that is, and why it is no longer a resolved
+    // term.
+    const linkQ = deepLinkQuery(q);
     open.addEventListener("click", () =>
-      go(top ? notePageHref(result.noteId, top.pageIndex, linkQ) : noteHref(result.noteId, linkQ)),
+      go(top === undefined ? noteHref(result.noteId, linkQ) : notePageHref(result.noteId, top, linkQ)),
     );
 
     const card = el("div", { class: "card card--result" }, open);
     card.style.animationDelay = `${Math.min(i * 24, 240)}ms`;
-    if (target && note) galleryEngine.add({ target, noteId: note.id, page: note.firstPage, size: "thumb", thumb, alt });
+    if (target) galleryEngine.add({ target, noteId: note.id, page: note.firstPage, size: "thumb", thumb, alt });
     return card;
   }
 

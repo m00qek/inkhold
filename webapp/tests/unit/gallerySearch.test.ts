@@ -1,54 +1,83 @@
 // @vitest-environment happy-dom
 //
-// The search renderer's PENDING sentences, where they actually get painted.
+// The search renderer: which rows a query produces, and which sentences land
+// around them.
 //
-// `noteSearch.test.ts` pins what the two sentences SAY; this pins where each one
-// lands, which is a separate failure: the strings can be perfect and the empty
-// state still show the old unquantified line because the branch never reached
-// them. Both halves of `pending-ness.md` §6 are here — the empty state explains
-// an absence, a non-empty page qualifies a presence, and the gallery says
-// nothing at all because it never claimed completeness.
+// `noteSearch.test.ts` pins what the sentences SAY and what a row's count means;
+// this pins what the renderer chose to paint, which is a separate failure — the
+// strings can be perfect and the empty state still show the old line because the
+// branch never reached them, and the merge can be perfect and still drop a name
+// match. Both halves of `pending-ness.md` §6 are here too: the empty state
+// explains an absence, a non-empty page qualifies a presence, and the gallery
+// says nothing at all because it never claimed completeness.
 
 import { describe, it, expect } from "vitest";
 import { createGallerySearch, type GallerySearchCtx } from "../../src/pages/gallerySearch";
 import type { SearchState } from "../../src/pages/noteSearch";
-import type { LazyEngine } from "../../src/render/lazy";
+import type { SearchResult } from "../../src/pages/galleryCards";
+import type { Entry, Id, Listing, NoteSummary } from "../../src/core/types";
+import type { LocalHit } from "../../src/search/localSearch";
 
-/** A hit shaped like the server's, enough for `groupHits` to make a row of it. */
-function hit(noteId: string, name: string) {
-  return { noteId, noteName: name, pageIndex: 0, snippet: "an <mark>excerpt</mark>", kind: 0 };
+/** One matching DOCUMENT, as the engine hands it over: an id and its pages. */
+function doc(fileId: number, pages: number[], updatedAt = 0): LocalHit {
+  return { md5: `md5-${fileId}`, fileId, pages, updatedAt };
+}
+
+/** A note in the cached tree — the other half of every row (see `searchResults`). */
+function note(id: string, name: string, fileType = "note"): NoteSummary {
+  return {
+    kind: "note",
+    id,
+    name,
+    pageCount: 1,
+    firstPage: { index: 0, hash: null },
+    updatedAt: 0,
+    fileType,
+    fileHash: null,
+    hasRecognizedText: true,
+  } as NoteSummary;
+}
+
+/** One cached folder listing, which is all `folders.values()` ever yields. */
+function listing(entries: Entry[]): Listing {
+  return { folderId: null, path: [], entries, syncVersion: 1 };
+}
+
+function results(query: string, documents: LocalHit[]): SearchState {
+  return { kind: "results", query, documents };
 }
 
 /**
  * The renderer with every collaborator stubbed to the smallest thing that
  * satisfies it. Nothing here is a fake of the search — the search state is
  * handed in directly — so a failure is always about what the renderer chose to
- * paint.
+ * paint. `resultCard` records the {@link SearchResult} it was handed, because
+ * half of what this file asserts is the JOIN rather than the DOM.
  */
-function harness(initial: { state: SearchState; pending: number | null }) {
+function harness(initial: { state: SearchState; pending: number | null; tree?: Entry[]; treeLoaded?: boolean }) {
   const gallery = document.createElement("section");
   let state = initial.state;
   let pending = initial.pending;
+  const tree = initial.tree ?? [];
+  const built: SearchResult[] = [];
 
   const ctx: GallerySearchCtx = {
     gallery,
-    // Never reached: only the append path frees lazy slots, and these tests
-    // paint from scratch.
-    galleryEngine: { remove: () => {} } as unknown as LazyEngine,
     getSearchState: () => state,
-    loadMore: () => Promise.resolve(),
-    folders: { values: () => [] }, // no cached tree: the name half matches nothing
-    treeLoaded: () => true,
+    folders: { values: () => (tree.length === 0 ? [] : [listing(tree)]) },
+    treeLoaded: () => initial.treeLoaded ?? true,
     labelFor: (f) => f.name,
     resultCard: (r) => {
+      built.push(r);
       const card = document.createElement("article");
-      card.textContent = r.noteName;
+      card.className = "card--result";
+      card.textContent = r.note.name;
       return card;
     },
     emptyState: (title, body) => {
       const box = document.createElement("div");
       box.className = "empty";
-      box.dataset.title = title;
+      box.dataset["title"] = title;
       box.textContent = body;
       return box;
     },
@@ -57,8 +86,11 @@ function harness(initial: { state: SearchState; pending: number | null }) {
 
   const search = createGallerySearch(ctx);
   return {
+    gallery,
+    built,
     paint(q = "rutabaga") {
       gallery.replaceChildren();
+      built.length = 0;
       search.renderSearch(q);
       return gallery;
     },
@@ -69,78 +101,213 @@ function harness(initial: { state: SearchState; pending: number | null }) {
       state = s;
     },
     emptyBody: () => gallery.querySelector(".empty")?.textContent ?? "",
+    head: () => gallery.querySelector(".section-head")?.textContent ?? "",
     notices: () => [...gallery.querySelectorAll(".hits__notice")].map((n) => n.textContent),
+    rows: () => [...gallery.querySelectorAll(".card--result")].map((n) => n.textContent),
   };
 }
 
-const noHits: SearchState = {
-  kind: "results",
-  query: "rutabaga",
-  hits: [],
-  usedFuzzy: false,
-  coverage: { notes: 4, unsearchable: 0, pending: 0 },
-};
+// A document matching by transcript is only a row once the LISTING names it —
+// the index ships no names (§4.1) and may legitimately hold documents the live
+// library no longer has (§2.7).
+describe("the join between a hit and the listing", () => {
+  it("names a transcript hit from the cached tree and counts its pages", () => {
+    const h = harness({
+      state: results("aurora", [doc(7, [2, 5, 9])]),
+      pending: 0,
+      tree: [note("7", "Weekly review")],
+    });
+    h.paint("aurora");
+
+    expect(h.rows()).toEqual(["Weekly review"]);
+    expect(h.built[0]?.pages).toEqual([2, 5, 9]);
+    expect(h.built[0]?.nameMatched).toBe(false);
+  });
+
+  // THE INTERSECTION. §2.7 makes the local index a legitimate SUPERSET of the
+  // live library, and correctness comes from intersecting hits with the
+  // listing — which is also the only thing that could have named the row.
+  it("DROPS a hit the listing does not name rather than rendering it anonymously", () => {
+    const h = harness({
+      state: results("aurora", [doc(7, [1]), doc(404, [1, 2])]),
+      pending: 0,
+      tree: [note("7", "Weekly review")],
+    });
+    h.paint("aurora");
+
+    expect(h.rows()).toEqual(["Weekly review"]);
+    expect(h.head()).toContain("1 note");
+  });
+
+  // `files.id` is a number in the index and its decimal string in the listing.
+  // Getting this wrong matches nothing at all, silently.
+  it("joins the index's numeric file id to the listing's string id", () => {
+    const h = harness({ state: results("aurora", [doc(12, [0])]), pending: 0, tree: [note("12", "Twelve")] });
+    h.paint("aurora");
+    expect(h.rows()).toEqual(["Twelve"]);
+  });
+
+  it("takes the segment kind from the listing's file type, not from the hit", () => {
+    const h = harness({
+      state: results("readme", [doc(1, [3]), doc(2, [4])]),
+      pending: 0,
+      tree: [note("1", "readme", "txt"), note("2", "Weekly review", "note")],
+    });
+    h.paint("readme");
+
+    expect(h.built.find((r) => r.noteId === "1")?.kind).toBe(1);
+    expect(h.built.find((r) => r.noteId === "2")?.kind).toBe(0);
+  });
+});
+
+// NAME MATCHING IS UNAFFECTED by the switch: it was always answered from the
+// cached tree, with no round trip and no endpoint.
+describe("the name half of the query", () => {
+  it("still merges filename matches that no transcript hit named", () => {
+    const h = harness({
+      state: results("rut", [doc(7, [1])]),
+      pending: 0,
+      tree: [note("7", "Weekly review"), note("8", "Rutabaga plans")],
+    });
+    h.paint("rut");
+
+    expect(h.rows()).toEqual(["Rutabaga plans", "Weekly review"]);
+    // A name-only match reached no page, so its row has nothing to count.
+    expect(h.built.find((r) => r.noteId === "8")?.pages).toEqual([]);
+  });
+
+  it("marks a document that matched BOTH ways once, as a name match", () => {
+    const h = harness({
+      state: results("weekly", [doc(7, [1, 2])]),
+      pending: 0,
+      tree: [note("7", "Weekly review")],
+    });
+    h.paint("weekly");
+
+    expect(h.rows()).toEqual(["Weekly review"]);
+    expect(h.built[0]?.nameMatched).toBe(true);
+    // …and it keeps its pages: it is one document, not two rows.
+    expect(h.built[0]?.pages).toEqual([1, 2]);
+  });
+
+  it("puts name matches first and otherwise keeps the engine's rank order", () => {
+    const h = harness({
+      // Rank order is the engine's: most matching pages first.
+      state: results("plan", [doc(1, [0, 1, 2]), doc(2, [5])]),
+      pending: 0,
+      tree: [note("1", "Alpha"), note("2", "Beta"), note("3", "Plan B")],
+    });
+    h.paint("plan");
+
+    expect(h.rows()).toEqual(["Plan B", "Alpha", "Beta"]);
+  });
+});
+
+// THE CONTROL IS GONE, not hidden. A whole local index answers whole: there is
+// no cursor to spend and nothing that may still grow within one query.
+describe("no continuation", () => {
+  it("paints no 'More results' affordance, whatever the result size", () => {
+    const h = harness({
+      state: results("a", [doc(1, [0]), doc(2, [1]), doc(3, [2])]),
+      pending: 0,
+      tree: [note("1", "One"), note("2", "Two"), note("3", "Three")],
+    });
+    h.paint("a");
+
+    expect(h.gallery.querySelector(".hits__more")).toBeNull();
+    expect(h.gallery.textContent).not.toContain("More results");
+  });
+
+  // The old header spoke in floors — "3+ notes · 20+ pages" — because the
+  // server terminated at a page boundary and never counted. It counts now.
+  it("states the counts plainly, with no '+' floors", () => {
+    const h = harness({
+      state: results("a", [doc(1, [0, 1]), doc(2, [4])]),
+      pending: 0,
+      tree: [note("1", "One"), note("2", "Two")],
+    });
+    h.paint("a");
+
+    expect(h.head()).toContain("2 notes · 3 pages");
+    expect(h.head()).not.toContain("+");
+  });
+
+  it("counts only documents when nothing matched by transcript", () => {
+    const h = harness({ state: results("one", []), pending: 0, tree: [note("1", "One")] });
+    h.paint("one");
+    expect(h.head()).toContain("1 note");
+    expect(h.head()).not.toContain("page");
+  });
+});
+
+// A FAILED SEARCH IS ITS OWN STATE, and since `golden-search.md` §6 step 6 it is
+// reachable: there is no server fallback behind the index, so an engine that
+// cannot answer reaches the results area. What it may NOT do is claim failure
+// while the thing it needs is still arriving.
+describe("a search that failed", () => {
+  it("says so, distinctly from 'no matches'", () => {
+    const h = harness({ state: { kind: "error", query: "aurora" }, pending: 0, tree: [note("1", "One")] });
+    h.paint("aurora");
+    expect(h.gallery.querySelector(".empty")?.getAttribute("data-title")).toBe("Couldn't search");
+  });
+
+  // The index intersects its answer with the cached tree and raises while that
+  // cache is still empty — the ordinary state for the first moments after boot.
+  // That is early, not broken, and it reads as the search still running.
+  it("reads as still searching while the tree walk has not finished", () => {
+    const h = harness({ state: { kind: "error", query: "aurora" }, pending: 0, treeLoaded: false });
+    h.paint("aurora");
+    expect(h.gallery.querySelector(".empty")?.getAttribute("data-title")).toBe("Searching…");
+  });
+});
 
 describe("the search renderer's pending sentences", () => {
   // THE HEADLINE. A just-uploaded file returns no matches for itself, and
-  // "No matches" alone is a completeness claim the server knows to be false.
+  // "No matches" alone is a completeness claim the client knows to be false.
   it("says a zero-hit search is still indexing rather than leaving 'No matches' unqualified", () => {
-    const h = harness({
-      state: { ...noHits, coverage: { notes: 4, unsearchable: 0, pending: 3 } },
-      pending: null,
-    });
+    const h = harness({ state: results("rutabaga", []), pending: 3 });
     h.paint();
     expect(h.emptyBody()).toContain("3 documents are still being indexed");
   });
 
-  // The two numbers, side by side, in the order that tells the reader what to
+  // The two sentences, side by side, in the order that tells the reader what to
   // do: waiting helps with the first and never helps with the second.
   it("says BOTH sentences when both apply, pending first", () => {
-    const h = harness({
-      state: { ...noHits, coverage: { notes: 40, unsearchable: 12, pending: 2 } },
-      pending: null,
-    });
+    const h = harness({ state: results("rutabaga", []), pending: 2 });
     h.paint();
     const body = h.emptyBody();
     expect(body).toContain("2 documents are still being indexed");
-    expect(body).toContain("12 of your 40 notes have no recognised text");
-    expect(body.indexOf("still being indexed")).toBeLessThan(body.indexOf("no recognised text"));
+    expect(body).toContain("Only notes recognised on the device are searchable.");
+    expect(body.indexOf("still being indexed")).toBeLessThan(body.indexOf("recognised"));
   });
 
   // Nothing outstanding is the ordinary case, and it must read exactly as it did
   // before any of this existed.
-  it("falls back to the unquantified coverage sentence when nothing is outstanding", () => {
-    const h = harness({ state: noHits, pending: 0 });
+  it("falls back to the coverage sentence alone when nothing is outstanding", () => {
+    const h = harness({ state: results("rutabaga", []), pending: 0 });
     h.paint();
     expect(h.emptyBody()).toBe("Only notes recognised on the device are searchable.");
   });
 
   // The non-empty half: the list implies "this is what there is", and while a
   // derive is outstanding it is not.
-  it("qualifies a NON-EMPTY page from the live channel, since that response carries no coverage", () => {
-    const h = harness({
-      state: { kind: "results", query: "rutabaga", hits: [hit("7", "Notes")], usedFuzzy: false, coverage: null },
-      pending: 2,
-    });
+  it("qualifies a NON-EMPTY page from the live channel, which is now the only source", () => {
+    const h = harness({ state: results("rutabaga", [doc(7, [0])]), pending: 2, tree: [note("7", "Notes")] });
     h.paint();
     expect(h.notices()).toContain("More may appear — 2 documents are still being indexed.");
   });
 
   it("says nothing over results when nothing is outstanding, and nothing when the server never said", () => {
-    const withHits: SearchState = {
-      kind: "results",
-      query: "rutabaga",
-      hits: [hit("7", "Notes")],
-      usedFuzzy: false,
-      coverage: null,
-    };
-    const zero = harness({ state: withHits, pending: 0 });
+    const withHits = results("rutabaga", [doc(7, [0])]);
+    const tree = [note("7", "Notes")];
+
+    const zero = harness({ state: withHits, pending: 0, tree });
     zero.paint();
     expect(zero.notices()).toEqual([]);
 
     // `null` is "the server did not say" — an old server, or a client that fell
     // back to polling. It must read as silence, never as a claim either way.
-    const silent = harness({ state: withHits, pending: null });
+    const silent = harness({ state: withHits, pending: null, tree });
     silent.paint();
     expect(silent.notices()).toEqual([]);
   });
@@ -148,29 +315,13 @@ describe("the search renderer's pending sentences", () => {
   // The live half: a frame arrives, the number moves, the next paint says so.
   // Without this the sentence is only ever as fresh as the last keystroke.
   it("follows the live channel — a frame that changes the count changes the next paint", () => {
-    const h = harness({
-      state: { kind: "results", query: "rutabaga", hits: [hit("7", "Notes")], usedFuzzy: false, coverage: null },
-      pending: 3,
-    });
+    const h = harness({ state: results("rutabaga", [doc(7, [0])]), pending: 3, tree: [note("7", "Notes")] });
     h.paint();
     expect(h.notices()).toEqual(["More may appear — 3 documents are still being indexed."]);
 
     h.setPending(0); // the worker finished; the server pushed `pending: 0`
     h.paint();
     expect(h.notices()).toEqual([]);
-  });
-
-  // A zero-hit response's own number wins over the channel's: it is the fresher
-  // of the two and it is guaranteed present. They are the same number from two
-  // routes, and adding them would double-count.
-  it("prefers the response's own count on a zero-hit page over the live channel's", () => {
-    const h = harness({
-      state: { ...noHits, coverage: { notes: 4, unsearchable: 0, pending: 1 } },
-      pending: 9,
-    });
-    h.paint();
-    expect(h.emptyBody()).toContain("1 document is still being indexed");
-    expect(h.emptyBody()).not.toContain("9 documents");
   });
 
   // A failed search is not an empty one, and it is not a place to explain

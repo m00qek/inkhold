@@ -1,9 +1,12 @@
-// The primitives BOTH search-index decoders are built on — the cursor, the
-// varint, the bounds checks and the one error class. `termCodec.ts` reads the
-// term payload (`TIDX`) and `manifestCodec.ts` reads the manifest (`SMAN`); the
-// two formats are different but they are spelt the same way, by the same encoder
-// (`backend/services/search/index_export.zig`), and their readers must fail the
-// same way too.
+// The primitives a search-index decoder is built on — the cursor, the varint,
+// the bounds checks and the one error class. `manifestCodec.ts` reads the
+// manifest (`SMAN`) with them.
+//
+// IT HAD A SECOND TENANT until §6 step 6: `termCodec.ts` read the old `TIDX`
+// term payload, whose format the terms stream replaced (§0.1). What survives is
+// the shape of the rule rather than the sharing — a payload from
+// `backend/services/search/index_export.zig` is spelt this way, and a reader of
+// one must fail the way a reader of another does.
 //
 // Extracted when the manifest decoder landed, rather than copied. A second
 // hand-written varint reader is not a style problem: it is a second set of

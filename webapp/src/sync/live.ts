@@ -31,12 +31,12 @@
 //
 // KNOWN LIMIT OF THE POLLING FALLBACK: it reads only the FIRST frame of the
 // response, which is the sync one, so a client that has fallen back to polling
-// stops hearing about indexing. It is not left blind — a zero-hit search still
-// carries the count in its own response (`Coverage.pending`) — but the "results
-// may grow" line over a non-empty page needs this channel and simply will not
-// appear there. Fixing it means teaching `fetchVersionOnce` to drain the whole
-// one-shot body, and nobody has needed it: the fallback is for a browser with no
-// `EventSource` at all.
+// stops hearing about indexing — and this channel is now the ONLY source for
+// that count, since a query is answered locally and no response comes back with
+// one attached. Both the empty state's "still being indexed" and the "results
+// may grow" line therefore go quiet there. Fixing it means teaching
+// `fetchVersionOnce` to drain the whole one-shot body, and nobody has needed it:
+// the fallback is for a browser with no `EventSource` at all.
 
 import type { IndexStatus, LiveChannel } from "./types";
 

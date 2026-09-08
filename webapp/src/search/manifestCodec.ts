@@ -8,9 +8,9 @@
 // file to make the Zig test pass turns this side red, which is the only
 // arrangement that catches a format change made on one side only.
 //
-// Pure: no wasm, no network, no DOM. It sits beside `termCodec.ts` and shares
-// its cursor (`wire.ts`), because the two payloads are spelt the same way by the
-// same encoder and must fail the same way too.
+// Pure: no wasm, no network, no DOM. It reads through `wire.ts`'s cursor, which
+// is where the encoder's spelling and the one failure mode live — shared with
+// whatever else this encoder emits, rather than restated here.
 //
 // ## THE MANIFEST IS COMPLETE OR IT IS BROKEN
 //

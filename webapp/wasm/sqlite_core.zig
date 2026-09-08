@@ -58,6 +58,10 @@
 //!     be the second tokenizer implementation the whole design exists to avoid,
 //!     and a JS-side escaper would have to decide what FTS5 does with `-` — this
 //!     way punctuation simply folds to no terms.
+//!   * `idx_fuzzy` owns the TYPO LADDER for the same reason twice over: the
+//!     distance is measured on the folded token against the folded vocabulary
+//!     (`foldToken`), and the vocabulary it scans is inside this module. See the
+//!     "Typo tolerance" section below.
 //!
 //! `search/query.ts` keeps ranking policy, snippets and the staleness count;
 //! §9.4 (tier-1 order vs bm25 order) is a client decision and nothing here
@@ -82,6 +86,23 @@
 //!   i32  idx_query(u8* q, usize len, u32 limit)    — TOTAL matches, or -rc.
 //!   i32  idx_hit(u32 i)         — doc id of hit `i` (i < min(total, limit)), or -1.
 //!
+//! Typo fallback:
+//!   i32  idx_fuzzy(u8* q, usize len, u32 limit)
+//!        `idx_query` with the ladder attached. IDENTICAL to it — same total,
+//!        same `idx_hit` buffer, same errors — whenever the query AS TYPED
+//!        matched anything at all; only a total of 0 goes on to re-run a widened
+//!        expression. So a caller may switch to it wholesale and nothing about a
+//!        query that matches changes.
+//!   u8*  idx_expansion_ptr() / u32 idx_expansion_len()
+//!        WHAT was substituted, so the UI can say "matched **reunião**": UTF-8
+//!        `typed \t matched \n` per pair, in the order the expression names
+//!        them. Rewritten by EVERY query — an exact query that matched leaves it
+//!        empty, which is the fallback rule made visible. A length of 0 means
+//!        nothing was substituted and the pointer must not be dereferenced.
+//!        Neither half can contain a delimiter: `typed` is a whitespace-
+//!        delimited token, and `matched` is an fts5 term, which `unicode61`
+//!        cannot emit containing a tab or a newline (it splits on both).
+//!
 //! Persistence:
 //!   i32  idx_serialize()        — image length, or -rc. Bytes at `idx_image_ptr`.
 //!   u8*  idx_image_ptr()
@@ -104,7 +125,8 @@
 //!
 //! `memory` can grow on any call, so JS must re-read every pointer AFTER the call
 //! that produced it. `idx_image_ptr` is valid until the next
-//! `idx_serialize`/`idx_close`; the error message until the next call of any kind.
+//! `idx_serialize`/`idx_close`; the expansion until the next query of either
+//! kind; the error message until the next call of any kind.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -171,6 +193,10 @@ var image_len: usize = 0;
 var match: std.ArrayList(u8) = .empty;
 var hits: std.ArrayList(u32) = .empty;
 var errbuf: std.ArrayList(u8) = .empty;
+/// What the typo ladder substituted, as `typed \t matched \n` pairs. Cleared by
+/// EVERY query rather than only by a fuzzy one, so it can never outlive the
+/// answer it explains — see the header's ABI note.
+var expansion: std.ArrayList(u8) = .empty;
 
 /// `-SQLITE_MISUSE`: the caller reached a query/build entry point with no open
 /// database. Distinct from `-SQLITE_ERROR`, which is a real statement failure.
@@ -271,6 +297,7 @@ export fn idx_close() void {
     }
     hits.clearRetainingCapacity();
     match.clearRetainingCapacity();
+    expansion.clearRetainingCapacity();
 }
 
 /// One explicit transaction around a whole build, because FTS5 flushes its
@@ -364,54 +391,87 @@ fn buildMatch(h: *c.sqlite3, query: []const u8) i32 {
         return -rc;
     }
 
+    // The terms of ONE token at a time; nothing here outlives the query.
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var terms: std.ArrayList([]const u8) = .empty;
+
     var it = std.mem.tokenizeAny(u8, query, " \t\r\n\x0b\x0c");
     while (it.next()) |tok| {
-        rc = c.sqlite3_exec(h, fold_reset_sql, null, null, null);
-        if (rc != c.SQLITE_OK) {
-            setErrDb();
-            return -rc;
-        }
-        {
-            var s: ?*c.sqlite3_stmt = null;
-            rc = c.sqlite3_prepare_v2(h, "INSERT INTO temp.token_fold(rowid, t) VALUES(1, ?1)", -1, &s, null);
-            if (rc != c.SQLITE_OK) {
-                setErrDb();
-                return -rc;
-            }
-            defer _ = c.sqlite3_finalize(s);
-            rc = c.sqlite3_bind_text(s, 1, tok.ptr, @intCast(tok.len), null);
-            if (rc != c.SQLITE_OK) {
-                setErrDb();
-                return -rc;
-            }
-            rc = c.sqlite3_step(s);
-            if (rc != c.SQLITE_DONE) {
-                setErrDb();
-                return -rc;
-            }
-        }
-        var s: ?*c.sqlite3_stmt = null;
-        rc = c.sqlite3_prepare_v2(h, "SELECT term FROM temp.token_fold_vocab", -1, &s, null);
-        if (rc != c.SQLITE_OK) {
-            setErrDb();
-            return -rc;
-        }
-        defer _ = c.sqlite3_finalize(s);
-        while (true) {
-            rc = c.sqlite3_step(s);
-            if (rc == c.SQLITE_DONE) break;
-            if (rc != c.SQLITE_ROW) {
-                setErrDb();
-                return -rc;
-            }
-            const text = c.sqlite3_column_text(s, 0) orelse continue;
+        terms.clearRetainingCapacity();
+        rc = foldToken(h, arena, tok, &terms);
+        if (rc != 0) return rc;
+        for (terms.items) |term| {
             if (match.items.len != 0) match.append(gpa, ' ') catch return -c.SQLITE_NOMEM;
-            appendQuoted(std.mem.span(text)) catch return -c.SQLITE_NOMEM;
+            appendQuoted(term) catch return -c.SQLITE_NOMEM;
         }
     }
 
     const open_ended = query.len != 0 and !std.ascii.isWhitespace(query[query.len - 1]);
     if (match.items.len != 0 and open_ended) match.append(gpa, '*') catch return -c.SQLITE_NOMEM;
+    return 0;
+}
+
+/// Every term `tok` tokenizes to, in vocabulary order, appended to `out` and
+/// duped from `alloc`. Empty for punctuation. `fold_ddl` must already have run
+/// on `h`. Returns 0, or `-rc`.
+///
+/// THE fold, singular: `buildMatch` asks it what to search for and the typo
+/// ladder asks it what to measure a distance against, so the string the index is
+/// queried with and the string a candidate is compared to cannot come from two
+/// different tokenizers. That is the same argument that put the fold in wasm at
+/// all, applied one level down.
+fn foldToken(
+    h: *c.sqlite3,
+    alloc: std.mem.Allocator,
+    tok: []const u8,
+    out: *std.ArrayList([]const u8),
+) i32 {
+    var rc = c.sqlite3_exec(h, fold_reset_sql, null, null, null);
+    if (rc != c.SQLITE_OK) {
+        setErrDb();
+        return -rc;
+    }
+    {
+        var s: ?*c.sqlite3_stmt = null;
+        rc = c.sqlite3_prepare_v2(h, "INSERT INTO temp.token_fold(rowid, t) VALUES(1, ?1)", -1, &s, null);
+        if (rc != c.SQLITE_OK) {
+            setErrDb();
+            return -rc;
+        }
+        defer _ = c.sqlite3_finalize(s);
+        rc = c.sqlite3_bind_text(s, 1, tok.ptr, @intCast(tok.len), null);
+        if (rc != c.SQLITE_OK) {
+            setErrDb();
+            return -rc;
+        }
+        rc = c.sqlite3_step(s);
+        if (rc != c.SQLITE_DONE) {
+            setErrDb();
+            return -rc;
+        }
+    }
+    var s: ?*c.sqlite3_stmt = null;
+    rc = c.sqlite3_prepare_v2(h, "SELECT term FROM temp.token_fold_vocab", -1, &s, null);
+    if (rc != c.SQLITE_OK) {
+        setErrDb();
+        return -rc;
+    }
+    defer _ = c.sqlite3_finalize(s);
+    while (true) {
+        rc = c.sqlite3_step(s);
+        if (rc == c.SQLITE_DONE) break;
+        if (rc != c.SQLITE_ROW) {
+            setErrDb();
+            return -rc;
+        }
+        const text = c.sqlite3_column_text(s, 0) orelse continue;
+        // Duped because the row is invalidated by the next step, and the ladder
+        // holds every token's terms across the whole vocabulary scan.
+        const owned = alloc.dupe(u8, std.mem.span(text)) catch return -c.SQLITE_NOMEM;
+        out.append(alloc, owned) catch return -c.SQLITE_NOMEM;
+    }
     return 0;
 }
 
@@ -426,11 +486,23 @@ fn buildMatch(h: *c.sqlite3, query: []const u8) i32 {
 export fn idx_query(ptr: [*]const u8, len: usize, limit: u32) i32 {
     const h = db orelse return no_db;
     hits.clearRetainingCapacity();
+    // An exact query explains nothing, and a stale explanation reads like a
+    // fresh one — the same trap the error message documents.
+    expansion.clearRetainingCapacity();
 
     const rc0 = buildMatch(h, ptr[0..len]);
     if (rc0 != 0) return rc0;
     // Nothing tokenizable: no results, and not an error.
     if (match.items.len == 0) return 0;
+
+    return runMatch(h, limit);
+}
+
+/// Step whatever expression is in `match`, buffering the first `limit` rowids
+/// for `idx_hit` and returning the exact total. Shared by the exact pass and the
+/// fuzzy re-run so the two cannot count differently.
+fn runMatch(h: *c.sqlite3, limit: u32) i32 {
+    hits.clearRetainingCapacity();
 
     var stmt: ?*c.sqlite3_stmt = null;
     var rc = c.sqlite3_prepare_v2(h, "SELECT rowid FROM docs WHERE docs MATCH ?1 ORDER BY rank", -1, &stmt, null);
@@ -465,6 +537,543 @@ export fn idx_query(ptr: [*]const u8, len: usize, limit: u32) i32 {
 export fn idx_hit(i: u32) i32 {
     if (i >= hits.items.len) return -1;
     return @intCast(hits.items[i]);
+}
+
+// ---------------------------------------------------------------------------
+// Typo tolerance — a FALLBACK, never a widening
+// ---------------------------------------------------------------------------
+//
+// MOVED, not rewritten, from `backend/services/search/fuzzy.zig`, which
+// `golden-search.md` §6.1 says is where the candidate ladder goes: "the
+// `fts5vocab` corpus walk, `VocabSource` and `betterCandidate`, which move to
+// the browser". Step 6 deletes the server's copy, so what is not here is gone.
+//
+// It is in the WASM rather than in `webapp/src/search/` for three reasons, and
+// the first is the one the design rests on:
+//
+//   1. `foldToken` runs the query token through THE INDEX'S OWN TOKENIZER, so
+//      "calígrafa" and "caligrafa" reach the distance function as one string and
+//      the comparison is folded-against-folded. A TypeScript fold would be a
+//      second opinion about `remove_diacritics 2`, which is exactly what putting
+//      SQLite in the browser exists to prevent.
+//   2. The distance is over CODEPOINTS of Portuguese text. A TypeScript decoder
+//      would be a second opinion about Unicode as well.
+//   3. The vocabulary lives inside this module's FTS5 index. Exporting tens of
+//      thousands of terms across the JS boundary on every failed search would
+//      cost far more than scanning them where they already are.
+//
+// Why any of it exists: the searchable text is the device's own handwriting
+// recognition, so the CORPUS is misspelt, not just the query. "Danie Witches.
+// Arch Interview" and "usar infra-set dá trabalho!" are real rows. Exact
+// matching therefore fails even when the user types the word correctly, which is
+// a stronger case than ordinary typo tolerance.
+//
+// `spellfix1`, `editdist3` and `soundex` are not in this build, and vendoring
+// spellfix1 was rejected: its phonetics are English-oriented, the same reason the
+// `porter` stemmer was rejected for a Portuguese corpus. So the index's own
+// vocabulary is walked and the distance computed here.
+//
+// ## SCALING ASSUMPTION — the shape is unchanged, the DANGER is not
+//
+// Every fallback search scans the ENTIRE vocabulary once, comparing each term
+// against each query token: `O(V · T · (L² + cap))` for V terms and T query
+// tokens of at most L codepoints. Both the distance and the shortlist are capped
+// by constants, so the scan is LINEAR in V and stays linear. That shape and those
+// caps are carried over exactly.
+//
+// What does NOT carry over is the server's reason for caring so much. There, the
+// scan ran under a coarse global DB lock, so going slow did not merely make
+// search slow — it stalled device sync behind it, and the zero-hit prefix
+// `reunaio` measured 6,133.8 ms p50 on the Pi with 98% of it in this scan
+// (`wasm-fuzzy-bench.md`). In the browser there is no lock and nothing is queued
+// behind the scan: the worst case is one tab's own search box, on a search that
+// already returned nothing. So the specific danger evaporates and the
+// linear-in-V assumption is all that remains — and it does remain: a large or
+// multi-tenant vocabulary would still need this replaced by an n-gram or
+// deletion-neighbour index, or a real fuzzy extension, NOT merely a bigger cap.
+//
+// MEASURED here over the real library — 23,964 pages, 63,577 distinct terms —
+// through the shipped artifact: a query that MATCHES costs 1.42 ms against the
+// exact path's 1.37 ms, so the fallback is free when it does not fire, and one
+// that does not costs 71.3 ms p50 for the whole scan. Two orders of magnitude
+// better than the Pi, and still the most expensive thing this module does.
+
+/// How many vocabulary terms one search may add. bm25 over a hundred OR'd terms
+/// is not a ranking, it is noise — and each extra term is another posting list to
+/// merge. 32 is far more than a real typo needs (a misspelt word has a handful of
+/// near neighbours, not dozens) while keeping the expression small.
+///
+/// It is a CEILING, not a target. What the expansion actually offers is the
+/// best-ranked tier and nothing else (see `betterCandidate`), which in practice
+/// is one or two terms; the cap only decides what happens when a query has more
+/// equally-good readings than are worth searching for.
+const max_fuzzy_terms: usize = 32;
+
+/// Longest token, in codepoints, the distance function will consider. Past this
+/// the token is left exact: a 64-character "word" is not a typo. Also the size of
+/// `editDistance`'s stack rows, which is why it is a constant and not a policy.
+const max_fuzzy_term_cp: usize = 64;
+
+/// The `fts5vocab` view of the index's OWN terms — the candidate pool. Created
+/// per call with `IF NOT EXISTS` for the same reason the fold table is: a
+/// deserialized connection is a new connection and has no temp tables at all.
+const vocab_ddl =
+    "CREATE VIRTUAL TABLE IF NOT EXISTS temp.docs_vocab USING fts5vocab('main','docs','row');";
+
+const vocab_select_sql = "SELECT term FROM temp.docs_vocab;";
+
+/// The edit distance a token of `len` term-codepoints tolerates.
+///
+/// "Edit" here is `editDistance`'s, i.e. Damerau-Levenshtein: a swap of two
+/// adjacent characters costs ONE, like an insertion or a deletion. The rungs
+/// below are unchanged by that — what changes is which words a rung can reach,
+/// not how far it reaches.
+///
+/// The threshold MUST scale with length. One edit on a four-letter word is a huge
+/// net — "casa" reaches casa/cara/caso/asa/cama and on — while one edit on a
+/// twelve-letter word is very nearly the word itself. A flat threshold makes
+/// short tokens match almost anything, which is exactly the precision loss this
+/// whole design is trying to avoid. The 0 / 1 / 2 ladder is the conventional one,
+/// and the ≤3 rung means short tokens get NO expansion at all: at that length a
+/// single edit is not a typo signal, it is a different word.
+///
+/// `len` is counted by `termLen`, i.e. in CODEPOINTS — the corpus is Portuguese,
+/// and "ção" must be three characters and not five.
+fn maxEdits(len: usize) usize {
+    if (len <= 3) return 0;
+    if (len <= 7) return 1;
+    return 2;
+}
+
+/// One vocabulary term the scan found near a query token, with the two numbers
+/// that decide whether it is a BETTER guess than another one.
+const Candidate = struct {
+    /// The vocabulary term itself, as the index holds it (already folded).
+    term: []const u8,
+    /// Edit distance from the query token, `editDistance`'s answer.
+    dist: usize,
+    /// How much longer or shorter the candidate is than the token, in
+    /// codepoints. See `betterCandidate` for why this is the tiebreak.
+    delta: usize,
+};
+
+/// The ranking rule, in one place: which of two near-misses is the better guess.
+///
+///   1. **Shorter edit distance wins.** One edit away is a likelier reading of
+///      what was meant than two.
+///   2. **Then the smaller length difference.** This is what separates a
+///      transposition from a deletion at the same distance, and it is why `tset`
+///      prefers `test` over `set`: both are one edit away, but the swap preserves
+///      length (delta 0) while dropping the leading `t` does not (delta 1).
+///      Somebody who typed four characters more probably meant a four-character
+///      word than a three-character one.
+///   3. **Then the term itself, byte order.** Not meaningful, deliberately — it
+///      exists so that two candidates the first two rules cannot separate are
+///      still ordered the SAME WAY on every run. Without it the survivors of the
+///      cap would depend on `fts5vocab` iteration order, i.e. on which document
+///      happened to be indexed first, and the same query would answer differently
+///      before and after an unrelated sync.
+fn betterCandidate(a: Candidate, b: Candidate) bool {
+    if (a.dist != b.dist) return a.dist < b.dist;
+    if (a.delta != b.delta) return a.delta < b.delta;
+    return std.mem.order(u8, a.term, b.term) == .lt;
+}
+
+/// One query token on the fallback path.
+const FuzzyToken = struct {
+    /// The token as the PERSON typed it, which is half of what the UI renders.
+    raw: []const u8,
+    /// Every term it folded to — what the primary expression emits for it.
+    terms: []const []const u8,
+    /// The single term when it folded to exactly one, which is the only case
+    /// that can be expanded: a distance is measured against a vocabulary term,
+    /// and punctuation (no terms) or something that splits (several) has none to
+    /// measure. Null otherwise, and null when the ladder allows no edits.
+    term: ?[]const u8,
+    /// Whether the primary expression prefix-matches this token's last term.
+    prefix: bool,
+    /// `raw`'s length in term-codepoints, which is what the ladder rungs read and
+    /// what a mid-typing candidate is truncated to.
+    len: usize,
+    /// `term`'s length in codepoints, for the ranking's `delta`. Kept beside
+    /// `len` so the comparison is folded-against-folded, exactly like the
+    /// distance itself.
+    term_len: usize,
+    budget: usize,
+    /// Near-misses found by the scan, sorted by `betterCandidate`, never longer
+    /// than the cap.
+    cands: std.ArrayList(Candidate) = .empty,
+    /// The candidates that survived ranking and the shared cap, in rank order —
+    /// what actually goes into the expression.
+    alts: std.ArrayList([]const u8) = .empty,
+};
+
+/// Offers one near-miss to a token, keeping its list sorted by `betterCandidate`
+/// and never longer than `cap`.
+///
+/// A BOUNDED insertion sort rather than "collect everything, then sort": the scan
+/// walks the whole vocabulary, and a query whose budget happens to admit most of
+/// it would otherwise materialise the whole vocabulary per token before throwing
+/// nearly all of it away. Here the list is at most `cap` long at every moment, so
+/// the extra work per accepted candidate is `O(cap)` and the extra memory is
+/// `O(cap)` — the scan stays linear in vocabulary size, which is the property the
+/// scaling note above depends on.
+///
+/// `cand.term` is BORROWED (a live `fts5vocab` row); it is duped only if it is
+/// actually kept, so a rejected candidate costs no allocation at all.
+fn offer(alloc: std.mem.Allocator, t: *FuzzyToken, cap: usize, cand: Candidate) !void {
+    if (cap == 0) return;
+    var i: usize = 0;
+    while (i < t.cands.items.len and !betterCandidate(cand, t.cands.items[i])) : (i += 1) {}
+    // Worse than everything already held, with no room left to hold it.
+    if (i >= cap) return;
+
+    var owned = cand;
+    owned.term = try alloc.dupe(u8, cand.term);
+    if (t.cands.items.len < cap) {
+        try t.cands.insert(alloc, i, owned);
+    } else {
+        // Full: the worst entry falls off the end to make room.
+        var j = t.cands.items.len - 1;
+        while (j > i) : (j -= 1) t.cands.items[j] = t.cands.items[j - 1];
+        t.cands.items[i] = owned;
+    }
+}
+
+/// Rebuild `match` as the primary expression with an OR-group spliced in per
+/// expanded token, and `expansion` as the `typed \t matched \n` record of what
+/// that group added. Returns 1 when it widened anything, 0 when there was nothing
+/// to widen — in which case the caller must NOT re-run, because the expression
+/// would be the byte-identical one that just returned nothing — or `-rc`.
+///
+/// The shape is:
+///
+///     primary:  "funciona" "caligrafa"*
+///     fuzzy:    "funciona" AND ("caligrafa"* OR "caligrafia")
+///
+/// so the AND between tokens is preserved and every term — including the ones
+/// read out of `fts5vocab` — goes through the same quoting as before. The AND is
+/// written out rather than left implicit because FTS5 only lets the operator be
+/// omitted between two phrases: `"a" ("b" OR "c")` is a syntax error. Spelling it
+/// everywhere rather than only where a group appears keeps one rule instead of
+/// two, and means the same thing.
+///
+/// ## What goes into the OR-group is RANKED, not merely near enough
+///
+/// Every vocabulary term inside a token's budget is a candidate, but only the
+/// best tier is offered: `betterCandidate` orders them and everything the
+/// ordering can separate from the winner is dropped. Widening to the whole budget
+/// was how `tset` came back with `set` — one deletion away, exactly as `test` is
+/// one transposition away — and once both are in the group bm25 scores them
+/// alike, because it has no notion that one is a likelier reading of what was
+/// typed. Genuinely tied candidates all survive ("cala" really is equally close
+/// to casa, cara and cama); a worse one does not.
+///
+/// Terms from the vocabulary are index-derived rather than user-typed, but they
+/// are quoted anyway: expansion must not become a second, unaudited path into the
+/// parser, and defence in depth costs nothing here.
+fn buildFuzzyMatch(h: *c.sqlite3, query: []const u8) i32 {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var rc = c.sqlite3_exec(h, fold_ddl, null, null, null);
+    if (rc != c.SQLITE_OK) {
+        setErrDb();
+        return -rc;
+    }
+
+    var tokens: std.ArrayList(FuzzyToken) = .empty;
+    var it = std.mem.tokenizeAny(u8, query, " \t\r\n\x0b\x0c");
+    var expandable = false;
+    while (it.next()) |tok| {
+        var terms: std.ArrayList([]const u8) = .empty;
+        rc = foldToken(h, arena, tok, &terms);
+        if (rc != 0) return rc;
+        const len = termLen(tok);
+        const budget = if (len <= max_fuzzy_term_cp) maxEdits(len) else 0;
+        const term: ?[]const u8 = if (budget > 0 and terms.items.len == 1) terms.items[0] else null;
+        if (term != null) expandable = true;
+        tokens.append(arena, .{
+            .raw = tok,
+            .terms = terms.items,
+            .term = term,
+            .prefix = false,
+            .len = len,
+            .term_len = if (term) |x| cpLen(x) else 0,
+            .budget = budget,
+        }) catch return -c.SQLITE_NOMEM;
+    }
+    // Where `buildMatch` puts the `*`, restated: on the last term it emitted,
+    // when the query does not end in whitespace. That is the last term of the
+    // last token THAT PRODUCED ANY — `casa -` prefix-matches `casa`, because the
+    // hyphen folds away and contributes nothing to hang a star on.
+    if (query.len != 0 and !std.ascii.isWhitespace(query[query.len - 1])) {
+        var i = tokens.items.len;
+        while (i > 0) : (i -= 1) {
+            if (tokens.items[i - 1].terms.len != 0) {
+                tokens.items[i - 1].prefix = true;
+                break;
+            }
+        }
+    }
+    // Every token is too short (or unfoldable) to expand: the fallback has
+    // nothing to offer that the primary pass did not already try.
+    if (!expandable) return 0;
+
+    rc = c.sqlite3_exec(h, vocab_ddl, null, null, null);
+    if (rc != c.SQLITE_OK) {
+        setErrDb();
+        return -rc;
+    }
+    var vocab: ?*c.sqlite3_stmt = null;
+    rc = c.sqlite3_prepare_v2(h, vocab_select_sql, -1, &vocab, null);
+    if (rc != c.SQLITE_OK) {
+        setErrDb();
+        return -rc;
+    }
+    defer _ = c.sqlite3_finalize(vocab);
+    while (true) {
+        rc = c.sqlite3_step(vocab);
+        if (rc == c.SQLITE_DONE) break;
+        if (rc != c.SQLITE_ROW) {
+            setErrDb();
+            return -rc;
+        }
+        const raw_term = c.sqlite3_column_text(vocab, 0) orelse continue;
+        const vterm = std.mem.span(raw_term);
+        for (tokens.items) |*t| {
+            const term = t.term orelse continue;
+            // For the word still being typed the vocabulary term is TRUNCATED to
+            // the length typed so far, so a typo inside a half-written word is
+            // still reachable: "calugraf" vs "caligrafia"[0..8] is one edit,
+            // while against the whole term it is three and would be missed.
+            const cand = if (t.prefix) truncCodepoints(vterm, t.len) else vterm;
+            const d = editDistance(term, cand, t.budget) orelse continue;
+            // Distance 0 is the term the primary pass already searched for.
+            if (d == 0) continue;
+            const cand_len = cpLen(cand);
+            offer(arena, t, max_fuzzy_terms, .{
+                .term = vterm,
+                .dist = d,
+                // Measured against the string the DISTANCE was measured against,
+                // so a truncated mid-typing candidate is compared on the same
+                // footing as a whole term.
+                .delta = if (cand_len > t.term_len) cand_len - t.term_len else t.term_len - cand_len,
+            }) catch return -c.SQLITE_NOMEM;
+        }
+    }
+
+    // Only the BEST tier survives — see the `tset`/`set` case in the doc comment.
+    for (tokens.items) |*t| {
+        if (t.cands.items.len == 0) continue;
+        const best = t.cands.items[0];
+        var n: usize = 1;
+        while (n < t.cands.items.len and
+            t.cands.items[n].dist == best.dist and
+            t.cands.items[n].delta == best.delta) : (n += 1)
+        {}
+        t.cands.shrinkRetainingCapacity(n);
+    }
+
+    // `max_fuzzy_terms` is a budget for the whole SEARCH, so a multi-token query
+    // shares it round-robin: every token gets its best candidate before any token
+    // gets its second. Taking tokens in order instead would let one misspelt word
+    // eat the budget and leave the next unexpanded.
+    var added: usize = 0;
+    var round: usize = 0;
+    outer: while (true) : (round += 1) {
+        var progressed = false;
+        for (tokens.items) |*t| {
+            if (round >= t.cands.items.len) continue;
+            if (added >= max_fuzzy_terms) break :outer;
+            t.alts.append(arena, t.cands.items[round].term) catch return -c.SQLITE_NOMEM;
+            added += 1;
+            progressed = true;
+        }
+        if (!progressed) break;
+    }
+    if (added == 0) return 0;
+
+    match.clearRetainingCapacity();
+    expansion.clearRetainingCapacity();
+    for (tokens.items) |t| {
+        if (t.alts.items.len == 0) {
+            // Byte-for-byte what `buildMatch` emits for this token.
+            for (t.terms, 0..) |term, i| {
+                appendAnd() catch return -c.SQLITE_NOMEM;
+                appendQuoted(term) catch return -c.SQLITE_NOMEM;
+                if (t.prefix and i + 1 == t.terms.len) match.append(gpa, '*') catch return -c.SQLITE_NOMEM;
+            }
+            continue;
+        }
+        // An expandable token folded to exactly one term, so the group is that
+        // term OR the near-misses the ranking could not separate from each other.
+        appendAnd() catch return -c.SQLITE_NOMEM;
+        match.append(gpa, '(') catch return -c.SQLITE_NOMEM;
+        appendQuoted(t.terms[0]) catch return -c.SQLITE_NOMEM;
+        if (t.prefix) match.append(gpa, '*') catch return -c.SQLITE_NOMEM;
+        for (t.alts.items) |alt| {
+            match.appendSlice(gpa, " OR ") catch return -c.SQLITE_NOMEM;
+            appendQuoted(alt) catch return -c.SQLITE_NOMEM;
+            // Written from the SAME loop that writes the expression, so what is
+            // reported cannot name a substitution the search was not widened by.
+            expansion.appendSlice(gpa, t.raw) catch return -c.SQLITE_NOMEM;
+            expansion.append(gpa, '\t') catch return -c.SQLITE_NOMEM;
+            expansion.appendSlice(gpa, alt) catch return -c.SQLITE_NOMEM;
+            expansion.append(gpa, '\n') catch return -c.SQLITE_NOMEM;
+        }
+        match.append(gpa, ')') catch return -c.SQLITE_NOMEM;
+    }
+    return 1;
+}
+
+/// The explicit `AND` between two emitted phrases. See `buildFuzzyMatch`.
+fn appendAnd() !void {
+    if (match.items.len != 0) try match.appendSlice(gpa, " AND ");
+}
+
+/// `idx_query`, with the typo ladder behind it.
+///
+/// The exact pass runs FIRST and unmodified, and the ladder is reached only when
+/// it returned a total of zero. That ordering is the whole rule — expansion is a
+/// FALLBACK, never a widening — and it is enforced here rather than left to the
+/// caller, so there is no way to ask for a correction to a query that already had
+/// an answer.
+export fn idx_fuzzy(ptr: [*]const u8, len: usize, limit: u32) i32 {
+    const h = db orelse return no_db;
+
+    const total = idx_query(ptr, len, limit);
+    // Non-zero is either hits — nothing to correct — or a failure, which has
+    // nothing to fall back to. Either way this is `idx_query`'s answer verbatim.
+    if (total != 0) return total;
+
+    const rc = buildFuzzyMatch(h, ptr[0..len]);
+    // 0 is "nothing to expand", and re-running would ask the identical question.
+    if (rc <= 0) return rc;
+    return runMatch(h, limit);
+}
+
+export fn idx_expansion_ptr() ?[*]const u8 {
+    return expansion.items.ptr;
+}
+
+export fn idx_expansion_len() u32 {
+    return @intCast(expansion.items.len);
+}
+
+/// The first `n` codepoints of `s` (all of it when shorter).
+fn truncCodepoints(s: []const u8, n: usize) []const u8 {
+    var seen: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] & 0xC0 == 0x80) continue; // continuation byte
+        if (seen == n) return s[0..i];
+        seen += 1;
+    }
+    return s;
+}
+
+/// Decodes `s` into codepoints. Invalid UTF-8 degrades to one codepoint per byte
+/// rather than erroring: this is a ranking heuristic, not a parser.
+fn codepoints(buf: []u21, s: []const u8) []u21 {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len and n < buf.len) {
+        const l = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+        if (i + l > s.len) break;
+        buf[n] = std.unicode.utf8Decode(s[i..][0..l]) catch s[i];
+        n += 1;
+        i += l;
+    }
+    return buf[0..n];
+}
+
+/// Damerau-Levenshtein distance between `a` and `b` in CODEPOINTS, or null when
+/// it exceeds `budget`.
+///
+/// ## Why transposition is one edit and not two
+///
+/// Swapping two adjacent characters is one of the commonest human typos, and
+/// under plain Levenshtein it costs TWO edits — so `wtiches` never reached
+/// `witches` at all, and `tset` reached `set` (drop the leading `t`, one edit)
+/// while missing `test`. Landing on a different word is worse than missing: the
+/// answer looks plausible and is not one. Counting the swap as one edit puts
+/// `test` in reach at the same distance the ladder already allows.
+///
+/// ## Which variant
+///
+/// The OPTIMAL STRING ALIGNMENT variant: it forbids editing a substring twice, so
+/// `ca` → `abc` is 3 rather than the unrestricted 2. That restriction is
+/// irrelevant here — the ladder never allows more than two edits, and two edits
+/// cannot re-cross the same substring — while OSA needs only one extra rolling
+/// row instead of the alphabet-indexed last-occurrence table the unrestricted
+/// algorithm requires. Same answers within budget, less state.
+///
+/// Codepoints, not bytes, because the corpus is accented: on bytes, "ção" is five
+/// units and a single mistyped accent would read as a two-edit difference. The
+/// length pre-check and the per-row floor let a hopeless pair fall out early,
+/// which is what keeps the full-vocabulary scan cheap. Both survive the
+/// transposition rule: a swap does not change length, and `d[i][j]` via
+/// transposition is `d[i-2][j-2] + 1`, which is `>= min(row i-1)` because
+/// adjacent diagonal cells differ by at most 1 — so a row whose minimum already
+/// exceeds the budget still cannot be rescued by a later swap.
+fn editDistance(a: []const u8, b: []const u8, budget: usize) ?usize {
+    var abuf: [max_fuzzy_term_cp]u21 = undefined;
+    var bbuf: [max_fuzzy_term_cp]u21 = undefined;
+    const x = codepoints(&abuf, a);
+    const y = codepoints(&bbuf, b);
+
+    const diff = if (x.len > y.len) x.len - y.len else y.len - x.len;
+    if (diff > budget) return null;
+
+    // Three rolling rows, not two: the transposition step reads `d[i-2][j-2]`.
+    var prev2: [max_fuzzy_term_cp + 1]usize = undefined;
+    var prev: [max_fuzzy_term_cp + 1]usize = undefined;
+    var curr: [max_fuzzy_term_cp + 1]usize = undefined;
+    for (0..y.len + 1) |j| prev[j] = j;
+
+    for (x, 0..) |xc, i| {
+        curr[0] = i + 1;
+        var row_min = curr[0];
+        for (y, 0..) |yc, j| {
+            const cost: usize = if (xc == yc) 0 else 1;
+            var v = @min(@min(curr[j] + 1, prev[j + 1] + 1), prev[j] + cost);
+            // The two characters are each other's neighbour, swapped: one edit.
+            if (i > 0 and j > 0 and xc == y[j - 1] and x[i - 1] == yc) {
+                v = @min(v, prev2[j - 1] + 1);
+            }
+            curr[j + 1] = v;
+            row_min = @min(row_min, v);
+        }
+        if (row_min > budget) return null;
+        @memcpy(prev2[0 .. y.len + 1], prev[0 .. y.len + 1]);
+        @memcpy(prev[0 .. y.len + 1], curr[0 .. y.len + 1]);
+    }
+    const d = prev[y.len];
+    return if (d > budget) null else d;
+}
+
+/// How many codepoints `s` decodes to, by the same forgiving rule as
+/// `codepoints` — so the ranking's length comparison and the distance function
+/// count the same units.
+fn cpLen(s: []const u8) usize {
+    var buf: [max_fuzzy_term_cp]u21 = undefined;
+    return codepoints(&buf, s).len;
+}
+
+/// How many characters of a token `unicode61` would keep as part of a term — i.e.
+/// how much the user has actually typed, ignoring punctuation they may have leant
+/// on. Counted in CODEPOINTS, not bytes, so an accented word is not credited
+/// double: `sé` is two characters, and so is `se`.
+fn termLen(tok: []const u8) usize {
+    var n: usize = 0;
+    for (tok) |ch| {
+        // Skip UTF-8 continuation bytes: one codepoint counts once.
+        if (ch & 0xC0 == 0x80) continue;
+        if (std.ascii.isAlphanumeric(ch) or ch >= 0x80) n += 1;
+    }
+    return n;
 }
 
 /// Serialize `main`. The bytes live at `idx_image_ptr()` until the next

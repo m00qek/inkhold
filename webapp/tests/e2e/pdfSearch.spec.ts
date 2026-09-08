@@ -58,12 +58,13 @@ test.describe("find in PDF", () => {
     // in the `.txt`, not in a file name.
     await searchBox(page).fill("marmalade");
 
-    // One result, the manual, with the marked excerpt and a PAGE-unit locator.
-    // `kind = 2` collapses to the note's unit downstream, and "Matches on 3
-    // pages" is what a PDF should say anyway.
+    // One result, the manual, with a PAGE-unit locator and NO excerpt — §6 step
+    // 6 deleted the snippet and the server route that rendered it, so the row's
+    // whole claim is its count. `kind = 2` collapses to the note's unit
+    // downstream, and "Matches on 3 pages" is what a PDF should say anyway.
     const row = results(page).filter({ hasText: "Appliance manual" }).first();
     await expect(row).toBeVisible();
-    await expect(row.locator(".hit__snippet mark").first()).toHaveText("Marmalade");
+    await expect(row.locator(".hit__snippet")).toHaveCount(0);
     await expect(row.locator(".card__matches")).toHaveText("Matches on 3 pages");
 
     // Click it → the PDF VIEWER (not the reader) opens.

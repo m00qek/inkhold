@@ -350,56 +350,14 @@ export interface NoteMeta {
 }
 
 /**
- * One full-text search result. A hit is a PAGE, not a note: the transcript index
- * is per-page, and the whole value of the excerpt is that it points at the page
- * the words are actually on. That is why {@link SearchHit.pageIndex} exists and
- * why the UI deep-links to it rather than to the note's first page.
- */
-export interface SearchHit {
-  /** The FILE id — open it with the reader, same as a gallery card. */
-  noteId: Id;
-  /** The note's name, for the result row's heading. PLAIN TEXT — see below. */
-  noteName: string;
-  /** 0-based page the match is on. The reader is opened at exactly this page. */
-  pageIndex: number;
-  /**
-   * ⚠️ **PRE-ESCAPED HTML.** The excerpt around the match, with `<mark>…</mark>`
-   * around the matched terms and *everything else HTML-escaped by the server*
-   * (`note_search.escapeSnippet` — the raw transcript is device-authored text
-   * that may itself contain `<`, `&` or a whole `<script>`, so the escaping has
-   * to happen on the side that splices the markers in).
-   *
-   * Therefore, and ONLY for this field:
-   *   - render it with `innerHTML`, or the highlighting shows as literal
-   *     `&lt;mark&gt;`;
-   *   - do NOT escape it again, for the same reason;
-   *   - and do NOT extend that treatment to any sibling field. `noteName` is raw
-   *     device text with no escaping pass behind it and goes through
-   *     `textContent`, exactly as the reader's transcript does.
-   */
-  snippet: string;
-  /**
-   * What {@link pageIndex} COUNTS — the segment kind. Absent (or 0) is a
-   * `.note` PAGE, exactly as it always was: the server omits null optionals, so
-   * a note-page hit's wire shape is byte-identical to before other kinds
-   * existed. `1` is a `.txt` PARAGRAPH, whose `pageIndex` is the paragraph
-   * ordinal and whose hit opens the `.txt` VIEWER (not the reader) at that
-   * paragraph. Tolerant by contract — the client reads anything that is not
-   * exactly `1` as a note page, so a future kind it does not know degrades to
-   * the reader rather than to a blank.
-   */
-  kind?: number;
-}
-
-/**
  * One matching `.txt` paragraph of ONE file — find-in-txt's prev/next jumps and
  * its exact count. The `.txt` analog of {@link PageMatch}, plus the paragraph's
  * BYTE RANGE, which is what the viewer maps back to a position in the
  * already-loaded text (there are no word rectangles for plain text).
  */
 export interface TxtMatch {
-  /** The paragraph's segment ordinal. Equal to a library {@link SearchHit.pageIndex}
-   *  for the same paragraph, so a deep link opens the viewer straight at it. */
+  /** The paragraph's segment ordinal — the same ordinal a library result row's
+   *  page list carries, so a deep link opens the viewer straight at it. */
   segment: number;
   /** The paragraph's byte offset in the blob, and its length. */
   offset: number;
@@ -422,8 +380,7 @@ export interface TxtMatch {
  * The `.txt`-scoped search response: EVERY matching paragraph of one file, in
  * ordinal order, with per-paragraph counts and byte ranges. Complete and
  * unranked by construction — so the viewer's "N matches in M paragraphs" is
- * exact, unlike library search's floors (single-document scope, the in-note
- * counter precedent).
+ * exact (single-document scope, the in-note counter precedent).
  */
 export interface TxtSearchResults {
   /** Echoed, so a late response is discardable — find searches per keystroke. */
@@ -470,85 +427,6 @@ export interface TxtSearchBatch {
 }
 
 /**
- * How much of the library is searchable AT ALL — the numbers behind "only notes
- * recognised on the device are searchable".
- *
- * Present ONLY on a zero-hit response, because that is the only state that
- * renders it: `12 of your 40 notes have no recognised text` is the difference
- * between "it is not there" and "it might be there and I cannot see it", and
- * paying for the aggregate on every keystroke of a search that IS finding things
- * would be waste.
- */
-export interface Coverage {
-  /** Undeleted files the indexer really parsed a `.note` container out of. */
-  notes: number;
-  /** How many of those carry no recognized text, and so cannot be found. */
-  unsearchable: number;
-  /**
-   * Documents of yours whose indexing has not finished yet.
-   *
-   * A DIFFERENT NUMBER FROM {@link Coverage.unsearchable}, and they must never
-   * be added together or shown as one sentence. `unsearchable` is permanent —
-   * a note the device never recognised carries no text and never will — while
-   * this is transient and resolves without anyone doing anything. Telling
-   * somebody their half-minute-old upload is permanently unsearchable is both
-   * wrong and unactionable.
-   *
-   * The two sets do not overlap: a `.note` is indexed on upload and so is never
-   * pending, and a document still being derived is not counted in `notes`.
-   *
-   * Absent reads as 0 at the seam, which is the ONE default here that is not a
-   * claim: the only thing this drives is a sentence shown when it is above
-   * zero, so "the server did not say" and "nothing is pending" produce
-   * identical UI. `notes`/`unsearchable` cannot be defaulted that way, because
-   * zeroes there would render as a confident "0 of your 0 notes".
-   */
-  pending: number;
-}
-
-/** A full-text search response: the query as searched, plus its ranked hits. */
-export interface SearchResults {
-  /**
-   * The query the server actually ran, echoed back. Not currently used for
-   * staleness (the client tracks its own token — see `pages/noteSearch.ts`), but
-   * it is what makes a logged response self-describing.
-   */
-  query: string;
-  /** Best match first (bm25). Empty for a blank query — that is a 200, not an error. */
-  hits: SearchHit[];
-  /**
-   * Whether the typo-tolerant fallback actually ran — i.e. whether these hits
-   * answer the query as typed or only approximately.
-   *
-   * NOT optional in the domain, and not optional on the wire either: the server
-   * serializes with `emit_null_optional_fields = false`, so an optional `false`
-   * would be OMITTED and the client could not tell "the search was exact" from
-   * "the server is too old to say" — opposite instructions about whether to say
-   * so above the results. The seam therefore defaults a missing value to `false`,
-   * which is the reading that claims nothing.
-   */
-  usedFuzzy: boolean;
-  /** See {@link Coverage}. `null` whenever the server did not send it. */
-  coverage: Coverage | null;
-  /**
-   * OPAQUE continuation for the next page of hits, present ONLY when more
-   * results MAY exist beyond the ones returned. Pass it back verbatim
-   * (`?cursor=`) to fetch the next ≤20 hits — which may carry another cursor,
-   * or none when the results are exhausted.
-   *
-   * `undefined` means "this is everything": the server clamps a page at 20 and
-   * a keyset cursor is how the rest is reached, so absence of the cursor is the
-   * one honest end-of-results signal there is. NO TOTAL IS EVER SERVED — the
-   * early-terminating query stops at the page boundary precisely so it never
-   * counts the rest, and the UI must never fabricate a count it was not given
-   * The string is not to be parsed,
-   * compared or stored beyond handing it straight back: its shape belongs to
-   * the server and changes with the index's layout.
-   */
-  cursor?: string;
-}
-
-/**
  * One matching page of ONE note, for find-in-note's counter and its filmstrip
  * badges.
  */
@@ -582,11 +460,11 @@ export interface PageMatch {
  * The note-scoped search response: EVERY matching page of one note, in page
  * order, with per-page counts. Unranked and unlimited by construction.
  *
- * This is deliberately not `SearchResults` filtered to a note. That query is
- * ranked across the whole library and clamped, so as a per-note counter it is
- * SILENTLY INCOMPLETE — another note's higher-ranked hits push this one out of
- * the window and the reader shows a total that is simply wrong. A wrong count
- * that looks right is worse than a slow one.
+ * This is deliberately not the library-wide query filtered to a note. That one
+ * ranks across the whole library, so as a per-note counter it is SILENTLY
+ * INCOMPLETE — another note's higher-ranked hits push this one out and the
+ * reader shows a total that is simply wrong. A wrong count that looks right is
+ * worse than a slow one.
  *
  * ONE REQUEST ANSWERS THE WHOLE NOTEBOOK. That is the point: a 200-page note
  * costs this call plus one `getPageText` per page actually looked at, not 200 of
@@ -597,8 +475,9 @@ export interface NoteSearchResults {
   query: string;
   pages: PageMatch[];
   /**
-   * Whether the typo-tolerant fallback ran, exactly as {@link SearchResults}
-   * reports it — and read the same strict way at the seam, for the same reason.
+   * Whether the typo-tolerant fallback ran. Read STRICTLY at the seam (`=== true`):
+   * the server omits null optionals, so anything that is not literally `true`
+   * means "answered as typed" — the reading that claims nothing.
    *
    * Find used to be the one search on this app that did NOT tolerate typos,
    * silently: the identical query answered two different ways with nothing on

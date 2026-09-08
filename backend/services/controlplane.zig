@@ -2641,9 +2641,20 @@ test "hasRecognizedText means finished pages, not recognition merely enabled" {
     }
 
     // The badge must agree with the search filter EXACTLY: shown ⟺ findable.
-    const hits = try notesearch.searchPages(arena.allocator(), testing.io, f.db, 1, "hello", 20, null);
-    try testing.expectEqual(@as(usize, 1), hits.hits.len);
-    try testing.expectEqualStrings("done.note", hits.hits[0].noteName);
+    // Asked per document, because that is the only read left — library-wide
+    // search moved into the browser (`golden-search.md` §6 step 6).
+    for (root.entries) |e| {
+        const findable = (try notesearch.searchNotePages(
+            arena.allocator(),
+            f.db,
+            1,
+            try std.fmt.parseInt(u64, e.id, 10),
+            "hello",
+            null,
+            notesearch.max_batch,
+        )).pages.len > 0;
+        try testing.expectEqual(e.hasRecognizedText.?, findable);
+    }
 
     // A non-`.note` never claims recognized text.
     _ = try seedBytes(&f, null, "x.pdf", "%PDF-1.7 nope");
