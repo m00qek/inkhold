@@ -197,6 +197,12 @@ jobs:
       # PUSHES ONLY FROM `main`. A pull request still builds the image, because a
       # broken Dockerfile should fail review rather than the next release; it
       # just has nowhere to publish, and a fork's token could not push anyway.
+      # Before the build step, which needs it. Registries reject an uppercase
+      # path and `github.repository` preserves whatever case the owner typed.
+      - name: Lowercase the image name
+        id: name
+        run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
@@ -204,10 +210,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Lowercase the image name
-        id: name
-        run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - name: Build and push by digest
         id: build
@@ -217,7 +219,10 @@ jobs:
           file: docker/Dockerfile
           platforms: ${{ matrix.platform }}
           build-args: VERSION=${{ github.sha }}
-          outputs: type=image,name=${{ steps.name.outputs.image }},push-by-digest=true,name-canonical=true,push=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          # `push-by-digest` is meaningless without a push, so a pull request
+          # builds to the cache instead: the Dockerfile and every architecture
+          # still get exercised, and nothing is published.
+          outputs: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', steps.name.outputs.image) || 'type=cacheonly' }}
 
       # A file per digest, named by the digest, so the merge job can just list
       # the directory. The matrix cannot share a variable any other way.
