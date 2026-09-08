@@ -22,7 +22,6 @@ const dltokensmod = @import("../http/download_tokens.zig");
 const filesmod = @import("../services/files.zig");
 const noteindex = @import("../services/note_index.zig");
 const deferredmod = @import("../services/deferred.zig");
-const notesearch = @import("../services/search/query.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
 const uploadcap = @import("../handlers/upload_cap.zig");
@@ -1849,70 +1848,18 @@ test "history meta: serves the VERSION's own page count, not the current note's;
     }
 }
 
-test "history search: one-document scan reads the OLD version's text, not the FTS" {
-    const f = try Fixture.init();
-    defer f.deinit();
-    const ctx = &f.ctx;
-    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
-    const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+// FIND-IN-A-RETAINED-VERSION IS THE BROWSER'S — `golden-search.md` §6 step 7.
+// `GET /note/:id/history/:md5/search` and `searchHistoryPages` are gone; the
+// browser fetches `text/<md5>` for the version it is showing and searches its own
+// index. What that route proved beyond search itself — that a retained version's
+// OWN transcript survives its supersession, distinct from the current one — is
+// proved by `/history/:md5/meta` and `/history/:md5/page/:n/text` above, and by
+// gate 2 of "the per-document text route serves ONE document's real text".
+// Its `:md5`-not-in-this-file's-history gate is the meta route's, tested there;
+// the text route cannot draw that boundary at all, having no `:id` to scope
+// through (see "unreachable and underived are ONE 404").
 
-    var obuf: [16384]u8 = undefined;
-    var reqbuf: [2048]u8 = undefined;
-    var pbuf: [128]u8 = undefined;
-
-    // "alpha" is recognized in v1 and EDITED OUT of v2 ("beta" replaces it).
-    const id = try seedRecognizedVersion(f, admin, "hist.note", "AAAA", &.{ "alpha", "common" });
-    _ = try seedRecognizedVersion(f, admin, "hist.note", "BBBB", &.{ "beta", "common" });
-    const v1md5 = try soleHistoryMd5(f, id);
-
-    // The FTS (current-only, H2) no longer holds "alpha" — proving the scan below
-    // cannot be reading it from there.
-    try std.testing.expectEqual(@as(usize, 0), try searchHits(f, admin, "alpha"));
-
-    const PageMatch = struct { pageIndex: i64, matches: i64, terms: []const []const u8 };
-    // Searching v1 for "alpha" finds its page via the one-document scan.
-    {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/search?q=alpha", .{ id, v1md5 });
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        var parsed = try std.json.parseFromSlice(
-            struct { query: []const u8, pages: []PageMatch },
-            gpa,
-            resp.body,
-            .{ .ignore_unknown_fields = true },
-        );
-        defer parsed.deinit();
-        try std.testing.expectEqual(@as(usize, 1), parsed.value.pages.len);
-        try std.testing.expectEqual(@as(i64, 0), parsed.value.pages[0].pageIndex);
-        try std.testing.expect(parsed.value.pages[0].matches >= 1);
-    }
-
-    // A term that is in neither version returns no pages (not a 404 — the version
-    // exists, it just has no match).
-    {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/search?q=zzznope", .{ id, v1md5 });
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        var parsed = try std.json.parseFromSlice(
-            struct { pages: []PageMatch },
-            gpa,
-            resp.body,
-            .{ .ignore_unknown_fields = true },
-        );
-        defer parsed.deinit();
-        try std.testing.expectEqual(@as(usize, 0), parsed.value.pages.len);
-    }
-
-    // A md5 not in this file's history is a 404, not an empty result.
-    {
-        const bogus = "ffffffffffffffffffffffffffffffff";
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/search?q=alpha", .{ id, bogus });
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 404), resp.status);
-    }
-}
-
-test "history restore: re-points via supersede, re-indexes the FTS, and is undoable" {
+test "history restore: re-points via supersede, flips what is searchable, and is undoable" {
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -1934,9 +1881,12 @@ test "history restore: re-points via supersede, re-indexes the FTS, and is undoa
 
     const RestoreVO = struct { success: bool, md5: []const u8, size: i64, createdAt: i64, current: bool };
 
-    // Restore v1: the file re-points at v1, the DISPLACED v2 is retained, and the
-    // FTS is re-indexed to v1's content (this MUST go through the supersede path,
-    // not a raw md5 UPDATE — that is why global search flips).
+    // Restore v1: the file re-points at v1, the DISPLACED v2 is retained, and what
+    // the caller can find flips to v1's content. This MUST go through the
+    // supersede path rather than a raw md5 UPDATE, and `searchHits` follows
+    // `files.md5` for exactly the reason that matters now: the search-index
+    // manifest ships the caller's live rows BY md5, so a restore that did not
+    // re-point the row would leave the browser indexing the old document.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/restore", .{ id, v1md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", path, &web_tok, "{}");
@@ -3669,31 +3619,37 @@ fn countTrashed(f: *Fixture, user_id: u64) !i64 {
 
 /// How many of `user_id`'s OWN live files `q` is findable in.
 ///
-/// `golden-search.md` §6 step 6 deleted the server's library-wide read, so this
-/// asks the in-document one about every file the caller holds. That read's
-/// `files` join is the same security boundary the deleted one carried, which is
-/// what keeps "0 hits after a delete" meaning what it meant.
+/// `golden-search.md` §6 steps 6 and 7 deleted every server-side read that could
+/// answer this: step 6 took the library-wide one, step 7 took the five in-document
+/// ones and `search/query.zig` with them. **The server interprets no query at
+/// all now**, so there is nothing left to ask — which is why this reads the
+/// TRANSCRIPT rows directly rather than calling anything.
+///
+/// A plain case-folded substring over `note_page_index.text`, joined to `files`
+/// the way every deleted read joined it. Deliberately NOT the FTS and NOT a
+/// tokenizer: re-deriving `buildMatch`'s expression here would be
+/// re-implementing a deleted function to keep its tests alive, and would also
+/// die again at step 8 when `segment_fts` goes. Every caller below searches a
+/// single ASCII word, which a substring answers identically.
+///
+/// The `files` join is what still carries the meaning: it is the same ownership
+/// + `deleted = 0` boundary the deleted reads carried, and it is what keeps
+/// "0 hits after a delete" and "1 hit after a restore" saying what they said.
+/// Note that it also means this follows `files.md5` — a superseded version's
+/// rows survive in `note_page_index` but no live row points at them, which is
+/// exactly the H2 "current-only" property the FTS had.
 fn searchHits(f: *Fixture, user_id: u64, q: []const u8) !usize {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    var ids: std.ArrayList(u64) = .empty;
-    {
-        var s = try f.db.prepare(
-            "SELECT id FROM files WHERE user_id = ?1 AND deleted = 0 AND is_folder = 0 ORDER BY id;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        while (try s.step()) try ids.append(a, @intCast(s.columnInt(0)));
-    }
-
-    var n: usize = 0;
-    for (ids.items) |id| {
-        const r = try notesearch.searchNotePages(a, f.db, user_id, id, q, null, notesearch.max_batch);
-        if (r.pages.len != 0) n += 1;
-    }
-    return n;
+    var s = try f.db.prepare(
+        "SELECT COUNT(DISTINCT f.id) FROM files f " ++
+            "JOIN note_page_index p ON p.blob_md5 = f.md5 " ++
+            "WHERE f.user_id = ?1 AND f.deleted = 0 AND f.is_folder = 0 " ++
+            "  AND p.text IS NOT NULL AND instr(lower(p.text), lower(?2)) > 0;",
+    );
+    defer s.finalize();
+    s.bindInt(1, @intCast(user_id));
+    s.bindText(2, q);
+    _ = try s.step();
+    return @intCast(s.columnInt(0));
 }
 
 test "device delete_folder_v3 soft-deletes: leaves listings and search, but the blob survives and the row restores to readable bytes" {
@@ -3709,7 +3665,8 @@ test "device delete_folder_v3 soft-deletes: leaves listings and search, but the 
     var reqbuf: [2048]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // A real recognized note, so the FTS side of "leaves search" is not a stub.
+    // A real recognized note, so the transcript side of "leaves search" is not a
+    // stub: there is text to stop finding.
     const rec_id = try seedRecognizedNote(f, alice, "rec.note", &.{ "Zebra", "Quokka" });
     const md5 = blk: {
         const e = (try f.files.get(alice, rec_id)).?;
@@ -5124,10 +5081,13 @@ fn inflateStitched(a: std.mem.Allocator, body: []const u8) ![]u8 {
 /// 12-byte header — the same number the serve path feeds into the gzip trailer.
 /// The test computes its expected decoded byte count from these, so an
 /// implementation that truncated a fragment could not satisfy it.
-fn storedPlainLen(f: *Fixture, md5: []const u8) !u32 {
+///
+/// Takes the STORE rather than the fixture because both derived stores are read
+/// this way: the stitched stream's tests against `terms/`, the per-document text
+/// route's against `text/`.
+fn storedPlainLen(store: @import("../store/derived.zig").DerivedStore, md5: []const u8) !u32 {
     const derivedstore = @import("../store/derived.zig");
     const derivesearch = @import("../services/derive_search.zig");
-    const store = f.files.terms.?;
     var file = try store.open(md5, derivesearch.index_version);
     defer file.close(std.testing.io);
     const h = try derivedstore.readHeader(std.testing.io, file);
@@ -5243,7 +5203,7 @@ test "the search-index stream is ONE gzip member carrying every document, not a 
     var expected_bytes: u64 = 0;
     for (md5s, 0..) |md5, i| {
         if (i == gone) continue;
-        expected_bytes += try storedPlainLen(f, &md5);
+        expected_bytes += try storedPlainLen(f.files.terms.?, &md5);
     }
     try std.testing.expectEqual(expected_bytes, plain.len);
 
@@ -5437,8 +5397,10 @@ test "the search-index stream is scoped to the caller: a housemate's documents a
     // THE SCOPE IS THE MANIFEST'S, and this is what says so: the caller's
     // manifest has one row, so there is no position a bitmap could name that
     // reaches the housemate's document. `index_export`'s `d.user_id = ?1` is the
-    // whole boundary and this route adds no md5-addressed second door — unlike
-    // `/search-index/terms`, which does and needs a `files` join per request.
+    // whole boundary and this route adds no md5-addressed second door. `text/:md5`
+    // is the one route that IS md5-addressed, and it pays for that with a
+    // `Files.reachesBlob` gate per request; a bitmap position needs none, because
+    // it can only ever name a row the caller's own manifest already listed.
     try std.testing.expectEqual(@as(u32, 1), rows);
 
     var want_buf: [64]u8 = undefined;
@@ -5456,82 +5418,269 @@ test "the search-index stream is scoped to the caller: a housemate's documents a
     try std.testing.expect(std.mem.indexOf(u8, plain, "confidencial") == null);
 }
 
-test "control-plane note-scoped search: its own route, scoped like the note's other reads" {
+// ---------------------------------------------------------------------------
+// THE PER-DOCUMENT TEXT ROUTE — `golden-search.md` §1.1, build order step 7
+// ---------------------------------------------------------------------------
+//
+// ONE route replaces five. §1.1: *"All five in-doc routes collapse to
+// 'authorize, serve `text/<md5>`.' History and bin are not special: they are
+// other md5s, gated exactly as they are gated today."* So the spec below is
+// about two things and nothing else: that a caller who can reach a blob by ANY
+// of the three paths gets the same bytes, and that a caller who cannot is told
+// the same thing an underived document is.
+//
+// The decode assertions are the stitched stream's, for the stream's reason: this
+// body is a single-member gzip too, and §3.1's failure mode — a decoder that
+// resolves successfully on 0.5% of the payload — is invisible to any check that
+// only asks whether the request worked.
+
+/// GET the text record for one md5 and assert the whole transport contract, then
+/// hand back the DECODED bytes. Every caller below compares real text, never a
+/// status code.
+fn fetchDocText(
+    a: std.mem.Allocator,
+    ctx: *Context,
+    obuf: []u8,
+    reqbuf: []u8,
+    tok: []const u8,
+    md5: []const u8,
+) ![]u8 {
+    var pbuf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/text/{s}", .{md5});
+    const resp = try requestWithCookie(ctx, obuf, reqbuf, "GET", path, tok, "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+
+    try expectHeaderContains(resp.head, "content-type: application/x-ndjson");
+    try expectHeaderContains(resp.head, "content-encoding: gzip");
+    // A BARE URL GETS NO YEAR. `immutable` says the true thing — these bytes do
+    // not change under this URL — but the URL's key omits the `index_version`
+    // the FILE is keyed by, so a parser bump re-derives the same md5 and there
+    // would be nothing to invalidate a year-long entry with. See
+    // `immutable_routes` and the handler's own docstring.
+    try expectHeaderContains(resp.head, "cache-control: private, immutable");
+    try expectHeaderAbsentSubstring(resp.head, "max-age");
+
+    const derivesearch = @import("../services/derive_search.zig");
+    // ...AND `?v=` EARNS IT, which is the other half of the same rule: with the
+    // version in the URL the entry cannot outlive what it described, exactly as
+    // for the routes that name their content in the path. `/file/{id}?v={hash}`
+    // is the same device, and the manifest already ships this field per row.
+    {
+        var vbuf: [256]u8 = undefined;
+        const versioned = try std.fmt.bufPrint(&vbuf, "/api/controlplane/text/{s}?v={d}", .{ md5, derivesearch.index_version });
+        const r = try requestWithCookie(ctx, obuf, reqbuf, "GET", versioned, tok, "");
+        try std.testing.expectEqual(@as(u16, 200), r.status);
+        try expectHeaderContains(r.head, "cache-control: private, max-age=31536000, immutable");
+    }
+    // A STALE version does not, because it does not name what is served.
+    {
+        var vbuf: [256]u8 = undefined;
+        const stale = try std.fmt.bufPrint(&vbuf, "/api/controlplane/text/{s}?v={d}", .{ md5, derivesearch.index_version - 1 });
+        const r = try requestWithCookie(ctx, obuf, reqbuf, "GET", stale, tok, "");
+        try std.testing.expectEqual(@as(u16, 200), r.status);
+        try expectHeaderAbsentSubstring(r.head, "max-age");
+    }
+    // A REAL LENGTH, which is the difference from the stitched stream: there is
+    // no walk here to discover a skip mid-flight, so the one open file's size is
+    // the honest answer and the client gets a progress bar out of it.
+    try expectHeaderContains(resp.head, "content-length:");
+    try expectHeaderAbsentSubstring(resp.head, "transfer-encoding:");
+
+    return inflateStitched(a, resp.body);
+}
+
+test "the per-document text route serves ONE document's real text, by each of the three ways a caller reaches it" {
     const f = try Fixture.init();
     defer f.deinit();
+    try withDerivedStores(f);
     const ctx = &f.ctx;
     const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
 
-    var obuf: [16384]u8 = undefined;
+    var obuf: [65536]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+    const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // ACCENTS ON PURPOSE, and they are the assertion that this route is not the
+    // terms route wearing a different path. `terms/` holds `unicode61
+    // remove_diacritics 2` output, so "orçamento" is "orcamento" there; `text/`
+    // holds the document's REAL text, which is what find-in-document has to
+    // highlight and deep-link into (§2.2, §4.1). A record that folded would pass
+    // every structural check below and be the wrong file.
+    const live = try seedRecognizedNote(f, admin, "vivo.note", &.{"reunião de orçamento"});
+    // A SECOND upload of the same name supersedes the first and retains it in
+    // `file_history` — which is gate 2, and the only one of the three that a
+    // `files` join cannot reach.
+    _ = try seedRecognizedNote(f, admin, "vivo.note", &.{"versão revista"});
+    const current_md5 = try fileMd5(f, live);
+    const retained_md5 = try soleHistoryMd5(f, live);
+
+    const binned = try seedRecognizedNote(f, admin, "lixo.note", &.{"documentação antiga"});
+    const binned_md5 = try fileMd5(f, binned);
+    try f.files.trash(admin, binned);
+
+    // --- gate 1: a LIVE document ------------------------------------------
+    {
+        const plain = try fetchDocText(a, ctx, &obuf, &reqbuf, &web_tok, &current_md5);
+
+        // The record's shape (`derive_search.writeHeader` + `TextWriter.page`):
+        // exactly one header line naming this md5 and the content version, then
+        // one line per segment carrying its ordinal and its text.
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, plain, "{\"md5\":\""));
+        try std.testing.expect(std.mem.startsWith(u8, plain, "{\"md5\":\""));
+        try std.testing.expect(std.mem.indexOf(u8, plain, &current_md5) != null);
+        try std.testing.expect(std.mem.indexOf(u8, plain, "\"p\":0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, plain, "versão revista") != null);
+
+        // AND THE DECODED BYTE COUNT, read independently from the stored file's
+        // own 12-byte header — the same number the trailer was built from. A
+        // response that dropped the tail of the fragment satisfies every
+        // substring check above and misses this by exactly what it dropped.
+        try std.testing.expectEqual(
+            @as(usize, try storedPlainLen(f.files.text.?, &current_md5)),
+            plain.len,
+        );
+    }
+
+    // --- gate 2: a RETAINED VERSION, which no `files` row points at --------
+    //
+    // This is the gate `searchHistoryPages` existed for: an arbitrary historic
+    // md5 is not in the caller's live set, so the FTS partition mask could not
+    // scope it and it scanned `note_page_index` by `blob_md5` instead. Nothing
+    // is scoping an index here, so the whole of what is left is `reachesBlob`
+    // finding the `file_history` row.
+    {
+        const plain = try fetchDocText(a, ctx, &obuf, &reqbuf, &web_tok, &retained_md5);
+        try std.testing.expect(std.mem.indexOf(u8, plain, &retained_md5) != null);
+        // THE OLD text, not the current one — the version's own derived file.
+        try std.testing.expect(std.mem.indexOf(u8, plain, "reunião de orçamento") != null);
+        try std.testing.expect(std.mem.indexOf(u8, plain, "versão revista") == null);
+    }
+
+    // --- gate 3: a TRASHED document ----------------------------------------
+    //
+    // The bin's ownership check is the live one without `deleted = 0`, so the
+    // flag drops out of the collapsed predicate entirely. Trashing hides the row;
+    // it does not take the bytes away, and find-in-document in the bin reads the
+    // same file the live route reads.
+    {
+        const plain = try fetchDocText(a, ctx, &obuf, &reqbuf, &web_tok, &binned_md5);
+        try std.testing.expect(std.mem.indexOf(u8, plain, &binned_md5) != null);
+        try std.testing.expect(std.mem.indexOf(u8, plain, "documentação antiga") != null);
+    }
+}
+
+test "the per-document text route: unreachable and underived are ONE 404, byte for byte" {
+    const derivesearch = @import("../services/derive_search.zig");
+    const f = try Fixture.init();
+    defer f.deinit();
+    try withDerivedStores(f);
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+
+    var obuf: [65536]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
     var pbuf: [128]u8 = undefined;
     const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
 
-    // Byte-identical content again, so one deduplicated blob holds the single
-    // copy of the transcript both accounts' files reference.
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
     const bob = (try f.svc.createUser(admin, "bob", false)).id;
     _ = try f.svc.changePassword(bob, null, &password.md5Hex("bpass111"));
-    const labels = &[_][]const u8{"reunião de avaliação trimestral"};
-    const mine = try seedRecognizedNote(f, admin, "mine.note", labels);
-    const theirs = try seedRecognizedNote(f, bob, "theirs.note", labels);
 
-    const mine_path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/search?q=avaliacao", .{mine});
+    // Bob gets a live document AND a retained version, because the housemate
+    // boundary has to hold on both of the gates that admit an md5 — a predicate
+    // that leaked through `file_history` would be invisible to a live-only test.
+    const theirs = try seedRecognizedNote(f, bob, "deles.note", &.{"confidencial"});
+    _ = try seedRecognizedNote(f, bob, "deles.note", &.{"confidencial revisto"});
+    const theirs_md5 = try fileMd5(f, theirs);
+    const theirs_old_md5 = try soleHistoryMd5(f, theirs);
 
-    // --- scope: no session → 401; a device token → 403 (cross-face) ---
+    const mine = try seedRecognizedNote(f, admin, "meu.note", &.{"inventário"});
+    const mine_md5 = try fileMd5(f, mine);
+
+    // --- scope, before anything else: no session -> 401, device token -> 403 --
     {
-        const req = try buildRequest(&reqbuf, "GET", mine_path, &.{}, "");
-        const resp = try roundtrip(ctx, req, &obuf);
-        try std.testing.expectEqual(@as(u16, 401), resp.status);
+        const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/text/" ++ "a" ** 32, &.{}, "");
+        try std.testing.expectEqual(@as(u16, 401), (try roundtrip(ctx, req, &obuf)).status);
     }
     {
         const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "bob", "bpass111", "SN9");
-        const req = try buildRequest(&reqbuf, "GET", mine_path, &.{
+        const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/text/" ++ "a" ** 32, &.{
             .{ .name = "x-access-token", .value = &dev_tok },
         }, "");
-        const resp = try roundtrip(ctx, req, &obuf);
-        try std.testing.expectEqual(@as(u16, 403), resp.status);
+        try std.testing.expectEqual(@as(u16, 403), (try roundtrip(ctx, req, &obuf)).status);
     }
 
-    const Body = struct {
-        query: []const u8,
-        pages: []const struct { pageIndex: i64, matches: i64 },
+    // The route WORKS for this caller on this md5 — asserted first, so the 404s
+    // below are known to be the gate refusing rather than the fixture failing to
+    // derive anything at all.
+    _ = try fetchDocText(a, ctx, &obuf, &reqbuf, &web_tok, &mine_md5);
+
+    // THE UNDERIVED CASE, manufactured the way the world produces it: the blob is
+    // theirs and reachable, and the derived file is simply not there — GC'd
+    // between two requests, or a derive still outstanding (§2.4 makes the FILE
+    // the fact, so this state is ordinary rather than exotic).
+    f.files.text.?.remove(&mine_md5, derivesearch.index_version);
+
+    // Every way this route can say no, collected. `heads` holds the FULL response
+    // — head and body — of each, because the claim is not "all four are 404" but
+    // that they are ONE ANSWER: a caller must not be able to tell a blob it
+    // cannot reach from one that exists and is not derived, or the route becomes
+    // an existence oracle over the deduplicated blob space (the whole reason the
+    // md5 space is shared between accounts at all).
+    const refusals = [_][]const u8{
+        &mine_md5, // reachable, NOT derived
+        &theirs_md5, // derived, NOT reachable — a housemate's live document
+        &theirs_old_md5, // derived, NOT reachable — a housemate's retained version
+        "f" ** 32, // names no blob at all
+        "nao-e-um-md5", // not even the right shape: still 404, never a 400
     };
-
-    // The happy path — and proof the nested route did not shadow (or get shadowed
-    // by) `/api/controlplane/note/{id}`, which has no `pages[].matches`.
-    {
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", mine_path, &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        var p = try std.json.parseFromSlice(Body, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expectEqualStrings("avaliacao", p.value.query);
-        try std.testing.expectEqual(@as(usize, 1), p.value.pages.len);
-        try std.testing.expectEqual(@as(i64, 0), p.value.pages[0].pageIndex);
-        try std.testing.expectEqual(@as(i64, 1), p.value.pages[0].matches);
-    }
-
-    // Bob's note, the caller's own transcript row — and still nothing. A foreign
-    // id, a non-existent id and a blank query are one indistinguishable 200.
-    const foreign = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/search?q=avaliacao", .{theirs});
-    for ([_][]const u8{
-        foreign,
-        "/api/controlplane/note/99999/search?q=avaliacao",
-    }) |path| {
+    var first: []const u8 = "";
+    for (refusals, 0..) |md5, i| {
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/text/{s}", .{md5});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        var p = try std.json.parseFromSlice(Body, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expectEqual(@as(usize, 0), p.value.pages.len);
-    }
-    {
-        const blank = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/search", .{mine});
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", blank, &web_tok, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        var p = try std.json.parseFromSlice(Body, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expectEqual(@as(usize, 0), p.value.pages.len);
+        try std.testing.expectEqual(@as(u16, 404), resp.status);
+        // A miss must carry no cache policy at all — caching a 404 on a URL that
+        // will become valid the moment the derive lands is the one way this route
+        // could break itself permanently.
+        try expectHeaderAbsentSubstring(resp.head, "immutable");
+        try expectHeaderAbsentSubstring(resp.head, "cache-control");
+
+        const whole = try std.fmt.allocPrint(a, "{s}\r\n\r\n{s}", .{ resp.head, resp.body });
+        if (i == 0) first = whole else try std.testing.expectEqualStrings(first, whole);
     }
 }
+
+// FIND-IN-NOTE IS THE BROWSER'S TOO — `golden-search.md` §6 step 7.
+// `GET /note/:id/search`, its `txt-search` twin and `searchNotePages` are gone,
+// and with them the last route that took a `q`. The scope half of what the
+// deleted spec drew is drawn on the replacing route by the two specs above:
+// no session → 401, a device token → 403, a housemate's document → refused.
+//
+// THE OWNERSHIP BOUNDARY GENUINELY CHANGED SHAPE, and both halves of the change
+// are worth stating rather than hiding behind "still covered".
+//
+// The old route answered a foreign id, a missing id and a blank query with one
+// indistinguishable empty 200. `text/:md5` is CONTENT-ADDRESSED and has no `:id`
+// to scope through, so its indistinguishable answer is a 404 covering four cases
+// instead of three — unreachable, underived, no such blob, and not even an md5 —
+// asserted byte for byte, head and body, in "unreachable and underived are ONE
+// 404". That is the stronger statement, because there is no shape left for an
+// existence oracle over the deduplicated blob space to leak through.
+//
+// What it no longer says anything about is the case the deleted spec was BUILT
+// on: two accounts whose files reference ONE deduplicated blob. Asking for a
+// housemate's note id used to be an empty answer; asking for that blob's md5 is
+// a 200, and correctly so — the caller holds a file made of those exact bytes,
+// and there is no honest sense in which the text is not theirs. The boundary
+// that survives is `reachesBlob`, and content the caller does not hold a copy of
+// is what it refuses.
 
 test "static SPA serving: index, assets, wasm, path-traversal refused, API precedence, disabled=404" {
     const f = try Fixture.init();
@@ -5916,6 +6065,14 @@ test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the 
         // one, both released before the response head goes out; the fragment walk
         // that follows is fs → socket and touches the DB not at all.
         "/api/controlplane/search-index/stream",
+        // The per-document text record, manual for the SAME reason as the stream
+        // above — a reader rather than an escape from the writer — and audited to
+        // the same standard. Its only DB touch is one `Files.reachesBlob` (two
+        // indexed COUNTs), inside either a `ctx.borrowReader()` bracket or a
+        // `ctx.lockDb()` one, both released before the response head goes out;
+        // the fragment copy that follows is fs → socket and touches the DB not at
+        // all.
+        "/api/controlplane/text/:md5",
     };
     var found: usize = 0;
     for (app.routes) |r| {
@@ -6002,6 +6159,18 @@ test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the 
 /// addressing, same 404-on-miss. Trashing hides the row, never the bytes or the
 /// hash, so a cached preview can no more outlive what it described than the live
 /// history route's can.
+///
+/// `/api/controlplane/text/:md5` is the ONE entry here that answers `immutable`
+/// with NO `max-age`, and the difference is the rule rather than an exception to
+/// it. Its body is opaque compressed bytes — no Zig struct is serialised into it,
+/// so the regression this list was written for cannot occur — and the URL's
+/// `:md5` addresses the blob. But the FILE's key is `(md5, index_version)`: a
+/// parser bump re-derives the same md5 into a new file and unlinks the old one,
+/// so what this URL serves does change, once, per parser release. A year-long
+/// entry would therefore strand a browser on text an old parser produced, on a
+/// URL that cannot change to tell it — `PageTextVO.words` again. Granting no
+/// freshness lifetime is what keeps that reachable, while `immutable` still says
+/// the true thing about the bytes themselves. See the handler.
 const immutable_routes = [_][]const u8{
     "/note/:id/page/:n",
     "/note/:id/template/:hash",
@@ -6013,6 +6182,7 @@ const immutable_routes = [_][]const u8{
     "/api/controlplane/note/:id/history/:md5/raw",
     "/api/controlplane/bin/note/:id/history/:md5/page/:n",
     "/api/controlplane/bin/note/:id/history/:md5/raw",
+    "/api/controlplane/text/:md5",
 };
 
 /// EVERY OTHER ROUTE IN THE TABLE. Adding a route without listing it here (or in
@@ -6040,10 +6210,8 @@ const non_immutable_routes = [_][]const u8{
     "/api/controlplane/bin/:id/restore",
     "/api/controlplane/bin/file/metadata/:id",
     "/api/controlplane/bin/note/:id/page/:n/text",
-    "/api/controlplane/bin/note/:id/search",
     "/api/controlplane/bin/note/:id/history",
     "/api/controlplane/bin/note/:id/history/:md5/page/:n/text",
-    "/api/controlplane/bin/note/:id/history/:md5/search",
     "/api/controlplane/entry/:id",
     "/api/controlplane/entry/:id/rename",
     "/api/controlplane/equipment/unlink",
@@ -6054,9 +6222,6 @@ const non_immutable_routes = [_][]const u8{
     "/api/controlplane/note/:id/history/:md5/meta",
     "/api/controlplane/note/:id/history/:md5/page/:n/text",
     "/api/controlplane/note/:id/history/:md5/restore",
-    "/api/controlplane/note/:id/history/:md5/search",
-    "/api/controlplane/note/:id/search",
-    "/api/controlplane/note/:id/txt-search",
     "/api/controlplane/search-index/manifest",
     // NO-STORE, which is stricter than everything else on this list and is the
     // skip rule's consequence rather than caution: two identical `(m, want)`
@@ -6134,7 +6299,7 @@ test "cache policy: every route is classified, and only the byte routes may be i
             return error.StaleCachePolicyEntry;
         }
     }
-    try std.testing.expectEqual(@as(usize, 10), immutable_routes.len);
+    try std.testing.expectEqual(@as(usize, 11), immutable_routes.len);
 }
 
 test "cache policy: the served responses match the classification, route by route" {
@@ -6204,9 +6369,14 @@ test "cache policy: the served responses match the classification, route by rout
         "/api/controlplane/events",
         "/api/admin/users",
         "/oss/get/1?t=deadbeefdeadbeefdeadbeefdeadbeef",
+        // The per-document text route on its MISS path. It is the one entry in
+        // `immutable_routes` this fixture cannot drive to a 200 (no derived
+        // stores), and the miss is the half that matters here anyway: caching a
+        // 404 on a URL that becomes valid the moment the derive lands would break
+        // find-in-document permanently for that document.
+        "/api/controlplane/text/" ++ "f" ** 32,
         try std.fmt.bufPrint(pbuf[0..96], "/api/controlplane/file/metadata/{d}", .{note_id}),
-        try std.fmt.bufPrint(pbuf[96..176], "/api/controlplane/note/{d}/search?q=Test", .{note_id}),
-        try std.fmt.bufPrint(pbuf[176..], "/note/{d}/page/0/text?v={s}", .{ note_id, text_hash[0..] }),
+        try std.fmt.bufPrint(pbuf[96..], "/note/{d}/page/0/text?v={s}", .{ note_id, text_hash[0..] }),
     };
     for (others) |path| {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -9166,7 +9336,7 @@ test "the bin's own read path previews a trashed file that every LIVE route 404s
     try std.testing.expectEqual(@as(usize, 0), try searchHits(f, admin, "Zebra"));
 }
 
-test "bin parity phase 1: page-text ovals + find-in-note serve a TRASHED note's current version; live routes 404" {
+test "bin parity phase 1: page-text ovals serve a TRASHED note's current version; live routes 404" {
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -9197,7 +9367,6 @@ test "bin parity phase 1: page-text ovals + find-in-note serve a TRASHED note's 
         text: ?[]const u8 = null,
         words: ?[]const struct { text: []const u8 } = null,
     };
-    const PageMatch = struct { pageIndex: i64, matches: i64, terms: []const []const u8 };
 
     // --- bin page-text: the CURRENT (v2) transcript + word boxes, `no-cache`,
     //     never `immutable`, raw VO — the same shape the live text route serves. ---
@@ -9215,63 +9384,27 @@ test "bin parity phase 1: page-text ovals + find-in-note serve a TRASHED note's 
         try std.testing.expectEqualStrings("beta", p.value.words.?[0].text);
     }
 
-    // --- bin find-in-note: one COMPLETE response, matching the CURRENT text. ---
-    {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/search?q=beta", .{id});
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        try std.testing.expect(std.mem.indexOf(u8, resp.head, "immutable") == null);
-        try std.testing.expect(std.mem.indexOf(u8, resp.body, "cursor") == null); // no cursor
-        var p = try std.json.parseFromSlice(
-            struct { query: []const u8, pages: []PageMatch },
-            gpa,
-            resp.body,
-            .{ .ignore_unknown_fields = true },
-        );
-        defer p.deinit();
-        try std.testing.expectEqual(@as(usize, 1), p.value.pages.len);
-        try std.testing.expectEqual(@as(i64, 0), p.value.pages[0].pageIndex);
-        try std.testing.expect(p.value.pages[0].matches >= 1);
-    }
-    // A term in neither version is a 200 with no pages (the box searches as you type).
-    {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/search?q=zzznope", .{id});
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        var p = try std.json.parseFromSlice(struct { pages: []PageMatch }, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expectEqual(@as(usize, 0), p.value.pages.len);
-    }
+    // NO BIN FIND-IN-NOTE HERE ANY MORE — `golden-search.md` §6 step 7. The bin
+    // twin of `/note/:id/search` went with its live original; find-in-document in
+    // the bin fetches `text/<md5>` like everywhere else, and gate 3 of "the
+    // per-document text route serves ONE document's real text" is where the
+    // trashed-and-still-readable claim is made now. What stays here is what was
+    // never about search: the bin's own note reads, and the scope boundary.
 
     // --- the LIVE text route 404s the now-trashed id (`Files.get` hardcodes
-    //     `deleted = 0`), and the live find-in-note excludes it (its files-join
-    //     drops `deleted = 1`), so the degraded bin find is retired on the bin
+    //     `deleted = 0`), so the degraded bin reads are retired on the bin
     //     surface, not the live one. ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/text?v={s}", .{ id, "f" ** 32 });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "")).status);
-    }
-    {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/search?q=beta", .{id});
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status); // live search: empty, not 404
-        var p = try std.json.parseFromSlice(struct { pages: []PageMatch }, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expectEqual(@as(usize, 0), p.value.pages.len);
     }
 
     // --- the boundary runs BOTH ways: a LIVE note's id on the bin routes → 404,
     //     so they cannot quietly become a second general read path. ---
     {
         const live_id = try seedRecognizedNote(f, admin, "live.note", &.{"gamma"});
-        {
-            const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/page/0/text", .{live_id});
-            try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "")).status);
-        }
-        {
-            const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/search?q=gamma", .{live_id});
-            try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "")).status);
-        }
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/page/0/text", .{live_id});
+        try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "")).status);
     }
 }
 
@@ -9360,20 +9493,16 @@ test "bin parity phase 2: view-only version history for a TRASHED note serves ea
         try std.testing.expectEqualStrings("beta", p.value.text.?); // the CURRENT text — distinct
     }
 
-    // --- find-in-a-retained-version: the one-document scan finds "alpha" (edited out
-    //     of the current version), and a bogus md5 is a 404 (not an empty result). ---
-    const PageMatch = struct { pageIndex: i64, matches: i64, terms: []const []const u8 };
+    // --- an md5 that is NOT in this file's retained history is a 404, not an empty
+    //     answer. `golden-search.md` §6 step 7 deleted the `…/history/:md5/search`
+    //     twin this used to be asserted through, so it is asserted on the
+    //     page-text twin instead — the same `historyVersionIn(.trashed)` gate, on
+    //     the route that still takes a `:md5` to scope. The one route that
+    //     replaced the search twins CANNOT draw this boundary: `text/:md5` is
+    //     content-addressed with no `:id` to scope through, so for it an md5 in
+    //     another file's history is simply an md5 the caller can or cannot reach. ---
     {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/history/{s}/search?q=alpha", .{ id, v1md5 });
-        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
-        try std.testing.expectEqual(@as(u16, 200), resp.status);
-        var p = try std.json.parseFromSlice(struct { pages: []PageMatch }, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expectEqual(@as(usize, 1), p.value.pages.len);
-        try std.testing.expectEqual(@as(i64, 0), p.value.pages[0].pageIndex);
-    }
-    {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/history/{s}/search?q=alpha", .{ id, "f" ** 32 });
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/history/{s}/page/0/text", .{ id, "f" ** 32 });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "")).status);
     }
 
@@ -10171,7 +10300,7 @@ fn driveReadOnlyProbes(f: *Fixture, probes: []const ReadOnlyProbe, web_tok: []co
 }
 
 /// Builds the probe list against seeded rows. Paths are arena-owned.
-fn readOnlyProbes(a: std.mem.Allocator, note_id: u64, ver_id: u64, ver_md5: []const u8, trashed_id: u64, trashed_md5: []const u8) ![]const ReadOnlyProbe {
+fn readOnlyProbes(a: std.mem.Allocator, note_id: u64) ![]const ReadOnlyProbe {
     var out: std.ArrayList(ReadOnlyProbe) = .empty;
     const fixed = [_]ReadOnlyProbe{
         .{ .route = "/api/version", .path = "/api/version", .method = "GET" },
@@ -10209,36 +10338,11 @@ fn readOnlyProbes(a: std.mem.Allocator, note_id: u64, ver_id: u64, ver_md5: []co
         .body = try std.fmt.allocPrint(a, "{{\"id\":\"{d}\"}}", .{note_id}),
         .face = .device,
     });
-    try out.append(a, .{
-        .route = "/api/controlplane/note/:id/search",
-        .path = try std.fmt.allocPrint(a, "/api/controlplane/note/{d}/search?q=hello", .{note_id}),
-        .method = "GET",
-        .face = .web,
-    });
-    try out.append(a, .{
-        .route = "/api/controlplane/note/:id/txt-search",
-        .path = try std.fmt.allocPrint(a, "/api/controlplane/note/{d}/txt-search?q=hello", .{note_id}),
-        .method = "GET",
-        .face = .web,
-    });
-    try out.append(a, .{
-        .route = "/api/controlplane/note/:id/history/:md5/search",
-        .path = try std.fmt.allocPrint(a, "/api/controlplane/note/{d}/history/{s}/search?q=hello", .{ ver_id, ver_md5 }),
-        .method = "GET",
-        .face = .web,
-    });
-    try out.append(a, .{
-        .route = "/api/controlplane/bin/note/:id/search",
-        .path = try std.fmt.allocPrint(a, "/api/controlplane/bin/note/{d}/search?q=hello", .{trashed_id}),
-        .method = "GET",
-        .face = .web,
-    });
-    try out.append(a, .{
-        .route = "/api/controlplane/bin/note/:id/history/:md5/search",
-        .path = try std.fmt.allocPrint(a, "/api/controlplane/bin/note/{d}/history/{s}/search?q=hello", .{ trashed_id, trashed_md5 }),
-        .method = "GET",
-        .face = .web,
-    });
+    // The five in-document search probes that used to close this list are gone
+    // with their routes (`golden-search.md` §6 step 7). Both halves of the
+    // coverage assertion below still hold, and that is the point: a route and its
+    // probe leave together, so the audit neither loses a flagged route nor keeps
+    // a stale probe naming one that no longer exists.
     return out.items;
 }
 
@@ -10247,10 +10351,6 @@ const AuditData = struct {
     web_tok: [32]u8,
     dev_tok: [32]u8,
     note_id: u64,
-    ver_id: u64,
-    ver_md5: [32]u8,
-    trashed_id: u64,
-    trashed_md5: [32]u8,
 };
 
 fn seedAuditData(f: *Fixture) !AuditData {
@@ -10260,30 +10360,13 @@ fn seedAuditData(f: *Fixture) !AuditData {
     var reqbuf: [2048]u8 = undefined;
     const dev_tok = try deviceLogin(&f.ctx, &obuf, &reqbuf, "admin", "adminpw1", "SN-AUDIT");
 
+    // One real row is all the surviving id-bearing probes need. The versioned and
+    // trashed notes seeded here existed for the five in-document search probes,
+    // which went with their routes (`golden-search.md` §6 step 7); nothing
+    // `read_only` takes a `:md5` any more.
     const note_id = try seedRecognizedNote(f, admin, "audit.note", &.{"hello"});
 
-    // A file with a RETAINED version: the same name uploaded twice.
-    _ = try seedRecognizedVersion(f, admin, "versioned.note", "aaaa", &.{"hello"});
-    const ver_id = try seedRecognizedVersion(f, admin, "versioned.note", "bbbb", &.{"hello"});
-    const ver_md5 = try soleHistoryMd5(f, ver_id);
-
-    // The same, then trashed — so the bin's own search and its view-only history
-    // search each have something real to answer about. A probe that 404s before
-    // reaching the DB work would audit nothing.
-    _ = try seedRecognizedVersion(f, admin, "trashed.note", "cccc", &.{"hello"});
-    const trashed_id = try seedRecognizedVersion(f, admin, "trashed.note", "dddd", &.{"hello"});
-    const trashed_md5 = try soleHistoryMd5(f, trashed_id);
-    try f.files.trash(admin, trashed_id);
-
-    return .{
-        .web_tok = web_tok,
-        .dev_tok = dev_tok,
-        .note_id = note_id,
-        .ver_id = ver_id,
-        .ver_md5 = ver_md5,
-        .trashed_id = trashed_id,
-        .trashed_md5 = trashed_md5,
-    };
+    return .{ .web_tok = web_tok, .dev_tok = dev_tok, .note_id = note_id };
 }
 
 test "every read_only route has a probe, so the audit grows with the table instead of decaying" {
@@ -10292,7 +10375,7 @@ test "every read_only route has a probe, so the audit grows with the table inste
     // check stopped covering the table.
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const probes = try readOnlyProbes(arena.allocator(), 1, 1, "0" ** 32, 1, "0" ** 32);
+    const probes = try readOnlyProbes(arena.allocator(), 1);
 
     for (app.routes) |r| {
         if (!r.read_only) continue;
@@ -10330,7 +10413,7 @@ test "every read_only route answers correctly through a genuinely read-only conn
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const probes = try readOnlyProbes(arena.allocator(), d.note_id, d.ver_id, &d.ver_md5, d.trashed_id, &d.trashed_md5);
+    const probes = try readOnlyProbes(arena.allocator(), d.note_id);
     try driveReadOnlyProbes(f, probes, &d.web_tok, &d.dev_tok);
 
     // They really did run on readers, rather than all falling back and proving
@@ -10357,7 +10440,7 @@ test "no read_only route mutates a row, including through a write whose failure 
 
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const probes = try readOnlyProbes(arena.allocator(), d.note_id, d.ver_id, &d.ver_md5, d.trashed_id, &d.trashed_md5);
+    const probes = try readOnlyProbes(arena.allocator(), d.note_id);
 
     var watch: sqlite.WriteWatch = .{ .db = f.db };
     watch.arm();

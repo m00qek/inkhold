@@ -12,8 +12,8 @@
 //! Nibble-aligned on purpose: `partition = rowid >> 48`, so the partition reads
 //! off the TOP FOUR HEX DIGITS of any rowid in any EXPLAIN or debug dump —
 //! `0x0002_0000_0000_001a` is partition 2, sequence 26, at a glance. Range ops
-//! are `BETWEEN (p << 48) AND ((p + 1) << 48) - 1`, which FTS5 pushes into its
-//! index (the `M1><` plan signature `search/query.zig` pins).
+//! are `BETWEEN (p << 48) AND ((p + 1) << 48) - 1`, which FTS5 pushed into its
+//! index as the `M1><` plan the reads pinned.
 //!
 //! ## Why a table and not `users.id`
 //!
@@ -33,8 +33,11 @@
 //! sequences within a partition are likewise monotonic and never handed out
 //! twice (`allocSeq` under the caller's write transaction).
 //!
-//! The MASK IS NEVER THE ACCESS CHECK: it scopes the FTS scan for speed, and
-//! the `files` join in `search/query.zig` remains the ownership/tombstone boundary.
+//! The MASK IS NEVER THE ACCESS CHECK: it scoped the FTS scan for speed, and a
+//! `files` join was always the ownership/tombstone boundary beside it. There is
+//! no scan left to scope — `golden-search.md` §6 step 7 took the last reader —
+//! so what this module now feeds is a write-only index, and step 8 retires both.
+//! The boundary that stands is `Files.reachesBlob`, on `text/<md5>`.
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");

@@ -15,6 +15,7 @@
 import type { Api } from "../api/types";
 import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
+import type { DocSearch } from "../search/docSearch";
 import type { Id, NoteMeta, NoteSummary, Theme } from "../core/types";
 // TYPE-ONLY, so this is a compile-time cycle the emit erases (`reader.ts` imports
 // `Viewer` from here; this imports `ReaderOrigin` from there). `ReaderOrigin`
@@ -62,6 +63,15 @@ export interface Viewer {
  */
 export interface ViewerDeps {
   api: Api;
+  /**
+   * The ONE in-document search (`golden-search.md` §1.1): one document's
+   * `text/<md5>` in the same wasm FTS5 instance the library search uses. On the
+   * shared deps object rather than per viewer so a session holds one instance
+   * and one built index — §8.1 measured that documents through a reused instance
+   * converge on the cost of the single worst one, which they cannot do if each
+   * viewer opens its own.
+   */
+  docSearch: DocSearch;
   renderer: NoteRenderer;
   cache: RenderCache;
   getTheme: () => Theme;

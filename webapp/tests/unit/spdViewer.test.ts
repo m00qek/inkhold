@@ -215,7 +215,7 @@ function deps(over: Partial<ViewerDeps> = {}): ViewerDeps {
 
 function meta(over: Partial<NoteMeta> = {}): NoteMeta {
   return {
-    id: "n-files-sketch",
+    id: "174",
     name: "Kitchen sketch",
     pages: [],
     fileType: "spd",
@@ -309,12 +309,12 @@ describe("createSpdViewer (DOM seam)", () => {
     const version = { md5: "e".repeat(32), createdAt: 1_752_000_000_000 };
     const v = createSpdViewer(deps({ onVersions, onRestoreVersion }), { loader: async () => exports, decodeTile });
     document.body.append(v.el);
-    await v.open(synthesizeSummary(meta({ id: "n-files-sketch", fileHash: "a".repeat(32) })), Promise.resolve(meta({ id: "n-files-sketch", fileHash: "a".repeat(32) })), 0, { kind: "history", folderPath: "Note / Files", version }, "");
+    await v.open(synthesizeSummary(meta({ id: "174", fileHash: "a".repeat(32) })), Promise.resolve(meta({ id: "174", fileHash: "a".repeat(32) })), 0, { kind: "history", folderPath: "Note / Files", version }, "");
     await until(() => calls.length > 0);
 
     // NOT the live `/file/:id?v=` (the current blob) — the version-scoped history
     // raw route, keyed by the version's md5.
-    expect(calls[0]).toBe(`/api/controlplane/note/n-files-sketch/history/${"e".repeat(32)}/raw`);
+    expect(calls[0]).toBe(`/api/controlplane/note/174/history/${"e".repeat(32)}/raw`);
 
     // The read-only version chrome: banner up, Move to bin gone, Versions shown.
     const banner = v.el.querySelector(".version-banner") as HTMLElement;
@@ -328,7 +328,7 @@ describe("createSpdViewer (DOM seam)", () => {
     versions.click();
     expect(onVersions).toHaveBeenCalledOnce();
     (banner.querySelector(".version-banner__restore") as HTMLElement).click();
-    expect(onRestoreVersion).toHaveBeenCalledWith(expect.objectContaining({ id: "n-files-sketch" }), version);
+    expect(onRestoreVersion).toHaveBeenCalledWith(expect.objectContaining({ id: "174" }), version);
     v.destroy();
   });
 
@@ -342,8 +342,8 @@ describe("createSpdViewer (DOM seam)", () => {
     const version = { md5: "e".repeat(32), createdAt: 1_752_000_000_000 };
     const v = createSpdViewer(deps({ onPosition }), { loader: async () => exports, decodeTile: vi.fn() });
     document.body.append(v.el);
-    await v.open(synthesizeSummary(meta({ id: "n-files-sketch" })), Promise.resolve(meta({ id: "n-files-sketch" })), 0, { kind: "history", folderPath: "Note / Files", version }, "");
-    expect(onPosition).toHaveBeenCalledWith("n-files-sketch", 0, "", version.md5);
+    await v.open(synthesizeSummary(meta({ id: "174" })), Promise.resolve(meta({ id: "174" })), 0, { kind: "history", folderPath: "Note / Files", version }, "");
+    expect(onPosition).toHaveBeenCalledWith("174", 0, "", version.md5);
     v.destroy();
   });
 
@@ -354,7 +354,7 @@ describe("createSpdViewer (DOM seam)", () => {
     const { exports } = makeFakeDecoder(SAMPLE);
     const v = createSpdViewer(deps({ onPosition }), { loader: async () => exports, decodeTile: vi.fn() });
     document.body.append(v.el);
-    await v.open(synthesizeSummary(meta({ id: "n-files-sketch" })), Promise.resolve(meta({ id: "n-files-sketch" })), 0, { kind: "folder", folderPath: "Note / Files" }, "");
+    await v.open(synthesizeSummary(meta({ id: "174" })), Promise.resolve(meta({ id: "174" })), 0, { kind: "folder", folderPath: "Note / Files" }, "");
     expect(onPosition).not.toHaveBeenCalled();
     v.destroy();
   });

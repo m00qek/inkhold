@@ -183,7 +183,7 @@ export async function statsOf(page: Page): Promise<SessionStats> {
 export async function openPageOne(page: Page, body: Buffer, shape?: LinkShape) {
   await signedIn(page);
   const served = await serveRanges(page, body, shape);
-  await page.goto("/#/note/n-files-manual");
+  await page.goto("/#/note/178");
   await freezeMotion(page);
   await expect(page.getByRole("region", { name: "PDF viewer" })).toBeVisible();
   await expect.poll(() => inkFraction(page), { timeout: 120_000 }).toBeGreaterThan(0.001);

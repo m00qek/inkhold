@@ -8,9 +8,9 @@ import { signedIn, freezeMotion } from "./helpers/app";
 //
 // The library runs against the in-memory fake `Api`, but the raw file is a REAL
 // URL the viewer fetches itself (not an `Api` call), so it needs a real response.
-// `n-files-readme` is the `.txt` fixture (see `api/fake.ts`).
+// `177` is the `.txt` fixture (see `api/fake.ts`).
 
-const README = "n-files-readme";
+const README = "177";
 const BODY = "Shopping list\n\n- oat milk\n- lentils\n- a new nib for the Supernote\n\nSee you Sunday.";
 
 /** Serve `/file/:id` for the fixture: text/plain inline, attachment on download. */

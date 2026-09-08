@@ -83,7 +83,7 @@ test.describe("accessibility — library & reader", () => {
 
   test("the reader exposes a named region and labelled pager controls", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
 
     await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Previous page" })).toBeVisible();

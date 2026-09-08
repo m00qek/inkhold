@@ -134,6 +134,18 @@ export interface IndexSearch extends LocalSearch {
    *  `searchService.ts`'s; this is the single step it drives. */
   sync(signal?: AbortSignal): Promise<SyncOutcome>;
   /**
+   * One document's `index_version`, from the manifest last synced — the other
+   * half of the `(md5, indexVersion)` cache key, which the derived files are
+   * named by and which `docText.ts` sends as `?v=`.
+   *
+   * `null` when there is no manifest yet (the offline cold start), when it does
+   * not name this document, or when it has no index row for it. The offline
+   * listing stand-in deliberately does NOT answer here: it knows what is live, not
+   * what has been derived at which version, and inventing a version is precisely
+   * how a URL comes to claim content it is not serving.
+   */
+  indexVersion(md5: string): number | null;
+  /**
    * Hand the 16 MB back (§4.2). Dropping an index means dropping the INSTANCE —
    * wasm linear memory never shrinks — so this closes it and forgets it, and the
    * next search rebuilds from rows that never left IndexedDB.
@@ -161,6 +173,16 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   // merging into the previous one would resurrect exactly the documents §2.7
   // relies on absence to remove.
   let live: Map<string, LiveDocument> | null = null;
+  /**
+   * `md5 -> index_version`, from the same manifest and replaced with it.
+   *
+   * Kept BESIDE `live` rather than read off it because the two have different
+   * sources: `live` is whichever of the manifest and the cached listing answered,
+   * and the listing knows what exists, not what has been derived at which version.
+   * A version guessed from the listing would be a URL claiming content nobody is
+   * serving — see `docText.ts`'s header.
+   */
+  let versions = new Map<string, number | null>();
 
   let index: SearchIndex | null = null;
   let building: Promise<SearchIndex> | null = null;
@@ -217,11 +239,18 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     async sync(signal) {
       const outcome = await sync.sync({ signal });
       const next = new Map<string, ManifestRow>();
-      for (const row of outcome.manifest.rows) next.set(row.md5, row);
+      const nextVersions = new Map<string, number | null>();
+      for (const row of outcome.manifest.rows) {
+        next.set(row.md5, row);
+        nextVersions.set(row.md5, row.indexVersion);
+      }
       live = next;
+      versions = nextVersions;
       if (outcome.received > 0) rows += 1;
       return outcome;
     },
+
+    indexVersion: (md5) => versions.get(md5) ?? null,
 
     drop() {
       index?.close();

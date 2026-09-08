@@ -14,7 +14,7 @@ import type { Page } from "@playwright/test";
 //
 // The library/reader run against the in-memory fake `Api`, but the raw-file
 // endpoint the viewer fetches is a REAL browser request — so this route serves
-// the fixture's bytes at `/file/n-files-sketch`, exactly as the server would.
+// the fixture's bytes at `/file/174`, exactly as the server would.
 // `/sqlite-core.wasm` is a Vite public asset, served by the dev server verbatim.
 
 const SPD_PATH = fileURLToPath(new URL("../../../parsers/spd/tests/fixtures/layers_hidden.spd", import.meta.url));
@@ -89,7 +89,7 @@ test.describe(".spd viewer (real decoder)", () => {
   test("renders a per-layer canvas stack onto a non-blank drawing", async ({ page }) => {
     await signedIn(page);
     await serveSpd(page);
-    await page.goto("/#/note/n-files-sketch");
+    await page.goto("/#/note/174");
     await freezeMotion(page);
 
     const region = page.getByRole("region", { name: "Sketch viewer" });
@@ -107,7 +107,7 @@ test.describe(".spd viewer (real decoder)", () => {
   test("lists the layers; hiding the Reference Layer makes the drawing see-through", async ({ page }) => {
     await signedIn(page);
     await serveSpd(page);
-    await page.goto("/#/note/n-files-sketch");
+    await page.goto("/#/note/174");
     await freezeMotion(page);
 
     const region = page.getByRole("region", { name: "Sketch viewer" });
@@ -149,7 +149,7 @@ test.describe(".spd viewer (real decoder)", () => {
   test("the opacity fill bar drives the readout + the layer canvas (keyboard + drag); a hidden layer's bar is disabled", async ({ page }) => {
     await signedIn(page);
     await serveSpd(page);
-    await page.goto("/#/note/n-files-sketch");
+    await page.goto("/#/note/174");
     await freezeMotion(page);
 
     const region = page.getByRole("region", { name: "Sketch viewer" });
@@ -202,7 +202,7 @@ test.describe(".spd viewer (real decoder)", () => {
   test("the Download menu offers the flat/layered × current/original matrix plus the raw .spd", async ({ page }) => {
     await signedIn(page);
     await serveSpd(page);
-    await page.goto("/#/note/n-files-sketch");
+    await page.goto("/#/note/174");
     await freezeMotion(page);
 
     const region = page.getByRole("region", { name: "Sketch viewer" });
@@ -258,7 +258,7 @@ test.describe(".spd viewer (real decoder)", () => {
 
     // The reference: the note reader's page-index (filmstrip) thumbnail box. Its
     // rendered height comes from CSS (width 76px, aspect 0.75) — no page raster needed.
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await freezeMotion(page);
     const film = page.locator(".filmstrip__thumb").first();
     await expect(film).toBeVisible();
@@ -266,7 +266,7 @@ test.describe(".spd viewer (real decoder)", () => {
     expect(filmH).toBeGreaterThan(0);
 
     // The .spd viewer: open the Layers panel.
-    await page.goto("/#/note/n-files-sketch");
+    await page.goto("/#/note/174");
     const region = page.getByRole("region", { name: "Sketch viewer" });
     await expect(region.locator(".spd-canvas-wrap .spd-layer-canvas").first()).toBeVisible();
     await region.getByRole("button", { name: "Layers" }).click();

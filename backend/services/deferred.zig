@@ -103,8 +103,7 @@ pub const Tenant = struct {
     /// pending" while a derive is running is worse than no count at all.
     ///
     /// A reader may only ADD a bound to it (`AND f.user_id = ?`, `AND f.md5 = ?`)
-    /// — never narrow or restate what is already there. Same rule, and the same
-    /// reason, as `search/query.zig`'s single `fromWhere`.
+    /// — never narrow or restate what is already there.
     from_where: []const u8,
 
     /// The next outstanding blob for this tenant, as `(md5, name, size)` — built
@@ -264,11 +263,10 @@ fn runTxt(job: Job) anyerror!void {
     //    lock taken and released around it.
     //
     //    Forward from ordinal 0 on purpose: `rowid ASC == ordinal order` is what
-    //    lets a find accumulate its keyset batches with no re-sort, and what
-    //    keeps the document's derived scan range (`query.docSegmentRanges`) a
-    //    single run. Fill from anywhere else and a document half-way through its
-    //    write is a scattered band, which costs a find one `M1><` pass per run
-    //    for as long as the write takes.
+    //    keeps a document's segments ONE contiguous run, which is what
+    //    `search/maintain.zig`'s whole-doc re-mint and its `index_version` heal
+    //    are defined in terms of. Fill from anywhere else and a document half-way
+    //    through its write is a scattered band for as long as the write takes.
     var at: usize = 0;
     while (at < rows) {
         const end = txtindex.chunkEnd(d, at);

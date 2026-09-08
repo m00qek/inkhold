@@ -9,25 +9,14 @@
 //   getPageBytes → GET  /note/{id}/page/{n}?v={hash}        (immutable, HTTP-cached)
 //   getPageText  → GET  /note/{id}/page/{n}/text?v={textHash} (immutable, HTTP-cached)
 //   getPageLinks → GET  /note/{id}/page/{n}/links?v={linksHash}
-//   searchInNote → GET  /api/controlplane/note/{id}/search?q={terms}
 //
-// NO LIBRARY-WIDE SEARCH LIVES HERE ANY MORE (`golden-search.md` §6 step 6).
-// The browser holds the index and answers every global query itself; what is
-// left below is IN-DOCUMENT find, which §6 step 7 moves onto the same engine.
+// NO SEARCH OF ANY KIND LIVES HERE ANY MORE (`golden-search.md` §6 steps 6-7).
+// The browser holds every index and answers every query itself — library-wide
+// and in-document alike; `src/search/` fetches `text/<md5>` and nothing on this
+// seam is asked to interpret a query.
 
 import type { PdfLink } from "../render/pdfLinks";
-import type {
-  Hash,
-  Id,
-  Listing,
-  NoteMeta,
-  NoteSearchBatch,
-  NoteSearchResults,
-  PageRef,
-  PageText,
-  TxtSearchBatch,
-  TxtSearchResults,
-} from "../core/types";
+import type { Hash, Id, Listing, NoteMeta, PageRef, PageText } from "../core/types";
 
 /**
  * One page's links, as {@link Api.getPageLinks} answers.
@@ -122,75 +111,6 @@ export interface Api {
    * the capture behind §14 carries 51,256 records over 1702 pages.
    */
   getPageLinks(id: Id, page: PageRef): Promise<PageLinks>;
-
-  /**
-   * Every matching page of ONE note, with a per-page match count — what
-   * find-in-note's counter and its filmstrip badges are made of.
-   *
-   * ONE REQUEST FOR THE WHOLE NOTEBOOK, and that is the design rather than an
-   * optimisation. Asking per page would fire ~200 requests for a 200-page note;
-   * the browser caps ~6 concurrent per origin and our server serialises every
-   * connection on one coarse `db_lock`, so those six would contend on the same
-   * mutex the reader needs for its page bitmaps — a find could starve the pages
-   * being read.
-   *
-   * COMPLETE AND UNRANKED. A ranked, clamped answer reused as a per-note counter
-   * is silently incomplete, and a wrong count that looks right is worse than a
-   * slow one.
-   *
-   * A blank query resolves to zero pages without a request — find searches as
-   * you type, so backspacing to empty must cost nothing.
-   */
-  searchInNote(noteId: Id, query: string): Promise<NoteSearchResults>;
-
-  /**
-   * Every matching PARAGRAPH of ONE `.txt` file, with a per-paragraph count and
-   * BYTE RANGE — what the `.txt` viewer's find highlights and jumps between.
-   *
-   * The `.txt` analog of {@link searchInNote}, and its exact contract: COMPLETE
-   * AND UNRANKED (a clamped per-file counter is silently wrong), typo-tolerant,
-   * scoped by the SAME server-side `files` join — a foreign, trashed or
-   * non-existent id, and a `.note` id with no paragraph segments, are one
-   * indistinguishable empty answer. It differs only in what a match is: a
-   * paragraph (ordinal + byte range), not a page.
-   *
-   * A blank query resolves to zero segments without a request, exactly as
-   * {@link searchInNote} does — the viewer searches as you type.
-   */
-  searchInTxt(noteId: Id, query: string): Promise<TxtSearchResults>;
-
-  /**
-   * The STREAMING twin of {@link searchInNote}: the same keyset, the same query,
-   * the same matching — but every batch is surfaced to `onBatch` as it lands
-   * instead of hidden behind one await. This is what lets find show first matches
-   * and a "N+" floor immediately, then settle to the exact count when the last
-   * batch returns (see {@link NoteSearchBatch}).
-   *
-   * ALONGSIDE the drain, not instead of it: {@link searchInNote} is kept for any
-   * caller that just wants the whole set. The two share one keyset implementation,
-   * so a term the drain finds the stream finds — batching never drops or dups a
-   * match across the cursor boundary.
-   *
-   * `onBatch` receives the CUMULATIVE result so far (page order), so it replaces
-   * rather than concatenates. `signal` aborts the drain between batches — a
-   * superseded keystroke must not keep draining a giant document. A blank query
-   * resolves without a request, exactly as {@link searchInNote} does.
-   */
-  searchInNoteStream(
-    noteId: Id,
-    query: string,
-    onBatch: (batch: NoteSearchBatch) => void,
-    signal?: AbortSignal,
-  ): Promise<void>;
-
-  /** The `.txt` twin of {@link searchInNoteStream}: streaming find-in-txt, same
-   *  contract, cumulative paragraphs per batch. */
-  searchInTxtStream(
-    noteId: Id,
-    query: string,
-    onBatch: (batch: TxtSearchBatch) => void,
-    signal?: AbortSignal,
-  ): Promise<void>;
 
   // ---------------------------------------------------------------------------
   // WRITES. Everything above this line is a read; the control-plane face was
@@ -429,17 +349,6 @@ export interface Api {
   historyPageText(id: Id, md5: Hash, index: number): Promise<PageText>;
 
   /**
-   * Find within ONE retained version
-   * (`GET /api/controlplane/note/:id/history/:md5/search?q=`). The response is
-   * {@link NoteSearchResults} MINUS the cursor: a one-document scan of the
-   * version's own recognized text (H8), complete in one shot, exact + accent-fold,
-   * with NO corpus-wide fuzzy widening — `usedFuzzy` is always false. A blank
-   * query resolves to zero pages without a request, exactly as
-   * {@link searchInNote} does.
-   */
-  searchHistory(id: Id, md5: Hash, query: string): Promise<NoteSearchResults>;
-
-  /**
    * Restore a retained version (`POST …/history/:md5/restore`): re-point the file
    * at that blob through the normal supersede path, which re-derives it as the new
    * current version AND retains the displaced current as a new history row — so
@@ -475,8 +384,10 @@ export interface Api {
   // The `/bin/…` twins of the current-version and version-history reads above,
   // for a file that is IN the recycle bin. A trashed file's data is fully
   // retained — its blob, its md5-keyed `note_index` transcript, and its
-  // `file_history` — so the bin viewer can offer the SAME recognized-text ovals,
-  // in-note find and view-only version history the live viewer does. Each is a
+  // `file_history` — so the bin viewer can offer the SAME recognized-text ovals
+  // and view-only version history the live viewer does. (Find is not among them
+  // any more: the in-document index is keyed by blob md5, and a trashed file's
+  // md5 addresses the same `text/<md5>` every other one does.) Each is a
   // separate ROUTE (and so a separate seam method) for the same reason
   // {@link getBinNoteMeta} is: the live routes hardcode `deleted = 0` as the
   // shared ownership boundary and are deliberately not relaxed to see the bin.
@@ -491,15 +402,6 @@ export interface Api {
    * text ovals and marks find-in-a-trashed-note's word rectangles.
    */
   binPageText(id: Id, page: PageRef): Promise<PageText>;
-
-  /**
-   * {@link searchInNote} for a TRASHED note
-   * (`GET /api/controlplane/bin/note/:id/search?q=`) — a one-document scan of the
-   * trashed file's retained transcript, COMPLETE in one response with no cursor
-   * (like {@link searchHistory}), so `usedFuzzy` is always false. A blank query
-   * resolves to zero pages without a request.
-   */
-  binSearchInNote(noteId: Id, query: string): Promise<NoteSearchResults>;
 
   /**
    * {@link noteHistory} for a TRASHED file
@@ -518,10 +420,6 @@ export interface Api {
    *  (`GET /api/controlplane/bin/note/:id/history/:md5/page/:n/text`) — ovals +
    *  find rectangles on a previewed past version, from the bin. */
   binHistoryPageText(id: Id, md5: Hash, index: number): Promise<PageText>;
-
-  /** {@link searchHistory} for a retained version of a TRASHED file
-   *  (`GET /api/controlplane/bin/note/:id/history/:md5/search?q=`). */
-  binSearchHistory(id: Id, md5: Hash, query: string): Promise<NoteSearchResults>;
 
   /** {@link historyRaw} for a retained version of a TRASHED file
    *  (`GET /api/controlplane/bin/note/:id/history/:md5/raw`) — the raw-based

@@ -9,13 +9,13 @@ import { signedIn, freezeMotion } from "./helpers/app";
 // only one viewer is ever visible, the topbar hides, and the universal toolbar
 // actions (Back, Move to bin) work in a non-reader viewer before any tiles land.
 //
-// The `Files` fixture folder carries one of each: `n-files-sketch` is a `.spd`,
-// `n-files-readme` a `.txt`. Only the `.spd` STUB is exercised here now — the
+// The `Files` fixture folder carries one of each: `174` is a `.spd`,
+// `177` a `.txt`. Only the `.spd` STUB is exercised here now — the
 // `.txt` viewer is REAL (it fetches and lays out text), so its render, font-size
 // control and universal actions live in `txtViewer.spec.ts`.
 
 const CASES = [
-  { kind: ".spd", id: "n-files-sketch", region: "Sketch viewer", cls: ".viewer--spd", mark: "SPD", name: "Kitchen sketch" },
+  { kind: ".spd", id: "174", region: "Sketch viewer", cls: ".viewer--spd", mark: "SPD", name: "Kitchen sketch" },
 ] as const;
 
 for (const c of CASES) {
@@ -81,20 +81,20 @@ test("switching viewers (note → .spd → note) hides the prior each time", asy
   await signedIn(page);
 
   // A real .note: the reader.
-  await page.goto("/#/note/n-doc-attn");
+  await page.goto("/#/note/141");
   await expect(page.locator(".reader.is-open")).toBeVisible();
 
   // In-app hash change (no reload), so this exercises the shell's `activate` — not
   // a fresh boot. The .spd viewer comes up and the reader is gone: not two overlays.
   await page.evaluate(() => {
-    window.location.hash = "#/note/n-files-sketch";
+    window.location.hash = "#/note/174";
   });
   await expect(page.locator(".viewer--spd")).toBeVisible();
   await expect(page.locator(".reader.is-open")).toBeHidden();
 
   // Back to a note: the reader returns and the .spd viewer is hidden again.
   await page.evaluate(() => {
-    window.location.hash = "#/note/n-doc-attn";
+    window.location.hash = "#/note/141";
   });
   await expect(page.locator(".reader.is-open")).toBeVisible();
   await expect(page.locator(".viewer--spd")).toBeHidden();

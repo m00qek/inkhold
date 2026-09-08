@@ -8,9 +8,11 @@
 //! FOLD on an x86 box and extrapolated to the ARM1176 at an assumed 10-20×;
 //! COMPRESSION — the one new CPU cost this design adds to the server — was never
 //! measured at all. Both are settled by running this on the deployment target,
-//! which is what `search_bench.zig` and `indoc_bench.zig` are already shaped for:
-//! cross-compiled with `-Dtarget=arm-linux-musleabihf -Dcpu=arm1176jzf_s`, scp'd
-//! to the Pi, run there.
+//! which is the shape every bench in this repo has taken: cross-compiled with
+//! `-Dtarget=arm-linux-musleabihf -Dcpu=arm1176jzf_s`, scp'd to the Pi, run
+//! there. It is the last of them — `search_bench.zig` went with library-wide
+//! search (`golden-search.md` §6 step 6) and `indoc_bench.zig` with the
+//! in-document reads it timed (step 7).
 //!
 //! ## It measures THIS code, not a proxy
 //!
@@ -699,8 +701,8 @@ fn mbps(bytes: usize, ns: u64) f64 {
         (@as(f64, @floatFromInt(ns)) / 1_000_000_000.0);
 }
 
-/// `/proc/self/status`, read the same way `indoc_bench.zig` and `health.zig`
-/// read it and for the same stated reason: a `/proc` file reports `st_size = 0`,
+/// `/proc/self/status`, read the same way `health.zig` reads it and for the same
+/// stated reason: a `/proc` file reports `st_size = 0`,
 /// so the size-driven whole-file helpers return an empty slice and every figure
 /// silently reads as "unknown" on the one platform that can answer.
 fn statusKb(io: Io, key: []const u8) ?u64 {

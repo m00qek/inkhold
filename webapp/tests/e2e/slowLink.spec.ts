@@ -55,7 +55,7 @@ import { layeredPageLayers, layeredPagePayload } from "../../src/api/layeredFixt
 //   a bin retry reads as a retry         ← the `state === "error"` flip in `open`
 //   a deep-linked crumb corrects itself  ← `onLabelsSettled` in `settle()`
 //   a deep link's category tiles settle  ← `relabelFolders`'s card replacement
-//   a superseded search is aborted       ← `inflight?.abort()` in `cancelPending`
+//   a superseded find is aborted         ← `runAbort?.abort()` in `findInNote`
 //
 // And prefer `recordText` (helpers/recordText.ts) over any `expect(locator)` for
 // "it must never have said X": Playwright's matchers retry until they pass, so
@@ -332,9 +332,17 @@ test.describe("a search inside a subfolder, while the tree walk is outstanding",
           syncVersion: 1,
         },
       },
-      // The transcript half answers at once, and answers NOTHING. That is what
-      // used to settle the question prematurely.
-      "controlplane/search": { json: { query: "Zebra", hits: [], usedFuzzy: false, coverage: null } },
+      // THE TRANSCRIPT HALF NEEDS NO ENTRY, and that absence is the whole of what
+      // §6 step 6 changed here. It used to be `controlplane/search`, answering at
+      // once and answering NOTHING — which is what settled the question
+      // prematurely. It is now the browser's own index (`golden-search.md` §6),
+      // which in this scenario has no manifest and no stored rows and therefore
+      // also answers nothing, instantly and without a round trip.
+      //
+      // So the bug's window did not close with the route; it got WIDER, because
+      // the empty answer now arrives in the same task as the keystroke instead of
+      // after a request. What stops "No matches" being painted is `gallerySearch`'s
+      // `!ctx.treeLoaded()` clause and nothing else.
       "user/me": { json: ME },
     };
     await mockApi(page, scenario);
@@ -342,25 +350,34 @@ test.describe("a search inside a subfolder, while the tree walk is outstanding",
 
   // 1.1 — the permanent lie. The name half of a library-wide query is matched
   // against the cached tree that `prefetchTree` fills one folder at a time, so a
-  // transcript response with no hits routinely arrives BEFORE the name half can
+  // transcript answer with no hits routinely arrives BEFORE the name half can
   // have been computed against a complete library. "No matches" painted then is
   // a claim about notes the app has not looked at yet — and inside a subfolder
   // it never self-corrected, because the repaint was gated on `folderId === null`.
   test("says Searching…, never No matches, while the walk is still running", async ({ page }) => {
+    // RECORDED, not sampled, and that is a change forced by the mechanism rather
+    // than a preference. The old test's sync point was "wait for the transcript
+    // response", which pinned the moment the empty answer arrived; there is no
+    // response now, so there is no moment to wait for — and the empty answer lands
+    // in the same task as the keystroke, which is exactly the flash this file's
+    // header says a retrying matcher cannot see. The whole window is therefore
+    // recorded and asserted over afterwards.
+    const gallery = await recordText(page, "#gallery");
     await heldBranch(page, { archiveDelayMs: 4000 });
     await page.goto("/?real#/folder/proj");
     await expect(page.locator("#gallery")).toContainText("Sprint plan");
 
     await page.getByRole("searchbox", { name: "Search notes" }).fill("Zebra");
-    // Wait for the transcript half to have ANSWERED — otherwise "Searching…"
-    // would be true for the trivial reason that nothing had come back yet.
-    await page.waitForResponse((r) => r.url().includes("controlplane/search"));
 
     // The walk has not landed…
     await expect(page.getByRole("navigation", { name: "Folders" })).toHaveAttribute("aria-busy", "true");
-    // …so the negative is not claimed.
+    // …so the negative is not claimed, now…
     await expect(galleryEmpty(page).locator("h3")).toHaveText("Searching…");
-    await expect(page.locator("#gallery")).not.toContainText("No matches");
+    // …nor at any point since the keystroke. This is the assertion with teeth:
+    // remove the `!ctx.treeLoaded()` clause and "No matches" is painted for one
+    // repaint before "Searching…" replaces it, which the line above would miss.
+    expect(await gallery.everShowed("No matches")).toBe(false);
+    expect(await gallery.everShowed("Searching…")).toBe(true);
   });
 
   // The other half: the claim has to RESOLVE. `rail.settle()` only repainted at
@@ -379,33 +396,20 @@ test.describe("a search inside a subfolder, while the tree walk is outstanding",
   });
 });
 
-test.describe("a superseded library search", () => {
-  // 2.7 — the token machine here is correct and always was: a superseded response
-  // is dropped on both arms. But dropping is not stopping. The request went on to
-  // completion holding one of the browser's ~6 connections per origin, so typing
-  // past the 220 ms debounce spent several of them on answers nobody would ever
-  // see, against the gallery's own listings and thumbnails.
-  test("gives its connection back rather than running to completion", async ({ page }) => {
-    await mockApi(page, {
-      // Held, so the first query is still on the wire when the next keystroke
-      // supersedes it — which is the whole of the window.
-      "controlplane/search": { delayMs: 6000, json: { query: "", hits: [], usedFuzzy: false, coverage: null } },
-      "controlplane/tree": { json: { folderId: null, path: [], entries: [], syncVersion: 1 } },
-      "user/me": { json: ME },
-    });
-    await page.goto("/?real");
-    const box = page.getByRole("searchbox", { name: "Search notes" });
-
-    await box.fill("zebra");
-    await page.waitForRequest((r) => r.url().includes("controlplane/search"));
-
-    // The browser reporting the request as FAILED is the observable: an abort is
-    // `net::ERR_ABORTED`, and a request merely ignored never fails at all.
-    const dropped = page.waitForEvent("requestfailed", (r) => r.url().includes("controlplane/search"));
-    await box.fill("zebras");
-    expect((await dropped).failure()?.errorText ?? "").toContain("ABORTED");
-  });
-});
+// 2.7 — "a superseded search gives its connection back" — MOVED, not dropped.
+//
+// It lived here as a LIBRARY search: `controlplane/search` was held, a second
+// keystroke superseded the first, and the observable was the browser reporting
+// the first request as `net::ERR_ABORTED`. A library-wide query makes no request
+// at all now (`golden-search.md` §6 step 6), so there is no connection out here
+// to give back and no way to write that assertion in this scope.
+//
+// The behaviour it pinned is still real, on the one search that still touches the
+// network: the FIRST find on a document fetches `text/<md5>`, a giant one can be
+// megabytes, and `findInNote`'s `cancelPending` aborts it when the query moves
+// on. So the test moved to where that fetch happens — see "a superseded find gives
+// its connection back" in the reader's note-stage block below, next to the
+// layered fixture it needs.
 
 test.describe("the recycle bin's actions while one is in flight", () => {
   const trashed = {
@@ -623,22 +627,22 @@ test.describe("the reader's image stage", () => {
     // early via the `onerror` fallback, and the state under test would never be
     // the one measured.
     await page.route(
-      (url) => url.pathname === "/file/n-shot-map",
+      (url) => url.pathname === "/file/152",
       async (route) => {
         await new Promise((r) => setTimeout(r, 10_000));
         await route.fulfill({ status: 200, contentType: "image/png", body: Buffer.from(TINY_PNG_BASE64, "base64") });
       },
     );
 
-    await page.goto("/#/note/n-shot-pricing");
+    await page.goto("/#/note/151");
     const img = page.locator(".filestage__img");
     await expect.poll(async () => img.evaluate((e: HTMLImageElement) => e.naturalWidth)).toBeGreaterThan(0);
     const first = await img.getAttribute("src");
-    expect(first).toContain("n-shot-pricing");
+    expect(first).toContain("151");
 
     // Straight to the second image, whose bytes are held.
     await page.evaluate(() => {
-      window.location.hash = "#/note/n-shot-map";
+      window.location.hash = "#/note/152";
     });
     // The title moves in the SAME synchronous block that swaps the stage, so
     // once it reads the second file the stage is already in its in-flight state.
@@ -998,8 +1002,12 @@ test.describe("the reader's note stage, mid-fetch", () => {
     const counter = await recordText(page, ".findbar__count");
     await mockApi(page, {
       "controlplane/file/metadata": { delayMs: 6000, json: layeredMeta(3, []) },
-      // Held too, so the counter cannot be settled by the note-wide count landing.
-      "controlplane/note/n-lay/search": { delayMs: 6000, json: { pages: [], usedFuzzy: false } },
+      // Held too, so the counter cannot be settled by the note-wide count
+      // landing. This is `text/<md5>` now (§6 step 7): the note-scoped search
+      // route is gone and the count comes from an index the browser builds out
+      // of this response, so holding it holds the whole of phase 2 — which is
+      // what makes the intermediate state observable at all.
+      "controlplane/text/": { delayMs: 6000, json: {} },
       "controlplane/tree": {
         json: {
           folderId: null,
@@ -1028,6 +1036,52 @@ test.describe("the reader's note stage, mid-fetch", () => {
 
     expect(await counter.everShowed("Not recognised")).toBe(false);
     expect(await counter.everShowed("No matches")).toBe(false);
+  });
+
+  // 2.7, REHOUSED — see the note where this used to live, above the recycle bin's
+  // block. The token machine is correct and always was: a superseded answer is
+  // dropped on both arms. But DROPPING IS NOT STOPPING. The request went on to
+  // completion holding one of the browser's ~6 connections per origin, and after
+  // §6 step 7 the request it is holding is the one that can actually be big:
+  // `text/<md5>` is a whole document's text, 3.15 MB for the worst real one
+  // (§8.1), against a find bar that issues a new one every 220 ms of typing.
+  //
+  // `findInNote`'s `cancelPending` aborts it, and the browser reporting the
+  // request as FAILED is the observable: an abort is `net::ERR_ABORTED`, and a
+  // request merely ignored never fails at all.
+  test("a superseded find gives its connection back rather than running to completion", async ({ page }) => {
+    await mockApi(page, {
+      // The metadata lands, so find has the real page list and the query really
+      // runs — this test is about the fetch, not about the skeleton.
+      "controlplane/file/metadata": { json: layeredMeta(3, [0, 1, 2]) },
+      // Held, so the first query's text fetch is still on the wire when the next
+      // keystroke supersedes it. That IS the window.
+      "controlplane/text/": { delayMs: 6000, json: {} },
+      "controlplane/tree": {
+        json: {
+          folderId: null,
+          path: [],
+          entries: [
+            { ...layeredEntry({ firstPageLayered: false, pageCount: 3 }), hasRecognizedText: true },
+          ],
+          syncVersion: 1,
+        },
+      },
+      "user/me": { json: ME },
+    });
+    await serveLayeredPages(page);
+    await page.goto(`/?real#/note/${LAY}`);
+    await expect(page.locator(".reader.is-open")).toBeVisible();
+
+    await page.getByRole("button", { name: "Find in this note" }).click();
+    const field = page.getByRole("textbox", { name: "Find in this note" });
+
+    await field.fill("zebra");
+    await page.waitForRequest((r) => r.url().includes("controlplane/text/"));
+
+    const dropped = page.waitForEvent("requestfailed", (r) => r.url().includes("controlplane/text/"));
+    await field.fill("zebras");
+    expect((await dropped).failure()?.errorText ?? "").toContain("ABORTED");
   });
 
   // THE PAYOFF of a listing's `firstPage` carrying its layers: a note opened from

@@ -168,31 +168,6 @@ describe("historyRaw", () => {
   });
 });
 
-describe("searchHistory", () => {
-  it("a blank query costs NO request and returns the empty result", async () => {
-    const { fn, calls } = recordingFetch(() => jsonResponse({}));
-    vi.stubGlobal("fetch", fn);
-    const r = await createHttpApi().searchHistory("n1", "abc", "   ");
-    expect(r).toEqual({ query: "", pages: [], usedFuzzy: false });
-    expect(calls).toHaveLength(0);
-  });
-
-  it("normalizes page matches and PINS usedFuzzy false even if the server sends true", async () => {
-    const { fn, calls } = recordingFetch(() =>
-      jsonResponse({
-        query: "witches",
-        pages: [{ pageIndex: 3, matches: 2, terms: ["witches"] }],
-        usedFuzzy: true, // a history scan never fuzzes (H8) — the seam refuses it
-      }),
-    );
-    vi.stubGlobal("fetch", fn);
-    const r = await createHttpApi().searchHistory("n1", "abc", "witches");
-    expect(calls[0]).toContain("/api/controlplane/note/n1/history/abc/search?q=witches");
-    expect(r.usedFuzzy).toBe(false);
-    expect(r.pages).toEqual([{ pageIndex: 3, matches: 2, terms: ["witches"] }]);
-  });
-});
-
 describe("restoreVersion", () => {
   it("POSTs the restore route and returns the new current version", async () => {
     const { fn, calls } = recordingFetch((_url, init) => {

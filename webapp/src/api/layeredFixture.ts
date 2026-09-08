@@ -21,7 +21,7 @@
 
 import type { PageLayer, PageRef } from "../core/types";
 
-export const LAYERED_NOTE_ID = "n-layers";
+export const LAYERED_NOTE_ID = "104";
 
 /** The fixture's page size — the A5X native portrait page, like every other
  *  fake page (and the payload header agrees, as the real index guarantees). */

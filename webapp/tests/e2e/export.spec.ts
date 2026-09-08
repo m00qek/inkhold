@@ -7,10 +7,10 @@ import { readFile } from "node:fs/promises";
 // WHOLE NOTEBOOK. On a page with no layer stack the per-page rows fall back to the
 // composite (Flattened image / PDF document) and the layered-only rows fold away; the
 // whole notebook offers its PDF plus the raw `.note`. These tests drive the
-// no-layer note (n-doc-attn); the layered matrix is proved in noteLayers.spec.ts.
+// no-layer note (141); the layered matrix is proved in noteLayers.spec.ts.
 
-const NOTE = "/#/note/n-doc-attn"; // 20 pages, recognized, known hardware
-const UNSCALED = "/#/note/n-doc-unscaled"; // recognized, but no verified mm scale
+const NOTE = "/#/note/141"; // 20 pages, recognized, known hardware
+const UNSCALED = "/#/note/144"; // recognized, but no verified mm scale
 
 // The reader's export trigger is labelled "Download" now (the verb
 // a user knows), though it still opens the same export menu.
@@ -272,7 +272,7 @@ test.describe("export menu", () => {
 
   test("the menu is not offered for files that are not notes", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-epub"); // an .epub: no viewer, so the reader
+    await page.goto("/#/note/143"); // an .epub: no viewer, so the reader
     await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
 
     // A page exporter over a file with no pages would be chrome that does

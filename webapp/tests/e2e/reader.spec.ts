@@ -8,7 +8,7 @@ import { signedIn, inkFraction, contrastRatio, paintedColours, cardButton, freez
 test.describe("reader", () => {
   test("opens a note by route and paints the current page", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
 
     await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
     await expect(page.locator(".reader__title")).toContainText("Attention");
@@ -21,7 +21,7 @@ test.describe("reader", () => {
 
   test("navigates pages with the pager, the filmstrip, and the keyboard", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
     await page.getByRole("button", { name: "Next page" }).click();
@@ -53,7 +53,7 @@ test.describe("reader", () => {
 
     test("toggling shows and hides the panel and tracks aria-pressed", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
       await expect(panel(page)).toBeHidden();
@@ -71,7 +71,7 @@ test.describe("reader", () => {
 
     test("the panel head reads `[icon] Recognized text` — a decorative icon before the label", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
       await toggle(page).click();
@@ -86,7 +86,7 @@ test.describe("reader", () => {
       // regime where the panel's 268px+22px actually competes with the canvas.
       await page.setViewportSize({ width: 800, height: 1000 });
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
       // The page index docks on the LEFT and is open by default; close it so this
@@ -110,7 +110,7 @@ test.describe("reader", () => {
 
     test("content follows the current page while the panel stays open", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       // Wait for the note to finish opening: opening a note RESETS the panel, so
       // a toggle click racing that reset would be undone by it.
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
@@ -125,7 +125,7 @@ test.describe("reader", () => {
 
     test("a page with no recognized text disables the toggle and states so plainly", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
       await expect(toggle(page)).toBeEnabled();
 
@@ -148,12 +148,12 @@ test.describe("reader", () => {
 
     test("the panel resets to closed when a different note opens", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
       await toggle(page).click();
       await expect(panel(page)).toBeVisible();
 
-      await page.goto("/#/note/n-weekly");
+      await page.goto("/#/note/101");
       await expect(page.locator(".pager__count")).toHaveText("1 / 3");
       await expect(panel(page)).toBeHidden();
       await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
@@ -170,7 +170,7 @@ test.describe("reader", () => {
 
     test("rides the shared side-panel primitive, docked LEFT, open by default", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
       // One family: a `.side-panel` with the `.pages` hook and a `[icon] Pages`
@@ -204,7 +204,7 @@ test.describe("reader", () => {
       // actually moves the page width.
       await page.setViewportSize({ width: 800, height: 1000 });
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
       const pageEl = page.locator(".page");
@@ -225,7 +225,7 @@ test.describe("reader", () => {
     test("on a narrow stage, opening a right-hand tool auto-collapses the page index", async ({ page }) => {
       await page.setViewportSize({ width: 800, height: 1000 });
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
       await expect(pagesPanel(page)).toBeVisible();
 
@@ -240,7 +240,7 @@ test.describe("reader", () => {
 
   test("Back returns to the library", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
 
     await page.getByRole("button", { name: "Library" }).click();
@@ -262,7 +262,7 @@ test.describe("reader", () => {
       test(`toolbar buttons show their label and icon in ${scheme} mode`, async ({ page }) => {
         await page.emulateMedia({ colorScheme: scheme });
         await signedIn(page);
-        await page.goto("/#/note/n-doc-attn");
+        await page.goto("/#/note/141");
 
         await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
@@ -317,7 +317,7 @@ test.describe("reader", () => {
   test.describe("the reader owns the header", () => {
     test("opening a note hides the library topbar and the reader still has height", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
       await freezeMotion(page);
 
@@ -346,7 +346,7 @@ test.describe("reader", () => {
 
     test("closing the reader brings the library header back", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".topbar")).toBeHidden();
 
       await page.locator(".backbtn").click();
@@ -391,7 +391,7 @@ test.describe("reader", () => {
   test.describe("the shared toolbar", () => {
     test("exposes a toolbar landmark with two zones and a decorative divider", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
       const bar = page.getByRole("toolbar", { name: "Reader controls" });
@@ -416,7 +416,7 @@ test.describe("reader", () => {
 
     test("is one tab stop and arrow keys rove between its controls", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
       // Opens with Back focused (the keyboard entry point) and exactly one control
@@ -438,7 +438,7 @@ test.describe("reader", () => {
 
     test("roves through the right zone to the added Move to bin control", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.getByRole("button", { name: "Library" })).toBeFocused();
 
       // End jumps to the LAST control in the bar's single tab stop. Adding Move to
@@ -457,7 +457,7 @@ test.describe("reader", () => {
 
     test("Download and recognised-text are icon-only but keep their accessible names", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
       const bar = page.locator(".reader__bar");
@@ -481,7 +481,7 @@ test.describe("reader", () => {
 
     test("the Download trigger wears an active look while its menu is open, cleared when it closes", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
       // AFTER navigation (a hash goto reloads the document and would drop a style
       // tag added earlier): freeze so the active background is its settled value,
@@ -513,7 +513,7 @@ test.describe("reader", () => {
 
     test("Move to bin trashes the open note, offers an undo with the device line, and leaves the reader", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".reader.is-open")).toBeVisible();
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
@@ -554,7 +554,7 @@ test.describe("reader", () => {
   });
   // A `.note`'s OWN links — the rectangles a PDF used as a page's template
   // brought with it (`parsers/note/note-format.md` §14). The fake serves them
-  // for ONE fixture (`n-proj-beta`, seven pages), exactly as the real page list
+  // for ONE fixture (`122`, "Project Beta", seven pages), exactly as the real page list
   // carries `linksHash` for only the pages that have a link block.
   //
   // Rendered by the SAME component the PDF viewer uses (`pages/pdfLinkLayer.ts`),
@@ -568,7 +568,7 @@ test.describe("reader", () => {
 
     test("puts each link on its own rect, as a real anchor, labelled", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-proj-beta");
+      await page.goto("/#/note/122");
       await expect(page.locator(".pager__count")).toHaveText("1 / 7");
       await expect(layer(page).locator("a")).toHaveCount(2, { timeout: 10_000 });
 
@@ -588,7 +588,7 @@ test.describe("reader", () => {
       ).resolves.toContain("pdf-links");
 
       // The INTERNAL one: this app's own route, in this tab.
-      const internal = layer(page).locator('a[href="#/note/n-proj-beta/page/2"]');
+      const internal = layer(page).locator('a[href="#/note/122/page/2"]');
       await expect(internal).toHaveCount(1);
       await expect(internal).toHaveAttribute("aria-label", "Go to page 2");
       await expect(internal).not.toHaveAttribute("target", "_blank");
@@ -619,26 +619,26 @@ test.describe("reader", () => {
 
     test("following an internal link is a page turn, at a real address", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-proj-beta");
+      await page.goto("/#/note/122");
       await expect(page.locator(".pager__count")).toHaveText("1 / 7");
 
-      await layer(page).locator('a[href="#/note/n-proj-beta/page/2"]').click();
+      await layer(page).locator('a[href="#/note/122/page/2"]').click();
       await expect(page.locator(".pager__count")).toHaveText("2 / 7");
       // A REAL ADDRESS, not a scroll: shareable, and it survives a reload.
-      expect(page.url()).toContain("#/note/n-proj-beta/page/2");
+      expect(page.url()).toContain("#/note/122/page/2");
       // The layer followed the turn — page 2's jump goes to page 3, so the
       // previous page's anchor is gone rather than left offering a stale target.
-      await expect(layer(page).locator('a[href="#/note/n-proj-beta/page/3"]')).toHaveCount(1, {
+      await expect(layer(page).locator('a[href="#/note/122/page/3"]')).toHaveCount(1, {
         timeout: 10_000,
       });
-      await expect(layer(page).locator('a[href="#/note/n-proj-beta/page/2"]')).toHaveCount(0);
+      await expect(layer(page).locator('a[href="#/note/122/page/2"]')).toHaveCount(0);
     });
 
     test("a note with no imported template has no layer at all", async ({ page }) => {
       // The overwhelming case: a note on a built-in style has nothing to
       // preserve, so there is no link block, no request and nothing focusable.
       await signedIn(page);
-      await page.goto("/#/note/n-doc-attn");
+      await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveText("1 / 20");
       await expect(page.locator(".page canvas")).toBeVisible();
       await expect(layer(page).locator("a")).toHaveCount(0);
@@ -646,7 +646,7 @@ test.describe("reader", () => {
 
     test("the layer follows the page box through a zoom step", async ({ page }) => {
       await signedIn(page);
-      await page.goto("/#/note/n-proj-beta");
+      await page.goto("/#/note/122");
       const anchor = layer(page).locator('a[href^="https://example.com/planner"]');
       await expect(anchor).toBeVisible({ timeout: 10_000 });
 

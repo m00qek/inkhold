@@ -84,7 +84,6 @@ test {
     _ = @import("services/settings.zig");
     _ = @import("services/health.zig");
     _ = @import("services/note_index.zig");
-    _ = @import("services/search/query.zig");
     _ = @import("services/search/maintain.zig");
     _ = @import("services/search/fuzzy.zig");
     _ = @import("services/search/index_export.zig");

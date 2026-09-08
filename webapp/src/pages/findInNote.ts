@@ -10,23 +10,27 @@
 // TWO PHASES, BECAUSE THEY COST DIFFERENT THINGS
 // ============================================================================
 //
-// A 200-page notebook must not mean 200 requests. It would not even fire them at
-// once — browsers cap ~6 concurrent per origin on HTTP/1.1 — and our server
-// threads every connection but serialises them on a coarse `db_lock`, so those
-// six would contend on the same mutex the reader needs for its page bitmaps. A
-// find could starve the pages being read.
+// The two things find shows come from different places, and only one of them is
+// a search:
 //
-// The way out is that the two things find shows have different costs:
-//
-//   COUNTS — the counter and the filmstrip badges — need only which pages match
-//   and how many. That is ONE note-scoped query (`Api.searchInNote`) against the
-//   FTS index that already holds per-page text, for the whole notebook.
+//   COUNTS — the counter and the filmstrip badges — are the BROWSER's answer.
+//   `golden-search.md` §1.1: one document's text is loaded into the same wasm
+//   FTS5 instance the library search uses and asked the same `idx_query`. The
+//   text arrives as `text/<md5>` on the FIRST FIND (§4.1) — never on open,
+//   because reading a note needs the renderer and not a text index — and is
+//   HTTP-immutable, so every later find on it costs nothing.
 //
 //   RECTANGLES — the ovals — need `getPageText`, and only for the page actually
 //   on screen. Lazy, and HTTP-immutable behind `?v={textHash}`.
 //
-// So a 200-page notebook costs one request plus one per page you actually look
-// at. That is not an optimisation to add later; at that size it is the design.
+// So a 200-page notebook costs ONE text fetch plus one page-text request per
+// page you actually look at, and the notebook-wide count is then computed
+// locally on every keystroke.
+//
+// The note-scoped SERVER route this used to call is gone (§6 step 7), and with
+// it the reason the phases were split the way they were: the server threaded
+// every connection but serialised them on a coarse `db_lock`, so a find could
+// starve the pages being read. Nothing here contends with anything any more.
 //
 // ============================================================================
 // WHAT THE INTERMEDIATE STATE MUST NOT SAY
@@ -56,7 +60,28 @@
 
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
 import type { Api } from "../api/types";
-import type { Hash, Id, NoteSearchBatch, PageMatch, PageRef, WordBox } from "../core/types";
+import type { Hash, Id, PageRef, WordBox } from "../core/types";
+import type { DocSearch, DocSearchResult } from "../search/docSearch";
+
+/**
+ * One matching page: the count the counter sums and the terms the ovals are
+ * drawn from — `docSearch.ts`'s record, in the reader's own vocabulary
+ * (`pageIndex`, because a `.note` segment ordinal IS a page).
+ *
+ * Declared here rather than shared: the seam's own match shape was the shape of
+ * a SERVER response, and it went with the routes — this controller reads none.
+ * The fields are the same because the meaning is.
+ */
+interface FindPage {
+  readonly pageIndex: number;
+  readonly matches: number;
+  readonly terms: readonly string[];
+}
+
+/** `docSearch.ts`'s answer in the reader's vocabulary. */
+function toPages(result: DocSearchResult): FindPage[] {
+  return result.segments.map((s) => ({ pageIndex: s.segment, matches: s.matches, terms: s.terms }));
+}
 
 /**
  * What the find bar's counter can be showing. Distinct states rather than "some
@@ -86,22 +111,17 @@ export type FindState =
    */
   | { kind: "counting"; onThisPage: number; recognisedPages: number | null }
   /**
-   * Phase 2, STREAMING (in-doc-search Phase 4). Matches are arriving in page
-   * order and the note is still being drained, so `total` is a FLOOR, not the
-   * final count — the counter shows it as "N+" and settles to the exact number
-   * once the last batch lands. `at` steps the accumulated set; `fuzzy` is carried
-   * for the same reason `settled` carries it. This is the browser-Ctrl+F shape
-   * ("3 / 20+" → resolves), and a finite document always reaches the exact count.
-   */
-  | { kind: "streaming"; at: number; total: number; fuzzy: boolean }
-  /**
-   * Phase 2, SETTLED, with matches. `at` is 0-based over the now-EXACT `total`.
+   * Phase 2, SETTLED, with matches. `at` is 0-based over the EXACT `total`.
    *
-   * `fuzzy` is the server's `usedFuzzy`: nothing matched as typed and these are
-   * close matches. Carried on the state rather than held beside it because it
-   * qualifies the very number being shown — `3 of 7` means something different
-   * when the seven are approximate — and it is said ONCE, above the note, never
-   * per match.
+   * THERE IS NO FLOOR STATE, and its absence is the shape of the new mechanism
+   * rather than a simplification of the old one: the answer comes from a local
+   * index in one call, so there are no batches to accumulate and no "N+" that
+   * later resolves. What is still progressive is the WAIT — see `counting`.
+   *
+   * `fuzzy` says nothing matched as typed and these are close matches. Carried on
+   * the state rather than held beside it because it qualifies the very number
+   * being shown — `3 of 7` means something different when the seven are
+   * approximate — and it is said ONCE, above the note, never per match.
    */
   | { kind: "settled"; at: number; total: number; fuzzy: boolean }
   /**
@@ -141,11 +161,18 @@ export interface FindView {
 }
 
 export interface FindDeps {
+  /** Still the API, but ONLY for `getPageText` — the ovals. No search route. */
   api: Api;
+  /**
+   * The one in-document search (§1.1). Shared with the `.txt` and `.pdf` viewers
+   * so the wasm instance and its built index are one per session, not one per
+   * viewer — §8.1's "documents do not stack" is a property of reusing it.
+   */
+  docs: DocSearch;
   view: FindView;
   /** Where UNAUTHORIZED / STALE_PAGE go. Never swallow them here. */
   failures: ApiFailureSink;
-  /** Quiet period before the note-wide count is sent, ms. Default 220. */
+  /** Quiet period before the note-wide count is asked for, ms. Default 220. */
   debounceMs?: number;
 }
 
@@ -165,8 +192,15 @@ export interface FindController {
    * the real metadata lands (a caller may still pass `true` when the LISTING's
    * own whole-note answer settles it negatively). Defaults to `true`, which is
    * right for every caller holding a real `NoteMeta`.
+   *
+   * `md5` IS THE ONLY THING THE SEARCH NEEDS, and that is what collapsed the
+   * scope adapters (§1.1: "history and bin are not special: they are other
+   * md5s"). `NoteMeta.fileHash` already carries it, and `historyScope.ts` and
+   * `bin.ts` already rewrite that field for a version preview — so a preview
+   * searches its own retained blob with no reroute anywhere. Null (a note with
+   * no content address) leaves find inert rather than searching the wrong blob.
    */
-  setNote(noteId: Id | null, pages: readonly PageRef[], recognitionKnown?: boolean): void;
+  setNote(noteId: Id | null, md5: string | null, pages: readonly PageRef[], recognitionKnown?: boolean): void;
   /** The reader moved to a page — repaint that page's ovals. */
   setPage(index: number): void;
   /** The field changed. Cheap, idempotent, safe per keystroke. */
@@ -175,9 +209,9 @@ export interface FindController {
   step(dir: 1 | -1): void;
   /**
    * Opt IN to the typo-tolerant fallback for the current query — the response to
-   * the `fuzzyPrompt` affordance. The fuzzy result was already fetched (the
-   * server returns it as one no-cursor batch when the exact search is empty); it
-   * was merely HELD, not displayed, so this reveals it without a new request. A
+   * the `fuzzyPrompt` affordance. The ladder already ran (`idx_fuzzy` fires it
+   * only when the query as typed matched nothing) and its answer was merely
+   * HELD, not displayed, so this reveals it without asking anything again. A
    * no-op unless a fuzzy result is currently being held.
    */
   searchSimilar(): void;
@@ -211,26 +245,26 @@ function wordTerms(text: string): string[] {
  *
  * ## `terms` is the answer; the query is only a guess
  *
- * When `terms` is non-null it is the server's list of what it COUNTED on this
- * page — folded index terms, from `PageMatch.terms` — and a word is circled
+ * When `terms` is non-null it is what the index COUNTED on this page — folded
+ * terms named from the page's own text by `docSearch.ts` — and a word is circled
  * exactly when one of its own terms is in that list. An equality test, not a
  * second matching rule: the ovals are then derived from the count rather than
  * re-derived from the query.
  *
  * That distinction is the point of the whole term shape. This function used to
  * re-derive the match with a folded SUBSTRING test, independently of how the
- * server counted, and the two agreed only by luck — the client has no way to
- * reproduce the prefix `*` expansion, the tokenizer's exact folding, or which
- * near-miss a typo expanded into. That coincidence is what kept the typo
- * fallback switched off on the note-scoped route.
+ * count was made, and the two agreed only by luck — a raw query cannot reproduce
+ * the prefix `*` expansion, the tokenizer's exact folding, or which near-miss the
+ * typo ladder expanded into.
  *
  * ## `terms === null` is phase 1, and says so
  *
- * Before the note-wide counts land there is no server answer to derive anything
- * from, and drawing nothing would cost find the immediacy that is its whole
- * feel. So the substring guess survives HERE and only here, alongside a counter
- * that claims nothing beyond this page ("4 on this page · searching 3 pages…").
- * When the counts land both are replaced by the real answer.
+ * Before the note-wide counts land there is no answer to derive anything from —
+ * the first find on a document is waiting on `text/<md5>` and a ~40–360 ms index
+ * build (§8.1) — and drawing nothing would cost find the immediacy that is its
+ * whole feel. So the substring guess survives HERE and only here, alongside a
+ * counter that claims nothing beyond this page ("4 on this page · searching 3
+ * pages…"). When the counts land both are replaced by the real answer.
  *
  * The count is never derived from the returned boxes once the counts have
  * landed: where the device's word rectangles tokenise differently from the
@@ -261,6 +295,9 @@ export function createFindController(deps: FindDeps): FindController {
 
   let open = false;
   let noteId: Id | null = null;
+  /** The blob this find searches — `NoteMeta.fileHash`, which a version preview
+   *  has already rewritten to the retained version's own md5. */
+  let noteMd5: string | null = null;
   let pages: readonly PageRef[] = [];
   let pageIndex = 0;
 
@@ -277,25 +314,21 @@ export function createFindController(deps: FindDeps): FindController {
    */
   let token = 0;
 
-  /** Phase 2's answer: matching pages ACCUMULATED so far, in page order. */
-  let counts: PageMatch[] = [];
-  /** The stream is exhausted — the count is now EXACT, not a floor. */
-  let settled = false;
-  /** A batch has landed (streaming or settled): the ovals derive from the server's
-   *  counted terms now, not the provisional phase-1 guess. While `landedCounts` is
-   *  true and `settled` is false, the note is still draining — the counter shows a
-   *  floor ("N+"). Once `settled`, the count is exact. */
+  /** Phase 2's answer: matching pages, in page order. Complete when it lands. */
+  let counts: FindPage[] = [];
+  /** The answer has landed: the ovals derive from its counted terms now, not the
+   *  provisional phase-1 guess, and the count is EXACT. */
   let landedCounts = false;
-  /** The server's `usedFuzzy` for the answer currently on screen. */
+  /** Whether the answer on screen came from the typo ladder. */
   let fuzzy = false;
   /**
-   * A fuzzy fallback fetched but HELD, awaiting the opt-in (manual-fuzzy is opt-in
-   * — in-doc-search Phase 3). `null` unless the `fuzzyPrompt` state is showing.
+   * A fuzzy fallback computed but HELD, awaiting the opt-in (manual-fuzzy is
+   * opt-in). `null` unless the `fuzzyPrompt` state is showing.
    */
-  let heldFuzzy: PageMatch[] | null = null;
+  let heldFuzzy: FindPage[] | null = null;
   /** The user opted in to fuzzy for the current query — clears on every new query. */
   let optedIn = false;
-  /** Aborts the in-flight stream drain between batches when the query moves on. */
+  /** Aborts the in-flight `text/<md5>` fetch when the query moves on. */
   let runAbort: AbortController | null = null;
   /** 0-based index of the current match over the whole note; -1 when there is none. */
   let at = -1;
@@ -328,7 +361,7 @@ export function createFindController(deps: FindDeps): FindController {
   }
 
   /**
-   * What the server counted on `page` — the terms the ovals are drawn from.
+   * What the index counted on `page` — the terms the ovals are drawn from.
    * `null` until the counts land, which is what puts {@link matchWords} into its
    * provisional mode; an empty array afterwards means the page genuinely has
    * nothing to circle.
@@ -400,7 +433,7 @@ export function createFindController(deps: FindDeps): FindController {
     if (mine !== token || !open || noteId !== id || pages[pageIndex] !== page) return;
 
     const matched = matchWords(words, query, termsOn(pageIndex));
-    // Before any batch lands there is no note-wide index yet, so the first match
+    // Before the answer lands there is no note-wide index yet, so the first match
     // on this page is the current one; after, only if `at` really is here.
     let current = -1;
     if (matched.length > 0) {
@@ -412,9 +445,9 @@ export function createFindController(deps: FindDeps): FindController {
     }
     view.setPageMatches(matched, current);
     // Phase 1's counter says what it actually knows: this page, and that the
-    // rest is still being counted. No total. Once a batch has landed, the batch
-    // handler owns the counter (a floor or the exact settle) — paintPage must not
-    // clobber it, so it only speaks before the first batch.
+    // rest is still being counted. No total. Once the answer has landed,
+    // `applyResult` owns the counter — paintPage must not clobber it, so it only
+    // speaks beforehand.
     if (!landedCounts) {
       view.setState({ kind: "counting", onThisPage: matched.length, recognisedPages: recognisedPagesOrNull() });
     }
@@ -430,10 +463,6 @@ export function createFindController(deps: FindDeps): FindController {
    *    `1 of 1`, the filmstrip badged a page you were not on, nothing was
    *    circled, and Next had nowhere to step — every part right, the feature
    *    broken.
-   *
-   * Runs ONCE, the first time `at` moves off -1; later batches only APPEND
-   * higher-page matches (rowid ASC == page order), so `at` stays valid and the
-   * reader is never yanked around as the stream drains.
    */
   function landOnFirst(): void {
     const here = firstOnPage(pageIndex);
@@ -441,35 +470,33 @@ export function createFindController(deps: FindDeps): FindController {
   }
 
   /**
-   * Consume one streaming batch: accumulate, paint the progressive counter (a
-   * floor while draining, the exact settle on the last batch), and gate the
-   * typo-tolerant fallback behind the opt-in.
+   * Take the index's answer: paint the exact counter, and gate the typo-tolerant
+   * fallback behind the opt-in.
    */
-  function applyBatch(id: Id, batch: NoteSearchBatch, mine: number): void {
+  function applyResult(id: Id, result: DocSearchResult, mine: number): void {
     if (mine !== token) return; // a later keystroke superseded us
     if (!open || noteId !== id) return;
 
-    // THE MANUAL-FUZZY OPT-IN (in-doc-search Phase 3, route 2). A fuzzy fallback
-    // that FOUND something is not shown automatically — the user is offered
-    // "search similar" and it displays only on request (`searchSimilar`). The
-    // fuzzy scan already ran server-side (it is a one-shot, no-cursor batch); we
-    // simply HOLD its result rather than substituting close matches for the word
-    // that was typed. A fuzzy fallback that found NOTHING is a real absence — "No
-    // matches", no affordance, since searching similar would find nothing either.
-    if (batch.usedFuzzy && !optedIn) {
+    // THE MANUAL-FUZZY OPT-IN. A fuzzy fallback that FOUND something is not shown
+    // automatically — the user is offered "search similar" and it displays only on
+    // request (`searchSimilar`). The ladder has already run (`idx_fuzzy` fires it
+    // only when the query as typed matched nothing); we simply HOLD its answer
+    // rather than substituting close matches for the word that was typed. A fuzzy
+    // fallback that found NOTHING is a real absence — "No matches", no affordance,
+    // since searching similar would find nothing either.
+    if (result.usedFuzzy && !optedIn) {
       landedCounts = true;
       counts = [];
       fuzzy = true;
       at = -1;
       view.setPageCounts(new Map());
       view.setStepEnabled(false);
-      if (batch.pages.length > 0) {
-        heldFuzzy = batch.pages;
-        settled = false;
+      const held = toPages(result);
+      if (held.length > 0) {
+        heldFuzzy = held;
         view.setState({ kind: "fuzzyPrompt" });
       } else {
         heldFuzzy = null;
-        settled = true;
         fuzzy = false;
         view.setState({ kind: "empty" });
       }
@@ -477,76 +504,68 @@ export function createFindController(deps: FindDeps): FindController {
       return;
     }
 
-    // EXACT, or opted-in fuzzy: accumulate and show progressively.
+    // EXACT, or opted-in fuzzy. One call, one complete answer.
     landedCounts = true;
-    counts = batch.pages;
-    fuzzy = batch.usedFuzzy;
+    counts = toPages(result);
+    fuzzy = result.usedFuzzy;
     view.setPageCounts(countsMap());
 
     const n = total();
-    if (n > 0 && at < 0) landOnFirst();
-    else if (n > 0) at = Math.min(at, n - 1);
+    if (n > 0) landOnFirst();
     else at = -1;
 
-    if (batch.done) {
-      settled = true;
-      if (n === 0) {
-        view.setStepEnabled(false);
-        view.setState({ kind: "empty" });
-        void paintPage();
-        return;
-      }
-      view.setStepEnabled(n > 1);
-      view.setState({ kind: "settled", at, total: n, fuzzy });
-    } else {
-      settled = false;
-      if (n === 0) {
-        // Nothing matched yet but more batches are coming (a rare exact-keyset
-        // case — an empty exact normally becomes the fuzzy one-shot). Keep the
-        // still-counting feel rather than claiming an absence prematurely.
-        view.setStepEnabled(false);
-        view.setState({ kind: "counting", onThisPage: 0, recognisedPages: recognisedPagesOrNull() });
-        void paintPage();
-        return;
-      }
-      view.setStepEnabled(n > 1);
-      view.setState({ kind: "streaming", at, total: n, fuzzy });
+    if (n === 0) {
+      view.setStepEnabled(false);
+      view.setState({ kind: "empty" });
+      void paintPage();
+      return;
     }
+    view.setStepEnabled(n > 1);
+    view.setState({ kind: "settled", at, total: n, fuzzy });
 
-    // Navigate to the landed match's page if it is not the one on screen (only
-    // ever true on the first landing); otherwise repaint this page's ovals in
-    // place. `showPage` returns through `setPage`, which repaints — not an extra.
+    // Navigate to the landed match's page if it is not the one on screen;
+    // otherwise repaint this page's ovals in place. `showPage` returns through
+    // `setPage`, which repaints — not an extra.
     const where = locate(at);
     if (where && where.pageIndex !== pageIndex) view.showPage(where.pageIndex);
     else void paintPage();
   }
 
-  /** Phase 2: the note-scoped STREAMING drain — each batch is a separate request
-   *  (a separate small db-lock window, the single-core fairness win), consumed as
-   *  it lands so the counter shows a floor and settles to exact. */
-  async function runStream(id: Id, q: string, mine: number): Promise<void> {
+  /**
+   * Phase 2: the whole notebook, from the browser's own index.
+   *
+   * The FIRST find on a document pays `text/<md5>` plus the index build (39 ms at
+   * 77 segments, 363 ms at the worst real document — §8.1); every find after that
+   * is the query alone, because `docSearch.ts` keeps the built index and the
+   * response is HTTP-immutable. The abort covers the fetch: a giant document must
+   * not keep downloading for a query nobody is looking at any more. The build and
+   * the query are not abortable and should not be — they are the same work the
+   * next keystroke needs, and a superseded answer is dropped by its token.
+   */
+  async function runSearch(id: Id, md5: string, q: string, mine: number): Promise<void> {
     const ac = new AbortController();
     runAbort = ac;
     try {
-      await api.searchInNoteStream(id, q, (batch) => applyBatch(id, batch, mine), ac.signal);
+      const result = await deps.docs.search(md5, q, ac.signal);
+      applyResult(id, result, mine);
     } catch (e) {
       if (mine !== token) return;
-      // A dead session / stale page belongs to the shell. Anything else is a real
-      // failure of this search, distinct from an empty result.
+      // A dead session belongs to the shell. Anything else — including a 404 from
+      // a document that is not derived yet — is a real failure of this search and
+      // must not render as an empty one.
       if (dispatchApiFailure(failures, e)) return;
       view.setState({ kind: "error" });
     }
   }
 
   /** The opt-in: reveal the held fuzzy result as a settled, approximate answer.
-   *  No new request — the fuzzy batch was already fetched, only held back. */
+   *  Nothing is asked again — the ladder's answer was already computed and held. */
   function searchSimilar(): void {
     if (heldFuzzy === null || !open) return;
     optedIn = true;
     counts = heldFuzzy;
     heldFuzzy = null;
     fuzzy = true;
-    settled = true;
     landedCounts = true;
     view.setPageCounts(countsMap());
 
@@ -571,8 +590,8 @@ export function createFindController(deps: FindDeps): FindController {
       clearTimeout(timer);
       timer = undefined;
     }
-    // Stop draining a superseded stream between batches — a giant document must
-    // not keep fetching for a query nobody is looking at any more.
+    // Stop a superseded `text/<md5>` fetch — a giant document must not keep
+    // downloading for a query nobody is looking at any more.
     runAbort?.abort();
     runAbort = null;
     // Orphans anything already awaiting a response: its captured token is stale
@@ -585,7 +604,6 @@ export function createFindController(deps: FindDeps): FindController {
     query = q;
     cancelPending();
     counts = [];
-    settled = false;
     landedCounts = false;
     fuzzy = false;
     heldFuzzy = null;
@@ -602,8 +620,8 @@ export function createFindController(deps: FindDeps): FindController {
     // `textHash: null` — asking it here painted "Not recognised on the device"
     // about a note whose metadata was still in flight. It self-corrected when
     // the meta landed, but the false statement was what the user read meanwhile.
-    // While `recognitionKnown` is false the query simply runs: phase 2 is a
-    // SERVER-side count that does not depend on the local page list at all, so
+    // While `recognitionKnown` is false the query simply runs: phase 2 counts
+    // over `text/<md5>`, which does not depend on the local page list at all, so
     // the honest answer arrives on its own.
     if (recognitionKnown && noteId !== null && pages.length > 0 && recognisedPages() === 0) {
       clearPainted();
@@ -623,15 +641,23 @@ export function createFindController(deps: FindDeps): FindController {
     view.setState({ kind: "counting", onThisPage: 0, recognisedPages: recognisedPagesOrNull() });
     void paintPage();
 
-    // PHASE 2, debounced: one request for the whole notebook. Debounced for the
-    // same reason the library's search is — seven keystrokes for one intent is
-    // six queries already obsolete when they land.
+    // PHASE 2, debounced: the whole notebook, in one call.
+    //
+    // STILL DEBOUNCED even though the query is local, and §4.6's "the debounce is
+    // void" does not reach here: the FIRST find on a document is a fetch plus a
+    // build, and firing that per keystroke would download and index the document
+    // seven times for one intent. The query itself is 1.3–11.5 ms (§8.1) and
+    // would not need it.
+    //
+    // A note with no content address cannot be searched — the route is keyed by
+    // md5 — and there is nothing to say about that beyond leaving find inert.
     const id = noteId;
-    if (id === null) return;
+    const md5 = noteMd5;
+    if (id === null || md5 === null) return;
     const mine = token;
     timer = setTimeout(() => {
       timer = undefined;
-      void runStream(id, q, mine);
+      void runSearch(id, md5, q, mine);
     }, debounceMs);
   }
 
@@ -672,9 +698,10 @@ export function createFindController(deps: FindDeps): FindController {
     // moment it is.
     toggle: () => (open ? closeBar() : openBar()),
 
-    setNote(id: Id | null, next: readonly PageRef[], known = true): void {
+    setNote(id: Id | null, md5: string | null, next: readonly PageRef[], known = true): void {
       const changed = id !== noteId;
       noteId = id;
+      noteMd5 = md5;
       pages = next;
       recognitionKnown = known;
       if (changed) pageIndex = 0;
@@ -700,14 +727,10 @@ export function createFindController(deps: FindDeps): FindController {
     step(dir: 1 | -1): void {
       const n = total();
       if (!landedCounts || n === 0) return; // nothing to step through, or not knowably so yet
-      // SETTLED wraps over the exact set; STREAMING clamps within the accumulated
-      // set — wrapping over a floor would step onto a match the "N+" only promised
-      // MIGHT exist. The background drain keeps extending the set, and prev/next
-      // stepping past what is loaded simply holds at the last loaded match until
-      // the next batch (which auto-continues) grows it — the fetch-ahead the plan
-      // asks for, delivered by the drain that is already running.
-      at = settled ? (at + dir + n) % n : Math.max(0, Math.min(n - 1, at + dir));
-      view.setState({ kind: settled ? "settled" : "streaming", at, total: n, fuzzy });
+      // Wraps, unconditionally: the answer is complete when it lands, so there is
+      // no floor to step off the end of.
+      at = (at + dir + n) % n;
+      view.setState({ kind: "settled", at, total: n, fuzzy });
       const where = locate(at);
       if (!where) return;
       // Stepping crosses page boundaries and turns the page as it goes — that is
@@ -722,12 +745,12 @@ export function createFindController(deps: FindDeps): FindController {
     reset(): void {
       open = false;
       noteId = null;
+      noteMd5 = null;
       pages = [];
       pageIndex = 0;
       active = null;
       query = "";
       counts = [];
-      settled = false;
       landedCounts = false;
       fuzzy = false;
       heldFuzzy = null;

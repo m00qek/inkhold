@@ -11,19 +11,22 @@ import { parsePageWords, type PdfWord } from "../../src/render/pdfText";
 import { ovalsFor } from "../../src/pages/findOvals";
 import { fold as txtFold } from "../../src/pages/txtFind";
 import type { ApiFailureSink } from "../../src/api/client";
-import type { Api } from "../../src/api/types";
-import type { NoteSearchBatch, PageMatch, WordBox } from "../../src/core/types";
+import type { WordBox } from "../../src/core/types";
+import type { DocSearch, DocSearchResult, DocSegmentMatch } from "../../src/search/docSearch";
 
 // Find-in-PDF's logic with the DOM and the decoder both injected.
 //
 // THE ONE THING HERE THAT IS NOT LIKE THE OTHER TWO FIND CONTROLLERS, and the
-// reason most of this file exists: the client is a LOCATOR, not a judge. The
-// server says which pages matched and how many times; MuPDF says where the words
+// reason most of this file exists: this side is a LOCATOR, not a judge. The
+// INDEX says which pages matched and how many times; MuPDF says where the words
 // are. Those two can legitimately disagree — SQLite folds diacritics and MuPDF
 // does not, a word can be hyphenated across a line break, a ligature can arrive
 // as one glyph — and when they do, the page is still a match and simply has no
 // box on it. A viewer that reported "No matches" there would be making a
 // confident false statement about a document that does contain the word.
+//
+// The ENGINE is faked here; that it really answers is `docSearch.test.ts`'s job,
+// against the shipped wasm.
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -31,9 +34,13 @@ function word(t: string, i: number): PdfWord {
   return { t, x: 10, y: 12 + i * 14, w: t.length * 6, h: 11 };
 }
 
-function match(pageIndex: number, matches: number, terms: string[]): PageMatch {
-  return { pageIndex, matches, terms };
+/** A matching PAGE. `offset`/`length` are null because a PDF ordinal IS the
+ *  address — the `.txt` case is the only one that carries a byte range. */
+function match(segment: number, matches: number, terms: string[]): DocSegmentMatch {
+  return { segment, offset: null, length: null, matches, terms };
 }
+
+const MD5 = "b".repeat(32);
 
 interface Built {
   find: ReturnType<typeof createPdfFindController>;
@@ -43,29 +50,30 @@ interface Built {
   badges: ReadonlyMap<number, number>[];
   view: PdfFindView;
   words: ReturnType<typeof vi.fn>;
-  searchInNoteStream: ReturnType<typeof vi.fn>;
+  search: ReturnType<typeof vi.fn>;
 }
 
 function build(
   opts: {
-    pages?: PageMatch[];
+    pages?: DocSegmentMatch[];
     /** The words MuPDF finds, per page. A page absent from the map has none. */
     words?: Record<number, PdfWord[]>;
     usedFuzzy?: boolean;
-    batches?: NoteSearchBatch[];
   } = {},
 ): Built {
   const perPage = opts.words ?? {};
   const words = vi.fn(async (page: number) => perPage[page] ?? []);
-  const searchInNoteStream = vi.fn(
-    async (_id: string, _q: string, onBatch: (b: NoteSearchBatch) => void) => {
-      const batches =
-        opts.batches ??
-        [{ query: "q", pages: opts.pages ?? [], usedFuzzy: opts.usedFuzzy ?? false, done: true }];
-      for (const b of batches) onBatch(b);
-    },
+  const usedFuzzy = opts.usedFuzzy ?? false;
+  const search = vi.fn(
+    async (md5: string, query: string): Promise<DocSearchResult> => ({
+      query,
+      md5,
+      segments: opts.pages ?? [],
+      usedFuzzy,
+      expansions: usedFuzzy ? [{ typed: query, matched: "rutabaga" }] : [],
+    }),
   );
-  const api = { searchInNoteStream } as unknown as Api;
+  const docs: DocSearch = { search, drop: vi.fn() };
 
   const states: PdfFindState[] = [];
   const marks: { words: PdfWord[]; current: number }[] = [];
@@ -80,15 +88,15 @@ function build(
     focusField: vi.fn(),
   };
   const failures: ApiFailureSink = { onSessionExpired: vi.fn(), onStalePage: vi.fn() };
-  const find = createPdfFindController({ api, view, failures, words, debounceMs: 0 });
-  return { find, states, marks, badges, view, words, searchInNoteStream };
+  const find = createPdfFindController({ docs, view, failures, words, debounceMs: 0 });
+  return { find, states, marks, badges, view, words, search };
 }
 
 const last = <T>(xs: T[]): T | undefined => xs[xs.length - 1];
 
 describe("matchWords", () => {
-  it("marks exactly the terms the server says it counted", () => {
-    // The property the whole term shape exists for. The client cannot reproduce
+  it("marks exactly the terms the count says it counted", () => {
+    // The property the whole term shape exists for. This side cannot reproduce
     // the prefix expansion, the tokenizer's fold, or which near-miss a typo
     // expanded into — so it does not try; it compares.
     const words = [word("Avaliação", 0), word("attention", 1), word("budget", 2)];
@@ -99,7 +107,7 @@ describe("matchWords", () => {
     ]);
   });
 
-  it("marks nothing at all for a page the server named no terms on", () => {
+  it("marks nothing at all for a page no terms were named on", () => {
     // A phrase token, say: the count stands and there is simply nothing to point
     // at. Never a substring guess, which is what the reader's phase 1 does and is
     // wrong here because there is no phase 1.
@@ -127,19 +135,19 @@ describe("matchWords", () => {
 });
 
 describe("the honesty rule", () => {
-  it("badges every matching page with the SERVER's count, including one it cannot locate", () => {
+  it("badges every matching page with the INDEX's count, including one it cannot locate", () => {
     // The filmstrip indicator: which pages hold matches, and how many. It reads
     // from the same `counts` the counter does, which is the whole point — a
     // badge derived from the located BOXES would show nothing on a page whose
     // words MuPDF could not name, quietly contradicting a counter that says the
-    // match is there. Page 3 below is exactly that page: the server counted two,
-    // the client can place none.
+    // match is there. Page 3 below is exactly that page: the index counted two,
+    // this side can place none.
     return (async () => {
       const b = build({
         pages: [match(0, 1, ["ledger"]), match(3, 2, ["ledger"])],
         words: { 0: [word("ledger", 0)] }, // page 3 yields nothing placeable
       });
-      b.find.setDocument("n-book");
+      b.find.setDocument("n-book", MD5);
       b.find.setPage(0);
       b.find.open();
       b.find.setQuery("ledger");
@@ -161,7 +169,7 @@ describe("the honesty rule", () => {
     })();
   });
 
-  it("A PAGE THE SERVER MATCHED BUT THE CLIENT CANNOT LOCATE STILL READS AS A MATCH", () => {
+  it("A PAGE THE INDEX MATCHED BUT THE LOCATOR CANNOT PLACE STILL READS AS A MATCH", () => {
     // §9's first test, and the one most likely to be undone by accident: it is
     // undone by ANY change that derives the counter from the boxes.
     //
@@ -174,14 +182,14 @@ describe("the honesty rule", () => {
         pages: [match(3, 2, ["cooperate"])],
         words: { 3: [word("co", 0), word("operate", 1), word("Elsewhere", 2)] },
       });
-      b.find.setDocument("n-book");
+      b.find.setDocument("n-book", MD5);
       b.find.setPage(3);
       b.find.open();
       b.find.setQuery("cooperate");
       await flush();
       await flush();
 
-      // THE COUNT IS THE SERVER'S, and it says two.
+      // THE COUNT IS THE INDEX'S, and it says two.
       expect(last(b.states)).toEqual({ kind: "settled", at: 0, total: 2, fuzzy: false });
       expect(pdfCountText(last(b.states)!)).toBe("1 of 2");
       // …and it is emphatically NOT this.
@@ -195,7 +203,7 @@ describe("the honesty rule", () => {
   it("keeps the count when the PAGE ITSELF will not yield words", async () => {
     // A scanned insert in a text book, or a page whose structured-text pass
     // failed. `words` resolving empty and `words` rejecting are the same answer
-    // to the viewer: no boxes, and the server's count untouched.
+    // to the viewer: no boxes, and the index's count untouched.
     for (const words of [
       vi.fn(async () => []),
       vi.fn(async () => {
@@ -206,7 +214,7 @@ describe("the honesty rule", () => {
       (b.words as unknown as { mockImplementation: (f: unknown) => void }).mockImplementation(
         words as unknown as () => Promise<PdfWord[]>,
       );
-      b.find.setDocument("n-book");
+      b.find.setDocument("n-book", MD5);
       b.find.open();
       b.find.setQuery("rutabaga");
       await flush();
@@ -224,7 +232,7 @@ describe("the honesty rule", () => {
       pages: [match(0, 3, ["quince"])],
       words: { 0: [word("Quince", 0), word("paste", 1), word("quince", 2)] },
     });
-    b.find.setDocument("n-book");
+    b.find.setDocument("n-book", MD5);
     b.find.open();
     b.find.setQuery("quince");
     await flush();
@@ -242,11 +250,11 @@ describe("the honesty rule", () => {
     expect(last(b.marks)!.current).toBe(1);
   });
 
-  it("says 'No matches' only when the SERVER found none", async () => {
+  it("says 'No matches' only when the INDEX found none", async () => {
     // The other side of the rule, so the first test cannot be satisfied by a
     // controller that never says it.
     const b = build({ pages: [] });
-    b.find.setDocument("n-book");
+    b.find.setDocument("n-book", MD5);
     b.find.open();
     b.find.setQuery("quokka");
     await flush();
@@ -261,7 +269,7 @@ describe("the find controller", () => {
     // `1 of 12` is a claim about the whole document, and a total that quietly
     // revises itself is how a search loses trust.
     const b = build({ pages: [match(0, 4, ["rutabaga"])] });
-    b.find.setDocument("n-book");
+    b.find.setDocument("n-book", MD5);
     b.find.open();
     b.find.setQuery("rutabaga");
     expect(last(b.states)).toEqual({ kind: "counting" });
@@ -271,33 +279,55 @@ describe("the find controller", () => {
     expect(last(b.states)).toMatchObject({ kind: "settled", total: 4 });
   });
 
-  it("shows a FLOOR while the document is still draining, then the exact count", async () => {
-    const b = build({
-      batches: [
-        { query: "q", pages: [match(0, 2, ["rutabaga"])], usedFuzzy: false, done: false },
-        {
-          query: "q",
-          pages: [match(0, 2, ["rutabaga"]), match(9, 3, ["rutabaga"])],
-          usedFuzzy: false,
-          done: true,
-        },
-      ],
-    });
-    b.find.setDocument("n-book");
+  // THERE IS NO FLOOR ANY MORE, and its absence is the shape of the mechanism.
+  // The old counter drained a server keyset and showed "1 of 2+" until the last
+  // batch; a local index answers in one call, so the only two things the counter
+  // can say are "Searching…" and the exact count.
+  it("never shows an 'N+' floor: the answer is complete when it lands", async () => {
+    const b = build({ pages: [match(0, 2, ["rutabaga"]), match(9, 3, ["rutabaga"])] });
+    b.find.setDocument("n-book", MD5);
     b.find.open();
     b.find.setQuery("rutabaga");
     await flush();
     await flush();
-    const streaming = b.states.find((s) => s.kind === "streaming");
-    expect(streaming).toMatchObject({ kind: "streaming", total: 2 });
-    expect(pdfCountText(streaming!)).toBe("1 of 2+");
+    expect(b.states.map((st) => pdfCountText(st)).some((t) => t.includes("+"))).toBe(false);
     expect(last(b.states)).toMatchObject({ kind: "settled", total: 5 });
     expect(pdfCountText(last(b.states)!)).toBe("1 of 5");
   });
 
+  // §4.1: opening a book to read it needs the renderer, not a text index.
+  it("asks the engine nothing until the first find", async () => {
+    const b = build({ pages: [match(0, 1, ["rutabaga"])] });
+    b.find.setDocument("n-book", MD5);
+    b.find.setPage(3);
+    b.find.open();
+    await flush();
+    expect(b.search).not.toHaveBeenCalled();
+
+    b.find.setQuery("rutabaga");
+    await flush();
+    await flush();
+    expect(b.search).toHaveBeenCalledWith(MD5, "rutabaga", expect.anything());
+  });
+
+  // §1.1: "history and bin are not special: they are other md5s". A trashed
+  // file's blob keeps its md5, and `getBinNoteMeta` hands the viewer that same
+  // `fileHash` — so the bin reaches this identical code path with no reroute.
+  it("searches whatever md5 the meta names, which is how the bin and history work", async () => {
+    const trashed = "c".repeat(32);
+    const b = build({ pages: [match(2, 1, ["rutabaga"])] });
+    b.find.setDocument("n-book", trashed);
+    b.find.open();
+    b.find.setQuery("rutabaga");
+    await flush();
+    await flush();
+    expect(b.search).toHaveBeenCalledWith(trashed, "rutabaga", expect.anything());
+    expect(last(b.states)).toMatchObject({ kind: "settled", total: 1 });
+  });
+
   it("lands on the FIRST match's page when the page on screen has none", async () => {
     const b = build({ pages: [match(7, 1, ["rutabaga"])] });
-    b.find.setDocument("n-book");
+    b.find.setDocument("n-book", MD5);
     b.find.setPage(0);
     b.find.open();
     b.find.setQuery("rutabaga");
@@ -313,7 +343,7 @@ describe("the find controller", () => {
       pages: [match(0, 1, ["rutabaga"]), match(4, 1, ["rutabaga"])],
       words: { 4: [word("rutabaga", 0)] },
     });
-    b.find.setDocument("n-book");
+    b.find.setDocument("n-book", MD5);
     b.find.setPage(4);
     b.find.open();
     b.find.setQuery("rutabaga");
@@ -325,7 +355,7 @@ describe("the find controller", () => {
 
   it("steps across page boundaries, turning the page as it goes", async () => {
     const b = build({ pages: [match(0, 1, ["a"]), match(5, 1, ["a"])] });
-    b.find.setDocument("n-book");
+    b.find.setDocument("n-book", MD5);
     b.find.open();
     b.find.setQuery("a");
     await flush();
@@ -339,23 +369,24 @@ describe("the find controller", () => {
 
   it("HOLDS a typo-tolerant result behind the opt-in rather than substituting it", async () => {
     const b = build({ pages: [match(2, 1, ["rutabaga"])], usedFuzzy: true });
-    b.find.setDocument("n-book");
+    b.find.setDocument("n-book", MD5);
     b.find.open();
     b.find.setQuery("rutabagga");
     await flush();
     await flush();
     expect(last(b.states)).toEqual({ kind: "fuzzyPrompt" });
-    // No new request when the offer is taken up — the batch was already fetched.
-    const calls = b.searchInNoteStream.mock.calls.length;
+    // Nothing asked again when the offer is taken up — the ladder ran inside the
+    // one query, and its answer was merely held.
+    const calls = b.search.mock.calls.length;
     b.find.searchSimilar();
     await flush();
-    expect(b.searchInNoteStream.mock.calls.length).toBe(calls);
+    expect(b.search.mock.calls.length).toBe(calls);
     expect(last(b.states)).toMatchObject({ kind: "settled", total: 1, fuzzy: true });
   });
 
   it("a fuzzy fallback that found NOTHING is a real absence, with no offer", async () => {
     const b = build({ pages: [], usedFuzzy: true });
-    b.find.setDocument("n-book");
+    b.find.setDocument("n-book", MD5);
     b.find.open();
     b.find.setQuery("quokka");
     await flush();
@@ -371,7 +402,7 @@ describe("the find controller", () => {
       pages: [match(0, 1, ["rutabaga"])],
       words: { 0: [word("rutabaga", 0)] },
     });
-    b.find.setDocument("n-book");
+    b.find.setDocument("n-book", MD5);
     b.find.open();
     b.find.setQuery("rutabaga");
     await flush();
@@ -386,10 +417,10 @@ describe("the find controller", () => {
     // A failed search that renders as an empty one is indistinguishable from a
     // query nobody wrote about.
     const b = build();
-    b.searchInNoteStream.mockImplementation(async () => {
+    b.search.mockImplementation(async () => {
       throw new Error("the network went away");
     });
-    b.find.setDocument("n-book");
+    b.find.setDocument("n-book", MD5);
     b.find.open();
     b.find.setQuery("rutabaga");
     await flush();
@@ -400,7 +431,7 @@ describe("the find controller", () => {
 
   it("drops everything with the document, so the next one opens clean", async () => {
     const b = build({ pages: [match(0, 3, ["rutabaga"])] });
-    b.find.setDocument("n-book");
+    b.find.setDocument("n-book", MD5);
     b.find.open();
     b.find.setQuery("rutabaga");
     await flush();
@@ -422,7 +453,7 @@ describe("parsePageWords", () => {
 
   it("answers with nothing for a payload that is not an array of words", () => {
     // Every one of these costs the HIGHLIGHT and never the count: the page still
-    // matched, because the server said so.
+    // matched, because the index said so.
     for (const bad of ["", "not json", "[", '{"t":"a"}', "[]"]) {
       expect(parsePageWords(bad)).toEqual([]);
     }

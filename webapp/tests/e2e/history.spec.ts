@@ -2,13 +2,15 @@ import { test, expect, type Page, type Locator } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { signedIn, freezeMotion, railSettled } from "./helpers/app";
+import { mockDocText, noteTextRecord } from "./helpers/docText";
+import { fakeFileHash } from "../../src/api/fake";
 
 // The "history of this file" UI (hot-cache versioning, phases 3-6): the version
 // MENU from a card's ⋯ item (an anchored floating panel, NOT a modal), a read-only
 // PREVIEW of a past version in the reused reader (banner + find-in-preview), and
 // RESTORE (confirm + toast + refresh).
 //
-// FIXTURE FACTS. "Attention Is All You Need" (`n-doc-attn`) is a 20-page `.note`
+// FIXTURE FACTS. "Attention Is All You Need" (`141`) is a 20-page `.note`
 // with recognition on every page except index 2, 5, 8… The fake gives every
 // `.note` THREE versions — the current blob plus two retained — newest-first. Its
 // transcript carries "budget" on every recognised page, so a find-in-preview for
@@ -18,6 +20,30 @@ import { signedIn, freezeMotion, railSettled } from "./helpers/app";
 // not a `<dialog>`. Rows are `.vh-row`; a row CLICK previews (no per-row buttons).
 const menu = (page: Page): Locator => page.locator(".vh");
 const rows = (page: Page): Locator => page.locator(".vh-row");
+
+/**
+ * The version preview's find, served (`golden-search.md` §1.1, §6 step 7).
+ *
+ * `/note/:id/history/:md5/search` is gone. A preview searches the RETAINED
+ * blob's own `text/<md5>` and nothing reroutes anywhere — which is §1.1's
+ * "history and bin are not special: they are other md5s" as a fact rather than a
+ * claim, because `historyScope.ts` has already rewritten `NoteMeta.fileHash` to
+ * the version's address before find sees it.
+ *
+ * Served through `fallback` rather than by md5, and that is forced: the fake
+ * mints a retained version's address from a hash it does not export, so a test
+ * cannot name it. What the test CAN name — and asserts below — is the md5 that
+ * must NOT be asked for, which is the live note's.
+ */
+async function mockPreviewText(page: Page): Promise<{ count(md5?: string): number }> {
+  return mockDocText(
+    page,
+    {},
+    // The version has 19 pages to the live note's 20, and the same recognition
+    // spread — the fake's `versionPageCount`, mirrored.
+    { fallback: noteTextRecord("Attention Is All You Need", 19) },
+  );
+}
 
 async function openHistory(page: Page): Promise<void> {
   await signedIn(page);
@@ -86,29 +112,41 @@ test.describe("version history", () => {
     await expect(page.locator(".pager__count")).toHaveText("1 / 19");
   });
 
-  test("find-in-preview marks matches via the history search endpoint (no fuzzy)", async ({ page }) => {
+  test("find-in-preview searches the VERSION's own blob, not the live note's", async ({ page }) => {
     await openHistory(page);
+    const text = await mockPreviewText(page);
     await rows(page).nth(1).click();
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await freezeMotion(page);
 
-    // The reused find bar, backed by the per-version history search.
+    // The reused find bar, running over the retained blob's own text.
     await page.getByRole("button", { name: "Find in this note" }).click();
     const field = page.getByRole("textbox", { name: "Find in this note" });
     await expect(field).toBeFocused();
     await field.fill("budget");
 
-    // The counter settles to a real "N of M" and the filmstrip badges the matching
-    // pages — the marks that work off the search endpoint's per-page counts.
-    await expect(page.locator(".findbar__count")).toContainText("of", { timeout: 5000 });
+    // The counter settles to a real "N of M" and the filmstrip badges the
+    // matching pages. Generous, because this is the session's first find: it pays
+    // the wasm instantiate and the index build.
+    await expect(page.locator(".findbar__count")).toContainText("of", { timeout: 20_000 });
     await expect(page.locator(".filmstrip__hits").first()).toBeVisible();
-    // One-document find: NO fuzzy affordance ever appears (usedFuzzy is false).
+    // One-document find over a corpus that contains the word exactly: nothing
+    // approximate is claimed, and the opt-in affordance never appears.
     await expect(page.locator(".findbar__fuzzy")).toBeHidden();
     await expect(page.locator(".findbar__ask")).toBeHidden();
+
+    // THE REROUTE, AS AN OBSERVATION. One document's text was fetched, and it was
+    // not the live note's — `historyScope.ts` rewrote `fileHash` to the version's
+    // address before find ever saw it, which is the whole of what "history is not
+    // special" means (§1.1). Under the old reroute this was a different ROUTE;
+    // now it is the same route with a different key, and the key is checkable.
+    expect(text.count()).toBe(1);
+    expect(text.count(fakeFileHash("141"))).toBe(0);
   });
 
   test("find-in-preview draws on-page word ovals from the per-version transcript", async ({ page }) => {
     await openHistory(page);
+    await mockPreviewText(page);
     await rows(page).nth(1).click();
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await freezeMotion(page);
@@ -117,14 +155,14 @@ test.describe("version history", () => {
     // the half of find that needs `getPageText`. Previously the preview zeroed
     // that out (empty transcript), so a version preview counted matches but drew
     // NO ovals. Now the reroute reads the version's real transcript
-    // (`historyPageText`), so the marks paint. `n-doc-attn`'s scale is verified
+    // (`historyPageText`), so the marks paint. `141`'s scale is verified
     // (`pxPerMm` non-null), so the ovals CAN be placed — this pins that they are.
     await page.getByRole("button", { name: "Find in this note" }).click();
     await page.getByRole("textbox", { name: "Find in this note" }).fill("budget");
 
-    // The counter settles first (the note-scoped search), then the current page's
-    // ovals paint from the per-version transcript's word boxes.
-    await expect(page.locator(".findbar__count")).toContainText("of", { timeout: 5000 });
+    // The counter settles first (the index over `text/<md5>`), then the current
+    // page's ovals paint from the per-version transcript's word boxes.
+    await expect(page.locator(".findbar__count")).toContainText("of", { timeout: 20_000 });
     await expect(page.locator(".reader .findbox").first()).toBeVisible();
     // The "scale unverified, no marks" note stays hidden — the ovals really drew.
     await expect(page.locator(".findbar__note")).toBeHidden();
@@ -162,7 +200,7 @@ test.describe("version history", () => {
     const download = page.waitForEvent("download");
     await rawItem.click();
     const url = new URL((await download).url());
-    expect(url.pathname).toMatch(/^\/api\/controlplane\/note\/n-doc-attn\/history\/[0-9a-f]+\/raw$/);
+    expect(url.pathname).toMatch(/^\/api\/controlplane\/note\/141\/history\/[0-9a-f]+\/raw$/);
     expect(url.searchParams.get("download")).toBe("1");
   });
 
@@ -208,12 +246,12 @@ test.describe("version history", () => {
 // bare note URL.
 test.describe("versions in the reader: toolbar control + addressable previews", () => {
   // The 7-char md5 prefix the panel's Preview writes into the address bar.
-  const versionUrlRe = /#\/note\/n-doc-attn\/version\/[0-9a-f]{7}$/;
-  const bareNoteRe = /#\/note\/n-doc-attn$/;
+  const versionUrlRe = /#\/note\/141\/version\/[0-9a-f]{7}$/;
+  const bareNoteRe = /#\/note\/141$/;
 
   test("the reader toolbar's Versions control opens the SAME history panel", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await expect(page.locator(".reader.is-open")).toBeVisible();
 
     // Gated to a live `.note` (like the card ⋯ menu), in the reader's toolbar.
@@ -256,7 +294,7 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
 
     await page.goto("/#/folder/document");
     await railSettled(page);
-    await page.goto(`/#/note/n-doc-attn/version/${short}`);
+    await page.goto(`/#/note/141/version/${short}`);
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await expect(page.locator(".reader .version-banner")).toContainText("not the current note");
     await expect(page.locator(".pager__count")).toHaveText("1 / 19");
@@ -275,7 +313,7 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
     await confirm.getByRole("button", { name: "Restore this version" }).click();
     await expect(page.locator(".reader .version-banner")).toBeHidden();
 
-    await page.goto(`/#/note/n-doc-attn/version/${short}`);
+    await page.goto(`/#/note/141/version/${short}`);
     await expect(page.locator(".reader.is-open")).toBeVisible();
     // The live note, no preview banner, and the URL rewritten to the bare form.
     await expect(page.locator(".reader .version-banner")).toBeHidden();
@@ -284,7 +322,7 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
 
   test("an unknown short (aged out of the hot cache) falls back to the live note + a notice", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn/version/0000000");
+    await page.goto("/#/note/141/version/0000000");
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await expect(page.locator(".reader .version-banner")).toBeHidden();
     await expect(page.locator(".toast")).toContainText(/no longer available/i);
@@ -352,9 +390,9 @@ async function serveHistoryRaw(page: Page): Promise<{ hits: () => string[] }> {
       hits.push(path);
       const id = decodeURIComponent(path.split("/note/")[1]!.split("/history/")[0]!);
       const nosniff = { "x-content-type-options": "nosniff" };
-      if (id === "n-files-sketch") {
+      if (id === "174") {
         await route.fulfill({ status: 200, contentType: "application/octet-stream", headers: nosniff, body: SPD_BYTES });
-      } else if (id === "n-files-readme") {
+      } else if (id === "177") {
         await route.fulfill({ status: 200, contentType: "text/plain; charset=utf-8", headers: nosniff, body: TXT_BODY });
       } else {
         await route.fulfill({ status: 200, contentType: "image/png", headers: nosniff, body: TINY_PNG });
@@ -395,7 +433,7 @@ test.describe("version history — raw-based kinds (.spd / .txt / image)", () =>
     // The real decoder rendered the VERSION — a per-layer canvas stack — and its
     // bytes came off the version-scoped history route (not the live `/file/`).
     await expect(region.locator(".spd-canvas-wrap .spd-layer-canvas").first()).toBeVisible();
-    expect(raw.hits().some((p) => p.startsWith("/api/controlplane/note/n-files-sketch/history/"))).toBe(true);
+    expect(raw.hits().some((p) => p.startsWith("/api/controlplane/note/174/history/"))).toBe(true);
 
     // The read-only version chrome: banner + Restore + Versions; no Move to bin.
     const banner = region.locator(".version-banner");
@@ -425,7 +463,7 @@ test.describe("version history — raw-based kinds (.spd / .txt / image)", () =>
 
     // The version's text is laid out (fetched off the history raw route).
     await expect(region.locator(".txt__sheet")).toContainText("Shopping list");
-    expect(raw.hits().some((p) => p.startsWith("/api/controlplane/note/n-files-readme/history/"))).toBe(true);
+    expect(raw.hits().some((p) => p.startsWith("/api/controlplane/note/177/history/"))).toBe(true);
 
     const banner = region.locator(".version-banner");
     await expect(banner).toBeVisible();
@@ -447,7 +485,7 @@ test.describe("version history — raw-based kinds (.spd / .txt / image)", () =>
 
     // The image's bytes came off the version-scoped history route.
     await expect
-      .poll(() => raw.hits().some((p) => p.startsWith("/api/controlplane/note/n-files-shot/history/")))
+      .poll(() => raw.hits().some((p) => p.startsWith("/api/controlplane/note/173/history/")))
       .toBe(true);
 
     // The read-only version chrome in the reader: banner + Restore + the toolbar
@@ -467,8 +505,8 @@ test.describe("version history — raw-based kinds (.spd / .txt / image)", () =>
 // current-canonicalise / age-out fallbacks are the SHARED `openNoteVersion` path,
 // already proved for `.note` above; these cover the raw viewers' open paths.
 test.describe("addressable version previews — raw-based kinds (.spd / .txt / image)", () => {
-  const spdVersionRe = /#\/note\/n-files-sketch\/version\/[0-9a-f]{7}$/;
-  const bareSpdRe = /#\/note\/n-files-sketch$/;
+  const spdVersionRe = /#\/note\/174\/version\/[0-9a-f]{7}$/;
+  const bareSpdRe = /#\/note\/174$/;
 
   test("opening a .spd version via the panel addresses it; a reload reopens the same version", async ({ page }) => {
     await signedIn(page);
@@ -499,12 +537,12 @@ test.describe("addressable version previews — raw-based kinds (.spd / .txt / i
     // Derive a real 7-char short from the panel, then hit the URL with no panel up.
     await openFilesHistory(page, "readme");
     await rows(page).nth(1).click();
-    await expect(page).toHaveURL(/#\/note\/n-files-readme\/version\/[0-9a-f]{7}$/);
+    await expect(page).toHaveURL(/#\/note\/177\/version\/[0-9a-f]{7}$/);
     const short = page.url().split("/version/")[1]!;
 
     await page.goto("/#/folder/files");
     await railSettled(page);
-    await page.goto(`/#/note/n-files-readme/version/${short}`);
+    await page.goto(`/#/note/177/version/${short}`);
 
     const region = page.getByRole("region", { name: "Text viewer" });
     await expect(region).toBeVisible();
@@ -517,12 +555,12 @@ test.describe("addressable version previews — raw-based kinds (.spd / .txt / i
     await serveHistoryRaw(page);
     await openFilesHistory(page, "Screenshot — dashboard");
     await rows(page).nth(1).click();
-    await expect(page).toHaveURL(/#\/note\/n-files-shot\/version\/[0-9a-f]{7}$/);
+    await expect(page).toHaveURL(/#\/note\/173\/version\/[0-9a-f]{7}$/);
     const short = page.url().split("/version/")[1]!;
 
     await page.goto("/#/folder/files");
     await railSettled(page);
-    await page.goto(`/#/note/n-files-shot/version/${short}`);
+    await page.goto(`/#/note/173/version/${short}`);
 
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await expect(page.locator(".reader .version-banner")).toContainText("not the current note");
@@ -540,7 +578,7 @@ test.describe("addressable version previews — raw-based kinds (.spd / .txt / i
     // Cold-load a `:short` that names no retained version (aged out / bad prefix):
     // the shared resolve degrades to the live file in its own viewer + a notice,
     // never a hard error, and the address is canonicalised to the bare note URL.
-    await page.goto("/#/note/n-files-sketch/version/0000000");
+    await page.goto("/#/note/174/version/0000000");
     await expect(page.getByRole("region", { name: "Sketch viewer" })).toBeVisible();
     await expect(page.locator(".viewer--spd .version-banner")).toBeHidden();
     await expect(page.locator(".toast")).toContainText(/no longer available/i);

@@ -13,6 +13,8 @@ import {
   imgPainted,
 } from "./helpers/app";
 import { serveRanges } from "./helpers/pdfRange";
+import { mockDocText, noteTextRecord } from "./helpers/docText";
+import { fakeFileHash } from "../../src/api/fake";
 
 // The recycle bin, end to end against the fake `Api`'s bin fixture (see
 // `src/api/binFake.ts`): a folder deleted with the two notes inside it, plus an
@@ -46,6 +48,9 @@ async function openBin(page: Page): Promise<void> {
   await binRow(page).click();
   await expect(page.locator(".bin")).toBeVisible();
 }
+
+/** `download_test.note` — the older trashed seed, by id (`src/api/binFake.ts`). */
+const BIN_OLD_NOTE_ID = "304";
 
 /**
  * A bin row's two decisions now live behind the shared "…" overflow menu (the
@@ -583,6 +588,23 @@ test.describe("recycle bin", () => {
 
   test("a trashed .note preview draws recognized-text ovals and find-in-note works", async ({ page }) => {
     await signedIn(page);
+    // THE BIN IS NOT A SCOPE ANY MORE (`golden-search.md` §1.1, §6 step 7).
+    // `/bin/note/:id/search` is gone; a trashed file's find fetches
+    // `text/<md5>` under the RETAINED blob's own address, exactly as a live
+    // file's does, and `createBinScope` reroutes nothing for it — there is
+    // nothing left to reroute. That is the collapse §1.1 promised: "history and
+    // bin are not special, they are other md5s".
+    //
+    // Served under the trashed blob's OWN address, which is the whole claim: a
+    // trashed file's md5 is the md5 it always had (`binFake.ts`'s `BlobHash`),
+    // so the record is registered by name here rather than through a `fallback`
+    // that answers whatever is asked. This spec used to need that workaround
+    // because the fixture minted `"<id>-md5"`, a hash the real route's path
+    // could not carry. `download_test.note` is 2 pages, both recognised,
+    // "budget" twice on each.
+    await mockDocText(page, {
+      [fakeFileHash(BIN_OLD_NOTE_ID)]: noteTextRecord("download_test.note", 2),
+    });
     await page.goto("/");
     await openBin(page);
 
@@ -597,13 +619,17 @@ test.describe("recycle bin", () => {
     await findBtn.click();
     await page.getByRole("textbox", { name: "Find in this note" }).fill("budget");
 
-    // The counter settles to a real "N of M" off the bin search route…
-    await expect(page.locator(".findbar__count")).toContainText("of", { timeout: 5000 });
+    // The counter settles to a real "N of M" off the retained blob's own text.
+    // Generous, because this is the session's first find: it pays the wasm
+    // instantiate (16.13 MB) and the index build before it can say a number.
+    await expect(page.locator(".findbar__count")).toContainText("of", { timeout: 20_000 });
     // …and the on-page ovals paint from the bin page-text route's word boxes —
-    // the half of find that needs `getPageText`, which the bin reroute now serves.
+    // the half of find that needs `getPageText`, which the bin reroute DOES still
+    // serve. Only the search half stopped being a scope.
     await expect(page.locator(".reader .findbox").first()).toBeVisible();
     await expect(page.locator(".findbar__note")).toBeHidden();
-    // A one-document scan never widens — no fuzzy affordance ever appears.
+    // The word is in the text exactly as typed, so the ladder never fires and no
+    // fuzzy affordance appears.
     await expect(page.locator(".findbar__fuzzy")).toBeHidden();
   });
 
@@ -856,7 +882,7 @@ test.describe("recycle bin", () => {
   test("a trashed .spd opens its real viewer off the bin route, and Restore returns it", async ({ page }) => {
     await signedIn(page);
     const raw = await serveRawBytes(page, "application/octet-stream", SPD_BYTES);
-    await page.goto("/#/note/n-files-sketch");
+    await page.goto("/#/note/174");
     await freezeMotion(page);
 
     await trashAndReopenFromBin(page, "Sketch viewer", "Kitchen sketch");
@@ -892,7 +918,7 @@ test.describe("recycle bin", () => {
   test("a trashed .txt opens its real viewer, and Delete permanently confirms first", async ({ page }) => {
     await signedIn(page);
     const raw = await serveRawBytes(page, "text/plain; charset=utf-8", TXT_BODY);
-    await page.goto("/#/note/n-files-readme");
+    await page.goto("/#/note/177");
     await freezeMotion(page);
 
     await trashAndReopenFromBin(page, "Text viewer", "readme");
@@ -905,7 +931,7 @@ test.describe("recycle bin", () => {
     // precedent: the original is still there to save until the purge).
     await expect(region.locator('[aria-label="Download"]')).toHaveAttribute(
       "href",
-      /^\/api\/controlplane\/bin\/file\/n-files-readme\?/,
+      /^\/api\/controlplane\/bin\/file\/177\?/,
     );
 
     // Purge NEVER skips the dialog; a cancel leaves the viewer open on the file.
@@ -941,7 +967,7 @@ test.describe("recycle bin", () => {
     // clicks a "Move to bin" that did not exist either.
     await signedIn(page);
     const raw = await serveRawBytes(page, "application/pdf", PDF_BYTES);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
 
     await trashAndReopenFromBin(page, "PDF viewer", "Appliance manual");
@@ -999,7 +1025,7 @@ test.describe("recycle bin", () => {
 
   test("a trashed .spd and .txt paint their REAL previews through the facade, not doc glyphs", async ({ page }) => {
     await signedIn(page);
-    const hits = await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+    const hits = await mockThumbnailBackend(page, { textIds: ["177"] });
     await page.goto("/");
     await railSettled(page);
 
@@ -1014,7 +1040,9 @@ test.describe("recycle bin", () => {
     const spd = spdRow.locator(".bin__thumb img");
     await expect(spd).toHaveCount(1);
     await expect.poll(() => imgInkFraction(spd), { timeout: 6000 }).toBeGreaterThan(0.02);
-    expect(hits.thumbnailHits("n-files-sketch-md5")).toBeGreaterThan(0);
+    // Addressed by the blob's REAL md5 — the same one the live listing gave it,
+    // because trashing does not rewrite a blob (`binFake.ts`'s `BlobHash`).
+    expect(hits.thumbnailHits(fakeFileHash("174"))).toBeGreaterThan(0);
     // …and the row pre-clamped its lead from the `.spd`'s stated thumb dims, so
     // the tile reserved its final width before any bytes arrived.
     await expect(spdRow.locator(".bin__thumb")).toHaveClass(/has-aspect/);
@@ -1025,7 +1053,7 @@ test.describe("recycle bin", () => {
     const txt = page.locator(".bin__row", { hasText: "readme" }).locator(".bin__thumb img");
     await expect(txt).toHaveCount(1);
     await expect.poll(() => imgInkFraction(txt), { timeout: 6000 }).toBeGreaterThan(0.004);
-    expect(hits.binFileHits("n-files-readme")).toBeGreaterThan(0);
+    expect(hits.binFileHits("177")).toBeGreaterThan(0);
   });
 
   test("a trashed .pdf renders its page 0 off the BIN route, and learns the page's shape", async ({ page }) => {
@@ -1035,9 +1063,9 @@ test.describe("recycle bin", () => {
     // 200x100 — landscape, nothing like the A4 portrait the row reserves — so
     // the lead's final shape is proof the page itself was read.
     await signedIn(page);
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+    await mockThumbnailBackend(page, { textIds: ["177"] });
     const served = await serveRanges(page, PDF_BYTES, undefined, (url) =>
-      url.pathname === "/api/controlplane/bin/file/n-files-manual",
+      url.pathname === "/api/controlplane/bin/file/178",
     );
     await page.goto("/");
     await railSettled(page);
@@ -1123,14 +1151,14 @@ test.describe("recycle bin", () => {
       .poll(
         () =>
           page.evaluate(
-            () =>
+            (hash: string) =>
               new Promise((resolve) => {
                 const open = indexedDB.open("sn-dims", 1);
                 open.onerror = () => resolve(null);
                 open.onsuccess = () => {
                   const db = open.result;
                   try {
-                    const req = db.transaction("dims", "readonly").objectStore("dims").get("n-files-shot-md5");
+                    const req = db.transaction("dims", "readonly").objectStore("dims").get(hash);
                     req.onsuccess = () => {
                       const r = req.result as { w: number; h: number } | undefined;
                       db.close();
@@ -1146,6 +1174,9 @@ test.describe("recycle bin", () => {
                   }
                 };
               }),
+            // The blob's REAL md5, which is what a trashed row advertises now
+            // (`binFake.ts`'s `BlobHash`) and what the memo is therefore keyed by.
+            fakeFileHash("173"),
           ),
         { timeout: 6000 },
       )
@@ -1189,11 +1220,11 @@ test.describe("recycle-bin viewer URL", () => {
     await expect(page.locator("#back-label, .backbtn")).toContainText("Recycle bin");
     // The deep bin path, NOT the live `#/note/:id` (whose blob 404s for a trashed
     // file). The first page collapses to the bare form.
-    await expect(page).toHaveURL(/#\/bin\/note\/t-old$/);
+    await expect(page).toHaveURL(/#\/bin\/note\/304$/);
 
     // The page rides the URL — `download_test.note` has two pages.
     await reader.getByRole("button", { name: "Next page" }).click();
-    await expect(page).toHaveURL(/#\/bin\/note\/t-old\/page\/2$/);
+    await expect(page).toHaveURL(/#\/bin\/note\/304\/page\/2$/);
     const at = page.url();
 
     // A RELOAD reopens the SAME trashed file at the SAME page, not the library.
@@ -1208,10 +1239,10 @@ test.describe("recycle-bin viewer URL", () => {
     // No prior in-app navigation: the shell boots straight onto the bin-note URL,
     // so `openBinNote` must load the bin listing before it can find the entry and
     // build its origin. The static bin fixture survives a cold boot.
-    await page.goto("/#/bin/note/t-old");
+    await page.goto("/#/bin/note/304");
     await expect(page.locator(".reader")).toBeVisible();
     await expect(page.locator("#back-label, .backbtn")).toContainText("Recycle bin");
-    await expect(page).toHaveURL(/#\/bin\/note\/t-old$/);
+    await expect(page).toHaveURL(/#\/bin\/note\/304$/);
 
     // The view-only history control is present on a trashed `.note` (bin-parity),
     // and Move to bin is not — the bin context swap survived the cold open.

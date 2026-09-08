@@ -75,6 +75,7 @@ import { createPdfViewer } from "./pdfViewer";
 import type { Viewer, ViewerDeps } from "./viewer";
 import { createNoteSearch, MIN_GLOBAL_QUERY_LEN, type SearchState } from "./noteSearch";
 import { createSearchService } from "../search/searchService";
+import { createDocSearch } from "../search/docSearch";
 // The three features pulled out of this god-file (Review-2 Pass-2 #3), each fed
 // an explicit context the controller builds — no hidden coupling back in.
 import { createGalleryCards, type GalleryCards } from "./galleryCards";
@@ -1246,6 +1247,25 @@ export function createAppShell(deps: AppDeps): AppShell {
   // actions drifting apart between viewers: they are literally the same closures.
   const viewerDeps: ViewerDeps = {
     api,
+    // IN-DOCUMENT SEARCH, and it is `golden-search.md` §1.1's whole point: the
+    // same wasm FTS5 engine the library search runs on, pointed at ONE document's
+    // `text/<md5>` instead of the terms index. Built HERE, once, and handed to
+    // every viewer — the reader, the `.txt` viewer and the PDF viewer all search
+    // through this one object, so a session holds one instance and one built
+    // index rather than three (§8.1: documents through a reused instance converge
+    // on the cost of the single worst one).
+    //
+    // NO `api` GOES INTO IT, exactly as none goes into `searchService` above, and
+    // for the same reason: there is no in-document search route left to call.
+    //
+    // The one thing it does need from the library side is the `index_version` the
+    // manifest already carries — `text/<md5>` is served under a long-lived
+    // `immutable` and its path names only the md5, so the version has to ride the
+    // query string or a re-derivation would be invisible to the browser's cache
+    // (`docText.ts`'s header). Read fresh per call, because the manifest arrives
+    // on a background sync and a value captured here would be whatever was known
+    // at construction.
+    docSearch: createDocSearch({ indexVersion: (md5) => searchService.indexVersion(md5) }),
     renderer,
     cache,
     getTheme: currentTheme,

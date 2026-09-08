@@ -242,13 +242,17 @@ test "the pool hands out each connection to at most one borrower, and empties ra
     try testing.expectEqual(@as(usize, 3), pool.available());
 }
 
-test "a reader may still write its own TEMP scratch, which is what makes search poolable" {
-    // VERIFIED, not assumed, because the search routes depend on it entirely.
-    // `SQLITE_OPEN_READONLY` refuses writes to the DATABASE; the per-connection
-    // `temp` schema is a different store and stays writable. In-document search
-    // tokenizes every query through `temp.token_fold` (`search/fuzzy.zig`) to see
-    // a string exactly as the index saw its own text — so if this were refused,
-    // find-in-note could not run on a pooled reader at all.
+test "a reader may still write its own TEMP scratch, which is what makes a folding read poolable" {
+    // VERIFIED, not assumed. `SQLITE_OPEN_READONLY` refuses writes to the
+    // DATABASE; the per-connection `temp` schema is a different store and stays
+    // writable — which is why `sqlite.WriteWatch` scopes its audit to `main` and
+    // not to every attachment, and why a read that needs to see a string exactly
+    // as the index saw its own text (`temp.token_fold`, `search/fuzzy.zig`) can
+    // run on a pooled reader at all.
+    //
+    // No route folds on a reader today: the reads that did went into the browser
+    // with `golden-search.md` §6 step 7. The property is pinned anyway, because
+    // the audit above is written in terms of it.
     const f = try Fixture.init();
     defer f.deinit();
     var pool = try Pool.open(testing.allocator, f.path, 1);

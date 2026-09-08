@@ -1355,11 +1355,13 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   }
 
   const find: PdfFindController = createPdfFindController({
-    api: deps.api,
+    // The ONE in-document search, shared with the reader and the `.txt` viewer
+    // so a session holds one wasm instance and one built index.
+    docs: deps.docSearch,
     failures: { onSessionExpired: deps.onSessionExpired },
     // THE LOCATOR, and the one seam that makes this testable without a worker.
     // A page that will not read is a page with no boxes: the count above it is
-    // the server's and stays exactly as it was.
+    // the index's and stays exactly as it was.
     words: async (page) => (session && open_ ? session.pageWords(page) : []),
     view: {
       setOpen(isOpen) {
@@ -2094,7 +2096,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     //
     // A BIN origin carries no query — `router.ts` drops it there — so this is a
     // no-op for a trashed file rather than a branch.
-    find.setDocument(m.id);
+    find.setDocument(m.id, m.fileHash);
     find.setPage(pageIndex);
     if (query !== "") {
       findInput.value = query;

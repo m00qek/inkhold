@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { cardButton, signedIn, freezeMotion } from "./helpers/app";
 
 // The `.note` reader's LAYERS PANEL, end to end through the REAL decoder. The
-// fake `Api` serves the layered fixture (`n-layers`, src/api/layeredFixture.ts):
+// fake `Api` serves the layered fixture (`104`, src/api/layeredFixture.ts):
 // page 1 carries `layers` in its meta ref and a genuine SNPG v2 payload —
 // four records with a DEVICE-HIDDEN Layer 2 and a renamed current layer — so
 // what is proved is the whole path: meta layers → payload fetch → wasm
@@ -26,7 +26,7 @@ const menu = (page: Page) => page.locator(".reader__bar .menu__pop", { has: page
 
 async function openLayered(page: Page): Promise<void> {
   await signedIn(page);
-  await page.goto("/#/note/n-layers");
+  await page.goto("/#/note/104");
   await freezeMotion(page);
   await expect(page.locator(".pager__count")).toHaveText("1 / 2");
   // The stack is up once all four record canvases exist with real backing.

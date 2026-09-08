@@ -41,9 +41,10 @@ pub const api_version = auth.api_version;
 /// backfill is a write. Its failure is swallowed by design, so on a reader it
 /// would not error — it would quietly serve a note as an unindexed placeholder.
 /// A silent wrong answer is worse than a slow one, so the whole family keeps the
-/// writer until the heal has somewhere else to happen. Search is exempt because
-/// it reads the FTS directly and never heals (`search_partition.active` is
-/// explicitly the read-only half of that module).
+/// writer until the heal has somewhere else to happen. The search-index manifest
+/// is exempt because it reads `files`/`note_index`/`note_page_index` directly and
+/// heals nothing — it calls no `indexRowEnsuring`, which is the property its own
+/// read-only probe checks.
 pub const routes = [_]router.Route{
     .{ .method = .GET, .path = "/api/version", .scopes = &.{.public}, .handler = auth.version, .read_only = true },
 
@@ -203,20 +204,8 @@ pub const routes = [_]router.Route{
     // Generic per-item metadata (page dims, `fileType`, `fileHash`) — EVERY
     // previewable kind fetches this on open, not just `.note`, so it lives under
     // `/file/metadata/` rather than the `/note/` noun. The genuinely note-only
-    // reads (`/note/:id/page`, `/note/:id/search`, `/template`, `/history/...`)
-    // stay below.
+    // reads (`/note/:id/page`, `/template`, `/history/...`) stay below.
     .{ .method = .GET, .path = "/api/controlplane/file/metadata/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneNote },
-    // Find-in-note: EVERY matching page of ONE note, with a count per page.
-    // Complete and unranked — the client auto-drains its cursor to the exact
-    // count, which is why it is a route of its own and not a mode of something
-    // else. `golden-search.md` §6 step 7 retires it once `text/<md5>` can be
-    // searched in the browser.
-    .{ .method = .GET, .path = "/api/controlplane/note/:id/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneNoteSearch, .read_only = true },
-    // Find-in-txt: EVERY matching `.txt` paragraph of ONE file, with a count and
-    // byte range per paragraph. Its own route because it answers about paragraphs
-    // + byte ranges rather than pages + counts — different fields for a different
-    // viewer. Retired alongside its `.note` twin in step 7.
-    .{ .method = .GET, .path = "/api/controlplane/note/:id/txt-search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTxtSearch, .read_only = true },
     // --- The client-side search index (`golden-search.md` §2/§3) ---
     //
     // GLOBAL SEARCH IS THE BROWSER'S. The server ships the caller's complete live
@@ -253,14 +242,36 @@ pub const routes = [_]router.Route{
     // out. That is also why it takes no read-only probe: the flag is what the
     // probe audits, and this route does not claim it.
     .{ .method = .GET, .path = "/api/controlplane/search-index/stream", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexStream, .manual_db_lock = true },
+    // The per-document text record (`golden-search.md` §1.1, build order step 7)
+    // — the third of the three routes §6.1's sweep leaves standing, and the one
+    // that replaced FIVE: `/note/:id/search`, `/note/:id/txt-search`,
+    // `/note/:id/history/:md5/search` and both bin twins all collapsed to
+    // "authorize, serve `text/<md5>`", and are gone from this table. §6.1's
+    // assertion holds as written: nothing but the manifest and the stream matches
+    // `search` in a path, and this route is the third that stands.
+    //
+    // Content-addressed and therefore NOT note-scoped: there is no `:id` to gate
+    // through, so the gate is `Files.reachesBlob` — a live file, a trashed one,
+    // or a retained version — which is those five routes' three gates, collapsed
+    // (see the handler).
+    //
+    // `manual_db_lock` for the STREAM ROUTE'S REASON, not for the writer's lock:
+    // it is a pure read that wants a pooled reader, and `read_only` would hold
+    // the lease for the whole dispatch — which on a download means for the whole
+    // download, and degrades to the WRITER under `db_lock` when the pool is
+    // empty. The handler borrows the reader around its gate and nothing else.
+    // Unlike the stream it DOES declare a `content_length`: the skip rule that
+    // forbids one there cannot arise for a single already-open file.
+    .{ .method = .GET, .path = "/api/controlplane/text/:md5", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneDocumentText, .manual_db_lock = true },
     // --- Hot-cache versioning: "history of this file" ---
     // All note-scoped by `:id` (the same ownership gate the siblings above use);
     // the per-version routes gate `:md5` on being a RETAINED version of THAT file
     // (`Files.historyVersion`) — a stranger's md5, or one not in this file's
     // history, is a 404. `history` lists versions; `.../page/:n` previews one
     // (reusing the live page path, hence `manual_db_lock` like `/note/:id/page/:n`
-    // — it STREAMS); `.../search` is a one-document scan (H8, NOT the FTS);
-    // `.../restore` re-points through the supersede path and is undoable (H9).
+    // — it STREAMS); `.../restore` re-points through the supersede path and is
+    // undoable (H9). Find-in-a-version is not here: it is `text/<md5>` above,
+    // gated by `Files.reachesBlob`, which admits a retained version by design.
     .{ .method = .GET, .path = "/api/controlplane/note/:id/history", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistory },
     // The version's OWN page geometry (count + dims), read from its retained
     // `note_index` (H7) so a preview of a version with a different page count than
@@ -281,7 +292,6 @@ pub const routes = [_]router.Route{
     // `manual_db_lock` because it STREAMS (like `/file/:id`), and `immutable`
     // because `:md5` pins the whole blob (like `/history/:md5/page/:n`).
     .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/raw", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistoryRaw, .manual_db_lock = true },
-    .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistorySearch, .read_only = true },
     .{ .method = .POST, .path = "/api/controlplane/note/:id/history/:md5/restore", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistoryRestore },
     // Immutable per-page byte payload (versioned by content hash; browser-cached).
     // `manual_db_lock` for the same reason as the /oss routes above: the lookup and
@@ -383,12 +393,12 @@ pub const routes = [_]router.Route{
     // meta for a TRASHED file); the note-only bin reads stay under `/bin/note/`.
     .{ .method = .GET, .path = "/api/controlplane/bin/file/metadata/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinNote },
     .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/page/:n", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinPage, .manual_db_lock = true },
-    // The bin twins of the live text + find-in-note routes: page-N ovals and
-    // find-in-a-trashed-note, keyed on the trashed file's CURRENT md5 (owned,
-    // `deleted = 1`). Both non-immutable JSON, both pure-DB (no `manual_db_lock`);
-    // a live id on either is a 404, like the sibling bin gates.
+    // The bin twin of the live page-text route: page-N ovals for a TRASHED note,
+    // keyed on the trashed file's CURRENT md5 (owned, `deleted = 1`). Non-immutable
+    // JSON, pure-DB (no `manual_db_lock`); a live id is a 404, like the sibling bin
+    // gates. Find-in-a-trashed-note is `text/<md5>` — `Files.reachesBlob` admits a
+    // trashed file's blob, so the bin needed no route of its own.
     .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinPageText },
-    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinNoteSearch, .read_only = true },
     // View-only version history for a TRASHED note (bin-parity phase 2): the same
     // history handlers as the live `/note/:id/history/...` routes, delegated with the
     // trashed scope (`deleted = 1`), reachable because `file_history` follows a file
@@ -402,7 +412,6 @@ pub const routes = [_]router.Route{
     .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/page/:n", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistoryPage, .manual_db_lock = true },
     .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistoryPageText },
     .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/raw", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistoryRaw, .manual_db_lock = true },
-    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistorySearch, .read_only = true },
     .{ .method = .GET, .path = "/api/controlplane/bin/file/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinFile, .manual_db_lock = true },
     // Restore reports what it ACTUALLY did — the ancestor chain, the descendants,
     // and any auto-rename — because that routinely exceeds what was asked.

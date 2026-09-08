@@ -31,7 +31,7 @@ const COVER_INK = 0.15;
 // The fixture `.note` in `Files`, addressed by the whole-file hash its tile
 // puts in `/thumbnail/{hash}` — the knob that decides whether the mock serves
 // it a cover (200) or answers like the real server for a coverless note (404).
-const NOTE_HASH = fakeFileHash("n-files-note");
+const NOTE_HASH = fakeFileHash("171");
 
 async function openFiles(page: Page): Promise<void> {
   await page.goto("/");
@@ -49,7 +49,7 @@ test.describe("thumbnails across file types", () => {
     // The `.note` is COVERLESS here (404, like most real notes), so this test
     // keeps proving the client-render fallback end to end; the cover-preferred
     // path has its own test below.
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"], coverless: [NOTE_HASH] });
+    await mockThumbnailBackend(page, { textIds: ["177"], coverless: [NOTE_HASH] });
     await openFiles(page);
 
     // note → the rendered page, painted into an <img> from a WebP blob.
@@ -87,7 +87,7 @@ test.describe("thumbnails across file types", () => {
   });
 
   test("a .txt tile renders a snippet of its first lines, not a blank", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"], coverless: [NOTE_HASH] });
+    await mockThumbnailBackend(page, { textIds: ["177"], coverless: [NOTE_HASH] });
     await openFiles(page);
 
     const txt = card(page, "readme");
@@ -102,7 +102,7 @@ test.describe("thumbnails across file types", () => {
   test("a .note with a cover prefers it over the client render", async ({ page }) => {
     // No `coverless` entry: /thumbnail/{NOTE_HASH} answers 200 with the mock
     // cover, the way the real server serves a note whose user set one.
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+    await mockThumbnailBackend(page, { textIds: ["177"] });
     await openFiles(page);
 
     const note = card(page, "Meeting notes — Q3");

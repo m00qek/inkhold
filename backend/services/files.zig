@@ -337,10 +337,11 @@ pub const Files = struct {
     /// unreachable through the UI while it went on consuming quota. It has no pair,
     /// so it also travels alone — one rule, no exception.
     ///
-    /// SHARED BY `list`, `childCount`, `liveSubtreeCount`, the bin listing and —
-    /// since the leak `backlog.md` reported — library-wide search and its coverage
-    /// count (`search/query.zig`). That is the whole reason it is generated rather
-    /// than typed out, and why it is `pub`: a count that disagreed with the listing
+    /// SHARED BY `list`, `childCount`, `liveSubtreeCount` and the bin listing —
+    /// and, until `golden-search.md` §6 retired them, by library-wide search and
+    /// its coverage count, which is the leak `backlog.md` reported. That is the
+    /// whole reason it is generated rather than typed out, and why it is `pub`:
+    /// a count that disagreed with the listing
     /// beside it is "the one place the bin leaked back into view", and copies of a
     /// predicate this fiddly do not stay equal.
     ///
@@ -2752,6 +2753,44 @@ pub const Files = struct {
     /// is the same "does this user hold this blob" question.
     pub fn holdsBlob(self: Files, user_id: u64, md5: []const u8) !bool {
         return (try self.userBlobRefs(user_id, md5)) > 0;
+    }
+
+    /// True when `user_id` can reach blob `md5` by ANY path they already have —
+    /// the ownership boundary for `/api/controlplane/text/{md5}`
+    /// (`golden-search.md` §1.1).
+    ///
+    /// **It is one predicate because the five in-document routes it replaces
+    /// were three gates over the same question.** A caller reaches a blob's text
+    /// as a LIVE file of theirs (the ordinary `files` join), as a TRASHED one
+    /// (the bin's gate, which is that same join without the `deleted = 0`), or as
+    /// a RETAINED VERSION of a file of theirs (`historyVersionIn`'s `file_history`
+    /// join). Collapse the three and the `deleted` flag drops out of both halves —
+    /// live and trashed are BOTH accepted — leaving exactly `userChargedRefs`:
+    /// their `files` rows plus the `file_history` rows of those files.
+    ///
+    /// **That coincidence is not one.** The quota rule that shaped
+    /// `userChargedRefs` is *if the bytes occupy disk, the user is charged*, and
+    /// the set of blobs a user is charged for is precisely the set they can still
+    /// get at — a retained version is downloadable through `/history/{md5}/raw`,
+    /// a trashed file through the bin. So the reachability question and the
+    /// billing question have one answer, and giving text its own second query
+    /// would be a copy of this one waiting to drift from it.
+    ///
+    /// What the three gates carried that this does NOT is the file ID: they were
+    /// per-document routes, so they could ask "is this md5 a version of THIS
+    /// file". This route is content-addressed and has no id to scope through, the
+    /// same position `/thumbnail/{hash}` is in — and the answer is the same one
+    /// `holdsBlob` gives: whoever holds the bytes may read what is derived from
+    /// them, because they can already download the bytes.
+    ///
+    /// False is the handler's 404, deliberately indistinguishable from "not
+    /// derived", so the route is no existence oracle over the deduplicated blob
+    /// space. A short or malformed md5 reaches nothing and is false too.
+    ///
+    /// Two indexed COUNTs, no allocation.
+    pub fn reachesBlob(self: Files, user_id: u64, md5: []const u8) !bool {
+        if (md5.len != md5_len) return false;
+        return (try self.userChargedRefs(user_id, md5)) > 0;
     }
 
     /// What `restoreRow` did to one row. `was_trashed` is what the counts in
@@ -6664,11 +6703,12 @@ test "SEARCH-NEUTRALITY: a renamed + relocated note leaves the blob-keyed index 
     const note = try putSearchNote(&f, 1, null, "orig.note", &.{"quarterly roadmap review"});
     defer freeEntry(note);
 
-    // Record the index size so we can prove the move never touched it. That the
-    // renamed note is still FOUND end-to-end is proven in http_integration's
-    // "device move_v3 … stays searchable" test — `files.zig` cannot import the
-    // search READ module (`search/query.zig`) without a cycle (query already
-    // imports files), and index-neutrality is the property that belongs here.
+    // Record the index size so we can prove the move never touched it. A rename
+    // is a `files` row edit and the index is keyed on the BLOB, so a mechanism
+    // that re-minted on rename would be re-deriving for nothing — and would move
+    // the masked rowids that the re-mint and heal paths are defined against.
+    // Index-neutrality is the property that belongs here; what the browser can
+    // then find is the browser's, off `text/<md5>`.
     const seg_before = blk: {
         var s = try f.db.prepare("SELECT COUNT(*) FROM segment_search;");
         defer s.finalize();

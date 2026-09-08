@@ -572,58 +572,35 @@ describe("shell seams", () => {
     expect(await wrapped.getPageText("b", page)).toEqual({ text: "live", words: [] });
   });
 
-  it("reroutes in-note find and the whole history family for a trashed id", async () => {
-    const done = { query: "q", pages: [{ pageIndex: 0, matches: 2, terms: ["q"] }], usedFuzzy: false };
+  it("reroutes the whole history family for a trashed id", async () => {
     const live = {
-      searchStream: vi.fn((_id, _q, onBatch) => {
-        onBatch({ query: "q", pages: [], usedFuzzy: false, done: true });
-        return Promise.resolve();
-      }),
       noteHistory: vi.fn(async () => ({ id: "x", versions: [] })),
       historyPageBytes: vi.fn(async () => new ArrayBuffer(0)),
       historyPageText: vi.fn(async () => ({ text: "live", words: [] })),
       historyRaw: vi.fn(async () => new ArrayBuffer(0)),
-      searchHistory: vi.fn(async () => done),
     };
     const trashed = {
-      binSearch: vi.fn(async () => done),
       binNoteHistory: vi.fn(async () => ({ id: "a", versions: [{ md5: "v1", size: 1, createdAt: 1, current: true, pageCount: 2 }] })),
       binHistoryPageBytes: vi.fn(async () => new ArrayBuffer(0)),
       binHistoryPageText: vi.fn(async () => ({ text: "trashed-version", words: [] })),
       binHistoryRaw: vi.fn(async () => new ArrayBuffer(0)),
-      binSearchHistory: vi.fn(async () => done),
     };
     const api = {
-      searchInNote: vi.fn(async () => done),
-      binSearchInNote: trashed.binSearch,
-      searchInNoteStream: live.searchStream,
       noteHistory: live.noteHistory,
       historyPageBytes: live.historyPageBytes,
       historyPageText: live.historyPageText,
       historyRaw: live.historyRaw,
-      searchHistory: live.searchHistory,
       binNoteHistory: trashed.binNoteHistory,
       binHistoryPageBytes: trashed.binHistoryPageBytes,
       binHistoryPageText: trashed.binHistoryPageText,
       binHistoryRaw: trashed.binHistoryRaw,
-      binSearchHistory: trashed.binSearchHistory,
     } as unknown as Api;
 
     const scope = createBinScope();
     const wrapped = scope.wrap(api);
     scope.attach((id) => id === "a");
 
-    // Phase 1 find: the STREAM reroutes to the bin search VO, surfaced as one
-    // `done` batch (`usedFuzzy:false`) — the historyScope shape.
-    const batches: unknown[] = [];
-    await wrapped.searchInNoteStream("a", "q", (b) => batches.push(b));
-    expect(trashed.binSearch).toHaveBeenCalledWith("a", "q");
-    expect(batches).toEqual([{ query: "q", pages: done.pages, usedFuzzy: false, done: true }]);
-    // A live id still streams live.
-    await wrapped.searchInNoteStream("b", "q", () => {});
-    expect(live.searchStream).toHaveBeenCalled();
-
-    // Phase 2 history family: every call reroutes to its bin twin for a trashed id.
+    // Every call reroutes to its bin twin for a trashed id.
     await wrapped.noteHistory("a");
     expect(trashed.binNoteHistory).toHaveBeenCalledWith("a");
     await wrapped.historyPageBytes("a", "v1", 0);
@@ -631,14 +608,51 @@ describe("shell seams", () => {
     expect(await wrapped.historyPageText("a", "v1", 0)).toEqual({ text: "trashed-version", words: [] });
     await wrapped.historyRaw("a", "v1");
     expect(trashed.binHistoryRaw).toHaveBeenCalledWith("a", "v1");
-    await wrapped.searchHistory("a", "v1", "q");
-    expect(trashed.binSearchHistory).toHaveBeenCalledWith("a", "v1", "q");
 
     // …and a LIVE id passes straight through to the live history routes.
     await wrapped.noteHistory("b");
     expect(live.noteHistory).toHaveBeenCalledWith("b");
     await wrapped.historyPageText("b", "v1", 0);
     expect(live.historyPageText).toHaveBeenCalled();
+  });
+
+  // THE SCOPE HAS NO SEARCH IN IT ANY MORE, and that absence is the assertion.
+  //
+  // `golden-search.md` §1.1 collapsed the five in-document search routes to one
+  // keyed by BLOB MD5 — "history and bin are not special: they are other md5s".
+  // A trashed file's blob keeps the md5 it had before it was trashed, and
+  // `getBinNoteMeta` (rerouted above) already hands the viewer that `fileHash`,
+  // so find-in-a-trashed-note needs no reroute at all: the same controller, the
+  // same engine, a different md5.
+  //
+  // Written as a property of the WRAPPER rather than of one method name — the
+  // seam carries no search method to name any more, so the guard is stated
+  // against a HYPOTHETICAL one: hand the wrapper a search-named member and it
+  // must come back the same function object, and the wrapper must not grow one
+  // of its own. A reroute reintroduced under any spelling fails here.
+  it("wraps NOTHING whose name is about searching — §1.1's collapse", () => {
+    const api = {
+      searchAnything: vi.fn(),
+      binSearchAnything: vi.fn(),
+      getNoteMeta: vi.fn(),
+      getBinNoteMeta: vi.fn(),
+    } as unknown as Api;
+
+    const scope = createBinScope();
+    const wrapped = scope.wrap(api);
+    scope.attach(() => true);
+
+    const source = api as unknown as Record<string, unknown>;
+    const seen = wrapped as unknown as Record<string, unknown>;
+    for (const name of new Set([...Object.keys(source), ...Object.keys(seen)])) {
+      if (!/search/i.test(name)) continue;
+      // Passed through by the spread, i.e. the SAME function object — the
+      // wrapper does not intercept it, and invents nothing under that name.
+      expect(seen[name]).toBe(source[name]);
+    }
+    // And the one that carries the md5 IS still rerouted, because that is what
+    // makes the no-search-reroute rule work.
+    expect(wrapped.getNoteMeta).not.toBe(api.getNoteMeta);
   });
 
   it("builds a content-addressed URL on the bin's own file route, or none at all", () => {

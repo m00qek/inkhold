@@ -333,7 +333,7 @@ const ddl_v1 =
     \\-- names it). `files_bin_name` in v12 is the same key over TRASHED rows,
     \\-- non-unique because the bin can legitimately hold two rows under one name.
     \\--
-    \\-- ALSO LOAD-BEARING BY NAME, like `files_md5` below: the search-index
+    \\-- LOAD-BEARING BY NAME — the only index here that still is: the search-index
     \\-- manifest states `INDEXED BY files_live_name` (`search/index_export.zig`),
     \\-- so dropping or renaming this does not make that read slow, it makes the
     \\-- statement fail to prepare. It is named for the PARTIAL clause rather than
@@ -344,14 +344,16 @@ const ddl_v1 =
     \\CREATE UNIQUE INDEX files_live_name
     \\  ON files(user_id, COALESCE(parent_id, 0), name) WHERE deleted = 0;
     \\
-    \\-- LOAD-BEARING BY NAME. Full-text search NAMES this index — `INDEXED BY
-    \\-- files_md5` on the `files` join in `search/query.zig` — so dropping or
-    \\-- renaming it does not make search slow, it makes the statement fail to
-    \\-- prepare. That is the trade taken deliberately: without the directive
-    \\-- SQLite reaches `files` through `files_user_parent (user_id=?)` and every
-    \\-- row a search returns re-walks the caller's entire library (measured 7.8x
-    \\-- on a ten-document page, and growing with the library rather than the
-    \\-- query). A loud failure is the price of not depending on `ANALYZE`.
+    \\-- LOAD-BEARING BY PLAN, and it USED to be load-bearing by name: search's
+    \\-- `files` join stated `INDEXED BY files_md5`, so losing this index failed
+    \\-- loudly at prepare time rather than quietly at runtime. That statement went
+    \\-- with the read face in `golden-search.md` §6 step 7, and no statement names
+    \\-- the index any more — but the derivation still reaches `files` by md5 with
+    \\-- no owner to seek on, and losing this turns each arm into a scan
+    \\-- (MEASURED: 8,647 VM steps per document). What catches that now is the
+    \\-- plan pin in `search/index_export.zig`, which asserts `SEARCH f USING
+    \\-- INDEX files_md5 (md5=?)` — a failing test rather than a failing prepare,
+    \\-- and the reason this comment is not simply deleted.
     \\CREATE INDEX files_md5 ON files(md5);
     \\
     \\CREATE INDEX files_user_parent ON files(user_id, parent_id, deleted);

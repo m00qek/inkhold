@@ -84,7 +84,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   test("opens a .pdf in its own viewer and paints real pixels", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
 
     const region = page.getByRole("region", { name: "PDF viewer" });
@@ -98,7 +98,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   test("pages through the document, and the pager bounds itself", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
 
     const region = page.getByRole("region", { name: "PDF viewer" });
@@ -123,7 +123,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   test("zooming re-rasters at a larger size, not a stretched bitmap", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
 
     const region = page.getByRole("region", { name: "PDF viewer" });
@@ -201,7 +201,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // exact numbers per orientation are pinned in `markGeometry.test.ts`.
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -265,7 +265,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // published its page since it existed.
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -274,7 +274,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     await region.getByRole("button", { name: "Next page" }).click();
     await expect(region.getByText("2 / 2")).toBeVisible();
     // ONE-BASED in the URL, 0-based internally — the router's convention.
-    await expect(page).toHaveURL(/#\/note\/n-files-manual\/page\/2$/);
+    await expect(page).toHaveURL(/#\/note\/178\/page\/2$/);
 
     // And the address is REAL: a reload opens the page it names, which is the
     // whole point of writing it. A URL that only decorates the address bar would
@@ -288,7 +288,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   test("refuses a corrupt PDF with MuPDF's own words, and does not wedge", async ({ page }) => {
     await signedIn(page);
     await servePdf(page, Buffer.from("this is definitely not a pdf"));
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
 
     const region = page.getByRole("region", { name: "PDF viewer" });
@@ -305,7 +305,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   test("hiding the Document layer shows the transparent checker, not the desk", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
 
     const region = page.getByRole("region", { name: "PDF viewer" });
@@ -347,7 +347,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   test("the page index lists every page, jumps, and tracks the current one", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
 
     const region = page.getByRole("region", { name: "PDF viewer" });
@@ -385,7 +385,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   test("the strip paints thumbnails, and reserves each row's shape first", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -419,7 +419,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // and the only witness was my eye on a screenshot.
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -521,7 +521,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // so the same keys — and Escape leaves, which every other viewer already did.
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -566,7 +566,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   test("orders its controls and words its subtitle as the reader does", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -591,7 +591,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     await expect(region.locator(".viewer__title")).not.toContainText("PDF");
 
     // …and the reader, whose order this one now follows.
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await freezeMotion(page);
     await expect(page.locator(".reader.is-open")).toBeVisible();
     expect(await pagerBeforeZoom(page.locator(".reader.is-open"))).toBe(true);
@@ -606,7 +606,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // a slow link that is most of the time you spend looking at the strip.
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -625,7 +625,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // …and the reader still HAS its ruled paper: this is a scoping fix, not a
     // deletion, and a test that only checked the PDF would pass just as happily
     // if the placeholder had been dropped from both.
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await freezeMotion(page);
     await expect(page.locator("#note-pages-panel .filmstrip__thumb").first()).toBeVisible();
     expect(await bg("#note-pages-panel .filmstrip__thumb")).toContain("gradient");
@@ -637,7 +637,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // this ink on page 1 and look entirely plausible doing it.
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -756,7 +756,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   async function openStrip(page: Page): Promise<Locator> {
     await signedIn(page);
     await servePdf(page, PANEL_PDF_BYTES);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -818,7 +818,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // inked anyway.
     await openStrip(page);
     await page.goto("/#/");
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -857,7 +857,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // `host.replaceChildren()` is the same call that lets the pixels go.
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -873,7 +873,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   test("the annotations panel lists the document under the ink, and toggles both", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -910,7 +910,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // bitmap. Reopening the same document is the cheapest way to force that read.
     await signedIn(page);
     await servePdf(page);
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -922,7 +922,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // Leave, and come back to the same document. The counters reset per open, so
     // what they read after this is the SECOND visit's work alone.
     await page.goto("/#/");
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
     // The panel's open state SURVIVES the document change (it is viewer chrome,
@@ -1054,7 +1054,7 @@ function inflatedStreams(pdf: Buffer): Buffer[] {
 async function openMarkedPdf(page: Page, page2: boolean): Promise<Locator> {
   await signedIn(page);
   await servePdf(page);
-  await page.goto("/#/note/n-files-manual");
+  await page.goto("/#/note/178");
   await freezeMotion(page);
   const region = page.getByRole("region", { name: "PDF viewer" });
   await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -1581,7 +1581,7 @@ function linkedPdfBytes(): Buffer {
 async function openLinkedPdf(page: Page): Promise<Locator> {
   await signedIn(page);
   await servePdf(page, linkedPdfBytes());
-  await page.goto("/#/note/n-files-manual");
+  await page.goto("/#/note/178");
   await freezeMotion(page);
   const region = page.getByRole("region", { name: "PDF viewer" });
   await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -1610,7 +1610,7 @@ test.describe("PDF links", () => {
 
     // The INTERNAL one: the app's own route, in this tab, so following it
     // leaves you somewhere you can share and reload into.
-    const internal = layer.locator('a[href="#/note/n-files-manual/page/2"]');
+    const internal = layer.locator('a[href="#/note/178/page/2"]');
     await expect(internal).toHaveCount(1);
     await expect(internal).toHaveAttribute("aria-label", "Go to page 2");
     await expect(internal).not.toHaveAttribute("target", "_blank");
@@ -1641,11 +1641,11 @@ test.describe("PDF links", () => {
   test("following an internal link is a real navigation to that page", async ({ page }) => {
     const region = await openLinkedPdf(page);
     await expect(region.getByText("1 / 2")).toBeVisible();
-    await page.locator('.pdf-links a[href="#/note/n-files-manual/page/2"]').click();
+    await page.locator('.pdf-links a[href="#/note/178/page/2"]').click();
     await expect(region.getByText("2 / 2")).toBeVisible({ timeout: 20_000 });
     // A REAL ADDRESS, not a scroll: the URL is the page, so this is shareable
     // and survives a reload.
-    expect(page.url()).toContain("#/note/n-files-manual/page/2");
+    expect(page.url()).toContain("#/note/178/page/2");
     // And the page under it is page 2's — a link that moved the counter over a
     // stale canvas would pass everything above.
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
@@ -1710,7 +1710,7 @@ test.describe("PDF links", () => {
     // is what actually decides it. Both are asserted.
     await signedIn(page);
     await servePdf(page, linkedPdfBytes());
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);

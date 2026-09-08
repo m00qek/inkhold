@@ -19,6 +19,7 @@ import { el } from "../ui/dom";
 import type { Api } from "../api/types";
 import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
+import type { DocSearch } from "../search/docSearch";
 import type { Hash, Id, NoteMeta, NoteSummary, PageRef, Theme, WordBox } from "../core/types";
 import { createLazyEngine, defaultPlaceholder, renderPage, type LazyEngine } from "../render/lazy";
 import { createTemplateProvider } from "../render/template";
@@ -57,6 +58,15 @@ import type { PageLayer } from "../core/types";
 
 export interface ReaderDeps {
   api: Api;
+  /**
+   * The ONE in-document search (`golden-search.md` §1.1): one document's
+   * `text/<md5>` in the same wasm FTS5 instance the library search uses. Shared
+   * across the reader and the `.txt`/`.pdf` viewers so a session holds one
+   * instance and one built index — §8.1 measured that documents through a reused
+   * instance converge on the cost of the single worst one, which they cannot do
+   * if each viewer opens its own.
+   */
+  docSearch: DocSearch;
   renderer: NoteRenderer;
   cache: RenderCache;
   getTheme: () => Theme;
@@ -884,7 +894,7 @@ export function createReader(deps: ReaderDeps): Reader {
     // The links memo is keyed by hash so a moved page could not serve a stale
     // set anyway, but the entries under the OLD hashes are dead weight.
     linksByPage.clear();
-    find.setNote(fresh.id, fresh.pages);
+    find.setNote(fresh.id, fresh.fileHash, fresh.pages);
     buildFilmstrip();
     void showPage(pageIndex);
   }
@@ -967,11 +977,6 @@ export function createReader(deps: ReaderDeps): Reader {
         if (n === null) return `${here}searching…`;
         return `${here}searching ${n} ${n === 1 ? "page" : "pages"}…`;
       }
-      case "streaming":
-        // A FLOOR while the note is still draining — "3 of 20+", the browser
-        // Ctrl+F shape. It settles to the exact `${at+1} of ${total}` the moment
-        // the last batch lands (a finite note always reaches exact).
-        return `${state.at + 1} of ${state.total}+`;
       case "settled":
         return `${state.at + 1} of ${state.total}`;
       case "fuzzyPrompt":
@@ -983,10 +988,9 @@ export function createReader(deps: ReaderDeps): Reader {
     }
   }
 
-  /** The dimmer treatment: every state that is not a live count of matches. A
-   *  streaming floor IS a live count, so it reads at full weight like a settle. */
+  /** The dimmer treatment: every state that is not a live count of matches. */
   function countIsNone(state: FindState): boolean {
-    return state.kind !== "settled" && state.kind !== "streaming" && state.kind !== "idle";
+    return state.kind !== "settled" && state.kind !== "idle";
   }
 
   /**
@@ -1115,6 +1119,10 @@ export function createReader(deps: ReaderDeps): Reader {
 
   const find = createFindController({
     api,
+    // The ONE in-document search, shared with the `.txt` and `.pdf` viewers so
+    // the wasm instance and its built index are one per session (§8.1's
+    // "documents do not stack" is a property of reusing it).
+    docs: deps.docSearch,
     // The same sink everything else in this reader uses: an expired session
     // reaches the shell, a stale `?v=` refetches the note metadata.
     failures,
@@ -2050,7 +2058,7 @@ export function createReader(deps: ReaderDeps): Reader {
         // on the device" over a note whose metadata was still in flight. The
         // LISTING's whole-note answer is the one thing that IS known then, and a
         // `false` from it settles the question negatively for real.
-        find.setNote(meta.id, meta.pages, metaResolved || !summaryRecognized);
+        find.setNote(meta.id, meta.fileHash, meta.pages, metaResolved || !summaryRecognized);
         buildFilmstrip();
         // PRIMING FIND FROM THE ROUTE, through the one path that exists: open the
         // bar, fill the field, hand the controller the query. Landing on the first
@@ -2150,7 +2158,7 @@ export function createReader(deps: ReaderDeps): Reader {
         header.setSubtitle(
           subtitle(origin, `${meta.pages.length} ${meta.pages.length === 1 ? "page" : "pages"}`),
         );
-        find.setNote(meta.id, meta.pages);
+        find.setNote(meta.id, meta.fileHash, meta.pages);
         buildFilmstrip();
         // ONLY REPAINT WHEN THE PAGE ACTUALLY CHANGED. `buildFilmstrip` has just
         // rebuilt the strip, so the blur-up source (a rendered thumb canvas) is

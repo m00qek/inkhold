@@ -21,7 +21,7 @@ import {
 } from "./layeredFixture";
 
 /**
- * The `.mark` that annotates `n-files-manual`, and the PDF it belongs to.
+ * The `.mark` that annotates `178` ("Appliance manual"), and the PDF it belongs to.
  *
  * It reuses the layered fixture's payload, which is already a real SNPG v2 body
  * at 1404x1872 — the device PANEL size, which is exactly what a mark is written
@@ -33,8 +33,8 @@ import {
  * viewer that ignored `sourcePage` would paint this ink on page 1 and look
  * perfectly plausible doing it.
  */
-export const MARKED_PDF_ID = "n-files-manual";
-export const PDF_MARK_ID = "n-files-manual.pdf.mark";
+export const MARKED_PDF_ID = "178";
+export const PDF_MARK_ID = "179";
 const PDF_MARK_SOURCE_PAGE = 2;
 import { canPreviewHistory, isAcceptedUpload, nextAvailableName, uploadExtension } from "../core/fileKind";
 import type {
@@ -45,16 +45,10 @@ import type {
   Id,
   Listing,
   NoteMeta,
-  NoteSearchBatch,
-  NoteSearchResults,
   NoteSummary,
-  PageMatch,
   PageRef,
   PageText,
   RestoredVersion,
-  TxtMatch,
-  TxtSearchBatch,
-  TxtSearchResults,
   WordBox,
 } from "../core/types";
 
@@ -107,13 +101,13 @@ const RECOGNIZED_FROM: Record<string, number> = {};
  * The PDF-TEMPLATE fixture: the one note whose pages were rasterised from an
  * imported PDF and kept that document's own links (`note-format.md` §14).
  *
- * Chosen rather than invented, for the reason `n-late-ocr` states in reverse:
+ * Chosen rather than invented, for the reason the late-recognition note (`181`) states in reverse:
  * every listing count and section head in the e2e suite is asserted literally,
  * so a NEW note in a real folder rewrites unrelated expectations. This one is
  * seven pages long, which is what an internal page jump needs to be worth
  * looking at.
  */
-const LINKED_NOTE_ID: Id = "n-proj-beta";
+const LINKED_NOTE_ID: Id = "122";
 
 function fakeTextHash(noteId: Id, index: number, recognized: boolean, from = 0): string | null {
   if (!recognized || index < from || index % 3 === 2) return null;
@@ -199,366 +193,30 @@ function fakePageLinks(page: PageRef, pageCount: number): PdfLink[] {
   ];
 }
 
-// --- the `.txt` fixture content ---------------------------------------------
-//
-// The raw text a `.txt` fixture holds. Its paragraphs are what the segment seam
-// indexes, and what the `.txt` viewer's find scrolls to and marks inside.
-// `zephyrine` lives ONLY here
-// (no note transcript, no file name), so a search for it exercises the pure
-// `.txt` path end to end — one text hit, opening the `.txt` viewer.
-//
-// e2e serves this SAME string as the raw `/file/:id` body, so the viewer's
-// client-side marking lines up with the byte ranges this fixture reports.
-const TXT_CONTENT: Record<Id, string> = {
-  "n-files-readme":
-    "Shopping list\n\n- oat milk\n- lentils\n- a new nib for the Supernote\n\n" +
-    "The zephyrine tea arrived on Friday.\n\n" +
-    "See you Sunday. More zephyrine steeped, brighter.",
-};
-
-// --- the `.pdf` fixture content ---------------------------------------------
-//
-// The text a `.pdf` fixture's PAGES hold — the segment seam's THIRD tenant, and
-// the shape `pdf_text.zig` writes: one indexed segment per page, `kind = 2`,
-// addressed by the PDF page number. Find-in-PDF marks inside them.
-//
-// NOT DERIVED FROM `hasRecognizedText`, and that is the point rather than a
-// shortcut: a PDF is not a note and has no on-device recognition, so it is not
-// what "only notes recognised on the device are searchable" is about. Whether
-// its text is indexed is a fact
-// about the SERVER's pass over the blob, which is exactly what this table stands
-// in for — the same way `TXT_CONTENT` stands in for the `.txt` chunker.
-//
-// `marmalade` lives ONLY here (no note transcript, no `.txt` paragraph, no file
-// name), so a search for it exercises the pure `.pdf` path end to end.
-//
-// e2e serves a REAL PDF carrying these same lines as the raw `/file/:id` body,
-// so what MuPDF locates in the browser is what this fixture says matched. If the
-// two ever drift, the deep-link test fails with marks missing rather than
-// quietly proving nothing.
-const PDF_CONTENT: Record<Id, string[]> = {
-  "n-files-manual": [
-    "Marmalade kettle descaling",
-    "Marmalade drum bearing service",
-    "Filter mesh rinse programme",
-    "Marmalade spare parts",
-  ],
-};
-
-/** One paragraph of a `.txt` fixture, with its BYTE range — the real index's row. */
-interface TxtSeg {
-  ordinal: number;
-  text: string;
-  offset: number;
-  length: number;
-}
-
-/**
- * Split a `.txt` fixture's content into paragraphs on blank lines, tracking each
- * paragraph's BYTE range — the same shape `txt_index.zig` derives (one segment
- * per run of non-blank lines; a `\r` before a terminator trimmed). Byte offsets
- * are computed through `TextEncoder`, so an accented fixture still reports the
- * ranges the viewer maps back through.
- */
-function txtSegmentsOf(id: Id): TxtSeg[] {
-  const content = TXT_CONTENT[id];
-  if (content === undefined) return [];
-  const enc = new TextEncoder();
-  const segs: { startChar: number; text: string }[] = [];
-  const lines = content.split("\n");
-  let charPos = 0;
-  let start = -1;
-  let end = -1;
-  const isBlank = (l: string): boolean => /^[ \t\r]*$/.test(l);
-  const flush = (): void => {
-    if (start >= 0) segs.push({ startChar: start, text: content.slice(start, end) });
-    start = -1;
-  };
-  for (const line of lines) {
-    const lineStart = charPos;
-    const contentEnd = lineStart + line.length - (line.endsWith("\r") ? 1 : 0);
-    if (isBlank(line)) flush();
-    else {
-      if (start < 0) start = lineStart;
-      end = contentEnd;
-    }
-    charPos += line.length + 1; // the split consumed one "\n"
-  }
-  flush();
-  return segs.map((s, ordinal) => ({
-    ordinal,
-    text: s.text,
-    offset: enc.encode(content.slice(0, s.startChar)).length,
-    length: enc.encode(s.text).length,
-  }));
-}
-
-/**
- * The in-doc STREAMING stride: how many matching pages/paragraphs one batch of a
- * streaming find carries. Deliberately SMALLER than the real server's 20 so the
- * fake's modest fixtures still stream across several batches — which is what lets
- * the viewer's "N+" floor, its settle, and prev/next across a batch boundary be
- * exercised at all. The value is not observable as a number anywhere (the floor
- * shows the ACCUMULATED count, not the stride), so a fake-only stride is honest.
- */
-const FIND_STREAM_BATCH = 6;
-
-// --- the note-scoped search fixture -----------------------------------------
-//
-// Stands in for `note_search.searchNotePages`, and it is TOKEN-BASED rather than
-// substring-based because the three properties the reader is built on are all
-// properties of tokens:
-//
-//   1. NO LIMIT and NO RANKING — a per-note counter that clamps is silently
-//      incomplete, which is why find has never been a library query filtered
-//      down to one document;
-//   2. every page names WHICH TERMS it matched, so the client circles exactly
-//      what was counted instead of re-deriving it from the query;
-//   3. a typo falls back to close matches, and the response says that it did.
-//
-// A substring model can express none of the last two honestly: it has no notion
-// of a term to report, and no notion of a near-miss to fall back to.
-
-/**
- * Case- and accent-insensitive form — the same fold `unicode61
- * remove_diacritics 2` applies to the real index, and the same one
- * `findInNote.ts` applies to a word label before comparing it with a term.
- */
-function foldTerm(s: string): string {
-  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-}
-
-/** Every term a string tokenizes to, in order, folded. Punctuation splits. */
-function termsOf(s: string): string[] {
-  return foldTerm(s)
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter(Boolean);
-}
-
-/** The edit budget for a token of `len` characters — the backend's 0/1/2 ladder. */
-function fakeMaxEdits(len: number): number {
-  if (len <= 3) return 0;
-  if (len <= 7) return 1;
-  return 2;
-}
-
-/** Levenshtein distance, bailing out past `budget`. */
-function editDistance(a: string, b: string, budget: number): number | null {
-  if (Math.abs(a.length - b.length) > budget) return null;
-  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
-  for (let i = 0; i < a.length; i++) {
-    const curr = [i + 1];
-    let rowMin = curr[0]!;
-    for (let j = 0; j < b.length; j++) {
-      const cost = a[i] === b[j] ? 0 : 1;
-      curr.push(Math.min(curr[j]! + 1, prev[j + 1]! + 1, prev[j]! + cost));
-      rowMin = Math.min(rowMin, curr[j + 1]!);
-    }
-    if (rowMin > budget) return null;
-    prev = curr;
-  }
-  return prev[b.length]! > budget ? null : prev[b.length]!;
-}
-
-/** One term of the query as the index would search for it. */
-interface QueryTerm {
-  term: string;
-  /** Whether the MATCH would prefix-match it — the word still being typed. */
-  prefix: boolean;
-}
-
-/**
- * The query's terms. Only the LAST is a prefix, and only past two characters,
- * mirroring `buildMatch`. The `q` reaching here is already trimmed by the client
- * seam, so there is no trailing space left to say the word is finished.
- */
-function queryTerms(query: string): QueryTerm[] {
-  const terms = termsOf(query);
-  return terms.map((term, i) => ({ term, prefix: i === terms.length - 1 && term.length >= 2 }));
-}
-
-function satisfies(pageTerm: string, q: QueryTerm): boolean {
-  return q.prefix ? pageTerm.startsWith(q.term) : pageTerm === q.term;
-}
-
-/**
- * One word of the query and its accepted spellings. OR within a group, AND
- * across groups — the shape of the backend's expression, where a widened token
- * becomes `("witchez"* OR "witches")` and the AND between words survives it.
- */
-type TermGroup = QueryTerm[];
-
-const satisfiesGroup = (pageTerm: string, group: TermGroup): boolean =>
-  group.some((q) => satisfies(pageTerm, q));
-
-/** The recognised pages of a note, with their transcripts already tokenized. */
-function notePageTerms(noteId: Id): { pageIndex: number; terms: string[] }[] {
-  // `noteSummary`, not `ALL_NOTES`: a TRASHED note's in-note search (the bin
-  // reroute) scans its retained transcript too. Library-WIDE search never reaches
-  // here for a trashed id — it walks `ALL_NOTES` and the row is not in it.
-  const summary = noteSummary(noteId);
-  // A `.pdf`'s indexed pages, which is the SAME ROUTE a note's pages come
-  // through — `searchNotePages` is keyed on the document's blob and not on its
-  // format, so the server needs no branch here and neither does the fixture.
-  // What differs is only where the text comes from.
-  const pdfPages = PDF_CONTENT[noteId];
-  if (pdfPages) {
-    return pdfPages.map((text, pageIndex) => ({ pageIndex, terms: termsOf(text) }));
-  }
-  if (!summary || !summary.hasRecognizedText) return [];
-  const out: { pageIndex: number; terms: string[] }[] = [];
-  for (const page of pages(noteId, summary.pageCount, true)) {
-    // A page the device never recognized is invisible to find, exactly as the
-    // real index has no row for it.
-    if (page.textHash === null) continue;
-    out.push({ pageIndex: page.index, terms: termsOf(fakeText(summary.name, page.index)) });
-  }
-  return out;
-}
-
-/**
- * One pass: every page whose terms satisfy EVERY group, with the count of
- * matching word instances and the distinct terms those instances are.
- *
- * The count is INSTANCES and the term list is DISTINCT, which is the same
- * distinction the backend draws: a page saying "echo echo echo" is three matches
- * and one term, because the terms are labels to compare words against while the
- * count is the tally.
- */
-function noteSearchPass(noteId: Id, groups: TermGroup[]): PageMatch[] {
-  if (groups.length === 0) return [];
-  const out: PageMatch[] = [];
-  for (const page of notePageTerms(noteId)) {
-    if (!groups.every((g) => page.terms.some((t) => satisfiesGroup(t, g)))) continue;
-    const hit = page.terms.filter((t) => groups.some((g) => satisfiesGroup(t, g)));
-    out.push({ pageIndex: page.pageIndex, matches: hit.length, terms: [...new Set(hit)] });
-  }
-  return out;
-}
-
-/**
- * Each query word widened by the near-miss spellings a VOCABULARY offers, or
- * null when nothing anywhere is near enough — in which case the caller must NOT
- * re-run, because the pass would be identical to the exact one that just found
- * nothing. This is the shared body of both the note- and `.txt`-scoped fuzzy
- * fallback; only the vocabulary source differs, so each caller assembles its own
- * and hands it in.
- *
- * A word still being typed is compared against the vocabulary term TRUNCATED to
- * what has been typed, exactly as the backend does, so a typo inside a half
- * written word is still reachable.
- */
-function widenAgainstVocabulary(vocabulary: Set<string>, terms: QueryTerm[]): TermGroup[] | null {
-  let widened = false;
-  const groups = terms.map((q) => {
-    const group: TermGroup = [q];
-    const budget = fakeMaxEdits(q.term.length);
-    if (budget === 0) return group;
-    for (const word of vocabulary) {
-      const candidate = q.prefix ? word.slice(0, q.term.length) : word;
-      const d = editDistance(q.term, candidate, budget);
-      // Distance 0 is the term the exact pass already searched for.
-      if (d !== null && d > 0) {
-        group.push({ term: word, prefix: false });
-        widened = true;
-      }
-    }
-    return group;
-  });
-  return widened ? groups : null;
-}
-
-/** {@link widenAgainstVocabulary} over one note's own page vocabulary. */
-function fuzzyGroups(noteId: Id, terms: QueryTerm[]): TermGroup[] | null {
-  return widenAgainstVocabulary(new Set(notePageTerms(noteId).flatMap((p) => p.terms)), terms);
-}
-
-/**
- * The note-scoped search: EVERY matching page of one note, in page order, with a
- * per-page count, the terms that count counted, and whether it had to guess.
- *
- * Exact first; the vocabulary is consulted ONLY when that found nothing, which
- * is what keeps the fallback invisible whenever it is not needed.
- */
-function noteSearchFixture(noteId: Id, query: string): { pages: PageMatch[]; usedFuzzy: boolean } {
-  const terms = queryTerms(query);
-  if (terms.length === 0) return { pages: [], usedFuzzy: false };
-
-  const exact = noteSearchPass(noteId, terms.map((q) => [q]));
-  if (exact.length > 0) return { pages: exact, usedFuzzy: false };
-
-  const widened = fuzzyGroups(noteId, terms);
-  if (widened === null) return { pages: [], usedFuzzy: false };
-  // The expansion having RUN is what the flag reports, as on the real service —
-  // so it is true even when the widened search still finds nothing.
-  return { pages: noteSearchPass(noteId, widened), usedFuzzy: true };
-}
-
-// --- the `.txt`-scoped search fixture ---------------------------------------
-//
-// Stands in for `note_search.searchTxtSegments`, the `.txt` analog of the
-// note-scoped fixture above and TOKEN-BASED for the same three reasons: no
-// limit / no ranking (a per-file counter that clamps is silently wrong), every
-// paragraph names WHICH terms it matched (so the viewer marks exactly what was
-// counted), and a typo falls back to close matches, saying so. It differs from
-// the note fixture only in what a segment IS — a paragraph carrying its byte
-// range, not a page.
-
-/** A `.txt` file's paragraphs, with their terms already tokenized (AND-per-paragraph). */
-function txtSegTerms(id: Id): { seg: TxtSeg; terms: string[] }[] {
-  return txtSegmentsOf(id).map((seg) => ({ seg, terms: termsOf(seg.text) }));
-}
-
-/**
- * One pass: every paragraph whose terms satisfy EVERY group, with its byte
- * range, the count of matching word instances, and the distinct terms — the
- * INSTANCES/DISTINCT split the backend draws (`countMatches`).
- */
-function txtSearchPass(id: Id, groups: TermGroup[]): TxtMatch[] {
-  if (groups.length === 0) return [];
-  const out: TxtMatch[] = [];
-  for (const { seg, terms } of txtSegTerms(id)) {
-    if (!groups.every((g) => terms.some((t) => satisfiesGroup(t, g)))) continue;
-    const hit = terms.filter((t) => groups.some((g) => satisfiesGroup(t, g)));
-    out.push({
-      segment: seg.ordinal,
-      offset: seg.offset,
-      length: seg.length,
-      matches: hit.length,
-      terms: [...new Set(hit)],
-    });
-  }
-  return out;
-}
-
-/** {@link widenAgainstVocabulary} over a `.txt` file's own paragraph vocabulary. */
-function txtFuzzyGroups(id: Id, terms: QueryTerm[]): TermGroup[] | null {
-  return widenAgainstVocabulary(new Set(txtSegTerms(id).flatMap((s) => s.terms)), terms);
-}
-
-/**
- * The `.txt`-scoped search: EVERY matching paragraph of one file, in ordinal
- * order, with a per-paragraph count, the terms that count counted, and whether
- * it had to guess. Exact first; the vocabulary is consulted ONLY when that found
- * nothing, exactly as the note-scoped and library-wide fixtures do.
- */
-function txtSearchFixture(id: Id, query: string): { segments: TxtMatch[]; usedFuzzy: boolean } {
-  const terms = queryTerms(query);
-  if (terms.length === 0) return { segments: [], usedFuzzy: false };
-
-  const exact = txtSearchPass(id, terms.map((q) => [q]));
-  if (exact.length > 0) return { segments: exact, usedFuzzy: false };
-
-  const widened = txtFuzzyGroups(id, terms);
-  if (widened === null) return { segments: [], usedFuzzy: false };
-  return { segments: txtSearchPass(id, widened), usedFuzzy: true };
-}
-
 /**
  * A fixture note. `fileType` and `hasRecognizedText` are explicit per note so the
  * fixture carries a REALISTIC spread rather than a uniform "everything is a
  * recognized .note" — the tree genuinely holds PDFs and screenshots, and most
  * notes were never run through on-device recognition.
+ *
+ * ## THE IDS ARE DECIMAL, AND THAT IS A CORRECTNESS PROPERTY
+ *
+ * They used to be readable strings (`n-doc-attn`, `n-files-readme`). A real
+ * `files.id` is an INTEGER — it travels in the search manifest as a varint
+ * (`manifestCodec.ts`'s `ManifestRow.fileId`) and reaches the app through the
+ * seam as its decimal string, and the two are joined by number:
+ * `library.ts` feeds the index `Number(e.id)` and `gallerySearch.ts` matches a
+ * hit back to a card with `String(doc.fileId)`.
+ *
+ * Against an opaque id that join is `Number("n-doc-attn") === NaN` on one side
+ * and `"NaN"` on the other, so NO transcript hit can ever match a card — which
+ * made the whole transcript half of library search unexercisable in dev and in
+ * e2e, silently and with no failure to look at. Decimal ids are what the real
+ * server hands out; a fixture that could not express one hid a bug class rather
+ * than a spelling.
+ *
+ * Folder ids stay words (`dir-note`, `projects`): nothing joins a folder by
+ * number, and the rail's routes read better for it.
  */
 interface NoteOpts {
   /** Default "note". Non-"note" fixtures exercise the badge's other values. */
@@ -626,7 +284,7 @@ function note(id: Id, name: string, pageCount: number, updatedAt: number, opts: 
  * raster-only export path is a fixture the UI is built against, not a branch
  * that is only ever reached by a device nobody in the household owns.
  */
-const UNSCALED_NOTE_ID = "n-doc-unscaled";
+const UNSCALED_NOTE_ID = "144";
 
 /**
  * Word boxes for a fake transcript, in MILLIMETRES on the 118.64 x 158.19 mm
@@ -689,8 +347,13 @@ function uploadSteps(size: number): number {
   return Math.max(4, Math.min(24, Math.ceil(size / 65_536)));
 }
 
-/** Ids for uploaded files: `up-1`, `up-2`, … — never a fixture id. */
+/**
+ * Ids for uploaded files: `901`, `902`, … — decimal like every other file id
+ * (see `note`), and numbered well clear of the fixture tree so an upload is
+ * never mistaken for a seeded note.
+ */
 let uploadSeq = 0;
+const UPLOAD_ID_BASE = 900;
 
 const DAY = 86_400_000;
 const NOW = 1_752_800_000_000; // fixed epoch ms — no Date.now(), keeps fixtures deterministic
@@ -792,7 +455,7 @@ const FOLDERS: Record<string, Folder> = {
 // in) observable in dev and pixel-probeable in e2e. It lives in the custom
 // top-level "Archive" folder (the rail's "Other" group).
 const ARCHIVE_NOTES: NoteSummary[] = Array.from({ length: 30 }, (_, i) =>
-  note(`n-arc-${i}`, `Archive note ${String(i + 1).padStart(2, "0")}`, 1 + (i % 6), NOW - (i + 4) * DAY, {
+  note(String(200 + i), `Archive note ${String(i + 1).padStart(2, "0")}`, 1 + (i % 6), NOW - (i + 4) * DAY, {
     // Alternating, so a single scrolled gallery shows both marker states side by side.
     hasRecognizedText: i % 2 === 0,
   }),
@@ -820,9 +483,9 @@ const CHILDREN: Record<string, Entry[]> = {
   // Note: a user subfolder + a few notes (recursive count = 5).
   note: [
     FOLDERS.projects!,
-    note("n-weekly", "Weekly review", 3, NOW - DAY, { hasRecognizedText: true }),
-    note("n-ideas", "Ideas & scratch", 1, NOW),
-    note("n-sketch", "Sketch — kitchen layout", 1, NOW - 3 * DAY),
+    note("101", "Weekly review", 3, NOW - DAY, { hasRecognizedText: true }),
+    note("102", "Ideas & scratch", 1, NOW),
+    note("103", "Sketch — kitchen layout", 1, NOW - 3 * DAY),
     // The layered fixture (see layeredFixture.ts): page 1 carries `layers` in
     // its meta ref and a real SNPG v2 payload — a device-hidden Layer 2, a
     // renamed current layer — page 2 carries none, so the reader's panel both
@@ -830,29 +493,29 @@ const CHILDREN: Record<string, Entry[]> = {
     note(LAYERED_NOTE_ID, "Layered field sketch", 2, NOW - 2 * DAY),
   ],
   // A user folder living INSIDE the NOTE container — see "dir-note" above.
-  scratch: [note("n-scratch-todo", "Scratch — todo", 1, NOW - 2 * DAY)],
+  scratch: [note("111", "Scratch — todo", 1, NOW - 2 * DAY)],
   projects: [
-    note("n-proj-alpha", "Project Aurora — kickoff", 6, NOW - 6 * DAY, { hasRecognizedText: true }),
-    note("n-proj-beta", "Project Beta", 7, NOW - 8 * DAY),
+    note("121", "Project Aurora — kickoff", 6, NOW - 6 * DAY, { hasRecognizedText: true }),
+    note("122", "Project Beta", 7, NOW - 8 * DAY),
   ],
   // MyStyle: templates (count = 3). Blank templates: nothing to recognize.
   mystyle: [
-    note("n-tmpl-cornell", "Cornell notes", 1, NOW - 60 * DAY),
-    note("n-tmpl-planner", "Weekly planner", 1, NOW - 60 * DAY),
-    note("n-tmpl-dots", "Dot grid", 1, NOW - 60 * DAY),
+    note("131", "Cornell notes", 1, NOW - 60 * DAY),
+    note("132", "Weekly planner", 1, NOW - 60 * DAY),
+    note("133", "Dot grid", 1, NOW - 60 * DAY),
   ],
   // Document: an annotated paper (a real .note) next to a plain PDF that was
   // never a note at all — the "another file type living in the tree" case the
   // hardcoded "note" badge used to misreport.
   document: [
-    note("n-doc-attn", "Attention Is All You Need", 20, NOW - 9 * DAY, { hasRecognizedText: true }),
-    note("n-doc-lease", "Apartment lease — signed", 6, NOW - 26 * DAY, { fileType: "pdf" }),
+    note("141", "Attention Is All You Need", 20, NOW - 9 * DAY, { hasRecognizedText: true }),
+    note("142", "Apartment lease — signed", 6, NOW - 26 * DAY, { fileType: "pdf" }),
     // An `.epub`: uploadable (`UPLOAD_ACCEPT`) and readable ON THE DEVICE, but
     // with no viewer here — so it is the reader's "no preview, here is a
     // download" state. That state used to be exercised by the PDF above; PDFs
     // now open in their own viewer, and this keeps the reader's own fallback
     // under test rather than letting it go dark.
-    note("n-doc-epub", "Sourdough — a field guide", 1, NOW - 27 * DAY, { fileType: "epub" }),
+    note("143", "Sourdough — a field guide", 1, NOW - 27 * DAY, { fileType: "epub" }),
     // Recognized, but written on hardware whose millimetre scale has never been
     // measured — `getNoteMeta` answers `pxPerMm: null` for it. This is the
     // raster-only export case, kept in the fixture so it is a state the UI is
@@ -865,10 +528,10 @@ const CHILDREN: Record<string, Entry[]> = {
   export: [],
   // SCREENSHOT holds PNGs, not notes — and a screenshot is never recognized.
   screenshot: [
-    note("n-shot-pricing", "Screenshot — pricing page", 1, NOW - 2 * DAY, { fileType: "png" }),
-    note("n-shot-map", "Screenshot — trailhead map", 1, NOW - 5 * DAY, { fileType: "png" }),
+    note("151", "Screenshot — pricing page", 1, NOW - 2 * DAY, { fileType: "png" }),
+    note("152", "Screenshot — trailhead map", 1, NOW - 5 * DAY, { fileType: "png" }),
   ],
-  inbox: [note("n-inbox-doodles", "Unsorted — meeting doodles", 2, NOW - DAY, { hasRecognizedText: true })],
+  inbox: [note("161", "Unsorted — meeting doodles", 2, NOW - DAY, { hasRecognizedText: true })],
   archive: ARCHIVE_NOTES,
   // One of every previewable kind, for the thumbnail facade. The `.note` renders
   // its page, the png is a native <img>, the `.spd` shows its extracted embedded
@@ -881,23 +544,23 @@ const CHILDREN: Record<string, Entry[]> = {
     // The COVER note: its aspect is the cover's dims (the e2e cover mock serves
     // a 120×160 PNG), which win over page 1's — same 3:4 here, deliberately, so
     // the cover-vs-coverless e2e stay shape-agnostic.
-    note("n-files-note", "Meeting notes — Q3", 2, NOW - DAY, { hasRecognizedText: true, thumbAspect: { w: 120, h: 160 } }),
+    note("171", "Meeting notes — Q3", 2, NOW - DAY, { hasRecognizedText: true, thumbAspect: { w: 120, h: 160 } }),
     // A LANDSCAPE note: page 1's effective dims are wide, so its derived aspect
     // is the honest 1872×1404 — the §D case the masonry layout exists for.
-    note("n-files-board", "Whiteboard — sprint plan", 1, NOW - 2 * DAY, { pageDims: { w: 1872, h: 1404 } }),
+    note("172", "Whiteboard — sprint plan", 1, NOW - 2 * DAY, { pageDims: { w: 1872, h: 1404 } }),
     // An image carries NO thumbAspect (decision 5: local dims memo only).
-    note("n-files-shot", "Screenshot — dashboard", 1, NOW - 3 * DAY, { fileType: "png" }),
+    note("173", "Screenshot — dashboard", 1, NOW - 3 * DAY, { fileType: "png" }),
     // A `.spd` serves its embedded thumbnail's dims.
-    note("n-files-sketch", "Kitchen sketch", 1, NOW - 4 * DAY, { fileType: "spd", thumbAspect: { w: 600, h: 800 } }),
+    note("174", "Kitchen sketch", 1, NOW - 4 * DAY, { fileType: "spd", thumbAspect: { w: 600, h: 800 } }),
     // The two clamp extremes, both `.spd` (the one type whose thumb can be any
     // shape): a panorama that must reserve its LETTERBOXED width in rows and hit
     // the wide floor in the grid, and a scroll that must hit the 2.5× tall cap.
-    note("n-files-pano", "Panorama — coastline", 1, NOW - 5 * DAY, { fileType: "spd", thumbAspect: { w: 3000, h: 400 } }),
-    note("n-files-scroll", "Receipt — long scroll", 1, NOW - 6 * DAY, { fileType: "spd", thumbAspect: { w: 240, h: 1800 } }),
+    note("175", "Panorama — coastline", 1, NOW - 5 * DAY, { fileType: "spd", thumbAspect: { w: 3000, h: 400 } }),
+    note("176", "Receipt — long scroll", 1, NOW - 6 * DAY, { fileType: "spd", thumbAspect: { w: 240, h: 1800 } }),
     // A `.txt` carries NO thumbAspect either — its snippet's shape is the
     // client-side constant (we rasterise it, we fix it).
-    note("n-files-readme", "readme", 1, NOW - 7 * DAY, { fileType: "txt" }),
-    note("n-files-manual", "Appliance manual", 4, NOW - 8 * DAY, { fileType: "pdf" }),
+    note("177", "readme", 1, NOW - 7 * DAY, { fileType: "txt" }),
+    note("178", "Appliance manual", 4, NOW - 8 * DAY, { fileType: "pdf" }),
   ],
 };
 
@@ -918,15 +581,15 @@ for (const entries of Object.values(CHILDREN)) {
  * real folder would rewrite half a dozen unrelated expectations for a fixture
  * that exists to be opened by route.
  */
-ALL_NOTES["n-late-ocr"] = note("n-late-ocr", "Recognised from page two", 4, NOW - 2 * DAY, {
+ALL_NOTES["181"] = note("181", "Recognised from page two", 4, NOW - 2 * DAY, {
   hasRecognizedText: true,
   recognizedFrom: 1,
 });
 
 // The recycle-bin fixture's own notes, kept in a SEPARATE map from the live
-// library. Keyed the same way, so every PER-ID transcript / search / version-
-// history generator answers for a TRASHED id exactly as for a live one — the fake
-// mirror of "a trashed file's md5-keyed data is fully retained".
+// library. Keyed the same way, so every PER-ID transcript / version-history
+// generator answers for a TRASHED id exactly as for a live one — the fake mirror
+// of "a trashed file's md5-keyed data is fully retained".
 // Deliberately NOT in `ALL_NOTES`: the library-wide enumerations walk
 // `ALL_NOTES`, and a trashed note must not surface in a live-wide listing (the
 // real server excludes `deleted = 1`). `noteSummary(id)` unions the two for the
@@ -941,9 +604,9 @@ for (const s of BIN_SEED_NOTES) {
 
 /**
  * A note summary by id — the live library first, then the recycle-bin fixture.
- * The per-id generators (transcript, in-note search, version history) resolve
- * through this so they answer for a TRASHED id, while the library-wide walks stay
- * on `ALL_NOTES` alone (a trashed note is unfindable in a live-wide search).
+ * The per-id generators (transcript, version history) resolve through this so
+ * they answer for a TRASHED id, while the library-wide walks stay on `ALL_NOTES`
+ * alone (a trashed note is unfindable in a live-wide listing).
  */
 function noteSummary(id: Id): NoteSummary | undefined {
   return ALL_NOTES[id] ?? BIN_NOTES[id];
@@ -1090,7 +753,8 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
         size: fakeSize(id, summary.pageCount),
         // The fixture is an N6-class device (1404 px over a 118.64 mm canvas),
         // which is exactly the hardware the real scale table has verified. The
-        // "unknown hardware" case is exercised by `n-doc-unscaled` below, which
+        // "unknown hardware" case is exercised by `144` ("Field notes — unknown
+        // device") below, which
         // has recognition but NO scale — the raster-only PDF path.
         pxPerMm: summary.id === UNSCALED_NOTE_ID ? null : 1404 / 118.64,
       };
@@ -1148,91 +812,12 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       return { links: fakePageLinks(page, summary.pageCount) };
     },
 
-    async searchInNote(noteId: Id, query: string): Promise<NoteSearchResults> {
-      const q = query.trim();
-      if (q === "") return { query: "", pages: [], usedFuzzy: false };
-      await delay(latency);
-      return { query: q, ...noteSearchFixture(noteId, q) };
-    },
-
-    async searchInTxt(noteId: Id, query: string): Promise<TxtSearchResults> {
-      const q = query.trim();
-      if (q === "") return { query: "", segments: [], usedFuzzy: false };
-      await delay(latency);
-      return { query: q, ...txtSearchFixture(noteId, q) };
-    },
-
-    // The STREAMING twins — the fake actually BATCHES the in-doc keyset (a small
-    // page/paragraph stride), so a viewer sees first matches + a "N+" floor and
-    // then the exact count, exactly as it would against the real server. The
-    // EXACT path streams in `FIND_STREAM_BATCH`-sized chunks with a yield between;
-    // the FUZZY fallback mirrors the server's one-shot, no-cursor result — a
-    // single `done` batch. `signal` stops the walk between chunks.
-    async searchInNoteStream(
-      noteId: Id,
-      query: string,
-      onBatch: (batch: NoteSearchBatch) => void,
-      signal?: AbortSignal,
-    ): Promise<void> {
-      const q = query.trim();
-      if (q === "") {
-        onBatch({ query: "", pages: [], usedFuzzy: false, done: true });
-        return;
-      }
-      const { pages, usedFuzzy } = noteSearchFixture(noteId, q);
-      if (usedFuzzy) {
-        await delay(latency);
-        if (signal?.aborted) return;
-        onBatch({ query: q, pages, usedFuzzy: true, done: true });
-        return;
-      }
-      const acc: PageMatch[] = [];
-      for (let i = 0; i < pages.length || i === 0; i += FIND_STREAM_BATCH) {
-        await delay(latency);
-        if (signal?.aborted) return;
-        acc.push(...pages.slice(i, i + FIND_STREAM_BATCH));
-        const done = i + FIND_STREAM_BATCH >= pages.length;
-        onBatch({ query: q, pages: [...acc], usedFuzzy: false, done });
-        if (done) return;
-      }
-    },
-
-    async searchInTxtStream(
-      noteId: Id,
-      query: string,
-      onBatch: (batch: TxtSearchBatch) => void,
-      signal?: AbortSignal,
-    ): Promise<void> {
-      const q = query.trim();
-      if (q === "") {
-        onBatch({ query: "", segments: [], usedFuzzy: false, done: true });
-        return;
-      }
-      const { segments, usedFuzzy } = txtSearchFixture(noteId, q);
-      if (usedFuzzy) {
-        await delay(latency);
-        if (signal?.aborted) return;
-        onBatch({ query: q, segments, usedFuzzy: true, done: true });
-        return;
-      }
-      const acc: TxtMatch[] = [];
-      for (let i = 0; i < segments.length || i === 0; i += FIND_STREAM_BATCH) {
-        await delay(latency);
-        if (signal?.aborted) return;
-        acc.push(...segments.slice(i, i + FIND_STREAM_BATCH));
-        const done = i + FIND_STREAM_BATCH >= segments.length;
-        onBatch({ query: q, segments: [...acc], usedFuzzy: false, done });
-        if (done) return;
-      }
-    },
-
     // --- HISTORY (hot-cache versioning) ---
     //
     // The read + restore face over the per-instance `historyState`. Mirrors the
-    // real client at the seam: `noteHistory` newest-first, `searchHistory` EXACT
-    // ONLY (usedFuzzy pinned false — a one-document scan never widens), and
-    // `restoreVersion` re-points AND retains the displaced current, so the result
-    // is undoable by construction.
+    // real client at the seam: `noteHistory` newest-first, and `restoreVersion`
+    // re-points AND retains the displaced current, so the result is undoable by
+    // construction.
 
     async noteHistory(id: Id): Promise<FileHistory> {
       await delay(latency);
@@ -1301,16 +886,6 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       return { text, words: fakeWords(text) };
     },
 
-    async searchHistory(id: Id, _md5: string, query: string): Promise<NoteSearchResults> {
-      const q = query.trim();
-      if (q === "") return { query: "", pages: [], usedFuzzy: false };
-      await delay(latency);
-      // The retained version's own recognized text. In the fake a version shares
-      // the live note's transcript — enough to exercise counts + navigation — and
-      // history search is exact-only, so `usedFuzzy` is pinned false (H8).
-      return { query: q, pages: noteSearchFixture(id, q).pages, usedFuzzy: false };
-    },
-
     async restoreVersion(id: Id, md5: string): Promise<RestoredVersion> {
       await delay(latency);
       const versions = historyFor(id);
@@ -1364,16 +939,6 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       return { text, words: fakeWords(text) };
     },
 
-    async binSearchInNote(noteId: Id, query: string): Promise<NoteSearchResults> {
-      const q = query.trim();
-      if (q === "") return { query: "", pages: [], usedFuzzy: false };
-      await delay(latency);
-      // A one-document scan over the trashed file's retained transcript, exact-
-      // only (no corpus to widen against), so `usedFuzzy` is pinned false — the
-      // `searchHistory` shape, on the current version.
-      return { query: q, pages: noteSearchFixture(noteId, q).pages, usedFuzzy: false };
-    },
-
     async binNoteHistory(id: Id): Promise<FileHistory> {
       await delay(latency);
       // The trashed file's retained `file_history` — the same list a live note
@@ -1401,13 +966,6 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       }
       const text = `Version ${md5.slice(0, 6)} — ${fakeText(summary.name, index)}`;
       return { text, words: fakeWords(text) };
-    },
-
-    async binSearchHistory(id: Id, _md5: string, query: string): Promise<NoteSearchResults> {
-      const q = query.trim();
-      if (q === "") return { query: "", pages: [], usedFuzzy: false };
-      await delay(latency);
-      return { query: q, pages: noteSearchFixture(id, q).pages, usedFuzzy: false };
     },
 
     async binHistoryRaw(id: Id, md5: string): Promise<ArrayBuffer> {
@@ -1511,7 +1069,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
         name,
         siblings.map((e) => e.name),
       );
-      const id = `up-${String(++uploadSeq)}` as Id;
+      const id = String(UPLOAD_ID_BASE + ++uploadSeq) as Id;
       const entry = note(id, final, 1, Date.now(), { fileType: uploadExtension(final) || "note" });
       siblings.push(entry);
       ALL_NOTES[String(id)] = entry;
@@ -1526,23 +1084,30 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
     // the one behaviour it deliberately cannot fake. The lookup is how a trashed
     // fixture entry keeps its real name/type/size — a `.spd` trashed from the
     // library must still be a `.spd` when the bin opens it into its viewer.
-    ...createBinFake(delay, latency, (id) => {
-      const n = ALL_NOTES[id];
-      return n
-        ? {
-            name: n.name,
-            fileType: n.fileType,
-            size: fakeSize(id, n.pageCount),
-            pageCount: n.pageCount,
-            // Recognition survives trashing (md5-keyed index), so a note trashed
-            // from the library keeps its transcript, ovals and find in the bin.
-            recognized: n.hasRecognizedText,
-            // The shape survives trashing (blob-keyed index), so a trashed row
-            // keeps reserving its final tile width exactly like a live one.
-            thumbAspect: n.thumbAspect,
-          }
-        : null;
-    }),
+    ...createBinFake(
+      delay,
+      latency,
+      (id) => {
+        const n = ALL_NOTES[id];
+        return n
+          ? {
+              name: n.name,
+              fileType: n.fileType,
+              size: fakeSize(id, n.pageCount),
+              pageCount: n.pageCount,
+              // Recognition survives trashing (md5-keyed index), so a note trashed
+              // from the library keeps its transcript, ovals and find in the bin.
+              recognized: n.hasRecognizedText,
+              // The shape survives trashing (blob-keyed index), so a trashed row
+              // keeps reserving its final tile width exactly like a live one.
+              thumbAspect: n.thumbAspect,
+            }
+          : null;
+      },
+      // The blob md5 a trashed row advertises — the SAME one the live listing
+      // gave, because trashing does not rewrite a blob. See `BlobHash`.
+      fakeFileHash,
+    ),
     // --- ADMIN WRITES ---
     //
     // A SPREAD OF AN IIFE, deliberately. These five methods need a fixture they

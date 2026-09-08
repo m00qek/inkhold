@@ -166,7 +166,7 @@ describe("inkRecordIndices", () => {
 wasmSuite("inkRecordIndices (the shipped mark payload)", () => {
   it("picks Main and Layer Renamed out of the fixture — not the sheet, not the hidden one", () => {
     // The fixture IS the `.mark` the PDF viewer composites (`fake.ts`'s
-    // `getPageBytes` hands this payload back for `n-files-manual.pdf.mark`), so
+    // `getPageBytes` hands this payload back for the `.mark` `179`), so
     // this is the real answer for the real file: records 1 and 3. Record 0 is the
     // white sheet the PDF replaces and record 2 is device-hidden.
     const records = enumerateSnpg(loadDecoder(), layeredPagePayload(0)!)!.records;

@@ -11,12 +11,20 @@
 import { describe, it, expect, vi } from "vitest";
 import { createTxtViewer, TxtLoadError, type TxtSeam } from "../../src/pages/txtViewer";
 import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
-import type { NoteMeta, TxtMatch, TxtSearchBatch } from "../../src/core/types";
+import type { NoteMeta } from "../../src/core/types";
+import type { DocSearch, DocSearchResult, DocSegmentMatch } from "../../src/search/docSearch";
 import { synthesizeSummary } from "../../src/pages/library";
+
+/** An engine that answers nothing — the default for the tests that never search. */
+const noDocSearch: DocSearch = {
+  search: async (md5, query) => ({ query, md5, segments: [], usedFuzzy: false, expansions: [] }),
+  drop: () => {},
+};
 
 function deps(over: Partial<ViewerDeps> = {}): ViewerDeps {
   return {
     api: {} as ViewerDeps["api"],
+    docSearch: noDocSearch,
     renderer: {} as ViewerDeps["renderer"],
     cache: {} as ViewerDeps["cache"],
     getTheme: () => "light",
@@ -357,41 +365,45 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
 describe("txt viewer — find", () => {
   // Alpha in para 0; "zephyrine" in paragraphs 1 and 2 (byte = char, all ASCII).
   const BODY = "Alpha here.\n\nThe zephyrine tea.\n\nMore zephyrine, brighter.";
-  const ZEPH = [
+  // The `.txt` case is the ONE where the ordinal is not the address: `o`/`l` are
+  // the paragraph's byte range in the raw blob, and `byteToCharMap` is what turns
+  // them into the UTF-16 indices the viewer holds. Byte = char here (all ASCII),
+  // which is exactly why `byteToCharMap`'s own multi-byte behaviour is pinned in
+  // `txtFind.test.ts` rather than smuggled in here.
+  const ZEPH: DocSegmentMatch[] = [
     { segment: 1, offset: 13, length: 18, matches: 1, terms: ["zephyrine"] },
     { segment: 2, offset: 33, length: 25, matches: 1, terms: ["zephyrine"] },
   ];
 
   /**
-   * A viewer whose `api.searchInTxtStream` streams `segments` for any query. By
-   * default one complete `done` batch (settles immediately); `opts.batches`
-   * streams several cumulative batches (the floor-then-exact path), and
-   * `opts.usedFuzzy` marks the single batch a typo-tolerant fallback (the opt-in
-   * gate). The streaming twin of the drain API — the viewer consumes batches now.
+   * A viewer whose in-document engine answers `segments` for any query.
+   * `opts.usedFuzzy` marks the answer a typo-tolerant fallback, which is the
+   * opt-in gate; `opts.hold` leaves the query unresolved so a test can read the
+   * counter while the text is still being fetched and indexed.
    */
   function findViewer(
-    segments: TxtMatch[] = ZEPH,
+    segments: DocSegmentMatch[] = ZEPH,
     over: Partial<ViewerDeps> = {},
-    opts: { usedFuzzy?: boolean; batches?: TxtMatch[][] } = {},
+    opts: { usedFuzzy?: boolean; hold?: boolean } = {},
   ) {
-    const searchInTxtStream = vi.fn(
-      async (_id: string, query: string, onBatch: (b: TxtSearchBatch) => void, signal?: AbortSignal) => {
-        if (opts.batches) {
-          const acc: TxtMatch[] = [];
-          for (let i = 0; i < opts.batches.length; i++) {
-            await Promise.resolve();
-            if (signal?.aborted) return;
-            acc.push(...opts.batches[i]!);
-            onBatch({ query, segments: [...acc], usedFuzzy: false, done: i === opts.batches.length - 1 });
-          }
-          return;
-        }
-        onBatch({ query, segments, usedFuzzy: opts.usedFuzzy ?? false, done: true });
-      },
-    );
+    let land!: () => void;
+    const search = vi.fn(async (md5: string, query: string): Promise<DocSearchResult> => {
+      const answer: DocSearchResult = {
+        query,
+        md5,
+        segments,
+        usedFuzzy: opts.usedFuzzy ?? false,
+        expansions: opts.usedFuzzy ? [{ typed: query, matched: "zephyrine" }] : [],
+      };
+      if (!opts.hold) return answer;
+      return new Promise<DocSearchResult>((resolve) => {
+        land = () => resolve(answer);
+      });
+    });
+    const docSearch: DocSearch = { search, drop: vi.fn() };
     const f = fakeSeam();
-    const v = mount(createTxtViewer(deps({ api: { searchInTxtStream } as unknown as ViewerDeps["api"], ...over }), f.seam));
-    return { v, f, searchInTxtStream };
+    const v = mount(createTxtViewer(deps({ docSearch, ...over }), f.seam));
+    return { v, f, search, land: () => land() };
   }
 
   const btn = (v: ReturnType<typeof createTxtViewer>, name: string) =>
@@ -406,17 +418,19 @@ describe("txt viewer — find", () => {
   });
 
   it("a ?q= deep link opens find, marks matches, and lands on the target paragraph", async () => {
-    const { v, f, searchInTxtStream } = findViewer();
+    const { v, f, search } = findViewer();
     // page = 1 → the paragraph ordinal the library hit routed with.
     await v.open(synthesizeSummary(meta({ id: "n-r" })), Promise.resolve(meta({ id: "n-r" })), 1, FOLDER, "zephyrine");
     f.calls[0]!.d.resolve(BODY);
     await flush();
     await flush();
 
-    // The bar is open and pre-filled; the query reached the blob-scoped endpoint.
+    // The bar is open and pre-filled, and the query went to the BLOB — `fileHash`,
+    // not the file id. That is the whole of `golden-search.md` §1.1's collapse:
+    // one md5-keyed route, so history and the bin reach it with no reroute.
     expect((q(v, ".txtbar") as HTMLElement).hidden).toBe(false);
     expect((q(v, ".txtbar input") as HTMLInputElement).value).toBe("zephyrine");
-    expect(searchInTxtStream).toHaveBeenCalledWith("n-r", "zephyrine", expect.any(Function), expect.any(AbortSignal));
+    expect(search).toHaveBeenCalledWith("a".repeat(32), "zephyrine", expect.any(AbortSignal));
 
     // Both paragraphs are wrapped and their word marked.
     const paras = v.el.querySelectorAll(".txt__match");
@@ -466,12 +480,15 @@ describe("txt viewer — find", () => {
   });
 
   it("opening WITHOUT a query leaves find closed (no bar, no request)", async () => {
-    const { v, f, searchInTxtStream } = findViewer();
+    const { v, f, search } = findViewer();
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     f.calls[0]!.d.resolve(BODY);
     await flush();
     expect((q(v, ".txtbar") as HTMLElement).hidden).toBe(true);
-    expect(searchInTxtStream).not.toHaveBeenCalled();
+    // §4.1: OPENING A FILE TO READ IT FETCHES NO TEXT INDEX. The `.txt` blob is
+    // already on screen; the search record is a separate, larger fetch that only
+    // a find pays for.
+    expect(search).not.toHaveBeenCalled();
     v.destroy();
   });
 
@@ -509,69 +526,46 @@ describe("txt viewer — find", () => {
     v.destroy();
   });
 
-  // --- in-doc-search Phase 4: progressive counter over streamed batches --------
-
-  /** A viewer with a MANUALLY-driven stream, so a test can land one batch at a
-   *  time and read the counter between them. Returns `emit`, the `onBatch` the
-   *  viewer handed the stream. */
-  function streamViewer(over: Partial<ViewerDeps> = {}) {
-    let emit: ((b: TxtSearchBatch) => void) | null = null;
-    const searchInTxtStream = vi.fn(
-      async (_id: string, _query: string, onBatch: (b: TxtSearchBatch) => void) => {
-        emit = onBatch;
-      },
-    );
-    const f = fakeSeam();
-    const v = mount(createTxtViewer(deps({ api: { searchInTxtStream } as unknown as ViewerDeps["api"], ...over }), f.seam));
-    return { v, f, emit: (b: TxtSearchBatch) => emit!(b) };
-  }
-
-  it("streams a '+' FLOOR while draining, then settles to the exact count", async () => {
-    const { v, f, emit } = streamViewer();
+  // THERE IS NO FLOOR ANY MORE. The old counter drained a server keyset and read
+  // "1+ match in 1+ paragraph" until the last batch; a local index answers in one
+  // call, so the counter has exactly two things to say — "Searching…" while the
+  // text is being fetched and indexed, and then the exact "N in M".
+  it("says 'Searching…' with NO number until the answer lands, then the exact count", async () => {
+    const { v, f, land } = findViewer(ZEPH, {}, { hold: true });
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 1, FOLDER, "zephyrine");
     f.calls[0]!.d.resolve(BODY);
     await flush();
 
-    // First batch: one paragraph, more coming — a FLOOR, not the exact count.
-    emit({ query: "zephyrine", segments: [ZEPH[0]!], usedFuzzy: false, done: false });
-    await flush();
-    expect(q(v, ".txtbar__count")!.textContent).toBe("1+ match in 1+ paragraph");
-    expect(v.el.querySelectorAll(".txt__match")).toHaveLength(1);
+    expect(q(v, ".txtbar__count")!.textContent).toBe("Searching…");
+    expect(v.el.querySelectorAll(".txt__match")).toHaveLength(0);
 
-    // Last batch (done): the floor RESOLVES to the exact "N in M".
-    emit({ query: "zephyrine", segments: ZEPH, usedFuzzy: false, done: true });
+    land();
     await flush();
     expect(q(v, ".txtbar__count")!.textContent).toBe("2 matches in 2 paragraphs");
     expect(v.el.querySelectorAll(".txt__match")).toHaveLength(2);
     v.destroy();
   });
 
-  it("prev/next steps the accumulated set and reaches a match only a later batch loads", async () => {
-    const { v, f, emit } = streamViewer();
+  // A `.note` or `.pdf` segment has no byte range because its ordinal IS the
+  // address. If one ever reached the `.txt` path it could not be placed in the
+  // string, and marking it from byte 0 would highlight the top of the file.
+  it("drops a segment that carries no byte range rather than marking from byte 0", async () => {
+    const mixed: DocSegmentMatch[] = [
+      { segment: 0, offset: null, length: null, matches: 9, terms: ["zephyrine"] },
+      ZEPH[0]!,
+    ];
+    const { v, f } = findViewer(mixed);
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 1, FOLDER, "zephyrine");
     f.calls[0]!.d.resolve(BODY);
     await flush();
-
-    const current = () =>
-      [...v.el.querySelectorAll(".txt__match")].findIndex((p) => p.classList.contains("is-current"));
-
-    // One paragraph loaded so far: Next CLAMPS (no wrapping over a floor).
-    emit({ query: "zephyrine", segments: [ZEPH[0]!], usedFuzzy: false, done: false });
     await flush();
-    expect(current()).toBe(0);
-    btn(v, "Next match").click();
-    expect(current()).toBe(0); // the second match is not loaded yet
-
-    // The next batch loads it; now Next crosses into it.
-    emit({ query: "zephyrine", segments: ZEPH, usedFuzzy: false, done: true });
-    await flush();
-    btn(v, "Next match").click();
-    expect(current()).toBe(1);
+    expect(v.el.querySelectorAll(".txt__match")).toHaveLength(1);
+    expect(q(v, ".txtbar__count")!.textContent).toBe("1 match in 1 paragraph");
     v.destroy();
   });
 
   it("manual fuzzy is OPT-IN: offers 'Search similar', reveals the held result on click", async () => {
-    const { v, f } = findViewer(ZEPH, {}, { usedFuzzy: true });
+    const { v, f, search } = findViewer(ZEPH, {}, { usedFuzzy: true });
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "zephyryne"); // a typo absent from the file
     f.calls[0]!.d.resolve(BODY);
     await flush();
@@ -584,9 +578,12 @@ describe("txt viewer — find", () => {
     const ask = q(v, ".txtbar__ask") as HTMLButtonElement;
     expect(ask.hidden).toBe(false);
 
-    // Opt in → the held fuzzy result is revealed, with NO new request.
+    // Opt in → the held fuzzy result is revealed, with nothing asked again: the
+    // ladder ran inside the one query and its answer was merely held.
+    const calls = search.mock.calls.length;
     ask.click();
     await flush();
+    expect(search.mock.calls.length).toBe(calls);
     expect(v.el.querySelectorAll(".txt__match")).toHaveLength(2);
     expect(q(v, ".txtbar__count")!.textContent).toBe("2 matches in 2 paragraphs");
     expect(ask.hidden).toBe(true);

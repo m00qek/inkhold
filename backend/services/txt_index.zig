@@ -86,12 +86,12 @@
 //! written LAST, in the transaction that closes the document.
 //!
 //! **Chunks are filled in READING ORDER, from ordinal 0**, and that is not an
-//! arbitrary direction: `rowid ASC == ordinal order` is what lets find-in-txt
-//! accumulate keyset batches with no re-sort, and what keeps the document's
-//! derived range (`query.docSegmentRanges`) a single run rather than several.
-//! Filling forward means a document being written right now — or one a crash
-//! left half written — still reports as ONE document, incomplete rather than
-//! multiplied across the result page.
+//! arbitrary direction. It is what keeps a document's segments ONE contiguous
+//! run in ordinal order, which is what `maintain.zig`'s whole-doc re-mint and
+//! its `index_version` heal are defined in terms of — the reader that also
+//! depended on it went with `golden-search.md` §6 step 7. And filling forward
+//! means a document being written right now — or one a crash left half written —
+//! still reports as ONE document, incomplete rather than multiplied.
 //!
 //! There is a SECOND writer, and the memo is what serializes it: the listing
 //! path's lazy heal (`ensureIndexed`) writes the same documents in one
@@ -122,7 +122,6 @@ const blobstore = @import("../store/blobs.zig");
 const blob_source = @import("../store/blob_source.zig");
 const noteindex = @import("note_index.zig");
 const search = @import("search/maintain.zig");
-const notesearch = @import("search/query.zig");
 const sn = @import("supernote");
 
 const Allocator = std.mem.Allocator;
@@ -425,8 +424,8 @@ pub fn md5Hex(data: []const u8) [32]u8 {
 //     "no records" (not an error), and `layerVOsFromBlob` maps that to "no
 //     panel" — but again, no reader reaches a kind = 1 row.
 //   - `recogn_status` = 1 on real segments ("text present" — decision 4: the
-//     FTS predicate and `scoped_from_where`'s `recogn_status = 1` pass with
-//     no predicate change), 0 on the marker.
+//     FTS predicate and the manifest's searchable predicate both pass with no
+//     predicate change), 0 on the marker.
 
 const upsert_segment_sql =
     \\INSERT INTO note_page_index(blob_md5, kind, page_index, content_hash, width, height,
@@ -441,8 +440,8 @@ const upsert_segment_sql =
 ;
 
 /// The derived-state marker (see the module docs): ordinal 0, no text, no
-/// range — `recogn_status = 0` keeps it out of the FTS predicate and out of
-/// `scoped_from_where`. `content_hash` is md5("") for want of content.
+/// range — `recogn_status = 0` keeps it out of the FTS predicate and out of the
+/// manifest's searchable predicate. `content_hash` is md5("") for want of content.
 const upsert_marker_sql =
     \\INSERT INTO note_page_index(blob_md5, kind, page_index, content_hash, width, height,
     \\                            layers, recogn_status)
@@ -665,9 +664,9 @@ pub fn storeVerdict(db: sqlite.Db, blob_md5: []const u8, v: Verdict) !void {
 /// indexed. Those two must never be able to disagree about what is outstanding:
 /// a count that says "nothing pending" while the worker is still deriving is
 /// worse than no count at all, and a second hand-written copy of these five
-/// clauses is exactly how that happens. Same reasoning as `search/query.zig`'s
-/// single `fromWhere` — one clause, several statements built ON it, and callers
-/// may only ADD to it (a user scope, a blob scope), never restate it.
+/// clauses is exactly how that happens. One clause, several statements built ON
+/// it, and callers may only ADD to it (a user scope, a blob scope), never
+/// restate it.
 ///
 /// It also answers PER BLOB — `... AND f.md5 = ?` — which is what the per-blob
 /// term-set question in `docs/scratch/pending-ness.md` §4.1 needs, so that
@@ -1007,12 +1006,13 @@ test "the ranged (blob-store) source derives identically to the slice source" {
 /// gives every anonymous struct literal its own distinct type.
 const Put = struct { id: u64, md5: [32]u8 };
 
-/// WHAT REPLACED LIBRARY-WIDE SEARCH IN THESE TESTS. `golden-search.md` §6 step 6
-/// deleted the server's global read, so a test that used to ask "which of my
-/// files does this word appear in?" asks every live file it owns, one at a time,
-/// through the in-document read. The `files` join those reads are built on is
-/// the same security boundary the deleted one carried, which is what keeps the
-/// isolation assertions below meaning what they meant.
+/// WHAT REPLACED SEARCH IN THESE TESTS. `golden-search.md` §6 deleted the
+/// server's library-wide read in step 6 and its in-document read in step 7 —
+/// every query is the browser's now, answered off `text/<md5>`. So a test that
+/// used to ask "which of my files does this word appear in, and where?" asks the
+/// rows both those answers are DERIVED from: `note_page_index`, joined to
+/// `files` for the same ownership/tombstone boundary the deleted reads carried,
+/// which is what keeps the isolation assertions below meaning what they meant.
 const FoundFile = struct {
     noteId: u64,
     noteName: []const u8,
@@ -1022,6 +1022,29 @@ const FoundFile = struct {
 };
 
 const FoundFiles = struct { hits: []const FoundFile };
+
+/// One indexed `.txt` paragraph: its ordinal, the byte range in the raw blob
+/// that the viewer scrolls to, and the stored text. These three fields ARE the
+/// `.txt` record `text/<md5>` carries (`golden-search.md` §1.1), which is why
+/// the assertions below read them rather than a query's answer about them.
+const Paragraph = struct {
+    segment: i64,
+    offset: i64,
+    length: i64,
+    text: []const u8,
+};
+
+/// Every whitespace-separated token of `q` present in `text`, case-insensitively.
+/// Empty/blank `q` matches nothing, exactly as the search box's blank state did.
+fn allTermsIn(text: []const u8, q: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, q, " \t\n");
+    var any = false;
+    while (it.next()) |t| {
+        any = true;
+        if (std.ascii.indexOfIgnoreCase(text, t) == null) return false;
+    }
+    return any;
+}
 
 const Fixture = struct {
     db: sqlite.Db,
@@ -1135,50 +1158,61 @@ const Fixture = struct {
         return out.items;
     }
 
-    /// Which of `user_id`'s OWN live files contain `q` — see `FoundFile`.
+    /// Which of `user_id`'s OWN live files carry EVERY token of `q` in one
+    /// segment, and the first ordinal that does — see `FoundFile`. The per-segment
+    /// AND is the paragraph semantics under test (plan decision 2), so it is kept;
+    /// the tokens are matched case-insensitively as substrings rather than through
+    /// the index's fold, which puts one fewer mechanism between the indexer and
+    /// the assertion.
     fn search_(f: *Fixture, user_id: u64, q: []const u8) !FoundFiles {
         var hits: std.ArrayList(FoundFile) = .empty;
-        var names: std.ArrayList(FoundFile) = .empty;
-        {
-            var s = try f.db.prepare(
-                "SELECT id, name FROM files WHERE user_id = ?1 AND deleted = 0 AND is_folder = 0 ORDER BY id;",
-            );
-            defer s.finalize();
-            s.bindInt(1, @intCast(user_id));
-            while (try s.step()) try names.append(f.a(), .{
-                .noteId = @intCast(s.columnInt(0)),
+        var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        var s = try f.db.prepare(
+            "SELECT fi.id, fi.name, p.page_index, p.text FROM files fi " ++
+                "JOIN note_page_index p ON p.blob_md5 = fi.md5 " ++
+                "WHERE fi.user_id = ?1 AND fi.deleted = 0 AND fi.is_folder = 0 " ++
+                "AND p.recogn_status = 1 ORDER BY fi.id, p.page_index;",
+        );
+        defer s.finalize();
+        s.bindInt(1, @intCast(user_id));
+        while (try s.step()) {
+            const fid: u64 = @intCast(s.columnInt(0));
+            if (seen.contains(fid)) continue;
+            if (!allTermsIn(s.columnText(3), q)) continue;
+            try seen.put(f.a(), fid, {});
+            try hits.append(f.a(), .{
+                .noteId = fid,
                 .noteName = try f.a().dupe(u8, s.columnText(1)),
-                .pageIndex = 0,
+                .pageIndex = s.columnInt(2),
             });
-        }
-        for (names.items) |cand| {
-            const r = try notesearch.searchNotePages(f.a(), f.db, user_id, cand.noteId, q, null, notesearch.max_batch);
-            if (r.pages.len == 0) continue;
-            try hits.append(f.a(), .{ .noteId = cand.noteId, .noteName = cand.noteName, .pageIndex = r.pages[0].pageIndex });
         }
         return .{ .hits = hits.items };
     }
 
-    /// Find-in-txt DRAINED to completion: auto-continues the keyset until the
-    /// cursor is absent, accumulating every paragraph — the client's auto-drain,
-    /// so the complete-result assertions read the whole file through the batched
-    /// entry point exactly as the viewer will.
-    fn txtSearch(f: *Fixture, user_id: u64, note_id: u64, q: []const u8) !notesearch.TxtResults {
-        const arena = f.a();
-        var segs: std.ArrayList(notesearch.TxtMatch) = .empty;
-        var query: []const u8 = q;
-        var cursor: ?[]const u8 = null;
-        var first = true;
-        while (true) {
-            const r = try notesearch.searchTxtSegments(arena, f.db, user_id, note_id, q, cursor, notesearch.default_batch);
-            if (first) {
-                query = r.query;
-                first = false;
-            }
-            try segs.appendSlice(arena, r.segments);
-            cursor = r.cursor orelse break;
+    /// One file's `.txt` paragraphs that carry every token of `q`, in ordinal
+    /// order, with the byte range the viewer scrolls to — read straight from
+    /// `note_page_index`, which is the row `text/<md5>` is derived from and the
+    /// browser's own index is built out of.
+    fn paragraphs(f: *Fixture, note_id: u64, q: []const u8) ![]Paragraph {
+        var out: std.ArrayList(Paragraph) = .empty;
+        var s = try f.db.prepare(
+            "SELECT p.page_index, p.recogn_offset, p.recogn_length, p.text " ++
+                "FROM note_page_index p JOIN files fi ON fi.md5 = p.blob_md5 " ++
+                "WHERE fi.id = ?1 AND p.recogn_status = 1 ORDER BY p.page_index;",
+        );
+        defer s.finalize();
+        s.bindInt(1, @intCast(note_id));
+        while (try s.step()) {
+            const text = s.columnText(3);
+            if (!allTermsIn(text, q)) continue;
+            try out.append(f.a(), .{
+                .segment = s.columnInt(0),
+                .offset = s.columnInt(1),
+                .length = s.columnInt(2),
+                .text = try f.a().dupe(u8, text),
+            });
         }
-        return .{ .query = query, .segments = segs.items };
+        return out.items;
     }
 
     fn count(f: *Fixture, sql: []const u8) !i64 {
@@ -1293,122 +1327,56 @@ test "isolation: another user never sees the txt segments, though the text rows 
     try testing.expectEqual(@as(i64, 2), try f.count("SELECT COUNT(*) FROM segment_search;"));
 }
 
-test "FIND-IN-TXT: blob-scoped, complete, unranked, with an EXACT per-paragraph count and byte range" {
+test "FIND-IN-TXT'S MATERIAL: one row per paragraph, its ordinal, and a byte range that replays exactly" {
     var f = try Fixture.init();
     defer f.deinit();
 
-    // Three paragraphs; "target" appears 0/1/2 times across them, and once in a
-    // SECOND file that must never leak into the first file's find.
+    // Three paragraphs; "target" appears 1/0/2 times across them, and once in a
+    // SECOND file whose rows must not be reachable through this file's id.
     const blob = "the target sits here\n\nno match in this one\n\ntarget then target again\n";
     const put = try f.put(1, "doc.txt", blob);
     _ = try f.put(1, "other.txt", "a decoy target elsewhere\n");
 
-    const res = try f.txtSearch(1, put.id, "target");
-    // COMPLETE: both matching paragraphs, in ordinal order, and nothing from the
+    // The find itself is the browser's (`golden-search.md` §6 step 7); what the
+    // server owes is the material it answers from, and that is what is asserted:
+    // the paragraphs carrying the word, at their ordinals, and nothing from the
     // non-matching middle paragraph or the other file.
-    try testing.expectEqual(@as(usize, 2), res.segments.len);
+    const res = try f.paragraphs(put.id, "target");
+    try testing.expectEqual(@as(usize, 2), res.len);
+    try testing.expectEqual(@as(i64, 0), res[0].segment);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, res[0].text, "target"));
+    try testing.expectEqual(@as(i64, 2), res[1].segment);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, res[1].text, "target"));
 
-    try testing.expectEqual(@as(i64, 0), res.segments[0].segment);
-    try testing.expectEqual(@as(i64, 1), res.segments[0].matches); // "target" ×1
-    try testing.expectEqual(@as(i64, 2), res.segments[1].segment);
-    try testing.expectEqual(@as(i64, 2), res.segments[1].matches); // "target" ×2 — EXACT
-
-    // The byte range replays to exactly the paragraph the viewer scrolls to.
-    for (res.segments) |seg| {
+    // THE BYTE RANGE IS THE ADDRESS, and it replays to exactly the paragraph the
+    // viewer scrolls to — the one field `.txt` needs that `.note` and PDF do not
+    // (§1.1), because a paragraph ordinal is not itself an address.
+    for (res) |seg| {
         const off: usize = @intCast(seg.offset);
         const len: usize = @intCast(seg.length);
-        const para = blob[off..][0..len];
-        try testing.expect(std.mem.indexOf(u8, para, "target") != null);
-        try testing.expect(std.mem.indexOf(u8, "target", seg.terms[0]) != null);
+        try testing.expectEqualStrings(seg.text, blob[off..][0..len]);
     }
 }
 
-test "FIND-IN-TXT: same FTS as library search — a diacritic-folded / prefix term that finds the file finds its paragraphs" {
+test "THE STORED PARAGRAPH IS UNFOLDED: accents survive into the row the text record is built from" {
     var f = try Fixture.init();
     defer f.deinit();
 
-    // Accented corpus word; the query is typed WITHOUT the accent (the household
-    // case). Both the library search and find-in-txt fold it the same way.
+    // The fold used to live on the READ, so nothing downstream cared what the row
+    // held. It lives in the browser now, over `text/<md5>` — and `docText.ts`
+    // states the contract this pins: *"The text is UNFOLDED — accents intact,
+    // unlike `terms/`"*. A server that folded on the way IN would hand the viewer
+    // `cafe` to mark inside a paragraph that says `café`, and the byte ranges
+    // beside it would stop addressing the blob the viewer decoded.
     const put = try f.put(1, "notes.txt", "a linha sobre caf\u{00e9} aqui\n\nplain paragraph\n");
 
-    // The file is findable at all (the anchor for the paragraph assertions).
-    try testing.expect((try f.search_(1, "cafe")).hits.len >= 1);
-
-    // Find-in-txt finds the same paragraph, unaccented query.
-    const exact = try f.txtSearch(1, put.id, "cafe");
-    try testing.expectEqual(@as(usize, 1), exact.segments.len);
-    try testing.expectEqual(@as(i64, 0), exact.segments[0].segment);
-
-    // And a prefix of it (the word still being typed — trailing char, no space)
-    // reaches it too, exactly as the library prefix rules do.
-    const prefix = try f.txtSearch(1, put.id, "caf");
-    try testing.expectEqual(@as(usize, 1), prefix.segments.len);
+    const rows = try f.paragraphs(put.id, "linha");
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqual(@as(i64, 0), rows[0].segment);
+    try testing.expectEqualStrings("a linha sobre caf\u{00e9} aqui", rows[0].text);
 }
 
-test "FIND-IN-TXT: isolation — another user's identical text and a foreign file id both answer empty" {
-    var f = try Fixture.init();
-    defer f.deinit();
-
-    const body = "a shared private paragraph\n";
-    const mine = try f.put(1, "mine.txt", body);
-    const theirs = try f.put(2, "theirs.txt", body); // same content, user 2
-
-    // User 1 finds their own paragraph...
-    try testing.expectEqual(@as(usize, 1), (try f.txtSearch(1, mine.id, "private")).segments.len);
-    // ...but never through user 2's file id (the `files` join is the boundary,
-    // even though the underlying text row is shared)...
-    try testing.expectEqual(@as(usize, 0), (try f.txtSearch(1, theirs.id, "private")).segments.len);
-    // ...and user 2 sees only their own.
-    try testing.expectEqual(@as(usize, 1), (try f.txtSearch(2, theirs.id, "private")).segments.len);
-    try testing.expectEqual(@as(usize, 0), (try f.txtSearch(2, mine.id, "private")).segments.len);
-
-    // A note id that never existed is the same empty answer, not an error.
-    try testing.expectEqual(@as(usize, 0), (try f.txtSearch(1, 999999, "private")).segments.len);
-}
-
-test "FIND-IN-TXT BATCHED PARITY (the non-negotiable): the UNION of SMALL batches is the whole file, boundary-clean" {
-    var f = try Fixture.init();
-    defer f.deinit();
-
-    // Twelve paragraphs sharing a common word — batch 3 ⇒ several round-trips, so
-    // the cursor boundary is crossed repeatedly. This is the `.txt` shape the Pi
-    // pathology lives in (a big file's find must chunk into small lock windows).
-    var blob: std.ArrayList(u8) = .empty;
-    for (0..12) |i| {
-        if (i != 0) try blob.appendSlice(f.a(), "\n\n");
-        try blob.appendSlice(f.a(), try std.fmt.allocPrint(f.a(), "para{d} common rare{d}", .{ i, i }));
-    }
-    const put = try f.put(1, "doc.txt", blob.items);
-
-    for ([_][]const u8{ "common ", "rare5 ", "zzzptl " }) |q| {
-        // The UNBATCHED in-doc result is the oracle for the batched drain: the
-        // stride must not be able to change the answer.
-        const whole = try f.txtSearch(1, put.id, q);
-        const d = try f.a().alloc(i64, whole.segments.len);
-        for (whole.segments, d) |seg, *o| o.* = seg.segment;
-        std.sort.pdq(i64, d, {}, std.sort.asc(i64));
-
-        // Drain in-doc at batch 3, checking each batch is BOUNDED and no paragraph
-        // is dropped or duplicated across the cursor boundary.
-        var seen: std.AutoHashMapUnmanaged(i64, void) = .empty;
-        var got: std.ArrayList(i64) = .empty;
-        var cursor: ?[]const u8 = null;
-        while (true) {
-            const r = try notesearch.searchTxtSegments(f.a(), f.db, 1, put.id, q, cursor, 3);
-            try testing.expect(r.segments.len <= 3);
-            for (r.segments) |seg| {
-                const gop = try seen.getOrPut(f.a(), seg.segment);
-                try testing.expect(!gop.found_existing);
-                try got.append(f.a(), seg.segment);
-            }
-            cursor = r.cursor orelse break;
-        }
-        std.sort.pdq(i64, got.items, {}, std.sort.asc(i64));
-        try testing.expectEqualSlices(i64, d, got.items);
-    }
-}
-
-test "FIND-IN-TXT EDITED ORDER: editing paragraphs keeps the band CONTIGUOUS in ordinal order; find stays complete" {
+test "EDITED ORDER: editing paragraphs keeps the band CONTIGUOUS in ordinal order, and the rows complete" {
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -1417,8 +1385,8 @@ test "FIND-IN-TXT EDITED ORDER: editing paragraphs keeps the band CONTIGUOUS in 
     const v1 = "p0 common\n\np1 common\n\np2 common\n\np3 common\n\np4 common\n\np5 common\n";
     const put1 = try f.put(1, "doc.txt", v1);
 
-    // Contiguous at ingest: find returns all six paragraphs.
-    try testing.expectEqual(@as(usize, 6), (try f.txtSearch(1, put1.id, "common ")).segments.len);
+    // Contiguous at ingest: all six paragraphs are there.
+    try testing.expectEqual(@as(usize, 6), (try f.paragraphs(put1.id, "common")).len);
 
     // Edit paragraphs 1 and 3: the replace flips the blob, and the whole-doc-band
     // re-mint (in-doc-search plan Phase 1) re-mints the file's paragraphs afresh
@@ -1436,11 +1404,12 @@ test "FIND-IN-TXT EDITED ORDER: editing paragraphs keeps the band CONTIGUOUS in 
     try testing.expectEqual(r0 + 4, try f.segRowidByText(1, "p4 common"));
     try testing.expectEqual(r0 + 5, try f.segRowidByText(1, "p5 common"));
 
-    // Find is COMPLETE and file-scoped: all six paragraphs in ordinal order.
-    const res = try f.txtSearch(1, put2.id, "common ");
-    try testing.expectEqual(@as(usize, 6), res.segments.len);
-    for (res.segments, 0..) |seg, i| try testing.expectEqual(@as(i64, @intCast(i)), seg.segment);
-    try testing.expectEqual(@as(usize, 2), (try f.txtSearch(1, put2.id, "edited ")).segments.len);
+    // And the rows are COMPLETE and file-scoped: all six paragraphs, in ordinal
+    // order, with no decoy from the neighbour that shares the word.
+    const res = try f.paragraphs(put2.id, "common");
+    try testing.expectEqual(@as(usize, 6), res.len);
+    for (res, 0..) |seg, i| try testing.expectEqual(@as(i64, @intCast(i)), seg.segment);
+    try testing.expectEqual(@as(usize, 2), (try f.paragraphs(put2.id, "edited")).len);
 }
 
 test "LIFECYCLE: editing one paragraph re-mints the whole band CONTIGUOUS in ordinal order" {
@@ -1689,13 +1658,16 @@ fn expectFtsClean(f: *Fixture) !void {
     try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('integrity-check');");
 }
 
-test "THE BAND IS STILL CONTIGUOUS after a chunked write — the arithmetic the scan rests on" {
-    // The load-bearing property. `query.docSegmentRanges` derives the file's own
-    // rowid ranges and runs one `M1><` pass per range, and `rowid ASC` is ordinal
-    // order only while a document's segments are ONE contiguous run — so a
-    // scattered band costs a find extra passes and, past the range cap, the whole
-    // partition. Three commits produced this band, and it has to look exactly
-    // like one statement did.
+test "THE BAND IS STILL CONTIGUOUS after a chunked write — the arithmetic the re-mint rests on" {
+    // The load-bearing property, and the reason a chunked write is not free:
+    // `rowid ASC` is ordinal order only while a document's segments are ONE
+    // contiguous run, and three commits produced this band, so it has to look
+    // exactly like one statement did.
+    //
+    // The reader that DEPENDED on it (the in-doc scan's derived rowid ranges) is
+    // gone with `golden-search.md` §6 step 7. The band itself is not: it is what
+    // `maintain.zig`'s whole-doc re-mint and its `index_version` heal are defined
+    // in terms of, and it goes with `segment_search` in step 8, not before.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -1868,9 +1840,9 @@ test "a re-run after a partial write DROPS and re-reserves — one band, no dupl
             "JOIN note_page_index p ON p.id = s.segment_id " ++
             "GROUP BY s.segment_id HAVING COUNT(*) > 1);",
     ));
-    // One hit for the one file, and find-in-txt still sees every paragraph.
+    // One hit for the one file, and every paragraph of it is still there.
     try testing.expectEqual(@as(usize, 1), (try f.search_(1, "rutabaga")).hits.len);
-    try testing.expectEqual(@as(usize, 120), (try f.txtSearch(1, put.id, "rutabaga ")).segments.len);
+    try testing.expectEqual(@as(usize, 120), (try f.paragraphs(put.id, "rutabaga")).len);
     try expectFtsClean(&f);
 }
 

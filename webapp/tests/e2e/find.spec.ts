@@ -1,5 +1,7 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { signedIn, freezeMotion, contrastRatio, paintedColours } from "./helpers/app";
+import { mockDocText, noteTextRecord, type TextRecord } from "./helpers/docText";
+import { fakeFileHash } from "../../src/api/fake";
 
 // Find in note. Universal search answers WHICH NOTE; find answers WHERE ON THIS
 // PAGE, because the device's recognition carries a rectangle per word.
@@ -10,7 +12,21 @@ import { signedIn, freezeMotion, contrastRatio, paintedColours } from "./helpers
 // ancestor, a field that was a bare text node with no border or ground, and a
 // counter that quietly revised its total.
 //
-// FIXTURE FACTS. "Attention Is All You Need" (`n-doc-attn`) is 20 pages with
+// WHAT ANSWERS THE COUNTER NOW (`golden-search.md` §1.1, §6 step 7)
+//
+// The note-scoped `/note/:id/search` route is gone. Find fetches `text/<md5>`
+// once, builds a per-document FTS5 index in the browser's own wasm engine, and
+// answers every question below out of it — which words matched, how many
+// instances, which to circle, in what document order. So the mock this file
+// installs is the document's TEXT, not a search result: what is under test is
+// the engine finding the word, not the viewer rendering a number it was handed.
+//
+// The ovals are still `getPageText`'s (the device's word rectangles, from the
+// fake `Api`), and the counts are still the index's, so the two halves have the
+// same seam they always had — see `matchWords` on why one is derived from the
+// other rather than re-derived from the query.
+//
+// FIXTURE FACTS. "Attention Is All You Need" (`141`) is 20 pages with
 // recognition on every page except index 2, 5, 8… — 14 recognised pages. Every
 // recognised page's transcript carries the word "budget" exactly twice, so the
 // note-wide total is 28 and page 1's badge is 2.
@@ -19,8 +35,31 @@ import { signedIn, freezeMotion, contrastRatio, paintedColours } from "./helpers
 // the ODD pages only, so it is never on the page find opens over. Recognised odd
 // pages are 1, 3, 7, 9, 13, 15, 19 — seven pages, one match each, the first of
 // them page 2 while you are looking at page 1.
+//
+// Both facts are properties of `helpers/docText.ts`'s transcript generator AND
+// of `api/fake.ts`'s word boxes, which are two spellings of one string. The
+// helper's header says what happens when they drift.
 
-const NOTE = "/#/note/n-doc-attn";
+const NOTE = "/#/note/141";
+
+/**
+ * Every fixture note this file opens, as its text record — keyed by the blob md5
+ * the reader hands to `docSearch` (`NoteMeta.fileHash`, which is `fakeFileHash`).
+ *
+ * The notes that are deliberately ABSENT are the ones that matter: `102`,
+ * `103` and `143` carry no recognition, so find is refused at the
+ * door and nothing is ever fetched for them. If one of them ever did fetch, the
+ * mock's 404 would surface it as find's `error` state rather than letting a
+ * silent "No matches" pass for the disabled control.
+ */
+const TEXT: Record<string, TextRecord> = {
+  [fakeFileHash("141")]: noteTextRecord("Attention Is All You Need", 20),
+  // Nothing on page 1, a transcript from page 2 on — so its recognised pages are
+  // indices 1 and 3 only.
+  [fakeFileHash("181")]: noteTextRecord("Recognised from page two", 4, 1),
+  [fakeFileHash("144")]: noteTextRecord("Field notes — unknown device", 3),
+  [fakeFileHash("101")]: noteTextRecord("Weekly review", 3),
+};
 
 const findBar = (page: Page): Locator => page.locator(".findbar");
 const findField = (page: Page): Locator => page.getByRole("textbox", { name: "Find in this note" });
@@ -29,11 +68,41 @@ const counter = (page: Page): Locator => page.locator(".findbar__count");
 const ovals = (page: Page): Locator => page.locator(".page .findbox");
 const badges = (page: Page): Locator => page.locator(".filmstrip__hits");
 
-async function openNote(page: Page, route = NOTE): Promise<void> {
+/**
+ * What the counter says, waited for GENEROUSLY.
+ *
+ * The first find of a session pays what the design says it pays and no test can
+ * wish it away: `WebAssembly.instantiate` of `sqlite-core.wasm` is a 16.13 MB
+ * allocation (§8.1) and the index build follows it. On this fixture that is tens
+ * of milliseconds and Playwright's 5 s default is ample — but the e2e suite runs
+ * `fullyParallel` against a Vite dev server, and under that contention a cold
+ * instantiate is the one step here that can take seconds. Every counter
+ * assertion goes through this rather than only the ones that looked slow in
+ * somebody's run, because a per-site guess is how a suite acquires a flake that
+ * passes alone and fails in a full run — this file has already paid for that
+ * lesson twice (see the two POLLED comments below).
+ *
+ * It costs nothing when the assertion passes, which is the ordinary case.
+ */
+async function settles(page: Page, text: string | RegExp): Promise<void> {
+  await expect(counter(page)).toHaveText(text, { timeout: 20_000 });
+}
+
+async function openNote(
+  page: Page,
+  route = NOTE,
+  opts: { textDelayMs?: number } = {},
+): Promise<{ count(md5?: string): number }> {
   await signedIn(page);
+  // AFTER `signedIn`, so this wins over `mockApi`'s catch-all — see
+  // `mockDocText`. Nothing is fetched until somebody types (§4.1: the text
+  // arrives on the first find, never on open), which several tests below assert
+  // by observing the counter claim nothing while the bar is merely open.
+  const hits = await mockDocText(page, TEXT, { delayMs: opts.textDelayMs });
   await page.goto(route);
   await expect(page.locator(".reader.is-open")).toBeVisible();
   await freezeMotion(page);
+  return hits;
 }
 
 // The reader paints from a SKELETON page list (the listing summary + placeholder
@@ -43,26 +112,33 @@ async function openNote(page: Page, route = NOTE): Promise<void> {
 // real metadata landed, so Find stayed disabled for the whole session on any note
 // whose recognition starts later. Not slow-link-only: it was wrong immediately.
 //
-// `n-late-ocr` exists for this: 4 pages, nothing recognised on page 1, a
+// `181` ("Recognised from page two") exists for this: 4 pages, nothing
+// recognised on page 1, a
 // transcript from page 2 on. The default fixture pattern always recognises page
 // 1, which is exactly why the bug was unrepresentable and shipped.
 test.describe("the Find affordance reflects the WHOLE note, not the skeleton", () => {
   test("a note recognised only from page two still offers Find", async ({ page }) => {
-    await openNote(page, "/#/note/n-late-ocr");
+    await openNote(page, "/#/note/181");
 
     const toggle = findToggle(page);
     await expect(toggle).toBeEnabled();
     await expect(toggle).toHaveAttribute("title", "Find in this note");
 
-    // And it really searches: the transcript on the later pages is reachable.
+    // And it really searches: the transcript on the LATER pages is reachable.
+    // Recognition starts at index 1 and index 2 carries none, so the recognised
+    // pages are 1 and 3 — four "budget"s, none of them on the page find opened
+    // over, so settling has to leave page 1 to reach the first.
     await toggle.click();
     await expect(findBar(page)).toBeVisible();
+    await findField(page).fill("budget");
+    await settles(page, "1 of 4");
+    await expect(page.locator(".pager__count")).toHaveText("2 / 4");
   });
 
   // The other half of the same rule: a note with NO recognition anywhere must
   // still say so, rather than being made hopeful by the summary's flag.
   test("a note with no recognition anywhere keeps Find disabled", async ({ page }) => {
-    await openNote(page, "/#/note/n-sketch");
+    await openNote(page, "/#/note/103");
     const toggle = findToggle(page);
     await expect(toggle).toBeDisabled();
     await expect(toggle).toHaveAttribute("title", "This note has no recognised text to search");
@@ -86,7 +162,7 @@ test.describe("find in note", () => {
     await expect(findField(page)).toBeFocused();
     await expect(findToggle(page)).toHaveAttribute("aria-pressed", "true");
     // Opening fetches nothing and claims nothing.
-    await expect(counter(page)).toHaveText("");
+    await settles(page, "");
     await expect(ovals(page)).toHaveCount(0);
 
     await findToggle(page).click();
@@ -116,7 +192,7 @@ test.describe("find in note", () => {
     await expect(findBar(page)).toBeHidden();
     // The reader is still there — one Escape dismissed the innermost thing only.
     await expect(page.locator(".reader.is-open")).toBeVisible();
-    await expect(page).toHaveURL(/#\/note\/n-doc-attn$/);
+    await expect(page).toHaveURL(/#\/note\/141$/);
 
     await page.keyboard.press("Escape");
     await expect(page.locator(".reader.is-open")).toBeHidden();
@@ -165,6 +241,11 @@ test.describe("find in note", () => {
     await openNote(page);
     await findToggle(page).click();
     await findField(page).fill("budget");
+    // SETTLED FIRST, because the `is-current` assertion at the bottom needs a
+    // current match and there is none until the counts land. The ovals themselves
+    // appear a beat earlier — phase 1's substring guess draws them off the word
+    // boxes alone — so this waits for the half that has to be waited for.
+    await settles(page, "1 of 28");
 
     // Two on page 1 — the ovals come from the page's word rectangles.
     await expect(ovals(page)).toHaveCount(2);
@@ -215,7 +296,7 @@ test.describe("find in note", () => {
     // The current match is marked by weight alone — no fill, ever.
     //
     // BOTH WIDTHS IN ONE SNAPSHOT, AND POLLED. The ovals are re-rendered whenever
-    // the find state moves (a count batch landing, a re-measure), so reading the
+    // the find state moves (the counts landing, a re-measure), so reading the
     // two in separate round trips can straddle a repaint: the second handle goes
     // stale and its computed style reads back "" (→ NaN), or the two samples
     // momentarily come from different renders and report the same weight. Both
@@ -239,14 +320,33 @@ test.describe("find in note", () => {
       .toBe(true);
   });
 
-  // THE PROGRESSIVE COUNTER (in-doc-search Phase 4). The count is never invented:
-  // before any match it says only what it knows (this page, still counting); as
-  // batches stream in it shows a FLOOR ("N+"), the browser-Ctrl+F shape; and it
-  // SETTLES to the exact "1 of 28" when the last batch lands. Asserted over the
-  // counter's whole DOM history rather than by racing a frame, so the ordering
-  // (phase-1 → floor → exact) cannot pass by simply missing the window.
-  test("the counter counts up through a '+' floor and settles to the exact total", async ({ page }) => {
-    await openNote(page);
+  // THE PROGRESSIVE COUNTER. The count is never invented: before any total it
+  // says only what it knows (this page, still counting), and it SETTLES to the
+  // exact "1 of 28". Asserted over the counter's whole DOM history rather than by
+  // racing a frame, so the ordering (phase 1 → exact) cannot pass by simply
+  // missing the window.
+  //
+  // WHAT THIS TEST LOST, AND IT IS NOT A RELAXATION. It used to require a FLOOR
+  // ("N of M+") in the middle, because the server answered a note-wide count in
+  // streamed batches and the counter accumulated them the way browser Ctrl+F
+  // does. There are no batches: `text/<md5>` is one request and `idx_query`
+  // produces the exact total in one call, so `FindState` has no floor state at
+  // all — `findInNote.ts` says so in the `settled` doc comment, and asserting a
+  // floor here would now be asserting a mechanism the design deleted on purpose.
+  //
+  // What is still progressive is the WAIT, and that is what the history below
+  // pins: phase 1 answers the page in front of you off its word boxes and claims
+  // NOTHING about the note ("2 on this page · searching 14 pages…") until the
+  // index has been built. That is the property the floor was only one expression
+  // of, and it is the one that could still regress.
+  //
+  // HELD, because the wait is what is being observed. The build is ~40 ms on this
+  // fixture and the fetch is local, so on a fast machine phase 1 and the settle
+  // can land in the same frame — and then the history has one entry and the
+  // ordering below is vacuously true. The delay makes the window real rather than
+  // lucky, exactly as `slowLink.spec.ts` argues for its own held responses.
+  test("the counter claims no total while it is counting, then settles to the exact one", async ({ page }) => {
+    await openNote(page, NOTE, { textDelayMs: 400 });
     await findToggle(page).click();
 
     await page.evaluate(() => {
@@ -261,17 +361,15 @@ test.describe("find in note", () => {
     });
 
     await findField(page).fill("budget");
-    await expect(counter(page)).toHaveText("1 of 28"); // settles to the exact count
+    await settles(page, "1 of 28"); // the exact count
 
     const history = await page.evaluate(() => (window as unknown as { __counter: string[] }).__counter);
 
-    // A FLOOR appeared while draining — "N of M+", never presented as final.
-    const floorAt = history.findIndex((t) => /\d+ of \d+\+/.test(t));
-    expect(floorAt).toBeGreaterThan(0);
-
-    // Before ANY count of matches (floor or exact) the counter claimed no total —
-    // only "this page" and "still counting".
+    // Before ANY total the counter claimed none — only "this page" and "still
+    // counting". A number that quietly revises itself is how a search loses
+    // trust, and this is the whole of the rule that says so.
     const firstCount = history.findIndex((t) => /\d+ of \d+/.test(t));
+    expect(firstCount).toBeGreaterThan(0);
     for (const text of history.slice(0, firstCount)) {
       expect(text).not.toMatch(/\d+ of \d+/);
     }
@@ -279,8 +377,39 @@ test.describe("find in note", () => {
     // 14 of the 20 pages carry recognition, and that is the number counted.
     expect(history.slice(0, firstCount).some((t) => /searching 14 pages/.test(t))).toBe(true);
 
-    // The LAST word is the exact total, with no "+" — a finite note reaches it.
+    // NO FLOOR EVER APPEARED. The absence is asserted rather than assumed: a
+    // "N of M+" reaching the counter again would mean somebody had reintroduced a
+    // provisional total over an answer that is exact by construction.
+    expect(history.filter((t) => /\d+ of \d+\+/.test(t))).toEqual([]);
+
+    // …and the total, once claimed, never moved.
     expect(history[history.length - 1]).toBe("1 of 28");
+    for (const text of history.slice(firstCount)) expect(text).toBe("1 of 28");
+  });
+
+  // §4.1 AS AN OBSERVATION. The text is fetched on the FIRST find and never
+  // again: it is content-addressed and served `immutable`, so every later
+  // keystroke queries an index that is already built. Nothing on screen shows
+  // this, which is exactly why it is worth a test — the regression is silent and
+  // costs a round trip per keystroke on a 3G link.
+  test("the document's text is fetched once, on the first find, and reused after that", async ({ page }) => {
+    const text = await openNote(page);
+    const md5Requests = () => text.count();
+
+    // Opening the bar is free. §4.1: reading a note needs the renderer, not a
+    // text index, and nobody should pay for a table they never query.
+    await findToggle(page).click();
+    await expect(findBar(page)).toBeVisible();
+    expect(md5Requests()).toBe(0);
+
+    await findField(page).fill("budget");
+    await settles(page, "1 of 28");
+    expect(md5Requests()).toBe(1);
+
+    // A second query on the same document is answered from the built index.
+    await findField(page).fill("witches");
+    await settles(page, "1 of 7");
+    expect(md5Requests()).toBe(1);
   });
 
   test("stepping is disabled until the counts land, then crosses page boundaries", async ({ page }) => {
@@ -292,17 +421,17 @@ test.describe("find in note", () => {
     await expect(next).toBeDisabled();
 
     await findField(page).fill("budget");
-    await expect(counter(page)).toHaveText("1 of 28");
+    await settles(page, "1 of 28");
     await expect(next).toBeEnabled();
     await expect(prev).toBeEnabled();
 
     await next.click();
-    await expect(counter(page)).toHaveText("2 of 28");
+    await settles(page, "2 of 28");
     await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
     // Match 3 is the first on the next recognised page — stepping turns the page.
     await next.click();
-    await expect(counter(page)).toHaveText("3 of 28");
+    await settles(page, "3 of 28");
     await expect(page.locator(".pager__count")).toHaveText("2 / 20");
     await expect(ovals(page)).toHaveCount(2);
 
@@ -310,7 +439,7 @@ test.describe("find in note", () => {
     await prev.click();
     await prev.click();
     await prev.click();
-    await expect(counter(page)).toHaveText("28 of 28");
+    await settles(page, "28 of 28");
     await expect(page.locator(".pager__count")).toHaveText("20 / 20");
   });
 
@@ -325,7 +454,7 @@ test.describe("find in note", () => {
     await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
     await findField(page).fill("witches");
-    await expect(counter(page)).toHaveText("1 of 7");
+    await settles(page, "1 of 7");
 
     // The reader followed the count instead of leaving it stranded.
     await expect(page.locator(".pager__count")).toHaveText("2 / 20");
@@ -335,14 +464,14 @@ test.describe("find in note", () => {
     // …and stepping carries on across pages from where it landed.
     const next = page.getByRole("button", { name: "Next match" });
     await next.click();
-    await expect(counter(page)).toHaveText("2 of 7");
+    await settles(page, "2 of 7");
     await expect(page.locator(".pager__count")).toHaveText("4 / 20");
     await expect(ovals(page)).toHaveCount(1);
 
     // Backwards from the first match wraps to the last, on the last odd page.
     await page.getByRole("button", { name: "Previous match" }).click();
     await page.getByRole("button", { name: "Previous match" }).click();
-    await expect(counter(page)).toHaveText("7 of 7");
+    await settles(page, "7 of 7");
     await expect(page.locator(".pager__count")).toHaveText("20 / 20");
     await expect(ovals(page)).toHaveCount(1);
   });
@@ -352,6 +481,13 @@ test.describe("find in note", () => {
   // matches". It was left out because the ovals were re-derived from the query
   // and would have disagreed with a count that included near-misses — so the fix
   // was the term list, not the tolerance.
+  //
+  // THE LADDER IS NOW THE WASM'S, and this is where that is observable. The
+  // server's in-document routes never ran their fuzzy fallback at all, so §6 step
+  // 6 briefly reopened the regression above; step 7 closes it by asking
+  // `idx_fuzzy` — the same ladder the library search uses, over THIS document's
+  // vocabulary, gated by the engine itself so it fires only when the query as
+  // typed matched nothing. `docSearch.ts` says so in its `usedFuzzy` comment.
   // MANUAL FUZZY IS OPT-IN (in-doc-search Phase 3). A typo typed into the bar is
   // not silently answered with close matches — the bar offers "search similar",
   // and only on request does the typo-tolerant result appear. (A deep link from a
@@ -363,14 +499,14 @@ test.describe("find in note", () => {
 
     // The exact word is found directly — nothing approximate is claimed.
     await findField(page).fill("witches");
-    await expect(counter(page)).toHaveText("1 of 7");
+    await settles(page, "1 of 7");
     await expect(page.locator(".findbar__fuzzy")).toBeHidden();
     const exactPages = await badges(page).count();
 
     // The typo: the exact search is empty, so the bar OFFERS the fuzzy fallback
     // rather than running it — no marks, no fuzzy notice, just the affordance.
     await findField(page).fill("witchez");
-    await expect(counter(page)).toHaveText("No matches");
+    await settles(page, "No matches");
     await expect(page.locator(".findbar__ask")).toBeVisible();
     await expect(page.locator(".findbar__fuzzy")).toBeHidden();
     await expect(badges(page)).toHaveCount(0);
@@ -380,7 +516,7 @@ test.describe("find in note", () => {
     // count and the ovals agree on the fuzzy hit: the oval is round "witches",
     // the word that was counted, though nothing on the page spells "witchez".
     await page.locator(".findbar__ask").click();
-    await expect(counter(page)).toHaveText("1 of 7");
+    await settles(page, "1 of 7");
     expect(await badges(page).count()).toBe(exactPages);
     await expect(page.locator(".pager__count")).toHaveText("2 / 20");
     await expect(page.locator(".findbar__fuzzy")).toBeVisible();
@@ -397,7 +533,7 @@ test.describe("find in note", () => {
     await openNote(page);
     await findToggle(page).click();
     await findField(page).fill("budget");
-    await expect(counter(page)).toHaveText("1 of 28");
+    await settles(page, "1 of 28");
 
     // 14 recognised pages, two matches each (but only visible ones are in the DOM).
     await expect(badges(page).first()).toBeVisible();
@@ -436,7 +572,7 @@ test.describe("find in note", () => {
   // for a recognised note opened on a page that has none; the whole-note case is
   // now refused at the door instead.
   test("an unrecognised note does not offer find at all", async ({ page }) => {
-    await openNote(page, "/#/note/n-ideas");
+    await openNote(page, "/#/note/102");
     const toggle = findToggle(page);
     await expect(toggle).toBeVisible();
     await expect(toggle).toBeDisabled();
@@ -455,20 +591,22 @@ test.describe("find in note", () => {
     await openNote(page);
     await findToggle(page).click();
     await findField(page).fill("zzzznotawordanywhere");
-    await expect(counter(page)).toHaveText("No matches");
+    await settles(page, "No matches");
     await expect(ovals(page)).toHaveCount(0);
   });
 
   // `pxPerMm === null` — the server has not verified this hardware's millimetre
-  // scale, which is the COMMON case. The counter still works (matches are
-  // counted server-side from the transcript), so the bar has to explain why the
-  // page carries no marks rather than leaving a count beside a blank page.
+  // scale, which is the COMMON case. The counter still works (the count comes
+  // from the transcript, which needs no geometry at all), so the bar has to
+  // explain why the page carries no marks rather than leaving a count beside a
+  // blank page. The two halves are independent by construction, and this is what
+  // says so: the index answered, the rectangles could not be placed.
   test("an unverified device scale draws no ovals and says why", async ({ page }) => {
-    await openNote(page, "/#/note/n-doc-unscaled");
+    await openNote(page, "/#/note/144");
     await findToggle(page).click();
     await findField(page).fill("budget");
 
-    await expect(counter(page)).toHaveText(/\d+ of \d+/);
+    await settles(page, /\d+ of \d+/);
     await expect(ovals(page)).toHaveCount(0);
     await expect(page.locator(".findbar__note")).toBeVisible();
     // The filmstrip badges are counts, not positions, so they still appear.
@@ -515,6 +653,9 @@ test.describe("find in note", () => {
     await openNote(page);
     await findToggle(page).click();
     await findField(page).fill("budget");
+    // Settled before the page is turned, so what is being observed is the
+    // repaint and not the counts landing on top of it.
+    await settles(page, "1 of 28");
     await expect(ovals(page)).toHaveCount(2);
 
     // Page 3 (index 2) has no recognition: nothing to circle, and the counter
@@ -522,7 +663,7 @@ test.describe("find in note", () => {
     await page.getByRole("button", { name: "Page 3" }).click();
     await expect(page.locator(".pager__count")).toHaveText("3 / 20");
     await expect(ovals(page)).toHaveCount(0);
-    await expect(counter(page)).toHaveText(/of 28$/);
+    await settles(page, /of 28$/);
 
     await page.getByRole("button", { name: "Page 4" }).click();
     await expect(ovals(page)).toHaveCount(2);
@@ -532,9 +673,10 @@ test.describe("find in note", () => {
     await openNote(page);
     await findToggle(page).click();
     await findField(page).fill("budget");
+    await settles(page, "1 of 28");
     await expect(badges(page).first()).toBeVisible();
 
-    await page.goto("/#/note/n-weekly");
+    await page.goto("/#/note/101");
     await expect(page.locator(".pager__count")).toHaveText("1 / 3");
     await expect(findBar(page)).toBeHidden();
     await expect(badges(page)).toHaveCount(0);
@@ -542,14 +684,14 @@ test.describe("find in note", () => {
 
     await findToggle(page).click();
     await expect(findField(page)).toHaveValue("");
-    await expect(counter(page)).toHaveText("");
+    await settles(page, "");
   });
 
   test("find is not offered over a file that has no recognition to search", async ({ page }) => {
     // An `.epub`: no viewer, so the reader's no-preview state — and no word
     // boxes, no transcript, nothing for find to answer. (A PDF would no longer
     // do: it opens in its own viewer now, which has no find of its own either.)
-    await openNote(page, "/#/note/n-doc-epub");
+    await openNote(page, "/#/note/143");
     await expect(findToggle(page)).toBeHidden();
     await page.keyboard.press("ControlOrMeta+f");
     await expect(findBar(page)).toBeHidden();
@@ -563,7 +705,7 @@ test.describe("find in note", () => {
       await openNote(page);
       await findToggle(page).click();
       await findField(page).fill("budget");
-      await expect(counter(page)).toHaveText("1 of 28");
+      await settles(page, "1 of 28");
       await freezeMotion(page);
 
       const count = await paintedColours(counter(page));
@@ -596,14 +738,14 @@ test.describe("find in note", () => {
       await openNote(page);
       await findToggle(page).click();
       // Opening the bar claims nothing — peeking is free out here too.
-      await expect(page).toHaveURL(/#\/note\/n-doc-attn$/);
+      await expect(page).toHaveURL(/#\/note\/141$/);
 
       await findField(page).fill("budget");
-      await expect(counter(page)).toHaveText("1 of 28");
-      await expect(page).toHaveURL(/#\/note\/n-doc-attn\?q=budget$/);
+      await settles(page, "1 of 28");
+      await expect(page).toHaveURL(/#\/note\/141\?q=budget$/);
 
       await findField(page).fill("");
-      await expect(page).toHaveURL(/#\/note\/n-doc-attn$/);
+      await expect(page).toHaveURL(/#\/note\/141$/);
     });
 
     test("closing find stops the URL claiming a search", async ({ page }) => {
@@ -614,7 +756,7 @@ test.describe("find in note", () => {
 
       await page.keyboard.press("Escape");
       await expect(findBar(page)).toBeHidden();
-      await expect(page).toHaveURL(/#\/note\/n-doc-attn$/);
+      await expect(page).toHaveURL(/#\/note\/141$/);
     });
 
     // RELOAD RESTORES BOTH. Page 4 (`/page/4`, index 3) is an ODD page, which is where the
@@ -622,19 +764,19 @@ test.describe("find in note", () => {
     // has no reason to move off it. That is what makes "the page was restored" a
     // claim about the URL rather than about where find happened to land.
     test("a reload of a page-and-query URL restores both", async ({ page }) => {
-      await openNote(page, "/#/note/n-doc-attn/page/4?q=witches");
+      await openNote(page, "/#/note/141/page/4?q=witches");
 
       await expect(page.locator(".pager__count")).toHaveText("4 / 20");
       await expect(findBar(page)).toBeVisible();
       await expect(findField(page)).toHaveValue("witches");
-      await expect(counter(page)).toHaveText("2 of 7");
+      await settles(page, "2 of 7");
       await expect(page.locator(".findbox.is-current")).toHaveCount(1);
 
       await page.reload();
 
       await expect(page.locator(".pager__count")).toHaveText("4 / 20");
       await expect(findField(page)).toHaveValue("witches");
-      await expect(counter(page)).toHaveText("2 of 7");
+      await settles(page, "2 of 7");
       await expect(page.locator(".findbox.is-current")).toHaveCount(1);
     });
 
@@ -651,7 +793,7 @@ test.describe("find in note", () => {
 
       // It reached the URL escaped, not raw — a bare `#` here would mean the
       // route ended two characters ago.
-      await expect(page).toHaveURL(/#\/note\/n-doc-attn\?q=/);
+      await expect(page).toHaveURL(/#\/note\/141\?q=/);
       await expect(page).not.toHaveURL(/q=caf%C3%A9 /);
       const hash = await page.evaluate(() => location.hash);
       expect(hash).not.toContain("#2");
@@ -668,7 +810,7 @@ test.describe("find in note", () => {
     // halves of the position are written together or the URL describes half a
     // screen.
     test("turning the page keeps the query in the URL", async ({ page }) => {
-      await openNote(page, "/#/note/n-doc-attn?q=witches");
+      await openNote(page, "/#/note/141?q=witches");
       await expect(findField(page)).toHaveValue("witches");
 
       await page.getByRole("button", { name: "Next match" }).click();

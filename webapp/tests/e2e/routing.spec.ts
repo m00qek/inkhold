@@ -312,30 +312,30 @@ test.describe("what is deliberately NOT in the URL", () => {
 test.describe("page numbers in the URL count from one", () => {
   test("the address bar agrees with the pager, in both directions", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
 
     // Internal index 4 → `/page/5`, and the pager independently says "5 / 20".
     await page.getByRole("button", { name: "Page 5" }).click();
     await expect(page.locator(".pager__count")).toHaveText("5 / 20");
-    await expect(page).toHaveURL(/#\/note\/n-doc-attn\/page\/5$/);
+    await expect(page).toHaveURL(/#\/note\/141\/page\/5$/);
 
     // And back the other way, on a cold load.
-    await page.goto("/#/note/n-doc-attn/page/5");
+    await page.goto("/#/note/141/page/5");
     await expect(page.locator(".pager__count")).toHaveText("5 / 20");
   });
 
   test("the first page has one URL, and `page/1` is accepted as the same place", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn/page/5");
+    await page.goto("/#/note/141/page/5");
     await expect(page.locator(".pager__count")).toHaveText("5 / 20");
 
     // Returning to the start collapses to the bare path rather than emitting a
     // second spelling of it.
     await page.getByRole("button", { name: "Page 1", exact: true }).click();
-    await expect(page).toHaveURL(/#\/note\/n-doc-attn$/);
+    await expect(page).toHaveURL(/#\/note\/141$/);
 
     // …but a hand-typed or shared `page/1` still lands there.
-    await page.goto("/#/note/n-doc-attn/page/1");
+    await page.goto("/#/note/141/page/1");
     await expect(page.locator(".pager__count")).toHaveText("1 / 20");
   });
 
@@ -344,17 +344,38 @@ test.describe("page numbers in the URL count from one", () => {
     // `page/0` means nothing once the URL counts from one. It is clamped to the
     // start of THIS note — not 404'd, and not bounced to the library, which
     // would make a mistyped page number look like a broken link.
-    await page.goto("/#/note/n-doc-attn/page/0");
+    await page.goto("/#/note/141/page/0");
     await expect(reader(page)).toBeVisible();
     await expect(page.locator(".pager__count")).toHaveText("1 / 20");
 
     // Past the end is clamped by the READER, which is the only thing that knows
     // how long the note is.
-    await page.goto("/#/note/n-doc-attn/page/900");
+    await page.goto("/#/note/141/page/900");
     await expect(page.locator(".pager__count")).toHaveText("20 / 20");
   });
 
-  test("a search hit deep-links to the page its excerpt is on, numbered the same way", async ({ page }) => {
+  // BROKEN SINCE `golden-search.md` §6 STEP 6, AND DECLARED RATHER THAN LEFT RED.
+  //
+  // "Endor" exists only in a TRANSCRIPT (`noteTranscript` in helpers/docText.ts
+  // writes it on odd pages), so this row can only come from the transcript half
+  // of a query — which step 6 moved onto the browser's own index. The e2e fake
+  // ships no index fixture (no `search-index/manifest`, no `search-index/stream`),
+  // so nothing fills the store, no hit is produced, and the click below has no
+  // row to click. The commit that deleted the server fallback did not mention it.
+  //
+  // WHAT IT MUST ASSERT WHEN THE FIXTURE LANDS — and it is not what the title
+  // says any more, because there are no excerpts (§4.3): a result row is a
+  // DOCUMENT carrying a match count (`.card__matches`, "Matches on 3 pages"),
+  // and its one link opens the FIRST matching page with the query attached. For
+  // "Endor" over "Project Aurora — kickoff" that is pages 1, 3 and 5 zero-based,
+  // so the first is index 1 → `/page/2?q=Endor`, which is the one-based
+  // conversion this describe block exists to pin.
+  //
+  // The prerequisite that WAS missing is met: fixture ids are decimal now, so
+  // the manifest's `fileId` varint can name a card (see `note` in
+  // `src/api/fake.ts`). What is left is a helper serving real bytes for those
+  // two routes — see the note at the top of `search.spec.ts`.
+  test.fixme("a search hit deep-links to the first page it matched, numbered the same way", async ({ page }) => {
     await signedIn(page);
     await page.goto("/");
     // "Endor" is on the ODD pages only, so the best-ranked page is not the first
@@ -362,12 +383,14 @@ test.describe("page numbers in the URL count from one", () => {
     await railSettled(page); // the name half of a search reads the cached tree
     await searchBox(page).fill("Endor");
     const row = page.locator(".card--result").filter({ hasText: "Project Aurora — kickoff" });
+    // A DOCUMENT with a match count, not an excerpt — the row's whole answer.
+    await expect(row.locator(".card__matches")).toHaveText("Matches on 3 pages");
     await row.locator(".card__open").click();
 
     await expect(page.locator(".pager__count")).toHaveText("2 / 6");
     // The href builder the result rows use is the SAME one the reader writes
     // with, so the conversion cannot be applied in one and missed in the other.
-    await expect(page).toHaveURL(/#\/note\/n-proj-alpha\/page\/2\?q=Endor$/);
+    await expect(page).toHaveURL(/#\/note\/121\/page\/2\?q=Endor$/);
   });
 });
 
@@ -386,7 +409,7 @@ test.describe("Back out of a note goes where you came from", () => {
 
     await page.getByRole("button", { name: "Page 9" }).click();
     await expect(page.locator(".pager__count")).toHaveText("9 / 20");
-    await expect(page).toHaveURL(/#\/note\/n-doc-attn\/page\/9$/);
+    await expect(page).toHaveURL(/#\/note\/141\/page\/9$/);
 
     // ONE Back, and it lands in the FOLDER — not on page 8, and not at the
     // library root the reader used to be sent to unconditionally.

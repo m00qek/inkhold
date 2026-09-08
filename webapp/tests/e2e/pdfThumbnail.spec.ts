@@ -28,7 +28,7 @@ const card = (page: Page, name: string) => page.locator(".card", { hasText: name
 const manual = (page: Page) => card(page, "Appliance manual");
 
 /**
- * The `Files` folder with real PDF bytes behind `n-files-manual` ALONE.
+ * The `Files` folder with real PDF bytes behind `178` ("Appliance manual") ALONE.
  *
  * Registered AFTER `mockThumbnailBackend` so Playwright's newest-first matching
  * gives the PDF its own bytes while every sibling tile — the images, the `.spd`,
@@ -37,9 +37,9 @@ const manual = (page: Page) => card(page, "Appliance manual");
  * around.
  */
 async function openFilesWithPdf(page: Page): Promise<{ count: () => number; bytes: () => number }> {
-  await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+  await mockThumbnailBackend(page, { textIds: ["177"] });
   const served = await serveRanges(page, PDF, undefined, (url) =>
-    url.pathname === "/file/n-files-manual",
+    url.pathname === "/file/178",
   );
   await page.goto("/");
   await railSettled(page);
@@ -103,11 +103,11 @@ test.describe("a .pdf's gallery tile is its page 0", () => {
   // the placeholder timer — so the glyph is guaranteed, and the assertion is
   // about what the tile settles on afterwards.
   test("a tile that showed the interim glyph STILL ends at page 0's aspect", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+    await mockThumbnailBackend(page, { textIds: ["177"] });
     // 300 ms per request, effectively unlimited throughput: the delay is the
     // point, not the bandwidth.
     await serveRanges(page, PDF, { latencyMs: 300, bytesPerSecond: 1e9 }, (url) =>
-      url.pathname === "/file/n-files-manual",
+      url.pathname === "/file/178",
     );
     await page.goto("/");
     await railSettled(page);
@@ -169,7 +169,7 @@ test.describe("a .pdf's gallery tile is its page 0", () => {
     // The honest floor, on a real browser: an encrypted or corrupt document (here
     // simply not a PDF) must still paint something. `mockThumbnailBackend` alone
     // serves PNG bytes for the raw route, which MuPDF refuses.
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+    await mockThumbnailBackend(page, { textIds: ["177"] });
     await page.goto("/");
     await railSettled(page);
     await page.locator(".card--folder", { hasText: "Files" }).click();

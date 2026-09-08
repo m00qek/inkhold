@@ -56,9 +56,9 @@ const sqlite_flags = [_][]const u8{
     // Double-quoted string literals off. Upstream's own recommendation: with
     // DQS on, a misspelled column name silently degrades to a string literal
     // instead of erroring. Audited — every string literal in our SQL is
-    // single-quoted, and the double quotes in `search/query.zig`'s MATCH
-    // expressions are parsed by FTS5's query parser (from a *bound
-    // parameter*), never by the SQL tokenizer, so they are unaffected.
+    // single-quoted, and the double quotes any MATCH expression carries are
+    // parsed by FTS5's query parser (from a *bound parameter*), never by the SQL
+    // tokenizer, so they are unaffected.
     "-DSQLITE_DQS=0",
 
     // sqlite3_status/_db_status are never read, so the allocator's global
@@ -795,29 +795,20 @@ pub fn build(b: *std.Build) void {
     const serve_step = b.step("serve", "Run the Inkhold server");
     serve_step.dependOn(&run_serve.step);
 
-    // ---- The IN-DOCUMENT bench (`zig build indoc-bench`) — MEASUREMENT ONLY ----
-    //
-    // A standalone executable that opens an EXISTING corpus READ-ONLY. Its own
-    // artifact rather than a `test "BENCH …"` because the numbers wanted are the
-    // deployment target's, and a cross-compiled test binary cannot be
-    // `zig build test`-run from the dev box — this one is scp'd to the Pi and run
-    // there. It links the same vendored SQLite as the server so the pragmas, the
-    // page cache and FTS5 are the server's, not the host distro's. NOT installed
-    // by `zig build`; nothing in the server depends on it.
-    //
-    // It answers `client-side-search-impl.md` §7.3: what the two live in-doc
-    // reads cost against the shipped `segment_fts`-free scan shape.
-    const indoc_mod = b.createModule(.{
-        .root_source_file = b.path("backend/indoc_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    linkSqlite(b, indoc_mod);
-    const indoc_exe = b.addExecutable(.{ .name = "indoc-bench", .root_module = indoc_mod });
-    const indoc_step = b.step("indoc-bench", "Build the in-document search bench (measurement only)");
-    indoc_step.dependOn(&b.addInstallArtifact(indoc_exe, .{}).step);
+    // (`zig build indoc-bench` was here. It timed the two server-side in-doc
+    // reads against the `segment_fts`-free scan shape to settle
+    // `client-side-search-impl.md` §7.3 — "can find-in-note lose the FTS without
+    // client work?". `golden-search.md` §6 step 7 answered the question the other
+    // way and deleted BOTH subjects: in-document search is the browser's, off
+    // `text/<md5>`. A bench whose two arms are both gone measures nothing.)
 
-    // The DERIVE bench — same posture again, answering `golden-search.md` §7's
+    // The DERIVE bench — a standalone executable rather than a `test "BENCH …"`
+    // because the numbers wanted are the DEPLOYMENT TARGET'S, and a
+    // cross-compiled test binary cannot be `zig build test`-run from the dev box:
+    // this one is scp'd to the Pi and run there. It links the same vendored
+    // SQLite as the server, so the pragmas and the page cache are the server's
+    // and not the host distro's, and it is NOT installed by `zig build` —
+    // nothing in the server depends on it. It answers `golden-search.md` §7's
     // last derive-cost item: what the fold, deflate level 6 and the two file
     // writes cost per document on the ARM1176 the design is shaped around.
     // It calls the real `derive_search.writeDerived`, so it needs the note

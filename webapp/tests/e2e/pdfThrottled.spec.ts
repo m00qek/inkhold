@@ -104,7 +104,7 @@ test.describe("page 1 on a throttled link (20x CPU + Fast 3G)", () => {
     await signedIn(page);
     const served = await serveRanges(page, body, FAST_3G);
     const started = Date.now();
-    await page.goto("/#/note/n-files-manual");
+    await page.goto("/#/note/178");
     await freezeMotion(page);
     await expect.poll(() => inkFraction(page), { timeout: 880_000 }).toBeGreaterThan(0.001);
     const before = Date.now() - started;

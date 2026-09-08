@@ -1023,24 +1023,6 @@ pub const ControlPlaneService = struct {
         return self.pageTextForMd5(arena, md5, n);
     }
 
-    /// `GET /api/controlplane/bin/note/{id}/search?q=` — find-in-note over a TRASHED
-    /// note, keyed on the trashed file's CURRENT md5. Null (→ the handler's 404) for
-    /// a live/missing id or a folder — the same owned + `deleted = 1` gate the bin's
-    /// other note routes share, so a live id here is a 404 exactly as it is on the
-    /// bin page/text routes. `query` is already percent-decoded by the handler.
-    ///
-    /// Reuses the one-document scan `searchHistoryPages` (H8, NOT the FTS): the
-    /// transcript is retained md5-keyed even after trash (H10), so this reads it
-    /// directly. One COMPLETE response, no cursor — exactly the history-search shape,
-    /// which is the same `NoteSearchResults` VO find-in-note serves.
-    pub fn binSearch(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, query: []const u8) !?notesearch.HistoryResults {
-        const entry = (try self.lookup(.trashed, user_id, id)) orelse return null;
-        defer freeEntry(self.files.gpa, entry);
-        if (entry.is_folder) return null;
-        const md5 = entry.md5 orelse return null;
-        return try notesearch.searchHistoryPages(arena, self.files.db, md5, query);
-    }
-
     /// `pageText`, but keyed directly by a blob `md5` rather than an `Entry` — the
     /// per-version transcript path (`GET …/history/{md5}/page/{n}/text`). The md5's
     /// ownership + retained-ness are the caller's gate (`Files.historyVersion`);
@@ -1754,7 +1736,6 @@ fn freeEntry(gpa: std.mem.Allocator, e: Entry) void {
 const testing = std.testing;
 const sqlite = @import("../db/sqlite.zig");
 const schema = @import("../db/schema.zig");
-const notesearch = @import("search/query.zig");
 const nb = @import("note_builder");
 
 /// Real device captures. Local fixtures only — they are not redistributed.
@@ -2640,20 +2621,21 @@ test "hasRecognizedText means finished pages, not recognition merely enabled" {
         try testing.expectEqualStrings("note", e.fileType.?);
     }
 
-    // The badge must agree with the search filter EXACTLY: shown ⟺ findable.
-    // Asked per document, because that is the only read left — library-wide
-    // search moved into the browser (`golden-search.md` §6 step 6).
+    // The badge must agree with what a find can actually reach: shown ⟺ the
+    // document has a page of FINISHED recognition whose text carries the term.
+    // Asked of `note_page_index` directly because that row is what `text/<md5>`
+    // is derived from and what the browser's own index is built out of —
+    // in-document search moved into the browser in `golden-search.md` §6 step 7,
+    // so there is no server-side find left to ask.
     for (root.entries) |e| {
-        const findable = (try notesearch.searchNotePages(
-            arena.allocator(),
-            f.db,
-            1,
-            try std.fmt.parseInt(u64, e.id, 10),
-            "hello",
-            null,
-            notesearch.max_batch,
-        )).pages.len > 0;
-        try testing.expectEqual(e.hasRecognizedText.?, findable);
+        var s = try f.db.prepare(
+            "SELECT COUNT(*) FROM note_page_index p JOIN files f ON f.md5 = p.blob_md5 " ++
+                "WHERE f.id = ?1 AND p.recogn_status = 1 AND p.text LIKE '%hello%';",
+        );
+        defer s.finalize();
+        s.bindInt(1, @intCast(try std.fmt.parseInt(u64, e.id, 10)));
+        try testing.expect(try s.step());
+        try testing.expectEqual(e.hasRecognizedText.?, s.columnInt(0) > 0);
     }
 
     // A non-`.note` never claims recognized text.

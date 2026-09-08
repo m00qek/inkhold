@@ -336,10 +336,9 @@ test "CursorWatch sees a DELETE issued inside an open cursor, and not one issued
 ///
 /// **`database` is not decoration.** `temp` is per-connection scratch and is
 /// writable even on a read-only connection — `search/fuzzy.zig` tokenizes through
-/// a `temp.token_fold` table on every in-document search, which is a legitimate
-/// write that must not read as a misclassification. Watching `main` alone is the
-/// difference between an audit that means something and one that has to be
-/// switched off.
+/// a `temp.token_fold` table, which is a legitimate write that must not read as a
+/// misclassification. Watching `main` alone is the difference between an audit
+/// that means something and one that has to be switched off.
 pub const WriteWatch = struct {
     db: Db,
     /// Which attached database to count mutations in. `temp` and any other

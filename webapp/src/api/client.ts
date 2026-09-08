@@ -20,16 +20,10 @@ import type {
   Listing,
   LayerSlot,
   NoteMeta,
-  NoteSearchBatch,
-  NoteSearchResults,
   PageLayer,
-  PageMatch,
   PageRef,
   PageText,
   RestoredVersion,
-  TxtMatch,
-  TxtSearchBatch,
-  TxtSearchResults,
   WordBox,
 } from "../core/types";
 
@@ -728,68 +722,6 @@ function normalizeEntry(e: Entry): Entry {
 }
 
 /**
- * One `.txt` paragraph match, with the fields the server may omit filled in.
- *
- * `segment`/`offset`/`length` are load-bearing — the viewer scrolls to the
- * paragraph by them — so a malformed row is DROPPED (`normalizeTxtMatches`)
- * rather than defaulted to offset 0, which would scroll to the wrong place.
- * `matches` upholds "never 0" at the seam; `terms` degrades to empty (a
- * paragraph the viewer marks nothing in, never one it marks wrongly).
- */
-function normalizeTxtMatch(m: TxtMatch): TxtMatch {
-  return {
-    segment: Math.floor(m.segment),
-    offset: Math.floor(m.offset),
-    length: Math.max(0, Math.floor(m.length)),
-    matches: typeof m.matches === "number" && Number.isFinite(m.matches) ? Math.max(1, Math.floor(m.matches)) : 1,
-    terms: Array.isArray(m.terms) ? m.terms.filter((t): t is string => typeof t === "string" && t !== "") : [],
-  };
-}
-
-function normalizeTxtMatches(segments: TxtMatch[] | undefined): TxtMatch[] {
-  if (!Array.isArray(segments)) return [];
-  return segments
-    .filter(
-      (m) =>
-        typeof m?.segment === "number" &&
-        Number.isFinite(m.segment) &&
-        m.segment >= 0 &&
-        typeof m.offset === "number" &&
-        Number.isFinite(m.offset) &&
-        m.offset >= 0,
-    )
-    .map(normalizeTxtMatch)
-    .sort((a, b) => a.segment - b.segment);
-}
-
-/**
- * Note-scoped match rows, in page order and with the counts made safe.
- *
- * A row exists because the index matched that page, so `matches` is never 0 —
- * `Math.max(1, …)` upholds that at the seam rather than letting a malformed row
- * become a filmstrip badge reading "0 matches", which is an absence stated as a
- * presence. Rows without a usable page index are DROPPED rather than defaulted
- * to page 0: a wrong page is a jump to the wrong place, where a missing one is
- * just one fewer badge.
- *
- * `terms` degrades to EMPTY rather than to anything invented: a page with no
- * usable terms is one the reader draws no ovals on, which is a match it cannot
- * point at — never a match it points at wrongly. The count is untouched by that,
- * because the count is the authority and the ovals are the illustration.
- */
-function normalizePageMatches(pages: PageMatch[] | undefined): PageMatch[] {
-  if (!Array.isArray(pages)) return [];
-  return pages
-    .filter((p) => typeof p?.pageIndex === "number" && Number.isFinite(p.pageIndex) && p.pageIndex >= 0)
-    .map((p) => ({
-      pageIndex: Math.floor(p.pageIndex),
-      matches: typeof p.matches === "number" && Number.isFinite(p.matches) ? Math.max(1, Math.floor(p.matches)) : 1,
-      terms: Array.isArray(p.terms) ? p.terms.filter((t): t is string => typeof t === "string" && t !== "") : [],
-    }))
-    .sort((a, b) => a.pageIndex - b.pageIndex);
-}
-
-/**
  * One version row off the wire, made safe.
  *
  * Same `emit_null_optional_fields = false` discipline as every VO on this face:
@@ -819,91 +751,6 @@ function normalizeVersion(v: {
         ? Math.floor(v.pageCount)
         : 0,
   };
-}
-
-/**
- * Walk the note-scoped keyset ONCE, in page order, calling `onBatch` with the
- * CUMULATIVE, normalized result after every network batch. This is the single
- * implementation both the drain ({@link Api.searchInNote}) and the stream
- * ({@link Api.searchInNoteStream}) run on — so batching cannot ever make them
- * disagree, which is the non-negotiable the whole feature turns on: the union of
- * all in-doc batches equals what one complete scan would have found.
- *
- * `signal` aborts BETWEEN batches (never mid-request): a superseded keystroke
- * must not keep draining a giant document. The fuzzy fallback arrives as a
- * single no-cursor batch (`done` on the first call), so a fuzzy stream is one
- * `onBatch`.
- */
-async function drainNoteSearch(
-  noteId: Id,
-  q: string,
-  onBatch: (batch: NoteSearchBatch) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const base = `/api/controlplane/note/${encodeURIComponent(noteId)}/search`;
-  const raw: PageMatch[] = [];
-  let usedFuzzy = false;
-  let outQuery = q;
-  let cursor: string | undefined;
-  let first = true;
-  for (;;) {
-    if (signal?.aborted) return;
-    const params = new URLSearchParams({ q });
-    if (cursor) params.set("cursor", cursor);
-    const r = await request<NoteSearchResults & { cursor?: string }>("GET", `${base}?${params.toString()}`);
-    if (signal?.aborted) return;
-    if (first) {
-      // `=== true`, STRICTLY: the server omits null optionals, so anything that
-      // is not literally `true` means "answered as typed" — the reading that
-      // claims nothing. Read once, off the first batch; the fallback is a
-      // one-shot.
-      usedFuzzy = r.usedFuzzy === true;
-      outQuery = r.query ?? q;
-      first = false;
-    }
-    if (Array.isArray(r.pages)) raw.push(...r.pages);
-    // ABSENT / malformed cursor is the "no more results" signal — the walk ends
-    // honestly, never on a `?cursor=undefined` request.
-    const next = typeof r.cursor === "string" && r.cursor !== "" ? r.cursor : undefined;
-    const done = !next;
-    onBatch({ query: outQuery, pages: normalizePageMatches(raw), usedFuzzy, done });
-    if (done) return;
-    cursor = next;
-  }
-}
-
-/** The `.txt` twin of {@link drainNoteSearch}: the paragraph keyset, one walk,
- *  cumulative-per-batch, shared by the drain and the stream. */
-async function drainTxtSearch(
-  noteId: Id,
-  q: string,
-  onBatch: (batch: TxtSearchBatch) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const base = `/api/controlplane/note/${encodeURIComponent(noteId)}/txt-search`;
-  const raw: TxtMatch[] = [];
-  let usedFuzzy = false;
-  let outQuery = q;
-  let cursor: string | undefined;
-  let first = true;
-  for (;;) {
-    if (signal?.aborted) return;
-    const params = new URLSearchParams({ q });
-    if (cursor) params.set("cursor", cursor);
-    const r = await request<TxtSearchResults & { cursor?: string }>("GET", `${base}?${params.toString()}`);
-    if (signal?.aborted) return;
-    if (first) {
-      usedFuzzy = r.usedFuzzy === true;
-      outQuery = r.query ?? q;
-      first = false;
-    }
-    if (Array.isArray(r.segments)) raw.push(...r.segments);
-    const next = typeof r.cursor === "string" && r.cursor !== "" ? r.cursor : undefined;
-    const done = !next;
-    onBatch({ query: outQuery, segments: normalizeTxtMatches(raw), usedFuzzy, done });
-    if (done) return;
-    cursor = next;
-  }
 }
 
 export function createHttpApi(): Api {
@@ -1042,76 +889,6 @@ export function createHttpApi(): Api {
       }
       const list = (raw as { links?: unknown } | null)?.links;
       return { links: parsePageLinks(JSON.stringify(list ?? [])) };
-    },
-
-    async searchInNote(noteId: Id, query: string): Promise<NoteSearchResults> {
-      // Short-circuit BEFORE the network: find searches as you type, so
-      // backspacing to empty must cost nothing.
-      const q = query.trim();
-      if (q === "") return { query: "", pages: [], usedFuzzy: false };
-
-      // AUTO-DRAIN the keyset — the convenience API for a caller that wants the
-      // WHOLE set in one await. The keyset walk itself is `drainNoteSearch`, shared
-      // with the streaming variant, so the two can never disagree; here we just
-      // keep the last (cumulative) batch, which is the complete result. Each batch
-      // is a separate request (the fairness win on the single-core Pi: a separate
-      // small db-lock window with a yield point between, never one multi-second
-      // hold); `normalizePageMatches` stable-sorts by pageIndex, so a
-      // legacy-scattered band still displays in reading order.
-      let final: NoteSearchResults = { query: q, pages: [], usedFuzzy: false };
-      await drainNoteSearch(noteId, q, (b) => {
-        final = { query: b.query, pages: b.pages, usedFuzzy: b.usedFuzzy };
-      });
-      return final;
-    },
-
-    searchInNoteStream(
-      noteId: Id,
-      query: string,
-      onBatch: (batch: NoteSearchBatch) => void,
-      signal?: AbortSignal,
-    ): Promise<void> {
-      // The STREAMING variant: same keyset, same query, but each batch is handed
-      // up as it lands so find can show first matches + a "N+" floor at once and
-      // settle to exact on the last batch. The short-circuit costs nothing on a
-      // blank box, exactly as the drain does — but it still emits ONE empty `done`
-      // batch, so a consumer's "settled empty" path fires without a network hit.
-      const q = query.trim();
-      if (q === "") {
-        onBatch({ query: "", pages: [], usedFuzzy: false, done: true });
-        return Promise.resolve();
-      }
-      return drainNoteSearch(noteId, q, onBatch, signal);
-    },
-
-    async searchInTxt(noteId: Id, query: string): Promise<TxtSearchResults> {
-      // Same pre-network short-circuit as `searchInNote`: the viewer searches
-      // as you type, so backspacing to empty must cost nothing. Drains the shared
-      // paragraph keyset to the exact, complete set — the `.txt` pathology (a
-      // 9000-paragraph file) is precisely why the walk chunks into small lock
-      // windows rather than one scan.
-      const q = query.trim();
-      if (q === "") return { query: "", segments: [], usedFuzzy: false };
-
-      let final: TxtSearchResults = { query: q, segments: [], usedFuzzy: false };
-      await drainTxtSearch(noteId, q, (b) => {
-        final = { query: b.query, segments: b.segments, usedFuzzy: b.usedFuzzy };
-      });
-      return final;
-    },
-
-    searchInTxtStream(
-      noteId: Id,
-      query: string,
-      onBatch: (batch: TxtSearchBatch) => void,
-      signal?: AbortSignal,
-    ): Promise<void> {
-      const q = query.trim();
-      if (q === "") {
-        onBatch({ query: "", segments: [], usedFuzzy: false, done: true });
-        return Promise.resolve();
-      }
-      return drainTxtSearch(noteId, q, onBatch, signal);
     },
 
     // --- WRITES (append-only, at your own marker — see `types.ts`) ---
@@ -1500,23 +1277,6 @@ export function createHttpApi(): Api {
       return { text: body?.text ?? "", words: normalizeWords(body?.words) };
     },
 
-    async searchHistory(id: Id, md5: Hash, query: string): Promise<NoteSearchResults> {
-      // Same pre-network short-circuit as `searchInNote`: find-in-preview searches
-      // as you type, so backspacing to empty must cost nothing.
-      const q = query.trim();
-      if (q === "") return { query: "", pages: [], usedFuzzy: false };
-      const base = `/api/controlplane/note/${encodeURIComponent(id)}/history/${encodeURIComponent(md5)}/search`;
-      const r = await request<NoteSearchResults>("GET", `${base}?${new URLSearchParams({ q }).toString()}`);
-      return {
-        query: r.query ?? q,
-        pages: normalizePageMatches(r.pages),
-        // The history search NEVER fuzzes (H8) — it is a one-document scan, no
-        // corpus vocabulary to widen against. Pinned false so no fuzzy affordance
-        // can ever appear on a preview even if a future server sent the flag.
-        usedFuzzy: false,
-      };
-    },
-
     async restoreVersion(id: Id, md5: Hash): Promise<RestoredVersion> {
       // A 507 (over quota) is thrown by `request()` as `ApiError("QUOTA_EXCEEDED",
       // …, 507)` — the caller surfaces it; the restore changed nothing.
@@ -1546,12 +1306,12 @@ export function createHttpApi(): Api {
 
     // --- BIN-SCOPED READS (recycle-bin viewer parity) ---
     //
-    // The `/bin/…` twins of `getPageText`, `searchInNote` and the history reads,
-    // for a file that is in the recycle bin. Each is the live implementation with
-    // `/api/controlplane/bin` in front of the URL — a trashed file's transcript,
-    // matches and version history are fully retained (md5-keyed, gated `deleted =
-    // 1`), so the bodies and normalizations are byte-identical to their live
-    // twins. `createBinScope` reroutes a trashed id's reads onto these.
+    // The `/bin/…` twins of `getPageText` and the history reads, for a file that
+    // is in the recycle bin. Each is the live implementation with
+    // `/api/controlplane/bin` in front of the URL — a trashed file's transcript
+    // and version history are fully retained (md5-keyed, gated `deleted = 1`), so
+    // the bodies and normalizations are byte-identical to their live twins.
+    // `createBinScope` reroutes a trashed id's reads onto these.
 
     async binPageText(id: Id, page: PageRef): Promise<PageText> {
       // The bin twin of `getPageText`. No `?v=` and no `textHash` short-circuit:
@@ -1570,17 +1330,6 @@ export function createHttpApi(): Api {
         throw new ApiError(body.errorCode ?? "ERROR", body.errorMsg ?? "Something went wrong.", res.status);
       }
       return { text: body?.text ?? "", words: normalizeWords(body?.words) };
-    },
-
-    async binSearchInNote(noteId: Id, query: string): Promise<NoteSearchResults> {
-      // The bin twin of `searchInNote`, shaped like `searchHistory`: one complete
-      // response, no cursor, exact-only (`usedFuzzy` pinned false). Same
-      // pre-network short-circuit — find-in-a-trashed-note searches as you type.
-      const q = query.trim();
-      if (q === "") return { query: "", pages: [], usedFuzzy: false };
-      const base = `/api/controlplane/bin/note/${encodeURIComponent(noteId)}/search`;
-      const r = await request<NoteSearchResults>("GET", `${base}?${new URLSearchParams({ q }).toString()}`);
-      return { query: r.query ?? q, pages: normalizePageMatches(r.pages), usedFuzzy: false };
     },
 
     async binNoteHistory(id: Id): Promise<FileHistory> {
@@ -1614,14 +1363,6 @@ export function createHttpApi(): Api {
         throw new ApiError(body.errorCode ?? "ERROR", body.errorMsg ?? "Something went wrong.", res.status);
       }
       return { text: body?.text ?? "", words: normalizeWords(body?.words) };
-    },
-
-    async binSearchHistory(id: Id, md5: Hash, query: string): Promise<NoteSearchResults> {
-      const q = query.trim();
-      if (q === "") return { query: "", pages: [], usedFuzzy: false };
-      const base = `/api/controlplane/bin/note/${encodeURIComponent(id)}/history/${encodeURIComponent(md5)}/search`;
-      const r = await request<NoteSearchResults>("GET", `${base}?${new URLSearchParams({ q }).toString()}`);
-      return { query: r.query ?? q, pages: normalizePageMatches(r.pages), usedFuzzy: false };
     },
 
     async binHistoryRaw(id: Id, md5: Hash): Promise<ArrayBuffer> {

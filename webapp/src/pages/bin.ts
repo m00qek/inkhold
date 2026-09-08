@@ -55,7 +55,7 @@ import { getDims } from "../cache/dimsMemo";
 import type { Api } from "../api/types";
 import type { LazyEngine, LazySlotInput } from "../render/lazy";
 import type { Bin, BinEntry, Restored, Trashed } from "../core/binTypes";
-import type { Hash, Id, NoteSearchBatch, NoteSearchResults, PageRef, PageText } from "../core/types";
+import type { Hash, Id, PageRef, PageText } from "../core/types";
 import type { FileHistory } from "../core/types";
 import type { NoteMeta } from "../core/types";
 
@@ -853,26 +853,18 @@ export function createBinScope(): BinScope {
         // panel — the same wrap-once discipline as `getPageBytes`.
         getPageText: (id: Id, page: PageRef): Promise<PageText> =>
           isTrashed(id) ? api.binPageText(id, page) : api.getPageText(id, page),
-        // Find-in-a-trashed-note. The live search READ filters `deleted = 0`, so a
-        // trashed id would come back empty through it; the bin search route scans
-        // the retained transcript instead. `searchInNote` (the drain) and its
-        // STREAM twin both reroute — the stream is surfaced as ONE `done` batch
-        // (`usedFuzzy:false`), exactly as `historyScope` surfaces the one-document
-        // history search, so the reader's streaming find bar drives it unchanged.
-        searchInNote: (id: Id, q: string): Promise<NoteSearchResults> =>
-          isTrashed(id) ? api.binSearchInNote(id, q) : api.searchInNote(id, q),
-        searchInNoteStream: (id: Id, q: string, onBatch: (batch: NoteSearchBatch) => void, signal?: AbortSignal) => {
-          if (!isTrashed(id)) return api.searchInNoteStream(id, q, onBatch, signal);
-          const t = q.trim();
-          if (t === "") {
-            onBatch({ query: "", pages: [], usedFuzzy: false, done: true });
-            return Promise.resolve();
-          }
-          return api.binSearchInNote(id, q).then((r) => {
-            if (signal?.aborted) return;
-            onBatch({ query: r.query, pages: r.pages, usedFuzzy: false, done: true });
-          });
-        },
+        // FIND-IN-A-TRASHED-NOTE REROUTES NOTHING, and that absence is
+        // `golden-search.md` §1.1. In-document search is keyed by BLOB MD5 now —
+        // one route, `text/<md5>`, authorized on its own terms — and a trashed
+        // file's blob has the same md5 it had before it was trashed. So the bin is
+        // not a scope for search at all: `getBinNoteMeta` above already hands the
+        // viewer the file's `fileHash`, and the find controllers search exactly
+        // that field.
+        //
+        // What DID need a reroute, and still does, is everything addressed by
+        // `files.id` — the live reads hardcode `deleted = 0`, so a trashed id comes
+        // back empty through them.
+        //
         // VIEW-ONLY version history in the bin (Phase 2). A trashed file's
         // `file_history` follows it into the bin (purged only when the bin purges),
         // so its version list, per-version pages/text/raw and per-version find all
@@ -889,8 +881,6 @@ export function createBinScope(): BinScope {
           isTrashed(id) ? api.binHistoryPageText(id, md5, index) : api.historyPageText(id, md5, index),
         historyRaw: (id: Id, md5: Hash): Promise<ArrayBuffer> =>
           isTrashed(id) ? api.binHistoryRaw(id, md5) : api.historyRaw(id, md5),
-        searchHistory: (id: Id, md5: Hash, q: string): Promise<NoteSearchResults> =>
-          isTrashed(id) ? api.binSearchHistory(id, md5, q) : api.searchHistory(id, md5, q),
       };
     },
   };

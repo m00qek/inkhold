@@ -21,8 +21,8 @@
 //! The worker serves the whole install; the UI has to answer *"how many of MY
 //! documents"*. So the only thing added to a tenant's clause is `f.user_id = ?`
 //! — the `files` VISIBILITY predicates (`deleted = 0`, `is_folder = 0`,
-//! `md5 IS NOT NULL`) are already inside it and are deliberately not restated,
-//! the same rule `search/query.zig`'s single `fromWhere` enforces for search.
+//! `md5 IS NOT NULL`) are already inside it and are deliberately not restated —
+//! a reader may only ADD a bound, never narrow or restate what is already there.
 //!
 //! `UNION` rather than `UNION ALL` between the tenants, and the select list is
 //! the BLOB: one PDF owing both a probe and its text is one document still being
@@ -56,10 +56,10 @@
 //! | statement | p50 | p95 |
 //! |---|---:|---:|
 //! | this count, one owner | **27.25 ms** | 29.55 ms |
-//! | `search/query.zig`'s `coverage_sql`, which it rides beside | 72.4 ms | 86.2 ms |
+//! | search's `coverage_sql`, which it rode beside (since deleted) | 72.4 ms | 86.2 ms |
 //! | `files.syncVersion`, the SSE tick's existing cost | 0.42 ms | 1.10 ms |
 //!
-//! So it is a third of the aggregate a zero-hit search ALREADY pays — cheap
+//! So it was a third of the aggregate a zero-hit search ALREADY paid — cheap
 //! enough to attach there — and 65x what one poll tick costs today, which is
 //! far too much to pay 2/s per owner for ever (5.5 % of the single core, and a
 //! 27 ms `db_lock` window twice a second competing with device sync).
@@ -89,8 +89,8 @@ const noteindex = @import("note_index.zig");
 /// in md5 order and turns every row into a random page fetch across the whole
 /// install. Scoped, SQLite seeks `files_user_parent (user_id=?)` and the work is
 /// bounded by the CALLER's library rather than the install's — the same property
-/// `search/query.zig`'s plan pin exists to keep for search, and the plan pin in
-/// this file's tests keeps it here.
+/// search's own plan pin existed to keep, and the plan pin in this file's tests
+/// keeps it here.
 ///
 /// `?1` the note index version, `?2` the owner.
 fn countSql() []const u8 {
@@ -691,9 +691,9 @@ test "PLAN PIN: the count is bounded by the CALLER's library, and nothing is sca
     //
     // So the load-bearing fact is that `files` is reached by `files_user_parent
     // (user_id=?)`: the scan is over the CALLER's library, not the install's.
-    // Same property `search/query.zig` pins for search, one index along.
+    // Same property search's own plan pin kept, one index along.
     //
-    // NOT stated as `INDEXED BY`, unlike search's `files_md5`. There the planner
+    // NOT stated as `INDEXED BY`, unlike search's `files_md5` was. There the planner
     // genuinely picks wrong (`user_id=?` looked cheaper than a near-unique md5);
     // here `f.user_id = ?2` IS an equality on that index's first column and the
     // planner picks it unaided on an empty test database and on the 1,275-file

@@ -39,7 +39,7 @@ function reader(page: Page): Locator {
 test.describe("navigating while the reader is open", () => {
   test("a rail folder closes the reader, lists that folder, and leaves the note route", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await expect(reader(page)).toBeVisible();
 
     // The rail stays visible beside the overlay — this is the click that used to
@@ -60,7 +60,7 @@ test.describe("navigating while the reader is open", () => {
 
     await cardButton(page, /Attention Is All You Need/).click();
     await expect(reader(page)).toBeVisible();
-    await expect(page).toHaveURL(/#\/note\/n-doc-attn$/);
+    await expect(page).toHaveURL(/#\/note\/141$/);
 
     // The breadcrumb used to live in a topbar that stayed on screen over the
     // reader, repeating the note's title and its folder. The topbar leaves now,
@@ -77,7 +77,7 @@ test.describe("navigating while the reader is open", () => {
 
   test("the URL is truthful afterwards: a reload does not reopen the note", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await expect(reader(page)).toBeVisible();
 
     await railSettled(page);
@@ -101,7 +101,7 @@ test.describe("navigating while the reader is open", () => {
 
   test("the library's listing chrome is gone over a note, and reader controls leave the route alone", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await expect(reader(page)).toBeVisible();
 
     // Sort, the view toggle and the search box all describe a LISTING, and the
@@ -120,7 +120,7 @@ test.describe("navigating while the reader is open", () => {
     // `/page/2` for the SECOND page: the URL counts from one, as the pager on
     // screen does, while the reader indexes from zero. The conversion lives in
     // the router and nowhere else.
-    await expect(page).toHaveURL(/#\/note\/n-doc-attn\/page\/2$/);
+    await expect(page).toHaveURL(/#\/note\/141\/page\/2$/);
   });
 
   test("Back and forward still route the reader", async ({ page }) => {
@@ -157,7 +157,7 @@ test.describe("the URL follows the reader without becoming history", () => {
     const card = cardButton(page, /Attention Is All You Need/);
     await card.click();
     await expect(reader(page)).toBeVisible();
-    await expect(page).toHaveURL(/#\/note\/n-doc-attn$/);
+    await expect(page).toHaveURL(/#\/note\/141$/);
 
     // The depth history has reached by the time the note is open. Everything
     // after this must leave it exactly here.
@@ -171,7 +171,7 @@ test.describe("the URL follows the reader without becoming history", () => {
     await expect(page.locator(".pager__count")).toHaveText("7 / 20");
 
     // The URL describes what is on screen…
-    await expect(page).toHaveURL(/#\/note\/n-doc-attn\/page\/7$/);
+    await expect(page).toHaveURL(/#\/note\/141\/page\/7$/);
     // …and three page turns cost nothing in history. A build that pushed instead
     // of replaced reads `depth + 3` here and passes every other assertion in this
     // file.
@@ -186,7 +186,7 @@ test.describe("the URL follows the reader without becoming history", () => {
 
   test("the rewritten URL is truthful: a reload lands on the page you were on", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await page.getByRole("button", { name: "Page 5" }).click();
     await expect(page.locator(".pager__count")).toHaveText("5 / 20");
 
@@ -223,7 +223,7 @@ test.describe("the initial route is dispatched once", () => {
     // Page 4 (index 3), because it is one the device RECOGNISED — the fixture
     // leaves every third page without a transcript, and the Text toggle is
     // correctly disabled on those.
-    await page.goto("/#/note/n-doc-attn/page/4");
+    await page.goto("/#/note/141/page/4");
     await expect(page.locator(".pager__count")).toHaveText("4 / 20");
 
     // Two things the URL says nothing about, so only a genuine re-open can lose
@@ -256,16 +256,16 @@ test.describe("the initial route is dispatched once", () => {
   // rather than only by the latch.
   test("re-dispatching the route re-opens the reader where it already is", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await page.getByRole("button", { name: "Page 4" }).click();
     await expect(page.locator(".pager__count")).toHaveText("4 / 20");
-    await expect(page).toHaveURL(/#\/note\/n-doc-attn\/page\/4$/);
+    await expect(page).toHaveURL(/#\/note\/141\/page\/4$/);
 
     // Forcing a real dispatch of the CURRENT route — what a duplicate boot did.
     await page.evaluate(() => window.dispatchEvent(new HashChangeEvent("hashchange")));
     await page.waitForTimeout(300);
 
     await expect(page.locator(".pager__count")).toHaveText("4 / 20");
-    await expect(page).toHaveURL(/#\/note\/n-doc-attn\/page\/4$/);
+    await expect(page).toHaveURL(/#\/note\/141\/page\/4$/);
   });
 });

@@ -8,8 +8,8 @@ import { signedIn, cardButton, railSettled } from "./helpers/app";
 // same 409 the real endpoint will.
 //
 // FIXTURE FACTS. The `note` folder (`#/folder/note`) holds the user subfolder
-// `Projects` plus the notes `Ideas & scratch` (`n-ideas`) and `Weekly review`
-// (`n-weekly`). At the library root the resolved category anchors (Note, Export,
+// `Projects` plus the notes `Ideas & scratch` (`102`) and `Weekly review`
+// (`101`). At the library root the resolved category anchors (Note, Export,
 // …) are the fixed folders the device relies on, where Rename must not appear.
 
 const dialog = (page: Page) => page.locator("dialog.rename");

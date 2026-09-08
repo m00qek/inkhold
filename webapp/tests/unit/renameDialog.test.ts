@@ -73,26 +73,26 @@ describe("validateRename — the stem gate", () => {
 describe("api.rename (fake) — NameTaken on a sibling clash", () => {
   it("renames the fixture entry in place and returns the updated entry", async () => {
     const api = createFakeApi({ latencyMs: 0 });
-    const updated = await api.rename("n-ideas", "Ideas — reorganised.note");
+    const updated = await api.rename("102", "Ideas — reorganised.note");
     expect(updated.name).toBe("Ideas — reorganised.note");
 
     // The change is visible in the folder's listing (mutated in place).
     const listing = await api.listFolder("note");
-    expect(listing.entries.some((e) => e.id === "n-ideas" && e.name === "Ideas — reorganised.note")).toBe(true);
+    expect(listing.entries.some((e) => e.id === "102" && e.name === "Ideas — reorganised.note")).toBe(true);
   });
 
   it("rejects with NameTakenError when a sibling in the same parent already has the name", async () => {
     const api = createFakeApi({ latencyMs: 0 });
-    // `n-ideas` ("Ideas & scratch") and `n-weekly` ("Weekly review") live in the
+    // `102` ("Ideas & scratch") and `101` ("Weekly review") live in the
     // SAME folder, so renaming one onto the other's name is a clash.
-    await expect(api.rename("n-ideas", "Weekly review")).rejects.toBeInstanceOf(NameTakenError);
+    await expect(api.rename("102", "Weekly review")).rejects.toBeInstanceOf(NameTakenError);
   });
 
   it("allows a name that only clashes with an entry in a DIFFERENT folder", async () => {
     const api = createFakeApi({ latencyMs: 0 });
     // "Cornell notes" lives in `mystyle`, not in `note`, so it is not a sibling of
-    // `n-ideas` and must not block the rename.
-    const updated = await api.rename("n-ideas", "Cornell notes");
+    // `102` and must not block the rename.
+    const updated = await api.rename("102", "Cornell notes");
     expect(updated.name).toBe("Cornell notes");
   });
 });

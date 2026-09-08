@@ -15,7 +15,7 @@ import {
   markParagraph,
   buildFindContent,
 } from "../../src/pages/txtFind";
-import type { TxtMatch } from "../../src/core/types";
+import type { TxtSegmentMatch } from "../../src/pages/txtFind";
 
 describe("fold", () => {
   it("strips diacritics and lowercases, like the index", () => {
@@ -53,7 +53,7 @@ describe("resolveFindSegments", () => {
   it("turns byte ranges into char ranges and folds the terms", () => {
     const text = "café here.\n\nplain tail.";
     // "plain tail." starts at byte 13 (café = 5 bytes + " here.\n\n" = 8), char 12.
-    const segs: TxtMatch[] = [{ segment: 1, offset: 13, length: 11, matches: 1, terms: ["Plain"] }];
+    const segs: TxtSegmentMatch[] = [{ segment: 1, offset: 13, length: 11, matches: 1, terms: ["Plain"] }];
     const [r] = resolveFindSegments(text, segs);
     expect(text.slice(r!.startChar, r!.endChar)).toBe("plain tail.");
     expect(r!.terms.has("plain")).toBe(true); // folded

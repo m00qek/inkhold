@@ -7,8 +7,8 @@ import { signedIn, mockRawFiles, inkFraction } from "./helpers/app";
 // placeholder page for a blob it cannot parse, and the client could not tell that
 // page was fake. `fileType` is now server-verified, so there are three outcomes.
 //
-// The fixture's cases: `n-doc-attn` is a real note, `n-shot-pricing` is a png,
-// `n-doc-lease` is a pdf.
+// The fixture's cases: `141` is a real note, `151` is a png,
+// `142` is a pdf.
 
 const card = (page: Page, name: string) => page.locator(".card", { hasText: name });
 
@@ -16,7 +16,7 @@ test.describe("non-.note files", () => {
   test("an image opens as an <img> off the raw-file endpoint, not the canvas pipeline", async ({ page }) => {
     await signedIn(page);
     await mockRawFiles(page);
-    await page.goto("/#/note/n-shot-pricing");
+    await page.goto("/#/note/151");
 
     const img = page.locator(".filestage__img");
     await expect(img).toBeVisible();
@@ -24,7 +24,7 @@ test.describe("non-.note files", () => {
     // The content-addressed raw-file URL — `?v=` is required by the route, which
     // is what lets it answer `immutable`.
     const src = await img.getAttribute("src");
-    expect(src).toMatch(/^\/file\/n-shot-pricing\?v=[0-9a-f]{32}$/);
+    expect(src).toMatch(/^\/file\/151\?v=[0-9a-f]{32}$/);
     expect(src).not.toContain("download=1"); // the PREVIEW is inline, not a download
 
     // It really decoded — not merely an element with an attribute.
@@ -48,7 +48,7 @@ test.describe("non-.note files", () => {
   test("a pdf opens in the PDF viewer now, not the reader's no-preview state", async ({ page }) => {
     await signedIn(page);
     await mockRawFiles(page);
-    await page.goto("/#/note/n-doc-lease");
+    await page.goto("/#/note/142");
 
     // Its OWN viewer — the reader is not involved. (`mockRawFiles` serves PNG
     // bytes for every raw file, so MuPDF refuses them and the viewer shows its
@@ -74,7 +74,7 @@ test.describe("non-.note files", () => {
       .getByRole("menuitem", { name: "PDF document" });
     await expect(raw).toBeVisible();
     const [download] = await Promise.all([page.waitForEvent("download"), raw.click()]);
-    expect(download.url()).toMatch(/\/file\/n-doc-lease\?v=[0-9a-f]{32}&download=1$/);
+    expect(download.url()).toMatch(/\/file\/142\?v=[0-9a-f]{32}&download=1$/);
     expect(download.suggestedFilename()).toBeTruthy();
     await expect(region).toBeVisible();
   });
@@ -85,7 +85,7 @@ test.describe("non-.note files", () => {
     // readable, no viewer here — keeps the state under test.
     await signedIn(page);
     await mockRawFiles(page);
-    await page.goto("/#/note/n-doc-epub");
+    await page.goto("/#/note/143");
 
     // Not a blank canvas: a named state that says what the file is.
     const body = page.locator(".filestage__empty");
@@ -101,7 +101,7 @@ test.describe("non-.note files", () => {
     // The download link is the versioned URL with the attachment flag.
     const link = body.locator(".filestage__download");
     await expect(link).toBeVisible();
-    expect(await link.getAttribute("href")).toMatch(/^\/file\/n-doc-epub\?v=[0-9a-f]{32}&download=1$/);
+    expect(await link.getAttribute("href")).toMatch(/^\/file\/143\?v=[0-9a-f]{32}&download=1$/);
 
     // …and it actually downloads, rather than navigating away from the app.
     const [download] = await Promise.all([page.waitForEvent("download"), link.click()]);
@@ -112,7 +112,7 @@ test.describe("non-.note files", () => {
   test("a real .note is untouched — the canvas pipeline still paints it", async ({ page }) => {
     await signedIn(page);
     await mockRawFiles(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
 
     await expect(page.locator(".pager__count")).toHaveText("1 / 20");
     await expect(page.locator(".filmstrip__page").first()).toBeVisible();
@@ -137,7 +137,7 @@ test.describe("non-.note files", () => {
     const shot = card(page, "pricing page");
     const thumb = shot.locator(".thumb__img");
     await expect(thumb).toBeVisible();
-    expect(await thumb.getAttribute("src")).toMatch(/^\/file\/n-shot-pricing\?v=[0-9a-f]{32}$/);
+    expect(await thumb.getAttribute("src")).toMatch(/^\/file\/151\?v=[0-9a-f]{32}$/);
     await expect.poll(async () => thumb.evaluate((e: HTMLImageElement) => e.naturalWidth)).toBeGreaterThan(0);
     // No canvas on an image card: registering one would ask the SNPG pipeline for
     // page bytes that do not exist.

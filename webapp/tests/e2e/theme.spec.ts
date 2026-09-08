@@ -213,7 +213,7 @@ test.describe("theme control reach", () => {
     expect(inLibrary.height).toBeGreaterThan(20);
 
     // The regression: open a note. The library topbar is gone…
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
     await expect(page.locator(".sn-root")).toHaveClass(/is-reading/);
     await expect(page.locator(".topbar")).toBeHidden();

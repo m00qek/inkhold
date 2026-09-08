@@ -55,8 +55,9 @@
 //!
 //! A blank page still gets a row: the band arithmetic is `first + page_index`,
 //! so a missing row is a hole in the run. It carries `recogn_status = 0` and
-//! NULL text, which keeps it out of the FTS predicate and out of
-//! `scoped_from_where` — present, addressable, invisible to search. A document
+//! NULL text, which keeps it out of the FTS predicate and out of the manifest's
+//! searchable predicate (`search/index_export.zig`) — present, addressable,
+//! invisible to search, and so absent from `text/<md5>` too. A document
 //! where EVERY page is like that is a scan, and that is a verdict
 //! (`Verdict.no_text`), not a failure: unrecorded, the worker would re-read a
 //! 1,450-page scanned book every idle tick for ever.
@@ -367,8 +368,9 @@ fn storePageRows(db: sqlite.Db, blob_md5: []const u8, pages: []const Page) !void
         s.bindInt(2, p.index);
         s.bindText(3, &hash); // content_hash — see the module's column contract
         // "Text present" is what `recogn_status = 1` means everywhere on this
-        // table, and `scoped_from_where` filters on it. A blank page says 0 and
-        // carries NULL text, so it is present in the band and absent from search.
+        // table, and the manifest's searchable predicate filters on it. A blank
+        // page says 0 and carries NULL text, so it is present in the band and
+        // absent from every derived record.
         s.bindInt(4, if (p.text.len == 0) 0 else 1);
         s.bindTextOpt(5, if (p.text.len == 0) null else &hash);
         s.bindTextOpt(6, if (p.text.len == 0) null else p.text);
@@ -459,7 +461,6 @@ test "the page cap is a decision with a stated value, not an accident" {
 const thumbstore = @import("../store/thumbs.zig");
 const filesvc = @import("files.zig");
 const deferredmod = @import("deferred.zig");
-const notesearch = @import("search/query.zig");
 const partition = @import("search_partition.zig");
 
 /// 120 pages, one line of text each: "Recipe N rutabaga leafNNN". Every page
@@ -471,11 +472,12 @@ const book_pdf = @embedFile("../pdf/testdata/text-120-page.pdf");
 /// Three bare `/MediaBox` pages with no content stream — a scan, minus the image.
 const scan_pdf = @embedFile("../pdf/testdata/three-page.pdf");
 
-/// WHAT REPLACED LIBRARY-WIDE SEARCH IN THESE TESTS. `golden-search.md` §6 step 6
-/// deleted the server's global read, so a test that used to ask "which of my
-/// files does this word appear in?" asks every live file it owns, one at a time,
-/// through the in-document read. The `files` join those reads are built on is
-/// the same security boundary the deleted one carried.
+/// WHAT REPLACED SEARCH IN THESE TESTS. `golden-search.md` §6 deleted the
+/// server's library-wide read in step 6 and its in-document read in step 7 —
+/// every query is the browser's now, answered off `text/<md5>`. So a test that
+/// used to ask "which of my files does this word appear in, and where?" asks the
+/// rows both those answers are DERIVED from: `note_page_index`, joined to
+/// `files` for the same ownership/tombstone boundary the deleted reads carried.
 const FoundFile = struct {
     noteId: u64,
     noteName: []const u8,
@@ -577,12 +579,6 @@ const Fixture = struct {
         return md5;
     }
 
-    fn fileId(f: *Fixture, name: []const u8) !u64 {
-        var r = (try f.db.row("SELECT id FROM files WHERE name = ?1 AND deleted = 0;", &.{.{ .text = name }})).?;
-        defer r.finalize();
-        return @intCast(r.int(0));
-    }
-
     /// The blob's segment rowids in page order, for one owner — the band, as the
     /// jump arithmetic sees it.
     fn band(f: *Fixture, user_id: u64, md5: []const u8) ![]i64 {
@@ -600,28 +596,41 @@ const Fixture = struct {
         return out.items;
     }
 
-    /// Which of `user_id`'s OWN live files contain `q` — see `FoundFile`.
+    /// Which of `user_id`'s OWN live files carry `q` on a page of finished
+    /// recognition, and the first ordinal that does — see `FoundFile`. Exact
+    /// substring rather than the index's fold: these fixtures are ASCII
+    /// (`rutabaga`, `leaf042`), and it puts one fewer mechanism between the
+    /// extractor under test and the assertion.
     fn search_(f: *Fixture, user_id: u64, q: []const u8) !FoundFiles {
         var hits: std.ArrayList(FoundFile) = .empty;
-        var names: std.ArrayList(FoundFile) = .empty;
-        {
-            var s = try f.db.prepare(
-                "SELECT id, name FROM files WHERE user_id = ?1 AND deleted = 0 AND is_folder = 0 ORDER BY id;",
-            );
-            defer s.finalize();
-            s.bindInt(1, @intCast(user_id));
-            while (try s.step()) try names.append(f.a(), .{
-                .noteId = @intCast(s.columnInt(0)),
-                .noteName = try f.a().dupe(u8, s.columnText(1)),
-                .pageIndex = 0,
-            });
-        }
-        for (names.items) |cand| {
-            const r = try notesearch.searchNotePages(f.a(), f.db, user_id, cand.noteId, q, null, notesearch.max_batch);
-            if (r.pages.len == 0) continue;
-            try hits.append(f.a(), .{ .noteId = cand.noteId, .noteName = cand.noteName, .pageIndex = r.pages[0].pageIndex });
-        }
+        var s = try f.db.prepare(
+            "SELECT fi.id, fi.name, MIN(p.page_index) FROM files fi " ++
+                "JOIN note_page_index p ON p.blob_md5 = fi.md5 " ++
+                "WHERE fi.user_id = ?1 AND fi.deleted = 0 AND fi.is_folder = 0 " ++
+                "AND p.recogn_status = 1 AND p.text LIKE '%' || ?2 || '%' " ++
+                "GROUP BY fi.id ORDER BY fi.id;",
+        );
+        defer s.finalize();
+        s.bindInt(1, @intCast(user_id));
+        s.bindText(2, q);
+        while (try s.step()) try hits.append(f.a(), .{
+            .noteId = @intCast(s.columnInt(0)),
+            .noteName = try f.a().dupe(u8, s.columnText(1)),
+            .pageIndex = s.columnInt(2),
+        });
         return .{ .hits = hits.items };
+    }
+
+    /// How many of `md5`'s pages carry `q` — the in-document half of `search_`,
+    /// and exactly what the browser's own index answers off `text/<md5>`.
+    fn pagesWith(f: *Fixture, md5: []const u8, q: []const u8) !i64 {
+        var r = (try f.db.row(
+            "SELECT COUNT(*) FROM note_page_index " ++
+                "WHERE blob_md5 = ?1 AND recogn_status = 1 AND text LIKE '%' || ?2 || '%';",
+            &.{ .{ .text = md5 }, .{ .text = q } },
+        )).?;
+        defer r.finalize();
+        return r.int(0);
     }
 };
 
@@ -682,12 +691,15 @@ fn expectFtsClean(f: *Fixture) !void {
 }
 
 test "THE BAND IS STILL CONTIGUOUS after a chunked write — the arithmetic the scan rests on" {
-    // The load-bearing property of this whole file. `query.docSegmentRanges`
-    // derives the document's own rowid ranges and runs one `M1><` pass per
-    // range, and `rowid ASC` is reading order only while a document's segments
-    // are ONE contiguous run in page order — so a scattered band costs a find
-    // extra passes and, past the range cap, the whole partition. Three commits
-    // produced this band, and it has to look exactly like one statement did.
+    // The load-bearing property of this whole file, and the reason a chunked
+    // write is not free: `rowid ASC` is reading order only while a document's
+    // segments are ONE contiguous run in page order, and three commits produced
+    // this band, so it has to look exactly like one statement did.
+    //
+    // The reader that DEPENDED on it (the in-doc scan's derived rowid ranges) is
+    // gone with `golden-search.md` §6 step 7. The band itself is not: it is what
+    // `maintain.zig`'s whole-doc re-mint and its `index_version` heal are defined
+    // in terms of, and it goes with `segment_search` in step 8, not before.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -831,48 +843,52 @@ test "AN INDEXED PDF IS SEARCHABLE END TO END: every page that matched, at its r
     try testing.expect(!try needsText(f.db, &md5));
 
     // The document is reachable at all, as the caller's own file.
-    const id = try f.fileId("book.pdf");
     const hits = try f.search_(1, "rutabaga"); // on all 120 pages
     try testing.expectEqual(@as(usize, 1), hits.hits.len);
     try testing.expectEqualStrings("book.pdf", hits.hits[0].noteName);
 
-    // And the find inside it is COMPLETE — every page, which is the claim no
-    // ranked read could make.
-    const in_doc = try notesearch.searchNotePages(f.a(), f.db, 1, id, "rutabaga", null, 500);
-    try testing.expectEqual(@as(usize, 120), in_doc.pages.len);
+    // And what is there to find inside it is COMPLETE — every page. The find
+    // itself is the browser's since `golden-search.md` §6 step 7, so what this
+    // asserts is the material it is given: 120 rows, each carrying the word.
+    try testing.expectEqual(@as(i64, 120), try f.pagesWith(&md5, "rutabaga"));
 
-    // A word on exactly one page finds exactly that page, which is what makes
+    // A word on exactly one page sits on exactly that page, which is what makes
     // `page_index` the PDF PAGE NUMBER rather than an ordinal into something.
-    const one = try notesearch.searchNotePages(f.a(), f.db, 1, id, "leaf077", null, 500);
-    try testing.expectEqual(@as(usize, 1), one.pages.len);
-    try testing.expectEqual(@as(i64, 77), one.pages[0].pageIndex);
+    try testing.expectEqual(@as(i64, 1), try f.pagesWith(&md5, "leaf077"));
+    const one = try f.search_(1, "leaf077");
+    try testing.expectEqual(@as(usize, 1), one.hits.len);
+    try testing.expectEqual(@as(i64, 77), one.hits[0].pageIndex);
 
     // And a term the document lacks reaches it from neither direction.
-    try testing.expectEqual(@as(usize, 0), (try notesearch.searchNotePages(f.a(), f.db, 1, id, "quokka", null, 500)).pages.len);
+    try testing.expectEqual(@as(i64, 0), try f.pagesWith(&md5, "quokka"));
     for ((try f.search_(1, "quokka")).hits) |h| try testing.expect(!std.mem.eql(u8, h.noteName, "book.pdf"));
 }
 
-test "find-in-PDF's whole server side is the note-scoped route unchanged: kind = 2 pages, with the terms the client locates against" {
+test "find-in-PDF's whole server side is a kind = 2 page row per PDF page, addressed by its page number" {
     // THE GATE FOR find-in-PDF (`pdf-in-doc-search.md` §2). The claim under test
-    // is that the in-document route needs NOTHING new for a PDF: it is keyed on
-    // the document's blob, not on its format, so a `kind = 2` page comes back
-    // through the same statement a `.note` page does — and it comes back with
-    // `terms`, which is the whole client contract. The viewer marks what the
-    // server COUNTED; without terms it would have to re-derive membership, which
-    // is the one thing the division of labour forbids.
+    // is that a PDF needs NOTHING new on the server: it contributes the same
+    // per-segment row a `.note` page does, keyed on the document's blob rather
+    // than on its format, so the SAME derivation carries it into `text/<md5>` and
+    // the SAME browser index answers a find inside it. `golden-search.md` §1.1 is
+    // that claim generalised — format differences stop being code and become the
+    // ordinal and address fields of a record.
+    //
+    // Where the terms went: the route used to report which INDEX terms a query
+    // expanded to, because the viewer marked what the server had counted. The
+    // browser holds the index now and names its own terms off this text, so what
+    // the server owes is the text at the right ordinal — which is what is
+    // asserted here.
     //
     // The `indexable = 1` gate this file's header warns every reader about is a
     // COVERAGE predicate (the manifest's unsearchable-notes denominator,
-    // `index_export.zig`) and is not in `scoped_from_where`, which is what
-    // `searchNotePages` runs. Asserted below rather than argued: the flag really
-    // is off for this document and the pages really do come back anyway, so a
-    // future reader who moves that predicate into the shared clause breaks this
-    // test rather than the feature.
+    // `index_export.zig`), and it does not gate a page row. Asserted below rather
+    // than argued: the flag really is off for this document and the pages really
+    // are there anyway, so a future reader who conflates the two breaks this test
+    // rather than the feature.
     var f = try Fixture.init();
     defer f.deinit();
 
     const md5 = try f.put(1, "book.pdf", book_pdf);
-    const id = try f.fileId("book.pdf");
 
     // A PDF is not an indexable NOTE, and never becomes one.
     var ix = (try f.db.row("SELECT indexable FROM note_index WHERE blob_md5 = ?1;", &.{.{ .text = &md5 }})).?;
@@ -880,8 +896,8 @@ test "find-in-PDF's whole server side is the note-scoped route unchanged: kind =
     try testing.expectEqual(@as(i64, 0), ix.int(0));
 
     // Every row this document contributed is `kind = 2` — the PDF tenant's — so
-    // what the route returns below is unambiguously a PDF page and not some
-    // `.note` row that wandered in.
+    // what is read below is unambiguously a PDF page and not some `.note` row
+    // that wandered in.
     var kinds = (try f.db.row(
         "SELECT COUNT(*), SUM(kind = 2) FROM note_page_index WHERE blob_md5 = ?1;",
         &.{.{ .text = &md5 }},
@@ -890,26 +906,16 @@ test "find-in-PDF's whole server side is the note-scoped route unchanged: kind =
     try testing.expectEqual(@as(i64, 120), kinds.int(0));
     try testing.expectEqual(@as(i64, 120), kinds.int(1));
 
-    // The route itself, on a word that lives on ONE page: the page number the
-    // viewer opens, the count it displays, and the folded term it locates.
-    const one = try notesearch.searchNotePages(f.a(), f.db, 1, id, "leaf042", null, 500);
-    try testing.expectEqual(@as(usize, 1), one.pages.len);
-    try testing.expectEqual(@as(i64, 42), one.pages[0].pageIndex);
-    try testing.expectEqual(@as(i64, 1), one.pages[0].matches);
-    try testing.expectEqual(@as(usize, 1), one.pages[0].terms.len);
-    try testing.expectEqualStrings("leaf042", one.pages[0].terms[0]);
+    // A word that lives on ONE page: it is on one row, and that row's ordinal is
+    // the PDF page number the viewer opens.
+    try testing.expectEqual(@as(i64, 1), try f.pagesWith(&md5, "leaf042"));
+    const one = try f.search_(1, "leaf042");
+    try testing.expectEqual(@as(usize, 1), one.hits.len);
+    try testing.expectEqual(@as(i64, 42), one.hits[0].pageIndex);
 
-    // AND THE TERM IS THE INDEX'S, NOT THE QUERY'S — the property §6 leans on.
-    // A prefix query (the box mid-typing) counts the words it expanded to and
-    // NAMES them, so the client locates `leaf042` rather than re-implementing
-    // what `leaf042*` meant.
-    const typing = try notesearch.searchNotePages(f.a(), f.db, 1, id, "leaf04", null, 500);
-    try testing.expectEqual(@as(usize, 10), typing.pages.len); // leaf040..leaf049
-    for (typing.pages) |p| {
-        try testing.expectEqual(@as(usize, 1), p.terms.len);
-        try testing.expect(std.mem.startsWith(u8, p.terms[0], "leaf04"));
-        try testing.expect(p.terms[0].len == "leaf040".len); // the WORD, not the prefix
-    }
+    // The ten pages a mid-typing `leaf04` would expand across are ten SEPARATE
+    // rows, not one run of text — the property that makes an ordinal an address.
+    try testing.expectEqual(@as(i64, 10), try f.pagesWith(&md5, "leaf04")); // leaf040..leaf049
 }
 
 test "a PDF that yields NO TEXT is a verdict, and its pages stay invisible to search" {
@@ -1114,7 +1120,6 @@ test "A NOTE HEAL LEAVES THE PDF TENANT'S ROWS ALONE — a tenant owns its own s
     defer f.deinit();
 
     const md5 = try f.put(1, "book.pdf", book_pdf);
-    const id = try f.fileId("book.pdf");
     const before = try f.band(1, &md5);
 
     // Force the lazy heal the way the shipped path does: stale the version, then
@@ -1135,10 +1140,11 @@ test "A NOTE HEAL LEAVES THE PDF TENANT'S ROWS ALONE — a tenant owns its own s
     const after = try f.band(1, &md5);
     try testing.expectEqualSlices(i64, before, after);
 
-    // And the document is still findable, which is the property a user notices.
-    const hit = try notesearch.searchNotePages(f.a(), f.db, 1, id, "leaf042", null, 500);
-    try testing.expectEqual(@as(usize, 1), hit.pages.len);
-    try testing.expectEqual(@as(i64, 42), hit.pages[0].pageIndex);
+    // And the text is still there, at its page number — the property a user
+    // notices, because it is what `text/<md5>` is derived from.
+    const hit = try f.search_(1, "leaf042");
+    try testing.expectEqual(@as(usize, 1), hit.hits.len);
+    try testing.expectEqual(@as(i64, 42), hit.hits[0].pageIndex);
     try expectFtsClean(&f);
 }
 

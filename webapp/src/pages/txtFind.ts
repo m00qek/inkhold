@@ -11,13 +11,14 @@
 // — and nothing of their mechanism.
 //
 // THE ONE HAZARD THIS FILE EXISTS TO GET RIGHT: the byte range vs the string
-// index. The backend addresses a paragraph by its BYTE offset in the raw blob
-// (`recogn_offset`/`recogn_length`); the viewer holds the file as a decoded
-// UTF-16 string. `byteToCharMap` is the one conversion between them, so a
-// multi-byte character before a match cannot slide the highlight off the word.
+// index. A paragraph is addressed by its BYTE offset in the raw blob — the `o`/`l`
+// fields a `.txt` segment carries in its `text/<md5>` record, and the reason that
+// record has them at all (`golden-search.md` §1.1: the address is a FIELD, not a
+// branch). The viewer holds the file as a decoded UTF-16 string. `byteToCharMap`
+// is the one conversion between them, so a multi-byte character before a match
+// cannot slide the highlight off the word.
 
 import { el } from "../ui/dom";
-import type { TxtMatch } from "../core/types";
 
 /**
  * Case- and accent-insensitive form — the SAME fold `unicode61
@@ -74,6 +75,26 @@ export function byteToCharMap(text: string, byteOffsets: readonly number[]): Map
   return out;
 }
 
+/**
+ * One matching paragraph as the index reports it — `docSearch.ts`'s
+ * `DocSegmentMatch` narrowed to the `.txt` case, where the byte range is present.
+ *
+ * Declared structurally rather than imported from the search module so this file
+ * stays a pure text/DOM adapter: it is handed ordinals, ranges, terms and counts,
+ * and does not know what produced them.
+ */
+export interface TxtSegmentMatch {
+  /** The paragraph's segment ordinal — the deep link's target. */
+  readonly segment: number;
+  /** Its byte offset in the raw blob, and its byte length. */
+  readonly offset: number;
+  readonly length: number;
+  /** The index's exact match count for this paragraph. */
+  readonly matches: number;
+  /** The folded terms it matched — what a word is marked against. */
+  readonly terms: readonly string[];
+}
+
 /** One matching paragraph, resolved into the loaded string's coordinates. */
 export interface FindSegment {
   /** The paragraph's segment ordinal — the deep link's target, and the URL page. */
@@ -88,11 +109,11 @@ export interface FindSegment {
 }
 
 /**
- * Resolve each backend {@link TxtMatch}'s byte range to a char range in `text`,
- * in ONE byte→char pass over the whole set of offsets. Input order (ordinal =
- * byte order) is preserved.
+ * Resolve each {@link TxtSegmentMatch}'s byte range to a char range in `text`, in
+ * ONE byte→char pass over the whole set of offsets. Input order (ordinal = byte
+ * order) is preserved.
  */
-export function resolveFindSegments(text: string, segments: readonly TxtMatch[]): FindSegment[] {
+export function resolveFindSegments(text: string, segments: readonly TxtSegmentMatch[]): FindSegment[] {
   const offsets: number[] = [];
   for (const s of segments) offsets.push(s.offset, s.offset + s.length);
   const map = byteToCharMap(text, offsets);
@@ -109,13 +130,17 @@ export function resolveFindSegments(text: string, segments: readonly TxtMatch[])
  * Total match instances across the matching paragraphs — the exact "N".
  *
  * Summed from the INDEX's per-paragraph counts, never from the marks the viewer
- * drew: where the client tokenises a word differently from the index the two can
+ * drew: where this side tokenises a word differently from the index the two can
  * disagree, and then the count wins — the same one-way authority find-in-note's
  * counter holds over its ovals.
  */
 export function totalMatches(segments: readonly { matches: number }[]): number {
   return segments.reduce((n, s) => n + s.matches, 0);
 }
+
+/** The counter while the answer is still coming — the first find on a file pays
+ *  a `text/<md5>` fetch and an index build, and a number cannot be shown yet. */
+export const TXT_SEARCHING = "Searching…";
 
 /**
  * The counter copy: "N matches in M paragraphs", singular-aware. Exact, because
@@ -126,21 +151,6 @@ export function txtCountText(total: number, paragraphs: number): string {
   if (paragraphs <= 0) return "No matches";
   const m = `${total} ${total === 1 ? "match" : "matches"}`;
   const p = `${paragraphs} ${paragraphs === 1 ? "paragraph" : "paragraphs"}`;
-  return `${m} in ${p}`;
-}
-
-/**
- * The STREAMING counter copy (in-doc-search Phase 4): a FLOOR while the file is
- * still being drained ("N+ matches in M+ paragraphs"), settling to the exact
- * {@link txtCountText} the moment the last batch lands. A finite file always
- * reaches exact, so the "+" is only ever the in-progress display — the same
- * browser-Ctrl+F shape find-in-note's counter uses.
- */
-export function txtCountProgress(total: number, paragraphs: number, done: boolean): string {
-  if (done) return txtCountText(total, paragraphs);
-  if (paragraphs <= 0) return "Searching…";
-  const m = `${total}+ ${total === 1 ? "match" : "matches"}`;
-  const p = `${paragraphs}+ ${paragraphs === 1 ? "paragraph" : "paragraphs"}`;
   return `${m} in ${p}`;
 }
 

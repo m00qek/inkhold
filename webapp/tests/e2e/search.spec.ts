@@ -1,5 +1,7 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { signedIn, contrastRatio, cardButton, freezeMotion, paintedColours, railSettled } from "./helpers/app";
+import { mockDocText, noteTextRecord, type TextRecord } from "./helpers/docText";
+import { fakeFileHash } from "../../src/api/fake";
 
 // ONE QUERY, ONE SCOPE, ONE LIST — and, since `golden-search.md` §6 step 6, one
 // ENGINE.
@@ -29,10 +31,37 @@ import { signedIn, contrastRatio, cardButton, freezeMotion, paintedColours, rail
 // `tests/unit/resultRow.test.ts` against the real card factory, and the engine's
 // answers in `tests/unit/searchService.test.ts`.
 //
-// The sweep's own assertion — a network log holding `search-index/manifest`,
-// `search-index/stream` and `text/<md5>` and nothing else — needs a fixture that
-// serves those routes. It lands with §6 step 7, which is when the in-document
-// routes it would also have to exclude actually go.
+// THE SWEEP'S OWN ASSERTION (§6.1), AND THE HALF OF IT THAT IS REACHABLE
+//
+// §6.1 asks for one run that types a query into the library search box, opens a
+// result, searches inside the document, and finds `search-index/manifest`,
+// `search-index/stream` and `text/<md5>` in the network log and NOTHING ELSE
+// search-related. Half of that is asserted at the bottom of this file — the
+// NOTHING ELSE half, which is the half that can regress — and the positive half
+// is not, for a reason worth writing down rather than deferring again.
+//
+// `search-index/stream` is never requested here because the sync never gets a
+// manifest to diff, and it never gets one because the fake ships no index
+// fixture: no `search-index/manifest` and no `search-index/stream` for the sync
+// to fetch, so the store stays empty and the index answers zero documents.
+//
+// THE PREREQUISITE IS NOW MET, AND THE FIXTURE IS NOT YET WRITTEN. The blocker
+// used to be the JOIN rather than the bytes: `gallerySearch.ts` matches an index
+// hit to a card by `String(doc.fileId)` and `library.ts` feeds the offline
+// stand-in with `Number(e.id)`, so the manifest's `files.id` varint and the
+// listing's `Id` have to be the same number written two ways — and every fixture
+// id was an opaque string (`n-doc-attn`), which `Number()` turns into `NaN`. No
+// manifest row could name one, whatever bytes a mock served. `src/api/fake.ts`
+// now issues DECIMAL ids, as `files.id` really is (see `note` there), so the
+// join works and the remaining work is honest bytes: a helper that serves a real
+// `SMAN` manifest (`src/search/manifestCodec.ts` decodes it;
+// `backend/services/search/testdata/manifest_golden.bin` is a real one) and a
+// real stitched terms stream (`backend/http/gzip_stitch.zig`).
+//
+// Until that lands: the transcript half of a library query answers zero
+// documents here, the name half is what these tests exercise, and the
+// in-document half — which is a real network call again in step 7 — is
+// exercised in full.
 
 /** A result row: the library's own card, in its search variant. */
 function results(page: Page): Locator {
@@ -47,6 +76,18 @@ function searchBox(page: Page): Locator {
 function matchLine(row: Locator): Locator {
   return row.locator(".card__matches");
 }
+
+/**
+ * The one document a result is opened INTO below, as its text record.
+ *
+ * "Aurora" is in `121`'s name, which is what the row matches on — and
+ * also in every recognised page's transcript, because `fakeText` opens each page
+ * with the note's own name. Six pages, indices 2 and 5 unrecognised, so four
+ * pages carry it once each.
+ */
+const TEXT: Record<string, TextRecord> = {
+  [fakeFileHash("121")]: noteTextRecord("Project Aurora — kickoff", 6),
+};
 
 test.describe("universal search", () => {
   test("typing surfaces rows that mark the matched name — and carry no excerpt", async ({ page }) => {
@@ -262,6 +303,10 @@ test.describe("universal search", () => {
   // page one Next away, instead of one chip away out here.
   test("a result opens the note WITH find already running on the typed query", async ({ page }) => {
     await signedIn(page);
+    // The find bar that opens on the other side of this click fetches
+    // `text/<md5>` and answers from the browser's own engine (§1.1). Registered
+    // after `signedIn` so it beats `mockApi`'s catch-all.
+    await mockDocText(page, TEXT);
     await page.goto("/");
     await railSettled(page);
     await searchBox(page).fill("Aurora");
@@ -276,15 +321,64 @@ test.describe("universal search", () => {
     // answer — and §4.3 took the excerpt, so there is no mark to read and no
     // expansion the row holds. `deepLinkQuery` is where that changes when the
     // index's own expansion reaches the row.
-    await expect(page).toHaveURL(/#\/note\/n-proj-alpha(\/page\/\d+)?\?q=Aurora$/);
+    await expect(page).toHaveURL(/#\/note\/121(\/page\/\d+)?\?q=Aurora$/);
 
     // Primed, not merely carried: the bar is open, the field is filled, and the
-    // counter has settled on a real total.
+    // counter has settled on a real total. Four recognised pages of six, one
+    // "Aurora" each — the note's own name opens every page's transcript.
     await expect(page.locator(".findbar")).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Find in this note" })).toHaveValue("Aurora");
-    await expect(page.locator(".findbar__count")).toHaveText(/^1 of \d+$/);
+    // Generous, because this is the session's FIRST find: it pays the wasm
+    // instantiate (16.13 MB, §8.1) and the index build before it can say a
+    // number, and the suite runs `fullyParallel`.
+    await expect(page.locator(".findbar__count")).toHaveText("1 of 4", { timeout: 20_000 });
     // …and something is actually circled on the page in front of you.
     await expect(page.locator(".page .findbox.is-current")).toHaveCount(1);
+  });
+
+  // THE SWEEP, as far as this suite can carry it (§6.1). Eight routes became
+  // three, and the three that survive are `search-index/manifest`,
+  // `search-index/stream` and `text/<md5>`. This walks the whole user path the
+  // sweep describes — type in the library box, open a result, search inside the
+  // document — and asserts that nothing else with `search` in its path was ever
+  // requested.
+  //
+  // It is the NEGATIVE half, and it is deliberately the negative half: the
+  // positive one ("the stream was fetched") is unreachable here for the reason
+  // the file header gives, but the negative one is what actually rots. A
+  // reintroduced `/note/:id/search`, `/note/:id/txt-search`, a history- or
+  // bin-scoped twin, or a revived library-wide `/api/controlplane/search` all
+  // fail this the moment they are called, and none of them would fail anything
+  // else in the suite — the viewers would simply work again, off the wrong
+  // mechanism.
+  test("no route with 'search' in its path is reached but the index's own two", async ({ page }) => {
+    await signedIn(page);
+    // `mockDocText` records every search-shaped request the page makes, not only
+    // the ones it answers, so a call to a resurrected route is seen even though
+    // `mockApi`'s catch-all would blandly succeed it.
+    const text = await mockDocText(page, TEXT);
+    await page.goto("/");
+    await railSettled(page);
+
+    await searchBox(page).fill("Aurora");
+    const row = results(page).filter({ hasText: "Project Aurora — kickoff" });
+    await expect(row).toHaveCount(1);
+    await row.locator(".card__open").click();
+    await expect(page.locator(".findbar__count")).toHaveText("1 of 4", { timeout: 20_000 });
+
+    // A second query inside the document, so the in-document path is exercised
+    // past its first call — where a fallback to a server route would have lived.
+    await page.getByRole("textbox", { name: "Find in this note" }).fill("kickoff");
+    await expect(page.locator(".findbar__count")).toHaveText("1 of 4", { timeout: 20_000 });
+
+    const paths = text.searchPaths();
+    // Non-vacuity: the document's text really was fetched, once.
+    expect(paths.filter((p) => p.startsWith("/api/controlplane/text/"))).toHaveLength(1);
+    // …and every other search-shaped path belongs to the index's own two routes.
+    const strays = paths.filter(
+      (p) => !p.startsWith("/api/controlplane/text/") && !p.startsWith("/api/controlplane/search-index/"),
+    );
+    expect(strays).toEqual([]);
   });
 
   test("a result row is reachable and openable by keyboard", async ({ page }) => {
@@ -305,7 +399,7 @@ test.describe("universal search", () => {
 
   test("the page-carrying URL is truthful: a reload lands on the same page", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-proj-alpha/page/4");
+    await page.goto("/#/note/121/page/4");
 
     await expect(page.locator(".pager__count")).toHaveText("4 / 6");
     await page.reload();
@@ -421,11 +515,11 @@ test.describe("universal search", () => {
 
   test("the library search box is not offered over an open reader", async ({ page }) => {
     await signedIn(page);
-    await page.goto("/#/note/n-doc-attn");
+    await page.goto("/#/note/141");
     await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
 
     await expect(searchBox(page)).toBeHidden();
-    await expect(page).toHaveURL(/#\/note\/n-doc-attn$/);
+    await expect(page).toHaveURL(/#\/note\/141$/);
 
     // Closing the reader gives it straight back, query and all.
     await page.locator(".backbtn").click();

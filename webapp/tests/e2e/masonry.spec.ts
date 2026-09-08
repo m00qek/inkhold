@@ -49,7 +49,7 @@ test.describe("masonry icon gallery", () => {
   // notes/spd, the client constant for .txt, the decoded image for an image,
   // the 3:4 fallback for a glyph — at one uniform column width.
   test("mixed gallery: every tile's aspect matches its source, at uniform width", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+    await mockThumbnailBackend(page, { textIds: ["177"] });
     await openFiles(page);
     const w = await tileWidth(page);
 
@@ -88,7 +88,7 @@ test.describe("masonry icon gallery", () => {
   // column. `grid-auto-flow: row` is what carries it; this pins the behaviour,
   // not the property.
   test("the sort order reads left-to-right across the masonry", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+    await mockThumbnailBackend(page, { textIds: ["177"] });
     await openFiles(page);
 
     // DOM order is the sort order (default "recent"; the fixture's updatedAt
@@ -134,7 +134,7 @@ test.describe("masonry icon gallery", () => {
   // before its image bytes arrive, and that box does not move when they land.
   // The held `/thumbnail/` response is what makes "before" a real observation.
   test("tiles with a served aspect are stable across their image load", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"], delayMs: 600 });
+    await mockThumbnailBackend(page, { textIds: ["177"], delayMs: 600 });
     await openFiles(page);
 
     // Both tiles are gated on the held `/thumbnail/` response; the `.txt` tile
@@ -169,7 +169,7 @@ test.describe("masonry icon gallery", () => {
   // at 2.5× the column width, a pathological panorama floors at width / 2.5,
   // and both letterbox (`object-fit: contain`) rather than distort.
   test("extreme aspects clamp at 2.5× the column width, letterboxed", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+    await mockThumbnailBackend(page, { textIds: ["177"] });
     await openFiles(page);
     const w = await tileWidth(page);
 
@@ -203,7 +203,7 @@ test.describe("reflow-free list rows", () => {
   }
 
   test("a landscape row's lead and text are final before its thumb loads", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"], delayMs: 600 });
+    await mockThumbnailBackend(page, { textIds: ["177"], delayMs: 600 });
     await openFilesList(page);
 
     const row = card(page, "Whiteboard — sprint plan");
@@ -228,7 +228,7 @@ test.describe("reflow-free list rows", () => {
   });
 
   test("an extreme panorama reserves its CLAMPED width from first paint", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"], delayMs: 600 });
+    await mockThumbnailBackend(page, { textIds: ["177"], delayMs: 600 });
     await openFilesList(page);
 
     const row = card(page, "Panorama — coastline");
@@ -249,7 +249,7 @@ test.describe("reflow-free list rows", () => {
   });
 
   test("the 3:4 floor still stands for a row with nothing to state yet", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["n-files-readme"] });
+    await mockThumbnailBackend(page, { textIds: ["177"] });
     await openFilesList(page);
 
     const listH = await page.evaluate(() =>

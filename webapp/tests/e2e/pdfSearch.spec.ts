@@ -2,29 +2,57 @@ import { test, expect, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { signedIn, freezeMotion } from "./helpers/app";
+import { mockDocText, pdfTextRecord, type TextRecord } from "./helpers/docText";
+import { fakeFileHash } from "../../src/api/fake";
 
 // FIND-IN-PDF, END TO END, and the only test in the suite where both halves of
 // the feature are real at once.
 //
-// The division of labour is the whole design (`docs/scratch/pdf-in-doc-search.md`
-// §1): the SERVER decides which pages matched and names the folded terms it
-// counted; the CLIENT asks MuPDF where those words sit and marks them. Every
-// other test stands on one side of that line — the Zig suite proves the route
-// answers for a `kind = 2` blob, `pdfFind.test.ts` proves the controller obeys
-// the count it is given, the wasm ABI test proves `ink_page_words` reports boxes
-// in the page's own space. Only here do a real search result, a real route, a
-// real MuPDF instance and a real page of glyphs have to agree.
+// The division of labour survives §6 step 7 intact; what moved is only which
+// machine does the first half. The INDEX decides which pages matched and names
+// the folded terms it counted; MuPDF is asked where those words sit and the
+// viewer marks them. That first half used to be a Zig route over a `kind = 2`
+// blob and is now the browser's own FTS5 instance, built from `text/<md5>` —
+// the SAME route and the SAME record the reader and the `.txt` viewer fetch,
+// because a PDF page is a segment whose ordinal is a page number and nothing
+// else about it is special (`golden-search.md` §1.1).
 //
-// WHICH IS WHY THE TWO FIXTURES ARE THE SAME TEXT. The library runs against the
-// in-memory fake `Api`, whose `PDF_CONTENT` stands in for the server's index;
-// the raw file is a REAL browser request, served here as a REAL PDF carrying the
-// same lines. If they ever drift, this fails with the count right and the marks
-// missing — which is precisely the failure the honesty rule tolerates on a real
-// document and must not tolerate in a fixture.
+// Every other test stands on one side of that line — `pdfFind.test.ts` proves
+// the controller obeys the count it is given, `docSearch.test.ts` proves the
+// engine's answer, the wasm ABI test proves `ink_page_words` reports boxes in
+// the page's own space. Only here do a real index, a real record, a real MuPDF
+// instance and a real page of glyphs have to agree.
+//
+// WHICH IS WHY THE TWO FIXTURES ARE THE SAME TEXT. The raw file is a REAL
+// browser request, served here as a REAL PDF; the text record served alongside
+// it carries those same lines. If they ever drift, this fails with the count
+// right and the marks missing — which is precisely the failure the honesty rule
+// tolerates on a real document and must not tolerate in a fixture.
+//
+// WHAT THIS FILE NO LONGER ASSERTS, AND WHY IT IS NOT A DELETION
+//
+// It used to arrive at the viewer by typing "marmalade" into the LIBRARY search
+// box and clicking the row, checking on the way past that the row said "Matches
+// on 3 pages" and carried no excerpt. The library-wide transcript half cannot
+// answer against the fake — see `search.spec.ts`'s header for the two reasons,
+// the second of which (`gallerySearch.ts` joins on `String(doc.fileId)`, and
+// every fixture id is an opaque string) no mock in this directory can fix. The
+// row's own count line is pinned in `tests/unit/resultRow.test.ts`.
+//
+// So this enters by the URL that row PRODUCES. Same screen, same deep link, and
+// everything from the viewer inward is asserted unchanged.
+
+const MANUAL = "178";
+const MANUAL_MD5 = fakeFileHash(MANUAL);
 
 const PDF_BYTES = readFileSync(
   fileURLToPath(new URL("../../wasm/tests/fixtures/text-four-page.pdf", import.meta.url)),
 );
+
+/** The book's text record: four pages, "Marmalade" on 1, 2 and 4 — page 3 (index
+ *  2) is the one without it, which is what makes Next skipping a page an
+ *  observation rather than a coincidence. */
+const TEXT: Record<string, TextRecord> = { [MANUAL_MD5]: pdfTextRecord() };
 
 async function servePdf(page: Page): Promise<void> {
   await page.route(
@@ -40,35 +68,35 @@ async function servePdf(page: Page): Promise<void> {
   );
 }
 
-const searchBox = (page: Page) => page.getByRole("searchbox", { name: "Search notes" });
-const results = (page: Page) => page.locator(".card--result");
+/** The whole backend this file needs: the session, the raw PDF, and the one
+ *  search route left. `mockDocText` goes AFTER `signedIn` so it wins over
+ *  `mockApi`'s catch-all. */
+async function openManual(page: Page, route: string): Promise<{ count(md5?: string): number }> {
+  await signedIn(page);
+  await servePdf(page);
+  const text = await mockDocText(page, TEXT);
+  await page.goto(route);
+  await freezeMotion(page);
+  return text;
+}
+
 const viewer = (page: Page) => page.getByRole("region", { name: "PDF viewer" });
 const marks = (page: Page) => page.locator(".pdf-find-mark");
 
-test.describe("find in PDF", () => {
-  test("a global hit on a PDF opens the viewer at that page, primed and marked", async ({
-    page,
-  }) => {
-    await signedIn(page);
-    await servePdf(page);
-    await page.goto("/");
-    await freezeMotion(page);
+/** The counter, waited for generously: the first find of a session pays the wasm
+ *  instantiate (16.13 MB, §8.1) and the index build before it can say a number,
+ *  and MuPDF has to raster a page under the same contention. */
+async function counts(page: Page, text: string): Promise<void> {
+  await expect(viewer(page).locator(".pdfbar__count")).toHaveText(text, { timeout: 20_000 });
+}
 
+test.describe("find in PDF", () => {
+  test("a `?q=` deep link opens the viewer at that page, primed and marked", async ({ page }) => {
     // A term that lives ONLY in the PDF's pages — not in a note transcript, not
     // in the `.txt`, not in a file name.
-    await searchBox(page).fill("marmalade");
+    const text = await openManual(page, `/#/note/${MANUAL}?q=marmalade`);
 
-    // One result, the manual, with a PAGE-unit locator and NO excerpt — §6 step
-    // 6 deleted the snippet and the server route that rendered it, so the row's
-    // whole claim is its count. `kind = 2` collapses to the note's unit
-    // downstream, and "Matches on 3 pages" is what a PDF should say anyway.
-    const row = results(page).filter({ hasText: "Appliance manual" }).first();
-    await expect(row).toBeVisible();
-    await expect(row.locator(".hit__snippet")).toHaveCount(0);
-    await expect(row.locator(".card__matches")).toHaveText("Matches on 3 pages");
-
-    // Click it → the PDF VIEWER (not the reader) opens.
-    await row.locator("button.card__open").click();
+    // The PDF VIEWER, not the reader.
     await expect(viewer(page)).toBeVisible();
     await expect(page.locator(".reader.is-open")).toBeHidden();
 
@@ -79,12 +107,15 @@ test.describe("find in PDF", () => {
     await expect(bar).toBeVisible();
     await expect(bar.locator("input")).toHaveValue("marmalade");
 
-    // The counter is the SERVER's: three pages, one match each.
-    await expect(bar.locator(".pdfbar__count")).toHaveText("1 of 3", { timeout: 20_000 });
+    // The counter is the INDEX's: three pages, one match each.
+    await counts(page, "1 of 3");
+    // …and it cost exactly one fetch of the document's text (§4.1).
+    expect(text.count(MANUAL_MD5)).toBe(1);
 
     // AND THE MATCH IS MARKED, by a real MuPDF instance that located the word on
     // a real page of glyphs. This is the assertion nothing else in the suite can
-    // make.
+    // make: one machine said WHICH page and WHICH folded terms, another said
+    // WHERE, and the two agreed.
     await expect(marks(page).first()).toBeVisible({ timeout: 20_000 });
     await expect(marks(page)).toHaveCount(1);
     await expect(marks(page).first()).toHaveClass(/is-current/);
@@ -117,26 +148,25 @@ test.describe("find in PDF", () => {
   });
 
   test("Next walks the matches, turning the page and moving the mark with it", async ({ page }) => {
-    await signedIn(page);
-    await servePdf(page);
-    await page.goto("/#/note/n-files-manual/page/1?q=marmalade");
-    await freezeMotion(page);
+    const text = await openManual(page, `/#/note/${MANUAL}/page/1?q=marmalade`);
 
     const region = viewer(page);
     const bar = region.locator(".pdfbar");
-    await expect(bar.locator(".pdfbar__count")).toHaveText("1 of 3", { timeout: 20_000 });
+    await counts(page, "1 of 3");
     await expect(region.getByText("1 / 4")).toBeVisible();
 
     // Page 2 of the fixture carries the second match; page 3 does not.
     await bar.getByRole("button", { name: "Next match" }).click();
-    await expect(bar.locator(".pdfbar__count")).toHaveText("2 of 3");
+    await counts(page, "2 of 3");
     await expect(region.getByText("2 / 4")).toBeVisible();
     await expect(marks(page).first()).toBeVisible({ timeout: 20_000 });
 
     // …and the third skips the unmatched page entirely, which is what makes this
-    // a document-wide find rather than a per-page one.
+    // a document-wide find rather than a per-page one. THE SKIP IS THE INDEX'S:
+    // page 3's segment is in the record and simply does not match, so nothing
+    // here is inferring absence from a page it failed to raster.
     await bar.getByRole("button", { name: "Next match" }).click();
-    await expect(bar.locator(".pdfbar__count")).toHaveText("3 of 3");
+    await counts(page, "3 of 3");
     await expect(region.getByText("4 / 4")).toBeVisible();
     await expect(marks(page).first()).toBeVisible({ timeout: 20_000 });
 
@@ -144,15 +174,15 @@ test.describe("find in PDF", () => {
     // route counts from one, as `notePageHref` documents.
     expect(page.url()).toContain("/page/4");
     expect(page.url()).toContain("q=marmalade");
+
+    // Three page turns and three marks, off ONE fetch of the document's text.
+    expect(text.count(MANUAL_MD5)).toBe(1);
   });
 
   test("the marks go down with the search, and with the document", async ({ page }) => {
     // A mark left up over the next page — or the next FILE — would point at a
     // word that is not there.
-    await signedIn(page);
-    await servePdf(page);
-    await page.goto("/#/note/n-files-manual/page/1?q=marmalade");
-    await freezeMotion(page);
+    await openManual(page, `/#/note/${MANUAL}/page/1?q=marmalade`);
 
     const region = viewer(page);
     await expect(marks(page).first()).toBeVisible({ timeout: 20_000 });
@@ -166,7 +196,7 @@ test.describe("find in PDF", () => {
     // The count is unchanged — the document still has three matches, and the
     // current one is still the first; this page simply is not one of them. THIS
     // IS THE HONESTY RULE ON SCREEN: no boxes is never "No matches".
-    await expect(region.locator(".pdfbar__count")).toHaveText("1 of 3");
+    await counts(page, "1 of 3");
 
     // Escape closes find before it leaves the viewer, so a search is not thrown
     // away together with the document it was running in.
@@ -176,5 +206,30 @@ test.describe("find in PDF", () => {
     await expect(marks(page)).toHaveCount(0);
     await page.keyboard.press("Escape");
     await expect(region).toBeHidden();
+  });
+
+  // THE 404 IS NOT AN EMPTY RESULT, and a PDF is where that matters most: a book
+  // whose text has not been derived yet is exactly the document somebody is most
+  // likely to search first. `docText.ts` makes the 404 deliberately ambiguous —
+  // unreachable, or underived — and both readings mean "we could not look", never
+  // "it is not in here". Rendering it as "No matches" would be a confident false
+  // statement about a document that plainly contains the word.
+  test("a document with no text record says it could not search, not that there is nothing", async ({ page }) => {
+    await signedIn(page);
+    await servePdf(page);
+    // An EMPTY record map: every `text/<md5>` 404s, exactly as the route answers
+    // for a blob the deferred worker has not reached.
+    await mockDocText(page, {});
+    await page.goto(`/#/note/${MANUAL}?q=marmalade`);
+    await freezeMotion(page);
+
+    await expect(viewer(page)).toBeVisible();
+    // Asserted POSITIVELY, not as "it did not say No matches": a negative here
+    // would pass just as happily against a counter that said nothing at all.
+    await counts(page, "Couldn't search this file. Keep typing to retry.");
+    await expect(marks(page)).toHaveCount(0);
+    // The book itself is still readable — a find that failed does not take the
+    // document with it.
+    await expect(page.locator(".pdf-page")).toBeVisible();
   });
 });

@@ -12,7 +12,6 @@ const controlplane = @import("../services/controlplane.zig");
 const eventstreams = @import("../http/event_streams.zig");
 const multipart = @import("../http/multipart.zig");
 const upload_cap = @import("upload_cap.zig");
-const notesearch = @import("../services/search/query.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbnailmod = @import("../services/thumbnail.zig");
 const filesvc = @import("../services/files.zig");
@@ -23,6 +22,9 @@ const pendingsvc = @import("../services/pending.zig");
 const index_export = @import("../services/search/index_export.zig");
 const indexstream = @import("../services/search/index_stream.zig");
 const wantbitmap = @import("../services/search/want_bitmap.zig");
+const derived = @import("../store/derived.zig");
+const derivesearch = @import("../services/derive_search.zig");
+const gzip_stitch = @import("../http/gzip_stitch.zig");
 const sqlite = @import("../db/sqlite.zig");
 
 const Context = context.Context;
@@ -996,38 +998,6 @@ pub fn controlplaneBinPageText(ctx: *Context, req: *Request, params: Params) any
     });
 }
 
-/// GET /api/controlplane/bin/note/{id}/search?q={terms} -> EVERY page of a TRASHED
-/// note whose recognized text matches, with a per-page count — the bin twin of the
-/// live `/note/{id}/search`, keyed on the trashed file's CURRENT md5 through
-/// `ControlPlaneService.binSearch`.
-///
-/// One COMPLETE response, no cursor (the history-search shape): it is a one-document
-/// scan of the retained `note_page_index`, not the FTS the live route drains. SAME
-/// `NoteSearchResults` VO (`{ query, pages: [{ pageIndex, matches, terms }] }`)
-/// find-in-note serves, so the reader's find bar reuses its rendering.
-///
-/// A live/missing id, or a folder, is a 404 — the same owned + `deleted = 1` gate the
-/// bin's other note routes share (a live id here is indistinguishable from a missing
-/// one, and vice versa on the live route). A missing/blank `q` is a 200 with no pages
-/// (the box searches as you type). NOT `immutable` (JSON) and NOT `manual_db_lock`.
-pub fn controlplaneBinNoteSearch(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
-    const id = reply.pathId(params) orelse return badRequest(ctx, req);
-
-    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena.deinit();
-
-    // Read the target BEFORE responding — responding invalidates head strings.
-    const raw_q = reply.queryParam(req.head.target, "q") orelse "";
-    const q = reply.percentDecode(arena.allocator(), raw_q) catch return serverError(ctx, req);
-
-    var svc = controlplane.ControlPlaneService.init(files);
-    const vo = (svc.binSearch(arena.allocator(), caller.user_id, id, q) catch return serverError(ctx, req)) orelse
-        return fail(ctx, req, .not_found, "NOT_FOUND", "no such note");
-    try json.respond(ctx.gpa, req, .ok, vo, null);
-}
-
 /// GET /api/controlplane/tree?parent={id} -> a folder's child folders + note
 /// summaries, its breadcrumb, and the user's syncVersion. `parent` omitted or
 /// `root` = the user's root.
@@ -1059,116 +1029,6 @@ pub fn controlplaneTree(ctx: *Context, req: *Request, params: Params) anyerror!v
     defer arena.deinit();
     var svc = controlplane.ControlPlaneService.init(files);
     const vo = svc.listing(arena.allocator(), caller.user_id, parent_id) catch return serverError(ctx, req);
-    try json.respond(ctx.gpa, req, .ok, vo, null);
-}
-
-/// GET /api/controlplane/note/{id}/search?q={terms} -> EVERY page of one note
-/// that matches, with a match count per page.
-///
-/// Responds `{ query, pages: [{ pageIndex, matches, terms }] }`, in page order.
-/// This is find-in-note's counter and its filmstrip badges; the word rectangles
-/// the ovals are drawn from come separately from `/note/{id}/page/{n}/text`,
-/// lazily, for the page actually on screen — so a 200-page notebook costs one of
-/// these plus one page-text request per page looked at.
-///
-/// `terms` names WHICH words each page matched, folded as the index holds them,
-/// so the client circles exactly what was counted instead of re-deriving it.
-/// EXACT matching only: the typo ladder is the browser's now (`golden-search.md`
-/// §6 step 6 moved it into `sqlite_core.wasm`), and step 7 is what brings it back
-/// to find-in-note, by moving find-in-note onto the same engine.
-///
-/// ## Its own route, and a sub-resource of the note
-///
-/// It is UNRANKED and reaches the EXACT per-note count by draining the keyset
-/// stream — bm25's window would drop the note being read below other notes'
-/// hits, so a rank on this face is a wrong count. It carries counts, not note
-/// names. As a sub-resource of a note it sits where the note's other reads
-/// already are, beside `/api/controlplane/file/metadata/{id}`.
-///
-/// It IS keyset-batched (a `batch` stride, not a bm25 `limit`): the fairness win
-/// over the old one-shot complete scan, and — because rank plays no part —
-/// draining every batch still reaches the exact count, which a finite document
-/// always can.
-///
-/// `batch` (page stride, default `default_batch`) + `cursor` keyset the stream:
-/// the response carries one batch of pages plus a `cursor` when more remain, and
-/// the client auto-drains to the exact count — each batch a separate request, so
-/// a separate small lock window (the fairness win, replacing the old one-shot
-/// complete scan). A `cursor` that does not parse is a 400.
-///
-/// A missing/blank `q` is a 200 with no pages (the box searches as you type), and
-/// a note id that is not the caller's is a 200 with no pages rather than a 404 —
-/// the scoping lives in `notesearch.searchNotePages`, whose `files` join makes a
-/// foreign, trashed and non-existent note one indistinguishable answer.
-pub fn controlplaneNoteSearch(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
-    const id = reply.pathId(params) orelse return badRequest(ctx, req);
-
-    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena.deinit();
-
-    // Read the target BEFORE responding — responding invalidates head strings.
-    const raw_q = reply.queryParam(req.head.target, "q") orelse "";
-    const q = reply.percentDecode(arena.allocator(), raw_q) catch return serverError(ctx, req);
-    const batch: i64 = if (reply.queryParam(req.head.target, "batch")) |b|
-        std.fmt.parseInt(i64, b, 10) catch return badRequest(ctx, req)
-    else
-        notesearch.default_batch;
-    const cursor = reply.queryParam(req.head.target, "cursor");
-
-    const vo = notesearch.searchNotePages(arena.allocator(), files.db, caller.user_id, id, q, cursor, batch) catch |e| switch (e) {
-        error.InvalidCursor => return badRequest(ctx, req),
-        else => return serverError(ctx, req),
-    };
-    try json.respond(ctx.gpa, req, .ok, vo, null);
-}
-
-/// GET /api/controlplane/note/{id}/txt-search?q={terms} -> EVERY `.txt`
-/// paragraph of one file that matches, with a per-paragraph count and byte
-/// range.
-///
-/// Responds `{ query, segments: [{ segment, offset, length, matches, terms }] }`,
-/// in ordinal (= byte) order. This is find-in-txt's counter and its prev/next
-/// paragraph jumps: the viewer already holds the whole file, so it marks matches
-/// inside the loaded text (client-side, from `terms`) and scrolls to a paragraph
-/// by its `offset`/`length` byte range.
-///
-/// ## Its own route, not a `kind` on `/note/{id}/search`
-///
-/// The note-scoped find answers about `.note` PAGES (page index + count); this
-/// answers about `.txt` PARAGRAPHS (ordinal + BYTE RANGE + count). They carry
-/// different fields for different viewers, so a single route switching its
-/// response shape on the file's kind would make the contract invisible at the
-/// call site. It mirrors its twin's contract otherwise — complete, unranked,
-/// unlimited, exact — through `notesearch.searchTxtSegments`.
-///
-/// Same boundary as its twin: the scoping is entirely in `searchTxtSegments`,
-/// whose `files` join makes a foreign, trashed and non-existent file one
-/// indistinguishable empty answer; a `.note` id here simply has no `kind = 1`
-/// rows and so also answers empty. A missing/blank `q` is a 200 with no
-/// segments (the box searches as you type).
-pub fn controlplaneTxtSearch(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
-    const id = reply.pathId(params) orelse return badRequest(ctx, req);
-
-    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena.deinit();
-
-    // Read the target BEFORE responding — responding invalidates head strings.
-    const raw_q = reply.queryParam(req.head.target, "q") orelse "";
-    const q = reply.percentDecode(arena.allocator(), raw_q) catch return serverError(ctx, req);
-    const batch: i64 = if (reply.queryParam(req.head.target, "batch")) |b|
-        std.fmt.parseInt(i64, b, 10) catch return badRequest(ctx, req)
-    else
-        notesearch.default_batch;
-    const cursor = reply.queryParam(req.head.target, "cursor");
-
-    const vo = notesearch.searchTxtSegments(arena.allocator(), files.db, caller.user_id, id, q, cursor, batch) catch |e| switch (e) {
-        error.InvalidCursor => return badRequest(ctx, req),
-        else => return serverError(ctx, req),
-    };
     try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 
@@ -1441,52 +1301,6 @@ fn historyPage(ctx: *Context, req: *Request, params: Params, scope: controlplane
     } orelse return reply.notFound(req);
 
     return writePageResponse(ctx, req, svc, planned);
-}
-
-/// GET /api/controlplane/note/{id}/history/{md5}/search?q={terms} -> the pages of
-/// a RETAINED version whose recognized text matches, `{ query, pages: [{
-/// pageIndex, matches, terms }] }` — the same VO find-in-note serves, so the
-/// reader's find-in-preview reuses its rendering.
-///
-/// A ONE-DOCUMENT scan of that version's `note_page_index.text` (H8), NOT the FTS:
-/// retained versions are never in the shared index by design, so this reads the
-/// OLD text directly. Exact + accent-fold, no corpus scan, no fuzzy widening.
-/// A missing/blank `q` is a 200 with no pages (the box searches as you type); an
-/// md5 not in this file's history is a 404.
-pub fn controlplaneHistorySearch(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    return historySearch(ctx, req, params, .live);
-}
-
-/// GET /api/controlplane/bin/note/{id}/history/{md5}/search?q={terms} -> find-in-a-
-/// retained-version of a TRASHED file — the bin twin of `controlplaneHistorySearch`,
-/// delegating to the SAME handler with the trashed scope. Same one-document scan,
-/// same `NoteSearchResults` VO; only the gate's state differs
-/// (`historyVersionIn(.trashed)`), so a live file's md5 here is a 404.
-pub fn controlplaneBinHistorySearch(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    return historySearch(ctx, req, params, .trashed);
-}
-
-fn historySearch(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
-    const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
-    const id = reply.pathId(params) orelse return badRequest(ctx, req);
-    const md5 = params.get("md5") orelse return badRequest(ctx, req);
-
-    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena.deinit();
-
-    // The gate is a real 404 here (not an empty result like the note-wide search):
-    // a per-version URL that names a version this file never had is a client error,
-    // not "no matches". Same rule the preview/restore routes follow.
-    if ((files.historyVersionIn(scope, caller.user_id, id, md5) catch return serverError(ctx, req)) == null)
-        return fail(ctx, req, .not_found, "NOT_FOUND", "no such version");
-
-    // Read the target BEFORE responding — responding invalidates head strings.
-    const raw_q = reply.queryParam(req.head.target, "q") orelse "";
-    const q = reply.percentDecode(arena.allocator(), raw_q) catch return serverError(ctx, req);
-
-    const vo = notesearch.searchHistoryPages(arena.allocator(), files.db, md5, q) catch return serverError(ctx, req);
-    try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 
 /// POST /api/controlplane/note/{id}/history/{md5}/restore -> re-point the file at
@@ -2677,6 +2491,216 @@ fn eventsOneShot(ctx: *Context, req: *Request, sync_version: i64, index: ?pendin
         .keep_alive = false,
         .extra_headers = &sse_headers,
     });
+}
+
+// ---------------------------------------------------------------------------
+// THE PER-DOCUMENT TEXT ROUTE — `golden-search.md` §1.1, build order step 7
+// ---------------------------------------------------------------------------
+
+/// GET /api/controlplane/text/{md5} -> ONE document's `text/{md5}.{v}` record as
+/// a single gzip stream: the header line plus one line per segment, each with the
+/// segment's ordinal, its address and its real text (`derive_search.TextWriter`).
+///
+/// ## This route is five routes
+///
+/// §1.1: *"All five in-doc routes collapse to 'authorize, serve `text/<md5>`.'"*
+/// They are gone as of §6 step 7: global search and in-document search are the
+/// same mechanism pointed at different data, so find-in-note, find-in-txt,
+/// find-in-PDF, find-in-a-version and find-in-the-bin stopped being five server
+/// answers and became one file the browser loads into the FTS5 instance it
+/// already has. **Format differences stop being code and become data** — a
+/// segment's ordinal and its address are fields in a record here, not a branch in
+/// a query.
+///
+/// The one that had a real reason to exist was the history scan: an arbitrary
+/// historic md5 is not in the caller's live set, so the FTS partition mask could
+/// not scope it and it read `note_page_index` by `blob_md5` instead. That reason
+/// evaporates when nothing is scoping an index. What is left of all five is the
+/// gate below.
+///
+/// ## The gate, which is the whole of what is left
+///
+/// `Files.reachesBlob` — a live file of theirs, a trashed one, or a retained
+/// version of one — and its header argues why the three collapse into a single
+/// query. History and the bin are not special: they are other md5s, gated exactly
+/// as they are gated today.
+///
+/// **404 covers BOTH refusals and they are indistinguishable from outside**: an
+/// md5 the caller cannot reach and an md5 that is simply not derived answer
+/// identically, so the route is no existence oracle over the deduplicated blob
+/// space. That is the same boundary `/thumbnail/{hash}` draws for the same
+/// reason — a content-addressed URL has no file id to scope through.
+///
+/// ## The body is the STORED fragment, wrapped
+///
+/// Ten bytes of gzip header, the file's raw-deflate fragment verbatim, `03 00`,
+/// and the 8-byte trailer built from the CRC32 and length in the file's OWN
+/// 12-byte header. No compression and no decompression: the derive step
+/// compressed these bytes once and this route never touches a plaintext byte,
+/// because the thing doing it is a Pi 1 B+.
+///
+/// `content-encoding: gzip` regardless of `Accept-Encoding`, exactly as the
+/// stitched stream sends it: there is no identity form of this body to negotiate
+/// down to, and inflating one to produce it would spend the Pi's CPU undoing the
+/// one thing the design is for.
+///
+/// ## `content_length`, which the STREAM route refuses and this one takes
+///
+/// The stream route argues at length for chunked, and the argument is entirely
+/// about the SKIP RULE: it promises a length before a walk that discovers
+/// mid-flight that a document is gone, and the ways out are 1,222 held
+/// descriptors or a truncated body. **Neither applies to one document.** There is
+/// no walk to skip inside; the file is open before the head goes out, and a blob
+/// GC'd a moment later cannot shorten an open fd (the store only ever publishes
+/// by rename, so a named file's bytes are fixed for its whole life). So the
+/// length is knowable, honest, and worth having: the client shows real progress
+/// on a document that may be megabytes over 3G.
+///
+/// It also makes a std bug unreachable rather than merely avoided.
+/// `File.Reader.streamRemaining` is the obvious spelling for the copy below and
+/// **panics against a CHUNKED response** — it lowers to `sendFile`, and
+/// `chunkedSendFile` sizes its chunk header from a LOWER bound, leaving
+/// `state.chunk_len` mid-chunk when the transfer writes fewer bytes than
+/// promised (REPRODUCED on Zig 0.16.0; see `index_stream.zig`). A declared
+/// `content_length` takes a sendFile path that keeps no such state.
+///
+/// ## `private, immutable` — and NO `max-age`, which is the interesting half
+///
+/// The file's key is `(md5, index_version)`; this URL carries only the md5. Those
+/// bytes cannot change under the URL while the parser stands still — the store is
+/// content-addressed and publishes by rename — but an `index_version` bump
+/// re-derives the SAME md5 into a new file and unlinks the old one, so what this
+/// URL serves does change, once, per parser release.
+///
+/// So `immutable` says the true thing ("these bytes will not change under you")
+/// and the response grants no freshness lifetime to hold it in. That is the
+/// deliberate difference from the ten `public, max-age=31536000, immutable`
+/// routes: every one of THOSE names its content in the URL, so a year-long entry
+/// can never outlive what it described. A year here would strand a browser on
+/// text an old parser produced, on a URL that cannot change to tell it — which is
+/// the `PageTextVO.words` regression the cache-policy pin exists to prevent,
+/// wearing a search hat. §4.4's *"the browser's own cache does the storing, no
+/// code"* is still what happens: a revalidated hit costs a conditional request,
+/// and the tier 1/tier 2 prefetch that wants a real promise goes to IndexedDB
+/// precisely because the HTTP cache cannot make one.
+///
+/// `private` rather than `public` for the manifest's reason: this is one person's
+/// document text and the household may sit behind a shared proxy on a plain-HTTP
+/// origin.
+///
+/// ## `manual_db_lock`, with the reader borrowed HERE
+///
+/// The same reasoning as the stitched stream, and it is not weaker for being one
+/// file: `read_only` holds its lease for the WHOLE dispatch, which on a download
+/// route means for the whole download, and an empty pool degrades `read_only` to
+/// the WRITER under `db_lock` — so one 3G client fetching one book's text would
+/// stall device sync for the length of it. The gate is two indexed COUNTs; it
+/// gets a borrowed reader (or a narrow `lockDb` window when the pool is empty),
+/// released before a single byte of body is written, and the file → socket copy
+/// that follows touches the DB not at all.
+pub fn controlplaneDocumentText(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    const caller = ctx.caller.?; // controlplane scope
+    const files = ctx.files orelse return serverError(ctx, req);
+    const md5 = params.get("md5") orelse return badRequest(ctx, req);
+
+    // A deployment that keeps no text store has no derived file for ANY md5 —
+    // the underived case for every document at once, and answered as such. NOT a
+    // 500 like the stream route's missing terms store: there the empty-but-valid
+    // stream would have told the client "every document arrived" and it would
+    // have stopped asking, while a 404 here is simply "find-in-document has
+    // nothing to load", which is the truth.
+    const text = files.text orelse return reply.notFound(req);
+
+    // THE GATE, in its own lock window and nothing else in it.
+    const reachable = blk: {
+        if (ctx.borrowReader()) |lease| {
+            defer ctx.returnReader(lease);
+            const ro = files.readerView(lease.db);
+            break :blk ro.reachesBlob(caller.user_id, md5) catch return serverError(ctx, req);
+        }
+        ctx.lockDb();
+        defer ctx.unlockDb();
+        break :blk files.reachesBlob(caller.user_id, md5) catch return serverError(ctx, req);
+    };
+    if (!reachable) return reply.notFound(req);
+
+    // From here the DB is never touched again. `open` before `stat` before the
+    // head: every one of these is a 404 that a caller cannot tell from the
+    // refusal above, which is what makes "not derived" and "not yours" one answer.
+    var file = text.open(md5, derivesearch.index_version) catch return reply.notFound(req);
+    defer file.close(ctx.io);
+    const size = (file.stat(ctx.io) catch return reply.notFound(req)).size;
+    // Also the format check: a truncated or foreign-format file is refused here
+    // rather than streamed as half a deflate stream that no trailer can make whole.
+    const h = derived.readHeader(ctx.io, file) catch return reply.notFound(req);
+    if (size <= derived.header_len) return reply.notFound(req); // a header and no fragment
+
+    // DOES THE URL NAME WHAT IT SERVES? `?v=` carries the `index_version`, which
+    // is the other half of the store's key and which the manifest already ships
+    // per row. When it matches, a year-long entry cannot outlive what it
+    // described — the property every other `max-age=31536000, immutable` route
+    // has by naming its content in the path, reached here through the query
+    // string instead. `/file/{id}?v={fileHash}` is the same device.
+    //
+    // When it is absent or stale, the year is refused and only `immutable`
+    // stands: the bytes will not change under this URL while the parser does,
+    // but a parser bump re-derives the same md5 and unlinks the old file, so
+    // without the version there is nothing to invalidate the entry — which is
+    // the `PageTextVO.words` regression wearing a search hat.
+    var vbuf: [24]u8 = undefined;
+    const named = if (reply.queryParam(req.head.target, "v")) |v|
+        std.mem.eql(u8, v, std.fmt.bufPrint(&vbuf, "{d}", .{derivesearch.index_version}) catch "")
+    else
+        false;
+
+    var trailer: gzip_stitch.Trailer = .{};
+    trailer.append(h.crc, h.len);
+
+    // The wire length, from the one file we hold open: the gzip header, the
+    // fragment (everything past the stored 12-byte one), the terminating block
+    // and the 8-byte trailer.
+    const content_length = gzip_stitch.header.len +
+        (size - derived.header_len) +
+        gzip_stitch.terminator.len + 8;
+
+    var wbuf: [16 * 1024]u8 = undefined;
+    var body = req.respondStreaming(&wbuf, .{
+        .content_length = content_length,
+        .respond_options = .{
+            .extra_headers = &.{
+                // The decoded body is JSONL, one line per segment; the encoding is
+                // the transport, not a variant of another representation.
+                .{ .name = "content-type", .value = "application/x-ndjson" },
+                .{ .name = "content-encoding", .value = "gzip" },
+                .{ .name = "cache-control", .value = if (named) "private, max-age=31536000, immutable" else "private, immutable" },
+                .{ .name = "x-content-type-options", .value = "nosniff" },
+            },
+        },
+    }) catch return;
+
+    // Past the head nothing can become a status code. A failure below returns
+    // WITHOUT `end()`, closing the connection short of `content_length` — the
+    // truncation signal every decoder reports — instead of reaching `end()`,
+    // which asserts the full length and would panic. Same discipline as the
+    // thumbnail and page routes.
+    body.writer.writeAll(gzip_stitch.header) catch return error.StreamTruncated;
+
+    // POSITIONAL READS INTO ONE 16 KB BUFFER, bounded by `size` so the walk
+    // delivers exactly what the head promised. Never read-all-then-write: the
+    // largest document in the corpus is 1.35 MB stored and three concurrent
+    // finds must not be that many megabytes of RSS on a 50 MB budget.
+    var rbuf: [16 * 1024]u8 = undefined;
+    var off: u64 = derived.header_len;
+    while (off < size) {
+        const want: usize = @intCast(@min(rbuf.len, size - off));
+        const n = file.readPositionalAll(ctx.io, rbuf[0..want], off) catch return error.StreamTruncated;
+        if (n == 0) return error.StreamTruncated; // the file ended short of its own stat
+        body.writer.writeAll(rbuf[0..n]) catch return error.StreamTruncated;
+        off += n;
+    }
+
+    trailer.finish(&body.writer) catch return error.StreamTruncated;
+    body.end() catch {};
 }
 
 /// GET /api/controlplane/events -> the live-freshness (SSE) channel: the caller's

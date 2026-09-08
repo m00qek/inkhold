@@ -31,7 +31,8 @@ import {
   buildFindContent,
   resolveFindSegments,
   totalMatches,
-  txtCountProgress,
+  txtCountText,
+  TXT_SEARCHING,
   type FindSegment,
 } from "./txtFind";
 
@@ -178,9 +179,10 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
 
   // --- find state ----------------------------------------------------------
   // The whole file is loaded in the viewer, so find is a DOM/text operation over
-  // `loadedText` — no per-page fetch, no rectangles. The blob-scoped backend
-  // query names WHICH paragraphs match and how many; the viewer marks and jumps
-  // between them.
+  // `loadedText` — no per-page fetch, no rectangles. The browser's own index over
+  // this file's `text/<md5>` (`golden-search.md` §1.1) names WHICH paragraphs
+  // match, how many, and their BYTE RANGES; the viewer maps those ranges into the
+  // string it holds, marks them and jumps between them.
   let loadedText: string | null = null;
   let findOpen = false;
   /** The trimmed query pending, in flight, or painted — makes the input idempotent. */
@@ -190,25 +192,28 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
    *  current — the same staleness guard the reader's find and search use. */
   let findToken = 0;
   let findTimer: ReturnType<typeof setTimeout> | undefined;
-  /** The matching paragraphs ACCUMULATED so far, resolved into the loaded string's
-   *  coordinates. Grows batch by batch until `findDone` (in-doc-search Phase 4). */
+  /** The matching paragraphs, resolved into the loaded string's coordinates.
+   *  Complete when it lands — one call, one answer. */
   let findSegs: FindSegment[] = [];
   /** Their `.txt__match` wrappers, aligned 1:1 with `findSegs` (ordinal order). */
   let findParas: HTMLElement[] = [];
   /** The current matching paragraph, indexing `findSegs`/`findParas`; -1 = none. */
   let findAt = -1;
-  /** The stream is exhausted — the counter is now EXACT, not a floor ("N+"). */
-  let findDone = false;
+  /** A query is out and nothing has come back — the counter shows no number.
+   *  The FIRST find on a file pays `text/<md5>` plus an index build (55 ms for a
+   *  1,483-segment novel, 363 ms for Les Misérables — §8.1); every find after it
+   *  is the query alone. */
+  let findSearching = false;
   /**
-   * A typo-tolerant result fetched but HELD, awaiting the opt-in — manual fuzzy is
-   * opt-in (in-doc-search Phase 3). `null` unless the "search similar" affordance
-   * is showing. A deep link from a global fuzzy hit carries the resolved term and
-   * runs exact, so it never reaches this gate.
+   * A typo-tolerant result computed but HELD, awaiting the opt-in — manual fuzzy
+   * is opt-in. `null` unless the "search similar" affordance is showing. A deep
+   * link from a global fuzzy hit carries the resolved term and runs exact, so it
+   * never reaches this gate.
    */
   let heldFuzzySegs: FindSegment[] | null = null;
   /** The user opted in to fuzzy for the current query — clears on every new query. */
   let findOptedIn = false;
-  /** Aborts the in-flight stream drain between batches when the query moves on. */
+  /** Aborts the in-flight `text/<md5>` fetch when the query moves on. */
   let findAbort: AbortController | null = null;
   /**
    * A paragraph ordinal a deep link asked to open at, consumed once the results
@@ -478,12 +483,16 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
 
   // --- find ----------------------------------------------------------------
 
-  /** Repaint the counter — a FLOOR ("N+ …") while the file is still draining, the
-   *  exact "N in M" once done — and enable prev/next only when there is more than
+  /** Repaint the counter — no number while the answer is still coming, the exact
+   *  "N in M" once it lands — and enable prev/next only when there is more than
    *  one matching paragraph to step between (stepping a set of one is a no-op). */
   function paintFindCount(): void {
     findCount.textContent =
-      findQuery === "" ? "" : txtCountProgress(totalMatches(findSegs), findSegs.length, findDone);
+      findQuery === ""
+        ? ""
+        : findSearching
+          ? TXT_SEARCHING
+          : txtCountText(totalMatches(findSegs), findSegs.length);
     const canStep = findSegs.length > 1;
     findPrev.disabled = !canStep;
     findNext.disabled = !canStep;
@@ -495,7 +504,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
     findSegs = [];
     findParas = [];
     findAt = -1;
-    findDone = false;
+    findSearching = false;
     findAsk.hidden = true;
     if (textPre && loadedText !== null) textPre.replaceChildren(document.createTextNode(loadedText));
   }
@@ -512,10 +521,10 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
   }
 
   /**
-   * Paint the accumulated matches into the loaded text. On the FIRST landing it
-   * settles on one paragraph — the deep link's target when it named a matching
-   * one, else the first match — and scrolls there; later batches keep the current
-   * paragraph and do NOT scroll, so the file drains without stealing the reader's
+   * Paint the matches into the loaded text. On a LANDING it settles on one
+   * paragraph — the deep link's target when it named a matching one, else the
+   * first match — and scrolls there; otherwise it keeps the current paragraph and
+   * does NOT scroll, so revealing a held fuzzy answer does not steal the reader's
    * place. Rebuilds the `<pre>`'s children in place (font size kept).
    */
   function renderFind(landing: boolean): void {
@@ -545,68 +554,72 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
     syncUrl();
   }
 
-  /** The opt-in: reveal the held typo-tolerant matches as the answer. No new
-   *  request — the fuzzy batch was already fetched, only held back. */
+  /** The opt-in: reveal the held typo-tolerant matches as the answer. Nothing is
+   *  asked again — the ladder's answer was already computed, only held back. */
   function searchSimilar(): void {
     if (heldFuzzySegs === null || loadedText === null) return;
     findOptedIn = true;
     findSegs = heldFuzzySegs;
     heldFuzzySegs = null;
-    findDone = true;
+    findSearching = false;
     findAsk.hidden = true;
     findAt = -1;
     renderFind(true);
   }
 
   /**
-   * The blob-scoped STREAMING drain: each batch is a separate request (a separate
-   * small db-lock window — the single-core fairness win), consumed as it lands so
-   * the counter shows a floor and settles to exact. Painted only while the token
-   * is still current; the fuzzy fallback is gated behind the opt-in.
+   * The document-scoped search: the browser's own index over this file's
+   * `text/<md5>` (§1.1), which carries each paragraph's BYTE RANGE — the `o`/`l`
+   * fields — so `resolveFindSegments` can map the answer into the string already
+   * on screen. One call, one complete answer; the fuzzy fallback is gated behind
+   * the opt-in, and a superseded answer is dropped by its token.
+   *
+   * The abort covers the fetch only. The build and the query are not abortable
+   * and should not be: they are the same work the next keystroke needs.
    */
   async function runFind(query: string, mine: number): Promise<void> {
-    if (loadedText === null || !meta) return; // nothing loaded to search yet
+    if (loadedText === null || !meta?.fileHash) return; // nothing loaded, or no address
+    // Said here as well as in `setFindQuery`, because a `?q=` deep link reaches
+    // this function DIRECTLY once the blob lands — it never went through the
+    // field, so nothing else would have put the counter into its waiting state.
+    findSearching = true;
+    paintFindCount();
     const ac = new AbortController();
     findAbort = ac;
-    let first = true;
     try {
-      await deps.api.searchInTxtStream(
-        meta.id,
-        query,
-        (batch) => {
-          if (mine !== findToken || loadedText === null) return;
-          // THE MANUAL-FUZZY OPT-IN. A fuzzy fallback that FOUND something is held,
-          // not shown — the affordance offers it; a fuzzy fallback that found
-          // NOTHING is a genuine absence. The fuzzy scan already ran server-side
-          // (a one-shot, no-cursor batch), so this only gates the DISPLAY.
-          if (batch.usedFuzzy && !findOptedIn) {
-            const segs = resolveFindSegments(loadedText, batch.segments);
-            clearFindMarks(); // drop any exact marks; resets findDone + hides the ask
-            findCount.textContent = "No matches";
-            if (segs.length > 0) {
-              // Held, not shown: the affordance offers it. A fuzzy fallback that
-              // found NOTHING is a real absence — "No matches", no affordance.
-              heldFuzzySegs = segs;
-              findAsk.hidden = false;
-            } else {
-              heldFuzzySegs = null;
-            }
-            return;
-          }
-          findDone = batch.done;
-          findSegs = resolveFindSegments(loadedText, batch.segments);
-          renderFind(first);
-          first = false;
-        },
-        ac.signal,
+      const result = await deps.docSearch.search(meta.fileHash, query, ac.signal);
+      if (mine !== findToken || loadedText === null) return;
+      // A `.note` or `.pdf` segment carries no byte range because its ordinal IS
+      // the address; a `.txt` one always does. A segment without one cannot be
+      // placed in the string, so it is dropped rather than marked from byte 0.
+      const located = result.segments.flatMap((s) =>
+        s.offset === null || s.length === null
+          ? []
+          : [{ segment: s.segment, offset: s.offset, length: s.length, matches: s.matches, terms: s.terms }],
       );
+      // THE MANUAL-FUZZY OPT-IN. A fuzzy fallback that FOUND something is held,
+      // not shown — the affordance offers it; one that found NOTHING is a genuine
+      // absence. The ladder has already run (`idx_fuzzy` fires it only on a total
+      // of 0), so this gates the DISPLAY and nothing else.
+      if (result.usedFuzzy && !findOptedIn) {
+        const segs = resolveFindSegments(loadedText, located);
+        clearFindMarks(); // drop any exact marks; hides the ask
+        findCount.textContent = "No matches";
+        heldFuzzySegs = segs.length > 0 ? segs : null;
+        findAsk.hidden = segs.length === 0;
+        return;
+      }
+      findSearching = false;
+      findSegs = resolveFindSegments(loadedText, located);
+      renderFind(true);
     } catch (e) {
       if (mine !== findToken) return;
       // A dead session belongs to the shell, exactly as it does for the page
       // load — never a swallowed "no matches".
       if (dispatchApiFailure({ onSessionExpired: deps.onSessionExpired }, e)) return;
-      // Any other failure leaves the text readable and unmarked; the next
-      // keystroke retries for free.
+      // Any other failure — including a 404 from a file whose text is not derived
+      // yet — leaves the text readable and unmarked; the next keystroke retries
+      // for free.
       clearFindMarks();
       paintFindCount();
     }
@@ -624,7 +637,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
     // result and opt-in so the gate re-arms for this query.
     findAbort?.abort();
     findAbort = null;
-    findDone = false;
+    findSearching = q !== "";
     heldFuzzySegs = null;
     findOptedIn = false;
     findAsk.hidden = true;
@@ -638,6 +651,10 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
       syncUrl();
       return;
     }
+    // The waiting state starts at the KEYSTROKE, not at the request: the debounce
+    // is part of the wait, and a counter still showing the previous query's exact
+    // number would be describing an answer to a question nobody is asking.
+    paintFindCount();
     const mine = findToken;
     findTimer = setTimeout(() => {
       findTimer = undefined;
@@ -646,15 +663,13 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
   }
 
   /** Step to the next (+1) / previous (-1) matching paragraph — keyboard and
-   *  buttons both land here, mirroring the reader's `find.step`. Once the file is
-   *  drained (`findDone`) it wraps over the exact set; while still streaming it
-   *  clamps within the accumulated set, since wrapping over a floor would step
-   *  onto a match the "N+" only promised might exist (the background drain keeps
-   *  extending it). */
+   *  buttons both land here, mirroring the reader's `find.step`. Wraps
+   *  unconditionally: the answer is complete when it lands, so there is no floor
+   *  to step off the end of. */
   function stepFind(dir: 1 | -1): void {
     const n = findSegs.length;
     if (n === 0) return;
-    findAt = findDone ? (findAt + dir + n) % n : Math.max(0, Math.min(n - 1, findAt + dir));
+    findAt = (findAt + dir + n) % n;
     focusCurrent();
     // Stepping moves which paragraph the URL points at, so the address bar keeps
     // describing where you are — the reader's page-step behaviour, adapted.
@@ -680,7 +695,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
     findAt = -1;
     findSegs = [];
     findParas = [];
-    findDone = false;
+    findSearching = false;
     heldFuzzySegs = null;
     findOptedIn = false;
     findAsk.hidden = true;
@@ -715,7 +730,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
     findToken++;
     findActive = null;
     findQuery = "";
-    findDone = false;
+    findSearching = false;
     heldFuzzySegs = null;
     findOptedIn = false;
     findInput.value = "";

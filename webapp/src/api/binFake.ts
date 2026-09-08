@@ -96,19 +96,19 @@ interface Seed {
  * close enough to the end of its window to render the `is-soon` treatment.
  */
 const SEEDS: Seed[] = [
-  { kind: "folder", id: "t-folder", name: "nested_to_remove", path: "/NOTE/Note/nested_to_remove", agoDays: 0, size: 0, parentId: null, fileType: "", pageCount: 0 },
+  { kind: "folder", id: "301", name: "nested_to_remove", path: "/NOTE/Note/nested_to_remove", agoDays: 0, size: 0, parentId: null, fileType: "", pageCount: 0 },
   // Recognized, so its bin preview draws ovals and find-in-a-trashed-note works
   // (Phase 1) and it has a version history to browse (Phase 2).
-  { kind: "note", id: "t-child-a", name: "20260720_152956.note", path: "/NOTE/Note/nested_to_remove/20260720_152956.note", agoDays: 0, size: 1_468_006, parentId: "t-folder", fileType: "note", pageCount: 3, recognized: true },
+  { kind: "note", id: "302", name: "20260720_152956.note", path: "/NOTE/Note/nested_to_remove/20260720_152956.note", agoDays: 0, size: 1_468_006, parentId: "301", fileType: "note", pageCount: 3, recognized: true },
   // Un-recognized, kept so the "trashed note with no transcript" state stays a
   // fixture the bin viewer is exercised against.
-  { kind: "note", id: "t-child-b", name: "20260720_153311.note", path: "/NOTE/Note/nested_to_remove/20260720_153311.note", agoDays: 0, size: 629_145, parentId: "t-folder", fileType: "note", pageCount: 1 },
-  { kind: "note", id: "t-old", name: "download_test.note", path: "/NOTE/Note/download_test.note", agoDays: 26, size: 2_202_009, parentId: null, fileType: "note", pageCount: 2, recognized: true },
+  { kind: "note", id: "303", name: "20260720_153311.note", path: "/NOTE/Note/nested_to_remove/20260720_153311.note", agoDays: 0, size: 629_145, parentId: "301", fileType: "note", pageCount: 1 },
+  { kind: "note", id: "304", name: "download_test.note", path: "/NOTE/Note/download_test.note", agoDays: 26, size: 2_202_009, parentId: null, fileType: "note", pageCount: 2, recognized: true },
 ];
 
 /**
  * The trashed NOTE seeds, exported so fake.ts can register them in its
- * `ALL_NOTES` map and drive every transcript/search/history generator for a
+ * `ALL_NOTES` map and drive every transcript/history generator for a
  * trashed id exactly as it does for a live one — the fake mirror of "a trashed
  * file's md5-keyed data is fully retained". fake.ts owns those generators, so the
  * bin read methods live there; this module stays the bin STATE owner.
@@ -161,8 +161,30 @@ export interface TrashedLookup {
   } | null;
 }
 
+/**
+ * A file's whole-blob md5, supplied by fake.ts (`fakeFileHash`) so a trashed row
+ * carries the SAME content address its live twin advertised.
+ *
+ * Injected rather than minted here, and that is the fix for a defect this file
+ * used to carry: it wrote `` `${id}-md5` ``, which is not 32 hex. The real
+ * routes are content-addressed — `/thumbnail/{hash}`, and since
+ * `golden-search.md` §6 step 7 the in-document text route `text/<md5>` — so a
+ * path could not have carried that value at all, and `docText.ts`'s parser
+ * refuses it in a record header. Every spec that searched inside a trashed note
+ * therefore had to work around the fixture rather than exercise the route.
+ *
+ * Trashing does not rewrite a blob, so "the same md5, trashed or live" is the
+ * real invariant, not a convenience.
+ */
+export type BlobHash = (id: Id) => string;
+
 /** Construct the fake bin. State is per-instance, so tests do not leak into each other. */
-export function createBinFake(delay: (ms: number) => Promise<void>, latency: number, lookup?: TrashedLookup): BinFake {
+export function createBinFake(
+  delay: (ms: number) => Promise<void>,
+  latency: number,
+  lookup: TrashedLookup | undefined,
+  blobHash: BlobHash,
+): BinFake {
   const now = Date.now();
   let rows: BinEntry[] = SEEDS.map((s) => ({
     kind: s.kind,
@@ -174,7 +196,7 @@ export function createBinFake(delay: (ms: number) => Promise<void>, latency: num
     parentId: s.parentId,
     isRoot: s.parentId === null,
     fileType: s.fileType,
-    fileHash: s.kind === "folder" ? null : `${s.id}-md5`,
+    fileHash: s.kind === "folder" ? null : blobHash(s.id),
     // The SAME ref `getBinNoteMeta` hands the reader for page 0, so the row's
     // thumbnail and the reader's first page share a content hash and therefore a
     // render-cache entry — exactly as they do against the real server.
@@ -278,7 +300,7 @@ export function createBinFake(delay: (ms: number) => Promise<void>, latency: num
         parentId: null,
         isRoot: true,
         fileType,
-        fileHash: `${id}-md5`,
+        fileHash: blobHash(id),
         firstPage: pageCount > 0 ? binFirstPage(id, recognized) : null,
         // Carried through from the live entry, exactly like name/type/size: the
         // real index is blob-keyed, so trashing does not change a file's shape.
