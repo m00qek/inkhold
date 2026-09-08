@@ -86,8 +86,10 @@ test {
     _ = @import("services/search/query.zig");
     _ = @import("services/search/maintain.zig");
     _ = @import("services/search/fuzzy.zig");
+    _ = @import("services/search/index_export.zig");
     _ = @import("services/txt_index.zig");
     _ = @import("services/pdf_text.zig");
+    _ = @import("services/pending.zig");
     _ = @import("services/search_partition.zig");
     _ = @import("services/auth/password.zig");
     _ = @import("services/auth/service.zig");

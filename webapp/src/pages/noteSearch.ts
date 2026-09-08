@@ -502,3 +502,49 @@ export function coverageLine(coverage: Coverage | null): string {
     "so they cannot be searched by their handwriting."
   );
 }
+
+/** `n document` / `n documents`, so the two sentences below agree on the noun. */
+function documents(n: number): string {
+  return `${n} ${n === 1 ? "document is" : "documents are"} still being indexed`;
+}
+
+/**
+ * What the EMPTY state says about work that has not finished yet.
+ *
+ * ## Why this is not folded into {@link coverageLine}
+ *
+ * They answer opposite questions. `coverageLine` is about notes whose text will
+ * never exist — the device never recognised them, and no amount of waiting
+ * changes that. This is about a file whose text is *on its way*, seconds or
+ * minutes out. Merging the two numbers would tell somebody their half-minute-old
+ * upload is permanently unsearchable, which is wrong and, worse, tells them to
+ * stop waiting for the thing that is about to arrive.
+ *
+ * So the empty state says BOTH when both apply, pending first: it is the one
+ * that changes what the reader should do next.
+ *
+ * `null` when nothing is outstanding, which is the ordinary case — the caller
+ * then shows the coverage sentence alone, exactly as it did before this existed.
+ */
+export function pendingLine(pending: number): string | null {
+  if (pending <= 0) return null;
+  return `${documents(pending)} — matches in them will appear on their own.`;
+}
+
+/**
+ * The quiet line over a NON-EMPTY page of results.
+ *
+ * THE CLAIM BEING REPAIRED IS COMPLETENESS. A list of results implies "this is
+ * what there is"; while a derive is outstanding that is not true, and a reader
+ * who does not know it reads a partial answer as a whole one. Anywhere the app
+ * does not imply completeness — the gallery, a folder listing — silence is
+ * correct and this says nothing.
+ *
+ * Deliberately quieter than the empty state's version: over real results the
+ * reader has something to be getting on with, and the line is a caveat rather
+ * than an explanation.
+ */
+export function resultsMayGrowLine(pending: number): string | null {
+  if (pending <= 0) return null;
+  return `More may appear — ${documents(pending)}.`;
+}

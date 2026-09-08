@@ -802,7 +802,12 @@ function normalizeTxtMatches(segments: TxtMatch[] | undefined): TxtMatch[] {
 function normalizeCoverage(c: Coverage | null | undefined): Coverage | null {
   if (!c || typeof c.notes !== "number" || typeof c.unsearchable !== "number") return null;
   if (!Number.isFinite(c.notes) || !Number.isFinite(c.unsearchable)) return null;
-  return { notes: c.notes, unsearchable: c.unsearchable };
+  // `pending` DOES default, unlike the other two — see {@link Coverage.pending}.
+  // It drives a sentence shown only above zero, so a server too old to send it
+  // and a library with nothing outstanding produce the same screen; defaulting
+  // it asserts nothing. A negative or non-finite value is not a count.
+  const pending = typeof c.pending === "number" && Number.isFinite(c.pending) ? Math.max(0, Math.floor(c.pending)) : 0;
+  return { notes: c.notes, unsearchable: c.unsearchable, pending };
 }
 
 /**

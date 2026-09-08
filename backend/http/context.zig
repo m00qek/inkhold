@@ -11,6 +11,7 @@ const event_streams = @import("event_streams.zig");
 const files = @import("../services/files.zig");
 const lock_stats = @import("lock_stats.zig");
 const reader_pool = @import("../db/reader_pool.zig");
+const pending = @import("../services/pending.zig");
 
 /// Name of the HttpOnly session cookie carrying a control-plane session token.
 pub const session_cookie_name = "sn_session";
@@ -84,6 +85,21 @@ pub const Context = struct {
     /// makes "hold a connection open" an explicitly opted-into capability of
     /// serve mode rather than something a handler can decide alone.
     event_streams: ?*event_streams.EventStreams = null,
+    /// The shared "how much is still being indexed" answer, behind the live
+    /// channel's `event: index` frame. Set at startup by `app.run`.
+    ///
+    /// **Null means "say nothing about indexing"** — the frame is simply not
+    /// emitted, exactly as a null `event_streams` means "do not hold a
+    /// connection". That is what keeps the integration harness (no worker, no
+    /// threads) working unchanged, and it makes an absent frame a legible "this
+    /// server does not report it" rather than a claim that nothing is pending.
+    ///
+    /// Takes `db_lock` ITSELF rather than through `lockDb`, like the deferred
+    /// worker does, so its windows do not appear in the per-route histogram.
+    /// Acceptable because they are rare (see `pending.Pulse`) and because
+    /// attributing them to whichever stream happened to trigger the count would
+    /// be worse than not attributing them at all.
+    pending: ?*pending.Pulse = null,
     /// The caller's IP (formatted), set per connection; null if unavailable.
     client_ip: ?[]const u8 = null,
     /// Serializes access to the single shared SQLite connection across the

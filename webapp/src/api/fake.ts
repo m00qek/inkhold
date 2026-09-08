@@ -741,6 +741,11 @@ function fixtureCoverage(): Coverage {
   return {
     notes: notes.length,
     unsearchable: notes.filter((n) => !n.hasRecognizedText).length,
+    // The fixture library is fully derived — nothing was uploaded a moment ago,
+    // so nothing is mid-index. The pending SENTENCE is exercised by the unit
+    // tests, which can state the number directly; a fake that claimed work
+    // outstanding would leave a "still indexing" line on every mock screenshot.
+    pending: 0,
   };
 }
 

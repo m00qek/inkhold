@@ -328,6 +328,15 @@ const ddl_v1 =
     \\-- rule looks a sibling up by (`Files.hidePairedMark` / `pairOf` — a plan pin
     \\-- names it). `files_bin_name` in v12 is the same key over TRASHED rows,
     \\-- non-unique because the bin can legitimately hold two rows under one name.
+    \\--
+    \\-- ALSO LOAD-BEARING BY NAME, like `files_md5` below: the search-index
+    \\-- manifest states `INDEXED BY files_live_name` (`search/index_export.zig`),
+    \\-- so dropping or renaming this does not make that read slow, it makes the
+    \\-- statement fail to prepare. It is named for the PARTIAL clause rather than
+    \\-- the columns — `WHERE deleted = 0` is why walking one user's live library
+    \\-- does not also walk their bin (MEASURED: 400 trashed files cost 2,000 VM
+    \\-- steps through the total `files_user_parent` index and zero through this
+    \\-- one, on a response fetched on every visit).
     \\CREATE UNIQUE INDEX files_live_name
     \\  ON files(user_id, COALESCE(parent_id, 0), name) WHERE deleted = 0;
     \\

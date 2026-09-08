@@ -83,13 +83,30 @@ pub const Tenant = struct {
     /// one enormous one.
     priority: u8,
 
-    /// Selects the blobs this tenant still owes work on, as
-    /// `(md5, name, size)`, ordered however it likes — the worker only takes
-    /// the first row. It MUST exclude work already done, or the worker spins on
+    /// THE PREDICATE: a bare FROM/WHERE naming the blobs this tenant still owes
+    /// work on, with `files` aliased `f`, `blobs` aliased `b` and `note_index`
+    /// aliased `ni`. It MUST exclude work already done, or the worker spins on
     /// the same blob for ever.
     ///
     /// Bound parameter 1 is the note index version, because every current
     /// tenant's "is it current" question is asked against it.
+    ///
+    /// **A clause rather than a statement, because there are two readers of it.**
+    /// This file takes the next job out of it (`discovery` below, `LIMIT 1`);
+    /// `pending.zig` COUNTS over it to tell a user how many of their documents
+    /// are still being indexed. Pending-ness is not a second fact about the
+    /// worker — it IS the worker's own question, asked with a different verb —
+    /// and a hand-written second copy of the clause is precisely how the count
+    /// and the worker would come to disagree. A count that says "nothing
+    /// pending" while a derive is running is worse than no count at all.
+    ///
+    /// A reader may only ADD a bound to it (`AND f.user_id = ?`, `AND f.md5 = ?`)
+    /// — never narrow or restate what is already there. Same rule, and the same
+    /// reason, as `search/query.zig`'s single `fromWhere`.
+    from_where: []const u8,
+
+    /// The next outstanding blob for this tenant, as `(md5, name, size)` — built
+    /// from `from_where` by `discovery`, never written out by hand.
     pending_sql: []const u8,
 
     /// Do one blob's work. Called WITHOUT the DB lock held: the tenant takes it
@@ -147,46 +164,33 @@ pub const Job = struct {
     }
 };
 
+/// A tenant's predicate turned into the statement the worker runs: the next
+/// outstanding blob, smallest first.
+///
+/// SHORTEST-JOB-FIRST is the `ORDER BY`, and it is this file's business rather
+/// than the tenant's — fifty small files produce fifty quick wins instead of
+/// queueing behind one enormous one. The tenant supplies WHICH blobs are
+/// outstanding and nothing about the order they are taken in.
+fn discovery(comptime from_where: []const u8) []const u8 {
+    return "SELECT f.md5, f.name, b.size\n" ++ from_where ++
+        \\
+        \\ ORDER BY b.size ASC
+        \\ LIMIT 1;
+    ;
+}
+
 /// `.txt` paragraph segments (`txt_index.zig`) — the first tenant.
 ///
-/// The SQL mirrors `txtindex.needsDerive` exactly, and the two are asserted to
-/// agree in this file's tests. It is a second expression of the same predicate,
+/// The predicate lives in `txt_index.pending_from_where`, beside
+/// `txtindex.needsDerive`, whose memo it mirrors — and the two are asserted to
+/// agree in this file's tests. It is a second expression of the same question,
 /// which is a cost; the alternative is a worker that cannot tell finished work
 /// from outstanding work without calling into every tenant, which is worse.
-///
-/// `LIKE '%_.txt'` IS `txtindex.wants`, not an approximation: `_` is LIKE's
-/// single-character wildcard, so the pattern demands at least one character
-/// before the dot — which is exactly the rule that makes a bare `.txt` a
-/// leading-dot name with no extension rather than a text file.
-///
-/// `ni.txt_index IS NULL` mirrors `needsDerive`'s memo exactly, and for its
-/// reason: the write below is CHUNKED, so `kind = 1` rows exist from the first
-/// commit onwards while the document is still half written. Asking about rows
-/// here — which this query used to do — would call an interrupted write
-/// finished and leave the file half indexed for ever.
-///
-/// The `note_index` join is the ORDER CONTRACT (`txt_index.ensureIndexed`): the
-/// note half heals first, so a blob whose row is missing or stale is not
-/// offered here at all. It becomes visible on a later pass, once that row is
-/// current — which the idle tick guarantees will happen.
 const txt_tenant: Tenant = .{
     .name = "txt",
     .priority = 1,
-    .pending_sql =
-    \\SELECT f.md5, f.name, b.size
-    \\  FROM files f
-    \\  JOIN blobs b ON b.md5 = f.md5
-    \\  JOIN note_index ni ON ni.blob_md5 = f.md5
-    \\ WHERE f.is_folder = 0
-    \\   AND f.deleted = 0
-    \\   AND f.md5 IS NOT NULL
-    \\   AND LOWER(f.name) LIKE '%_.txt'
-    \\   AND ni.index_version = ?1
-    \\   AND ni.indexable = 0
-    \\   AND ni.txt_index IS NULL
-    \\ ORDER BY b.size ASC
-    \\ LIMIT 1;
-    ,
+    .from_where = txtindex.pending_from_where,
+    .pending_sql = discovery(txtindex.pending_from_where),
     .run = runTxt,
 };
 
@@ -285,12 +289,14 @@ fn runTxt(job: Job) anyerror!void {
 /// behind it is ~2 minutes on the deployment target — the biggest and least
 /// urgent job this worker has.
 ///
-/// ONE tenant asking two questions, not two tenants — see `pdf_index.pending_sql`
-/// for why the forward-progress guard makes that the only shape that works.
+/// ONE tenant asking two questions, not two tenants — see
+/// `pdf_index.pending_from_where` for why the forward-progress guard makes that
+/// the only shape that works.
 const pdf_tenant: Tenant = .{
     .name = "pdf",
     .priority = 2,
-    .pending_sql = pdfindex.pending_sql,
+    .from_where = pdfindex.pending_from_where,
+    .pending_sql = discovery(pdfindex.pending_from_where),
     .run = runPdf,
 };
 
@@ -1135,6 +1141,7 @@ test "the tenant table is ordered by priority, so `nextJob` can take the first m
         prev = t.priority;
         try std.testing.expect(t.name.len > 0);
         try std.testing.expect(t.pending_sql.len > 0);
+        try std.testing.expect(t.from_where.len > 0);
     }
 }
 
@@ -1148,4 +1155,63 @@ test "every tenant's pending_sql is valid SQL against the real schema" {
         const s = try db.prepare(t.pending_sql);
         s.finalize();
     }
+}
+
+test "a tenant's discovery statement CONTAINS its predicate, so a second reader cannot drift from it" {
+    // The structural half of the no-drift argument, and the reason `from_where`
+    // is a field rather than a convention. `pending.zig` counts over exactly
+    // these bytes; if a tenant ever hand-writes its `pending_sql` again, the
+    // count and the worker are free to disagree about what is outstanding, and
+    // the symptom is a UI that says "nothing pending" while a derive is running.
+    // Behavioural agreement is asserted separately (`pending.zig`'s tests, and
+    // the `needsDerive`/`needsProbe` tests above); this pins that there is
+    // literally ONE copy of the clause.
+    for (&tenants) |*t| {
+        try std.testing.expect(std.mem.indexOf(u8, t.pending_sql, t.from_where) != null);
+    }
+}
+
+test "the predicate answers PER BLOB as well as per install — one bound parameter, not a fourth copy" {
+    // `docs/scratch/pending-ness.md` §4.1 needs "is THIS blob still being
+    // derived?" for a cache decision, and getting it wrong loses data silently:
+    // a client that caches a not-yet-derived blob's empty term set never asks
+    // again. That endpoint is not built here, but the predicate it will be built
+    // ON is — so this asserts the shape composes, rather than leaving the next
+    // author to discover it does not and write the rule out a fourth time.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const txt = try f.put("notes.txt", two_paragraphs);
+    const pdf = try f.put("doc.pdf", rotate90_pdf);
+
+    const per_blob = struct {
+        fn ask(db: sqlite.Db, from_where: []const u8, md5: []const u8) !bool {
+            const sql = try std.fmt.allocPrint(
+                testing.allocator,
+                "SELECT 1\n{s}\n   AND f.md5 = ?2\n LIMIT 1;",
+                .{from_where},
+            );
+            defer testing.allocator.free(sql);
+            var r = (try db.row(sql, &.{
+                .{ .int = noteindex.index_version },
+                .{ .text = md5 },
+            })) orelse return false;
+            r.finalize();
+            return true;
+        }
+    }.ask;
+
+    // Before the work: each tenant's predicate names its own blob and not the
+    // other's — the per-blob answer is not merely "is anything pending".
+    try std.testing.expect(try per_blob(f.db, txt_tenant.from_where, &txt));
+    try std.testing.expect(!try per_blob(f.db, txt_tenant.from_where, &pdf));
+    try std.testing.expect(try per_blob(f.db, pdf_tenant.from_where, &pdf));
+    try std.testing.expect(!try per_blob(f.db, pdf_tenant.from_where, &txt));
+
+    f.drain();
+
+    // And after it, both are done — the same authority `needsDerive` /
+    // `needsProbe` report, reached through the shared clause.
+    try std.testing.expect(!try per_blob(f.db, txt_tenant.from_where, &txt));
+    try std.testing.expect(!try per_blob(f.db, pdf_tenant.from_where, &pdf));
 }

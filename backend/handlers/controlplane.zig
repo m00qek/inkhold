@@ -19,6 +19,7 @@ const filesvc = @import("../services/files.zig");
 const config = @import("../config.zig");
 const transport = @import("../http/transport.zig");
 const authsvc = @import("../services/auth/service.zig");
+const pendingsvc = @import("../services/pending.zig");
 
 const Context = context.Context;
 const Request = router.Request;
@@ -2371,8 +2372,37 @@ const sse_headers = [_]std.http.Header{
     .{ .name = "x-accel-buffering", .value = "no" },
 };
 
+/// The `event: index` frame's body — how much of the caller's library is still
+/// being derived, and a version that moves when a derive lands.
+///
+/// ONE FRAME FOR TWO READERS, deliberately (`docs/scratch/pending-ness.md` §4).
+/// The UI needs "N still indexing" for the sentence that qualifies a search's
+/// completeness; a client keeping its own index needs "the index changed,
+/// re-sync". Those are the same fact observed twice, and splitting them would
+/// mean two pollers, two costs and two chances to disagree about when a derive
+/// finished.
+///
+/// JSON rather than the bare integer `event: sync` uses, because it carries two
+/// numbers — and because a named object is what lets a third be added later
+/// without moving what the first two mean.
+fn writeIndexFrame(w: *std.Io.Writer, snap: pendingsvc.Snapshot) !void {
+    try w.print("event: index\ndata: {{\"pending\":{d},\"version\":{d}}}\n\n", .{ snap.pending, snap.version });
+}
+
+/// The caller's index state, or null when this server does not report it (no
+/// `Pulse` — the integration harness, or a build with no worker).
+///
+/// Takes NO lock here: `Pulse` takes `db_lock` itself, and only on the rare tick
+/// where it actually counts. Calling this inside a `lockDb` bracket would
+/// deadlock on the non-reentrant mutex, which is the one way to get this wrong.
+fn indexSnapshot(ctx: *Context, user_id: u64) ?pendingsvc.Snapshot {
+    const pulse = ctx.pending orelse return null;
+    return pulse.forUser(user_id);
+}
+
 /// The DEGRADED shape of `/api/controlplane/events`: one `event: sync` frame
-/// carrying the current version, then close.
+/// carrying the current version (plus an `event: index` frame when this server
+/// reports one), then close.
 ///
 /// Not an error path — a deliberate fallback, and the *only* behaviour this
 /// endpoint had before streaming existed. The client cannot tell the two apart
@@ -2380,12 +2410,18 @@ const sse_headers = [_]std.http.Header{
 /// reconnecting after `retry:`. So an over-cap or non-serve-mode caller silently
 /// becomes a `retry_ms` poller and stays correct; nothing in the frontend needs
 /// to know which shape it got.
-fn eventsOneShot(ctx: *Context, req: *Request, sync_version: i64) anyerror!void {
-    var buf: [128]u8 = undefined;
-    const body = std.fmt.bufPrint(&buf, "retry: {d}\nevent: sync\ndata: {d}\n\n", .{
-        eventstreams.retry_ms, sync_version,
-    }) catch return serverError(ctx, req);
-    try req.respond(body, .{
+///
+/// THE INDEX FRAME BELONGS HERE TOO, and that is not symmetry for its own sake:
+/// a degraded caller is the one whose next frame is furthest away (`retry_ms`,
+/// 5 s), so it is the one that most needs the current answer in the response it
+/// already has.
+fn eventsOneShot(ctx: *Context, req: *Request, sync_version: i64, index: ?pendingsvc.Snapshot) anyerror!void {
+    var buf: [192]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    w.print("retry: {d}\nevent: sync\ndata: {d}\n\n", .{ eventstreams.retry_ms, sync_version }) catch
+        return serverError(ctx, req);
+    if (index) |snap| writeIndexFrame(&w, snap) catch return serverError(ctx, req);
+    try req.respond(w.buffered(), .{
         .keep_alive = false,
         .extra_headers = &sse_headers,
     });
@@ -2415,10 +2451,15 @@ fn eventsOneShot(ctx: *Context, req: *Request, sync_version: i64) anyerror!void 
 ///
 /// So the route is `manual_db_lock` and follows the discipline `/oss/get/:id`,
 /// `/note/:id/page/:n` and `/file/:id` already established: take `ctx.db_lock`
-/// around each DB touch and NOTHING else. Every DB access in this handler is a
+/// around each DB touch and NOTHING else. This handler's own DB access is a
 /// single `files.syncVersion` — one indexed single-row SELECT — inside its own
 /// `lockDb`/`unlockDb` bracket. The lock is never held across the sleep, the
 /// socket write, or the flush.
+///
+/// The pending count is the ONE touch that is not this handler's: `pending.Pulse`
+/// takes `db_lock` itself, and only on the rare tick where it actually counts.
+/// So `indexSnapshot` is called OUTSIDE every bracket here — the mutex is not
+/// reentrant, and calling it inside one is the single way to deadlock this loop.
 ///
 /// ## The loop
 ///
@@ -2441,15 +2482,19 @@ pub fn controlplaneEvents(ctx: *Context, req: *Request, params: Params) anyerror
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
 
-    // DB touch #1 of 2 in this handler, and the only one before the head is sent.
+    // The only DB touch before the head is sent.
     const initial: i64 = blk: {
         ctx.lockDb();
         defer ctx.unlockDb();
         break :blk files.syncVersion(caller.user_id) catch 0;
     };
 
-    const streams = ctx.event_streams orelse return eventsOneShot(ctx, req, initial);
-    if (!streams.tryAcquire(ctx.io, caller.user_id)) return eventsOneShot(ctx, req, initial);
+    // OUTSIDE the bracket above, on purpose: `Pulse` takes `db_lock` itself on
+    // the rare tick where it counts, and this handler's mutex is not reentrant.
+    const initial_index = indexSnapshot(ctx, caller.user_id);
+
+    const streams = ctx.event_streams orelse return eventsOneShot(ctx, req, initial, initial_index);
+    if (!streams.tryAcquire(ctx.io, caller.user_id)) return eventsOneShot(ctx, req, initial, initial_index);
     // THE slot-balance guarantee: one release per successful acquire, on every
     // path out of the handler including the error returns below.
     defer streams.release(ctx.io, caller.user_id);
@@ -2464,9 +2509,11 @@ pub fn controlplaneEvents(ctx: *Context, req: *Request, params: Params) anyerror
     }) catch return;
 
     body.writer.print("retry: {d}\nevent: sync\ndata: {d}\n\n", .{ eventstreams.retry_ms, initial }) catch return;
+    if (initial_index) |snap| writeIndexFrame(&body.writer, snap) catch return;
     body.flush() catch return;
 
     var last = initial;
+    var last_index = initial_index;
     var since_write_ms: i64 = 0;
     var lived_ms: i64 = 0;
 
@@ -2476,7 +2523,7 @@ pub fn controlplaneEvents(ctx: *Context, req: *Request, params: Params) anyerror
         lived_ms += streams.poll_interval_ms;
         since_write_ms += streams.poll_interval_ms;
 
-        // DB touch #2 of 2. Narrow bracket, taken and released every tick — this
+        // The version tick. Narrow bracket, taken and released every tick — this
         // is the difference between a stream that costs microseconds of global
         // lock per second and one that freezes device sync for its whole life.
         // A read error is treated as "no change": a transient DB failure must not
@@ -2487,10 +2534,30 @@ pub fn controlplaneEvents(ctx: *Context, req: *Request, params: Params) anyerror
             break :blk files.syncVersion(caller.user_id) catch last;
         };
 
+        // The index tick. Free unless something says the count moved (see
+        // `pending.Pulse`), and OUTSIDE the lock bracket above for the same
+        // reason the initial read is.
+        const index_now = indexSnapshot(ctx, caller.user_id);
+
+        var wrote = false;
         if (current != last) {
             last = current;
-            since_write_ms = 0;
             body.writer.print("event: sync\ndata: {d}\n\n", .{current}) catch break;
+            wrote = true;
+        }
+        // ON CHANGE ONLY, exactly as `event: sync` is. A frame per tick would be
+        // 2 frames/s down a link this project treats as 3G, saying nothing.
+        if (index_now) |now| {
+            const moved = last_index == null or
+                now.pending != last_index.?.pending or now.version != last_index.?.version;
+            if (moved) {
+                last_index = now;
+                writeIndexFrame(&body.writer, now) catch break;
+                wrote = true;
+            }
+        }
+        if (wrote) {
+            since_write_ms = 0;
             body.flush() catch break;
         } else if (since_write_ms >= streams.heartbeat_ms) {
             since_write_ms = 0;

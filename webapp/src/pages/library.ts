@@ -48,7 +48,7 @@ import type { Api } from "../api/types";
 import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
 import type { PersistentThumbStore } from "../cache/idb";
-import type { LiveChannel } from "../sync/types";
+import type { IndexStatus, LiveChannel } from "../sync/types";
 import type { Entry, Folder, Hash, Id, Listing, NoteMeta, NoteSummary, Theme } from "../core/types";
 import { skeletonPage } from "../core/noteSkeleton";
 import { ApiError, NameTakenError, dispatchApiFailure, type ApiFailureSink } from "../api/client";
@@ -1548,6 +1548,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     labelFor: (folder) => rail.labelFor(folder),
     resultCard: galleryCards.resultCard,
     emptyState,
+    indexPending: () => indexPending,
   });
 
   /**
@@ -2524,6 +2525,18 @@ root,
     }
   }
 
+  /**
+   * How many of this user's documents the server last said were still being
+   * derived, or `null` while it has not said at all.
+   *
+   * NULL IS NOT ZERO. An old server, or a client that fell back to polling,
+   * never sends the frame — and "the server did not say" must not be painted as
+   * "nothing is outstanding", because that is the reading that quietly drops the
+   * caveat off a search that needed it. The renderer treats null as "say
+   * nothing", which is the same screen as zero and a different claim.
+   */
+  let indexPending: number | null = null;
+
   /** A live sync-version bump: revalidate the folder we're looking at if stale. */
   function onBump(version: number): void {
     knownSyncVersion = Math.max(knownSyncVersion, version);
@@ -2533,7 +2546,23 @@ root,
       void folderCache.prefetch(true);
     }
   }
-  const unsubscribe = live.subscribe(onBump);
+  /**
+   * A live `event: index` frame: how much is still being derived.
+   *
+   * REPAINTS ONLY THE SEARCH, and only when the number really moved. The frame
+   * arrives at the poll interval whenever a derive lands, and the search list is
+   * the one surface making a completeness claim the count can falsify — the
+   * gallery claims nothing, so it has nothing to correct (`pending-ness.md` §6).
+   */
+  function onIndex(status: IndexStatus): void {
+    if (status.pending === indexPending) return;
+    indexPending = status.pending;
+    // Only where a query is on screen: `renderGallery` refuses to paint over an
+    // open viewer or destination anyway, and repainting a folder listing for a
+    // number it never shows would be work with no pixel behind it.
+    if (query.trim() !== "" && destination === null && activeViewer === null) renderGallery();
+  }
+  const unsubscribe = live.subscribe(onBump, onIndex);
 
   // --- view / theme --------------------------------------------------------
   function setView(next: View): void {

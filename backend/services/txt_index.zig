@@ -625,6 +625,60 @@ pub fn storeVerdict(db: sqlite.Db, blob_md5: []const u8, v: Verdict) !void {
     _ = try s.step();
 }
 
+/// THE `.txt` TENANT'S PREDICATE: every `files` row whose blob still owes
+/// paragraph segments, as a bare FROM/WHERE with the `files` alias `f`, the
+/// `blobs` alias `b` and the `note_index` alias `ni`. Bound parameter 1 is
+/// `noteindex.index_version`.
+///
+/// **A FROM/WHERE and not a statement, deliberately — this is the one copy.**
+/// `deferred.zig` selects `LIMIT 1` from it to find the next job; `pending.zig`
+/// counts over it to tell a user how much of their library is still being
+/// indexed. Those two must never be able to disagree about what is outstanding:
+/// a count that says "nothing pending" while the worker is still deriving is
+/// worse than no count at all, and a second hand-written copy of these five
+/// clauses is exactly how that happens. Same reasoning as `search/query.zig`'s
+/// single `fromWhere` — one clause, several statements built ON it, and callers
+/// may only ADD to it (a user scope, a blob scope), never restate it.
+///
+/// It also answers PER BLOB — `... AND f.md5 = ?` — which is what the per-blob
+/// term-set question in `docs/scratch/pending-ness.md` §4.1 needs, so that
+/// distinction is a bound parameter here rather than a fourth copy of the rule.
+///
+/// The clauses, each load-bearing:
+///
+/// `LIKE '%_.txt'` IS `wants`, not an approximation: `_` is LIKE's
+/// single-character wildcard, so the pattern demands at least one character
+/// before the dot — which is exactly the rule that makes a bare `.txt` a
+/// leading-dot name with no extension rather than a text file.
+///
+/// `ni.txt_index IS NULL` mirrors `needsDerive`'s memo exactly, and for its
+/// reason: the deferred write is CHUNKED, so `kind = 1` rows exist from the
+/// first commit onwards while the document is still half written. Asking about
+/// rows here — which this query used to do — would call an interrupted write
+/// finished and leave the file half indexed for ever.
+///
+/// The `note_index` join is the ORDER CONTRACT (`ensureIndexed` above): the note
+/// half heals first, so a blob whose row is missing or stale is not offered here
+/// at all. It becomes visible on a later pass, once that row is current — which
+/// the idle tick guarantees will happen.
+///
+/// `deleted = 0` and `is_folder = 0` are the `files` VISIBILITY rules, and they
+/// live here rather than at the call sites for the same reason the rest does:
+/// the bin is not a work queue, and a count scoped to a user must not restate
+/// them differently from the worker.
+pub const pending_from_where =
+    \\  FROM files f
+    \\  JOIN blobs b ON b.md5 = f.md5
+    \\  JOIN note_index ni ON ni.blob_md5 = f.md5
+    \\ WHERE f.is_folder = 0
+    \\   AND f.deleted = 0
+    \\   AND f.md5 IS NOT NULL
+    \\   AND LOWER(f.name) LIKE '%_.txt'
+    \\   AND ni.index_version = ?1
+    \\   AND ni.indexable = 0
+    \\   AND ni.txt_index IS NULL
+;
+
 /// Whether this blob still needs a `.txt` derivation. False — the memo — only
 /// when a CURRENT `note_index` row exists AND either the note parser verified
 /// the bytes (`indexable = 1`: a real `.note` is never chunked, whatever it is

@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { coverageLine, createNoteSearch, groupHits, pageSummary, MIN_GLOBAL_QUERY_LEN, type SearchState } from "../../src/pages/noteSearch";
+import {
+  coverageLine,
+  createNoteSearch,
+  groupHits,
+  pageSummary,
+  pendingLine,
+  resultsMayGrowLine,
+  MIN_GLOBAL_QUERY_LEN,
+  type SearchState,
+} from "../../src/pages/noteSearch";
 import { ApiError } from "../../src/api/client";
 import type { Api } from "../../src/api/types";
 import type { Coverage, SearchHit, SearchResults } from "../../src/core/types";
@@ -559,7 +568,7 @@ describe("createNoteSearch", () => {
   // I cannot see it".
   describe("coverageLine", () => {
     it("quantifies when the server counted", () => {
-      expect(coverageLine({ notes: 40, unsearchable: 12 })).toBe(
+      expect(coverageLine({ notes: 40, unsearchable: 12, pending: 0 })).toBe(
         "12 of your 40 notes have no recognised text, so they cannot be searched by their handwriting.",
       );
     });
@@ -574,8 +583,49 @@ describe("createNoteSearch", () => {
     it("degrades when there is nothing to warn about", () => {
       // Everything is findable, so making the reader do arithmetic to learn that
       // the answer is "no" buys nothing.
-      expect(coverageLine({ notes: 40, unsearchable: 0 })).toBe("Only notes recognised on the device are searchable.");
-      expect(coverageLine({ notes: 0, unsearchable: 0 })).toBe("Only notes recognised on the device are searchable.");
+      expect(coverageLine({ notes: 40, unsearchable: 0, pending: 0 })).toBe("Only notes recognised on the device are searchable.");
+      expect(coverageLine({ notes: 0, unsearchable: 0, pending: 0 })).toBe("Only notes recognised on the device are searchable.");
+    });
+  });
+
+  // The two sentences pending-ness adds, and the one property that matters most
+  // about them: they are a DIFFERENT claim from the coverage sentence above.
+  // `unsearchable` is permanent and `pending` resolves itself, so a UI that
+  // merged them would tell somebody their half-minute-old upload is permanently
+  // unsearchable — and, worse, tell them to stop waiting for the text that is
+  // about to arrive.
+  describe("pendingLine and resultsMayGrowLine", () => {
+    it("says how much is still coming, over an empty result", () => {
+      expect(pendingLine(3)).toBe("3 documents are still being indexed — matches in them will appear on their own.");
+      expect(pendingLine(1)).toBe("1 document is still being indexed — matches in them will appear on their own.");
+    });
+
+    it("qualifies a NON-EMPTY page more quietly, because completeness is the only claim to repair", () => {
+      expect(resultsMayGrowLine(2)).toBe("More may appear — 2 documents are still being indexed.");
+      expect(resultsMayGrowLine(1)).toBe("More may appear — 1 document is still being indexed.");
+    });
+
+    // Silence is the ordinary case. A line that appeared over a fully indexed
+    // library would be permanent furniture saying nothing.
+    it("says nothing at all when nothing is outstanding", () => {
+      expect(pendingLine(0)).toBeNull();
+      expect(resultsMayGrowLine(0)).toBeNull();
+      expect(pendingLine(-1)).toBeNull();
+      expect(resultsMayGrowLine(-1)).toBeNull();
+    });
+
+    // The two sentences must not be able to collapse into each other: the empty
+    // state explains an absence, the results line qualifies a presence.
+    it("does not say the same thing twice", () => {
+      expect(pendingLine(3)).not.toBe(resultsMayGrowLine(3));
+    });
+
+    // …and neither of them is the coverage sentence, which is about text that
+    // will never exist.
+    it("is a different sentence from the unsearchable one", () => {
+      const cov = coverageLine({ notes: 40, unsearchable: 12, pending: 3 });
+      expect(cov).not.toContain("still being indexed");
+      expect(pendingLine(3)).not.toContain("no recognised text");
     });
   });
 

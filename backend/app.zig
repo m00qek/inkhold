@@ -29,6 +29,7 @@ const schema = @import("db/schema.zig");
 const authsvc = @import("services/auth/service.zig");
 const filesmod = @import("services/files.zig");
 const deferred = @import("services/deferred.zig");
+const pendingsvc = @import("services/pending.zig");
 const settingsmod = @import("services/settings.zig");
 const ratelimit = @import("http/ratelimit.zig");
 const dltokens = @import("http/download_tokens.zig");
@@ -166,6 +167,18 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     // anything a missed signal or a restart left behind.
     files_svc.deferred = &worker;
 
+    // The shared pending count behind the live channel's `event: index` frame.
+    // AFTER the worker because it reads the worker's own signals — the ingest
+    // epoch and the completed-job counter — to decide when its answer is stale.
+    // It holds no memory and no thread of its own, so there is nothing to stop
+    // and nothing to free; it simply goes with this stack frame.
+    var pending_pulse: pendingsvc.Pulse = .{
+        .db = db,
+        .db_lock = &db_lock,
+        .io = io,
+        .worker = &worker,
+    };
+
     var ctx: Context = .{
         .gpa = gpa,
         .io = io,
@@ -175,6 +188,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
         .limiter = &limiter,
         .download_tokens = &download_tokens,
         .event_streams = &event_streams,
+        .pending = &pending_pulse,
         .db_lock = &db_lock,
         .readers = &readers,
         .lock_stats = &lock_stats_table,

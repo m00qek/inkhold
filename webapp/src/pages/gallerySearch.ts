@@ -13,7 +13,7 @@
 // library-wide now, and both land in one list of notes.
 
 import { el } from "../ui/dom";
-import { coverageLine, groupHits, type SearchState } from "./noteSearch";
+import { coverageLine, groupHits, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
@@ -82,6 +82,19 @@ export interface GallerySearchCtx {
   resultCard: (result: SearchResult, i: number, q: string) => HTMLElement;
   /** The shell's empty/loading state block. */
   emptyState: (title: string, body: string) => HTMLElement;
+  /**
+   * How many of the caller's documents are still being derived, as last heard
+   * from the live channel's `event: index` frame — `null` when this server has
+   * not said (an old server, or a client that fell back to polling).
+   *
+   * READ AT PAINT TIME, not captured, so the frame that arrives while results
+   * are on screen changes what the next repaint says. It is the ONLY source for
+   * a NON-EMPTY page: a search that found things does not pay for the aggregate
+   * (see `Coverage`), so the number can only come from the channel that pushes
+   * it for free. A zero-hit page prefers its own response's number, which is
+   * both fresher and guaranteed present.
+   */
+  indexPending: () => number | null;
 }
 
 export interface GallerySearch {
@@ -281,10 +294,27 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     const results = searchResults(q);
     const pages = results.reduce((n, r) => n + r.pages.length, 0);
 
+    // How many documents are still being derived. The response's own number
+    // when it gave one (a zero-hit search carries it and it is the freshest
+    // thing there is), otherwise the live channel's last frame. Never both
+    // added together — they are the same number from two channels, not two.
+    const pending =
+      searchState.kind === "results" && searchState.coverage !== null
+        ? searchState.coverage.pending
+        : (ctx.indexPending() ?? 0);
+
     // Said ONCE, above everything, and only where there is something to qualify:
     // a notice over an empty list would explain nothing.
     if (searchState.kind === "results" && searchState.usedFuzzy && results.length > 0) {
       gallery.append(el("p", { class: "hits__notice", role: "status", text: FUZZY_NOTICE }));
+    }
+    // THE COMPLETENESS CAVEAT, over real results only. The list implies "this is
+    // what there is"; while a derive is outstanding that is not true, and a
+    // reader who does not know it reads a partial answer as a whole one. The
+    // empty state says its own, stronger version below.
+    if (results.length > 0) {
+      const grow = resultsMayGrowLine(pending);
+      if (grow) gallery.append(el("p", { class: "hits__notice", role: "status", text: grow }));
     }
 
     if (results.length === 0) {
@@ -309,7 +339,12 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         // root, which is what used to leave this state stranded forever.
         gallery.append(ctx.emptyState("Searching…", "Looking through every note — names, typing and handwriting."));
       } else {
-        gallery.append(ctx.emptyState(`No matches for “${q}”`, coverageLine(searchState.coverage)));
+        // BOTH sentences when both apply, pending first: one says waiting will
+        // help and the other says it will not, so the transient one has to lead
+        // or the reader stops waiting for the thing that is about to arrive.
+        const still = pendingLine(pending);
+        const why = coverageLine(searchState.kind === "results" ? searchState.coverage : null);
+        gallery.append(ctx.emptyState(`No matches for “${q}”`, still ? `${still} ${why}` : why));
       }
       return;
     }

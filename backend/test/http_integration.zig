@@ -27,6 +27,8 @@ const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
 const uploadcap = @import("../handlers/upload_cap.zig");
 const eventstreams = @import("../http/event_streams.zig");
+const pendingsvc = @import("../services/pending.zig");
+const deferredsvc = @import("../services/deferred.zig");
 const readerpool = @import("../db/reader_pool.zig");
 const lockstats = @import("../http/lock_stats.zig");
 const sn = @import("supernote");
@@ -6742,6 +6744,148 @@ test "a held stream pushes a NEW syncVersion when the tree changes, then release
     // that silently downgrades the endpoint to one-shot forever.
     try std.testing.expectEqual(@as(u32, 0), streams.count(std.testing.io));
     try std.testing.expectEqual(@as(u32, 0), streams.countFor(std.testing.io, who.id));
+}
+
+test "`event: index` is emitted when a derive completes, and NOT when an unrelated file is renamed" {
+    // The frame's whole contract, driven end to end. Two halves, and the second
+    // is the one that keeps the channel usable: a frame per poll would be two a
+    // second down a link this project treats as 3G, saying nothing new. So the
+    // change below has to move `syncVersion` (and therefore emit `event: sync`)
+    // while leaving `event: index` silent.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    var lock: std.Io.Mutex = .init;
+    ctx.db_lock = &lock;
+
+    const who = try onboardedAdmin(f);
+
+    // A `.txt` whose derive is deferred: outstanding from the moment it lands.
+    {
+        lock.lockUncancelable(std.testing.io);
+        defer lock.unlock(std.testing.io);
+        var r = std.Io.Reader.fixed("A paragraph.\n\nAnd a second one.\n");
+        const e = try f.files.putFile(who.id, null, "notes.txt", &r, null);
+        gpa.free(e.name);
+        if (e.md5) |m| gpa.free(m);
+    }
+
+    var worker: deferredsvc.Worker = .{
+        .gpa = gpa,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &lock,
+        .io = std.testing.io,
+    };
+    var pulse: pendingsvc.Pulse = .{
+        .db = f.db,
+        .db_lock = &lock,
+        .io = std.testing.io,
+        .worker = &worker,
+        // No backstop expiry during the test: every frame below must be
+        // attributable to a signal, never to the clock running out.
+        .max_age_ms = 1_000_000,
+    };
+    ctx.pending = &pulse;
+
+    var streams: eventstreams.EventStreams = .{
+        .poll_interval_ms = 5,
+        .heartbeat_ms = 1_000_000,
+        .max_lifetime_ms = 600,
+    };
+    ctx.event_streams = &streams;
+
+    var runner: StreamRunner = .{ .ctx = ctx, .token = who.token };
+    const t = try std.Thread.spawn(.{}, StreamRunner.run, .{&runner});
+    try runner.waitUntilHeld(&streams);
+
+    // An UNRELATED change: the tree moves, so `syncVersion` moves, but nothing
+    // about what is outstanding does.
+    {
+        lock.lockUncancelable(std.testing.io);
+        defer lock.unlock(std.testing.io);
+        const dir = try f.files.createFolder(who.id, null, "Dir");
+        gpa.free(dir.name);
+    }
+    // Let the stream see it before the derive lands, so the two events cannot
+    // collapse into one frame and leave the "not on a rename" half vacuous.
+    try std.testing.io.sleep(.fromMilliseconds(60), .awake);
+
+    // Now the derive: the worker finishes the `.txt` and the count drops to 0.
+    worker.drain();
+
+    t.join();
+    try std.testing.expectEqual(@as(u16, 200), runner.status);
+    const out = runner.output();
+
+    // Frame at connect: one document outstanding.
+    try std.testing.expect(std.mem.indexOf(u8, out, "event: index\ndata: {\"pending\":1,") != null);
+    // …and one more once the worker is done, saying so.
+    try std.testing.expect(std.mem.indexOf(u8, out, "event: index\ndata: {\"pending\":0,") != null);
+    // The sync bump really did happen, so the count below is about the INDEX
+    // frame and not about a stream that saw nothing at all.
+    try std.testing.expect(std.mem.indexOf(u8, out, "event: sync") != null);
+
+    // EXACTLY TWO index frames across ~120 polls. More is the emit-on-change
+    // rule broken; fewer is a derive nobody was told about.
+    var frames: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, out, at, "event: index")) |i| : (at = i + 1) frames += 1;
+    try std.testing.expectEqual(@as(usize, 2), frames);
+}
+
+test "with no pending pulse the endpoint says NOTHING about indexing rather than claiming zero" {
+    // `ctx.pending == null` is a server that does not report it — the
+    // integration harness, and any build with no worker. An `event: index` with
+    // `pending: 0` there would be a claim nobody checked, and the client would
+    // stop qualifying its "No matches".
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    const who = try onboardedAdmin(f);
+    try std.testing.expect(ctx.pending == null);
+
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+    const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/events", &who.token, "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "event: sync") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "event: index") == null);
+}
+
+test "the DEGRADED one-shot shape carries the index frame too — it is the client furthest from the next one" {
+    // A caller over the per-user cap reconnects on `retry:` (5 s). It is exactly
+    // the client that cannot afford to wait for a pushed frame, so the one-shot
+    // response has to answer in full.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    var lock: std.Io.Mutex = .init;
+    ctx.db_lock = &lock;
+    const who = try onboardedAdmin(f);
+
+    {
+        lock.lockUncancelable(std.testing.io);
+        defer lock.unlock(std.testing.io);
+        var r = std.Io.Reader.fixed("A paragraph.\n\nAnd a second one.\n");
+        const e = try f.files.putFile(who.id, null, "notes.txt", &r, null);
+        gpa.free(e.name);
+        if (e.md5) |m| gpa.free(m);
+    }
+    var pulse: pendingsvc.Pulse = .{ .db = f.db, .db_lock = &lock, .io = std.testing.io };
+    ctx.pending = &pulse;
+
+    var streams: eventstreams.EventStreams = .{ .max_total = 8, .max_per_user = 1 };
+    ctx.event_streams = &streams;
+    try std.testing.expect(streams.tryAcquire(std.testing.io, who.id)); // occupy it
+    defer streams.release(std.testing.io, who.id);
+
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+    const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/events", &who.token, "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "chunked") == null); // really one-shot
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "event: index\ndata: {\"pending\":1,") != null);
 }
 
 test "an idle held stream emits heartbeat comment frames" {

@@ -55,8 +55,16 @@ pub fn wants(name: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name[dot + 1 ..], "pdf");
 }
 
-/// The blobs still owing PDF work, as `(md5, name, size)` — `deferred.Tenant`'s
-/// contract. Bound parameter 1 is `noteindex.index_version`.
+/// THE `.pdf` TENANT'S PREDICATE: every `files` row whose blob still owes PDF
+/// work, as a bare FROM/WHERE with the `files` alias `f`, the `blobs` alias `b`
+/// and the `note_index` alias `ni`. Bound parameter 1 is
+/// `noteindex.index_version`.
+///
+/// **A FROM/WHERE and not a statement, deliberately — this is the one copy**, for
+/// the reason `txt_index.pending_from_where` states at length: `deferred.zig`
+/// takes `LIMIT 1` from it and `pending.zig` counts over it, and those two
+/// disagreeing about what is outstanding is the whole failure this shape
+/// prevents. Callers may only ADD a bound (a user scope, a blob scope).
 ///
 /// TWO QUESTIONS, ONE TENANT, asked in order. A PDF owes a PROBE (page count and
 /// the page-1 box, ~1 s) and then a TEXT PASS (`pdf_text.zig`, ~2 minutes on the
@@ -65,6 +73,10 @@ pub fn wants(name: []const u8) bool {
 /// second tenant asking about the same md5 would be refused as "no progress" and
 /// the text would wait for the idle tick. One job brings the PDF fully up to
 /// date instead.
+///
+/// It is also why a COUNT over this clause must be over DISTINCT BLOBS rather
+/// than over outstanding questions: one PDF owing both a probe and its text is
+/// one document still being indexed, not two.
 ///
 /// The text half is gated on `pdf_probe = 0`: text is never asked of a file
 /// whose first answer is missing or negative. Mirrors `needsProbe` and
@@ -78,8 +90,7 @@ pub fn wants(name: []const u8) bool {
 /// The `note_index` join is the same ORDER CONTRACT `txt_index` has: a blob
 /// whose row is missing or stale is not offered, because the note half heals
 /// first and its heal rewrites the row this one writes into.
-pub const pending_sql =
-    \\SELECT f.md5, f.name, b.size
+pub const pending_from_where =
     \\  FROM files f
     \\  JOIN blobs b ON b.md5 = f.md5
     \\  JOIN note_index ni ON ni.blob_md5 = f.md5
@@ -92,8 +103,6 @@ pub const pending_sql =
     \\   AND (ni.pdf_probe IS NULL
     \\        OR (ni.pdf_probe = 0 AND ni.page_count = 0)
     \\        OR (ni.pdf_probe = 0 AND ni.pdf_text IS NULL))
-    \\ ORDER BY b.size ASC
-    \\ LIMIT 1;
 ;
 
 /// Whether this blob still needs probing — the authority the discovery query
@@ -173,10 +182,10 @@ test "NoContext is not a verdict — a transient failure must not write off a go
     try testing.expectEqual(@as(?Verdict, .no_pages), Verdict.of(pdfprobe.Error.NoPages));
 }
 
-test "pending_sql compiles against the real schema" {
+test "the pending predicate compiles against the real schema" {
     var db = try sqlite.Db.openMemory();
     defer db.close();
     try schema.migrate(db);
-    const s = try db.prepare(pending_sql);
+    const s = try db.prepare("SELECT f.md5\n" ++ pending_from_where ++ ";");
     s.finalize();
 }

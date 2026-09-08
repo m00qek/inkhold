@@ -75,6 +75,10 @@ const foldRows = fuzzy.foldRows;
 const foldTerms = fuzzy.foldTerms;
 const maintain = @import("maintain.zig");
 const fts_predicate = maintain.fts_predicate;
+/// The count of the caller's documents whose derive has not finished. A
+/// zero-hit response is the one place search has to answer "why is this empty",
+/// and "not indexed yet" is one of the two honest answers — see `coverageOf`.
+const pendingsvc = @import("../pending.zig");
 
 /// THE `.mark` PAIRING RULE, borrowed rather than rewritten. `files.zig` owns it
 /// (`Files.hidePairedMark`) because that is where a pair is HIDDEN from a listing
@@ -198,6 +202,19 @@ pub const Coverage = struct {
     /// How many of those carry no recognized text, and are therefore invisible
     /// to search however it is spelled.
     unsearchable: i64,
+    /// Documents of the caller's whose derive has not finished — `pending.zig`.
+    ///
+    /// **A DIFFERENT NUMBER FROM `unsearchable`, and the distinction is the
+    /// whole reason it is a third field rather than folded into the second.**
+    /// `unsearchable` is PERMANENT: a note whose device OCR is absent carries no
+    /// text and never will. This is TRANSIENT and resolves on its own. Merging
+    /// them would tell somebody their thirty-second-old upload is permanently
+    /// unsearchable, which is both wrong and unactionable. Two numbers, and the
+    /// UI says two different sentences (`webapp/src/pages/noteSearch.ts`).
+    ///
+    /// A note is never pending and a pending document is never in `notes`: the
+    /// two sets do not even overlap. See `pending.zig` for why.
+    pending: i64,
 };
 
 pub const Results = struct {
@@ -748,12 +765,47 @@ const coverage_sql =
     "WHERE f.user_id = ?1 AND f.deleted = 0 AND f.is_folder = 0" ++ hide_paired_mark ++ " " ++
     "AND EXISTS (SELECT 1 FROM note_index WHERE blob_md5 = f.md5 AND indexable = 1);";
 
+/// ## Why `pending` rides HERE and only here — the §9 decision, recorded
+///
+/// `docs/scratch/pending-ness.md` §9 asks whether `Coverage` should ride on
+/// EVERY search or only on zero-hit exits, because §6 wants a "results may grow"
+/// line on a NON-EMPTY page too and that needs the number always.
+///
+/// **It stays zero-hit-only, and the event frame carries the non-empty case.**
+/// Three reasons, in the order they decided it:
+///
+///   1. The aggregate MEASURED **72.4 ms p50 on the Pi**, and `pending` adds
+///      **27.25 ms** to it. Attaching that to every keystroke of a search that
+///      IS finding things is the exact cost this function's "conditional so the
+///      aggregate is not paid on every keystroke" comment was written to avoid,
+///      and the non-empty page is precisely the common path.
+///   2. The number is ALREADY on its way to a non-empty page by a channel that
+///      costs nothing extra: `event: index` pushes it to every connected client
+///      within a poll interval, computed once and shared. Paying for it a second
+///      time, per keystroke, to learn a fact the page will be told anyway is
+///      work with no answer attached to it.
+///   3. The zero-hit page cannot wait for that frame, which is why it keeps its
+///      own copy. A caller on the DEGRADED one-shot stream (over the per-user
+///      cap, or a client with no `EventSource`) is up to `retry_ms` = 5 s from
+///      its next frame, and "No matches" is a completeness claim that must be
+///      qualified in the response that made it, not five seconds later.
+///
+/// The failure mode of the other choice, named because it is what makes this a
+/// decision rather than a preference: `Coverage` on every response would make
+/// the cheap path pay a 100 ms aggregate to render a line that is usually
+/// absent, on the one machine where 100 ms of held `db_lock` is device sync
+/// stalling.
 fn coverageOf(db: sqlite.Db, user_id: u64) !Coverage {
-    var r = (try db.row(coverage_sql, &.{.{ .int = @intCast(user_id) }})) orelse return .{ .notes = 0, .unsearchable = 0 };
+    // Asked separately from the aggregate below because it is a different
+    // question over a different predicate — `pending.zig` owns it, and owns it
+    // jointly with the worker, which is the point (`pending-ness.md` §3).
+    const outstanding = pendingsvc.countFor(db, user_id) catch 0;
+    var r = (try db.row(coverage_sql, &.{.{ .int = @intCast(user_id) }})) orelse
+        return .{ .notes = 0, .unsearchable = 0, .pending = outstanding };
     defer r.finalize();
     // `SUM` over no rows is NULL, which reads back as 0 — the right answer for
     // an empty library, and the only NULL this statement can produce.
-    return .{ .notes = r.int(0), .unsearchable = r.int(1) };
+    return .{ .notes = r.int(0), .unsearchable = r.int(1), .pending = outstanding };
 }
 
 /// One result row, plus what `Hit` does not carry: the `note_page_index.id`
@@ -2449,6 +2501,7 @@ const filesvc = @import("../files.zig");
 const noteindex = @import("../note_index.zig");
 const sn = @import("supernote");
 const nb = @import("note_builder");
+const deferred = @import("../deferred.zig");
 
 const Fixture = struct {
     db: sqlite.Db,
@@ -2457,6 +2510,9 @@ const Fixture = struct {
     arena: std.heap.ArenaAllocator,
     path: [128]u8 = undefined,
     path_len: usize = 0,
+    /// Stands in for the server's global `db_lock` — only the deferred worker
+    /// wants one, and only in the tests that drain it.
+    db_lock: std.Io.Mutex = .init,
 
     fn init() !Fixture {
         return initAt(false);
@@ -5615,6 +5671,40 @@ test "BENCH note: a page fold on a connection that has folded a whole document, 
 // ---------------------------------------------------------------------------
 // Tests — coverage
 // ---------------------------------------------------------------------------
+
+test "PENDING AND UNSEARCHABLE ARE DIFFERENT NUMBERS, and a note with no recognised text is never pending" {
+    // §2 of `docs/scratch/pending-ness.md`, asserted where the two numbers meet.
+    // `unsearchable` is permanent — a note whose device OCR is absent — and
+    // `pending` is transient. One library carrying one of each has to report
+    // 1 and 1, not 2 of anything: the sentences they drive say opposite things
+    // about whether waiting will help.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // Permanently unsearchable: a real `.note` the device never recognised.
+    _ = try f.putSpec(1, "blank.note", .{ .pages = &.{
+        .{ .layers = &.{.{ .slot = .main, .bitmap = "DDDD" }} },
+    } });
+    // Transiently pending: a `.txt` whose derive is off the connection now.
+    _ = try f.putBytes(1, "fresh.txt", "a paragraph that will be searchable shortly");
+
+    const before = (try f.search(1, "zzzzzzzzz ")).coverage.?;
+    try testing.expectEqual(@as(i64, 1), before.notes);
+    try testing.expectEqual(@as(i64, 1), before.unsearchable); // the ink note
+    try testing.expectEqual(@as(i64, 1), before.pending); // the .txt, and NOT the note
+
+    // The worker runs. The transient number resolves itself; the permanent one
+    // does not move, because nothing about that note changed.
+    deferred.drainNow(testing.allocator, f.db, f.files.blobs, &f.db_lock, testing.io);
+    const after = (try f.search(1, "zzzzzzzzz ")).coverage.?;
+    try testing.expectEqual(@as(i64, 1), after.unsearchable);
+    try testing.expectEqual(@as(i64, 0), after.pending);
+
+    // And it is the CALLER's outstanding work, not the install's.
+    _ = try f.putBytes(2, "theirs.txt", "somebody else's unindexed paragraph");
+    try testing.expectEqual(@as(i64, 0), (try f.search(1, "zzzzzzzzz ")).coverage.?.pending);
+    try testing.expectEqual(@as(i64, 1), (try f.search(2, "zzzzzzzzz ")).coverage.?.pending);
+}
 
 test "an empty result quantifies the unsearchable, and a non-empty one does not pay for it" {
     var f = try Fixture.init();

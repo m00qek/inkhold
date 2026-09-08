@@ -484,6 +484,26 @@ export interface Coverage {
   notes: number;
   /** How many of those carry no recognized text, and so cannot be found. */
   unsearchable: number;
+  /**
+   * Documents of yours whose indexing has not finished yet.
+   *
+   * A DIFFERENT NUMBER FROM {@link Coverage.unsearchable}, and they must never
+   * be added together or shown as one sentence. `unsearchable` is permanent —
+   * a note the device never recognised carries no text and never will — while
+   * this is transient and resolves without anyone doing anything. Telling
+   * somebody their half-minute-old upload is permanently unsearchable is both
+   * wrong and unactionable.
+   *
+   * The two sets do not overlap: a `.note` is indexed on upload and so is never
+   * pending, and a document still being derived is not counted in `notes`.
+   *
+   * Absent reads as 0 at the seam, which is the ONE default here that is not a
+   * claim: the only thing this drives is a sentence shown when it is above
+   * zero, so "the server did not say" and "nothing is pending" produce
+   * identical UI. `notes`/`unsearchable` cannot be defaulted that way, because
+   * zeroes there would render as a confident "0 of your 0 notes".
+   */
+  pending: number;
 }
 
 /** A full-text search response: the query as searched, plus its ranked hits. */

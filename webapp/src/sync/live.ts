@@ -23,8 +23,22 @@
 // reconnect AND any pending poll, leaving nothing running. The `EventSource`
 // constructor and the poll fetch are injectable so tests can drive both without
 // a network.
+//
+// TWO NAMED FRAMES now ride this one connection: `event: sync` (the version) and
+// `event: index` (how much of the library is still being derived). One socket,
+// because a held stream costs one of four per-user slots on the server and a
+// second subscription would halve how many tabs can stay live.
+//
+// KNOWN LIMIT OF THE POLLING FALLBACK: it reads only the FIRST frame of the
+// response, which is the sync one, so a client that has fallen back to polling
+// stops hearing about indexing. It is not left blind — a zero-hit search still
+// carries the count in its own response (`Coverage.pending`) — but the "results
+// may grow" line over a non-empty page needs this channel and simply will not
+// appear there. Fixing it means teaching `fetchVersionOnce` to drain the whole
+// one-shot body, and nobody has needed it: the fallback is for a browser with no
+// `EventSource` at all.
 
-import type { LiveChannel } from "./types";
+import type { IndexStatus, LiveChannel } from "./types";
 
 /** The subset of `EventSource` we depend on — lets tests supply a fake. The
  * server emits a **named** `event: sync` frame (see handlers/controlplane.zig
@@ -68,6 +82,33 @@ export interface LiveChannelOptions {
 
 const DEFAULT_URL = "/api/controlplane/events";
 const CLOSED = 2; // EventSource.CLOSED
+
+/**
+ * Parse an `event: index` payload — `{"pending":3,"version":41}`.
+ *
+ * TOLERANT ONLY WHERE ABSENCE IS NOT A CLAIM. A frame that does not parse, or
+ * whose `pending` is not a finite number, yields `undefined` and the UI keeps
+ * whatever it last knew: an unreadable frame must never be turned into
+ * "nothing is pending", which is the reading that would silently drop the
+ * "still indexing" line off a search that needs it. `version` is allowed to be
+ * missing (0) — nothing in this app reads it yet, and it is not a claim about
+ * completeness the way `pending` is.
+ */
+export function parseIndexStatus(data: string): IndexStatus | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data.trim());
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const { pending, version } = parsed as { pending?: unknown; version?: unknown };
+  if (typeof pending !== "number" || !Number.isFinite(pending)) return undefined;
+  return {
+    pending: Math.max(0, Math.floor(pending)),
+    version: typeof version === "number" && Number.isFinite(version) ? version : 0,
+  };
+}
 
 /** Parse a sync-version out of an SSE payload: a bare number or `{syncVersion}`. */
 export function parseBump(data: string): number | undefined {
@@ -156,7 +197,7 @@ export function createLiveChannel(opts: LiveChannelOptions = {}): LiveChannel {
   const pollMs = opts.pollMs ?? 15000;
 
   return {
-    subscribe(onBump: (syncVersion: number) => void): () => void {
+    subscribe(onBump: (syncVersion: number) => void, onIndex?: (status: IndexStatus) => void): () => void {
       let source: EventSourceLike | null = null;
       let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
       let pollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -209,6 +250,15 @@ export function createLiveChannel(opts: LiveChannelOptions = {}): LiveChannel {
         };
         es.addEventListener("sync", onData); // the server's named frame
         es.addEventListener("message", onData); // defensive: unnamed frames
+        // The index frame. NOT on "message" as well: its payload is JSON and the
+        // unnamed handler above would read it as a sync-version, so a shared
+        // listener would let one frame answer two questions.
+        if (onIndex) {
+          es.addEventListener("index", (ev: MessageEvent) => {
+            const status = parseIndexStatus(String(ev.data ?? ""));
+            if (status !== undefined) onIndex(status);
+          });
+        }
         es.onerror = () => {
           // Transient errors: EventSource retries itself while readyState stays
           // CONNECTING (that is also how the server's degraded one-shot shape

@@ -692,9 +692,11 @@ describe("createHttpApi", () => {
     it("passes coverage through when present and reports NULL — never zeroes — when absent", async () => {
       vi.stubGlobal(
         "fetch",
-        recordingFetch(() => jsonResponse({ query: "q", hits: [], coverage: { notes: 40, unsearchable: 12 } })).fn,
+        recordingFetch(() =>
+          jsonResponse({ query: "q", hits: [], coverage: { notes: 40, unsearchable: 12, pending: 3 } }),
+        ).fn,
       );
-      expect((await createHttpApi().searchText("q")).coverage).toEqual({ notes: 40, unsearchable: 12 });
+      expect((await createHttpApi().searchText("q")).coverage).toEqual({ notes: 40, unsearchable: 12, pending: 3 });
 
       vi.stubGlobal("fetch", recordingFetch(() => jsonResponse({ query: "q", hits: [] })).fn);
       expect((await createHttpApi().searchText("q")).coverage).toBeNull();
@@ -702,6 +704,35 @@ describe("createHttpApi", () => {
       // Half a claim is not a claim.
       vi.stubGlobal("fetch", recordingFetch(() => jsonResponse({ query: "q", hits: [], coverage: { notes: 40 } })).fn);
       expect((await createHttpApi().searchText("q")).coverage).toBeNull();
+    });
+
+    // `pending` is the one field here that DOES default, and only because the
+    // sentence it drives is shown above zero: "the server did not say" and
+    // "nothing is outstanding" have to produce the same screen. A negative or
+    // fractional count is not a count and degrades the same way.
+    it("defaults an absent pending to zero, because silence and nothing-pending look identical on screen", async () => {
+      const cov = async (coverage: unknown) => {
+        vi.stubGlobal("fetch", recordingFetch(() => jsonResponse({ query: "q", hits: [], coverage })).fn);
+        return (await createHttpApi().searchText("q")).coverage;
+      };
+      expect(await cov({ notes: 40, unsearchable: 12 })).toEqual({ notes: 40, unsearchable: 12, pending: 0 });
+      expect(await cov({ notes: 40, unsearchable: 12, pending: -4 })).toEqual({
+        notes: 40,
+        unsearchable: 12,
+        pending: 0,
+      });
+      expect(await cov({ notes: 40, unsearchable: 12, pending: "3" })).toEqual({
+        notes: 40,
+        unsearchable: 12,
+        pending: 0,
+      });
+      // …but a real number survives, which is what makes the default a fallback
+      // rather than a shrug.
+      expect(await cov({ notes: 40, unsearchable: 12, pending: 7 })).toEqual({
+        notes: 40,
+        unsearchable: 12,
+        pending: 7,
+      });
     });
 
     // The bug class this whole seam exists to prevent: a dead session must not
