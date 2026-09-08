@@ -4,7 +4,7 @@
 // decodable by the actual `note-decode.wasm` the dev server ships. That is
 // what lets the reader's layers panel run END TO END in dev and e2e — fake
 // data plane, real decoder — the way the `.spd` viewer's e2e drives the real
-// `spd-decode.wasm` against a committed fixture.
+// `sqlite-core.wasm` against a committed fixture.
 //
 // The layer cast mirrors the settled capture (`layers_edited.note`,
 // ): a nameless background and main

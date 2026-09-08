@@ -80,12 +80,13 @@ const sqlite_flags = [_][]const u8{
     //     out for a Portuguese corpus.
 };
 
-/// Hard-trimmed SQLite for the WASM `.spd` decoder (`zig build wasm-spd-decode`).
+/// Hard-trimmed SQLite for the browser (`zig build wasm-sqlite-core`).
 ///
-/// The browser needs SQLite only to `sqlite3_deserialize` a memory image
-/// read-only and run a handful of `SELECT`s over `config`/`surface_*` — no
-/// writes, no files, no threads. So this profile drops everything that path
-/// does not touch, on top of the backend's omissions:
+/// The browser needs SQLite for exactly two things — `sqlite3_deserialize` a
+/// `.spd` image and run a handful of `SELECT`s over `config`/`surface_*`, and
+/// build and query the local FTS5 search index. No files, no threads. So this
+/// profile drops everything neither path touches, on top of the backend's
+/// omissions:
 ///
 ///   * `THREADSAFE=0`  — the wasm instance is single-threaded; no mutexes.
 ///   * `OS_OTHER=1`    — remove the built-in unix/win VFS wholesale (file I/O,
@@ -95,17 +96,38 @@ const sqlite_flags = [_][]const u8{
 ///   * `OMIT_WAL`      — the parser rewrites a real `.spd`'s WAL header to
 ///                       rollback-journal before deserialize (`neutralizeWalMode`),
 ///                       and `:memory:` never runs WAL, so the WAL module is dead.
-///   * `OMIT_AUTOINIT` — the single entry point (`spd_decode.open`) calls
-///                       `sqlite3_initialize` explicitly.
-///   * `OMIT_JSON` + no FTS5/RTREE/GEOPOLY (opt-in, never enabled here) — every
-///                       optional SQL module dropped.
+///   * `OMIT_AUTOINIT` — every entry point that can be the first call into the
+///                       module calls `sqlite3_initialize` explicitly.
+///   * `OMIT_JSON` + no RTREE/GEOPOLY — every optional SQL module dropped except
+///                       the one that is now load-bearing:
+///   * `ENABLE_FTS5`   — global search is answered in the browser
+///                       (`client-side-search-impl.md`). MEASURED on this
+///                       artifact: 667,211 raw / 290,879 gzip without it against
+///                       828,562 / 362,009 with, so FTS5 costs **+71,130 bytes
+///                       gzip** and that is the whole download cost of the
+///                       feature. `precompress.mjs` pins the total.
+///   * `TEMP_STORE=3`  — **THE DANGEROUS ONE.** The null VFS cannot open a file
+///                       (`nullOpen` returns `SQLITE_IOERR` unconditionally), so
+///                       anything that spilled to temp storage would spill to a
+///                       temp FILE and fail. `3` forces temp storage to memory
+///                       and cannot be overridden by a pragma. Without it an
+///                       FTS5 merge *"surfaces as a corrupt index in production
+///                       rather than as a build error"* (`wasm-search-bench.md`
+///                       §0).
+///                       REMOVING IT CHANGES NOTHING OBSERVABLE — measured, up
+///                       to 80,000 documents and an 80,000-row `ORDER BY rank`.
+///                       So it is not defended by a behavioural test: the module
+///                       asks the compiled amalgamation for it
+///                       (`sqlite3_compileoption_used`) and `idx_open` refuses
+///                       to open without it, which is what
+///                       `webapp/wasm/tests/sqlite_core_abi.mjs` asserts.
 ///   * the read-only-safe omissions (UTF16, LOAD_EXTENSION, DEPRECATED,
 ///     SHARED_CACHE, PROGRESS_CALLBACK, AUTHORIZATION, COMPLETE, DECLTYPE,
 ///     TRACE, AUTOVACUUM) + `UNTESTABLE` + `DQS=0` + `MEMSTATUS=0`.
 ///
 /// Honest caveat: there is no "read-only" flag — the b-tree/pager/SQL core stays
 /// to run any SELECT. The win is dropping every optional module + the OS layer.
-const spd_sqlite_wasm_flags = [_][]const u8{
+const sqlite_core_wasm_flags = [_][]const u8{
     "-DSQLITE_THREADSAFE=0",
     "-DSQLITE_OS_OTHER=1",
     "-DSQLITE_OMIT_WAL",
@@ -125,6 +147,8 @@ const spd_sqlite_wasm_flags = [_][]const u8{
     "-DSQLITE_DQS=0",
     "-DSQLITE_DEFAULT_MEMSTATUS=0",
     "-DSQLITE_LIKE_DOESNT_MATCH_BLOBS",
+    "-DSQLITE_ENABLE_FTS5",
+    "-DSQLITE_TEMP_STORE=3",
     // NB: the grammar-altering omissions (OMIT_TRIGGER/VIEW/WINDOWFUNC/CTE/
     // ATTACH/PRAGMA/…) are deliberately NOT used. They require regenerating the
     // Lemon parser, which the vendored *amalgamation* ships pre-built — enabling
@@ -651,83 +675,68 @@ pub fn build(b: *std.Build) void {
     spd_mod.link_libc = true;
     spd_mod.addIncludePath(b.path("vendor/sqlite"));
 
-    // ---- WebAssembly `.spd` viewer decoder (frontend) ----
-    // The SAME `parsers/spd` parser, compiled to WASM so the browser viewer
-    // never re-parses `.spd` in JS (the drift the PoC proved). SQLite is
-    // compiled in RIGHT HERE with the hard-trimmed, OS-less, read-only profile
-    // (`spd_sqlite_wasm_flags`) plus the null VFS — a second, tiny copy distinct
-    // from the backend's full-featured one, because the two builds want opposite
-    // things (FTS5 + threads server-side; none of it in the browser). Targets
-    // wasm32-WASI, not freestanding: the SQLite amalgamation needs libc HEADERS
-    // (<string.h>, <stdlib.h>) that only wasi-libc provides. The `OS_OTHER` VFS
-    // means no WASI syscall is exercised on the read path — the imports are
-    // present but inert (verified by the ABI test).
+    // ---- WebAssembly SQLite core: the `.spd` decoder AND the search index ----
+    // ONE artifact, two ABIs (`spd_*` + `idx_*`), because SQLite alone is
+    // ~290 KB gzip of the 362 KB artifact: two modules would ship ~580 KB to
+    // avoid ~10 KB of Zig a given page happens not to call, which is the wrong
+    // trade — `client-side-search-impl.md` §5, which also names the file:
+    // an artifact called `spd-decode` that also runs search is a lie in the
+    // build graph.
+    //
+    // The `.spd` half is the SAME `parsers/spd` parser the backend uses, so the
+    // browser viewer never re-parses `.spd` in JS (the drift the PoC proved).
+    // SQLite is compiled in RIGHT HERE with the hard-trimmed, OS-less profile
+    // (`sqlite_core_wasm_flags`) plus the null VFS — a second copy distinct from
+    // the backend's full-featured one. Targets wasm32-WASI, not freestanding:
+    // the SQLite amalgamation needs libc HEADERS (<string.h>, <stdlib.h>) that
+    // only wasi-libc provides. The `OS_OTHER` VFS means no WASI syscall is
+    // exercised — the imports are present but inert (the ABI test verifies it by
+    // instantiating under a REAL WASI, so a stray syscall would show up).
     const wasi_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
-    const spd_decode_mod = b.createModule(.{
-        .root_source_file = b.path("webapp/wasm/spd_decode.zig"),
+    const sqlite_core_mod = b.createModule(.{
+        .root_source_file = b.path("webapp/wasm/sqlite_core.zig"),
         .target = wasi_target,
         .optimize = .ReleaseSmall,
     });
-    spd_decode_mod.addImport("spd", spd_mod);
-    spd_decode_mod.link_libc = true;
-    spd_decode_mod.addIncludePath(b.path("vendor/sqlite"));
+    sqlite_core_mod.addImport("spd", spd_mod);
+    sqlite_core_mod.link_libc = true;
+    sqlite_core_mod.addIncludePath(b.path("vendor/sqlite"));
     // The trimmed amalgamation + the null VFS, compiled into THIS artifact only
     // (never the native modules, which linkSqlite their own full build).
-    spd_decode_mod.addCSourceFile(.{
+    sqlite_core_mod.addCSourceFile(.{
         .file = b.path("vendor/sqlite/sqlite3.c"),
-        .flags = &spd_sqlite_wasm_flags,
+        .flags = &sqlite_core_wasm_flags,
     });
-    spd_decode_mod.addCSourceFile(.{
+    sqlite_core_mod.addCSourceFile(.{
         .file = b.path("webapp/wasm/sqlite_vfs_null.c"),
-        .flags = &spd_sqlite_wasm_flags,
+        .flags = &sqlite_core_wasm_flags,
     });
-    const spd_decode = b.addExecutable(.{ .name = "spd-decode", .root_module = spd_decode_mod });
-    // WASI *reactor*: exports `_initialize` (runs libc/C ctors) and the `spd_*`
+    const sqlite_core = b.addExecutable(.{ .name = "sqlite-core", .root_module = sqlite_core_mod });
+    // WASI *reactor*: exports `_initialize` (runs libc/C ctors) and the ABI
     // functions, with no `_start`/`main`. This is the shape a browser wants —
     // instantiate, call `_initialize` once, then call the ABI. (Plain
     // `entry = .disabled` still emitted a command-style `_start` here because
     // wasi-libc is linked; the exec model is the right knob.)
-    spd_decode.wasi_exec_model = .reactor;
-    spd_decode.rdynamic = true; // keep the `export fn`s
-    const spd_decode_step = b.step("wasm-spd-decode", "Build the .spd viewer decoder wasm");
-    spd_decode_step.dependOn(&b.addInstallArtifact(spd_decode, .{}).step);
+    sqlite_core.wasi_exec_model = .reactor;
+    sqlite_core.rdynamic = true; // keep the `export fn`s
+    const sqlite_core_step = b.step("wasm-sqlite-core", "Build the .spd decoder + search index wasm");
+    sqlite_core_step.dependOn(&b.addInstallArtifact(sqlite_core, .{}).step);
 
-    // ---- THROWAWAY: FTS5-in-wasm measurement harness (`zig build wasm-fts-bench`) ----
-    // Exists only to produce `docs/scratch/wasm-search-bench.md`. It is the SAME
-    // artifact as `spd-decode` above plus `-DSQLITE_ENABLE_FTS5` and the bench
-    // ABI in `webapp/wasm/fts_bench.zig`, so its compile/instantiate cost is the
-    // cost of the fused module the client-side-search plan proposes.
-    //
-    // Nothing above is touched: `spd_sqlite_wasm_flags` still ships with FTS5
-    // OFF, and this step is not wired into `wasm` or any default. Delete both
-    // this block and `fts_bench.zig` once the plan is decided.
-    const fts_bench_flags = spd_sqlite_wasm_flags ++ [_][]const u8{
-        "-DSQLITE_ENABLE_FTS5",
-        // The null VFS cannot open a file, so a spill to a temp FILE would fail.
-        // FTS5 merges and ORDER BY want temp storage; 3 = always in memory.
-        "-DSQLITE_TEMP_STORE=3",
-    };
-    const fts_bench_mod = b.createModule(.{
-        .root_source_file = b.path("webapp/wasm/fts_bench.zig"),
-        .target = wasi_target,
-        .optimize = .ReleaseSmall,
-    });
-    fts_bench_mod.addImport("spd", spd_mod);
-    fts_bench_mod.link_libc = true;
-    fts_bench_mod.addIncludePath(b.path("vendor/sqlite"));
-    fts_bench_mod.addCSourceFile(.{
-        .file = b.path("vendor/sqlite/sqlite3.c"),
-        .flags = &fts_bench_flags,
-    });
-    fts_bench_mod.addCSourceFile(.{
-        .file = b.path("webapp/wasm/sqlite_vfs_null.c"),
-        .flags = &fts_bench_flags,
-    });
-    const fts_bench = b.addExecutable(.{ .name = "fts-bench", .root_module = fts_bench_mod });
-    fts_bench.wasi_exec_model = .reactor;
-    fts_bench.rdynamic = true;
-    const fts_bench_step = b.step("wasm-fts-bench", "THROWAWAY: build the FTS5-in-wasm benchmark harness");
-    fts_bench_step.dependOn(&b.addInstallArtifact(fts_bench, .{}).step);
+    // The proof that the module WORKS rather than merely links, and the only
+    // place `-DSQLITE_TEMP_STORE=3` is checked — the flag whose absence would
+    // otherwise surface as a corrupt index in a browser rather than as a build
+    // failure. Its own step, like the PDF one, because `zig build test` is
+    // Zig-only and must stay runnable without Node.
+    const sqlite_core_abi_test = b.addSystemCommand(&.{ "node", "webapp/wasm/tests/sqlite_core_abi.mjs" });
+    sqlite_core_abi_test.addFileArg(sqlite_core.getEmittedBin());
+    sqlite_core_abi_test.addFileArg(b.path("parsers/spd/tests/fixtures/layers_hidden.spd"));
+    sqlite_core_abi_test.expectExitCode(0);
+    sqlite_core_abi_test.stdio = .inherit;
+    const sqlite_core_test_step = b.step(
+        "wasm-sqlite-core-test",
+        "Drive both ABIs of the built sqlite-core wasm (needs Node)",
+    );
+    sqlite_core_test_step.dependOn(&sqlite_core_abi_test.step);
 
     // ---- THROWAWAY: the fuzzy-ladder-in-wasm harness (`zig build wasm-fuzzy-bench`) ----
     // Exists only to produce `docs/scratch/wasm-fuzzy-bench.md`, and to settle by
@@ -742,9 +751,9 @@ pub fn build(b: *std.Build) void {
     // different file that exposes only the `@cImport`. Wiring the backend one in
     // here is the honest version of the claim.
     //
-    // Same flags as `wasm-fts-bench`, so the two documents' numbers are taken on
-    // the same engine configuration. Nothing shipping is touched; delete this
-    // block and `wasm_fuzzy_bench.zig` with the report.
+    // Built with the SHIPPING `sqlite_core_wasm_flags`, so what it measures is
+    // the engine configuration the browser actually gets. Nothing shipping is
+    // touched; delete this block and `wasm_fuzzy_bench.zig` with the report.
     const fuzzy_bench_mod = b.createModule(.{
         // AT THE REPO ROOT deliberately: a Zig module cannot `@import` a file
         // outside its root directory, and this harness has to reach BOTH
@@ -766,11 +775,11 @@ pub fn build(b: *std.Build) void {
     fuzzy_bench_mod.addIncludePath(b.path("vendor/sqlite"));
     fuzzy_bench_mod.addCSourceFile(.{
         .file = b.path("vendor/sqlite/sqlite3.c"),
-        .flags = &fts_bench_flags,
+        .flags = &sqlite_core_wasm_flags,
     });
     fuzzy_bench_mod.addCSourceFile(.{
         .file = b.path("webapp/wasm/sqlite_vfs_null.c"),
-        .flags = &fts_bench_flags,
+        .flags = &sqlite_core_wasm_flags,
     });
     const fuzzy_bench = b.addExecutable(.{ .name = "fuzzy-bench", .root_module = fuzzy_bench_mod });
     fuzzy_bench.wasi_exec_model = .reactor;

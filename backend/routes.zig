@@ -216,6 +216,34 @@ pub const routes = [_]router.Route{
     // it answers about paragraphs + byte ranges rather than pages + counts —
     // different fields for a different viewer.
     .{ .method = .GET, .path = "/api/controlplane/note/:id/txt-search", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTxtSearch, .read_only = true },
+    // --- The client-side search index (`client-side-search-impl.md` §2.1) ---
+    //
+    // The two reads a browser needs in order to answer global search LOCALLY: the
+    // caller's complete live document set, and the inverted term payload for a
+    // batch of blobs. Both are BYTES rather than JSON — §9.2 measured the same
+    // manifest at 143 KB of JSON against 27 KB of raw md5s, and this server
+    // compresses no API response, so that 5.2x is what actually travels.
+    //
+    // ADDITIVE AND INERT. Nothing else changed to add them: `/search` above is
+    // untouched and the browser does not fetch these yet. Phase 1 §3 calls this
+    // "the natural place to stop and ship if phase 1 stalls".
+    //
+    // `read_only` for the same reason `/search` is, and it is the same argument
+    // rather than a new one: they read `files`, `doc_terms`, `note_index` and
+    // `note_page_index` directly and heal nothing. The self-healing family this
+    // section's header excludes is the one that calls `indexRowEnsuring`; neither
+    // of these does, and the read-only probe in `test/http_integration.zig`
+    // checks that claim on a connection where a write would fail loudly.
+    //
+    // Caching is the one thing that differs between them, and it is not a detail:
+    // the manifest is the caller's MUTABLE library and is `no-cache` + ETag (a
+    // conditional request per visit — see the handler for why that is the answer
+    // to §9.2's open refetch question), while the terms payload is
+    // content-addressed and `immutable`, but ONLY when the URL carries the
+    // `index_version` that is the other half of its cache key. That conditional
+    // is this file's own rule, stated below on `/note/:id/page/:n/text`.
+    .{ .method = .GET, .path = "/api/controlplane/search-index/manifest", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexManifest, .read_only = true },
+    .{ .method = .GET, .path = "/api/controlplane/search-index/terms", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexTerms, .read_only = true },
     // --- Hot-cache versioning: "history of this file" ---
     // All note-scoped by `:id` (the same ownership gate the siblings above use);
     // the per-version routes gate `:md5` on being a RETAINED version of THAT file

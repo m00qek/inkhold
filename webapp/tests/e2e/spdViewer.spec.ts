@@ -5,7 +5,7 @@ import { signedIn, freezeMotion } from "./helpers/app";
 import type { Page } from "@playwright/test";
 
 // The `.spd` viewer, END TO END through the REAL decoder. Unlike the seam tests
-// (viewers.spec.ts), this drives the actual `spd-decode.wasm` in Chromium against
+// (viewers.spec.ts), this drives the actual `sqlite-core.wasm` in Chromium against
 // the committed `.spd` fixture (the same one the Zig/WASM smoke asserts: 4 layers
 // 3/2/1/9999, Layer 2 hidden, Layer 3 semi-transparent), so what is proved is the
 // whole render model: fetch → WASM parse → per-tile `createImageBitmap` → the
@@ -15,7 +15,7 @@ import type { Page } from "@playwright/test";
 // The library/reader run against the in-memory fake `Api`, but the raw-file
 // endpoint the viewer fetches is a REAL browser request — so this route serves
 // the fixture's bytes at `/file/n-files-sketch`, exactly as the server would.
-// `/spd-decode.wasm` is a Vite public asset, served by the dev server verbatim.
+// `/sqlite-core.wasm` is a Vite public asset, served by the dev server verbatim.
 
 const SPD_PATH = fileURLToPath(new URL("../../../parsers/spd/tests/fixtures/layers_hidden.spd", import.meta.url));
 const SPD_BYTES = readFileSync(SPD_PATH);

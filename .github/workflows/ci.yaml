@@ -71,6 +71,13 @@ jobs:
       - name: Setup Web Tests
         run: make web-test-setup
 
+      # The only place `-DSQLITE_TEMP_STORE=3` is checked. Removing that flag
+      # changes nothing observable (measured — see `sqlite_core_wasm_flags`),
+      # so the module refuses to open an index without it and this step is what
+      # makes the refusal visible. A guard nobody runs is not a guard.
+      - name: Test the sqlite-core wasm ABI
+        run: zig build wasm-sqlite-core-test
+
       - name: Test Frontend
         run: make web-test
 

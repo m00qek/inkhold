@@ -45,6 +45,8 @@
 //       delta[0]                 varint  = the first ordinal
 //       delta[i]                 varint  = ordinal[i] - ordinal[i-1], >= 1
 
+import { Cursor, SearchWireError, UTF8, readMagic } from "./wire";
+
 /** The wire spelling this build understands. NOT `index_version` — see above. */
 export const FORMAT_VERSION = 1;
 
@@ -54,17 +56,17 @@ export const HEADER_LEN = 13;
 /** "TIDX". Four bytes so an error page or a truncated body fails on byte 0. */
 const MAGIC = [0x54, 0x49, 0x44, 0x58];
 
-/** A varint wider than this cannot be a length, a count or an ordinal here. */
-const MAX_VARINT_BYTES = 5;
-
 /**
- * A payload this build refuses to read. Distinct from a generic `Error` so a
- * caller can tell "the server speaks a format I do not" — which wants a reload,
- * not a retry — from a transport failure, which wants a retry.
+ * A payload this build refuses to read.
+ *
+ * **An alias, not a class of its own.** It was one until the manifest decoder
+ * landed beside this file and needed the same behaviour from the same cursor;
+ * two classes would have invited a `catch` that handled one and let the other
+ * escape. The name is kept because it is what every caller already imports, and
+ * the distinction that mattered — "the server speaks a format I do not", which
+ * wants a reload rather than a retry — is unchanged.
  */
-export class TermCodecError extends Error {
-  override readonly name = "TermCodecError";
-}
+export { SearchWireError as TermCodecError } from "./wire";
 
 /** One decoded payload, entirely in md5 terms. */
 export interface TermIndex {
@@ -84,92 +86,28 @@ export interface TermIndex {
 /** Called once per term, in the payload's ascending term order. */
 export type TermVisitor = (term: string, documents: readonly string[]) => void;
 
-// `fatal` on purpose. Terms reach the browser having been folded by SQLite's
-// tokenizer, so they are always valid UTF-8; a replacement character here would
-// mean the stream has come apart, and an index quietly full of U+FFFD matches
-// nothing a user can type and reports no error.
-const UTF8 = new TextDecoder("utf-8", { fatal: true });
-
-class Cursor {
-  offset = 0;
-  constructor(readonly bytes: Uint8Array) {}
-
-  byte(): number {
-    const b = this.bytes[this.offset];
-    if (b === undefined) throw new TermCodecError("term index payload ends mid-record");
-    this.offset += 1;
-    return b;
-  }
-
-  slice(length: number): Uint8Array {
-    const end = this.offset + length;
-    if (end > this.bytes.length) {
-      throw new TermCodecError("term index payload ends mid-record");
-    }
-    const out = this.bytes.subarray(this.offset, end);
-    this.offset = end;
-    return out;
-  }
-
-  /** Unsigned LEB128, bounded so a corrupt stream cannot spin. */
-  varint(): number {
-    let value = 0;
-    let shift = 0;
-    for (let i = 0; i < MAX_VARINT_BYTES; i += 1) {
-      const b = this.byte();
-      value += (b & 0x7f) * 2 ** shift;
-      if ((b & 0x80) === 0) {
-        if (value > 0xffffffff) {
-          throw new TermCodecError("term index payload carries an implausible length");
-        }
-        return value;
-      }
-      shift += 7;
-    }
-    throw new TermCodecError("term index payload carries an over-long varint");
-  }
-}
-
 function readHeader(cursor: Cursor): { docCount: number; termCount: number } {
   if (cursor.bytes.length < HEADER_LEN) {
-    throw new TermCodecError("term index payload is shorter than its header");
+    throw new SearchWireError("term index payload is shorter than its header");
   }
-  for (const expected of MAGIC) {
-    if (cursor.byte() !== expected) {
-      throw new TermCodecError("not a term index payload (bad magic)");
-    }
-  }
-  const version = cursor.byte();
-  if (version !== FORMAT_VERSION) {
-    // Named in full because the obvious fix — "bump index_version and re-derive"
-    // — is the expensive wrong one. This is a codec mismatch; the terms are fine.
-    throw new TermCodecError(
-      `unsupported term index format version ${version}; this build decodes ${FORMAT_VERSION}. ` +
-        "This is the wire spelling, not index_version: the terms have not changed.",
-    );
-  }
-  const view = new DataView(cursor.bytes.buffer, cursor.bytes.byteOffset, cursor.bytes.byteLength);
-  const docCount = view.getUint32(cursor.offset, true);
-  const termCount = view.getUint32(cursor.offset + 4, true);
-  cursor.offset += 8;
+  readMagic(cursor, MAGIC, FORMAT_VERSION);
+  const docCount = cursor.u32();
+  const termCount = cursor.u32();
   // Checked BEFORE the table is allocated: a corrupt `docCount` is four bytes
   // that would otherwise ask the browser for an array of four billion strings.
   if (HEADER_LEN + docCount * 16 > cursor.bytes.length) {
-    throw new TermCodecError("term index payload is too short for the document table it declares");
+    throw new SearchWireError("term index payload is too short for the document table it declares");
   }
   return { docCount, termCount };
 }
 
 function readDocuments(cursor: Cursor, docCount: number): string[] {
   const documents: string[] = new Array<string>(docCount);
-  for (let i = 0; i < docCount; i += 1) {
-    // Lowercase hex, always. The md5 is the key the store, the manifest and the
-    // live listing all meet on; a payload that spelt it differently would read as
-    // a document the client has never seen and be fetched again every visit.
-    let hex = "";
-    for (const byte of cursor.slice(16)) hex += byte.toString(16).padStart(2, "0");
-    documents[i] = hex;
-  }
+  // Lowercase hex, always — `Cursor.md5` is shared with the manifest decoder for
+  // exactly this reason. The md5 is the key the store, the manifest and the live
+  // listing all meet on; a payload that spelt it differently would read as a
+  // document the client has never seen and be fetched again on every visit.
+  for (let i = 0; i < docCount; i += 1) documents[i] = cursor.md5();
   return documents;
 }
 
@@ -192,7 +130,7 @@ export function readTermIndex(payload: Uint8Array, visit: TermVisitor): string[]
     const shared = cursor.varint();
     const suffixLen = cursor.varint();
     if (shared > previous.length) {
-      throw new TermCodecError("term index shares more bytes than its predecessor has");
+      throw new SearchWireError("term index shares more bytes than its predecessor has");
     }
     const suffix = cursor.slice(suffixLen);
 
@@ -202,12 +140,12 @@ export function readTermIndex(payload: Uint8Array, visit: TermVisitor): string[]
     // out-of-order term means the stream has come apart — and the consumer merges
     // payloads on the assumption that both are sorted.
     if (shared === previous.length) {
-      if (suffixLen === 0) throw new TermCodecError("term index repeats a term");
+      if (suffixLen === 0) throw new SearchWireError("term index repeats a term");
     } else {
       const here = suffix[0];
       const there = previous[shared];
       if (here === undefined || there === undefined || here <= there) {
-        throw new TermCodecError("term index terms are not in ascending order");
+        throw new SearchWireError("term index terms are not in ascending order");
       }
     }
 
@@ -225,14 +163,14 @@ export function readTermIndex(payload: Uint8Array, visit: TermVisitor): string[]
     try {
       term = UTF8.decode(termBytes);
     } catch {
-      throw new TermCodecError("term index carries a term that is not valid UTF-8");
+      throw new SearchWireError("term index carries a term that is not valid UTF-8");
     }
 
     const postingCount = cursor.varint();
     if (postingCount === 0) {
       // An inverted index has no room for a term nothing holds; a zero here means
       // the reader is misaligned rather than that the server sent an odd term.
-      throw new TermCodecError("term index carries a term with no documents");
+      throw new SearchWireError("term index carries a term with no documents");
     }
     const holders: string[] = new Array<string>(postingCount);
     let ordinal = 0;
@@ -241,12 +179,12 @@ export function readTermIndex(payload: Uint8Array, visit: TermVisitor): string[]
       // Gaps after the first are at least 1, because the ordinals ascend
       // strictly. A zero would read back as a repeated document.
       if (p > 0 && delta === 0) {
-        throw new TermCodecError("term index repeats a document in one posting list");
+        throw new SearchWireError("term index repeats a document in one posting list");
       }
       ordinal += delta;
       const md5 = documents[ordinal];
       if (md5 === undefined) {
-        throw new TermCodecError("term index posting names a document it does not carry");
+        throw new SearchWireError("term index posting names a document it does not carry");
       }
       holders[p] = md5;
     }
@@ -258,7 +196,7 @@ export function readTermIndex(payload: Uint8Array, visit: TermVisitor): string[]
   // shorter, entirely well-formed index — fewer results, no error, which §8 names
   // as the failure mode client-side search introduces.
   if (cursor.offset !== payload.length) {
-    throw new TermCodecError("term index payload has trailing bytes after its last term");
+    throw new SearchWireError("term index payload has trailing bytes after its last term");
   }
   return documents;
 }

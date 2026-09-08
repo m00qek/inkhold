@@ -20,6 +20,7 @@ const config = @import("../config.zig");
 const transport = @import("../http/transport.zig");
 const authsvc = @import("../services/auth/service.zig");
 const pendingsvc = @import("../services/pending.zig");
+const index_export = @import("../services/search/index_export.zig");
 
 const Context = context.Context;
 const Request = router.Request;
@@ -2399,6 +2400,196 @@ fn indexSnapshot(ctx: *Context, user_id: u64) ?pendingsvc.Snapshot {
     const pulse = ctx.pending orelse return null;
     return pulse.forUser(user_id);
 }
+
+// ---------------------------------------------------------------------------
+// THE CLIENT-SIDE SEARCH INDEX — `client-side-search-impl.md` §2.1, phase 1
+// step 4
+// ---------------------------------------------------------------------------
+//
+// Two reads, both additive and both inert until a client asks: nothing else in
+// the server changed, `/api/controlplane/search` still answers exactly as it
+// did, and the browser does not know these exist yet. §3 calls this "the
+// natural place to stop and ship if phase 1 stalls", and it is left in that
+// state deliberately.
+//
+// All the query logic is `services/search/index_export.zig`; these are the HTTP
+// shells over it — the parse, the cache headers and nothing else.
+//
+// **Both bodies are BYTES, not JSON**, and §9.2's measurement is the whole
+// argument: 143,139 raw JSON against 27,663 raw for the same 1,222-document
+// manifest, because md5s are 72.6% of the payload and a hash does not compress.
+// This server sends no `content-encoding` on API responses (only precompressed
+// static assets, `http/static.zig`), so the raw column is the one that travels
+// and the saving is 5.2x rather than the 30% the gzip columns show.
+
+/// GET /api/controlplane/search-index/manifest -> the caller's COMPLETE live
+/// document set, as `index_export`'s `SMAN` payload.
+///
+/// ## `no-cache` + an ETag, which is the OPPOSITE of `immutable`
+///
+/// The terms route below is content-addressed and immutable; this one is the
+/// caller's mutable library and must never be served from a cache without
+/// asking. `no-cache` does not mean "do not store" — it means "store it, and
+/// revalidate every time", which is exactly the contract this payload wants: the
+/// browser keeps the bytes and spends one conditional request per visit, and a
+/// household whose library has not moved pays a 304 with no body instead of
+/// 27 KB.
+///
+/// **This is §9.2's open question answered.** That section measured the manifest
+/// and closed with *"still open, and NOT decided by this measurement: how often
+/// it is refetched … the shape that would is a conditional request, and that is
+/// step 4's design."* The answer is that there is no refresh interval, because
+/// there is nothing to tune: the client may refetch on every visit and on every
+/// `event: index` frame, and an unchanged manifest costs a few hundred bytes.
+/// A polling cadence would have been a guess about how often a household edits;
+/// a validator is not a guess.
+///
+/// `private`, because the manifest is one person's library and this household
+/// may sit behind a shared proxy.
+///
+/// The ETag is a hash of the BODY (`index_export.bodyEtag`) rather than a
+/// version counter — see that function for why a counter would be both a second
+/// opinion about what changes the manifest and, in `pending.Pulse.version`'s
+/// case, restart-relative where an ETag outlives reboots.
+pub fn controlplaneSearchIndexManifest(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    const caller = ctx.caller.?; // controlplane scope
+    const files = ctx.files orelse return serverError(ctx, req);
+
+    // READ THE REQUEST BEFORE RESPONDING — responding invalidates the head's
+    // strings, and this one has to survive until after the body is built.
+    var inm_buf: [64]u8 = undefined;
+    const if_none_match = router.headerCopy(req, "if-none-match", &inm_buf);
+
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const m = index_export.manifest(a, files.db, caller.user_id) catch return serverError(ctx, req);
+    var body: std.ArrayList(u8) = .empty;
+    index_export.writeManifest(a, &body, m) catch return serverError(ctx, req);
+
+    var etag_buf: [34]u8 = undefined;
+    const hex = index_export.bodyEtag(body.items);
+    const etag = std.fmt.bufPrint(&etag_buf, "\"{s}\"", .{hex}) catch return serverError(ctx, req);
+
+    // The ETag rides on the 304 as well as the 200: a validator the client is
+    // not re-told is one it may drop, and the next visit would then be a full
+    // fetch of bytes it already holds.
+    const headers = [_]std.http.Header{
+        .{ .name = "content-type", .value = "application/octet-stream" },
+        .{ .name = "cache-control", .value = "private, no-cache" },
+        .{ .name = "etag", .value = etag },
+        .{ .name = "x-content-type-options", .value = "nosniff" },
+    };
+
+    // Byte equality, not a weak comparison: this server mints exactly one form of
+    // this validator, so anything else is either a different manifest or a
+    // different server.
+    if (std.mem.eql(u8, if_none_match, etag)) {
+        return req.respond("", .{ .status = .not_modified, .extra_headers = &headers });
+    }
+    try req.respond(body.items, .{ .status = .ok, .extra_headers = &headers });
+}
+
+/// GET /api/controlplane/search-index/terms?md5=…&md5=…[&v=…] -> the front-coded
+/// inverted term payload for a batch of blobs the caller holds.
+///
+/// ## Authorization is a `files` join per request — §2.4
+///
+/// The BODY depends on md5 alone, which is what makes it cacheable and
+/// byte-identical between housemates; the RIGHT to receive it does not. That
+/// join lives in `index_export.writeTerms`, in one clause both its statements are
+/// built on, with `THE LEAK TEST` beside it. Nothing here re-decides it: an md5
+/// the caller does not hold is simply absent from the response, which is also
+/// what an md5 nobody holds looks like.
+///
+/// ## `immutable` ONLY when the URL carries the version
+///
+/// `routes.zig` states the rule this obeys: *"`immutable` is safe only when the
+/// cache key covers everything that can change"*, recorded there beside a route
+/// that shipped `immutable` once and pinned a year of stale content. A term set
+/// is content-addressed by `(md5, index_version)` (§4), and the md5 alone is only
+/// half of that — a version bump re-derives the same blob into different terms.
+///
+/// So `v` is the client's `index_version`, read off the manifest, and it is a
+/// pure cache-buster: it changes the URL and nothing about the answer. With it,
+/// the response is immutable for a year. Without it the response is identical
+/// bytes with `no-cache` and an ETag, which is correct and merely slower — the
+/// safe direction, and it keeps a hand-typed URL from poisoning a browser cache
+/// for a year.
+pub fn controlplaneSearchIndexTerms(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    const caller = ctx.caller.?; // controlplane scope
+    const files = ctx.files orelse return serverError(ctx, req);
+
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // READ THE TARGET BEFORE RESPONDING. Every md5 is copied out of the head
+    // here, because the head's strings do not survive the reply.
+    var md5s: std.ArrayList([]const u8) = .empty;
+    var it = queryValues(req.head.target, "md5");
+    while (it.next()) |raw| {
+        // A cap rather than a truncation: silently answering about the first 128
+        // of 200 would hand the client a payload that looks complete, and it
+        // would cache the missing ones as derived-and-empty for ever.
+        if (md5s.items.len == index_export.max_terms_md5s) return badRequest(ctx, req);
+        if (!index_export.isMd5Hex(raw)) return badRequest(ctx, req);
+        md5s.append(a, a.dupe(u8, raw) catch return serverError(ctx, req)) catch
+            return serverError(ctx, req);
+    }
+    const versioned = reply.queryParam(req.head.target, "v") != null;
+
+    var body: std.ArrayList(u8) = .empty;
+    index_export.writeTerms(a, a, &body, files.db, caller.user_id, md5s.items) catch
+        return serverError(ctx, req);
+
+    var etag_buf: [34]u8 = undefined;
+    const hex = index_export.bodyEtag(body.items);
+    const etag = std.fmt.bufPrint(&etag_buf, "\"{s}\"", .{hex}) catch return serverError(ctx, req);
+
+    const headers = [_]std.http.Header{
+        .{ .name = "content-type", .value = "application/octet-stream" },
+        .{ .name = "cache-control", .value = if (versioned)
+            "private, max-age=31536000, immutable"
+        else
+            "private, no-cache" },
+        .{ .name = "etag", .value = etag },
+        .{ .name = "x-content-type-options", .value = "nosniff" },
+    };
+    try req.respond(body.items, .{ .status = .ok, .extra_headers = &headers });
+}
+
+/// Every value of a REPEATED query parameter, in the order they appear.
+///
+/// `reply.queryParam` answers the FIRST match, which is right for every other
+/// route on this face — an id, a hash, a limit — and silently wrong here: a
+/// request naming 40 md5s would be answered about one, and the client would
+/// record the other 39 as documents with no terms. Repetition is the shape §2.1
+/// specifies (`?md5=…&md5=…`) because it is what a `URLSearchParams` builds
+/// without any encoding of our own.
+fn queryValues(target: []const u8, name: []const u8) QueryValues {
+    const q = std.mem.indexOfScalar(u8, target, '?') orelse target.len;
+    return .{ .name = name, .rest = target[@min(q + 1, target.len)..] };
+}
+
+const QueryValues = struct {
+    name: []const u8,
+    rest: []const u8,
+
+    fn next(self: *QueryValues) ?[]const u8 {
+        while (self.rest.len != 0) {
+            const amp = std.mem.indexOfScalar(u8, self.rest, '&') orelse self.rest.len;
+            const pair = self.rest[0..amp];
+            self.rest = self.rest[@min(amp + 1, self.rest.len)..];
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+            if (std.mem.eql(u8, pair[0..eq], self.name)) return pair[eq + 1 ..];
+        }
+        return null;
+    }
+};
 
 /// The DEGRADED shape of `/api/controlplane/events`: one `event: sync` frame
 /// carrying the current version (plus an `event: index` frame when this server

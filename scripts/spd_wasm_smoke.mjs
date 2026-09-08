@@ -1,7 +1,8 @@
-// Ad-hoc smoke harness: drive spd-decode.wasm through its C-ABI against the
-// committed `.spd` fixture and check the layer tree + tile geometry match the
-// parser's Zig tests. Not part of CI. Run:
-//   node scripts/spd_wasm_smoke.mjs zig-out/bin/spd-decode.wasm parsers/spd/tests/fixtures/layers_hidden.spd
+// Ad-hoc smoke harness: drive the `spd_*` half of sqlite-core.wasm through its
+// C-ABI against the committed `.spd` fixture and check the layer tree + tile
+// geometry match the parser's Zig tests. Predates, and overlaps,
+// `webapp/wasm/tests/sqlite_core_abi.mjs`, which IS wired into a build step. Run:
+//   node scripts/spd_wasm_smoke.mjs zig-out/bin/sqlite-core.wasm parsers/spd/tests/fixtures/layers_hidden.spd
 import fs from "node:fs";
 
 const [wasmPath, spdPath] = process.argv.slice(2);

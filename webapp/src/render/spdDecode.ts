@@ -83,7 +83,7 @@ export const REFERENCE_LAYER_ID = 9999;
  *  library card's `.spd` export, `export/spdModel.ts`) places tiles on the SAME
  *  grid the viewer's own render does. */
 export const TILE = 128;
-export const DEFAULT_WASM_URL = "/spd-decode.wasm";
+export const DEFAULT_WASM_URL = "/sqlite-core.wasm";
 
 const OPEN_ERRORS: Record<number, string> = {
   [-1]: "not a SQLite database",

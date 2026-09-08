@@ -76,7 +76,7 @@ export const okRandomCode: MockResponse = {
  * (client.ts, md5.ts…) and break module loading.
  *
  * What is NOT here is exactly as load-bearing, because it must keep reaching
- * Vite: `/note-decode.wasm` and `/spd-decode.wasm` (real modules the `.note` and
+ * Vite: `/note-decode.wasm` and `/sqlite-core.wasm` (real modules the `.note` and
  * `.spd` decoders instantiate — `noteLayers.spec.ts` and `spdViewer.spec.ts` run
  * the genuine wasm), `/fonts/*.woff2` (self-hosted @font-face), `/src/**`,
  * `/@vite/**`, `/node_modules/**`, `/index.html` and `/` itself. Note the

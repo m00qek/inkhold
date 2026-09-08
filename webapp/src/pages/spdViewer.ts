@@ -1,7 +1,7 @@
 // The `.spd` viewer — Supernote's Atelier layered-drawing format. A `.spd` is a
 // SQLite database of PNG tiles on a sparse 128×128 grid, one `surface_<id>` table
 // per layer, plus a protobuf layer tree. This module DECODES it (the shared
-// parser, compiled to `spd-decode.wasm`) and renders it as a STACK OF PER-LAYER
+// parser, compiled into `sqlite-core.wasm`) and renders it as a STACK OF PER-LAYER
 // CANVASES: the WASM extracts, the browser rasterises (`createImageBitmap`) each
 // tile once onto its layer's own canvas, and the browser compositor blends the
 // stack. See `parsers/spd/spd-format.md` and the ABI header in
@@ -96,7 +96,7 @@ export type SpdExportModel = LayeredExportModel;
 // ============================================================================
 
 export interface SpdViewerOptions {
-  /** URL of the decoder wasm. Default `/spd-decode.wasm`. */
+  /** URL of the decoder wasm. Default `/sqlite-core.wasm`. */
   wasmUrl?: string;
   /** Override module loading (tests). Default fetches + instantiates `wasmUrl`. */
   loader?: () => Promise<SpdDecoderExports>;

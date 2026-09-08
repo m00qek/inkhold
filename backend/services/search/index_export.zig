@@ -305,6 +305,7 @@ const sqlite = @import("../../db/sqlite.zig");
 const filesvc = @import("../files.zig");
 const maintain = @import("maintain.zig");
 const pending = @import("../pending.zig");
+const partition = @import("../search_partition.zig");
 
 /// Which pass of the fill this document belongs to — `client-side-search.md` §3,
 /// in its order, so `ORDER BY tier` IS the fill order and no second table maps
@@ -669,6 +670,388 @@ pub fn manifest(arena: std.mem.Allocator, db: sqlite.Db, user_id: u64) !Manifest
         try rows.append(arena, owned);
     }
     return .{ .rows = rows.items, .coverage = c.coverage() };
+}
+
+// ---------------------------------------------------------------------------
+// THE MANIFEST ON THE WIRE — `client-side-search-impl.md` §3 step 4, decided by
+// §9.2's measurement
+// ---------------------------------------------------------------------------
+
+/// How the manifest is SPELT. Separate from `format_version` above (the term
+/// payload's) on purpose: the two payloads are fetched by different code on
+/// different cadences, and there is no reason a change to one should invalidate
+/// the other. Neither is `index_version`, which says what the terms MEAN.
+pub const manifest_format_version: u8 = 1;
+
+/// Four bytes, for the same reason `TIDX` is four: an error page, a proxy's
+/// courtesy HTML or a truncated response fails on byte 0 rather than being read
+/// as a row count.
+pub const manifest_magic = "SMAN";
+
+/// magic + version + row_count.
+pub const manifest_header_len = manifest_magic.len + 1 + 4;
+
+/// The manifest as BYTES — the format §9.2's measurement chose over JSON, and
+/// the numbers are the whole argument.
+///
+/// MEASURED, 1,222 documents (`search-baseline.md` §1's corpus size), gzip
+/// level 6:
+///
+///     JSON             143,139 raw   38,597 gzip
+///     these bytes       27,663 raw   26,937 gzip     <- 30% off the gzip figure
+///
+/// **This server does not compress API responses** — only precompressed static
+/// assets, `http/static.zig` — so the figure that actually travels is the RAW
+/// one, and there the saving is **5.2x** rather than 30%. Either way it is the
+/// same trade the term codec already took for its ordinal table: md5s are 72.6%
+/// of this payload and hashes do not compress, so representation is the only
+/// lever with any travel in it.
+///
+/// ## Layout
+///
+///     "SMAN"                   magic, 4 bytes
+///     manifest_format_version  u8
+///     row_count                u32 LE
+///     notes                    varint   `Coverage.notes`
+///     unsearchable             varint   `Coverage.unsearchable`
+///     row_count x row, in the manifest's own order:
+///       md5                    16 RAW bytes
+///       flags                  u8       tier in the low nibble, derivation in the high
+///       file_id                varint
+///       updated_at             varint   ABSOLUTE on a tier's first row, else the
+///                                       gap from the row before it
+///       index_version          varint   0 = absent, else version + 1
+///
+/// `row_count` is fixed-width and near the front so the decoder can check the
+/// stream against it. A truncated body that merely ran out of rows would
+/// otherwise decode as a shorter, perfectly valid manifest — and a short
+/// manifest is read by the client as DELETIONS (§2.2). That is the one
+/// corruption this payload can suffer that looks like a legitimate answer.
+///
+/// `updated_at` is a GAP because the rows are already `updated_at` DESC within a
+/// tier: consecutive documents in a real household are minutes or hours apart,
+/// which is two varint bytes where the absolute epoch second is five.
+///
+/// **The FIRST row of each tier carries its ABSOLUTE `updated_at`, not a zero
+/// gap**, and that is the difference between a decodable manifest and one whose
+/// timestamps are all relative to nothing. A tier boundary is the only place the
+/// gap could go negative, so it is the only place a fresh anchor is needed — and
+/// there are exactly three tiers, so the whole manifest pays about fifteen bytes
+/// for it. An earlier draft wrote a zero there; every row of every tier then
+/// decoded as an offset from an origin the client could not know, and the
+/// symptom would have been a result list in a plausible but wrong order rather
+/// than an error.
+///
+/// `index_version` is stored `+1` so that ZERO can mean ABSENT. A blob indexed
+/// at version 0 and a blob with no index row at all are different facts — the
+/// first is cacheable under `(md5, 0)` and the second cannot be cached at all —
+/// and merging them hands the client a cache key it must not use.
+///
+/// **NO DOCUMENT NAMES, deliberately.** They would balloon the one response that
+/// is paid on every visit, and the client does not need them: a locally-answered
+/// result set names `file_id`s, and the file listing the app already holds turns
+/// those into names. §2.2's per-FILE keying is what makes that work.
+pub fn writeManifest(gpa: std.mem.Allocator, out: *std.ArrayList(u8), m: Manifest) EncodeError!void {
+    try out.appendSlice(gpa, manifest_magic);
+    try out.append(gpa, manifest_format_version);
+    try appendU32(gpa, out, @intCast(m.rows.len));
+    try appendVarint(gpa, out, @intCast(m.coverage.notes));
+    try appendVarint(gpa, out, @intCast(m.coverage.unsearchable));
+
+    var prev_tier: ?Tier = null;
+    var prev_at: i64 = 0;
+    for (m.rows) |r| {
+        var raw: [16]u8 = undefined;
+        try md5FromHex(r.md5, &raw);
+        try out.appendSlice(gpa, &raw);
+        try out.append(gpa, @as(u8, @intFromEnum(r.tier)) | (@as(u8, @intFromEnum(r.derivation)) << 4));
+        try appendVarint(gpa, out, @intCast(r.file_id));
+        const at = if (prev_tier != null and prev_tier.? == r.tier)
+            prev_at - r.updated_at // the gap, inside a tier
+        else
+            r.updated_at; // the anchor, at a tier boundary
+        try appendVarint(gpa, out, @intCast(at));
+        try appendVarint(gpa, out, if (r.index_version) |v| @intCast(v + 1) else 0);
+        prev_tier = r.tier;
+        prev_at = r.updated_at;
+    }
+}
+
+/// A strong validator for a body, as 32 lowercase hex characters.
+///
+/// **THE ANSWER TO "HOW OFTEN IS THE MANIFEST REFETCHED", and it is a validator
+/// rather than a policy.** §9.2 left that question open and said the shape that
+/// would settle it is a conditional request. This is that shape, and the answer
+/// it gives is: **as often as the client likes**. A manifest that has not changed
+/// costs one conditional request and a 304 with no body instead of 27 KB; one
+/// that has changed costs what it always cost. So there is no refresh interval to
+/// tune, no staleness window to reason about, and no chance of a client's cadence
+/// and a household's editing rhythm disagreeing.
+///
+/// ## Why it is a hash of the BODY and not a version number
+///
+/// The tempting cheap validator is `files.syncVersion` — 0.42 ms, already read by
+/// the live channel on every tick — combined with the worker's `done` counter.
+/// Both were rejected, for different reasons and both fatal:
+///
+///   * A version pair is **a second opinion about what changes the manifest**.
+///     The manifest is a projection of `files`, `note_index`, `note_page_index`,
+///     the pairing rule and both deferred tenants; anything that has to enumerate
+///     those in order to say "nothing moved" is a list that will be wrong the
+///     first time one of them gains a case. Being wrong here is SILENT and it is
+///     the worst failure this payload has: a client told 304 over a manifest that
+///     lost a row goes on matching a deleted document for ever, because absence
+///     from the manifest is the ONLY removal channel this design has (§2.2).
+///   * `pending.Pulse.version` is **restart-relative and not persisted**
+///     (`pending-ness.md` §11.3 says in as many words that it is "wrong for
+///     anything that tries to store it across a reboot"). An ETag is stored
+///     across reboots, by every browser, by definition.
+///
+/// A hash of the bytes cannot be wrong about any of that, because it is not an
+/// opinion about the manifest — it IS the manifest. What it costs is that the
+/// server still runs the full query (178 ms on the Pi) before it can answer 304,
+/// so this saves BYTES and not WORK. That is the right half to save: the bytes
+/// are the recurring cost §9.2 flagged, they are paid on a 1 Mbit/s link, and the
+/// query was going to run anyway on any visit that did change something.
+///
+/// md5 rather than SHA-256 because this is a cache validator and not a security
+/// boundary — nothing is authorized by it, and the payload it names is already
+/// scoped by the session that asked for it.
+pub fn bodyEtag(bytes: []const u8) [32]u8 {
+    var digest: [16]u8 = undefined;
+    std.crypto.hash.Md5.hash(bytes, &digest, .{});
+    var hex: [32]u8 = undefined;
+    _ = std.fmt.bufPrint(&hex, "{x}", .{&digest}) catch unreachable;
+    return hex;
+}
+
+// ---------------------------------------------------------------------------
+// THE TERM PAYLOAD FOR A BATCH OF md5s — §2.1's second route, §2.4's rule
+// ---------------------------------------------------------------------------
+
+// ## MASK FOR SPEED, JOIN FOR CORRECTNESS — and this is the second entry point
+//
+// §2.4 is one sentence with teeth: the response body depends on **md5 alone**,
+// which is what makes it `immutable`-cacheable and byte-identical between
+// housemates — and *"the right to receive it is a `files` join per request"*.
+// `query.zig`'s module docs state the rule this is an instance of and name the
+// hazard exactly: *"a second entry point would be a place to forget it."*
+//
+// So the visibility predicates are written ONCE below and both statements are
+// built on them. The partition id is a MASK — it bounds which `doc_terms` rows
+// are read — and is never the access check, because a `doc_terms` row is keyed
+// by blob and a blob is shared between households by design.
+//
+// The failure this prevents is not subtle and it is not recoverable: an md5 is
+// 32 characters a housemate can read off their own manifest, and without the
+// join, naming one would hand over the full text vocabulary of a document they
+// have never been shown.
+
+/// The ONE clause. `?1` is the caller. Nothing below may restate it, narrow it,
+/// or reach `files` by any other route.
+const held_by_caller = " f.user_id = ?1 AND f.deleted = 0 AND f.is_folder = 0";
+
+/// Which of the requested md5s the caller ACTUALLY HOLDS — the authorization
+/// answer and the payload's ordinal table, in one statement.
+///
+/// **This is the gate.** Ordinals are assigned from these rows and nothing else,
+/// so an md5 that does not survive this clause has no ordinal, and a posting for
+/// it cannot be encoded even if a later statement produced one.
+///
+/// **`json_each` rather than a generated `IN (?,?,…)`**, so this is a STATIC
+/// statement with a plan that can be pinned, in a file where every other
+/// statement is comptime-built. The request's md5 list arrives as a JSON array in
+/// `?2`; the alternative is SQL assembled per request, which is both a style
+/// break and an unpinnable plan.
+///
+/// `INDEXED BY files_md5` for `query.zig`'s reason one route along: `md5` is
+/// content-addressed and near-unique while `user_id` is by definition the whole
+/// library, so reaching `files` by the owner would re-walk that library once per
+/// requested md5. Stated rather than left to `ANALYZE`, and a requirement rather
+/// than a hint — dropping the index fails the PREPARE.
+///
+/// `ORDER BY f.md5` IS the ordinal assignment. Ordinals are the payload's own, so
+/// sorting them by md5 makes the payload a pure function of the md5 SET rather
+/// than of the order the client happened to ask in — which is what lets two
+/// housemates share one cache entry (§2.4), and what makes the postings below
+/// come out strictly ascending for free.
+const held_sql =
+    "SELECT DISTINCT f.md5 FROM json_each(?2) j " ++
+    "CROSS JOIN files f INDEXED BY files_md5 ON f.md5 = j.value " ++
+    "WHERE" ++ held_by_caller ++ " ORDER BY f.md5;";
+
+/// The terms themselves, for the md5s the caller holds.
+///
+/// **The `files` join is here TOO, and it is DEFENSE IN DEPTH rather than the
+/// gate** — stated precisely, because overstating it is how the real gate gets
+/// deleted by someone reasoning that one of the two must be redundant. The
+/// ordinal table above already excludes anything the caller does not hold, and
+/// `writeTerms` drops a row whose md5 has no ordinal. What this join adds is that
+/// the reason a foreign row never ships stops depending on a Zig lookup: it is
+/// the same `files` predicate, in the statement, the way `fuzzy.zig`'s
+/// `doc_terms_select_sql` re-applies it for the same reason.
+///
+/// It is also why the STRUCTURAL test asserts over both statements rather than
+/// over behaviour alone: removing this one leaves every behavioural test green,
+/// and that is exactly the class of deletion `query.zig`'s "second entry point"
+/// warning is about.
+///
+/// `ORDER BY dt.term, dt.blob_md5` is what the encoder demands — terms ascending
+/// by byte, and postings within a term strictly ascending, which they are because
+/// the ordinal table is sorted by md5 too. `DISTINCT` because two `files` rows of
+/// one blob are two join rows and one document.
+///
+/// **`CROSS JOIN`, and it is a join-ORDER directive rather than a join kind.**
+/// `json_each` is a table-valued function with no statistics, so the planner has
+/// no way to know the request's md5 list is the small side. Left as a plain
+/// `JOIN` it made `doc_terms` the OUTER loop and seeked the PARTITION PREFIX
+/// alone — every term row the household owns, read once per request. MEASURED:
+/// 400 unrelated notes of the caller's own took an eight-document export from
+/// **1,534 to 19,539 VM steps**, for identical output. The plan pin names both
+/// key columns for this reason: the bad plan is still a `SEARCH` on the primary
+/// key, so "doc_terms is seeked" would have passed over it.
+const terms_sql =
+    "SELECT DISTINCT dt.term, dt.blob_md5 FROM json_each(?2) j " ++
+    "CROSS JOIN doc_terms dt ON dt.partition_id = ?3 AND dt.blob_md5 = j.value " ++
+    "CROSS JOIN files f INDEXED BY files_md5 ON f.md5 = dt.blob_md5 " ++
+    "WHERE" ++ held_by_caller ++ " ORDER BY dt.term, dt.blob_md5;";
+
+/// How many md5s one request may name.
+///
+/// A GET carries them in the query string, and 37 characters each (`&md5=` plus
+/// 32 hex) puts 128 at ~4.7 KB — comfortably inside any request-line limit, where
+/// an uncapped batch would let a client build a request the transport has to
+/// refuse with no useful error.
+///
+/// It is also what bounds the work. The whole 1,222-document library is 10
+/// requests, which on §9.1's own arithmetic (HTTP/1.1, ~6 connections, 100-250 ms
+/// RTT) is ~0.3 s of round-trip against the ~10 s that per-document fetching was
+/// measured to cost. §9.1's "one bundle per tier" becomes "a handful of bundles
+/// per tier" — which keeps what per-document fetching lost without making any
+/// single response unbounded.
+pub const max_terms_md5s: usize = 128;
+
+/// The term payload for `md5s`, restricted to the ones `user_id` holds.
+///
+/// **An md5 the caller does not hold is simply ABSENT from the payload** — not an
+/// error, and not an empty entry. That is the same answer a caller gets for an
+/// md5 nobody holds and for one that never existed, so the response says nothing
+/// about anybody else's library. §4's three states survive for the md5s that ARE
+/// covered: present with postings, present with none (derived-and-empty, a final
+/// answer the client caches), absent (never sent — ask again).
+///
+/// Everything is written into `out`; `arena` holds the ordinal table.
+pub fn writeTerms(
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    db: sqlite.Db,
+    user_id: u64,
+    md5s: []const []const u8,
+) !void {
+    // The md5 list as JSON, for `json_each`. Built here rather than by the
+    // handler so the ENCODING of the bound parameter cannot drift from the
+    // statement that reads it.
+    var json_list: std.ArrayList(u8) = .empty;
+    defer json_list.deinit(gpa);
+    try json_list.append(gpa, '[');
+    for (md5s, 0..) |m, i| {
+        // REJECTED rather than escaped. Every value reaching this point is 32
+        // characters of lowercase hex or it is not an md5, and a quoting routine
+        // would be a place for that to quietly stop being true.
+        if (!isMd5Hex(m)) return error.InvalidMd5;
+        if (i != 0) try json_list.append(gpa, ',');
+        try json_list.append(gpa, '"');
+        try json_list.appendSlice(gpa, m);
+        try json_list.append(gpa, '"');
+    }
+    try json_list.append(gpa, ']');
+
+    var held: std.ArrayList([]const u8) = .empty;
+    {
+        var s = try db.prepare(held_sql);
+        defer s.finalize();
+        s.bindInt(1, @intCast(user_id));
+        s.bindText(2, json_list.items);
+        while (try s.step()) try held.append(arena, try arena.dupe(u8, s.columnText(0)));
+    }
+
+    var enc = try Encoder.begin(gpa, out, held.items);
+    defer enc.deinit();
+    if (held.items.len == 0) {
+        // No ordinal table means no posting can be encoded at all, so running the
+        // term statement would be a read whose every row had to be discarded.
+        enc.finish();
+        return;
+    }
+
+    // MASK FOR SPEED: the caller's own partition bounds `doc_terms`. A caller who
+    // has never ingested anything has no partition and therefore no terms — the
+    // same answer as an empty library — and the ordinal table still ships, so a
+    // held-but-unindexed blob is derived-and-EMPTY rather than absent.
+    const part = (try partition.active(db, user_id)) orelse {
+        enc.finish();
+        return;
+    };
+
+    var s = try db.prepare(terms_sql);
+    defer s.finalize();
+    s.bindInt(1, @intCast(user_id));
+    s.bindText(2, json_list.items);
+    s.bindInt(3, part);
+
+    // One `addTerm` per term, accumulating its ordinals as the rows arrive. The
+    // statement's ORDER BY guarantees the grouping, so nothing is buffered but
+    // the current term's posting list — the same streaming discipline `Encoder`
+    // exists for.
+    var current: std.ArrayList(u8) = .empty;
+    defer current.deinit(gpa);
+    var ordinals: std.ArrayList(u32) = .empty;
+    defer ordinals.deinit(gpa);
+    var have_term = false;
+    while (try s.step()) {
+        const term = s.columnText(0);
+        const blob = s.columnText(1);
+        const ord = ordinalOf(held.items, blob) orelse continue;
+        if (!have_term or !std.mem.eql(u8, current.items, term)) {
+            if (have_term) try enc.addTerm(current.items, ordinals.items);
+            current.clearRetainingCapacity();
+            try current.appendSlice(gpa, term);
+            ordinals.clearRetainingCapacity();
+            have_term = true;
+        }
+        try ordinals.append(gpa, ord);
+    }
+    if (have_term) try enc.addTerm(current.items, ordinals.items);
+    enc.finish();
+}
+
+/// The ordinal of `md5` in the sorted table, or null. Binary search: the table is
+/// `ORDER BY f.md5` by construction, and a linear scan would make the export
+/// quadratic in the batch size for no reason.
+fn ordinalOf(table: []const []const u8, md5: []const u8) ?u32 {
+    var lo: usize = 0;
+    var hi: usize = table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        switch (std.mem.order(u8, table[mid], md5)) {
+            .lt => lo = mid + 1,
+            .gt => hi = mid,
+            .eq => return @intCast(mid),
+        }
+    }
+    return null;
+}
+
+/// 32 characters of lowercase hex, and nothing else — the gate on everything
+/// that reaches a bound parameter or the JSON list above.
+pub fn isMd5Hex(s: []const u8) bool {
+    if (s.len != 32) return false;
+    for (s) |c| switch (c) {
+        '0'...'9', 'a'...'f' => {},
+        else => return false,
+    };
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1408,6 +1791,527 @@ test "CAVEAT: a stale note_index row reports DERIVED though nothing has derived 
 }
 
 // ---------------------------------------------------------------------------
+// Tests — the manifest on the wire, and its golden vector
+// ---------------------------------------------------------------------------
+
+/// The checked-in manifest payload the browser decodes. Pinned exactly as the
+/// term payload is: encoded here, decoded in
+/// `webapp/tests/unit/manifestCodec.test.ts` against expectations written out by
+/// hand on BOTH sides. Regenerating it to make one side pass turns the other
+/// red, which is the only arrangement that catches a format change made in one
+/// place.
+const manifest_golden = @embedFile("testdata/manifest_golden.bin");
+
+/// The golden manifest's rows, chosen so every branch of `writeManifest` appears
+/// at least once and a reader of the hex dump can see which is which:
+///
+///   7    tier 1, derived, current index_version — the ordinary row
+///   8    tier 1 again, so the `updated_at` GAP is exercised inside a tier, and
+///        `pending`, so the flags byte's high nibble is not always zero
+///   300  the tier CHANGES, so the timestamp is a fresh ABSOLUTE anchor rather
+///        than a gap; a file_id past 127, so its varint is two bytes; and NO
+///        index_version, which is a blob nothing has looked at yet
+///   301  tier changes again — a second anchor — and back to `derived`
+///   302  a second row in the last tier, so a real gap is encoded after an anchor
+///        as well as before one, and `index_version` ZERO, which is a version and
+///        not an absence
+const golden_manifest: Manifest = .{
+    .coverage = .{ .notes = 3, .unsearchable = 1 },
+    .rows = &.{
+        .{ .file_id = 7, .md5 = "0123456789abcdef0123456789abcdef", .updated_at = 1_700_000_000, .index_version = 15, .tier = .note, .derivation = .derived },
+        .{ .file_id = 8, .md5 = "fedcba9876543210fedcba9876543210", .updated_at = 1_699_990_000, .index_version = 15, .tier = .note, .derivation = .pending },
+        .{ .file_id = 300, .md5 = "00112233445566778899aabbccddeeff", .updated_at = 1_600_000_000, .index_version = null, .tier = .marked, .derivation = .pending },
+        .{ .file_id = 301, .md5 = "d41d8cd98f00b204e9800998ecf8427e", .updated_at = 1_599_999_999, .index_version = 3, .tier = .other, .derivation = .derived },
+        .{ .file_id = 302, .md5 = "ffffffffffffffffffffffffffffffff", .updated_at = 1_500_000_000, .index_version = 0, .tier = .other, .derivation = .derived },
+    },
+};
+
+// The golden manifest payload, byte for byte, 130 bytes. Written out so that a
+// reviewer can check the file with `xxd` and nothing else.
+//
+//   53 4d 41 4e              "SMAN"
+//   01                       manifest_format_version = 1
+//   05 00 00 00              row_count = 5
+//   03                       coverage.notes = 3
+//   01                       coverage.unsearchable = 1
+//
+//   0123456789abcdef0123456789abcdef   md5
+//   01                       flags: tier 1 (note), derivation 0 (derived)
+//   07                       file_id 7
+//   80 e2 cf aa 06           updated_at 1,700,000,000 ABSOLUTE — first row of a tier
+//   10                       index_version 15, +1
+//
+//   fedcba9876543210fedcba9876543210   md5
+//   11                       flags: tier 1, derivation 1 (pending)
+//   08                       file_id 8
+//   90 4e                    gap 10,000 — same tier, so it is a gap
+//   10                       index_version 15, +1
+//
+//   00112233445566778899aabbccddeeff   md5
+//   12                       flags: tier 2 (marked), derivation 1 (pending)
+//   ac 02                    file_id 300 — two varint bytes
+//   80 a0 f8 fa 05           updated_at 1,600,000,000 ABSOLUTE — the tier CHANGED
+//   00                       index_version ABSENT
+//
+//   d41d8cd98f00b204e9800998ecf8427e   md5
+//   03                       flags: tier 3 (other), derivation 0
+//   ad 02                    file_id 301
+//   ff 9f f8 fa 05           updated_at 1,599,999,999 ABSOLUTE — tier changed again
+//   04                       index_version 3, +1
+//
+//   ffffffffffffffffffffffffffffffff   md5
+//   03                       flags: tier 3, derivation 0
+//   ae 02                    file_id 302
+//   ff c1 d7 2f              gap 99,999,999 — same tier, so it is a real gap
+//   01                       index_version 0, +1 — zero is a REAL version
+
+test "the golden manifest encodes byte for byte" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+
+    try writeManifest(gpa, &out, golden_manifest);
+
+    // NOT a round-trip, for the same reason the term golden is not: the bytes are
+    // checked in and the browser's suite decodes THIS FILE against expectations
+    // written out by hand there. "Fixing" this assertion by regenerating the file
+    // turns that suite red.
+    try testing.expectEqualSlices(u8, manifest_golden, out.items);
+}
+
+test "the golden manifest is the size its annotated dump claims" {
+    // Header 9 + two coverage varints + five rows. A different total means the
+    // dump above has drifted from the encoder and stopped being verifiable by
+    // reading it.
+    try testing.expectEqual(@as(usize, 130), manifest_golden.len);
+    try testing.expectEqual(@as(usize, 9), manifest_header_len);
+    try testing.expectEqualSlices(u8, manifest_magic, manifest_golden[0..4]);
+    try testing.expectEqual(manifest_format_version, manifest_golden[4]);
+}
+
+test "index_version ZERO is a real version and not an absent one" {
+    // The `+1` in the encoding exists for exactly this row. A blob indexed at
+    // version 0 and a blob with no index row at all are different facts — one is
+    // cacheable under `(md5, 0)` and the other cannot be cached at all — and a
+    // naive "0 means absent" merges them and hands the client a cache key it must
+    // not use.
+    const gpa = std.testing.allocator;
+    var absent: std.ArrayList(u8) = .empty;
+    defer absent.deinit(gpa);
+    var zero: std.ArrayList(u8) = .empty;
+    defer zero.deinit(gpa);
+    const row: Row = .{
+        .file_id = 1,
+        .md5 = "0123456789abcdef0123456789abcdef",
+        .updated_at = 0,
+        .index_version = null,
+        .tier = .note,
+        .derivation = .derived,
+    };
+    var row_zero = row;
+    row_zero.index_version = 0;
+    try writeManifest(gpa, &absent, .{ .rows = &.{row}, .coverage = .{} });
+    try writeManifest(gpa, &zero, .{ .rows = &.{row_zero}, .coverage = .{} });
+    try testing.expect(!std.mem.eql(u8, absent.items, zero.items));
+}
+
+test "an md5 the manifest cannot spell never reaches the wire" {
+    const gpa = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    // Same rule the term payload enforces, and for the same reason: the md5 is
+    // the client's cache key, and a manifest spelling it in a different case than
+    // the term payload would read as a document the client has never seen.
+    const bad: Row = .{
+        .file_id = 1,
+        .md5 = "0123456789ABCDEF0123456789ABCDEF",
+        .updated_at = 0,
+        .index_version = null,
+        .tier = .note,
+        .derivation = .derived,
+    };
+    try testing.expectError(error.InvalidMd5, writeManifest(gpa, &out, .{ .rows = &.{bad}, .coverage = .{} }));
+}
+
+test "the ETag is the body, so a manifest that lost a row cannot answer 304" {
+    // THE CONDITIONAL REQUEST'S WHOLE ARGUMENT, driven. Absence from the manifest
+    // is the ONLY removal channel this design has (§2.2), so a validator that
+    // said "unchanged" over a manifest that had lost a row would leave a trashed
+    // document matching in the browser for ever. A hash of the bytes cannot say
+    // that; a version number maintained beside them could.
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+
+    _ = try f.putNote(1, "keep.note", &.{"fica"});
+    const gone = try f.putNote(1, "gone.note", &.{"sai"});
+
+    var a: std.ArrayList(u8) = .empty;
+    defer a.deinit(gpa);
+    try writeManifest(gpa, &a, try f.manifest(1));
+    const etag_before = bodyEtag(a.items);
+
+    // Same library, asked twice: the validator must be STABLE, or every visit
+    // refetches and the conditional request buys nothing at all.
+    var again: std.ArrayList(u8) = .empty;
+    defer again.deinit(gpa);
+    try writeManifest(gpa, &again, try f.manifest(1));
+    try testing.expectEqualSlices(u8, &etag_before, &bodyEtag(again.items));
+
+    try f.files.trash(1, gone);
+    var b: std.ArrayList(u8) = .empty;
+    defer b.deinit(gpa);
+    try writeManifest(gpa, &b, try f.manifest(1));
+    try testing.expect(!std.mem.eql(u8, &etag_before, &bodyEtag(b.items)));
+}
+
+test "the manifest carries no document names, and that is a decision" {
+    // §3 step 3 omitted them deliberately: names would balloon the one response
+    // paid on every visit, and a locally-answered result set gets them from the
+    // file listing the app already holds, keyed on `file_id`. Asserted rather
+    // than trusted, because "just add the name" is a one-line change that costs
+    // every household bytes on every visit for ever.
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    _ = try f.putNote(1, "Reunião trimestral.note", &.{"pauta"});
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try writeManifest(gpa, &out, try f.manifest(1));
+    try testing.expect(std.mem.indexOf(u8, out.items, "Reuni") == null);
+    try testing.expect(std.mem.indexOf(u8, out.items, ".note") == null);
+
+    // And the size that buys: a row is a fixed 16 + 1 plus three varints, so the
+    // payload is bounded by the row count and by nothing a user can type.
+    try testing.expect(out.items.len < manifest_header_len + 2 + 32);
+    // The absolute anchor really is there: the one row's timestamp must survive
+    // the round trip, and a zero here would mean it had not.
+    try testing.expect(out.items[out.items.len - 6] != 0);
+}
+
+// ---------------------------------------------------------------------------
+// Tests — the term payload for a batch, and §2.4's join
+// ---------------------------------------------------------------------------
+
+fn exportTerms(f: *Fixture, user_id: u64, md5s: []const []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(testing.allocator);
+    try writeTerms(f.a(), testing.allocator, &out, f.db, user_id, md5s);
+    return out.toOwnedSlice(testing.allocator);
+}
+
+/// How many documents the payload's ordinal table names — which is the whole
+/// subject of the authorization tests, because "covered" and "not covered" is
+/// exactly what the join decides.
+fn docCountOf(payload: []const u8) u32 {
+    return std.mem.readInt(u32, payload[5..9], .little);
+}
+
+fn termCountOf(payload: []const u8) u32 {
+    return std.mem.readInt(u32, payload[9..13], .little);
+}
+
+fn payloadCovers(payload: []const u8, md5_hex: []const u8) bool {
+    var raw: [16]u8 = undefined;
+    md5FromHex(md5_hex, &raw) catch return false;
+    const table = payload[header_len..][0 .. docCountOf(payload) * 16];
+    var i: usize = 0;
+    while (i < table.len) : (i += 16) {
+        if (std.mem.eql(u8, table[i..][0..16], &raw)) return true;
+    }
+    return false;
+}
+
+fn md5Of(f: *Fixture, file_id: u64) ![]const u8 {
+    var s = try f.db.prepare("SELECT md5 FROM files WHERE id = ?1;");
+    defer s.finalize();
+    s.bindInt(1, @intCast(file_id));
+    _ = try s.step();
+    return f.a().dupe(u8, s.columnText(0));
+}
+
+test "THE LEAK TEST: a caller who does not hold the md5 receives nothing, however well-formed the request" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // §2.4, and the reason this route is its own entry point rather than a
+    // parameter on an existing one. The BODY depends on md5 alone — that is what
+    // makes it `immutable` and shareable between housemates — so the only thing
+    // between a housemate's md5 and their document's entire vocabulary is the
+    // `files` join, per request. `query.zig`'s module docs warn that "a second
+    // entry point would be a place to forget it"; this is that second entry
+    // point, and this is that test.
+    //
+    // The md5 is not a secret and must not be treated as one: it is 32 characters
+    // sitting in the other person's own manifest, and it is the SAME 32
+    // characters for identical bytes under both accounts, by design (§4).
+    const mine = try f.putNote(1, "meu.note", &.{"particular"});
+    const theirs = try f.putNote(2, "dele.note", &.{"confidencial"});
+    const mine_md5 = try md5Of(&f, mine);
+    const theirs_md5 = try md5Of(&f, theirs);
+    try testing.expect(!std.mem.eql(u8, mine_md5, theirs_md5));
+
+    // Asking for BOTH: the caller's own document comes back and the housemate's
+    // is absent from the ordinal table entirely — not empty, ABSENT — so the
+    // response says nothing about whether it exists.
+    const payload = try exportTerms(&f, 1, &.{ mine_md5, theirs_md5 });
+    defer testing.allocator.free(payload);
+    try testing.expectEqual(@as(u32, 1), docCountOf(payload));
+    try testing.expect(payloadCovers(payload, mine_md5));
+    try testing.expect(!payloadCovers(payload, theirs_md5));
+    try testing.expect(termCountOf(payload) > 0);
+
+    // And asking for the housemate's ALONE is an empty payload rather than an
+    // error: an error would itself be an answer about somebody else's library.
+    const only_theirs = try exportTerms(&f, 1, &.{theirs_md5});
+    defer testing.allocator.free(only_theirs);
+    try testing.expectEqual(@as(u32, 0), docCountOf(only_theirs));
+    try testing.expectEqual(@as(u32, 0), termCountOf(only_theirs));
+
+    // A trashed file is not held either — the bin is not the library, and the
+    // same clause is what says so.
+    try f.files.trash(1, mine);
+    const after_trash = try exportTerms(&f, 1, &.{mine_md5});
+    defer testing.allocator.free(after_trash);
+    try testing.expectEqual(@as(u32, 0), docCountOf(after_trash));
+
+    // An md5 nobody holds, and an "md5" that is not one at all.
+    const nobody = try exportTerms(&f, 1, &.{"00000000000000000000000000000000"});
+    defer testing.allocator.free(nobody);
+    try testing.expectEqual(@as(u32, 0), docCountOf(nobody));
+    var sink: std.ArrayList(u8) = .empty;
+    defer sink.deinit(testing.allocator);
+    try testing.expectError(
+        error.InvalidMd5,
+        writeTerms(f.a(), testing.allocator, &sink, f.db, 1, &.{"\" OR 1=1 --"}),
+    );
+}
+
+test "STRUCTURAL: every statement that reads a term reaches `files` through the ONE clause" {
+    // The other half of the leak test, and the half that catches what behaviour
+    // cannot. VERIFIED by deleting each: removing the owner test from
+    // `held_by_caller` fails the leak test and the HTTP one, but removing the
+    // `files` join from `terms_sql` alone leaves every behavioural test GREEN —
+    // the ordinal table happens to gate it — so only a structural assertion can
+    // say that the defense-in-depth copy is still there. That is precisely the
+    // deletion `query.zig`'s "a second entry point would be a place to forget it"
+    // is about.
+    try testing.expect(std.mem.indexOf(u8, held_sql, held_by_caller) != null);
+    try testing.expect(std.mem.indexOf(u8, terms_sql, held_by_caller) != null);
+    // Exactly ONE occurrence of the owner test in each: a second copy is a second
+    // opinion, and the one that gets edited is never the one that matters.
+    for ([_][]const u8{ held_sql, terms_sql }) |sql| {
+        var count: usize = 0;
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, sql, at, "user_id")) |i| : (at = i + 1) count += 1;
+        try testing.expectEqual(@as(usize, 1), count);
+    }
+}
+
+test "the same blob under two users ships a byte-identical payload" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // §4's `partition_id`-is-not-identity claim, which is the whole reason this
+    // route can be `immutable` and its cache entry shared between housemates. The
+    // two hold the same bytes under different names, in different partitions,
+    // with different file ids — and none of that may reach the wire.
+    const mine = try f.putNote(1, "meu.note", &.{ "reunião", "trimestral" });
+    const theirs = try f.putNote(2, "cópia dele.note", &.{ "reunião", "trimestral" });
+    const md5 = try md5Of(&f, mine);
+    try testing.expectEqualStrings(md5, try md5Of(&f, theirs));
+
+    const a = try exportTerms(&f, 1, &.{md5});
+    defer testing.allocator.free(a);
+    const b = try exportTerms(&f, 2, &.{md5});
+    defer testing.allocator.free(b);
+    try testing.expectEqualSlices(u8, a, b);
+    try testing.expect(termCountOf(a) > 0);
+}
+
+test "the payload is a function of the md5 SET, not of the order they were asked in" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // What makes one cache entry serve two clients that asked differently — and
+    // what makes the postings come out strictly ascending for free, because the
+    // ordinal table is sorted. A payload that honoured request order would be a
+    // different byte string per client for the same documents.
+    const a_id = try f.putNote(1, "a.note", &.{"alpha"});
+    const b_id = try f.putNote(1, "b.note", &.{"bravo"});
+    const a_md5 = try md5Of(&f, a_id);
+    const b_md5 = try md5Of(&f, b_id);
+
+    const one = try exportTerms(&f, 1, &.{ a_md5, b_md5 });
+    defer testing.allocator.free(one);
+    const other = try exportTerms(&f, 1, &.{ b_md5, a_md5 });
+    defer testing.allocator.free(other);
+    try testing.expectEqualSlices(u8, one, other);
+
+    // A duplicate in the request is one document, not two: an ordinal table with
+    // a repeat would make the same document match twice in the browser.
+    const dup = try exportTerms(&f, 1, &.{ a_md5, a_md5 });
+    defer testing.allocator.free(dup);
+    try testing.expectEqual(@as(u32, 1), docCountOf(dup));
+}
+
+test "a blob with no searchable text ships an EMPTY term set, not a missing one" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // §4's third state, from the server side. A document that folds to nothing is
+    // derived-and-EMPTY and the client must be able to cache that as final; a
+    // document ABSENT from the payload is one it must ask about again. On the
+    // wire the difference is the ordinal table and nothing else — so it is the
+    // ordinal table this asserts.
+    const blank = try f.putNote(1, "blank.note", &.{});
+    const blank_md5 = try md5Of(&f, blank);
+
+    const payload = try exportTerms(&f, 1, &.{blank_md5});
+    defer testing.allocator.free(payload);
+    try testing.expectEqual(@as(u32, 1), docCountOf(payload)); // PRESENT
+    try testing.expectEqual(@as(u32, 0), termCountOf(payload)); // and EMPTY
+    try testing.expect(payloadCovers(payload, blank_md5));
+
+    const with_text = try f.putNote(1, "texto.note", &.{"reunião"});
+    const both = try exportTerms(&f, 1, &.{ blank_md5, try md5Of(&f, with_text) });
+    defer testing.allocator.free(both);
+    try testing.expectEqual(@as(u32, 2), docCountOf(both));
+    try testing.expect(termCountOf(both) > 0);
+}
+
+test "PLAN PIN: the term export reaches `files` by blob and never re-walks the caller's library" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    _ = try f.putNote(1, "n.note", &.{"alpha"});
+
+    // The hazard `query.zig` records with a number: without `INDEXED BY
+    // files_md5` SQLite picks `files_user_parent (user_id=?)`, whose first column
+    // selects the caller's ENTIRE library, and re-walks it once per row — which
+    // took a ten-document page "from 8,811 to 48,811 VM steps" there. Here the
+    // outer loop is the REQUESTED md5 list, so the same mistake costs a library
+    // walk per md5 asked for, on the cold fill that asks for all of them.
+    //
+    // BOTH statements, because both join `files` and only one of them is the
+    // access check people remember.
+    inline for ([_][]const u8{ held_sql, terms_sql }) |sql| {
+        var s = try f.db.prepare("EXPLAIN QUERY PLAN " ++ sql);
+        defer s.finalize();
+        var files_by_md5 = false;
+        while (try s.step()) {
+            const detail = s.columnText(3);
+            if (std.mem.indexOf(u8, detail, "SEARCH f USING INDEX files_md5 (md5=?)") != null) files_by_md5 = true;
+            // `json_each` is a table-valued function and shows as a SCAN of the
+            // REQUEST's own md5 list, which is exactly right — every requested
+            // md5 is visited once. Nothing belonging to the database may be.
+            try testing.expect(std.mem.indexOf(u8, detail, "SCAN f") == null);
+            try testing.expect(std.mem.indexOf(u8, detail, "SCAN dt") == null);
+        }
+        try testing.expect(files_by_md5);
+    }
+
+    // AND `doc_terms` BY BOTH PRIMARY KEY COLUMNS, which is the pin this file
+    // learned the hard way and the reason the joins are spelt `CROSS JOIN`.
+    //
+    // MEASURED, before that: left as a plain `JOIN`, SQLite made `doc_terms` the
+    // OUTER loop and seeked `PRIMARY KEY (partition_id=?)` — the partition prefix
+    // ALONE — then probed the request's md5 list for each row. Every term row the
+    // household owns, read once per request, to answer about eight documents.
+    // Adding 400 unrelated notes of the caller's own took the export from 1,534
+    // to 19,539 VM steps, for identical output.
+    //
+    // Naming `blob_md5=?` is what makes this line able to fail: the bad plan is
+    // still a `SEARCH` on `dt` and still uses the PRIMARY KEY, so "doc_terms is
+    // seeked" would have passed over exactly the regression it is here for — the
+    // same lesson `note_page_index_blob` taught the manifest's pin.
+    var s = try f.db.prepare("EXPLAIN QUERY PLAN " ++ terms_sql);
+    defer s.finalize();
+    var dt_seek = false;
+    var sorts: usize = 0;
+    while (try s.step()) {
+        const detail = s.columnText(3);
+        if (std.mem.indexOf(u8, detail, "SEARCH dt USING PRIMARY KEY (partition_id=? AND blob_md5=?)") != null) dt_seek = true;
+        if (std.mem.indexOf(u8, detail, "TEMP B-TREE") != null) sorts += 1;
+    }
+    try testing.expect(dt_seek);
+    // ONE temp b-tree, shared by the `DISTINCT` and the `ORDER BY` — the encoder
+    // requires ascending terms and strictly ascending postings, so the sort is not
+    // optional. A second would mean something else had started materialising.
+    try testing.expectEqual(@as(usize, 1), sorts);
+}
+
+/// The VM steps ONE term export costs, both statements together.
+///
+/// The statements are re-prepared here rather than counted inside `writeTerms`:
+/// `vmSteps` is per statement, and threading a counter through production code
+/// for a test's benefit is how production code grows test-shaped seams.
+fn termSteps(f: *Fixture, user_id: u64, md5s: []const []const u8) !i64 {
+    const gpa = testing.allocator;
+    var json_list: std.ArrayList(u8) = .empty;
+    defer json_list.deinit(gpa);
+    try json_list.append(gpa, '[');
+    for (md5s, 0..) |m, i| {
+        if (i != 0) try json_list.append(gpa, ',');
+        try json_list.append(gpa, '"');
+        try json_list.appendSlice(gpa, m);
+        try json_list.append(gpa, '"');
+    }
+    try json_list.append(gpa, ']');
+
+    var total: i64 = 0;
+    var held = try f.db.prepare(held_sql);
+    defer held.finalize();
+    held.bindInt(1, @intCast(user_id));
+    held.bindText(2, json_list.items);
+    while (try held.step()) {}
+    total += held.vmSteps();
+
+    const part = (try partition.active(f.db, user_id)) orelse return total;
+    var terms = try f.db.prepare(terms_sql);
+    defer terms.finalize();
+    terms.bindInt(1, @intCast(user_id));
+    terms.bindText(2, json_list.items);
+    terms.bindInt(3, part);
+    while (try terms.step()) {}
+    return total + terms.vmSteps();
+}
+
+test "WORK PIN: exporting N blobs costs VM steps linear in N and flat in library size" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // The pin §6 asked for, and its note about why it is meaningful HERE:
+    // search's work pins are blind to prefix expansion because that work happens
+    // inside the FTS virtual table's `xFilter`/`xNext`, but this reads
+    // `doc_terms` by primary key and runs no `MATCH`, so the counter sees all of
+    // it. MEASURED: 1,062 VM steps for eight documents, and it does not move.
+    const wanted = try f.a().alloc([]const u8, 8);
+    for (0..8) |i| {
+        const id = try f.putNote(1, try std.fmt.allocPrint(f.a(), "n{d}.note", .{i}), &.{
+            try std.fmt.allocPrint(f.a(), "palavra{d}", .{i}),
+            "comum",
+        });
+        wanted[i] = try md5Of(&f, id);
+    }
+    const base = try termSteps(&f, 1, wanted);
+
+    // 400 documents OF THE CALLER'S OWN that were not asked for. The export is
+    // driven by the request's md5 list, so none of them may be touched: what is
+    // allowed here is a b-tree that grew a level, not a walk. This is the
+    // assertion the `CROSS JOIN` exists for — as a plain `JOIN` it read 19,539
+    // steps here against 1,534.
+    for (0..400) |i| _ = try f.putNote(1, try std.fmt.allocPrint(f.a(), "bulk{d:0>4}.note", .{i}), &.{"enchimento"});
+    try testing.expect((try termSteps(&f, 1, wanted)) - base <= 8);
+
+    // And a whole other household member's library — the one the missing `files`
+    // join would have made VISIBLE and a `user_id` access path would have made
+    // EXPENSIVE. Neither, here.
+    for (0..400) |i| _ = try f.putNote(2, try std.fmt.allocPrint(f.a(), "outro{d:0>4}.note", .{i}), &.{"enchimento"});
+    try testing.expect((try termSteps(&f, 1, wanted)) - base <= 8);
+}
+
+// ---------------------------------------------------------------------------
 // Tests — the plan pin and the work pin
 // ---------------------------------------------------------------------------
 
@@ -1668,48 +2572,6 @@ fn writeJson(gpa: std.mem.Allocator, out: *std.ArrayList(u8), m: Manifest) !void
     try out.appendSlice(gpa, "]}");
 }
 
-/// The manifest in the representation the TERM CODEC already chose for the same
-/// problem — raw 16-byte md5s and varints — so this is not a new format so much
-/// as the existing decision applied to the other payload. §9.2 names md5
-/// representation as the lever for both.
-///
-///     "SMAN" magic, u8 version, u32 row_count, varint notes, varint unsearchable
-///     per row, in the manifest's own order:
-///       md5              16 RAW bytes
-///       flags            u8    tier in the low nibble, derivation in the high
-///       file_id          varint
-///       updated_at_gap   varint  previous row's `updated_at` minus this one's
-///       index_version    varint  0 = absent, else version + 1
-///
-/// `updated_at` is a GAP because the order is already `updated_at` DESC within a
-/// tier: consecutive documents in a real household are minutes or hours apart,
-/// which is two varint bytes where the absolute epoch second is five. The gap
-/// resets at a tier boundary, which is the only place it could go negative.
-fn writeBinary(gpa: std.mem.Allocator, out: *std.ArrayList(u8), m: Manifest) !void {
-    try out.appendSlice(gpa, "SMAN");
-    try out.append(gpa, 1);
-    var count: [4]u8 = undefined;
-    std.mem.writeInt(u32, &count, @intCast(m.rows.len), .little);
-    try out.appendSlice(gpa, &count);
-    try appendVarint(gpa, out, @intCast(m.coverage.notes));
-    try appendVarint(gpa, out, @intCast(m.coverage.unsearchable));
-
-    var prev_tier: ?Tier = null;
-    var prev_at: i64 = 0;
-    for (m.rows) |r| {
-        var raw: [16]u8 = undefined;
-        try md5FromHex(r.md5, &raw);
-        try out.appendSlice(gpa, &raw);
-        try out.append(gpa, @as(u8, @intFromEnum(r.tier)) | (@as(u8, @intFromEnum(r.derivation)) << 4));
-        try appendVarint(gpa, out, @intCast(r.file_id));
-        const gap = if (prev_tier != null and prev_tier.? == r.tier) prev_at - r.updated_at else 0;
-        try appendVarint(gpa, out, @intCast(gap));
-        try appendVarint(gpa, out, if (r.index_version) |v| @intCast(v + 1) else 0);
-        prev_tier = r.tier;
-        prev_at = r.updated_at;
-    }
-}
-
 /// gzip at LEVEL 6 — the setting every other figure in `client-side-search.md`
 /// and `client-side-search-impl.md` was taken at, so these numbers sit beside
 /// those without a footnote.
@@ -1804,7 +2666,7 @@ test "MEASUREMENT: what one manifest costs on the wire, and how it grows" {
         json.clearRetainingCapacity();
         bin.clearRetainingCapacity();
         try writeJson(gpa, &json, m);
-        try writeBinary(gpa, &bin, m);
+        try writeManifest(gpa, &bin, m);
         const json_gz = try gzipLen(gpa, json.items);
         const bin_gz = try gzipLen(gpa, bin.items);
         if (n == 1222) {
