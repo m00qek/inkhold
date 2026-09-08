@@ -169,7 +169,7 @@ test "crc32Combine: lengths straddling powers of two" {
     var buf: [65537]u8 = undefined;
     for (&buf, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
     for ([_]usize{
-        1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33,
+        1,  2,  3,  4,   7,   8,   9,    15,   16,   17,    31,    32,    33,
         63, 64, 65, 255, 256, 257, 1023, 1024, 1025, 65535, 65536, 65537,
     }) |n| {
         try expectCombines(&.{ "prefix bytes that stay put", buf[0..n] });

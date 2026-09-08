@@ -246,8 +246,7 @@ test "streaming put/open/has round-trip" {
     try s.commit();
 
     try testing.expect(store.has(md5_a, 7));
-    try expectContents(store, md5_a,
-        7, "{\"md5\":\"…\",\"v\":7}\n{\"p\":0,\"t\":\"reuniao\"}\n{\"p\":1,\"t\":\"acta\"}\n");
+    try expectContents(store, md5_a, 7, "{\"md5\":\"…\",\"v\":7}\n{\"p\":0,\"t\":\"reuniao\"}\n{\"p\":1,\"t\":\"acta\"}\n");
 }
 
 test "nothing is visible until commit, and abort leaves no trace" {
@@ -339,9 +338,8 @@ test "a malformed md5 is a miss / no-op on every entry point, never a panic" {
     const store = try DerivedStore.init(io, tmp.dir);
 
     for ([_][]const u8{
-        "", "a", "abc", "0123456789abcdef",
-        "0123456789abcdef0123456789abcdef0",
-        "../../../../../../etc/passwd-x-32",
+        "",                                  "a",                                 "abc", "0123456789abcdef",
+        "0123456789abcdef0123456789abcdef0", "../../../../../../etc/passwd-x-32",
     }) |bad| {
         try testing.expect(!store.has(bad, 1));
         try testing.expectError(error.InvalidMd5, store.open(bad, 1));

@@ -781,8 +781,8 @@ test "v14: the search index is gone, `kind = 0` stays, and a mid-derive database
     // Every object of the index is gone — the FTS5 shadow tables with it, which
     // `DROP TABLE` on a virtual table is what removes.
     for ([_][]const u8{
-        "segment_fts",       "segment_text",        "segment_search",    "search_partitions",
-        "segment_fts_data",  "segment_fts_docsize", "segment_fts_idx",   "segment_fts_config",
+        "segment_fts",            "segment_text",           "segment_search",  "search_partitions",
+        "segment_fts_data",       "segment_fts_docsize",    "segment_fts_idx", "segment_fts_config",
         "segment_search_segment", "search_partitions_user",
     }) |name| {
         var r = (try db.row("SELECT COUNT(*) FROM sqlite_master WHERE name = ?1;", &.{.{ .text = name }})).?;

@@ -6412,7 +6412,6 @@ test "purging the last reference removes the .note cover file along with the blo
 /// in one blob, from a device rather than from the synthetic builder.
 const sample2_note = @embedFile("sample-2.note");
 
-
 fn wireDerivedStores(f: *Fixture) !void {
     const terms_dir = try f.tmp.dir.createDirPathOpen(testing.io, "terms", .{});
     const text_dir = try f.tmp.dir.createDirPathOpen(testing.io, "text", .{});

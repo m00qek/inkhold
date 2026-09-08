@@ -228,7 +228,6 @@ fn encodeString(f: *derived.Fragment, s: []const u8) !void {
 
 const testing = std.testing;
 
-
 const md5_x = "cccccccccccccccccccccccccccccccc";
 
 test "terms: folded, deduplicated, one line per page, empty pages skipped" {

@@ -189,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
             }
             total.fold_ns += best;
             try emit(io, "  fold     {d:>10.1} ms  {d:.4} ms/page  {d:.2} MB/s  terms_chars={d}\n", .{
-                msOf(best), msOf(best) / @as(f64, @floatFromInt(@max(doc.rows, 1))),
+                msOf(best),                 msOf(best) / @as(f64, @floatFromInt(@max(doc.rows, 1))),
                 mbps(doc.text_bytes, best), terms_chars,
             });
         }
@@ -259,7 +259,7 @@ pub fn main(init: std.process.Init) !void {
         total.text_plain += text_file.plain.len;
 
         try emit(io, "  derive   {d:>10.1} ms  terms={d}B text={d}B  (plain terms={d}B text={d}B)\n", .{
-            msOf(best_derive), terms_file.stored, text_file.stored,
+            msOf(best_derive),    terms_file.stored,   text_file.stored,
             terms_file.plain.len, text_file.plain.len,
         });
 
@@ -270,10 +270,11 @@ pub fn main(init: std.process.Init) !void {
             total.levels[li].text_bytes += x.bytes;
             total.levels[li].terms_ns += t.ns;
             total.levels[li].text_ns += x.ns;
-            try emit(io,
+            try emit(
+                io,
                 "  level {d}  terms {d}B {d:.1} ms {d:.2} MB/s | text {d}B {d:.1} ms {d:.2} MB/s\n",
                 .{
-                    lvl, t.bytes, msOf(t.ns), mbps(terms_file.plain.len, t.ns),
+                    lvl,     t.bytes,    msOf(t.ns),                      mbps(terms_file.plain.len, t.ns),
                     x.bytes, msOf(x.ns), mbps(text_file.plain.len, x.ns),
                 },
             );
@@ -312,14 +313,15 @@ pub fn main(init: std.process.Init) !void {
     } else if (want_derive) {
         try emit(io, "  derive   {d:>10.1} ms  terms={d}B text={d}B  (plain terms={d}B text={d}B)\n", .{
             msOf(total.derive_ns), total.terms_stored, total.text_stored,
-            total.terms_plain, total.text_plain,
+            total.terms_plain,     total.text_plain,
         });
         for (levels.items, 0..) |lvl, li| {
             const L = total.levels[li];
-            try emit(io,
+            try emit(
+                io,
                 "  level {d}  terms {d}B {d:.1} ms | text {d}B {d:.1} ms | stream {d}B {d:.1} ms\n",
                 .{
-                    lvl, L.terms_bytes, msOf(L.terms_ns), L.text_bytes, msOf(L.text_ns),
+                    lvl,                          L.terms_bytes,                msOf(L.terms_ns), L.text_bytes, msOf(L.text_ns),
                     L.terms_bytes + L.text_bytes, msOf(L.terms_ns + L.text_ns),
                 },
             );
@@ -562,14 +564,20 @@ fn splitPass(gpa: std.mem.Allocator, io: Io, db: sqlite.Db, doc: Doc) !SplitResu
 
 fn emitSplit(io: Io, s: SplitResult, rows: usize) !void {
     const per = @as(f64, @floatFromInt(@max(rows, 1)));
-    try emit(io,
+    try emit(
+        io,
         "  split    {d:>10.1} ms  ddl {d:.2} reset {d:.2} insert {d:.2} vocab {d:.2} ms/page" ++
             "  ({d:.0}% / {d:.0}% / {d:.0}% / {d:.0}%)\n",
         .{
             msOf(s.total),
-            msOf(s.ddl) / per, msOf(s.reset) / per, msOf(s.insert) / per, msOf(s.vocab) / per,
-            share(s.ddl, s.total), share(s.reset, s.total),
-            share(s.insert, s.total), share(s.vocab, s.total),
+            msOf(s.ddl) / per,
+            msOf(s.reset) / per,
+            msOf(s.insert) / per,
+            msOf(s.vocab) / per,
+            share(s.ddl, s.total),
+            share(s.reset, s.total),
+            share(s.insert, s.total),
+            share(s.vocab, s.total),
         },
     );
 }
