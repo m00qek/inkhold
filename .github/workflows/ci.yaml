@@ -128,3 +128,156 @@ jobs:
         with:
           name: inkhold-${{ matrix.target }}
           path: inkhold-${{ matrix.target }}.tar.gz
+
+  # ---- Container images -------------------------------------------------------
+  #
+  # ONE RUNNER PER ARCHITECTURE, exactly like `release` above and for the same
+  # reason: each target is its own MuPDF compile, and four of them in series is
+  # four times the wall clock for no saving. Each runner pushes a single-platform
+  # image BY DIGEST (no tag), and `image-manifest` below stitches the digests
+  # into one manifest list — the standard way to build a multi-arch tag without
+  # the runners having to coordinate.
+  #
+  # NO QEMU, and that is a property of the image rather than an oversight: the
+  # Dockerfile is COPY-only, so nothing foreign is ever EXECUTED during the
+  # build. Zig cross-compiles the binary on the x86 runner and buildx only has
+  # to lay bytes down.
+  image:
+    needs: [test-backend, test-frontend]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            target: x86_64-linux-musl
+          - platform: linux/386
+            target: x86-linux-musl
+          - platform: linux/arm64
+            target: aarch64-linux-musl
+          - platform: linux/arm/v7
+            target: arm-linux-musleabihf
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Cache Zig build
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: ${{ runner.os }}-zigcache-${{ hashFiles('build.zig', 'build.zig.zon', 'webapp/wasm/**') }}
+          restore-keys: ${{ runner.os }}-zigcache-
+
+      - name: Install Frontend Dependencies
+        run: npm --prefix webapp ci
+
+      # The Makefile owns the layout, so a local `make docker-image` and this
+      # produce the same context. One arch here, not all four.
+      - name: Build the context for ${{ matrix.platform }}
+        run: make docker-context DOCKER_ARCHES=${{ matrix.platform }}=${{ matrix.target }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # PUSHES ONLY FROM `main`. A pull request still builds the image, because a
+      # broken Dockerfile should fail review rather than the next release; it
+      # just has nowhere to publish, and a fork's token could not push anyway.
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase the image name
+        id: name
+        run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: VERSION=${{ github.sha }}
+          outputs: type=image,name=${{ steps.name.outputs.image }},push-by-digest=true,name-canonical=true,push=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # A file per digest, named by the digest, so the merge job can just list
+      # the directory. The matrix cannot share a variable any other way.
+      - name: Export the digest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # The manifest list: one tag that resolves to whichever of the four images
+  # matches the puller's architecture.
+  image-manifest:
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download the digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase the image name
+        id: name
+        run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # `latest` for the people following main, and the commit sha for anyone who
+      # needs to pin or to say exactly what they are running in a bug report.
+      - name: Create the manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ steps.name.outputs.image }}:latest \
+            --tag ${{ steps.name.outputs.image }}:${{ github.sha }} \
+            $(printf '${{ steps.name.outputs.image }}@sha256:%s ' *)
+
+      - name: Show what was published
+        run: docker buildx imagetools inspect ${{ steps.name.outputs.image }}:latest

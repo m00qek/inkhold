@@ -1,0 +1,10 @@
+# The context is `docker/`, and only two things in it belong in an image. An
+# exclude-all with two exceptions rather than a list of things to skip, so that
+# a stray file dropped in here — a scratch binary, an editor backup — cannot
+# silently become a layer.
+#
+# `!context` re-includes the DIRECTORY: Docker skips the contents of an excluded
+# directory outright, so excepting `context/**` alone would match nothing.
+*
+!config.zon
+!context

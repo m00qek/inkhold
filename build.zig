@@ -625,6 +625,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // `-Dstrip=true` drops the server binary's debug info. OFF by default,
+    // because a panic trace with no symbols is a bug report nobody can act on.
+    // The container images turn it on: MEASURED on x86_64-linux-musl,
+    // ReleaseSafe, 58.4 MB -> 10.1 MB, which is most of what "minimal" means
+    // for an image whose only other content is the SPA.
+    const strip = b.option(bool, "strip", "Strip debug info from the server binary") orelse false;
+
     // `inkhold --version`. Read from `build.zig.zon` rather than restated here,
     // so the number a user quotes in a bug report is the package version and
     // there is exactly one place to bump at release time. (This is the SERVER's
@@ -788,6 +795,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("backend/main.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = strip,
     });
     serve_mod.addImport("tls", tls_mod);
     serve_mod.addImport("supernote", supernote); // backend can use the .note library

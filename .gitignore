@@ -25,6 +25,11 @@ data/
 
 # --- local config (capture.zon is a committed template; config.zon/serve-run are yours) ---
 config.zon
+# ...except the container's, which is part of the IMAGE rather than somebody's
+# local server. `config.zon` above is deliberately unanchored (it matches at any
+# depth), so this one has to be excepted by name or it silently never ships and
+# the image fails to build.
+!docker/config.zon
 serve-run.zon
 
 # --- capture / reverse-engineering scratch (not source) ---
@@ -52,3 +57,8 @@ server/
 
 # --- editor / tooling local state ---
 .claude/
+
+# The multi-arch container build context: cross-compiled binaries and a copy of
+# the built SPA, all reproducible from `make docker-context`.
+docker/context/
+docker/build-*/

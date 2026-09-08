@@ -1,0 +1,135 @@
+name: Bug report
+description: Something is broken — a wrong-looking screen, or a sync that fails.
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. This beta has a handful of testers and one maintainer,
+        so a report that carries its own evidence is worth several that don't.
+
+        **Two sections below ask for a screenshot or a device log.** Fill in whichever
+        matches your problem — you do not need both. If you would rather not share
+        either, say so in the box and send what you can; a report with a workaround in
+        it is still worth filing.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of problem is it?
+      options:
+        - Something looks wrong in the browser (layout, thumbnails, a viewer)
+        - Sync between the device and the server fails
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect instead?
+      placeholder: |
+        The device showed "Private Cloud Sync Failed. This file has been moved or
+        deleted" and stopped. I expected the sync to finish.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered, from a state someone else could start from.
+      placeholder: |
+        1. Fresh install, empty database
+        2. Bind the device
+        3. Trigger a sync
+        4. Fails within a few seconds
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Device model matters most — only the **Nomad (A6 X2)** is verified so far, and
+        everything else is officially untested.
+      value: |
+        - **Device:** (Nomad / Manta / A5 X / A6 X / …)
+        - **Inkhold:** (docker image or built from source, and roughly which version)
+        - **Server:** (hardware, OS)
+        - **Network:** (direct on the LAN, or through a reverse proxy / tunnel)
+    validations:
+      required: true
+
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: "Screenshot — if something LOOKS wrong"
+      description: |
+        For anything visual, a screenshot is usually faster than any description, and
+        often shows the cause outright.
+
+        **Blur or crop whatever you like.** Your notebooks are yours: thumbnails,
+        page previews and file names can all be obscured without making the report
+        less useful. What has to survive is the broken element and enough of the
+        surrounding layout to place it on the screen.
+
+        Two things that often help more than the picture, and reveal nothing personal:
+
+        - the **URL** in the address bar
+        - the **browser console** (F12 → Console) — copy any red errors
+      placeholder: Drag an image in here, and paste any console errors below it.
+
+  - type: textarea
+    id: logcat
+    attributes:
+      label: "Device log — if SYNC fails"
+      description: |
+        A sync failure on the device is almost always explained by a device log, and
+        almost never by the server's. Capturing one takes about five minutes:
+
+        **1. Enable Side Loading on the device** — Settings → Security & Privacy →
+        Side Loading. (This is what turns on Android's developer mode, which is what
+        makes the log readable over USB.)
+
+        **2. Install `adb`** on a computer — the "platform-tools" package on Linux,
+        `brew install android-platform-tools` on macOS, or Google's platform-tools zip
+        on Windows.
+
+        **3. Plug the device in** and check it is seen:
+        ```
+        adb devices
+        ```
+
+        **4. Clear the log, then start capturing:**
+        ```
+        adb logcat -c
+        adb logcat > sync.log
+        ```
+
+        **5. Trigger the sync on the device**, wait for it to fail, then stop the
+        capture with `Ctrl-C` and attach `sync.log` here.
+
+        ---
+
+        **A warning worth reading before you upload it:** the log contains the names
+        of files it touches, so it will show some of your notebook and folder names.
+        You are welcome to open it in a text editor and replace anything you would
+        rather not share — the structure and the extensions are what matter, not the
+        words.
+
+        **If you cannot or would rather not do this, that is fine — say so.** Then the
+        most useful thing instead is the **exact file names in the folder that failed**,
+        including any with `CONFLICT` in the name, with their extensions kept. You can
+        replace the words with placeholders (`notes-A.pdf`, `notes-A.pdf.mark`) as long
+        as the shape is preserved.
+      placeholder: Attach sync.log, or paste the file names from the failing folder.
+
+  - type: textarea
+    id: anything_else
+    attributes:
+      label: Anything else you noticed
+      description: |
+        Workarounds, things that made it better or worse, whether it happens every
+        time — often the most valuable box on this form.

@@ -1,0 +1,34 @@
+// Inkhold's configuration INSIDE THE CONTAINER. Absolute paths throughout,
+// because the process runs with a volume as its working directory and the
+// relative defaults would put the database and the SPA in the wrong halves of
+// the image.
+//
+// To override any of this, mount your own file over `/etc/inkhold/config.zon`.
+.{
+    // The container's own interface. Publishing the port is the host's job
+    // (`-p 8089:8089`); binding to loopback in here would make that impossible.
+    .host = "0.0.0.0",
+    .port = 8089,
+
+    // STATE — all of it under the volume, so a `docker rm` loses nothing.
+    .db_path = "/var/lib/inkhold/inkhold.db",
+    .cred_key_path = "/var/lib/inkhold/cred.key",
+    .data_dir = "/var/lib/inkhold/data",
+
+    // The built SPA, which belongs to the IMAGE: it is versioned with the
+    // binary that serves it and must not drift across an upgrade.
+    .web_dir = "/srv/webapp/dist",
+
+    .admin_email = "admin@home.lan",
+    .max_connections = 96,
+
+    // TLS off by default: a container is usually behind something that already
+    // terminates it, and the in-process option stays available for the case
+    // where it is not. Mount the cert and key and flip `enabled`.
+    .tls = .{
+        .enabled = false,
+        .cert_path = "/var/lib/inkhold/certs/cert.pem",
+        .key_path = "/var/lib/inkhold/certs/key.pem",
+        .cipher_suites = .{},
+    },
+}

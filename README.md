@@ -84,7 +84,8 @@ whole point of the beta.
 
 ## Get Inkhold
 
-Two ways in. Both end at [First run](#first-run), which is the same either way.
+Three ways in. All of them end at [First run](#first-run), which is the same
+either way.
 
 ### Download a binary
 
@@ -113,6 +114,36 @@ To keep the config elsewhere, name it: `./inkhold --config=/etc/inkhold/config.z
 connections only from the machine itself: your tablet and your browser will both
 fail to reach it, and it looks exactly like a firewall problem. Use `0.0.0.0` to
 listen on every interface, or your server's LAN address to pin it to one.
+
+### Run the container
+
+```sh
+docker volume create inkhold
+docker run -d --name inkhold -p 8089:8089 \
+  -v inkhold:/var/lib/inkhold \
+  ghcr.io/m00qek/inkhold-beta:latest
+docker logs inkhold          # the first-run admin password is printed here
+```
+
+One tag covers **x86_64, aarch64, armv7 and 32-bit x86** — Docker pulls the one
+that matches your machine. The image is built `FROM scratch`: the server is
+statically linked, so there is no base distribution in there at all, which is
+why it is ~25 MB and has nothing to patch. It also means there is no shell, so
+`docker exec` will not give you one.
+
+Everything that must survive an upgrade — the database, `cred.key`, your notes
+and the search index — lives in the `/var/lib/inkhold` volume. The image's
+config is at `/etc/inkhold/config.zon`; mount your own over it to change the
+port, turn on TLS, or set a different admin email:
+
+```sh
+docker run -d --name inkhold -p 8089:8089 \
+  -v inkhold:/var/lib/inkhold \
+  -v ./my-config.zon:/etc/inkhold/config.zon:ro \
+  ghcr.io/m00qek/inkhold-beta:latest
+```
+
+`:latest` follows `main`. To pin a build, use the commit SHA as the tag.
 
 ### Build from source
 

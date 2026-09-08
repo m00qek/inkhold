@@ -14,7 +14,7 @@ SERVE_PORT := $(PORT)
 
 TARGET ?= native-linux-musl
 
-.PHONY: help build release-artifact run serve test parser-test test-all web-test web-test-unit web-test-e2e web-test-setup fmt fmt-fix lan-ip clean docs docs-build docs-deps
+.PHONY: help build release-artifact docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-test-e2e web-test-setup fmt fmt-fix lan-ip clean docs docs-build docs-deps
 
 help:
 	@echo "Inkhold"
@@ -105,6 +105,63 @@ $(WEB)/node_modules/.package-lock.json:
 
 build:
 	zig build -Doptimize=$(OPTIMIZE)
+
+# ---- Container images -------------------------------------------------------
+#
+# One `platform=zig-target` pair per architecture, kept in step with the release
+# matrix in `.github/workflows/ci.yaml`: these are the same four binaries the
+# tarballs ship, cross-compiled the same way. Adding an architecture is one line
+# here and one entry there.
+DOCKER_ARCHES = \
+	linux/amd64=x86_64-linux-musl \
+	linux/386=x86-linux-musl \
+	linux/arm64=aarch64-linux-musl \
+	linux/arm/v7=arm-linux-musleabihf
+
+COMMA := ,
+EMPTY :=
+SPACE := $(EMPTY) $(EMPTY)
+
+# The `--platform` argument buildx wants: the left-hand sides, comma-joined.
+DOCKER_PLATFORMS = $(subst $(SPACE),$(COMMA),$(foreach a,$(DOCKER_ARCHES),$(firstword $(subst =, ,$(a)))))
+
+IMAGE ?= inkhold
+TAG   ?= dev
+
+# Lay out what the Dockerfile copies: one binary per platform, under the exact
+# `TARGETPLATFORM` path buildx asks for, plus the SPA once (it is
+# architecture-independent, so it is built and copied a single time).
+#
+# STRIPPED, unlike the tarballs. An image is pulled repeatedly over a home
+# connection and debug info is 48 MB of the 58 MB it would otherwise cost; a
+# tarball is fetched once by someone who may have to file a bug report from it,
+# so that one keeps its symbols.
+docker-context: $(WEB)/node_modules/.package-lock.json
+	rm -rf docker/context
+	npm --prefix $(WEB) run build
+	mkdir -p docker/context/webapp
+	cp -r $(WEB)/dist docker/context/webapp/
+	@set -e; for a in $(DOCKER_ARCHES); do \
+		p=$${a%%=*}; t=$${a##*=}; \
+		echo ">>> $$p  ($$t)"; \
+		zig build -Doptimize=ReleaseSafe -Dstrip=true -Dtarget=$$t --prefix docker/build-$$t; \
+		mkdir -p "docker/context/$$p"; \
+		cp "docker/build-$$t/bin/inkhold" "docker/context/$$p/inkhold"; \
+		rm -rf "docker/build-$$t"; \
+	done
+	@echo ">>> docker/context ready"
+
+# A local multi-arch build. `--load` cannot take a manifest LIST, so this builds
+# and caches without loading; use `docker-image-host` for something runnable here.
+docker-image: docker-context
+	docker buildx build --file docker/Dockerfile \
+		--platform "$(DOCKER_PLATFORMS)" \
+		--build-arg VERSION=$(TAG) --tag $(IMAGE):$(TAG) docker
+
+# The one for THIS machine, loaded into the local daemon so `docker run` works.
+docker-image-host: docker-context
+	docker buildx build --file docker/Dockerfile --load \
+		--build-arg VERSION=$(TAG) --tag $(IMAGE):$(TAG) docker
 
 release-artifact: $(WEB)/node_modules/.package-lock.json
 	zig build -Doptimize=ReleaseSafe -Dtarget=$(TARGET)
