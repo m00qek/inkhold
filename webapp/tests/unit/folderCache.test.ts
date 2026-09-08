@@ -117,6 +117,41 @@ describe("folder cache: the walk", () => {
     expect(api.calls).toEqual([null, "a"]); // each folder asked about ONCE
   });
 
+  it("joins a concurrent listing of the same folder into ONE request", async () => {
+    // THE COLD-BOOT RACE, staged. `library.ts` starts the walk while `main.ts`
+    // dispatches the route, and at `#/` the route's folder is the walk's first
+    // hop — so the root was listed twice, 1 ms apart, on every boot (MEASURED
+    // 2026-09-08). Both callers still get the answer; only the request merges.
+    const { cache, api } = make({ root: [folder("a", "A")], a: [] });
+
+    const walk = cache.prefetch();
+    const route = cache.listFolder(null);
+
+    await api.release("root");
+    const listed = await route;
+    expect(listed.folderId).toBe(null);
+
+    for (const k of ["a"]) await api.release(k);
+    await walk;
+
+    expect(api.calls).toEqual([null, "a"]); // the root asked about ONCE
+  });
+
+  it("does not hand a FAILED listing to the next caller", async () => {
+    // The join lives only as long as the request. A folder that failed must be
+    // askable again immediately, or one outage becomes a permanent one.
+    const { cache, api } = make({ root: [] });
+
+    const first = cache.listFolder(null);
+    await api.fail("root");
+    await expect(first).rejects.toThrow("boom root");
+
+    const second = cache.listFolder(null);
+    expect(api.calls).toEqual([null, null]); // a real second request
+    await api.release("root");
+    expect((await second).folderId).toBe(null);
+  });
+
   it("coalesces a burst of forced walks into exactly one follow-up", async () => {
     const { cache, api } = make({ root: [], a: [] });
 

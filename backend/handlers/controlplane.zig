@@ -2232,7 +2232,7 @@ pub fn controlplaneSearchIndexManifest(ctx: *Context, req: *Request, params: Par
     defer arena.deinit();
     const a = arena.allocator();
 
-    const m = index_export.manifest(a, files.db, caller.user_id) catch return serverError(ctx, req);
+    const m = index_export.manifest(a, files.db, caller.user_id, files.terms) catch return serverError(ctx, req);
     var body: std.ArrayList(u8) = .empty;
     index_export.writeManifest(a, &body, m) catch return serverError(ctx, req);
 
@@ -2286,8 +2286,11 @@ fn manifestGate(
     gpa: std.mem.Allocator,
     db: sqlite.Db,
     user_id: u64,
+    terms: ?derived.DerivedStore,
 ) !ManifestGate {
-    const m = try index_export.manifest(arena, db, user_id);
+    // THE SAME STORE THE MANIFEST ROUTE PASSES, or the two build different
+    // bodies and this gate rejects the very ETag that route just minted.
+    const m = try index_export.manifest(arena, db, user_id, terms);
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(gpa);
     try index_export.writeManifest(gpa, &body, m);
@@ -2399,12 +2402,12 @@ pub fn controlplaneSearchIndexStream(ctx: *Context, req: *Request, params: Param
     const gate = blk: {
         if (ctx.borrowReader()) |lease| {
             defer ctx.returnReader(lease);
-            break :blk manifestGate(a, ctx.gpa, lease.db, caller.user_id) catch
+            break :blk manifestGate(a, ctx.gpa, lease.db, caller.user_id, files.terms) catch
                 return serverError(ctx, req);
         }
         ctx.lockDb();
         defer ctx.unlockDb();
-        break :blk manifestGate(a, ctx.gpa, files.db, caller.user_id) catch
+        break :blk manifestGate(a, ctx.gpa, files.db, caller.user_id, files.terms) catch
             return serverError(ctx, req);
     };
 

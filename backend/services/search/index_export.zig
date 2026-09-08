@@ -100,6 +100,7 @@ fn nibble(c: u8) EncodeError!u8 {
 const sqlite = @import("../../db/sqlite.zig");
 const filesvc = @import("../files.zig");
 const pending = @import("../pending.zig");
+const derivedstore = @import("../../store/derived.zig");
 
 /// Which pass of the fill this document belongs to — `client-side-search.md` §3,
 /// in its order, so `ORDER BY tier` IS the fill order and no second table maps
@@ -385,13 +386,18 @@ const col_derivation = 6;
 /// caller's library twice. `Manifest` is the collecting convenience on top.
 pub const Cursor = struct {
     stmt: sqlite.Stmt,
+    /// The terms store, consulted per row — see `next`. Optional because a
+    /// caller that only wants tiers and coverage has no use for it; passing
+    /// null makes this cursor report the DATABASE's opinion, which is the one
+    /// `next` exists to correct, so production must pass the store.
+    terms: ?derivedstore.DerivedStore = null,
     tally: Coverage = .{},
     drained: bool = false,
 
-    pub fn open(db: sqlite.Db, user_id: u64) !Cursor {
+    pub fn open(db: sqlite.Db, user_id: u64, terms: ?derivedstore.DerivedStore) !Cursor {
         const stmt = try db.prepare(manifest_sql);
         stmt.bindInt(1, @intCast(user_id));
-        return .{ .stmt = stmt };
+        return .{ .stmt = stmt, .terms = terms };
     }
 
     /// The next document, or null once the manifest is complete.
@@ -430,11 +436,12 @@ pub const Cursor = struct {
             self.tally.notes += 1;
             if (self.stmt.columnInt(col_has_text) == 0) self.tally.unsearchable += 1;
         }
+        const md5 = self.stmt.columnText(col_md5);
         return .{
             .file_id = self.stmt.columnInt(col_id),
-            .md5 = self.stmt.columnText(col_md5),
+            .md5 = md5,
             .updated_at = self.stmt.columnInt(col_updated_at),
-            .index_version = self.stmt.columnIntOpt(col_index_version),
+            .index_version = self.derivedVersion(md5),
             .tier = tier,
             // `owes_derive_expr` is an `EXISTS`, so it answers 0 or 1 and never
             // NULL — the `unknown` arm is unreachable by construction and is
@@ -447,6 +454,32 @@ pub const Cursor = struct {
                 .unknown
             else if (self.stmt.columnInt(col_derivation) != 0) .pending else .derived,
         };
+    }
+
+    /// The version the client may ASK FOR, which is not the version the database
+    /// records.
+    ///
+    /// `note_index.index_version` marks every blob the note indexer has
+    /// processed — a sketch, a photo, an `.epub`, anything it opened and found
+    /// no text in. A terms file is written only for the documents that had
+    /// some. Reporting the column raw therefore advertises documents that will
+    /// never have anything to fetch, and the client cannot discover its mistake:
+    /// `diffManifest` puts every non-null version in `want`, `index_stream.zig`
+    /// skips what it cannot open, and the answer is an empty body that leaves
+    /// the want set exactly as it was. MEASURED on a live library 2026-09-08:
+    /// 18 of 41 rows, re-requested on every event tick, for ever.
+    ///
+    /// So the store is asked instead, because `derived.zig` is emphatic that the
+    /// FILE is the derivation state and a second record of it is the divergence
+    /// `ensureIndexed` was deleted for (§0.1). One `access` per row on a route
+    /// that already sorts the caller's whole library.
+    ///
+    /// A null here is not "unknown": it is "nothing to fetch", which is what
+    /// `derivation` already distinguishes from "not yet" for the client.
+    fn derivedVersion(self: Cursor, md5: []const u8) ?i64 {
+        const recorded = self.stmt.columnIntOpt(col_index_version) orelse return null;
+        const store = self.terms orelse return recorded;
+        return if (store.has(md5, recorded)) recorded else null;
     }
 
     /// The coverage counts. **Only meaningful once the cursor has been drained**
@@ -464,8 +497,13 @@ pub const Cursor = struct {
 };
 
 /// The whole manifest in `arena`. Rows own their md5s.
-pub fn manifest(arena: std.mem.Allocator, db: sqlite.Db, user_id: u64) !Manifest {
-    var c = try Cursor.open(db, user_id);
+pub fn manifest(
+    arena: std.mem.Allocator,
+    db: sqlite.Db,
+    user_id: u64,
+    terms: ?derivedstore.DerivedStore,
+) !Manifest {
+    var c = try Cursor.open(db, user_id, terms);
     defer c.finalize();
     var rows: std.ArrayList(Row) = .empty;
     while (try c.next()) |row| {
@@ -681,9 +719,18 @@ const Fixture = struct {
         const store = try blobstore.BlobStore.init(testing.io, tmp.dir);
         const thumbs_dir = try tmp.dir.createDirPathOpen(testing.io, "thumbs", .{});
         const thumbs = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
+        var files = filesvc.Files.init(testing.allocator, testing.io, db, store, thumbs);
+        // THE DERIVED STORES ARE PART OF THE SUBJECT. Without them the manifest
+        // cursor has nothing to ask and falls back to the DATABASE's opinion of
+        // what is derived — which is the very thing `derivedVersion` exists to
+        // correct, so a fixture lacking them would assert the defect.
+        const terms_dir = try tmp.dir.createDirPathOpen(testing.io, "terms", .{});
+        files.terms = try derivedstore.DerivedStore.init(testing.io, terms_dir);
+        const text_dir = try tmp.dir.createDirPathOpen(testing.io, "text", .{});
+        files.text = try derivedstore.DerivedStore.init(testing.io, text_dir);
         return .{
             .db = db,
-            .files = filesvc.Files.init(testing.allocator, testing.io, db, store, thumbs),
+            .files = files,
             .tmp = tmp,
             .arena = std.heap.ArenaAllocator.init(testing.allocator),
         };
@@ -741,7 +788,7 @@ const Fixture = struct {
     }
 
     fn manifest(f: *Fixture, user_id: u64) !Manifest {
-        return index_export.manifest(f.a(), f.db, user_id);
+        return index_export.manifest(f.a(), f.db, user_id, f.files.terms);
     }
 
     /// The manifest's row for `file_id`, or null when it is absent. "Absent" is
@@ -961,6 +1008,64 @@ test "the manifest is COMPLETE: a document with nothing to say is still a row" {
     for (m.rows, 0..) |r, i| for (m.rows[i + 1 ..]) |other| try testing.expect(r.file_id != other.file_id);
 }
 
+test "the version a row reports is the STORE's, so the client never asks for a file that will never exist" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // `note_index.index_version` marks every blob the indexer OPENED, which
+    // includes everything it opened and found no text in. The terms file is
+    // written only where there was some. Reporting the column raw put 18 of a
+    // real library's 41 rows into the client's `want` set permanently: the
+    // stream skips what it cannot open, the empty answer changes nothing, and
+    // the next tick asks again (`backlog.md`, 2026-09-08).
+    const png = try f.putBytes(1, "scan.png", "\x89PNG not text at any point");
+    const blank = try f.putNote(1, "blank.note", &.{});
+    const written = try f.putNote(1, "handwriting.note", &.{"caligrafia"});
+    f.drain();
+
+    // The database has a version for all three — that is the state being
+    // corrected, and asserting it is what makes the rest of this test mean
+    // something rather than pass vacuously.
+    for ([_]u64{ png, blank, written }) |id| {
+        var st = try f.db.prepare(
+            "SELECT ni.index_version FROM files d JOIN note_index ni ON ni.blob_md5 = d.md5 WHERE d.id = ?1;",
+        );
+        defer st.finalize();
+        st.bindInt(1, @intCast(id));
+        try testing.expect(try st.step());
+        try testing.expect(!st.columnIsNull(0));
+    }
+
+    // The manifest reports what can actually be FETCHED. The image cannot: no
+    // tenant claims it, so nothing was ever written for it and nothing ever
+    // will be.
+    try testing.expect((try f.rowFor(1, png)).?.index_version == null);
+
+    // THE EMPTY NOTE IS NOT THE SAME CASE, and the difference is the whole
+    // distinction. A `.note` gets its terms file at ingest whatever is on it, so
+    // the blank one HAS a record — a header line and no pages. That is a version
+    // worth advertising: the client fetches it once, learns the document has
+    // nothing to say, and stops asking. Emptiness that ARRIVED converges;
+    // emptiness that is merely implied by a missing file does not.
+    const blank_row = (try f.rowFor(1, blank)).?;
+    try testing.expect(blank_row.index_version != null);
+    try testing.expect(f.files.terms.?.has(blank_row.md5, blank_row.index_version.?));
+
+    const row = (try f.rowFor(1, written)).?;
+    try testing.expect(row.index_version != null);
+    try testing.expect(f.files.terms.?.has(row.md5, row.index_version.?));
+
+    // AND ALL THREE ARE STILL ROWS. The fix is a narrower `index_version`, never
+    // a filter: the test above this one records why a dropped row reads to the
+    // client as a deletion of a document that is still there.
+    try testing.expectEqual(@as(usize, 3), (try f.manifest(1)).rows.len);
+
+    // Deleting the file behind a good row takes its version with it, because the
+    // file IS the state — nothing else has to be told.
+    f.files.terms.?.removeAll(row.md5);
+    try testing.expect((try f.rowFor(1, written)).?.index_version == null);
+}
+
 test "a trashed file is absent from the manifest, which is the only way removal ever reaches the client" {
     var f = try Fixture.init();
     defer f.deinit();
@@ -1115,9 +1220,15 @@ test "CAVEAT: a stale note_index row reports DERIVED though nothing has derived 
     try f.db.exec("UPDATE note_index SET index_version = index_version - 1;");
     const stale = (try f.rowFor(1, txt)).?;
     try testing.expectEqual(Derivation.derived, stale.derivation);
-    // …and the row says so, which is the escape hatch: the version the client
-    // would key its cache on is not the current one.
-    try testing.expect(stale.index_version.? != noteindex.index_version);
+    // …and the row NO LONGER OFFERS A VERSION AT ALL, which is a stronger
+    // escape hatch than the one this test was written with. It used to check
+    // only that the advertised version was not the current one — true, but it
+    // still named a `(md5, version)` the client would put in `want` and the
+    // stream could never answer, because the file for the decremented version
+    // does not exist. `derivedVersion` asks the store, finds nothing, and says
+    // nothing. The caveat that remains is the `derivation` column's alone.
+    try testing.expect(stale.index_version == null);
+    try testing.expect(!f.files.terms.?.has(stale.md5, noteindex.index_version - 1));
 }
 
 // ---------------------------------------------------------------------------
@@ -1435,7 +1546,7 @@ test "PLAN PIN: the manifest seeks every table it touches and sorts the caller's
 /// The VM steps ONE manifest costs, drained — every row, both pairing probes,
 /// the sort, and the coverage tally that rides along.
 fn manifestSteps(f: *Fixture, user_id: u64) !i64 {
-    var c = try Cursor.open(f.db, user_id);
+    var c = try Cursor.open(f.db, user_id, f.files.terms);
     defer c.finalize();
     while (try c.next()) |_| {}
     return c.stmt.vmSteps();

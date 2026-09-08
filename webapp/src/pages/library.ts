@@ -2506,7 +2506,9 @@ root,
   async function refetch(id: Id | null, prev: Listing | undefined): Promise<void> {
     let fresh: Listing;
     try {
-      fresh = await api.listFolder(id);
+      // Through the cache, so a boot that lists the root here and walks it in
+      // `prefetch` at the same instant sends one request (`FolderCache.listFolder`).
+      fresh = await folderCache.listFolder(id);
     } catch (e) {
       // A dead session isn't a "couldn't load this folder" — don't paint the
       // retry empty-state over a shell that's about to be torn down.

@@ -37,6 +37,21 @@ export interface FolderCache {
    */
   put(id: Id | null, listing: Listing): void;
   /**
+   * List one folder, JOINING a request for the same folder already in flight.
+   *
+   * The walk and the route fire together on every cold boot — `library.ts`
+   * starts `prefetch()` while `main.ts` dispatches the route, and at `#/` the
+   * route's folder IS the walk's first hop, so the root was fetched twice, 1 ms
+   * apart (MEASURED 2026-09-08). Joining is not a cache: the promise is dropped
+   * the moment it settles, so this only ever merges genuinely CONCURRENT asks,
+   * and two asks that overlap by a millisecond cannot want different answers.
+   *
+   * Both callers still do their own thing with the result — the walk `put`s it,
+   * the refetch reconciles it against what it held — and a rejection reaches
+   * both, exactly as two separate failures would have.
+   */
+  listFolder(id: Id | null): Promise<Listing>;
+  /**
    * Populate the cache for the whole (small, household-sized) tree. BFS,
    * sequential; `force` re-lists already-cached folders (used when a sync bump
    * lands).
@@ -148,6 +163,32 @@ export function createFolderCache({ api, handled, onWalked }: FolderCacheDeps): 
     if (id === null) rootFolders = listing.entries.filter((e): e is Folder => e.kind === "folder");
   }
 
+  /** Folder key -> the request in flight for it. Empty whenever nothing is. */
+  const inFlight = new Map<string, Promise<Listing>>();
+
+  function listFolder(id: Id | null): Promise<Listing> {
+    const k = key(id);
+    const running = inFlight.get(k);
+    if (running) return running;
+    // CALLERS GET THE API'S OWN PROMISE, and the bookkeeping rides a side
+    // branch. Chaining the cleanup onto what is returned instead (`.finally`,
+    // or a `.then` that forwards) would put an extra microtask between the
+    // response and every awaiting caller — invisible in a browser, and enough
+    // to desynchronise the walk from anything sequencing it a tick at a time.
+    //
+    // Both arms delete: a failed request must not be handed to the next caller,
+    // which would turn one folder's outage into a permanent one. The rejection
+    // is consumed on this branch only, so it does not surface as unhandled
+    // while still reaching everyone who asked.
+    const started = api.listFolder(id);
+    inFlight.set(k, started);
+    void started.then(
+      () => inFlight.delete(k),
+      () => inFlight.delete(k),
+    );
+    return started;
+  }
+
   async function run(force: boolean): Promise<void> {
     const mine = ++generation;
     const queue: (Id | null)[] = [null];
@@ -159,7 +200,7 @@ export function createFolderCache({ api, handled, onWalked }: FolderCacheDeps): 
       let l = listings.get(key(id));
       if (!l || force) {
         try {
-          l = await api.listFolder(id);
+          l = await listFolder(id);
         } catch (e) {
           // An expired session fails every remaining hop identically — stop the
           // walk and let the shell re-authenticate instead of grinding through
@@ -210,6 +251,7 @@ export function createFolderCache({ api, handled, onWalked }: FolderCacheDeps): 
       walked: (id) => listings.has(key(id)),
     },
     put,
+    listFolder,
     prefetch,
   };
 }
