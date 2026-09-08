@@ -76,6 +76,8 @@ const config = @import("../config.zig");
 const sqlite = @import("../db/sqlite.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
+const derivedstore = @import("../store/derived.zig");
+const derivesearch = @import("derive_search.zig");
 const authsvc = @import("auth/service.zig");
 const noteindex = @import("note_index.zig");
 const notesearch = @import("search/maintain.zig");
@@ -85,6 +87,7 @@ const txtindex = @import("txt_index.zig");
 const deferredmod = @import("deferred.zig");
 
 const md5_len = blobstore.md5_hex_len;
+const log = std.log.scoped(.files);
 
 pub const Entry = struct {
     id: u64,
@@ -193,6 +196,13 @@ pub const Files = struct {
     /// root). Written at ingest and by the on-demand repair; cleaned up by
     /// `removeBlobFiles` whenever a blob leaves disk.
     thumbs: thumbstore.ThumbStore,
+    /// The two per-document derived stores, `terms/<md5>.<v>` and
+    /// `text/<md5>.<v>` (`golden-search.md` §2.1). Optional because most tests
+    /// and the CLI never derive: a null store is "this deployment does not keep
+    /// them", which the derive paths treat as nothing to write, not as an error.
+    /// Cleanup rides `removeBlobFiles` exactly as the thumbnail's does.
+    terms: ?derivedstore.DerivedStore = null,
+    text: ?derivedstore.DerivedStore = null,
     /// Single-flight gate for `repairDerivedThumb`. A gallery load after a
     /// restore fires N missing-thumbnail GETs at once; N concurrent derives
     /// (up to a 16 MiB `.spd` buffer, or a full `.note` index parse) would
@@ -1067,6 +1077,27 @@ pub const Files = struct {
             if (d.thumb) |t| self.thumbs.put(md5, t.bytes) catch {};
         }
 
+        // ---- `terms/<md5>.<v>` + `text/<md5>.<v>` for a `.note`, HERE and not
+        // inside the transaction ---- `golden-search.md` §2.5: "a file write is
+        // not in a transaction at all". The thumbnail above is the precedent and
+        // the argument is the same one — a crash between the write and the
+        // commit can only orphan a content-keyed, regenerable file, which
+        // `removeBlobFiles` sweeps with the blob (§2.7).
+        //
+        // EAGER rather than deferred, which is the one format where that is the
+        // right call (§2.4): a `.note`'s text is already inside the container
+        // (`RECOGNTEXT` — there is no OCR to run) and the parse above had to
+        // happen anyway for rendering, so all this adds to the upload is the
+        // fold. A dedup'd re-link takes no fresh parse and so writes nothing;
+        // the file it would have written is already there.
+        //
+        // Best-effort, like the `.spd` row below: nothing reads these yet, they
+        // are regenerable from the blob, and a failed upload is a far worse
+        // outcome than a missing terms file.
+        if (parsed) |p| self.writeNoteDerived(md5, p) catch |e| {
+            log.warn("terms/text write failed for {s}: {t}", .{ md5, e });
+        };
+
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
 
@@ -1248,6 +1279,35 @@ pub const Files = struct {
             .size = size,
             .updated_at = ts,
         };
+    }
+
+    /// `terms/<md5>.<v>` and `text/<md5>.<v>` for one `.note`. All of the work
+    /// is in `derive_search.writeDerived` and `note_index.Pages`; what is left
+    /// here is the decision that this ingest writes them at all.
+    ///
+    /// **Gated on `indexable`, and that gate is load-bearing.** The parse above
+    /// runs on every blob, and a `.txt` or a `.pdf` comes back as a `Parsed`
+    /// with `indexable = false` and zero pages — not as null. Writing for one of
+    /// those would publish an empty terms file for a document the deferred
+    /// worker still owes real work, and under §2.4 the file's EXISTENCE is what
+    /// says "derived": the blob would report done, for ever, with nothing in it.
+    fn writeNoteDerived(self: Files, md5: []const u8, p: *const noteindex.Parsed) !void {
+        if (!p.indexable) return;
+        // Null store = "this deployment does not keep them" (see the fields), so
+        // there is nothing to write and nothing has gone wrong.
+        const terms_store = self.terms orelse return;
+        const text_store = self.text orelse return;
+        var src = noteindex.Pages.init(p);
+        try derivesearch.writeDerived(
+            self.gpa,
+            terms_store,
+            text_store,
+            md5,
+            // The ADDRESS SPACE — every page — not the recognised ones the
+            // source will actually yield. See `derive_search.writeHeader`.
+            p.note.page_count,
+            &src,
+        );
     }
 
     /// Links an ALREADY-STORED blob into `parent_id` as a NEW file, never over an
@@ -3178,6 +3238,10 @@ pub const Files = struct {
     fn removeBlobFiles(self: Files, md5: []const u8) void {
         self.blobs.remove(md5);
         self.thumbs.remove(md5);
+        // Every version, because this side does not know which ones exist
+        // (`golden-search.md` §2.7 — purge rides the blob GC).
+        if (self.terms) |t| t.removeAll(md5);
+        if (self.text) |t| t.removeAll(md5);
     }
 
     /// Decrements a blob's LIVE reference (`blobs.refcount`, the count of `files`
@@ -6329,6 +6393,102 @@ test "purging the last reference removes the .note cover file along with the blo
     try testing.expect(!try noteindex.isCurrent(f.db, &md5)); // row released in the txn
     try testing.expect(!f.files.blobs.has(&md5)); // blob GC'd post-commit
     try testing.expect(!f.files.thumbs.has(&md5)); // and its derived cover with it
+}
+
+// ---- `.note` search derivation: both files, written at ingest ----
+
+/// A real device capture, and the reason it is this one: two pages, page 0
+/// finished (`"Test\nMiddle\nTest"`) and page 1 still recognising. Both halves
+/// of `golden-search.md` §2.2 — a row, and a page that must not produce one —
+/// in one blob, from a device rather than from the synthetic builder.
+const sample2_note = @embedFile("sample-2.note");
+
+/// Read a stored fragment back to its plaintext, the way the stream route will:
+/// past the header, plus the final block the serve path appends.
+fn inflateStored(store: derivedstore.DerivedStore, md5: []const u8) ![]u8 {
+    var file = try store.open(md5, derivesearch.index_version);
+    defer file.close(store.io);
+    var raw: [1 << 16]u8 = undefined;
+    const n = try file.readPositionalAll(store.io, &raw, 0);
+
+    var body: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer body.deinit();
+    try body.writer.writeAll(raw[derivedstore.header_len..n]);
+    try body.writer.writeAll(&[_]u8{ 0x03, 0x00 });
+
+    var input: std.Io.Reader = .fixed(body.written());
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var d = std.compress.flate.Decompress.init(&input, .raw, &window);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer out.deinit();
+    _ = try d.reader.streamRemaining(&out.writer);
+    return out.toOwnedSlice();
+}
+
+fn wireDerivedStores(f: *Fixture) !void {
+    const terms_dir = try f.tmp.dir.createDirPathOpen(testing.io, "terms", .{});
+    const text_dir = try f.tmp.dir.createDirPathOpen(testing.io, "text", .{});
+    f.files.terms = try derivedstore.DerivedStore.init(testing.io, terms_dir);
+    f.files.text = try derivedstore.DerivedStore.init(testing.io, text_dir);
+}
+
+test "linking a .note writes BOTH derived files AT INGEST, skipping the page with no transcript" {
+    // The wiring test for `writeNoteDerived`: everything upstream is unit-tested
+    // in `store/derived.zig` and `services/derive_search.zig`; what is only
+    // testable here is that the ingest path actually calls them, and does it
+    // without a worker — §2.4's "so `.note` writes its terms file at ingest".
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.db.exec("UPDATE capacity SET total_bytes = 100000000 WHERE user_id = 1;");
+    try wireDerivedStores(&f);
+
+    const e = try putBytes(&f, 1, null, "notes.note", sample2_note);
+    defer freeEntry(e);
+    const md5 = e.md5.?;
+
+    // Derived IS the existence of the file, and for a `.note` it exists by the
+    // time the upload returns.
+    try testing.expect(f.files.terms.?.has(md5, derivesearch.index_version));
+    try testing.expect(f.files.text.?.has(md5, derivesearch.index_version));
+
+    const t = try inflateStored(f.files.terms.?, md5);
+    defer testing.allocator.free(t);
+    var lines = std.mem.tokenizeScalar(u8, t, '\n');
+    // `n` is the ADDRESS SPACE — both pages — not the one row that follows.
+    try testing.expect(std.mem.indexOf(u8, lines.next().?, "\"n\":2") != null);
+    // Folded, case-collapsed, "Test" twice deduplicated, vocabulary order.
+    try testing.expectEqualStrings("{\"p\":0,\"t\":\"middle test\"}", lines.next().?);
+    try testing.expect(lines.next() == null); // page 1 is still recognising
+
+    // The text file carries the transcript verbatim, addressed by ORDINAL
+    // alone: no `o`/`l` byte range, which only `.txt` has.
+    const x = try inflateStored(f.files.text.?, md5);
+    defer testing.allocator.free(x);
+    var xlines = std.mem.tokenizeScalar(u8, x, '\n');
+    _ = xlines.next();
+    const p0 = try std.json.parseFromSlice(std.json.Value, testing.allocator, xlines.next().?, .{});
+    defer p0.deinit();
+    try testing.expectEqual(@as(i64, 0), p0.value.object.get("p").?.integer);
+    try testing.expect(p0.value.object.get("o") == null);
+    try testing.expect(p0.value.object.get("l") == null);
+    try testing.expectEqualStrings("Test\nMiddle\nTest", p0.value.object.get("t").?.string);
+    try testing.expect(xlines.next() == null);
+}
+
+test "a .txt through the same path derives NOTHING — `indexable` is the gate" {
+    // The note parse runs on EVERY blob and answers `indexable = false` for a
+    // non-note rather than null, so without the gate this path would publish an
+    // empty terms file for a `.txt`. Under §2.4 that file IS the claim that the
+    // blob is derived — while `deferred.txt_tenant` still owes it every
+    // paragraph, and nothing would ever revisit it.
+    var f = try Fixture.init();
+    defer f.deinit();
+    try wireDerivedStores(&f);
+
+    const e = try putBytes(&f, 1, null, "readme.txt", "plain text, no magic");
+    defer freeEntry(e);
+    try testing.expect(!f.files.terms.?.has(e.md5.?, derivesearch.index_version));
+    try testing.expect(!f.files.text.?.has(e.md5.?, derivesearch.index_version));
 }
 
 // ---- move / rename (the device's move_v3 primitive) ----

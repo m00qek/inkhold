@@ -33,6 +33,7 @@ const thumbstore = @import("../store/thumbs.zig");
 const blob_source = @import("../store/blob_source.zig");
 const search = @import("search/maintain.zig");
 const thumbnail = @import("thumbnail.zig");
+const derivesearch = @import("derive_search.zig");
 const sn = @import("supernote");
 
 const Md5 = std.crypto.hash.Md5;
@@ -282,6 +283,40 @@ pub const Parsed = struct {
 
     pub fn deinit(self: *Parsed) void {
         self.arena.deinit();
+    }
+};
+
+/// The `.note` half of `derive_search`'s page source — the whole of this
+/// format's contribution to `golden-search.md` §2.2.
+///
+/// **A page with no text is skipped, not yielded empty.** `PageRow.text` is
+/// null whenever the page has no FINISHED transcript, which on this format is
+/// ordinary rather than exceptional: a device syncs pages long before the
+/// recogniser reaches them, and `sample-2.note` is one finished page and one
+/// still recognising. Both writers would drop an empty row anyway (`TermsWriter`
+/// because a termless FTS5 row can never match), so yielding one would only buy
+/// a fold per blank page.
+///
+/// The ordinal is the row's own `page_index`. That is the addressing key
+/// `note_page_index`, `pagePlan` and the viewer's deep link all use, so taking
+/// it from the row rather than re-deriving it from the loop is one fewer place
+/// where the derived address could drift from the stored one.
+pub const Pages = struct {
+    p: *const Parsed,
+    i: usize = 0,
+
+    pub fn init(p: *const Parsed) Pages {
+        return .{ .p = p };
+    }
+
+    pub fn next(self: *Pages) !?derivesearch.Page {
+        while (self.i < self.p.pages.len) {
+            const page = self.p.pages[self.i];
+            self.i += 1;
+            // `offset`/`len` stay null: a note page's address IS its ordinal.
+            if (page.text) |t| return .{ .ordinal = page.page_index, .text = t };
+        }
+        return null;
     }
 };
 

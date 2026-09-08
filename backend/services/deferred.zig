@@ -52,6 +52,8 @@
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const blobstore = @import("../store/blobs.zig");
+const derivedstore = @import("../store/derived.zig");
+const derivesearch = @import("derive_search.zig");
 const txtindex = @import("txt_index.zig");
 const noteindex = @import("note_index.zig");
 const pdfindex = @import("pdf_index.zig");
@@ -135,6 +137,11 @@ pub const Job = struct {
     /// is the whole gate, and a blob's holders cannot disagree about it.
     name: []const u8,
     now: i64,
+    /// The two derived stores (`golden-search.md` §2.1), or null where this
+    /// deployment keeps none — every test that does not wire them, and
+    /// `drainNow`. Null means "do not write them", never an error.
+    terms: ?derivedstore.DerivedStore = null,
+    text: ?derivedstore.DerivedStore = null,
 
     /// Is this blob's `.txt` work still outstanding, asked under the lock?
     ///
@@ -219,6 +226,22 @@ fn runTxt(job: Job) anyerror!void {
     defer d.deinit();
     const rows = txtindex.rowCount(d);
 
+    // 2b. The two derived FILES, still off the lock — §2.5's *"a file write is
+    //     not in a transaction at all"*. Nothing below needs them and nothing
+    //     reads them yet, so a failure here is logged and the indexing job
+    //     carries on: they are regenerable, and a document that is searchable
+    //     server-side but has no derived files is the state the whole library
+    //     is in today.
+    //
+    //     It can be off the lock BECAUSE THE FOLD DOES NOT TOUCH THIS DATABASE.
+    //     `temp.token_fold` is a contentless scratch FTS5 table, so folding runs
+    //     on a private in-memory connection and the shared one is not involved.
+    //     Doing it on `job.db` would have meant holding the global write lock
+    //     for the whole compression pass.
+    writeTxtFiles(job, d) catch |e| {
+        log.warn("derived files failed for {s}: {t}", .{ job.md5, e });
+    };
+
     // 3. RESERVE, under the lock and in its own transaction: one contiguous run
     //    of masked rowids per holder, so every chunk below lands at
     //    `first_rowid + ordinal` however many transactions it takes. Minting per
@@ -277,6 +300,23 @@ fn runTxt(job: Job) anyerror!void {
     errdefer job.db.exec("ROLLBACK;") catch {};
     try txtindex.finish(job.db, job.md5, bands, d, job.now);
     try job.db.exec("COMMIT;");
+}
+
+/// `terms/<md5>.<v>` and `text/<md5>.<v>` for one `.txt`. All of the work is in
+/// `derive_search.writeDerived` and `txt_index.Pages`; what is left here is the
+/// decision that this tenant writes them at all.
+fn writeTxtFiles(job: Job, d: txtindex.Derived) !void {
+    const terms_store = job.terms orelse return;
+    const text_store = job.text orelse return;
+    var src = txtindex.Pages.init(d);
+    try derivesearch.writeDerived(
+        job.gpa,
+        terms_store,
+        text_store,
+        job.md5,
+        @intCast(txtindex.rowCount(d)),
+        &src,
+    );
 }
 
 /// A `.pdf`'s shape (`pdf_index.zig`) and then its TEXT (`pdf_text.zig`) — page
@@ -418,6 +458,20 @@ fn runPdfText(job: Job) anyerror!void {
         at = chunk.to();
     }
 
+    // 4b. The two derived FILES, off the lock — §2.5's *"a file write is not in
+    //     a transaction at all"*. Failure is logged, never fatal: the files are
+    //     regenerable and a document that is searchable server-side but has no
+    //     derived files is the state the whole library is in today.
+    //
+    //     BEFORE the verdict, and that ordering is the point. §2.4 makes the
+    //     FILE the fact that a document is derived; write it after `finish` and
+    //     a crash in between leaves a blob the discovery query will never offer
+    //     again and a file nothing will ever write. Before it, the same crash
+    //     leaves the blob outstanding and the whole pass is simply redone.
+    writePdfFiles(job, &ex, doc_pages, any_text) catch |e| {
+        log.warn("derived files failed for {s}: {t}", .{ job.md5, e });
+    };
+
     // 5. Finish LAST, in its own transaction: the per-document term sets, the
     //    late-holder repair, and only then the verdict that says this document
     //    is indexed.
@@ -429,10 +483,195 @@ fn runPdfText(job: Job) anyerror!void {
     try job.db.exec("COMMIT;");
 }
 
+/// `terms/<md5>.<v>` and `text/<md5>.<v>` for one `.pdf`.
+///
+/// **THIS IS A SECOND EXTRACTION OF THE SAME DOCUMENT, and the cost is real:**
+/// ~0.10 s/page on the deployment target, so the 1,703-page harshest subject on
+/// record goes from ~2 minutes to ~4. Niced to 19 and off the lock in both
+/// halves — measured at 1.4 ms of foreground latency, `mupdf.md` §9.8 — so what
+/// it spends is background wall-clock on the least urgent job the worker has,
+/// not responsiveness. It is not a second OPEN: `pdf/text.zig`'s `Extractor` is
+/// random access with its own reopen schedule, so the SAME one is walked again
+/// from page 0 and the second pass costs the pages and nothing else.
+///
+/// **It was accepted rather than overlooked.** The two consumers cannot share
+/// one walk without one of them driving the other: `writeDerived` is a pull
+/// loop, the chunk loop above is a pull loop, and fusing them means either
+/// inverting `writeDerived` into a callback — which is exactly the shape §2.2's
+/// per-page record removed — or putting `job.db`, the lock and the reserved
+/// bands inside `pdf_text.Pages`, which is a format-blind page source that would
+/// then know about transactions. It would also entangle the two failure modes:
+/// a derived-file write failing is logged and survivable, an index write failing
+/// is not, and in one loop they become the same error.
+///
+/// **And it is transitional.** §2.5 retires `kind = 2` rows entirely — they
+/// exist only for search, and search is moving into these two files — at which
+/// point the chunked index write goes and this becomes the only pass.
+fn writePdfFiles(
+    job: Job,
+    ex: *pdftextpass.Extractor,
+    doc_pages: u32,
+    any_text: bool,
+) !void {
+    const terms_store = job.terms orelse return;
+    const text_store = job.text orelse return;
+
+    // A SCAN COSTS NOTHING TO DERIVE, and must not cost a second pass to find
+    // that out. The walk above already proved every page came back empty, so the
+    // source is skipped and the two header-only files are written directly —
+    // which is the right artifact, not an omission: §2.4 makes the file's
+    // existence the fact that the document is derived, and a scan genuinely is.
+    if (!any_text) {
+        var none: NoPages = .{};
+        return derivesearch.writeDerived(job.gpa, terms_store, text_store, job.md5, doc_pages, &none);
+    }
+
+    var src = pdftext.Pages.init(job.gpa, ex);
+    defer src.deinit();
+    try derivesearch.writeDerived(job.gpa, terms_store, text_store, job.md5, doc_pages, &src);
+}
+
+/// A page source with no pages — the whole of a scanned document's derivation.
+const NoPages = struct {
+    pub fn next(_: *NoPages) !?derivesearch.Page {
+        return null;
+    }
+};
+
 /// Every tenant, in one named place so the SET of them can be tested rather
 /// than only the individual tenants — the same reason `startupSweeps` exists.
 /// A sweep that nothing calls is a sweep that silently never runs.
 pub const tenants = [_]Tenant{ txt_tenant, pdf_tenant };
+
+// ---------------------------------------------------------------------------
+// Reconcile — the backfill the tenant predicates structurally cannot do
+// ---------------------------------------------------------------------------
+
+/// `terms/<md5>.<v>` and `text/<md5>.<v>` for one `.note`, the reconcile twin of
+/// `files.writeNoteDerived`. The `.note` format has no tenant of its own: it
+/// derives inside the upload path (§2.4), so this is the ONLY code that can give
+/// a note that predates the feature its files.
+///
+/// `!p.indexable` returns rather than writing header-only files, and that is
+/// deliberate agreement with the ingest side: a blob the note parser rejects is
+/// not a note at all, whatever it is called, and the two callers must not
+/// disagree about what a `.note` artifact is.
+fn writeNoteFiles(job: Job, p: *const noteindex.Parsed) !void {
+    if (!p.indexable) return;
+    const terms_store = job.terms orelse return;
+    const text_store = job.text orelse return;
+    var src = noteindex.Pages.init(p);
+    try derivesearch.writeDerived(
+        job.gpa,
+        terms_store,
+        text_store,
+        job.md5,
+        // The ADDRESS SPACE — every page, not the recognised ones the source
+        // will yield. See `derive_search.writeHeader`.
+        p.note.page_count,
+        &src,
+    );
+}
+
+/// THE RECONCILE PREDICATE — and the whole point of it is what it does NOT say.
+///
+/// **The bug it repairs.** The derived-file writes were hung off the tenants'
+/// `pending_from_where`, which ask *"does this blob still owe INDEX work?"*.
+/// Every blob indexed before the feature existed answers **no**, so it is never
+/// offered and never gets its files. MEASURED against the dev database: **0 of 4
+/// `.txt` blobs would be offered — all four are already indexed** — and the 22
+/// `.note` blobs fail from the other side, deriving at ingest with a dedup'd
+/// re-link taking no fresh parse. `golden-search.md` §2.4 states the rule the
+/// old question violates: *"derived is the existence of the file, for every
+/// format, with no tenant predicate involved."*
+///
+/// So there is no `txt_index IS NULL`, no `pdf_probe IS NULL`, no index state of
+/// any kind here. This clause says only **"a live document of a format we can
+/// derive"**; whether its files exist is asked of the DISK, one `has` per
+/// document, because §2.4 makes the file the authority and a column would be a
+/// second opinion that needs a migration to acquire.
+///
+/// **`ni.indexable` is the FORMAT question, not a work question**, and it is
+/// how both tenants already spell "is this really a note" (*"a real `.note` is
+/// never chunked, whatever it is called"*). Taking it from the parsed content
+/// rather than from the name is strictly better here than an extension test
+/// would be: a `.note` whose bytes do not parse is correctly not a candidate
+/// (nothing to derive, so an extension rule would re-parse it every tick for
+/// ever), and a note living under some other name is correctly still one.
+///
+/// **The `note_index` join is `txt_index.pending_from_where`'s ORDER CONTRACT,
+/// inherited on purpose.** A blob with no row, or a stale one, is not offered —
+/// it cannot be, because `indexable` is what picks the parser. It becomes
+/// visible once `ensureIndexed` heals the row, which is the same self-healing
+/// posture the rest of this file rests on.
+///
+/// Bound 1 is the index version; bound 2 is the CURSOR — see `nextCandidate`.
+const reconcile_sql =
+    \\SELECT f.md5, f.name, ni.indexable
+    \\  FROM files f
+    \\  JOIN blobs b ON b.md5 = f.md5
+    \\  JOIN note_index ni ON ni.blob_md5 = f.md5
+    \\ WHERE f.is_folder = 0
+    \\   AND f.deleted = 0
+    \\   AND f.md5 IS NOT NULL
+    \\   AND ni.index_version = ?1
+    \\   AND (ni.indexable = 1
+    \\        OR LOWER(f.name) LIKE '%_.txt'
+    \\        OR LOWER(f.name) LIKE '%_.pdf')
+    \\   AND f.md5 > ?2
+    \\ ORDER BY f.md5 ASC
+    \\ LIMIT 1;
+;
+
+/// One document the reconcile pass may owe files for.
+const Candidate = struct {
+    md5: [32]u8,
+    /// Owned by the caller's allocator. Only its EXTENSION is read — the
+    /// dispatch rule `Job.name` states: any holder's name will do.
+    name: []u8,
+    /// The note parser verified the bytes. Chooses the page source.
+    indexable: bool,
+};
+
+/// Derive one document's two files from its stored blob, dispatching on format.
+///
+/// Called WITHOUT the DB lock, like every `Tenant.run`, and for the same reason:
+/// this is the parse, and the parse is the expensive half. Unlike a tenant it
+/// writes nothing to the database at all, so there is no transaction to take the
+/// lock back for.
+fn deriveOne(job: Job, indexable: bool) !void {
+    if (indexable) return deriveNote(job);
+    if (txtindex.wants(job.name)) return deriveTxt(job);
+    if (pdfindex.wants(job.name)) return derivePdf(job);
+    // Unreachable via `reconcile_sql`, whose LIKE clauses are the same rule
+    // `wants` is. Silence rather than an error: a row that got here is a
+    // disagreement between the two spellings, and the test below pins them.
+}
+
+fn deriveNote(job: Job) !void {
+    var p = (try noteindex.parseStoredBlob(job.gpa, job.io, job.blobs, job.md5)) orelse return;
+    defer p.deinit();
+    try writeNoteFiles(job, &p);
+}
+
+fn deriveTxt(job: Job) !void {
+    var d = (try txtindex.deriveStored(job.gpa, job.blobs, job.md5)) orelse return;
+    defer d.deinit();
+    try writeTxtFiles(job, d);
+}
+
+fn derivePdf(job: Job) !void {
+    const file = job.blobs.open(job.md5) catch return; // blob gone: nothing to derive
+    defer file.close(job.io);
+    var ex = pdftextpass.Extractor.open(file) catch return;
+    defer ex.close();
+    // `any_text = true` is "we have not walked it", not a claim. `runPdfText`
+    // knows a scan is a scan because its index pass already saw every page come
+    // back empty; this pass has seen nothing. Walking a scan anyway costs one
+    // MuPDF pass and writes exactly the same header-only pair, so guessing wrong
+    // costs time on the least urgent job the worker has and never correctness.
+    try writePdfFiles(job, &ex, ex.pages, true);
+}
 
 /// What the worker found on one pass.
 pub const Found = struct {
@@ -470,6 +709,9 @@ pub const Worker = struct {
     blobs: blobstore.BlobStore,
     lock: *std.Io.Mutex,
     io: std.Io,
+    /// Handed to every `Job`. Set by `app.run`; null everywhere else.
+    terms: ?derivedstore.DerivedStore = null,
+    text: ?derivedstore.DerivedStore = null,
 
     thread: ?std.Thread = null,
 
@@ -522,6 +764,15 @@ pub const Worker = struct {
 
     fn loop(self: *Worker) void {
         nice19();
+
+        // ONCE AT START, and on THIS thread rather than the boot path. Deriving
+        // a library that has none is minutes of MuPDF and note parsing on a Pi
+        // 1 B+, and boot must not wait for it — where `nice19` above has already
+        // put this thread at the priority `mupdf.md` §9.8 measured at 1.4 ms of
+        // foreground cost. It is the same argument `sweepTmp` makes for running
+        // at startup, applied to work too big to run at startup.
+        self.reconcileDerived();
+
         while (!self.stopping.load(.acquire)) {
             // Read the epoch BEFORE draining. A signal that arrives while we are
             // working then leaves the word changed, so the wait below returns
@@ -535,7 +786,113 @@ pub const Worker = struct {
                 seen,
                 .{ .duration = .{ .raw = .{ .nanoseconds = idle_tick_ns }, .clock = .awake } },
             ) catch {};
+
+            // AN UNCHANGED EPOCH IS THE IDLE TICK, and the word is the only
+            // witness: `futexWaitTimeout` reports a timeout by returning, not by
+            // erroring, so its error set cannot tell us. Reconciling on every
+            // wake instead would put a full library scan behind every upload —
+            // which is precisely the traffic pattern that has the least need of
+            // one, since an upload derives its own files on the way in.
+            if (self.epoch.load(.acquire) == seen) self.reconcileDerived();
         }
+    }
+
+    /// Give every live document its two derived files, whatever the index thinks.
+    ///
+    /// **The backfill `reconcile_sql` explains, and the reason it cannot be a
+    /// tenant.** A tenant is discovered through its own "what do I still owe?"
+    /// clause; this pass exists precisely because that question has the wrong
+    /// answer for every blob derived — or indexed — before the files existed.
+    /// It asks the DISK instead, once per document.
+    ///
+    /// **ONE DOCUMENT AT A TIME, through a CURSOR rather than a batch.** The
+    /// candidate list is read `LIMIT 1` at a time under the lock, keyed on the
+    /// last md5 seen, so the pass holds no list, allocates nothing per library
+    /// size, and re-reads a live table between documents instead of acting on a
+    /// snapshot that a trash or a purge may have invalidated. `files_md5` makes
+    /// the whole pass one walk of that index however many steps it takes.
+    ///
+    /// **The common case never opens a blob.** Two `stat`s say the files are
+    /// there and the document is skipped; only a genuine miss pays a parse. That
+    /// is what makes running this every idle tick affordable — 1,222 documents
+    /// is 2,444 warm `stat`s per 30 s, against the seconds-to-minutes a single
+    /// missing document costs.
+    ///
+    /// **BOTH stores are asked, not just `terms`.** `writeDerived` commits terms
+    /// first and text second, so a crash between the two leaves a terms file
+    /// whose twin is missing — a document that reports derived for ever and
+    /// 404s the text every viewer opens. One extra `stat` closes it.
+    ///
+    /// Failures are per-document and never fatal: one unparseable blob must not
+    /// cost the other 999 their files. `stopping` is checked between documents,
+    /// so a shutdown lands between two of them rather than after all of them.
+    pub fn reconcileDerived(self: *Worker) void {
+        // Null stores are "this deployment keeps none" — `drainNow`, and every
+        // test that does not wire them. A no-op, never an error.
+        const terms = self.terms orelse return;
+        const text = self.text orelse return;
+
+        var cursor_buf: [32]u8 = undefined;
+        var cursor: []const u8 = ""; // every hex md5 sorts after the empty string
+        var missing: usize = 0;
+
+        while (!self.stopping.load(.acquire)) {
+            const c = self.nextCandidate(cursor) catch |e| {
+                log.warn("reconcile discovery failed: {t}", .{e});
+                return;
+            } orelse break;
+            defer self.gpa.free(c.name);
+
+            // ADVANCE FIRST. Everything below is allowed to fail, and a cursor
+            // moved only on success would re-offer the failing document for ever
+            // — a hot loop on the one core this server is allowed to have, which
+            // is the same hazard `drain`'s forward-progress guard exists for.
+            cursor_buf = c.md5;
+            cursor = &cursor_buf;
+
+            if (terms.has(&c.md5, derivesearch.index_version) and
+                text.has(&c.md5, derivesearch.index_version)) continue;
+
+            deriveOne(.{
+                .gpa = self.gpa,
+                .db = self.db,
+                .blobs = self.blobs,
+                .lock = self.lock,
+                .io = self.io,
+                .md5 = &c.md5,
+                .name = c.name,
+                .now = std.Io.Clock.real.now(self.io).toSeconds(),
+                .terms = terms,
+                .text = text,
+            }, c.indexable) catch |e| {
+                log.warn("reconcile failed for {s}: {t}", .{ &c.md5, e });
+                continue;
+            };
+            missing += 1;
+        }
+
+        if (missing != 0) log.info("reconcile derived {d} document(s)", .{missing});
+    }
+
+    /// The next candidate after `after`, read under the lock like any other
+    /// reader of the shared connection. The name is duped because the row's
+    /// memory dies with the statement, and the statement dies with the lock.
+    fn nextCandidate(self: *Worker, after: []const u8) !?Candidate {
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
+
+        var r = (try self.db.row(reconcile_sql, &.{
+            .{ .int = noteindex.index_version },
+            .{ .text = after },
+        })) orelse return null;
+        defer r.finalize();
+
+        const md5_text = r.text(0);
+        if (md5_text.len != 32) return null; // a corrupt row; `nextJob` is as wary
+        var c: Candidate = .{ .md5 = undefined, .name = undefined, .indexable = r.int(2) != 0 };
+        @memcpy(&c.md5, md5_text);
+        c.name = try self.gpa.dupe(u8, r.text(1));
+        return c;
     }
 
     /// Run outstanding jobs until there are none, or until asked to stop.
@@ -580,6 +937,8 @@ pub const Worker = struct {
                 .md5 = &found.md5,
                 .name = found.name,
                 .now = std.Io.Clock.real.now(self.io).toSeconds(),
+                .terms = self.terms,
+                .text = self.text,
             }) catch |e| {
                 // LEFT OUTSTANDING ON PURPOSE: the discovery query will offer it
                 // again. Returning rather than continuing is what stops a blob
@@ -711,6 +1070,17 @@ const Fixture = struct {
         drainNow(testing.allocator, f.db, f.files.blobs, &f.lock, testing.io);
     }
 
+    /// The two derived stores, on this fixture's tmp dir. Every reconcile test
+    /// wants both; the older tests spell them out inline.
+    fn stores(f: *Fixture) !struct { terms: derivedstore.DerivedStore, text: derivedstore.DerivedStore } {
+        const terms_dir = try f.tmp.dir.createDirPathOpen(testing.io, "terms", .{});
+        const text_dir = try f.tmp.dir.createDirPathOpen(testing.io, "text", .{});
+        return .{
+            .terms = try derivedstore.DerivedStore.init(testing.io, terms_dir),
+            .text = try derivedstore.DerivedStore.init(testing.io, text_dir),
+        };
+    }
+
     fn segmentCount(f: *Fixture, md5: []const u8) !i64 {
         var r = (try f.db.row(
             "SELECT COUNT(*) FROM note_page_index WHERE blob_md5 = ?1 AND kind = 1;",
@@ -722,6 +1092,100 @@ const Fixture = struct {
 };
 
 const two_paragraphs = "First paragraph, with words in it.\n\nSecond paragraph, also with words.\n";
+
+test "the .txt tenant writes BOTH derived files, and they inflate to the §2.2 record" {
+    // The wiring test for `writeTxtFiles`: the two stores exist, the worker is
+    // given them, and a drain leaves real files behind. Everything upstream of
+    // this is unit-tested in `store/derived.zig` and `services/derive_search.zig`;
+    // what is only testable here is that the tenant actually calls them.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const terms_dir = try f.tmp.dir.createDirPathOpen(testing.io, "terms", .{});
+    const text_dir = try f.tmp.dir.createDirPathOpen(testing.io, "text", .{});
+    const terms = try derivedstore.DerivedStore.init(testing.io, terms_dir);
+    const text = try derivedstore.DerivedStore.init(testing.io, text_dir);
+
+    const md5 = try f.put("notes.txt", two_paragraphs);
+    try testing.expect(!terms.has(&md5, derivesearch.index_version));
+
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = terms,
+        .text = text,
+    };
+    w.drain();
+
+    try testing.expectEqual(@as(i64, 2), try f.segmentCount(&md5));
+    try testing.expect(terms.has(&md5, derivesearch.index_version));
+    try testing.expect(text.has(&md5, derivesearch.index_version));
+
+    const t = try inflateStored(terms, &md5);
+    defer testing.allocator.free(t);
+    var lines = std.mem.tokenizeScalar(u8, t, '\n');
+    const head = lines.next().?;
+    try testing.expect(std.mem.indexOf(u8, head, "\"n\":2") != null);
+    // Folded, deduplicated, vocabulary order -- and "with" and "words" appear on
+    // both paragraphs, which is exactly the per-page shape §2.2 ships.
+    try testing.expectEqualStrings(
+        "{\"p\":0,\"t\":\"first in it paragraph with words\"}",
+        lines.next().?,
+    );
+    try testing.expectEqualStrings(
+        "{\"p\":1,\"t\":\"also paragraph second with words\"}",
+        lines.next().?,
+    );
+    try testing.expect(lines.next() == null);
+
+    // The text file carries the real paragraph AND its byte range into the raw
+    // blob -- the address `txtFind.ts` deep-links to.
+    const x = try inflateStored(text, &md5);
+    defer testing.allocator.free(x);
+    var xlines = std.mem.tokenizeScalar(u8, x, '\n');
+    _ = xlines.next();
+    const p0 = try std.json.parseFromSlice(std.json.Value, testing.allocator, xlines.next().?, .{});
+    defer p0.deinit();
+    try testing.expectEqualStrings("First paragraph, with words in it.", p0.value.object.get("t").?.string);
+    try testing.expectEqual(@as(i64, 0), p0.value.object.get("o").?.integer);
+    try testing.expectEqual(@as(i64, 34), p0.value.object.get("l").?.integer);
+}
+
+test "no stores wired means no files and no failure" {
+    // `drainNow` and every older test take this path; it must stay a no-op
+    // rather than an error, because a deployment without the stores is exactly
+    // the state the tree was in before them.
+    var f = try Fixture.init();
+    defer f.deinit();
+    const md5 = try f.put("notes.txt", two_paragraphs);
+    f.drain();
+    try testing.expectEqual(@as(i64, 2), try f.segmentCount(&md5));
+}
+
+/// Read a stored fragment back to its plaintext, the way the stream route will:
+/// past the header, plus the final block the serve path appends.
+fn inflateStored(store: derivedstore.DerivedStore, md5: []const u8) ![]u8 {
+    var file = try store.open(md5, derivesearch.index_version);
+    defer file.close(store.io);
+    var raw: [1 << 16]u8 = undefined;
+    const n = try file.readPositionalAll(store.io, &raw, 0);
+
+    var body: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer body.deinit();
+    try body.writer.writeAll(raw[derivedstore.header_len..n]);
+    try body.writer.writeAll(&[_]u8{ 0x03, 0x00 });
+
+    var input: std.Io.Reader = .fixed(body.written());
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var d = std.compress.flate.Decompress.init(&input, .raw, &window);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer out.deinit();
+    _ = try d.reader.streamRemaining(&out.writer);
+    return out.toOwnedSlice();
+}
 
 test "an upload does NOT index the .txt, and a drain does" {
     // The whole point. `putFile` used to chunk the file while the client held
@@ -1103,6 +1567,108 @@ test "a SCANNED PDF records its verdict and is never offered again" {
     try std.testing.expectEqual(@as(usize, 0), w.done.load(.acquire));
 }
 
+test "the .pdf tenant writes BOTH derived files, ACROSS CHUNK BOUNDARIES" {
+    // The wiring test for `writePdfFiles`, and the one place the chunked source
+    // is driven end to end: 120 pages is three `pdf_text.chunk_pages` chunks, so
+    // a source that only ever handed out its first chunk — or that released a
+    // chunk while `writeDerived` was still reading a page out of it — fails here
+    // and nowhere else.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const terms_dir = try f.tmp.dir.createDirPathOpen(testing.io, "terms", .{});
+    const text_dir = try f.tmp.dir.createDirPathOpen(testing.io, "text", .{});
+    const terms = try derivedstore.DerivedStore.init(testing.io, terms_dir);
+    const text = try derivedstore.DerivedStore.init(testing.io, text_dir);
+
+    const md5 = try f.put("book.pdf", book_pdf);
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = terms,
+        .text = text,
+    };
+    w.drain();
+
+    try testing.expect(terms.has(&md5, derivesearch.index_version));
+    try testing.expect(text.has(&md5, derivesearch.index_version));
+
+    const t = try inflateStored(terms, &md5);
+    defer testing.allocator.free(t);
+    var lines = std.mem.tokenizeScalar(u8, t, '\n');
+    try testing.expect(std.mem.indexOf(u8, lines.next().?, "\"n\":120") != null);
+    // Folded, vocabulary order. Every page carries `rutabaga`; exactly one
+    // carries its own `leafNNN`, which is what makes the ordinal assertable.
+    var seen: usize = 0;
+    while (lines.next()) |line| : (seen += 1) {
+        var buf: [64]u8 = undefined;
+        try testing.expectEqualStrings(
+            try std.fmt.bufPrint(
+                &buf,
+                "{{\"p\":{d},\"t\":\"{d} leaf{d:0>3} recipe rutabaga\"}}",
+                .{ seen, seen, seen },
+            ),
+            line,
+        );
+    }
+    try testing.expectEqual(@as(usize, 120), seen); // the last two chunks, too
+
+    // The text file carries the page's real text, addressed by ORDINAL alone —
+    // a PDF page has no byte range in the blob, so `o`/`l` are absent.
+    const x = try inflateStored(text, &md5);
+    defer testing.allocator.free(x);
+    var xlines = std.mem.tokenizeScalar(u8, x, '\n');
+    _ = xlines.next();
+    const p0 = try std.json.parseFromSlice(std.json.Value, testing.allocator, xlines.next().?, .{});
+    defer p0.deinit();
+    try testing.expectEqual(@as(i64, 0), p0.value.object.get("p").?.integer);
+    try testing.expect(p0.value.object.get("o") == null);
+    try testing.expect(p0.value.object.get("l") == null);
+    try testing.expect(std.mem.indexOf(u8, p0.value.object.get("t").?.string, "Recipe 0 rutabaga leaf000") != null);
+}
+
+test "a SCANNED PDF still gets its two files, and they are the header alone" {
+    // Two properties in one, and both are load-bearing. §2.4 makes the FILE the
+    // fact that a document is derived, so a scan has to leave one behind or it
+    // reports pending for ever; and an image-only page is SKIPPED rather than
+    // written as an empty row, so what it leaves behind is a header and nothing
+    // else. It is also the one document `writePdfFiles` declines to walk twice.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const terms_dir = try f.tmp.dir.createDirPathOpen(testing.io, "terms", .{});
+    const text_dir = try f.tmp.dir.createDirPathOpen(testing.io, "text", .{});
+    const terms = try derivedstore.DerivedStore.init(testing.io, terms_dir);
+    const text = try derivedstore.DerivedStore.init(testing.io, text_dir);
+
+    const md5 = try f.put("scan.pdf", scan_pdf);
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = terms,
+        .text = text,
+    };
+    w.drain();
+
+    try testing.expect(terms.has(&md5, derivesearch.index_version));
+    try testing.expect(text.has(&md5, derivesearch.index_version));
+
+    for ([_]derivedstore.DerivedStore{ terms, text }) |store| {
+        const got = try inflateStored(store, &md5);
+        defer testing.allocator.free(got);
+        var lines = std.mem.tokenizeScalar(u8, got, '\n');
+        // `n` is the ADDRESS SPACE: three pages, none of which says anything.
+        try testing.expect(std.mem.indexOf(u8, lines.next().?, "\"n\":3") != null);
+        try testing.expect(lines.next() == null);
+    }
+}
+
 test "NICE 19 IS PER-THREAD — the worker yields the core, the request threads do not" {
     // The scheduling half of the answer (`mupdf.md` §9.8): a CPU-bound pass at
     // nice 0 doubles foreground latency on the single ARM1176 core, at nice 19 it
@@ -1214,4 +1780,326 @@ test "the predicate answers PER BLOB as well as per install — one bound parame
     // `needsProbe` report, reached through the shared clause.
     try std.testing.expect(!try per_blob(f.db, txt_tenant.from_where, &txt));
     try std.testing.expect(!try per_blob(f.db, pdf_tenant.from_where, &pdf));
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile
+// ---------------------------------------------------------------------------
+
+/// Two pages, page 0 recognised — so the derived record has one page line over a
+/// two-page address space, which is the `.note` shape `derive_search` writes.
+const sample2_note = @embedFile("sample-2.note");
+
+test "RECONCILE: an ALREADY-INDEXED .txt gets its files, and a drain cannot give them" {
+    // THE BUG, stated as a test. The library was indexed before the derived
+    // stores existed, so every tenant predicate answers "nothing owed" — and
+    // hanging the file writes off those predicates means the document never gets
+    // its files, for ever, with no error. MEASURED on the dev database: 0 of 4
+    // `.txt` blobs would be offered. Both halves are asserted, because only the
+    // second one is new: the drain must NOT produce the files, the reconcile
+    // pass must.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const md5 = try f.put("notes.txt", two_paragraphs);
+    f.drain(); // indexed by a worker with no stores wired: the shipped state
+    try testing.expectEqual(@as(i64, 2), try f.segmentCount(&md5));
+    try testing.expect(!try txtindex.needsDerive(f.db, &md5));
+    try testing.expectEqual(@as(?Found, null), try nextJob(testing.allocator, f.db));
+
+    const s = try f.stores();
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = s.terms,
+        .text = s.text,
+    };
+
+    // The tenants have nothing to say about this blob — which is the defect,
+    // not an accident of the fixture.
+    w.drain();
+    try testing.expectEqual(@as(usize, 0), w.done.load(.acquire));
+    try testing.expect(!s.terms.has(&md5, derivesearch.index_version));
+
+    w.reconcileDerived();
+
+    try testing.expect(s.terms.has(&md5, derivesearch.index_version));
+    try testing.expect(s.text.has(&md5, derivesearch.index_version));
+
+    // And what it wrote is the real §2.2 record, not an empty placeholder — a
+    // backfill that left header-only files behind would satisfy `has` for ever.
+    const t = try inflateStored(s.terms, &md5);
+    defer testing.allocator.free(t);
+    var lines = std.mem.tokenizeScalar(u8, t, '\n');
+    try testing.expect(std.mem.indexOf(u8, lines.next().?, "\"n\":2") != null);
+    try testing.expectEqualStrings(
+        "{\"p\":0,\"t\":\"first in it paragraph with words\"}",
+        lines.next().?,
+    );
+    try testing.expectEqualStrings(
+        "{\"p\":1,\"t\":\"also paragraph second with words\"}",
+        lines.next().?,
+    );
+    try testing.expect(lines.next() == null);
+}
+
+test "RECONCILE: a .note gets its files, which NOTHING else in the worker can do" {
+    // The other half of the same bug, failing from the opposite side: a `.note`
+    // derives inside the upload transaction (§2.4), so it is never pending and
+    // has no tenant at all. A note uploaded before the stores existed — or
+    // arriving through a dedup'd re-link, which takes no fresh parse — is
+    // reachable only here. MEASURED on the dev database: 22 such blobs.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const md5 = try f.put("n.note", sample2_note);
+    f.drain();
+    try testing.expectEqual(@as(?Found, null), try nextJob(testing.allocator, f.db));
+
+    const s = try f.stores();
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = s.terms,
+        .text = s.text,
+    };
+    w.reconcileDerived();
+
+    try testing.expect(s.terms.has(&md5, derivesearch.index_version));
+    try testing.expect(s.text.has(&md5, derivesearch.index_version));
+
+    const t = try inflateStored(s.terms, &md5);
+    defer testing.allocator.free(t);
+    var lines = std.mem.tokenizeScalar(u8, t, '\n');
+    // `n` is the ADDRESS SPACE: two pages, one of which has a finished
+    // transcript. The unrecognised page is skipped, not written empty.
+    try testing.expect(std.mem.indexOf(u8, lines.next().?, "\"n\":2") != null);
+    try testing.expect(std.mem.startsWith(u8, lines.next().?, "{\"p\":0,\"t\":\""));
+    try testing.expect(lines.next() == null);
+}
+
+test "RECONCILE: a .pdf gets its files through the chunked source" {
+    // 120 pages is three `pdf_text.chunk_pages` chunks, so this drives the one
+    // page source that is not already in hand — and it does it WITHOUT the
+    // `any_text` shortcut `runPdfText` takes, which is the only thing the
+    // reconcile path does differently from the tenant.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const md5 = try f.put("book.pdf", book_pdf);
+    f.drain();
+    try testing.expectEqual(@as(?Found, null), try nextJob(testing.allocator, f.db));
+
+    const s = try f.stores();
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = s.terms,
+        .text = s.text,
+    };
+    w.reconcileDerived();
+
+    try testing.expect(s.terms.has(&md5, derivesearch.index_version));
+    try testing.expect(s.text.has(&md5, derivesearch.index_version));
+
+    const t = try inflateStored(s.terms, &md5);
+    defer testing.allocator.free(t);
+    var lines = std.mem.tokenizeScalar(u8, t, '\n');
+    try testing.expect(std.mem.indexOf(u8, lines.next().?, "\"n\":120") != null);
+    var seen: usize = 0;
+    while (lines.next()) |line| : (seen += 1) {
+        var buf: [64]u8 = undefined;
+        try testing.expectEqualStrings(
+            try std.fmt.bufPrint(&buf, "{{\"p\":{d},\"t\":\"{d} leaf{d:0>3} recipe rutabaga\"}}", .{ seen, seen, seen }),
+            line,
+        );
+    }
+    try testing.expectEqual(@as(usize, 120), seen); // past both chunk boundaries
+}
+
+test "RECONCILE: a document that HAS its files is not derived again" {
+    // The pass runs on every idle tick, so the skip is what makes it affordable:
+    // two `stat`s and no blob read. Asserted by CONTENT rather than by timing —
+    // the files are overwritten with a sentinel that a re-derive would destroy.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const s = try f.stores();
+    const md5 = try f.put("notes.txt", two_paragraphs);
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = s.terms,
+        .text = s.text,
+    };
+    w.drain(); // the tenant writes them on the way past
+    try testing.expect(s.terms.has(&md5, derivesearch.index_version));
+
+    const sentinel = "not a fragment";
+    try s.terms.put(&md5, derivesearch.index_version, sentinel);
+    try s.text.put(&md5, derivesearch.index_version, sentinel);
+
+    w.reconcileDerived();
+
+    for ([_]derivedstore.DerivedStore{ s.terms, s.text }) |store| {
+        const got = try rawStored(store, &md5);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings(sentinel, got);
+    }
+}
+
+test "RECONCILE: a HALF-WRITTEN pair is completed — terms alone is not derived" {
+    // `writeDerived` commits terms first and text second, so a crash between the
+    // two leaves a terms file whose twin is missing. Asking `terms.has` alone
+    // would call that document derived for ever, and every viewer opening it
+    // would 404 the text. One extra `stat` is the whole fix.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const s = try f.stores();
+    const md5 = try f.put("notes.txt", two_paragraphs);
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = s.terms,
+        .text = s.text,
+    };
+    w.drain();
+    s.text.remove(&md5, derivesearch.index_version); // the torn commit
+
+    w.reconcileDerived();
+
+    try testing.expect(s.text.has(&md5, derivesearch.index_version));
+    const x = try inflateStored(s.text, &md5);
+    defer testing.allocator.free(x);
+    try testing.expect(std.mem.indexOf(u8, x, "First paragraph") != null);
+}
+
+test "RECONCILE: null stores are a no-op, not an error" {
+    // `drainNow`, and every deployment and test that keeps no derived stores.
+    // The pass must decline silently — that is the state the tree was in before
+    // the stores existed, and it is not a failure.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    _ = try f.put("notes.txt", two_paragraphs);
+    var w: Worker = .{ .gpa = testing.allocator, .db = f.db, .blobs = f.files.blobs, .lock = &f.lock, .io = testing.io };
+    w.reconcileDerived();
+    try testing.expectEqual(@as(usize, 0), w.done.load(.acquire));
+}
+
+test "RECONCILE: the bin is not a backfill queue either" {
+    // `files` VISIBILITY, the same rule the tenant predicates carry: a trashed
+    // document is in nobody's manifest, so deriving it spends a parse on
+    // something nothing can ever stream. And it comes back the moment it is
+    // restored, without anything re-signalling.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const s = try f.stores();
+    const md5 = try f.put("notes.txt", two_paragraphs);
+    try f.db.exec("UPDATE files SET deleted = 1 WHERE md5 IS NOT NULL;");
+
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = s.terms,
+        .text = s.text,
+    };
+    w.reconcileDerived();
+    try testing.expect(!s.terms.has(&md5, derivesearch.index_version));
+
+    try f.db.exec("UPDATE files SET deleted = 0 WHERE md5 IS NOT NULL;");
+    w.reconcileDerived();
+    try testing.expect(s.terms.has(&md5, derivesearch.index_version));
+}
+
+test "RECONCILE: the cursor visits EVERY document, and a second pass reads no blob" {
+    // The pass walks `LIMIT 1` at a time keyed on the last md5 seen, so a cursor
+    // that failed to advance would spin on one document and a cursor that
+    // advanced too far would skip its neighbours — both silent, and both fatal
+    // to a backfill. Three formats in one pass, in md5 order, whatever that is.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const txt = try f.put("notes.txt", two_paragraphs);
+    const note = try f.put("n.note", sample2_note);
+    const pdf = try f.put("doc.pdf", rotate90_pdf);
+    f.drain();
+
+    const s = try f.stores();
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = s.terms,
+        .text = s.text,
+    };
+    w.reconcileDerived();
+
+    for ([_][32]u8{ txt, note, pdf }) |md5| {
+        try testing.expect(s.terms.has(&md5, derivesearch.index_version));
+        try testing.expect(s.text.has(&md5, derivesearch.index_version));
+    }
+
+    // Idempotent: everything is present, so the second pass opens nothing.
+    // Proved the same way as the skip test — a sentinel a re-derive would eat.
+    const sentinel = "still here";
+    try s.terms.put(&txt, derivesearch.index_version, sentinel);
+    w.reconcileDerived();
+    const got = try rawStored(s.terms, &txt);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(sentinel, got);
+}
+
+test "RECONCILE: the SQL compiles, and carries NO index state" {
+    // Two readers of one extension rule — this clause and `deriveOne`'s dispatch
+    // — which is a real cost, paid for the same reason the tenants pay it. A
+    // name the SQL admits and `wants` rejects is a document the pass offers and
+    // then silently declines to derive, every tick, for ever.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    try schema.migrate(db);
+    const s = try db.prepare(reconcile_sql);
+    s.finalize();
+
+    try testing.expect(std.mem.indexOf(u8, reconcile_sql, "LIKE '%_.txt'") != null);
+    try testing.expect(std.mem.indexOf(u8, reconcile_sql, "LIKE '%_.pdf'") != null);
+    // `_` demands a character before the dot, exactly as `wants` does.
+    try testing.expect(txtindex.wants("a.txt") and pdfindex.wants("a.pdf"));
+    try testing.expect(!txtindex.wants(".txt") and !pdfindex.wants(".pdf"));
+    // And no work predicate leaked in — asking one is the bug this pass repairs.
+    for ([_][]const u8{ "txt_index", "pdf_probe", "pdf_text" }) |column| {
+        try testing.expect(std.mem.indexOf(u8, reconcile_sql, column) == null);
+    }
+}
+
+/// A stored file's bytes as they sit on disk — no header skip, no inflate. For
+/// the sentinel tests, which write something that is neither.
+fn rawStored(store: derivedstore.DerivedStore, md5: []const u8) ![]u8 {
+    var file = try store.open(md5, derivesearch.index_version);
+    defer file.close(store.io);
+    var buf: [1 << 12]u8 = undefined;
+    const n = try file.readPositionalAll(store.io, &buf, 0);
+    return testing.allocator.dupe(u8, buf[0..n]);
 }

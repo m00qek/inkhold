@@ -117,6 +117,7 @@
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
+const derivesearch = @import("derive_search.zig");
 const blobstore = @import("../store/blobs.zig");
 const blob_source = @import("../store/blob_source.zig");
 const noteindex = @import("note_index.zig");
@@ -473,6 +474,35 @@ fn upsertSegment(db: sqlite.Db, blob_md5: []const u8, ordinal: i64, seg: Segment
 /// the single marker row when it produced none. **Never zero**, which is what
 /// makes it a legal band length — `reserveOwnerBlobBands` asserts as much, and a
 /// zero-length band would be a document with no address.
+/// A `derive_search.Page` source over a finished `Derived` — the `.txt` half of
+/// the one per-format seam search has (`derive_search.writeDerived`).
+///
+/// Trivial, because the whole document is already in hand; `.pdf`'s equivalent
+/// is the one that earns the iterator. What is NOT trivial and belongs here is
+/// the ADDRESS: a `.txt` segment is addressed by its byte range into the raw
+/// blob, not by its ordinal, because that is what `txtFind.ts` deep-links to
+/// through `byteToCharMap`. Every other format leaves those null.
+pub const Pages = struct {
+    d: Derived,
+    i: usize = 0,
+
+    pub fn init(d: Derived) Pages {
+        return .{ .d = d };
+    }
+
+    pub fn next(self: *Pages) !?derivesearch.Page {
+        if (self.i >= self.d.segments.len) return null;
+        const seg = self.d.segments[self.i];
+        defer self.i += 1;
+        return .{
+            .ordinal = @intCast(self.i),
+            .text = seg.text,
+            .offset = seg.offset,
+            .len = seg.len,
+        };
+    }
+};
+
 pub fn rowCount(d: Derived) usize {
     return @max(d.segments.len, 1);
 }

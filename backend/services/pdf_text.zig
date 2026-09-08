@@ -64,6 +64,7 @@
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const blobstore = @import("../store/blobs.zig");
+const derivesearch = @import("derive_search.zig");
 const noteindex = @import("note_index.zig");
 const pdfindex = @import("pdf_index.zig");
 const pdftext = @import("../pdf/text.zig");
@@ -224,6 +225,79 @@ pub fn nextChunk(gpa: Allocator, ex: *pdftext.Extractor, from: u32) !?Chunk {
     }
     return .{ .arena = arena, .from = from, .pages = try pages.toOwnedSlice(a) };
 }
+
+/// A `derive_search.Page` source over a LIVE `Extractor` — the `.pdf` end of the
+/// one per-format seam search has (`derive_search.writeDerived`).
+///
+/// **This is the case that earns the pull iterator.** `txt_index.Pages` walks a
+/// document already in hand; here there is no such document and there must not
+/// be one. Text arrives a `Chunk` at a time (50 pages / 40 KB, whichever comes
+/// first) and the whole memory story of the text pass is that a book is never
+/// held whole — 2 MB for a 1,450-page document, on a 50 MB budget. So `next`
+/// hands out one page of the chunk it is holding and pulls the next chunk when
+/// that runs out; the caller sees a flat sequence of pages and nothing above it
+/// knows chunks exist.
+///
+/// **THE ARENA LIFETIME IS THE INVARIANT THE WHOLE DESIGN RESTS ON.** A page's
+/// text is a slice into its chunk's arena and dies when that chunk is released,
+/// which happens the moment `next` is asked for the page after the chunk's last.
+/// That is safe because `writeDerived` consumes a `Page` COMPLETELY before it
+/// calls `next` again — it folds it into the terms fragment and writes it into
+/// the text fragment inside one loop body, and neither writer keeps the slice.
+/// Verified against `derive_search.writeDerived`, and stated here because a
+/// source that buffered its pages would need a different iterator and a
+/// consumer that stashed one would corrupt this one silently.
+///
+/// A page with no extractable text is SKIPPED rather than yielded empty. The
+/// index rows cannot do that — `first_rowid + page_index` needs every page
+/// present or the band gains a hole — but the derived files are addressed by the
+/// ordinal written on each line, so an image-only page is simply a line that is
+/// not there. It is also what the two writers would do with it anyway.
+pub const Pages = struct {
+    gpa: Allocator,
+    ex: *pdftext.Extractor,
+    /// The chunk being handed out, or null before the first pull and after the
+    /// last. Owned here: `deinit` releases whatever is still held.
+    chunk: ?Chunk = null,
+    /// How far into `chunk.pages` the hand-out has got.
+    at: usize = 0,
+    /// Where the next chunk starts. `nextChunk` is the sole authority on where
+    /// the document ends (`min(pages, max_pages)`), so there is no second copy
+    /// of the cap here to drift from it.
+    from: u32 = 0,
+
+    pub fn init(gpa: Allocator, ex: *pdftext.Extractor) Pages {
+        return .{ .gpa = gpa, .ex = ex };
+    }
+
+    /// Releases the chunk in flight. Idempotent, and needed on the error path
+    /// only — a completed walk has already released its last chunk.
+    pub fn deinit(self: *Pages) void {
+        if (self.chunk) |*c| c.deinit();
+        self.chunk = null;
+    }
+
+    pub fn next(self: *Pages) !?derivesearch.Page {
+        while (true) {
+            if (self.chunk) |*c| {
+                while (self.at < c.pages.len) {
+                    const p = c.pages[self.at];
+                    self.at += 1;
+                    if (p.text.len == 0) continue; // scanned or image-only
+                    // Addressed by ORDINAL: a PDF page has no byte range in the
+                    // blob, and the page number is what a viewer deep-links to.
+                    return .{ .ordinal = p.index, .text = p.text };
+                }
+                c.deinit();
+                self.chunk = null;
+            }
+            const c = (try nextChunk(self.gpa, self.ex, self.from)) orelse return null;
+            self.from = c.to();
+            self.chunk = c;
+            self.at = 0;
+        }
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Write — inside the caller's transaction

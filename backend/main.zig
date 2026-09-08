@@ -75,6 +75,7 @@ test {
     _ = @import("store/blobs.zig");
     _ = @import("store/blob_source.zig");
     _ = @import("store/thumbs.zig");
+    _ = @import("store/derived.zig");
     _ = @import("services/files.zig");
     _ = @import("services/thumbnail.zig");
     _ = @import("services/spd_index.zig");
@@ -87,6 +88,8 @@ test {
     _ = @import("services/search/maintain.zig");
     _ = @import("services/search/fuzzy.zig");
     _ = @import("services/search/index_export.zig");
+    _ = @import("services/search/want_bitmap.zig");
+    _ = @import("services/derive_search.zig");
     _ = @import("services/txt_index.zig");
     _ = @import("services/pdf_text.zig");
     _ = @import("services/pending.zig");

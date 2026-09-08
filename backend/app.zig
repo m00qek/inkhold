@@ -37,6 +37,7 @@ const eventstreams = @import("http/event_streams.zig");
 const lockstats = @import("http/lock_stats.zig");
 const blobstore = @import("store/blobs.zig");
 const thumbstore = @import("store/thumbs.zig");
+const derivedstore = @import("store/derived.zig");
 const passwordmod = @import("services/auth/password.zig");
 
 /// Builds everything and serves until an unrecoverable error. Never returns on
@@ -118,7 +119,32 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     const thumb_store = try thumbstore.ThumbStore.init(io, thumbs_dir);
     thumb_store.sweepTmp();
 
+    // The two per-document derived stores (`golden-search.md` §2.1). Same
+    // posture as thumbs: derived, regenerable, backup-skippable, cleanup riding
+    // the source blob's GC. Losing either directory costs a re-derive, not data.
+    //
+    // NOT on the boot path, and not from the tenants' discovery query either:
+    // `deferred.Worker.reconcileDerived` finds what is missing, on the worker
+    // thread. The tenant predicates ask "does this blob still owe INDEX work?",
+    // which is the wrong question — §2.4 makes the FILE the fact — and answers
+    // "no" for every document indexed before these stores existed.
+    const terms_path = try std.fmt.allocPrint(gpa, "{s}/terms", .{cfg.data_dir});
+    defer gpa.free(terms_path);
+    const terms_dir = try std.Io.Dir.cwd().createDirPathOpen(io, terms_path, .{});
+    defer terms_dir.close(io);
+    const terms_store = try derivedstore.DerivedStore.init(io, terms_dir);
+    terms_store.sweepTmp();
+
+    const text_path = try std.fmt.allocPrint(gpa, "{s}/text", .{cfg.data_dir});
+    defer gpa.free(text_path);
+    const text_dir = try std.Io.Dir.cwd().createDirPathOpen(io, text_path, .{});
+    defer text_dir.close(io);
+    const text_store = try derivedstore.DerivedStore.init(io, text_dir);
+    text_store.sweepTmp();
+
     var files_svc = filesmod.Files.init(gpa, io, db, blob_store, thumb_store);
+    files_svc.terms = terms_store;
+    files_svc.text = text_store;
     files_svc.history = cfg.history; // hot-cache versioning bounds (keep / max_bytes)
 
     // Recycle-bin retention, on the same startup tick as the session sweep: an
@@ -158,6 +184,8 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
         .blobs = blob_store,
         .lock = &db_lock,
         .io = io,
+        .terms = terms_store,
+        .text = text_store,
     };
     try worker.start();
     defer worker.stop();
