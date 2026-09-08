@@ -618,7 +618,7 @@ describe("shell seams", () => {
 
   // THE SCOPE HAS NO SEARCH IN IT ANY MORE, and that absence is the assertion.
   //
-  // `golden-search.md` §1.1 collapsed the five in-document search routes to one
+  // collapsed the five in-document search routes to one
   // keyed by BLOB MD5 — "history and bin are not special: they are other md5s".
   // A trashed file's blob keeps the md5 it had before it was trashed, and
   // `getBinNoteMeta` (rerouted above) already hands the viewer that `fileHash`,

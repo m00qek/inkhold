@@ -1218,7 +1218,7 @@ test "sync supersede RETAINS the prior version: history row, old blob kept, and 
     try std.testing.expectEqual(@as(i64, @intCast(v1.len + v2.len)), try usedBytes(f, alice));
     // Two blobs coexist now (current + retained). Search stays CURRENT-ONLY —
     // the H2 invariant — and that is no longer a property of an index that the
-    // retained version was kept out of: `golden-search.md` §6 step 8 deleted the
+    // retained version was kept out of: schema v14 deleted the
     // index, and what a client is told about is the MANIFEST, which is a
     // projection of `files` and so reaches a version only while a live row points
     // at it. Pinned end-to-end by the recognized-text supersede test below, which
@@ -1852,7 +1852,7 @@ test "history meta: serves the VERSION's own page count, not the current note's;
     }
 }
 
-// FIND-IN-A-RETAINED-VERSION IS THE BROWSER'S — `golden-search.md` §6 step 7.
+// FIND-IN-A-RETAINED-VERSION IS THE BROWSER'S.
 // `GET /note/:id/history/:md5/search` and `searchHistoryPages` are gone; the
 // browser fetches `text/<md5>` for the version it is showing and searches its own
 // index. What that route proved beyond search itself — that a retained version's
@@ -3623,7 +3623,7 @@ fn countTrashed(f: *Fixture, user_id: u64) !i64 {
 
 /// How many of `user_id`'s OWN live files `q` is findable in.
 ///
-/// `golden-search.md` §6 steps 6 and 7 deleted every server-side read that could
+/// the search removal steps 6 and 7 deleted every server-side read that could
 /// answer this: step 6 took the library-wide one, step 7 took the five in-document
 /// ones and `search/query.zig` with them. **The server interprets no query at
 /// all now**, so there is nothing left to ask — which is why this reads the
@@ -5008,7 +5008,7 @@ test "the search-index manifest is served as bytes, and an unchanged one answers
 }
 
 // ---------------------------------------------------------------------------
-// THE STITCHED SEARCH-INDEX STREAM — `golden-search.md` §3.1/§3.2/§3.3
+// THE STITCHED SEARCH-INDEX STREAM
 // ---------------------------------------------------------------------------
 //
 // **THIS SPEC EXISTS BECAUSE THE OBVIOUS IMPLEMENTATION FAILS SILENTLY.** §3.1,
@@ -5427,7 +5427,7 @@ test "the search-index stream is scoped to the caller: a housemate's documents a
 }
 
 // ---------------------------------------------------------------------------
-// THE PER-DOCUMENT TEXT ROUTE — `golden-search.md` §1.1, build order step 7
+// THE PER-DOCUMENT TEXT ROUTE, build order step 7
 // ---------------------------------------------------------------------------
 //
 // ONE route replaces five. §1.1: *"All five in-doc routes collapse to
@@ -5665,7 +5665,7 @@ test "the per-document text route: unreachable and underived are ONE 404, byte f
     }
 }
 
-// FIND-IN-NOTE IS THE BROWSER'S TOO — `golden-search.md` §6 step 7.
+// FIND-IN-NOTE IS THE BROWSER'S TOO.
 // `GET /note/:id/search`, its `txt-search` twin and `searchNotePages` are gone,
 // and with them the last route that took a `q`. The scope half of what the
 // deleted spec drew is drawn on the replacing route by the two specs above:
@@ -9388,7 +9388,7 @@ test "bin parity phase 1: page-text ovals serve a TRASHED note's current version
         try std.testing.expectEqualStrings("beta", p.value.words.?[0].text);
     }
 
-    // NO BIN FIND-IN-NOTE HERE ANY MORE — `golden-search.md` §6 step 7. The bin
+    // NO BIN FIND-IN-NOTE HERE ANY MORE. The bin
     // twin of `/note/:id/search` went with its live original; find-in-document in
     // the bin fetches `text/<md5>` like everywhere else, and gate 3 of "the
     // per-document text route serves ONE document's real text" is where the
@@ -9498,7 +9498,7 @@ test "bin parity phase 2: view-only version history for a TRASHED note serves ea
     }
 
     // --- an md5 that is NOT in this file's retained history is a 404, not an empty
-    //     answer. `golden-search.md` §6 step 7 deleted the `…/history/:md5/search`
+    //     answer. The move into the browser deleted the `…/history/:md5/search`
     //     twin this used to be asserted through, so it is asserted on the
     //     page-text twin instead — the same `historyVersionIn(.trashed)` gate, on
     //     the route that still takes a `:md5` to scope. The one route that
@@ -10343,7 +10343,7 @@ fn readOnlyProbes(a: std.mem.Allocator, note_id: u64) ![]const ReadOnlyProbe {
         .face = .device,
     });
     // The five in-document search probes that used to close this list are gone
-    // with their routes (`golden-search.md` §6 step 7). Both halves of the
+    // with their routes. Both halves of the
     // coverage assertion below still hold, and that is the point: a route and its
     // probe leave together, so the audit neither loses a flagged route nor keeps
     // a stale probe naming one that no longer exists.
@@ -10366,7 +10366,7 @@ fn seedAuditData(f: *Fixture) !AuditData {
 
     // One real row is all the surviving id-bearing probes need. The versioned and
     // trashed notes seeded here existed for the five in-document search probes,
-    // which went with their routes (`golden-search.md` §6 step 7); nothing
+    // which went with their routes; nothing
     // `read_only` takes a `:md5` any more.
     const note_id = try seedRecognizedNote(f, admin, "audit.note", &.{"hello"});
 

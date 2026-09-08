@@ -1,5 +1,5 @@
 // The ENCODER for the `want=` parameter of the search-index stream — "these
-// are the manifest positions I am missing" (`golden-search.md` §3.3). The
+// are the manifest positions I am missing". The
 // decoder is `backend/services/search/want_bitmap.zig`; the two are pinned by
 // ONE checked-in artifact, `testdata/want_golden.txt`, whose meaning is
 // written out by hand on both sides.

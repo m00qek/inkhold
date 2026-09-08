@@ -1,5 +1,5 @@
 //! The SERVER SIDE of the client's search index: **the manifest and its
-//! tiering** (`golden-search.md` §2.3) — the caller's COMPLETE live document
+//! tiering** — the caller's COMPLETE live document
 //! set, which is also the only mechanism by which a trashed file ever stops
 //! matching in the browser.
 //!
@@ -58,8 +58,8 @@ fn nibble(c: u8) EncodeError!u8 {
 }
 
 // ---------------------------------------------------------------------------
-// THE MANIFEST — `client-side-search-impl.md` §2.2, and the tiering it carries,
-// `client-side-search.md` §3
+// THE MANIFEST, and the tiering it carries,
+//
 // ---------------------------------------------------------------------------
 
 // ## The manifest is COMPLETE or it is broken. There is no third option.
@@ -102,7 +102,7 @@ const filesvc = @import("../files.zig");
 const pending = @import("../pending.zig");
 const derivedstore = @import("../../store/derived.zig");
 
-/// Which pass of the fill this document belongs to — `client-side-search.md` §3,
+/// Which pass of the fill this document belongs to,
 /// in its order, so `ORDER BY tier` IS the fill order and no second table maps
 /// one to the other.
 ///
@@ -134,7 +134,7 @@ pub const Tier = enum(u8) {
 ///
 /// `derived` here is *"no tenant of the deferred worker owes this blob work"*,
 /// and that is narrower than the plain-English "its text has been extracted".
-/// `pending-ness.md` §11.4 records the gap and it is deliberate: the count and
+/// the pending-ness work records the gap and it is deliberate: the count and
 /// this column agree with the WORKER, which is the property §3 exists to keep,
 /// and the worker offers a blob only once its `note_index` row is current. So a
 /// blob whose note half is STALE reports `derived` while genuinely underived —
@@ -143,7 +143,7 @@ pub const Tier = enum(u8) {
 ///
 /// **That under-report is why the client's rule is `unknown` => `pending` and
 /// why an empty term set is only cacheable together with its `index_version`.**
-/// `client-side-search.md` §4.1: caching a false empty loses that document for
+/// Caching a false empty loses that document for
 /// ever — no error, no retry, no symptom. The `(md5, index_version)` key is what
 /// makes the stale-note window survivable: the heal bumps the row to the current
 /// version, and a client keyed on the old one refetches instead of trusting the
@@ -166,7 +166,7 @@ pub const Derivation = enum(u8) {
     unknown = 2,
 };
 
-/// THE SEAM, FILLED — `docs/scratch/pending-ness.md` §3 and §4.1.
+/// THE SEAM, FILLED.
 ///
 /// That plan is emphatic that pending-ness IS the deferred tenants' own
 /// predicate, extracted and shared: *"any other definition would be a second
@@ -219,7 +219,7 @@ fn hasRecognisedText(comptime a: []const u8) []const u8 {
         ".md5 AND recogn_status = 1 AND " ++ has_text ++ ")";
 }
 
-/// `client-side-search.md` §3's three passes as one SQL expression over the row
+/// 's three passes as one SQL expression over the row
 /// aliased `a`. Exported because §9.1's cold fill is *"one bundle per tier"*, so
 /// the terms route (step 4) selects by tier and must ask the same question this
 /// manifest answered — one expression, or the client's tier 2 and the server's
@@ -231,7 +231,7 @@ fn hasRecognisedText(comptime a: []const u8) []const u8 {
 /// PDF-only, and the device annotates formats this server has never heard of. An
 /// annotated `book.epub` is a tier-2 document. Nothing in this file may ask what
 /// the document IS; the sibling's existence is the whole answer, and
-/// `files.zig` owns it (`client-side-search-impl.md` §0.2 records why there is
+/// `files.zig` owns it (the search redesign records why there is
 /// exactly one copy).
 pub fn tierExpr(comptime a: []const u8) []const u8 {
     return "CASE WHEN " ++ isNote(a) ++ " THEN 1" ++
@@ -267,7 +267,7 @@ pub const Coverage = struct {
     /// How many of those carry no recognised text, and are therefore invisible
     /// to search however it is spelled. PERMANENT, and not to be confused with
     /// `Derivation.pending`, which is transient and resolves itself
-    /// (`pending-ness.md` §2 — two numbers, two sentences).
+    /// (— two numbers, two sentences).
     unsearchable: i64 = 0,
 };
 
@@ -296,7 +296,7 @@ pub const Row = struct {
 
 /// The whole manifest, materialised. Convenient, and honest about its cost: the
 /// manifest is complete by construction, so this is O(the caller's library) in
-/// memory as well as in work. At the 1,222-file corpus of `search-baseline.md`
+/// memory as well as in work. At the 1,222-file corpus of
 /// §1 that is tens of kilobytes (MEASURED — see the measurement test), which is
 /// inside the 50 MB budget with room to spare; a household ten times that size
 /// should stream `Cursor` instead, which is why `Cursor` is the primitive and
@@ -333,7 +333,7 @@ pub const Manifest = struct {
 /// Tier first (`.note`, then annotated, then bulk), `updated_at` DESC inside a
 /// tier, `f.id` last so that two documents saved in the same second have a
 /// stable order rather than SQLite's. The client fetches in the order it
-/// receives, so this ordering IS `client-side-search.md` §3's
+/// receives, so this ordering IS 's
 /// "download by relevance" and the client re-sorting would be a second opinion.
 ///
 /// It costs one sort of the caller's library — the ORDER BY cannot ride an index
@@ -449,7 +449,7 @@ pub const Cursor = struct {
             // `derived`. That would be the one wrong answer here: `derived` is a
             // licence to cache an empty term set for ever, and a client that
             // took it on a column the server had failed to compute would lose
-            // that document permanently (`client-side-search.md` §4.1).
+            // that document permanently.
             .derivation = if (self.stmt.columnIsNull(col_derivation))
                 .unknown
             else if (self.stmt.columnInt(col_derivation) != 0) .pending else .derived,
@@ -515,7 +515,7 @@ pub fn manifest(
 }
 
 // ---------------------------------------------------------------------------
-// THE MANIFEST ON THE WIRE — `client-side-search-impl.md` §3 step 4, decided by
+// THE MANIFEST ON THE WIRE, decided by
 // §9.2's measurement
 // ---------------------------------------------------------------------------
 
@@ -536,7 +536,7 @@ pub const manifest_header_len = manifest_magic.len + 1 + 4;
 /// The manifest as BYTES — the format §9.2's measurement chose over JSON, and
 /// the numbers are the whole argument.
 ///
-/// MEASURED, 1,222 documents (`search-baseline.md` §1's corpus size), gzip
+/// MEASURED, 1,222 documents ('s corpus size), gzip
 /// level 6:
 ///
 ///     JSON             143,139 raw   38,597 gzip
@@ -645,7 +645,7 @@ pub fn writeManifest(gpa: std.mem.Allocator, out: *std.ArrayList(u8), m: Manifes
 ///     lost a row goes on matching a deleted document for ever, because absence
 ///     from the manifest is the ONLY removal channel this design has (§2.2).
 ///   * `pending.Pulse.version` is **restart-relative and not persisted**
-///     (`pending-ness.md` §11.3 says in as many words that it is "wrong for
+///     (the pending-ness work says in as many words that it is "wrong for
 ///     anything that tries to store it across a reboot"). An ETag is stored
 ///     across reboots, by every browser, by definition.
 ///
@@ -772,7 +772,7 @@ const Fixture = struct {
     /// thread would. The REAL worker and the real tenants: a fixture that wrote
     /// `note_index.txt_index` by hand would be asserting the manifest agrees with
     /// the fixture's opinion of what "derived" means, which is the second opinion
-    /// `pending-ness.md` §3 exists to forbid.
+    /// exists to forbid.
     fn drain(f: *Fixture) void {
         deferred.drainNow(testing.allocator, f.db, f.files.blobs, &f.lock, testing.io);
     }
@@ -806,7 +806,7 @@ test "the manifest arrives in the fill order: notes, then anything annotated, th
 
     // One document per tier, uploaded in the WRONG order and timestamped so that
     // recency alone would reverse them — the bulk file is the newest thing in the
-    // library. Tier has to win, or `client-side-search.md` §3's whole argument
+    // library. Tier has to win, or 's whole argument
     // (684 bytes and the household's own handwriting is searchable) collapses
     // into "whatever was touched last".
     const bulk = try f.putBytes(1, "Don Quijote.txt", "windmills");
@@ -1017,7 +1017,7 @@ test "the version a row reports is the STORE's, so the client never asks for a f
     // written only where there was some. Reporting the column raw put 18 of a
     // real library's 41 rows into the client's `want` set permanently: the
     // stream skips what it cannot open, the empty answer changes nothing, and
-    // the next tick asks again (`backlog.md`, 2026-09-08).
+    // the next tick asks again (2026-09-08).
     const png = try f.putBytes(1, "scan.png", "\x89PNG not text at any point");
     const blank = try f.putNote(1, "blank.note", &.{});
     const written = try f.putNote(1, "handwriting.note", &.{"caligrafia"});
@@ -1126,7 +1126,7 @@ test "a just-uploaded document is PENDING, and stops being pending when the work
     var f = try Fixture.init();
     defer f.deinit();
 
-    // THE SEAM, FILLED — `pending-ness.md` §8's first sentence, asked of the
+    // THE SEAM, FILLED — 's first sentence, asked of the
     // manifest instead of the count. This replaces the tripwire that pinned
     // "every row says `unknown`"; that test existed only to make the seam
     // impossible to fill silently, and it has done its job.
@@ -1137,7 +1137,7 @@ test "a just-uploaded document is PENDING, and stops being pending when the work
     // licence to cache that emptiness for ever; `pending` is an instruction to
     // ask again. Getting it backwards on this row would make `notes.txt`
     // unsearchable in the browser permanently, with no error anywhere
-    // (`client-side-search.md` §4.1).
+    //
     const txt = try f.putBytes(1, "notes.txt", "Primeiro parágrafo.\n\nSegundo parágrafo.\n");
     try testing.expectEqual(Derivation.pending, (try f.rowFor(1, txt)).?.derivation);
 
@@ -1201,7 +1201,7 @@ test "CAVEAT: a stale note_index row reports DERIVED though nothing has derived 
     var f = try Fixture.init();
     defer f.deinit();
 
-    // THE UNDER-REPORT, DRIVEN RATHER THAN FOOTNOTED — `pending-ness.md` §11.4.
+    // THE UNDER-REPORT, DRIVEN RATHER THAN FOOTNOTED.
     // Every tenant's clause requires a CURRENT `note_index` row, because the note
     // half heals first and its heal rewrites what the tenant writes into. So a
     // blob whose row is stale is not offered to the worker, is therefore not
@@ -1614,7 +1614,7 @@ test "WORK PIN: the manifest costs the caller's own live library, and nothing el
     // row already has the name and the md5 the arms go and re-read, so a
     // hand-written `d.name LIKE '%_.txt' AND ni.txt_index IS NULL` would answer
     // most rows without touching `files` at all. That is precisely the second
-    // opinion `pending-ness.md` §3 forbids — *"free to drift from what the worker
+    // opinion forbids — *"free to drift from what the worker
     // actually does"* — and the failure it buys is silent: the manifest would
     // report `derived` for a blob the worker still owes, the client would cache
     // that document's emptiness for ever, and nothing anywhere would error. The
@@ -1628,7 +1628,7 @@ test "WORK PIN: the manifest costs the caller's own live library, and nothing el
     //
     // AND WHAT IT COSTS IN TIME, because VM steps are not milliseconds. MEASURED
     // on the deployment target — Pi 1 B+, the 1,222-file install
-    // `pending-ness.md` §11.1 measured on, 322 live documents for the owner under
+    // the pending-ness work measured on, 322 live documents for the owner under
     // test, warm cache, 40 iterations — the statement itself, both spellings:
     //
     //     owes_derive_expr = NULL          127.27 ms p50   141.51 ms p95
@@ -1692,9 +1692,8 @@ fn writeJson(gpa: std.mem.Allocator, out: *std.ArrayList(u8), m: Manifest) !void
     try out.appendSlice(gpa, "]}");
 }
 
-/// gzip at LEVEL 6 — the setting every other figure in `client-side-search.md`
-/// and `client-side-search-impl.md` was taken at, so these numbers sit beside
-/// those without a footnote.
+/// gzip at LEVEL 6 — the setting every other size figure in this tree was
+/// taken at, so these numbers sit beside those without a footnote.
 fn gzipLen(gpa: std.mem.Allocator, bytes: []const u8) !usize {
     var sink: std.Io.Writer.Allocating = try .initCapacity(gpa, 4096);
     defer sink.deinit();
@@ -1713,7 +1712,7 @@ test "MEASUREMENT: what one manifest costs on the wire, and how it grows" {
     // that document. It is a test rather than a note so that the numbers cannot
     // go stale without something going red.
     //
-    // The library is sized to `search-baseline.md` §1's real corpus — 1,222
+    // The library is sized to 's real corpus — 1,222
     // undeleted non-folder files — and the timestamps are SPREAD over two years
     // rather than left at the ingest clock, because a manifest whose rows all
     // shared one second would delta-encode to nothing and flatter the binary form

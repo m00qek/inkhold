@@ -12,8 +12,8 @@
 // space and two mappings for one page is how two overlays drift apart.
 //
 // WHY THE MODULE HANDS OVER WORDS AND NOT MATCHES. The server decides what
-// matched; the client only points at it (`docs/scratch/pdf-in-doc-search.md`
-// §1). MuPDF's own `fz_search_page` would have been less code and a second
+// matched; the client only points at it. MuPDF's own `fz_search_page` would
+// have been less code and a second
 // opinion: its matcher does not fold diacritics, so `avaliação` in the page
 // would not answer a query the index counted as `avaliacao`, and the count on
 // screen and the boxes under it would describe different things. So the fold
@@ -56,7 +56,7 @@ export interface PdfWord {
  * DEFENSIVE ABOUT ITS OWN SIDE OF THE WIRE, exactly as `parsePageLinks` is, and
  * for the same reason: `t` is text out of a document that arrived by device
  * sync. A malformed payload costs the page its highlight and nothing else —
- * which is the honesty rule's own shape (`pdf-in-doc-search.md` §6). The page
+ * which is the honesty rule's own shape. The page
  * still MATCHED; the server said so, and nothing here can take that back.
  *
  * An empty `t` is dropped rather than kept: it can match no term, so it is a box

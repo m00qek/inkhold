@@ -1,5 +1,5 @@
 // Where the terms stream lands: one IndexedDB record per document, keyed by
-// `(md5, index_version)` — `golden-search.md` §4.2.
+// `(md5, index_version)`.
 //
 // What this must not break:
 //   * No wasm on this path. Sync writes rows and nothing else; the FTS index

@@ -77,12 +77,12 @@ const Allocator = std.mem.Allocator;
 /// - **8** → canonical document order (in-doc-search plan): the heal re-minted
 ///   any holder's segment band a PAST incremental flip left OUT of page order,
 ///   so `rowid ASC == reading order` for legacy notes too. **RETIRED** by
-///   `golden-search.md` §6 step 8 along with the bands themselves. Kept in the
+///   schema v14 along with the bands themselves. Kept in the
 ///   list because the number is spent. No stored-column change either way — the
 ///   raster/SNPG/text goldens were untouched.
 /// - **9** → per-document term set (in-doc-search entry 8b): backfilled each
 ///   note's `doc_terms` — the in-doc fuzzy candidate pool — on the same
-///   canonical-order heal. **RETIRED**: `golden-search.md` §6 step 6
+///   canonical-order heal. **RETIRED**: the search removal
 ///   moved the typo ladder into the browser and schema v13 dropped the table, so
 ///   this bump now heals nothing that still exists. Kept in the list because the
 ///   number is spent: a client that saw 9 must not see it again meaning
@@ -288,7 +288,7 @@ pub const Parsed = struct {
 };
 
 /// The `.note` half of `derive_search`'s page source — the whole of this
-/// format's contribution to `golden-search.md` §2.2.
+/// format's contribution to.
 ///
 /// **A page with no text is skipped, not yielded empty.** `PageRow.text` is
 /// null whenever the page has no FINISHED transcript, which on this format is
@@ -765,7 +765,7 @@ const upsert_page_sql =
 /// It used to be a `PageUpsert` context handed to `search.reconcilePage`, which
 /// wrapped it in the posting dance — diff the stored text, subtract the old
 /// postings, upsert, then either refresh them in place or mint a fresh masked
-/// rowid. `golden-search.md` §6 step 8 deleted the index those postings fed, so
+/// rowid. schema v14 deleted the index those postings fed, so
 /// what is left is the upsert the adapter always owned, called directly.
 fn upsertPage(db: sqlite.Db, blob_md5: []const u8, page: PageRow, buf: []u8) !void {
     var s = try db.prepare(upsert_page_sql);
@@ -795,7 +795,7 @@ fn upsertPage(db: sqlite.Db, blob_md5: []const u8, page: PageRow, buf: []u8) !vo
 /// wasteful but never a constraint violation, and a page row keeps its `id`
 /// across a re-index.
 ///
-/// **It writes rows and nothing else now.** Until `golden-search.md` §6 step 8
+/// **It writes rows and nothing else now.** Until schema v14
 /// this was also the "re-parse of the SAME blob" search path: each page's stored
 /// text was diffed before the upsert, and a page whose text had changed had its
 /// FTS postings subtracted and re-inserted at the same masked rowids so the

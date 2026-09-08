@@ -1,7 +1,7 @@
 //! The search package's leaf: the tokenizer and the fold. Imports nothing of the
 //! package's.
 //!
-//! The half of the old module that survived `golden-search.md` §6's sweep, and
+//! The half of the old module that survived the search removal's sweep, and
 //! the basis of parity by construction (§2.2): the derive step folds through
 //! this tokenizer to produce the `terms/` records the browser indexes, so the
 //! two engines agree about what a word is because one declaration made both.
@@ -26,8 +26,8 @@ pub const fts_tokenizer = "unicode61 remove_diacritics 2";
 /// connection kept paying for the biggest thing folded before it: a 300-word
 /// page fold went from 0.4 ms to 13.9 ms and did not come back, the first
 /// search after it paid 160-194 ms, and a reader that had never folded a
-/// document still paid 2.6x because a one-row `DELETE` is a tombstone too
-/// (`optimizations.md` 11b). Automerge reclaimed it only after several hundred
+/// document still paid 2.6x because a one-row `DELETE` is a tombstone too.
+/// Automerge reclaimed it only after several hundred
 /// folds, and not reliably within two thousand. Today's caller
 /// (`derive_search.TermsWriter`) folds a document page by page through one
 /// connection, so page N would pay for pages 0..N-1. Nothing reads the text
@@ -64,7 +64,7 @@ pub fn foldTerms(arena: std.mem.Allocator, db: sqlite.Db, tok: []const u8) ![]co
 }
 
 // ---------------------------------------------------------------------------
-// Tests — the shared fold table does not accumulate (optimizations.md 11b)
+// Tests — the shared fold table does not accumulate
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;

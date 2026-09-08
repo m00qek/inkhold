@@ -426,7 +426,7 @@ describe("txt viewer — find", () => {
     await flush();
 
     // The bar is open and pre-filled, and the query went to the BLOB — `fileHash`,
-    // not the file id. That is the whole of `golden-search.md` §1.1's collapse:
+    // not the file id. That is the whole of 's collapse:
     // one md5-keyed route, so history and the bin reach it with no reroute.
     expect((q(v, ".txtbar") as HTMLElement).hidden).toBe(false);
     expect((q(v, ".txtbar input") as HTMLInputElement).value).toBe("zephyrine");

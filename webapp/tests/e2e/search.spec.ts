@@ -4,8 +4,7 @@ import { mockDocText, noteTextRecord, type TextRecord } from "./helpers/docText"
 import { mockSearchIndex, noteTermsDocument, type FixtureManifestRow } from "./helpers/searchIndex";
 import { fakeFileHash } from "../../src/api/fake";
 
-// ONE QUERY, ONE SCOPE, ONE LIST — and, since `golden-search.md` §6 step 6, one
-// ENGINE.
+// ONE QUERY, ONE SCOPE, ONE LIST — and, since the search removal, one ENGINE.
 //
 // The library used to answer a query twice: a gallery filtered by NAME to the
 // folder you were standing in, plus a separate list of transcript matches from

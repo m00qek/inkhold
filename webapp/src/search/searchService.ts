@@ -1,4 +1,4 @@
-// What the search box calls — `golden-search.md` §6's whole surface: the local
+// What the search box calls — the search removal's whole surface: the local
 // index, and the sync lifecycle that gets it into a state where it can answer.
 //
 //     event: index ─┐

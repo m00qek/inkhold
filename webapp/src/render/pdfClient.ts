@@ -60,7 +60,7 @@ export interface PdfSession {
    * A page with none answers `[]`, and that stays an answer rather than an
    * error: a scanned page has no words, and a page the SERVER matched can still
    * yield none this side can name. The count on screen is the server's either
-   * way (`pdf-in-doc-search.md` §6), so an empty list costs a box and never a
+   * way, so an empty list costs a box and never a
    * match.
    */
   pageWords(page: number): Promise<PdfWord[]>;

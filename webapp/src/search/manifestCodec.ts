@@ -1,5 +1,5 @@
 // The DECODER for the server's MANIFEST payload — the caller's complete live
-// document set (`golden-search.md` §2.3). The encoder is
+// document set. The encoder is
 // `backend/services/search/index_export.zig`'s `writeManifest`; the two are
 // pinned by ONE checked-in artifact, `testdata/manifest_golden.bin`, whose
 // expectations are written out by hand on both sides. Pure: no wasm, no

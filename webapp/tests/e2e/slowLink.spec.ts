@@ -335,7 +335,7 @@ test.describe("a search inside a subfolder, while the tree walk is outstanding",
       // THE TRANSCRIPT HALF NEEDS NO ENTRY, and that absence is the whole of what
       // §6 step 6 changed here. It used to be `controlplane/search`, answering at
       // once and answering NOTHING — which is what settled the question
-      // prematurely. It is now the browser's own index (`golden-search.md` §6),
+      // prematurely. It is now the browser's own index,
       // which in this scenario has no manifest and no stored rows and therefore
       // also answers nothing, instantly and without a round trip.
       //
@@ -401,7 +401,7 @@ test.describe("a search inside a subfolder, while the tree walk is outstanding",
 // It lived here as a LIBRARY search: `controlplane/search` was held, a second
 // keystroke superseded the first, and the observable was the browser reporting
 // the first request as `net::ERR_ABORTED`. A library-wide query makes no request
-// at all now (`golden-search.md` §6 step 6), so there is no connection out here
+// at all now, so there is no connection out here
 // to give back and no way to write that assertion in this scope.
 //
 // The behaviour it pinned is still real, on the one search that still touches the

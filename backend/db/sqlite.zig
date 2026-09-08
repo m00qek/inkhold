@@ -50,7 +50,7 @@ pub var log_exec_errors: bool = true;
 /// a reader re-reads pages the writer would have kept, which costs I/O, and the
 /// pool multiplies whatever this is by its size. 1 MB × 3 readers ≈ 3 MB of page
 /// cache — file-backed and reclaimable, which is the half of the RSS figure the
-/// kernel does not charge us for (run-on-rpi-32bit.md). It is a lazily-filled
+/// kernel does not charge us for. It is a lazily-filled
 /// CEILING, not an upfront allocation.
 pub const reader_cache_size_kib = 1000;
 
@@ -124,7 +124,7 @@ pub const Db = struct {
         // Same 32 MB window as the writer, and cheaper here than it looks: the
         // kernel page cache holds ONE physical copy of the mapped file across
         // every connection that maps it, so N readers do not cost N times the
-        // pages. See optimizations.md 7a.
+        // pages.
         try db.exec("PRAGMA mmap_size = 33554432;");
         return db;
     }

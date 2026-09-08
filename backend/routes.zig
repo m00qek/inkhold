@@ -206,7 +206,7 @@ pub const routes = [_]router.Route{
     // `/file/metadata/` rather than the `/note/` noun. The genuinely note-only
     // reads (`/note/:id/page`, `/template`, `/history/...`) stay below.
     .{ .method = .GET, .path = "/api/controlplane/file/metadata/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneNote },
-    // --- The client-side search index (`golden-search.md` §2/§3) ---
+    // --- The client-side search index ---
     //
     // GLOBAL SEARCH IS THE BROWSER'S. The server ships the caller's complete live
     // document set (the manifest) and the per-document term records the stream
@@ -227,7 +227,7 @@ pub const routes = [_]router.Route{
     // a conditional request per visit; see the handler for why that is the answer
     // to §9.2's open refetch question rather than a polling cadence.
     .{ .method = .GET, .path = "/api/controlplane/search-index/manifest", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexManifest, .read_only = true },
-    // The stitched stream (`golden-search.md` §3.2/§3.3, build order step 2), and
+    // The stitched stream (build order step 2), and
     // it is the one route in this family that is NOT `read_only`.
     //
     // Not because it writes — it reads `files` and the two index tables exactly as
@@ -242,7 +242,7 @@ pub const routes = [_]router.Route{
     // out. That is also why it takes no read-only probe: the flag is what the
     // probe audits, and this route does not claim it.
     .{ .method = .GET, .path = "/api/controlplane/search-index/stream", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexStream, .manual_db_lock = true },
-    // The per-document text record (`golden-search.md` §1.1, build order step 7)
+    // The per-document text record (build order step 7)
     // — the third of the three routes §6.1's sweep leaves standing, and the one
     // that replaced FIVE: `/note/:id/search`, `/note/:id/txt-search`,
     // `/note/:id/history/:md5/search` and both bin twins all collapsed to

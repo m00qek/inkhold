@@ -357,7 +357,7 @@ test.describe("page numbers in the URL count from one", () => {
     await expect(page.locator(".pager__count")).toHaveText("20 / 20");
   });
 
-  // BROKEN SINCE `golden-search.md` §6 STEP 6, DECLARED RATHER THAN LEFT RED —
+  // BROKEN SINCE the search removal STEP 6, DECLARED RATHER THAN LEFT RED —
   // AND NOW RUNNING, because the fixture it was waiting for exists
   // (`helpers/searchIndex.ts`).
   //

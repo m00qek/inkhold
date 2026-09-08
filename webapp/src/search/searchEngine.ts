@@ -1,7 +1,7 @@
 // The MAIN-THREAD half of the search worker — `SearchIndex`'s surface,
 // `Promise`-shaped, answered by `engineWorker.ts` where a `Worker` exists and
-// by an instance in this thread where one does not (`golden-search.md` §7;
-// `docSearch.ts` says why each consumer gets its own engine and worker).
+// by an instance in this thread where one does not. `docSearch.ts` says why
+// each consumer gets its own engine and worker.
 //
 // What this must not break:
 //   * `createSearchEngine` constructs NOTHING — no `Worker`, no fetch, no linear

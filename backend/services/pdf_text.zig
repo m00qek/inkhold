@@ -1,12 +1,12 @@
 //! The `.pdf` text pass: extract one page of text at a time and hand it to
 //! `derive_search.writeDerived`, which writes the document's `terms/` and
-//! `text/` files (`golden-search.md` §2.2). The browser searches those.
+//! `text/` files. The browser searches those.
 //!
 //! **It used to write rows too** — one `kind = 2` row per page in
 //! `note_page_index`, scoped by `segment_search` and indexed by `segment_fts`,
 //! so library search returned PDF pages interleaved with note pages. It was the
 //! segment seam's third tenant, it forced the whole reserved-band design
-//! (`search/maintain.zig`), and `golden-search.md` §6 step 8 deleted all of it.
+//! (`search/maintain.zig`), and schema v14 deleted all of it.
 //! What that removes from THIS file is the chunked index write and the second
 //! MuPDF walk it forced (`deferred.writePdfFiles` used to be a separate pass
 //! over the same extractor); what is left is `Chunk`/`nextChunk`, which are how
@@ -67,10 +67,10 @@ pub const max_pages: u32 = 5_000;
 /// ~40 KB of text, whichever comes first, which is ~2 MB for the harshest
 /// document on record against a 50 MB budget.
 ///
-/// **These were a WRITE-TRANSACTION cap, and both halves were measured as one**
-/// (`mupdf.md` §9.8): neither rows nor bytes alone predicted the lock hold, and
+/// **These were a WRITE-TRANSACTION cap, and both halves were measured as one:**
+/// neither rows nor bytes alone predicted the lock hold, and
 /// text volume mattered as much as page count — the cookbook cost 1.76x the
-/// planner's write on FEWER pages. `golden-search.md` §6 step 8 deleted the write,
+/// planner's write on FEWER pages. schema v14 deleted the write,
 /// so what the dual cap bounds now is RESIDENCY, where the byte half is the one
 /// that was always doing the work. The numbers are kept rather than re-derived:
 /// they are known to keep a book out of memory, and nothing measured says a
@@ -295,7 +295,7 @@ pub const Pages = struct {
 /// "this PDF's text is derived" is true only when it is.
 ///
 /// It used to close a CHUNKED INDEX WRITE — the late-holder band repair, then
-/// the verdict. `golden-search.md` §6 step 8 deleted the `kind = 2` rows and the
+/// the verdict. schema v14 deleted the `kind = 2` rows and the
 /// bands, so the verdict is all that is left of the transaction.
 pub fn finish(
     db: sqlite.Db,
@@ -361,7 +361,7 @@ test "the page cap is a decision with a stated value, not an accident" {
 // Tests — the walk, and the verdict it earns
 // ---------------------------------------------------------------------------
 
-// WHAT WENT FROM HERE, AND WHERE IT WENT. Until `golden-search.md` §6 step 8
+// WHAT WENT FROM HERE, AND WHERE IT WENT. Until schema v14
 // this file wrote `kind = 2` rows into a reserved band, and most of the tests
 // below were about that band: contiguity across three commits, an ingest between
 // chunks that must not interleave, a crash that leaves holes rather than

@@ -1,4 +1,4 @@
-// The READER for the stitched terms stream — `golden-search.md` §2.2's JSONL
+// The READER for the stitched terms stream — 's JSONL
 // records, parsed as they land. The writer is `derive_search.zig`'s
 // `writeHeader` plus its per-page line, stitched into one gzip member by
 // `search/index_stream.zig`. Pure: no wasm, no IndexedDB, no `fetch`.

@@ -573,7 +573,7 @@ fz_buffer *ink_shim_page_links(fz_document *doc, int number)
 
 /* WHY WORDS AND NOT A SEARCH. MuPDF has `fz_search_page`, needle in, quads out,
  * and it would be less code than everything below. It is the wrong shape here,
- * and the reason is `pdf-in-doc-search.md` §6: the SERVER decides what matched.
+ * and the reason is: the SERVER decides what matched.
  * Its tokenizer is SQLite's `unicode61 remove_diacritics 2` — a fold MuPDF's
  * matcher does not implement — so a household writing Portuguese would have the
  * index count `avaliação` for a query of `avaliacao` and the page's own renderer

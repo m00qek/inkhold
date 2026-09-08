@@ -1,4 +1,4 @@
-// The BOUNDED half of the in-document text cache — `golden-search.md` §4.4.
+// The BOUNDED half of the in-document text cache.
 //
 //     on demand    →  GET text/<md5>?v=…  →  the browser's HTTP cache  (no code)
 //     prefetched   →  GET text/<md5>?v=…  →  HERE                     (this file)

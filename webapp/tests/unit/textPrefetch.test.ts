@@ -16,7 +16,7 @@ import { createTextPrefetch, orderCandidates } from "../../src/search/textPrefet
 import type { DocumentText, TextTransport } from "../../src/search/docText";
 import type { ManifestRow, Tier } from "../../src/search/manifestCodec";
 
-// WHAT THE BROWSER CACHES OF A DOCUMENT'S TEXT — `golden-search.md` §4.4.
+// WHAT THE BROWSER CACHES OF A DOCUMENT'S TEXT.
 //
 // The two halves are tested at different levels on purpose. The BUDGET decision
 // is pure (`planTextEviction`) and asserted directly, because the real store

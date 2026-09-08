@@ -41,7 +41,7 @@ export interface PdfHighlightLayer {
    *
    * An empty list takes the layer down, which is the state a page the server
    * matched but the client could not locate lands in — no box, and the counter
-   * above it still says the page matched (`pdf-in-doc-search.md` §6).
+   * above it still says the page matched.
    */
   setMarks(words: readonly PdfWord[], at: { pagePt: Size; canvas: Size; current: number }): void;
   /** Take the layer down. */

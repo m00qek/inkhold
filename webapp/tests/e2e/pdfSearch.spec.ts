@@ -15,7 +15,7 @@ import { fakeFileHash } from "../../src/api/fake";
 // blob and is now the browser's own FTS5 instance, built from `text/<md5>` —
 // the SAME route and the SAME record the reader and the `.txt` viewer fetch,
 // because a PDF page is a segment whose ordinal is a page number and nothing
-// else about it is special (`golden-search.md` §1.1).
+// else about it is special.
 //
 // Every other test stands on one side of that line — `pdfFind.test.ts` proves
 // the controller obeys the count it is given, `docSearch.test.ts` proves the

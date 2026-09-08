@@ -22,7 +22,7 @@ const menu = (page: Page): Locator => page.locator(".vh");
 const rows = (page: Page): Locator => page.locator(".vh-row");
 
 /**
- * The version preview's find, served (`golden-search.md` §1.1, §6 step 7).
+ * The version preview's find, served.
  *
  * `/note/:id/history/:md5/search` is gone. A preview searches the RETAINED
  * blob's own `text/<md5>` and nothing reroutes anywhere — which is §1.1's

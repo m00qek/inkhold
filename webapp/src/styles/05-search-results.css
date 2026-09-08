@@ -6,8 +6,8 @@
    listing aligned to the same grid by construction rather than by two sets of
    numbers that drift.
 
-   THE EXCERPT'S RULES ARE GONE WITH THE EXCERPT (`golden-search.md` §4.3: they
-   are dropped, not deferred), and so is the "More results" row — a whole local
+   THE EXCERPT'S RULES ARE GONE WITH THE EXCERPT (they are dropped, not
+   deferred), and so is the "More results" row — a whole local
    index answers whole, so there is no cursor and no control to style.
 
    Every rule below is scoped to its own component class — nothing here can

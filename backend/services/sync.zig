@@ -103,7 +103,7 @@ pub const SyncService = struct {
     /// `summary/hash` and `summary/group` that residue is beneath their own
     /// `ORDER BY f.id LIMIT`, which sorts the user's files and predates all of
     /// this; for `summary/id` it is the whole remaining cost, and killing it
-    /// needs an index keyed on folders. Recorded in `optimizations.md` entry 10,
+    /// needs an index keyed on folders. Recorded,
     /// not built — no measurement demands it yet.
     ///
     /// **Still replaces a `pathOf` call per row**, which is what `6605d69` moved
@@ -417,7 +417,7 @@ test "summaryGroup lists folders as groups" {
 // `summary/hash` 3-5x on the Pi (252-268 ms p50 → 872 ms-1.34 s, max 1.78 s)
 // with a change that read as an optimization and passed every behavioural test
 // there was. Only the SHAPE of the work regressed, so only a test that reads
-// the shape can catch it. See `docs/scratch/optimizations.md` entry 10.
+// the shape can catch it.
 // ---------------------------------------------------------------------------
 
 /// What the RECURSIVE STEP of a plan actually does to `files`.

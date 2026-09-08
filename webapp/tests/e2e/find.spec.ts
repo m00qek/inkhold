@@ -12,7 +12,7 @@ import { fakeFileHash } from "../../src/api/fake";
 // ancestor, a field that was a bare text node with no border or ground, and a
 // counter that quietly revised its total.
 //
-// WHAT ANSWERS THE COUNTER NOW (`golden-search.md` §1.1, §6 step 7)
+// WHAT ANSWERS THE COUNTER NOW
 //
 // The note-scoped `/note/:id/search` route is gone. Find fetches `text/<md5>`
 // once, builds a per-document FTS5 index in the browser's own wasm engine, and

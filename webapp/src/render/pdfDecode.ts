@@ -597,7 +597,7 @@ export class AsyncPdfDocument {
    * here it is load-bearing rather than merely tidy: a page of scanned images
    * has no words, and a page the server MATCHED can still yield none the client
    * can name. Either way the page stays a match with no box drawn
-   * (`pdf-in-doc-search.md` §6) — so this must not throw, or an unlocatable page
+   * — so this must not throw, or an unlocatable page
    * would take the whole find down with it.
    *
    * The bytes are copied out and parsed before the module's buffer is released,

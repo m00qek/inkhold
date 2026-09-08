@@ -7,7 +7,7 @@
 // this pins what the renderer chose to paint, which is a separate failure — the
 // strings can be perfect and the empty state still show the old line because the
 // branch never reached them, and the merge can be perfect and still drop a name
-// match. Both halves of `pending-ness.md` §6 are here too: the empty state
+// match. Both halves of are here too: the empty state
 // explains an absence, a non-empty page qualifies a presence, and the gallery
 // says nothing at all because it never claimed completeness.
 
@@ -354,7 +354,7 @@ describe("what the results say about a corrected query", () => {
   });
 });
 
-// A FAILED SEARCH IS ITS OWN STATE, and since `golden-search.md` §6 step 6 it is
+// A FAILED SEARCH IS ITS OWN STATE, and since the search removal it is
 // reachable: there is no server fallback behind the index, so an engine that
 // cannot answer reaches the results area. What it may NOT do is claim failure
 // while the thing it needs is still arriving.

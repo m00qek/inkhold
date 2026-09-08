@@ -1,11 +1,11 @@
 //! The `.txt` derivation: split a text blob into PARAGRAPH segments, which
 //! `derive_search.writeDerived` turns into the document's `terms/` and `text/`
-//! files (`golden-search.md` §2.2). The browser searches those.
+//! files. The browser searches those.
 //!
 //! **It used to write rows too** — one `kind = 1` row per paragraph in
 //! `note_page_index`, scoped by `segment_search` and indexed by `segment_fts`,
 //! so library search could return `.txt` paragraphs interleaved with note pages.
-//! `golden-search.md` §6 step 8 deleted all three, so what is left here is the
+//! schema v14 deleted all three, so what is left here is the
 //! paragraph splitter, the page source over it, and the VERDICT column that
 //! tells the deferred worker this blob is done.
 //!
@@ -131,7 +131,7 @@ pub const Segment = struct {
     ///
     /// There used to be a `text_hash` beside it — md5 of this string, the
     /// version-flip's per-paragraph diff key and the row's `content_hash`. Both
-    /// consumers were `note_page_index` rows, and `golden-search.md` §6 step 8
+    /// consumers were `note_page_index` rows
     /// retired them, so the derive no longer hashes every paragraph.
     text: []const u8,
 };
@@ -385,7 +385,7 @@ pub const Pages = struct {
 /// empty one, or the over-cap skip) is still a document, and a zero would say it
 /// has no address at all. It used to be the count of `note_page_index` rows the
 /// write laid down — a marker row for exactly this case — and the rows went with
-/// `golden-search.md` §6 step 8; the address space did not.
+/// schema v14; the address space did not.
 pub fn rowCount(d: Derived) usize {
     return @max(d.segments.len, 1);
 }
@@ -436,7 +436,7 @@ pub fn storeVerdict(db: sqlite.Db, blob_md5: []const u8, v: Verdict) !void {
 /// restate it.
 ///
 /// It also answers PER BLOB — `... AND f.md5 = ?` — which is what the per-blob
-/// term-set question in `docs/scratch/pending-ness.md` §4.1 needs, so that
+/// term-set question in the pending-ness work needs, so that
 /// distinction is a bound parameter here rather than a fourth copy of the rule.
 ///
 /// The clauses, each load-bearing:
@@ -450,7 +450,7 @@ pub fn storeVerdict(db: sqlite.Db, blob_md5: []const u8, v: Verdict) !void {
 /// about ROWS, and stopped when the write became chunked: `kind = 1` rows
 /// existed from the first commit onwards while the document was still half
 /// written, so the question called an interrupted write finished for ever.
-/// `golden-search.md` §6 step 8 deleted the rows, and the column is simply the
+/// schema v14 deleted the rows, and the column is simply the
 /// only place the answer lives now.
 ///
 /// The `note_index` join is the ORDER CONTRACT: the note half heals first
@@ -512,8 +512,8 @@ pub fn needsDerive(db: sqlite.Db, blob_md5: []const u8) !bool {
 // **What it cost while it earned its keep.** It used to write the blob's whole
 // paragraph index in ONE transaction — 4 min 28 s of held `db_lock` for a
 // 15.65 MB `.txt` on the deployment target, the largest single hold on record
-// (`run-on-rpi-32bit.md`, 2026-08-09 §5), with chunking built, measured and
-// REVERTED for costing memory (`optimizations.md` entry 13). `golden-search.md`
+// (2026-08-09 §5), with chunking built, measured and
+// REVERTED for costing memory.
 // §6 step 8 deleted that index and the hold fell to one UPDATE.
 //
 // **Why one UPDATE was still the wrong write.** After step 8 the verdict no
@@ -548,7 +548,7 @@ pub fn needsDerive(db: sqlite.Db, blob_md5: []const u8) !bool {
 // Tests — ingest, the derived record, lifecycle
 // ---------------------------------------------------------------------------
 
-// WHAT WENT FROM HERE, AND WHERE IT WENT. Until `golden-search.md` §6 step 8
+// WHAT WENT FROM HERE, AND WHERE IT WENT. Until schema v14
 // this file wrote a `kind = 1` row per paragraph into a reserved band, and most
 // of the tests below were about those rows and that band: the NOT NULL column
 // contract, per-owner isolation through `segment_search`, a re-mint that keeps a
@@ -754,7 +754,7 @@ const Put = struct { id: u64, md5: [32]u8 };
 
 /// One record line of `text/<md5>`: the ordinal, the byte range in the raw blob
 /// that the viewer scrolls to, and the unfolded paragraph. These three fields
-/// ARE the `.txt` record (`golden-search.md` §1.1 / §2.2).
+/// ARE the `.txt` record.
 const Record = struct {
     ordinal: i64,
     offset: i64,
@@ -935,7 +935,7 @@ test "FIND-IN-TXT'S MATERIAL: one record per paragraph, its ordinal, and a byte 
     try testing.expectEqual(@as(i64, 3), all.n);
     try testing.expectEqual(@as(usize, 3), all.rows.len);
 
-    // The find itself is the browser's (`golden-search.md` §6 step 7); what the
+    // The find itself is the browser's; what the
     // server owes is the material it answers from, at the right ordinals, with
     // the non-matching middle paragraph absent from the answer.
     const hits = try f.matching(&put.md5, "target");
@@ -1118,7 +1118,7 @@ test "purge and GC: a purged .txt takes its derived files with it" {
     try testing.expect(f.text.has(&put.md5, derivesearch.index_version));
 
     // Purged: the blob is reaped and its md5-keyed derivations go with it
-    // (`golden-search.md` §2.7 — purge rides the blob GC).
+    // (— purge rides the blob GC).
     try f.files.purge(1, put.id);
     try testing.expectEqual(@as(i64, 0), try f.count("SELECT COUNT(*) FROM blobs;"));
     try testing.expectEqual(@as(i64, 0), try f.count("SELECT COUNT(*) FROM note_page_index;"));

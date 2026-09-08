@@ -1173,7 +1173,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   // and the reader use, so an expired session mid-search reaches the composition
   // root instead of quietly rendering as "no matches".
   //
-  // THE ENGINE IS THE SEAM `golden-search.md` §6 LANDS ON, and step 6 left ONE
+  // THE ENGINE IS THE SEAM the search removal LANDS ON, and step 6 left ONE
   // producer behind it: `src/search/searchService.ts` is the browser's own
   // index and nothing else. NO `api` IS PASSED and that absence is the boundary
   // — there is no library-wide search route left to call, so a query the index
@@ -1247,7 +1247,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   // actions drifting apart between viewers: they are literally the same closures.
   const viewerDeps: ViewerDeps = {
     api,
-    // IN-DOCUMENT SEARCH, and it is `golden-search.md` §1.1's whole point: the
+    // IN-DOCUMENT SEARCH, and it is 's whole point: the
     // same wasm FTS5 engine the library search runs on, pointed at ONE document's
     // `text/<md5>` instead of the terms index. Built HERE, once, and handed to
     // every viewer — the reader, the `.txt` viewer and the PDF viewer all search
@@ -2584,7 +2584,7 @@ root,
    * REPAINTS ONLY THE SEARCH, and only when the number really moved. The frame
    * arrives at the poll interval whenever a derive lands, and the search list is
    * the one surface making a completeness claim the count can falsify — the
-   * gallery claims nothing, so it has nothing to correct (`pending-ness.md` §6).
+   * gallery claims nothing, so it has nothing to correct.
    */
   function onIndex(status: IndexStatus): void {
     if (status.pending === indexPending) return;

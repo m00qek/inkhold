@@ -588,7 +588,7 @@ test.describe("recycle bin", () => {
 
   test("a trashed .note preview draws recognized-text ovals and find-in-note works", async ({ page }) => {
     await signedIn(page);
-    // THE BIN IS NOT A SCOPE ANY MORE (`golden-search.md` §1.1, §6 step 7).
+    // THE BIN IS NOT A SCOPE ANY MORE.
     // `/bin/note/:id/search` is gone; a trashed file's find fetches
     // `text/<md5>` under the RETAINED blob's own address, exactly as a live
     // file's does, and `createBinScope` reroutes nothing for it — there is

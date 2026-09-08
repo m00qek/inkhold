@@ -1,4 +1,4 @@
-//! Writing the two per-document derived files (`golden-search.md` §2.2). The
+//! Writing the two per-document derived files. The
 //! format lives here; `.txt` paragraphs, `.note` pages and `.pdf` pages supply
 //! `(ordinal, text)`.
 //!

@@ -8,7 +8,7 @@
 //!
 //! ## What lives here rather than in C, and why
 //!
-//! **The reopen schedule.** `mupdf.md` §9.6-§9.9 measured this to death: with the
+//! **The reopen schedule.** the PDF measurements measured this to death: with the
 //! store capped at 4 MB the memory curve is nearly flat in batch size while TIME
 //! is not, and the knee that matters is between 256 and held-open. **Batch 32,
 //! store 4 MB, never held open** is a DECISION with its reasoning recorded
@@ -37,8 +37,8 @@ const probe = @import("probe.zig");
 /// knows how to record this.
 pub const Error = probe.Error;
 
-/// Pages between reopens. **DECIDED, not tuned** — see the module docs and
-/// `mupdf.md` §9.9. Held open, the 446 MB book costs +6.5 MB and leaves 0.3 MB
+/// Pages between reopens. **DECIDED, not tuned** — see the module docs.
+/// Held open, the 446 MB book costs +6.5 MB and leaves 0.3 MB
 /// of the server's budget; at 32 it is 12.90 MB on the real Pi.
 pub const batch_pages: u32 = 32;
 
@@ -217,7 +217,7 @@ test "a PDF with no text at all yields empty pages — a result, not a failure" 
 }
 
 test "THE REOPEN: the document is re-opened on the batch boundary and the text does not change" {
-    // The rule the 50 MB budget rests on (`mupdf.md` §9.7: held open, the 446 MB
+    // The rule the 50 MB budget rests on (: held open, the 446 MB
     // book costs +6.5 MB and leaves 0.3 MB of headroom). Memory cannot be
     // asserted in a unit test; that the reopen HAPPENS and is transparent can
     // be, with a batch of 1 so every page crosses the boundary.

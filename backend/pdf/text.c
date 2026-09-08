@@ -13,7 +13,7 @@
  * OUTLIVES a single call so `text.zig` can walk pages without reopening for each
  * one. Sharing a file would mean one of the two contracts written down twice.
  *
- * THREE RULES, each of which cost a measurement or a day (`mupdf.md` §9.6-9.9):
+ * THREE RULES, each of which cost a measurement or a day:
  *
  *   1. THE STORE IS CAPPED AT 4 MB, not left at the default. Uncapped, the
  *      446 MB Wok book peaks at 29.12 MB on the Pi against 12.90 MB capped —

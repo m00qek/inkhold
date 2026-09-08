@@ -1,4 +1,4 @@
-// WHICH documents' text the browser keeps ahead of time — `golden-search.md`
+// WHICH documents' text the browser keeps ahead of time
 // §4.4's tiering, and the only place in the client that decides it.
 //
 //     manifest rows ──order──▶ tier 1, then tier 2 by updated_at

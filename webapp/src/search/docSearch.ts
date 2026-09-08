@@ -1,4 +1,4 @@
-// IN-DOCUMENT SEARCH on the same engine as the library — `golden-search.md`
+// IN-DOCUMENT SEARCH on the same engine as the library
 // §1.1. One document's real text (`docText.ts`) goes into a wasm FTS5 instance
 // through the same `idx_query` fold; the three highlight adapters
 // (`findInNote.ts`, `txtFind.ts`, `pdfFind.ts`) read the one record shape here.

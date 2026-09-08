@@ -2,7 +2,7 @@ import type { Page } from "@playwright/test";
 import { noteTranscript, recognisedPages } from "./docText";
 
 // THE TWO ROUTES THE LIBRARY'S OWN SEARCH IS BUILT ON, as a fixture —
-// `golden-search.md` §6.1's positive half.
+// the sweep's positive half.
 //
 //     GET /api/controlplane/search-index/manifest          → SMAN bytes + ETag
 //     GET /api/controlplane/search-index/stream?m=…&want=… → stitched JSONL

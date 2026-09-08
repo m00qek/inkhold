@@ -13,7 +13,7 @@
 // THE ONE HAZARD THIS FILE EXISTS TO GET RIGHT: the byte range vs the string
 // index. A paragraph is addressed by its BYTE offset in the raw blob — the `o`/`l`
 // fields a `.txt` segment carries in its `text/<md5>` record, and the reason that
-// record has them at all (`golden-search.md` §1.1: the address is a FIELD, not a
+// record has them at all (: the address is a FIELD, not a
 // branch). The viewer holds the file as a decoded UTF-16 string. `byteToCharMap`
 // is the one conversion between them, so a multi-byte character before a match
 // cannot slide the highlight off the word.

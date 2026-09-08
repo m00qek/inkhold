@@ -1444,7 +1444,7 @@ pub const ControlPlaneService = struct {
     // parsed the blob (up to 16 MB, ranged) and wrote `note_index.txt_index`, so
     // that a `.txt` the deferred worker had not reached yet recorded its verdict
     // on a READ. That was worth its cost while the verdict meant "the paragraphs
-    // are in `segment_fts`"; `golden-search.md` §6 step 8 deleted that index, and
+    // are in `segment_fts`"; schema v14 deleted that index, and
     // what the verdict came to mean is "`terms/<md5>` and `text/<md5>` exist" —
     // which this path never wrote.
     //
@@ -2621,7 +2621,7 @@ test "hasRecognizedText means finished pages, not recognition merely enabled" {
     // document has a page of FINISHED recognition whose text carries the term.
     // Asked of `note_page_index` directly because that row is what `text/<md5>`
     // is derived from and what the browser's own index is built out of —
-    // in-document search moved into the browser in `golden-search.md` §6 step 7,
+    // in-document search moved into the browser in the move into the browser,
     // so there is no server-side find left to ask.
     for (root.entries) |e| {
         var s = try f.db.prepare(

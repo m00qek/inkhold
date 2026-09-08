@@ -14,7 +14,7 @@
 // a search:
 //
 //   COUNTS — the counter and the filmstrip badges — are the BROWSER's answer.
-//   `golden-search.md` §1.1: one document's text is loaded into the same wasm
+//   One document's text is loaded into the same wasm
 //   FTS5 instance the library search uses and asked the same `idx_query`. The
 //   text arrives as `text/<md5>` on the FIRST FIND (§4.1) — never on open,
 //   because reading a note needs the renderer and not a text index — and is

@@ -180,7 +180,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
   // --- find state ----------------------------------------------------------
   // The whole file is loaded in the viewer, so find is a DOM/text operation over
   // `loadedText` — no per-page fetch, no rectangles. The browser's own index over
-  // this file's `text/<md5>` (`golden-search.md` §1.1) names WHICH paragraphs
+  // this file's `text/<md5>` names WHICH paragraphs
   // match, how many, and their BYTE RANGES; the viewer maps those ranges into the
   // string it holds, marks them and jumps between them.
   let loadedText: string | null = null;

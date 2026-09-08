@@ -1,5 +1,5 @@
 //! The `want=` parameter of the search-index stream: a bitmap over manifest
-//! positions, base64url, read without allocating (`golden-search.md` §3.3 — a
+//! positions, base64url, read without allocating (— a
 //! bitmap because 200 md5s is a 6.6 KB URL; 1,222 documents is 204 characters).
 //!
 //! A position means nothing except against the exact row order

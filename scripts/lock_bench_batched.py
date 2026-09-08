@@ -133,8 +133,8 @@ def discover(c):
 # Selectivity here is stated per ACCOUNT, but because `phase_search` sends a
 # prefix term (see its docstring) what these timings actually track is the term's
 # posting count across the WHOLE index, not the caller's share of it — MEASURED
-# at ~30 us per whole-index posting, linear (docs/scratch/search-baseline.md
-# §3b). The classes still order correctly; the reason they do is not the one the
+# at ~30 us per whole-index posting, and linear. The classes still order
+# correctly; the reason they do is not the one the
 # names suggest.
 SEARCH_TERMS = {
     "ubiquitous": ["reuniao"],        # ~100% of pages
@@ -188,12 +188,12 @@ def phase_search(c, folders, notes, rounds, rng, term_class="mid"):
     `reuniao`.
 
     That is the RIGHT query to measure — the SPA trims on both sides of its own
-    boundary, so a prefix term is the only kind a browser can send (see
-    docs/scratch/search-baseline.md). Keep it. But it must not be confused with
-    the completed-term cost, because on the Pi the two differ by 10.0x: 810.3 ms
+    boundary, so a prefix term is the only kind a browser can send. Keep it, but
+    it must not be confused with the completed-term cost, because on the Pi the
+    two differ by 10.0x: 810.3 ms
     p50 here against 80.6 ms for the same page with the term completed, of which
-    95% is FTS posting expansion. Anything in optimizations.md or
-    run-on-rpi-32bit.md that came through this script is the left-hand number.
+    95% is FTS posting expansion. Any figure that came through this script is
+    the left-hand number.
 
     Appending a space (`q=reuniao+`) would measure the other query. Do that in a
     separate class rather than by editing this one, or the historical series

@@ -44,7 +44,7 @@
 //!     property this module exists to keep. It becomes both pending and
 //!     derivable on the pass after the note half heals.
 //!
-//! ## The cost constraint, and what it MEASURED (`docs/scratch/pending-ness.md` §5)
+//! ## The cost constraint, and what it MEASURED
 //!
 //! The live channel polls every 500 ms and its loop is PER CONNECTED CLIENT, so
 //! a naive recount inside it is *(clients × tenants)* aggregate queries per
@@ -135,7 +135,7 @@ fn spellVersion(comptime clause: []const u8) []const u8 {
     }
 }
 
-/// **The seam `docs/scratch/pending-ness.md` §4.1 named: pending-ness PER BLOB,
+/// **The seam named: pending-ness PER BLOB,
 /// as a SQL boolean** — true when any tenant still owes derive work for the
 /// `files` row aliased `alias`.
 ///
@@ -248,7 +248,7 @@ pub const Snapshot = struct {
 ///
 /// `handlers/controlplane.zig`'s SSE loop runs once per connected client every
 /// `poll_interval_ms`. Counting inside it is *(clients × tenants)* aggregates a
-/// second for ever, which is the trap `docs/scratch/pending-ness.md` §5 names. A
+/// second for ever, which is the trap the pending-ness work names. A
 /// shared 500 ms window removes the CLIENT multiplier — and MEASURED, that is
 /// still not enough: 27.25 ms twice a second is 5.5 % of the single core and a
 /// 27 ms `db_lock` window 2/s competing with device sync, permanently, to power

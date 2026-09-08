@@ -568,7 +568,7 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
    * (results are library-wide, so "where is this?" is a real question now), and
    * how far through the document the query reached.
    *
-   * No excerpt and no page chips (`golden-search.md` §4.3): one quiet line of
+   * No excerpt and no page chips: one quiet line of
    * metadata (`pageSummary`) and a link carrying the QUERY and the first
    * matching page, so find is already running on arrival and every other
    * matching page is one Next away inside the reader.

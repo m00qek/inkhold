@@ -10,7 +10,7 @@
 //   getPageText  → GET  /note/{id}/page/{n}/text?v={textHash} (immutable, HTTP-cached)
 //   getPageLinks → GET  /note/{id}/page/{n}/links?v={linksHash}
 //
-// NO SEARCH OF ANY KIND LIVES HERE ANY MORE (`golden-search.md` §6 steps 6-7).
+// NO SEARCH OF ANY KIND LIVES HERE ANY MORE.
 // The browser holds every index and answers every query itself — library-wide
 // and in-document alike; `src/search/` fetches `text/<md5>` and nothing on this
 // seam is asked to interpret a query.
@@ -296,8 +296,8 @@ export interface Api {
 
   // --- HISTORY (hot-cache versioning — "history of this file") ---
   //
-  // The read + restore face of the version history (docs/scratch/hot-cache-
-  // versioning.md, phases 3-6). All note-scoped by `:id` (the same ownership gate
+  // The read + restore face of the version history, phases 3-6. All note-scoped
+  // by `:id` (the same ownership gate
   // the sibling `/note/:id` routes use); the per-version routes are gated on
   // `:md5` being a RETAINED version of THAT file, so a stranger's md5 — or one not
   // in this file's history — is one indistinguishable 404.

@@ -61,7 +61,7 @@
 //! `userBlobRefs` (files only) survives alongside it and is NOT interchangeable.
 //! It existed for SEARCH — segment rows followed live file references, because
 //! text from content no file holds had to stop being findable whatever history
-//! said — and `golden-search.md` §6 step 8 removed that reader. What keeps it is
+//! said — and schema v14 removed that reader. What keeps it is
 //! `holdsBlob`, the ownership gate on md5-keyed reads: "may this account see
 //! bytes derived from this content" is the FILES question, and a `file_history`
 //! row is not a thing anyone browses.
@@ -200,7 +200,7 @@ pub const Files = struct {
     /// `removeBlobFiles` whenever a blob leaves disk.
     thumbs: thumbstore.ThumbStore,
     /// The two per-document derived stores, `terms/<md5>.<v>` and
-    /// `text/<md5>.<v>` (`golden-search.md` §2.1). Optional because most tests
+    /// `text/<md5>.<v>`. Optional because most tests
     /// and the CLI never derive: a null store is "this deployment does not keep
     /// them", which the derive paths treat as nothing to write, not as an error.
     /// Cleanup rides `removeBlobFiles` exactly as the thumbnail's does.
@@ -341,8 +341,8 @@ pub const Files = struct {
     /// so it also travels alone — one rule, no exception.
     ///
     /// SHARED BY `list`, `childCount`, `liveSubtreeCount` and the bin listing —
-    /// and, until `golden-search.md` §6 retired them, by library-wide search and
-    /// its coverage count, which is the leak `backlog.md` reported. That is the
+    /// and, until the search removal retired them, by library-wide search and
+    /// its coverage count, which is the leak the backlog reported. That is the
     /// whole reason it is generated rather than typed out, and why it is `pub`:
     /// a count that disagreed with the listing
     /// beside it is "the one place the bin leaked back into view", and copies of a
@@ -375,7 +375,7 @@ pub const Files = struct {
     /// are one fact asked from two ends.
     ///
     /// Nothing in the backend consumes it yet. It exists because
-    /// `client-side-search.md` §3 wants "anything with a `.mark` companion" as a
+    /// the search redesign wants "anything with a `.mark` companion" as a
     /// tier-2 signal, and the moment that is written as its own SQL there are two
     /// copies of the pairing rule to keep equal. `is_folder = 0` on both sides: a
     /// folder is never half of a pair.
@@ -1082,7 +1082,7 @@ pub const Files = struct {
         }
 
         // ---- `terms/<md5>.<v>` + `text/<md5>.<v>` for a `.note`, HERE and not
-        // inside the transaction ---- `golden-search.md` §2.5: "a file write is
+        // inside the transaction ----: "a file write is
         // not in a transaction at all". The thumbnail above is the precedent and
         // the argument is the same one — a crash between the write and the
         // commit can only orphan a content-keyed, regenerable file, which
@@ -1126,7 +1126,7 @@ pub const Files = struct {
         // only by a retained version had to stop being searchable, or
         // find-in-library would surface text from content no live file held. The
         // two were deliberately separate so fusing them could not silently
-        // re-break one. `golden-search.md` §6 step 8 removed the search half.
+        // re-break one. schema v14 removed the search half.
         var new_charge = false; // the user held NO reference of any kind to the new content
         if (!same_content) new_charge = try self.userChargedRefs(user_id, md5) == 0;
 
@@ -1178,7 +1178,7 @@ pub const Files = struct {
         // atomically saw exactly one version — `flipOwnerBlob` when this row was
         // both their last reference to the old content and their first to the
         // new, and a drop and/or a mint when the reference counts said
-        // otherwise. `golden-search.md` §6 step 8 deleted that index. What the
+        // otherwise. schema v14 deleted that index. What the
         // client sees a new version of instead is the derived files, which are
         // keyed by md5 and so need no per-owner bookkeeping at all.)
 
@@ -2144,7 +2144,7 @@ pub const Files = struct {
         // (The account's search world used to go FIRST here, while the md5-keyed
         // text the FTS deletes read still existed: every posting in the user's
         // partitions, the segment rows, and the partition mapping rows.
-        // `golden-search.md` §6 step 8 deleted all three, and the derived files
+        // schema v14 deleted all three, and the derived files
         // this account's blobs may still have are reaped with the BLOBS below —
         // they are md5-keyed and shared, so they were never per-account.)
 
@@ -2608,7 +2608,7 @@ pub const Files = struct {
         // any more had to stop being findable, whatever `file_history` said. It
         // ran after the deletes so it saw the final state, and before the decrefs
         // because the FTS 'delete' read the md5-keyed text a refcount-0 GC would
-        // take away. `golden-search.md` §6 step 8 removed the index; a purge's
+        // take away. schema v14 removed the index; a purge's
         // only remaining search effect is the derived files a reaped blob takes
         // with it, which `removeBlobFiles` handles below.)
 
@@ -2733,7 +2733,7 @@ pub const Files = struct {
 
     /// True when `user_id` can reach blob `md5` by ANY path they already have —
     /// the ownership boundary for `/api/controlplane/text/{md5}`
-    /// (`golden-search.md` §1.1).
+    ///
     ///
     /// **It is one predicate because the five in-document routes it replaces
     /// were three gates over the same question.** A caller reaches a blob's text
@@ -3254,7 +3254,7 @@ pub const Files = struct {
         self.blobs.remove(md5);
         self.thumbs.remove(md5);
         // Every version, because this side does not know which ones exist
-        // (`golden-search.md` §2.7 — purge rides the blob GC).
+        // (— purge rides the blob GC).
         if (self.terms) |t| t.removeAll(md5);
         if (self.text) |t| t.removeAll(md5);
     }
@@ -3317,7 +3317,7 @@ pub const Files = struct {
         // An FTS pass used to go FIRST here, and could not be folded into the
         // cascade: an external-content FTS5 delete read the text back out of
         // `note_page_index` to know which postings to subtract, so it only worked
-        // while those rows were still there. `golden-search.md` §6 step 8 deleted
+        // while those rows were still there. schema v14 deleted
         // that index, and the ordering constraint with it.
         try noteindex.deleteForBlob(self.db, md5);
         try spdindex.deleteForBlob(self.db, md5); // intent; the FK cascade is the backstop
@@ -6378,7 +6378,7 @@ test "repairDerivedThumb (.note) heals a stale row and a wiped row — restoring
     // 2. Row wiped entirely (a pre-index blob): repair restores the row + its
     // cover location. (This used to have to wipe `segment_fts` and
     // `segment_search` first — their FK blocked deleting pages from under them.
-    // `golden-search.md` §6 step 8 removed both.)
+    // schema v14 removed both.)
     try f.db.exec("DELETE FROM note_index;");
     try testing.expect(f.files.thumbNeedsRepair(md5));
     f.files.repairDerivedThumb(NoLock{}, md5);
@@ -6408,7 +6408,7 @@ test "purging the last reference removes the .note cover file along with the blo
 
 /// A real device capture, and the reason it is this one: two pages, page 0
 /// finished (`"Test\nMiddle\nTest"`) and page 1 still recognising. Both halves
-/// of `golden-search.md` §2.2 — a row, and a page that must not produce one —
+/// of — a row, and a page that must not produce one —
 /// in one blob, from a device rather than from the synthetic builder.
 const sample2_note = @embedFile("sample-2.note");
 
@@ -6681,7 +6681,7 @@ test "SEARCH-NEUTRALITY: a renamed + relocated note leaves the blob-keyed index 
     //
     // It used to count `segment_search` rows, which were per owner x blob and
     // therefore the thing a path-aware mechanism would have disturbed. Those went
-    // with `golden-search.md` §6 step 8, so the same question is asked of the row
+    // with schema v14, so the same question is asked of the row
     // set that survives: the blob's page index, and its `indexed_at` stamp, which
     // a re-derive would move even if the row count came out the same.
     const IndexState = struct { rows: i64, indexed_at: i64 };

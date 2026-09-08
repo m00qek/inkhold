@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 
 // ONE DOCUMENT'S TEXT, served to e2e — the only route in-document search still
-// makes (`golden-search.md` §1.1, §6 step 7).
+// makes.
 //
 //     GET /api/controlplane/text/<md5>?v=<index_version>
 //

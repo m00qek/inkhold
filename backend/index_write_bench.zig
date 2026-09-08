@@ -5,7 +5,7 @@
 //!
 //! ## The question it existed to answer, and the half of it that is left
 //!
-//! `docs/scratch/golden-search.md` §6 step 8 deletes `segment_fts`,
+//! schema v14 deletes `segment_fts`,
 //! `segment_search`, `search_partitions`, the reserved-band machinery and the
 //! `kind = 1` / `kind = 2` rows in `note_page_index`, and said plainly:
 //!
@@ -88,10 +88,10 @@ const usage =
     \\  --scratch PATH   the writable copy (default index-write-bench.db). Put it
     \\                   on the SAME storage the server's database lives on — a
     \\                   commit to a tmpfs is not the commit being measured.
-    \\  --mode probe|whole|split|mint|all   what to run. Since `golden-search.md`
-    \\                   §6 step 8 landed, `probe` is the only mode with a
+    \\  --mode probe|whole|split|mint|all   what to run. Since schema
+    \\                   v14 landed, `probe` is the only mode with a
     \\                   subject; whole/split/mint say `machinery absent` and do
-    \\                   nothing, and are still accepted so the exact §8.5 command
+    \\                   nothing, and are still accepted so the exact command
     \\                   line reproduces rather than failing on an argument.
     \\  --blob MD5       (accepted, and now inert — it selected one document for
     \\                   the timed modes)
@@ -173,7 +173,7 @@ pub fn main(init: std.process.Init) !void {
     if (!machinery and (want_whole or want_split or want_mint)) {
         try emit(io,
             \\
-            \\  machinery absent — `golden-search.md` §6 step 8 has landed and there is no
+            \\  machinery absent — schema v14 has landed and there is no
             \\  write-side search maintenance left to time. That IS the after-measurement:
             \\  every millisecond §8.5's BEFORE column records is now zero, and `probe`
             \\  above is the evidence that the rows are gone too.

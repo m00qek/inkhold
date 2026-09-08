@@ -22,7 +22,7 @@ import type { StoredTermsDocument, TermsStore } from "../../src/cache/termsStore
 //
 // The server corrected every one of them and §6 step 6 deletes the server, so
 // unless the correction exists here first the capability is gone permanently.
-// `golden-search.md` §6.1 says where it goes: the ladder "moves to the browser".
+// the sweep says where it goes: the ladder "moves to the browser".
 //
 // The four cases are asserted against the REAL corpus when one is at hand and a
 // synthetic stand-in otherwise, because the questions are the same either way —

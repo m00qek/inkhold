@@ -19,7 +19,7 @@ import { ApiError } from "../../src/api/client";
 // The search controller with the DOM and the ENGINE both replaced — the same
 // shape as ocrPanel.test.ts. The invariants worth a test are the two that cost
 // real money if they regress: one run per PAUSE rather than per keystroke (which
-// used to be a request and is now a frame — `golden-search.md` §4.6), and an
+// used to be a request and is now a frame —), and an
 // answer that lost the race never painting over a newer one.
 //
 // The engine is a `LocalSearch` and nothing here knows or asks which real one it

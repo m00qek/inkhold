@@ -7,7 +7,7 @@
 // ============================================================================
 //
 // `code-review-2` recorded find-controller UNIFICATION as WON'T-DO when there
-// were two (`STATUS.md`). This is the third, and it is a consequence of that
+// were two. This is the third, and it is a consequence of that
 // decision rather than a departure from it: per-viewer controllers ARE the
 // accepted pattern here, because what the three share is a SHAPE — an in-document
 // query, terms as the one-way authority for what to mark, prev/next stepping, an
@@ -26,8 +26,7 @@
 // ============================================================================
 //
 // THE INDEX decides what matched — now the browser's own, over the document's
-// `text/<md5>` loaded into the same wasm FTS5 instance the library search uses
-// (`golden-search.md` §1.1). It answers, per page, the match COUNT and the folded
+// `text/<md5>` loaded into the same wasm FTS5 instance the library search uses. It answers, per page, the match COUNT and the folded
 // TERMS counted. This file is a LOCATOR: it asks MuPDF where those terms sit on
 // the page in front of it and draws a mark.
 //

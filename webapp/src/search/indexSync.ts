@@ -1,4 +1,4 @@
-// SYNC — `golden-search.md` §6 step 3: fetch the manifest, diff it against what
+// SYNC — the search removal step 3: fetch the manifest, diff it against what
 // is stored, ask for the difference as a bitmap, stream the answer into
 // IndexedDB as it arrives.
 //

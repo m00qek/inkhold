@@ -4,7 +4,7 @@
 //! `spd_decode.zig` and compiled in below) and the local search index (`idx_*`,
 //! here). They are ONE artifact because splitting them would ship the ~290 KB
 //! amalgamation TWICE to avoid ~10 KB of Zig a given page happens not to call —
-//! `client-side-search-impl.md` §5, which also explains the file's name: an
+//! which also explains the file's name: an
 //! artifact called `spd-decode` that also runs search is a lie in the build graph.
 //!
 //! ## The flags, and the one that is dangerous
@@ -16,7 +16,7 @@
 //! that spilled to temp STORAGE would spill to a temp FILE and fail. Forcing temp
 //! storage to memory is a prerequisite for FTS5 under `OS_OTHER=1`, and the
 //! failure it prevents *"surfaces as a corrupt index in production rather than as
-//! a build error"* (`wasm-search-bench.md` §0).
+//! a build error"*.
 //!
 //! **And it cannot be tested by behaviour, which is why `idx_open` refuses.**
 //! MEASURED while building this: with the flag REMOVED, the module is
@@ -32,7 +32,7 @@
 //!
 //! ## Two ABI traps, both silent until they are not
 //!
-//! Recorded in `wasm-search-bench.md` §6, where they cost a debugging cycle, and
+//! Recorded where they cost a debugging cycle, and
 //! both are consequences of the flag set rather than of anything here:
 //!
 //!   1. the `sqlite3_deserialize` target must come from **`sqlite3_malloc`**, not
@@ -52,7 +52,7 @@
 //!   * `schema_version` is exported so the TypeScript record that caches a
 //!     serialized image cannot drift from the DDL that produced it. A change to
 //!     the table definition or its `tokenize=` makes a stored image stale with no
-//!     server-side version moving (`client-side-search-impl.md` §4).
+//!     server-side version moving.
 //!   * `idx_query` takes the user's RAW string and folds it through the index's
 //!     own tokenizer before building the MATCH expression. A JS-side fold would
 //!     be the second tokenizer implementation the whole design exists to avoid,
@@ -148,7 +148,7 @@ else
     std.heap.page_allocator;
 
 /// MUST stay identical to `backend/services/search/fuzzy.zig`'s `fts_tokenizer`
-/// — the ONE remaining anchor, since `golden-search.md` §6 step 8 deleted
+/// — the ONE remaining anchor, since schema v14 deleted
 /// `segment_fts` and the server stopped holding an index of its own. The terms
 /// the server ships are the output of that tokenizer; a different one here would
 /// index a folded term against a differently-folded query and quietly miss.
@@ -160,7 +160,7 @@ const tokenizer = "unicode61 remove_diacritics 2";
 const schema_version: u32 = 1;
 
 /// No `prefix=` option, deliberately: the server's own index has none
-/// (`search-baseline.md` §213 blames it for the Pi's seek storm), the bench
+/// (blames it for the Pi's seek storm), the bench
 /// measured prefix queries at 0.034–0.075 ms without one, and a prefix index
 /// would grow the serialized image the client has to store for no measured gain.
 const index_ddl = "CREATE VIRTUAL TABLE docs USING fts5(body, tokenize='" ++ tokenizer ++ "');";
@@ -173,7 +173,7 @@ const index_ddl = "CREATE VIRTUAL TABLE docs USING fts5(body, tokenize='" ++ tok
 /// below. `DELETE FROM` does not empty an FTS5 index, it appends tombstones, so
 /// on a long-lived instance every fold would keep paying for the biggest thing
 /// ever folded. That failure — "search gets slower the longer the tab has been
-/// open" — is `optimizations.md` entry 11b, measured server-side at 0.4 ms → 13.9 ms.
+/// open" — is, measured server-side at 0.4 ms → 13.9 ms.
 /// A search worker is exactly as long-lived as the connections that found it.
 const fold_ddl =
     "CREATE VIRTUAL TABLE IF NOT EXISTS temp.token_fold USING fts5(t, content='', tokenize='" ++ tokenizer ++ "');" ++
@@ -545,7 +545,7 @@ export fn idx_hit(i: u32) i32 {
 // ---------------------------------------------------------------------------
 //
 // MOVED, not rewritten, from `backend/services/search/fuzzy.zig`, which
-// `golden-search.md` §6.1 says is where the candidate ladder goes: "the
+// the sweep says is where the candidate ladder goes: "the
 // `fts5vocab` corpus walk, `VocabSource` and `betterCandidate`, which move to
 // the browser". Step 6 deletes the server's copy, so what is not here is gone.
 //
@@ -585,8 +585,8 @@ export fn idx_hit(i: u32) i32 {
 // What does NOT carry over is the server's reason for caring so much. There, the
 // scan ran under a coarse global DB lock, so going slow did not merely make
 // search slow — it stalled device sync behind it, and the zero-hit prefix
-// `reunaio` measured 6,133.8 ms p50 on the Pi with 98% of it in this scan
-// (`wasm-fuzzy-bench.md`). In the browser there is no lock and nothing is queued
+// `reunaio` measured 6,133.8 ms p50 on the Pi with 98% of it in this scan.
+// In the browser there is no lock and nothing is queued
 // behind the scan: the worst case is one tab's own search box, on a search that
 // already returned nothing. So the specific danger evaporates and the
 // linear-in-V assumption is all that remains — and it does remain: a large or

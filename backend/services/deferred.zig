@@ -136,9 +136,9 @@ pub const Job = struct {
     /// is the whole gate, and a blob's holders cannot disagree about it.
     name: []const u8,
     // (A `now` used to ride here, threaded into every band mint so a partition's
-    // `created_at` and a job's clock agreed. `golden-search.md` §6 step 8 deleted
+    // `created_at` and a job's clock agreed. schema v14 deleted
     // the partitions; nothing a tenant writes is timestamped any more.)
-    /// The two derived stores (`golden-search.md` §2.1), or null where this
+    /// The two derived stores, or null where this
     /// deployment keeps none — every test that does not wire them, and
     /// `drainNow`. Null means "do not write them", never an error.
     terms: ?derivedstore.DerivedStore = null,
@@ -213,7 +213,7 @@ fn runTxt(job: Job) anyerror!void {
     // **STEP 3 USED TO BE A CHUNKED WRITE.** A 1,703-segment document written in
     // one transaction held the global `db_lock` 137 ms on the dev box and 13.9 s
     // on the Pi, so the paragraph rows were written reserve / chunk / finish,
-    // one transaction per chunk. `golden-search.md` §6 step 8 deleted those rows
+    // one transaction per chunk. schema v14 deleted those rows
     // and every one of those transactions with them: what this tenant writes to
     // the database now is ONE verdict, and §8.5's 98.1 s of held lock per
     // whole-library ingest is what that removes.
@@ -344,9 +344,9 @@ fn runPdfProbe(job: Job) anyerror!void {
 /// The PDF text pass — the tenant's second question, and back inside the
 /// three-step shape.
 ///
-/// **IT USED TO BE THE EXCEPTION, AND `golden-search.md` §6 step 8 ENDED THAT.**
+/// **IT USED TO BE THE EXCEPTION, AND schema v14 ENDED THAT.**
 /// A 1,450-page PDF's `kind = 2` rows written in one transaction held the global
-/// `db_lock` for 13.9-24.4 s (`mupdf.md` §9.8), so the row write was CHUNKED —
+/// `db_lock` for 13.9-24.4 s, so the row write was CHUNKED —
 /// extract off the lock, commit under it, around a band of masked rowids
 /// reserved up front — and the derived files were a SECOND MuPDF walk of the
 /// same book, ~0.10 s/page on the target, accepted because the two consumers
@@ -485,7 +485,7 @@ fn writeNoteFiles(job: Job, p: *const noteindex.Parsed) !void {
 /// offered and never gets its files. MEASURED against the dev database: **0 of 4
 /// `.txt` blobs would be offered — all four are already indexed** — and the 22
 /// `.note` blobs fail from the other side, deriving at ingest with a dedup'd
-/// re-link taking no fresh parse. `golden-search.md` §2.4 states the rule the
+/// re-link taking no fresh parse. the search redesign states the rule the
 /// old question violates: *"derived is the existence of the file, for every
 /// format, with no tenant predicate involved."*
 ///
@@ -669,7 +669,7 @@ pub const Worker = struct {
         // ONCE AT START, and on THIS thread rather than the boot path. Deriving
         // a library that has none is minutes of MuPDF and note parsing on a Pi
         // 1 B+, and boot must not wait for it — where `nice19` above has already
-        // put this thread at the priority `mupdf.md` §9.8 measured at 1.4 ms of
+        // put this thread at the priority the PDF measurements measured at 1.4 ms of
         // foreground cost. It is the same argument `sweepTmp` makes for running
         // at startup, applied to work too big to run at startup.
         self.reconcileDerived();
@@ -861,9 +861,9 @@ pub const Worker = struct {
 };
 
 /// Drops the CALLING THREAD to nice 19 — the other half of the scheduling
-/// answer, and the half `search-index.md` §4 got the wrong way round.
+/// answer, and the half an earlier design got the wrong way round.
 ///
-/// **MEASURED on the Pi** (`mupdf.md` §9.8). A CPU-bound background pass against
+/// **MEASURED on the Pi**. A CPU-bound background pass against
 /// the single ARM1176 core doubles foreground latency at nice 0 (19.8 → 40.0 ms
 /// p50); at nice 19 it costs **1.4 ms** (19.8 → 21.2). That one call is the
 /// whole reason the PDF parse does not have to be resumable — and resumability
@@ -983,7 +983,7 @@ const Fixture = struct {
     /// Has the `.txt` tenant finished with this blob? The VERDICT, which is what
     /// the tenant writes to the database and the only thing it writes.
     ///
-    /// It used to count the blob's `kind = 1` paragraph rows; `golden-search.md`
+    /// It used to count the blob's `kind = 1` paragraph rows;
     /// §6 step 8 deleted them, and the derived FILES the tenant now produces are
     /// asserted directly in the tests that wire the stores.
     fn txtDone(f: *Fixture, md5: []const u8) !bool {
@@ -1139,7 +1139,7 @@ test "THE .txt DERIVE WRITES IN READING ORDER, and the verdict comes AFTER the f
     //
     // This used to assert the same two things about a CHUNKED ROW WRITE, through
     // triggers on `note_page_index` and `note_index` — the only honest observer
-    // of order from outside those transactions. `golden-search.md` §6 step 8
+    // of order from outside those transactions. schema v14
     // deleted the rows and the chunking, so the order is now observable directly:
     // the records are in the file, and the verdict is in the row.
     var f = try Fixture.init();
@@ -1521,7 +1521,7 @@ test "a SCANNED PDF still gets its two files, and they are the header alone" {
 }
 
 test "NICE 19 IS PER-THREAD — the worker yields the core, the request threads do not" {
-    // The scheduling half of the answer (`mupdf.md` §9.8): a CPU-bound pass at
+    // The scheduling half of the answer: a CPU-bound pass at
     // nice 0 doubles foreground latency on the single ARM1176 core, at nice 19 it
     // costs 1.4 ms. The property that makes that safe is that nice on Linux is
     // per-TASK — so this asserts BOTH halves: the spawned thread really moved,
@@ -1589,7 +1589,7 @@ test "a tenant's discovery statement CONTAINS its predicate, so a second reader 
 }
 
 test "the predicate answers PER BLOB as well as per install — one bound parameter, not a fourth copy" {
-    // `docs/scratch/pending-ness.md` §4.1 needs "is THIS blob still being
+    // the pending-ness work needs "is THIS blob still being
     // derived?" for a cache decision, and getting it wrong loses data silently:
     // a client that caches a not-yet-derived blob's empty term set never asks
     // again. That endpoint is not built here, but the predicate it will be built

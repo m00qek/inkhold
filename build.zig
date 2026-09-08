@@ -8,7 +8,7 @@ const sqlite_flags = [_][]const u8{
     // FTS5 is a *build option*, not a given: on a host SQLite built without it
     // the server fails at runtime. Vendoring turns that into a guarantee.
     //
-    // **`golden-search.md` §6 step 8 deleted the server's FTS5 INDEX and this
+    // **schema v14 deleted the server's FTS5 INDEX and this
     // flag stayed**, which §6.1 says outright: what needs FTS5 now is
     // `search/fuzzy.zig`'s contentless `temp.token_fold`, the tokenizer the
     // derive step folds every document's terms through. That fold is the whole
@@ -110,8 +110,8 @@ const sqlite_flags = [_][]const u8{
 ///                       module calls `sqlite3_initialize` explicitly.
 ///   * `OMIT_JSON` + no RTREE/GEOPOLY — every optional SQL module dropped except
 ///                       the one that is now load-bearing:
-///   * `ENABLE_FTS5`   — global search is answered in the browser
-///                       (`client-side-search-impl.md`). MEASURED on this
+///   * `ENABLE_FTS5`   — global search is answered in the browser.
+///                       MEASURED on this
 ///                       artifact: 667,211 raw / 290,879 gzip without it against
 ///                       828,562 / 362,009 with, so FTS5 costs **+71,130 bytes
 ///                       gzip** and that is the whole download cost of the
@@ -122,8 +122,7 @@ const sqlite_flags = [_][]const u8{
 ///                       temp FILE and fail. `3` forces temp storage to memory
 ///                       and cannot be overridden by a pragma. Without it an
 ///                       FTS5 merge *"surfaces as a corrupt index in production
-///                       rather than as a build error"* (`wasm-search-bench.md`
-///                       §0).
+///                       rather than as a build error"*.
 ///                       REMOVING IT CHANGES NOTHING OBSERVABLE — measured, up
 ///                       to 80,000 documents and an 80,000-row `ORDER BY rank`.
 ///                       So it is not defended by a behavioural test: the module
@@ -689,7 +688,7 @@ pub fn build(b: *std.Build) void {
     // ONE artifact, two ABIs (`spd_*` + `idx_*`), because SQLite alone is
     // ~290 KB gzip of the 362 KB artifact: two modules would ship ~580 KB to
     // avoid ~10 KB of Zig a given page happens not to call, which is the wrong
-    // trade — `client-side-search-impl.md` §5, which also names the file:
+    // trade, which also names the file:
     // an artifact called `spd-decode` that also runs search is a lie in the
     // build graph.
     //
@@ -807,8 +806,8 @@ pub fn build(b: *std.Build) void {
 
     // (`zig build indoc-bench` was here. It timed the two server-side in-doc
     // reads against the `segment_fts`-free scan shape to settle
-    // `client-side-search-impl.md` §7.3 — "can find-in-note lose the FTS without
-    // client work?". `golden-search.md` §6 step 7 answered the question the other
+    // — "can find-in-note lose the FTS without
+    // client work?". the move into the browser answered the question the other
     // way and deleted BOTH subjects: in-document search is the browser's, off
     // `text/<md5>`. A bench whose two arms are both gone measures nothing.)
 
@@ -818,7 +817,7 @@ pub fn build(b: *std.Build) void {
     // this one is scp'd to the Pi and run there. It links the same vendored
     // SQLite as the server, so the pragmas and the page cache are the server's
     // and not the host distro's, and it is NOT installed by `zig build` —
-    // nothing in the server depends on it. It answers `golden-search.md` §7's
+    // nothing in the server depends on it. It answers 's
     // last derive-cost item: what the fold, deflate level 6 and the two file
     // writes cost per document on the ARM1176 the design is shaped around.
     // It calls the real `derive_search.writeDerived`, so it needs the note
@@ -837,7 +836,7 @@ pub fn build(b: *std.Build) void {
     derive_step.dependOn(&b.addInstallArtifact(derive_exe, .{}).step);
 
     // The WRITE-SIDE bench, and the sibling of the one above: `derive_bench`
-    // times what `golden-search.md`'s new derive path costs, this one measured
+    // times what the new derive path costs, this one measured
     // what the OLD index cost beside it — the reserved bands, the
     // `segment_search` rows, the `segment_fts` postings and the `kind = 1`/
     // `kind = 2` rows §6 step 8 deleted. Step 8 said "nobody has measured what it

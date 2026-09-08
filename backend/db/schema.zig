@@ -91,7 +91,7 @@ const sqlite = @import("sqlite.zig");
 ///
 /// v14 DROPS THE WHOLE SERVER-SIDE SEARCH INDEX — `segment_fts`, `segment_text`,
 /// `segment_search`, `search_partitions` and the `kind = 1`/`kind = 2` rows of
-/// `note_page_index`. `golden-search.md` §6 step 8: library and in-document
+/// `note_page_index`. schema v14: library and in-document
 /// search are the browser's, off the two derived stores, so every one of these
 /// was being written on each ingest and read by nothing. Irreversible in DATA on
 /// the same terms as v13, and much more of it.
@@ -355,7 +355,7 @@ const ddl_v1 =
     \\-- LOAD-BEARING BY PLAN, and it USED to be load-bearing by name: search's
     \\-- `files` join stated `INDEXED BY files_md5`, so losing this index failed
     \\-- loudly at prepare time rather than quietly at runtime. That statement went
-    \\-- with the read face in `golden-search.md` §6 step 7, and no statement names
+    \\-- with the read face when search moved into the browser, and no statement names
     \\-- the index any more — but the derivation still reaches `files` by md5 with
     \\-- no owner to seek on, and losing this turns each arm into a scan
     \\-- (MEASURED: 8,647 VM steps per document). What catches that now is the
@@ -663,7 +663,7 @@ const ddl_v12 =
 
 /// v13 — `doc_terms` goes.
 ///
-/// `golden-search.md` §5.3 states its only reason to exist: FTS5 is indexed
+/// the search redesign states its only reason to exist: FTS5 is indexed
 /// `term -> documents`, and IN-DOCUMENT typo correction needed
 /// `document -> terms`. Its only reader was the fuzzy candidate pool, and §6
 /// step 6 moved that ladder into the browser's own engine — so this is a table
@@ -687,7 +687,7 @@ const ddl_v13 =
 
 /// v14 — the server-side search index goes, all of it.
 ///
-/// `golden-search.md` §6 step 8. `segment_fts` was the FTS5 posting list,
+/// schema v14. `segment_fts` was the FTS5 posting list,
 /// `segment_search` the per-owner masked rowids that scoped it, `segment_text`
 /// the view FTS5 read its external content through, `search_partitions` the
 /// generation counter the mask was built from, and `kind = 1` / `kind = 2` rows

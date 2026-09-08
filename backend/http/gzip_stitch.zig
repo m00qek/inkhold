@@ -1,5 +1,5 @@
-//! Stitching stored deflate fragments into ONE gzip stream (`golden-search.md`
-//! §3.2): serving costs a header, N file reads and a trailer — no compression,
+//! Stitching stored deflate fragments into ONE gzip stream: serving costs a
+//! header, N file reads and a trailer — no compression,
 //! no decompression — on a Pi 1 B+.
 //!
 //! Must not break:

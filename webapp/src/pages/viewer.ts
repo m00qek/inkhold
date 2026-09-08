@@ -64,7 +64,7 @@ export interface Viewer {
 export interface ViewerDeps {
   api: Api;
   /**
-   * The ONE in-document search (`golden-search.md` §1.1): one document's
+   * The ONE in-document search: one document's
    * `text/<md5>` in the same wasm FTS5 instance the library search uses. On the
    * shared deps object rather than per viewer so a session holds one instance
    * and one built index — §8.1 measured that documents through a reused instance

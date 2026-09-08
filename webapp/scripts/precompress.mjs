@@ -35,8 +35,8 @@ const COMPRESS = new Set([".js", ".css", ".html", ".svg", ".json", ".wasm", ".ma
 /**
  * Gzip ceilings, by file name, in bytes. Exceeding one FAILS THE BUILD.
  *
- * `client-side-search.md` §9.6 — *"size is the cost, not CPU"* — and
- * `wasm-search-bench.md` §10 — *"every risk left in the plan is a size risk"*.
+ * — *"size is the cost, not CPU"*, and
+ * *"every risk left in the plan is a size risk"*.
  * Both are true and neither is enforceable by reading. A budget nobody checks is
  * not a budget, so it is checked here, where the number actually exists.
  *
@@ -63,14 +63,14 @@ const COMPRESS = new Set([".js", ".css", ".html", ".svg", ".json", ".wasm", ".ma
  *     intent, and none of them can land unnoticed.
  *
  * The absolute number matters because this module is the dominant term in the
- * first-visit budget (`client-side-search.md` §6: ~537 KB), and it is downloaded
+ * first-visit budget (: ~537 KB), and it is downloaded
  * by anyone who searches or opens a `.spd`.
  *
  * **Raising a ceiling is a legitimate act** — a feature may be worth its bytes.
  * Raising it without saying what bought the bytes is not; the number above is
  * the record.
  *
- * ### 366,000 → 369,000: the typo ladder (`golden-search.md` §6.1)
+ * ### 366,000 → 369,000: the typo ladder
  *
  * `idx_fuzzy` and what it needs — the Damerau-Levenshtein distance, the 0/1/2
  * rung table, the ranked `fts5vocab` scan with its bounded shortlist, and the

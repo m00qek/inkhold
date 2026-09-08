@@ -95,7 +95,7 @@ describe("createHistoryScope wrap — getPageText reroute", () => {
   });
 });
 
-// THE SEARCH REROUTE IS GONE, and that absence is `golden-search.md` §1.1.
+// THE SEARCH REROUTE IS GONE, and that absence is.
 //
 // It used to swap the seam's in-note search for the one-document history search
 // (H8) and surface it as a single `done` batch. In-document search is now ONE
