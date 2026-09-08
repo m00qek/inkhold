@@ -15,6 +15,7 @@ import { fileKind, rawFileUrl } from "../core/fileKind";
 import { getDims } from "../cache/dimsMemo";
 import { go, folderHref, noteHref, notePageHref } from "../router";
 import { pageSummary, deepLinkQuery } from "./noteSearch";
+import type { Expansion } from "../search/localSearch";
 import type { Entry, Folder, Hash, Id, NoteSummary } from "../core/types";
 import type { Category } from "./rail";
 import type { LazyEngine } from "../render/lazy";
@@ -93,10 +94,10 @@ export interface SearchResult {
  * card built now reflects the view state at build time, exactly as the inline
  * closures did.
  *
- * THE SEARCH STATE IS NO LONGER AMONG THEM. A result row used to read
- * `usedFuzzy` off it to decide which term its deep link carried; excerpts are
- * gone and with them the marks that named the corrected word, so a row is now a
- * pure function of the {@link SearchResult} it is handed.
+ * THE SEARCH STATE IS STILL NOT AMONG THEM. A result row used to read
+ * `usedFuzzy` off it and then reverse-engineer the corrected word out of the
+ * server's marked excerpt; what `resultCard` takes now is the expansion itself,
+ * as an argument, so a row remains a pure function of what it is handed.
  */
 export interface GalleryCardsCtx {
   /** The gallery's lazy render engine — cards register their `<img>`/canvas here. */
@@ -131,7 +132,9 @@ export interface GalleryCardsCtx {
 export interface GalleryCards {
   folderCard: (folder: Folder) => HTMLElement;
   noteCard: (note: NoteSummary, i: number) => HTMLElement;
-  resultCard: (result: SearchResult, i: number, q: string) => HTMLElement;
+  /** `expansions` is what the typo ladder substituted for this QUERY (empty when
+   *  it did not fire) — the row uses it for its deep link only. See `resultCard`. */
+  resultCard: (result: SearchResult, i: number, q: string, expansions?: readonly Expansion[]) => HTMLElement;
 }
 
 /**
@@ -585,8 +588,16 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
    * the QUERY as well as the first matching page: clicking a result opens the
    * document with find already running, and every other matching page is one Next
    * away inside the reader rather than one chip away outside it.
+   *
+   * WHAT THE ROW SAYS ABOUT A CORRECTED QUERY IS NOTHING, deliberately. The typo
+   * ladder substitutes per TOKEN of the query, so one substitution explains every
+   * row in the list identically and a per-row line would be the same sentence
+   * repeated down the page — and it would be false on the rows that matched by
+   * NAME, which matched the typed spelling exactly. The sentence is said once,
+   * over the list, by `gallerySearch.ts`. `expansions` reaches here only to
+   * decide which query the link carries.
    */
-  function resultCard(result: SearchResult, i: number, q: string): HTMLElement {
+  function resultCard(result: SearchResult, i: number, q: string, expansions: readonly Expansion[] = []): HTMLElement {
     const note = result.note;
     const { node: media, target, thumbClass, thumb, alt } = thumbMedia(note);
     const top = result.pages[0];
@@ -641,9 +652,17 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
     // The query travels in the URL rather than in shell state precisely so this
     // is one link: it survives a reload, it can be shared, and the reader is
     // primed by the same route it is opened by. `deepLinkQuery` carries the
-    // decision about WHICH query that is, and why it is no longer a resolved
-    // term.
-    const linkQ = deepLinkQuery(q);
+    // decision about WHICH query that is — the typed one, with any token the
+    // ladder unambiguously corrected replaced by the word actually searched.
+    //
+    // ONLY A ROW WITH TRANSCRIPT HITS OFFERS THE EXPANSION. A name-only match
+    // (`pages` empty) matched the typed spelling in its TITLE, and nothing says
+    // the corrected word appears anywhere inside it — handing the viewer's find
+    // a word the reader never typed, for a document that matched for an
+    // unrelated reason, is a worse arrival than the typo. A transcript hit is
+    // the opposite case: the corrected term is why those pages are in the list,
+    // so it is guaranteed to be in the document and find opens on it exactly.
+    const linkQ = deepLinkQuery(q, result.pages.length > 0 ? expansions : []);
     open.addEventListener("click", () =>
       go(top === undefined ? noteHref(result.noteId, linkQ) : notePageHref(result.noteId, top, linkQ)),
     );

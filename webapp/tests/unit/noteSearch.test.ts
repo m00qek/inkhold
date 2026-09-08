@@ -3,15 +3,17 @@ import {
   coverageLine,
   createNoteSearch,
   deepLinkQuery,
+  expansionNotice,
   noLocalSearch,
   pageSummary,
   pendingLine,
   resultsMayGrowLine,
   DEFAULT_DEBOUNCE_MS,
   MIN_GLOBAL_QUERY_LEN,
+  type ExpansionPart,
   type SearchState,
 } from "../../src/pages/noteSearch";
-import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "../../src/search/localSearch";
+import { rankDocuments, type Expansion, type LocalHit, type LocalResults, type LocalSearch } from "../../src/search/localSearch";
 import { ApiError } from "../../src/api/client";
 
 // The search controller with the DOM and the ENGINE both replaced — the same
@@ -32,8 +34,8 @@ function doc(fileId: number, pages: number[], updatedAt = 0): LocalHit {
 }
 
 /** What a `results` state looks like once documents land. */
-function painted(query: string, documents: LocalHit[]): SearchState {
-  return { kind: "results", query, documents };
+function painted(query: string, documents: LocalHit[], expansions: Expansion[] = []): SearchState {
+  return { kind: "results", query, documents, expansions };
 }
 
 /** A `LocalSearch` whose answers arrive only when the test says so. */
@@ -53,13 +55,14 @@ function deferredSearch() {
   };
 
   /** Settle the Nth still-pending call (in call order). */
-  const settle = async (index: number, documents: LocalHit[]): Promise<void> => {
+  const settle = async (index: number, documents: LocalHit[], expansions: Expansion[] = []): Promise<void> => {
     const p = pending[index];
     if (!p) throw new Error(`no pending call at ${index} (have ${pending.length})`);
     p.resolve({
       query: p.query,
       totalPages: documents.reduce((n, d) => n + d.pages.length, 0),
       documents,
+      expansions,
     });
     await Promise.resolve();
     await Promise.resolve();
@@ -347,7 +350,7 @@ describe("createNoteSearch", () => {
       expect((h.controller as Record<string, unknown>)["loadMore"]).toBeUndefined();
     });
 
-    it("carries nothing but the query and its documents", async () => {
+    it("carries nothing but the query, its documents and what was substituted", async () => {
       const h = harness();
       h.controller.setQuery("roadmap");
       await vi.advanceTimersByTimeAsync(DEBOUNCE);
@@ -355,9 +358,32 @@ describe("createNoteSearch", () => {
 
       const state = h.last();
       expect(state?.kind).toBe("results");
-      // No `cursor`, no `usedFuzzy`, no `coverage` — each retired with the
-      // server that was the only thing able to say it.
-      expect(Object.keys(state ?? {}).sort()).toEqual(["documents", "kind", "query"]);
+      // No `cursor` and no `coverage` — each retired with the server that was
+      // the only thing able to say it. `expansions` is emphatically NOT the
+      // `usedFuzzy` that retired with them: a boolean was all the server could
+      // offer, because the corrected word lived only inside the marked excerpt
+      // §4.3 deletes. The client ran the ladder, so it carries the WORDS.
+      expect(Object.keys(state ?? {}).sort()).toEqual(["documents", "expansions", "kind", "query"]);
+    });
+
+    // …and it is a fallback, so it is empty on every query that answered as
+    // typed, which is nearly all of them.
+    it("substitutes nothing when the query as typed answered", async () => {
+      const h = harness();
+      h.controller.setQuery("roadmap");
+      await vi.advanceTimersByTimeAsync(DEBOUNCE);
+      await h.settle(0, [doc(1, [0])]);
+
+      expect(h.last()).toEqual(painted("roadmap", [doc(1, [0])]));
+    });
+
+    it("passes the ladder's substitution through to the view unchanged", async () => {
+      const h = harness();
+      h.controller.setQuery("valjaen");
+      await vi.advanceTimersByTimeAsync(DEBOUNCE);
+      await h.settle(0, [doc(1, [0])], [{ typed: "valjaen", matched: "valjean" }]);
+
+      expect(h.last()).toEqual(painted("valjaen", [doc(1, [0])], [{ typed: "valjaen", matched: "valjean" }]));
     });
   });
 
@@ -410,14 +436,126 @@ describe("rankDocuments, as the view relies on it", () => {
 });
 
 // What the deep link carries, now that nothing marks anything.
+// §4.3's "matched **reunião**", as the sentence the results say once above the
+// list. The renderer's own choices — where the line goes, and when it is
+// suppressed — are `gallerySearch.test.ts`'s; this pins the WORDING.
+describe("expansionNotice", () => {
+  /** The sentence as one string, so a test reads like what lands on screen. */
+  const say = (parts: ExpansionPart[] | null): string | null => (parts ? parts.map((p) => p.text).join("") : null);
+  /** Just the words set apart — the half §4.3 asks to be emphasised. */
+  const words = (parts: ExpansionPart[] | null): string[] =>
+    (parts ?? []).filter((p) => p.matched).map((p) => p.text);
+
+  // THE FALLBACK IS THE ORDINARY SILENCE. Expansion never widens a query that
+  // answered, so the line appears exactly when there is something to explain.
+  it("says nothing when the query as typed is what answered", () => {
+    expect(expansionNotice([])).toBeNull();
+  });
+
+  it("names the word searched and the word typed", () => {
+    const parts = expansionNotice([{ typed: "valjaen", matched: "valjean" }]);
+    expect(say(parts)).toBe("Matched valjean instead of “valjaen”.");
+    // The substituted word is the emphasised half — a word, never a snippet.
+    expect(words(parts)).toEqual(["valjean"]);
+  });
+
+  // THE TIE IS REAL: `valjen` reaches `valen` and `valjean`, one edit and one
+  // character away each, and the index searched them as ALTERNATIVES. So the
+  // connective inside a group is "or".
+  it("offers both readings of a genuine distance tie, as alternatives", () => {
+    const parts = expansionNotice([
+      { typed: "valjen", matched: "valen" },
+      { typed: "valjen", matched: "valjean" },
+    ]);
+    expect(say(parts)).toBe("Matched valen or valjean instead of “valjen”.");
+    expect(words(parts)).toEqual(["valen", "valjean"]);
+  });
+
+  // ACROSS tokens the relationship is the opposite one — both had to appear —
+  // so the groups are listed rather than alternated, and each keeps its own
+  // "instead of" so the reader can tell which word stood in for which.
+  it("keeps the pairing when more than one token was corrected", () => {
+    expect(
+      say(
+        expansionNotice([
+          { typed: "valjen", matched: "valen" },
+          { typed: "valjen", matched: "valjean" },
+          { typed: "reuniao", matched: "reunião" },
+        ]),
+      ),
+    ).toBe("Matched valen or valjean instead of “valjen”, and reunião instead of “reuniao”.");
+  });
+
+  // Only the tokens that FAILED are in the array at all, so a query where one
+  // word was exact reports the other alone — which is the honest sentence.
+  it("reports only the token that was substituted, not the whole query", () => {
+    expect(say(expansionNotice([{ typed: "cosete", matched: "cosette" }]))).toBe(
+      "Matched cosette instead of “cosete”.",
+    );
+  });
+
+  it("says a repeated substitution once", () => {
+    expect(
+      say(
+        expansionNotice([
+          { typed: "valjaen", matched: "valjean" },
+          { typed: "valjaen", matched: "valjean" },
+        ]),
+      ),
+    ).toBe("Matched valjean instead of “valjaen”.");
+  });
+
+  // NOT A STRING, and the reason is the escaping as much as the emphasis. Both
+  // halves are device-authored (an index term, a token out of the search box),
+  // and the renderer turns parts into text nodes — so nothing here can become
+  // the `innerHTML` of unescaped text that step 6 deleted.
+  it("keeps the word as a part rather than as markup", () => {
+    const parts = expansionNotice([{ typed: "<b>x</b>", matched: "<i>y</i>" }]) ?? [];
+    expect(parts.some((p) => p.matched && p.text === "<i>y</i>")).toBe(true);
+    expect(parts.map((p) => p.text).join("")).toContain("<b>x</b>");
+  });
+});
+
 describe("deepLinkQuery", () => {
-  // THE DECISION: what they typed. The alternative was to guess an expansion the
-  // row does not have — `LocalHit` carries no matched term — and inventing one
-  // is worse than handing the viewer's find the same string the box holds.
-  it("is the typed query, verbatim", () => {
+  // THE DECISION, REVERSED. It used to carry the typo, because the row could not
+  // know the correction once §4.3 deleted the marked excerpt it was read out of.
+  // The CLIENT runs the ladder now, so the term arrives as data — and carrying
+  // the typo was not merely a missed nicety: the three viewers gate a fuzzy
+  // answer behind an opt-in, so a row that had just said "matches on 887 pages"
+  // opened a find reading "No matches" over a "search similar" prompt.
+  it("carries the word that was searched, not the one that was typed", () => {
+    expect(deepLinkQuery("valjaen", [{ typed: "valjaen", matched: "valjean" }])).toBe("valjean");
+  });
+
+  it("is the typed query, verbatim, when nothing was substituted", () => {
     expect(deepLinkQuery("reunaio")).toBe("reunaio");
-    expect(deepLinkQuery("jean valjean")).toBe("jean valjean");
+    expect(deepLinkQuery("jean valjean", [])).toBe("jean valjean");
     expect(deepLinkQuery("")).toBe("");
+  });
+
+  // Per TOKEN, like the ladder: a query where one word was exact keeps it.
+  it("substitutes only the tokens the ladder corrected, in place", () => {
+    expect(deepLinkQuery("jean valjaen", [{ typed: "valjaen", matched: "valjean" }])).toBe("jean valjean");
+  });
+
+  // A TIE IS NOT RESOLVED HERE. `valjen` reached two words and the row does not
+  // say which one this document holds; picking one would invent a fact, and for
+  // the rows holding the other word it would be worse than the typo — the
+  // viewer's own ladder recovers from a typo and has no reason to expand one
+  // real word into a different real one.
+  it("leaves an ambiguous token alone rather than guessing between two readings", () => {
+    expect(
+      deepLinkQuery("valjen", [
+        { typed: "valjen", matched: "valen" },
+        { typed: "valjen", matched: "valjean" },
+      ]),
+    ).toBe("valjen");
+  });
+
+  it("preserves the query's own spacing", () => {
+    expect(deepLinkQuery("  jean   valjaen ", [{ typed: "valjaen", matched: "valjean" }])).toBe(
+      "  jean   valjean ",
+    );
   });
 });
 

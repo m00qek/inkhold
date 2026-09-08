@@ -12,18 +12,25 @@ import {
   type TextKey,
   type TextStore,
 } from "../../src/cache/textStore";
-import { createOfflineText, orderCandidates } from "../../src/search/offlineText";
+import { createTextPrefetch, orderCandidates } from "../../src/search/textPrefetch";
 import type { DocumentText, TextTransport } from "../../src/search/docText";
 import type { ManifestRow, Tier } from "../../src/search/manifestCodec";
 
-// WHAT "OFFLINE" MEANS FOR IN-DOCUMENT TEXT — `golden-search.md` §4.4.
+// WHAT THE BROWSER CACHES OF A DOCUMENT'S TEXT — `golden-search.md` §4.4.
 //
 // The two halves are tested at different levels on purpose. The BUDGET decision
 // is pure (`planTextEviction`) and asserted directly, because the real store
-// needs an IndexedDB node does not have; the POLICY — which documents are kept
-// without being asked for, and which need asking — runs against an in-memory
-// `TextStore` that mirrors the real one's put/evict structure, so the eviction
-// under test is the same shared function the IndexedDB store calls.
+// needs an IndexedDB node does not have; the POLICY — which documents are worth
+// fetching before anybody asks, and which are left to the HTTP cache — runs
+// against an in-memory `TextStore` that mirrors the real one's put/evict
+// structure, so the eviction under test is the same shared function the
+// IndexedDB store calls.
+//
+// **There is no "keep this offline" here any more, and there is no pin.** §4.4
+// was corrected: offline is a side effect of running the work in the browser,
+// not a goal, and a control whose only power was to override eviction was
+// promising an availability this project does not offer. What survives is the
+// budget, the per-document cap, and tier 1 as the one protected class.
 
 const md5 = (n: string): string => n.repeat(32).slice(0, 32);
 const NOTE = md5("a");
@@ -63,7 +70,6 @@ function memoryStore(available = true, budgetBytes = DEFAULT_TEXT_BUDGET): TextS
 } {
   const records = new Map<string, StoredDocumentText>();
   const metas = new Map<string, ProtectedMeta & { md5: string; indexVersion: number }>();
-  const pinSet = new Set<number>();
   let clock = 0;
 
   function enforce(): void {
@@ -123,22 +129,12 @@ function memoryStore(available = true, budgetBytes = DEFAULT_TEXT_BUDGET): TextS
         metas.delete(key);
       }
     },
-    async pins() {
-      return [...pinSet];
-    },
-    async pin(fileId) {
-      pinSet.add(fileId);
-    },
-    async unpin(fileId) {
-      pinSet.delete(fileId);
-    },
     async budget() {
       return budgetBytes;
     },
     async clear() {
       records.clear();
       metas.clear();
-      pinSet.clear();
     },
   };
 }
@@ -155,6 +151,17 @@ function transportOf(bodies: Record<string, DocumentText>): {
     return body;
   };
   return { transport, calls };
+}
+
+/**
+ * "Is this document's text held at this version?" — asked of the STORE, because
+ * the prefetch no longer answers it. It was a public method only so a
+ * per-document control could paint a checked state, and there is no such control
+ * any more; the store's own `keys()` is the fact itself.
+ */
+async function isHeld(store: TextStore, hash: string, indexVersion: number): Promise<boolean> {
+  const held = await store.keys();
+  return held.some((h) => h.md5 === hash && h.indexVersion === indexVersion);
 }
 
 const meta = (key: string, size: number, lastAccess: number, protect = false): ProtectedMeta => ({
@@ -189,7 +196,10 @@ describe("the budget", () => {
   });
 
   it("sheds everything evictable when the protected set alone exceeds the budget", () => {
-    const metas = [meta("pinned", 500, 1, true), meta("a", 30, 2)];
+    // A note library larger than the whole allowance. Tier 1 is bounded by the
+    // household's own page count, and what bounds it in the end is the origin
+    // quota rather than this number.
+    const metas = [meta("notes", 500, 1, true), meta("a", 30, 2)];
     expect(planTextEviction(metas, 100)).toEqual(["a"]);
   });
 
@@ -207,28 +217,25 @@ describe("orderCandidates", () => {
     row(OTHER, "other", 3, 300),
   ];
 
-  it("keeps tier 1 and tier 2, and never tier 3 on its own", () => {
-    const ordered = orderCandidates(rows, new Set());
+  it("keeps tier 1 and tier 2, and never tier 3 at all", () => {
+    // Tier 3 used to be reachable through a pin. With the pin gone it is the
+    // on-demand half without exception, and the HTTP cache is its whole story.
+    const ordered = orderCandidates(rows);
     expect(ordered.map((c) => c.md5)).toEqual([NOTE, MARKED]);
     // Tier 1 is protected — kept with no budget check; tier 2 is not.
     expect(ordered.map((c) => c.protect)).toEqual([true, false]);
   });
 
-  it("puts a pin first and protects it, whatever tier it is", () => {
-    const ordered = orderCandidates(rows, new Set([3]));
-    expect(ordered[0]).toMatchObject({ md5: OTHER, protect: true });
-  });
-
   it("orders each group newest first", () => {
     const olderNote = row(md5("d"), "note", 4, 50);
-    const ordered = orderCandidates([olderNote, ...rows], new Set());
+    const ordered = orderCandidates([olderNote, ...rows]);
     expect(ordered.map((c) => c.md5)).toEqual([NOTE, md5("d"), MARKED]);
   });
 
   it("refuses a row that cannot be keyed, and one that is not derived yet", () => {
     const unkeyed = row(md5("e"), "note", 5, 400, null);
     const pending = row(md5("f"), "note", 6, 400, 15, "pending");
-    const ordered = orderCandidates([unkeyed, pending, ...rows], new Set());
+    const ordered = orderCandidates([unkeyed, pending, ...rows]);
     expect(ordered.map((c) => c.md5)).toEqual([NOTE, MARKED]);
   });
 });
@@ -237,83 +244,62 @@ describe("the prefetch", () => {
   it("keeps a `.note` without being asked", async () => {
     const store = memoryStore();
     const { transport, calls } = transportOf({ [NOTE]: text(NOTE, 15, 300) });
-    const offline = createOfflineText({ store, transport });
+    const prefetch = createTextPrefetch({ store, transport });
 
-    const outcome = await offline.prefetch([row(NOTE, "note", 1, 100)]);
+    const outcome = await prefetch.prefetch([row(NOTE, "note", 1, 100)]);
     expect(outcome.kept).toBe(1);
     expect(calls).toEqual([`${NOTE}.15`]);
-    expect(await offline.isKept(NOTE, 15)).toBe(true);
+    expect(await isHeld(store, NOTE, 15)).toBe(true);
     expect(store.metas.get(textKeyOf(NOTE, 15))!.protect).toBe(true);
   });
 
-  it("does not keep another format until it is opted in — and the opt-in survives a reload", async () => {
+  it("leaves another format alone entirely — there is no opt-in to override it", async () => {
     const store = memoryStore();
-    const { transport } = transportOf({ [OTHER]: text(OTHER, 15, 300) });
-    const rows = [row(OTHER, "other", 3, 300)];
+    const { transport, calls } = transportOf({ [OTHER]: text(OTHER, 15, 300) });
 
-    const first = createOfflineText({ store, transport });
-    await first.prefetch(rows);
-    expect(await first.isKept(OTHER, 15)).toBe(false);
-
-    expect(await first.keepOffline({ md5: OTHER, fileId: 3, indexVersion: 15 })).toBe(true);
-    expect(await first.isKept(OTHER, 15)).toBe(true);
-
-    // "A reload": the facade is rebuilt from nothing, and the store is the only
-    // thing that carried anything across — which is the point of pinning in
-    // IndexedDB rather than in a variable.
-    const reloaded = createOfflineText({ store, transport });
-    expect([...(await reloaded.pinned())]).toEqual([3]);
-    const outcome = await reloaded.prefetch(rows);
-    expect(outcome.kept).toBe(1);
-    expect(await reloaded.isKept(OTHER, 15)).toBe(true);
+    const prefetch = createTextPrefetch({ store, transport });
+    await prefetch.prefetch([row(OTHER, "other", 3, 300)]);
+    expect(await isHeld(store, OTHER, 15)).toBe(false);
+    // Not fetched-and-refused: never asked for. A tier-3 find pays one fetch and
+    // the immutable HTTP cache answers every later one.
+    expect(calls).toEqual([]);
   });
 
-  it("pins by fileId, so editing the document does not release the promise", async () => {
-    const store = memoryStore();
-    const edited = md5("9");
-    const { transport } = transportOf({ [OTHER]: text(OTHER, 15, 300), [edited]: text(edited, 15, 300) });
-    const offline = createOfflineText({ store, transport });
-
-    await offline.keepOffline({ md5: OTHER, fileId: 3, indexVersion: 15 });
-    // The device wrote in it: same file, new blob, new md5.
-    await offline.prefetch([row(edited, "other", 3, 400)]);
-    expect(await offline.isKept(edited, 15)).toBe(true);
-    // …and the superseded generation is gone rather than holding budget.
-    expect(await offline.isKept(OTHER, 15)).toBe(false);
-  });
-
-  it("releases the protection when the pin goes, and the text becomes evictable", async () => {
+  it("releases a record a previous build had pinned, and lets it be evicted", async () => {
+    // THE MIGRATION, and the only reason `setProtection` outlived the pin. A
+    // store written by the build that had one holds `protect: true` on a tier-2
+    // record; nothing else walks both the manifest and the held set, so if this
+    // pass did not correct it the record would be exempt from eviction for ever.
     const store = memoryStore(true, 1_000);
-    const { transport } = transportOf({ [OTHER]: text(OTHER, 15, 600) });
-    const offline = createOfflineText({ store, transport });
+    const { transport } = transportOf({ [MARKED]: text(MARKED, 15, 600) });
+    await store.put(text(MARKED, 15, 600), { protect: true });
+    expect(store.metas.get(textKeyOf(MARKED, 15))!.protect).toBe(true);
 
-    await offline.keepOffline({ md5: OTHER, fileId: 3, indexVersion: 15 });
-    expect(store.metas.get(textKeyOf(OTHER, 15))!.protect).toBe(true);
-    await offline.forget({ md5: OTHER, fileId: 3, indexVersion: 15 });
-    expect(store.metas.get(textKeyOf(OTHER, 15))!.protect).toBe(false);
-    expect([...(await offline.pinned())]).toEqual([]);
+    const prefetch = createTextPrefetch({ store, transport });
+    await prefetch.prefetch([row(MARKED, "marked", 2, 200)]);
+    expect(store.metas.get(textKeyOf(MARKED, 15))!.protect).toBe(false);
   });
 
   it("spends the budget on tier 2 newest-first and stops", async () => {
     // Five annotated documents of 250 B against a 1,000 B budget. Four fit; the
     // OLDEST is the one that does not, which is the failure §4.4 asks for in as
-    // many words — "the two oldest annotated books are not offline" rather than
-    // "the household silently synced 40 MB".
+    // many words — "the two oldest annotated books cost a fetch on their first
+    // find" rather than "the household silently synced 40 MB".
     const hashes = [md5("1"), md5("2"), md5("3"), md5("4"), md5("5")];
     const store = memoryStore(true, 1_000);
     const bodies: Record<string, DocumentText> = {};
     for (const h of hashes) bodies[h] = text(h, 15, 250);
     const { transport, calls } = transportOf(bodies);
-    const offline = createOfflineText({ store, transport });
+    const prefetch = createTextPrefetch({ store, transport });
 
     // Handed to the pass OLDEST first, so the ordering under test is the
     // policy's and not the manifest's.
-    const outcome = await offline.prefetch(
+    const outcome = await prefetch.prefetch(
       hashes.map((h, i) => row(h, "marked", i + 10, (i + 1) * 100)),
     );
     expect(outcome.kept).toBe(4);
-    expect(await offline.isKept(hashes[4]!, 15)).toBe(true);
-    expect(await offline.isKept(hashes[0]!, 15)).toBe(false);
+    expect(await isHeld(store, hashes[4]!, 15)).toBe(true);
+    expect(await isHeld(store, hashes[0]!, 15)).toBe(false);
     // The four newest were asked for, newest first, and once the allowance was
     // gone the walk stopped ASKING — the oldest was never fetched.
     expect(calls).toEqual([...hashes].reverse().slice(0, 4).map((h) => `${h}.15`));
@@ -325,49 +311,45 @@ describe("the prefetch", () => {
       [NOTE]: text(NOTE, 15, 900),
       [MARKED]: text(MARKED, 15, 300),
     });
-    const offline = createOfflineText({ store, transport });
+    const prefetch = createTextPrefetch({ store, transport });
 
-    await offline.prefetch([row(NOTE, "note", 1, 100), row(MARKED, "marked", 2, 200)]);
+    await prefetch.prefetch([row(NOTE, "note", 1, 100), row(MARKED, "marked", 2, 200)]);
     // §4.4: tier 1 is kept with NO budget check — and having spent the budget, it
     // is what stops tier 2 rather than being shed for it. Once the allowance is
     // gone the walk stops ASKING, so nothing is fetched to be thrown away.
-    expect(await offline.isKept(NOTE, 15)).toBe(true);
-    expect(await offline.isKept(MARKED, 15)).toBe(false);
+    expect(await isHeld(store, NOTE, 15)).toBe(true);
+    expect(await isHeld(store, MARKED, 15)).toBe(false);
     expect(calls).toEqual([`${NOTE}.15`]);
   });
 
   it("refuses a tier-2 document over the per-document cap, and does not re-fetch it", async () => {
     // MEASURED, §4.4: one `.mark` on a novel moves 1.35 MB of stored text into
-    // the always-offline set from a single gesture. The cap is what turns that
-    // into a document with an explicit action available instead.
+    // the cache from a single gesture. The cap is what stops one annotated novel
+    // crowding out everything else; the document itself is still findable, it
+    // just pays a fetch on its first find like any tier-3 one.
     const store = memoryStore(true, 4_000); // cap = 1,000
     const { transport, calls } = transportOf({ [MARKED]: text(MARKED, 15, 3_000) });
-    const offline = createOfflineText({ store, transport });
+    const prefetch = createTextPrefetch({ store, transport });
     const rows = [row(MARKED, "marked", 2, 200)];
 
-    const outcome = await offline.prefetch(rows);
+    const outcome = await prefetch.prefetch(rows);
     expect(outcome).toMatchObject({ kept: 0, skipped: 1 });
-    expect(await offline.isKept(MARKED, 15)).toBe(false);
+    expect(await isHeld(store, MARKED, 15)).toBe(false);
 
-    await offline.prefetch(rows);
+    await prefetch.prefetch(rows);
     expect(calls).toEqual([`${MARKED}.15`]); // fetched once, refused, remembered.
-
-    // …and the explicit opt-in overrides the cap, which is the whole point of
-    // having one.
-    expect(await offline.keepOffline({ md5: MARKED, fileId: 2, indexVersion: 15 })).toBe(true);
-    expect(await offline.isKept(MARKED, 15)).toBe(true);
   });
 
   it("drops a generation the manifest moved past", async () => {
     const store = memoryStore();
     const { transport } = transportOf({ [NOTE]: text(NOTE, 16, 300) });
     await store.put(text(NOTE, 15, 300), { protect: true });
-    const offline = createOfflineText({ store, transport });
+    const prefetch = createTextPrefetch({ store, transport });
 
-    const outcome = await offline.prefetch([row(NOTE, "note", 1, 100, 16)]);
+    const outcome = await prefetch.prefetch([row(NOTE, "note", 1, 100, 16)]);
     expect(outcome.dropped).toBe(1);
-    expect(await offline.isKept(NOTE, 15)).toBe(false);
-    expect(await offline.isKept(NOTE, 16)).toBe(true);
+    expect(await isHeld(store, NOTE, 15)).toBe(false);
+    expect(await isHeld(store, NOTE, 16)).toBe(true);
   });
 
   it("does nothing at all without a manifest", async () => {
@@ -377,47 +359,35 @@ describe("the prefetch", () => {
     const store = memoryStore();
     await store.put(text(NOTE, 15, 300), { protect: true });
     const { transport, calls } = transportOf({});
-    const offline = createOfflineText({ store, transport });
+    const prefetch = createTextPrefetch({ store, transport });
 
-    expect(await offline.prefetch([])).toMatchObject({ kept: 0, dropped: 0 });
+    expect(await prefetch.prefetch([])).toMatchObject({ kept: 0, dropped: 0 });
     expect(calls).toEqual([]);
-    expect(await offline.isKept(NOTE, 15)).toBe(true);
+    expect(await isHeld(store, NOTE, 15)).toBe(true);
   });
 
   it("survives a document that will not fetch, and carries on with the rest", async () => {
     const store = memoryStore();
     const { transport } = transportOf({ [MARKED]: text(MARKED, 15, 300) });
-    const offline = createOfflineText({ store, transport });
+    const prefetch = createTextPrefetch({ store, transport });
 
-    const outcome = await offline.prefetch([
+    const outcome = await prefetch.prefetch([
       row(NOTE, "note", 1, 900), // no body: the transport throws
       row(MARKED, "marked", 2, 200),
     ]);
     expect(outcome.kept).toBe(1);
-    expect(await offline.isKept(MARKED, 15)).toBe(true);
+    expect(await isHeld(store, MARKED, 15)).toBe(true);
   });
 
   it("degrades to nothing where IndexedDB is missing", async () => {
     const store = memoryStore(false);
     const { transport, calls } = transportOf({ [NOTE]: text(NOTE, 15, 300) });
-    const offline = createOfflineText({ store, transport });
+    const prefetch = createTextPrefetch({ store, transport });
 
-    expect(offline.available).toBe(false);
-    expect(await offline.prefetch([row(NOTE, "note", 1, 100)])).toMatchObject({ kept: 0 });
-    expect(await offline.keepOffline({ md5: NOTE, fileId: 1, indexVersion: 15 })).toBe(false);
-    expect(await offline.isKept(NOTE, 15)).toBe(false);
+    expect(prefetch.available).toBe(false);
+    expect(await prefetch.prefetch([row(NOTE, "note", 1, 100)])).toMatchObject({ kept: 0 });
     // Nothing was fetched to be thrown away: an unavailable store is a no-op, and
     // in-document search then fetches on demand exactly as it does today.
-    expect(calls).toEqual([]);
-  });
-
-  it("refuses to promise anything about a document with no index version", async () => {
-    const store = memoryStore();
-    const { transport, calls } = transportOf({ [OTHER]: text(OTHER, 15, 300) });
-    const offline = createOfflineText({ store, transport });
-
-    expect(await offline.keepOffline({ md5: OTHER, fileId: 3, indexVersion: null })).toBe(false);
-    expect(await offline.isKept(OTHER, null)).toBe(false);
     expect(calls).toEqual([]);
   });
 });
@@ -431,12 +401,9 @@ describe("openTextStore", () => {
     expect(store.available).toBe(false);
     expect(await store.get(NOTE, 15)).toBeNull();
     expect(await store.keys()).toEqual([]);
-    expect(await store.pins()).toEqual([]);
     await store.put(text(NOTE, 15, 300), { protect: true });
-    await store.pin(1);
     await store.setProtection(NOTE, 15, false);
     await store.drop([{ md5: NOTE, indexVersion: 15 }]);
-    await store.unpin(1);
     await store.clear();
     expect(await store.get(NOTE, 15)).toBeNull();
   });

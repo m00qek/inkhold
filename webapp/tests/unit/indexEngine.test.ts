@@ -335,6 +335,33 @@ describe("SearchIndex lifecycle and refusals", () => {
     }
   });
 
+  it("rebuilds onto the same instance, whether or not anything was there", async () => {
+    // The one thing both consumers do, and the reason it is a method rather than
+    // two lines repeated on each side of the worker boundary. §8.1: successive
+    // builds through ONE instance converge on the cost of the worst document,
+    // which is why a worker per document would be waste.
+    const index = await SearchIndex.open(loadCore);
+    try {
+      // Nothing held: the reset is skipped, and the build is just a build.
+      index.rebuild([NOTES]);
+      expect(index.documents()).toEqual([NOTES.md5]);
+      // Held: the previous document goes rather than being added to — the same
+      // md5 twice would be refused, and a second document would answer queries
+      // belonging to the one that is no longer open.
+      index.rebuild([BOOK]);
+      expect(index.documents()).toEqual([BOOK.md5]);
+      expect(index.query("reuniao ", 10).total).toBe(0);
+      expect(index.query("caligrafia ", 10).total).toBe(1);
+      // And after a FAILED build, which reset on its way out, the short path is
+      // the right one — `rebuild` must be safe to call blindly.
+      expect(() => index.rebuild([NOTES, NOTES])).toThrow(/already in this index/);
+      index.rebuild([NOTES]);
+      expect(index.documents()).toEqual([NOTES.md5]);
+    } finally {
+      index.close();
+    }
+  });
+
   it("refuses the same document twice instead of doubling its counts", async () => {
     const index = await SearchIndex.open(loadCore);
     try {

@@ -28,7 +28,7 @@
 //   pattern, not a new invention.
 
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
-import type { LocalHit, LocalSearch } from "../search/localSearch";
+import type { Expansion, LocalHit, LocalSearch } from "../search/localSearch";
 
 /**
  * The floor a LIBRARY-WIDE query must clear before it is run. One or two
@@ -80,17 +80,32 @@ export type SearchState =
        * recency ({@link rankDocuments}). One row per document and never one per
        * page, which is what §4.3 buys by dropping excerpts.
        *
-       * THERE IS NOTHING ELSE IN THIS STATE, and the absences are the design:
-       * no cursor (a client holding the whole index has already paid for every
-       * match, so there is nothing left to spend), no `usedFuzzy` (the shape
-       * carries no expansion to report), and no `Coverage` (nothing counts the
-       * unsearchable now that no server interprets the query).
+       * THE ABSENCES ARE STILL THE DESIGN: no cursor (a client holding the whole
+       * index has already paid for every match, so there is nothing left to
+       * spend), and no `Coverage` (nothing counts the unsearchable now that no
+       * server interprets the query).
        *
        * `LocalResults.totalPages` is not carried either: it is the sum of these
        * documents' page counts, so the view would be storing a number it can
        * add up. The renderer counts what it paints.
        */
       documents: readonly LocalHit[];
+      /**
+       * What the typo ladder substituted, or empty when the query as typed is
+       * what answered.
+       *
+       * NOT `usedFuzzy`. A boolean was the SERVER's shape, and it was all the
+       * server could offer because the corrected word only ever existed inside
+       * the marked excerpt §4.3 deletes. The client ran the expansion itself, so
+       * it holds the words — and the words are the point: §4.3 gives up the
+       * excerpt's at-a-glance "why", and what replaces it is the match count
+       * plus, when the ladder fired, the word actually searched.
+       *
+       * PER TOKEN, NOT PER DOCUMENT, which is why it lives on the state beside
+       * `documents` rather than on a {@link LocalHit}: one substitution explains
+       * every row in the list at once. See {@link expansionNotice}.
+       */
+      expansions: readonly Expansion[];
     }
   | { kind: "error"; query: string };
 
@@ -195,7 +210,7 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
     try {
       const results = await engine.search(query, ac.signal);
       if (mine !== token) return; // a later keystroke superseded us — drop it
-      view.setState({ kind: "results", query, documents: results.documents });
+      view.setState({ kind: "results", query, documents: results.documents, expansions: results.expansions });
     } catch (e) {
       if (mine !== token) return;
       // A dead session belongs to the shell, not to the results area. Routing it
@@ -248,38 +263,178 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
   };
 }
 
+// --- what the ladder substituted ---------------------------------------------
+
+/**
+ * The expansions as the sentence groups them: one entry per TYPED token, in the
+ * order the ladder reported them, holding the vocabulary words offered for it.
+ *
+ * The grouping is the whole reason this is not a flat list. `valjen` alone
+ * produced TWO substitutions — `valen` and `valjean`, a genuine distance tie —
+ * and the index searched them as alternatives of one another; a two-token query
+ * where both words were corrected searched its groups TOGETHER. So the terms
+ * inside a group are joined with "or" and the groups are not, and a flat list
+ * would have to pick one connective and be wrong about the other.
+ *
+ * Exported for the tests that pin the wording, and shared by
+ * {@link expansionNotice} and {@link deepLinkQuery} so the sentence and the link
+ * cannot disagree about what a tie is.
+ */
+export function groupExpansions(expansions: readonly Expansion[]): Map<string, string[]> {
+  const groups = new Map<string, string[]>();
+  for (const e of expansions) {
+    const held = groups.get(e.typed);
+    // Deduped: the same substitution reported twice is one word to a reader, and
+    // "matched valjean or valjean" is the sort of thing that reaches a screen.
+    if (held) {
+      if (!held.includes(e.matched)) held.push(e.matched);
+    } else groups.set(e.typed, [e.matched]);
+  }
+  return groups;
+}
+
+/**
+ * One piece of the expansion sentence: prose, or a vocabulary word to emphasise.
+ *
+ * IT IS PARTS RATHER THAN A STRING BECAUSE OF THE EMPHASIS AND THE ESCAPING, and
+ * those turn out to be the same problem. §4.3's phrasing is "matched
+ * **reunião**" — the substituted word is set apart, so the sentence cannot be
+ * one `textContent`. The other way to get emphasis is a markup string spliced in
+ * with `innerHTML`, and step 6 deleted this app's last one of those. Both halves
+ * here are device-authored text (a term out of the index's own vocabulary, a
+ * token out of the search box), so the renderer turns each part into a text node
+ * or an element with `text:` and there is no escaping pass to get wrong.
+ */
+export interface ExpansionPart {
+  readonly text: string;
+  /** True for a word the ladder searched — the renderer sets it apart. */
+  readonly matched?: boolean;
+}
+
+/**
+ * What the results say about a query the typo ladder had to correct — the line
+ * §7 was still missing, and the half of §4.3's replacement for the excerpt that
+ * a match count cannot carry.
+ *
+ * ## The wording
+ *
+ * `Matched valjean instead of “valjaen”.` — the design's own verb, with the
+ * typed token named because otherwise the sentence asserts a word the reader
+ * never wrote and gives them nothing to connect it to. One uniform template per
+ * group, so the tie and the multi-token case are the same sentence and not two
+ * more branches:
+ *
+ *   Matched **valen** or **valjean** instead of “valjen”.
+ *   Matched **valen** or **valjean** instead of “valjen”, and **reunião**
+ *     instead of “reuniao”.
+ *
+ * ONLY THE TOKENS THAT FAILED APPEAR. A query where one word was exact and the
+ * other was corrected reports the corrected one alone, which is exactly right:
+ * the sentence explains a substitution, and there was only one.
+ *
+ * ## What it deliberately does not say
+ *
+ * NOT "no matches for …". The list underneath holds rows that matched by NAME
+ * too, and those matched the typed spelling exactly — a negative about the query
+ * as a whole would be contradicted by a `<mark>`ed title two lines below it.
+ * This says only what was substituted, which stays true whatever else answered.
+ *
+ * NOT AN EXCERPT. §4.3 is emphatic, and the reason is structural rather than
+ * aesthetic: producing one means the server interprets the query, which is the
+ * entire cost the redesign removed. A word is free — the client did the
+ * expansion itself — and a snippet is not.
+ *
+ * `null` when nothing was substituted, which is every query that answered as
+ * typed: expansion is a FALLBACK, never a widening, so silence is the ordinary
+ * case and the line appears exactly when something needs explaining.
+ */
+export function expansionNotice(expansions: readonly Expansion[]): ExpansionPart[] | null {
+  const groups = groupExpansions(expansions);
+  if (groups.size === 0) return null;
+
+  const parts: ExpansionPart[] = [{ text: "Matched " }];
+  const entries = [...groups];
+  for (const [i, [typed, terms]] of entries.entries()) {
+    for (const [j, term] of terms.entries()) {
+      // "or", not "and": inside a group the terms are ALTERNATIVES — the ladder
+      // could not separate them, so the index searched `(valen OR valjean)` and
+      // a row needed only one of them.
+      if (j > 0) parts.push({ text: j === terms.length - 1 ? " or " : ", " });
+      parts.push({ text: term, matched: true });
+    }
+    parts.push({ text: ` instead of “${typed}”` });
+    // Between GROUPS the relationship is the opposite one — both tokens had to
+    // appear — so they are listed rather than alternated, and the pairing is
+    // kept: "valen or valjean, and reunião" without the "instead of" clauses
+    // would leave the reader guessing which stood in for which.
+    if (i < entries.length - 1) parts.push({ text: i === entries.length - 2 ? ", and " : ", " });
+  }
+  parts.push({ text: "." });
+  return parts;
+}
+
 // --- the query a deep link carries -------------------------------------------
 
 /**
  * The query a global-search HIT should deep-link the viewer's find with: the
- * typed query, verbatim.
+ * typed query, with any token the ladder unambiguously corrected replaced by the
+ * word that was actually searched.
  *
  * ## Why this is a named function and not just `q`
  *
- * It used to resolve the word that actually matched. On a fuzzy search the term
- * in the document is the CORRECTION, not the typo, and the server had already
- * marked it — so the link carried `reunião` where the user typed `reunaio`, and
- * the viewer's find ran it exact instead of re-fuzzing inside the document.
- * That machinery read the marks back out of the excerpt's HTML, and §4.3 drops
- * excerpts, so the marks are gone with it.
+ * It used to resolve the word that actually matched, by reading the server's
+ * marks back out of the excerpt's HTML. §4.3 drops excerpts, so that machinery
+ * went with them, and for a while this carried the raw query and said so.
  *
- * ## The decision, and its cost
+ * ## The decision, reversed, and why the shape now carries it
  *
- * DEEP-LINK WHAT THEY TYPED. The alternatives were to guess an expansion the row
- * does not have, or to carry no query at all and open the viewer cold; the first
- * invents a fact and the second discards one. What this loses, stated plainly
- * rather than left to be discovered: until in-document search moves onto the same
- * engine (§6 step 7), a typo that the global index expanded is handed to a find
- * that must expand it again — the residual fuzzy scan that resolving the term
- * once removed. It is one document rather than the corpus, and it is temporary.
+ * DEEP-LINK WHAT WAS SEARCHED. The old objection was that the row does not know
+ * the matched term — and it does now: the CLIENT ran the expansion, so the term
+ * arrives on `LocalResults.expansions` without anything having to parse a
+ * snippet. That closes the note this function has been carrying ("the one place
+ * that changes when the shape can carry it") and it fixes a real defect rather
+ * than adding a nicety: `pdfFind.ts` states, in the contract for its own
+ * `fuzzyPrompt`, that "a deep link from a global fuzzy hit already carries the
+ * RESOLVED term, so it runs exact and never reaches here". With the typo in the
+ * link that sentence was false in all three viewers — you clicked a row that had
+ * just told you the document matched on 887 pages, and the find that opened with
+ * it said "No matches" over a "search similar" opt-in.
  *
- * What the shape cannot do YET is the better version §4.3 asks for: the client
- * did its own expansion, so it knows the matched term without parsing anything.
- * `LocalHit` does not carry it, so this is the one place that changes when it
- * does — hence a function with a name rather than `q` spliced into an href.
+ * It also gives back the residual fuzzy scan: an exact term skips the ladder the
+ * viewer would otherwise have to run again inside the document.
+ *
+ * ## The two things it refuses to substitute
+ *
+ * A TIE. `valjen` reached `valen` AND `valjean`, one edit and one character away
+ * each, and the row does not say which of them this document holds. Picking the
+ * first would invent a fact — and would be worse than the typo for the half of
+ * the rows that hold the other word, because the viewer's own ladder recovers
+ * from a typo and has no reason to expand one real word into another. So a token
+ * with more than one candidate travels as typed.
+ *
+ * A TOKEN THE CALLER DID NOT EXPAND. The caller passes no expansions for a
+ * NAME-ONLY row (see `galleryCards.resultCard`): that row matched the typed
+ * spelling in its title, and the corrected word may not be in the document at
+ * all, so substituting there would swap a query the reader wrote for one nothing
+ * connects to what they clicked.
+ *
+ * The whitespace of the typed query is preserved exactly, because the tokens are
+ * substituted in place rather than re-joined: `Expansion.typed` is the raw
+ * whitespace-delimited token (`sqlite_core.zig` records `t.raw`), which is what
+ * makes a plain token-for-token swap correct and case-preserving.
  */
-export function deepLinkQuery(typed: string): string {
-  return typed;
+export function deepLinkQuery(typed: string, expansions: readonly Expansion[] = []): string {
+  if (expansions.length === 0) return typed;
+  const groups = groupExpansions(expansions);
+  // The capturing split keeps the separators as elements, so re-joining restores
+  // the original spacing rather than normalising it.
+  return typed
+    .split(/(\s+)/)
+    .map((token) => {
+      const terms = groups.get(token);
+      return terms && terms.length === 1 ? terms[0]! : token;
+    })
+    .join("");
 }
 
 /**

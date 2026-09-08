@@ -1,18 +1,36 @@
-// WHICH documents' text is promised offline — `golden-search.md` §4.4's tiering,
-// and the only place in the client that decides it.
+// WHICH documents' text the browser keeps ahead of time — `golden-search.md`
+// §4.4's tiering, and the only place in the client that decides it.
 //
-//     manifest rows ──order──▶ pinned, then tier 1, then tier 2 by updated_at
+//     manifest rows ──order──▶ tier 1, then tier 2 by updated_at
 //                                  │
-//                                  ├─ protected: kept, no budget check
+//                                  ├─ tier 1: kept, no budget check
 //                                  └─ tier 2: kept until the budget is spent
 //
-// **In-doc search cannot be more offline than the DOCUMENT is** (§4.4). Offline
-// there are no `.note` pages to render and no PDF page ranges to display, so
-// there was never a document on screen to search; keeping text for a document
-// that cannot be opened would be a promise about a screen nobody can reach. What
-// this module keeps is therefore bounded by what the reading cache can plausibly
-// show, and the explicit opt-in below is the seam through which a real "keep
-// this available offline" — text AND blob, a DOCUMENT feature — would arrive.
+// ## It is a CACHE, and the reason is LATENCY — not availability
+//
+// §4.4 was corrected on this and the file was renamed with it: it used to be
+// `offlineText.ts` and it used to talk about a "promise". **Offline is a SIDE
+// EFFECT of running the work in the browser, not a goal.** The server is a Pi
+// 1 B+ with a ~50 MB budget and a modern client can carry an index it cannot
+// (`client-server-balance.md` §0); that the text then happens to answer with the
+// network down is the architecture showing through. Nobody promised it and
+// nothing depends on it.
+//
+// What this prefetch actually buys is spelt out in §4.4 and is worth restating,
+// because it is the whole justification for spending any bytes at all: **the
+// first find in a document costs a fetch plus a build, and the build alone is
+// 315 ms on the worst real document (§8.1)**. Prefetching removes the fetch from
+// the documents most likely to be searched. That is a latency argument, it is
+// bounded, and it is the only one being made.
+//
+// **The explicit "keep this offline" control is GONE**, and its removal is the
+// same correction. Its only power was to override eviction, which is an
+// availability guarantee — and one this project would have been lying about,
+// since in-doc search cannot be more offline than the DOCUMENT is: with no
+// network there are no `.note` pages to render and no PDF page ranges to display,
+// so there was never a document on screen to search. A text-only "keep this
+// offline" over-promised twice over — once by promising availability, and again
+// by delivering only the half you cannot read.
 //
 // ## Tier, not file type, and the manifest is the only thing that knows
 //
@@ -33,13 +51,12 @@
 // ## `.mark` measures ENGAGEMENT, and that is why tier 2 is budgeted
 //
 // §3 tiers the TERMS the same way and says being wrong there costs a wait. Here
-// it costs permanent storage and repeated bandwidth on every device: MEASURED,
-// one `.mark` on Les Misérables moves 1,355,048 B of stored text into the
-// always-offline set from a single gesture — seven times the whole of tier 2 on
-// the dev corpus. Hence a budget walked in tier order and a per-document cap
-// (`textStore.ts` argues both numbers), so the failure mode is "the two oldest
-// annotated books are not offline" and never "the household silently synced
-// 40 MB".
+// it costs storage and repeated bandwidth on every device: MEASURED, one `.mark`
+// on Les Misérables moves 1,355,048 B of stored text into the cache from a single
+// gesture — seven times the whole of tier 2 on the dev corpus. Hence a budget
+// walked in tier order and a per-document cap (`textStore.ts` argues both
+// numbers), so the failure mode is "the two oldest annotated books cost a fetch
+// on their first find" and never "the household silently synced 40 MB".
 //
 // ## What is NOT here, deliberately
 //
@@ -48,7 +65,7 @@
 // addressed, no code (§4.4). `docSearch.ts` reads THIS store first and falls
 // back to that fetch; it never writes here, because a store that filled itself
 // from browsing would be a byte budget over the same bytes the browser is
-// already budgeting, with none of the promise that justifies this one.
+// already budgeting, and it would have no ceiling of its own.
 //
 // **A skipped document is not remembered across a reload.** Within a session an
 // oversize tier-2 document is fetched once and then skipped by md5, so a burst of
@@ -69,18 +86,18 @@ import { httpTextTransport, type TextTransport } from "./docText";
 import type { ManifestRow } from "./manifestCodec";
 
 /** One document the prefetch may keep, in the order it should be considered. */
-export interface OfflineCandidate {
+export interface PrefetchCandidate {
   readonly md5: string;
   readonly fileId: number;
   /** Never null — a row that cannot be keyed is not a candidate. */
   readonly indexVersion: number;
-  /** Exempt from the budget and from eviction: tier 1, or pinned. */
+  /** Exempt from the budget and from eviction. Tier 1, and nothing else. */
   readonly protect: boolean;
 }
 
 /**
- * §4.4's rule as an ordering, which is all it is: pinned first, then tier 1,
- * then tier 2 by `updated_at` descending. Pure.
+ * §4.4's rule as an ordering, which is all it is: tier 1, then tier 2 by
+ * `updated_at` descending. Pure.
  *
  * Two whole classes of row are dropped before any of that:
  *
@@ -93,16 +110,13 @@ export interface OfflineCandidate {
  *     free, which is the same reason `manifestCodec` refuses to cache an empty
  *     term set under those states.
  *
- * Tier 3 is absent unless pinned: that is the on-demand half, and the HTTP cache
- * is its story.
+ * Tier 3 is absent entirely: that is the on-demand half, and the HTTP cache is
+ * its story. There used to be a third group ahead of these two, holding whatever
+ * had been pinned; the pin is gone (see the header) and so is the group.
  */
-export function orderCandidates(
-  rows: readonly ManifestRow[],
-  pins: ReadonlySet<number>,
-): OfflineCandidate[] {
-  const pinned: OfflineCandidate[] = [];
-  const notes: OfflineCandidate[] = [];
-  const marked: OfflineCandidate[] = [];
+export function orderCandidates(rows: readonly ManifestRow[]): PrefetchCandidate[] {
+  const notes: PrefetchCandidate[] = [];
+  const marked: PrefetchCandidate[] = [];
   // Newest first within each group. §4.4 asks for it on tier 2; tier 1 gets the
   // same order so that a library too large for the origin's quota degrades by
   // dropping the OLDEST notes rather than by whatever order the server filled.
@@ -111,11 +125,10 @@ export function orderCandidates(
     const indexVersion = row.indexVersion;
     if (indexVersion === null || row.derivation !== "derived") continue;
     const { md5, fileId } = row;
-    if (pins.has(fileId)) pinned.push({ md5, fileId, indexVersion, protect: true });
-    else if (row.tier === "note") notes.push({ md5, fileId, indexVersion, protect: true });
+    if (row.tier === "note") notes.push({ md5, fileId, indexVersion, protect: true });
     else if (row.tier === "marked") marked.push({ md5, fileId, indexVersion, protect: false });
   }
-  return [...pinned, ...notes, ...marked];
+  return [...notes, ...marked];
 }
 
 /** What one pass did — for tests, and for anything that ever wants to say it. */
@@ -130,16 +143,8 @@ export interface PrefetchOutcome {
   readonly bytes: number;
 }
 
-/** How a document is named to the opt-in — what a UI control has in hand. */
-export interface OfflineTarget {
-  readonly md5: string;
-  readonly fileId: number;
-  /** From `searchService.indexVersion(md5)`. Null means "not syncable yet". */
-  readonly indexVersion: number | null;
-}
-
-export interface OfflineText {
-  /** False where IndexedDB is not available: every call below is then a no-op
+export interface TextPrefetch {
+  /** False where IndexedDB is not available: {@link prefetch} is then a no-op
    *  and in-document search simply fetches, which is §4.2's required path. */
   readonly available: boolean;
   /**
@@ -148,34 +153,23 @@ export interface OfflineText {
    * and it swallows a failed document rather than abandoning the pass.
    */
   prefetch(rows: readonly ManifestRow[], signal?: AbortSignal): Promise<PrefetchOutcome>;
-  /** The explicit "make available offline": pin, fetch now, keep unconditionally.
-   *  Returns false when there is nothing to key the record by. */
-  keepOffline(target: OfflineTarget, signal?: AbortSignal): Promise<boolean>;
-  /** Release the pin. The text stays until the budget wants the space back —
-   *  it is a cache again, which is what un-promising means. */
-  forget(target: OfflineTarget): Promise<void>;
-  /** Whether this document's text is held AT THIS VERSION — the honest answer to
-   *  "is this available offline?", which the HTTP cache cannot give. */
-  isKept(md5: string, indexVersion: number | null): Promise<boolean>;
-  /** `files.id` of everything explicitly kept. For a control's checked state. */
-  pinned(): Promise<ReadonlySet<number>>;
 }
 
-export interface OfflineTextOptions {
+export interface TextPrefetchOptions {
   /** Defaults to the real IndexedDB store. */
   store?: TextStore;
   /** How a text record is fetched. Injectable so tests need no network. */
   transport?: TextTransport;
 }
 
-export function createOfflineText(opts: OfflineTextOptions = {}): OfflineText {
+export function createTextPrefetch(opts: TextPrefetchOptions = {}): TextPrefetch {
   const store = opts.store ?? openTextStore();
   const transport = opts.transport ?? httpTextTransport();
   /** Session-scoped: md5s fetched once and refused. See the header. */
   const refused = new Set<string>();
   let running: Promise<PrefetchOutcome> | null = null;
 
-  async function fetchInto(candidate: OfflineCandidate, signal?: AbortSignal): Promise<number> {
+  async function fetchInto(candidate: PrefetchCandidate, signal?: AbortSignal): Promise<number> {
     const doc = await transport(candidate.md5, candidate.indexVersion, signal);
     // The record's OWN version is what it is stored under, not the manifest's:
     // the same rule §3.3 states for the terms stream — key what ARRIVED. A
@@ -189,8 +183,7 @@ export function createOfflineText(opts: OfflineTextOptions = {}): OfflineText {
     const empty: PrefetchOutcome = { kept: 0, skipped: 0, dropped: 0, bytes: 0 };
     if (!store.available || rows.length === 0) return empty;
 
-    const pins = new Set(await store.pins());
-    const candidates = orderCandidates(rows, pins);
+    const candidates = orderCandidates(rows);
     const wanted = new Map(candidates.map((c) => [textKeyOf(c.md5, c.indexVersion), c]));
     const held = await store.keys();
 
@@ -219,9 +212,10 @@ export function createOfflineText(opts: OfflineTextOptions = {}): OfflineText {
       const key = textKeyOf(candidate.md5, candidate.indexVersion);
       const already = heldNow.get(key);
       if (already) {
-        // Re-asserted every pass rather than trusted from when it was written: a
-        // pin added or released since is exactly a change of protection on a
-        // record already held, and this is the only thing that walks both.
+        // Re-asserted every pass rather than trusted from when it was written.
+        // It is also the MIGRATION off the pin: a record a previous build left
+        // protected because somebody had pinned it is corrected here, and this
+        // is the only thing that walks both the manifest and the held set.
         if (already.protect !== candidate.protect) {
           await store.setProtection(candidate.md5, candidate.indexVersion, candidate.protect);
         }
@@ -230,9 +224,9 @@ export function createOfflineText(opts: OfflineTextOptions = {}): OfflineText {
         continue;
       }
       if (refused.has(key)) continue;
-      // The budget stops the WALK, not the store: tier 1 and pins are kept
-      // whatever it says (§4.4 keeps tier 1 "with no budget check"), and their
-      // bytes are still counted so tier 2 gets only what is left over.
+      // The budget stops the WALK, not the store: tier 1 is kept whatever it says
+      // (§4.4 keeps tier 1 "with no budget check"), and its bytes are still
+      // counted so tier 2 gets only what is left over.
       if (!candidate.protect && bytes >= budget) continue;
       try {
         const size = await fetchInto(candidate, signal);
@@ -274,44 +268,6 @@ export function createOfflineText(opts: OfflineTextOptions = {}): OfflineText {
       });
       running = p;
       return p;
-    },
-
-    async keepOffline(target, signal) {
-      // A document with no `indexVersion` cannot be keyed, so the pin would be a
-      // promise with nothing behind it. The caller gets `false` and can say so.
-      if (!store.available || target.indexVersion === null) return false;
-      await store.pin(target.fileId);
-      const key = textKeyOf(target.md5, target.indexVersion);
-      refused.delete(key);
-      try {
-        await fetchInto(
-          { md5: target.md5, fileId: target.fileId, indexVersion: target.indexVersion, protect: true },
-          signal,
-        );
-        return true;
-      } catch {
-        // The pin survives a failed fetch on purpose: the intent is recorded, and
-        // the next prefetch pass — after the next sync — makes good on it.
-        return false;
-      }
-    },
-
-    async forget(target) {
-      if (!store.available) return;
-      await store.unpin(target.fileId);
-      if (target.indexVersion !== null) {
-        await store.setProtection(target.md5, target.indexVersion, false);
-      }
-    },
-
-    async isKept(md5, indexVersion) {
-      if (!store.available || indexVersion === null) return false;
-      const held = await store.keys();
-      return held.some((h) => h.md5 === md5 && h.indexVersion === indexVersion);
-    },
-
-    async pinned() {
-      return new Set(await store.pins());
     },
   };
 }

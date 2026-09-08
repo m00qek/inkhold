@@ -24,6 +24,13 @@
 // and it is not free: 703 ms for the whole 1,222-document library, 39 ms at
 // tier 1 (§8.1). It is paid by the person who typed, once, and then reused.
 //
+// **It is no longer paid on this thread.** `searchEngine.ts` answers from a
+// worker holding the instance, so those 703 ms — and the 71.3 ms a no-match query
+// costs per keystroke (§8.6) — leave the UI alone. The rule above is unchanged
+// and gained a second half: the WORKER is not constructed until the first query
+// either, because a worker spawned at boot would instantiate the engine at boot
+// and break §4.2 in a new way.
+//
 // ## The index is a SUPERSET and the manifest is what makes an answer correct
 //
 // §2.7: purging is not a protocol step. A trashed document stops matching
@@ -86,7 +93,8 @@
 // live and derived", and only the second knows about `indexVersion`.
 
 import { newestPerDocument } from "../cache/termsStore";
-import { SearchIndex, type CoreLoader, type QueryResult, type TermsDocument } from "./indexEngine";
+import type { CoreLoader, QueryResult, TermsDocument } from "./indexEngine";
+import { createSearchEngine, type SearchEngine } from "./searchEngine";
 import { createIndexSync, type IndexSync, type SyncOutcome } from "./indexSync";
 import type { ManifestRow } from "./manifestCodec";
 import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
@@ -184,27 +192,40 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
    */
   let versions = new Map<string, number | null>();
 
-  let index: SearchIndex | null = null;
-  let building: Promise<SearchIndex> | null = null;
+  let index: SearchEngine | null = null;
+  let building: Promise<SearchEngine> | null = null;
   // Bumped when the STORE changed, not when the manifest did: a deletion needs
   // no rebuild at all, because the intersection above already hides it. Only
   // rows that arrived can make the built index wrong.
   let rows = 0;
   let built = -1;
 
-  async function build(): Promise<SearchIndex> {
+  async function build(): Promise<SearchEngine> {
     const target = rows;
     // `all()` already keeps the newest generation per md5; run it again anyway,
     // because the guard it exists for is FATAL — `SearchIndex.build` refuses a
     // repeated md5 rather than doubling the counts §4.3 ranks by — and a store
     // supplied by a caller (or a test) has made no such promise.
     const docs: TermsDocument[] = newestPerDocument(await sync.documents());
-    const engine = index ?? (await SearchIndex.open(load));
     // Reused rather than re-opened: §4.1 measured that `idx_open()` returns the
     // old database's pages to SQLite's heap INSIDE linear memory, so successive
     // builds converge on the cost of the worst one instead of growing past it.
-    if (index) engine.reset();
-    engine.build(docs);
+    // `SearchEngine.build` is that reuse — one worker, one instance, `rebuild`.
+    const engine = index ?? createSearchEngine({ load });
+    try {
+      await engine.build(docs);
+    } catch (err) {
+      // A failed build leaves an EMPTY index (`SearchIndex.build` resets), and a
+      // worker that DIED leaves one that can never answer again. Neither is
+      // worth keeping, and the same reasoning is spelt out in `docSearch.ts`:
+      // dropping it costs one re-instantiation on a path that is already an
+      // error, and it makes a dead worker a failed search rather than a search
+      // box that is broken for the rest of the session.
+      index = null;
+      built = -1;
+      engine.close();
+      throw err;
+    }
     index = engine;
     built = target;
     return engine;
@@ -217,7 +238,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     return out;
   }
 
-  function engine(): Promise<SearchIndex> {
+  function engine(): Promise<SearchEngine> {
     if (index && built === rows) return Promise.resolve(index);
     // A sync that lands mid-build is picked up by the NEXT search rather than
     // restarting one that may already be 700 ms in. The alternative spends the
@@ -269,7 +290,10 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
       // deleted the fallback, so the divergence is now a "couldn't search" on
       // screen rather than a slow answer.
       if (!live && (listing?.().length ?? 0) === 0) throw new Error("local search has nothing to answer from");
-      // THE FIRST THING THAT CAN REACH THE LOADER, and it is behind a query.
+      // THE FIRST THING THAT CAN REACH THE LOADER — and, since the engine moved
+      // off this thread, the first thing that can construct the WORKER. §4.2's
+      // promise is the same one either way: a person who never searches pays
+      // neither the 16.13 MB nor a thread to hold it.
       const idx = await engine();
       // The build is not abortable and should not be — it is the same work the
       // next keystroke needs. What a superseded search must not do is PAINT, and
@@ -286,10 +310,12 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
       // and it is what the corpus needs rather than a nicety: the text is the
       // device's own handwriting recognition, so exact matching fails even when
       // the person spells the word correctly.
-      return {
-        query,
-        ...group(idx.query(query, ALL_PAGES, true), live ?? offlineLive()),
-      };
+      //
+      // The SIGNAL travels with it now that the query is a message rather than a
+      // call: a superseded keystroke rejects here instead of waiting out the
+      // 71.3 ms whole-vocabulary scan a no-match query costs (§8.6).
+      const answer = await idx.query(query, ALL_PAGES, true, signal);
+      return { query, ...group(answer, live ?? offlineLive()) };
     },
   };
 }

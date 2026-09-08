@@ -28,6 +28,17 @@
   line-height: 1.5;
   color: var(--ink-soft);
 }
+/* The word the typo ladder searched in place of what was typed — §4.3's
+   "matched **reunião**". Set apart INSIDE the notice, not styled as a second
+   component: it is one word in a sentence, and the sentence is already the
+   notice's. Weight and full-strength ink only — no colour of its own, because
+   `.hits__notice` already carries the accent rule and a second accent inside it
+   would read as a control. Scoped under the notice, so its (0,2,0) reach cannot
+   leave this block. */
+.hits__notice .hits__matched {
+  font-weight: 600;
+  color: var(--ink);
+}
 /* "still counting", in the section head beside the totals. */
 .hits__count {
   font-family: var(--font-mono);

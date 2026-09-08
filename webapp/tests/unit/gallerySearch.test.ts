@@ -16,7 +16,7 @@ import { createGallerySearch, type GallerySearchCtx } from "../../src/pages/gall
 import type { SearchState } from "../../src/pages/noteSearch";
 import type { SearchResult } from "../../src/pages/galleryCards";
 import type { Entry, Id, Listing, NoteSummary } from "../../src/core/types";
-import type { LocalHit } from "../../src/search/localSearch";
+import type { Expansion, LocalHit } from "../../src/search/localSearch";
 
 /** One matching DOCUMENT, as the engine hands it over: an id and its pages. */
 function doc(fileId: number, pages: number[], updatedAt = 0): LocalHit {
@@ -43,8 +43,8 @@ function listing(entries: Entry[]): Listing {
   return { folderId: null, path: [], entries, syncVersion: 1 };
 }
 
-function results(query: string, documents: LocalHit[]): SearchState {
-  return { kind: "results", query, documents };
+function results(query: string, documents: LocalHit[], expansions: Expansion[] = []): SearchState {
+  return { kind: "results", query, documents, expansions };
 }
 
 /**
@@ -60,6 +60,8 @@ function harness(initial: { state: SearchState; pending: number | null; tree?: E
   let pending = initial.pending;
   const tree = initial.tree ?? [];
   const built: SearchResult[] = [];
+  /** What each row was handed for its DEEP LINK, parallel to {@link built}. */
+  const handed: (readonly Expansion[] | undefined)[] = [];
 
   const ctx: GallerySearchCtx = {
     gallery,
@@ -67,8 +69,9 @@ function harness(initial: { state: SearchState; pending: number | null; tree?: E
     folders: { values: () => (tree.length === 0 ? [] : [listing(tree)]) },
     treeLoaded: () => initial.treeLoaded ?? true,
     labelFor: (f) => f.name,
-    resultCard: (r) => {
+    resultCard: (r, _i, _q, expansions) => {
       built.push(r);
+      handed.push(expansions);
       const card = document.createElement("article");
       card.className = "card--result";
       card.textContent = r.note.name;
@@ -88,9 +91,11 @@ function harness(initial: { state: SearchState; pending: number | null; tree?: E
   return {
     gallery,
     built,
+    handed,
     paint(q = "rutabaga") {
       gallery.replaceChildren();
       built.length = 0;
+      handed.length = 0;
       search.renderSearch(q);
       return gallery;
     },
@@ -103,6 +108,8 @@ function harness(initial: { state: SearchState; pending: number | null; tree?: E
     emptyBody: () => gallery.querySelector(".empty")?.textContent ?? "",
     head: () => gallery.querySelector(".section-head")?.textContent ?? "",
     notices: () => [...gallery.querySelectorAll(".hits__notice")].map((n) => n.textContent),
+    /** The words the ladder searched, as the emphasised half of the notice. */
+    matchedWords: () => [...gallery.querySelectorAll(".hits__matched")].map((n) => n.textContent),
     rows: () => [...gallery.querySelectorAll(".card--result")].map((n) => n.textContent),
   };
 }
@@ -237,6 +244,113 @@ describe("no continuation", () => {
     h.paint("one");
     expect(h.head()).toContain("1 note");
     expect(h.head()).not.toContain("page");
+  });
+});
+
+// §4.3's "matched **reunião**" — the half of what replaced the excerpt that a
+// match count cannot carry. `noteSearch.test.ts` pins the WORDING; this pins
+// what the renderer chose to do with it, which is the separate failure: the
+// sentence can be perfect and still be on every row, or over the wrong list.
+describe("what the results say about a corrected query", () => {
+  const CORRECTED: Expansion[] = [{ typed: "valjaen", matched: "valjean" }];
+
+  // ONCE, ABOVE THE LIST. The expansion is per TOKEN, so it explains every row
+  // identically — and it would be false on a row that matched by NAME, which
+  // matched the typed spelling exactly. A row is never the place for it.
+  it("says it once above the list, and never on a row", () => {
+    const h = harness({
+      state: results("valjaen", [doc(1, [0, 4]), doc(2, [7])], CORRECTED),
+      pending: 0,
+      tree: [note("1", "One"), note("2", "Two")],
+    });
+    h.paint("valjaen");
+
+    expect(h.notices()).toEqual(["Matched valjean instead of “valjaen”."]);
+    expect(h.matchedWords()).toEqual(["valjean"]);
+    expect(h.rows()).toEqual(["One", "Two"]); // the stub rows say only their names
+  });
+
+  // A FALLBACK, NEVER A WIDENING: the query that answered as typed explains
+  // nothing, so the line is not there at all.
+  it("says nothing when the query as typed is what answered", () => {
+    const h = harness({ state: results("aurora", [doc(1, [0])]), pending: 0, tree: [note("1", "One")] });
+    h.paint("aurora");
+    expect(h.notices()).toEqual([]);
+  });
+
+  // IT LEADS. `resultsMayGrowLine` qualifies the LIST; this qualifies the
+  // QUERY, and a reader who does not yet know which word was searched has no
+  // use for a note about the list growing.
+  it("comes before the completeness caveat, and before the counts", () => {
+    const h = harness({
+      state: results("valjaen", [doc(1, [0])], CORRECTED),
+      pending: 2,
+      tree: [note("1", "One")],
+    });
+    h.paint("valjaen");
+
+    expect(h.notices()).toEqual([
+      "Matched valjean instead of “valjaen”.",
+      "More may appear — 2 documents are still being indexed.",
+    ]);
+    const order = [...h.gallery.children].map((n) => n.className);
+    expect(order.indexOf("hits__notice")).toBeLessThan(order.indexOf("section-head"));
+  });
+
+  // THE ENGINE'S GUARD IS NOT THIS VIEW'S GUARD. `indexSearch.ts` refuses to
+  // report a substitution over an empty ANSWER; this renderer intersects again
+  // — a hit the cached tree cannot name is dropped (§2.7) — so a list standing
+  // on name matches alone would be explained by an expansion that produced none
+  // of it.
+  it("stays silent when every row it could explain fell out of the listing join", () => {
+    const h = harness({
+      // The corrected term reached document 404, which the tree does not name.
+      // "One" is here because its NAME contains the typed spelling.
+      state: results("valjaen", [doc(404, [1, 2])], CORRECTED),
+      pending: 0,
+      tree: [note("1", "valjaen plans")],
+    });
+    h.paint("valjaen");
+
+    expect(h.rows()).toEqual(["valjaen plans"]);
+    expect(h.notices()).toEqual([]);
+  });
+
+  it("stays silent over an empty result set, where it would contradict 'No matches'", () => {
+    const h = harness({ state: results("valjaen", [], CORRECTED), pending: 0, tree: [note("1", "One")] });
+    h.paint("valjaen");
+
+    expect(h.notices()).toEqual([]);
+    expect(h.emptyBody()).not.toContain("valjean");
+  });
+
+  // NODES, NEVER MARKUP. Both halves are device-authored — an index term, a
+  // token out of the search box — and step 6 deleted this app's last
+  // `innerHTML` of anything like that.
+  it("builds the sentence from text, so neither half can be markup", () => {
+    const h = harness({
+      state: results("<b>x</b>", [doc(1, [0])], [{ typed: "<b>x</b>", matched: "<i>y</i>" }]),
+      pending: 0,
+      tree: [note("1", "One")],
+    });
+    h.paint("<b>x</b>");
+
+    const notice = h.gallery.querySelector(".hits__notice")!;
+    expect(notice.textContent).toBe("Matched <i>y</i> instead of “<b>x</b>”.");
+    expect(notice.querySelector("i")).toBeNull();
+    expect(notice.querySelector("b")).toBeNull();
+  });
+
+  // The expansions reach the ROW as well, and for exactly one reason: the row
+  // decides which query its deep link carries (`deepLinkQuery`).
+  it("hands the substitution to each row, for its deep link", () => {
+    const h = harness({
+      state: results("valjaen", [doc(1, [0])], CORRECTED),
+      pending: 0,
+      tree: [note("1", "One")],
+    });
+    h.paint("valjaen");
+    expect(h.handed).toEqual([CORRECTED]);
   });
 });
 

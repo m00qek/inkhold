@@ -23,7 +23,19 @@
 // until somebody types into a find bar — the same rule `indexSearch.ts` holds for
 // the library index, for the same 16.13 MB reason.
 //
+// ## …and it is a WORKER's instance, not this thread's
+//
+// §7 called the 315 ms first-find build "the one thing on this list a household
+// would actually feel", and it was on the main thread. It is not any more:
+// `searchEngine.ts` holds it behind a worker wherever a `Worker` exists, and
+// falls back to this thread where one does not. Nothing about the shape below
+// changed — `DocSearch.search` was already `Promise`-returning and every caller
+// already awaited it, which is what made the move an internal one.
+//
 // ## Its own wasm instance, and that is a decision with a number behind it
+//
+// (And "its own instance" is now also its own WORKER, which is the same decision
+// read once more: the library's build must not queue in front of a find.)
 //
 // §8.1's measured lifecycle shares ONE instance between the library index and the
 // in-document one, restoring the library from its serialized image afterwards
@@ -62,7 +74,8 @@
 // {@link countMarks}), and a segment the engine did not match is never added
 // because a word in it happens to fold to a query term.
 
-import { SearchIndex, type CoreLoader, type TermsDocument } from "./indexEngine";
+import type { CoreLoader, TermsDocument } from "./indexEngine";
+import { createSearchEngine, type SearchEngine } from "./searchEngine";
 import { httpTextTransport, type DocumentText, type TextTransport } from "./docText";
 import { openTextStore, type TextStore } from "../cache/textStore";
 import type { Expansion } from "./localSearch";
@@ -132,16 +145,16 @@ export interface DocSearchOptions {
   /** How the text record is fetched. Injectable so tests need no network. */
   transport?: TextTransport;
   /**
-   * Where PROMISED-offline text is kept (§4.4) — `.note` and anything with a
-   * `.mark`, plus whatever was explicitly kept. Read here and never written:
-   * what belongs in it is `offlineText.ts`'s decision, and a store that filled
-   * itself from browsing would be a byte budget over the bytes the HTTP cache is
-   * already keeping for free.
+   * The PREFETCHED text cache (§4.4) — `.note`, and anything with a `.mark` that
+   * fits the budget. Read here and never written: what belongs in it is
+   * `textPrefetch.ts`'s decision, and a store that filled itself from browsing
+   * would be a byte budget over the bytes the HTTP cache is already keeping for
+   * free.
    *
    * A miss, an unavailable IndexedDB, a version that moved — all three land on
    * the same line below, which is the fetch this module has always done. The
-   * store is an optimisation for the online case and the whole story for the
-   * offline one, and it is never a source of truth.
+   * store saves that fetch on the documents most likely to be searched; it is
+   * never a source of truth and it promises nothing.
    */
   store?: TextStore;
   /** How an engine instance is obtained. Injectable so tests need no wasm. */
@@ -281,7 +294,7 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
   const load = opts.load;
   const versionOf = opts.indexVersion ?? ((): number | null => null);
 
-  let index: SearchIndex | null = null;
+  let index: SearchEngine | null = null;
   /**
    * What is currently BUILT into `index`, not merely fetched — `md5@version`,
    * because a version bump is the same md5 with different text, and an index
@@ -291,7 +304,7 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
   let loaded: string | null = null;
   /** The in-flight load, so a burst of keystrokes on a cold document is one
    *  fetch and one build rather than one per keystroke. */
-  let loading: { key: string; done: Promise<SearchIndex> } | null = null;
+  let loading: { key: string; done: Promise<SearchEngine> } | null = null;
   /** The loaded document's segments by ordinal — where `o`/`l` and the text to
    *  mark come from once the engine has answered with a bare ordinal. */
   let byOrdinal = new Map<number, DocumentText["segments"][number]>();
@@ -312,12 +325,13 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
     return transport(md5, version, signal);
   }
 
-  async function load1(md5: string, key: string, version: number | null, signal?: AbortSignal): Promise<SearchIndex> {
+  async function load1(md5: string, key: string, version: number | null, signal?: AbortSignal): Promise<SearchEngine> {
     const text = await fetchText(md5, version, signal);
-    const engine = index ?? (await SearchIndex.open(load));
     // Reused rather than re-opened: §8.1 measured that successive documents
-    // through one instance converge on the cost of the worst one.
-    if (index) engine.reset();
+    // through one instance converge on the cost of the worst one. That is what
+    // `SearchEngine.build` is — `reset()` then `build()` on the instance the
+    // worker already holds — and it is why there is no worker per document.
+    const engine = index ?? createSearchEngine({ load });
     index = engine;
     // A rebuild that throws must not leave the previous document's `byOrdinal`
     // beside a half-built table — `SearchIndex.build` resets on failure, so the
@@ -325,13 +339,27 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
     loaded = null;
     byOrdinal = new Map();
     const doc: TermsDocument = { md5, pages: text.segments.map((s) => ({ p: s.p, t: s.t })) };
-    engine.build([doc]);
+    // ~6 ms of main-thread block to clone the worst document's 14,055 segments
+    // across the boundary (MEASURED in Chromium — `engineWorker.ts` has the
+    // table), against the whole build it takes off this thread.
+    try {
+      await engine.build([doc]);
+    } catch (err) {
+      // A failed build leaves an EMPTY index (`SearchIndex.build` resets), and a
+      // worker that DIED leaves one that can never answer again. Neither is
+      // worth keeping: dropping it costs one re-instantiation on a path that is
+      // already an error, and it is what makes a dead worker a failed find
+      // rather than a find bar that is broken for the rest of the session.
+      index = null;
+      engine.close();
+      throw err;
+    }
     for (const s of text.segments) byOrdinal.set(s.p, s);
     loaded = key;
     return engine;
   }
 
-  function ready(md5: string, key: string, version: number | null, signal?: AbortSignal): Promise<SearchIndex> {
+  function ready(md5: string, key: string, version: number | null, signal?: AbortSignal): Promise<SearchEngine> {
     if (index && loaded === key) return Promise.resolve(index);
     // A second caller joins the load in flight for the SAME document; a different
     // document supersedes it, because a build is not abortable and the one
@@ -364,7 +392,12 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
       // server's in-document routes never ran their fuzzy fallback, and the
       // corpus is the device's own handwriting recognition, so exact matching
       // fails even when the person spells the word correctly.
-      const answer = engine.query(query, ALL_SEGMENTS, true);
+      //
+      // The SIGNAL travels with it now that the query is a message rather than a
+      // call: a superseded keystroke rejects here rather than waiting out the
+      // 71.3 ms whole-vocabulary scan a no-match query costs (§8.6), and the
+      // query behind it is posted at once.
+      const answer = await engine.query(query, ALL_SEGMENTS, true, signal);
       const plan = planMarks(query, answer.expansions);
       const segments: DocSegmentMatch[] = [];
       for (const hit of answer.hits) {

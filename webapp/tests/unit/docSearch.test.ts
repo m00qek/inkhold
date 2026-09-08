@@ -494,7 +494,7 @@ describe("the offline text store", () => {
   // §4.4's other half: `.note` and `.mark`-annotated documents are PROMISED
   // offline, so their text is in IndexedDB rather than only in the HTTP cache.
   // What this asserts is the seam — which source answers, and when the stored one
-  // is refused — not the store itself, which `offlineText.test.ts` owns.
+  // is refused — not the store itself, which `textPrefetch.test.ts` owns.
   function heldStore(records: DocumentText[]): TextStore {
     const held = new Map(records.map((r) => [textKeyOf(r.md5, r.indexVersion), r]));
     return {

@@ -33,7 +33,8 @@ import { fakeFileHash } from "../../src/api/fake";
 //
 // The tests that do NOT mock it are exercising the NAME half, deliberately: what
 // the excerpt's removal changed about a row — no `.hit__snippet` anywhere, no
-// "More results" control, no fuzzy notice, a header that counts plainly — plus
+// "More results" control, no notice over a query that answered, a header that
+// counts plainly — plus
 // the routing, the focus behaviour and the deep link, none of which care where a
 // row came from. The transcript half's own row contract (the count line and its
 // wording per file kind) stays pinned in `tests/unit/resultRow.test.ts` against
@@ -159,7 +160,7 @@ test.describe("universal search", () => {
 
   // THE RETIRED CONTRACT, asserted as an absence so it cannot come back by
   // accident. Each of these was a mechanism the server's answer paid for.
-  test("no excerpt, no continuation control, no fuzzy notice — anywhere in a result list", async ({ page }) => {
+  test("no excerpt, no continuation control, no notice — over a query that answered", async ({ page }) => {
     await signedIn(page);
     await page.goto("/");
     await railSettled(page);
@@ -174,8 +175,10 @@ test.describe("universal search", () => {
     // The cursor's "More results" — a whole local index answers whole.
     await expect(page.getByRole("button", { name: "More results" })).toHaveCount(0);
     await expect(page.locator(".hits__more")).toHaveCount(0);
-    // The fuzzy notice rode `usedFuzzy` on a server response, and there is no
-    // response. Nothing here is pending either, so no notice of any kind.
+    // No notice of any kind. Nothing is pending, and "Project" is a word the
+    // library really holds — expansion is a FALLBACK, never a widening, so a
+    // query that answered as typed has nothing to explain. The corrected case
+    // has its own test, below, and it needs an index fixture to reach.
     await expect(page.locator(".hits__notice")).toHaveCount(0);
   });
 
@@ -355,11 +358,10 @@ test.describe("universal search", () => {
 
     await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
     await expect(page.locator(".reader__title")).toContainText("Project Aurora");
-    // THE DEEP LINK CARRIES WHAT WAS TYPED, verbatim. It used to carry a term
-    // read back out of the excerpt's `<mark>` elements — a correction on a fuzzy
-    // answer — and §4.3 took the excerpt, so there is no mark to read and no
-    // expansion the row holds. `deepLinkQuery` is where that changes when the
-    // index's own expansion reaches the row.
+    // THE DEEP LINK CARRIES WHAT WAS TYPED, verbatim — because "Aurora" is what
+    // the index searched. `deepLinkQuery` substitutes only where the typo ladder
+    // resolved a token, which this query gave it no reason to do; the corrected
+    // case is asserted below, against the index fixture.
     await expect(page).toHaveURL(/#\/note\/121(\/page\/\d+)?\?q=Aurora$/);
 
     // Primed, not merely carried: the bar is open, the field is filled, and the
@@ -483,6 +485,56 @@ test.describe("universal search", () => {
       (p) => !p.startsWith("/api/controlplane/text/") && !p.startsWith("/api/controlplane/search-index/"),
     );
     expect(strays).toEqual([]);
+  });
+
+  // §4.3's "matched **reunião**", against a REAL ladder — the correction is
+  // computed by the same `idx_fuzzy` the library runs, over a real FTS5 index in
+  // real `sqlite-core.wasm`, and the fixture supplies only the bytes.
+  //
+  // "ednor" is the query for the same reason "Endor" was: the word lives ONLY in
+  // a transcript, so nothing about this can be the name half. It is a
+  // TRANSPOSITION of a five-codepoint word, which `maxEdits` puts one edit
+  // inside the ladder's reach, and no other term in the fixture's vocabulary is
+  // that close — so the substitution is unambiguous and the deep link takes it.
+  test("a corrected query says which word it searched, and opens the viewer on it", async ({ page }) => {
+    await signedIn(page);
+    await mockSearchIndex(page, { rows: INDEX_ROWS, documents: INDEX_DOCS });
+    await mockDocText(page, INDEX_TEXT);
+    await page.goto("/");
+    await railSettled(page);
+
+    await searchBox(page).fill("ednor");
+    const row = results(page).filter({ hasText: "Project Aurora — kickoff" });
+    await expect(row).toHaveCount(1, { timeout: 20_000 });
+
+    // SAID ONCE, ABOVE THE LIST, and it names the word rather than asserting a
+    // boolean. This is what replaces the excerpt's at-a-glance "why": without
+    // it you get 2 pages of results for a word you did not type and nothing
+    // says the index looked for a different one.
+    const notice = page.locator(".hits__notice");
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toHaveText("Matched endor instead of “ednor”.");
+    // The substituted word is set apart — §4.3's emphasis, and the only part of
+    // the sentence that is a vocabulary term.
+    await expect(notice.locator(".hits__matched")).toHaveText("endor");
+    // NOT AN EXCERPT. A word, never a snippet: §4.3 drops those rather than
+    // deferring them, which is what leaves the server with no query-interpreting
+    // code at all.
+    await expect(page.locator(".hit__snippet")).toHaveCount(0);
+    // The row still says what it always says — the count is the corrected
+    // query's, and it is exact: "Endor" is on the odd pages, 1 and 3.
+    await expect(matchLine(row)).toHaveText("Matches on 2 pages");
+
+    // THE DEEP LINK CARRIES THE CORRECTION, not the typo. Handing the viewer
+    // "ednor" would open a find that matched nothing over a "search similar"
+    // opt-in, on a row that had just said the document matches on two pages.
+    await row.locator(".card__open").click();
+    await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
+    await expect(page).toHaveURL(/#\/note\/121\/page\/2\?q=endor$/);
+    await expect(page.getByRole("textbox", { name: "Find in this note" })).toHaveValue("endor");
+    // Settled on a real count, exactly — no fuzzy prompt, because the term is
+    // the one the document holds.
+    await expect(page.locator(".findbar__count")).toHaveText("1 of 2", { timeout: 20_000 });
   });
 
   test("a result row is reachable and openable by keyboard", async ({ page }) => {

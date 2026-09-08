@@ -41,11 +41,12 @@
 // that provably cannot contain it. One re-run, and only one, however many frames
 // arrived meanwhile.
 //
-// ## The offline-text prefetch rides the same sync, one step behind it
+// ## The text prefetch rides the same sync, one step behind it
 //
-// §4.4 keeps `.note` and `.mark`-annotated documents' TEXT offline on a budget,
-// and the manifest a sync just decoded is the only thing that knows which
-// documents those are (`offlineText.ts` says why the file listing cannot). So the
+// §4.4 caches `.note` and `.mark`-annotated documents' TEXT on a budget — for
+// LATENCY, not availability (`textPrefetch.ts`'s header) — and the manifest a
+// sync just decoded is the only thing that knows which documents those are
+// (`textPrefetch.ts` also says why the file listing cannot). So the
 // pass is started from the sync's own completion and NOT awaited: it is
 // opportunistic by design, it must never delay the moment search becomes usable,
 // and a household member who is only browsing pays nothing for it — it touches no
@@ -63,7 +64,7 @@ import type { LiveChannel } from "../sync/types";
 import type { CoreLoader } from "./indexEngine";
 import type { IndexSync } from "./indexSync";
 import { createIndexSearch, type LiveDocument } from "./indexSearch";
-import { createOfflineText, type OfflineText } from "./offlineText";
+import { createTextPrefetch, type TextPrefetch } from "./textPrefetch";
 import type { LocalSearch } from "./localSearch";
 
 /**
@@ -90,10 +91,10 @@ export interface SearchServiceOptions {
    */
   listing?: () => readonly LiveDocument[];
   /**
-   * §4.4's promised-offline text. Defaults to the real one; a no-op where
-   * IndexedDB is missing, in which case nothing below happens at all.
+   * §4.4's text prefetch. Defaults to the real one; a no-op where IndexedDB is
+   * missing, in which case nothing below happens at all.
    */
-  offlineText?: OfflineText;
+  textPrefetch?: TextPrefetch;
 }
 
 export interface SearchService extends LocalSearch {
@@ -109,11 +110,13 @@ export interface SearchService extends LocalSearch {
    *  forwarded because in-document search needs it for `text/<md5>`'s `?v=`. */
   indexVersion(md5: string): number | null;
   /**
-   * §4.4's offline text — the tier 1/tier 2 prefetch this service drives, and the
-   * explicit "make available offline" a control hangs off. Exposed HERE because
-   * this is what already holds the manifest a target's `indexVersion` comes from.
+   * §4.4's tier 1/tier 2 text prefetch, which this service drives off the
+   * manifest each sync decodes. Exposed because this is where it is driven from
+   * and `available` is the honest answer to "is anything being cached at all".
+   * Nothing sets policy through it: what belongs in the cache is
+   * `textPrefetch.ts`'s decision and there is no per-document control any more.
    */
-  readonly offlineText: OfflineText;
+  readonly textPrefetch: TextPrefetch;
   /** Subscribe both triggers to the live channel. Returns the unsubscribe. */
   attachLive(live: LiveChannel): () => void;
   /** Cancel the pending window and hand back the engine's 16 MB (§4.2). */
@@ -122,7 +125,7 @@ export interface SearchService extends LocalSearch {
 
 export function createSearchService(opts: SearchServiceOptions): SearchService {
   const local = createIndexSearch({ sync: opts.sync, load: opts.load, listing: opts.listing });
-  const offlineText = opts.offlineText ?? createOfflineText();
+  const textPrefetch = opts.textPrefetch ?? createTextPrefetch();
   const coalesceMs = opts.coalesceMs ?? COALESCE_MS;
 
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -141,7 +144,7 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
         // on search being usable — so it is started here and not awaited, and a
         // failure inside it is as silent as a failed sync (same header, same
         // reason: nobody asked for it, and the next trigger retries).
-        void offlineText.prefetch(outcome.manifest.rows).catch(() => undefined);
+        void textPrefetch.prefetch(outcome.manifest.rows).catch(() => undefined);
       }, () => undefined) // see the header: silent by design.
       .finally(() => {
         running = null;
@@ -175,7 +178,7 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
 
     indexVersion: (md5) => local.indexVersion(md5),
 
-    offlineText,
+    textPrefetch,
 
     attachLive(live) {
       // One subscription for both triggers, because one socket carries both

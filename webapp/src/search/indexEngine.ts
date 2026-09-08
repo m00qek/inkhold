@@ -9,6 +9,15 @@
 // header of `webapp/wasm/sqlite_core.zig`. Read that before changing anything
 // here.
 //
+// ## Synchronous, and it stays synchronous — the WORKER is elsewhere
+//
+// Every call below is a straight-line wasm call, because that is the shape the
+// ABI has. Nothing in `src/` constructs this class on the UI thread any more:
+// `searchEngine.ts` is the seam the two consumers meet, and it answers from
+// `engineWorker.ts` — which holds one of these — wherever a `Worker` exists.
+// Keeping this half synchronous is what lets the worker be a thin shell and lets
+// `indexEngine.test.ts` drive the real ABI without one.
+//
 // ## The engine is NOT instantiated until someone searches
 //
 // §4.2 is explicit and it is the reason `open()` is a function rather than a
@@ -417,6 +426,22 @@ export class SearchIndex {
   }
 
   /**
+   * Replace this index's contents with `docs` — the only thing either consumer
+   * ever wanted, and the reason it is a method rather than two lines repeated on
+   * both sides of a worker boundary.
+   *
+   * `reset()` is skipped on an index that holds nothing, so the first build after
+   * `open()` does not pay a second `idx_open()` for an empty database. A build
+   * that FAILED also leaves nothing (see {@link build}), so the retry after one
+   * takes the same short path — which is what makes this safe to call blindly.
+   */
+  rebuild(docs: Iterable<TermsDocument>): void {
+    this.assertOpen();
+    if (this.table.documentCount > 0) this.reset();
+    this.build(docs);
+  }
+
+  /**
    * One document's rows, assigning them rowids and recording the mapping.
    *
    * Called inside `build`'s transaction. The same md5 twice is refused HERE
@@ -466,8 +491,8 @@ export class SearchIndex {
    * free when it does not fire, and a query that does not costs **71.3 ms p50**
    * for the whole-vocabulary scan. That is the price of an answer where there
    * was none — the same ladder is 6,133.8 ms p50 on the Pi
-   * (`wasm-fuzzy-bench.md`) — but it is paid on a keystroke, so a caller typing
-   * into a box wants it off the main thread if anything here ever is.
+   * (`wasm-fuzzy-bench.md`) — and it is paid on a KEYSTROKE, which is why this
+   * class is driven from a worker (`searchEngine.ts`) rather than from the box.
    * `result.expansions` says what it substituted, and is empty when it did not
    * fire.
    */

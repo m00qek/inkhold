@@ -18,10 +18,11 @@
 // — and that is a repaint, not a growth.
 
 import { el } from "../ui/dom";
-import { coverageLine, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
+import { coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
+import type { Expansion } from "../search/localSearch";
 import type { Folder, Id, NoteSummary } from "../core/types";
 
 /** `n thing` / `n things`, with the plural only where it belongs. */
@@ -63,7 +64,7 @@ export interface GallerySearchCtx {
   /** The rail's category-aware folder label (never `folder.name` directly). */
   labelFor: (folder: Folder) => string;
   /** The card factory's result-row builder. */
-  resultCard: (result: SearchResult, i: number, q: string) => HTMLElement;
+  resultCard: (result: SearchResult, i: number, q: string, expansions?: readonly Expansion[]) => HTMLElement;
   /** The shell's empty/loading state block. */
   emptyState: (title: string, body: string) => HTMLElement;
   /**
@@ -177,6 +178,53 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   }
 
   /**
+   * The line that says what the typo ladder searched — `golden-search.md` §4.3's
+   * "matched **reunião**", and the last piece of it that was still unrendered.
+   *
+   * ## ONCE, OVER THE LIST — not on the rows
+   *
+   * The expansion is per TOKEN of the query, so the substitution that explains
+   * the top row explains the bottom one identically; a per-row line would be one
+   * sentence repeated down the page for no added fact. Worse, it would be a
+   * FALSE sentence on the rows that matched by NAME — those matched the typed
+   * spelling exactly, and no expansion is why they are here. A header is the
+   * only placement where the sentence is true of everything under it, and it is
+   * the same rule `.hits__notice` already exists for.
+   *
+   * It goes ABOVE the completeness caveat because it is about a different thing
+   * and a prior one: `resultsMayGrowLine` qualifies the list, this qualifies the
+   * QUERY, and a reader who does not yet know which word was searched has no use
+   * for a note about the list growing.
+   *
+   * ## Gated on a row that the expansion actually produced
+   *
+   * `indexSearch.ts` already refuses to report a substitution over an empty
+   * answer, but this renderer intersects again — a hit whose document the cached
+   * tree cannot name is dropped (see `searchResults`) — so the engine's guard is
+   * not this view's guard. If every transcript hit fell out of that join and the
+   * list is standing on name matches alone, the sentence would be explaining
+   * rows it had nothing to do with. So it is said only when a row with pages
+   * survived to carry it.
+   *
+   * ## Nodes, never markup
+   *
+   * Both halves are device-authored text — a term from the index's own
+   * vocabulary, a token out of the search box — and this app deleted its last
+   * `innerHTML` of anything like that in step 6. Each part becomes a text node
+   * or an element built with `text:`, so there is no escaping pass to forget.
+   */
+  function expansionBlock(expansions: readonly Expansion[], results: readonly SearchResult[]): HTMLElement | null {
+    if (!results.some((r) => r.pages.length > 0)) return null;
+    const parts = expansionNotice(expansions);
+    if (!parts) return null;
+    return el(
+      "p",
+      { class: "hits__notice", role: "status" },
+      ...parts.map((p) => (p.matched ? el("strong", { class: "hits__matched", text: p.text }) : document.createTextNode(p.text))),
+    );
+  }
+
+  /**
    * What the results header says.
    *
    * IT COUNTS WHAT IT IS SHOWING, and that is the whole rule. The "N+" floors
@@ -219,6 +267,14 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     // is the whole story now — a local answer carries no counts to prefer over
     // it, because nothing on the server counts anything at query time.
     const pending = ctx.indexPending() ?? 0;
+
+    // What was actually searched, when the query as typed answered nothing and
+    // the ladder stood a vocabulary word in for it. FIRST, above the caveat: it
+    // says what the question became, and everything below it is an answer to
+    // that question. See `expansionBlock` for why it is one line and not N.
+    const expansions = searchState.kind === "results" ? searchState.expansions : [];
+    const matched = expansionBlock(expansions, results);
+    if (matched) gallery.append(matched);
 
     // THE COMPLETENESS CAVEAT, over real results only. The list implies "this is
     // what there is"; while a derive is outstanding that is not true, and a
@@ -279,7 +335,10 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         searchState.kind === "searching" ? el("span", { class: "hits__count", text: "Searching handwriting…" }) : null,
       ),
     );
-    for (const [i, result] of results.entries()) gallery.append(ctx.resultCard(result, i, q));
+    // The expansions ride along to the row for its DEEP LINK only — the row
+    // renders nothing about them (see `expansionBlock`), it decides which query
+    // the viewer's find opens with.
+    for (const [i, result] of results.entries()) gallery.append(ctx.resultCard(result, i, q, expansions));
   }
 
   return { renderSearch };

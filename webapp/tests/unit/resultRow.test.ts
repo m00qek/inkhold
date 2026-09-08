@@ -102,11 +102,22 @@ describe("a result row", () => {
   });
 });
 
+// THE ROW SAYS NOTHING ABOUT THE SUBSTITUTION, and that is the placement
+// decision made visible. The ladder substitutes per TOKEN of the query, so one
+// sentence explains every row identically — it is said once, over the list, by
+// `gallerySearch.ts`. Repeating it per row would also be a LIE on the rows that
+// matched by name, which matched the typed spelling exactly.
+describe("what a row does NOT say about a corrected query", () => {
+  it("renders no expansion line of its own", () => {
+    const row = cards().resultCard(hitResult([2]), 0, "valjaen", [{ typed: "valjaen", matched: "valjean" }]);
+    expect(row.textContent).not.toContain("valjean");
+    expect(row.querySelector(".hits__matched")).toBeNull();
+  });
+});
+
 describe("the deep link a row opens", () => {
-  // THE DECISION, in the DOM: the link carries what the user typed. There is no
-  // marked term to resolve any more — the marks lived in the excerpt — and
-  // inventing an expansion the row does not have would be worse than handing the
-  // viewer's find the string the box actually holds.
+  // The ordinary case, which is nearly every case: the query as typed answered,
+  // so there is nothing to resolve and the link carries the string the box holds.
   it("carries the typed query, verbatim, to the FIRST matching page", () => {
     const row = cards().resultCard(hitResult([4, 7, 11]), 0, "reunaio");
     (row.querySelector(".card__open") as HTMLElement).click();
@@ -132,5 +143,48 @@ describe("the deep link a row opens", () => {
     (row.querySelector(".card__open") as HTMLElement).click();
 
     expect(window.location.hash).toBe("#/note/7?q=aurora");
+  });
+
+  // THE DECISION REVERSED, in the DOM. The row could not know the correction
+  // while it lived inside a server-marked excerpt; the CLIENT runs the ladder
+  // now, so the term arrives as data. And it is a defect being closed rather
+  // than a nicety added: the viewers gate a fuzzy answer behind an opt-in, so a
+  // link carrying the typo opened a find reading "No matches" over a "search
+  // similar" prompt, on a row that had just said the document matched.
+  it("carries the CORRECTED term when the ladder resolved the typo", () => {
+    const row = cards().resultCard(hitResult([4, 7]), 0, "valjaen", [{ typed: "valjaen", matched: "valjean" }]);
+    (row.querySelector(".card__open") as HTMLElement).click();
+
+    expect(window.location.hash).toBe("#/note/7/page/5?q=valjean");
+  });
+
+  // A TIE IS NOT RESOLVED. Two readings one edit apart, and the row does not say
+  // which one this document holds — so it hands over what was typed and lets the
+  // viewer's own ladder do what it already does well.
+  it("keeps the typed word when the ladder offered two readings of it", () => {
+    const row = cards().resultCard(hitResult([4]), 0, "valjen", [
+      { typed: "valjen", matched: "valen" },
+      { typed: "valjen", matched: "valjean" },
+    ]);
+    (row.querySelector(".card__open") as HTMLElement).click();
+
+    expect(window.location.hash).toBe("#/note/7/page/5?q=valjen");
+  });
+
+  // A NAME-ONLY ROW IS NOT AN EXPANSION'S DOING. It matched the typed spelling
+  // in its title, and nothing says the corrected word is anywhere inside it —
+  // opening the find on a word the reader never typed, in a document that
+  // matched for an unrelated reason, is a worse arrival than the typo.
+  it("does NOT substitute for a name-only match, whatever the ladder found", () => {
+    const n = note("8", "Valjaen plans");
+    const row = cards().resultCard(
+      { noteId: n.id, note: n, folderPath: null, nameMatched: true, pages: [], kind: 0 },
+      0,
+      "valjaen",
+      [{ typed: "valjaen", matched: "valjean" }],
+    );
+    (row.querySelector(".card__open") as HTMLElement).click();
+
+    expect(window.location.hash).toBe("#/note/8?q=valjaen");
   });
 });
