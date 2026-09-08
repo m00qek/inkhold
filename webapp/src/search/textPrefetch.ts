@@ -2,83 +2,29 @@
 // §4.4's tiering, and the only place in the client that decides it.
 //
 //     manifest rows ──order──▶ tier 1, then tier 2 by updated_at
-//                                  │
 //                                  ├─ tier 1: kept, no budget check
 //                                  └─ tier 2: kept until the budget is spent
 //
-// ## It is a CACHE, and the reason is LATENCY — not availability
-//
-// §4.4 was corrected on this and the file was renamed with it: it used to be
-// `offlineText.ts` and it used to talk about a "promise". **Offline is a SIDE
-// EFFECT of running the work in the browser, not a goal.** The server is a Pi
-// 1 B+ with a ~50 MB budget and a modern client can carry an index it cannot
-// (`client-server-balance.md` §0); that the text then happens to answer with the
-// network down is the architecture showing through. Nobody promised it and
-// nothing depends on it.
-//
-// What this prefetch actually buys is spelt out in §4.4 and is worth restating,
-// because it is the whole justification for spending any bytes at all: **the
-// first find in a document costs a fetch plus a build, and the build alone is
-// 315 ms on the worst real document (§8.1)**. Prefetching removes the fetch from
-// the documents most likely to be searched. That is a latency argument, it is
-// bounded, and it is the only one being made.
-//
-// **The explicit "keep this offline" control is GONE**, and its removal is the
-// same correction. Its only power was to override eviction, which is an
-// availability guarantee — and one this project would have been lying about,
-// since in-doc search cannot be more offline than the DOCUMENT is: with no
-// network there are no `.note` pages to render and no PDF page ranges to display,
-// so there was never a document on screen to search. A text-only "keep this
-// offline" over-promised twice over — once by promising availability, and again
-// by delivering only the half you cannot read.
-//
-// ## Tier, not file type, and the manifest is the only thing that knows
-//
-// The tiering is `.note` (tier 1), then anything with a `.mark` companion
-// (tier 2), then everything else. Only the MANIFEST carries it: `manifestCodec`
-// decodes `tier` per row, and the server computed it from the pairing it
-// resolves. The listing's `fileType` cannot answer the tier-2 half at all — it
-// says what a file IS, and "has somebody written on it" is a fact about a
-// DIFFERENT file in the same folder (`NoteMeta.markId`, which only the open
-// document carries). Deriving tier 2 from `fileType === "mark"` would keep the
-// annotation and not the PDF it annotates, which is the file with the text.
-//
-// So this runs off manifest rows, which means it runs after a sync and not
-// before. That is the right dependency anyway: §4.4 says the prefetch is
-// opportunistic, runs AFTER the terms stream completes, and is never a gate on
-// search being usable.
-//
-// ## `.mark` measures ENGAGEMENT, and that is why tier 2 is budgeted
-//
-// §3 tiers the TERMS the same way and says being wrong there costs a wait. Here
-// it costs storage and repeated bandwidth on every device: MEASURED, one `.mark`
-// on Les Misérables moves 1,355,048 B of stored text into the cache from a single
-// gesture — seven times the whole of tier 2 on the dev corpus. Hence a budget
-// walked in tier order and a per-document cap (`textStore.ts` argues both
-// numbers), so the failure mode is "the two oldest annotated books cost a fetch
-// on their first find" and never "the household silently synced 40 MB".
-//
-// ## What is NOT here, deliberately
-//
-// **On-demand text is not stored by us.** A find on a tier-3 document fetches
-// `text/<md5>` and the browser's HTTP cache keeps it — immutable, content
-// addressed, no code (§4.4). `docSearch.ts` reads THIS store first and falls
-// back to that fetch; it never writes here, because a store that filled itself
-// from browsing would be a byte budget over the same bytes the browser is
-// already budgeting, and it would have no ceiling of its own.
-//
-// **A skipped document is not remembered across a reload.** Within a session an
-// oversize tier-2 document is fetched once and then skipped by md5, so a burst of
-// syncs does not re-fetch a novel; across a reload it is fetched again, and that
-// re-fetch is served by the immutable HTTP cache in the ordinary case. Persisting
-// the refusal would be a fourth store to invalidate on a version bump, to save a
-// cache hit.
+// What this must not break:
+//   * It is a CACHE for LATENCY, not availability: the first find in a document
+//     costs a fetch plus a build (315 ms on the worst real document, §8.1), and
+//     prefetching removes the fetch. Offline is a side effect nobody promised.
+//   * Tier comes from the MANIFEST only. The listing's `fileType` cannot answer
+//     tier 2 — "has somebody written on it" is a fact about a DIFFERENT file
+//     (`NoteMeta.markId`), and `fileType === "mark"` would keep the annotation
+//     instead of the PDF that has the text. So this runs after a sync.
+//   * Tier 2 is budgeted because `.mark` measures ENGAGEMENT: one `.mark` on
+//     Les Misérables moves 1,355,048 B into the cache from a single gesture —
+//     seven times the whole of tier 2 on the dev corpus.
+//   * On-demand text is never stored here (the HTTP cache is its story), and a
+//     refused document is remembered for the session only.
 
 import {
   openTextStore,
   perDocumentCap,
   textKeyOf,
   weighText,
+  type HeldText,
   type TextKey,
   type TextStore,
 } from "../cache/textStore";
@@ -96,30 +42,17 @@ export interface PrefetchCandidate {
 }
 
 /**
- * §4.4's rule as an ordering, which is all it is: tier 1, then tier 2 by
- * `updated_at` descending. Pure.
- *
- * Two whole classes of row are dropped before any of that:
- *
- *   * **no `indexVersion`** — the record cannot be keyed, and `manifestCodec`
- *     spells out that a null is "cannot be cached", never "version 0". Storing
- *     one under a guessed version is how a client comes to answer finds from
- *     text nobody is serving.
- *   * **not `derived`** — a `pending` or `unknown` blob has no file to fetch, so
- *     asking would spend a round trip to be told 404. The next sync retries for
- *     free, which is the same reason `manifestCodec` refuses to cache an empty
- *     term set under those states.
- *
- * Tier 3 is absent entirely: that is the on-demand half, and the HTTP cache is
- * its story. There used to be a third group ahead of these two, holding whatever
- * had been pinned; the pin is gone (see the header) and so is the group.
+ * §4.4's rule as an ordering: tier 1, then tier 2 by `updated_at` descending.
+ * Pure. Dropped first: rows with no `indexVersion` (cannot be keyed — storing
+ * one under a guessed version answers finds from text nobody is serving) and
+ * rows not `derived` (no file to fetch; asking spends a round trip on a 404).
+ * Tier 3 is the on-demand half and is absent.
  */
 export function orderCandidates(rows: readonly ManifestRow[]): PrefetchCandidate[] {
   const notes: PrefetchCandidate[] = [];
   const marked: PrefetchCandidate[] = [];
-  // Newest first within each group. §4.4 asks for it on tier 2; tier 1 gets the
-  // same order so that a library too large for the origin's quota degrades by
-  // dropping the OLDEST notes rather than by whatever order the server filled.
+  // Newest first in both groups, so a library too large for the origin's
+  // quota degrades by dropping the OLDEST notes.
   const newestFirst = [...rows].sort((a, b) => b.updatedAt - a.updatedAt);
   for (const row of newestFirst) {
     const indexVersion = row.indexVersion;
@@ -145,13 +78,11 @@ export interface PrefetchOutcome {
 
 export interface TextPrefetch {
   /** False where IndexedDB is not available: {@link prefetch} is then a no-op
-   *  and in-document search simply fetches, which is §4.2's required path. */
+   *  and in-document search simply fetches. */
   readonly available: boolean;
-  /**
-   * Run one pass over the manifest. Opportunistic and never a gate: it is called
-   * after a sync completes, it fetches sequentially so it cannot crowd the link,
-   * and it swallows a failed document rather than abandoning the pass.
-   */
+  /** Run one pass over the manifest. Opportunistic and never a gate: fetches
+   *  sequentially so it cannot crowd the link, and swallows a failed document
+   *  rather than abandoning the pass. */
   prefetch(rows: readonly ManifestRow[], signal?: AbortSignal): Promise<PrefetchOutcome>;
 }
 
@@ -165,16 +96,14 @@ export interface TextPrefetchOptions {
 export function createTextPrefetch(opts: TextPrefetchOptions = {}): TextPrefetch {
   const store = opts.store ?? openTextStore();
   const transport = opts.transport ?? httpTextTransport();
-  /** Session-scoped: md5s fetched once and refused. See the header. */
+  /** Session-scoped: md5s fetched once and refused. */
   const refused = new Set<string>();
   let running: Promise<PrefetchOutcome> | null = null;
 
   async function fetchInto(candidate: PrefetchCandidate, signal?: AbortSignal): Promise<number> {
     const doc = await transport(candidate.md5, candidate.indexVersion, signal);
-    // The record's OWN version is what it is stored under, not the manifest's:
-    // the same rule §3.3 states for the terms stream — key what ARRIVED. A
-    // manifest that has moved since the request would otherwise file this
-    // document's text under a version whose text it is not.
+    // Stored under the record's OWN version (§3.3: key what ARRIVED), not the
+    // manifest's, which may have moved since the request.
     await store.put(doc, { protect: candidate.protect });
     return weighText(doc);
   }
@@ -185,24 +114,20 @@ export function createTextPrefetch(opts: TextPrefetchOptions = {}): TextPrefetch
 
     const candidates = orderCandidates(rows);
     const wanted = new Map(candidates.map((c) => [textKeyOf(c.md5, c.indexVersion), c]));
-    const held = await store.keys();
-
-    // Clean-up, not a protocol step (§2.7) — but it runs FIRST, because a
-    // superseded generation of a document occupies budget that its replacement
-    // is about to need. Only ever under a manifest: an empty one is refused
-    // above, since absence of evidence is not a deletion.
-    const stale: TextKey[] = held
-      .filter((h) => !wanted.has(textKeyOf(h.md5, h.indexVersion)))
-      .map((h) => ({ md5: h.md5, indexVersion: h.indexVersion }));
+    const heldNow = new Map<string, HeldText>();
+    const stale: TextKey[] = [];
+    for (const h of await store.keys()) {
+      const key = textKeyOf(h.md5, h.indexVersion);
+      if (wanted.has(key)) heldNow.set(key, h);
+      else stale.push({ md5: h.md5, indexVersion: h.indexVersion });
+    }
+    // Clean-up runs FIRST: a superseded generation occupies budget its
+    // replacement is about to need. Only ever under a manifest (an empty one
+    // returned above) — absence of evidence is not a deletion.
     await store.drop(stale);
 
     const budget = await store.budget();
     const cap = perDocumentCap(budget);
-    const heldNow = new Map(
-      held
-        .filter((h) => wanted.has(textKeyOf(h.md5, h.indexVersion)))
-        .map((h) => [textKeyOf(h.md5, h.indexVersion), h]),
-    );
 
     let kept = 0;
     let skipped = 0;
@@ -212,10 +137,9 @@ export function createTextPrefetch(opts: TextPrefetchOptions = {}): TextPrefetch
       const key = textKeyOf(candidate.md5, candidate.indexVersion);
       const already = heldNow.get(key);
       if (already) {
-        // Re-asserted every pass rather than trusted from when it was written.
-        // It is also the MIGRATION off the pin: a record a previous build left
-        // protected because somebody had pinned it is corrected here, and this
-        // is the only thing that walks both the manifest and the held set.
+        // Re-asserted every pass. This is also the MIGRATION off the old pin
+        // store: a record a previous build left protected is corrected here,
+        // the only place that walks both the manifest and the held set.
         if (already.protect !== candidate.protect) {
           await store.setProtection(candidate.md5, candidate.indexVersion, candidate.protect);
         }
@@ -224,18 +148,15 @@ export function createTextPrefetch(opts: TextPrefetchOptions = {}): TextPrefetch
         continue;
       }
       if (refused.has(key)) continue;
-      // The budget stops the WALK, not the store: tier 1 is kept whatever it says
-      // (§4.4 keeps tier 1 "with no budget check"), and its bytes are still
-      // counted so tier 2 gets only what is left over.
+      // The budget stops the WALK, not the store: tier 1 is kept whatever it
+      // says, and its bytes still count so tier 2 gets only what is left.
       if (!candidate.protect && bytes >= budget) continue;
       try {
         const size = await fetchInto(candidate, signal);
         if (!candidate.protect && (size > cap || bytes + size > budget)) {
           // Fetched to be weighed, then refused: nothing on the wire says how
-          // big a text record is before it arrives, and a HEAD per document
-          // would be a round trip each on the link this app is built for. The
-          // refusal is remembered for the session so the next sync does not
-          // repeat it.
+          // big a text record is, and a HEAD per document is a round trip
+          // each on 3G.
           await store.drop([{ md5: candidate.md5, indexVersion: candidate.indexVersion }]);
           refused.add(key);
           skipped += 1;
@@ -245,8 +166,7 @@ export function createTextPrefetch(opts: TextPrefetchOptions = {}): TextPrefetch
         bytes += size;
       } catch {
         // One document's failure is not the pass's: a 404 is `pending` racing
-        // the manifest, and an abort or a dead link is retried by the next sync,
-        // which is a device upload or a derive completing — both routine.
+        // the manifest, and the next sync retries.
         if (signal?.aborted) break;
       }
     }
@@ -259,9 +179,8 @@ export function createTextPrefetch(opts: TextPrefetchOptions = {}): TextPrefetch
     },
 
     prefetch(rows, signal) {
-      // ONE pass at a time. A second trigger arriving mid-pass would fetch the
-      // same documents against the same budget and the two would race each other
-      // over the eviction the first is about to cause.
+      // ONE pass at a time: two would race each other over the eviction the
+      // first is about to cause.
       if (running) return running;
       const p = pass(rows, signal).finally(() => {
         running = null;

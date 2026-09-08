@@ -4,10 +4,10 @@ import { fileURLToPath } from "node:url";
 import {
   MANIFEST_FORMAT_VERSION,
   MANIFEST_HEADER_LEN,
+  SearchWireError,
   decodeManifest,
   type ManifestRow,
 } from "../../src/search/manifestCodec";
-import { SearchWireError } from "../../src/search/wire";
 
 // THE golden vector — one artifact, two implementations. The encoder
 // (`backend/services/search/index_export.zig`'s `writeManifest`) asserts it

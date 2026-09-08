@@ -14,7 +14,7 @@ import {
   type DocumentText,
   type TextTransport,
 } from "../../src/search/docText";
-import { SearchWireError } from "../../src/search/wire";
+import { SearchWireError } from "../../src/search/manifestCodec";
 import { textKeyOf, type TextStore } from "../../src/cache/textStore";
 import type { CoreLoader, SearchCoreExports } from "../../src/search/indexEngine";
 import { byteToCharMap, resolveFindSegments } from "../../src/pages/txtFind";

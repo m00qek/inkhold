@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseTermsJsonl, textChunks, type TermsDocument } from "../../src/search/termsStream";
-import { SearchWireError } from "../../src/search/wire";
+import { SearchWireError } from "../../src/search/manifestCodec";
 
 const A = "0123456789abcdef0123456789abcdef";
 const B = "fedcba9876543210fedcba9876543210";

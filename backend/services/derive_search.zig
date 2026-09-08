@@ -1,53 +1,31 @@
-//! Writing the two per-document derived files — `golden-search.md` §2.2.
+//! Writing the two per-document derived files (`golden-search.md` §2.2). The
+//! format lives here; `.txt` paragraphs, `.note` pages and `.pdf` pages supply
+//! `(ordinal, text)`.
 //!
-//! One place, three callers. `.txt` paragraphs, `.note` pages and `.pdf` pages
-//! are three different derivations that produce the same two files, and the
-//! whole point of §1.1 is that search stops having per-format mechanisms. So
-//! the format lives here and the derive paths supply `(ordinal, text)`.
-//!
-//! ## Both writers STREAM, and that is the design rather than an optimisation
-//!
-//! A page's line is written the moment that page is available and is never
-//! looked at again. Nothing accumulates.
-//!
-//! That is what §2.2's move to per-page records bought. The record it replaced
-//! was `term -> [pages]`, inverted across the whole document, which forced the
-//! deriving side to hold a map until the last page — 2.84 MB for the largest
-//! document in the corpus and 11.18 MB for a pathological one, on a 50 MB
-//! budget (§8.2). Per-page rows have no such map, which also turns `.pdf`'s
-//! chunked arrival — 50 pages at a time, never held whole — from the awkward
-//! case into the natural one.
-//!
-//! ## The fold is the SERVER's tokenizer, and that is the parity argument
-//!
-//! Terms are produced by `fuzzy.foldRows`, i.e. by FTS5's own
-//! `unicode61 remove_diacritics 2` running inside SQLite. The browser folds only
-//! the QUERY, with the same C compiled to wasm. Neither side owns a second
-//! tokenizer, so the corpus cannot diverge from the query — which is the entire
-//! reason SQLite is in the browser at all rather than a JS index.
-//!
-//! **A consequence that removes code: a folded term needs no JSON escaping.**
-//! `unicode61` treats `"`, `\` and every control character as separators, so a
-//! term cannot contain one. The terms file therefore writes bare strings and
-//! asserts that in a test rather than trusting it. The TEXT file is raw document
-//! content and is escaped properly.
+//! Must not break:
+//!   * Both writers STREAM: a page's line is written when the page is available
+//!     and never looked at again. The inverted `term -> [pages]` record this
+//!     replaced held a map until the last page — 2.84 MB for the largest
+//!     document, 11.18 MB for a pathological one, on a 50 MB budget (§8.2).
+//!   * Terms come from `fuzzy.foldRows` — FTS5's own `unicode61` in SQLite —
+//!     and the browser folds the QUERY with the same C compiled to wasm, so the
+//!     corpus cannot diverge from the query. A folded term cannot contain `"`,
+//!     `\` or a control character (unicode61 treats them as separators), so the
+//!     terms file writes bare strings with no escaping; a test pins it. The TEXT
+//!     file is raw content and is escaped.
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const derived = @import("../store/derived.zig");
 const fuzzy = @import("search/fuzzy.zig");
 
-/// The `v` in a record's header line — the CONTENT version, matching the
-/// `index_version` in the filename. Kept as one import so the two cannot drift.
+/// The `v` in a record's header line — the CONTENT version, the same
+/// `index_version` as the filename's, so the two cannot drift.
 pub const index_version = @import("note_index.zig").index_version;
 
-/// Written by both files as their first line.
-///
-/// `n` is the document's ADDRESS SPACE — its page/paragraph count — not the
-/// number of lines that follow. The two differ whenever a page has no text
-/// (an unrecognised `.note` page, an image-only PDF page), and the address space
-/// is both the more useful number and the one every derive path knows before it
-/// starts. A client that wants the row count counts rows.
+/// The first line of both files. `n` is the document's ADDRESS SPACE — its
+/// page/paragraph count — not the row count: the two differ whenever a page has
+/// no text (an unrecognised `.note` page, an image-only PDF page).
 fn writeHeader(f: *derived.Fragment, md5: []const u8, n: u32) !void {
     var buf: [96]u8 = undefined;
     const line = try std.fmt.bufPrint(
@@ -58,38 +36,23 @@ fn writeHeader(f: *derived.Fragment, md5: []const u8, n: u32) !void {
     try f.write(line);
 }
 
-/// One unit of a document, whatever the format calls it: a `.txt` paragraph, a
-/// `.pdf` page, a `.note` page.
+/// One unit of a document: a `.txt` paragraph, a `.pdf` page, a `.note` page.
 pub const Page = struct {
     ordinal: i64,
     text: []const u8,
-    /// The segment's byte range into the RAW BLOB, for the one format whose
-    /// address is a range rather than an ordinal (`.txt`). Null everywhere else,
-    /// where the ordinal IS the address.
+    /// Byte range into the RAW BLOB, for the one format addressed by range
+    /// rather than ordinal (`.txt`). Null everywhere else.
     offset: ?u64 = null,
     len: ?u32 = null,
 };
 
-/// Write both derived files for one document from a PAGE SOURCE.
+/// Write both derived files for one document from a page source: anything with
+/// `fn next(self: *Self) !?Page` (`txt_index.Pages`, `note_index.Pages`,
+/// `pdf_text.Pages`). This is the whole per-format seam. A PULL iterator because
+/// `.pdf` text arrives 50 pages at a time and is never held whole; `anytype`
+/// because every call site is known at compile time.
 ///
-/// **This is the whole per-format seam.** A source is anything with
-/// `fn next(self: *Self) !?Page`, and the three that exist live beside the data
-/// they walk — `txt_index.Pages` over a `Derived`, `note_index.Pages` over a
-/// `Parsed`, `pdf_text.Pages` over a live `Extractor`. Everything downstream of
-/// `next` is format-blind already: the fold, the JSON, the deflate fragment, the
-/// CRC, the atomic rename.
-///
-/// **A PULL iterator specifically, because of `.pdf`.** Its text arrives 50
-/// pages at a time and is never held whole, so a push interface ("here are all
-/// the pages") could not express it and a callback would invert control for the
-/// two formats that do not need it. Pulling makes the awkward case disappear
-/// into the same call the easy ones use.
-///
-/// `src` is `anytype` rather than a vtable: every call site is known at compile
-/// time, so this monomorphizes with no indirection and no `*anyopaque`.
-///
-/// `n` is the ADDRESS SPACE — the document's page or paragraph count — not the
-/// number of pages the source will yield. See `writeHeader`.
+/// `n` is the ADDRESS SPACE, not the number of pages the source will yield.
 pub fn writeDerived(
     gpa: std.mem.Allocator,
     terms_store: derived.DerivedStore,
@@ -98,10 +61,8 @@ pub fn writeDerived(
     n: u32,
     src: anytype,
 ) !void {
-    // Private, in-memory, and used for NOTHING but the tokenizer. `temp.token_fold`
-    // is contentless, so the fold reads no table — which is what lets every
-    // caller do this off the global write lock (§2.5). Opened per document:
-    // once per derive is not a cost worth pooling.
+    // A private in-memory connection for nothing but the tokenizer. The fold
+    // reads no table, which is what keeps this off the global write lock (§2.5).
     var fold = try sqlite.Db.openMemory();
     defer fold.close();
 
@@ -110,8 +71,7 @@ pub fn writeDerived(
     try tw.begin(gpa, terms_store, fold, md5, n);
     errdefer tw.abort();
 
-    // Both are large values (each embeds deflate's 64 KB window), which is why
-    // they are heap-allocated rather than locals.
+    // Both embed deflate's 64 KB window, hence heap rather than locals.
     const xw = try gpa.create(TextWriter);
     defer gpa.destroy(xw);
     try xw.begin(text_store, md5, n);
@@ -127,11 +87,11 @@ pub fn writeDerived(
 }
 
 /// Writes `terms/<md5>.<v>`: a header line, then `{"p":…,"t":"…"}` per page,
-/// the `t` being that page's folded terms separated by spaces.
+/// `t` being the page's folded terms separated by spaces.
 pub const TermsWriter = struct {
     frag: derived.Fragment,
     db: sqlite.Db,
-    /// One reusable line buffer for the whole document.
+    /// Reused for the whole document.
     line: std.ArrayList(u8),
     gpa: std.mem.Allocator,
 
@@ -151,10 +111,8 @@ pub const TermsWriter = struct {
         try writeHeader(&w.frag, md5, n);
     }
 
-    /// Fold one page and write its line. A page whose text folds to NOTHING —
-    /// punctuation, an empty transcript — is skipped rather than written as an
-    /// empty row: an FTS5 row with no terms can never match, so it would be
-    /// pure size.
+    /// A page that folds to NOTHING is skipped, not written as an empty row: an
+    /// FTS5 row with no terms can never match.
     pub fn page(w: *TermsWriter, ordinal: i64, text: []const u8) !void {
         w.line.clearRetainingCapacity();
 
@@ -172,13 +130,13 @@ pub const TermsWriter = struct {
 
         var head: [48]u8 = undefined;
         try w.frag.write(try std.fmt.bufPrint(&head, "{{\"p\":{d},\"t\":\"", .{ordinal}));
-        // No escaping: a folded term cannot contain `"` or `\` — see the header.
+        // No escaping: a folded term cannot contain `"` or `\` (header).
         try w.frag.write(w.line.items);
         try w.frag.write("\"}\n");
     }
 
-    /// Safe to follow with `abort` — a caller's `errdefer w.abort()` still runs
-    /// if the underlying commit fails, so releasing `line` must be idempotent.
+    /// A caller's `errdefer w.abort()` still runs if the fragment commit fails,
+    /// so `release` must be idempotent or that double-frees `line`.
     pub fn commit(w: *TermsWriter) !void {
         w.release();
         try w.frag.commit();
@@ -196,10 +154,9 @@ pub const TermsWriter = struct {
     }
 };
 
-/// Writes `text/<md5>.<v>`: a header line, then one line per segment carrying
-/// the real text and that segment's ADDRESS — the byte range for `.txt`, the
-/// page number for `.pdf`/`.note`. The address is what a viewer deep-links to,
-/// and it is why in-document search can drop the server entirely (§4.1).
+/// Writes `text/<md5>.<v>`: a header line, then one line per segment with the
+/// real text and the segment's ADDRESS — the byte range for `.txt`, the page
+/// for `.pdf`/`.note` — which is what a viewer deep-links to (§4.1).
 pub const TextWriter = struct {
     frag: derived.Fragment,
 
@@ -214,10 +171,8 @@ pub const TextWriter = struct {
         try writeHeader(&w.frag, md5, n);
     }
 
-    /// One segment. `offset`/`len` are the `.txt` raw-blob byte range and are
-    /// null for formats addressed by page alone — `txtFind.ts` is the only
-    /// consumer that needs them, and it is the only viewer whose address is not
-    /// simply the ordinal.
+    /// `offset`/`len` are the `.txt` raw-blob byte range (`txtFind.ts` is the
+    /// one consumer), null for formats addressed by page alone.
     pub fn page(
         w: *TextWriter,
         ordinal: i64,
@@ -248,18 +203,17 @@ pub const TextWriter = struct {
     }
 };
 
-/// JSON-escape `s` into the fragment. Goes through a small stack buffer so a
-/// large segment does not need an allocation — `std.json`'s encoder writes to a
-/// `std.Io.Writer`, and `Fragment` deliberately is not one (it tees into a hash
-/// as well as a compressor), so the buffer is the seam between them.
+/// JSON-escape `s` into the fragment through a stack buffer, no allocation:
+/// `std.json`'s encoder wants a `std.Io.Writer` and `Fragment` is not one (it
+/// tees into a hash as well as a compressor).
 fn encodeString(f: *derived.Fragment, s: []const u8) !void {
     var buf: [4096]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     var rest = s;
     try f.write("\"");
     while (rest.len > 0) {
-        // Chunk on a codepoint boundary: splitting a multi-byte sequence would
-        // make the encoder emit two invalid strings instead of one valid one.
+        // Chunk on a codepoint boundary: a split multi-byte sequence encodes as
+        // two invalid strings instead of one valid one.
         var take = @min(rest.len, buf.len / 8);
         while (take < rest.len and (rest[take] & 0xC0) == 0x80) take += 1;
         w = .fixed(&buf);

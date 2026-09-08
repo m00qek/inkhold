@@ -1,96 +1,22 @@
 // The browser's own FTS5 index answering the search box, behind
-// `localSearch.ts`'s one result shape — and since `golden-search.md` §6 step 6
-// deleted the fallback, the ONLY thing that answers a library-wide query.
+// `localSearch.ts`'s result shape — since `golden-search.md` §6 step 6 deleted
+// the server fallback, the ONLY thing that answers a library-wide query.
 //
 //     TermsStore rows ──build──▶ SearchIndex ──query──▶ PageRef[]
 //                                                  │
 //                     manifest ──────join──────────┴──▶ LocalHit[]
 //
-// Three decisions live here and nowhere else: WHEN the engine wakes up, WHAT a
-// rowid means once the manifest is joined onto it, and WHICH documents an answer
-// is allowed to contain.
-//
-// ## Nothing touches wasm until somebody searches
-//
-// §4.2 is the rule the whole file is arranged around: `WebAssembly.instantiate`
-// allocates a 16.13 MB static footprint (MEASURED, §8.1) and a household member
-// who only ever browses must not pay it. So the loader is called from `search()`
-// and from no other path — not from the constructor, not from `sync()`, not from
-// `ready`. `indexSync.ts` and `termsStore.ts` each say the same thing from their
-// own side; this is the side that could still get it wrong, because it is the
-// one holding the loader.
-//
-// The build is on the FIRST SEARCH rather than at sync time for the same reason,
-// and it is not free: 703 ms for the whole 1,222-document library, 39 ms at
-// tier 1 (§8.1). It is paid by the person who typed, once, and then reused.
-//
-// **It is no longer paid on this thread.** `searchEngine.ts` answers from a
-// worker holding the instance, so those 703 ms — and the 71.3 ms a no-match query
-// costs per keystroke (§8.6) — leave the UI alone. The rule above is unchanged
-// and gained a second half: the WORKER is not constructed until the first query
-// either, because a worker spawned at boot would instantiate the engine at boot
-// and break §4.2 in a new way.
-//
-// ## The index is a SUPERSET and the manifest is what makes an answer correct
-//
-// §2.7: purging is not a protocol step. A trashed document stops matching
-// because it is ABSENT from the next complete manifest, and local leftovers are
-// harmless — until they are returned. So every hit is intersected with the
-// manifest before it becomes a row, and a document the manifest does not name is
-// dropped whether or not any clean-up has run. This is also the only way a
-// deletion becomes visible immediately: the drop of its rows is clean-up, and
-// clean-up is allowed to be late.
-//
-// The manifest is joined for a second reason as well — it is where `fileId` and
-// `updatedAt` come from. The terms records deliberately carry neither (§2.2),
-// because the app already holds the listing and shipping names in the index
-// would be a second copy of it.
-//
-// **`totalPages` is summed from what SURVIVED the intersection, not taken from
-// the engine's exact total.** The engine counts pages in the index; the UI shows
-// pages in the rows. A deleted document's five pages in the first number and not
-// the second is a count that contradicts what is on screen.
-//
-// ## The typo ladder is ASKED FOR here, and its answer is intersected too
-//
-// The query goes to the engine with the fallback enabled (§6.1 moved the ladder
-// into the wasm), so a search the corpus misspells still answers — the text is
-// the device's own handwriting recognition, so exact matching fails even when
-// the person spells the word correctly. What comes back is `expansions`, and it
-// is subject to the same rule as the count below: a substitution whose every
-// page belonged to a document the manifest no longer names is dropped with those
-// pages, because "matched **reunião**" over an empty result contradicts the
-// screen exactly as a too-large total would.
-//
-// ## What "ready" promises, and the one thing it does not
-//
-// `ready` means there is an index to answer from. It goes true after a sync has
-// produced a manifest and stays false where IndexedDB is not there at all
-// (`TermsStore.available`), because the no-op store answers every build with
-// zero documents — and a search that confidently returns nothing is worse than
-// one that says it could not run. Since step 6 there is nothing behind this to
-// fall back to, so `search` RAISES rather than answering empty, and the box
-// paints "couldn't search".
-//
-// ## Offline, where there is no manifest to join
-//
-// The manifest is held in memory, so a session that has never managed a sync has
-// none — which would leave a full store from yesterday unsearchable and make
-// §4.4's "global search is fully offline" false in exactly the case it is for.
-//
-// The answer is NOT a persisted manifest. That would be a second opinion about a
-// fact the server regenerates per request, and the first thing it would do on a
-// stale read is resurrect documents §2.7 relies on absence to remove.
-//
-// It is §2.7's own rule: intersect against the file listing the app already
-// caches. A listing entry carries `fileHash` — the same blob md5 the derived
-// files are keyed by — plus the id and timestamp a hit needs, so it can stand in
-// for the manifest wholesale. The shell INJECTS it (`opts.listing`), because the
-// folder cache is a `pages/` concern and this module must not learn about it.
-//
-// It is a fallback and ranks below the manifest whenever one exists: the listing
-// is the app's view of the tree, the manifest is the server's answer to "what is
-// live and derived", and only the second knows about `indexVersion`.
+// What this must not break:
+//   * Nothing reaches the wasm loader — or constructs the worker — except
+//     `search()`. Not the constructor, not `sync()`, not `ready`. §4.2:
+//     16.13 MB of linear memory that a member who only browses must never pay.
+//   * The index is a SUPERSET; the manifest (or the cached listing, offline) is
+//     what makes an answer correct (§2.7). A document absent from it must not be
+//     returned, and `totalPages`/`expansions` are taken from what SURVIVED the
+//     intersection, never from the engine's own total.
+//   * The offline stand-in is the app's cached file LISTING, injected — never a
+//     persisted manifest, which would resurrect on a stale read exactly the
+//     documents absence is meant to remove. It ranks below the manifest.
 
 import { newestPerDocument } from "../cache/termsStore";
 import type { CoreLoader, QueryResult, TermsDocument } from "./indexEngine";
@@ -100,15 +26,11 @@ import type { ManifestRow } from "./manifestCodec";
 import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
 
 /**
- * The page cap handed to `idx_query`, which is to say none.
- *
- * The limit does NOT bound the scan: `idx_query` steps every matching row to
- * produce the exact total whatever the limit is, and the limit only decides how
- * many rowids it keeps. So capping buys one `u32` per skipped hit and costs the
- * thing the rows are ranked by — a document whose pages fell off the end reports
- * fewer matches than it has, and sorts below documents with fewer. The whole
- * library's index is 23,997 rows, so the worst case this can retain is ~96 KB,
- * and the pathological `con*` (5,642 pages) is 37.9 ms of stepping either way.
+ * No page cap. The limit does not bound the scan — `idx_query` steps every
+ * matching row for the exact total regardless — it only decides how many
+ * rowids are kept, and a document whose pages fell off the end would report
+ * fewer matches than it has and sort below documents with fewer. Worst case
+ * retained is ~96 KB (23,997 rows); `con*` (5,642 pages) is 37.9 ms either way.
  */
 const ALL_PAGES = 0xffffffff;
 
@@ -118,13 +40,9 @@ export interface IndexSearchOptions {
   /** How an engine instance is obtained. Injectable so tests need no wasm. */
   load?: CoreLoader;
   /**
-   * The app's cached file listing, as the OFFLINE stand-in for the manifest —
-   * see the header. Injected because the folder cache is a `pages/` concern;
-   * this module knows only that something can name live documents.
-   *
-   * An entry with no `md5` is skipped rather than guessed at: the listing's
-   * `fileHash` is optional on the wire, and a document that cannot be named
-   * cannot be intersected.
+   * The app's cached file listing, the OFFLINE stand-in for the manifest.
+   * Injected because the folder cache is a `pages/` concern. An entry with no
+   * `md5` is skipped: a document that cannot be named cannot be intersected.
    */
   listing?: () => readonly LiveDocument[];
 }
@@ -142,28 +60,18 @@ export interface IndexSearch extends LocalSearch {
    *  `searchService.ts`'s; this is the single step it drives. */
   sync(signal?: AbortSignal): Promise<SyncOutcome>;
   /**
-   * One document's `index_version`, from the manifest last synced — the other
-   * half of the `(md5, indexVersion)` cache key, which the derived files are
-   * named by and which `docText.ts` sends as `?v=`.
-   *
-   * `null` when there is no manifest yet (the offline cold start), when it does
-   * not name this document, or when it has no index row for it. The offline
-   * listing stand-in deliberately does NOT answer here: it knows what is live, not
-   * what has been derived at which version, and inventing a version is precisely
-   * how a URL comes to claim content it is not serving.
+   * One document's `index_version` from the manifest last synced — the half of
+   * the `(md5, indexVersion)` cache key `docText.ts` sends as `?v=`. `null`
+   * when there is no manifest, or it does not name this document, or it has
+   * no index row for it. The offline listing never answers here.
    */
   indexVersion(md5: string): number | null;
-  /**
-   * Hand the 16 MB back (§4.2). Dropping an index means dropping the INSTANCE —
-   * wasm linear memory never shrinks — so this closes it and forgets it, and the
-   * next search rebuilds from rows that never left IndexedDB.
-   */
+  /** Hand the 16 MB back (§4.2): close the instance and forget it; the next
+   *  search rebuilds from rows that never left IndexedDB. */
   drop(): void;
 }
 
-/** An aborted search, spelled the way `fetch` spells it so one `catch` reads
- *  both — a superseded keystroke is distinguishable from a real failure by the
- *  name alone, wherever it is caught. */
+/** Spelled the way `fetch` spells an abort so one `catch` reads both. */
 function abortError(): Error {
   if (typeof DOMException === "function") return new DOMException("search aborted", "AbortError");
   const err = new Error("search aborted");
@@ -176,51 +84,35 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   const load = opts.load;
   const listing = opts.listing;
 
-  // The live document set, as a lookup. Replaced wholesale on every successful
-  // sync — the manifest is complete or it is broken (`manifestCodec.ts`), so
-  // merging into the previous one would resurrect exactly the documents §2.7
-  // relies on absence to remove.
+  // Replaced wholesale on every successful sync — the manifest is complete or
+  // it is broken (`manifestCodec.ts`); merging would resurrect deletions.
   let live: Map<string, LiveDocument> | null = null;
-  /**
-   * `md5 -> index_version`, from the same manifest and replaced with it.
-   *
-   * Kept BESIDE `live` rather than read off it because the two have different
-   * sources: `live` is whichever of the manifest and the cached listing answered,
-   * and the listing knows what exists, not what has been derived at which version.
-   * A version guessed from the listing would be a URL claiming content nobody is
-   * serving — see `docText.ts`'s header.
-   */
+  /** `md5 -> index_version`, from the same manifest. Kept BESIDE `live` because
+   *  `live` may be the listing, which has no versions to give. */
   let versions = new Map<string, number | null>();
 
   let index: SearchEngine | null = null;
   let building: Promise<SearchEngine> | null = null;
   // Bumped when the STORE changed, not when the manifest did: a deletion needs
-  // no rebuild at all, because the intersection above already hides it. Only
-  // rows that arrived can make the built index wrong.
+  // no rebuild, because the intersection already hides it.
   let rows = 0;
   let built = -1;
 
   async function build(): Promise<SearchEngine> {
     const target = rows;
     // `all()` already keeps the newest generation per md5; run it again anyway,
-    // because the guard it exists for is FATAL — `SearchIndex.build` refuses a
-    // repeated md5 rather than doubling the counts §4.3 ranks by — and a store
-    // supplied by a caller (or a test) has made no such promise.
+    // because the guard it protects is FATAL (`SearchIndex.build` refuses a
+    // repeated md5) and a caller-supplied store has made no such promise.
     const docs: TermsDocument[] = newestPerDocument(await sync.documents());
-    // Reused rather than re-opened: §4.1 measured that `idx_open()` returns the
-    // old database's pages to SQLite's heap INSIDE linear memory, so successive
-    // builds converge on the cost of the worst one instead of growing past it.
-    // `SearchEngine.build` is that reuse — one worker, one instance, `rebuild`.
+    // Reused, not re-opened: `SearchEngine.build` is `rebuild` on the instance
+    // the worker already holds (`indexEngine.ts`'s `reset` says why).
     const engine = index ?? createSearchEngine({ load });
     try {
       await engine.build(docs);
     } catch (err) {
-      // A failed build leaves an EMPTY index (`SearchIndex.build` resets), and a
-      // worker that DIED leaves one that can never answer again. Neither is
-      // worth keeping, and the same reasoning is spelt out in `docSearch.ts`:
-      // dropping it costs one re-instantiation on a path that is already an
-      // error, and it makes a dead worker a failed search rather than a search
-      // box that is broken for the rest of the session.
+      // A failed build leaves an EMPTY index and a dead worker leaves one that
+      // can never answer; dropping either makes this a failed search rather
+      // than a search box broken for the rest of the session.
       index = null;
       built = -1;
       engine.close();
@@ -240,9 +132,8 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
 
   function engine(): Promise<SearchEngine> {
     if (index && built === rows) return Promise.resolve(index);
-    // A sync that lands mid-build is picked up by the NEXT search rather than
-    // restarting one that may already be 700 ms in. The alternative spends the
-    // whole build again to add rows the person who typed did not ask about.
+    // A sync landing mid-build is picked up by the NEXT search rather than
+    // restarting one that may already be 700 ms in.
     if (building) return building;
     const p = build().finally(() => {
       building = null;
@@ -253,7 +144,6 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
 
   return {
     get ready() {
-      // Either source will do. The listing is the offline one — see the header.
       return (live !== null || (listing?.().length ?? 0) > 0) && sync.store.available;
     },
 
@@ -280,40 +170,19 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     },
 
     async search(query, signal): Promise<LocalResults> {
-      // Refused BEFORE the loader is reachable: a caller searching while not
-      // ready would otherwise pay 16 MB and a 703 ms build to get an exception.
-      //
-      // THE SAME TWO SOURCES `ready` ACCEPTS, and they have to be the same two.
-      // The guard used to demand a manifest, which made the offline cold start
-      // (§4.4) unreachable — `ready` said yes off the cached listing and the
-      // query then raised anyway. The server fallback swallowed that; step 6
-      // deleted the fallback, so the divergence is now a "couldn't search" on
-      // screen rather than a slow answer.
+      // Refused BEFORE the loader is reachable, and against THE SAME TWO
+      // SOURCES `ready` accepts: a guard that demanded a manifest once made the
+      // offline cold start unreachable — `ready` said yes off the listing and
+      // the query raised anyway.
       if (!live && (listing?.().length ?? 0) === 0) throw new Error("local search has nothing to answer from");
-      // THE FIRST THING THAT CAN REACH THE LOADER — and, since the engine moved
-      // off this thread, the first thing that can construct the WORKER. §4.2's
-      // promise is the same one either way: a person who never searches pays
-      // neither the 16.13 MB nor a thread to hold it.
+      // The first thing that can reach the loader, and construct the worker.
       const idx = await engine();
-      // The build is not abortable and should not be — it is the same work the
-      // next keystroke needs. What a superseded search must not do is PAINT, and
-      // that is what this raises for.
+      // The build is not abortable; what a superseded search must not do is PAINT.
       if (signal?.aborted) throw abortError();
-      // `live` is replaced by every sync and never cleared, so what the answer is
-      // intersected with is the manifest current when it is FORMED, not the one
-      // that was current when it began.
-      // The manifest when there is one, the cached listing when there is not —
-      // the header says why that order and not the reverse.
-      //
-      // Asked WITH the typo ladder, which the wasm runs only when the query as
-      // typed matched nothing. That is the whole of §4.3's "matched **reunião**"
-      // and it is what the corpus needs rather than a nicety: the text is the
-      // device's own handwriting recognition, so exact matching fails even when
-      // the person spells the word correctly.
-      //
-      // The SIGNAL travels with it now that the query is a message rather than a
-      // call: a superseded keystroke rejects here instead of waiting out the
-      // 71.3 ms whole-vocabulary scan a no-match query costs (§8.6).
+      // Asked WITH the typo ladder (the wasm runs it only on a no-match — the
+      // corpus is handwriting recognition, so exact matching fails even on a
+      // correctly spelled word). The signal travels with it so a superseded
+      // keystroke rejects instead of waiting out the 71.3 ms scan (§8.6).
       const answer = await idx.query(query, ALL_PAGES, true, signal);
       return { query, ...group(answer, live ?? offlineLive()) };
     },
@@ -321,12 +190,9 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
 }
 
 /**
- * An engine answer to result rows: group hits by document, intersect with the
- * manifest, rank — and carry the ladder's substitution across, or drop it.
- *
- * Pages come back in bm25 order and go out ascending, because the row deep-links
- * to the FIRST matching page (§4.3) and "first" has to mean first in the
- * document, not first in the ranking.
+ * Group hits by document, intersect with the live set, rank. Pages come back
+ * in bm25 order and go out ascending: the row deep-links to the FIRST matching
+ * page (§4.3), and "first" has to mean first in the document.
  */
 function group(
   result: QueryResult,
@@ -347,12 +213,8 @@ function group(
     totalPages += ordinals.length;
     documents.push({ md5, fileId: row.fileId, pages: ordinals, updatedAt: row.updatedAt });
   }
-  // The substitution is reported only when a ROW survived to carry it. Same
-  // rule as `totalPages` above and for the same reason: the engine counts what
-  // is in the index and the UI shows what is on screen, so "matched **reunião**"
-  // over an empty result — every corrected page belonging to a document the
-  // manifest no longer names — would be the header's contradiction in words
-  // instead of in numbers.
+  // Reported only when a ROW survived to carry it: "matched **reunião**" over
+  // an empty result would contradict the screen.
   const expansions = documents.length > 0 ? result.expansions : [];
   return { totalPages, documents: rankDocuments(documents), expansions };
 }

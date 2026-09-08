@@ -1,79 +1,34 @@
-//! The `want=` parameter of the search-index stream: a BITMAP over manifest
-//! positions, base64url, read here without allocating and without decoding it
-//! into anything (`golden-search.md` §3.3).
+//! The `want=` parameter of the search-index stream: a bitmap over manifest
+//! positions, base64url, read without allocating (`golden-search.md` §3.3 — a
+//! bitmap because 200 md5s is a 6.6 KB URL; 1,222 documents is 204 characters).
 //!
-//! ## Why a bitmap and not a list of md5s
+//! A position means nothing except against the exact row order
+//! `index_export.zig`'s `writeManifest` emitted, which is why this lives beside
+//! that writer rather than in `http/`. The golden vector shares the manifest's
+//! `testdata/`.
 //!
-//! The question the client has to ask is "the documents I do not have", which is
-//! potentially hundreds of md5s. 200 of them is a **6.6 KB URL**, past what
-//! proxies tolerate and past what several of them will even log rather than
-//! truncate. The manifest is already ordered and already carries an ETag, so the
-//! client can address documents by POSITION instead: 1,222 documents is **153
-//! bytes, 204 base64url characters** — a URL that fits anywhere, verified by the
-//! `1,222` test below.
-//!
-//! ## Why this lives beside the encoder rather than in `http/`
-//!
-//! `http/byte_range.zig` and its neighbours are protocol-generic: nothing there
-//! knows what a manifest is. A position in this bitmap is meaningless except
-//! against the exact row order `index_export.zig`'s `writeManifest` emitted, and
-//! the two must change together. Its golden vector sits in the same `testdata/`
-//! as the manifest's, for the same reason.
-//!
-//! ## The four refusals, and why none of them is a shrug
-//!
-//! §3.3's ETag exists precisely so a bitmap cannot be read against the wrong
-//! ordering, and this reader is the other half of that promise. Every
-//! disagreement is an ERROR the route answers, never a silent adjustment:
-//!
-//! - **Not base64url** → `MalformedWant`. Including standard-base64 `+` and `/`,
-//!   which is the drift the golden vector's `_-` prefix is chosen to catch.
-//! - **Non-canonical trailing bits** → `MalformedWant`. `std.base64` DROPS the
-//!   leftover bits of a final 2- or 3-character group rather than checking them,
-//!   so two different strings decode to the same bitmap and one of them was
-//!   written by something that is not the encoder in `webapp/src/search/`.
-//! - **Longer than the manifest** → `WantLongerThanManifest`, checked from the
-//!   ENCODED length before a single character is examined, so a megabyte of
-//!   query string costs a division rather than a scan.
-//! - **A set bit past the manifest's last position** → `WantBitPastManifest`.
-//!   Not a no-op: the client believes in a document this manifest does not have,
-//!   which means the two disagree about the ordering, and **412 is the honest
-//!   answer**. Skipping the bit would serve a stream silently misaligned with
-//!   what was asked for.
-//!
-//! A bitmap SHORTER than the manifest is legal and common — see `parse`.
-//!
-//! ## Zero allocation, and it is not a micro-optimisation
-//!
-//! `parse` borrows the query string and stores a slice and a length. `isSet`
-//! decodes the one 4-character group holding the byte it needs — a shift and
-//! four table lookups, against the ~127-177 ms the manifest query costs on the
-//! Pi anyway, and one call per manifest row. So the route holds no per-request
-//! buffer, needs no ceiling on how many documents a household may own, and
-//! cannot size that buffer wrongly — on a server whose whole posture is a 50 MB
-//! budget and three concurrent first visits.
+//! Every disagreement with the manifest is an ERROR the route answers, never a
+//! silent adjustment; in particular a set bit past the manifest's last position
+//! is a 412, not a skip — the two sides disagree about the ordering, and skipping
+//! it would serve a stream silently misaligned with what was asked for. A bitmap
+//! SHORTER than the manifest is legal and common (see `parse`).
 
 const std = @import("std");
 
 pub const Error = error{
-    /// Not base64url, or base64url written non-canonically. A 400: the client
-    /// sent something no encoder of ours produces.
+    /// Not base64url, or written non-canonically. A 400.
     MalformedWant,
-    /// More bytes than the manifest has positions. A 412 for the same reason as
-    /// `WantBitPastManifest` — the two sides disagree about the ordering.
+    /// More bytes than the manifest has positions. A 412.
     WantLongerThanManifest,
     /// A bit set at a position the manifest does not have. A 412.
     WantBitPastManifest,
 };
 
-/// base64url, unpadded. `-` and `_` rather than `+` and `/`, and no `=`: 153
-/// bytes divides by 3, so the real payload never needs padding, and refusing it
-/// leaves exactly one spelling per bitmap.
+/// base64url, unpadded. `=` is refused: 153 bytes divides by 3 so the real
+/// payload never needs it, and refusing it leaves one spelling per bitmap.
 const alphabet = std.base64.url_safe_alphabet_chars;
 
-/// Built here rather than borrowed from `std.base64`, whose equivalent sentinel
-/// is private. Six lines, and it puts `=`, `+` and `/` in the same bucket as any
-/// other junk byte — all three are simply not in this alphabet.
+/// `std.base64`'s equivalent sentinel is private.
 const invalid: u8 = 0xff;
 const char_to_sextet: [256]u8 = blk: {
     var table = [_]u8{invalid} ** 256;
@@ -82,24 +37,16 @@ const char_to_sextet: [256]u8 = blk: {
 };
 
 /// A validated `want=` parameter, answering "is manifest position N set?".
-///
-/// Borrows `encoded`, which for the route is the query string it already holds
-/// for the life of the request.
+/// Borrows `encoded` — the route's query string, held for the whole request.
 pub const WantBitmap = struct {
-    /// The base64url text itself, already proved well-formed by `parse`.
+    /// Already proved well-formed by `parse`.
     encoded: []const u8,
-    /// How many bytes it decodes to. Never more than `(manifest_len + 7) / 8`.
+    /// Never more than `(manifest_len + 7) / 8`.
     byte_len: usize,
 
-    /// Is the document at manifest position `position` being asked for?
-    ///
-    /// The caller walks the manifest IN ORDER — which is tier order, which is
-    /// priority order — and asks this once per row, so an indexed query is the
-    /// shape that matches rather than a materialised list of positions.
-    ///
-    /// A position past the end of the bitmap reads as unset, which is what makes
-    /// a short bitmap work (see `parse`). A position past the MANIFEST cannot be
-    /// asked about wrongly: `parse` already proved every such bit is zero.
+    /// A position past the end of the bitmap reads as unset (a short bitmap, see
+    /// `parse`). A position past the MANIFEST cannot be asked about wrongly:
+    /// `parse` already proved every such bit is zero.
     pub fn isSet(self: WantBitmap, position: usize) bool {
         const byte_index = position >> 3;
         if (byte_index >= self.byte_len) return false;
@@ -107,8 +54,6 @@ pub const WantBitmap = struct {
         return ((self.byteAt(byte_index) >> bit) & 1) == 1;
     }
 
-    /// How many documents were asked for. The route's log line, and the tests'
-    /// cheap way to say "all of them".
     pub fn countSet(self: WantBitmap) usize {
         var total: usize = 0;
         var i: usize = 0;
@@ -116,17 +61,15 @@ pub const WantBitmap = struct {
         return total;
     }
 
-    /// Byte `index` of the bitmap, decoded from the one base64 group that holds
-    /// it. LSB-FIRST within the byte: position N is bit `N & 7` of byte `N >> 3`,
-    /// so position 0 is the low bit of the first byte. MSB-first would decode
-    /// every byte's bits in reverse and produce a plausible, wrong document set;
-    /// the golden vector's `0..7, 13, 14, 15` distinguishes the two.
+    /// Byte `index`, decoded from the one base64 group holding it. LSB-FIRST
+    /// within the byte: position N is bit `N & 7` of byte `N >> 3`. MSB-first
+    /// produces a plausible, wrong document set; the golden vector's `13, 14, 15`
+    /// tells the two apart.
     fn byteAt(self: WantBitmap, index: usize) u8 {
         const group = (index / 3) * 4;
         const c0: u8 = char_to_sextet[self.encoded[group]];
         const c1: u8 = char_to_sextet[self.encoded[group + 1]];
-        // The masks are not decoration: a sextet is 6 bits in a u8, so `c1 << 4`
-        // unmasked is 1008 and does not fit the byte it is being written into.
+        // The masks are not decoration: `c1 << 4` unmasked does not fit a u8.
         return switch (index % 3) {
             0 => (c0 << 2) | (c1 >> 4),
             1 => ((c1 & 0x0f) << 4) | (char_to_sextet[self.encoded[group + 2]] >> 2),
@@ -140,15 +83,10 @@ pub const WantBitmap = struct {
 ///
 /// An EMPTY parameter is a valid empty set, and so is a bitmap shorter than the
 /// manifest: the encoder drops trailing zero bytes, so a client missing only the
-/// two newest notes — which tier order puts FIRST — sends a handful of
-/// characters rather than 204. Positions past the end simply read as unset.
-///
-/// Trailing zero bytes that were NOT trimmed are accepted too. Trimming is a
-/// courtesy the encoder does for the URL's sake, not a rule worth a refusal, and
-/// two spellings of the same set are harmless because nothing caches the string.
+/// newest notes — which tier order puts FIRST — sends a few characters, not 204.
+/// Untrimmed trailing zeros are accepted too; nothing caches the string.
 pub fn parse(want: []const u8, manifest_len: usize) Error!WantBitmap {
-    // A base64 group is 2, 3 or 4 characters. One is not a length any encoder
-    // can produce.
+    // A base64 group is 2, 3 or 4 characters; 1 is not a length any encoder produces.
     if (want.len % 4 == 1) return error.MalformedWant;
     const byte_len = (want.len / 4) * 3 + switch (want.len % 4) {
         2 => @as(usize, 1),
@@ -156,18 +94,17 @@ pub fn parse(want: []const u8, manifest_len: usize) Error!WantBitmap {
         else => @as(usize, 0),
     };
 
-    // FIRST, before any character is looked at: a bitmap longer than the
-    // manifest is refused on arithmetic alone, so an absurd query string is a
-    // division rather than a scan of it.
+    // Before any character is looked at, so a megabyte of query string costs a
+    // division rather than a scan.
     if (byte_len > (manifest_len + 7) / 8) return error.WantLongerThanManifest;
 
     for (want) |c| {
         if (char_to_sextet[c] == invalid) return error.MalformedWant;
     }
 
-    // The leftover bits of a short final group. `std.base64` discards these; a
-    // client that sets them is not the encoder we ship, and letting it through
-    // would give one bitmap several spellings.
+    // The leftover bits of a short final group. `std.base64` silently DISCARDS
+    // these, so one bitmap would have several spellings; a client that sets them
+    // is not the encoder in `webapp/src/search/`.
     switch (want.len % 4) {
         2 => if ((char_to_sextet[want[want.len - 1]] & 0x0f) != 0) return error.MalformedWant,
         3 => if ((char_to_sextet[want[want.len - 1]] & 0x03) != 0) return error.MalformedWant,
@@ -176,11 +113,10 @@ pub fn parse(want: []const u8, manifest_len: usize) Error!WantBitmap {
 
     const map: WantBitmap = .{ .encoded = want, .byte_len = byte_len };
 
-    // The last byte may reach past the manifest's last position — 1,222
-    // documents end six bits into byte 152. A bit set up there means the client
-    // is addressing a document this ordering does not have: 412, not a skip.
-    // Guarded rather than subtracted first, because a bitmap SHORTER than the
-    // manifest has no overhang and `byte_len * 8 - manifest_len` would wrap.
+    // A bit in the last byte's overhang addresses a document this ordering does
+    // not have: 412, never a skip. Guarded rather than subtracted first, because
+    // a bitmap SHORTER than the manifest has no overhang and the subtraction
+    // would wrap.
     if (byte_len * 8 > manifest_len) {
         const overhang: u3 = @intCast(byte_len * 8 - manifest_len); // 1..7
         const keep: u8 = @as(u8, 0xff) >> overhang;

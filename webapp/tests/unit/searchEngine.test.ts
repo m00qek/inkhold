@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createSearchEngine } from "../../src/search/searchEngine";
-import type { EngineRequest, EngineResponse } from "../../src/search/engineWorkerTypes";
+import type { EngineRequest, EngineResponse } from "../../src/search/engineWorker";
 import type { CoreLoader, TermsDocument } from "../../src/search/indexEngine";
 
 // The MAIN-THREAD half of the search worker, driven by a FAKE worker.

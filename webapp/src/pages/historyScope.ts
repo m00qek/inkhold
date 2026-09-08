@@ -18,20 +18,11 @@
 // Every other note (and the same note when no preview is active) passes straight
 // through — a live read is byte-identical to having no wrapper at all.
 //
-// ## IN-NOTE SEARCH IS NO LONGER ONE OF THEM, and that is the point of §1.1
-//
-// It used to be: the seam's in-note search rerouted to the one-document history
-// search (H8), surfaced as a single `done` batch so the reader's find bar drove
-// it unchanged. `golden-search.md` §1.1 collapsed all five in-doc routes to
-// "authorize, serve `text/<md5>`", and with one route KEYED BY MD5 there is
-// nothing left to reroute — "history and bin are not special: they are other
-// md5s". The seam carries no search method at all any more.
-//
-// The reroute that replaces it is one this file ALREADY performs, for a different
-// reason: {@link versionMeta} rewrites `fileHash` to the version's md5 so the raw
-// address is the version's. The find controllers read exactly that field, so a
-// preview searches its own retained blob because the meta already says which blob
-// it is. The indirection did not move — it disappeared.
+// In-note search is NOT rerouted here, and must not be: the in-document index is
+// keyed by blob md5 (`golden-search.md` §1.1 — "history and bin are other
+// md5s"), and the find controllers read `fileHash`, which {@link versionMeta}
+// already rewrites to the version's md5. A preview searches its own retained
+// blob because the meta says which blob it is.
 
 import type { Api } from "../api/types";
 import type { Id, NoteMeta, PageRef, PageText } from "../core/types";
@@ -105,16 +96,12 @@ export function createHistoryScope(): HistoryScope {
  * `textHash` is CARRIED from the live meta, not nulled: it is what ENABLES the
  * find bar (a note with no recognised page can't be searched). The word
  * RECTANGLES come from `getPageText`, which the reroute answers from the
- * per-version transcript route (`historyPageText`) — so preview find shows the
- * count, the filmstrip badges, page/match navigation AND on-page ovals, and a
- * version's PDF export carries its real invisible text layer.
+ * per-version transcript route (`historyPageText`).
  *
- * `fileHash` is set to the version md5, and it now does TWO jobs: the
- * raw/thumbnail address is the version's (the reader suppresses the raw download
- * in preview mode regardless), and it is what find-in-preview searches. Since
- * `golden-search.md` §1.1 the in-document index is keyed by blob md5, so this one
- * rewritten field is the whole of "search the version, not the live file" — there
- * is no search reroute in the wrapper above any more.
+ * `fileHash` is the version md5 and does TWO jobs: the raw/thumbnail address is
+ * the version's, and it is what find-in-preview searches — the in-document
+ * index is keyed by blob md5 (`golden-search.md` §1.1), so this one field is
+ * the whole of "search the version, not the live file".
  */
 export function versionMeta(base: NoteMeta, md5: string): NoteMeta {
   return {

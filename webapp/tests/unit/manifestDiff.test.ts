@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { diffManifest } from "../../src/search/manifestDiff";
+import { diffManifest } from "../../src/search/indexSync";
 import type { ManifestRow } from "../../src/search/manifestCodec";
 import type { TermsKey } from "../../src/cache/termsStore";
 

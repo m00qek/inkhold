@@ -1,36 +1,20 @@
-// The two HTTP calls sync makes, behind one interface so everything above them
-// is testable without a network — and so the one call that must NOT be read
-// whole is not accidentally read whole.
+// The two HTTP calls sync makes, behind one interface so everything above
+// them is testable without a network.
 //
-// ## Why this is not in `api/client.ts`
+// Not in `api/client.ts` because every wrapper there returns a parsed answer
+// and throws on non-2xx, and both statuses that MATTER here — the manifest's
+// 304 and the stream's 412 — are control flow. What is reused is
+// `bytesBudget`: a total-duration cap cannot tell a stall at 5% from a slow
+// success, and the whole library over 3G is a slow success.
 //
-// Every wrapper there returns a parsed answer, which is exactly what these two
-// cannot be:
-//
-//   * `request()` normalizes an envelope, JSON-decodes the body, and turns any
-//     non-2xx into a thrown `ApiError`. Both statuses that MATTER here — the
-//     manifest's 304 and the stream's 412 — are normal control flow, not
-//     failures, and the manifest's body is bytes rather than JSON.
-//   * `rawFetch()` is closer (bytes, the right timeout budget) but throws on
-//     anything that is not `ok`, so it cannot express either of them, and it
-//     hands back a `Response` whose statuses a caller would then re-interpret.
-//
-// What is reused is the one thing worth reusing: `bytesBudget`, the BYTES
-// timeout. Its comment is the reason — a total-duration cap cannot tell a stall
-// at 5% from a slow success, and the whole library over a 3G link is a slow
-// success. It only rules out the infinite case, which is the case that would
-// otherwise leave a sync pending for ever.
-//
-// ## The stream body is never buffered
-//
-// `stream()` hands back the DECODED TEXT CHUNKS, not the response — the
-// progressive property (§3.2: first document usable at 8 ms of a 193 ms stream)
-// is a property of what the consumer is given, and giving it a `Response` would
-// make `await res.text()` the obvious thing to do next.
-//
-// `Content-Encoding: gzip` is inflated by the browser before `response.body`
-// yields anything, so nothing here decompresses. `DecompressionStream` belongs
-// to §3.2's framed fallback, which is not the shape the server serves.
+// What this must not break:
+//   * `stream()` hands back DECODED TEXT CHUNKS, never the `Response` — the
+//     progressive property (first document usable at 8 ms of a 193 ms stream,
+//     §3.2) dies the moment `await res.text()` is the obvious next line.
+//   * `Content-Encoding: gzip` is inflated by the browser; nothing here
+//     decompresses.
+//   * The ETag is QUOTED on `if-none-match` and BARE in `m=` — see
+//     `entityTagValue`.
 
 import { bytesBudget } from "../api/client";
 import { textChunks } from "./termsStream";
@@ -41,11 +25,9 @@ const STREAM_URL = "/api/controlplane/search-index/stream";
 /** A manifest fetch. 200 carries a body; 304 says the one you hold is current. */
 export interface ManifestAnswer {
   readonly status: number;
-  /**
-   * The BARE hex validator, unquoted — what `m=` carries on the stream request.
-   * The server sends it on the 304 as well as the 200, deliberately: a validator
-   * the client is not re-told is one it may drop.
-   */
+  /** The BARE hex validator, unquoted — what `m=` carries. The server sends it
+   *  on the 304 as well as the 200: a validator the client is not re-told is
+   *  one it may drop. */
   readonly etag: string | null;
   readonly body: Uint8Array | null;
 }
@@ -64,12 +46,10 @@ export interface IndexTransport {
 /**
  * The bare value inside an entity tag: `W/"abc"` and `"abc"` both give `abc`.
  *
- * The server mints exactly one spelling — a quoted 32-hex string — and compares
- * `if-none-match` for BYTE equality, so the quotes have to survive the round
- * trip on that header. `m=`, on the stream request, is the opposite: the bare
- * hex, because a quoted string in a query string needs percent-encoding and buys
- * nothing. Getting this backwards produces a permanent 412 loop and no other
- * symptom, which is why it is one exported function and not two inline slices.
+ * The server mints one spelling — a quoted 32-hex string — and compares
+ * `if-none-match` for BYTE equality, so the quotes must survive on that
+ * header; `m=` on the stream request takes the bare hex. Getting this
+ * backwards is a permanent 412 loop with no other symptom.
  */
 export function entityTagValue(header: string | null): string | null {
   if (!header) return null;
@@ -98,13 +78,12 @@ export function httpTransport(): IndexTransport {
     },
 
     async stream(m, want, signal) {
-      // `want` is already base64url from `encodeWant` — no `+`, `/` or `=` in
-      // it — but the ETag is the server's to choose, so both go through
-      // `URLSearchParams` rather than being pasted in.
+      // `want` is base64url already, but the ETag is the server's to choose, so
+      // both go through `URLSearchParams`.
       const params = new URLSearchParams({ m, want });
       const budget = bytesBudget(signal);
-      // NOT in a `finally`: the budget covers the whole DOWNLOAD, not just the
-      // head, and the download is the part that can stall. `chunks` closes it.
+      // NOT in a `finally`: the budget covers the whole DOWNLOAD, which is the
+      // part that can stall. `chunks` closes it.
       let res: Response;
       try {
         res = await fetch(`${STREAM_URL}?${params.toString()}`, {

@@ -1,32 +1,22 @@
-// The ENCODER for the `want=` parameter of the search-index stream — "these are
-// the manifest positions I am missing" (`golden-search.md` §3.3). The decoder is
-// `backend/services/search/want_bitmap.zig`, and the two are pinned to each
-// other by ONE checked-in artifact,
-// `backend/services/search/testdata/want_golden.txt`, whose meaning is written
-// out by hand on BOTH sides. Regenerating it to make one side pass turns the
-// other red.
+// The ENCODER for the `want=` parameter of the search-index stream — "these
+// are the manifest positions I am missing" (`golden-search.md` §3.3). The
+// decoder is `backend/services/search/want_bitmap.zig`; the two are pinned by
+// ONE checked-in artifact, `testdata/want_golden.txt`, whose meaning is
+// written out by hand on both sides.
 //
-// The direction is the mirror image of `manifestCodec.ts`: there the server
-// encodes and the browser decodes, here the browser encodes and the server
-// decodes. Same discipline either way.
+// Positions, not md5s: 200 md5s is a 6.6 KB URL, 1,222 positions are 204
+// base64url characters. A position means nothing except against the exact row
+// order the server emitted, which is what the ETag beside it (`m=`) and the
+// 412 on a mismatch make structural.
 //
-// ## Why positions and not md5s
-//
-// "The documents I do not have" is potentially hundreds of hashes, and 200 md5s
-// is a 6.6 KB URL — past what proxies tolerate. The manifest is already ordered
-// and already has an ETag, so a position is a legitimate name for a document:
-// 1,222 documents become 153 bytes, 204 base64url characters, a URL that fits
-// anywhere. The ETag travels beside it (`&m=`) so the server can refuse — 412 —
-// rather than read the bitmap against an ordering the client never saw.
-//
-// ## Layout (mirrors `want_bitmap.zig`; change both or neither)
+// Layout (mirrors `want_bitmap.zig`; change both or neither):
 //
 //     bit `n & 7` of byte `n >> 3`    manifest position n — LSB-FIRST, so
 //                                     position 0 is the LOW bit of byte 0
 //     trailing zero bytes             dropped, see below
 //     base64url, UNPADDED             `-` and `_`, never `+` `/` `=`
 
-import { SearchWireError } from "./wire";
+import { SearchWireError } from "./manifestCodec";
 
 /** base64url. The two characters at the end are the whole difference from base64. */
 const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -34,21 +24,14 @@ const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
 /**
  * Spell a set of manifest positions as the `want=` parameter.
  *
- * `manifestLength` is the row count of the manifest the positions came from —
- * the same manifest whose ETag goes into `m=`. It is not decoration: it bounds
- * the bitmap, and the server refuses anything longer with a 412 rather than
- * guessing which document a position past the end meant.
- *
- * **Trailing zero bytes are dropped**, which is what keeps the common request
- * small. Tier order puts the household's newest notes FIRST, so a client that
- * refetched after a sync and is missing two of them sets two low bits and sends
- * a couple of characters instead of 204. The server reads any position past the
- * end of a short bitmap as unset.
+ * `manifestLength` bounds the bitmap; the server refuses anything longer with
+ * a 412. Trailing zero bytes are dropped: tier order puts the newest notes
+ * FIRST, so a client missing two of them sends a couple of characters instead
+ * of 204, and the server reads any position past the end as unset.
  *
  * @throws SearchWireError if a position is not an integer in `[0,
- * manifestLength)`. That is a caller bug rather than a corrupt payload, but it
- * is the SAME bug the 412 catches on the wire — the positions and the manifest
- * disagreeing — so it is worth the one error class the callers already handle.
+ * manifestLength)` — a caller bug, but the SAME bug the 412 catches on the
+ * wire, so it wears the one error class the callers already handle.
  */
 export function encodeWant(positions: Iterable<number>, manifestLength: number): string {
   if (!Number.isInteger(manifestLength) || manifestLength < 0) {
@@ -62,8 +45,7 @@ export function encodeWant(positions: Iterable<number>, manifestLength: number):
       );
     }
     // LSB-first. Reversing this produces a perfectly valid bitmap naming the
-    // wrong documents, and nothing downstream would report an error — the server
-    // would just stream a set the client did not ask for.
+    // wrong documents, and nothing downstream would report an error.
     bytes[position >> 3]! |= 1 << (position & 7);
   }
 
@@ -73,13 +55,10 @@ export function encodeWant(positions: Iterable<number>, manifestLength: number):
 }
 
 /**
- * base64url, unpadded, written out rather than reached for.
- *
- * `btoa` wants a binary string, which for a 153-byte array means either a spread
- * (a stack hazard once anyone reuses this) or a loop that builds the string
- * anyway — and then a `replace` pass for `+/` and a strip for `=`. Three
- * conversions to get one, with `+` or `/` surviving a slip and decoding on the
- * server as a document set nobody chose.
+ * base64url, unpadded, written out rather than reached for: `btoa` wants a
+ * binary string, then a `replace` for `+/` and a strip for `=` — three
+ * conversions, with `+` or `/` surviving a slip and decoding on the server as
+ * a document set nobody chose.
  */
 function base64url(bytes: Uint8Array): string {
   let out = "";
@@ -88,9 +67,8 @@ function base64url(bytes: Uint8Array): string {
     const n = (bytes[i]! << 16) | (bytes[i + 1]! << 8) | bytes[i + 2]!;
     out += ALPHABET[n >> 18]! + ALPHABET[(n >> 12) & 63]! + ALPHABET[(n >> 6) & 63]! + ALPHABET[n & 63]!;
   }
-  // The last one or two bytes. The leftover low bits of the final character are
-  // ZERO, not arbitrary padding: the server refuses a non-canonical group,
-  // because two spellings of one bitmap mean the sender is not this encoder.
+  // The leftover low bits of the final character are ZERO, not arbitrary
+  // padding: the server refuses a non-canonical group.
   const left = bytes.length - i;
   if (left === 1) {
     const n = bytes[i]!;

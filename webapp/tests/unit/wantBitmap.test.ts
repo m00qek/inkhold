@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { encodeWant } from "../../src/search/wantBitmap";
-import { SearchWireError } from "../../src/search/wire";
+import { SearchWireError } from "../../src/search/manifestCodec";
 
 // THE golden vector — one artifact, two implementations, exactly as
 // `manifestCodec.test.ts` and `manifest_golden.bin` do it, with the directions

@@ -1,64 +1,24 @@
-//! Derived per-document files, keyed by `(source md5, index_version)` and kept
-//! on disk as `<subdir>/<md5>.<index_version>`. Two stores share this one type:
+//! Derived per-document files keyed by `(source md5, index_version)`, on disk as
+//! `<subdir>/<md5>.<index_version>`: `data/terms/` (§2.2) and `data/text/`.
 //!
-//!     data/terms/<md5>.<v>   page -> its folded terms, for search  (§2.2)
-//!     data/text/<md5>.<v>    the document's segments, for reading
+//! `store/thumbs.zig`'s shape — flat, staged in `tmp/` then fsync'd then
+//! atomically renamed, cleaned up by the source blob's GC, a malformed key naming
+//! nothing — with two differences:
+//!   * The version is in the FILENAME (`golden-search.md` §2.1), so a parser
+//!     bump cannot serve text derived by the old one. `has(md5, v)` IS the
+//!     derivation state; a DB column may cache it, and is never the authority.
+//!   * Writes STREAM through a handle (`begin`, write, `commit`): `.pdf` text
+//!     arrives 50 pages at a time and terms are written per page. Nothing is
+//!     visible before the rename, so a partial derive is invisible, not corrupt.
 //!
-//! It is `store/thumbs.zig` with two things added, and everything else is
-//! deliberately the same — flat and unsharded, staged in `tmp/` then fsync'd
-//! then atomically renamed, cleanup riding the source blob's GC, **existence of
-//! the file IS the fact**, and a malformed key naming nothing rather than
-//! panicking. Read that file's header for why each of those is the way it is;
-//! only the differences are argued here.
-//!
-//! ## Difference 1: the version is in the NAME
-//!
-//! Same bytes, new parser, different output — so `index_version` is part of the
-//! key, not just of the content (`golden-search.md` §2.1). That makes the
-//! `(md5, index_version)` pair the client's cache key too, and it is what stops
-//! a parser bump silently serving text derived by the old one.
-//!
-//! A consequence worth stating: **`has(md5, v)` is the derivation state.** There
-//! is no "derived?" column to fall out of step with the disk, because the disk
-//! is the record. A DB column may CACHE it for the manifest query, but it is
-//! written after the rename and is never the authority.
-//!
-//! ## Difference 2: writes STREAM
-//!
-//! A thumbnail is small and already resident, so `ThumbStore.put` is one
-//! `writeAll`. These files are neither. `.pdf` text arrives 50 pages at a time
-//! and is never held whole (`pdf_text.nextChunk`), and a document's terms are
-//! written page by page as each is folded — that is the whole point of §2.2's
-//! per-page record, and holding the document to write it once would put back
-//! the accumulator that record exists to delete.
-//!
-//! So the write is a handle: `begin` stages, the caller writes as much as it
-//! likes over as long as it likes, `commit` publishes. `abort` (or simply
-//! failing to commit, via `defer`) drops the staging file. Nothing is visible
-//! until the rename, so a partial derive is invisible rather than corrupt.
-//!
-//! `Staged` is initialised THROUGH A POINTER (`begin(&staged, …)`) because it
-//! owns the buffer its writer points into; returning it by value would leave
-//! that pointer aimed at the dead copy.
-//!
-//! ## Retiring a superseded version
-//!
-//! `commit` unlinks every OTHER version of the same md5 once the new one is
-//! safely in place (§2.7). Without it an `index_version` bump would leave the
-//! old file behind for ever: nothing else would ever name it, and blob GC only
-//! fires when the source blob goes away.
-//!
-//! `removeAll` is the GC face, and it takes no version because a caller
-//! unlinking a dead blob's leftovers does not know which versions exist. It
-//! scans the directory, which is O(entries) — household scale, on a path that
-//! runs when a blob is destroyed, not when one is read.
+//! `Staged` and `Fragment` are initialised THROUGH A POINTER: each owns the
+//! buffer its writer points into, and returned by value that pointer would aim
+//! at the dead copy.
 
 const std = @import("std");
 const blobstore = @import("blobs.zig");
-// The stream's own two bytes rather than a second copy of them. This import is
-// why `zig test backend/store/derived.zig` alone no longer resolves — the real
-// suite is `zig build test`, and dodging that was how five hand-inlined
-// `{ 0x03, 0x00 }` literals got into the tree in the first place.
+// This import is why `zig test backend/store/derived.zig` alone does not
+// resolve; the suite is `zig build test`.
 const gzip_stitch = @import("../http/gzip_stitch.zig");
 
 const Io = std.Io;
@@ -72,23 +32,21 @@ const max_name_len = md5_hex_len + 1 + 20;
 
 pub const DerivedStore = struct {
     io: Io,
-    /// The store root (e.g. `<data_dir>/terms`). Owned by the caller; must be on
-    /// the same filesystem as its `tmp/` subdir so the publish rename is atomic.
+    /// Owned by the caller; must be on the same filesystem as its `tmp/` subdir
+    /// so the publish rename is atomic.
     root: Dir,
 
-    /// Ensures the `tmp/` staging subdir exists under `root`.
     pub fn init(io: Io, root: Dir) !DerivedStore {
         try ensureDir(io, root, "tmp");
         return .{ .io = io, .root = root };
     }
 
-    /// An in-progress write. Write through `staged.interface`; publish with
-    /// `commit`. Anything that is not committed leaves no trace.
+    /// An in-progress write. Anything not committed leaves no trace.
     pub const Staged = struct {
         store: DerivedStore,
         file: File,
         fw: File.Writer,
-        /// The writer the caller feeds. Valid between `begin` and `commit`.
+        /// Valid between `begin` and `commit`.
         interface: *std.Io.Writer,
         md5: [md5_hex_len]u8,
         version: i64,
@@ -99,8 +57,8 @@ pub const DerivedStore = struct {
         /// Flush, fsync, publish, then retire every other version of this md5.
         pub fn commit(s: *Staged) !void {
             std.debug.assert(!s.done);
-            try s.interface.flush(); // userspace buffer -> fd
-            try s.file.sync(s.store.io); // fd -> disk, BEFORE the rename publishes it
+            try s.interface.flush();
+            try s.file.sync(s.store.io); // BEFORE the rename publishes it
 
             var final_buf: [max_name_len]u8 = undefined;
             const final_rel = finalRel(&final_buf, &s.md5, s.version).?;
@@ -108,14 +66,13 @@ pub const DerivedStore = struct {
             s.done = true;
             s.file.close(s.store.io);
 
-            // Only now that the new version is durable and named: drop the old
-            // ones. A crash between the rename and here leaves two versions,
-            // which is safe — readers ask for one by name — and the next commit
-            // clears it.
+            // Only once the new version is durable and named. A crash between
+            // the rename and here leaves two versions, which is safe — readers
+            // ask for one by name — and the next commit clears it.
             s.store.removeOtherVersions(&s.md5, s.version);
         }
 
-        /// Drop the staging file. Idempotent, and safe to `defer` unconditionally.
+        /// Idempotent; safe to `defer` unconditionally.
         pub fn abort(s: *Staged) void {
             if (s.done) return;
             s.done = true;
@@ -128,8 +85,8 @@ pub const DerivedStore = struct {
         }
     };
 
-    /// Begin a streaming write of `(md5, version)`. `error.InvalidMd5` for a key
-    /// that is not 32 characters, checked before anything is created.
+    /// `error.InvalidMd5` for a key that is not 32 characters, before anything
+    /// is created.
     pub fn begin(self: DerivedStore, s: *Staged, md5: []const u8, version: i64) !void {
         if (md5.len != md5_hex_len) return error.InvalidMd5;
         s.store = self;
@@ -147,7 +104,6 @@ pub const DerivedStore = struct {
         s.interface = &s.fw.interface;
     }
 
-    /// Convenience for a caller that already holds the whole thing.
     pub fn put(self: DerivedStore, md5: []const u8, version: i64, bytes: []const u8) !void {
         var s: Staged = undefined;
         try self.begin(&s, md5, version);
@@ -156,16 +112,15 @@ pub const DerivedStore = struct {
         try s.commit();
     }
 
-    /// Opens a stored file for streaming reads. Caller closes. `error.InvalidMd5`
-    /// if `md5` is not 32 characters; a missing file is `error.FileNotFound`.
+    /// Caller closes. `error.InvalidMd5` for a bad key, `error.FileNotFound`
+    /// for a missing file.
     pub fn open(self: DerivedStore, md5: []const u8, version: i64) !File {
         var buf: [max_name_len]u8 = undefined;
         const rel = finalRel(&buf, md5, version) orelse return error.InvalidMd5;
         return self.root.openFile(self.io, rel, .{});
     }
 
-    /// **This is the derivation state** — see the header. A malformed md5 names
-    /// nothing, so it is a miss rather than an error.
+    /// THE derivation state. A malformed md5 names nothing: a miss, not an error.
     pub fn has(self: DerivedStore, md5: []const u8, version: i64) bool {
         var buf: [max_name_len]u8 = undefined;
         const rel = finalRel(&buf, md5, version) orelse return false;
@@ -173,15 +128,15 @@ pub const DerivedStore = struct {
         return true;
     }
 
-    /// Deletes one specific version. Missing is not an error.
+    /// Missing is not an error.
     pub fn remove(self: DerivedStore, md5: []const u8, version: i64) void {
         var buf: [max_name_len]u8 = undefined;
         const rel = finalRel(&buf, md5, version) orelse return;
         self.root.deleteFile(self.io, rel) catch {};
     }
 
-    /// Deletes EVERY version for this md5 — the blob-GC face, which does not
-    /// know what versions exist. No-op for a malformed key.
+    /// Every version — the blob-GC face, which does not know what versions
+    /// exist. No-op for a malformed key.
     pub fn removeAll(self: DerivedStore, md5: []const u8) void {
         if (md5.len != md5_hex_len) return;
         self.removeMatching(md5[0..md5_hex_len].*, null);
@@ -191,8 +146,8 @@ pub const DerivedStore = struct {
         self.removeMatching(md5.*, keep);
     }
 
-    /// Unlink `<md5>.*`, optionally sparing one version. Scans the directory
-    /// because the versions present are not knowable from the key alone.
+    /// Unlink `<md5>.*`, optionally sparing one version. O(entries), on a path
+    /// that runs when a blob dies rather than when one is read.
     fn removeMatching(self: DerivedStore, md5: [md5_hex_len]u8, keep: ?i64) void {
         var keep_buf: [max_name_len]u8 = undefined;
         const keep_rel: ?[]const u8 = if (keep) |v| finalRel(&keep_buf, &md5, v) else null;
@@ -212,8 +167,8 @@ pub const DerivedStore = struct {
         }
     }
 
-    /// Removes leftover staging files from a prior crash. Safe: temp files are
-    /// never referenced until renamed, so any that remain are abandoned writes.
+    /// Staging files are never referenced until renamed, so any that remain are
+    /// abandoned writes from a prior crash.
     pub fn sweepTmp(self: DerivedStore) void {
         self.root.deleteTree(self.io, "tmp") catch {};
         ensureDir(self.io, self.root, "tmp") catch {};
@@ -235,11 +190,9 @@ fn ensureDir(io: Io, root: Dir, sub: []const u8) !void {
     d.close(io);
 }
 
-/// `<md5>.<version>`, or null when `md5` is not exactly 32 characters. The
-/// length check lives HERE, at the one place a key becomes a path, so no entry
-/// point can index a short key out of bounds — a file that cannot exist is a
-/// miss, not a crash. A negative version is not representable in the name and
-/// is refused for the same reason.
+/// `<md5>.<version>`, or null. The length check lives at the one place a key
+/// becomes a path, so no entry point can index a short key out of bounds; a
+/// negative version is not representable and is refused for the same reason.
 fn finalRel(buf: *[max_name_len]u8, md5: []const u8, version: i64) ?[]const u8 {
     if (md5.len != md5_hex_len) return null;
     if (version < 0) return null;
@@ -444,41 +397,32 @@ test "sweepTmp clears staging and the store keeps working" {
 // The stored FORMAT: a 12-byte header, then one raw-deflate fragment.
 // ---------------------------------------------------------------------------
 
-/// What a stored file looks like on disk:
+/// On disk:
 ///
 ///     [0..4)   magic "IDF1"
 ///     [4..8)   CRC32 of the UNCOMPRESSED payload, little-endian
 ///     [8..12)  uncompressed length, little-endian u32
 ///     [12..)   the payload as a byte-aligned raw-deflate fragment
 ///
-/// **The CRC and the length are in the FILE, deliberately** (`golden-search.md`
-/// §3.3): the stream route walks a list of files and accumulates the gzip
-/// trailer with `crc32_combine` as it goes, so it must learn each fragment's
-/// two numbers from the bytes it is already reading. A DB lookup per document
-/// would put the write lock on the read path for no reason.
+/// The CRC and length are in the FILE so the stream route can accumulate the
+/// gzip trailer from the bytes it is already reading — no DB lookup, and no
+/// write lock, on the read path (§3.3). The fragment is `Container.raw` +
+/// `flush()`, never `finish()`, so it carries no BFINAL block and concatenates
+/// with any other (§3.2).
 ///
-/// The fragment is `Container.raw` + `flush()` and never `finish()`, so it
-/// carries no BFINAL block and concatenates with any other (§3.2). One header,
-/// one trailer, N fragments in between, and the whole thing is a single-member
-/// gzip that every decoder agrees about.
-///
-/// The magic is the format's own version. `index_version` is in the FILENAME
-/// and versions the DERIVED CONTENT; this versions the CONTAINER, and the two
-/// move for different reasons — a new parser bumps the first, a change to this
-/// header would bump the second.
+/// The magic versions the CONTAINER; `index_version` in the filename versions
+/// the CONTENT. They move for different reasons.
 pub const header_len = 12;
 const magic = "IDF1";
 
 pub const Header = struct {
     crc: u32,
-    /// Uncompressed length. u32 because gzip's ISIZE is u32 and no document
-    /// here approaches 4 GB; `crc32Combine` takes it widened.
+    /// u32 because gzip's ISIZE is; `crc32Combine` takes it widened.
     len: u32,
 };
 
-/// Read the header of a stored file. `error.BadFragment` for anything that is
-/// not one — a truncated write that somehow got published, or a file from a
-/// future format.
+/// `error.BadFragment` for anything that is not one — a truncated write that
+/// got published, or a future format.
 pub fn readHeader(io: Io, file: File) !Header {
     var buf: [header_len]u8 = undefined;
     const n = try file.readPositionalAll(io, &buf, 0);
@@ -490,25 +434,13 @@ pub fn readHeader(io: Io, file: File) !Header {
     };
 }
 
-/// Read a stored file back to its PLAINTEXT — the inverse of `Fragment`.
+/// Read a stored file back to its PLAINTEXT — the inverse of `Fragment`. Caller
+/// owns the slice. For tests and debugging; the serve route streams untouched.
 ///
-/// This module defines the format, so it is the module that can read it. Three
-/// callers had grown a private copy of these fifteen lines, each of them also
-/// hand-inlining the two terminator bytes; one of those copies was mine, and the
-/// other two followed it as precedent.
-///
-/// The terminator is why a fragment cannot simply be handed to an inflater. Every
-/// fragment is written with `flush()` and never `finish()`, so NONE of them
-/// carries a final block — that is the whole property that lets them concatenate
-/// (§3.2). A single fragment is therefore an incomplete deflate stream, and
-/// reading one back means appending exactly what the serve path appends after the
-/// last fragment. Get that wrong and the stream ends by starvation, which
-/// surfaces as `error.ReadFailed` with an EMPTY result rather than as a short
-/// one — an early version of the store's own test swallowed that and asserted
-/// against nothing.
-///
-/// Caller owns the returned slice. Mainly for tests and for a future debug path;
-/// the serve route never does this — it streams the fragment out untouched.
+/// The terminator MUST be appended: no fragment carries a final block, so alone
+/// it is an incomplete deflate stream, and without it the read ends by
+/// starvation — `error.ReadFailed` with an EMPTY result, not a short one. An
+/// early test swallowed that and asserted against nothing.
 pub fn readPlain(gpa: std.mem.Allocator, store: DerivedStore, md5: []const u8, version: i64) ![]u8 {
     var file = try store.open(md5, version);
     defer file.close(store.io);
@@ -535,15 +467,9 @@ pub fn readPlain(gpa: std.mem.Allocator, store: DerivedStore, md5: []const u8, v
     return out.toOwnedSlice();
 }
 
-/// A streaming write of one document into `(md5, version)`: plaintext in,
-/// header + deflate fragment on disk.
-///
-/// **Hold it somewhere that is not a deep stack frame.** It embeds deflate's
-/// 64 KB window, so it is a large value; a derive path should own one for the
-/// duration of a document rather than construct it per page.
-///
-/// Like `Staged`, it is initialised THROUGH A POINTER because it owns the
-/// buffers its writers point into.
+/// A streaming write of one document: plaintext in, header + deflate fragment
+/// on disk. Embeds deflate's 64 KB window, so hold it off a deep stack frame,
+/// one per document rather than per page.
 pub const Fragment = struct {
     staged: DerivedStore.Staged,
     window: [std.compress.flate.max_window_len]u8,
@@ -551,17 +477,15 @@ pub const Fragment = struct {
     crc: std.hash.Crc32,
     len: u64,
 
-    /// Append plaintext. Hashed and counted on the way in, compressed on the way
-    /// out — the two numbers the header carries are of the PLAINTEXT, which is
-    /// what the gzip trailer is defined over.
+    /// The CRC and length are of the PLAINTEXT — what the gzip trailer is
+    /// defined over.
     pub fn write(f: *Fragment, bytes: []const u8) !void {
         f.crc.update(bytes);
         f.len += bytes.len;
         try f.compress.writer.writeAll(bytes);
     }
 
-    /// Finish the fragment and publish the file. `flush()` rather than
-    /// `finish()`: see the format note above.
+    /// `flush()`, never `finish()`: no BFINAL block (see the format note).
     pub fn commit(f: *Fragment) !void {
         try f.compress.writer.flush();
 
@@ -570,28 +494,25 @@ pub const Fragment = struct {
         std.mem.writeInt(u32, head[4..8], f.crc.final(), .little);
         std.mem.writeInt(u32, head[8..12], @truncate(f.len), .little);
 
-        // The two numbers are only known now, so the header was reserved as
-        // zeroes at `begin` and is filled in here — into the STAGING file,
-        // before the fsync that `Staged.commit` does and long before the rename
-        // publishes anything.
+        // The header reserved at `begin` is filled in now, into the STAGING
+        // file, before `Staged.commit`'s fsync and rename.
         try f.staged.interface.flush();
         try f.staged.file.writePositionalAll(f.staged.store.io, &head, 0);
         try f.staged.commit();
     }
 
-    /// Drop everything. Idempotent, safe to `defer` unconditionally.
+    /// Idempotent; safe to `defer` unconditionally.
     pub fn abort(f: *Fragment) void {
         f.staged.abort();
     }
 };
 
-/// Begin a fragment write. Reserves the header, then opens the compressor.
 pub fn beginFragment(store: DerivedStore, f: *Fragment, md5: []const u8, version: i64) !void {
     try store.begin(&f.staged, md5, version);
     errdefer f.staged.abort();
     f.crc = .init();
     f.len = 0;
-    // Placeholder, overwritten by `commit` once the numbers exist.
+    // Placeholder header, overwritten by `commit`.
     try f.staged.interface.writeAll(&[_]u8{0} ** header_len);
     f.compress = try std.compress.flate.Compress.init(
         f.staged.interface,

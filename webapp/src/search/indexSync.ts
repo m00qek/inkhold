@@ -1,56 +1,39 @@
-// SYNC — `golden-search.md` §6 step 3's first half: fetch the manifest, diff it
-// against what is stored, ask for the difference as a bitmap, and stream the
-// answer into IndexedDB as it arrives.
+// SYNC — `golden-search.md` §6 step 3: fetch the manifest, diff it against what
+// is stored, ask for the difference as a bitmap, stream the answer into
+// IndexedDB as it arrives.
 //
 //     manifest ──diff──▶ want bitmap ──▶ stitched gzip ──▶ JSONL ──▶ IndexedDB
 //
-// **Nothing here touches wasm, and that is a requirement rather than a
-// coincidence** (§4.2). Two rules collide: the engine is downloaded on the first
-// visit because the download is decided by the first-visit budget, and a user
-// who never searches must never pay the 17.4 MB of linear memory
-// `WebAssembly.instantiate` allocates. The resolution is this file — rows go to
-// disk with no engine in the process, and the FTS index is built on first search
-// (39 ms at tier 1, MEASURED). An implementation that instantiated the engine
-// here would work, pass every test, and bill every household member who only
-// ever browses. So `indexSync.ts` may not import anything that can reach
-// `sqlite-core.wasm`.
-//
-// This module is NOT wired to the search box (§6 step 3 says so): it is additive
-// and inert, and the engine half consumes `TermsStore` without knowing any of
-// the above happened.
-//
-// ## 412 is control flow, not an error
-//
-// A bitmap position means nothing except against the exact row order the server
-// emitted, so the ETag travels beside it and a mismatch is refused (§3.3). The
-// household edits its library while a sync is in flight and the answer is a 412;
-// the client refetches the manifest, re-diffs and re-asks, and that is the
-// system working. It is bounded — see `MANIFEST_ATTEMPTS` — because the same
-// status also answers a bitmap that does not fit the manifest, which is a client
-// bug and would otherwise spin.
-//
-// ## A skipped document is normal, and is not an error either
-//
-// Between the manifest query and the walk a blob can be GC'd, or a derive can
-// still be outstanding, so the server SKIPS a document rather than erroring —
-// an error mid-stream would poison a stitched gzip for every document that had
-// nothing wrong with it (§3.3). **So what is stored is keyed on what ARRIVED**:
-// the record's own `md5` and `v`, never the manifest row that asked for it. A
-// skipped document is simply still missing at the next manifest and is asked for
-// again. `SyncOutcome.skipped` is arithmetic for the caller's benefit and
-// nothing branches on it.
+// What this must not break:
+//   * Nothing here may import anything that can reach `sqlite-core.wasm`
+//     (§4.2). Instantiating the engine at sync time would pass every test and
+//     bill every member who only browses 16 MB; the index is built on first
+//     search instead (39 ms at tier 1).
+//   * 412 is control flow (§3.3): the library moved between the manifest and
+//     the stream. Refetch, re-diff, re-ask — bounded by `MANIFEST_ATTEMPTS`,
+//     because a bitmap that does not fit the manifest is a client bug that
+//     answers 412 identically for ever.
+//   * A skipped document is normal, not an error (§3.3), so what is stored is
+//     keyed on what ARRIVED — the record's own `md5` and `v` — never the
+//     manifest row that asked for it.
+//   * The manifest REPLACES; absence is the only deletion mechanism.
 
-import { decodeManifest, type DocumentManifest } from "./manifestCodec";
-import { diffManifest } from "./manifestDiff";
+import { decodeManifest, type DocumentManifest, type ManifestRow } from "./manifestCodec";
 import { encodeWant } from "./wantBitmap";
 import { parseTermsJsonl, type TermsDocument } from "./termsStream";
 import { httpTransport, type IndexTransport } from "./indexTransport";
-import { openTermsStore, type TermsStore, type StoredTermsDocument } from "../cache/termsStore";
+import {
+  openTermsStore,
+  termsKeyOf,
+  type TermsKey,
+  type TermsStore,
+  type StoredTermsDocument,
+} from "../cache/termsStore";
 
 /**
- * A sync that could not complete. Distinct from `SearchWireError` (a payload
- * this build cannot read) because the reaction differs: this one wants the next
- * trigger to try again, that one wants a reload.
+ * A sync that could not complete. Distinct from `SearchWireError` because the
+ * reaction differs: this one wants the next trigger to retry, that one wants a
+ * reload.
  */
 export class IndexSyncError extends Error {
   override readonly name = "IndexSyncError";
@@ -62,15 +45,8 @@ export class IndexSyncError extends Error {
   }
 }
 
-/**
- * How many times a 412 may send us back for a fresh manifest.
- *
- * Three, because the legitimate cause — the library changing between the
- * manifest query and the stream request — is a race a household loses at most
- * once. The illegitimate cause is a bitmap the server reads as not fitting its
- * manifest, which is a bug on one side or the other and repeats identically for
- * ever; an unbounded retry would turn it into a request loop against a Pi.
- */
+/** Three: the legitimate cause (a race the household loses at most once) is
+ *  bounded, and the illegitimate one repeats identically for ever. */
 const MANIFEST_ATTEMPTS = 3;
 
 /** What one sync did. */
@@ -98,12 +74,9 @@ export interface IndexSyncOptions {
 
 export interface SyncRequest {
   signal?: AbortSignal;
-  /**
-   * Called once per document as it is stored, in manifest order — which is tier
-   * order, which is priority order (§3.3). It fires DURING the stream, not after
-   * it, which is the whole point of the format: the household's newest
-   * handwriting is usable at 8 ms of a 193 ms stream.
-   */
+  /** Called once per document as it is stored, in manifest order (tier order,
+   *  priority order) and DURING the stream: the newest handwriting is usable
+   *  at 8 ms of a 193 ms stream (§3.2). */
   onDocument?: (doc: TermsDocument) => void;
 }
 
@@ -115,22 +88,68 @@ export interface IndexSync {
   documents(): Promise<StoredTermsDocument[]>;
 }
 
+/** What one manifest, diffed against one local store, asks for. */
+export interface IndexDiff {
+  /** Manifest positions to set in the `want=` bitmap, ascending — straight
+   *  into `encodeWant(diff.want, manifest.rows.length)`. */
+  readonly want: readonly number[];
+  /** Local rows this manifest does not name. Safe to delete: nothing
+   *  downstream depends on it (§2.7 — the index is allowed to be a superset). */
+  readonly stale: readonly TermsKey[];
+  /** Manifest rows already held at the right version — the steady state. */
+  readonly held: number;
+  /** Rows with a null `indexVersion`: no `(md5, index_version)` to key on and
+   *  no filename for the server to open, so never asked for. */
+  readonly uncacheable: number;
+}
+
+/**
+ * Diff a manifest against what is stored locally. Pure.
+ *
+ * `derivation` is deliberately NOT consulted: it is a cache of a fact whose
+ * truth is the FILE (§2.4), and the two can disagree for a tick. Asking for a
+ * document whose file is not there costs one bit and the server skips it;
+ * not asking costs a whole manifest cycle. The only exclusion is having no
+ * version to name a row by — and a null version also makes a held row STALE,
+ * because a manifest that cannot supply one cannot vouch for what we hold.
+ */
+export function diffManifest(rows: readonly ManifestRow[], local: readonly TermsKey[]): IndexDiff {
+  const localKeys = local.map((key) => termsKeyOf(key.md5, key.indexVersion));
+  const held = new Set(localKeys);
+
+  const want: number[] = [];
+  const live = new Set<string>();
+  let alreadyHeld = 0;
+  let uncacheable = 0;
+
+  for (let position = 0; position < rows.length; position += 1) {
+    const row = rows[position]!;
+    if (row.indexVersion === null) {
+      uncacheable += 1;
+      continue;
+    }
+    const key = termsKeyOf(row.md5, row.indexVersion);
+    live.add(key);
+    if (held.has(key)) alreadyHeld += 1;
+    else want.push(position);
+  }
+
+  const stale = local.filter((_, i) => !live.has(localKeys[i]!));
+  return { want, stale, held: alreadyHeld, uncacheable };
+}
+
 export function createIndexSync(opts: IndexSyncOptions = {}): IndexSync {
   const store = opts.store ?? openTermsStore();
   const transport = opts.transport ?? httpTransport();
 
-  // The manifest we last decoded, so the next sync is a conditional request:
-  // 27,663 bytes for 1,222 documents and a ~177 ms query on the Pi, against a
-  // 304 with no body when the library has not changed (§2.3). Held in memory
-  // only — persisting it would be a second opinion about a fact the server
+  // The last manifest decoded, so the next sync is conditional: 27,663 bytes
+  // and ~177 ms on the Pi against a bodiless 304 (§2.3). In memory only —
+  // persisting it would be a second opinion about a fact the server
   // regenerates per request.
   let memo: { etag: string; manifest: DocumentManifest } | null = null;
 
-  // ONE sync at a time. §3.3 requires the two refetch triggers — `event: index`
-  // and "the file listing changed" — to be coalesced, because a device syncing
-  // 100 notes must not become a hundred manifest requests. Debouncing the
-  // triggers is the caller's; making a concurrent call join the one in flight
-  // rather than open a second stream is ours.
+  // ONE sync at a time: a concurrent call joins the one in flight rather than
+  // opening a second stream. Debouncing the triggers is the caller's (§3.3).
   let inFlight: Promise<SyncOutcome> | null = null;
 
   async function loadManifest(
@@ -143,9 +162,8 @@ export function createIndexSync(opts: IndexSyncOptions = {}): IndexSync {
       throw new IndexSyncError(`search manifest request answered ${answer.status}`, answer.status);
     }
     if (!answer.etag) {
-      // Without a validator there is nothing to put in `m=`, and a stream
-      // request without one is a 400. Refusing here names the cause; sending it
-      // anyway would surface as a manifest that "moved" on every attempt.
+      // Without a validator the stream request is a 400; sending it anyway
+      // would surface as a manifest that "moved" on every attempt.
       throw new IndexSyncError("search manifest arrived without an ETag", answer.status);
     }
     memo = { etag: answer.etag, manifest: decodeManifest(answer.body) };
@@ -161,9 +179,8 @@ export function createIndexSync(opts: IndexSyncOptions = {}): IndexSync {
       if (diff.want.length > 0) {
         const answer = await transport.stream(etag, encodeWant(diff.want, manifest.rows.length), req.signal);
         if (answer.status === 412) {
-          // The manifest moved under us. Drop the memo so the retry is
-          // UNCONDITIONAL: re-sending the stale validator would be asking the
-          // server whether the thing we already know changed has changed.
+          // Drop the memo so the retry is UNCONDITIONAL: re-sending the stale
+          // validator would ask whether the thing we know changed has changed.
           memo = null;
           continue;
         }
@@ -171,9 +188,9 @@ export function createIndexSync(opts: IndexSyncOptions = {}): IndexSync {
           throw new IndexSyncError(`search index stream answered ${answer.status}`, answer.status);
         }
         for await (const doc of parseTermsJsonl(answer.chunks)) {
-          // Stored one at a time, before the next line is even parsed: the
-          // memory cost of a sync is one document, not one library, and a stream
-          // that dies half way leaves everything before the tear on disk.
+          // Stored before the next line is parsed: the memory cost of a sync
+          // is one document, and a stream that dies half way leaves everything
+          // before the tear on disk.
           await store.put(doc);
           received += 1;
           req.onDocument?.(doc);

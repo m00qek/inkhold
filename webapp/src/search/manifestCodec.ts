@@ -1,40 +1,23 @@
 // The DECODER for the server's MANIFEST payload — the caller's complete live
-// document set, which is what the browser diffs its local index against
-// (`client-side-search-impl.md` §2.2, §3 step 4). The encoder is
-// `backend/services/search/index_export.zig`'s `writeManifest`, and the two are
-// pinned to each other by ONE checked-in artifact,
-// `backend/services/search/testdata/manifest_golden.bin`, which this module's
-// test decodes against expectations written out by hand HERE. Regenerating that
-// file to make the Zig test pass turns this side red, which is the only
-// arrangement that catches a format change made on one side only.
+// document set (`golden-search.md` §2.3). The encoder is
+// `backend/services/search/index_export.zig`'s `writeManifest`; the two are
+// pinned by ONE checked-in artifact, `testdata/manifest_golden.bin`, whose
+// expectations are written out by hand on both sides. Pure: no wasm, no
+// network, no DOM. The cursor and the one error class it reads through are at
+// the bottom of this file.
 //
-// Pure: no wasm, no network, no DOM. It reads through `wire.ts`'s cursor, which
-// is where the encoder's spelling and the one failure mode live — shared with
-// whatever else this encoder emits, rather than restated here.
+// What this must not break:
+//   * THE MANIFEST REPLACES, NEVER MERGES. Nothing on the wire removes anything
+//     and there are no tombstones; absence from the next complete manifest is
+//     the ONLY deletion mechanism. So truncation is the one corruption that
+//     looks like a legitimate answer — a body that ran out of rows decodes as a
+//     shorter, well-formed manifest and every missing row reads as a deletion.
+//     `rowCount` is in the header so the trailing-bytes check can catch it.
+//   * Bytes, not JSON: 27,663 bytes against 143,139 for 1,222 documents (md5s
+//     are 72.6% of the payload and do not compress), on a response paid every
+//     visit with no `content-encoding`.
 //
-// ## THE MANIFEST IS COMPLETE OR IT IS BROKEN
-//
-// This is not a listing the client merges into what it has — it REPLACES it.
-// Sync is additive ("here are the md5s I hold, send the ones I am missing") and
-// nothing on the wire ever removes anything; there are no tombstones. A trashed
-// file stops matching in the browser because it is ABSENT from the next complete
-// manifest and the client diffs the whole set. That is the only removal
-// mechanism this design has.
-//
-// Which makes truncation the one corruption that looks like a legitimate answer:
-// a body that ran out of rows halfway decodes as a shorter, perfectly
-// well-formed manifest, and the client reads every missing row as a DELETION of
-// a document that is still there. `rowCount` is in the header precisely so that
-// cannot happen silently, and this decoder checks it and the trailing bytes.
-//
-// ## Bytes rather than JSON, and the client does not get to choose
-//
-// MEASURED over 1,222 documents: 143,139 bytes of JSON against 27,663 of this,
-// because md5s are 72.6% of the payload and a hash does not compress. The server
-// sends no `content-encoding` on API responses, so that 5.2x is what travels, on
-// a response paid on every visit.
-//
-// ## Layout (mirrors `index_export.zig`'s `writeManifest`; change both or neither)
+// Layout (mirrors `writeManifest`; change both or neither):
 //
 //     "SMAN"                     magic, 4 bytes
 //     MANIFEST_FORMAT_VERSION    u8
@@ -49,8 +32,6 @@
 //                                        gap from the row before it
 //       indexVersion             varint  0 = absent, else version + 1
 
-import { Cursor, SearchWireError, readMagic } from "./wire";
-
 /** The wire spelling this build understands. NOT `index_version`. */
 export const MANIFEST_FORMAT_VERSION = 1;
 
@@ -61,28 +42,18 @@ export const MANIFEST_HEADER_LEN = 9;
 const MAGIC = [0x53, 0x4d, 0x41, 0x4e];
 
 /**
- * Which pass of the fill a document belongs to (`client-side-search.md` §3), in
- * the order the server sends them: the household's own handwriting, then
- * anything it has written on, then everything else.
- *
- * A PRIORITY, not an exclusion — every live document is in exactly one tier, and
- * `other` is the catch-all that makes that true. Being wrong about a tier costs
- * a wait, never a missing result.
+ * Which pass of the fill a document belongs to (§3), in the order the server
+ * sends them. A PRIORITY, not an exclusion: every live document is in exactly
+ * one tier, so being wrong about a tier costs a wait, never a missing result.
  */
 export type Tier = "note" | "marked" | "other";
 
 /**
- * What the client is allowed to conclude from an EMPTY term set for this md5.
- *
- * **This is a CACHE decision, not a status line** (`client-side-search.md` §4).
- * An empty term set is a legitimate, final answer for a document whose text
- * folds to nothing — and a blob whose derive has not run also has no terms. On
- * the wire the two are identical. A client that caches the second one's
- * emptiness never asks again, and that document is unsearchable FOR EVER: no
- * error, no retry, no symptom.
- *
- * So: cache an empty set under `derived`, and never under `pending` or
- * `unknown`.
+ * What the client may conclude from an EMPTY term set for this md5. A CACHE
+ * decision: a document whose text folds to nothing and a blob whose derive has
+ * not run are identical on the wire, and a client that caches the second one's
+ * emptiness never asks again — that document is unsearchable FOR EVER with no
+ * symptom. Cache an empty set under `derived`, never under `pending`/`unknown`.
  */
 export type Derivation = "derived" | "pending" | "unknown";
 
@@ -90,45 +61,32 @@ export type Derivation = "derived" | "pending" | "unknown";
 export interface ManifestRow {
   /** 32 lowercase hex — the term payload's key and the sync diff's identity. */
   readonly md5: string;
-  /**
-   * `files.id`. What a locally-answered hit has to name in order to be opened,
-   * and — because the manifest deliberately carries no names — what the client
-   * looks the document's NAME up by in the file listing it already holds.
-   */
+  /** `files.id`. The manifest carries no names; the client looks the name up
+   *  by this in the listing it already holds. */
   readonly fileId: number;
   /** The fill pass this document belongs to. */
   readonly tier: Tier;
   /** `files.updated_at`, seconds. The display order for a set of hits. */
   readonly updatedAt: number;
   /**
-   * The other half of the `(md5, indexVersion)` cache key, or null when the blob
-   * has no index row at all.
-   *
-   * **A null here means the entry cannot be cached, not that the version is 0.**
-   * Zero is a real version and arrives as `0`. Keying a cache entry on md5 alone
-   * is the mistake this field exists to prevent: `derivation` agrees with the
-   * deferred worker rather than with the plain-English question, so a blob whose
-   * index row is STALE reports `derived` while genuinely underived — and the
-   * only thing that makes that window survivable is that its version is not the
-   * current one, so a client keyed on both refetches.
+   * The other half of the `(md5, indexVersion)` cache key, or null when the
+   * blob has no index row. **Null means "cannot be cached", not version 0** —
+   * zero is a real version and arrives as `0`. A blob whose index row is STALE
+   * reports `derived` while genuinely underived; the only thing that makes
+   * that window survivable is a client keyed on both halves refetching.
    */
   readonly indexVersion: number | null;
   /** See {@link Derivation}. */
   readonly derivation: Derivation;
 }
 
-/**
- * How much of the caller's library is searchable at all — the fraction the
- * zero-hit search sentence renders.
- */
+/** How much of the caller's library is searchable at all — the fraction the
+ *  zero-hit search sentence renders. */
 export interface Coverage {
   /** Notes, by the indexer's verdict (a blob it really parsed as a `.note`). */
   readonly notes: number;
-  /**
-   * How many of those carry no recognised text and are therefore invisible to
-   * search however it is spelled. PERMANENT, and not to be confused with
-   * `derivation === "pending"`, which is transient and resolves itself.
-   */
+  /** Notes with no recognised text — invisible to search however it is
+   *  spelled. PERMANENT, unlike `derivation === "pending"`. */
   readonly unsearchable: number;
 }
 
@@ -149,10 +107,8 @@ export function decodeManifest(payload: Uint8Array): DocumentManifest {
   }
   readMagic(cursor, MAGIC, MANIFEST_FORMAT_VERSION);
   const rowCount = cursor.u32();
-  // Checked BEFORE anything is allocated: a corrupt `rowCount` is four bytes
-  // that would otherwise ask the browser for an array of four billion rows. The
-  // floor is 16 bytes of md5 plus a flags byte plus three varints of at least
-  // one byte each.
+  // Checked BEFORE anything is allocated: a corrupt `rowCount` would otherwise
+  // ask for an array of four billion rows. Floor: 16 md5 + 1 flags + 3 varints.
   if (MANIFEST_HEADER_LEN + rowCount * 20 > payload.length + 2) {
     throw new SearchWireError("manifest payload is too short for the row count it declares");
   }
@@ -166,13 +122,9 @@ export function decodeManifest(payload: Uint8Array): DocumentManifest {
     const md5 = cursor.md5();
     const flags = cursor.byte();
 
-    // UNKNOWN TIERS AND UNKNOWN DERIVATIONS ARE REFUSED, NOT COERCED. Both are
-    // small closed sets, and the conservative-looking fallbacks are the
-    // dangerous ones: defaulting a tier to `other` reorders a fill the server
-    // decided, and defaulting a derivation to `derived` is a licence to cache an
-    // empty term set for ever. If this build does not understand the value, the
-    // server is speaking a dialect it does not know, and that is the version
-    // byte's business rather than something to paper over per row.
+    // REFUSED, NOT COERCED: defaulting a tier to `other` reorders a fill the
+    // server decided, and defaulting a derivation to `derived` is a licence to
+    // cache an empty term set for ever.
     const tier = TIERS[flags & 0x0f];
     if (tier === undefined) throw new SearchWireError(`manifest row carries an unknown tier ${flags & 0x0f}`);
     const derivation = DERIVATIONS[flags >> 4];
@@ -181,12 +133,11 @@ export function decodeManifest(payload: Uint8Array): DocumentManifest {
     }
 
     const fileId = cursor.varint();
-    // A GAP from the previous row of the SAME tier, or a fresh ABSOLUTE anchor
-    // when the tier changed — which is the only place the gap could have gone
-    // negative, and therefore the only place an anchor is needed. Getting this
-    // wrong does not throw: it silently shifts every timestamp after the first
-    // tier change, and the symptom is a result list in a plausible but wrong
-    // order. That is why the golden vector spans all three tiers.
+    // A GAP from the previous row of the SAME tier, or an ABSOLUTE anchor when
+    // the tier changed. Getting this wrong does not throw: it silently shifts
+    // every timestamp after the first tier change, and the symptom is a result
+    // list in a plausible but wrong order — hence a golden vector spanning all
+    // three tiers.
     const raw = cursor.varint();
     const updatedAt = previousTier === tier ? previousUpdatedAt - raw : raw;
     const rawVersion = cursor.varint();
@@ -196,9 +147,7 @@ export function decodeManifest(payload: Uint8Array): DocumentManifest {
       fileId,
       tier,
       updatedAt,
-      // 0 is ABSENT and everything else is `value - 1`, so a document indexed at
-      // version 0 survives the round trip as 0 rather than becoming "no index
-      // row" — see `ManifestRow.indexVersion`.
+      // 0 is ABSENT and everything else is `value - 1`, so version 0 survives.
       indexVersion: rawVersion === 0 ? null : rawVersion - 1,
       derivation,
     };
@@ -206,12 +155,111 @@ export function decodeManifest(payload: Uint8Array): DocumentManifest {
     previousUpdatedAt = updatedAt;
   }
 
-  // THE TRUNCATION CHECK, and for this payload it is not a nicety. A body that
-  // ran out of rows decodes as a shorter, well-formed manifest, and the client
-  // reads every absent row as a deletion of a document that is still there. The
-  // count is in the header so this can be asked at all.
+  // THE TRUNCATION CHECK — see the header: a short body is otherwise read as
+  // deletions of documents that are still there.
   if (cursor.offset !== payload.length) {
     throw new SearchWireError("manifest payload has trailing bytes after its last row");
   }
   return { coverage: { notes, unsearchable }, rows };
+}
+
+// -----------------------------------------------------------------------------
+// The wire primitives: cursor, varint, bounds checks and the one error class.
+// Shared by every reader of a `search-index` payload (`termsStream.ts`,
+// `docText.ts`, `wantBitmap.ts` throw the same error).
+
+/**
+ * A payload this build refuses to read — "the server speaks a format I do
+ * not", which wants a reload, not a retry. ONE class across every payload, so
+ * a `catch` cannot handle one and let another escape.
+ */
+export class SearchWireError extends Error {
+  override readonly name = "SearchWireError";
+}
+
+/** A varint wider than this cannot be a length, a count, an id or an ordinal. */
+const MAX_VARINT_BYTES = 5;
+
+// `fatal`: terms were folded by SQLite's tokenizer and are valid UTF-8 by
+// construction, so a replacement character means the stream came apart — and
+// an index quietly full of U+FFFD matches nothing a user can type.
+
+/** A bounds-checked forward reader over one payload. */
+export class Cursor {
+  offset = 0;
+  constructor(readonly bytes: Uint8Array) {}
+
+  byte(): number {
+    const b = this.bytes[this.offset];
+    if (b === undefined) throw new SearchWireError("search index payload ends mid-record");
+    this.offset += 1;
+    return b;
+  }
+
+  slice(length: number): Uint8Array {
+    const end = this.offset + length;
+    if (end > this.bytes.length) {
+      throw new SearchWireError("search index payload ends mid-record");
+    }
+    const out = this.bytes.subarray(this.offset, end);
+    this.offset = end;
+    return out;
+  }
+
+  /** Unsigned LEB128, bounded so a corrupt stream cannot spin. */
+  varint(): number {
+    let value = 0;
+    let shift = 0;
+    for (let i = 0; i < MAX_VARINT_BYTES; i += 1) {
+      const b = this.byte();
+      value += (b & 0x7f) * 2 ** shift;
+      if ((b & 0x80) === 0) {
+        if (value > 0xffffffff) {
+          throw new SearchWireError("search index payload carries an implausible length");
+        }
+        return value;
+      }
+      shift += 7;
+    }
+    throw new SearchWireError("search index payload carries an over-long varint");
+  }
+
+  /** u32 little-endian. */
+  u32(): number {
+    const view = new DataView(this.bytes.buffer, this.bytes.byteOffset, this.bytes.byteLength);
+    const value = view.getUint32(this.offset, true);
+    this.offset += 4;
+    return value;
+  }
+
+  /** 16 raw bytes as 32 lowercase hex characters. */
+  md5(): string {
+    let hex = "";
+    for (const byte of this.slice(16)) hex += byte.toString(16).padStart(2, "0");
+    return hex;
+  }
+}
+
+/**
+ * Check the magic and the version byte, or throw. The message spells out that
+ * this is the WIRE SPELLING, not `index_version`: the obvious fix — bump
+ * `index_version` and re-derive — throws away a household's whole index to
+ * pick up a codec change.
+ */
+export function readMagic(cursor: Cursor, magic: readonly number[], version: number): void {
+  if (cursor.bytes.length < magic.length + 1) {
+    throw new SearchWireError("search index payload is shorter than its header");
+  }
+  for (const expected of magic) {
+    if (cursor.byte() !== expected) {
+      throw new SearchWireError("not a search index payload (bad magic)");
+    }
+  }
+  const got = cursor.byte();
+  if (got !== version) {
+    throw new SearchWireError(
+      `unsupported search index format version ${got}; this build decodes ${version}. ` +
+        "This is the wire spelling, not index_version: the terms have not changed.",
+    );
+  }
 }

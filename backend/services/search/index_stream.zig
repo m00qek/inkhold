@@ -1,59 +1,21 @@
-//! The WALK behind `/api/controlplane/search-index/stream` — manifest rows plus
-//! a `want=` bitmap in, one stitched gzip stream out (`golden-search.md` §3.2,
-//! §3.3).
+//! The walk behind `/api/controlplane/search-index/stream`: manifest rows plus a
+//! `want=` bitmap in, one stitched gzip out (`golden-search.md` §3.2, §3.3).
+//! `http/gzip_stitch.zig` owns the container, `store/derived.zig` the stored file
+//! (a 12-byte header with the plaintext CRC32 and length, then a raw-deflate
+//! fragment), `index_export.zig` the row order a bitmap position is read against.
 //!
-//! Everything hard here has already been decided somewhere else, and this file
-//! is where the three pieces meet:
-//!
-//!   * `http/gzip_stitch.zig` owns the container — the 10-byte header, the `03
-//!     00` terminator and the `crc32_combine` trailer that makes a single-member
-//!     gzip out of N independently compressed fragments. Concatenated `.gz`
-//!     MEMBERS would be the obvious thing and Chromium decodes the first of them
-//!     and reports success (§3.1); nothing here may reintroduce that.
-//!   * `store/derived.zig` owns the stored file — a 12-byte header carrying the
-//!     fragment's plaintext CRC32 and length, then the raw-deflate fragment.
-//!   * `index_export.zig` owns the ordering. A bitmap position means nothing
-//!     except against the exact row order `writeManifest` emitted, which is why
-//!     this walk lives beside that writer and beside `want_bitmap.zig` rather
-//!     than in `http/`.
-//!
-//! ## Two of §3.3's four mechanics are enforced HERE
-//!
-//! **A missing file is SKIPPED, never an error.** Between the manifest query and
-//! this walk a blob can be GC'd (`removeBlobFiles` unlinks both derived files)
-//! or a derive can still be outstanding — the manifest reports `index_version`
-//! from the index row, and §2.4 makes the FILE the fact, so the two can disagree
-//! for a whole tick. An error would have to become a status code that is already
-//! on the wire, or a truncated body, and either way it poisons the stream for
-//! every document that had nothing wrong with it. A skip costs nothing: the
-//! client keys its index on what ARRIVED, so the document is simply still absent
-//! at the next manifest and is asked for again.
-//!
-//! **Each fragment's CRC32 and length come from the FILE's own header**, so the
-//! walk reads nothing but the files it is already opening and the trailer
-//! accumulates as it goes. No DB lookup per document, and therefore no reason
-//! for the write lock to be anywhere near this path.
-//!
-//! ## The one failure that is NOT a skip
-//!
-//! A fragment is committed the moment its first byte reaches the socket. If the
-//! read fails after that — a disk error, a truncated file that somehow got
-//! published — the deflate stream already carries half a fragment and no trailer
-//! can make it whole. So the boundary is exact: `open` and `readHeader` failures
-//! are skips, and anything after them is `error.StreamTruncated`, which drops
-//! the connection short. A dropped connection is a decode failure in every
-//! client; a finished stream with a plausible trailer over half a document would
-//! not be, and that is the §3.1 failure mode wearing a different hat.
-//!
-//! ## One small buffer, streamed
-//!
-//! `buf` is the caller's, reused for every file: `File` → `Io.Writer` → socket,
-//! never read-all-then-write. The library is ~1-2 MB and three concurrent first
-//! visits must not be 6 MB of RSS on a 50 MB budget. Nothing here allocates.
-//!
-//! The copy is a positional-read loop rather than `streamRemaining`, and that is
-//! a Zig std bug rather than a preference — see the comment at the loop. It is
-//! worth knowing before "simplifying" this back.
+//! Must not break:
+//!   * A missing file is SKIPPED, never an error. The manifest and the disk can
+//!     disagree for a tick (a blob GC'd, a derive outstanding — §2.4 makes the
+//!     FILE the fact), and an error here is a status code already on the wire or
+//!     a truncated body: it poisons the stream for every document that was fine.
+//!     A skip costs nothing because the client keys its index on what ARRIVED.
+//!   * The trailer comes from each file's own header: no DB lookup per document,
+//!     so the write lock is nowhere near this path.
+//!   * `buf` is the caller's and nothing here allocates: three concurrent first
+//!     visits of a ~1-2 MB library on a 50 MB budget.
+//!   * The copy is a positional-read loop, not `streamRemaining` — a std bug,
+//!     see the loop. Do not "simplify" it back.
 
 const std = @import("std");
 const derived = @import("../../store/derived.zig");
@@ -64,34 +26,27 @@ const want_bitmap = @import("want_bitmap.zig");
 const Io = std.Io;
 const Writer = std.Io.Writer;
 
-/// What the walk did. Nothing in the RESPONSE says any of it, and that is the
-/// point: the client's contract is "what arrived", so a count travelling beside
-/// the bytes would be a second opinion about the same set — and the one place it
-/// could disagree is exactly where a document was skipped.
+/// What the walk did. Deliberately NOT in the response: the client's contract is
+/// "what arrived", and a count beside the bytes could only disagree with it
+/// exactly where a document was skipped.
 pub const Stats = struct {
-    /// Fragments written.
     sent: usize = 0,
-    /// Documents asked for whose file was not there — expected, not an error.
+    /// Asked for, file not there — expected, not an error.
     skipped: usize = 0,
-    /// Total UNCOMPRESSED bytes, i.e. the gzip ISIZE and what the client decodes.
+    /// UNCOMPRESSED bytes, i.e. the gzip ISIZE.
     plain_bytes: u64 = 0,
 };
 
 pub const Error = error{
-    /// A fragment failed mid-write. The head is long gone; the only honest
-    /// answer left is to drop the connection.
+    /// A fragment failed mid-write; the head is gone, so drop the connection.
     StreamTruncated,
 } || Writer.Error;
 
-/// Write the whole body: gzip header, the wanted fragments in MANIFEST ORDER,
-/// terminator, trailer.
+/// Write the whole body: gzip header, the wanted fragments in MANIFEST ORDER
+/// (which is tier order, which is priority order — §3.3), terminator, trailer.
 ///
-/// Manifest order is tier order is priority order (§3.3), so the tiering needs
-/// no mechanism of its own — it is the order the bytes come out, and the client
-/// parses them as they land (8 ms of a 193 ms stream, §3.2).
-///
-/// `rows` must be the exact rows the caller's ETag was computed over; the route
-/// is what guarantees that, and it is the whole reason for the 412 gate.
+/// `rows` must be the exact rows the caller's ETag was computed over; the
+/// route's 412 gate is what guarantees that.
 pub fn write(
     io: Io,
     terms: derived.DerivedStore,
@@ -108,10 +63,8 @@ pub fn write(
     for (rows, 0..) |row, position| {
         if (!want.isSet(position)) continue;
 
-        // No index row means no `(md5, index_version)` to name a file with. The
-        // manifest already told the client this (a null `index_version` is the
-        // "do not cache this" signal), so a client that asked anyway gets the
-        // same skip as any other absence rather than a special case.
+        // No index row, no file name. The manifest already said so (a null
+        // `index_version` is "do not cache this"); asking anyway is a plain skip.
         const version = row.index_version orelse {
             stats.skipped += 1;
             continue;
@@ -123,31 +76,28 @@ pub fn write(
         };
         defer file.close(io);
 
-        // The two numbers the trailer needs, out of the bytes we are opening
-        // anyway. `readHeader` is also the format check: a truncated or
-        // foreign-format file is refused here, while refusing still costs
-        // nothing but a skip.
+        // Also the format check: a truncated or foreign file is refused while
+        // refusing still costs only a skip.
         const h = derived.readHeader(io, file) catch {
             stats.skipped += 1;
             continue;
         };
 
-        // THE COMMIT POINT is the first byte of the loop below. Past it a partial
-        // write cannot be taken back, so every failure is fatal to the response
-        // rather than to the document.
+        // COMMIT POINT: past the first byte below a partial write cannot be
+        // taken back, so every failure is fatal to the response, not the document.
         //
-        // POSITIONAL READS INTO ONE BUFFER, and NOT `File.Reader.streamRemaining`
-        // — which is the obvious spelling, is what `http/static.zig` uses, and
-        // **panics against a CHUNKED response**. It lowers to `sendFile`, and
-        // `std.http.BodyWriter.chunkedSendFile` sizes its chunk header from
-        // `countSendFileLowerBound` — a LOWER bound. When the transfer writes
-        // fewer bytes than that header promised, `state.chunk_len` is left
-        // mid-chunk, and the next flush trips `writeSplatHeaderLimit` with a
-        // limit smaller than what is buffered: `unreachable` in `fixedDrain`, or
-        // `end()`'s "an earlier write call indicated more data would follow".
-        // REPRODUCED against std alone, outside this repo, on Zig 0.16.0. Every
-        // other streaming route here declares a `content_length`, whose sendFile
-        // path keeps no such state, which is why this is the first place it bites.
+        // Positional reads, NOT `File.Reader.streamRemaining` (the obvious
+        // spelling, and what `http/static.zig` uses): it PANICS against a chunked
+        // response. It lowers to `sendFile`, and `std.http.BodyWriter
+        // .chunkedSendFile` sizes its chunk header from `countSendFileLowerBound`
+        // — a LOWER bound. A transfer shorter than that header promised leaves
+        // `state.chunk_len` mid-chunk, and the next flush trips
+        // `writeSplatHeaderLimit`: `unreachable` in `fixedDrain`, or `end()`'s
+        // "an earlier write call indicated more data would follow". Reproduced
+        // against std alone on Zig 0.16.0. This response is chunked because
+        // `content_length` and the skip rule cannot both hold; every other
+        // streaming route declares a length, whose sendFile path keeps no such
+        // state, which is why this is the first place it bites.
         var off: u64 = derived.header_len;
         while (true) {
             const n = file.readPositionalAll(io, buf, off) catch return error.StreamTruncated;
@@ -162,12 +112,9 @@ pub fn write(
         stats.plain_bytes += h.len;
     }
 
-    // Correct for an EMPTY walk too, and that is worth knowing rather than
-    // assuming: `Trailer` starts empty with crc 0 and len 0, which are exactly
-    // gzip's values for an empty payload, and `terminator` is a valid final
-    // block on its own. A client that asked for nothing, or whose every
-    // document was skipped, gets a well-formed gzip of zero bytes instead of a
-    // stream its decoder rejects.
+    // Correct for an EMPTY walk too: crc 0 / len 0 are gzip's values for an
+    // empty payload and `terminator` is a valid final block on its own, so a
+    // client whose every document was skipped gets a well-formed empty gzip.
     try trailer.finish(w);
     return stats;
 }

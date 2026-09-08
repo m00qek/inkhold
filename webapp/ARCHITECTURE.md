@@ -182,7 +182,7 @@ port it, don't redesign.
   bm25-ranked, server-scoped to the caller's own non-deleted notes). The library's
   search box now answers **both** halves of its promise at once: the gallery keeps
   filtering the current folder by NAME, and a `.hits` block beneath it lists the
-  matching PAGES library-wide. `pages/noteSearch.ts` owns the debounce (220 ms) and
+  matching PAGES library-wide. `pages/noteSearch.ts` owns the debounce (120 ms) and
   the token-based staleness guard, DOM-free and unit-tested like `ocrPanel.ts`.
   Hits deep-link via the new `#/note/:id/page/:n` route (page 0 collapses to
   `#/note/:id`), so reader *position* is a function of the route the same way

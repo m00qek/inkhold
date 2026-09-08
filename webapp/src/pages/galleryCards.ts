@@ -59,13 +59,10 @@ function fmtDate(epochMs: number): string {
 /**
  * One note that matched, however it matched.
  *
- * `note` IS THE LISTING'S OWN RECORD AND IT IS NEVER NULL. A transcript hit
- * carries a file id and page ordinals and no name at all — the index ships none,
- * because the app already holds the listing (`golden-search.md` §4.1) — so a hit
- * the cached tree cannot name is dropped before it becomes one of these rather
- * than rendered as an anonymous row. That drop is also the §2.7 intersection:
- * the local index may legitimately be a superset of the live library, and the
- * listing is what says which documents still exist. See `gallerySearch.ts`.
+ * `note` IS THE LISTING'S OWN RECORD AND IT IS NEVER NULL: the index ships no
+ * names, so a hit the cached tree cannot name is dropped before it becomes one
+ * of these (see `gallerySearch.searchResults` — the drop is also §2.7's
+ * intersection with the live library).
  */
 export interface SearchResult {
   noteId: Id;
@@ -94,10 +91,8 @@ export interface SearchResult {
  * card built now reflects the view state at build time, exactly as the inline
  * closures did.
  *
- * THE SEARCH STATE IS STILL NOT AMONG THEM. A result row used to read
- * `usedFuzzy` off it and then reverse-engineer the corrected word out of the
- * server's marked excerpt; what `resultCard` takes now is the expansion itself,
- * as an argument, so a row remains a pure function of what it is handed.
+ * THE SEARCH STATE IS NOT AMONG THEM: `resultCard` takes the expansions as an
+ * argument, so a row stays a pure function of what it is handed.
  */
 export interface GalleryCardsCtx {
   /** The gallery's lazy render engine — cards register their `<img>`/canvas here. */
@@ -132,8 +127,7 @@ export interface GalleryCardsCtx {
 export interface GalleryCards {
   folderCard: (folder: Folder) => HTMLElement;
   noteCard: (note: NoteSummary, i: number) => HTMLElement;
-  /** `expansions` is what the typo ladder substituted for this QUERY (empty when
-   *  it did not fire) — the row uses it for its deep link only. See `resultCard`. */
+  /** `expansions` is what the typo ladder substituted for this QUERY — used for the deep link only. */
   resultCard: (result: SearchResult, i: number, q: string, expansions?: readonly Expansion[]) => HTMLElement;
 }
 
@@ -574,38 +568,23 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
    * (results are library-wide, so "where is this?" is a real question now), and
    * how far through the document the query reached.
    *
-   * THE EXCERPT IS GONE, and it is the load-bearing absence rather than a
-   * simplification. `golden-search.md` §4.3 drops excerpts instead of deferring
-   * them, which is what leaves the server with no query-interpreting code at all
-   * and makes search simply offline rather than offline-in-a-degraded-form. What
-   * the excerpt was actually for — "is this the one?" — is answered by the count
-   * beside the date and by landing on the first matching page.
+   * No excerpt and no page chips (`golden-search.md` §4.3): one quiet line of
+   * metadata (`pageSummary`) and a link carrying the QUERY and the first
+   * matching page, so find is already running on arrival and every other
+   * matching page is one Next away inside the reader.
    *
-   * THE PAGE CHIPS WENT EARLIER, for their own reason. A strip of per-page
-   * buttons made the row a menu of destinations, and the destination was never
-   * the question — "which notebook was that in?" is. So what is left is one quiet
-   * line of metadata (see `pageSummary`) and the row's own link, which carries
-   * the QUERY as well as the first matching page: clicking a result opens the
-   * document with find already running, and every other matching page is one Next
-   * away inside the reader rather than one chip away outside it.
-   *
-   * WHAT THE ROW SAYS ABOUT A CORRECTED QUERY IS NOTHING, deliberately. The typo
-   * ladder substitutes per TOKEN of the query, so one substitution explains every
-   * row in the list identically and a per-row line would be the same sentence
-   * repeated down the page — and it would be false on the rows that matched by
-   * NAME, which matched the typed spelling exactly. The sentence is said once,
-   * over the list, by `gallerySearch.ts`. `expansions` reaches here only to
-   * decide which query the link carries.
+   * THE ROW SAYS NOTHING ABOUT A CORRECTED QUERY. The substitution is per token
+   * and would be FALSE on a row that matched by NAME with the typed spelling, so
+   * it is said once, over the list, by `gallerySearch.ts`; `expansions` reaches
+   * here only to decide which query the link carries.
    */
   function resultCard(result: SearchResult, i: number, q: string, expansions: readonly Expansion[] = []): HTMLElement {
     const note = result.note;
     const { node: media, target, thumbClass, thumb, alt } = thumbMedia(note);
     const top = result.pages[0];
-    // Kind-aware: a `.txt` result counts PARAGRAPHS, a `.note` counts PAGES.
     const matchLine = pageSummary(result.pages.length, result.kind);
 
-    // A result row is a LIST row, so its lead gets the same pre-set aspect the
-    // library's rows do.
+    // A result row is a LIST row, so its lead gets the list rows' pre-set aspect.
     const tile = el("div", { class: thumbClass }, media);
     applyTileAspect(tile, note, media, true);
 
@@ -620,48 +599,32 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
         el(
           "div",
           { class: "card__main" },
-          // Marked only where the NAME is what matched — see `markedText`. With
-          // the excerpt gone this is the app's only `<mark>`, and it is the one
-          // that was never server-authored.
+          // Marked only where the NAME is what matched — see `markedText`.
           el("div", { class: "card__title" }, ...(result.nameMatched ? markedText(note.name, q) : [document.createTextNode(note.name)])),
           el(
             "div",
             { class: "card__meta" },
-            // The path, in the BIN'S treatment (`.bin__path`, `.card__path` —
-            // one shared rule). A bin row's home is not where you are standing
-            // either; same question, so the same answer looks the same.
+            // The path, in the BIN'S treatment (`.bin__path`, `.card__path` — one
+            // shared rule): same question, so the same answer looks the same.
             result.folderPath ? el("span", { class: "card__path", text: result.folderPath }) : null,
             result.folderPath ? el("span", { class: "dot" }) : null,
             el("span", { text: fmtDate(note.updatedAt) }),
-            // How far the query reached, in the meta line rather than in a strip
-            // of its own: it describes the row the same way the folder and the
-            // date do. Null for a name-only match — see `pageSummary` for why it
-            // counts pages and not matches.
+            // Null for a name-only match — see `pageSummary`.
             matchLine ? el("span", { class: "dot" }) : null,
             matchLine ? el("span", { class: "card__matches", text: matchLine }) : null,
           ),
         ),
       ),
     );
-    // Whole-row open goes to the FIRST matching page — the rest are what the
-    // count is counted from — AND carries the query, so find is already running
-    // when you arrive. That is what replaces both the chips and the excerpt: the
-    // other matching pages are reachable with Next inside the reader instead of
-    // being enumerated, or previewed, out here.
-    //
-    // The query travels in the URL rather than in shell state precisely so this
-    // is one link: it survives a reload, it can be shared, and the reader is
-    // primed by the same route it is opened by. `deepLinkQuery` carries the
-    // decision about WHICH query that is — the typed one, with any token the
-    // ladder unambiguously corrected replaced by the word actually searched.
+    // Whole-row open goes to the FIRST matching page and carries the query in
+    // the URL, not in shell state, so it is one link: it survives a reload, can
+    // be shared, and primes the reader by the same route it is opened by.
     //
     // ONLY A ROW WITH TRANSCRIPT HITS OFFERS THE EXPANSION. A name-only match
     // (`pages` empty) matched the typed spelling in its TITLE, and nothing says
-    // the corrected word appears anywhere inside it — handing the viewer's find
-    // a word the reader never typed, for a document that matched for an
-    // unrelated reason, is a worse arrival than the typo. A transcript hit is
-    // the opposite case: the corrected term is why those pages are in the list,
-    // so it is guaranteed to be in the document and find opens on it exactly.
+    // the corrected word is anywhere inside it; a transcript hit is the opposite
+    // case — the corrected term is why those pages are in the list, so find
+    // opens on it exactly. See `deepLinkQuery` for the tie it also refuses.
     const linkQ = deepLinkQuery(q, result.pages.length > 0 ? expansions : []);
     open.addEventListener("click", () =>
       go(top === undefined ? noteHref(result.noteId, linkQ) : notePageHref(result.noteId, top, linkQ)),

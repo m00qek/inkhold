@@ -1,85 +1,23 @@
 // The LOCAL SEARCH INDEX — `golden-search.md` §4.1's one FTS5 table, driven
-// through the `idx_*` ABI of the shipped `sqlite-core.wasm`. Build it from the
-// per-page term rows the stream delivers (§2.2), query it, serialize it, restore
-// it. No network, no IndexedDB, no DOM: the streaming and the storing are
-// `cache/`'s, and nothing here knows where the rows came from or where the image
-// goes.
+// through the `idx_*` ABI of `sqlite-core.wasm`. Synchronous, because that is
+// the ABI's shape; `searchEngine.ts` puts it behind a worker. No network, no
+// IndexedDB, no DOM. The ABI contract, including the two traps `deserialize`
+// is written around, is the header of `webapp/wasm/sqlite_core.zig`.
 //
-// The ABI contract, including the two traps this file is written around, is the
-// header of `webapp/wasm/sqlite_core.zig`. Read that before changing anything
-// here.
-//
-// ## Synchronous, and it stays synchronous — the WORKER is elsewhere
-//
-// Every call below is a straight-line wasm call, because that is the shape the
-// ABI has. Nothing in `src/` constructs this class on the UI thread any more:
-// `searchEngine.ts` is the seam the two consumers meet, and it answers from
-// `engineWorker.ts` — which holds one of these — wherever a `Worker` exists.
-// Keeping this half synchronous is what lets the worker be a thin shell and lets
-// `indexEngine.test.ts` drive the real ABI without one.
-//
-// ## The engine is NOT instantiated until someone searches
-//
-// §4.2 is explicit and it is the reason `open()` is a function rather than a
-// module-level constant: `WebAssembly.instantiate` allocates a **16.13 MB**
-// static footprint (MEASURED, §8.1), and a household member who never types in
-// the search box must never pay it. Streaming the rows into IndexedDB involves
-// no wasm at all; this module wakes up on the first query.
-//
-// The compiled `WebAssembly.Module` is cached and the *instance* is not, which
-// is the split that makes §4.2's "dropping" real: dropping the index means
-// discarding the instance (wasm linear memory never shrinks, so `DROP TABLE`
-// returns nothing to the browser), and a memoised instance — the shape
-// `spdDecode.ts` uses, correctly, for a decoder two callers share — could never
-// be dropped. Re-opening then re-instantiates 16 MB of memory but not 828 KB of
-// code.
-//
-// ## `page_of` / `doc_of` live HERE, in TypeScript, not in the wasm
-//
-// §4.1 draws three tables; the shipped artifact has one, because `idx_add` takes
-// a `u32` rowid and `idx_hit` hands that same rowid back. So the client assigns
-// a global rowid per (document, page) and keeps `rowid -> (md5, page)` beside
-// the manifest it already holds — which is where `file_id` and `updated_at` are
-// anyway (`manifestCodec.ts`), so `doc_of` would have been a second opinion
-// about them. No wasm rebuild, and it is exactly the shape §8.1's 23,997-row
-// measurement used.
-//
-// The consequence to hold onto: **the mapping is part of the index.** A stored
-// image whose rowid table was lost answers with integers nobody can name, so
-// `serialize()` returns both and `restore()` takes both.
-//
-// ## The query string goes to the wasm RAW
-//
-// `idx_query` folds the user's text through the index's own tokenizer before
-// building the MATCH expression. Folding or escaping it here would be the second
-// tokenizer implementation this whole design exists to avoid, and a JS escaper
-// would have to guess what FTS5 makes of `-` — guessing wrong is a syntax error
-// on a keystroke. A query that folds to no terms is **zero results and not an
-// error**; that is the behaviour, not a fallback.
-//
-// ## ...and so does the TYPO LADDER, for the same reason twice over
-//
-// `query(text, limit, true)` reaches `idx_fuzzy`, which is `idx_query` plus a
-// fallback the module itself gates: it corrects only a query that matched
-// NOTHING. The ladder is not reimplemented here (§6.1 moved it out of
-// `backend/services/search/fuzzy.zig` and into the wasm) because the distance it
-// measures is between the query token and the vocabulary AS THE INDEX'S OWN
-// TOKENIZER SEES THEM — a TypeScript version would be a second opinion about
-// `remove_diacritics 2` and about which codepoints a Portuguese word is made of.
-// What crosses the boundary is only the ANSWER: which token was typed, and which
-// vocabulary term was searched in its place.
-//
-// ## Two versions, and they are not the same version
-//
-// A snapshot carries `schemaVersion` (the wasm's `idx_schema_version()` — the
-// DDL and its `tokenize=`) and `mappingVersion` (this file's rowid-table shape).
-// Either can change with **nothing server-side moving**, which is precisely why
-// the server's `index_version` cannot stand in for them: it would still agree
-// while a stored image had become unreadable.
+// What this must not break:
+//   * `open()` is a function, not a module-level constant: `instantiate`
+//     allocates a 16.13 MB static footprint (§8.1) and a member who never
+//     searches must never pay it (§4.2).
+//   * The compiled `Module` is cached; the INSTANCE is not. Linear memory never
+//     shrinks, so dropping the index means dropping the instance, and a
+//     memoised instance could never be dropped.
+//   * The rowid table is PART of the index: `serialize()` returns both and
+//     `restore()` takes both. Its `mappingVersion` and the wasm's
+//     `schemaVersion` can each change with nothing server-side moving, so
+//     `index_version` cannot stand in for them.
+//   * The query string goes to the wasm RAW: folding or escaping it here is the
+//     second tokenizer this design exists to avoid.
 
-// The ONE shape a substitution has, taken from the module that defines the
-// result shape rather than restated: a twin declaration here is how the engine
-// and the view end up disagreeing about what "matched" means.
 import type { Expansion } from "./localSearch";
 
 /** The `idx_*` half of `sqlite-core.wasm` (`webapp/wasm/sqlite_core.zig`). */
@@ -135,11 +73,7 @@ export interface PageRef {
   page: number;
 }
 
-/**
- * A query's answer. `total` is EXACT and independent of `limit` — §9.5 retires
- * the server's "N+" floors precisely because a client holding the index has
- * already paid for the count.
- */
+/** A query's answer. `total` is EXACT and independent of `limit` (§9.5). */
 export interface QueryResult {
   total: number;
   /** bm25 rank order, capped at `limit`. Reordering is the caller's business. */
@@ -147,8 +81,7 @@ export interface QueryResult {
   /**
    * What the typo ladder substituted. ALWAYS empty unless the query was asked
    * with `fuzzy` and the exact pass found nothing — the wasm enforces that, so
-   * a non-empty list here means the results below are corrections and can be
-   * labelled as such ("matched **reunião**", §4.3).
+   * non-empty means the results are corrections ("matched **reunião**", §4.3).
    */
   expansions: Expansion[];
 }
@@ -165,11 +98,7 @@ export interface SnapshotDoc {
 /**
  * What persistence stores: the serialized database and the rowid table that
  * gives its integers meaning, under the two versions that can invalidate them.
- *
- * Structured-clonable as it stands, so IndexedDB takes it without a codec. There
- * is deliberately no byte format here — `manifestCodec.ts` and `wantBitmap.ts`
- * are hand-rolled because a SERVER encodes or decodes the other end and the two
- * must be pinned to each other. Nothing else reads this one.
+ * Structured-clonable as it stands, so IndexedDB takes it without a codec.
  */
 export interface IndexSnapshot {
   /** `idx_schema_version()` at the time of the write. */
@@ -192,10 +121,9 @@ export class SearchIndexError extends Error {
 }
 
 /**
- * A stored snapshot was built by a different index shape. NOT a corruption and
- * not a bug: it is the signal to throw the record away and rebuild from the rows
- * in IndexedDB, which is a path that has to exist anyway because the store is
- * evictable (§4.2).
+ * A stored snapshot was built by a different index shape. NOT a corruption:
+ * it is the signal to throw the record away and rebuild from the rows in
+ * IndexedDB, a path that must exist anyway because the store is evictable (§4.2).
  */
 export class StaleSnapshotError extends Error {
   constructor(what: string, want: number, got: number) {
@@ -207,11 +135,7 @@ export class StaleSnapshotError extends Error {
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder();
 
-/**
- * Fetch and COMPILE the module, once per URL. What is cached is the compiled
- * code — not an instance, see the header: the instance is the 16 MB, and it has
- * to stay droppable.
- */
+/** Compiled code, once per URL — never an instance (see the header). */
 const compiled = new Map<string, Promise<WebAssembly.Module>>();
 
 function compileCore(url: string): Promise<WebAssembly.Module> {
@@ -248,8 +172,8 @@ export function browserCoreLoader(url: string = DEFAULT_WASM_URL): CoreLoader {
 
 /**
  * The rowid table. Documents are appended in build order, so `firstRowid` is
- * ascending and a rowid is found by binary search rather than by a `Map` with
- * one entry per page — 23,997 entries where 1,222 will do.
+ * ascending and a rowid is found by binary search — 1,222 entries rather than
+ * a `Map` of 23,997.
  */
 class RowidTable {
   private readonly docs: SnapshotDoc[] = [];
@@ -296,17 +220,15 @@ class RowidTable {
   }
 
   snapshot(): SnapshotDoc[] {
-    // Copied: the caller may hold this across further builds, and `pages` is a
-    // view onto a typed array this table keeps mutating nothing but appending to.
+    // Copied: the caller may hold this across further builds.
     return this.docs.map((d) => ({ md5: d.md5, firstRowid: d.firstRowid, pages: d.pages.slice() }));
   }
 
   static from(docs: readonly SnapshotDoc[]): RowidTable {
     const t = new RowidTable();
     for (const d of docs) {
-      // `lookup` binary-searches, so ascending `firstRowid` is a precondition,
-      // not a coincidence of build order. A stored record that lost the order
-      // would otherwise answer with the wrong page rather than fail.
+      // `lookup` binary-searches: a stored table that lost its order would
+      // answer with the wrong page rather than fail.
       if (d.firstRowid < t.next) {
         throw new Error(`snapshot rowid table is out of order at ${d.md5}`);
       }
@@ -321,11 +243,9 @@ class RowidTable {
 /**
  * One open index on one wasm instance.
  *
- * LIFETIME RULE, and it is the hazard every method here is written around:
- * `memory.buffer` is replaced whenever linear memory grows, and ANY call can
- * grow it. So every `Uint8Array` view is built AFTER the call that produced the
- * pointer it wraps, and never kept across another call. Wasm pointers themselves
- * stay valid; only the JS views detach.
+ * LIFETIME RULE: `memory.buffer` is replaced whenever linear memory grows, and
+ * ANY call can grow it. So every `Uint8Array` view is built AFTER the call that
+ * produced the pointer it wraps, and never kept across another call.
  */
 export class SearchIndex {
   private readonly core: SearchCoreExports;
@@ -348,10 +268,8 @@ export class SearchIndex {
     return index;
   }
 
-  /**
-   * Instantiate and restore a stored snapshot — the second-visit path, 5.93 ms
-   * for the library's 10.36 MB image (§8.1), against 703 ms to build it.
-   */
+  /** Instantiate and restore a snapshot: 5.93 ms for the library's 10.36 MB
+   *  image, against 703 ms to build it (§8.1). */
   static async restore(
     snapshot: IndexSnapshot,
     load: CoreLoader = browserCoreLoader(),
@@ -381,13 +299,11 @@ export class SearchIndex {
   }
 
   /**
-   * Throw the contents away and start over on the SAME instance.
-   *
-   * §4.1 measured this and it is why the instance need not be discarded:
-   * `idx_open()` returns the closed database's pages to SQLite's heap *inside*
-   * linear memory, so the next build reuses that space instead of growing past
-   * it. Four documents through one instance converged on the cost of the single
-   * worst one whichever order they came in.
+   * Throw the contents away and start over on the SAME instance. `idx_open()`
+   * returns the closed database's pages to SQLite's heap INSIDE linear memory,
+   * so the next build reuses that space instead of growing past it: four
+   * documents through one instance converged on the single worst one whichever
+   * order they came in (§8.1). Reuse the instance; never re-instantiate.
    */
   reset(): void {
     this.assertOpen();
@@ -396,15 +312,12 @@ export class SearchIndex {
   }
 
   /**
-   * Index every page of every document under one transaction.
+   * Index every page of every document under ONE transaction: FTS5 flushes its
+   * pending index to a new level-0 segment at every COMMIT, so 24k
+   * autocommitted inserts are 24k segments plus the merges behind them.
    *
-   * The transaction is not an optimisation to taste: FTS5 flushes its pending
-   * in-memory index to a new level-0 segment at every COMMIT, so 24k
-   * autocommitted inserts are 24k segments and the merges behind them.
-   *
-   * A failure mid-build leaves an open transaction and a half-built table, so it
-   * resets rather than committing what got in — a partial index is worse than no
-   * index, because it answers.
+   * A failure mid-build resets rather than committing what got in — a partial
+   * index is worse than none, because it answers.
    */
   build(docs: Iterable<TermsDocument>): void {
     this.assertOpen();
@@ -412,9 +325,7 @@ export class SearchIndex {
     try {
       for (const doc of docs) this.addDocument(doc);
     } catch (err) {
-      // Best effort, and the original failure is what the caller needs to see:
-      // a reset that fails too would otherwise replace the diagnosis with its
-      // own symptom.
+      // Best effort; a reset that fails too must not replace the diagnosis.
       try {
         this.reset();
       } catch {
@@ -426,14 +337,9 @@ export class SearchIndex {
   }
 
   /**
-   * Replace this index's contents with `docs` — the only thing either consumer
-   * ever wanted, and the reason it is a method rather than two lines repeated on
-   * both sides of a worker boundary.
-   *
-   * `reset()` is skipped on an index that holds nothing, so the first build after
-   * `open()` does not pay a second `idx_open()` for an empty database. A build
-   * that FAILED also leaves nothing (see {@link build}), so the retry after one
-   * takes the same short path — which is what makes this safe to call blindly.
+   * Replace this index's contents with `docs`. `reset()` is skipped on an empty
+   * index, so the first build after `open()` — and the retry after a failed
+   * one, which also leaves nothing — takes the short path.
    */
   rebuild(docs: Iterable<TermsDocument>): void {
     this.assertOpen();
@@ -442,13 +348,10 @@ export class SearchIndex {
   }
 
   /**
-   * One document's rows, assigning them rowids and recording the mapping.
-   *
-   * Called inside `build`'s transaction. The same md5 twice is refused HERE
-   * rather than by the wasm: `idx_add` catches a repeated ROWID, and these
-   * rowids are freshly assigned, so a document indexed twice would sail through
-   * and simply answer every query twice. That is a caller bug — two manifests
-   * mixed — and it should say so instead of doubling the counts §4.3 ranks by.
+   * One document's rows, inside `build`'s transaction. A repeated md5 is
+   * refused HERE, not by the wasm: `idx_add` catches a repeated ROWID and these
+   * are freshly assigned, so a document indexed twice would sail through and
+   * answer every query twice, doubling the counts §4.3 ranks by.
    */
   addDocument(doc: TermsDocument): void {
     this.assertOpen();
@@ -463,12 +366,9 @@ export class SearchIndex {
 
   /**
    * One FTS5 row: `rowid -> terms`. The raw ABI, for a caller that owns its own
-   * rowid assignment; `addDocument` is the one that keeps the mapping honest.
-   *
-   * The terms arrive already folded (§2.2) and FTS5 tokenizes them again. That
-   * re-tokenization is a no-op BY CONSTRUCTION, not by luck: a token that came
-   * out of `unicode61 remove_diacritics 2` cannot contain a character that
-   * tokenizer treats as a separator.
+   * rowid assignment. The terms arrive already folded (§2.2) and FTS5 tokenizes
+   * them again — a no-op by construction, since a token out of `unicode61
+   * remove_diacritics 2` cannot contain a separator.
    */
   addPage(rowid: number, terms: string): void {
     this.assertOpen();
@@ -477,33 +377,26 @@ export class SearchIndex {
   }
 
   /**
-   * Run a query. `text` is the user's RAW string — see the header; folding it
-   * here would be the second tokenizer.
+   * Run a query. `text` is the user's RAW string (see the header). `limit`
+   * caps only what is returned: the total is exact, and stepping the whole
+   * result is 37.9 ms at the pathological `con*` (5,642 pages), 1.3–7.5 ms for
+   * ordinary queries (§8.1).
    *
-   * `limit` caps only what is returned. The total is the whole match count, and
-   * stepping the whole rank-ordered result is 37.9 ms at the library's
-   * pathological `con*` (5,642 pages) and 1.3–7.5 ms for ordinary queries (§8.1).
-   *
-   * `fuzzy` attaches the typo ladder, which the module runs ONLY when the query
-   * as typed matched nothing — a fallback, never a widening. MEASURED over the
-   * real library (24 documents, 23,964 pages, 63,577 distinct terms): a query
-   * that matches costs **1.42 ms against 1.37 ms** exact, i.e. the fallback is
-   * free when it does not fire, and a query that does not costs **71.3 ms p50**
-   * for the whole-vocabulary scan. That is the price of an answer where there
-   * was none — the same ladder is 6,133.8 ms p50 on the Pi
-   * (`wasm-fuzzy-bench.md`) — and it is paid on a KEYSTROKE, which is why this
-   * class is driven from a worker (`searchEngine.ts`) rather than from the box.
-   * `result.expansions` says what it substituted, and is empty when it did not
-   * fire.
+   * `fuzzy` attaches the typo ladder, which fires ONLY when the exact query
+   * matched nothing. Measured over the real library (23,964 pages, 63,577
+   * terms): a matching query costs 1.42 ms against 1.37 ms exact, so the ladder
+   * is free when it does not fire; a no-match query costs 71.3 ms p50 for the
+   * whole-vocabulary scan (6,133.8 ms on the Pi, `wasm-fuzzy-bench.md`), paid
+   * per KEYSTROKE — which is why this class is driven from a worker.
    */
   query(text: string, limit: number, fuzzy = false): QueryResult {
     this.assertOpen();
     if (!Number.isInteger(limit) || limit < 0) throw new RangeError(`bad limit ${limit}`);
     const len = this.stage(text);
-    // OPT-IN, and it stays opt-in: `shadowCompare.test.ts` checks this engine
-    // against a frozen capture of what the SERVER answered, and the server was
-    // asked exact questions. A default that corrected typos would turn every
-    // zero-result query in that capture into a disagreement of our own making.
+    // OPT-IN: `shadowCompare.test.ts` checks this engine against a frozen
+    // capture of what the SERVER answered to exact questions, and a default
+    // that corrected typos would turn every zero-result query in it into a
+    // disagreement of our own making.
     const call = fuzzy ? "idx_fuzzy" : "idx_query";
     const total = fuzzy
       ? this.core.idx_fuzzy(this.scratchPtr, len, limit)
@@ -517,8 +410,7 @@ export class SearchIndex {
       const rowid = this.core.idx_hit(i);
       if (rowid < 0) break;
       const ref = this.table.lookup(rowid);
-      // The image and the rowid table disagree — the one corruption that would
-      // otherwise surface as a result row pointing at nothing.
+      // Image and rowid table disagree — otherwise a result row pointing at nothing.
       if (!ref) throw new Error(`rowid ${rowid} is not in the index's rowid table`);
       hits.push(ref);
     }
@@ -526,14 +418,11 @@ export class SearchIndex {
   }
 
   /**
-   * What the ladder substituted, decoded from the module's `typed \t matched \n`
-   * record. Empty whenever the exact query answered — the wasm clears it on
-   * every query, so this cannot report a correction belonging to an earlier one.
-   *
-   * Neither half can contain a delimiter: `typed` is a whitespace-delimited
-   * token and `matched` is an fts5 term, and `unicode61` splits on tab and
-   * newline. A line that somehow lacks its tab is DROPPED rather than guessed
-   * at — a half-read pair would render as "matched **undefined**".
+   * The ladder's `typed \t matched \n` record. The wasm clears it on every
+   * query, so it cannot report a correction belonging to an earlier one.
+   * Neither half can contain a delimiter (`unicode61` splits on tab and
+   * newline); a line lacking its tab is DROPPED rather than rendered as
+   * "matched **undefined**".
    */
   private expansions(): Expansion[] {
     const n = this.core.idx_expansion_len();
@@ -558,8 +447,7 @@ export class SearchIndex {
     const len = this.core.idx_serialize();
     this.check("idx_serialize", len);
     const image = new Uint8Array(len);
-    // The pointer is read AFTER the call that produced it, and the copy happens
-    // before anything else can grow memory out from under the view.
+    // Pointer read AFTER the call that produced it; copied before memory can grow.
     image.set(new Uint8Array(this.core.memory.buffer, this.core.idx_image_ptr(), len));
     return {
       schemaVersion: this.core.idx_schema_version(),
@@ -574,13 +462,11 @@ export class SearchIndex {
    *
    * TRAP 1 (`sqlite_core.zig`'s header): the target must come from
    * `idx_image_alloc` — SQLite's own heap — because `FREEONCLOSE` hands the
-   * buffer back to `sqlite3_free`, and an `idx_alloc` pointer would be a
-   * cross-allocator free. TRAP 2 is handled inside that call, which is where it
-   * bites: on a fresh instance restoring from IndexedDB this is the FIRST call
-   * into SQLite, and `sqlite3_malloc64` traps until `sqlite3_initialize` has run.
-   *
-   * `idx_deserialize` TAKES OWNERSHIP: there is no free here, and there must not
-   * be one.
+   * buffer to `sqlite3_free`, and an `idx_alloc` pointer would be a
+   * cross-allocator free. TRAP 2 is inside that call: on a fresh instance this
+   * is the FIRST call into SQLite, and `sqlite3_malloc64` traps until
+   * `sqlite3_initialize` has run. `idx_deserialize` TAKES OWNERSHIP: no free
+   * here, and there must not be one.
    */
   deserialize(snapshot: IndexSnapshot): void {
     this.assertOpen();
@@ -600,10 +486,8 @@ export class SearchIndex {
   }
 
   /**
-   * Close the database. The INSTANCE survives, and so does its linear memory —
-   * dropping that means dropping every reference to this object (§4.2). Closing
-   * is what makes the next `SearchIndex.open` on a new instance the only way to
-   * hand memory back, and §4.1 measured that as an option rather than a duty.
+   * Close the database. The INSTANCE and its linear memory survive; handing
+   * memory back means dropping every reference to this object (§4.2).
    */
   close(): void {
     if (this.closed) return;
@@ -621,9 +505,8 @@ export class SearchIndex {
   /** UTF-8 `text` into the staging buffer; returns its byte length. */
   private stage(text: string): number {
     const bytes = ENCODER.encode(text);
-    // One byte more than the text, always: the empty query is a real case (the
-    // search box before anything is typed) and a zero-length allocation has no
-    // address worth handing across the boundary.
+    // One byte more than the text: the empty query is a real case, and a
+    // zero-length allocation has no address worth handing across the boundary.
     this.reserve(bytes.length + 1);
     new Uint8Array(this.core.memory.buffer, this.scratchPtr, this.scratchCap).set(bytes);
     return bytes.length;
@@ -631,8 +514,6 @@ export class SearchIndex {
 
   private reserve(need: number): void {
     if (this.scratchCap >= need) return;
-    // Doubling, so a build of 24k rows reallocates a handful of times rather
-    // than once per row that happens to be longer than the last.
     const cap = Math.max(need, this.scratchCap * 2, 1024);
     const ptr = this.core.idx_alloc(cap);
     if (ptr === 0) throw new Error(`idx_alloc(${cap}) returned null`);
@@ -651,11 +532,8 @@ export class SearchIndex {
     throw new SearchIndexError(call, rc, this.errorText());
   }
 
-  /**
-   * The module's last error message. Set on FAILURE and never cleared, so it is
-   * read ONLY after a negative return — otherwise it is whatever failed last,
-   * which reads like a fresh diagnosis and is not one.
-   */
+  /** Set on FAILURE and never cleared, so read ONLY after a negative return —
+   *  otherwise it is whatever failed last, which reads like a fresh diagnosis. */
   private errorText(): string {
     const n = this.core.idx_errmsg_len();
     if (n === 0) return "";

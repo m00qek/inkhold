@@ -1,64 +1,23 @@
-// What the search box calls — `golden-search.md` §6's whole surface, in one
-// object: the local index, and the sync lifecycle that gets it into a state
-// where it can answer.
+// What the search box calls — `golden-search.md` §6's whole surface: the local
+// index, and the sync lifecycle that gets it into a state where it can answer.
 //
 //     event: index ─┐
 //                   ├─▶ refresh() ─(one window)─▶ sync ─▶ rows in IndexedDB
 //     event: sync ──┘
 //
-// ONE PRODUCER, AND THAT IS THE USER-VISIBLE BOUNDARY §6 STEP 6 DRAWS. There
-// used to be a composite here choosing between this index and a `searchText`
-// round trip; the server no longer interprets a query, so a search the local
-// index cannot answer FAILS rather than quietly reaching the network. That is
-// deliberate: a fallback that is by definition never taken is a second
-// mechanism nobody exercises, and keeping one would have meant keeping the
-// server half of search alive to feed it.
-//
-// ## The two triggers, coalesced — and they arrive on the same socket
-//
-// §3.3 names them: `event: index` (a deferred derive completed) and "the file
-// listing changed" (a `.note` writes its terms at INGEST, outside the worker, so
-// the version never moves for it). Both must be coalesced, because a device
-// syncing 100 notes must become a handful of conditional manifest requests
-// rather than a hundred × ~127-177 ms of manifest query on the Pi.
-//
-// It turns out both ride ONE connection: `sync/live.ts` carries `event: sync`
-// and `event: index` on the same `EventSource` — so `attachLive` subscribes once
-// and both triggers land in the same window. There is nothing else to coalesce
-// them with.
-//
-// **A WINDOW FROM THE FIRST TRIGGER, NOT A TRAILING DEBOUNCE.** A debounce that
-// re-arms on every frame is exactly wrong for the case that motivates the
-// coalescing: a device pushing 100 notes emits frames continuously for as long
-// as it takes, so the sync would be deferred until the burst ENDED — minutes,
-// during which nothing new is searchable. A fixed window bounds the delay and
-// bounds the request rate at the same time.
-//
-// A trigger that arrives while a sync is running gets ONE queued re-run rather
-// than joining. Joining would be wrong for a real reason: `indexSync` already
-// makes a concurrent call join the request in flight, and that request fetched
-// its manifest before the new document existed — the join would return an answer
-// that provably cannot contain it. One re-run, and only one, however many frames
-// arrived meanwhile.
-//
-// ## The text prefetch rides the same sync, one step behind it
-//
-// §4.4 caches `.note` and `.mark`-annotated documents' TEXT on a budget — for
-// LATENCY, not availability (`textPrefetch.ts`'s header) — and the manifest a
-// sync just decoded is the only thing that knows which documents those are
-// (`textPrefetch.ts` also says why the file listing cannot). So the
-// pass is started from the sync's own completion and NOT awaited: it is
-// opportunistic by design, it must never delay the moment search becomes usable,
-// and a household member who is only browsing pays nothing for it — it touches no
-// wasm at all, which is the same rule the terms stream is arranged around.
-//
-// ## Failed syncs are silent
-//
-// `IndexSyncError` exists to be retried by the next trigger (its own header says
-// so), and the next trigger is a device upload or a derive completing — both
-// routine. Surfacing a background sync failure would put an error in front of
-// somebody who did not ask for anything, over a search box whose LAST good
-// answer is still on screen and whose next keystroke retries for free.
+// What this must not break:
+//   * ONE producer. A search the local index cannot answer FAILS; nothing
+//     reaches the network (§6 step 6).
+//   * A WINDOW FROM THE FIRST TRIGGER, NOT A TRAILING DEBOUNCE. A device
+//     pushing 100 notes emits frames for as long as it takes; a debounce that
+//     re-arms on every frame would defer the sync until the burst ENDED —
+//     minutes during which nothing new is searchable.
+//   * A trigger during a running sync gets ONE queued re-run, not a join: the
+//     request in flight fetched its manifest before the new document existed.
+//   * Failed syncs are silent: the next trigger (a device upload, a derive
+//     completing) retries, and the last good answer is still on screen.
+//   * The text prefetch is started from the sync's completion and NOT awaited
+//     (§4.4): opportunistic, never a gate on search being usable.
 
 import type { LiveChannel } from "../sync/types";
 import type { CoreLoader } from "./indexEngine";
@@ -67,13 +26,9 @@ import { createIndexSearch, type LiveDocument } from "./indexSearch";
 import { createTextPrefetch, type TextPrefetch } from "./textPrefetch";
 import type { LocalSearch } from "./localSearch";
 
-/**
- * How long the first trigger waits for its neighbours. 1500 ms, and both
- * directions are argued: the manifest costs ~127-177 ms on the Pi and a device
- * sync delivers its frames in a burst, so a window shorter than the burst's
- * spacing buys nothing; a window longer than a second or two is visible as "my
- * note is not findable yet" to whoever just uploaded it.
- */
+/** How long the first trigger waits for its neighbours. The manifest costs
+ *  ~127-177 ms on the Pi and a device sync bursts, so shorter buys nothing;
+ *  much longer is visible as "my note is not findable yet". */
 const COALESCE_MS = 1500;
 
 export interface SearchServiceOptions {
@@ -83,39 +38,24 @@ export interface SearchServiceOptions {
   load?: CoreLoader;
   /** See {@link COALESCE_MS}. */
   coalesceMs?: number;
-  /**
-   * The app's cached file listing, the OFFLINE stand-in for the manifest — see
-   * `indexSearch.ts`'s header. Without it a session that never manages a sync
-   * cannot answer from a full store, which is the one case §4.4's "fully
-   * offline" is actually about.
-   */
+  /** The app's cached file listing, the OFFLINE stand-in for the manifest
+   *  (`indexSearch.ts`). */
   listing?: () => readonly LiveDocument[];
-  /**
-   * §4.4's text prefetch. Defaults to the real one; a no-op where IndexedDB is
-   * missing, in which case nothing below happens at all.
-   */
+  /** §4.4's text prefetch. Defaults to the real one; a no-op without IndexedDB. */
   textPrefetch?: TextPrefetch;
 }
 
 export interface SearchService extends LocalSearch {
-  /**
-   * A trigger fired. Coalesced — call it from BOTH of §3.3's triggers and from
-   * anywhere else that learns the library moved; the cost of an extra call is
-   * nothing, because the window is what decides when a request happens.
-   */
+  /** A trigger fired. Coalesced — call it from anywhere that learns the
+   *  library moved; an extra call costs nothing. */
   refresh(): void;
   /** Sync now and await it. For boot, and for tests. Never rejects. */
   syncNow(): Promise<void>;
-  /** One document's `index_version` from the last manifest — `indexSearch.ts`'s,
-   *  forwarded because in-document search needs it for `text/<md5>`'s `?v=`. */
+  /** One document's `index_version` from the last manifest — forwarded because
+   *  in-document search needs it for `text/<md5>`'s `?v=`. */
   indexVersion(md5: string): number | null;
-  /**
-   * §4.4's tier 1/tier 2 text prefetch, which this service drives off the
-   * manifest each sync decodes. Exposed because this is where it is driven from
-   * and `available` is the honest answer to "is anything being cached at all".
-   * Nothing sets policy through it: what belongs in the cache is
-   * `textPrefetch.ts`'s decision and there is no per-document control any more.
-   */
+  /** §4.4's text prefetch, driven from here off each sync's manifest. Exposed
+   *  for `available`; nothing sets policy through it. */
   readonly textPrefetch: TextPrefetch;
   /** Subscribe both triggers to the live channel. Returns the unsubscribe. */
   attachLive(live: LiveChannel): () => void;
@@ -140,12 +80,9 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
     const p = local
       .sync()
       .then((outcome) => {
-        // §4.4: the text prefetch runs AFTER the terms stream and is never a gate
-        // on search being usable — so it is started here and not awaited, and a
-        // failure inside it is as silent as a failed sync (same header, same
-        // reason: nobody asked for it, and the next trigger retries).
+        // Started, not awaited, and as silent as a failed sync (see the header).
         void textPrefetch.prefetch(outcome.manifest.rows).catch(() => undefined);
-      }, () => undefined) // see the header: silent by design.
+      }, () => undefined) // silent by design — see the header.
       .finally(() => {
         running = null;
         if (!queued) return;
@@ -156,8 +93,7 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
     return p;
   }
 
-  // Armed by the FIRST trigger and not re-armed by the rest — a window, not a
-  // debounce. See the header.
+  // Armed by the FIRST trigger and not re-armed by the rest.
   function refresh(): void {
     if (timer !== null) return;
     timer = setTimeout(() => {
@@ -181,11 +117,8 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
     textPrefetch,
 
     attachLive(live) {
-      // One subscription for both triggers, because one socket carries both
-      // frames. `onBump` is "the file listing changed"; `onIndex` is
-      // `event: index`. Neither payload is read: what a trigger says is "ask the
-      // manifest", and the manifest is the answer to every version of that
-      // question.
+      // One socket carries both frames (`sync/live.ts`). Neither payload is
+      // read: a trigger says "ask the manifest", whatever it says.
       return live.subscribe(
         () => refresh(),
         () => refresh(),

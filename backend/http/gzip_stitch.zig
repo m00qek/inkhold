@@ -1,75 +1,39 @@
-//! Stitching stored deflate fragments into ONE gzip stream — the transport
-//! `golden-search.md` §3.2 specifies, and the arithmetic that makes it possible.
+//! Stitching stored deflate fragments into ONE gzip stream (`golden-search.md`
+//! §3.2): serving costs a header, N file reads and a trailer — no compression,
+//! no decompression — on a Pi 1 B+.
 //!
-//! ## Why this exists
-//!
-//! The search stream serves per-document records that were compressed ONCE, at
-//! derive time. Serving is meant to cost a header, N file reads and a footer:
-//! no compression, no decompression, no query interpretation, because the thing
-//! doing it is a Pi 1 B+.
-//!
-//! The obvious way to do that — concatenate ordinary `.gz` members — **is broken
-//! and fails SILENTLY**. Under `Content-Encoding: gzip` Chromium (and curl)
-//! decode the FIRST MEMBER ONLY and report success: 37 bytes delivered out of
-//! 7,980, `fetch()` resolving happily. §3.1. Node's zlib decodes all members,
-//! which is worse than useless — it means a Node test PASSES on a stream the
-//! browser truncates by 99.5%.
-//!
-//! So the fragments are **raw deflate, byte-aligned, with no BFINAL block**
-//! (`Container.raw` + `Compress.flush`, which ends in `byteAlignBlocks()`).
-//! Concatenated they are one valid deflate stream, and wrapping that in a single
-//! gzip header and trailer yields a single-member gzip that every decoder agrees
-//! about.
-//!
-//! ## The part that needs arithmetic
-//!
-//! The gzip trailer is the CRC32 of the whole uncompressed payload and its
-//! total length — but the serve path never sees a plaintext byte. All it has is
-//! each fragment and the two numbers stored beside it. `crc32Combine` turns
-//! per-fragment CRCs into the CRC of their concatenation, which is what lets the
-//! trailer exist without inflating anything.
-//!
-//! **`std.hash.Crc32` has no combine primitive** (checked: `std/hash/crc.zig` is
-//! a generic `Crc(...)` builder over many polynomials, and none expose one), so
-//! it is written here.
-//!
-//! Getting the trailer wrong fails LOUDLY in the places that matter — `gzip -t`
-//! reports "invalid compressed data--crc error", and browsers reject the body.
-//! That is the opposite of §3.1's failure mode and is the reason this is a safe
-//! thing to compute rather than a risky one.
-//!
-//! **But do not expect Zig to tell you.** `std.compress.flate.Decompress` reads
-//! the gzip footer into `container_metadata` and **never verifies it**:
-//! `Container.Error.WrongGzipChecksum` is declared and, as of this writing, is
-//! raised nowhere in the standard library. A caller wanting validation must
-//! compare `container_metadata.gzip` against its own hash of the output, which
-//! is what the tests below do. Worth knowing before writing a server-side check
-//! that would silently pass everything.
+//! Must not break:
+//!   * Concatenated `.gz` MEMBERS are not an option: under `Content-Encoding:
+//!     gzip` Chromium and curl decode the FIRST member only and report success
+//!     (37 bytes of 7,980, §3.1). Node's zlib decodes them all, so a Node test
+//!     passes on a stream the browser truncates.
+//!   * Fragments are raw deflate, byte-aligned, `flush()` and never `finish()`
+//!     (`byteAlignBlocks()`), so none carries BFINAL and they concatenate into
+//!     one deflate stream under a single header and trailer.
+//!   * `std.hash.Crc32` has no combine primitive; `crc32Combine` is zlib's.
+//!   * `std.compress.flate.Decompress` reads the gzip footer and NEVER verifies
+//!     it: `WrongGzipChecksum` is declared in std and raised nowhere. A check
+//!     must compare `container_metadata.gzip` against its own hash of the
+//!     output, as the tests do. `gzip -t` and every browser do reject on it.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Writer = std.Io.Writer;
 
-/// The 10-byte gzip header, straight from `std.compress.flate`. Named here so a
-/// serve path reads as header/body/trailer rather than reaching into flate for
-/// one constant.
+/// The 10-byte gzip header, straight from `std.compress.flate`.
 pub const header = std.compress.flate.Container.gzip.header();
 
-/// The empty FINAL stored block that terminates the deflate stream: BFINAL=1,
-/// BTYPE=00, then the padding to a byte boundary. Every fragment was written
-/// with `flush()` rather than `finish()` precisely so that none of them carries
-/// this, and exactly one of them appears here at the end.
+/// The empty FINAL stored block (BFINAL=1, BTYPE=00, padded to a byte). No
+/// fragment carries one; exactly one goes at the end.
 pub const terminator = [_]u8{ 0x03, 0x00 };
 
 // --- crc32Combine -----------------------------------------------------------
 
 const dim = 32;
-/// The CRC-32 polynomial, reflected — the same one `std.hash.Crc32` (ISO-HDLC)
-/// uses, and therefore the same one gzip requires.
+/// CRC-32, reflected — `std.hash.Crc32` (ISO-HDLC) and gzip's polynomial.
 const poly: u32 = 0xedb88320;
 
-/// Multiply a GF(2) bit-vector by a bit-matrix: XOR together the rows the vector
-/// selects.
+/// GF(2) bit-vector times bit-matrix: XOR the rows the vector selects.
 fn matrixTimes(mat: *const [dim]u32, vec_in: u32) u32 {
     var sum: u32 = 0;
     var vec = vec_in;
@@ -88,27 +52,18 @@ fn matrixSquare(square: *[dim]u32, mat: *const [dim]u32) void {
     for (0..dim) |n| square[n] = matrixTimes(mat, mat[n]);
 }
 
-/// `crc(A ++ B)` from `crc(A)`, `crc(B)` and the LENGTH of B in bytes — neither
-/// plaintext required.
+/// `crc(A ++ B)` from `crc(A)`, `crc(B)` and B's length — no plaintext needed.
 ///
-/// CRC32 is linear over GF(2), so appending `len_b` zero bytes to A is a linear
-/// operator on the 32-bit register and
+/// CRC32 is linear over GF(2), so appending `len_b` zero bytes is a linear
+/// operator: `crc(A ++ B) = zeros_op(len_b) * crc(A) XOR crc(B)`. zlib's
+/// method: "advance one zero BIT" as a 32x32 GF(2) bit-matrix, squared to get
+/// "advance 2^k bits", walking the bits of `len_b` — O(log n).
 ///
-///     crc(A ++ B) = zeros_op(len_b) * crc(A)  XOR  crc(B)
-///
-/// Applying that a byte at a time would be O(len_b), which would defeat the
-/// point. This is zlib's approach: represent "advance one zero BIT" as a 32x32
-/// bit-matrix over GF(2) and repeatedly SQUARE it to get "advance 2^k bits",
-/// then walk the bits of `len_b` multiplying in the matching square. O(log n),
-/// ~64 tiny matrix operations for any length that can exist.
-///
-/// It operates on FINAL, post-conditioned CRC values — the ones
-/// `std.hash.Crc32.final()` returns — because gzip's `init = 0xFFFFFFFF` /
-/// `xorout = 0xFFFFFFFF` conditionings cancel across the concatenation. That is
-/// why no unconditioning appears below; its absence is correct, not an omission.
+/// Operates on FINAL, post-conditioned values (what `std.hash.Crc32.final()`
+/// returns): gzip's `init`/`xorout` conditionings cancel across the
+/// concatenation, so the missing unconditioning is correct, not an omission.
 pub fn crc32Combine(crc_a: u32, crc_b: u32, len_b: u64) u32 {
-    // An empty B leaves A's checksum untouched. Worth an early return as well as
-    // a correctness note: the loop below is do-while shaped and would apply one
+    // Not only an identity: the loop is do-while shaped and would apply one
     // squaring to a zero length.
     if (len_b == 0) return crc_a;
 
@@ -128,8 +83,7 @@ pub fn crc32Combine(crc_a: u32, crc_b: u32, len_b: u64) u32 {
 
     var crc = crc_a;
     var len = len_b;
-    // Each squaring doubles the byte count, so this walks the bits of `len_b`,
-    // alternating which buffer holds the current operator to avoid a copy.
+    // Walks the bits of `len_b`, alternating buffers to avoid a copy.
     while (true) {
         matrixSquare(&even, &odd);
         if (len & 1 != 0) crc = matrixTimes(&even, crc);
@@ -147,18 +101,13 @@ pub fn crc32Combine(crc_a: u32, crc_b: u32, len_b: u64) u32 {
 
 // --- the accumulator a serve path uses --------------------------------------
 
-/// Accumulates the trailer while fragments stream past, so the serve path never
-/// holds the payload.
-///
-/// Usage: write `header`, then for each stored fragment write its bytes and call
-/// `append` with the CRC32 and uncompressed length recorded beside it, then
-/// `finish`. A fragment whose file is MISSING is skipped entirely — it is simply
-/// not appended, and the stream stays valid (§3.3).
+/// Accumulates the trailer while fragments stream past: write `header`, then per
+/// fragment its bytes and `append(crc, len)` from the numbers stored beside it,
+/// then `finish`. A missing fragment is simply not appended (§3.3).
 pub const Trailer = struct {
     crc: u32 = 0,
-    /// Total uncompressed length. Kept at u64 and truncated only when written:
-    /// ISIZE is defined modulo 2^32, so wrapping is correct rather than an
-    /// overflow to guard.
+    /// Truncated only when written: ISIZE is defined modulo 2^32, so wrapping
+    /// is correct rather than an overflow to guard.
     len: u64 = 0,
     empty: bool = true,
 
@@ -173,7 +122,7 @@ pub const Trailer = struct {
         t.len += fragment_len;
     }
 
-    /// Write the terminating block and the 8-byte gzip trailer.
+    /// The terminating block, then the 8-byte gzip trailer.
     pub fn finish(t: *const Trailer, w: *Writer) Writer.Error!void {
         try w.writeAll(&terminator);
         try w.writeInt(u32, t.crc, .little);

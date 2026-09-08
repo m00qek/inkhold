@@ -429,7 +429,7 @@ test.describe("universal search", () => {
   //
   // WHAT IS REAL HERE, because the point is that almost all of it is: the
   // manifest is decoded by `manifestCodec.ts`, diffed against IndexedDB by
-  // `manifestDiff.ts`, the difference is spelled as a `want` bitmap by
+  // `indexSync.ts`'s `diffManifest`, the difference is spelled as a `want` bitmap by
   // `wantBitmap.ts` and READ BACK by the mock (so the bitmap's LSB-first bit
   // order is checked in a browser rather than only in a unit test), the stream is
   // parsed progressively by `termsStream.ts` into `termsStore.ts`, and the query
