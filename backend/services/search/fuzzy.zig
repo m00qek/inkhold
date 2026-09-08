@@ -2,15 +2,15 @@
 //! (`fts_tokenizer`, `fold_ddl`, `foldRows`, `foldTerms`). It imports nothing of
 //! the package's.
 //!
-//! **THIS IS THE HALF THAT SURVIVES THE SWEEP** (`golden-search.md` §6.1,
-//! explicitly). `fts_tokenizer` is the `tokenize=` of `segment_fts` AND the fold
-//! the derive step runs to produce the `terms/` records the browser indexes, so
-//! it is the whole basis of parity-by-construction (§2.2) — deleting
-//! `segment_fts` in step 8 does not reduce the server's FTS5 dependency by one
-//! flag. What went in step 7 with the read expression it served is the
-//! query-building half: `appendToken`, `termLen` and `min_prefix_len` shaped a
-//! MATCH expression out of what the user had typed, and the browser types its
-//! own now.
+//! **THIS IS THE HALF THAT SURVIVED THE SWEEP** (`golden-search.md` §6.1,
+//! explicitly), and step 8 has now landed without touching it. `fts_tokenizer`
+//! is the fold the derive step runs to produce the `terms/` records the browser
+//! indexes, so it is the whole basis of parity-by-construction (§2.2) —
+//! **deleting `segment_fts` did not reduce the server's FTS5 dependency by one
+//! build flag**, and `build.zig` says the same beside `-DSQLITE_ENABLE_FTS5`.
+//! What went in step 7 with the read expression it served is the query-building
+//! half: `appendToken`, `termLen` and `min_prefix_len` shaped a MATCH expression
+//! out of what the user had typed, and the browser types its own now.
 //!
 //! **THE TYPO LADDER USED TO LIVE HERE AND DOES NOT.** `golden-search.md` §6
 //! step 6 moved it into `webapp/wasm/sqlite_core.zig`, where the browser's own
@@ -22,17 +22,21 @@
 //! What survives is the FOLD, and it is not a leftover — it is the whole basis
 //! of parity by construction (§2.2). The derive step runs this tokenizer to
 //! produce the terms it ships, so the browser's index and this server's agree
-//! about what a word is because they were made by the same declaration. Deleting
-//! `segment_fts` later does not reduce the FTS5 dependency by one flag.
+//! about what a word is because they were made by the same declaration.
 
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
 
-/// MUST stay identical to the `tokenize=` of `segment_fts` in `schema.zig`, and
-/// to the fold the derive step runs to produce the `terms/` records the browser
-/// indexes. That is what makes the two engines agree about what a word is BY
-/// CONSTRUCTION rather than by review (`golden-search.md` §2.2). A test asserts
-/// the two spellings have not drifted apart.
+/// MUST stay identical to `webapp/wasm/sqlite_core.zig`'s `tokenizer`, which is
+/// the `tokenize=` of the index the BROWSER builds out of the `terms/` records
+/// this fold produces. That is what makes the two engines agree about what a
+/// word is BY CONSTRUCTION rather than by review (`golden-search.md` §2.2), and
+/// both files say so.
+///
+/// It used to be anchored to `segment_fts` in `schema.zig` instead. §6 step 8
+/// deleted that table, and with it the last SERVER-side reader of a folded term
+/// — so the anchor moved to the other end of the wire, which is where the
+/// disagreement would now actually show up.
 pub const fts_tokenizer = "unicode61 remove_diacritics 2";
 
 /// A one-row FTS5 table with the SAME tokenizer as the index, used purely to

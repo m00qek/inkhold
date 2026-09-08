@@ -1,6 +1,7 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { signedIn, contrastRatio, cardButton, freezeMotion, paintedColours, railSettled } from "./helpers/app";
 import { mockDocText, noteTextRecord, type TextRecord } from "./helpers/docText";
+import { mockSearchIndex, noteTermsDocument, type FixtureManifestRow } from "./helpers/searchIndex";
 import { fakeFileHash } from "../../src/api/fake";
 
 // ONE QUERY, ONE SCOPE, ONE LIST — and, since `golden-search.md` §6 step 6, one
@@ -13,55 +14,53 @@ import { fakeFileHash } from "../../src/api/fake";
 // is gone: a row is a card plus one quiet line saying how far into the document
 // the query reached (§4.3).
 //
-// WHAT THIS FILE ASSERTS, AND WHAT IT CANNOT
+// WHAT THIS FILE ASSERTS, AND WHICH HALF ANSWERS EACH TEST
 //
 // Step 6 deleted `searchText` and the fallback with it, so the transcript half
 // is answered by the browser's own index — built from the terms stream, held in
 // IndexedDB. This suite runs against the in-memory fake `Api` with no backend
-// behind it (`helpers/app.ts`), and the fake ships no index fixture: there is no
-// `search-index/manifest` and no `search-index/stream` for the sync to fetch, so
-// the store stays empty and the index answers every query with zero documents.
+// behind it (`helpers/app.ts`), and the fake still ships no index fixture of its
+// own: a spec that mocks nothing gets no `search-index/manifest` and no
+// `search-index/stream`, the store stays empty, and the index answers every
+// query with zero documents.
 //
-// So the NAME half is what is exercisable here, and that is stated rather than
-// worked around. What the name half proves is exactly what the excerpt's removal
-// changed about a row — no `.hit__snippet` anywhere, no "More results" control,
-// no fuzzy notice, a header that counts plainly — plus the routing, the focus
-// behaviour and the deep link. The transcript half's own contract (the count
-// line, its wording per file kind, the first-matching-page link) is pinned in
-// `tests/unit/resultRow.test.ts` against the real card factory, and the engine's
-// answers in `tests/unit/searchService.test.ts`.
+// **A spec that WANTS the transcript half now asks for it**, with
+// `helpers/searchIndex.ts` — a real `SMAN` encoder plus a real terms stream, so
+// the sync, the diff, the want bitmap, IndexedDB and the wasm FTS5 engine all
+// run for real against fixture documents. Everything below `mockSearchIndex` is
+// production code; only the bytes are ours, and that encoder is pinned to the
+// checked-in golden vector in `tests/unit/searchIndexFixture.test.ts`.
 //
-// THE SWEEP'S OWN ASSERTION (§6.1), AND THE HALF OF IT THAT IS REACHABLE
+// The tests that do NOT mock it are exercising the NAME half, deliberately: what
+// the excerpt's removal changed about a row — no `.hit__snippet` anywhere, no
+// "More results" control, no fuzzy notice, a header that counts plainly — plus
+// the routing, the focus behaviour and the deep link, none of which care where a
+// row came from. The transcript half's own row contract (the count line and its
+// wording per file kind) stays pinned in `tests/unit/resultRow.test.ts` against
+// the real card factory, and the engine's answers in
+// `tests/unit/searchService.test.ts`.
+//
+// THE SWEEP'S OWN ASSERTION (§6.1), BOTH HALVES
 //
 // §6.1 asks for one run that types a query into the library search box, opens a
 // result, searches inside the document, and finds `search-index/manifest`,
 // `search-index/stream` and `text/<md5>` in the network log and NOTHING ELSE
-// search-related. Half of that is asserted at the bottom of this file — the
-// NOTHING ELSE half, which is the half that can regress — and the positive half
-// is not, for a reason worth writing down rather than deferring again.
+// search-related. Both halves are near the bottom of this file now:
 //
-// `search-index/stream` is never requested here because the sync never gets a
-// manifest to diff, and it never gets one because the fake ships no index
-// fixture: no `search-index/manifest` and no `search-index/stream` for the sync
-// to fetch, so the store stays empty and the index answers zero documents.
+//   * the NEGATIVE half — nothing else was requested — runs with no index
+//     fixture at all, which is the shape of almost every other spec here and the
+//     half that actually rots;
+//   * the POSITIVE half — those three routes really were requested, in that
+//     order, over a query no card's NAME could have answered ("Endor" lives only
+//     in a transcript).
 //
-// THE PREREQUISITE IS NOW MET, AND THE FIXTURE IS NOT YET WRITTEN. The blocker
-// used to be the JOIN rather than the bytes: `gallerySearch.ts` matches an index
-// hit to a card by `String(doc.fileId)` and `library.ts` feeds the offline
-// stand-in with `Number(e.id)`, so the manifest's `files.id` varint and the
-// listing's `Id` have to be the same number written two ways — and every fixture
-// id was an opaque string (`n-doc-attn`), which `Number()` turns into `NaN`. No
-// manifest row could name one, whatever bytes a mock served. `src/api/fake.ts`
-// now issues DECIMAL ids, as `files.id` really is (see `note` there), so the
-// join works and the remaining work is honest bytes: a helper that serves a real
-// `SMAN` manifest (`src/search/manifestCodec.ts` decodes it;
-// `backend/services/search/testdata/manifest_golden.bin` is a real one) and a
-// real stitched terms stream (`backend/http/gzip_stitch.zig`).
-//
-// Until that lands: the transcript half of a library query answers zero
-// documents here, the name half is what these tests exercise, and the
-// in-document half — which is a real network call again in step 7 — is
-// exercised in full.
+// The blocker on the positive half used to be the JOIN rather than the bytes:
+// `gallerySearch.ts` matches an index hit to a card by `String(doc.fileId)` and
+// `library.ts` feeds the offline stand-in with `Number(e.id)`, so the manifest's
+// `files.id` varint and the listing's `Id` have to be the same number written
+// two ways — and every fixture id was an opaque string (`n-doc-attn`), which
+// `Number()` turns into `NaN`. `src/api/fake.ts` issues DECIMAL ids now, as
+// `files.id` really is, and the bytes came after.
 
 /** A result row: the library's own card, in its search variant. */
 function results(page: Page): Locator {
@@ -88,6 +87,46 @@ function matchLine(row: Locator): Locator {
 const TEXT: Record<string, TextRecord> = {
   [fakeFileHash("121")]: noteTextRecord("Project Aurora — kickoff", 6),
 };
+
+// --- THE INDEX FIXTURE ------------------------------------------------------
+//
+// Three real `.note` fixtures as a manifest, and their transcripts as a terms
+// stream. This is what the file header above used to say could not be written:
+// the ids are decimal now, so a manifest row's `fileId` names a card, and
+// `helpers/searchIndex.ts` writes honest `SMAN` bytes for the rest.
+//
+// The `updatedAt`s are constants rather than the fixture's own `NOW - n * DAY`,
+// because the manifest's are SECONDS and only their ORDER is read (the rank's
+// tiebreak). Constants keep the encoder's "descending inside a tier" rule
+// checkable by eye.
+const INDEXED = [
+  { id: "121", name: "Project Aurora — kickoff", pages: 6, updatedAt: 1_700_000_000 },
+  { id: "141", name: "Attention Is All You Need", pages: 20, updatedAt: 1_699_000_000 },
+  { id: "161", name: "Unsorted — meeting doodles", pages: 2, updatedAt: 1_698_000_000 },
+] as const;
+
+/** All three as tier-1 rows — which is what a `.note` really is (§4.4), and what
+ *  makes the offline-text prefetch part of the path under test rather than
+ *  something the fixture arranged its way around. */
+const INDEX_ROWS: FixtureManifestRow[] = INDEXED.map((d) => ({
+  md5: fakeFileHash(d.id),
+  fileId: Number(d.id),
+  tier: "note",
+  updatedAt: d.updatedAt,
+  indexVersion: 1,
+  derivation: "derived",
+}));
+
+/** …and their terms, folded from the SAME generator the `text/<md5>` mock
+ *  serves. One source, so a match count and the marks it draws cannot drift. */
+const INDEX_DOCS = Object.fromEntries(
+  INDEXED.map((d) => [fakeFileHash(d.id), noteTermsDocument(fakeFileHash(d.id), d.name, d.pages)]),
+);
+
+/** The text records for the same three, for the prefetch and for find-in-note. */
+const INDEX_TEXT: Record<string, TextRecord> = Object.fromEntries(
+  INDEXED.map((d) => [fakeFileHash(d.id), noteTextRecord(d.name, d.pages)]),
+);
 
 test.describe("universal search", () => {
   test("typing surfaces rows that mark the matched name — and carry no excerpt", async ({ page }) => {
@@ -343,14 +382,14 @@ test.describe("universal search", () => {
   // document — and asserts that nothing else with `search` in its path was ever
   // requested.
   //
-  // It is the NEGATIVE half, and it is deliberately the negative half: the
-  // positive one ("the stream was fetched") is unreachable here for the reason
-  // the file header gives, but the negative one is what actually rots. A
-  // reintroduced `/note/:id/search`, `/note/:id/txt-search`, a history- or
-  // bin-scoped twin, or a revived library-wide `/api/controlplane/search` all
-  // fail this the moment they are called, and none of them would fail anything
-  // else in the suite — the viewers would simply work again, off the wrong
-  // mechanism.
+  // It is the NEGATIVE half, and it stays a test of its own now that the
+  // positive half exists below it: this one runs with NO index fixture at all,
+  // which is the shape almost every other spec in the suite has, and it is the
+  // one that actually rots. A reintroduced `/note/:id/search`,
+  // `/note/:id/txt-search`, a history- or bin-scoped twin, or a revived
+  // library-wide `/api/controlplane/search` all fail this the moment they are
+  // called, and none of them would fail anything else in the suite — the viewers
+  // would simply work again, off the wrong mechanism.
   test("no route with 'search' in its path is reached but the index's own two", async ({ page }) => {
     await signedIn(page);
     // `mockDocText` records every search-shaped request the page makes, not only
@@ -375,6 +414,71 @@ test.describe("universal search", () => {
     // Non-vacuity: the document's text really was fetched, once.
     expect(paths.filter((p) => p.startsWith("/api/controlplane/text/"))).toHaveLength(1);
     // …and every other search-shaped path belongs to the index's own two routes.
+    const strays = paths.filter(
+      (p) => !p.startsWith("/api/controlplane/text/") && !p.startsWith("/api/controlplane/search-index/"),
+    );
+    expect(strays).toEqual([]);
+  });
+
+  // THE POSITIVE HALF (§6.1), which the file header used to explain the absence
+  // of. The whole sentence, in one run: type a query into the library search
+  // box, open a result, search inside the document — and the network log
+  // contains the manifest, the stream and `text/<md5>`, and nothing else.
+  //
+  // WHAT IS REAL HERE, because the point is that almost all of it is: the
+  // manifest is decoded by `manifestCodec.ts`, diffed against IndexedDB by
+  // `manifestDiff.ts`, the difference is spelled as a `want` bitmap by
+  // `wantBitmap.ts` and READ BACK by the mock (so the bitmap's LSB-first bit
+  // order is checked in a browser rather than only in a unit test), the stream is
+  // parsed progressively by `termsStream.ts` into `termsStore.ts`, and the query
+  // is answered by a real FTS5 index inside real `sqlite-core.wasm`. What the
+  // fixture supplies is the bytes, and it supplies them through the same encoder
+  // `tests/unit/searchIndexFixture.test.ts` pins to the checked-in golden vector.
+  //
+  // "Endor" is the query on purpose: it lives ONLY in a transcript
+  // (`noteTranscript`'s marginalia line, odd pages), so no card's NAME can
+  // produce this row. The name half of library search — the half every other
+  // test in this file exercises — is provably not what answered.
+  test("the whole sweep, positively: manifest, stream, text/<md5>, and nothing else", async ({ page }) => {
+    await signedIn(page);
+    const index = await mockSearchIndex(page, { rows: INDEX_ROWS, documents: INDEX_DOCS });
+    const text = await mockDocText(page, INDEX_TEXT);
+    await page.goto("/");
+    await railSettled(page);
+
+    // The sync really ran: one manifest, one stream, and the stream asked for
+    // the three positions the diff found missing — by bitmap, decoded by the
+    // mock rather than assumed.
+    await expect.poll(() => index.streamHits(), { timeout: 20_000 }).toBe(1);
+    expect(index.wanted()).toEqual([[0, 1, 2]]);
+
+    await searchBox(page).fill("Endor");
+    const row = results(page).filter({ hasText: "Project Aurora — kickoff" });
+    await expect(row).toHaveCount(1);
+    // A DOCUMENT with a match count, not an excerpt (§4.3). Six pages, indices 2
+    // and 5 unrecognised, "Endor" on the ODD ones — so 1 and 3, and not 5.
+    await expect(matchLine(row)).toHaveText("Matches on 2 pages");
+
+    await row.locator(".card__open").click();
+    await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
+    // The deep link carries the query AND the first page it matched.
+    await expect(page).toHaveURL(/#\/note\/121\/page\/2\?q=Endor$/);
+    await expect(page.locator(".findbar__count")).toHaveText("1 of 2", { timeout: 20_000 });
+
+    // A second query inside the document, past the first call — where a fallback
+    // to a server route would have lived.
+    await page.getByRole("textbox", { name: "Find in this note" }).fill("witches");
+    await expect(page.locator(".findbar__count")).toHaveText("1 of 2", { timeout: 20_000 });
+
+    const paths = text.searchPaths();
+    // ALL THREE, positively. `text/<md5>` for this document is fetched by the
+    // §4.4 prefetch a tier-1 row earns rather than by the find — which is the
+    // design working, not the test dodging: the find then answers from the
+    // offline store and makes no request of its own.
+    expect(paths).toContain("/api/controlplane/search-index/manifest");
+    expect(paths).toContain("/api/controlplane/search-index/stream");
+    expect(paths).toContain(`/api/controlplane/text/${fakeFileHash("121")}`);
+    // …and NOTHING else. The same filter as the negative half above.
     const strays = paths.filter(
       (p) => !p.startsWith("/api/controlplane/text/") && !p.startsWith("/api/controlplane/search-index/"),
     );

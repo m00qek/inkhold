@@ -1047,13 +1047,65 @@ test.describe("recycle bin", () => {
     // the tile reserved its final width before any bytes arrived.
     await expect(spdRow.locator(".bin__thumb")).toHaveClass(/has-aspect/);
 
-    // The `.txt`: a rasterised snippet of its ACTUAL head — read off the
-    // BIN-scoped raw route, because the live `/file/{id}` 404s for anything
-    // trashed. This is the fetch the doc glyph never made.
+    // The `.txt`: a rasterised snippet of its ACTUAL head, not the doc glyph —
+    // ink the mark could not produce.
     const txt = page.locator(".bin__row", { hasText: "readme" }).locator(".bin__thumb img");
     await expect(txt).toHaveCount(1);
     await expect.poll(() => imgInkFraction(txt), { timeout: 6000 }).toBeGreaterThan(0.004);
+
+    // AND IT COST NOTHING. This walk saw `readme` twice — once as a live list
+    // row, once as a trashed one — and the raw blob was read exactly ONCE across
+    // BOTH scopes. That is the facade's own claim, stated in `ThumbSource.bin`:
+    // "cache entries stay keyed by hash alone, because the bytes are the same
+    // bytes whichever route carried them". It only became assertable when the
+    // bin's `fileHash` stopped being `<id>-md5` and became the live blob's own
+    // address (`binFake.ts`'s `BlobHash`) — before that the two tiles keyed
+    // differently and the second one paid for the first's bytes again.
+    //
+    // Which route the bin tile mints when the cache is genuinely COLD is the
+    // next test; it cannot be asked here, because arriving via the Files listing
+    // is what warms it.
+    expect(hits.fileHits("177") + hits.binFileHits("177")).toBe(1);
+  });
+
+  test("a trashed .txt tile reads its bytes off the BIN route when the cache is cold", async ({ page }) => {
+    // The other half of the test above, and it needs the bin to be the FIRST
+    // place the facade meets this blob: the live `/file/{id}` goes through
+    // `Files.get`, which hardcodes `deleted = 0`, so a tile that minted it would
+    // 404 its way to a glyph — but a tile that never fetches at all cannot show
+    // you which URL it would have used.
+    //
+    // So the file is trashed from its VIEWER, deep-linked. `readme` lives in the
+    // Files folder and the route lands on the ROOT gallery, which does not list
+    // it, so no facade tile for `177` is ever painted while it is live. The
+    // viewer's own raw fetch does not warm the facade — different cache — which
+    // is exactly the split this exercises.
+    await signedIn(page);
+    const hits = await mockThumbnailBackend(page, { textIds: ["177"] });
+    await page.goto("/#/note/177");
+    await freezeMotion(page);
+
+    const region = page.getByRole("region", { name: "Text viewer" });
+    await expect(region).toBeVisible();
+    await region.getByRole("button", { name: "Move to bin" }).click();
+    await expect(page.locator(".bin-toast")).toContainText("Moved");
+
+    // Everything the LIVE viewer read, before the bin paints anything. The
+    // viewer mints `/file/177` for its own bytes; what must not grow past this
+    // is the count AFTER the file is trashed.
+    const liveBefore = hits.fileHits("177");
+
+    // In-app, never a goto: a reload rebuilds the fake `Api` and loses the trash.
+    await openBin(page);
+
+    const txt = page.locator(".bin__row", { hasText: "readme" }).locator(".bin__thumb img");
+    await expect(txt).toHaveCount(1);
+    await expect.poll(() => imgInkFraction(txt), { timeout: 6000 }).toBeGreaterThan(0.004);
+    // The fetch the doc glyph never made, on the scope a trashed blob answers.
     expect(hits.binFileHits("177")).toBeGreaterThan(0);
+    // …and NOT on the live one, which `Files.get`'s `deleted = 0` would have
+    // 404'd on the real server.
+    expect(hits.fileHits("177")).toBe(liveBefore);
   });
 
   test("a trashed .pdf renders its page 0 off the BIN route, and learns the page's shape", async ({ page }) => {

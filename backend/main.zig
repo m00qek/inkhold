@@ -84,7 +84,6 @@ test {
     _ = @import("services/settings.zig");
     _ = @import("services/health.zig");
     _ = @import("services/note_index.zig");
-    _ = @import("services/search/maintain.zig");
     _ = @import("services/search/fuzzy.zig");
     _ = @import("services/search/index_export.zig");
     _ = @import("services/search/want_bitmap.zig");
@@ -93,7 +92,6 @@ test {
     _ = @import("services/txt_index.zig");
     _ = @import("services/pdf_text.zig");
     _ = @import("services/pending.zig");
-    _ = @import("services/search_partition.zig");
     _ = @import("services/auth/password.zig");
     _ = @import("services/auth/service.zig");
     _ = @import("handlers/auth.zig");

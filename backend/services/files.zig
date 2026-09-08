@@ -58,9 +58,13 @@
 //! responsible for. Charging it also makes the per-user `K` a safe thing to hand
 //! to a person — raising it spends their own allotment.
 //!
-//! `userBlobRefs` (files only) survives alongside it and is NOT interchangeable:
-//! SEARCH rows follow live file references, because text from content no file
-//! holds must stop being findable whatever history says.
+//! `userBlobRefs` (files only) survives alongside it and is NOT interchangeable.
+//! It existed for SEARCH — segment rows followed live file references, because
+//! text from content no file holds had to stop being findable whatever history
+//! said — and `golden-search.md` §6 step 8 removed that reader. What keeps it is
+//! `holdsBlob`, the ownership gate on md5-keyed reads: "may this account see
+//! bytes derived from this content" is the FILES question, and a `file_history`
+//! row is not a thing anyone browses.
 //!
 //! Under quota pressure the write paths **evict the user's oldest versions rather
 //! than refuse**, and refuse only when the live files alone do not fit — see
@@ -80,7 +84,6 @@ const derivedstore = @import("../store/derived.zig");
 const derivesearch = @import("derive_search.zig");
 const authsvc = @import("auth/service.zig");
 const noteindex = @import("note_index.zig");
-const notesearch = @import("search/maintain.zig");
 const thumbnail = @import("thumbnail.zig");
 const spdindex = @import("spd_index.zig");
 const txtindex = @import("txt_index.zig");
@@ -1111,29 +1114,21 @@ pub const Files = struct {
         // Reference the new blob unless it's the same content we already had.
         const same_content = if (old_md5) |om| std.mem.eql(u8, &om, md5) else false;
 
-        // ---- the two reference counts, read BEFORE any row write changes them ----
+        // ---- the reference count, read BEFORE any row write changes it ----
         //
-        // They used to be one pair of booleans doing two jobs. They are now
-        // deliberately SEPARATE, because quota and search stopped agreeing about
-        // what a reference is:
+        // QUOTA follows anything that keeps the bytes on disk
+        // (`userChargedRefs`), which since §6 includes `file_history`. A retained
+        // version occupies disk, so the user is charged for it, exactly as a
+        // trashed file is charged.
         //
-        //   - SEARCH follows LIVE FILE rows (`userBlobRefs`). A blob held only by
-        //     a retained version must NOT stay searchable — find-in-library would
-        //     surface text from content no live file holds.
-        //   - QUOTA follows anything that keeps the bytes on disk
-        //     (`userChargedRefs`), which since §6 includes `file_history`. A
-        //     retained version occupies disk, so the user is charged for it,
-        //     exactly as a trashed file is charged.
-        //
-        // Fusing them again would silently re-break one of the two.
-        var new_first = false; // the user's FIRST live-file reference to the new content
-        var old_last = false; // the replaced row held their LAST live-file reference to the old
+        // There used to be a SECOND pair of booleans beside it, read through
+        // `userBlobRefs`, because SEARCH counted only LIVE FILE rows: a blob held
+        // only by a retained version had to stop being searchable, or
+        // find-in-library would surface text from content no live file held. The
+        // two were deliberately separate so fusing them could not silently
+        // re-break one. `golden-search.md` §6 step 8 removed the search half.
         var new_charge = false; // the user held NO reference of any kind to the new content
-        if (!same_content) {
-            new_first = try self.userBlobRefs(user_id, md5) == 0;
-            new_charge = try self.userChargedRefs(user_id, md5) == 0;
-            if (old_md5) |om| old_last = try self.userBlobRefs(user_id, &om) == 1;
-        }
+        if (!same_content) new_charge = try self.userChargedRefs(user_id, md5) == 0;
 
         var file_id: u64 = undefined;
         const ts = self.now();
@@ -1178,26 +1173,14 @@ pub const Files = struct {
 
         try self.bumpSync(user_id); // an upload/replace changed the tree
 
-        // ---- search segment maintenance ----
-        // The owner's segment rows follow the content they hold, in THIS
-        // transaction — search atomically sees exactly one version. A new
-        // VERSION of a note is a new blob, and when this row was both the
-        // user's last reference to the old content and their first to the new,
-        // that is the flip: diffed by text_hash, unchanged pages REPOINTED
-        // (zero FTS writes, recency kept), edited pages vanish + mint fresh.
-        // When the reference counts say otherwise the flip degenerates: the
-        // old rows stay (another of the user's files still needs them) and/or
-        // the new rows already exist. All of it MUST run before the decref
-        // below — the FTS 'delete' side reads the old blob's text rows, which
-        // a refcount-0 GC would take away.
-        if (!same_content) {
-            if (old_last and new_first) {
-                try notesearch.flipOwnerBlob(self.db, user_id, &old_md5.?, md5, ts);
-            } else {
-                if (old_last) try notesearch.dropOwnerBlobSearch(self.db, user_id, &old_md5.?);
-                if (new_first) try notesearch.mintOwnerBlobSearch(self.db, user_id, md5, ts);
-            }
-        }
+        // (A REPLACE USED TO MAINTAIN SEARCH HERE. The owner's segment rows
+        // followed the content they held, in this same transaction, so search
+        // atomically saw exactly one version — `flipOwnerBlob` when this row was
+        // both their last reference to the old content and their first to the
+        // new, and a drop and/or a mint when the reference counts said
+        // otherwise. `golden-search.md` §6 step 8 deleted that index. What the
+        // client sees a new version of instead is the derived files, which are
+        // keyed by md5 and so need no per-owner bookkeeping at all.)
 
         // Release the replaced blob. RETAIN-ON-SUPERSEDE (H1): when versioning is
         // on, record the superseded version FIRST, so the `file_history` row is in
@@ -1665,10 +1648,6 @@ pub const Files = struct {
         const cap = try self.capacity(user_id);
         if (cap.used + delta > cap.total) return error.QuotaExceeded; // errdefer rolls back
         try self.addUsed(user_id, delta);
-
-        // Search postings are per-owner-per-blob and already exist for this owner
-        // (via the source) whenever `delta == 0`; only a first reference mints them.
-        if (delta != 0) try notesearch.mintOwnerBlobSearch(self.db, user_id, md5, ts);
 
         try self.bumpSync(user_id); // the tree gained a row
         try self.db.exec("COMMIT;");
@@ -2162,12 +2141,12 @@ pub const Files = struct {
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
 
-        // The account's search world goes FIRST, while the md5-keyed text the
-        // FTS deletes read still exists: every posting in the user's
-        // partitions, the segment rows (one exact range delete per partition),
-        // and the partition mapping rows. Restore never needed anything;
-        // deletion needs exactly this.
-        try notesearch.dropUserSearch(self.db, user_id);
+        // (The account's search world used to go FIRST here, while the md5-keyed
+        // text the FTS deletes read still existed: every posting in the user's
+        // partitions, the segment rows, and the partition mapping rows.
+        // `golden-search.md` §6 step 8 deleted all three, and the derived files
+        // this account's blobs may still have are reaped with the BLOBS below —
+        // they are md5-keyed and shared, so they were never per-account.)
 
         // EVERY file row, tombstoned ones included.
         //
@@ -2623,22 +2602,15 @@ pub const Files = struct {
             _ = try s.step();
         }
 
-        // The owner's SEARCH rows follow LIVE FILE references, so this pass still
-        // asks `userBlobRefs`: a blob no file of theirs holds any more must stop
-        // being findable, whatever `file_history` says about it.
-        //
-        // Read AFTER the deletes above, so it sees the final state — and BEFORE
-        // the decrefs below, because the FTS 'delete' reads the md5-keyed text a
-        // refcount-0 GC would take away.
-        var seen: std.ArrayList([md5_len]u8) = .empty;
-        defer seen.deinit(self.gpa);
-        outer: for (doomed.items) |*d| {
-            for (seen.items) |*s| if (std.mem.eql(u8, s, &d.md5)) continue :outer;
-            try seen.append(self.gpa, d.md5);
-            if (try self.userBlobRefs(user_id, &d.md5) == 0) {
-                try notesearch.dropOwnerBlobSearch(self.db, user_id, &d.md5);
-            }
-        }
+        // (A SEARCH PASS used to sit here, between the deletes and the decrefs.
+        // The owner's segment rows followed LIVE FILE references, so it asked
+        // `userBlobRefs` per distinct doomed blob: a blob no file of theirs held
+        // any more had to stop being findable, whatever `file_history` said. It
+        // ran after the deletes so it saw the final state, and before the decrefs
+        // because the FTS 'delete' read the md5-keyed text a refcount-0 GC would
+        // take away. `golden-search.md` §6 step 8 removed the index; a purge's
+        // only remaining search effect is the derived files a reaped blob takes
+        // with it, which `removeBlobFiles` handles below.)
 
         // Refund the mirror image of what `linkBlobIndexed` charged: one refund
         // per DISTINCT blob, and only for a blob this user no longer references
@@ -2680,10 +2652,14 @@ pub const Files = struct {
     /// because the bin holds a real reference to real bytes.
     ///
     /// This is the per-user counterpart to `blobs.refcount` (which is global, so
-    /// it cannot answer "does THIS user still hold this blob?"), and it is what
-    /// decides whether a link charges quota or an unlink refunds it. Quota is
-    /// billed per distinct blob per user; dedup across two users is not a
-    /// discount on either account.
+    /// it cannot answer "does THIS user still hold this blob?").
+    ///
+    /// **Its one caller is `holdsBlob`.** It used to be quota's predicate too,
+    /// and stopped being one when §6 made a retained version chargeable —
+    /// `userChargedRefs` is that question now. It also used to gate the search
+    /// index's per-owner rows, and §6 step 8 removed those. What is left is the
+    /// ownership boundary on md5-keyed reads, which is genuinely this question
+    /// and not the wider one.
     fn userBlobRefs(self: Files, user_id: u64, md5: []const u8) !u64 {
         var r = (try self.db.row(
             "SELECT COUNT(*) FROM files WHERE user_id = ?1 AND is_folder = 0 AND md5 = ?2;",
@@ -3335,19 +3311,14 @@ pub const Files = struct {
         }
 
         // Truly unreferenced. The blob's index dies with it, in this same
-        // transaction — otherwise we leak rows AND keep searchable text for
-        // deleted content. (The schema's ON DELETE CASCADE is the backstop; this
-        // is the intent.)
+        // transaction — otherwise we leak rows for deleted content. (The schema's
+        // ON DELETE CASCADE is the backstop; this is the intent.)
         //
-        // The FTS pass goes FIRST and cannot be folded into the cascade: an
-        // external-content FTS5 delete reads the text back out of
-        // `note_page_index` to know which postings to subtract, so it only works
-        // while those rows are still there. At this point every owner already
-        // dropped their segment rows (the paths that release a last reference
-        // do), so this is normally a no-op — the structural backstop for anything
-        // a bug left behind, paired with the segment-row sweep inside
-        // `deleteForBlob`.
-        try notesearch.unindexBlob(self.db, md5);
+        // An FTS pass used to go FIRST here, and could not be folded into the
+        // cascade: an external-content FTS5 delete read the text back out of
+        // `note_page_index` to know which postings to subtract, so it only worked
+        // while those rows were still there. `golden-search.md` §6 step 8 deleted
+        // that index, and the ordering constraint with it.
         try noteindex.deleteForBlob(self.db, md5);
         try spdindex.deleteForBlob(self.db, md5); // intent; the FK cascade is the backstop
         var s = try self.db.prepare("DELETE FROM blobs WHERE md5 = ?1;");
@@ -6405,10 +6376,9 @@ test "repairDerivedThumb (.note) heals a stale row and a wiped row — restoring
     try testing.expect((try f.files.noteCover(md5)) != null); // location restored
 
     // 2. Row wiped entirely (a pre-index blob): repair restores the row + its
-    // cover location. Segment rows are derived too; their FK deliberately blocks
-    // deleting pages from under them, so wipe them first (see note_index tests).
-    try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('delete-all');");
-    try f.db.exec("DELETE FROM segment_search;");
+    // cover location. (This used to have to wipe `segment_fts` and
+    // `segment_search` first — their FK blocked deleting pages from under them.
+    // `golden-search.md` §6 step 8 removed both.)
     try f.db.exec("DELETE FROM note_index;");
     try testing.expect(f.files.thumbNeedsRepair(md5));
     f.files.repairDerivedThumb(NoLock{}, md5);
@@ -6704,17 +6674,30 @@ test "SEARCH-NEUTRALITY: a renamed + relocated note leaves the blob-keyed index 
     defer freeEntry(note);
 
     // Record the index size so we can prove the move never touched it. A rename
-    // is a `files` row edit and the index is keyed on the BLOB, so a mechanism
-    // that re-minted on rename would be re-deriving for nothing — and would move
-    // the masked rowids that the re-mint and heal paths are defined against.
-    // Index-neutrality is the property that belongs here; what the browser can
-    // then find is the browser's, off `text/<md5>`.
-    const seg_before = blk: {
-        var s = try f.db.prepare("SELECT COUNT(*) FROM segment_search;");
-        defer s.finalize();
-        _ = try s.step();
-        break :blk s.columnInt(0);
-    };
+    // is a `files` row edit and everything derived is keyed on the BLOB, so a
+    // mechanism that re-derived on rename would be doing minutes of work for
+    // nothing. Derivation-neutrality is the property that belongs here; what the
+    // browser can then find is the browser's, off `text/<md5>`.
+    //
+    // It used to count `segment_search` rows, which were per owner x blob and
+    // therefore the thing a path-aware mechanism would have disturbed. Those went
+    // with `golden-search.md` §6 step 8, so the same question is asked of the row
+    // set that survives: the blob's page index, and its `indexed_at` stamp, which
+    // a re-derive would move even if the row count came out the same.
+    const IndexState = struct { rows: i64, indexed_at: i64 };
+    const read = struct {
+        fn get(db: sqlite.Db, md5: []const u8) !IndexState {
+            var r = (try db.row(
+                "SELECT (SELECT COUNT(*) FROM note_page_index WHERE blob_md5 = ?1), " ++
+                    "indexed_at FROM note_index WHERE blob_md5 = ?1;",
+                &.{.{ .text = md5 }},
+            )) orelse return error.NoIndexRow;
+            defer r.finalize();
+            return .{ .rows = r.int(0), .indexed_at = r.int(1) };
+        }
+    }.get;
+    const before = try read(f.db, note.md5.?);
+    try testing.expect(before.rows > 0); // or the assertion below is vacuous
 
     // RENAME it AND relocate it into a freshly-created folder — the exact device
     // move that once 404'd. The blob (and its md5-keyed index) is untouched.
@@ -6727,16 +6710,12 @@ test "SEARCH-NEUTRALITY: a renamed + relocated note leaves the blob-keyed index 
     }
     try testing.expectEqual(@as(?u64, note.id), try f.files.resolvePath(1, "/Archive/renamed.note"));
 
-    // The proof it was neutral: the segment index has exactly the rows it had
-    // before the move — nothing reindexed, nothing dropped (the index is keyed by
-    // the blob's md5 + partition, not by path).
-    const seg_after = blk: {
-        var s = try f.db.prepare("SELECT COUNT(*) FROM segment_search;");
-        defer s.finalize();
-        _ = try s.step();
-        break :blk s.columnInt(0);
-    };
-    try testing.expectEqual(seg_before, seg_after);
+    // The proof it was neutral: the blob's index is byte-for-byte the one it had
+    // before the move — nothing re-derived, nothing dropped (it is keyed by the
+    // blob's md5, not by path).
+    const after = try read(f.db, note.md5.?);
+    try testing.expectEqual(before.rows, after.rows);
+    try testing.expectEqual(before.indexed_at, after.indexed_at);
 }
 
 test "listing hides a .mark that has its PDF beside it, and counts the same way" {

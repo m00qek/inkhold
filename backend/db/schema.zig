@@ -21,8 +21,9 @@
 //!   note_index / note_page_index — the per-blob `.note` index (pages/segments,
 //!                        recognized text, cover memo).
 //!   spd_index         — the per-blob `.spd` index.
-//!   search_partitions / segment_search / segment_text / segment_fts
-//!                     — partitioned per-owner full-text search.
+//!   (search_partitions / segment_search / segment_text / segment_fts were the
+//!    partitioned per-owner full-text index. `ddl_v1` still CREATEs them and
+//!    `ddl_v14` drops them again — see v14 for why the baseline is not edited.)
 //!
 //!   settings          — server-wide config (today: the bin retention window).
 //! Still to come with the sync-core slice: a change log.
@@ -87,7 +88,14 @@ const sqlite = @import("sqlite.zig");
 /// v13 DROPS `doc_terms` — the first step that removes rather than adds, and the
 /// only one so far that is irreversible in DATA (a revert restores the table's
 /// DDL, not its rows; a re-derive would).
-pub const version: i64 = 13;
+///
+/// v14 DROPS THE WHOLE SERVER-SIDE SEARCH INDEX — `segment_fts`, `segment_text`,
+/// `segment_search`, `search_partitions` and the `kind = 1`/`kind = 2` rows of
+/// `note_page_index`. `golden-search.md` §6 step 8: library and in-document
+/// search are the browser's, off the two derived stores, so every one of these
+/// was being written on each ingest and read by nothing. Irreversible in DATA on
+/// the same terms as v13, and much more of it.
+pub const version: i64 = 14;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -101,7 +109,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 /// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
 /// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
 /// missed on a bump). The comptime check below makes the drift a build error.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12, ddl_v13 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12, ddl_v13, ddl_v14 };
 
 comptime {
     if (steps.len != version) @compileError(
@@ -573,10 +581,12 @@ const ddl_v9 =
 ///   3     the text pass could not open a file the probe could. A verdict, for
 ///         the same reason every `pdf_probe` failure is one.
 ///
-/// The memo is reset by `note_index`'s upsert, because the note half's heal
-/// DELETES the `kind = 2` rows this column claims exist — see the comment
-/// there. A marker that outlived its rows would report a searchable document
-/// that no longer is.
+/// **SINCE v14 IT CLAIMS NO ROWS.** The `kind = 2` rows are gone and the column
+/// records the derivation of `terms/<md5>` and `text/<md5>` instead — the same
+/// four values, about files rather than rows. (It also stopped being reset by
+/// `note_index`'s upsert well before that, once the note half's tail delete was
+/// scoped to `kind = 0`: a reset forced minutes of re-extraction per book for a
+/// heal that touched none of its rows.)
 const ddl_v10 =
     \\ALTER TABLE note_index ADD COLUMN pdf_text INTEGER;
 ;
@@ -604,6 +614,13 @@ const ddl_v10 =
 ///
 /// Additive and nullable, and NO `index_version` bump: this changes how the
 /// derivation is remembered, not what it produces.
+///
+/// **SINCE v14 IT CLAIMS NO ROWS EITHER**: the `kind = 1` rows went, and the
+/// column records the derivation of `terms/<md5>` and `text/<md5>` instead. The
+/// backfill below still reads correctly on the one install that runs it — steps
+/// go in order, so v11 sees the rows three steps before v14 deletes them — and
+/// its answer stays right afterwards, because a blob that had segments is a blob
+/// whose text was successfully split.
 const ddl_v11 =
     \\ALTER TABLE note_index ADD COLUMN txt_index INTEGER;
     \\UPDATE note_index SET txt_index = 0
@@ -667,6 +684,134 @@ const ddl_v12 =
 const ddl_v13 =
     \\DROP TABLE doc_terms;
 ;
+
+/// v14 — the server-side search index goes, all of it.
+///
+/// `golden-search.md` §6 step 8. `segment_fts` was the FTS5 posting list,
+/// `segment_search` the per-owner masked rowids that scoped it, `segment_text`
+/// the view FTS5 read its external content through, `search_partitions` the
+/// generation counter the mask was built from, and `kind = 1` / `kind = 2` rows
+/// in `note_page_index` were `.txt` paragraphs and PDF pages that existed for no
+/// other reader. Steps 6 and 7 moved library-wide and in-document search into the
+/// browser, off `search-index/manifest`, `search-index/stream` and `text/<md5>`,
+/// so all of it had been written on every ingest and consulted by nothing since.
+///
+/// **What that was costing, measured on the deployment target** (§8.5): 98.1 s of
+/// HELD `db_lock` per whole-library ingest — 38% of an ingest and 100% of the part
+/// a device sync queues behind — with a worst single hold of 8,985 ms.
+///
+/// `kind = 0` STAYS. Those rows carry page geometry, layers, `bg_hash` and the
+/// link block: rendering, not search.
+///
+/// **ORDER IS LOAD-BEARING.** `segment_fts` first, because it is an
+/// external-content table over `segment_text`; then the view; then
+/// `segment_search`, whose FK to `note_page_index(id)` the row delete would
+/// otherwise trip; then the partitions; and only then the rows. Each object's
+/// indexes (`segment_search_segment`, `search_partitions_user`) and FTS5's own
+/// shadow tables go with their parents.
+///
+/// **The baseline still CREATEs all of it**, for v13's reason exactly: `ddl_v1`
+/// is the verbatim text `sqlite_master` held when the long-way migrations
+/// stopped, and editing it would make a fresh database diverge from a migrated
+/// one for every object after the edit. A fresh install creates five objects and
+/// drops them one step later.
+///
+/// Irreversible in DATA, and by far the largest such step. A revert restores the
+/// DDL and empty tables; the rows come back only from a full re-derive — and
+/// nothing would read them if they did.
+///
+/// Safe to run MID-DERIVE. The whole step is one transaction (`applyStep`), and
+/// a deferred worker interrupted between two chunks of a document left partial
+/// `kind = 1`/`kind = 2` rows and a half-filled band — both of which this deletes
+/// outright. What decides whether that document is re-derived is
+/// `note_index.txt_index` / `pdf_text`, which this does not touch.
+const ddl_v14 =
+    \\DROP TABLE segment_fts;
+    \\DROP VIEW segment_text;
+    \\DROP TABLE segment_search;
+    \\DROP TABLE search_partitions;
+    \\DELETE FROM note_page_index WHERE kind <> 0;
+;
+
+test "v14: the search index is gone, `kind = 0` stays, and a mid-derive database survives it" {
+    // The one step a revert cannot undo, so it is driven against the state that
+    // makes it dangerous: a database holding all three tenants' rows, with one
+    // document HALF written — the shape an interrupted chunked write left, and
+    // the reason this step has to be one transaction rather than five statements.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+
+    // Stop at v13 so the objects v14 drops are really there to be dropped.
+    inline for (steps[0..13], 1..) |ddl, n| try applyStep(db, n, ddl);
+    try std.testing.expectEqual(@as(i64, 13), try userVersion(db));
+
+    try db.exec(
+        \\INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);
+        \\INSERT INTO blobs(md5, size, refcount, created_at) VALUES('n', 10, 1, 0);
+        \\INSERT INTO blobs(md5, size, refcount, created_at) VALUES('t', 10, 1, 0);
+        \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, indexed_at) VALUES('n', 1, 1, 2, 0);
+        \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, indexed_at) VALUES('t', 1, 0, 0, 0);
+        \\-- kind 0: a note's two pages, which STAY (geometry, layers, transcript).
+        \\INSERT INTO note_page_index(blob_md5, kind, page_index, content_hash, width, height, layers, recogn_status, text)
+        \\  VALUES('n', 0, 0, 'h0', 100, 200, x'', 1, 'ink one');
+        \\INSERT INTO note_page_index(blob_md5, kind, page_index, content_hash, width, height, layers, recogn_status, text)
+        \\  VALUES('n', 0, 1, 'h1', 100, 200, x'', 1, 'ink two');
+        \\-- kind 1: a `.txt` HALF written — two paragraph rows of a longer document,
+        \\-- with a band reserved for more than were filled. `txt_index` is still
+        \\-- NULL, which is what says the write never finished.
+        \\INSERT INTO note_page_index(blob_md5, kind, page_index, content_hash, width, height, layers, recogn_status, text)
+        \\  VALUES('t', 1, 0, 'p0', 0, 0, x'', 1, 'para one');
+        \\INSERT INTO note_page_index(blob_md5, kind, page_index, content_hash, width, height, layers, recogn_status, text)
+        \\  VALUES('t', 1, 1, 'p1', 0, 0, x'', 1, 'para two');
+        \\INSERT INTO search_partitions(user_id, active, next_seq, created_at) VALUES(1, 1, 8, 0);
+    );
+    // A band over all four rows, with its postings — the FK from `segment_search`
+    // to `note_page_index` is exactly what a naive row delete would trip.
+    try db.exec(
+        \\INSERT INTO segment_search(id, segment_id)
+        \\  SELECT (1 << 48) + p.id, p.id FROM note_page_index p;
+        \\INSERT INTO segment_fts(rowid, txt)
+        \\  SELECT s.id, p.text FROM segment_search s JOIN note_page_index p ON p.id = s.segment_id;
+    );
+    try std.testing.expectEqual(@as(i64, 4), try countOf(db, "SELECT COUNT(*) FROM segment_search;"));
+
+    try applyStep(db, 14, ddl_v14);
+    try std.testing.expectEqual(@as(i64, 14), try userVersion(db));
+
+    // Every object of the index is gone — the FTS5 shadow tables with it, which
+    // `DROP TABLE` on a virtual table is what removes.
+    for ([_][]const u8{
+        "segment_fts",       "segment_text",        "segment_search",    "search_partitions",
+        "segment_fts_data",  "segment_fts_docsize", "segment_fts_idx",   "segment_fts_config",
+        "segment_search_segment", "search_partitions_user",
+    }) |name| {
+        var r = (try db.row("SELECT COUNT(*) FROM sqlite_master WHERE name = ?1;", &.{.{ .text = name }})).?;
+        defer r.finalize();
+        try std.testing.expectEqual(@as(i64, 0), r.int(0));
+    }
+
+    // `kind = 0` STAYS — geometry and transcript are rendering, not search — and
+    // the half-written `.txt`'s rows go whether the write finished or not.
+    try std.testing.expectEqual(@as(i64, 2), try countOf(db, "SELECT COUNT(*) FROM note_page_index;"));
+    try std.testing.expectEqual(@as(i64, 2), try countOf(db, "SELECT COUNT(*) FROM note_page_index WHERE kind = 0;"));
+    try std.testing.expectEqual(@as(i64, 2), try countOf(db, "SELECT COUNT(*) FROM note_index;")); // both memos survive
+
+    // The database is still consistent, and still migratable from here.
+    {
+        var r = (try db.row("PRAGMA integrity_check;", &.{})).?;
+        defer r.finalize();
+        try std.testing.expectEqualStrings("ok", r.text(0));
+    }
+    try migrate(db);
+    try std.testing.expectEqual(version, try userVersion(db));
+}
+
+/// A one-column count, for the v14 test's many of them.
+fn countOf(db: sqlite.Db, sql: []const u8) !i64 {
+    var r = (try db.row(sql, &.{})) orelse return error.NoRow;
+    defer r.finalize();
+    return r.int(0);
+}
 
 test "migrate creates the v1 schema and is idempotent" {
     var db = try sqlite.Db.openMemory();

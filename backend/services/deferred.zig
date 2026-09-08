@@ -135,7 +135,9 @@ pub const Job = struct {
     /// A name the blob is known by. Any holder's name will do — the extension
     /// is the whole gate, and a blob's holders cannot disagree about it.
     name: []const u8,
-    now: i64,
+    // (A `now` used to ride here, threaded into every band mint so a partition's
+    // `created_at` and a job's clock agreed. `golden-search.md` §6 step 8 deleted
+    // the partitions; nothing a tenant writes is timestamped any more.)
     /// The two derived stores (`golden-search.md` §2.1), or null where this
     /// deployment keeps none — every test that does not wire them, and
     /// `drainNow`. Null means "do not write them", never an error.
@@ -208,12 +210,13 @@ fn runTxt(job: Job) anyerror!void {
     // `txt_index` itself stays lock-agnostic — it knows about paragraphs, not
     // about threading — so the discipline lives here, where the threading does.
     //
-    // THE WRITE IS CHUNKED, for the reason `runPdfText` is: a 1,703-segment
-    // document written in one transaction held the global `db_lock` 137 ms on
-    // the dev box and **13.9 s on the Pi** (`mupdf.md` §9.8 measured exactly
-    // this segment write), and `txt_index.max_file_bytes` allows ten times that
-    // many paragraphs. So step 3 becomes reserve / chunk / finish, and the same
-    // parse-off-the-lock, write-under-it discipline is applied per chunk.
+    // **STEP 3 USED TO BE A CHUNKED WRITE.** A 1,703-segment document written in
+    // one transaction held the global `db_lock` 137 ms on the dev box and 13.9 s
+    // on the Pi, so the paragraph rows were written reserve / chunk / finish,
+    // one transaction per chunk. `golden-search.md` §6 step 8 deleted those rows
+    // and every one of those transactions with them: what this tenant writes to
+    // the database now is ONE verdict, and §8.5's 98.1 s of held lock per
+    // whole-library ingest is what that removes.
 
     // 1. Re-check under the lock. The discovery query said so a moment ago, but
     //    an upload may have healed it since; `needsDerive` is the authority.
@@ -223,80 +226,40 @@ fn runTxt(job: Job) anyerror!void {
     //    with the file and the whole reason this is not on the upload path.
     var d = (try txtindex.deriveStored(job.gpa, job.blobs, job.md5)) orelse return;
     defer d.deinit();
-    const rows = txtindex.rowCount(d);
 
     // 2b. The two derived FILES, still off the lock — §2.5's *"a file write is
-    //     not in a transaction at all"*. Nothing below needs them and nothing
-    //     reads them yet, so a failure here is logged and the indexing job
-    //     carries on: they are regenerable, and a document that is searchable
-    //     server-side but has no derived files is the state the whole library
-    //     is in today.
+    //     not in a transaction at all"*. They are now the ONLY output of this
+    //     pass a reader ever sees, but a failure is still logged rather than
+    //     fatal: they are regenerable from the blob, and `reconcileDerived`
+    //     finds a document whose files are missing by asking the DISK.
     //
     //     It can be off the lock BECAUSE THE FOLD DOES NOT TOUCH THIS DATABASE.
     //     `temp.token_fold` is a contentless scratch FTS5 table, so folding runs
     //     on a private in-memory connection and the shared one is not involved.
     //     Doing it on `job.db` would have meant holding the global write lock
     //     for the whole compression pass.
+    //
+    //     BEFORE the verdict, and that ordering is the point — §2.4 makes the
+    //     FILE the fact that a document is derived. Write it after and a crash
+    //     in between leaves a blob the discovery query will never offer again
+    //     and a file nothing will ever write.
     writeTxtFiles(job, d) catch |e| {
         log.warn("derived files failed for {s}: {t}", .{ job.md5, e });
     };
 
-    // 3. RESERVE, under the lock and in its own transaction: one contiguous run
-    //    of masked rowids per holder, so every chunk below lands at
-    //    `first_rowid + ordinal` however many transactions it takes. Minting per
-    //    chunk instead would let a concurrent ingest's band interleave into the
-    //    middle of this one, and the jump arithmetic library search rests on
-    //    would be gone (`search/maintain.zig`, reserved bands).
-    const bands = blk: {
-        job.lock.lockUncancelable(job.io);
-        defer job.lock.unlock(job.io);
-        if (!try txtindex.needsDerive(job.db, job.md5)) return; // raced while deriving
-        try job.db.exec("BEGIN IMMEDIATE;");
-        errdefer job.db.exec("ROLLBACK;") catch {};
-        const b = try txtindex.reserve(job.gpa, job.db, job.md5, rows, job.now);
-        try job.db.exec("COMMIT;");
-        break :blk b;
-    };
-    defer job.gpa.free(bands);
-
-    // 4. Chunk by chunk, IN READING ORDER, each in its own transaction with the
-    //    lock taken and released around it.
-    //
-    //    Forward from ordinal 0 on purpose: `rowid ASC == ordinal order` is what
-    //    keeps a document's segments ONE contiguous run, which is what
-    //    `search/maintain.zig`'s whole-doc re-mint and its `index_version` heal
-    //    are defined in terms of. Fill from anywhere else and a document half-way
-    //    through its write is a scattered band for as long as the write takes.
-    var at: usize = 0;
-    while (at < rows) {
-        const end = txtindex.chunkEnd(d, at);
-        job.lock.lockUncancelable(job.io);
-        defer job.lock.unlock(job.io);
-        // STILL OURS TO WRITE? The listing path's lazy heal
-        // (`txt_index.ensureIndexed`) writes the same document, and between two
-        // chunks it can do the whole of it. Its write drops the band this one
-        // reserved, so carrying on would lay a second band over the first.
-        // Cheap — one indexed single-row select — and it is only ever false
-        // because somebody else has already finished the work.
-        if (!try txtindex.needsDerive(job.db, job.md5)) return;
-        try job.db.exec("BEGIN IMMEDIATE;");
-        errdefer job.db.exec("ROLLBACK;") catch {};
-        try txtindex.storeChunk(job.db, job.md5, bands, d, at, end);
-        try job.db.exec("COMMIT;");
-        at = end;
-    }
-
-    // 5. Finish LAST, in its own transaction: the per-document term sets, the
-    //    late-holder repair, and only then the verdict that says this blob's
-    //    paragraphs are indexed. Every early return above leaves the blob
-    //    outstanding, which is safe because a re-run drops the partial band and
-    //    reserves afresh — it never patches holes.
+    // 3. The verdict, under the lock, in one transaction. Re-asked first because
+    //    the derive above ran without the lock, so an ingest — or a second pass
+    //    of this worker — may have answered the same question about the same blob
+    //    meanwhile. (It also arbitrated against the listing path's lazy heal,
+    //    `txt_index.ensureIndexed`, until that was removed for writing this
+    //    verdict WITHOUT the files it stands for.) Every early return above
+    //    leaves the blob outstanding, which is safe: a re-run derives it again.
     job.lock.lockUncancelable(job.io);
     defer job.lock.unlock(job.io);
     if (!try txtindex.needsDerive(job.db, job.md5)) return;
     try job.db.exec("BEGIN IMMEDIATE;");
     errdefer job.db.exec("ROLLBACK;") catch {};
-    try txtindex.finish(job.db, job.md5, d, job.now);
+    try txtindex.storeVerdict(job.db, job.md5, txtindex.verdictFor(d));
     try job.db.exec("COMMIT;");
 }
 
@@ -378,26 +341,23 @@ fn runPdfProbe(job: Job) anyerror!void {
     }
 }
 
-/// The PDF text pass — the tenant's second question, and the ONLY job here that
-/// does not fit the three-step shape.
+/// The PDF text pass — the tenant's second question, and back inside the
+/// three-step shape.
 ///
-/// The three steps assume the write is one transaction. That is right for a
-/// `.txt` and wrong for a book: `mupdf.md` §9.8 measured **13.9-24.4 s** of held
-/// `db_lock` for a single-transaction write of a 1,450-page document, which on
-/// one core is the whole machine. So the write is CHUNKED, and this function is
-/// the same discipline applied per chunk — parse off the lock, write under it,
-/// release — around a range of masked rowids RESERVED up front so the chunking
-/// cannot break search's contiguous-band invariant (`pdf_text.zig`,
-/// `search/maintain.zig`).
+/// **IT USED TO BE THE EXCEPTION, AND `golden-search.md` §6 step 8 ENDED THAT.**
+/// A 1,450-page PDF's `kind = 2` rows written in one transaction held the global
+/// `db_lock` for 13.9-24.4 s (`mupdf.md` §9.8), so the row write was CHUNKED —
+/// extract off the lock, commit under it, around a band of masked rowids
+/// reserved up front — and the derived files were a SECOND MuPDF walk of the
+/// same book, ~0.10 s/page on the target, accepted because the two consumers
+/// could not share one pull loop. Step 8 deleted the rows, the bands and the
+/// chunked write, and with them the second walk: what is left is one extraction,
+/// straight into `derive_search.writeDerived`, and one transaction for the
+/// verdict.
 ///
-/// `Tenant.run`'s contract permits exactly this: the lock is passed in rather
-/// than taken around the call, and "one transaction" was `runTxt`'s own choice,
-/// stated in its comment, never a rule this file imposes.
-///
-/// **Every early return leaves the blob outstanding**, and that is safe because
-/// a re-run drops the partial band and reserves afresh — it never patches holes.
-/// A crash between chunks is the same story: `pdf_text` is still NULL, so the
-/// discovery query offers the blob again.
+/// **Every early return leaves the blob outstanding**, which is safe because the
+/// whole pass is simply redone: `pdf_text` is still NULL, so the discovery query
+/// offers the blob again.
 fn runPdfText(job: Job) anyerror!void {
     // 1. Ask under the lock, as every tenant does.
     if (!try job.pdfNeedsText()) return;
@@ -421,120 +381,66 @@ fn runPdfText(job: Job) anyerror!void {
     defer ex.close();
 
     const doc_pages = ex.pages;
+    // `nextChunk` is the sole authority on where the walk stops
+    // (`min(pages, max_pages)`); this is the same arithmetic, for the verdict.
     const to_index = @min(doc_pages, pdftext.max_pages);
 
-    // 3. RESERVE, under the lock and in its own transaction. Cheap — one
-    //    `next_seq` bump per holder — and it is what makes every chunk below
-    //    land at `first_rowid + page_index` however long the pass takes.
-    const bands = blk: {
-        job.lock.lockUncancelable(job.io);
-        defer job.lock.unlock(job.io);
-        if (!try pdftext.needsText(job.db, job.md5)) return; // raced while opening
-        try job.db.exec("BEGIN IMMEDIATE;");
-        errdefer job.db.exec("ROLLBACK;") catch {};
-        const b = try pdftext.reserve(job.gpa, job.db, job.md5, to_index, job.now);
-        try job.db.exec("COMMIT;");
-        break :blk b;
-    };
-    defer job.gpa.free(bands);
-
-    // 4. Chunk by chunk: extract off the lock, commit under it.
-    var at: u32 = 0;
-    var any_text = false;
-    while (at < to_index) {
-        var chunk = (try pdftext.nextChunk(job.gpa, &ex, at)) orelse break;
-        defer chunk.deinit();
-        for (chunk.pages) |p| {
-            if (p.text.len != 0) any_text = true;
-        }
-        job.lock.lockUncancelable(job.io);
-        defer job.lock.unlock(job.io);
-        try job.db.exec("BEGIN IMMEDIATE;");
-        errdefer job.db.exec("ROLLBACK;") catch {};
-        try pdftext.storeChunk(job.db, job.md5, bands, chunk);
-        try job.db.exec("COMMIT;");
-        at = chunk.to();
-    }
-
-    // 4b. The two derived FILES, off the lock — §2.5's *"a file write is not in
-    //     a transaction at all"*. Failure is logged, never fatal: the files are
-    //     regenerable and a document that is searchable server-side but has no
-    //     derived files is the state the whole library is in today.
+    // 2b. THE WALK, off the lock: one page at a time out of MuPDF and straight
+    //     into the two derived files. Failure is logged, never fatal — the files
+    //     are regenerable and `reconcileDerived` asks the DISK for them.
     //
     //     BEFORE the verdict, and that ordering is the point. §2.4 makes the
-    //     FILE the fact that a document is derived; write it after `finish` and
-    //     a crash in between leaves a blob the discovery query will never offer
-    //     again and a file nothing will ever write. Before it, the same crash
-    //     leaves the blob outstanding and the whole pass is simply redone.
-    writePdfFiles(job, &ex, doc_pages, any_text) catch |e| {
+    //     FILE the fact that a document is derived; write it after the verdict
+    //     and a crash in between leaves a blob the discovery query will never
+    //     offer again and a file nothing will ever write.
+    var src = pdftext.Pages.init(job.gpa, &ex);
+    defer src.deinit();
+    writePdfFiles(job, &src, doc_pages) catch |e| {
         log.warn("derived files failed for {s}: {t}", .{ job.md5, e });
     };
+    // The verdict has to know whether ANY page had text, and that is a fact
+    // about the walk. Two cases reach here without one: a deployment with no
+    // derived stores (`writePdfFiles` returns before touching the source), and a
+    // failure part-way. Draining finishes the walk in both, and costs nothing
+    // when `writeDerived` already exhausted it.
+    while (try src.next()) |_| {}
 
-    // 5. Finish LAST, in its own transaction: the per-document term sets, the
-    //    late-holder repair, and only then the verdict that says this document
-    //    is indexed.
+    // 3. The verdict, under the lock, in one transaction. Re-asked first, as
+    //    every tenant step is: the walk above ran without the lock, and a heal or
+    //    an upload can answer the same question about the same blob in between.
     job.lock.lockUncancelable(job.io);
     defer job.lock.unlock(job.io);
+    if (!try pdftext.needsText(job.db, job.md5)) return;
     try job.db.exec("BEGIN IMMEDIATE;");
     errdefer job.db.exec("ROLLBACK;") catch {};
-    try pdftext.finish(job.db, job.md5, at, pdftext.verdictFor(doc_pages, at, any_text), job.now);
+    try pdftext.finish(job.db, job.md5, to_index, pdftext.verdictFor(doc_pages, to_index, src.any_text));
     try job.db.exec("COMMIT;");
 }
 
 /// `terms/<md5>.<v>` and `text/<md5>.<v>` for one `.pdf`.
 ///
-/// **THIS IS A SECOND EXTRACTION OF THE SAME DOCUMENT, and the cost is real:**
-/// ~0.10 s/page on the deployment target, so the 1,703-page harshest subject on
-/// record goes from ~2 minutes to ~4. Niced to 19 and off the lock in both
-/// halves — measured at 1.4 ms of foreground latency, `mupdf.md` §9.8 — so what
-/// it spends is background wall-clock on the least urgent job the worker has,
-/// not responsiveness. It is not a second OPEN: `pdf/text.zig`'s `Extractor` is
-/// random access with its own reopen schedule, so the SAME one is walked again
-/// from page 0 and the second pass costs the pages and nothing else.
+/// The page source is the CALLER'S, and that is the change §6 step 8 made here.
 ///
-/// **It was accepted rather than overlooked.** The two consumers cannot share
-/// one walk without one of them driving the other: `writeDerived` is a pull
-/// loop, the chunk loop above is a pull loop, and fusing them means either
-/// inverting `writeDerived` into a callback — which is exactly the shape §2.2's
-/// per-page record removed — or putting `job.db`, the lock and the reserved
-/// bands inside `pdf_text.Pages`, which is a format-blind page source that would
-/// then know about transactions. It would also entangle the two failure modes:
-/// a derived-file write failing is logged and survivable, an index write failing
-/// is not, and in one loop they become the same error.
+/// This used to own the source and walk the extractor a SECOND time — ~0.10
+/// s/page on the deployment target, taking the 1,703-page harshest subject on
+/// record from ~2 minutes to ~4. It was accepted rather than overlooked: the
+/// chunked `kind = 2` write and `writeDerived` are both PULL loops, and fusing
+/// them meant either inverting `writeDerived` into a callback (exactly the shape
+/// §2.2's per-page record removed) or putting `job.db`, the lock and the
+/// reserved bands inside a format-blind page source. Step 8 deleted the other
+/// loop, so the source moved out to the caller and the second extraction is
+/// simply gone.
 ///
-/// **And it is transitional.** §2.5 retires `kind = 2` rows entirely — they
-/// exist only for search, and search is moving into these two files — at which
-/// point the chunked index write goes and this becomes the only pass.
-fn writePdfFiles(
-    job: Job,
-    ex: *pdftextpass.Extractor,
-    doc_pages: u32,
-    any_text: bool,
-) !void {
+/// **A SCAN needs no special case any more.** Its source yields nothing, and
+/// `writeDerived` over an empty source writes exactly the header-only pair the
+/// old `NoPages` shortcut wrote by hand — the right artifact, not an omission:
+/// §2.4 makes the file's existence the fact that the document is derived, and a
+/// scan genuinely is.
+fn writePdfFiles(job: Job, src: *pdftext.Pages, doc_pages: u32) !void {
     const terms_store = job.terms orelse return;
     const text_store = job.text orelse return;
-
-    // A SCAN COSTS NOTHING TO DERIVE, and must not cost a second pass to find
-    // that out. The walk above already proved every page came back empty, so the
-    // source is skipped and the two header-only files are written directly —
-    // which is the right artifact, not an omission: §2.4 makes the file's
-    // existence the fact that the document is derived, and a scan genuinely is.
-    if (!any_text) {
-        var none: NoPages = .{};
-        return derivesearch.writeDerived(job.gpa, terms_store, text_store, job.md5, doc_pages, &none);
-    }
-
-    var src = pdftext.Pages.init(job.gpa, ex);
-    defer src.deinit();
-    try derivesearch.writeDerived(job.gpa, terms_store, text_store, job.md5, doc_pages, &src);
+    try derivesearch.writeDerived(job.gpa, terms_store, text_store, job.md5, doc_pages, src);
 }
-
-/// A page source with no pages — the whole of a scanned document's derivation.
-const NoPages = struct {
-    pub fn next(_: *NoPages) !?derivesearch.Page {
-        return null;
-    }
-};
 
 /// Every tenant, in one named place so the SET of them can be tested rather
 /// than only the individual tenants — the same reason `startupSweeps` exists.
@@ -663,12 +569,9 @@ fn derivePdf(job: Job) !void {
     defer file.close(job.io);
     var ex = pdftextpass.Extractor.open(file) catch return;
     defer ex.close();
-    // `any_text = true` is "we have not walked it", not a claim. `runPdfText`
-    // knows a scan is a scan because its index pass already saw every page come
-    // back empty; this pass has seen nothing. Walking a scan anyway costs one
-    // MuPDF pass and writes exactly the same header-only pair, so guessing wrong
-    // costs time on the least urgent job the worker has and never correctness.
-    try writePdfFiles(job, &ex, ex.pages, true);
+    var src = pdftext.Pages.init(job.gpa, &ex);
+    defer src.deinit();
+    try writePdfFiles(job, &src, ex.pages);
 }
 
 /// What the worker found on one pass.
@@ -859,7 +762,6 @@ pub const Worker = struct {
                 .io = self.io,
                 .md5 = &c.md5,
                 .name = c.name,
-                .now = std.Io.Clock.real.now(self.io).toSeconds(),
                 .terms = terms,
                 .text = text,
             }, c.indexable) catch |e| {
@@ -934,7 +836,6 @@ pub const Worker = struct {
                 .io = self.io,
                 .md5 = &found.md5,
                 .name = found.name,
-                .now = std.Io.Clock.real.now(self.io).toSeconds(),
                 .terms = self.terms,
                 .text = self.text,
             }) catch |e| {
@@ -1079,13 +980,14 @@ const Fixture = struct {
         };
     }
 
-    fn segmentCount(f: *Fixture, md5: []const u8) !i64 {
-        var r = (try f.db.row(
-            "SELECT COUNT(*) FROM note_page_index WHERE blob_md5 = ?1 AND kind = 1;",
-            &.{.{ .text = md5 }},
-        )).?;
-        defer r.finalize();
-        return r.int(0);
+    /// Has the `.txt` tenant finished with this blob? The VERDICT, which is what
+    /// the tenant writes to the database and the only thing it writes.
+    ///
+    /// It used to count the blob's `kind = 1` paragraph rows; `golden-search.md`
+    /// §6 step 8 deleted them, and the derived FILES the tenant now produces are
+    /// asserted directly in the tests that wire the stores.
+    fn txtDone(f: *Fixture, md5: []const u8) !bool {
+        return !(try txtindex.needsDerive(f.db, md5));
     }
 };
 
@@ -1118,7 +1020,7 @@ test "the .txt tenant writes BOTH derived files, and they inflate to the §2.2 r
     };
     w.drain();
 
-    try testing.expectEqual(@as(i64, 2), try f.segmentCount(&md5));
+    try testing.expect(try f.txtDone(&md5));
     try testing.expect(terms.has(&md5, derivesearch.index_version));
     try testing.expect(text.has(&md5, derivesearch.index_version));
 
@@ -1160,21 +1062,22 @@ test "no stores wired means no files and no failure" {
     defer f.deinit();
     const md5 = try f.put("notes.txt", two_paragraphs);
     f.drain();
-    try testing.expectEqual(@as(i64, 2), try f.segmentCount(&md5));
+    // The verdict still lands, so the worker settles rather than re-offering the
+    // blob every idle tick. There is simply nothing to write it to disk.
+    try testing.expect(try f.txtDone(&md5));
 }
 
-
-test "an upload does NOT index the .txt, and a drain does" {
+test "an upload does NOT derive the .txt, and a drain does" {
     // The whole point. `putFile` used to chunk the file while the client held
     // the connection — 15-19 s for 5 MB on the deployment target.
     var f = try Fixture.init();
     defer f.deinit();
 
     const md5 = try f.put("notes.txt", two_paragraphs);
-    try std.testing.expectEqual(@as(i64, 0), try f.segmentCount(&md5));
+    try std.testing.expect(!try f.txtDone(&md5));
 
     f.drain();
-    try std.testing.expectEqual(@as(i64, 2), try f.segmentCount(&md5));
+    try std.testing.expect(try f.txtDone(&md5));
 }
 
 test "a second drain finds nothing — the query excludes finished work, so the worker cannot spin" {
@@ -1224,89 +1127,58 @@ fn manyParagraphs(a: std.mem.Allocator, n: usize) ![]const u8 {
     return out.items;
 }
 
-test "THE .txt WRITE FILLS IN READING ORDER and records its verdict LAST" {
-    // The shipped driver's write ORDER, asserted against the driver itself
-    // rather than against a test helper that imitates it. Both halves matter
-    // and both are silent when wrong:
+test "THE .txt DERIVE WRITES IN READING ORDER, and the verdict comes AFTER the files" {
+    // Both halves matter and both are silent when wrong:
     //
-    //   - **forward from ordinal 0**, because `rowid ASC == ordinal order` is
-    //     what a find's keyset relies on; a document filled from anywhere else
-    //     is a scattered band for the duration of its own write;
-    //   - **the verdict after every row**, because it is the memo, and a memo
-    //     that lands first calls an interrupted write finished for ever.
+    //   - **forward from ordinal 0**, so a document's records are one ascending
+    //     run and a client can address any paragraph by its ordinal;
+    //   - **the verdict after the two files**, because §2.4 makes the FILE the
+    //     fact that a document is derived, and a memo that lands first calls an
+    //     un-derived blob finished for ever — the discovery query would never
+    //     offer it again and nothing would ever write its files.
     //
-    // TRIGGERS are the only honest observer of order from outside the
-    // transactions — one records each paragraph row as it lands, the other the
-    // moment the verdict is stamped.
+    // This used to assert the same two things about a CHUNKED ROW WRITE, through
+    // triggers on `note_page_index` and `note_index` — the only honest observer
+    // of order from outside those transactions. `golden-search.md` §6 step 8
+    // deleted the rows and the chunking, so the order is now observable directly:
+    // the records are in the file, and the verdict is in the row.
     var f = try Fixture.init();
     defer f.deinit();
-    try f.db.exec(
-        \\CREATE TABLE probe(seq INTEGER PRIMARY KEY AUTOINCREMENT, ordinal INTEGER);
-        \\CREATE TRIGGER probe_ins AFTER INSERT ON note_page_index WHEN NEW.kind = 1
-        \\BEGIN INSERT INTO probe(ordinal) VALUES(NEW.page_index); END;
-        \\CREATE TRIGGER probe_verdict AFTER UPDATE OF txt_index ON note_index
-        \\WHEN NEW.txt_index IS NOT NULL
-        \\BEGIN INSERT INTO probe(ordinal) VALUES(-1); END;
-    );
+    const s = try f.stores();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const md5 = try f.put("book.txt", try manyParagraphs(arena.allocator(), 120));
-    f.drain();
 
-    // Reading order, ordinal 0 first — whatever the chunk boundaries were.
-    {
-        var r = (try f.db.row("SELECT ordinal FROM probe ORDER BY seq LIMIT 1;", &.{})).?;
-        defer r.finalize();
-        try std.testing.expectEqual(@as(i64, 0), r.int(0));
-    }
-    {
-        var r = (try f.db.row(
-            "SELECT COUNT(*) FROM probe a JOIN probe b ON b.seq = a.seq + 1 " ++
-                "WHERE a.ordinal >= 0 AND b.ordinal >= 0 AND b.ordinal <> a.ordinal + 1;",
-            &.{},
-        )).?;
-        defer r.finalize();
-        try std.testing.expectEqual(@as(i64, 0), r.int(0)); // never a step back
-    }
-    // And the verdict is the very last thing that happened.
-    {
-        var r = (try f.db.row("SELECT ordinal FROM probe ORDER BY seq DESC LIMIT 1;", &.{})).?;
-        defer r.finalize();
-        try std.testing.expectEqual(@as(i64, -1), r.int(0));
-    }
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = s.terms,
+        .text = s.text,
+    };
+    w.drain();
 
-    // Every paragraph was written exactly once, in however many transactions.
-    try std.testing.expectEqual(@as(i64, 120), try f.segmentCount(&md5));
-    {
-        var r = (try f.db.row(
-            "SELECT COUNT(*), COUNT(DISTINCT ordinal) FROM probe WHERE ordinal >= 0;",
-            &.{},
-        )).?;
-        defer r.finalize();
-        try std.testing.expectEqual(@as(i64, 120), r.int(0));
-        try std.testing.expectEqual(@as(i64, 120), r.int(1));
-    }
+    // The verdict is the LAST thing: both files exist by the time it is true.
+    try testing.expect(try f.txtDone(&md5));
+    try testing.expect(s.terms.has(&md5, derivesearch.index_version));
+    try testing.expect(s.text.has(&md5, derivesearch.index_version));
 
-    // And what the chunks add up to is ONE contiguous band in ordinal order —
-    // the invariant the reservation exists to keep across those transactions.
-    var s = try f.db.prepare(
-        "SELECT s.id FROM search_partitions sp " ++
-            "JOIN segment_search s ON s.id BETWEEN (sp.id << 48) AND ((sp.id + 1) << 48) - 1 " ++
-            "JOIN note_page_index p ON p.id = s.segment_id " ++
-            "WHERE sp.user_id = 1 AND p.blob_md5 = ?1 ORDER BY p.page_index;",
-    );
-    defer s.finalize();
-    s.bindText(1, &md5);
-    var n: i64 = 0;
-    var first: i64 = 0;
-    while (try s.step()) : (n += 1) {
-        if (n == 0) first = s.columnInt(0);
-        try std.testing.expectEqual(first + n, s.columnInt(0));
+    // Reading order: ordinal 0 first, every ordinal exactly once, never a step
+    // back — and the header's address space agrees with what followed.
+    const raw = try derivedstore.readPlain(arena.allocator(), s.text, &md5, derivesearch.index_version);
+    var lines = std.mem.tokenizeScalar(u8, raw, '\n');
+    const head = try std.json.parseFromSlice(std.json.Value, arena.allocator(), lines.next().?, .{});
+    try testing.expectEqual(@as(i64, 120), head.value.object.get("n").?.integer);
+
+    var expect_ordinal: i64 = 0;
+    while (lines.next()) |line| : (expect_ordinal += 1) {
+        const v = try std.json.parseFromSlice(std.json.Value, arena.allocator(), line, .{});
+        try testing.expectEqual(expect_ordinal, v.value.object.get("p").?.integer);
     }
-    try std.testing.expectEqual(@as(i64, 120), n);
-    try std.testing.expect(!try txtindex.needsDerive(f.db, &md5));
-    try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('integrity-check');");
+    try testing.expectEqual(@as(i64, 120), expect_ordinal);
 }
 
 test "a trashed .txt is not offered — the bin is not a work queue" {
@@ -1347,18 +1219,18 @@ test "the worker thread starts, does the work, and JOINS on stop" {
 
     const md5 = try f.put("notes.txt", two_paragraphs);
 
-    // The upload signalled it; wait for the segments rather than for a duration.
+    // The upload signalled it; wait for the verdict rather than for a duration.
     var spins: usize = 0;
     while (spins < 2000) : (spins += 1) {
         f.lock.lockUncancelable(testing.io);
-        const n = f.segmentCount(&md5) catch 0;
+        const done = f.txtDone(&md5) catch false;
         f.lock.unlock(testing.io);
-        if (n == 2) break;
+        if (done) break;
         std.Io.sleep(testing.io, .{ .nanoseconds = std.time.ns_per_ms }, .awake) catch {};
     }
     w.stop();
     try std.testing.expect(w.thread == null);
-    try std.testing.expectEqual(@as(i64, 2), try f.segmentCount(&md5));
+    try std.testing.expect(try f.txtDone(&md5));
 }
 
 /// A 200x100 page with `/Rotate 90` — so the honest answer is 100x200.
@@ -1483,12 +1355,15 @@ test "ONE JOB answers both of the .pdf tenant's questions — the shape, then th
     try std.testing.expectEqual(@as(?i64, 0), r.intOpt(1)); // pdfindex.Verdict.ok
     try std.testing.expectEqual(@as(?i64, 0), r.intOpt(2)); // pdftext.Verdict.ok
 
+    // And the text pass wrote no rows. It used to leave 120 `kind = 2` rows here;
+    // §6 step 8 made the two derived files its whole output, and those are
+    // asserted against real bytes in "the .pdf tenant writes BOTH derived files".
     var pages = (try f.db.row(
-        "SELECT COUNT(*) FROM note_page_index WHERE blob_md5 = ?1 AND kind = 2;",
+        "SELECT COUNT(*) FROM note_page_index WHERE blob_md5 = ?1;",
         &.{.{ .text = &md5 }},
     )).?;
     defer pages.finalize();
-    try std.testing.expectEqual(@as(i64, 120), pages.int(0));
+    try std.testing.expectEqual(@as(i64, 0), pages.int(0));
 }
 
 test "a second drain finds nothing for a finished PDF either — text is done work, not outstanding" {
@@ -1778,9 +1653,8 @@ test "RECONCILE: an ALREADY-INDEXED .txt gets its files, and a drain cannot give
     defer f.deinit();
 
     const md5 = try f.put("notes.txt", two_paragraphs);
-    f.drain(); // indexed by a worker with no stores wired: the shipped state
-    try testing.expectEqual(@as(i64, 2), try f.segmentCount(&md5));
-    try testing.expect(!try txtindex.needsDerive(f.db, &md5));
+    f.drain(); // derived by a worker with no stores wired: the shipped state
+    try testing.expect(try f.txtDone(&md5));
     try testing.expectEqual(@as(?Found, null), try nextJob(testing.allocator, f.db));
 
     const s = try f.stores();

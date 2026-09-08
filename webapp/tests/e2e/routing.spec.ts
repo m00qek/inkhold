@@ -1,6 +1,9 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { mockApi } from "./helpers/mockApi";
 import { signedIn, cardButton, railSettled } from "./helpers/app";
+import { mockDocText, noteTextRecord } from "./helpers/docText";
+import { mockSearchIndex, noteTermsDocument } from "./helpers/searchIndex";
+import { fakeFileHash } from "../../src/api/fake";
 
 // THE RULE, END TO END: every place has a URL; every navigation pushes and every
 // adjustment replaces.
@@ -354,29 +357,47 @@ test.describe("page numbers in the URL count from one", () => {
     await expect(page.locator(".pager__count")).toHaveText("20 / 20");
   });
 
-  // BROKEN SINCE `golden-search.md` §6 STEP 6, AND DECLARED RATHER THAN LEFT RED.
+  // BROKEN SINCE `golden-search.md` §6 STEP 6, DECLARED RATHER THAN LEFT RED —
+  // AND NOW RUNNING, because the fixture it was waiting for exists
+  // (`helpers/searchIndex.ts`).
   //
   // "Endor" exists only in a TRANSCRIPT (`noteTranscript` in helpers/docText.ts
   // writes it on odd pages), so this row can only come from the transcript half
-  // of a query — which step 6 moved onto the browser's own index. The e2e fake
-  // ships no index fixture (no `search-index/manifest`, no `search-index/stream`),
-  // so nothing fills the store, no hit is produced, and the click below has no
-  // row to click. The commit that deleted the server fallback did not mention it.
+  // of a query — which step 6 moved onto the browser's own index. Until the
+  // manifest and the stream had honest bytes here, nothing filled the store, no
+  // hit was produced, and the click below had no row to click.
   //
-  // WHAT IT MUST ASSERT WHEN THE FIXTURE LANDS — and it is not what the title
-  // says any more, because there are no excerpts (§4.3): a result row is a
-  // DOCUMENT carrying a match count (`.card__matches`, "Matches on 3 pages"),
-  // and its one link opens the FIRST matching page with the query attached. For
-  // "Endor" over "Project Aurora — kickoff" that is pages 1, 3 and 5 zero-based,
-  // so the first is index 1 → `/page/2?q=Endor`, which is the one-based
-  // conversion this describe block exists to pin.
-  //
-  // The prerequisite that WAS missing is met: fixture ids are decimal now, so
-  // the manifest's `fileId` varint can name a card (see `note` in
-  // `src/api/fake.ts`). What is left is a helper serving real bytes for those
-  // two routes — see the note at the top of `search.spec.ts`.
-  test.fixme("a search hit deep-links to the first page it matched, numbered the same way", async ({ page }) => {
+  // WHAT IT ASSERTS is not what its old title said, because there are no
+  // excerpts (§4.3): a result row is a DOCUMENT carrying a match count
+  // (`.card__matches`), and its one link opens the FIRST matching page with the
+  // query attached. Six pages; indices 2 and 5 carry no recognition
+  // (`recognisedPages`), and "Endor" is on the ODD ones — so pages 1 and 3
+  // zero-based, and the first is index 1 → `/page/2?q=Endor`, which is the
+  // one-based conversion this describe block exists to pin. (The `fixme`'s own
+  // note said three pages and page 5; page 5 is the third page with no
+  // transcript at all, which is exactly the sort of thing an unrun test says.)
+  test("a search hit deep-links to the first page it matched, numbered the same way", async ({ page }) => {
     await signedIn(page);
+    await mockSearchIndex(page, {
+      rows: [
+        {
+          md5: fakeFileHash("121"),
+          fileId: 121,
+          tier: "note",
+          updatedAt: 1_700_000_000,
+          indexVersion: 1,
+          derivation: "derived",
+        },
+      ],
+      documents: {
+        [fakeFileHash("121")]: noteTermsDocument(fakeFileHash("121"), "Project Aurora — kickoff", 6),
+      },
+    });
+    // The find bar the deep link primes fetches this — and so does the §4.4
+    // prefetch a tier-1 row earns. Without it the reader would open onto a red
+    // find bar, which would not fail the assertions below and would be a lie in
+    // the middle of a passing test.
+    await mockDocText(page, { [fakeFileHash("121")]: noteTextRecord("Project Aurora — kickoff", 6) });
     await page.goto("/");
     // "Endor" is on the ODD pages only, so the best-ranked page is not the first
     // — "the link carries a page" is a real claim here.
@@ -384,7 +405,7 @@ test.describe("page numbers in the URL count from one", () => {
     await searchBox(page).fill("Endor");
     const row = page.locator(".card--result").filter({ hasText: "Project Aurora — kickoff" });
     // A DOCUMENT with a match count, not an excerpt — the row's whole answer.
-    await expect(row.locator(".card__matches")).toHaveText("Matches on 3 pages");
+    await expect(row.locator(".card__matches")).toHaveText("Matches on 2 pages", { timeout: 20_000 });
     await row.locator(".card__open").click();
 
     await expect(page.locator(".pager__count")).toHaveText("2 / 6");

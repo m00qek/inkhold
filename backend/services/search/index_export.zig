@@ -99,9 +99,7 @@ fn nibble(c: u8) EncodeError!u8 {
 
 const sqlite = @import("../../db/sqlite.zig");
 const filesvc = @import("../files.zig");
-const maintain = @import("maintain.zig");
 const pending = @import("../pending.zig");
-const partition = @import("../search_partition.zig");
 
 /// Which pass of the fill this document belongs to — `client-side-search.md` §3,
 /// in its order, so `ORDER BY tier` IS the fill order and no second table maps
@@ -203,12 +201,21 @@ fn isNote(comptime a: []const u8) []const u8 {
     return "EXISTS (SELECT 1 FROM note_index WHERE blob_md5 = " ++ a ++ ".md5 AND indexable = 1)";
 }
 
+/// A page row that actually carries text. It used to be
+/// `search/maintain.zig`'s `fts_predicate`, imported so the manifest's notion of
+/// "searchable" could not drift from what the index sync had indexed; §6 step 8
+/// deleted that index and the sync with it, so the predicate lives here now,
+/// with only one caller left to agree with.
+const has_text = "text IS NOT NULL AND text <> ''";
+
 /// Carries recognised text somewhere — the exact complement of `unsearchable`.
-/// `maintain.fts_predicate` rather than a re-typed `text IS NOT NULL AND
-/// text <> ''`, so this cannot drift from what the index sync actually indexed.
+///
+/// Unscoped by `kind` and that is now moot: `kind = 1`/`kind = 2` rows went with
+/// step 8, and the only caller gates on `isNote` anyway, so the rows this can
+/// reach are `.note` pages.
 fn hasRecognisedText(comptime a: []const u8) []const u8 {
     return "EXISTS (SELECT 1 FROM note_page_index WHERE blob_md5 = " ++ a ++
-        ".md5 AND recogn_status = 1 AND " ++ maintain.fts_predicate ++ ")";
+        ".md5 AND recogn_status = 1 AND " ++ has_text ++ ")";
 }
 
 /// `client-side-search.md` §3's three passes as one SQL expression over the row

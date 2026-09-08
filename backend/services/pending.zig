@@ -216,11 +216,19 @@ pub const max_owners: usize = 32;
 ///
 /// THE BACKSTOP, and deliberately the deferred worker's own idle tick: it exists
 /// for exactly the same class of event — work that finished or appeared by a
-/// path that did not signal. The known one is `txt_index.ensureIndexed`, the
-/// lazy heal on the read path: it derives a `.txt` without going through the
-/// worker, so neither signal below moves and only this makes the count notice.
-/// Slow to react (up to 30 s) and never wrong for longer than that, which is the
-/// right trade for a transient line of UI.
+/// path that did not signal. `Files.putFile` is the ONLY caller of
+/// `Worker.signal`, so every other way the count moves lands here: trashing a
+/// `.txt` removes outstanding work (`deleted = 0` is in every tenant's clause),
+/// restoring it puts the work back, and a purge takes it away for good — three
+/// writes the worker never hears about. Slow to react (up to 30 s) and never
+/// wrong for longer than that, which is the right trade for a transient line of
+/// UI.
+///
+/// It used to name a fourth: `txt_index.ensureIndexed`, the `.txt` lazy heal on
+/// the READ path, which finished a derive without going through the worker. That
+/// heal is gone — the verdict has one writer now — so a `.txt` no longer leaves
+/// `pending` by any route but the worker, and `Pulse.version` moves for every one
+/// of them.
 pub const default_max_age_ms: i64 = deferred.idle_tick_ns / std.time.ns_per_ms;
 
 /// What one poll of the live channel needs to know about the index.
@@ -336,14 +344,19 @@ pub const Pulse = struct {
 
     /// Jobs the deferred worker has completed in this process.
     ///
-    /// KNOWN GAP, stated because a consumer will build a cache on it: this
-    /// observes the WORKER, so a document brought up to date by the lazy heal on
-    /// a read path (`txt_index.ensureIndexed`) does not move it. That document's
-    /// disappearance from `pending` IS still observed — the count is a fresh
-    /// query, not a counter — so a client watching for "something changed" is
-    /// still told; only the version number stays put. Restart-relative and not
-    /// persisted, which is right for a live channel that reconnects and re-reads,
-    /// and wrong for anything that tries to store it across a reboot.
+    /// THE KNOWN GAP HERE IS CLOSED, and it is worth saying which one: this
+    /// observes the WORKER, and a `.txt` brought up to date by the lazy heal on a
+    /// read path (`txt_index.ensureIndexed`) used to leave `pending` without
+    /// moving it. That heal is gone, so every derive this counter is meant to
+    /// report now runs inside `Tenant.run` and increments `done`.
+    ///
+    /// What it still does NOT observe is a document that leaves `pending` by
+    /// ceasing to be a document — a trash, or a purge. That disappearance IS
+    /// observed by the count beside it, which is a fresh query rather than a
+    /// counter, so a client watching for "something changed" is told; only the
+    /// version number stays put. Restart-relative and not persisted, which is
+    /// right for a live channel that reconnects and re-reads, and wrong for
+    /// anything that tries to store it across a reboot.
     fn version(self: *Pulse) i64 {
         const w = self.worker orelse return 0;
         return @intCast(w.done.load(.acquire));
@@ -635,10 +648,12 @@ test "an upload and a finished derive each make the count ask again — the sign
     try testing.expect(pulse.counts > after_upload);
 }
 
-test "the backstop makes a count expire even when nothing signalled — a lazy heal is not the worker" {
-    // `txt_index.ensureIndexed` derives a `.txt` on a READ path, so neither
-    // signal moves and the remembered count would otherwise stand for ever. The
-    // failure mode is the worst one this feature has: "still indexing" on screen
+test "the backstop makes a count expire even when nothing signalled" {
+    // A `Pulse` with no worker wired sees NEITHER signal, which is the shape of
+    // every change `Files.putFile` does not make — a trash, a restore, a purge,
+    // and (until it was removed) the `.txt` lazy heal on the read path. Without
+    // the backstop the remembered count would stand for ever, and the failure
+    // mode is the worst one this feature has: "still indexing" on screen
     // permanently, over a library that is fully indexed.
     var f = try Fixture.init();
     defer f.deinit();

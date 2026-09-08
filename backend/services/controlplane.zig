@@ -52,7 +52,6 @@ const Entry = @import("files.zig").Entry;
 const sn = @import("supernote");
 const noteindex = @import("note_index.zig");
 const spdindex = @import("spd_index.zig");
-const txtindex = @import("txt_index.zig");
 const settingsmod = @import("settings.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
@@ -1439,28 +1438,31 @@ pub const ControlPlaneService = struct {
         ) catch {};
     }
 
-    /// The `.txt` half of the lazy heal (the segment seam's first tenant):
-    /// a pre-existing `.txt`, invisible to search before the v5→v6 bump,
-    /// derives its paragraph segments on its first LISTING view — the one
-    /// place with the file NAME in hand, which is the derivation gate.
-    ///
-    /// Ordered AFTER `backfill` at every call site: the note half heals the
-    /// `note_index` row to the current version first, and `txt_index`'s own
-    /// gate returns early on a stale row (it would only derive segments the
-    /// note heal's tail-drop wipes). A no-op — one indexed SELECT — once the
-    /// blob is derived. Best-effort: a bad file costs its own searchability,
-    /// never the whole listing. One-time cost per blob on that first view
-    /// (seconds for a big file, plan decision 6).
-    fn txtBackfill(self: ControlPlaneService, md5: []const u8, name: []const u8) void {
-        txtindex.ensureIndexed(
-            self.files.gpa,
-            self.files.db,
-            self.files.blobs,
-            md5,
-            name,
-            std.Io.Clock.real.now(self.files.io).toSeconds(),
-        ) catch {};
-    }
+    // THE `.txt` HALF OF THE LAZY HEAL IS GONE, and this is where it was.
+    //
+    // `txtBackfill` called `txt_index.ensureIndexed` once per listing row: it
+    // parsed the blob (up to 16 MB, ranged) and wrote `note_index.txt_index`, so
+    // that a `.txt` the deferred worker had not reached yet recorded its verdict
+    // on a READ. That was worth its cost while the verdict meant "the paragraphs
+    // are in `segment_fts`"; `golden-search.md` §6 step 8 deleted that index, and
+    // what the verdict came to mean is "`terms/<md5>` and `text/<md5>` exist" —
+    // which this path never wrote.
+    //
+    // So it did not merely cost a parse on the wrong path. `deferred.runTxt`
+    // writes the two FILES and *then* the verdict, and states why the order is
+    // load-bearing (§2.4: the file is the fact). Writing the verdict alone
+    // inverted it: the blob stopped being offered to the worker, and
+    // `pending.owesDerive` — the manifest's `Derivation` byte — reported
+    // `derived` for a document whose derived files did not exist. It cost no
+    // data (the client's `manifestDiff` deliberately ignores `derivation`, and
+    // `reconcileDerived` writes the files on a later idle tick), but it was the
+    // one direction that column is documented never to lie in.
+    //
+    // Nothing replaces it. Every blob this could reach is a LIVE, non-folder
+    // `files` row, which is exactly the set `txt_index.pending_from_where`
+    // offers the worker — and `Files.putFile` signals the worker on commit, so
+    // the normal case never waits for the 30 s tick. The bin never called this
+    // (`bin` heals the note half only), so no reach is lost there either.
 
     /// One page's ref straight out of `note_page_index`. The dims are the stored
     /// **effective** per-page dims (the note's real header size, orientation
@@ -1596,10 +1598,9 @@ pub const ControlPlaneService = struct {
                 if (indexable and count > 0) first = try self.pageRefAt(arena, md5, 0);
                 aspect = aspectOf(row, first);
             }
-            // The listing is where a `.txt` heals into search (it has the
-            // name — the derivation gate). Runs after the note backfill
-            // inside `indexRowEnsuring`; a no-op once derived.
-            self.txtBackfill(md5, entry.name);
+            // NO `.txt` HEAL HERE ANY MORE — see the deleted `txtBackfill` above.
+            // A listing row is built from the `note_index` row and nothing else;
+            // the `.txt` derivation is the deferred worker's alone.
         }
 
         const file_type = try fileTypeFor(arena, indexable, marker, entry.name);
@@ -2448,11 +2449,6 @@ test "cold path: an unindexed blob is backfilled on first read, then served with
     var svc = ControlPlaneService.init(&f.files);
 
     // Simulate a blob that predates the index (or whose eager index failed).
-    // The segment rows (and their postings) are derived state too, and their
-    // FK deliberately blocks deleting pages from under them — wipe them the
-    // way a pre-index database simply never had them.
-    try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('delete-all');");
-    try f.db.exec("DELETE FROM segment_search;");
     try f.db.exec("DELETE FROM note_index;");
     try testing.expect(!try noteindex.isCurrent(f.db, &md5));
 

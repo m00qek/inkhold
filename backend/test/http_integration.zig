@@ -1216,10 +1216,14 @@ test "sync supersede RETAINS the prior version: history row, old blob kept, and 
     // the current blob PLUS the retained one; the meter used to read only the
     // current, which is precisely the figure that was lying.
     try std.testing.expectEqual(@as(i64, @intCast(v1.len + v2.len)), try usedBytes(f, alice));
-    // Two blobs coexist now (current + retained); global search stays current-only
-    // (the retained version never re-enters the FTS — the H2 invariant).
+    // Two blobs coexist now (current + retained). Search stays CURRENT-ONLY —
+    // the H2 invariant — and that is no longer a property of an index that the
+    // retained version was kept out of: `golden-search.md` §6 step 8 deleted the
+    // index, and what a client is told about is the MANIFEST, which is a
+    // projection of `files` and so reaches a version only while a live row points
+    // at it. Pinned end-to-end by the recognized-text supersede test below, which
+    // asserts v1's words become unfindable and v2's findable.
     try std.testing.expectEqual(@as(i64, 2), try countRows(f, "SELECT COUNT(*) FROM blobs;"));
-    try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM segment_search;"));
 }
 
 // ---- hot-cache versioning: "history of this file" HTTP endpoints (phases 3-6) ----
@@ -3626,11 +3630,15 @@ fn countTrashed(f: *Fixture, user_id: u64) !i64 {
 /// TRANSCRIPT rows directly rather than calling anything.
 ///
 /// A plain case-folded substring over `note_page_index.text`, joined to `files`
-/// the way every deleted read joined it. Deliberately NOT the FTS and NOT a
-/// tokenizer: re-deriving `buildMatch`'s expression here would be
-/// re-implementing a deleted function to keep its tests alive, and would also
-/// die again at step 8 when `segment_fts` goes. Every caller below searches a
-/// single ASCII word, which a substring answers identically.
+/// the way every deleted read joined it. Deliberately NOT a tokenizer:
+/// re-deriving `buildMatch`'s expression here would be re-implementing a deleted
+/// function to keep its tests alive. Every caller below searches a single ASCII
+/// word, which a substring answers identically.
+///
+/// **`kind = 0` is why this still works after step 8.** The rows it reads are
+/// `.note` page transcripts, which are RENDERING state and survive; the `.txt`
+/// and `.pdf` rows that used to sit beside them went with the index in §6 step 8.
+/// Every caller below seeds a `.note`.
 ///
 /// The `files` join is what still carries the meaning: it is the same ownership
 /// + `deleted = 0` boundary the deleted reads carried, and it is what keeps
@@ -7177,11 +7185,7 @@ test "GET /thumbnail/{hash}: a wiped .note cover row heals on demand — the rep
     // Wipe the index row entirely — a pre-index (pre-cover-location) blob. The
     // magic dispatch must route the re-derive to the `.note` cover parse, which
     // repopulates the row's recorded cover location, and the next GET streams
-    // the cover straight from the blob. Segment rows are derived state too;
-    // their FK blocks deleting pages from under them, so wipe them first (a
-    // pre-index database simply never had them).
-    try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('delete-all');");
-    try f.db.exec("DELETE FROM segment_search;");
+    // the cover straight from the blob.
     try f.db.exec("DELETE FROM note_index;");
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "");

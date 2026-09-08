@@ -5,9 +5,19 @@ const std = @import("std");
 const sqlite_flags = [_][]const u8{
     // ---- Required by our code ----
 
-    // `note_page_fts` is an FTS5 external-content table. FTS5 is a *build
-    // option*, not a given: on a host SQLite built without it the schema
-    // migration fails at runtime. Vendoring turns that into a guarantee.
+    // FTS5 is a *build option*, not a given: on a host SQLite built without it
+    // the server fails at runtime. Vendoring turns that into a guarantee.
+    //
+    // **`golden-search.md` §6 step 8 deleted the server's FTS5 INDEX and this
+    // flag stayed**, which §6.1 says outright: what needs FTS5 now is
+    // `search/fuzzy.zig`'s contentless `temp.token_fold`, the tokenizer the
+    // derive step folds every document's terms through. That fold is the whole
+    // basis of parity-by-construction with the browser's own index (§2.2), so
+    // this is more load-bearing than it was when a table declared it — it is now
+    // the only thing standing between the two engines and a silent disagreement
+    // about what a word is. It also still runs during migration: `ddl_v1`
+    // creates `segment_fts` and `ddl_v14` drops it again (see `schema.zig` v14
+    // for why the baseline is not edited).
     "-DSQLITE_ENABLE_FTS5",
 
     // Serialized. serve mode runs one thread per connection over a SINGLE
@@ -825,6 +835,31 @@ pub fn build(b: *std.Build) void {
     const derive_exe = b.addExecutable(.{ .name = "derive-bench", .root_module = derive_mod });
     const derive_step = b.step("derive-bench", "Build the derive-path bench (measurement only)");
     derive_step.dependOn(&b.addInstallArtifact(derive_exe, .{}).step);
+
+    // The WRITE-SIDE bench, and the sibling of the one above: `derive_bench`
+    // times what `golden-search.md`'s new derive path costs, this one measured
+    // what the OLD index cost beside it — the reserved bands, the
+    // `segment_search` rows, the `segment_fts` postings and the `kind = 1`/
+    // `kind = 2` rows §6 step 8 deleted. Step 8 said "nobody has measured what it
+    // is worth"; the BEFORE was taken with this binary on the ARM1176 and is
+    // §8.5's table.
+    //
+    // **STEP 8 HAS LANDED, so its timing modes are gone with their subject** and
+    // what is left is `--mode probe`: the tables and rows at zero, beside a
+    // database size that can be compared with the same run before the migration.
+    // Cross-compiled and run on the ARM1176 for the same reason as its sibling,
+    // and it still needs no MuPDF.
+    const idxwrite_mod = b.createModule(.{
+        .root_source_file = b.path("backend/index_write_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    idxwrite_mod.addImport("supernote", supernote);
+    idxwrite_mod.addImport("spd", spd_mod);
+    linkSqlite(b, idxwrite_mod);
+    const idxwrite_exe = b.addExecutable(.{ .name = "index-write-bench", .root_module = idxwrite_mod });
+    const idxwrite_step = b.step("index-write-bench", "Build the write-side search bench (measurement only)");
+    idxwrite_step.dependOn(&b.addInstallArtifact(idxwrite_exe, .{}).step);
 
     // ---- Tests ----
     const test_step = b.step("test", "Run all tests");

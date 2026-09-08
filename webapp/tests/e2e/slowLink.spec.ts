@@ -683,14 +683,18 @@ const LAY = "n-lay";
 const PAGE_HASHES = ["a1".repeat(16), "b2".repeat(16), "c3".repeat(16)];
 
 /** A page ref as the control plane serves it, layered or not. Layers are OMITTED
- *  where a page has none — never `null`, never `[]` — exactly as the wire does. */
-function wirePage(index: number, layered: boolean) {
+ *  where a page has none — never `null`, never `[]` — exactly as the wire does.
+ *
+ *  `recognised` is what `findInNote`'s gate reads (`textHash` non-null on at
+ *  least one page); it defaults to FALSE, which is what every layers scenario
+ *  here wants and what makes the skeleton case in 1.10 representable at all. */
+function wirePage(index: number, layered: boolean, recognised = false) {
   return {
     index,
     hash: PAGE_HASHES[index] ?? `${index}`.repeat(32).slice(0, 32),
     width: 1404,
     height: 1872,
-    textHash: null,
+    textHash: recognised ? `t${index}`.repeat(16).slice(0, 32) : null,
     ...(layered ? { layers: layeredPageLayers(0) } : {}),
   };
 }
@@ -710,8 +714,9 @@ function layeredEntry(opts: { firstPageLayered: boolean; pageCount: number }) {
   };
 }
 
-/** …and as `getNoteMeta` answers it. `layered` lists which page indices carry layers. */
-function layeredMeta(pageCount: number, layered: number[]) {
+/** …and as `getNoteMeta` answers it. `layered` lists which page indices carry
+ *  layers; `recognised`, which carry a transcript. */
+function layeredMeta(pageCount: number, layered: number[], recognised: number[] = []) {
   return {
     id: LAY,
     name: "Layered field sketch",
@@ -719,7 +724,7 @@ function layeredMeta(pageCount: number, layered: number[]) {
     fileHash: "0".repeat(32),
     size: 1_048_576,
     pxPerMm: null,
-    pages: Array.from({ length: pageCount }, (_, i) => wirePage(i, layered.includes(i))),
+    pages: Array.from({ length: pageCount }, (_, i) => wirePage(i, layered.includes(i), recognised.includes(i))),
   };
 }
 
@@ -1051,9 +1056,13 @@ test.describe("the reader's note stage, mid-fetch", () => {
   // request merely ignored never fails at all.
   test("a superseded find gives its connection back rather than running to completion", async ({ page }) => {
     await mockApi(page, {
-      // The metadata lands, so find has the real page list and the query really
-      // runs — this test is about the fetch, not about the skeleton.
-      "controlplane/file/metadata": { json: layeredMeta(3, [0, 1, 2]) },
+      // The metadata lands, AND its pages carry `textHash` — find's own gate,
+      // which this scenario had never satisfied: every `wirePage` said
+      // `textHash: null`, so the Find button stayed disabled ("This note has no
+      // recognised text to search") and the fetch under test was never issued.
+      // The test is about the fetch, not about the skeleton, so the note is
+      // recognised throughout.
+      "controlplane/file/metadata": { json: layeredMeta(3, [0, 1, 2], [0, 1, 2]) },
       // Held, so the first query's text fetch is still on the wire when the next
       // keystroke supersedes it. That IS the window.
       "controlplane/text/": { delayMs: 6000, json: {} },

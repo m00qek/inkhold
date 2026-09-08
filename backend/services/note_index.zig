@@ -31,7 +31,6 @@ const sqlite = @import("../db/sqlite.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
 const blob_source = @import("../store/blob_source.zig");
-const search = @import("search/maintain.zig");
 const thumbnail = @import("thumbnail.zig");
 const derivesearch = @import("derive_search.zig");
 const sn = @import("supernote");
@@ -75,15 +74,15 @@ const Allocator = std.mem.Allocator;
 ///   region with no top-level `label` reconstructed from its words instead of
 ///   dropped. Only the `text` column content changes (raster/SNPG goldens are
 ///   untouched); notes re-derive it lazily on the next `ensureIndexed`.
-/// - **8** → canonical document order (in-doc-search plan): the heal re-mints
+/// - **8** → canonical document order (in-doc-search plan): the heal re-minted
 ///   any holder's segment band a PAST incremental flip left OUT of page order,
-///   so `rowid ASC == reading order` for legacy notes too. No stored-column
-///   change — the raster/SNPG/text goldens are untouched; the bump only forces
-///   `ensureIndexed` to run `recanonicalizeHolders`, a no-op on the already-
-///   contiguous bands every note minted since the whole-doc-band re-mint has.
+///   so `rowid ASC == reading order` for legacy notes too. **RETIRED** by
+///   `golden-search.md` §6 step 8 along with the bands themselves. Kept in the
+///   list because the number is spent. No stored-column change either way — the
+///   raster/SNPG/text goldens were untouched.
 /// - **9** → per-document term set (in-doc-search entry 8b): backfilled each
 ///   note's `doc_terms` — the in-doc fuzzy candidate pool — on the same
-///   `recanonicalizeHolders` heal. **RETIRED**: `golden-search.md` §6 step 6
+///   canonical-order heal. **RETIRED**: `golden-search.md` §6 step 6
 ///   moved the typo ladder into the browser and schema v13 dropped the table, so
 ///   this bump now heals nothing that still exists. Kept in the list because the
 ///   number is spent: a client that saw 9 must not see it again meaning
@@ -760,53 +759,48 @@ const upsert_page_sql =
     \\  links_length=excluded.links_length, links_hash=excluded.links_hash;
 ;
 
-/// The one format-specific write `reconcilePage` hands the note adapter: the
-/// page-row upsert (raster geometry, layers, the recognition columns the search
-/// engine knows nothing about). `ordinal` is the page index the driver diffed
-/// on, bound as `page_index`.
-const PageUpsert = struct {
-    blob_md5: []const u8,
-    page: PageRow,
-    buf: []u8,
-    pub fn upsert(self: @This(), db: sqlite.Db, ordinal: i64) !void {
-        var s = try db.prepare(upsert_page_sql);
-        defer s.finalize();
-        s.bindText(1, self.blob_md5);
-        s.bindInt(2, ordinal);
-        s.bindText(3, &self.page.content_hash);
-        s.bindInt(4, self.page.width);
-        s.bindInt(5, self.page.height);
-        s.bindBlob(6, packLayers(self.buf, self.page.layers));
-        s.bindInt(7, self.page.recogn_status);
-        if (self.page.text_hash) |*h| s.bindText(8, h) else s.bindNull(8);
-        s.bindIntOpt(9, if (self.page.recogn_offset) |v| @intCast(v) else null);
-        s.bindIntOpt(10, if (self.page.recogn_length) |v| @intCast(v) else null);
-        s.bindTextOpt(11, self.page.text);
-        s.bindTextOpt(12, self.page.bg_hash);
-        s.bindInt(13, self.page.source_page);
-        s.bindIntOpt(14, if (self.page.links_offset) |v| @intCast(v) else null);
-        s.bindIntOpt(15, if (self.page.links_length) |v| @intCast(v) else null);
-        if (self.page.links_hash) |*h| s.bindText(16, h) else s.bindNull(16);
-        _ = try s.step();
-    }
-};
+/// One page row: raster geometry, layers, the recognition columns, the link
+/// block. `buf` is the caller's scratch for `packLayers`.
+///
+/// It used to be a `PageUpsert` context handed to `search.reconcilePage`, which
+/// wrapped it in the posting dance — diff the stored text, subtract the old
+/// postings, upsert, then either refresh them in place or mint a fresh masked
+/// rowid. `golden-search.md` §6 step 8 deleted the index those postings fed, so
+/// what is left is the upsert the adapter always owned, called directly.
+fn upsertPage(db: sqlite.Db, blob_md5: []const u8, page: PageRow, buf: []u8) !void {
+    var s = try db.prepare(upsert_page_sql);
+    defer s.finalize();
+    s.bindText(1, blob_md5);
+    s.bindInt(2, page.page_index);
+    s.bindText(3, &page.content_hash);
+    s.bindInt(4, page.width);
+    s.bindInt(5, page.height);
+    s.bindBlob(6, packLayers(buf, page.layers));
+    s.bindInt(7, page.recogn_status);
+    if (page.text_hash) |*h| s.bindText(8, h) else s.bindNull(8);
+    s.bindIntOpt(9, if (page.recogn_offset) |v| @intCast(v) else null);
+    s.bindIntOpt(10, if (page.recogn_length) |v| @intCast(v) else null);
+    s.bindTextOpt(11, page.text);
+    s.bindTextOpt(12, page.bg_hash);
+    s.bindInt(13, page.source_page);
+    s.bindIntOpt(14, if (page.links_offset) |v| @intCast(v) else null);
+    s.bindIntOpt(15, if (page.links_length) |v| @intCast(v) else null);
+    if (page.links_hash) |*h| s.bindText(16, h) else s.bindNull(16);
+    _ = try s.step();
+}
 
 /// Writes `p`'s rows for `blob_md5`. Call inside the caller's transaction (the
 /// `blobs` row must already exist — the FK is what ties index lifetime to blob
 /// lifetime). Upserts throughout, so two racing parses of the same blob are
 /// wasteful but never a constraint violation, and a page row keeps its `id`
-/// across a re-index — no longer because the id is the FTS `content_rowid`
-/// (it is not; `segment_search.id` is), but because `segment_search.segment_id`
-/// REFERENCES it.
+/// across a re-index.
 ///
-/// This IS the "re-parse of the SAME blob" search path (
-/// step 2): segment rows and their masked rowids — the owners' recency — are
-/// untouched. The stored text is DIFFED per page, and only a page whose text
-/// actually changed refreshes its postings, IN PLACE ('delete' old before the
-/// row is rewritten, insert new after, at the same segment rowids, for every
-/// partition holding the blob). On first ingest there are no segment rows yet
-/// (the owner's are minted by `linkBlobIndexed` once the `files` row exists),
-/// so every per-page search call here is a no-op then.
+/// **It writes rows and nothing else now.** Until `golden-search.md` §6 step 8
+/// this was also the "re-parse of the SAME blob" search path: each page's stored
+/// text was diffed before the upsert, and a page whose text had changed had its
+/// FTS postings subtracted and re-inserted at the same masked rowids so the
+/// owners' recency survived a re-index. That index is gone, and with it the diff
+/// — a re-parse is now `page_count` upserts and a tail delete.
 pub fn store(db: sqlite.Db, blob_md5: []const u8, p: Parsed, now: i64) !void {
     {
         var s = try db.prepare(upsert_note_sql);
@@ -835,27 +829,17 @@ pub fn store(db: sqlite.Db, blob_md5: []const u8, p: Parsed, now: i64) !void {
     }
 
     var layer_buf: [max_layers * max_layer_rec_size]u8 = undefined;
-    for (p.pages) |page| {
-        // The per-page re-derive discipline (diff the stored text, refresh
-        // postings in place or mint a fresh rowid) lives once in
-        // `search.reconcilePage`; the adapter hands it only the new text to diff
-        // on and the page-row upsert.
-        try search.reconcilePage(db, blob_md5, page.page_index, page.text orelse "", now, PageUpsert{
-            .blob_md5 = blob_md5,
-            .page = page,
-            .buf = &layer_buf,
-        });
-    }
+    for (p.pages) |page| try upsertPage(db, blob_md5, page, &layer_buf);
 
     // A re-index at a new `index_version` could in principle yield fewer pages;
-    // drop any tail left over from the previous shape — every owner's segment
-    // rows for it first (postings while the text still resolves, then the rows,
-    // then the pages; the segment FK makes any other order a loud error).
-    // BOTH statements are scoped to `kind = 0` — the note half's own rows. The
-    // table has three tenants, and for a blob the note parser REJECTED (a PDF,
-    // a `.txt`) `page_count` is zero, so an unscoped tail delete is not a tail
-    // delete at all: it is "drop every segment anyone wrote for this blob".
-    try search.dropTailSearch(db, blob_md5, p.note.page_count);
+    // drop any tail left over from the previous shape.
+    //
+    // SCOPED TO `kind = 0` — the note half's own rows. The table had three
+    // tenants when this was written, and for a blob the note parser REJECTED (a
+    // PDF, a `.txt`) `page_count` is zero, so an unscoped tail delete was not a
+    // tail delete at all: it was "drop every row anyone wrote for this blob".
+    // §6 step 8 retired the other two tenants, so the scope is belt and braces
+    // now — kept because the column still exists and the rule still holds.
     {
         var s = try db.prepare(
             "DELETE FROM note_page_index WHERE blob_md5 = ?1 AND page_index >= ?2 AND kind = 0;",
@@ -951,19 +935,6 @@ pub fn coverLocation(db: sqlite.Db, md5: []const u8) !?CoverLocation {
 /// is the explicit statement of intent (and works with FKs off).
 pub fn deleteForBlob(db: sqlite.Db, blob_md5: []const u8) !void {
     {
-        // Backstop only: at refcount 0 every owner has already dropped their
-        // segment rows (and `decref` ran the FTS 'delete' pass just before
-        // this), so this normally deletes nothing — but a row a bug left
-        // behind must not trip the `segment_search.segment_id` FK below.
-        var s = try db.prepare(
-            "DELETE FROM segment_search WHERE segment_id IN " ++
-                "(SELECT id FROM note_page_index WHERE blob_md5 = ?1);",
-        );
-        defer s.finalize();
-        s.bindText(1, blob_md5);
-        _ = try s.step();
-    }
-    {
         var s = try db.prepare("DELETE FROM note_page_index WHERE blob_md5 = ?1;");
         defer s.finalize();
         s.bindText(1, blob_md5);
@@ -1019,10 +990,6 @@ pub fn ensureIndexed(
     try db.exec("BEGIN IMMEDIATE;");
     errdefer db.exec("ROLLBACK;") catch {};
     try store(db, md5, parsed, now);
-    // Canonical-order heal (index_version 8): retire any legacy edit-scatter in
-    // a holder's band so `rowid ASC == page order`. A no-op on bands already
-    // contiguous — every note minted since the whole-doc-band re-mint.
-    try search.recanonicalizeHolders(db, md5, now);
     try db.exec("COMMIT;");
 }
 
@@ -1768,11 +1735,6 @@ test "lazy backfill repairs a missing or stale row and is idempotent under repea
     try testing.expectEqual(@as(i64, 2), try f.countRows("SELECT COUNT(*) FROM note_page_index;"));
 
     // Simulate a pre-existing blob (indexed before this feature existed).
-    // The segment rows (and their postings) are derived state too, and their
-    // FK deliberately blocks deleting pages from under them — wipe them the
-    // way a pre-index database simply never had them.
-    try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('delete-all');");
-    try f.db.exec("DELETE FROM segment_search;");
     try f.db.exec("DELETE FROM note_index;");
     try testing.expectEqual(@as(i64, 0), try f.countRows("SELECT COUNT(*) FROM note_page_index;")); // cascaded
     try testing.expect(!try isCurrent(f.db, &md5));
@@ -1781,7 +1743,8 @@ test "lazy backfill repairs a missing or stale row and is idempotent under repea
     try testing.expect(try isCurrent(f.db, &md5));
     try testing.expectEqual(@as(i64, 2), try f.countRows("SELECT COUNT(*) FROM note_page_index;"));
 
-    // Page rowids must be stable — the FTS table will target them.
+    // Page rowids must be stable across a re-index — the upsert is what makes a
+    // heal cheap, and a heal that renumbered would be a delete-and-rewrite.
     const rowid_before = try f.countRows("SELECT id FROM note_page_index ORDER BY page_index LIMIT 1;");
 
     // Repeated calls are no-ops; nothing duplicates, nothing moves.
@@ -2480,11 +2443,6 @@ test "needsRepair: missing or stale row only — no derived file exists for a .n
     try testing.expect((try coverLocation(f.db, &md5_2)) == null);
 
     // And a missing row entirely (pre-existing blob) → repair (then memoize).
-    // The segment rows (and their postings) are derived state too, and their FK
-    // deliberately blocks deleting pages from under them — wipe them the way a
-    // pre-index database simply never had them.
-    try f.db.exec("INSERT INTO segment_fts(segment_fts) VALUES('delete-all');");
-    try f.db.exec("DELETE FROM segment_search;");
     try f.db.exec("DELETE FROM note_index;");
     try testing.expect(try needsRepair(f.db, f.files.thumbs, &md5_2));
 }

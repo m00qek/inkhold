@@ -148,9 +148,10 @@ else
     std.heap.page_allocator;
 
 /// MUST stay identical to `backend/services/search/fuzzy.zig`'s `fts_tokenizer`
-/// and to `segment_fts` in `schema.zig`. The terms the server ships are the
-/// output of THAT tokenizer; a different one here would index a folded term
-/// against a differently-folded query and quietly miss.
+/// — the ONE remaining anchor, since `golden-search.md` §6 step 8 deleted
+/// `segment_fts` and the server stopped holding an index of its own. The terms
+/// the server ships are the output of that tokenizer; a different one here would
+/// index a folded term against a differently-folded query and quietly miss.
 const tokenizer = "unicode61 remove_diacritics 2";
 
 /// How the local index is SHAPED. Bumped when `index_ddl` or `tokenizer`

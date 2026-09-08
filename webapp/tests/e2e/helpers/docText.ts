@@ -42,8 +42,14 @@ import type { Page } from "@playwright/test";
 // the browser inflates before `httpTextTransport`'s `await res.text()` ever
 // runs — `docText.ts`'s header is explicit that nothing on the client
 // decompresses. So a `route.fulfill` with a plain body reaches the parser as the
-// identical string. Serving a hand-gzipped body here would be testing
-// Playwright's header handling, not ours.
+// identical string.
+//
+// AND A HAND-GZIPPED BODY WOULD NOT WORK, which is stronger than "would prove
+// nothing". Measured in Chromium: Playwright fulfils a route BELOW the
+// content-encoding pipeline, so `content-encoding: gzip` is passed through as a
+// header and the gzip bytes arrive at the page verbatim (45 bytes beginning
+// `1f 8b 08 00` for a 55-byte record, with and without a matching
+// `content-length`). `helpers/searchIndex.ts`'s header records the probe.
 
 /** One extracted segment, in the record's own spelling (`p`/`o`/`l`/`t`). */
 export interface TextSegmentFixture {
@@ -296,8 +302,19 @@ export async function mockDocText(
   // for. `/page/{n}/text` is the one route that must NOT be swept up — it is the
   // word RECTANGLES, not a search — so the text route is matched with its
   // trailing slash, which only `text/{md5}` has.
+  //
+  // SCOPED TO `/api/`, because this is an API log and the app is served by Vite
+  // in dev: every module the browser imports is a real request for a real path,
+  // and after §6 step 7 the in-document engine lives at `src/search/*`. So an
+  // unscoped filter logged `/src/search/searchService.ts`,
+  // `/src/search/indexEngine.ts` and a dozen siblings — sixteen entries, none of
+  // them traffic, and every one of them a source file whose EXISTENCE is what
+  // the sweep is celebrating. Funny once; a permanently red assertion after
+  // that. The routes the sweep polices are all under `/api/controlplane/`, and a
+  // resurrected one would be too, so nothing it exists to catch is lost.
   page.on("request", (req) => {
     const path = new URL(req.url()).pathname;
+    if (!path.startsWith("/api/")) return;
     if (/search/.test(path) || path.includes("/text/")) searchPaths.push(path);
   });
 
