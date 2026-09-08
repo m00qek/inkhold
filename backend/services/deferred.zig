@@ -1124,7 +1124,7 @@ test "the .txt tenant writes BOTH derived files, and they inflate to the §2.2 r
     try testing.expect(terms.has(&md5, derivesearch.index_version));
     try testing.expect(text.has(&md5, derivesearch.index_version));
 
-    const t = try inflateStored(terms, &md5);
+    const t = try derivedstore.readPlain(testing.allocator, terms, &md5, derivesearch.index_version);
     defer testing.allocator.free(t);
     var lines = std.mem.tokenizeScalar(u8, t, '\n');
     const head = lines.next().?;
@@ -1143,7 +1143,7 @@ test "the .txt tenant writes BOTH derived files, and they inflate to the §2.2 r
 
     // The text file carries the real paragraph AND its byte range into the raw
     // blob -- the address `txtFind.ts` deep-links to.
-    const x = try inflateStored(text, &md5);
+    const x = try derivedstore.readPlain(testing.allocator, text, &md5, derivesearch.index_version);
     defer testing.allocator.free(x);
     var xlines = std.mem.tokenizeScalar(u8, x, '\n');
     _ = xlines.next();
@@ -1165,27 +1165,6 @@ test "no stores wired means no files and no failure" {
     try testing.expectEqual(@as(i64, 2), try f.segmentCount(&md5));
 }
 
-/// Read a stored fragment back to its plaintext, the way the stream route will:
-/// past the header, plus the final block the serve path appends.
-fn inflateStored(store: derivedstore.DerivedStore, md5: []const u8) ![]u8 {
-    var file = try store.open(md5, derivesearch.index_version);
-    defer file.close(store.io);
-    var raw: [1 << 16]u8 = undefined;
-    const n = try file.readPositionalAll(store.io, &raw, 0);
-
-    var body: std.Io.Writer.Allocating = .init(testing.allocator);
-    defer body.deinit();
-    try body.writer.writeAll(raw[derivedstore.header_len..n]);
-    try body.writer.writeAll(&[_]u8{ 0x03, 0x00 });
-
-    var input: std.Io.Reader = .fixed(body.written());
-    var window: [std.compress.flate.max_window_len]u8 = undefined;
-    var d = std.compress.flate.Decompress.init(&input, .raw, &window);
-    var out: std.Io.Writer.Allocating = .init(testing.allocator);
-    errdefer out.deinit();
-    _ = try d.reader.streamRemaining(&out.writer);
-    return out.toOwnedSlice();
-}
 
 test "an upload does NOT index the .txt, and a drain does" {
     // The whole point. `putFile` used to chunk the file while the client held
@@ -1596,7 +1575,7 @@ test "the .pdf tenant writes BOTH derived files, ACROSS CHUNK BOUNDARIES" {
     try testing.expect(terms.has(&md5, derivesearch.index_version));
     try testing.expect(text.has(&md5, derivesearch.index_version));
 
-    const t = try inflateStored(terms, &md5);
+    const t = try derivedstore.readPlain(testing.allocator, terms, &md5, derivesearch.index_version);
     defer testing.allocator.free(t);
     var lines = std.mem.tokenizeScalar(u8, t, '\n');
     try testing.expect(std.mem.indexOf(u8, lines.next().?, "\"n\":120") != null);
@@ -1618,7 +1597,7 @@ test "the .pdf tenant writes BOTH derived files, ACROSS CHUNK BOUNDARIES" {
 
     // The text file carries the page's real text, addressed by ORDINAL alone —
     // a PDF page has no byte range in the blob, so `o`/`l` are absent.
-    const x = try inflateStored(text, &md5);
+    const x = try derivedstore.readPlain(testing.allocator, text, &md5, derivesearch.index_version);
     defer testing.allocator.free(x);
     var xlines = std.mem.tokenizeScalar(u8, x, '\n');
     _ = xlines.next();
@@ -1660,7 +1639,7 @@ test "a SCANNED PDF still gets its two files, and they are the header alone" {
     try testing.expect(text.has(&md5, derivesearch.index_version));
 
     for ([_]derivedstore.DerivedStore{ terms, text }) |store| {
-        const got = try inflateStored(store, &md5);
+        const got = try derivedstore.readPlain(testing.allocator, store, &md5, derivesearch.index_version);
         defer testing.allocator.free(got);
         var lines = std.mem.tokenizeScalar(u8, got, '\n');
         // `n` is the ADDRESS SPACE: three pages, none of which says anything.
@@ -1831,7 +1810,7 @@ test "RECONCILE: an ALREADY-INDEXED .txt gets its files, and a drain cannot give
 
     // And what it wrote is the real §2.2 record, not an empty placeholder — a
     // backfill that left header-only files behind would satisfy `has` for ever.
-    const t = try inflateStored(s.terms, &md5);
+    const t = try derivedstore.readPlain(testing.allocator, s.terms, &md5, derivesearch.index_version);
     defer testing.allocator.free(t);
     var lines = std.mem.tokenizeScalar(u8, t, '\n');
     try testing.expect(std.mem.indexOf(u8, lines.next().?, "\"n\":2") != null);
@@ -1874,7 +1853,7 @@ test "RECONCILE: a .note gets its files, which NOTHING else in the worker can do
     try testing.expect(s.terms.has(&md5, derivesearch.index_version));
     try testing.expect(s.text.has(&md5, derivesearch.index_version));
 
-    const t = try inflateStored(s.terms, &md5);
+    const t = try derivedstore.readPlain(testing.allocator, s.terms, &md5, derivesearch.index_version);
     defer testing.allocator.free(t);
     var lines = std.mem.tokenizeScalar(u8, t, '\n');
     // `n` is the ADDRESS SPACE: two pages, one of which has a finished
@@ -1911,7 +1890,7 @@ test "RECONCILE: a .pdf gets its files through the chunked source" {
     try testing.expect(s.terms.has(&md5, derivesearch.index_version));
     try testing.expect(s.text.has(&md5, derivesearch.index_version));
 
-    const t = try inflateStored(s.terms, &md5);
+    const t = try derivedstore.readPlain(testing.allocator, s.terms, &md5, derivesearch.index_version);
     defer testing.allocator.free(t);
     var lines = std.mem.tokenizeScalar(u8, t, '\n');
     try testing.expect(std.mem.indexOf(u8, lines.next().?, "\"n\":120") != null);
@@ -1985,7 +1964,7 @@ test "RECONCILE: a HALF-WRITTEN pair is completed — terms alone is not derived
     w.reconcileDerived();
 
     try testing.expect(s.text.has(&md5, derivesearch.index_version));
-    const x = try inflateStored(s.text, &md5);
+    const x = try derivedstore.readPlain(testing.allocator, s.text, &md5, derivesearch.index_version);
     defer testing.allocator.free(x);
     try testing.expect(std.mem.indexOf(u8, x, "First paragraph") != null);
 }

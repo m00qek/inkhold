@@ -55,6 +55,11 @@
 
 const std = @import("std");
 const blobstore = @import("blobs.zig");
+// The stream's own two bytes rather than a second copy of them. This import is
+// why `zig test backend/store/derived.zig` alone no longer resolves — the real
+// suite is `zig build test`, and dodging that was how five hand-inlined
+// `{ 0x03, 0x00 }` literals got into the tree in the first place.
+const gzip_stitch = @import("../http/gzip_stitch.zig");
 
 const Io = std.Io;
 const Dir = std.Io.Dir;
@@ -485,6 +490,51 @@ pub fn readHeader(io: Io, file: File) !Header {
     };
 }
 
+/// Read a stored file back to its PLAINTEXT — the inverse of `Fragment`.
+///
+/// This module defines the format, so it is the module that can read it. Three
+/// callers had grown a private copy of these fifteen lines, each of them also
+/// hand-inlining the two terminator bytes; one of those copies was mine, and the
+/// other two followed it as precedent.
+///
+/// The terminator is why a fragment cannot simply be handed to an inflater. Every
+/// fragment is written with `flush()` and never `finish()`, so NONE of them
+/// carries a final block — that is the whole property that lets them concatenate
+/// (§3.2). A single fragment is therefore an incomplete deflate stream, and
+/// reading one back means appending exactly what the serve path appends after the
+/// last fragment. Get that wrong and the stream ends by starvation, which
+/// surfaces as `error.ReadFailed` with an EMPTY result rather than as a short
+/// one — an early version of the store's own test swallowed that and asserted
+/// against nothing.
+///
+/// Caller owns the returned slice. Mainly for tests and for a future debug path;
+/// the serve route never does this — it streams the fragment out untouched.
+pub fn readPlain(gpa: std.mem.Allocator, store: DerivedStore, md5: []const u8, version: i64) ![]u8 {
+    var file = try store.open(md5, version);
+    defer file.close(store.io);
+
+    var body: std.Io.Writer.Allocating = .init(gpa);
+    defer body.deinit();
+    var buf: [4096]u8 = undefined;
+    var off: u64 = header_len;
+    while (true) {
+        const n = try file.readPositionalAll(store.io, &buf, off);
+        if (n == 0) break;
+        try body.writer.writeAll(buf[0..n]);
+        off += n;
+        if (n < buf.len) break;
+    }
+    try body.writer.writeAll(&gzip_stitch.terminator);
+
+    var input: std.Io.Reader = .fixed(body.written());
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var d = std.compress.flate.Decompress.init(&input, .raw, &window);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    _ = try d.reader.streamRemaining(&out.writer);
+    return out.toOwnedSlice();
+}
+
 /// A streaming write of one document into `(md5, version)`: plaintext in,
 /// header + deflate fragment on disk.
 ///
@@ -588,7 +638,7 @@ test "a fragment round-trips through the header and inflates" {
     var body: std.Io.Writer.Allocating = .init(testing.allocator);
     defer body.deinit();
     try body.writer.writeAll(raw[header_len..total]);
-    try body.writer.writeAll(&[_]u8{ 0x03, 0x00 }); // the final block the serve path appends
+    try body.writer.writeAll(&gzip_stitch.terminator);
 
     var input: std.Io.Reader = .fixed(body.written());
     var window: [std.compress.flate.max_window_len]u8 = undefined;
@@ -642,7 +692,7 @@ test "two stored fragments concatenate into one deflate stream" {
     // path appends after the last fragment (`gzip_stitch.terminator`). Without
     // it the stream is legitimately incomplete: every fragment was written with
     // `flush()` precisely so that none of them carries a BFINAL block.
-    try joined.writer.writeAll(&[_]u8{ 0x03, 0x00 });
+    try joined.writer.writeAll(&gzip_stitch.terminator);
 
     var input: std.Io.Reader = .fixed(joined.written());
     var window: [std.compress.flate.max_window_len]u8 = undefined;

@@ -274,25 +274,6 @@ fn encodeString(f: *derived.Fragment, s: []const u8) !void {
 
 const testing = std.testing;
 
-fn inflate(gpa: std.mem.Allocator, store: derived.DerivedStore, md5: []const u8) ![]u8 {
-    var file = try store.open(md5, index_version);
-    defer file.close(store.io);
-    var raw: [1 << 16]u8 = undefined;
-    const n = try file.readPositionalAll(store.io, &raw, 0);
-
-    var body: std.Io.Writer.Allocating = .init(gpa);
-    defer body.deinit();
-    try body.writer.writeAll(raw[derived.header_len..n]);
-    try body.writer.writeAll(&[_]u8{ 0x03, 0x00 }); // the serve path's final block
-
-    var input: std.Io.Reader = .fixed(body.written());
-    var window: [std.compress.flate.max_window_len]u8 = undefined;
-    var d = std.compress.flate.Decompress.init(&input, .raw, &window);
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    errdefer out.deinit();
-    _ = try d.reader.streamRemaining(&out.writer);
-    return out.toOwnedSlice();
-}
 
 const md5_x = "cccccccccccccccccccccccccccccccc";
 
@@ -315,7 +296,7 @@ test "terms: folded, deduplicated, one line per page, empty pages skipped" {
     try w.page(3, "Café");
     try w.commit();
 
-    const got = try inflate(testing.allocator, store, md5_x);
+    const got = try derived.readPlain(testing.allocator, store, md5_x, index_version);
     defer testing.allocator.free(got);
     var lines = std.mem.tokenizeScalar(u8, got, '\n');
     _ = lines.next(); // header
@@ -340,7 +321,7 @@ test "terms: the header carries the address space, not the row count" {
     try w.page(7, "reuniao"); // ...one of which has text
     try w.commit();
 
-    const got = try inflate(testing.allocator, store, md5_x);
+    const got = try derived.readPlain(testing.allocator, store, md5_x, index_version);
     defer testing.allocator.free(got);
     var lines = std.mem.tokenizeScalar(u8, got, '\n');
     const head = lines.next().?;
@@ -365,7 +346,7 @@ test "terms need no escaping, because unicode61 cannot emit a quote" {
     try w.page(0, "say \"hello\" \\ back\tnow\nplease \x01 {\"json\":true}");
     try w.commit();
 
-    const got = try inflate(testing.allocator, store, md5_x);
+    const got = try derived.readPlain(testing.allocator, store, md5_x, index_version);
     defer testing.allocator.free(got);
     var lines = std.mem.tokenizeScalar(u8, got, '\n');
     _ = lines.next();
@@ -395,7 +376,7 @@ test "text: real content, escaped, with the .txt byte range" {
     try w.page(2, null, null, ""); // empty segment: no row
     try w.commit();
 
-    const got = try inflate(testing.allocator, store, md5_x);
+    const got = try derived.readPlain(testing.allocator, store, md5_x, index_version);
     defer testing.allocator.free(got);
     var lines = std.mem.tokenizeScalar(u8, got, '\n');
     _ = lines.next();
@@ -435,7 +416,7 @@ test "text: a segment larger than the escape buffer survives intact" {
     try w.page(0, null, null, big.items);
     try w.commit();
 
-    const got = try inflate(testing.allocator, store, md5_x);
+    const got = try derived.readPlain(testing.allocator, store, md5_x, index_version);
     defer testing.allocator.free(got);
     var lines = std.mem.tokenizeScalar(u8, got, '\n');
     _ = lines.next();

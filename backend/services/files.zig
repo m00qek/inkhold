@@ -6403,27 +6403,6 @@ test "purging the last reference removes the .note cover file along with the blo
 /// in one blob, from a device rather than from the synthetic builder.
 const sample2_note = @embedFile("sample-2.note");
 
-/// Read a stored fragment back to its plaintext, the way the stream route will:
-/// past the header, plus the final block the serve path appends.
-fn inflateStored(store: derivedstore.DerivedStore, md5: []const u8) ![]u8 {
-    var file = try store.open(md5, derivesearch.index_version);
-    defer file.close(store.io);
-    var raw: [1 << 16]u8 = undefined;
-    const n = try file.readPositionalAll(store.io, &raw, 0);
-
-    var body: std.Io.Writer.Allocating = .init(testing.allocator);
-    defer body.deinit();
-    try body.writer.writeAll(raw[derivedstore.header_len..n]);
-    try body.writer.writeAll(&[_]u8{ 0x03, 0x00 });
-
-    var input: std.Io.Reader = .fixed(body.written());
-    var window: [std.compress.flate.max_window_len]u8 = undefined;
-    var d = std.compress.flate.Decompress.init(&input, .raw, &window);
-    var out: std.Io.Writer.Allocating = .init(testing.allocator);
-    errdefer out.deinit();
-    _ = try d.reader.streamRemaining(&out.writer);
-    return out.toOwnedSlice();
-}
 
 fn wireDerivedStores(f: *Fixture) !void {
     const terms_dir = try f.tmp.dir.createDirPathOpen(testing.io, "terms", .{});
@@ -6451,7 +6430,7 @@ test "linking a .note writes BOTH derived files AT INGEST, skipping the page wit
     try testing.expect(f.files.terms.?.has(md5, derivesearch.index_version));
     try testing.expect(f.files.text.?.has(md5, derivesearch.index_version));
 
-    const t = try inflateStored(f.files.terms.?, md5);
+    const t = try derivedstore.readPlain(testing.allocator, f.files.terms.?, md5, derivesearch.index_version);
     defer testing.allocator.free(t);
     var lines = std.mem.tokenizeScalar(u8, t, '\n');
     // `n` is the ADDRESS SPACE — both pages — not the one row that follows.
@@ -6462,7 +6441,7 @@ test "linking a .note writes BOTH derived files AT INGEST, skipping the page wit
 
     // The text file carries the transcript verbatim, addressed by ORDINAL
     // alone: no `o`/`l` byte range, which only `.txt` has.
-    const x = try inflateStored(f.files.text.?, md5);
+    const x = try derivedstore.readPlain(testing.allocator, f.files.text.?, md5, derivesearch.index_version);
     defer testing.allocator.free(x);
     var xlines = std.mem.tokenizeScalar(u8, x, '\n');
     _ = xlines.next();
