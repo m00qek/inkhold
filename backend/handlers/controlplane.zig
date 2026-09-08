@@ -21,6 +21,9 @@ const transport = @import("../http/transport.zig");
 const authsvc = @import("../services/auth/service.zig");
 const pendingsvc = @import("../services/pending.zig");
 const index_export = @import("../services/search/index_export.zig");
+const indexstream = @import("../services/search/index_stream.zig");
+const wantbitmap = @import("../services/search/want_bitmap.zig");
+const sqlite = @import("../db/sqlite.zig");
 
 const Context = context.Context;
 const Request = router.Request;
@@ -2560,6 +2563,213 @@ pub fn controlplaneSearchIndexTerms(ctx: *Context, req: *Request, params: Params
         .{ .name = "x-content-type-options", .value = "nosniff" },
     };
     try req.respond(body.items, .{ .status = .ok, .extra_headers = &headers });
+}
+
+// ---------------------------------------------------------------------------
+// THE STITCHED STREAM — `golden-search.md` §3.2 and §3.3, build order step 2
+// ---------------------------------------------------------------------------
+
+/// The manifest as ONE request must see it: the rows in their exact order, and
+/// the ETag of the bytes `writeManifest` would emit for them.
+const ManifestGate = struct {
+    rows: []const index_export.Row,
+    etag: [32]u8,
+};
+
+/// Re-run the manifest query and hash what it would serialize to.
+///
+/// **The bytes exist only to be hashed**, so they come from `gpa` and are
+/// released here, while the ROWS come from the request arena that has to outlive
+/// the whole stream. 27 KB against 1,222 documents (§9.2) is not a lot, but it
+/// is 27 KB held for the length of a 3G download for nothing.
+///
+/// Hashing the real body rather than comparing some cheaper summary is not an
+/// implementation detail either: `index_export.bodyEtag`'s own docs record why a
+/// version counter was rejected, and the gate below is only as trustworthy as
+/// the validator it compares.
+fn manifestGate(
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    db: sqlite.Db,
+    user_id: u64,
+) !ManifestGate {
+    const m = try index_export.manifest(arena, db, user_id);
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    try index_export.writeManifest(gpa, &body, m);
+    return .{ .rows = m.rows, .etag = index_export.bodyEtag(body.items) };
+}
+
+/// GET /api/controlplane/search-index/stream?m=<manifest etag>&want=<base64url>
+/// -> the requested documents' terms records as ONE gzip stream, stitched from
+/// the fragments `terms/<md5>.<v>` already holds.
+///
+/// ## What is on the wire, and why it is not N gzip files
+///
+/// Ten bytes of gzip header, each wanted document's stored raw-deflate fragment
+/// verbatim, `03 00`, and an 8-byte trailer whose CRC32 is `crc32_combine` over
+/// the per-fragment CRCs. No compression, no decompression, no query
+/// interpretation: a header, N file reads and a footer, because the thing doing
+/// it is a Pi 1 B+.
+///
+/// The obvious alternative — concatenated `.gz` MEMBERS under
+/// `Content-Encoding: gzip` — **fails silently** (§3.1, MEASURED 2026-08-21):
+/// Chromium 141 and `curl --compressed` decode the FIRST MEMBER ONLY and report
+/// success, 37 bytes of 7,980, `fetch()` resolving happily. Node's zlib decodes
+/// all of them, so a Node-based test passes on a stream the browser truncates by
+/// 99.5%. `http/gzip_stitch.zig` exists to make that shape unreachable and
+/// `test/http_integration.zig` asserts on the DECODED byte and document counts
+/// rather than on the request succeeding, for exactly this reason.
+///
+/// ## `Content-Encoding: gzip` regardless of `Accept-Encoding`
+///
+/// Not content negotiation, and not an oversight. There is no identity form of
+/// this body to serve: the fragments only exist compressed, and inflating them
+/// to satisfy a hypothetical client would spend the Pi's CPU undoing the one
+/// thing this design is for. Every client that will ever call this route is ours
+/// and speaks gzip; §3.2 measured four independent inflate implementations
+/// accepting the result.
+///
+/// ## CHUNKED, deliberately — and this is the one call worth arguing
+///
+/// `content_length` is knowable up front (10 + Σ fragment sizes + 10) at the
+/// cost of a stat pass, and it would buy the client a real progress bar. It is
+/// refused because **it cannot coexist with the skip rule.** The length is
+/// promised before the walk; a skip is discovered during it. A blob GC'd between
+/// the stat pass and the read pass leaves bytes owed that no longer exist, and
+/// the only ways out are both worse than no progress bar:
+///
+///   * hold every file OPEN from the stat pass to the walk, so the size cannot
+///     change under us — 1,222 descriptors for one household's library, times
+///     three concurrent first visits, on a box whose whole posture is a 50 MB
+///     budget; or
+///   * finish short of `content_length`, which is a truncated body — §3.1's
+///     failure mode, reintroduced by the fix for a progress bar.
+///
+/// Chunked costs a few bytes of framing per flush. And the progress the client
+/// actually shows is not a byte count anyway: it parses documents as they land
+/// off a `TextDecoderStream`, first one usable at 8 ms of a 193 ms stream (§3.2).
+///
+/// ## `manual_db_lock`, with the reader borrowed HERE
+///
+/// The route is a pure read and wants a pooled connection, but it cannot be
+/// `read_only`: that flag holds its lease for the whole dispatch, which on this
+/// route means for the whole download. A 3G client would park one of the pool's
+/// readers for a second or more — and when the pool is empty `read_only` falls
+/// back to the WRITER under `db_lock`, so a slow reader would block device sync
+/// for the length of its download. `router.readOnlyConflict` anticipates this in
+/// as many words: *"a streaming route that wants a reader needs the reader
+/// threaded through its own brackets."*
+///
+/// So this handler borrows the reader itself, around the manifest query and
+/// nothing else, and falls back to a narrow `lockDb` window when the pool is
+/// empty. Both are released before a single byte of body is written.
+pub fn controlplaneSearchIndexStream(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    const caller = ctx.caller.?; // controlplane scope
+    const files = ctx.files orelse return serverError(ctx, req);
+    // A deployment with no terms store cannot answer this at all. Serving an
+    // empty-but-valid stream would be worse than an error: the client would
+    // record every document as arrived, and §2.4's rule is that arrival is the
+    // fact — it would stop asking.
+    const terms = files.terms orelse return serverError(ctx, req);
+
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // READ THE TARGET BEFORE RESPONDING, and COPY it. `want.encoded` is a slice
+    // into the request head and the walk reads it once per manifest row, long
+    // after the response head has gone out — the same borrow-after-respond that
+    // `router.headerCopy` exists for on the header side.
+    const m_param = a.dupe(u8, reply.queryParam(req.head.target, "m") orelse return badRequest(ctx, req)) catch
+        return serverError(ctx, req);
+    // An absent `want` is the empty set, not an error: it is what a client with
+    // nothing left to fetch would send, and it must be cheap. The terms route
+    // answers a request naming no md5s the same way.
+    const want_param = a.dupe(u8, reply.queryParam(req.head.target, "want") orelse "") catch
+        return serverError(ctx, req);
+
+    // --- THE ETAG GATE, and it runs BEFORE the bitmap is even parsed ---------
+    //
+    // §3.3 puts it in this order on purpose: a bitmap indexes into the exact row
+    // order `writeManifest` emitted, so reading one against a manifest that has
+    // moved is the failure the whole scheme is built to make unreachable. Doing
+    // the syntactic check first would save a ~127-177 ms query on a garbage
+    // query string; it would also mean the server had interpreted positions
+    // before it knew whose ordering they were positions in.
+    //
+    // No per-user cache of the last manifest, either. That is new shared mutable
+    // state with an invalidation problem of its own, and the query is cheap,
+    // read-only and off the write lock.
+    const gate = blk: {
+        if (ctx.borrowReader()) |lease| {
+            defer ctx.returnReader(lease);
+            break :blk manifestGate(a, ctx.gpa, lease.db, caller.user_id) catch
+                return serverError(ctx, req);
+        }
+        ctx.lockDb();
+        defer ctx.unlockDb();
+        break :blk manifestGate(a, ctx.gpa, files.db, caller.user_id) catch
+            return serverError(ctx, req);
+    };
+
+    // The BARE hex, not the quoted entity-tag the header carries: a quoted string
+    // in a query needs percent-encoding and buys nothing. Byte equality, like the
+    // manifest route's `if-none-match` comparison, because this server mints
+    // exactly one spelling of this validator.
+    if (!std.mem.eql(u8, m_param, &gate.etag)) {
+        return fail(ctx, req, .precondition_failed, "MANIFEST_MOVED", "manifest changed; refetch it");
+    }
+
+    const want = wantbitmap.parse(want_param, gate.rows.len) catch |err| switch (err) {
+        // A string no encoder of ours produces. 400, because refetching the
+        // manifest would not help.
+        error.MalformedWant => return badRequest(ctx, req),
+        // The client is addressing documents this ordering does not have, which
+        // means the two disagree about the ordering despite the ETag matching.
+        // Same answer as a moved manifest, for the same reason.
+        error.WantLongerThanManifest, error.WantBitPastManifest => return fail(
+            ctx,
+            req,
+            .precondition_failed,
+            "MANIFEST_MOVED",
+            "want bitmap does not fit this manifest",
+        ),
+    };
+
+    const headers = [_]std.http.Header{
+        // The decoded body is JSONL, one document per fragment; the encoding is
+        // the transport (see above), not a variant of some other representation.
+        .{ .name = "content-type", .value = "application/x-ndjson" },
+        .{ .name = "content-encoding", .value = "gzip" },
+        // `no-store`, which is stricter than the manifest's `no-cache`, and the
+        // reason is the skip rule: two identical `(m, want)` requests may
+        // legitimately differ, because a document that was still deriving the
+        // first time arrives the second. A cached copy would freeze the first
+        // answer and the client would never see the document appear.
+        .{ .name = "cache-control", .value = "private, no-store" },
+        .{ .name = "x-content-type-options", .value = "nosniff" },
+    };
+
+    // 16 KB each, and that pair is the whole per-request memory cost of this
+    // route besides the manifest arena: file -> socket, never read-all-then-write
+    // (§3.3). Three concurrent first visits are ~96 KB rather than three whole
+    // libraries.
+    var wbuf: [16 * 1024]u8 = undefined;
+    var body = req.respondStreaming(&wbuf, .{
+        .respond_options = .{ .extra_headers = &headers },
+    }) catch return;
+
+    // From here nothing can become a status code — the head is on the wire. A
+    // mid-fragment failure returns without `end()`, closing the connection short
+    // of the trailer, which every decoder reports as a truncated gzip. That is
+    // the loud failure; finishing a stitched stream around half a fragment would
+    // be the quiet one.
+    var rbuf: [16 * 1024]u8 = undefined;
+    _ = indexstream.write(ctx.io, terms, gate.rows, want, &body.writer, &rbuf) catch
+        return error.StreamTruncated;
+    body.end() catch {};
 }
 
 /// Every value of a REPEATED query parameter, in the order they appear.

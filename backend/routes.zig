@@ -244,6 +244,21 @@ pub const routes = [_]router.Route{
     // is this file's own rule, stated below on `/note/:id/page/:n/text`.
     .{ .method = .GET, .path = "/api/controlplane/search-index/manifest", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexManifest, .read_only = true },
     .{ .method = .GET, .path = "/api/controlplane/search-index/terms", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexTerms, .read_only = true },
+    // The stitched stream (`golden-search.md` §3.2/§3.3, build order step 2), and
+    // it is the one route in this family that is NOT `read_only`.
+    //
+    // Not because it writes — it reads `files` and the two index tables exactly as
+    // its neighbours do — but because `read_only` holds its reader lease for the
+    // whole dispatch, and this dispatch is a download. A 3G client would park a
+    // pooled reader for the length of it, and an EMPTY pool degrades `read_only`
+    // to the writer under `db_lock`, so one slow reader would stall device sync
+    // for its whole download. `router.readOnlyConflict` names the alternative:
+    // "a streaming route that wants a reader needs the reader threaded through
+    // its own brackets", which is what the handler does — `ctx.borrowReader()`
+    // around the manifest query and nothing else, released before the head goes
+    // out. That is also why it takes no read-only probe: the flag is what the
+    // probe audits, and this route does not claim it.
+    .{ .method = .GET, .path = "/api/controlplane/search-index/stream", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexStream, .manual_db_lock = true },
     // --- Hot-cache versioning: "history of this file" ---
     // All note-scoped by `:id` (the same ownership gate the siblings above use);
     // the per-version routes gate `:md5` on being a RETAINED version of THAT file

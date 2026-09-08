@@ -5197,6 +5197,390 @@ test "the search-index terms route serves a caller's own blobs and nothing else"
     }
 }
 
+// ---------------------------------------------------------------------------
+// THE STITCHED SEARCH-INDEX STREAM — `golden-search.md` §3.1/§3.2/§3.3
+// ---------------------------------------------------------------------------
+//
+// **THIS SPEC EXISTS BECAUSE THE OBVIOUS IMPLEMENTATION FAILS SILENTLY.** §3.1,
+// MEASURED 2026-08-21: concatenated `.gz` members served under
+// `Content-Encoding: gzip` are decoded by Chromium 141 and `curl --compressed`
+// down to their FIRST MEMBER — 37 bytes of 7,980 — and both report success, with
+// `fetch()` resolving happily. A client would believe it held the whole library
+// and be missing 99.5% of it.
+//
+// So every assertion below is about DECODED BYTES AND DOCUMENTS, and never about
+// the request having worked. A test that checked the status code, or that the
+// body was non-empty, or that it decompressed without error, is exactly the test
+// that misses this — the broken stream passes all three.
+//
+// Zig's own decoder behaves like the browsers here, which is what makes an
+// in-tree assertion able to pin a browser bug: `Decompress` goes to `.end` after
+// one member's footer. It is Node's zlib that is the outlier, decoding every
+// member, and §3.1 records that a Node-based test therefore PASSES on a stream
+// the browser truncates. That is the trap this file is written around.
+
+/// Decode a `Transfer-Encoding: chunked` body. The stream route sends no
+/// `Content-Length` (see the handler for why: a length promised up front cannot
+/// coexist with §3.3's skip rule), so the test has to unwrap the framing to see
+/// the bytes a client would.
+fn dechunk(a: std.mem.Allocator, raw: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var rest = raw;
+    while (true) {
+        const eol = std.mem.indexOf(u8, rest, "\r\n") orelse return error.BadChunking;
+        // A chunk-size line may carry `;ext` parameters; ours never does, but
+        // parsing the whole line as hex would be a decoder that only works
+        // against this server.
+        const semi = std.mem.indexOfScalar(u8, rest[0..eol], ';') orelse eol;
+        const n = try std.fmt.parseInt(usize, rest[0..semi], 16);
+        rest = rest[eol + 2 ..];
+        if (n == 0) break;
+        if (rest.len < n + 2) return error.BadChunking;
+        try out.appendSlice(a, rest[0..n]);
+        rest = rest[n + 2 ..];
+    }
+    return out.items;
+}
+
+/// Inflate a stitched body the way a BROWSER does, and check the trailer the way
+/// `gzip -t` does.
+///
+/// Three separate claims, and each one has to be made by hand:
+///
+///   1. **Exactly one gzip member.** The broken shape of §3.1 is N members, and
+///      no amount of successful decoding distinguishes it. Counted on the whole
+///      10-byte header rather than the 3-byte magic, because a 3-byte needle
+///      collides by chance inside deflate output.
+///   2. **The payload decodes whole.** Zig stops after one member's footer, so a
+///      concatenation would come back as its first document and this comparison
+///      is what catches that.
+///   3. **The trailer agrees with the payload.** `std.compress.flate.Decompress`
+///      reads the gzip footer into `container_metadata` and NEVER VERIFIES IT —
+///      `Container.Error.WrongGzipChecksum` is declared in the standard library
+///      and raised nowhere in it. A Zig round trip written the obvious way passes
+///      on a stream every browser rejects, so the comparison browsers make is
+///      made here explicitly.
+fn inflateStitched(a: std.mem.Allocator, body: []const u8) ![]u8 {
+    const gzip_stitch = @import("../http/gzip_stitch.zig");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, gzip_stitch.header));
+
+    var input: std.Io.Reader = .fixed(body);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var d = std.compress.flate.Decompress.init(&input, .gzip, &window);
+    var got: std.Io.Writer.Allocating = .init(a);
+    _ = try d.reader.streamRemaining(&got.writer);
+
+    try std.testing.expectEqual(std.hash.Crc32.hash(got.written()), d.container_metadata.gzip.crc);
+    try std.testing.expectEqual(@as(u32, @intCast(got.written().len)), d.container_metadata.gzip.count);
+    return got.written();
+}
+
+/// The uncompressed size of a stored `terms/<md5>.<v>`, read from the file's own
+/// 12-byte header — the same number the serve path feeds into the gzip trailer.
+/// The test computes its expected decoded byte count from these, so an
+/// implementation that truncated a fragment could not satisfy it.
+fn storedPlainLen(f: *Fixture, md5: []const u8) !u32 {
+    const derivedstore = @import("../store/derived.zig");
+    const derivesearch = @import("../services/derive_search.zig");
+    const store = f.files.terms.?;
+    var file = try store.open(md5, derivesearch.index_version);
+    defer file.close(std.testing.io);
+    const h = try derivedstore.readHeader(std.testing.io, file);
+    return h.len;
+}
+
+/// Wire the two derived stores into a fixture. The default `Fixture` has none
+/// (most tests do not want the files written at ingest), and §2.4 makes the
+/// FILE the fact — so without this the manifest would describe documents whose
+/// fragments do not exist and every one of them would be skipped, which is a
+/// green test asserting nothing.
+fn withDerivedStores(f: *Fixture) !void {
+    const derivedstore = @import("../store/derived.zig");
+    const io = std.testing.io;
+    const terms_dir = try f.tmp.dir.createDirPathOpen(io, "terms", .{});
+    const text_dir = try f.tmp.dir.createDirPathOpen(io, "text", .{});
+    f.files.terms = try derivedstore.DerivedStore.init(io, terms_dir);
+    f.files.text = try derivedstore.DerivedStore.init(io, text_dir);
+}
+
+test "the search-index stream is ONE gzip member carrying every document, not a concatenation" {
+    const derivesearch = @import("../services/derive_search.zig");
+    const f = try Fixture.init();
+    defer f.deinit();
+    try withDerivedStores(f);
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+
+    var obuf: [65536]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+    var pbuf: [512]u8 = undefined;
+    const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Eight documents, because §3.1's bug is a RATIO: one member of eight
+    // arriving is a stream that decodes, parses and looks like an answer. Each
+    // gets a term nothing else has, so "which documents arrived" is decidable
+    // from the decoded text alone.
+    const words = [_][]const u8{
+        "trimestral", "orcamento",  "reuniao",  "acta",
+        "relatorio",  "manutencao", "projecto", "arquivo",
+    };
+    var md5s: [words.len][32]u8 = undefined;
+    for (words, 0..) |w, i| {
+        const name = try std.fmt.allocPrint(a, "doc{d}.note", .{i});
+        const id = try seedRecognizedNote(f, admin, name, &.{w});
+        md5s[i] = try fileMd5(f, id);
+    }
+
+    // THE GC RACE, and it is not an edge case worth skipping: between the
+    // manifest query and the walk a blob can be collected or a derive can still
+    // be outstanding, and §3.3 says a missing file is SKIPPED rather than an
+    // error, because an error mid-stream poisons a stitched gzip for every
+    // document that was fine. Unlinking one file is exactly that state.
+    const gone = 5;
+    f.files.terms.?.remove(&md5s[gone], derivesearch.index_version);
+
+    // --- the manifest, which is what the bitmap indexes into ----------------
+    var etag_buf: [64]u8 = undefined;
+    var etag: []const u8 = "";
+    var rows: u32 = 0;
+    {
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/manifest", &web_tok, "");
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        rows = std.mem.readInt(u32, resp.body[5..9], .little);
+        try std.testing.expectEqual(@as(u32, words.len), rows);
+        etag = try headerValue(resp.head, "etag", &etag_buf);
+    }
+    // The header's quoted entity-tag; `m=` carries the bare hex inside it.
+    try std.testing.expectEqual(@as(usize, 34), etag.len);
+    const etag_hex = etag[1 .. etag.len - 1];
+
+    var want_buf: [64]u8 = undefined;
+    const want_all = wantEveryPosition(&want_buf, rows);
+
+    // --- the stream ---------------------------------------------------------
+    const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want={s}", .{ etag_hex, want_all });
+    const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+
+    // The transport contract. `content-encoding: gzip` is what makes the body a
+    // single gzip stream to the browser rather than an opaque blob, and it is
+    // sent regardless of `Accept-Encoding` because the fragments only exist
+    // compressed — there is no identity form to negotiate down to.
+    try expectHeaderContains(resp.head, "content-encoding: gzip");
+    try expectHeaderContains(resp.head, "content-type: application/x-ndjson");
+    try expectHeaderContains(resp.head, "cache-control: private, no-store");
+    try expectHeaderAbsentSubstring(resp.head, "content-length:");
+
+    const body = try dechunk(a, resp.body);
+    // VERIFIED OUTSIDE ZIG, on this exact body dumped from this test: GNU
+    // `gzip -t` PASS (it checks CRC32 *and* ISIZE), python zlib decoding ONE
+    // member yields 551 bytes / 7 documents with zero unused bytes after it, and
+    // the wire bytes contain exactly one gzip header. That last line is the one
+    // Zig alone cannot make convincing, and it is §3.1's whole subject.
+    const plain = try inflateStitched(a, body);
+
+    // --- THE ASSERTIONS THAT A TRUNCATED STREAM CANNOT SATISFY --------------
+    //
+    // 1. DOCUMENT COUNT. Every record opens with its own `{"md5":"…` header
+    //    line, so counting them counts documents. Seven, not eight: one file was
+    //    unlinked above and is skipped.
+    try std.testing.expectEqual(@as(usize, words.len - 1), std.mem.count(u8, plain, "{\"md5\":\""));
+
+    // 2. DECODED BYTE COUNT, summed from the stored files' OWN headers — the
+    //    same numbers the trailer was built from, read independently here. A
+    //    stream that dropped a fragment, or half of one, misses this by exactly
+    //    what it dropped. (§3.1's real failure was 37 bytes of 7,980; this is the
+    //    assertion that would have caught it.)
+    var expected_bytes: u64 = 0;
+    for (md5s, 0..) |md5, i| {
+        if (i == gone) continue;
+        expected_bytes += try storedPlainLen(f, &md5);
+    }
+    try std.testing.expectEqual(expected_bytes, plain.len);
+
+    // 3. EVERY DOCUMENT INDIVIDUALLY. The count above would be satisfied by
+    //    seven copies of the first document; this is not. Each md5 appears
+    //    exactly once, each term appears, and the collected one appears nowhere.
+    for (md5s, words, 0..) |md5, word, i| {
+        if (i == gone) {
+            try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, plain, &md5));
+            try std.testing.expect(std.mem.indexOf(u8, plain, word) == null);
+            continue;
+        }
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, plain, &md5));
+        try std.testing.expect(std.mem.indexOf(u8, plain, word) != null);
+    }
+
+    // --- a SUBSET: position 0 only, which is the coalesced-refetch case -----
+    {
+        const one = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want=AQ", .{etag_hex});
+        const r = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", one, &web_tok, "");
+        try std.testing.expectEqual(@as(u16, 200), r.status);
+        const p = try inflateStitched(a, try dechunk(a, r.body));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, p, "{\"md5\":\""));
+    }
+
+    // --- and asking for NOTHING is a valid empty gzip, not a malformed body --
+    {
+        const none = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want=", .{etag_hex});
+        const r = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", none, &web_tok, "");
+        try std.testing.expectEqual(@as(u16, 200), r.status);
+        try std.testing.expectEqualStrings("", try inflateStitched(a, try dechunk(a, r.body)));
+    }
+}
+
+/// A bitmap with every one of `n` manifest positions set, base64url-encoded the
+/// way `webapp/src/search/wantBitmap.ts` does. Bits past `n` in the last byte
+/// stay CLEAR — a set bit up there is a 412 by design (`want_bitmap.zig`), so
+/// getting this wrong here would look like a route bug.
+fn wantEveryPosition(buf: []u8, n: u32) []const u8 {
+    var bits: [64]u8 = @splat(0);
+    for (0..n) |i| bits[i >> 3] |= @as(u8, 1) << @intCast(i & 7);
+    return std.base64.url_safe_no_pad.Encoder.encode(buf, bits[0 .. (n + 7) / 8]);
+}
+
+test "the search-index stream refuses a bitmap it cannot trust: 412 on the manifest, 400 on the encoding" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    try withDerivedStores(f);
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+
+    var obuf: [65536]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+    var pbuf: [512]u8 = undefined;
+    const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    _ = try seedRecognizedNote(f, admin, "a.note", &.{"trimestral"});
+    const doomed = try seedRecognizedNote(f, admin, "b.note", &.{"orcamento"});
+
+    var etag_buf: [64]u8 = undefined;
+    var etag: []const u8 = "";
+    {
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/manifest", &web_tok, "");
+        etag = try headerValue(resp.head, "etag", &etag_buf);
+    }
+    var hex_buf: [32]u8 = undefined;
+    @memcpy(&hex_buf, etag[1 .. etag.len - 1]);
+    const etag_hex: []const u8 = &hex_buf;
+
+    // --- scope, before anything else: no session -> 401, device token -> 403 --
+    {
+        const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/search-index/stream?m=x&want=AQ", &.{}, "");
+        const resp = try roundtrip(ctx, req, &obuf);
+        try std.testing.expectEqual(@as(u16, 401), resp.status);
+    }
+    {
+        const bob = (try f.svc.createUser(admin, "bob", false)).id;
+        _ = try f.svc.changePassword(bob, null, &password.md5Hex("bpass111"));
+        const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "bob", "bpass111", "SN9");
+        const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/search-index/stream?m=x&want=AQ", &.{
+            .{ .name = "x-access-token", .value = &dev_tok },
+        }, "");
+        const resp = try roundtrip(ctx, req, &obuf);
+        try std.testing.expectEqual(@as(u16, 403), resp.status);
+    }
+
+    // --- no `m=` at all: a client that named no manifest is not ours ---------
+    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/stream?want=AQ", &web_tok, "", 400);
+
+    // --- a WRONG `m=` is 412, and it is checked BEFORE the bitmap is read ----
+    //     The `want` below is malformed (`+` is base64, not base64url) and would
+    //     be a 400 against the right manifest. That it comes back 412 is the
+    //     ordering §3.3 requires: the server must not interpret a single bitmap
+    //     position before it knows whose ordering those positions are in.
+    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/stream?m=" ++ "0" ** 32 ++ "&want=+A", &web_tok, "", 412);
+
+    // --- a manifest that MOVED. The ETag was minted over two documents; trash
+    //     one and the same request must stop being answerable, because position
+    //     1 now means a different document than the client meant.
+    {
+        const stale = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want=Aw", .{etag_hex});
+        try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", stale, &web_tok, "", 200);
+        try f.files.trash(admin, doomed);
+        try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", stale, &web_tok, "", 412);
+    }
+
+    // --- the current manifest again, and the two refusals that are NOT 412 ---
+    {
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/manifest", &web_tok, "");
+        etag = try headerValue(resp.head, "etag", &etag_buf);
+        @memcpy(&hex_buf, etag[1 .. etag.len - 1]);
+    }
+    // Not base64url (`+` and `/` are base64's), a length no group can have, and
+    // non-canonical leftover bits in a short final group — all 400, because
+    // refetching the manifest would not help a client that cannot encode.
+    for ([_][]const u8{ "+A", "/A", "A", "AB" }) |bad| {
+        const p = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want={s}", .{ etag_hex, bad });
+        try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", p, &web_tok, "", 400);
+    }
+    // Longer than the manifest, and a bit set past its last position — both 412,
+    // because both say the two sides disagree about the ordering even though the
+    // validator matched. Skipping the stray bit would serve a stream silently
+    // misaligned with the question.
+    for ([_][]const u8{ "AAAA", "_g" }) |bad| {
+        const p = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want={s}", .{ etag_hex, bad });
+        try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", p, &web_tok, "", 412);
+    }
+}
+
+test "the search-index stream is scoped to the caller: a housemate's documents are not in it" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    try withDerivedStores(f);
+    const ctx = &f.ctx;
+    const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
+
+    var obuf: [65536]u8 = undefined;
+    var reqbuf: [2048]u8 = undefined;
+    var pbuf: [512]u8 = undefined;
+    const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const bob = (try f.svc.createUser(admin, "bob", false)).id;
+    _ = try f.svc.changePassword(bob, null, &password.md5Hex("bpass111"));
+    const mine = try seedRecognizedNote(f, admin, "mine.note", &.{"trimestral"});
+    const theirs = try seedRecognizedNote(f, bob, "theirs.note", &.{"confidencial"});
+    const mine_md5 = try fileMd5(f, mine);
+    const theirs_md5 = try fileMd5(f, theirs);
+
+    var etag_buf: [64]u8 = undefined;
+    var rows: u32 = 0;
+    var etag: []const u8 = "";
+    {
+        const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/manifest", &web_tok, "");
+        rows = std.mem.readInt(u32, resp.body[5..9], .little);
+        etag = try headerValue(resp.head, "etag", &etag_buf);
+    }
+    // THE SCOPE IS THE MANIFEST'S, and this is what says so: the caller's
+    // manifest has one row, so there is no position a bitmap could name that
+    // reaches the housemate's document. `index_export`'s `d.user_id = ?1` is the
+    // whole boundary and this route adds no md5-addressed second door — unlike
+    // `/search-index/terms`, which does and needs a `files` join per request.
+    try std.testing.expectEqual(@as(u32, 1), rows);
+
+    var want_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want={s}", .{
+        etag[1 .. etag.len - 1],
+        wantEveryPosition(&want_buf, rows),
+    });
+    const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    const plain = try inflateStitched(a, try dechunk(a, resp.body));
+
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, plain, "{\"md5\":\""));
+    try std.testing.expect(std.mem.indexOf(u8, plain, &mine_md5) != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, &theirs_md5) == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "confidencial") == null);
+}
+
 test "control-plane note-scoped search: its own route, scoped like the note's other reads" {
     const f = try Fixture.init();
     defer f.deinit();
@@ -5647,6 +6031,16 @@ test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the 
         // each in its own `ctx.lockDb()`/`unlockDb()` bracket, with the ingest
         // between them touching the DB not at all.
         "/api/controlplane/folder/:id/upload",
+        // The stitched search-index stream, and the ONE route here that is manual
+        // in order to get a READER rather than to escape the writer's lock. It is
+        // a pure read and would be `read_only` if that flag did not hold its lease
+        // for the whole dispatch — which on a download means for the whole
+        // download, and which degrades to the WRITER under `db_lock` when the pool
+        // is empty. Audited: its only DB touch is one `index_export.manifest`
+        // query, inside either a `ctx.borrowReader()` bracket or a `ctx.lockDb()`
+        // one, both released before the response head goes out; the fragment walk
+        // that follows is fs → socket and touches the DB not at all.
+        "/api/controlplane/search-index/stream",
     };
     var found: usize = 0;
     for (app.routes) |r| {
@@ -5801,6 +6195,12 @@ const non_immutable_routes = [_][]const u8{
     "/api/controlplane/note/:id/txt-search",
     "/api/controlplane/search",
     "/api/controlplane/search-index/manifest",
+    // NO-STORE, which is stricter than everything else on this list and is the
+    // skip rule's consequence rather than caution: two identical `(m, want)`
+    // requests may legitimately differ, because a document still deriving the
+    // first time is simply skipped and arrives the second. A cached copy would
+    // freeze the first answer, and the client would never see it appear.
+    "/api/controlplane/search-index/stream",
     "/api/controlplane/server-info",
     "/api/controlplane/tree",
     "/api/controlplane/usage",

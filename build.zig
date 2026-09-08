@@ -878,6 +878,24 @@ pub fn build(b: *std.Build) void {
     const indoc_step = b.step("indoc-bench", "Build the in-document search bench (measurement only)");
     indoc_step.dependOn(&b.addInstallArtifact(indoc_exe, .{}).step);
 
+    // The DERIVE bench — same posture again, answering `golden-search.md` §7's
+    // last derive-cost item: what the fold, deflate level 6 and the two file
+    // writes cost per document on the ARM1176 the design is shaped around.
+    // It calls the real `derive_search.writeDerived`, so it needs the note
+    // parser the derive path's neighbours import; it does NOT need MuPDF,
+    // because it reads page text from the corpus rather than extracting it.
+    const derive_mod = b.createModule(.{
+        .root_source_file = b.path("backend/derive_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    derive_mod.addImport("supernote", supernote);
+    derive_mod.addImport("spd", spd_mod);
+    linkSqlite(b, derive_mod);
+    const derive_exe = b.addExecutable(.{ .name = "derive-bench", .root_module = derive_mod });
+    const derive_step = b.step("derive-bench", "Build the derive-path bench (measurement only)");
+    derive_step.dependOn(&b.addInstallArtifact(derive_exe, .{}).step);
+
     // ---- Tests ----
     const test_step = b.step("test", "Run all tests");
 
