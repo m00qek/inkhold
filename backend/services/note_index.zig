@@ -117,7 +117,17 @@ const Allocator = std.mem.Allocator;
 // template brought with it (note-format.md §14). NULL on every page that has no
 // such block, which is every page of every note not built on a PDF template, so
 // re-deriving changes nothing for them.
-pub const index_version: i64 = 15;
+// v16: PDF text extraction replaces Private Use Area codepoints with spaces
+// (`pdf_text.stripPrivateUse`), so a PDF's derived terms MEAN something
+// different than they did at 15 — and the version is the client's cache key
+// (same bytes, new parser, different output). Without
+// this bump a browser holding `(md5, 15)` would serve the old vocabulary for
+// ever, because the manifest would advertise the same key it already has.
+//
+// It costs a re-index and a re-fold of EVERY document, not just the PDFs, which
+// is what a global version buys, and separating the two is recorded as worth
+// doing one day. Off the write lock, in the deferred worker.
+pub const index_version: i64 = 16;
 
 /// Chunk used when hashing a layer's bytes out of a ranged source. Bounds the
 /// memory a content hash costs, independent of how large the layer is. Shared

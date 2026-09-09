@@ -761,7 +761,13 @@ test "`owesDerive` is the tenants' own clause and names EVERY tenant, with no se
     // The version really is spelt, not dropped: an expression that lost the
     // `index_version` test would report a blob pending across a version bump for
     // ever, because the note half has not healed yet.
-    try testing.expect(std.mem.indexOf(u8, expr, "ni.index_version = 15") != null);
+    //
+    // Built from the CONSTANT rather than written out: this asserted
+    // `"ni.index_version = 15"` as a literal and so failed on the next bump —
+    // a test about the shape of the clause, red for a reason that had nothing to
+    // do with its shape.
+    const versioned = std.fmt.comptimePrint("ni.index_version = {d}", .{noteindex.index_version});
+    try testing.expect(std.mem.indexOf(u8, expr, versioned) != null);
 }
 
 test "`owesDerive` is valid SQL against the real schema, and answers per blob" {

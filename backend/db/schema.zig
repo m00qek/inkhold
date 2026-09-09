@@ -95,7 +95,12 @@ const sqlite = @import("sqlite.zig");
 /// search are the browser's, off the two derived stores, so every one of these
 /// was being written on each ingest and read by nothing. Irreversible in DATA on
 /// the same terms as v13, and much more of it.
-pub const version: i64 = 14;
+/// v15 re-derives every PDF's text, because the extraction rule changed:
+/// Private Use Area codepoints — an icon font's glyphs — now become spaces
+/// instead of travelling into the index (`pdf_text.stripPrivateUse`). It clears
+/// the `pdf_text` memo rather than touching a row of text, and the deferred
+/// worker rewrites the derived files from there.
+pub const version: i64 = 15;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -109,7 +114,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 /// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
 /// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
 /// missed on a bump). The comptime check below makes the drift a build error.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12, ddl_v13, ddl_v14 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12, ddl_v13, ddl_v14, ddl_v15 };
 
 comptime {
     if (steps.len != version) @compileError(
@@ -725,6 +730,42 @@ const ddl_v13 =
 /// `kind = 1`/`kind = 2` rows and a half-filled band — both of which this deletes
 /// outright. What decides whether that document is re-derived is
 /// `note_index.txt_index` / `pdf_text`, which this does not touch.
+/// v15 — every PDF's text is re-extracted, because the RULE changed.
+///
+/// A PDF's icon fonts map their glyphs into the Private Use
+/// Area and MuPDF extracts them faithfully, so codepoints no keyboard can
+/// produce reached the index. `unicode61` treats them as token CHARACTERS, so a
+/// glyph glued to a word took the word out of the index with it: MEASURED,
+/// `alpha<U+E906>beta` matched neither `alpha` nor `beta` nor `alphabeta`. The
+/// extractor replaces them with spaces now.
+///
+/// **TWO HALVES, AND BOTH ARE NEEDED.** `note_index.index_version` goes to 16 in
+/// the same change: that is what renames the derived files and what a browser
+/// diffs its cache against, so without it a client holding `(md5, 15)` would
+/// serve the old vocabulary for ever. And the re-index alone would not re-run
+/// the TEXT pass, because the `note_index` upsert deliberately preserves
+/// `pdf_probe`/`pdf_text` across a re-index — hence this statement.
+///
+/// **THIS CLEARS A MEMO, NOT DATA.** `pdf_text` NULL is exactly the state
+/// `needsText` reads as "still owed", so the deferred worker re-extracts each
+/// document and `writeDerived` replaces its two derived files through the
+/// store's tmp+rename. Nothing is deleted and nothing is unsearchable in the
+/// meantime — the old files stay until their replacements land.
+///
+/// **ONLY PDFs, and no `index_version` bump.** A bump would re-fold every note
+/// and every `.txt` as well, and the per-page fold is the 113x this project's
+/// deployment target pays. `.txt` is untouched for a
+/// second reason: `sanitizeUtf8` is shared with it, its PUA is the user's own
+/// content rather than a font artefact, and its segments are addressed by byte
+/// range into the raw blob.
+///
+/// Rows with a FAILURE verdict are left alone: `no_text`, `truncated` and
+/// `unopenable` are answers about the file, and re-asking would re-read every
+/// scanned PDF in the library to reach the same conclusion.
+const ddl_v15 =
+    \\UPDATE note_index SET pdf_text = NULL WHERE pdf_text = 0;
+;
+
 const ddl_v14 =
     \\DROP TABLE segment_fts;
     \\DROP VIEW segment_text;
@@ -732,6 +773,64 @@ const ddl_v14 =
     \\DROP TABLE search_partitions;
     \\DELETE FROM note_page_index WHERE kind <> 0;
 ;
+
+test "v15: only the DERIVED PDFs are re-asked, and a failure verdict is left alone" {
+    // The step re-extracts text whose rule changed, and the interesting half is
+    // what it does NOT touch: a scanned PDF that yielded no text, one that was
+    // truncated, one that would not open, and a `.txt` that has nothing to do
+    // with any of it. Re-asking those would re-read them to reach the same
+    // answer.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    inline for (steps[0..14], 1..) |ddl, n| try applyStep(db, n, ddl);
+    try std.testing.expectEqual(@as(i64, 14), try userVersion(db));
+
+    try db.exec(
+        \\INSERT INTO blobs(md5, size, refcount, created_at) VALUES('ok', 10, 1, 0);
+        \\INSERT INTO blobs(md5, size, refcount, created_at) VALUES('none', 10, 1, 0);
+        \\INSERT INTO blobs(md5, size, refcount, created_at) VALUES('trunc', 10, 1, 0);
+        \\INSERT INTO blobs(md5, size, refcount, created_at) VALUES('shut', 10, 1, 0);
+        \\INSERT INTO blobs(md5, size, refcount, created_at) VALUES('txt', 10, 1, 0);
+        \\-- pdf_text: 0 ok, 1 no_text, 2 truncated, 3 unopenable (pdf_text.Verdict).
+        \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, indexed_at, pdf_probe, pdf_text)
+        \\  VALUES('ok', 15, 0, 0, 0, 0, 0);
+        \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, indexed_at, pdf_probe, pdf_text)
+        \\  VALUES('none', 15, 0, 0, 0, 0, 1);
+        \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, indexed_at, pdf_probe, pdf_text)
+        \\  VALUES('trunc', 15, 0, 0, 0, 0, 2);
+        \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, indexed_at, pdf_probe, pdf_text)
+        \\  VALUES('shut', 15, 0, 0, 0, 0, 3);
+        \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, indexed_at, txt_index)
+        \\  VALUES('txt', 15, 0, 0, 0, 1);
+    );
+
+    try applyStep(db, 15, ddl_v15);
+    try std.testing.expectEqual(@as(i64, 15), try userVersion(db));
+
+    // The one that was derived is owed again — NULL beside a successful probe is
+    // precisely what `pdf_text.needsText` reads as "still owed". Scoped to the
+    // probe, because the `.txt` row's `pdf_text` was always NULL and is not
+    // evidence of anything.
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try countOf(db, "SELECT COUNT(*) FROM note_index WHERE pdf_probe = 0 AND pdf_text IS NULL;"),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try countOf(db, "SELECT COUNT(*) FROM note_index WHERE blob_md5 = 'ok' AND pdf_text IS NULL;"),
+    );
+    // The three verdicts about the FILE survive, and so does the `.txt` memo.
+    try std.testing.expectEqual(
+        @as(i64, 3),
+        try countOf(db, "SELECT COUNT(*) FROM note_index WHERE pdf_text IN (1, 2, 3);"),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 1),
+        try countOf(db, "SELECT COUNT(*) FROM note_index WHERE blob_md5 = 'txt' AND txt_index = 1;"),
+    );
+    // And nothing was deleted: five documents in, five out.
+    try std.testing.expectEqual(@as(i64, 5), try countOf(db, "SELECT COUNT(*) FROM note_index;"));
+}
 
 test "v14: the search index is gone, `kind = 0` stays, and a mid-derive database survives it" {
     // The one step a revert cannot undo, so it is driven against the state that

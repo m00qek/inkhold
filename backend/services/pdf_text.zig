@@ -197,12 +197,96 @@ pub fn nextChunk(gpa: Allocator, ex: *pdftext.Extractor, from: u32) !?Chunk {
         // pass: `Extractor` counts it, and the chunk carries it so `index` stays
         // the real page number. `Pages` is what drops it from the record.
         const raw = (try ex.page(n)) orelse "";
-        const text = try sanitizeUtf8(a, raw);
+        const text = try stripPrivateUse(a, try sanitizeUtf8(a, raw));
         try pages.append(a, .{ .index = n, .text = text });
         bytes += text.len;
         if (bytes >= chunk_bytes) break;
     }
     return .{ .arena = arena, .from = from, .pages = try pages.toOwnedSlice(a) };
+}
+
+/// Every Private Use Area codepoint replaced by a SPACE.
+///
+/// A PDF's icon fonts map their glyphs into the PUA, and MuPDF extracts what the
+/// font says the codepoint is, so a navigation bar or a bullet list arrives as
+/// codepoints no keyboard produces. On the dev corpus that was 33 distinct terms.
+///
+/// **THE JUNK VOCABULARY IS THE SMALL HALF.** `unicode61` treats a PUA codepoint
+/// as a TOKEN character, not a separator, so one glued to a word takes the word
+/// with it: MEASURED against the shipped wasm, `alpha<U+E906>beta` indexes as a
+/// single token matching neither `alpha` nor `beta` nor `alphabeta`. A real word
+/// touching an icon glyph is simply not findable, which is a correctness bug
+/// about the document's own text rather than noise beside it.
+///
+/// **A SPACE, NOT A DELETION**, and the difference is the whole fix. Deleting
+/// joins the neighbours into one unfindable token — `gamma<U+E906>delta` becomes
+/// `gammadelta`, matching neither half — while a space can only ever split.
+/// Measured both ways against the real tokenizer before choosing.
+///
+/// PDF-ONLY, deliberately. `sanitizeUtf8` is shared with `.txt`, whose segments
+/// are addressed by BYTE RANGE into the raw blob for `txtFind`'s deep links, and
+/// whose PUA is the user's own content rather than a font artefact. Filtering
+/// there would rewrite text nobody asked us to rewrite.
+///
+/// Safe on the FIND path: the browser's index decides what MATCHED, and
+/// `pdfFind.ts` asks MuPDF where the term sits on the page in front of it, so
+/// this changes membership without touching a single box.
+///
+/// Input must already be valid UTF-8 (`sanitizeUtf8` runs first), so a decode
+/// error here is impossible by construction and is treated as "not PUA".
+fn stripPrivateUse(a: Allocator, text: []const u8) ![]const u8 {
+    if (!hasPrivateUse(text)) return a.dupe(u8, text); // the overwhelming majority
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) {
+        const l = std.unicode.utf8ByteSequenceLength(text[i]) catch {
+            try out.append(a, text[i]);
+            i += 1;
+            continue;
+        };
+        if (i + l > text.len) {
+            try out.appendSlice(a, text[i..]);
+            break;
+        }
+        const cp = std.unicode.utf8Decode(text[i..][0..l]) catch {
+            try out.appendSlice(a, text[i..][0..l]);
+            i += l;
+            continue;
+        };
+        if (isPrivateUse(cp)) try out.append(a, ' ') else try out.appendSlice(a, text[i..][0..l]);
+        i += l;
+    }
+    // An OWNED slice, not `out.items`: the buffer is over-allocated, and a
+    // caller that frees the length rather than the capacity trips the debug
+    // allocator. The arena callers would never notice; the tests do.
+    return out.toOwnedSlice(a);
+}
+
+/// Whether `text` holds any PUA codepoint — one scan that allocates nothing, so
+/// the common case (a document with none) copies once and walks once.
+fn hasPrivateUse(text: []const u8) bool {
+    var i: usize = 0;
+    while (i < text.len) {
+        const l = std.unicode.utf8ByteSequenceLength(text[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + l > text.len) return false;
+        const cp = std.unicode.utf8Decode(text[i..][0..l]) catch {
+            i += l;
+            continue;
+        };
+        if (isPrivateUse(cp)) return true;
+        i += l;
+    }
+    return false;
+}
+
+/// The three Private Use Areas: the BMP's, and one per supplementary plane.
+fn isPrivateUse(cp: u21) bool {
+    return (cp >= 0xE000 and cp <= 0xF8FF) or
+        (cp >= 0xF0000 and cp <= 0xFFFFD) or
+        (cp >= 0x100000 and cp <= 0x10FFFD);
 }
 
 /// A `derive_search.Page` source over a LIVE `Extractor` — the `.pdf` end of the
@@ -326,6 +410,47 @@ pub fn verdictFor(doc_pages: u32, indexed_pages: u32, any_text: bool) Verdict {
 
 const testing = std.testing;
 const schema = @import("../db/schema.zig");
+
+test "a PUA glyph becomes a SPACE, so the word it touched stays findable" {
+    const a = testing.allocator;
+
+    // The failure this exists for, and it is not the junk term. `unicode61`
+    // treats a PUA codepoint as a token CHARACTER, so a glyph glued to a word
+    // takes the word out of the index with it. A space splits them; deleting
+    // would fuse them into one token matching neither half.
+    const glued = try stripPrivateUse(a, "alpha\u{E906}beta");
+    defer a.free(glued);
+    try testing.expectEqualStrings("alpha beta", glued);
+
+    // All three areas: the BMP's, and one per supplementary plane.
+    const all = try stripPrivateUse(a, "a\u{E000}b\u{F8FF}c\u{F0000}d\u{10FFFD}e");
+    defer a.free(all);
+    try testing.expectEqualStrings("a b c d e", all);
+
+    // The boundaries are exclusive on the outside — U+DFFF is a surrogate and
+    // cannot appear in valid UTF-8, so U+F900 and U+FFFD stand for "just past".
+    const edges = try stripPrivateUse(a, "\u{F900}\u{FFFD}\u{EFFFF}");
+    defer a.free(edges);
+    try testing.expectEqualStrings("\u{F900}\u{FFFD}\u{EFFFF}", edges);
+
+    // A document with none is copied verbatim, which is every document that is
+    // not carrying an icon font.
+    const clean = try stripPrivateUse(a, "reunião — a normal page, 2026");
+    defer a.free(clean);
+    try testing.expectEqualStrings("reunião — a normal page, 2026", clean);
+}
+
+test "the PUA filter runs on the derive path, not just in isolation" {
+    // `nextChunk` composes `sanitizeUtf8` then `stripPrivateUse`; the order
+    // matters, because the second assumes valid UTF-8. Asserted through the
+    // composition rather than the parts.
+    const a = testing.allocator;
+    const sanitized = try sanitizeUtf8(a, "x\u{E906}y");
+    defer a.free(sanitized);
+    const stripped = try stripPrivateUse(a, sanitized);
+    defer a.free(stripped);
+    try testing.expectEqualStrings("x y", stripped);
+}
 
 test "wants is the probe's extension rule, so the two halves cannot disagree" {
     try testing.expect(wants("book.pdf"));
