@@ -81,16 +81,15 @@ jobs:
       - name: Test Frontend
         run: make web-test
 
-  release:
-    # GATED ON THE SUITES. Without this the release job ran in PARALLEL with
-    # them, so a red build still uploaded artifacts — and the README points
-    # beta testers straight at those downloads. Shipping a binary from a build
-    # that failed is worse than shipping nothing.
+  # ---- The SPA, built ONCE -----------------------------------------------------
+  #
+  # `webapp/dist` is the same bytes for every architecture, and it used to be
+  # rebuilt by all four release runners and all four image runners: eight
+  # identical `npm run build`s per push. It is one job now, and everything
+  # downstream downloads its output.
+  webapp:
     needs: [test-backend, test-frontend]
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [x86_64-linux-musl, x86-linux-musl, aarch64-linux-musl, arm-linux-musleabihf]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -106,6 +105,57 @@ jobs:
           node-version: 22
           cache: 'npm'
           cache-dependency-path: webapp/package-lock.json
+
+      # `npm run build` runs `build:wasm` first, so this needs the same Zig
+      # cache the binaries do — the three wasm modules are wasm32 and identical
+      # across every release target.
+      - name: Cache Zig build
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: ${{ runner.os }}-zigcache-${{ hashFiles('build.zig', 'build.zig.zon', 'webapp/wasm/**') }}
+          restore-keys: ${{ runner.os }}-zigcache-
+
+      - name: Install Frontend Dependencies
+        run: npm --prefix webapp ci
+
+      - name: Build the SPA
+        run: make web-dist
+
+      - name: Upload the SPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapp-dist
+          path: webapp/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    # GATED ON THE SUITES. Without this the release job ran in PARALLEL with
+    # them, so a red build still uploaded artifacts — and the README points
+    # beta testers straight at those downloads. Shipping a binary from a build
+    # that failed is worse than shipping nothing.
+    needs: [webapp]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-linux-musl
+            platform: linux/amd64
+          - target: x86-linux-musl
+            platform: linux/386
+          - target: aarch64-linux-musl
+            platform: linux/arm64
+          - target: arm-linux-musleabihf
+            platform: linux/arm/v6
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - name: Cache Zig build (shared across the matrix — the wasm is target-independent)
         uses: actions/cache@v4
@@ -117,11 +167,15 @@ jobs:
           key: ${{ runner.os }}-zigcache-${{ hashFiles('build.zig', 'build.zig.zon', 'webapp/wasm/**') }}
           restore-keys: ${{ runner.os }}-zigcache-
 
-      - name: Install Frontend Dependencies
-        run: npm --prefix webapp ci
+      # Built once by `webapp` above; no Node on this runner at all.
+      - name: Download the SPA
+        uses: actions/download-artifact@v4
+        with:
+          name: webapp-dist
+          path: webapp/dist
 
       - name: Build Artifact
-        run: make release-artifact TARGET=${{ matrix.target }}
+        run: make release-artifact TARGET=${{ matrix.target }} SKIP_WEB=1
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -129,80 +183,86 @@ jobs:
           name: inkhold-${{ matrix.target }}
           path: inkhold-${{ matrix.target }}.tar.gz
 
-  # ---- Container images -------------------------------------------------------
+      # THE SAME COMPILE, RELINKED WITHOUT DEBUG INFO — 42 s against the 65 s the
+      # unstripped build above just paid, because `.zig-cache` is warm in this
+      # very job. That is what makes it worth having both: the tarball keeps its
+      # symbols, so a beta tester's panic trace is readable, and the image gets
+      # 9.9 MB instead of 58.4 MB.
+      #
+      # Post-stripping the artifact instead would be cheaper still and does not
+      # work: `zig objcopy` answers `error: unimplemented`, and GNU objcopy on
+      # the runner only knows its own architecture.
+      - name: Relink stripped, for the image
+        run: |
+          zig build -Doptimize=ReleaseSafe -Dstrip=true \
+            -Dtarget=${{ matrix.target }} $(make -s print-zig-cpu TARGET=${{ matrix.target }})
+
+      - name: Upload the stripped binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: zig-out/bin/inkhold
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---- The container images ---------------------------------------------------
   #
-  # ONE RUNNER PER ARCHITECTURE, exactly like `release` above and for the same
-  # reason: each target is its own MuPDF compile, and four of them in series is
-  # four times the wall clock for no saving. Each runner pushes a single-platform
-  # image BY DIGEST (no tag), and `image-manifest` below stitches the digests
-  # into one manifest list — the standard way to build a multi-arch tag without
-  # the runners having to coordinate.
+  # ONE RUNNER, and no compiler on it. The four binaries and the SPA are already
+  # built; this only lays them out and pushes. That also removes the digest dance
+  # a per-architecture matrix needs — buildx writes the manifest list itself when
+  # one invocation covers every platform.
   #
-  # NO QEMU, and that is a property of the image rather than an oversight: the
-  # Dockerfile is COPY-only, so nothing foreign is ever EXECUTED during the
-  # build. Zig cross-compiles the binary on the x86 runner and buildx only has
-  # to lay bytes down.
+  # NO QEMU, which is a property of the image rather than an oversight: the
+  # Dockerfile is COPY-only, so nothing foreign is ever EXECUTED during a build.
   image:
-    needs: [test-backend, test-frontend]
+    needs: [release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            target: x86_64-linux-musl
-          - platform: linux/386
-            target: x86-linux-musl
-          - platform: linux/arm64
-            target: aarch64-linux-musl
-          - platform: linux/arm/v7
-            target: arm-linux-musleabihf
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+      - name: Download the SPA
+        uses: actions/download-artifact@v4
         with:
-          version: 0.16.0
+          name: webapp-dist
+          path: docker/context/webapp/dist
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Download the binaries
+        uses: actions/download-artifact@v4
         with:
-          node-version: 22
-          cache: 'npm'
-          cache-dependency-path: webapp/package-lock.json
+          path: /tmp/binaries
+          pattern: binary-*
 
-      - name: Cache Zig build
-        uses: actions/cache@v4
-        with:
-          path: .zig-cache
-          key: ${{ runner.os }}-zigcache-${{ hashFiles('build.zig', 'build.zig.zon', 'webapp/wasm/**') }}
-          restore-keys: ${{ runner.os }}-zigcache-
-
-      - name: Install Frontend Dependencies
-        run: npm --prefix webapp ci
-
-      # The Makefile owns the layout, so a local `make docker-image` and this
-      # produce the same context. One arch here, not all four.
-      - name: Build the context for ${{ matrix.platform }}
-        run: make docker-context DOCKER_ARCHES=${{ matrix.platform }}=${{ matrix.target }}
+      # Into the `TARGETPLATFORM` layout the Dockerfile copies from, using the
+      # Makefile's own platform=target mapping rather than a second copy of it —
+      # an artifact name cannot carry a slash, so the two have to be related
+      # somewhere, and the Makefile is where that relation already lives.
+      - name: Lay out the build context
+        run: |
+          set -e
+          for a in $(make -s print-docker-arches); do
+            platform="${a%%=*}"; target="${a##*=}"
+            mkdir -p "docker/context/$platform"
+            cp "/tmp/binaries/binary-$target/inkhold" "docker/context/$platform/inkhold"
+            chmod +x "docker/context/$platform/inkhold"
+          done
+          find docker/context -type f -printf '%p  %s bytes\n'
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      # PUSHES ONLY FROM `main`. A pull request still builds the image, because a
-      # broken Dockerfile should fail review rather than the next release; it
-      # just has nowhere to publish, and a fork's token could not push anyway.
       # Before the build step, which needs it. Registries reject an uppercase
       # path and `github.repository` preserves whatever case the owner typed.
       - name: Lowercase the image name
         id: name
         run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
+      # PUSHES ONLY FROM `main`. A pull request still builds every architecture,
+      # so a broken Dockerfile fails review rather than the next release; it
+      # simply has nowhere to publish, and a fork's token could not push anyway.
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
@@ -211,78 +271,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push by digest
-        id: build
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: docker
           file: docker/Dockerfile
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v6
           build-args: VERSION=${{ github.sha }}
-          # `push-by-digest` is meaningless without a push, so a pull request
-          # builds to the cache instead: the Dockerfile and every architecture
-          # still get exercised, and nothing is published.
-          outputs: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', steps.name.outputs.image) || 'type=cacheonly' }}
-
-      # A file per digest, named by the digest, so the merge job can just list
-      # the directory. The matrix cannot share a variable any other way.
-      - name: Export the digest
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          mkdir -p /tmp/digests
-          touch "/tmp/digests/${DIGEST#sha256:}"
-
-      - name: Upload the digest
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
-        with:
-          name: digest-${{ strategy.job-index }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  # The manifest list: one tag that resolves to whichever of the four images
-  # matches the puller's architecture.
-  image-manifest:
-    needs: image
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Download the digests
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digest-*
-          merge-multiple: true
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Lowercase the image name
-        id: name
-        run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
-      # `latest` for the people following main, and the commit sha for anyone who
-      # needs to pin or to say exactly what they are running in a bug report.
-      - name: Create the manifest list
-        working-directory: /tmp/digests
-        run: |
-          docker buildx imagetools create \
-            --tag ${{ steps.name.outputs.image }}:latest \
-            --tag ${{ steps.name.outputs.image }}:${{ github.sha }} \
-            $(printf '${{ steps.name.outputs.image }}@sha256:%s ' *)
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ steps.name.outputs.image }}:latest
+            ${{ steps.name.outputs.image }}:${{ github.sha }}
 
       - name: Show what was published
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: docker buildx imagetools inspect ${{ steps.name.outputs.image }}:latest

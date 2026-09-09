@@ -125,8 +125,9 @@ docker run -d --name inkhold -p 8089:8089 \
 docker logs inkhold          # the first-run admin password is printed here
 ```
 
-One tag covers **x86_64, aarch64, armv7 and 32-bit x86** — Docker pulls the one
-that matches your machine. The image is built `FROM scratch`: the server is
+One tag covers **x86_64, aarch64, 32-bit ARM and 32-bit x86** — Docker pulls the
+one that matches your machine. The ARM image is built for ARMv6, so it runs on
+every Pi from the original B+ upward. The image is built `FROM scratch`: the server is
 statically linked, so there is no base distribution in there at all, which is
 why it is ~25 MB and has nothing to patch. It also means there is no shell, so
 `docker exec` will not give you one.

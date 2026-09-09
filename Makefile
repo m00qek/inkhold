@@ -14,7 +14,7 @@ SERVE_PORT := $(PORT)
 
 TARGET ?= native-linux-musl
 
-.PHONY: help build release-artifact docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-test-e2e web-test-setup fmt fmt-fix lan-ip clean docs docs-build docs-deps
+.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-test-e2e web-test-setup fmt fmt-fix lan-ip clean docs docs-build docs-deps
 
 help:
 	@echo "Inkhold"
@@ -110,13 +110,18 @@ build:
 #
 # One `platform=zig-target` pair per architecture, kept in step with the release
 # matrix in `.github/workflows/ci.yaml`: these are the same four binaries the
-# tarballs ship, cross-compiled the same way. Adding an architecture is one line
-# here and one entry there.
+# tarballs ship — literally the same, since CI now builds each once and hands it
+# to both. Adding an architecture is one line here and one entry there.
+#
+# 32-bit ARM is `v6`, NOT `v7`, and that follows from the reuse: the shared
+# binary carries the ARMv6 baseline the tarball needs for a Pi 1, so `v7` would
+# be a label the bytes do not support. It costs nothing — Docker serves a v6
+# image to a v7 host, so this covers strictly more machines than v7 did.
 DOCKER_ARCHES = \
 	linux/amd64=x86_64-linux-musl \
 	linux/386=x86-linux-musl \
 	linux/arm64=aarch64-linux-musl \
-	linux/arm/v7=arm-linux-musleabihf
+	linux/arm/v6=arm-linux-musleabihf
 
 COMMA := ,
 EMPTY :=
@@ -136,9 +141,8 @@ TAG   ?= dev
 # connection and debug info is 48 MB of the 58 MB it would otherwise cost; a
 # tarball is fetched once by someone who may have to file a bug report from it,
 # so that one keeps its symbols.
-docker-context: $(WEB)/node_modules/.package-lock.json
+docker-context: $(if $(SKIP_WEB),,web-dist)
 	rm -rf docker/context
-	npm --prefix $(WEB) run build
 	mkdir -p docker/context/webapp
 	cp -r $(WEB)/dist docker/context/webapp/
 	@set -e; for a in $(DOCKER_ARCHES); do \
@@ -184,9 +188,26 @@ docker-image-host: docker-context
 CPU_arm-linux-musleabihf = arm1176jzf_s
 ZIG_CPU = $(if $(CPU_$(TARGET)),-Dcpu=$(CPU_$(TARGET)))
 
-release-artifact: $(WEB)/node_modules/.package-lock.json
-	zig build -Doptimize=ReleaseSafe -Dtarget=$(TARGET) $(ZIG_CPU)
+# THE SPA IS ARCHITECTURE-INDEPENDENT, so it is built once and reused. Set
+# `SKIP_WEB=1` when `webapp/dist` is already in place — CI builds it in a job of
+# its own and hands the same bytes to every architecture and to the image, which
+# is how one `npm run build` replaced eight.
+SKIP_WEB ?=
+
+# Two accessors so CI does not have to restate what this file already knows:
+# the CPU baseline for a target, and the platform=target mapping. A second copy
+# of either in the workflow is a second place for them to drift.
+print-zig-cpu:
+	@echo '$(ZIG_CPU)'
+
+print-docker-arches:
+	@echo '$(DOCKER_ARCHES)'
+
+web-dist: $(WEB)/node_modules/.package-lock.json
 	npm --prefix $(WEB) run build
+
+release-artifact: $(if $(SKIP_WEB),,web-dist)
+	zig build -Doptimize=ReleaseSafe -Dtarget=$(TARGET) $(ZIG_CPU)
 	mkdir -p release-tmp/webapp
 	cp zig-out/bin/inkhold release-tmp/
 	cp -r webapp/dist release-tmp/webapp/
