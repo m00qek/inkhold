@@ -14,9 +14,15 @@
 // round trip — and why there is no longer a size ceiling: a 76 MB document
 // costs the blocks page 1 is written in.
 //
-// WHAT THIS IS NOT, YET. No `.mark` annotation overlay — that is the point of
-// the exercise and it is gated on the pairing
-// work, not on this file. A plain PDF viewer is worth having on its own.
+// THE `.mark` OVERLAY LANDED, and this comment used to say it had not. A paired
+// mark's ink is composited over the page here, at the page's own scale through
+// every zoom, in the thumbnail strip, and in all four exports; the annotations
+// panel toggles the document and each ink layer independently.
+//
+// WHAT THIS IS NOT is a version-history viewer: `canPreviewHistory` excludes
+// `.pdf`, so a PDF's retained versions stay unlisted even though the backend
+// keeps them. Painting a PAST version needs a second document handle open
+// beside the live one, which is the piece nobody has written.
 
 import { el } from "../ui/dom";
 import type { Hash, Id, NoteMeta, NoteSummary, PageRef } from "../core/types";
