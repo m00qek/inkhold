@@ -28,10 +28,17 @@ FROM scratch
 
 ARG TARGETPLATFORM
 ARG VERSION=dev
+ARG SOURCE=https://github.com/m00qek/inkhold-beta
 
+# `image.source` is the one that does more than describe: GHCR reads it to LINK
+# the package to its repository, which is what makes the package page show the
+# README and inherit the repo's own access rules. Without it the package floats
+# unattached to anything.
 LABEL org.opencontainers.image.title="Inkhold" \
       org.opencontainers.image.description="A private cloud for your Supernote — self-hosted." \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.source="${SOURCE}" \
+      org.opencontainers.image.revision="${VERSION}" \
       org.opencontainers.image.version="${VERSION}"
 
 # The server, and the SPA it serves on the same port.

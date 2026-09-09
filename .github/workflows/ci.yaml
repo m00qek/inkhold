@@ -277,7 +277,9 @@ jobs:
           context: docker
           file: docker/Dockerfile
           platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v6
-          build-args: VERSION=${{ github.sha }}
+          build-args: |
+            VERSION=${{ github.sha }}
+            SOURCE=${{ github.server_url }}/${{ github.repository }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: |
             ${{ steps.name.outputs.image }}:latest
