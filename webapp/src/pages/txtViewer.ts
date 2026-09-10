@@ -6,9 +6,10 @@
 // both the shared `.pager` slot shape (see `10-toolbar.css`):
 //
 //   ZOOM — `−` [Fit ⇕] `+`, the reader/`.spd` viewer's exact control, scaling the
-//   reading COLUMN's width (its measure). `Fit ⇕` is the default page fitted to
-//   the stage — the same label those viewers give their own first rung; each step
-//   widens the column, capped at the stage. This is the FRAME size.
+//   reading COLUMN's width (its measure). This is the FRAME size, and the ladder
+//   is bracketed by the app's two shared fit labels: `Fit ⇕` is the default page
+//   fitted to the stage, three multipliers widen the measure, and `Fit ⇔` at the
+//   top spans the stage outright.
 //
 //   FONT SIZE — `−` [16px] `+`, scaling the GLYPH size. Distinct knob: font size
 //   reflows the column (how many words land on a line), zoom only changes how wide
@@ -26,7 +27,7 @@ import { readLocal, writeLocal } from "../ui/storage";
 import { bytesBudget, dispatchApiFailure } from "../api/client";
 import { createToolbar } from "./toolbar";
 import { svg, VIEWER_IC } from "./viewerIcons";
-import { createZoomStepper, FIT_PAGE } from "./viewerControls";
+import { createZoomStepper, FIT_PAGE, FIT_WIDTH } from "./viewerControls";
 import { VIEWER_DEBOUNCE_MS, backWord, createViewerHeader, createViewerBody, createVersionBanner } from "./viewerChrome";
 import { createBinViewerActions } from "../ui/binViewerActions";
 import type { ReaderOrigin, Viewer, ViewerDeps } from "./viewer";
@@ -60,14 +61,27 @@ function clampFont(px: number): number {
 // persistence key, mirroring the font stepper's. The ladder is a small fixed set
 // of width multipliers applied to the default page, stepped by − / + exactly like
 // the `.spd` viewer's zoom — index 0 is `Fit ⇕` (the default column, factor 1), the
-// rest widen it, and `max-width:100%` (13-txt-viewer.css) caps them at the stage.
+// middle rungs widen it, and the last is `Fit ⇔`, which takes the stage's width
+// outright (13-txt-viewer.css).
 const ZOOM_KEY = "sn.txt.zoom";
-const ZOOM_FACTORS = [1, 1.25, 1.5, 1.75, 2] as const;
+const ZOOM_FACTORS = [1, 1.25, 1.5, 1.75] as const;
 const ZOOM_DEFAULT = 0; // Fit ⇕ — the default page, fitted to the stage
+/**
+ * The rung ABOVE the multipliers: the column spans the stage, whatever the stage.
+ *
+ * It has no factor, which is the point. `max-width: 100%` on the sheet already
+ * stopped a wide multiplier at the stage edge, so the `200%` rung this replaces
+ * already LANDED on fit-width at a common desk size (measured: 1211px of a
+ * 1218px stage) — but by accident of that desk's proportions, and on a wider one
+ * it stopped short with nothing to say so. Naming the rung makes the top of the
+ * ladder mean one thing on every stage instead of "200%, or the stage, whichever
+ * comes first". Ascending still holds: nothing is wider than the stage.
+ */
+const ZOOM_FIT_WIDTH = ZOOM_FACTORS.length;
 
 function clampZoomIdx(i: number): number {
   if (!Number.isFinite(i)) return ZOOM_DEFAULT;
-  return Math.max(0, Math.min(ZOOM_FACTORS.length - 1, Math.round(i)));
+  return Math.max(0, Math.min(ZOOM_FIT_WIDTH, Math.round(i)));
 }
 /**
  * `Fit ⇕` at the default column, else the width multiplier as a percentage.
@@ -82,7 +96,25 @@ function clampZoomIdx(i: number): number {
  * is width alone. That is why the label names the PAGE rather than an axis.
  */
 function zoomLabel(i: number): string {
-  return i === ZOOM_DEFAULT ? FIT_PAGE : `${Math.round(ZOOM_FACTORS[i]! * 100)}%`;
+  if (i === ZOOM_DEFAULT) return FIT_PAGE;
+  if (i === ZOOM_FIT_WIDTH) return FIT_WIDTH;
+  return `${Math.round(ZOOM_FACTORS[i]! * 100)}%`;
+}
+
+/**
+ * Put rung `i` on the sheet — the ONE place a rung becomes layout.
+ *
+ * Two mechanisms, because the two ends of the ladder are different shapes: the
+ * multiplier rungs steer `--txt-zoom`, which the sheet's `aspect-ratio` reads,
+ * while fit-width drops the aspect entirely and takes the stage's width. Sharing
+ * one function is what stops the two call sites (a step, and text arriving later)
+ * from drifting into disagreeing about which rung is on screen.
+ */
+function applyZoom(pre: HTMLElement, i: number): void {
+  const wide = i === ZOOM_FIT_WIDTH;
+  pre.classList.toggle("txt__sheet--wide", wide);
+  if (wide) pre.style.removeProperty("--txt-zoom");
+  else pre.style.setProperty("--txt-zoom", String(ZOOM_FACTORS[i]!));
 }
 
 /** The browser-facing side of the viewer — network + storage — injected so a
@@ -282,7 +314,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
       if (next !== zoomIdx) {
         // At a bound this is a no-op — clamp silently, persisting nothing.
         zoomIdx = next;
-        if (textPre) textPre.style.setProperty("--txt-zoom", String(ZOOM_FACTORS[zoomIdx]!));
+        if (textPre) applyZoom(textPre, zoomIdx);
         seam.saveZoom(zoomIdx);
       }
       return zoomIdx;
@@ -482,10 +514,9 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
     // file's line breaks and whitespace; the CSS wraps long lines to a measure.
     const pre = el("pre", { class: "txt__sheet", text }) as HTMLPreElement;
     pre.style.fontSize = `${size}px`;
-    // The reading column's width factor — the sheet's `aspect-ratio` multiplies it
-    // (13-txt-viewer.css); absent/`Fit` leaves the default page. Set here so text
-    // opened later inherits the current zoom, exactly as it inherits the font size.
-    pre.style.setProperty("--txt-zoom", String(ZOOM_FACTORS[zoomIdx]!));
+    // The current rung, applied here so text opened later inherits the zoom
+    // exactly as it inherits the font size (see `applyZoom`).
+    applyZoom(pre, zoomIdx);
     textPre = pre;
     loadedText = text;
     main.classList.add("viewer__main--text");

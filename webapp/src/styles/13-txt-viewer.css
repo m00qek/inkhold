@@ -39,7 +39,8 @@
    `--txt-zoom` (1 = `Fit ⇕`, the default page): a wider aspect at the same height is a
    wider measure, so the SAME glyph size reflows across more of the line. It is
    capped by `max-width: 100%` — once the column fills the stage width the page
-   simply stops widening. Distinct from font size, which changes the glyphs, not
+   simply stops widening, and the ladder's TOP rung goes there deliberately (see
+   `.txt__sheet--wide` below). Distinct from font size, which changes the glyphs, not
    the column. `--txt-zoom` defaults to 1 so an unset page is exactly that fit. */
 .txt__sheet {
   box-sizing: border-box;
@@ -71,6 +72,21 @@
   box-shadow:
     0 2px 3px var(--shadow),
     0 26px 50px -28px var(--shadow);
+}
+
+/* THE TOP RUNG — `Fit ⇔`, where the column spans the stage rather than a multiple
+   of the page. `max-width: 100%` above already stopped a wide multiplier at the
+   stage edge, so the `200%` rung this replaces already landed here on a common
+   desk (measured: 1211px of a 1218px stage) — but by accident of that desk's
+   proportions, and on a wider one it stopped short with nothing to say so.
+
+   `aspect-ratio` has to go rather than be overridden: it is what the multiplier
+   rungs steer, and with an explicit width AND the inherited `height: 100%` it
+   would be one constraint too many. What is left is a sheet the size of the
+   stage, which is exactly what fitting the width means for a reading column. */
+.txt__sheet--wide {
+  aspect-ratio: auto;
+  width: 100%;
 }
 
 /* ---- find in this file ------------------------------------------------------

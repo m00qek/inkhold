@@ -9,7 +9,7 @@
 // reuses ONE instance — that a hidden or superseded load never paints stale text.
 
 import { describe, it, expect, vi } from "vitest";
-import { FIT_PAGE } from "../../src/pages/viewerControls";
+import { FIT_PAGE, FIT_WIDTH } from "../../src/pages/viewerControls";
 import { createTxtViewer, TxtLoadError, type TxtSeam } from "../../src/pages/txtViewer";
 import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
 import type { NoteMeta } from "../../src/core/types";
@@ -326,6 +326,59 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
     expect(pre.style.getPropertyValue("--txt-zoom")).toBe("1");
     zoomIn(v).click();
     expect(pre.style.getPropertyValue("--txt-zoom")).toBe("1.25");
+    v.destroy();
+  });
+
+  it("tops out at `Fit ⇔`, which swaps the MECHANISM rather than raising the factor", async () => {
+    const f = fakeSeam();
+    const v = mount(createTxtViewer(deps(), f.seam));
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
+    f.calls[0]!.d.resolve("hi");
+    await flush();
+    const pre = q(v, ".txt__sheet") as HTMLPreElement;
+
+    // Three multiplier rungs, each still steering `--txt-zoom`…
+    for (const factor of ["1.25", "1.5", "1.75"]) {
+      zoomIn(v).click();
+      expect(pre.style.getPropertyValue("--txt-zoom")).toBe(factor);
+      expect(pre.classList.contains("txt__sheet--wide")).toBe(false);
+    }
+
+    // …then the top rung, which drops the factor entirely. Leaving a stale
+    // `--txt-zoom` behind would be invisible here but would decide the sheet's
+    // aspect the moment the class came off again.
+    zoomIn(v).click();
+    expect(zoomLabel(v).textContent).toBe(FIT_WIDTH);
+    expect(pre.classList.contains("txt__sheet--wide")).toBe(true);
+    expect(pre.style.getPropertyValue("--txt-zoom")).toBe("");
+
+    // It is the ceiling: another step in is a no-op, not a sixth rung.
+    const at = f.zoomSaves.length;
+    zoomIn(v).click();
+    expect(zoomLabel(v).textContent).toBe(FIT_WIDTH);
+    expect(f.zoomSaves.length).toBe(at);
+
+    // And stepping back restores the factor the class had displaced.
+    zoomOut(v).click();
+    expect(zoomLabel(v).textContent).toBe("175%");
+    expect(pre.classList.contains("txt__sheet--wide")).toBe(false);
+    expect(pre.style.getPropertyValue("--txt-zoom")).toBe("1.75");
+    v.destroy();
+  });
+
+  it("text arriving LATER opens at the fit-width rung, not at a bare factor", async () => {
+    // The rung is applied in two places — a step, and text landing afterwards.
+    // The second used to write `--txt-zoom` directly, so a file opened while
+    // fit-width was the current rung would have come back at a multiplier.
+    const f = fakeSeam(null, 4); // a prior session left the top rung stored
+    const v = mount(createTxtViewer(deps(), f.seam));
+    expect(zoomLabel(v).textContent).toBe(FIT_WIDTH);
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
+    f.calls[0]!.d.resolve("hi");
+    await flush();
+    const pre = q(v, ".txt__sheet") as HTMLPreElement;
+    expect(pre.classList.contains("txt__sheet--wide")).toBe(true);
+    expect(pre.style.getPropertyValue("--txt-zoom")).toBe("");
     v.destroy();
   });
 

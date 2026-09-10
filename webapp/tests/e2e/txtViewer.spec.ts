@@ -182,6 +182,56 @@ test.describe(".txt viewer", () => {
     expect(await region2.locator(".txt__sheet").evaluate((el) => Math.round(el.getBoundingClientRect().width))).toBe(fitWidth);
   });
 
+  test("`Fit ⇔` at the top of the ladder spans the stage, which no multiplier promises", async ({ page }) => {
+    // The rung this replaced was `200%`, and `max-width: 100%` meant it landed on
+    // the stage edge at a common desk size — by accident of that desk. The point
+    // of naming the rung is that it is EXACT: whatever the stage, the column is
+    // the stage. So this measures against the stage rather than against a number.
+    await signedIn(page);
+    await mockTextFile(page);
+    await page.goto(`/#/note/${README}`);
+    await freezeMotion(page);
+
+    const region = page.getByRole("region", { name: "Text viewer" });
+    const sheet = region.locator(".txt__sheet");
+    const zoomLabel = region.locator(".pager .txt-zoom");
+    await expect(sheet).toBeVisible();
+
+    // The stage's CONTENT box — the sheet's containing block, padding removed, so
+    // this is the width the column could possibly reach.
+    const availWidth = await sheet.evaluate((el) => {
+      const stage = el.parentElement!;
+      const cs = getComputedStyle(stage);
+      return stage.getBoundingClientRect().width - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    });
+
+    const fit = await sheet.evaluate((el) => el.getBoundingClientRect().width);
+    // The default page is a 3:4 column — comfortably short of the stage, or the
+    // rest of this test would prove nothing.
+    expect(fit).toBeLessThan(availWidth - 40);
+
+    for (const step of ["125%", "150%", "175%", "Fit ⇔"]) {
+      await region.getByRole("button", { name: "Zoom in" }).click();
+      await expect(zoomLabel).toHaveText(step);
+    }
+
+    const spanned = await sheet.evaluate((el) => el.getBoundingClientRect().width);
+    expect(Math.abs(spanned - availWidth)).toBeLessThan(1);
+    // The aspect is what the multiplier rungs steer, so the top rung has to be
+    // free of it — left in place it would fight the explicit width.
+    expect(await sheet.evaluate((el) => getComputedStyle(el).aspectRatio)).toBe("auto");
+
+    // Still fits the stage VERTICALLY, as every rung does: height is what the
+    // sheet is sized from, and the top rung only changes the measure.
+    const fitsHeight = await sheet.evaluate((el) => {
+      const stage = el.parentElement!;
+      const cs = getComputedStyle(stage);
+      const availH = stage.getBoundingClientRect().height - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+      return Math.abs(el.getBoundingClientRect().height - availH) < 1.5;
+    });
+    expect(fitsHeight).toBe(true);
+  });
+
   // The `−` [Fit] `+` control must render PIXEL-IDENTICAL to the reader's / the
   // `.spd` viewer's zoom control. Its readout carries its own `.txt-zoom` class
   // (so a `.zoom` locator stays unambiguous with two `.pager`s in the bar), but
