@@ -9,9 +9,10 @@ import { svg, VIEWER_IC } from "./viewerIcons";
 /**
  * THE TWO FIT LABELS, spelled once for every viewer that shows one.
  *
- * A fit is a fit ALONG AN AXIS, and two of the viewers offer both — so the label
- * has to say which, and saying it in words ("Fit" / "Fit width") cost the readout
- * most of its width for the rarer of the two. The arrows say the same thing in
+ * A fit is a fit ALONG AN AXIS, and the PDF and image viewers offer BOTH — so the
+ * label has to say which, and saying it in words ("Fit" / "Fit width") cost the
+ * readout most of its width for the rarer of the two. The note, `.spd` and `.txt`
+ * viewers fit one axis only and show `FIT_PAGE` alone. The arrows say the same thing in
  * one glyph, and they are a MATCHED PAIR on purpose: U+21D5 and U+21D4 are the
  * same double-stroke family, so the two read as one control's two settings
  * rather than as two unrelated marks. (U+2194, the single-stroke horizontal, is

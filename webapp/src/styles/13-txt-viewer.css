@@ -36,11 +36,11 @@
    frame's proportions stay constant. Taller content just scrolls within.
 
    THE ZOOM CONTROL widens the reading COLUMN by multiplying that aspect by
-   `--txt-zoom` (1 = Fit, the default page): a wider aspect at the same height is a
+   `--txt-zoom` (1 = `Fit ⇕`, the default page): a wider aspect at the same height is a
    wider measure, so the SAME glyph size reflows across more of the line. It is
    capped by `max-width: 100%` — once the column fills the stage width the page
    simply stops widening. Distinct from font size, which changes the glyphs, not
-   the column. `--txt-zoom` defaults to 1 so an unset page is exactly Fit. */
+   the column. `--txt-zoom` defaults to 1 so an unset page is exactly that fit. */
 .txt__sheet {
   box-sizing: border-box;
   height: 100%;

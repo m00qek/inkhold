@@ -9,6 +9,7 @@
 // reuses ONE instance — that a hidden or superseded load never paints stale text.
 
 import { describe, it, expect, vi } from "vitest";
+import { FIT_PAGE } from "../../src/pages/viewerControls";
 import { createTxtViewer, TxtLoadError, type TxtSeam } from "../../src/pages/txtViewer";
 import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
 import type { NoteMeta } from "../../src/core/types";
@@ -288,7 +289,7 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
     const v = mount(createTxtViewer(deps(), f.seam));
     expect(zoomOut(v)).not.toBeNull();
     expect(zoomIn(v)).not.toBeNull();
-    expect(zoomLabel(v).textContent).toBe("Fit");
+    expect(zoomLabel(v).textContent).toBe(FIT_PAGE);
     v.destroy();
   });
 
@@ -308,7 +309,7 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
     zoomOut(v).click(); // → Fit
     const at = f.zoomSaves.length;
     zoomOut(v).click(); // already Fit
-    expect(zoomLabel(v).textContent).toBe("Fit");
+    expect(zoomLabel(v).textContent).toBe(FIT_PAGE);
     expect(f.zoomSaves.length).toBe(at);
     v.destroy();
   });

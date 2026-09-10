@@ -5,8 +5,9 @@
 // as the reader does, and adds TWO reading controls to the toolbar's `view` zone,
 // both the shared `.pager` slot shape (see `10-toolbar.css`):
 //
-//   ZOOM — `−` [Fit] `+`, the reader/`.spd` viewer's exact control, scaling the
-//   reading COLUMN's width (its measure). "Fit" is the default page; each step
+//   ZOOM — `−` [Fit ⇕] `+`, the reader/`.spd` viewer's exact control, scaling the
+//   reading COLUMN's width (its measure). `Fit ⇕` is the default page fitted to
+//   the stage — the same label those viewers give their own first rung; each step
 //   widens the column, capped at the stage. This is the FRAME size.
 //
 //   FONT SIZE — `−` [16px] `+`, scaling the GLYPH size. Distinct knob: font size
@@ -25,7 +26,7 @@ import { readLocal, writeLocal } from "../ui/storage";
 import { bytesBudget, dispatchApiFailure } from "../api/client";
 import { createToolbar } from "./toolbar";
 import { svg, VIEWER_IC } from "./viewerIcons";
-import { createZoomStepper } from "./viewerControls";
+import { createZoomStepper, FIT_PAGE } from "./viewerControls";
 import { VIEWER_DEBOUNCE_MS, backWord, createViewerHeader, createViewerBody, createVersionBanner } from "./viewerChrome";
 import { createBinViewerActions } from "../ui/binViewerActions";
 import type { ReaderOrigin, Viewer, ViewerDeps } from "./viewer";
@@ -58,19 +59,30 @@ function clampFont(px: number): number {
 // GLYPH size and reflows the column; zoom sets how WIDE the column is. Its own
 // persistence key, mirroring the font stepper's. The ladder is a small fixed set
 // of width multipliers applied to the default page, stepped by − / + exactly like
-// the `.spd` viewer's zoom — index 0 is "Fit" (the default column, factor 1), the
+// the `.spd` viewer's zoom — index 0 is `Fit ⇕` (the default column, factor 1), the
 // rest widen it, and `max-width:100%` (13-txt-viewer.css) caps them at the stage.
 const ZOOM_KEY = "sn.txt.zoom";
 const ZOOM_FACTORS = [1, 1.25, 1.5, 1.75, 2] as const;
-const ZOOM_DEFAULT = 0; // Fit — the default page
+const ZOOM_DEFAULT = 0; // Fit ⇕ — the default page, fitted to the stage
 
 function clampZoomIdx(i: number): number {
   if (!Number.isFinite(i)) return ZOOM_DEFAULT;
   return Math.max(0, Math.min(ZOOM_FACTORS.length - 1, Math.round(i)));
 }
-/** "Fit" at the default column, else the width multiplier as a percentage. */
+/**
+ * `Fit ⇕` at the default column, else the width multiplier as a percentage.
+ *
+ * The SAME label the note and `.spd` viewers put on their own first rung, and it
+ * names the same thing: the sheet is `height: 100%` at the page's natural 3:4
+ * (13-txt-viewer.css), so rung 0 is that page fitted to the stage.
+ *
+ * The rungs above stretch the measure PAST the natural page. They do NOT leave
+ * the fit behind — height is what the sheet is sized from, so every rung still
+ * fills the stage vertically (measured: 5/5 rungs) and what a step actually buys
+ * is width alone. That is why the label names the PAGE rather than an axis.
+ */
 function zoomLabel(i: number): string {
-  return i === ZOOM_DEFAULT ? "Fit" : `${Math.round(ZOOM_FACTORS[i]! * 100)}%`;
+  return i === ZOOM_DEFAULT ? FIT_PAGE : `${Math.round(ZOOM_FACTORS[i]! * 100)}%`;
 }
 
 /** The browser-facing side of the viewer — network + storage — injected so a

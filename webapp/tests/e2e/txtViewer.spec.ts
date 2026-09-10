@@ -144,7 +144,7 @@ test.describe(".txt viewer", () => {
     // stepper's `.zoom` so the two `.pager`s in this bar stay addressable.
     const zoomLabel = region.locator(".pager .txt-zoom");
     await expect(sheet).toBeVisible();
-    await expect(zoomLabel).toHaveText("Fit");
+    await expect(zoomLabel).toHaveText("Fit ⇕");
 
     const width = () => sheet.evaluate((el) => Math.round(el.getBoundingClientRect().width));
     const fontPx = () => sheet.evaluate((el) => getComputedStyle(el).fontSize);
@@ -178,7 +178,7 @@ test.describe(".txt viewer", () => {
     // Fit restores the default column.
     await region2.getByRole("button", { name: "Zoom out" }).click();
     await region2.getByRole("button", { name: "Zoom out" }).click();
-    await expect(region2.locator(".pager .txt-zoom")).toHaveText("Fit");
+    await expect(region2.locator(".pager .txt-zoom")).toHaveText("Fit ⇕");
     expect(await region2.locator(".txt__sheet").evaluate((el) => Math.round(el.getBoundingClientRect().width))).toBe(fitWidth);
   });
 
@@ -235,7 +235,7 @@ test.describe(".txt viewer", () => {
     await expect(fontReadout).toHaveText("16px");
     await region.getByRole("button", { name: "Larger text" }).click();
     await expect(fontReadout).toHaveText("18px");
-    await expect(zoomReadout).toHaveText("Fit"); // column zoom untouched
+    await expect(zoomReadout).toHaveText("Fit ⇕"); // column zoom untouched
   });
 
   test("an unreadable file shows an honest state, still offering the download", async ({ page }) => {
