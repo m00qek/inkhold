@@ -29,6 +29,39 @@
 
 import { el } from "./dom";
 
+/**
+ * A px-valued CSS token read off `:root`.
+ *
+ * A viewer's relayout has to subtract exactly the width a docked panel takes
+ * from the stage, and that width is a token (`--panel-w`, `--panel-w-wide`,
+ * `--panel-w-narrow`, `--panel-gap` in `00-tokens.css`). So the JS reads the very
+ * value the stylesheet uses rather than duplicating it as a hand-synced constant
+ * that quietly drifts. `fallback` matches the token's authored value, for any
+ * environment where the property is not resolvable.
+ *
+ * IT LIVES HERE, with the component whose widths it reads, because the second
+ * viewer needing it is exactly how the drift its own comment warns about would
+ * have started: it was private to `reader.ts` until the PDF viewer grew the same
+ * squeeze rule, and copying it across would have made two constants for one
+ * token.
+ */
+export function tokenPx(name: string, fallback: number): number {
+  if (typeof getComputedStyle !== "function" || typeof document === "undefined") return fallback;
+  const n = Number.parseInt(getComputedStyle(document.documentElement).getPropertyValue(name), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * The narrowest a paged viewer will let its own side panels squeeze the page.
+ *
+ * NOT A TOKEN, because nothing draws it: it is a rule about when a panel has to
+ * give way, and the stylesheet has no opinion on that. Both paged viewers hold
+ * the page to the same floor, which is the point of it being one number — a page
+ * narrowed past this is not a page you are reading, it is a page you are looking
+ * at past the furniture.
+ */
+export const MIN_PAGE_W = 360;
+
 export interface SidePanelOptions {
   /** `id` for the `<aside>` — the target of an opener's `aria-controls`. */
   id?: string;

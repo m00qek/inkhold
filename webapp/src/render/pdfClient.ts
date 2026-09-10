@@ -3,10 +3,11 @@
 // It owns the `Worker`, tags every request with an id and hands back promises.
 // The viewer never sees a `postMessage`; it asks for a page and gets pixels.
 
-import type { PdfPageSize } from "./pdfDecode";
+import type { PdfPageSize } from "./pdfDocument";
 import type { PdfCacheStats } from "./pdfBlocks";
-import type { PdfLink } from "./pdfLinks";
-import type { PdfWord } from "./pdfText";
+import type { PdfLink } from "../core/types";
+import type { PdfWord } from "./pdfWire";
+import type { PdfOutlineEntry } from "./pdfWire";
 import type { PdfInkOverlay, PdfOpenMode, PdfRequest, PdfResponse } from "./pdfWorkerTypes";
 
 /**
@@ -48,31 +49,38 @@ export interface PdfSession {
    * The page's OWN links — the ones the document was authored with.
    *
    * Rects in the page's display space (points), so the caller's transform is
-   * the raster's scale and nothing else. A page with none answers `[]`, which
-   * is why this returns a list rather than throwing: no links is the common
-   * case and is not a failure.
+   * the raster's scale and nothing else. A page with none answers `[]`: no
+   * links is the common case and is not a failure.
    */
   pageLinks(page: number): Promise<PdfLink[]>;
   /**
    * The page's WORDS and their boxes, in the page's display space (points) —
    * what find-in-PDF points at.
    *
-   * A page with none answers `[]`, and that stays an answer rather than an
-   * error: a scanned page has no words, and a page the SERVER matched can still
-   * yield none this side can name. The count on screen is the server's either
-   * way, so an empty list costs a box and never a
-   * match.
+   * A page with none answers `[]` rather than erroring: a scanned page has no
+   * words, and a page the SERVER matched can still yield none this side can
+   * name. The count on screen is the server's either way, so an empty list
+   * costs a box and never a match.
    */
   pageWords(page: number): Promise<PdfWord[]>;
+  /**
+   * The document's OUTLINE, flat and in document order, each entry carrying the
+   * 0-based page its destination resolves to. PER DOCUMENT, not per page: asked
+   * once at open and kept for the document's life.
+   *
+   * A document with no outline answers `[]` — the COMMON case, and a success.
+   * The caller's response to that and to a failure is the same one (a dimmed
+   * opener, and a document that reads perfectly without it).
+   */
+  outline(): Promise<PdfOutlineEntry[]>;
   render(page: number, scale: number): Promise<PdfFrame>;
   /**
    * One page as a PDF of its own, with `ink` drawn over it — the page's own
    * content streams, not a picture of them.
    *
-   * `ink.alpha`'s buffer is TRANSFERRED and is DETACHED here: it is several
-   * megabytes that would otherwise be structured-cloned across the boundary, and
-   * the caller has no further use for it (the same handoff `render` gets back
-   * the other way). Reading it after this call yields a zero-length view.
+   * `ink.alpha`'s buffer is TRANSFERRED and is DETACHED here — several megabytes
+   * that would otherwise be structured-cloned. Reading it after this call yields
+   * a zero-length view.
    */
   exportPage(page: number, ink: PdfInkOverlay): Promise<Uint8Array>;
   /**
@@ -108,11 +116,10 @@ export interface PdfSession {
 /**
  * The most recent `stats()` answer, also published as `__inkholdPdfStats`.
  *
- * A DIAGNOSTIC SURFACE, not a test hook — though the acceptance test in
- * for range-served PDFs is exactly this question. "How many requests
- * and how many bytes did page 1 of that document cost?" has no other answer on
- * a real device, and the whole design is a bet about that number: on a 3G link
- * a bad access pattern is the difference between three seconds and thirty.
+ * A DIAGNOSTIC SURFACE, not a test hook. "How many requests and how many bytes
+ * did page 1 of that document cost?" has no other answer on a real device, and
+ * the whole range-served design is a bet about that number: on a 3G link a bad
+ * access pattern is the difference between three seconds and thirty.
  */
 let published: PdfSessionStats | null = null;
 export function lastPdfStats(): PdfSessionStats | null {
@@ -162,18 +169,14 @@ export function createPdfSession(makeWorker: PdfWorkerFactory = defaultWorker): 
   });
   // A worker that dies (an OOM on a very large raster, a module that will not
   // compile) must fail every waiter rather than leave the viewer on "Opening…".
-  //
   // AND MARK THE SESSION DEAD, or only the in-flight half is covered: the next
   // `send` would post to a worker that will never answer, and that request has
-  // no one left to reject it — the viewer sits on "Opening this PDF…" forever,
-  // which is the very state this handler exists to prevent.
+  // no one left to reject it.
   //
-  // Terminal is the right reading of this event. The worker catches everything
+  // Terminal is the right reading of this event: the worker catches everything
   // it can and answers with an `{ kind: "error" }` RESPONSE (`pdfWorker.ts`,
-  // `handle`), so a recoverable failure never reaches here; what does is a
-  // module that would not compile or an instance the engine killed, and neither
-  // recovers. `createPdfViewer` holds one session for its whole life, so a dead
-  // one surfaces as an honest placeholder on the next open rather than a hang.
+  // `handle`), so what reaches here is a module that would not compile or an
+  // instance the engine killed, and neither recovers.
   worker.addEventListener("error", (ev: ErrorEvent) => {
     dead = true;
     const err = new Error(ev.message || "the PDF worker stopped");
@@ -196,12 +199,10 @@ export function createPdfSession(makeWorker: PdfWorkerFactory = defaultWorker): 
   }
 
   /**
-   * REFUSED HERE, before the buffer is handed over. The mask is sized from a
-   * canvas on this side and the module reads `width * height` bytes from a
-   * pointer on the other: a buffer that disagrees with those numbers is an
-   * out-of-bounds read inside wasm, which is a torn-down instance and not a
-   * failed export. This is also the only door into the worker, so checking it
-   * per row would only make the second copy the untested one.
+   * REFUSED HERE, before the buffer is handed over. The module reads
+   * `width * height` bytes from a pointer on the other side, so a buffer that
+   * disagrees with those numbers is an out-of-bounds read inside wasm — a
+   * torn-down instance, not a failed export.
    */
   function checkInk(ink: PdfInkOverlay): void {
     if (ink.width <= 0 || ink.height <= 0 || ink.alpha.length !== ink.width * ink.height) {
@@ -235,6 +236,10 @@ export function createPdfSession(makeWorker: PdfWorkerFactory = defaultWorker): 
       const res = expect(await send({ kind: "pageWords", page }), "pageWords");
       return res.words;
     },
+    async outline() {
+      const res = expect(await send({ kind: "outline" }), "outline");
+      return res.entries;
+    },
     async render(page, scale) {
       const res = expect(await send({ kind: "render", page, scale }), "rendered");
       return { bitmap: res.bitmap, width: res.width, height: res.height };
@@ -255,10 +260,9 @@ export function createPdfSession(makeWorker: PdfWorkerFactory = defaultWorker): 
       );
     },
     async exportDocument(original) {
-      // The Blob is NOT transferred. Transferring detaches it on this side, and
-      // this side is the one that concatenates it with the delta afterwards —
-      // and a Blob is a handle, so the clone costs nothing the transfer would
-      // have saved.
+      // The Blob is NOT transferred: that would detach it on this side, which
+      // is the side that concatenates it with the delta afterwards — and a Blob
+      // is a handle, so the clone costs nothing anyway.
       const res = expect(await send({ kind: "exportDocument", original }), "exportedDocument");
       return res.delta;
     },

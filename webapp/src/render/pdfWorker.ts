@@ -1,12 +1,10 @@
 // The PDF WORKER — MuPDF, the block cache and every `ink_*` call, off the main
 // thread.
 //
-// TWO REASONS IT IS A WORKER, and only one of them is JSPI. Rastering a 77-page
-// A4 document on the main thread janks the UI for as long as it takes; and
-// `createImageBitmap` here transfers to the main thread's canvas with no pixel
-// copy, where an `ImageData` would have to be structured-cloned. JSPI works on
-// either thread — this is about responsiveness, which is the other half of the
-// mantra.
+// NOT FOR JSPI, which works on either thread. Rastering a 77-page A4 document on
+// the main thread janks the UI for as long as it takes, and `createImageBitmap`
+// here transfers to the main thread's canvas with no pixel copy, where an
+// `ImageData` would have to be structured-cloned.
 //
 // It owns exactly one document at a time. Requests are SERIALISED (see `queue`)
 // because the module has one handle table, one last-render buffer and, on the
@@ -14,14 +12,12 @@
 // inside wasm and hand back each other's pixels.
 
 import {
-  AsyncPdfDocument,
   DEFAULT_WASM_URL,
   browserLoader,
-  syncCalls,
   type HostRead,
-  type PdfCalls,
   type PdfDecoderExports,
-} from "./pdfDecode";
+} from "./pdfLoader";
+import { AsyncPdfDocument, syncCalls, type PdfCalls } from "./pdfDocument";
 import { BlockCache, type PdfCacheStats } from "./pdfBlocks";
 import { HttpError, fetchWhole, rangeFetcher } from "./pdfTransport";
 import type { PdfInkOverlay, PdfOpenMode, PdfRequest, PdfResponse } from "./pdfWorkerTypes";
@@ -41,14 +37,13 @@ interface WorkerScope {
 const ctx = globalThis as unknown as WorkerScope;
 
 /**
- * Is JSPI here? (measured present in Chromium 149, in a
- * non-secure, non-isolated context — which is what a household box on
- * `http://<lan-ip>` has to work in.)
+ * Is JSPI here? Measured present in Chromium 149 in a NON-SECURE, non-isolated
+ * context, which is what a household box on `http://<lan-ip>` has to work in.
  *
  * Feature-detected, never version-sniffed, and the answer picks a whole
  * transport: without it MuPDF cannot suspend on a `fetch`, so the document is
  * downloaded whole and opened from a buffer. Both paths are exercised — the
- * fallback is what Firefox and Safari may still be on (§6.1).
+ * fallback is what Firefox and Safari may still be on.
  */
 function hasJspi(): boolean {
   return (
@@ -70,10 +65,8 @@ let source: { url: string; size: number } | null = null;
  *
  * Installed only for the duration of the whole-document export, whose first act
  * inside MuPDF is to read the entire original back (see `exportDocument`). Over
- * the network that would be a second download of the whole file, which on the
- * 3G link this app is designed for is the difference between a feature and a
- * regret. Reading it out of the Blob the main thread already holds is local and
- * disk-backed.
+ * the network that would be a second download of the whole file; reading it out
+ * of the Blob the main thread already holds is local and disk-backed.
  */
 let localCopy: ((off: number, len: number) => Promise<Uint8Array>) | null = null;
 
@@ -145,46 +138,41 @@ const loadDecoder = browserLoader(DEFAULT_WASM_URL, (getMemory) => {
 
 /**
  * The exports, wrapped so that anything which can reach `ink.host_read` returns
- * a promise. All four suspend, not just the two the plan named: `ink_page_count`
- * walks the page tree and `ink_page_size` loads a page, and both of those read
- * bytes on a document that is still mostly unfetched.
+ * a promise. EVERY ENTRY BELOW SUSPENDS — each one reads bytes on a document
+ * that is still mostly unfetched, for the reason noted beside it — and an
+ * UNWRAPPED one TRAPS the instance on its first suspension rather than waiting.
  *
  * EXPORTED, AND `useJspi` IS A PARAMETER, PURELY SO THIS CAN BE TESTED. The
  * branch is otherwise unreachable from a test — `jspi` is decided once at module
  * load from the real engine's capabilities — and the failure it guards is
  * invisible to every other kind of check: forget one wrapper and the suite stays
  * green, the whole-file path stays correct, and only a RANGE-SERVED document in
- * a real browser traps the instance on its first suspension. That is a
- * production-only bug behind a green board, so the table gets an assertion of
- * its own (`pdfWorker.test.ts`).
+ * a real browser breaks. That is a production-only bug behind a green board, so
+ * the table gets an assertion of its own (`pdfWorker.test.ts`).
  */
 export function callsFor(x: PdfDecoderExports, useJspi: boolean = jspi): PdfCalls {
   if (!useJspi) return syncCalls(x);
   return {
     openWhole: (ptr, len) => x.ink_open(ptr, len),
     openStream: WebAssembly.promising(x.ink_open_stream),
+    // Walks the page tree.
     pageCount: WebAssembly.promising(x.ink_page_count),
+    // Loads a page.
     pageSize: WebAssembly.promising(x.ink_page_size),
-    // Listing a page's links LOADS the page, and resolving an internal
-    // destination walks the xref a second time — both read bytes, so both
-    // suspend on a document that is still mostly unfetched.
+    // Loads the page, then walks the xref again to resolve internal targets.
     pageLinks: WebAssembly.promising(x.ink_page_links),
-    // Extracting a page's WORDS runs the page — every font, every image, every
-    // content stream it references — so of everything in this table it is the
-    // most certain to suspend on a range-served document.
+    // RUNS the page — every font, image and content stream it references.
     pageWords: WebAssembly.promising(x.ink_page_words),
+    // Walks the outline tree, then resolves every entry's destination through
+    // `fz_resolve_link` / `fz_page_number_from_location`: the xref twice over.
+    loadOutline: WebAssembly.promising(x.ink_load_outline),
     render: WebAssembly.promising(x.ink_render),
-    // NOT OPTIONAL on this branch, whatever `PdfCalls` says. `ink_export_page`
-    // grafts a page, which walks the source document's xref and so can re-enter
-    // `ink.host_read`; unwrapped, the first suspension on a streamed document
-    // TRAPS the instance instead of waiting. `AsyncPdfDocument.exportPage` falls
-    // back to the raw export when this is absent — right for `syncCalls` on the
-    // non-JSPI branch above, where nothing suspends, and wrong here.
+    // Grafting walks the source document's xref. NOT OPTIONAL here whatever
+    // `PdfCalls` says: `AsyncPdfDocument.exportPage` falls back to the raw
+    // export when this is absent, which is right only for `syncCalls`.
     exportPage: WebAssembly.promising(x.ink_export_page),
-    // Both halves of the whole-document export, for the same reason: annotating
-    // loads a page (an xref walk), and the incremental write reads the ENTIRE
-    // original back through `ink.host_read`. Unwrapped, either would trap the
-    // instance on its first suspension.
+    // Annotating loads a page; the incremental write reads the ENTIRE original
+    // back through `ink.host_read`.
     annotatePage: WebAssembly.promising(x.ink_annotate_page),
     exportIncremental: WebAssembly.promising(x.ink_export_incremental),
   };
@@ -250,15 +238,12 @@ async function render(page: number, scale: number): Promise<PdfResponse & { kind
 /**
  * ONE PAGE, AS A PDF — the original page's structure with the ink over it.
  *
- * NOT A RASTER, which is the entire reason this row exists: `render` above hands
- * back pixels, and a PDF made from those pixels has no selectable text, no
- * fonts and no vectors. This asks the module to GRAFT the source page — its own
- * content streams and the resources they reference — into a fresh one-page
- * document, then draw the ink over it as an image mask.
+ * NOT A RASTER, which is the entire reason this row exists: the module GRAFTS
+ * the source page — its own content streams and the resources they reference —
+ * into a fresh one-page document, then draws the ink over it as an image mask.
  *
- * The refusals are the module's to make and they surface as a thrown error,
- * which `handle` turns into an `{ kind: "error" }` response: a source that is
- * not a PDF at all, a page that will not graft, a document already closed.
+ * The refusals are the module's to make and surface as a thrown error, which
+ * `handle` turns into an `{ kind: "error" }` response.
  */
 async function exportPage(page: number, ink: PdfInkOverlay): Promise<Uint8Array> {
   if (!doc) throw new Error("no document is open");
@@ -284,10 +269,7 @@ let annotated = false;
 
 /**
  * ONE PAGE OF THE WHOLE-DOCUMENT EXPORT: draw the ink into the open document.
- *
- * Sparse by nature — the real corpus is 7 annotated pages out of 77 — so this
- * is called a handful of times even for a long document, once per page the
- * `.mark` actually wrote on.
+ * Sparse by nature — the real corpus is 7 annotated pages out of 77.
  */
 async function annotatePage(page: number, ink: PdfInkOverlay): Promise<void> {
   if (!doc) throw new Error("no document is open");
@@ -379,6 +361,11 @@ function handle(req: PdfRequest): Promise<void> {
         ctx.postMessage({ kind: "pageWords", id: req.id, words: await doc.pageWords(req.page) });
         return;
       }
+      case "outline": {
+        if (!doc) throw new Error("no document is open");
+        ctx.postMessage({ kind: "outline", id: req.id, entries: await doc.outline() });
+        return;
+      }
       case "render": {
         const out = await render(req.page, req.scale);
         ctx.postMessage({ ...out, id: req.id }, [out.bitmap]);
@@ -400,9 +387,8 @@ function handle(req: PdfRequest): Promise<void> {
       }
       case "exportDocument": {
         const delta = await exportDocument(req.original);
-        // TRANSFERRED like the rest — though this one is the small message the
-        // whole design is for: tens of kilobytes, where the document it belongs
-        // to is tens of megabytes and never leaves the disk.
+        // TRANSFERRED like the rest, though this one is tens of kilobytes where
+        // the document it belongs to is tens of megabytes.
         ctx.postMessage({ kind: "exportedDocument", id: req.id, delta }, [
           delta.buffer as ArrayBuffer,
         ]);

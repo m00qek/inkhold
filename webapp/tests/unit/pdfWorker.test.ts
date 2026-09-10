@@ -19,7 +19,7 @@
 // then added two more entry points with the same property.
 
 import { describe, it, expect, vi, afterEach, beforeAll } from "vitest";
-import type { PdfDecoderExports } from "../../src/render/pdfDecode";
+import type { PdfDecoderExports } from "../../src/render/pdfLoader";
 
 // The module IS a worker: at import it registers a `message` listener on its
 // global scope. Node has no such scope, so one is supplied before the dynamic
@@ -51,6 +51,8 @@ function fakeExports(): PdfDecoderExports {
     ink_links_free: fn("ink_links_free"),
     ink_page_words: fn("ink_page_words"),
     ink_words_free: fn("ink_words_free"),
+    ink_load_outline: fn("ink_load_outline"),
+    ink_outline_free: fn("ink_outline_free"),
     ink_render: fn("ink_render"),
     ink_close: fn("ink_close"),
     ink_export_page: fn("ink_export_page"),
@@ -97,7 +99,9 @@ describe("the JSPI call table", () => {
    * resolves each internal destination, which is a second walk of the xref.
    * `pageWords` is the strongest case of all: it RUNS the page through a
    * structured-text device, so it touches every font, image and content stream
-   * the page names.
+   * the page names. `loadOutline` is `pageLinks`'s shape at document scale: it
+   * walks the outline tree and then resolves every entry's destination through
+   * the same `fz_resolve_link` pair, which is a second walk of the xref.
    */
   const MUST_SUSPEND: [string, string][] = [
     ["openStream", "ink_open_stream"],
@@ -105,6 +109,7 @@ describe("the JSPI call table", () => {
     ["pageSize", "ink_page_size"],
     ["pageLinks", "ink_page_links"],
     ["pageWords", "ink_page_words"],
+    ["loadOutline", "ink_load_outline"],
     ["render", "ink_render"],
     ["exportPage", "ink_export_page"],
     ["annotatePage", "ink_annotate_page"],
