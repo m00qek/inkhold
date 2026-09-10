@@ -15,11 +15,39 @@ function themeGlyph(): string {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
 }
 
-/** The product wordmark, set in the utility mono face. */
+/**
+ * The product mark: two brackets holding a stroke.
+ *
+ * NOT in `ICONS`. That table is one path string per glyph, drawn by `svg()` in a
+ * single `currentColor`; this one is two colours deliberately — the brackets take
+ * whatever ink surrounds them, the held stroke takes `--accent`, which the token
+ * file names as *brand* before it names selection or focus.
+ *
+ * IT IS THE SAME GEOMETRY AS `public/icon.svg` and the two must change together.
+ * A favicon cannot read the app's tokens, so that file bakes the palette in and
+ * this one inherits it; there is no way to share the source without shipping the
+ * stylesheet to the tab strip.
+ *
+ * Sized by attribute rather than by CSS so it needs no rule of its own, and
+ * hidden from assistive tech because the wordmark beside it already says the
+ * name.
+ */
+export function brandMark(px = 26): string {
+  return (
+    `<svg width="${px}" height="${px}" viewBox="0 0 24 24" fill="none" aria-hidden="true">` +
+    '<g stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M9 3.5H6.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2H9"/>' +
+    '<path d="M15 3.5h2.5a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H15"/></g>' +
+    '<path d="M12 8v8" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round"/></svg>'
+  );
+}
+
+/** The product wordmark: the mark, then the name in the utility mono face. */
 export function wordmark(): HTMLElement {
   return el(
     "p",
     { class: "wordmark" },
+    el("span", { class: "wordmark__mark", html: brandMark() }),
     el("span", { class: "wordmark__name", text: "INKHOLD" }),
   );
 }

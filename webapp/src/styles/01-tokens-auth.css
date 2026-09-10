@@ -168,11 +168,20 @@ body:has(.sn-root) {
   gap: 8px;
   margin: 0 0 30px;
   font-family: var(--font-mono);
-  font-size: var(--fs-eyebrow);
+  /* In step with the rail's (`02-app-shell-rail.css`): this is the one screen
+     whose whole job is to say which app you are signing in to. */
+  font-size: var(--fs-heading);
   font-weight: 600;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--ink);
+}
+
+/* Block-level for the reason the rail's mark is (`02-app-shell-rail.css`): an
+   inline wrapper brings a line box of its own and the glyph rides its baseline
+   instead of being centred on its own height. */
+.wordmark__mark {
+  display: flex;
 }
 
 /* --- Form layout --- */

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <!-- Inkhold. Two brackets holding a stroke: the name, read literally.
+       A FAVICON CANNOT READ THE APP'S TOKENS, so the palette is baked in here
+       and kept in step with `webapp/src/styles/00-tokens.css` by hand. Light is
+       the default because a tab strip is light far more often than not; the
+       media query is what Chrome and Firefox honour, and a browser that ignores
+       it gets the light mark on its own ground, which still reads. -->
+  <style>
+    .hold { stroke: #1c1b17; }
+    .ink  { stroke: #3f6b4a; }
+    @media (prefers-color-scheme: dark) {
+      .hold { stroke: #e9e6dd; }
+      .ink  { stroke: #7fae86; }
+    }
+  </style>
+  <!-- Drawn on the 24x24 grid of `webapp/src/ui/icons.ts`, at the weight that
+       survives 16px: the brackets carry the silhouette, the stroke carries the
+       colour, and there is nothing else to lose. -->
+  <g class="hold" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 3.5H6.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2H9"/>
+    <path d="M15 3.5h2.5a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H15"/>
+  </g>
+  <path class="ink" d="M12 8v8" stroke-width="3.4" stroke-linecap="round"/>
+</svg>

@@ -1,7 +1,7 @@
 /* ============================================================
    App shell — library gallery + .note reader.
-   Ported from docs/mockups/web-interface.html (the approved
-   visual source of truth). Scoped under .sn-root so it never
+   Ported from the approved visual source of truth.
+   Scoped under .sn-root so it never
    touches the centered auth sheet above. The chrome stays quiet;
    the notes (live <canvas> pages) carry the colour.
    ============================================================ */
@@ -78,11 +78,31 @@
   gap: 8px;
   padding: 22px 20px 18px;
   font-family: var(--font-mono);
-  font-size: var(--fs-eyebrow);
+  /* THE WORDMARK LEADS THE RAIL, so it cannot be the smallest thing in it. At
+     `--fs-eyebrow` it tied with the "FOLDERS" section label and sat BELOW the
+     nav items at `--fs-body` — the product name reading as a caption for the
+     list beneath it. `--fs-title` is the first step that puts it on top.
+
+     Tracking comes down as the size goes up: 0.16em is calibrated for 11px mono,
+     and the same ratio at 16px sprawls the word across the rail. */
+  font-size: var(--fs-heading);
   font-weight: 600;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+/* THE MARK'S WRAPPER MUST NOT BE AN INLINE BOX, and that is the whole fix.
+   As a plain `span` it got a line box of its own — with the same descender space
+   below the baseline that uppercase never uses — and the SVG sat on THAT box's
+   baseline, riding ~2px above where `align-items: center` was aiming it. Making
+   it a block-level box gives it exactly the glyph's height, so the row centres
+   the mark itself rather than a line box wrapped around it.
+
+   No nudge, and deliberately no nudge: a pixel offset here would be a second
+   correction stacked on the first, and it would need re-tuning at every size. */
+.brand__mark {
+  display: flex;
+}
+
 .nav {
   padding: 6px 12px;
   overflow-y: auto;
