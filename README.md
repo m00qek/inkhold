@@ -38,13 +38,17 @@ searching, and exporting everything from any device on your network.
 - **Read it in the browser** — notebooks, sketches, PDFs, images and text files,
   with per-layer viewing and in-document find. Pages render *in your browser*
   (small WebAssembly decoders), so the server only moves bytes.
+- **Work through a PDF** — its own table of contents as a navigation panel, text
+  you can select and copy straight off the page, fit-width zoom, go-to-page and
+  Home/End, and a page index that marks which pages carry your handwriting.
 - **Search your handwriting** — and your PDFs and text files, full-text across
   the whole library. Handwriting is searchable because your Supernote does the
   OCR on-device; the other formats carry their own text. The index is built and
   queried *in your browser* too, so the Pi never runs a query — and a typo still
   finds the word you meant.
 - **Recover mistakes** — a recycle bin with a retention window, and per-file
-  **version history** so you can look back at earlier states of a note.
+  **version history** so you can look back at earlier states of a note — the
+  handwriting on an annotated PDF included, which you can preview and restore.
 - **Export** — any note to PDF (with a searchable text layer), a flat PNG, or a
   layered `.ora`.
 - **Manage the household** — a small admin console for users, devices, quota, and
