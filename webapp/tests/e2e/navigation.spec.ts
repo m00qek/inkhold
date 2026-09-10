@@ -115,7 +115,7 @@ test.describe("navigating while the reader is open", () => {
     // The reader's own controls are not NAVIGATION — but the URL still has to say
     // where they left you, so the route gains a page and stays a note route.
     await page.getByRole("button", { name: "Next page" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("2 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("2 / 20");
     await expect(reader(page)).toBeVisible();
     // `/page/2` for the SECOND page: the URL counts from one, as the pager on
     // screen does, while the reader indexes from zero. The conversion lives in
@@ -164,11 +164,11 @@ test.describe("the URL follows the reader without becoming history", () => {
     const depth = await page.evaluate(() => history.length);
 
     await page.getByRole("button", { name: "Next page" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("2 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("2 / 20");
     await page.getByRole("button", { name: "Next page" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("3 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("3 / 20");
     await page.getByRole("button", { name: "Page 7" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("7 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("7 / 20");
 
     // The URL describes what is on screen…
     await expect(page).toHaveURL(/#\/note\/141\/page\/7$/);
@@ -188,12 +188,12 @@ test.describe("the URL follows the reader without becoming history", () => {
     await signedIn(page);
     await page.goto("/#/note/141");
     await page.getByRole("button", { name: "Page 5" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("5 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("5 / 20");
 
     await page.reload();
 
     // The whole reason the position is in the URL rather than in reader state.
-    await expect(page.locator(".pager__count")).toHaveText("5 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("5 / 20");
   });
 });
 
@@ -224,7 +224,7 @@ test.describe("the initial route is dispatched once", () => {
     // leaves every third page without a transcript, and the Text toggle is
     // correctly disabled on those.
     await page.goto("/#/note/141/page/4");
-    await expect(page.locator(".pager__count")).toHaveText("4 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("4 / 20");
 
     // Two things the URL says nothing about, so only a genuine re-open can lose
     // them: the zoom step, and the recognized-text panel.
@@ -245,7 +245,7 @@ test.describe("the initial route is dispatched once", () => {
     // `ocr.reset()`s the panel shut. Both still as the user left them.
     await expect(page.locator(".reader .zoom")).toHaveText("100%");
     await expect(page.locator(".ocr")).toBeVisible();
-    await expect(page.locator(".pager__count")).toHaveText("4 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("4 / 20");
     await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
   });
 
@@ -258,14 +258,14 @@ test.describe("the initial route is dispatched once", () => {
     await signedIn(page);
     await page.goto("/#/note/141");
     await page.getByRole("button", { name: "Page 4" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("4 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("4 / 20");
     await expect(page).toHaveURL(/#\/note\/141\/page\/4$/);
 
     // Forcing a real dispatch of the CURRENT route — what a duplicate boot did.
     await page.evaluate(() => window.dispatchEvent(new HashChangeEvent("hashchange")));
     await page.waitForTimeout(300);
 
-    await expect(page.locator(".pager__count")).toHaveText("4 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("4 / 20");
     await expect(page).toHaveURL(/#\/note\/141\/page\/4$/);
   });
 });

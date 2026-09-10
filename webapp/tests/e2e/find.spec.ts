@@ -12,7 +12,7 @@ import { fakeFileHash } from "../../src/api/fake";
 // ancestor, a field that was a bare text node with no border or ground, and a
 // counter that quietly revised its total.
 //
-// WHAT ANSWERS THE COUNTER NOW
+// WHAT ANSWERS THE COUNTER NOW (§1.1, §6 step 7)
 //
 // The note-scoped `/note/:id/search` route is gone. Find fetches `text/<md5>`
 // once, builds a per-document FTS5 index in the browser's own wasm engine, and
@@ -132,7 +132,7 @@ test.describe("the Find affordance reflects the WHOLE note, not the skeleton", (
     await expect(findBar(page)).toBeVisible();
     await findField(page).fill("budget");
     await settles(page, "1 of 4");
-    await expect(page.locator(".pager__count")).toHaveText("2 / 4");
+    await expect(page.locator(".pager__count")).toHaveValue("2 / 4");
   });
 
   // The other half of the same rule: a note with NO recognition anywhere must
@@ -427,12 +427,12 @@ test.describe("find in note", () => {
 
     await next.click();
     await settles(page, "2 of 28");
-    await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
     // Match 3 is the first on the next recognised page — stepping turns the page.
     await next.click();
     await settles(page, "3 of 28");
-    await expect(page.locator(".pager__count")).toHaveText("2 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("2 / 20");
     await expect(ovals(page)).toHaveCount(2);
 
     // Backwards from the first match wraps to the last, on the last matching page.
@@ -440,7 +440,7 @@ test.describe("find in note", () => {
     await prev.click();
     await prev.click();
     await settles(page, "28 of 28");
-    await expect(page.locator(".pager__count")).toHaveText("20 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("20 / 20");
   });
 
   // THE ONE THE FEATURE SHIPPED BROKEN. Every earlier test here searches a word
@@ -451,13 +451,13 @@ test.describe("find in note", () => {
   test("settling GOES TO the match when it is not on the page in front of you", async ({ page }) => {
     await openNote(page);
     await findToggle(page).click();
-    await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
     await findField(page).fill("witches");
     await settles(page, "1 of 7");
 
     // The reader followed the count instead of leaving it stranded.
-    await expect(page.locator(".pager__count")).toHaveText("2 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("2 / 20");
     await expect(ovals(page)).toHaveCount(1);
     await expect(page.locator(".findbox.is-current")).toHaveCount(1);
 
@@ -465,14 +465,14 @@ test.describe("find in note", () => {
     const next = page.getByRole("button", { name: "Next match" });
     await next.click();
     await settles(page, "2 of 7");
-    await expect(page.locator(".pager__count")).toHaveText("4 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("4 / 20");
     await expect(ovals(page)).toHaveCount(1);
 
     // Backwards from the first match wraps to the last, on the last odd page.
     await page.getByRole("button", { name: "Previous match" }).click();
     await page.getByRole("button", { name: "Previous match" }).click();
     await settles(page, "7 of 7");
-    await expect(page.locator(".pager__count")).toHaveText("20 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("20 / 20");
     await expect(ovals(page)).toHaveCount(1);
   });
 
@@ -518,7 +518,7 @@ test.describe("find in note", () => {
     await page.locator(".findbar__ask").click();
     await settles(page, "1 of 7");
     expect(await badges(page).count()).toBe(exactPages);
-    await expect(page.locator(".pager__count")).toHaveText("2 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("2 / 20");
     await expect(page.locator(".findbar__fuzzy")).toBeVisible();
     await expect(page.locator(".findbar__fuzzy")).toHaveCount(1);
     await expect(page.locator(".findbar__ask")).toBeHidden();
@@ -634,8 +634,18 @@ test.describe("find in note", () => {
     // moment the PAGE is wide enough can still catch its old pixel size — which
     // fails as "the loop did not grow" while the code under test is fine, and
     // only under load, because that is when the two frames separate.
+    //
+    // AND THE OVAL CAN BE ABSENT FOR A FRAME, which is the second half of the
+    // same fact and is what made this test fail about one run in four. The layer
+    // is cleared and repainted rather than resized in place, so between the two
+    // frames there is a moment with no oval in the DOM at all — and
+    // `boundingBox()` answers `null` there, so the non-null assertion threw
+    // out of the poll instead of letting it retry. A poll that cannot survive
+    // the very gap it was written to wait through is not waiting for anything.
+    // Zero is the right stand-in: it can never satisfy the predicate, so an oval
+    // that never comes back still fails, on the timeout, saying so.
     await expect
-      .poll(async () => (await ovals(page).first().boundingBox())!.width, { timeout: 10_000 })
+      .poll(async () => (await ovals(page).first().boundingBox())?.width ?? 0, { timeout: 10_000 })
       .toBeGreaterThan(before.width);
 
     const after = (await ovals(page).first().boundingBox())!;
@@ -661,7 +671,7 @@ test.describe("find in note", () => {
     // Page 3 (index 2) has no recognition: nothing to circle, and the counter
     // still describes the whole note.
     await page.getByRole("button", { name: "Page 3" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("3 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("3 / 20");
     await expect(ovals(page)).toHaveCount(0);
     await settles(page, /of 28$/);
 
@@ -677,7 +687,7 @@ test.describe("find in note", () => {
     await expect(badges(page).first()).toBeVisible();
 
     await page.goto("/#/note/101");
-    await expect(page.locator(".pager__count")).toHaveText("1 / 3");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 3");
     await expect(findBar(page)).toBeHidden();
     await expect(badges(page)).toHaveCount(0);
     await expect(ovals(page)).toHaveCount(0);
@@ -766,7 +776,7 @@ test.describe("find in note", () => {
     test("a reload of a page-and-query URL restores both", async ({ page }) => {
       await openNote(page, "/#/note/141/page/4?q=witches");
 
-      await expect(page.locator(".pager__count")).toHaveText("4 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("4 / 20");
       await expect(findBar(page)).toBeVisible();
       await expect(findField(page)).toHaveValue("witches");
       await settles(page, "2 of 7");
@@ -774,7 +784,7 @@ test.describe("find in note", () => {
 
       await page.reload();
 
-      await expect(page.locator(".pager__count")).toHaveText("4 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("4 / 20");
       await expect(findField(page)).toHaveValue("witches");
       await settles(page, "2 of 7");
       await expect(page.locator(".findbox.is-current")).toHaveCount(1);

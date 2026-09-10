@@ -12,20 +12,58 @@ test.describe("reader", () => {
 
     await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
     await expect(page.locator(".reader__title")).toContainText("Attention");
-    await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
     // The main viewer canvas actually rendered ink.
     const viewer = page.locator(".page canvas");
     await expect.poll(async () => inkFraction(viewer), { timeout: 5000 }).toBeGreaterThan(0.01);
   });
 
+  test("the ink rail marks every written page, and breaks on the blank one", async ({ page }) => {
+    // §2.5. The fixture note is handwriting all the way through
+    // except page 5, so the assertion is about the GAP: a rail that drew on
+    // every row would pass a "does it draw" test and fail the only question a
+    // reader actually asks of a notebook, which is where the writing stops.
+    await signedIn(page);
+    await page.goto("/#/note/141");
+    const strip = page.locator("#note-pages-panel");
+    const row = (n: number) => strip.locator(".filmstrip__page").nth(n);
+    await expect(row(0)).toBeVisible();
+
+    for (const n of [0, 1, 2, 3]) {
+      await expect(row(n)).toHaveClass(/filmstrip__page--inked/);
+    }
+    // …and the break.
+    await expect(row(4)).not.toHaveClass(/filmstrip__page--inked/);
+    await expect(row(5)).toHaveClass(/filmstrip__page--inked/);
+
+    // THE FACT IS NAMED, not only drawn: the stroke is a `::before` and never
+    // reaches a screen reader, so the row's own name has to carry it — and the
+    // blank row must not claim anything, since an unmarked row means "no ink
+    // claimed" rather than "this page is empty".
+    await expect(row(3)).toHaveAttribute("aria-label", "Page 4, written");
+    await expect(row(4)).toHaveAttribute("aria-label", "Page 5");
+
+    // EVERY STROKE IS THE SAME LENGTH — the claim the device makes now that it
+    // is yes/no rather than a gauge, and the thing a future "how much"
+    // treatment would have to argue against rather than drift into. Full row
+    // height is also what makes a run of them meet as one unbroken line.
+    const strokes = await strip.evaluate((el) =>
+      [...el.querySelectorAll(".filmstrip__page--inked")].map(
+        (r) => getComputedStyle(r, "::before").height,
+      ),
+    );
+    expect(strokes.length).toBeGreaterThan(3);
+    expect(new Set(strokes).size).toBe(1);
+  });
+
   test("navigates pages with the pager, the filmstrip, and the keyboard", async ({ page }) => {
     await signedIn(page);
     await page.goto("/#/note/141");
-    await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
     await page.getByRole("button", { name: "Next page" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("2 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("2 / 20");
 
     // The reader's arrow-key paging is claimed while the PAGE has focus; the
     // toolbar now owns arrow keys for roving between its own controls (WAI-ARIA
@@ -33,14 +71,75 @@ test.describe("reader", () => {
     // the stage before paging with the keyboard.
     await page.locator(".stage").click({ position: { x: 5, y: 5 } });
     await page.keyboard.press("ArrowRight");
-    await expect(page.locator(".pager__count")).toHaveText("3 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("3 / 20");
 
     await page.keyboard.press("ArrowLeft");
-    await expect(page.locator(".pager__count")).toHaveText("2 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("2 / 20");
 
     // Jump via a filmstrip thumbnail.
     await page.getByRole("button", { name: "Page 5" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("5 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("5 / 20");
+  });
+
+  test("Home and End jump to the first and last page", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/note/141");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
+
+    // Off the toolbar first, as the arrow-key paging above has to be: the bar
+    // roves on Home/End too, and takes them while one of its controls has focus.
+    await page.locator(".stage").click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press("End");
+    await expect(page.locator(".pager__count")).toHaveValue("20 / 20");
+    await expect(page.getByRole("button", { name: "Next page" })).toBeDisabled();
+
+    await page.keyboard.press("Home");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
+    await expect(page.getByRole("button", { name: "Previous page" })).toBeDisabled();
+  });
+
+  // §5 turned down a separate "go to page" box: the readout
+  // already showed the page and was a field in every respect except that it
+  // could not be typed into. These assert the four behaviours that makes it one,
+  // in the reader; `pdfViewer.spec.ts` asserts the same four, because the
+  // control is `viewerChrome.createPager` and there is only one of it.
+  test("the page readout is a field: a number lands, out of range clamps, Escape reverts", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/note/141");
+    const field = page.locator(".reader__bar .pager__count");
+    await expect(field).toHaveValue("1 / 20");
+
+    // It is a real, labelled control — not a status region, which is what a
+    // readout you can type into must never announce itself as.
+    await expect(page.locator(".reader__bar").getByRole("textbox", { name: "Page" })).toBeVisible();
+
+    await field.fill("7");
+    await field.press("Enter");
+    await expect(field).toHaveValue("7 / 20");
+    await expect(page.getByRole("button", { name: "Page 7" })).toHaveAttribute("aria-current", "true");
+    // Enter returns the keys to the page, so the very next arrow pages rather
+    // than editing the number that was just committed.
+    await expect(field).not.toBeFocused();
+    await page.keyboard.press("ArrowRight");
+    await expect(field).toHaveValue("8 / 20");
+
+    // OUT OF RANGE CLAMPS rather than being refused: 9999 in a 20-page notebook
+    // is unambiguous, and refusing it would leave the field holding a number the
+    // document does not have.
+    await field.fill("9999");
+    await field.press("Enter");
+    await expect(field).toHaveValue("20 / 20");
+
+    // Escape abandons the edit — and does NOT close the reader, which is what an
+    // Escape that reached the viewer's document handler would do.
+    await field.fill("3");
+    await field.press("Escape");
+    await expect(field).toHaveValue("20 / 20");
+    await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
+
+    // The live region kept the announcing the readout used to do, in words meant
+    // for a listener rather than an eye.
+    await expect(page.locator(".reader__bar .pager__live")).toHaveText("Page 20 of 20");
   });
 
   // The recognized-text panel. The fake fixture leaves every third page (index 2,
@@ -54,7 +153,7 @@ test.describe("reader", () => {
     test("toggling shows and hides the panel and tracks aria-pressed", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
       await expect(panel(page)).toBeHidden();
       await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
@@ -72,7 +171,7 @@ test.describe("reader", () => {
     test("the panel head reads `[icon] Recognized text` — a decorative icon before the label", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
       await toggle(page).click();
       const head = panel(page).locator(".ocr__head");
@@ -87,7 +186,7 @@ test.describe("reader", () => {
       await page.setViewportSize({ width: 800, height: 1000 });
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
       // The page index docks on the LEFT and is open by default; close it so this
       // measures the recognized-text (right) panel as the single variable, on a
@@ -113,12 +212,12 @@ test.describe("reader", () => {
       await page.goto("/#/note/141");
       // Wait for the note to finish opening: opening a note RESETS the panel, so
       // a toggle click racing that reset would be undone by it.
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
       await toggle(page).click();
       await expect(panel(page).locator(".ocr__body")).toContainText("page 1");
 
       await page.getByRole("button", { name: "Next page" }).click();
-      await expect(page.locator(".pager__count")).toHaveText("2 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("2 / 20");
       await expect(panel(page)).toBeVisible();
       await expect(panel(page).locator(".ocr__body")).toContainText("page 2");
     });
@@ -126,20 +225,24 @@ test.describe("reader", () => {
     test("a page with no recognized text disables the toggle and states so plainly", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
       await expect(toggle(page)).toBeEnabled();
 
       // Page 3 (index 2) is the fixture's un-recognized page.
-      await page.getByRole("button", { name: "Page 3", exact: true }).click();
-      await expect(page.locator(".pager__count")).toHaveText("3 / 20");
+      // BY NAME PREFIX, not by exact name: a row that carries ink says so in its
+      // own accessible name ("Page 3, written" — §2.5), so the name
+      // is state-dependent and an exact match stops finding the row the moment
+      // the ink rail knows anything about that page.
+      await page.getByRole("button", { name: /^Page 3\b/ }).click();
+      await expect(page.locator(".pager__count")).toHaveValue("3 / 20");
       await expect(toggle(page)).toBeDisabled();
 
       // Open the panel from a page that HAS text, then walk onto the one that
       // doesn't: the panel stays closable and says why it is blank.
-      await page.getByRole("button", { name: "Page 2", exact: true }).click();
+      await page.getByRole("button", { name: /^Page 2\b/ }).click();
       await expect(toggle(page)).toBeEnabled();
       await toggle(page).click();
-      await page.getByRole("button", { name: "Page 3", exact: true }).click();
+      await page.getByRole("button", { name: /^Page 3\b/ }).click();
       // The blank body says why, in the SHARED side-panel state line (loading /
       // empty / error) every docked panel speaks — see src/ui/sidePanel.ts.
       await expect(panel(page).locator(".side-panel__state")).toContainText("No recognized text");
@@ -149,12 +252,12 @@ test.describe("reader", () => {
     test("the panel resets to closed when a different note opens", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
       await toggle(page).click();
       await expect(panel(page)).toBeVisible();
 
       await page.goto("/#/note/101");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 3");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 3");
       await expect(panel(page)).toBeHidden();
       await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
     });
@@ -171,7 +274,7 @@ test.describe("reader", () => {
     test("rides the shared side-panel primitive, docked LEFT, open by default", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
       // One family: a `.side-panel` with the `.pages` hook and a `[icon] Pages`
       // head, exactly like Recognized text / Layers — but OPEN by default.
@@ -205,7 +308,7 @@ test.describe("reader", () => {
       await page.setViewportSize({ width: 800, height: 1000 });
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
       const pageEl = page.locator(".page");
       const narrow = await pageEl.evaluate((el: HTMLElement) => el.offsetWidth);
@@ -226,7 +329,7 @@ test.describe("reader", () => {
       await page.setViewportSize({ width: 800, height: 1000 });
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
       await expect(pagesPanel(page)).toBeVisible();
 
       // Opening Recognized text (a RIGHT dock) on a stage too narrow to hold both
@@ -264,7 +367,7 @@ test.describe("reader", () => {
         await signedIn(page);
         await page.goto("/#/note/141");
 
-        await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+        await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
         // "Move to bin" is now the icon+label control in the file zone — Download
         // and recognised-text went icon-only, so this is
@@ -318,7 +421,7 @@ test.describe("reader", () => {
     test("opening a note hides the library topbar and the reader still has height", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
       await freezeMotion(page);
 
       // The library header, and specifically the three controls that were wrong
@@ -392,7 +495,7 @@ test.describe("reader", () => {
     test("exposes a toolbar landmark with two zones and a decorative divider", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
       const bar = page.getByRole("toolbar", { name: "Reader controls" });
       await expect(bar).toBeVisible();
@@ -417,7 +520,7 @@ test.describe("reader", () => {
     test("is one tab stop and arrow keys rove between its controls", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
       // Opens with Back focused (the keyboard entry point) and exactly one control
       // in the bar is a tab stop; the rest are removed from the Tab order.
@@ -427,11 +530,34 @@ test.describe("reader", () => {
       // Arrow-right roves to the next control rather than paging: the toolbar
       // claims the key while one of its controls has focus, so the page does NOT
       // turn (that is the reader's arrow paging, and it is off the toolbar now).
+      //
+      // It skips Previous, which is disabled on page 1 — the reader bounds its
+      // pager since both paged viewers took the shared `createPager`, and
+      // `usable()` filters exactly that. Landing a tab stop on a dead control is
+      // what this asserts against.
+      const field = page.locator(".reader__bar .pager__count");
       await page.keyboard.press("ArrowRight");
-      await expect(page.getByRole("button", { name: "Previous page" })).toBeFocused();
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.getByRole("button", { name: "Previous page" })).toBeDisabled();
+      await expect(field).toBeFocused();
+      await expect(field).toHaveValue("1 / 20");
       expect(await page.locator('.reader__bar [tabindex="0"]').count()).toBe(1);
 
+      // THE PAGE FIELD IS IN THE ROVING ORDER, NOT A WALL IN IT. It is a text
+      // input, so it keeps the arrow while the caret has somewhere to go — the
+      // first press collapses the select-all that focusing it performed — and
+      // hands the key back at the edge, where roving carries on to Next.
+      await page.keyboard.press("ArrowRight");
+      await expect(field).toBeFocused();
+      await page.keyboard.press("ArrowRight");
+      await expect(page.getByRole("button", { name: "Next page" })).toBeFocused();
+      await expect(field).toHaveValue("1 / 20");
+      expect(await page.locator('.reader__bar [tabindex="0"]').count()).toBe(1);
+
+      // And back the same way — the caret takes one press, the edge gives the
+      // next one up, and disabled Previous is skipped again.
+      await page.keyboard.press("ArrowLeft");
+      await expect(field).toBeFocused();
+      await page.keyboard.press("ArrowLeft");
       await page.keyboard.press("ArrowLeft");
       await expect(page.getByRole("button", { name: "Library" })).toBeFocused();
     });
@@ -458,7 +584,7 @@ test.describe("reader", () => {
     test("Download and recognised-text are icon-only but keep their accessible names", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
       const bar = page.locator(".reader__bar");
 
@@ -482,7 +608,7 @@ test.describe("reader", () => {
     test("the Download trigger wears an active look while its menu is open, cleared when it closes", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
       // AFTER navigation (a hash goto reloads the document and would drop a style
       // tag added earlier): freeze so the active background is its settled value,
       // not a frame partway through the 0.14s transition.
@@ -515,7 +641,7 @@ test.describe("reader", () => {
       await signedIn(page);
       await page.goto("/#/note/141");
       await expect(page.locator(".reader.is-open")).toBeVisible();
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
       const moveBin = page.locator(".reader__bar").getByRole("button", { name: "Move to bin" });
       await expect(moveBin).toBeVisible();
@@ -557,7 +683,7 @@ test.describe("reader", () => {
   // for ONE fixture (`122`, "Project Beta", seven pages), exactly as the real page list
   // carries `linksHash` for only the pages that have a link block.
   //
-  // Rendered by the SAME component the PDF viewer uses (`pages/pdfLinkLayer.ts`),
+  // Rendered by the SAME component the PDF viewer uses (`pages/linkLayer.ts`),
   // so the anchors, the allowlist, the accessible names and the modifier-click
   // rule are not reimplemented here — what these tests pin is the wiring and the
   // GEOMETRY, which is the part that is specific to a `.note`: the rects are
@@ -569,7 +695,7 @@ test.describe("reader", () => {
     test("puts each link on its own rect, as a real anchor, labelled", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/122");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 7");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 7");
       await expect(layer(page).locator("a")).toHaveCount(2, { timeout: 10_000 });
 
       // The EXTERNAL one: a new tab, severed from this one, and named by its URL
@@ -620,10 +746,10 @@ test.describe("reader", () => {
     test("following an internal link is a page turn, at a real address", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/122");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 7");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 7");
 
       await layer(page).locator('a[href="#/note/122/page/2"]').click();
-      await expect(page.locator(".pager__count")).toHaveText("2 / 7");
+      await expect(page.locator(".pager__count")).toHaveValue("2 / 7");
       // A REAL ADDRESS, not a scroll: shareable, and it survives a reload.
       expect(page.url()).toContain("#/note/122/page/2");
       // The layer followed the turn — page 2's jump goes to page 3, so the
@@ -639,7 +765,7 @@ test.describe("reader", () => {
       // preserve, so there is no link block, no request and nothing focusable.
       await signedIn(page);
       await page.goto("/#/note/141");
-      await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+      await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
       await expect(page.locator(".page canvas")).toBeVisible();
       await expect(layer(page).locator("a")).toHaveCount(0);
     });

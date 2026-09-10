@@ -319,27 +319,30 @@ test.describe("page numbers in the URL count from one", () => {
 
     // Internal index 4 → `/page/5`, and the pager independently says "5 / 20".
     await page.getByRole("button", { name: "Page 5" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("5 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("5 / 20");
     await expect(page).toHaveURL(/#\/note\/141\/page\/5$/);
 
     // And back the other way, on a cold load.
     await page.goto("/#/note/141/page/5");
-    await expect(page.locator(".pager__count")).toHaveText("5 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("5 / 20");
   });
 
   test("the first page has one URL, and `page/1` is accepted as the same place", async ({ page }) => {
     await signedIn(page);
     await page.goto("/#/note/141/page/5");
-    await expect(page.locator(".pager__count")).toHaveText("5 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("5 / 20");
 
     // Returning to the start collapses to the bare path rather than emitting a
     // second spelling of it.
-    await page.getByRole("button", { name: "Page 1", exact: true }).click();
+    // By name PREFIX: an inked row's accessible name carries the fact
+    // ("Page 1, written" — §2.5), so an exact match is a locator
+    // that works only until the ink rail has an answer for that page.
+    await page.getByRole("button", { name: /^Page 1\b/ }).click();
     await expect(page).toHaveURL(/#\/note\/141$/);
 
     // …but a hand-typed or shared `page/1` still lands there.
     await page.goto("/#/note/141/page/1");
-    await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
   });
 
   test("a hand-edited page number lands somewhere sensible instead of erroring", async ({ page }) => {
@@ -349,15 +352,15 @@ test.describe("page numbers in the URL count from one", () => {
     // would make a mistyped page number look like a broken link.
     await page.goto("/#/note/141/page/0");
     await expect(reader(page)).toBeVisible();
-    await expect(page.locator(".pager__count")).toHaveText("1 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
     // Past the end is clamped by the READER, which is the only thing that knows
     // how long the note is.
     await page.goto("/#/note/141/page/900");
-    await expect(page.locator(".pager__count")).toHaveText("20 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("20 / 20");
   });
 
-  // BROKEN SINCE the search removal STEP 6, DECLARED RATHER THAN LEFT RED —
+  // BROKEN SINCE §6 STEP 6, DECLARED RATHER THAN LEFT RED —
   // AND NOW RUNNING, because the fixture it was waiting for exists
   // (`helpers/searchIndex.ts`).
   //
@@ -408,7 +411,7 @@ test.describe("page numbers in the URL count from one", () => {
     await expect(row.locator(".card__matches")).toHaveText("Matches on 2 pages", { timeout: 20_000 });
     await row.locator(".card__open").click();
 
-    await expect(page.locator(".pager__count")).toHaveText("2 / 6");
+    await expect(page.locator(".pager__count")).toHaveValue("2 / 6");
     // The href builder the result rows use is the SAME one the reader writes
     // with, so the conversion cannot be applied in one and missed in the other.
     await expect(page).toHaveURL(/#\/note\/121\/page\/2\?q=Endor$/);
@@ -429,7 +432,7 @@ test.describe("Back out of a note goes where you came from", () => {
     await expect(reader(page)).toBeVisible();
 
     await page.getByRole("button", { name: "Page 9" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("9 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("9 / 20");
     await expect(page).toHaveURL(/#\/note\/141\/page\/9$/);
 
     // ONE Back, and it lands in the FOLDER — not on page 8, and not at the

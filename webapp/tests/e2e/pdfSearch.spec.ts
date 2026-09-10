@@ -15,7 +15,7 @@ import { fakeFileHash } from "../../src/api/fake";
 // blob and is now the browser's own FTS5 instance, built from `text/<md5>` —
 // the SAME route and the SAME record the reader and the `.txt` viewer fetch,
 // because a PDF page is a segment whose ordinal is a page number and nothing
-// else about it is special.
+// else about it is special (§1.1).
 //
 // Every other test stands on one side of that line — `pdfFind.test.ts` proves
 // the controller obeys the count it is given, `docSearch.test.ts` proves the
@@ -153,12 +153,12 @@ test.describe("find in PDF", () => {
     const region = viewer(page);
     const bar = region.locator(".pdfbar");
     await counts(page, "1 of 3");
-    await expect(region.getByText("1 / 4")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 4");
 
     // Page 2 of the fixture carries the second match; page 3 does not.
     await bar.getByRole("button", { name: "Next match" }).click();
     await counts(page, "2 of 3");
-    await expect(region.getByText("2 / 4")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 4");
     await expect(marks(page).first()).toBeVisible({ timeout: 20_000 });
 
     // …and the third skips the unmatched page entirely, which is what makes this
@@ -167,7 +167,7 @@ test.describe("find in PDF", () => {
     // here is inferring absence from a page it failed to raster.
     await bar.getByRole("button", { name: "Next match" }).click();
     await counts(page, "3 of 3");
-    await expect(region.getByText("4 / 4")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("4 / 4");
     await expect(marks(page).first()).toBeVisible({ timeout: 20_000 });
 
     // The URL followed every step of that. `/page/4` is internal index 3: the
@@ -189,9 +189,9 @@ test.describe("find in PDF", () => {
 
     // Page 3 of the fixture has no match: the page turns and the marks go.
     await region.getByRole("button", { name: "Next page" }).click();
-    await expect(region.getByText("2 / 4")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 4");
     await region.getByRole("button", { name: "Next page" }).click();
-    await expect(region.getByText("3 / 4")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("3 / 4");
     await expect(marks(page)).toHaveCount(0, { timeout: 20_000 });
     // The count is unchanged — the document still has three matches, and the
     // current one is still the first; this page simply is not one of them. THIS

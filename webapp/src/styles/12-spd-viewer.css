@@ -92,5 +92,6 @@
 
 /* The zoom readout wears its OWN class (`.spd-zoom`) — every viewer is mounted at
    once, so a shared `.zoom` locator would resolve to more than one element — but
-   its CHROME is the shared `.zoom` treatment, grouped with `.spd-zoom`/`.txt-zoom`
-   in 10-toolbar.css so there is one source of truth rather than a per-viewer copy. */
+   its CHROME is the shared `.zoom` treatment, grouped with `.spd-zoom`/`.txt-zoom`/
+   `.pdf-zoom` in 10-toolbar.css so there is one source of truth rather than a
+   per-viewer copy. */

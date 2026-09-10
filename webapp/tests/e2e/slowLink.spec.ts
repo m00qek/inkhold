@@ -335,7 +335,7 @@ test.describe("a search inside a subfolder, while the tree walk is outstanding",
       // THE TRANSCRIPT HALF NEEDS NO ENTRY, and that absence is the whole of what
       // §6 step 6 changed here. It used to be `controlplane/search`, answering at
       // once and answering NOTHING — which is what settled the question
-      // prematurely. It is now the browser's own index,
+      // prematurely. It is now the browser's own index (§6),
       // which in this scenario has no manifest and no stored rows and therefore
       // also answers nothing, instantly and without a round trip.
       //
@@ -401,7 +401,7 @@ test.describe("a search inside a subfolder, while the tree walk is outstanding",
 // It lived here as a LIBRARY search: `controlplane/search` was held, a second
 // keystroke superseded the first, and the observable was the browser reporting
 // the first request as `net::ERR_ABORTED`. A library-wide query makes no request
-// at all now, so there is no connection out here
+// at all now (§6 step 6), so there is no connection out here
 // to give back and no way to write that assertion in this scope.
 //
 // The behaviour it pinned is still real, on the one search that still touches the
@@ -762,7 +762,9 @@ async function stageSnapshot(page: Page) {
       if (ctx) centreAlpha = ctx.getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data[3]!;
     }
     return {
-      pager: document.querySelector(".pager__count")?.textContent ?? "",
+      // The readout is the page FIELD now (`viewerChrome.createPager`), so the
+      // count lives in `value`, not in a text node.
+      pager: (document.querySelector(".pager__count") as HTMLInputElement | null)?.value ?? "",
       stackHidden: stack === null || stack.hidden,
       stackCanvases: stack ? stack.querySelectorAll("canvas").length : 0,
       canvasHidden: canvas === null || canvas.hidden,
@@ -888,7 +890,7 @@ test.describe("the reader's note stage, mid-fetch", () => {
     await serveLayeredPages(page, { index: 1, ms: 6000 });
     await page.goto("/?real");
     await page.locator(".card__open", { hasText: "Layered field sketch" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("1 / 2");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 2");
     // Page 1 carries none, and that is a fact off real metadata.
     expect((await stageSnapshot(page)).layersTitle).toBe("This page has no layers");
 
@@ -921,7 +923,7 @@ test.describe("the reader's note stage, mid-fetch", () => {
     await page.evaluate(() => {
       window.location.hash = "#/note/n-lay/page/2";
     });
-    await expect(page.locator(".pager__count")).toHaveText("2 / 3");
+    await expect(page.locator(".pager__count")).toHaveValue("2 / 3");
 
     const s = await stageSnapshot(page);
     expect(s.layersDisabled).toBe(true);

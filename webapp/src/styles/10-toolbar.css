@@ -74,28 +74,77 @@
   align-items: center;
   gap: var(--sp-1);
 }
-.pager__count {
+/* The PDF viewer's page readout wears its own class for the same reason
+   `.spd-zoom` and `.txt-zoom` do: both paged viewers are mounted at once, so one
+   shared class makes a single test locator resolve to two elements. Same rule,
+   two names.
+
+   IT IS AN `<input>`, AND AT REST IT MUST NOT LOOK LIKE ONE. The page number is
+   the one thing in this bar people also want to SET, so the readout is the field
+   (`viewerChrome.ts`) — but a border and a ground here would add a box to a bar
+   whose whole argument is density. Stripped back to the text it was, then given
+   the affordance only when a pointer or the caret is on it. */
+.pager__count,
+.pdf-pager__count {
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
   color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
   min-width: 66px;
   text-align: center;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+/* `--line` is, in 00-tokens.css's own words, "the underline affordance under
+   fields" — so the app's existing signal for "you can type here" is the only
+   thing that appears, and it appears as a shadow rather than a border so nothing
+   in the bar shifts by a pixel when it does. Keyboard focus additionally keeps
+   the global `:focus-visible` outline; this does not replace it. */
+.pager__count:hover,
+.pdf-pager__count:hover,
+.pager__count:focus,
+.pdf-pager__count:focus {
+  color: var(--ink);
+  box-shadow: inset 0 -1px 0 var(--line);
+}
+/* The live region the readout used to be. It says "Page 12 of 1700" to a screen
+   reader while the field beside it says `12 / 1700` to an eye; off-screen rather
+   than `display: none`, which would stop it being announced at all. */
+.pager__live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 /* The readout at the centre of every zoom/pager control. ONE definition for the
-   reader's bare `.zoom`, the `.spd` viewer's `.spd-zoom` and the `.txt` viewer's
-   `.txt-zoom`: those two carry their own class ONLY so a `.zoom` test locator
-   stays unambiguous with more than one readout mounted at once (every viewer is
-   in the DOM, hidden) — the CHROME is shared, so it lives here once rather than
-   being re-copied per viewer where a copy can silently drift or go missing. */
+   reader's bare `.zoom` (worn by the `.txt` viewer's FONT stepper too), the
+   `.spd` viewer's `.spd-zoom`, the `.txt` viewer's `.txt-zoom` and the PDF
+   viewer's `.pdf-zoom`: the last three carry their own class ONLY so a `.zoom`
+   test locator stays unambiguous with more than one readout mounted at once
+   (every viewer is in the DOM, hidden) — the CHROME is shared, so it lives here
+   once rather than being re-copied per viewer where a copy can silently drift or
+   go missing. */
 .zoom,
 .spd-zoom,
-.txt-zoom {
+.txt-zoom,
+.pdf-zoom {
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
   color: var(--ink-soft);
   min-width: 46px;
   text-align: center;
+}
+/* …and the PDF viewer's is the one that has to hold `Fit width`, which measures
+   ~60px at this face and would otherwise widen the control on that one step —
+   the readout is the only thing between two buttons, so a label that outgrows
+   the box moves them. The width lives HERE and not on the shared rule because
+   the other three readouts top out at `100%` / `300%` / `16px` and would just
+   carry 14px of dead space in every toolbar. */
+.pdf-zoom {
+  min-width: 62px;
 }
 
 /* --- the viewer's BIN-MODE cluster ------------------------------------------

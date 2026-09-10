@@ -6,7 +6,7 @@
    the column-zoom stepper wears its own `.txt-zoom` (a distinct class only so a
    `.pager .zoom` locator stays unambiguous with two `.pager`s in one bar), and
    `.txt-zoom` takes its CHROME from the shared readout treatment — grouped as
-   `.zoom, .spd-zoom, .txt-zoom` in 10-toolbar.css, so the Fit control renders
+   `.zoom, .spd-zoom, .txt-zoom, .pdf-zoom` in 10-toolbar.css, so the Fit control renders
    pixel-identical to the reader's and the `.spd` viewer's, off the shared rule
    rather than a divergent restyle here. What THIS file adds is the text column
    itself, whose WIDTH the zoom control scales via `--txt-zoom`.

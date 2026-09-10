@@ -74,6 +74,9 @@ const INERT_PDF_SEAM: PdfSeam = {
     open: () => Promise.resolve({ pageCount: 2, mode: "whole" as const }),
     pageSize: () => Promise.resolve({ width: 200, height: 100 }),
     pageLinks: () => Promise.resolve([]),
+    // The viewer asks for the outline once per open; a stub that has none says
+    // so, which is the same answer most real documents give.
+    outline: () => Promise.resolve([]),
     render: () =>
       Promise.resolve({
         // Only `close()` is ever reached: `paint` closes the bitmap and returns
@@ -451,11 +454,10 @@ describe(".pdf viewer, past the shared seam", () => {
     // moved from the number on screen rather than from the page in front of you.
     const v = createPdfViewer(deps(), INERT_PDF_SEAM);
     document.body.append(v.el);
-    // Scoped to the zoom stepper's own `.pager`: the PAGE readout carries the
-    // `.zoom` class too (`pdfViewer.ts:204`), so a bare `.zoom` inside this
-    // viewer resolves to two elements and finds the pager's first.
+    // The zoom readout carries `.pdf-zoom`, its own class — still located through
+    // the stepper's own `.pager` so this stays honest if that class ever moves.
     const zoomIn = v.el.querySelector('[aria-label="Zoom in"]') as HTMLButtonElement;
-    const readout = zoomIn.parentElement!.querySelector(".zoom") as HTMLElement;
+    const readout = zoomIn.parentElement!.querySelector(".pdf-zoom") as HTMLElement;
 
     const first = meta({ id: "n-first", fileType: "pdf" });
     await v.open(synthesizeSummary(first), Promise.resolve(first), 0, FOLDER, "");
@@ -489,6 +491,9 @@ describe(".pdf viewer, past the shared seam", () => {
         open: () => Promise.resolve({ pageCount: 2, mode: "whole" as const }),
         pageSize: () => Promise.resolve({ width: 200, height: 100 }),
         pageLinks: () => Promise.resolve([]),
+        // The viewer asks for the outline once per open; a stub that has none says
+        // so, which is the same answer most real documents give.
+        outline: () => Promise.resolve([]),
         render: (page: number, scale: number) => {
           renders.push({ page, scale });
           return Promise.resolve({
@@ -541,6 +546,9 @@ describe(".pdf viewer, past the shared seam", () => {
         // has to map onto.
         pageSize: () => Promise.resolve({ width: 200, height: 100 }),
         pageLinks: () => Promise.resolve([]),
+        // The viewer asks for the outline once per open; a stub that has none says
+        // so, which is the same answer most real documents give.
+        outline: () => Promise.resolve([]),
         render: (page: number) => {
           renders.push(page);
           return Promise.resolve({
@@ -629,6 +637,9 @@ describe(".pdf viewer, past the shared seam", () => {
         open: () => Promise.resolve({ pageCount: 3, mode: "stream" as const }),
         pageSize: () => Promise.resolve({ width: 200, height: 100 }),
         pageLinks: () => Promise.resolve([]),
+        // The viewer asks for the outline once per open; a stub that has none says
+        // so, which is the same answer most real documents give.
+        outline: () => Promise.resolve([]),
         render: () =>
           Promise.resolve({
             bitmap: { close: () => {} } as unknown as ImageBitmap,

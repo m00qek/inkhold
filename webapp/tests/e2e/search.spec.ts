@@ -4,7 +4,8 @@ import { mockDocText, noteTextRecord, type TextRecord } from "./helpers/docText"
 import { mockSearchIndex, noteTermsDocument, type FixtureManifestRow } from "./helpers/searchIndex";
 import { fakeFileHash } from "../../src/api/fake";
 
-// ONE QUERY, ONE SCOPE, ONE LIST — and, since the search removal, one ENGINE.
+// ONE QUERY, ONE SCOPE, ONE LIST — and, since §6 step 6, one
+// ENGINE.
 //
 // The library used to answer a query twice: a gallery filtered by NAME to the
 // folder you were standing in, plus a separate list of transcript matches from
@@ -556,10 +557,10 @@ test.describe("universal search", () => {
     await signedIn(page);
     await page.goto("/#/note/121/page/4");
 
-    await expect(page.locator(".pager__count")).toHaveText("4 / 6");
+    await expect(page.locator(".pager__count")).toHaveValue("4 / 6");
     await page.reload();
     // The whole reason the page lives in the route rather than in shell state.
-    await expect(page.locator(".pager__count")).toHaveText("4 / 6");
+    await expect(page.locator(".pager__count")).toHaveValue("4 / 6");
   });
 
   test("Back from a result returns to the library with the search still in place", async ({ page }) => {

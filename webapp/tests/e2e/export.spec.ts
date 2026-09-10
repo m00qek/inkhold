@@ -40,7 +40,7 @@ const groupItem = (page: Page, head: string, name: string) =>
 async function openReader(page: Page, route = NOTE, pages = 20): Promise<void> {
   await signedIn(page);
   await page.goto(route);
-  await expect(page.locator(".pager__count")).toHaveText(`1 / ${pages}`);
+  await expect(page.locator(".pager__count")).toHaveValue(`1 / ${pages}`);
 }
 
 /** Read a completed download into memory. */
@@ -120,7 +120,7 @@ test.describe("export menu", () => {
   test("Flattened image downloads a real PNG named after the note and page", async ({ page }) => {
     await openReader(page);
     await page.getByRole("button", { name: "Page 3" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("3 / 20");
+    await expect(page.locator(".pager__count")).toHaveValue("3 / 20");
 
     await exportBtn(page).click();
     const [download] = await Promise.all([

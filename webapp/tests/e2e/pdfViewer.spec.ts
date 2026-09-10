@@ -42,6 +42,38 @@ const PANEL_PDF_BYTES = readFileSync(
   fileURLToPath(new URL("../../wasm/tests/fixtures/two-page-panel.pdf", import.meta.url)),
 );
 
+/**
+ * A one-page fixture with THREE lines of real text, 300x120pt, baselines 20pt
+ * apart.
+ *
+ * The other text fixture (`text-four-page.pdf`) puts one line on each page,
+ * which is all find-in-PDF needs and is exactly what a selection test cannot
+ * use: the whole claim here is that a passage keeps its LINE BREAKS, and a page
+ * with one line has none to keep.
+ */
+const THREE_LINE_PDF_BYTES = readFileSync(
+  fileURLToPath(new URL("../../wasm/tests/fixtures/text-three-line.pdf", import.meta.url)),
+);
+
+/**
+ * A six-page fixture (300x200pt) carrying an OUTLINE three levels deep:
+ *
+ *   Part One (p0) / Chapter A (p1) / Chapter B (p2) / Part Two (p3) /
+ *   Chapter C (p4) / Section C.1 (p5)
+ *
+ * Six pages rather than two because the outline's whole claim is that it
+ * NAVIGATES: a two-page document cannot tell "clicked an entry and landed on its
+ * page" from "was already there". Three levels because the indent and the type
+ * scale both clamp, and a one-level outline exercises neither.
+ *
+ * `two-page.pdf` is the no-outline case — the fixture every other test in this
+ * file already uses, which is the point: the dimmed opener has to be what a
+ * PLAIN document shows.
+ */
+const OUTLINED_PDF_BYTES = readFileSync(
+  fileURLToPath(new URL("../../wasm/tests/fixtures/outlined-six-page.pdf", import.meta.url)),
+);
+
 async function servePdf(page: Page, body: Buffer = PDF_BYTES): Promise<void> {
   await page.route(
     (url) => url.pathname.startsWith("/file/"),
@@ -107,12 +139,12 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     const prev = region.getByRole("button", { name: "Previous page" });
     const next = region.getByRole("button", { name: "Next page" });
     // Two-page fixture: Back is dead on page 1, Forward is dead on page 2.
-    await expect(region.getByText("1 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 2");
     await expect(prev).toBeDisabled();
     await expect(next).toBeEnabled();
 
     await next.click();
-    await expect(region.getByText("2 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
     await expect(next).toBeDisabled();
     await expect(prev).toBeEnabled();
     // Page 2 also renders — a pager that moves a counter over a stale canvas
@@ -147,6 +179,12 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // that already overflowed would make every assertion below meaningless.
     expect(fit.scrollW).toBeLessThanOrEqual(fit.clientW + 1);
 
+    // TWO steps, because `Fit width` sits between Fit and 150% and on THIS
+    // fixture it is a no-op: 200 x 100 pt in a 992 x ~550 stage is already
+    // width-bound, so fit-page and fit-width are the same scale. That is the
+    // control being honest — the page fills the width at Fit already — and it is
+    // why the fit-width test above uses the portrait fixture instead.
+    await region.getByRole("button", { name: "Zoom in" }).click();
     await region.getByRole("button", { name: "Zoom in" }).click();
     // The BUFFER grows — CSS-scaling the old raster would leave it unchanged and
     // the page would simply go soft.
@@ -188,6 +226,60 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     expect(edges.atEnd.right).toBeGreaterThanOrEqual(0); // right edge in view
   });
 
+  test("Fit width fills the stage across and lets the page run off the bottom", async ({ page }) => {
+    // The step Fit cannot be: on a PORTRAIT page in a landscape window fit-page
+    // is bound by HEIGHT, so the page sits in a column with dead margins either
+    // side and the type comes out small. Fit width drops the height term, which
+    // is the trade every PDF reader offers — bigger type, and you scroll.
+    //
+    // The panel fixture is used because the default one is 2:1 landscape, where
+    // fit-width and fit-page legitimately COINCIDE and this test could not tell a
+    // working control from one that did nothing.
+    await signedIn(page);
+    await servePdf(page, PANEL_PDF_BYTES); // 351 x 468 pt — portrait
+    await page.goto("/#/note/178");
+    await freezeMotion(page);
+
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+
+    /** The page's box against the desk's CONTENT width, and both scroll axes. */
+    const geo = () =>
+      page.evaluate(() => {
+        const c = document.querySelector(".pdf-page") as HTMLCanvasElement;
+        const wrap = document.querySelector(".pdf-wrap") as HTMLElement;
+        const cs = getComputedStyle(wrap);
+        const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+        return {
+          css: c.getBoundingClientRect().width,
+          // `availableBox` measures the BORDER box less padding, so this is the
+          // width the raster was asked for — not `clientWidth`, which loses the
+          // scrollbar that Fit width itself brings into being.
+          avail: wrap.getBoundingClientRect().width - padX,
+          scrollH: wrap.scrollHeight,
+          clientH: wrap.clientHeight,
+        };
+      });
+
+    const fit = await geo();
+    // Fit really is height-bound here — otherwise the step below proves nothing.
+    expect(fit.css).toBeLessThan(fit.avail * 0.95);
+    expect(fit.scrollH).toBeLessThanOrEqual(fit.clientH + 1);
+
+    await region.getByRole("button", { name: "Zoom in" }).click();
+    await expect(region.locator(".pdf-zoom")).toHaveText("Fit width");
+
+    // The page now measures the stage exactly — that is the whole definition of
+    // the step, and a Fit-width that merely rounded up would drift here.
+    await expect.poll(async () => (await geo()).css, { timeout: 20_000 }).toBeGreaterThan(fit.css);
+    const wide = await geo();
+    expect(wide.css).toBeCloseTo(wide.avail, 0);
+    // …and the overflow it buys goes DOWN the page, which is the direction a
+    // document is read in. A step that grew the raster without letting the page
+    // out of the viewport would be the `max-width: 100%` bug again.
+    expect(wide.scrollH).toBeGreaterThan(wide.clientH);
+  });
+
   test("the ink keeps the page's scale at every zoom, and with a panel open", async ({ page }) => {
     // The `.mark` overlay is placed against the size the raster was ASKED for
     // (`markGeometry`), so anything that makes the painted box differ from that
@@ -218,7 +310,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
 
     const atFit = await ratio();
     const zoomIn = region.getByRole("button", { name: "Zoom in" });
-    for (const step of ["150%", "200%", "300%"]) {
+    for (const step of ["Fit width", "150%", "200%", "300%"]) {
       await zoomIn.click();
       await expect
         .poll(async () => Math.abs((await ratio()) - atFit) < 0.02, { timeout: 20_000 })
@@ -244,7 +336,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
       });
 
     const zoomOut = region.getByRole("button", { name: "Zoom out" });
-    for (const _ of [0, 1, 2]) await zoomOut.click();
+    for (const _ of [0, 1, 2, 3]) await zoomOut.click();
     await region.getByRole("button", { name: "Annotations" }).click();
 
     // Measured with the panel left out of `availableBox`: a 992px page beside a
@@ -269,10 +361,10 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
-    await expect(region.getByText("1 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 2");
 
     await region.getByRole("button", { name: "Next page" }).click();
-    await expect(region.getByText("2 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
     // ONE-BASED in the URL, 0-based internally — the router's convention.
     await expect(page).toHaveURL(/#\/note\/178\/page\/2$/);
 
@@ -281,7 +373,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // pass the assertion above and fail this one.
     await page.reload();
     await freezeMotion(page);
-    await expect(region.getByText("2 / 2")).toBeVisible({ timeout: 20_000 });
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2", { timeout: 20_000 });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
   });
 
@@ -373,7 +465,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // Clicking a row navigates, and the pager agrees — the two controls read the
     // same state rather than each keeping their own.
     await strip.nth(1).click();
-    await expect(region.getByText("2 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
     await expect(strip.nth(1)).toHaveAttribute("aria-current", "true");
     await expect(strip.nth(0)).toHaveAttribute("aria-current", "false");
 
@@ -525,19 +617,19 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     await freezeMotion(page);
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
-    await expect(region.getByText("1 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 2");
 
     await page.keyboard.press("ArrowRight");
-    await expect(region.getByText("2 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
     // The PAGE moved, not just the counter — a handler that only bumped the
     // readout would satisfy every assertion above.
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
     await page.keyboard.press("ArrowLeft");
-    await expect(region.getByText("1 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 2");
 
     // Bounded at both ends, exactly as the buttons are: no wrap, no negative page.
     await page.keyboard.press("ArrowLeft");
-    await expect(region.getByText("1 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 2");
 
     // THE TOOLBAR KEEPS THE ARROWS WHILE IT HAS FOCUS. `createToolbar` roves
     // between its controls with ArrowLeft/Right and stops the event there, so a
@@ -548,19 +640,72 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // they do.
     const pages = region.getByRole("button", { name: "Pages", exact: true });
     if ((await pages.getAttribute("aria-pressed")) !== "true") await pages.click();
-    await expect(region.getByText("1 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 2");
     await page.keyboard.press("ArrowRight"); // focus is on Pages — the toolbar's
-    await expect(region.getByText("1 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 2");
 
     // Focus outside the toolbar, and the same key pages again — and the strip's
     // highlight follows it, since the pager and the strip read one state.
     await page.locator(".pdf-page").click({ position: { x: 5, y: 5 } });
     await page.keyboard.press("ArrowRight");
-    await expect(region.getByText("2 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
     await expect(region.locator(".filmstrip__page").nth(1)).toHaveAttribute("aria-current", "true");
+
+    // Home and End are the ends of the same run, and they are PREVENTED where
+    // the arrows are not: left unclaimed they would scroll the stage to its
+    // extremes as well as turning the page.
+    await page.keyboard.press("Home");
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 2");
+    await page.keyboard.press("End");
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
 
     await page.keyboard.press("Escape");
     await expect(region).toBeHidden();
+  });
+
+  // The same four behaviours `reader.spec.ts` asserts of the reader's readout,
+  // asserted here because the control is `viewerChrome.createPager` and there is
+  // exactly one of it — a feature added to it is added to both paged viewers, so
+  // both are what "it works" means.
+  test("the page readout is a field: a number lands, out of range clamps, Escape reverts", async ({ page }) => {
+    await signedIn(page);
+    await servePdf(page);
+    await page.goto("/#/note/178");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    const field = region.locator(".pdf-pager__count");
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+    await expect(field).toHaveValue("1 / 2");
+
+    // Labelled control, not a status region — the role moved off it to the
+    // visually-hidden live region beside it when it became typeable.
+    await expect(region.getByRole("textbox", { name: "Page" })).toBeVisible();
+
+    await field.fill("2");
+    await field.press("Enter");
+    await expect(field).toHaveValue("2 / 2");
+    // The PAGE moved, not just the readout — the same thing the arrow-key test
+    // insists on, and the reason `go` is what the field calls.
+    await expect(region.locator(".filmstrip__page").nth(1)).toHaveAttribute("aria-current", "true");
+    await expect(field).not.toBeFocused();
+
+    // CLAMPS. This viewer's `go` silently drops an out-of-range jump, so without
+    // the clamp in the component the field would be left holding `9` over a
+    // two-page document.
+    await field.fill("1");
+    await field.press("Enter");
+    await field.fill("9");
+    await field.press("Enter");
+    await expect(field).toHaveValue("2 / 2");
+
+    // Escape reverts the edit and leaves the document open: this viewer closes on
+    // a document-level Escape, so the field has to stop the key reaching it.
+    await field.fill("1");
+    await field.press("Escape");
+    await expect(field).toHaveValue("2 / 2");
+    await expect(region).toBeVisible();
+
+    await expect(region.locator(".pager__live")).toHaveText("Page 2 of 2");
   });
 
   test("orders its controls and words its subtitle as the reader does", async ({ page }) => {
@@ -648,7 +793,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     await expect(overlay).toBeHidden();
 
     await region.getByRole("button", { name: "Next page" }).click();
-    await expect(region.getByText("2 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
     await expect(overlay).toBeVisible({ timeout: 20_000 });
     // The host is revealed as soon as the placement is known, which is BEFORE
     // the ink has been fetched and decoded — wait for a layer, not for the box.
@@ -767,6 +912,132 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     });
     return region;
   }
+
+  test("drags across three lines and copies the passage WITH its line breaks", async ({
+    page,
+    context,
+  }) => {
+    // §9's whole point, end to end: the shim's per-word line id,
+    // through the decoder, the client's parser, the selection layer and onto the
+    // system clipboard. Every earlier test in this feature can pass with the
+    // line ids dropped somewhere in the middle; this one cannot.
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await signedIn(page);
+    await servePdf(page, THREE_LINE_PDF_BYTES);
+    await page.goto("/#/note/178");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+
+    const layer = region.locator(".pdf-select");
+    await expect(layer).toBeVisible();
+    // THE WORDS ARE FETCHED ON INTENT, not on paint — building a page's
+    // structured text runs the page, so it is not paid on every page turn. The
+    // hover is that intent, and the class is how the layer says it arrived.
+    //
+    // Hovering the PAGE, not the layer: until the words land the layer is
+    // `pointer-events: none` (a page with no text must not swallow clicks meant
+    // for what is under it), so it is not a hover target yet. That is the state
+    // this hover exists to leave.
+    await region.locator(".pdf-page").hover();
+    await expect(layer).toHaveClass(/is-selectable/, { timeout: 20_000 });
+
+    const box = (await layer.boundingBox())!;
+    // The page is 300pt wide, so this is the one scale between page points and
+    // CSS pixels. The first line's baseline is at PDF y 90 on a 120pt page,
+    // which is 30pt down from the top; the glyphs sit above it.
+    const k = box.width / 300;
+    await page.mouse.move(box.x + 15 * k, box.y + 25 * k);
+    await page.mouse.down();
+    // PAST the last word on purpose: selecting to the end of a passage means
+    // pulling into the margin, and the layer resolves that to the nearest word
+    // rather than stalling.
+    await page.mouse.move(box.x + box.width - 2, box.y + box.height - 2, { steps: 10 });
+    await page.mouse.up();
+
+    await expect(region.locator(".pdf-select__box").first()).toBeVisible();
+    const copyBtn = region.getByRole("button", { name: "Copy selected text" });
+    await expect(copyBtn).toBeVisible();
+    await copyBtn.click();
+
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied).toBe("Marmalade kettle descaling\ngamma delta epsilon\nzeta eta theta");
+  });
+
+  test("Escape drops the selection and keeps the document", async ({ page }) => {
+    // The order Escape has to take: a selection is the most recent thing the
+    // reader did and the cheapest to lose, so one press must not throw it away
+    // together with the document.
+    await signedIn(page);
+    await servePdf(page, THREE_LINE_PDF_BYTES);
+    await page.goto("/#/note/178");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+    const layer = region.locator(".pdf-select");
+    // The page, not the layer — see the note in the test above.
+    await region.locator(".pdf-page").hover();
+    await expect(layer).toHaveClass(/is-selectable/, { timeout: 20_000 });
+
+    const box = (await layer.boundingBox())!;
+    const k = box.width / 300;
+    await page.mouse.move(box.x + 15 * k, box.y + 25 * k);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 120 * k, box.y + 25 * k, { steps: 6 });
+    await page.mouse.up();
+    await expect(region.locator(".pdf-select__box").first()).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(region.locator(".pdf-select__box")).toHaveCount(0);
+    await expect(region.getByRole("button", { name: "Copy selected text" })).toBeHidden();
+    // Still here. The press cleared the selection and nothing else.
+    await expect(region).toBeVisible();
+  });
+
+  test("the ink rail marks ONLY the annotated row, through the mark's sourcePage", async ({
+    page,
+  }) => {
+    // §2.6, and the opposite figure/ground from the reader's
+    // rail: a PDF is mostly untouched, so one stroke stands alone in a clean
+    // gutter instead of a gap standing out in a solid edge. Same device.
+    //
+    // The mark is sparse and names PDF page 2, so a viewer that took ink from
+    // the mark's own page ORDER rather than its `sourcePage` would mark row 1
+    // and look entirely plausible doing it — the same trap the overlay test
+    // guards, arriving through a different path.
+    const region = await openStrip(page);
+    const row = (n: number) => region.locator(".filmstrip__page").nth(n);
+    await expect(row(1)).toHaveClass(/filmstrip__page--inked/);
+    await expect(row(0)).not.toHaveClass(/filmstrip__page--inked/);
+
+    // ANNOTATED, not "written" — a PDF page nobody wrote from scratch. The word
+    // is the only thing the two viewers say differently about the same fact.
+    await expect(row(1)).toHaveAttribute("aria-label", "Page 2, annotated");
+    await expect(row(0)).toHaveAttribute("aria-label", "Page 1");
+  });
+
+  test("a PDF with no .mark claims nothing about any page", async ({ page }) => {
+    // The rail's three states reaching the screen: a plain document has no mark,
+    // so no page is KNOWN to be un-annotated, and the honest rail is an empty
+    // one. Drawing an all-empty rail here would be noise on every PDF anyone
+    // ever opens; asserting emptiness would be a claim nobody made.
+    await signedIn(page);
+    await servePdf(page);
+    // 142 is the fixture PDF with no `.mark` beside it — 178's pair is the one
+    // with annotations, and using it here would assert nothing.
+    await page.goto("/#/note/142");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+    const pages = region.getByRole("button", { name: "Pages", exact: true });
+    if ((await pages.getAttribute("aria-pressed")) !== "true") await pages.click();
+    await expect(region.locator(".filmstrip__page").first()).toBeVisible();
+    await expect(region.locator(".filmstrip__page--inked")).toHaveCount(0);
+    await expect(region.locator(".filmstrip__page").first()).toHaveAttribute(
+      "aria-label",
+      "Page 1",
+    );
+  });
 
   test("the STRIP carries the mark's handwriting, on the row that was written on", async ({
     page,
@@ -1060,7 +1331,7 @@ async function openMarkedPdf(page: Page, page2: boolean): Promise<Locator> {
   await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
   if (page2) {
     await region.getByRole("button", { name: "Next page" }).click();
-    await expect(region.getByText("2 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
     // The ink is fetched and decoded AFTER the placement is known, so waiting on
     // a layer canvas is what proves the stack is really up — and the layered
     // rows key off exactly that.
@@ -1640,9 +1911,9 @@ test.describe("PDF links", () => {
 
   test("following an internal link is a real navigation to that page", async ({ page }) => {
     const region = await openLinkedPdf(page);
-    await expect(region.getByText("1 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 2");
     await page.locator('.pdf-links a[href="#/note/178/page/2"]').click();
-    await expect(region.getByText("2 / 2")).toBeVisible({ timeout: 20_000 });
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2", { timeout: 20_000 });
     // A REAL ADDRESS, not a scroll: the URL is the page, so this is shareable
     // and survives a reload.
     expect(page.url()).toContain("#/note/178/page/2");
@@ -1683,8 +1954,12 @@ test.describe("PDF links", () => {
     };
 
     const fit = await settled();
+    // TWO steps to 150%: `Fit width` sits between it and `Fit`. This test wants a
+    // scale that is decisively bigger than Fit whatever the page's aspect, and
+    // fit-width on a landscape page can be Fit exactly.
     await region.getByRole("button", { name: "Zoom in" }).click();
-    await expect(region.locator(".zoom", { hasText: "150%" })).toBeVisible();
+    await region.getByRole("button", { name: "Zoom in" }).click();
+    await expect(region.locator(".pdf-zoom", { hasText: "150%" })).toBeVisible();
     await expect.poll(async () => (await measure())?.canvas ?? 0).toBeGreaterThan(fit.canvas * 1.2);
     const zoomed = await settled();
     // The box grew WITH the page: the same fraction of a bigger canvas.
@@ -1694,6 +1969,7 @@ test.describe("PDF links", () => {
 
     // A panel NARROWS the page rather than covering it, so Fit is a different
     // scale with it open — and the anchors have to move with it.
+    await region.getByRole("button", { name: "Zoom out" }).click();
     await region.getByRole("button", { name: "Zoom out" }).click();
     await region.getByRole("button", { name: "Pages" }).click();
     await expect(page.locator("#pdf-pages-panel")).toBeVisible();
@@ -1715,7 +1991,7 @@ test.describe("PDF links", () => {
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
     await region.getByRole("button", { name: "Next page" }).click();
-    await expect(region.getByText("2 / 2")).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
     await expect(page.locator(".pdf-mark canvas").first()).toBeAttached({ timeout: 20_000 });
     const anchor = page.locator('.pdf-links a[href="https://example.invalid/two"]');
     await expect(anchor).toBeVisible({ timeout: 20_000 });
@@ -1748,11 +2024,22 @@ test.describe("PDF links", () => {
     //   the page;
     //   find's highlights, UNDER the ink — the handwriting is the person's own
     //     and our mark must not cover it (`pdfHighlightLayer.ts`);
+    //   the text SELECTION, beside find's marks and under the ink for the same
+    //     reason. It is the one layer over the page that takes the pointer, and
+    //     it is here rather than above the links precisely so this test's claim
+    //     keeps holding: a press on a link reaches the link, and nothing in the
+    //     selection layer has to tell a click from a drag to make that true;
     //   the `.mark`'s ink;
     //   the links LAST, so they paint and hit-test above the ink whatever
     //     `pointer-events` says — a link under a scribble is exactly the case
     //     that occurs, because people annotate around what they care about.
-    expect(stacked.kids).toEqual(["pdf-page", "pdf-find-marks", "note-stack", "pdf-links"]);
+    expect(stacked.kids).toEqual([
+      "pdf-page",
+      "pdf-find-marks",
+      "pdf-select",
+      "note-stack",
+      "pdf-links",
+    ]);
     expect(stacked.hitIsTheLink).toBe(true);
   });
 
@@ -1767,3 +2054,406 @@ test.describe("PDF links", () => {
     await expect(page.locator(".pdf-links a")).toHaveCount(0);
   });
 });
+
+// ===========================================================================
+// The OUTLINE panel
+// ===========================================================================
+// For a book or a manual the outline IS the navigation and the filmstrip is a
+// flat run of thumbnails, so this is the one panel that answers "where does
+// Chapter Four start?". What only a browser can prove is the whole chain:
+// `ink_load_outline` walking MuPDF's outline tree and resolving each entry's
+// destination, the flat JSON crossing the worker, and a row that jumps.
+
+test.describe("PDF outline", () => {
+  /** Open the outlined fixture and wait for its first page to paint. */
+  async function openOutlinedPdf(page: Page): Promise<Locator> {
+    await signedIn(page);
+    await servePdf(page, OUTLINED_PDF_BYTES);
+    await page.goto("/#/note/178");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect(region).toBeVisible();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 6", { timeout: 20_000 });
+    return region;
+  }
+
+  test("lists the document's own headings, and an entry JUMPS to its page", async ({ page }) => {
+    const region = await openOutlinedPdf(page);
+    const panel = region.locator("#pdf-outline-panel");
+    const rows = region.locator(".pdf-outline__row");
+
+    // The opener is enabled the moment the outline lands, and named plainly —
+    // the "this document has none" half of the name belongs to the other case.
+    const opener = region.getByRole("button", { name: "Outline", exact: true });
+    await expect(opener).toBeEnabled({ timeout: 20_000 });
+
+    // CLOSED until asked for, exactly as Pages is: it is navigation, not
+    // something to spend the stage's width on by default.
+    await expect(panel).toBeHidden();
+    await opener.click();
+    await expect(panel).toBeVisible();
+
+    // Every entry, in document order, at its own depth and with its 1-BASED page
+    // number beside it — the wire is 0-based and the panel converts, because the
+    // number beside a heading is the one printed on the page.
+    await expect(rows).toHaveCount(6);
+    await expect(rows.locator(".pdf-outline__t")).toHaveText([
+      "Part One",
+      "Chapter A",
+      "Chapter B",
+      "Part Two",
+      "Chapter C",
+      "Section C.1",
+    ]);
+    await expect(rows.locator(".pdf-outline__p")).toHaveText(["1", "2", "3", "4", "5", "6"]);
+    // Depth is INDENT plus TYPE and never colour, so the level rides a custom
+    // property the stylesheet multiplies out.
+    const depths = await rows.evaluateAll((els) =>
+      els.map((e) => (e as HTMLElement).style.getPropertyValue("--depth")),
+    );
+    expect(depths).toEqual(["0", "1", "1", "0", "1", "2"]);
+
+    // The mark starts on the entry covering page 1…
+    await expect(rows.nth(0)).toHaveAttribute("aria-current", "true");
+
+    // …and clicking an entry LANDS on its page, with the mark following.
+    await rows.nth(5).click();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("6 / 6");
+    await expect(rows.nth(5)).toHaveAttribute("aria-current", "true");
+    await expect(rows.nth(0)).toHaveAttribute("aria-current", "false");
+    // The PAGE moved, not just the readout.
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+  });
+
+  test("the mark tracks PAGING, not only clicking", async ({ page }) => {
+    // The mark means "the entry you are inside", so it has to move with the
+    // arrow keys as faithfully as with a press — and the pages BETWEEN two
+    // entries belong to the earlier one.
+    const region = await openOutlinedPdf(page);
+    const rows = region.locator(".pdf-outline__row");
+    await region.getByRole("button", { name: "Outline", exact: true }).click();
+    await expect(rows).toHaveCount(6, { timeout: 20_000 });
+    await expect(rows.nth(0)).toHaveAttribute("aria-current", "true");
+
+    // Focus off the toolbar, or the arrows rove between controls instead
+    // (`createToolbar`, and `pdfViewer.spec.ts`'s own arrow-key test).
+    await page.locator(".pdf-page").click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press("ArrowRight"); // page 2 — Chapter A
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 6");
+    await expect(rows.nth(1)).toHaveAttribute("aria-current", "true");
+
+    await page.keyboard.press("ArrowRight"); // page 3 — Chapter B
+    await expect(rows.nth(2)).toHaveAttribute("aria-current", "true");
+    await page.keyboard.press("ArrowLeft"); // back to page 2
+    await expect(rows.nth(1)).toHaveAttribute("aria-current", "true");
+    await page.keyboard.press("End"); // page 6 — Section C.1
+    await expect(rows.nth(5)).toHaveAttribute("aria-current", "true");
+    // Exactly one row is ever marked.
+    await expect(region.locator('.pdf-outline__row[aria-current="true"]')).toHaveCount(1);
+  });
+
+  test("a document with NO outline keeps the opener, dimmed, and says why", async ({ page }) => {
+    // The reversal of this section's first rule, and the OCR toggle's precedent:
+    // "the feature stays discoverable instead of vanishing between pages"
+    // (07-find-in-note.css). A toolbar that changes shape per document is one
+    // the reader has to re-read, and every control beside a vanishing one moves
+    // under the pointer. The dimmed control also STATES something the absent one
+    // cannot — that this document has no outline — and it states it on the
+    // accessible name, so a screen reader gets a sentence rather than an
+    // unexplained dead control.
+    await signedIn(page);
+    await servePdf(page); // the plain two-page fixture
+    await page.goto("/#/note/178");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+
+    const opener = region.getByRole("button", { name: "Outline — this document has none" });
+    // PRESENT — this is the assertion that would pass on a hidden control if it
+    // were written as `not.toBeEnabled`, so it is written as presence first.
+    await expect(opener).toHaveCount(1);
+    await expect(opener).toBeVisible();
+    await expect(opener).toBeDisabled();
+    await expect(opener).toHaveAttribute("title", "Outline — this document has none");
+    // …and there is no second, enabled Outline control hiding behind it.
+    await expect(region.getByRole("button", { name: "Outline", exact: true })).toHaveCount(0);
+  });
+
+  test("Outline and Pages share one dock: opening either shuts the other", async ({ page }) => {
+    // Two navigation panels open at once would leave the page a sliver, and they
+    // want different tracks (a filmstrip is happiest at 180px, a wrapped chapter
+    // title is unreadable there) — which is why they are two panels sharing a
+    // dock rather than two tabs in one.
+    const region = await openOutlinedPdf(page);
+    const outlineBtn = region.getByRole("button", { name: "Outline", exact: true });
+    const pagesBtn = region.getByRole("button", { name: "Pages", exact: true });
+    const outlinePanel = region.locator("#pdf-outline-panel");
+    const pagesPanel = region.locator("#pdf-pages-panel");
+    await expect(outlineBtn).toBeEnabled({ timeout: 20_000 });
+
+    await pagesBtn.click();
+    await expect(pagesPanel).toBeVisible();
+    await expect(outlinePanel).toBeHidden();
+
+    await outlineBtn.click();
+    await expect(outlinePanel).toBeVisible();
+    await expect(pagesPanel).toBeHidden();
+    // The openers read the same state rather than each keeping their own.
+    await expect(outlineBtn).toHaveAttribute("aria-pressed", "true");
+    await expect(pagesBtn).toHaveAttribute("aria-pressed", "false");
+
+    await pagesBtn.click();
+    await expect(pagesPanel).toBeVisible();
+    await expect(outlinePanel).toBeHidden();
+    await expect(outlineBtn).toHaveAttribute("aria-pressed", "false");
+    await expect(pagesBtn).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("the page is never squeezed from BOTH sides at once", async ({ page }) => {
+    // The reader has measured this since it grew a second dock; this viewer had
+    // not, and got away with it because its left dock is capped at one panel —
+    // which halves the worst case rather than removing it. On a narrow window an
+    // outline on the left and the annotations on the right left the document a
+    // strip between them, with nothing to stop it.
+    //
+    // The rule is symmetric and the side that gives way is the one you did not
+    // just ask for: opening the annotations shuts navigation, and opening
+    // navigation shuts the annotations.
+    await page.setViewportSize({ width: 900, height: 800 });
+    const region = await openOutlinedPdf(page);
+    const outlineBtn = region.getByRole("button", { name: "Outline", exact: true });
+    const layersBtn = region.getByRole("button", { name: "Annotations", exact: true });
+    const outlinePanel = region.locator("#pdf-outline-panel");
+    const layersPanel = region.locator("#pdf-layers-panel");
+    await expect(outlineBtn).toBeEnabled({ timeout: 20_000 });
+
+    await outlineBtn.click();
+    await expect(outlinePanel).toBeVisible();
+
+    // Asking for the annotations says what you want to look at; navigation is
+    // the thing you can reopen without losing your place.
+    await layersBtn.click();
+    await expect(layersPanel).toBeVisible();
+    await expect(outlinePanel).toBeHidden();
+
+    // …and back the other way.
+    await outlineBtn.click();
+    await expect(outlinePanel).toBeVisible();
+    await expect(layersPanel).toBeHidden();
+
+    // THE PAGE IS STILL A PAGE. This is the claim the rule exists to make, and
+    // the one a pair of hidden/visible assertions would not have made on its own.
+    const box = (await region.locator(".pdf-page").boundingBox())!;
+    expect(box.width).toBeGreaterThan(200);
+  });
+
+  test("…but on a wide window both docks stay open together", async ({ page }) => {
+    // The guard has to be a floor, not a policy: with room for both, taking one
+    // away would be the app deciding what you may look at.
+    await page.setViewportSize({ width: 1600, height: 900 });
+    const region = await openOutlinedPdf(page);
+    const outlineBtn = region.getByRole("button", { name: "Outline", exact: true });
+    const layersBtn = region.getByRole("button", { name: "Annotations", exact: true });
+    await expect(outlineBtn).toBeEnabled({ timeout: 20_000 });
+
+    await outlineBtn.click();
+    await layersBtn.click();
+    await expect(region.locator("#pdf-layers-panel")).toBeVisible();
+    await expect(region.locator("#pdf-outline-panel")).toBeVisible();
+  });
+
+  test("the next annotated document opens with the Annotations toggle UN-pressed", async ({
+    page,
+  }) => {
+    // Teardown used to clear the dock's state by hand and leave the toggle's
+    // `aria-pressed` behind, so the second annotated document you opened showed
+    // a control announcing itself as pressed over a closed panel — a screen
+    // reader was told the panel was up, and the first click "closed" nothing.
+    // The state and the DOM now change in one place or not at all.
+    await signedIn(page);
+    await servePdf(page);
+    await page.goto("/#/note/178");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    const layersBtn = region.getByRole("button", { name: "Annotations", exact: true });
+    const layersPanel = page.locator("#pdf-layers-panel");
+    await expect(layersBtn).toBeVisible({ timeout: 20_000 });
+
+    await layersBtn.click();
+    await expect(layersPanel).toBeVisible();
+    await expect(layersBtn).toHaveAttribute("aria-pressed", "true");
+
+    // Out of the document and into it again — the same teardown a move to any
+    // other annotated file runs, and `178` is the only fixture with a `.mark`.
+    await page.goto("/#/");
+    await page.goto("/#/note/178");
+    await freezeMotion(page);
+    await expect(layersBtn).toBeVisible({ timeout: 20_000 });
+    await expect(layersPanel).toBeHidden();
+    await expect(layersBtn).toHaveAttribute("aria-pressed", "false");
+  });
+});
+
+// ============================================================================
+// ANNOTATION HISTORY — the ink's versions, reached from inside the viewer.
+// ============================================================================
+//
+// §7. A `.pdf` has no version history the app can paint, and it
+// still has none: what this control offers is the paired `.mark`'s history — the
+// handwriting — which was retained and quota-charged all along and reachable only
+// by trashing the document. Everything here therefore asserts TWO things at once:
+// that the ink's versions are reachable, and that nothing claims the document has
+// any.
+//
+// The panel itself is the shared one (`.vh`, portaled into `.menu-portal`), the
+// same component the card ⋯ menu and every other viewer open.
+
+const vh = (page: Page): Locator => page.locator(".vh");
+const vhRows = (page: Page): Locator => page.locator(".vh-row");
+
+test.describe("annotation history, from the PDF viewer", () => {
+  test("the control is PRESENT and dimmed on a document with no annotations", async ({ page }) => {
+    // 142 is the fixture PDF with no `.mark` beside it. Present-and-dimmed rather
+    // than absent: a toolbar that changes shape per document is one the reader has
+    // to re-read, and a control that vanishes takes its own explanation with it.
+    await signedIn(page);
+    await servePdf(page);
+    await page.goto("/#/note/142");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+
+    const btn = region.getByRole("button", {
+      name: "Annotation history — this document has no annotations",
+    });
+    await expect(btn).toHaveCount(1);
+    await expect(btn).toBeVisible();
+    await expect(btn).toBeDisabled();
+    // THE REASON RIDES THE NAME. A dimmed control with no explanation is a dead
+    // end; this one answers the question it raises.
+    await expect(btn).toHaveAttribute(
+      "title",
+      "Annotation history — this document has no annotations",
+    );
+    // …and no second, enabled control hiding behind it.
+    await expect(region.getByRole("button", { name: "Annotation history", exact: true })).toHaveCount(0);
+  });
+
+  test("the control is enabled on a document that HAS annotations, and lists the mark's versions", async ({
+    page,
+  }) => {
+    const region = await openMarkedPdf(page, false);
+    const btn = region.getByRole("button", { name: "Annotation history", exact: true });
+    await expect(btn).toBeEnabled({ timeout: 20_000 });
+
+    await btn.click();
+    await expect(vh(page)).toBeVisible();
+
+    // THE EYEBROW IS THE FIRST THING THAT HAS TO BE RIGHT. These are the mark's
+    // versions, not the document's, and the panel is the surface that says so.
+    await expect(vh(page).locator(".vh__eyebrow")).toHaveText("Annotation history", { timeout: 20_000 });
+    // And the caption scopes what Restore will do, which no row can.
+    await expect(vh(page).locator(".vh__caption")).toContainText("only the annotations");
+
+    // The mark accrues history like every other previewable kind: current + two
+    // retained. Before this feature these rows existed, were charged to the
+    // user's quota, and had no surface at all.
+    await expect(vhRows(page)).toHaveCount(3, { timeout: 20_000 });
+    await expect(vhRows(page).nth(0).locator(".tag-current")).toHaveText("Current");
+    // Headed by the DOCUMENT's name — `Appliance manual.pdf.mark` is a filename
+    // the device invented and the reader never chose to see.
+    await expect(vh(page)).toHaveAttribute("aria-label", /Appliance manual/);
+    await expect(vh(page)).toHaveAttribute("aria-label", /^Annotation history/);
+  });
+
+  test("previewing a version banners the ANNOTATIONS as old and the document as current", async ({
+    page,
+  }) => {
+    const region = await openMarkedPdf(page, false);
+    await region.getByRole("button", { name: "Annotation history", exact: true }).click();
+    await expect(vh(page)).toBeVisible();
+    await expect(vhRows(page)).toHaveCount(3, { timeout: 20_000 });
+    await vhRows(page).nth(1).click();
+    await expect(vh(page)).toBeHidden();
+
+    // The SAME viewer, on the SAME live document — no second handle, no new
+    // viewer. The document still paints.
+    await expect(region).toBeVisible();
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+
+    const banner = region.locator(".version-banner");
+    await expect(banner).toBeVisible();
+    // THE WHOLE POINT OF THE `annotations` VOICE. The shared banner's default
+    // sentence ends "this is not the current note", which here would be a straight
+    // lie about the document under the ink.
+    await expect(banner).toContainText("the annotations from");
+    await expect(banner).toContainText("the document itself is current");
+    await expect(banner).not.toContainText("not the current note");
+    await expect(banner.getByRole("button", { name: "Restore this version" })).toBeVisible();
+
+    // Read-only chrome, as every other viewer's preview: no Move to bin beside it.
+    await expect(region.getByRole("button", { name: "Move to bin" })).toBeHidden();
+
+    // Reopening the list from the control marks the on-screen version `Viewing` —
+    // which is the `previewVersion.md5` the control hands back to the panel.
+    //
+    // REOPENED IF IT GOES AWAY, and that is the app being right rather than the
+    // test being lax: the panel is a popover and a popover dismisses on SCROLL, so
+    // a raster or a placement landing under it while the reopened document is
+    // still settling will shut it. Waiting for pixels first is not enough — the
+    // strip and the ink placement both scroll after that — so the loop reopens and
+    // asks again instead of racing a repaint.
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+    await expect
+      .poll(
+        async () => {
+          if ((await vh(page).count()) === 0) {
+            await region.getByRole("button", { name: "Annotation history", exact: true }).click();
+          }
+          // ONE atomic read of the whole claim — which row is marked Viewing —
+          // because a second locator assertion after this one would be a second
+          // chance for a scroll to shut the panel between them.
+          return page.evaluate(() => {
+            const all = Array.from(document.querySelectorAll(".vh-row"));
+            const at = all.findIndex((r) => r.classList.contains("is-viewing"));
+            const marks = document.querySelectorAll(".vh-row.is-viewing .mark-viewing").length;
+            return marks === 1 ? at : -1;
+          });
+        },
+        { timeout: 20_000 },
+      )
+      // Row 1 — the one that was clicked, not row 0, which is Current.
+      .toBe(1);
+  });
+
+  test("Restore restores the ANNOTATIONS and lands back on the document", async ({ page }) => {
+    const region = await openMarkedPdf(page, false);
+    await region.getByRole("button", { name: "Annotation history", exact: true }).click();
+    await expect(vhRows(page)).toHaveCount(3, { timeout: 20_000 });
+    await vhRows(page).nth(1).click();
+    const banner = region.locator(".version-banner");
+    await expect(banner).toBeVisible();
+
+    await banner.getByRole("button", { name: "Restore this version" }).click();
+    const confirm = page.locator("dialog.confirm");
+    await expect(confirm).toBeVisible();
+    await confirm.getByRole("button", { name: "Restore this version" }).click();
+
+    // The toast is the shared undoable framing — restoring keeps what it replaced.
+    await expect(page.locator(".toast")).toContainText("kept in this file's history");
+
+    // BACK ON THE DOCUMENT, not on `Appliance manual.pdf.mark`. The mark is what
+    // got re-pointed; the document is what the reader was looking at, and routing
+    // to the mark would drop them into the note reader on a file they have never
+    // seen the name of.
+    await expect(page).toHaveURL(/#\/note\/178/);
+    await expect(region).toBeVisible();
+    await expect(banner).toBeHidden();
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+
+    // And the restored version is now the current one in the list.
+    await region.getByRole("button", { name: "Annotation history", exact: true }).click();
+    await expect(vhRows(page).nth(0).locator(".tag-current")).toHaveText("Current", { timeout: 20_000 });
+  });
+});
+

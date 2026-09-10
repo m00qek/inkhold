@@ -28,7 +28,7 @@ async function openLayered(page: Page): Promise<void> {
   await signedIn(page);
   await page.goto("/#/note/104");
   await freezeMotion(page);
-  await expect(page.locator(".pager__count")).toHaveText("1 / 2");
+  await expect(page.locator(".pager__count")).toHaveValue("1 / 2");
   // The stack is up once all four record canvases exist with real backing.
   await expect(stackCanvases(page)).toHaveCount(4);
 }
@@ -231,7 +231,7 @@ test.describe(".note layers panel (real decoder)", () => {
     await expect(panel(page)).toBeVisible();
 
     await page.getByRole("button", { name: "Next page" }).click();
-    await expect(page.locator(".pager__count")).toHaveText("2 / 2");
+    await expect(page.locator(".pager__count")).toHaveValue("2 / 2");
 
     // No layers on this page: the panel folds away and the toggle says why. The
     // download menu's CURRENT-view group stays (Flattened image + PDF document fall
