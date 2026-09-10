@@ -1,4 +1,4 @@
-//! Writing the two per-document derived files. The
+//! Writing the two per-document derived files (§2.2). The
 //! format lives here; `.txt` paragraphs, `.note` pages and `.pdf` pages supply
 //! `(ordinal, text)`.
 //!

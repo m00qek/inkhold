@@ -2,7 +2,7 @@
 //
 // What a RESULT ROW actually renders, through the real card factory.
 //
-// drops excerpts rather than deferring them, and that is
+// §4.3 drops excerpts rather than deferring them, and that is
 // the whole reason the server ends up with no query-interpreting code at all. So
 // the row's contract changed shape: it says "matches on N pages" where it used to
 // splice server HTML into `innerHTML`, and its deep link carries the typed query

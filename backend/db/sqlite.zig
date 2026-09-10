@@ -124,7 +124,6 @@ pub const Db = struct {
         // Same 32 MB window as the writer, and cheaper here than it looks: the
         // kernel page cache holds ONE physical copy of the mapped file across
         // every connection that maps it, so N readers do not cost N times the
-        // pages.
         try db.exec("PRAGMA mmap_size = 33554432;");
         return db;
     }

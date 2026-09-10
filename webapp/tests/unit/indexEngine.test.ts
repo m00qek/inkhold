@@ -16,7 +16,7 @@ import {
 // asserting here is a property of FTS5's tokenizer, not of our glue. A stub
 // speaking the ABI would let the folding-parity test pass while proving nothing
 // — and folding parity is the entire argument for putting SQLite in the browser
-//
+// (§1.1, §2.2).
 //
 // `public/`, not `zig-out/`: this is the artifact the app actually serves, and
 // `npm run build:wasm` (a `pretest` hook) is what puts it there.

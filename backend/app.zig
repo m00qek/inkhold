@@ -119,7 +119,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     const thumb_store = try thumbstore.ThumbStore.init(io, thumbs_dir);
     thumb_store.sweepTmp();
 
-    // The two per-document derived stores. Same
+    // The two per-document derived stores (§2.1). Same
     // posture as thumbs: derived, regenerable, backup-skippable, cleanup riding
     // the source blob's GC. Losing either directory costs a re-derive, not data.
     //

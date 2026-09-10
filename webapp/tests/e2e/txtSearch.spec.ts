@@ -8,7 +8,7 @@ import { fakeFileHash } from "../../src/api/fake";
 // running — matches highlighted, prev/next jumping between paragraphs, an exact
 // count.
 //
-// WHERE THE ANSWER COMES FROM
+// WHERE THE ANSWER COMES FROM (§1.1, §6 step 7)
 //
 // `/note/:id/txt-search` is gone, and with it the last of the three response
 // shapes in-document search used to have. The viewer fetches `text/<md5>` — the

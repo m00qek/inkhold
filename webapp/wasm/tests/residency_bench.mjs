@@ -1,5 +1,5 @@
 // Client residency + build latency for `sqlite-core.wasm` — the measurement
-// the search redesign asked for before step 7, recorded in its §8.1.
+// §7 asked for before step 7, recorded in its §8.1.
 //
 // NOT a test and NOT wired into `build.zig`: it needs a corpus, and the corpus
 // is a dev database rather than a fixture. It lives next to `sqlite_core_abi.mjs`

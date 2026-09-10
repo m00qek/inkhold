@@ -854,7 +854,7 @@ export function createBinScope(): BinScope {
         getPageText: (id: Id, page: PageRef): Promise<PageText> =>
           isTrashed(id) ? api.binPageText(id, page) : api.getPageText(id, page),
         // FIND-IN-A-TRASHED-NOTE REROUTES NOTHING, and that absence is
-        // deliberate. In-document search is keyed by BLOB MD5 now —
+        // §1.1. In-document search is keyed by BLOB MD5 now —
         // one route, `text/<md5>`, authorized on its own terms — and a trashed
         // file's blob has the same md5 it had before it was trashed. So the bin is
         // not a scope for search at all: `getBinNoteMeta` above already hands the

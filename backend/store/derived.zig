@@ -4,7 +4,7 @@
 //! `store/thumbs.zig`'s shape — flat, staged in `tmp/` then fsync'd then
 //! atomically renamed, cleaned up by the source blob's GC, a malformed key naming
 //! nothing — with two differences:
-//!   * The version is in the FILENAME, so a parser
+//!   * The version is in the FILENAME (§2.1), so a parser
 //!     bump cannot serve text derived by the old one. `has(md5, v)` IS the
 //!     derivation state; a DB column may cache it, and is never the authority.
 //!   * Writes STREAM through a handle (`begin`, write, `commit`): `.pdf` text

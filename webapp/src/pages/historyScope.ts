@@ -19,7 +19,7 @@
 // through — a live read is byte-identical to having no wrapper at all.
 //
 // In-note search is NOT rerouted here, and must not be: the in-document index is
-// keyed by blob md5 (— "history and bin are other
+// keyed by blob md5 (§1.1 — "history and bin are other
 // md5s"), and the find controllers read `fileHash`, which {@link versionMeta}
 // already rewrites to the version's md5. A preview searches its own retained
 // blob because the meta says which blob it is.
@@ -100,7 +100,7 @@ export function createHistoryScope(): HistoryScope {
  *
  * `fileHash` is the version md5 and does TWO jobs: the raw/thumbnail address is
  * the version's, and it is what find-in-preview searches — the in-document
- * index is keyed by blob md5, so this one field is
+ * index is keyed by blob md5 (§1.1), so this one field is
  * the whole of "search the version, not the live file".
  */
 export function versionMeta(base: NoteMeta, md5: string): NoteMeta {

@@ -13,16 +13,16 @@
 //      refuses to open an index it cannot vouch for. This file asserts the
 //      refusal — which is what turns a dropped flag into a red test rather than
 //      into a corrupt index in somebody's browser months later.
-//   2. **THE FUSION.** One artifact carries both ABIs. The same instance
+//   2. **THE FUSION.** One artifact carries both ABIs (§5). The same instance
 //      parses the `.spd` fixture and answers a search, so
 //      a build that quietly dropped one half fails here.
 //   3. **THE RESTORE PATH.** Serialize, then rebuild in a FRESH instance through
 //      `idx_image_alloc`/`idx_deserialize` and ask the same questions. That path
-//      carries both ABI traps the bench recorded, and its first
+//      carries both ABI traps §6 records, and its first
 //      call into SQLite is `idx_image_alloc` — which is exactly where
 //      `OMIT_AUTOINIT` bites.
-//   4. **THE TYPO LADDER.** It moved out of the server, and the search removal
-//      deletes the copy it came from, so
+//   4. **THE TYPO LADDER.** It moved out of the server
+//      (§6.1) and step 6 deletes the copy it came from, so
 //      what is asserted here is the only remaining description of how it
 //      behaves: the rungs, the best-tier-only rule, and above all that it is a
 //      FALLBACK — `idx_fuzzy` must answer a query that matched exactly the way
@@ -244,8 +244,8 @@ equal(query('"caligrafia" ').total, 2, "a quoted word searches for the word");
 
 // ---- the typo ladder --------------------------------------------------------
 // `idx_fuzzy` is `idx_query` with a FALLBACK attached, and every assertion below
-// is about that word. The ladder moved here from the server, and after the
-// search removal there is no other copy of it.
+// is about that word. The ladder moved here from the server
+// (§6.1), and after step 6 there is no other copy of it.
 
 // IT IS A FALLBACK, NOT A WIDENING, and the module enforces that rather than
 // trusting the caller: a query that matched anything is answered exactly, and
@@ -384,7 +384,7 @@ equal(fuzzy("reunaio ").total, -21, "...and so is a fuzzy one, with the same cod
 
 {
   e = await freshInstance();
-  // TRAP 1 and TRAP 2 in one call. The target must
+  // TRAP 1 and TRAP 2 in one call (§6). The target must
   // come from SQLite's own heap, or FREEONCLOSE frees a Zig-allocated pointer;
   // and on a fresh instance `sqlite3_malloc64` traps outright until
   // `sqlite3_initialize` has run, because OMIT_AUTOINIT leaves the memory

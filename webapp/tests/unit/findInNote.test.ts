@@ -12,8 +12,8 @@ import type { DocSearch, DocSearchResult, DocSegmentMatch } from "../../src/sear
 //   1. TWO PHASES. The current page's ovals are drawn from `getPageText`; the
 //      note-wide counts come from ONE in-document query over `text/<md5>`, never
 //      one per page.
-//   2. THE TEXT IS FETCHED ON THE FIRST FIND, NOT ON OPEN — opening a note to
-//      read it needs the renderer, not a text index.
+//   2. THE TEXT IS FETCHED ON THE FIRST FIND, NOT ON OPEN (§4.1) — opening a
+//      note to read it needs the renderer, not a text index.
 //   3. THE INTERMEDIATE STATE SHOWS NO TOTAL. `1 of 12` is a claim about the
 //      whole note, and a total that revises itself is how a search loses trust.
 //   4. SETTLING KEEPS THE MATCH ALREADY HIGHLIGHTED rather than jumping the page

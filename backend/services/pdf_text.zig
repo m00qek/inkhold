@@ -1,16 +1,6 @@
 //! The `.pdf` text pass: extract one page of text at a time and hand it to
 //! `derive_search.writeDerived`, which writes the document's `terms/` and
-//! `text/` files. The browser searches those.
-//!
-//! **It used to write rows too** — one `kind = 2` row per page in
-//! `note_page_index`, scoped by `segment_search` and indexed by `segment_fts`,
-//! so library search returned PDF pages interleaved with note pages. It was the
-//! segment seam's third tenant, it forced the whole reserved-band design
-//! (`search/maintain.zig`), and schema v14 deleted all of it.
-//! What that removes from THIS file is the chunked index write and the second
-//! MuPDF walk it forced (`deferred.writePdfFiles` used to be a separate pass
-//! over the same extractor); what is left is `Chunk`/`nextChunk`, which are how
-//! a book's text arrives without ever being held whole, and the VERDICT.
+//! `text/` files (§2.2). The browser searches those.
 //!
 //! `txt_index.zig` is the shape to read first; this is deliberately its sibling,
 //! and everything it inherits is inherited rather than rewritten: the shared
@@ -30,11 +20,8 @@
 //! ## Pages with no text
 //!
 //! A page MuPDF returns nothing for is simply a line the derived record does not
-//! carry — the record is addressed by the ordinal written on each line, and `n`
-//! on the header line is the document's whole address space either way. (While
-//! `kind = 2` rows existed a blank page still needed a ROW, because the band
-//! arithmetic was `first + page_index` and a missing row was a hole.) A document
-//! where EVERY page is like that is a scan, and that is a verdict
+//! carry — the record is addressed by the ordinal written on each line. A
+//! document where EVERY page is like that is a scan, and that is a verdict
 //! (`Verdict.no_text`), not a failure: unrecorded, the worker would re-read a
 //! 1,450-page scanned book every idle tick for ever.
 
@@ -46,16 +33,15 @@ const noteindex = @import("note_index.zig");
 const pdfindex = @import("pdf_index.zig");
 const pdftext = @import("../pdf/text.zig");
 // The seam's shared rule about what a page of text IS, owned by the first
-// tenant: the lossy UTF-8 lens. One copy, two callers.
+// tenant. One copy, two callers.
 const txtindex = @import("txt_index.zig");
 const sanitizeUtf8 = txtindex.sanitizeUtf8;
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.pdf_text);
 
-/// Pages indexed at most, per document. **A DECISION, not a limit that fell out
-/// of something** — see the module docs. A document longer than this is indexed
-/// to the cap and RECORDS the truncation.
+/// Pages indexed at most, per document. A document longer than this is indexed
+/// to the cap and RECORDS the truncation — see the module docs.
 ///
 /// 5,000 is generous against everything measured (the harshest real subject on
 /// record is 1,703 pages) and is a bound on the pass rather than a policy about
@@ -67,14 +53,10 @@ pub const max_pages: u32 = 5_000;
 /// ~40 KB of text, whichever comes first, which is ~2 MB for the harshest
 /// document on record against a 50 MB budget.
 ///
-/// **These were a WRITE-TRANSACTION cap, and both halves were measured as one:**
-/// neither rows nor bytes alone predicted the lock hold, and
-/// text volume mattered as much as page count — the cookbook cost 1.76x the
-/// planner's write on FEWER pages. schema v14 deleted the write,
-/// so what the dual cap bounds now is RESIDENCY, where the byte half is the one
-/// that was always doing the work. The numbers are kept rather than re-derived:
-/// they are known to keep a book out of memory, and nothing measured says a
-/// different pair would.
+/// **BOTH HALVES WERE MEASURED AS ONE** (§9.8): neither pages nor
+/// bytes alone predicted the cost, and text volume mattered as much as page
+/// count — the cookbook cost 1.76x the planner's on FEWER pages. The byte half
+/// is the one doing the work; the pair is kept rather than re-derived.
 pub const chunk_pages: u32 = 50;
 pub const chunk_bytes: usize = 40 * 1024;
 
@@ -86,8 +68,7 @@ pub const Verdict = enum(i64) {
     /// the document is never re-read.
     no_text = 1,
     /// Derived the first `max_pages`; the rest are not in the record. Recorded
-    /// rather than inferred, so "searchable, and incomplete" is a fact on the
-    /// row instead of an inference from two page counts.
+    /// rather than inferred from two page counts.
     truncated = 2,
     /// The text pass could not open a file the probe could. A verdict for the
     /// same reason every `pdf_probe` failure is one.
@@ -108,9 +89,8 @@ pub const Verdict = enum(i64) {
     }
 };
 
-/// Does this filename name a `.pdf`? The extension rule, shared with the probe
-/// so the two halves of the `.pdf` tenant cannot disagree about what they are
-/// looking at.
+/// The extension rule, shared with the probe so the two halves of the `.pdf`
+/// tenant cannot disagree about what they are looking at.
 pub const wants = pdfindex.wants;
 
 /// Whether this blob still needs its text extracted — the authority the
@@ -152,11 +132,8 @@ pub const Page = struct {
 };
 
 /// A run of consecutive pages, owning its own memory. `pages` is never empty and
-/// is always `[from, from + pages.len)`.
-///
-/// It used to be one WRITE TRANSACTION's worth as well as one extraction's. Since
-/// §6 step 8 there is no write, and this is purely the unit that keeps a book out
-/// of memory: ~2 MB for a 1,450-page document rather than the whole of it.
+/// is always `[from, from + pages.len)`. The unit that keeps a book out of
+/// memory: ~2 MB for a 1,450-page document rather than the whole of it.
 pub const Chunk = struct {
     arena: std.heap.ArenaAllocator,
     from: u32,
@@ -207,30 +184,20 @@ pub fn nextChunk(gpa: Allocator, ex: *pdftext.Extractor, from: u32) !?Chunk {
 
 /// Every Private Use Area codepoint replaced by a SPACE.
 ///
-/// A PDF's icon fonts map their glyphs into the PUA, and MuPDF extracts what the
-/// font says the codepoint is, so a navigation bar or a bullet list arrives as
-/// codepoints no keyboard produces. On the dev corpus that was 33 distinct terms.
+/// A PDF's icon fonts map their glyphs into the PUA, so a navigation bar arrives
+/// as codepoints no keyboard produces (33 distinct terms on the dev corpus).
+/// **The junk vocabulary is the small half**: `unicode61` treats a PUA codepoint
+/// as a TOKEN character, so one glued to a word takes the word with it —
+/// MEASURED against the shipped wasm, `alpha<U+E906>beta` indexes as a single
+/// token matching neither `alpha` nor `beta` nor `alphabeta`.
 ///
-/// **THE JUNK VOCABULARY IS THE SMALL HALF.** `unicode61` treats a PUA codepoint
-/// as a TOKEN character, not a separator, so one glued to a word takes the word
-/// with it: MEASURED against the shipped wasm, `alpha<U+E906>beta` indexes as a
-/// single token matching neither `alpha` nor `beta` nor `alphabeta`. A real word
-/// touching an icon glyph is simply not findable, which is a correctness bug
-/// about the document's own text rather than noise beside it.
+/// **A SPACE, NOT A DELETION.** Deleting joins the neighbours into one
+/// unfindable token — `gamma<U+E906>delta` becomes `gammadelta` — while a space
+/// can only ever split. Measured both ways against the real tokenizer.
 ///
-/// **A SPACE, NOT A DELETION**, and the difference is the whole fix. Deleting
-/// joins the neighbours into one unfindable token — `gamma<U+E906>delta` becomes
-/// `gammadelta`, matching neither half — while a space can only ever split.
-/// Measured both ways against the real tokenizer before choosing.
-///
-/// PDF-ONLY, deliberately. `sanitizeUtf8` is shared with `.txt`, whose segments
-/// are addressed by BYTE RANGE into the raw blob for `txtFind`'s deep links, and
-/// whose PUA is the user's own content rather than a font artefact. Filtering
-/// there would rewrite text nobody asked us to rewrite.
-///
-/// Safe on the FIND path: the browser's index decides what MATCHED, and
-/// `pdfFind.ts` asks MuPDF where the term sits on the page in front of it, so
-/// this changes membership without touching a single box.
+/// PDF-ONLY, deliberately. `sanitizeUtf8` is shared with `.txt`, whose PUA is
+/// the user's own content rather than a font artefact, and whose segments are
+/// addressed by BYTE RANGE into the raw blob.
 ///
 /// Input must already be valid UTF-8 (`sanitizeUtf8` runs first), so a decode
 /// error here is impossible by construction and is treated as "not PUA".
@@ -262,8 +229,8 @@ fn stripPrivateUse(a: Allocator, text: []const u8) ![]const u8 {
     return out.toOwnedSlice(a);
 }
 
-/// Whether `text` holds any PUA codepoint — one scan that allocates nothing, so
-/// the common case (a document with none) copies once and walks once.
+/// One scan that allocates nothing, so the common case (a document with none)
+/// copies once and walks once.
 fn hasPrivateUse(text: []const u8) bool {
     var i: usize = 0;
     while (i < text.len) {
@@ -293,28 +260,20 @@ fn isPrivateUse(cp: u21) bool {
 /// one per-format seam search has (`derive_search.writeDerived`).
 ///
 /// **This is the case that earns the pull iterator.** `txt_index.Pages` walks a
-/// document already in hand; here there is no such document and there must not
-/// be one. Text arrives a `Chunk` at a time (50 pages / 40 KB, whichever comes
-/// first) and the whole memory story of the text pass is that a book is never
-/// held whole — 2 MB for a 1,450-page document, on a 50 MB budget. So `next`
-/// hands out one page of the chunk it is holding and pulls the next chunk when
-/// that runs out; the caller sees a flat sequence of pages and nothing above it
-/// knows chunks exist.
+/// document already in hand; here there must not be one. Text arrives a `Chunk`
+/// at a time so a book is never held whole — 2 MB for a 1,450-page document, on
+/// a 50 MB budget — and nothing above `next` knows chunks exist.
 ///
 /// **THE ARENA LIFETIME IS THE INVARIANT THE WHOLE DESIGN RESTS ON.** A page's
 /// text is a slice into its chunk's arena and dies when that chunk is released,
 /// which happens the moment `next` is asked for the page after the chunk's last.
-/// That is safe because `writeDerived` consumes a `Page` COMPLETELY before it
-/// calls `next` again — it folds it into the terms fragment and writes it into
-/// the text fragment inside one loop body, and neither writer keeps the slice.
-/// Verified against `derive_search.writeDerived`, and stated here because a
-/// source that buffered its pages would need a different iterator and a
-/// consumer that stashed one would corrupt this one silently.
+/// That is safe ONLY because `writeDerived` consumes a `Page` COMPLETELY before
+/// it calls `next` again, and neither writer keeps the slice. A consumer that
+/// stashed a page would corrupt this silently.
 ///
 /// A page with no extractable text is SKIPPED rather than yielded empty: the
 /// derived files are addressed by the ordinal written on each line, so an
-/// image-only page is simply a line that is not there. It is also what the two
-/// writers would do with it anyway.
+/// image-only page is simply a line that is not there.
 pub const Pages = struct {
     gpa: Allocator,
     ex: *pdftext.Extractor,
@@ -327,14 +286,10 @@ pub const Pages = struct {
     /// the document ends (`min(pages, max_pages)`), so there is no second copy
     /// of the cap here to drift from it.
     from: u32 = 0,
-    /// Did the walk ever yield a page? Read AFTER the source is exhausted, it is
-    /// exactly `verdictFor`'s `any_text`: `false` means MuPDF returned nothing
-    /// for every page in the document, which is a scan.
-    ///
-    /// It lives here because this walk is now the ONLY one. The chunked index
-    /// write used to walk the extractor first and hand its answer to the derive
-    /// pass; §6 step 8 removed that walk, and the fact had to come from
-    /// somewhere that is not a second extraction of a book.
+    /// Read AFTER the source is exhausted, this is exactly `verdictFor`'s
+    /// `any_text`: `false` means MuPDF returned nothing for any page — a scan.
+    /// It lives here because this walk is the ONLY one, and the fact has to come
+    /// from somewhere that is not a second extraction of a book.
     any_text: bool = false,
 
     pub fn init(gpa: Allocator, ex: *pdftext.Extractor) Pages {
@@ -377,10 +332,6 @@ pub const Pages = struct {
 
 /// Closes the document's pass: the verdict, in its own transaction and LAST, so
 /// "this PDF's text is derived" is true only when it is.
-///
-/// It used to close a CHUNKED INDEX WRITE — the late-holder band repair, then
-/// the verdict. schema v14 deleted the `kind = 2` rows and the
-/// bands, so the verdict is all that is left of the transaction.
 pub fn finish(
     db: sqlite.Db,
     blob_md5: []const u8,
@@ -396,9 +347,8 @@ pub fn finish(
     try storeVerdict(db, blob_md5, v);
 }
 
-/// The verdict a completed pass earns, given what the document had and what was
-/// indexed. Split out so the rule is one expression rather than three branches
-/// scattered through the driver — and so it is testable without a PDF.
+/// Split out so the rule is one expression rather than three branches scattered
+/// through the driver — and so it is testable without a PDF.
 pub fn verdictFor(doc_pages: u32, indexed_pages: u32, any_text: bool) Verdict {
     if (!any_text) return .no_text;
     return if (indexed_pages < doc_pages) .truncated else .ok;
@@ -482,24 +432,13 @@ test "the page cap is a decision with a stated value, not an accident" {
 }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 // Tests — the walk, and the verdict it earns
 // ---------------------------------------------------------------------------
 
-// WHAT WENT FROM HERE, AND WHERE IT WENT. Until schema v14
-// this file wrote `kind = 2` rows into a reserved band, and most of the tests
-// below were about that band: contiguity across three commits, an ingest between
-// chunks that must not interleave, a crash that leaves holes rather than
-// corruption, a re-run that drops and re-reserves, two holders getting a band
-// each, and two benches sizing the chunk and the closing transaction. Step 8
-// deleted the rows, the band and both benches' subjects, so those tests were
-// deleted with them rather than left asserting something else.
-//
-// The property they ultimately protected — *every page of an indexed PDF is
-// findable, at its real page number* — did not go with them. It moved to the
-// derived files, and `deferred.zig` asserts it there against real bytes: "the
-// .pdf tenant writes BOTH derived files, ACROSS CHUNK BOUNDARIES" and "a
-// SCANNED PDF still gets its two files, and they are the header alone".
+// "Every page of an indexed PDF is findable, at its real page number" is
+// asserted against real bytes in `deferred.zig`: "the .pdf tenant writes BOTH
+// derived files, ACROSS CHUNK BOUNDARIES" and "a SCANNED PDF still gets its two
+// files, and they are the header alone".
 
 const thumbstore = @import("../store/thumbs.zig");
 const filesvc = @import("files.zig");
@@ -590,7 +529,6 @@ const Fixture = struct {
 
 /// Walks a blob's pages exactly as `deferred.runPdfText` does — one `Pages`
 /// source over one `Extractor`, drained — and reports what the verdict rests on.
-/// The whole of what this file contributes to a document, since the rows went.
 const Walk = struct { yielded: u32, last_ordinal: i64, any_text: bool };
 
 fn walk(f: *Fixture, md5: []const u8) !Walk {
@@ -611,10 +549,9 @@ fn walk(f: *Fixture, md5: []const u8) !Walk {
 }
 
 test "THE WALK IS THE WHOLE PASS: every page with text, once, addressed by its page number" {
-    // What replaced the band. `Pages` is now the only thing this file does with a
-    // document, and the verdict, the two derived files and the client's find are
-    // all downstream of it — so its contract is asserted directly: one record per
-    // page that has text, in page order, at the PDF PAGE NUMBER.
+    // The verdict, the two derived files and the client's find are all
+    // downstream of `Pages`, so its contract is asserted directly: one record
+    // per page that has text, in page order, at the PDF PAGE NUMBER.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -626,10 +563,9 @@ test "THE WALK IS THE WHOLE PASS: every page with text, once, addressed by its p
 }
 
 test "the walk crosses chunk boundaries transparently — 120 pages, three chunks, one sequence" {
-    // `Chunk` exists so a book is never held whole (~2 MB for 1,450 pages). The
-    // caller must not be able to tell: `next` pulls the next chunk when the one
-    // it is holding runs out, and the arena lifetime rule is what makes that
-    // safe. Asserted by ordinal continuity across the two seams.
+    // `Chunk` exists so a book is never held whole (~2 MB for 1,450 pages), and
+    // the caller must not be able to tell. Asserted by ordinal continuity across
+    // the two seams.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -654,10 +590,8 @@ test "the walk crosses chunk boundaries transparently — 120 pages, three chunk
 }
 
 test "a PDF that yields NO TEXT is a verdict, and the walk is what knows it" {
-    // A scan. It goes through exactly the same path as a book — there is no
-    // second code path for it, because "this document says nothing" is only
-    // knowable after the whole pass. Since §6 step 8 that pass is the `Pages`
-    // walk itself, so `any_text` is where the fact comes from.
+    // A scan goes through exactly the same path as a book: "this document says
+    // nothing" is only knowable after the whole pass.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -679,9 +613,8 @@ test "AN INDEXED PDF SETTLES: the tenant runs once, records `ok`, and is never o
     try testing.expectEqual(@as(?i64, @intFromEnum(Verdict.ok)), try f.verdictOf(&md5));
     try testing.expect(!try needsText(f.db, &md5));
 
-    // And it left NO `note_page_index` rows behind. That is the step-8 assertion
-    // in this file: the derivation's whole output is now the two derived files
-    // (`deferred.zig` asserts their bytes), and a PDF contributes no rows at all.
+    // And it left NO `note_page_index` rows behind: the derivation's whole
+    // output is the two derived files, and a PDF contributes no rows at all.
     var rows = (try f.db.row(
         "SELECT COUNT(*) FROM note_page_index WHERE blob_md5 = ?1;",
         &.{.{ .text = &md5 }},
@@ -715,14 +648,11 @@ test "TRUNCATION IS RECORDED — a capped document says so, and says how much it
 }
 
 test "A NOTE HEAL LEAVES THE PDF TENANT'S MEMO ALONE — a tenant owns its own answers" {
-    // THE HOLE THIS CLOSES, restated for what is left of it. `note_index.store`
-    // ends by dropping every page row at or past the parsed page count, and for a
-    // blob the note parser REJECTED that count is ZERO — so, unscoped, a note
-    // re-index deleted a PDF's entire text index, and the upsert had to CLEAR
-    // `pdf_text` to admit it. The delete is scoped to `kind = 0` and the memo is
-    // left alone, which is what stops a note-parser bump forcing minutes of
-    // re-extraction per book. The rows it used to protect went with §6 step 8;
-    // the memo it protects is the whole cost now, so this still pins it.
+    // THE HOLE THIS CLOSES. `note_index.store` ends by dropping every page row
+    // at or past the parsed page count, and for a blob the note parser REJECTED
+    // that count is ZERO. Unscoped, a note re-index would clear `pdf_text` — so
+    // the delete is scoped to `kind = 0` and the memo is left alone, which is
+    // what stops a note-parser bump forcing minutes of re-extraction per book.
     var f = try Fixture.init();
     defer f.deinit();
 

@@ -4,12 +4,11 @@
 //!
 //! The server's one `db_lock` protects the connection HANDLE, not the database.
 //! WAL supports concurrent readers plus one writer natively, and a single shared
-//! connection discards that: a 3.41 s global search (measured on the Pi,
-//!) holds the one lock, so every write and every other read
+//! connection discards that: a 3.41 s global search (measured on the Pi)
+//! holds the one lock, so every write and every other read
 //! queues behind it. A read that runs on its own connection is not a barrier —
 //! even on one core, where the win is PREEMPTION rather than parallelism: the OS
 //! timeslices the short read against the long search instead of serializing them.
-//!
 //!
 //! ## The two rules
 //!
@@ -45,8 +44,8 @@ pub const max_readers = 32;
 
 /// Readers opened by default.
 ///
-/// **3, from the revised one-or-two-core table**, not from the
-/// 4–6 that entry 4 first estimated against a multi-core box: on one core extra
+/// **3, from the revised one-or-two-core table**, not from the 4–6 first
+/// estimated against a multi-core box: on one core extra
 /// readers buy nothing but context switches, and each one costs a page cache.
 /// The exhaustion fallback above is what makes this safe to be wrong about — too
 /// few readers degrades to today's behaviour for the overflow, never to an error
@@ -251,7 +250,7 @@ test "a reader may still write its own TEMP scratch, which is what makes a foldi
     // run on a pooled reader at all.
     //
     // No route folds on a reader today: the reads that did went into the browser
-    // with the move into the browser. The property is pinned anyway, because
+    // with §6 step 7. The property is pinned anyway, because
     // the audit above is written in terms of it.
     const f = try Fixture.init();
     defer f.deinit();

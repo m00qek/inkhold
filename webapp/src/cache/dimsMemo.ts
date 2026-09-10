@@ -1,6 +1,6 @@
 // Image-document dimensions memo — the CONTRACT between the gallery layout
-// (which needs an image's aspect BEFORE any bytes arrive; docs/scratch/
-// ) and the thumbnail facade (which learns the true dims
+// (which needs an image's aspect BEFORE any bytes arrive) and the thumbnail
+// facade (which learns the true dims
 // the first time it decodes the image and records them here).
 //
 // Two layers, one surface:

@@ -15,7 +15,7 @@ import {
 // ---------------------------------------------------------------------------
 // THE SHADOW, run against a FROZEN capture of the server's answers.
 //
-// the search removal step 4 puts both engines behind the real search box and
+// §6 step 4 puts both engines behind the real search box and
 // counts disagreements on queries a person types. This replaces that, and the
 // reason is not impatience: step 6 DELETES the server implementation, so the
 // window in which the two can be compared at all is finite, and a control that

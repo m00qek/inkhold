@@ -1,17 +1,6 @@
 //! What the server knows about a PDF: how many pages, what shape page 1 is, and
 //! whether it opens at all. The `.pdf` half of `note_index`.
 //!
-//! ## Why there is anything to do here
-//!
-//! `thumbAspect` and `pageCount` already cross the wire and are already
-//! rendered; `controlplane.aspectOf` reads them straight off `note_index`. A PDF
-//! simply had no row worth reading — `indexable = 0`, and `page_count`, `width`
-//! and `height` all zero — so the gallery guessed 3:4 and corrected itself from
-//! decoded pixels. The columns, the wire format and the client were all already
-//! there. Only a producer was missing, and this is it.
-//!
-//! ## The shape of the work
-//!
 //! Deliberately the same shape as `txt_index`, so the deferred worker's three
 //! steps apply unchanged: ask under the lock (`needsProbe`), do the expensive
 //! part off it (`probe.probeFile`), write under it in one transaction
@@ -35,9 +24,8 @@ pub const Verdict = enum(i64) {
     pub fn of(e: pdfprobe.Error) ?Verdict {
         return switch (e) {
             // NOT a verdict about the file — the allocation failed on OUR side,
-            // and recording it would permanently write off a perfectly good PDF
-            // because the machine was briefly out of memory. Left unprobed so
-            // the next pass tries again.
+            // and recording it would permanently write off a good PDF because
+            // the machine was briefly out of memory.
             pdfprobe.Error.NoContext => null,
             pdfprobe.Error.Unopenable => .unopenable,
             pdfprobe.Error.Encrypted => .encrypted,
@@ -46,9 +34,8 @@ pub const Verdict = enum(i64) {
     }
 };
 
-/// Does this filename name a `.pdf`? The same extension rule as
-/// `txt_index.wants` and `thumbnail.wants`: a leading-dot name (`.pdf`) has no
-/// extension, nor does a trailing dot.
+/// The same extension rule as `txt_index.wants` and `thumbnail.wants`: a
+/// leading-dot name (`.pdf`) has no extension, nor does a trailing dot.
 pub fn wants(name: []const u8) bool {
     const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return false;
     if (dot == 0 or dot + 1 == name.len) return false;
@@ -60,28 +47,20 @@ pub fn wants(name: []const u8) bool {
 /// and the `note_index` alias `ni`. Bound parameter 1 is
 /// `noteindex.index_version`.
 ///
-/// **A FROM/WHERE and not a statement, deliberately — this is the one copy**, for
-/// the reason `txt_index.pending_from_where` states at length: `deferred.zig`
-/// takes `LIMIT 1` from it and `pending.zig` counts over it, and those two
-/// disagreeing about what is outstanding is the whole failure this shape
-/// prevents. Callers may only ADD a bound (a user scope, a blob scope).
+/// **A FROM/WHERE and not a statement, deliberately — this is the one copy**,
+/// for the reason `txt_index.pending_from_where` states: `deferred.zig` takes
+/// `LIMIT 1` from it and `pending.zig` counts over it. Callers may only ADD a
+/// bound (a user scope, a blob scope).
 ///
-/// TWO QUESTIONS, ONE TENANT, asked in order. A PDF owes a PROBE (page count and
-/// the page-1 box, ~1 s) and then a TEXT PASS (`pdf_text.zig`, ~2 minutes on the
-/// target). They are one tenant rather than two because `deferred.Worker.drain`
+/// TWO QUESTIONS, ONE TENANT, asked in order. A PDF owes a PROBE (page count
+/// and the page-1 box, ~1 s) and then a TEXT PASS (`pdf_text.zig`, ~2 minutes
+/// on the target). One tenant rather than two because `deferred.Worker.drain`
 /// offers each blob at most once per pass — its forward-progress guard — so a
-/// second tenant asking about the same md5 would be refused as "no progress" and
-/// the text would wait for the idle tick. One job brings the PDF fully up to
-/// date instead.
-///
-/// It is also why a COUNT over this clause must be over DISTINCT BLOBS rather
-/// than over outstanding questions: one PDF owing both a probe and its text is
-/// one document still being indexed, not two.
+/// second tenant asking about the same md5 would be refused as "no progress"
+/// and the text would wait for the idle tick.
 ///
 /// The text half is gated on `pdf_probe = 0`: text is never asked of a file
-/// whose first answer is missing or negative. Mirrors `needsProbe` and
-/// `pdf_text.needsText` between them, and all three are asserted to agree in the
-/// tests.
+/// whose first answer is missing or negative.
 ///
 /// `LIKE '%_.pdf'` IS `wants`: `_` is LIKE's single-character wildcard, so the
 /// pattern demands at least one character before the dot — the rule that makes a
@@ -106,20 +85,18 @@ pub const pending_from_where =
 ;
 
 /// Whether this blob still needs probing — the authority the discovery query
-/// approximates. False once any verdict is recorded, including a failure.
-/// ASKS THE DATA, NOT ONLY THE MEMO — the `txt_index.needsDerive` posture, and
-/// the reason this survives a heal. The shape lives in the NOTE columns
-/// (`page_count`/`width`/`height`, written by `store` below), so an
-/// `index_version` bump overwrites it with the note parser's own values, which
-/// for a PDF are zero. The verdict on the same row survives that. A memo alone
-/// would therefore read "already probed" over a shape the heal had just
-/// erased, and the blob would never be offered again — a PDF stuck at 0 pages
-/// with no way back short of editing the database.
+/// approximates.
 ///
-/// So `ok` with no `page_count` is treated as outstanding work. It is not
-/// ambiguous: a document that really has no pages is `no_pages`, never `ok`.
-/// A terminal verdict (unopenable/encrypted/no_pages) stored no shape in the
-/// first place, so it has nothing to lose and is deliberately NOT retried.
+/// ASKS THE DATA, NOT ONLY THE MEMO, and that is what makes it survive a heal.
+/// The shape lives in the NOTE columns (`page_count`/`width`/`height`), so an
+/// `index_version` bump overwrites it with the note parser's own zeroes while
+/// the verdict on the same row survives. A memo alone would read "already
+/// probed" over a shape the heal had just erased, and the blob would never be
+/// offered again — a PDF stuck at 0 pages short of editing the database.
+///
+/// So `ok` with no `page_count` is outstanding work, unambiguously: a document
+/// that really has no pages is `no_pages`, never `ok`. A terminal verdict
+/// stored no shape in the first place, so it is deliberately NOT retried.
 pub fn needsProbe(db: sqlite.Db, blob_md5: []const u8) !bool {
     var r = (try db.row(
         "SELECT pdf_probe, page_count FROM note_index " ++

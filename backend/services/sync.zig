@@ -103,8 +103,8 @@ pub const SyncService = struct {
     /// `summary/hash` and `summary/group` that residue is beneath their own
     /// `ORDER BY f.id LIMIT`, which sorts the user's files and predates all of
     /// this; for `summary/id` it is the whole remaining cost, and killing it
-    /// needs an index keyed on folders. Recorded,
-    /// not built — no measurement demands it yet.
+    /// needs an index keyed on folders. Noted, not built — no measurement
+    /// demands it yet.
     ///
     /// **Still replaces a `pathOf` call per row**, which is what `6605d69` moved
     /// the path into SQL to buy and what this must not hand back: `pathOf` walks

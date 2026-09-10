@@ -319,7 +319,7 @@ pub fn bindEquipment(ctx: *Context, req: *Request, params: Params) anyerror!void
     // THIS ROUTE ACCEPTS AN UNAUTHENTICATED CALL, and only this one.
     //
     // The Nomad fires `bindEquipment` SIX MILLISECONDS before it stores the token
-    // its login just returned (docs/scratch/nomad-login.log), so the one request
+    // its login just returned, so the one request
     // carrying the device's name goes out with no `x-access-token`. Requiring the
     // token meant answering 401 to every pairing: the handler never ran, the name
     // never landed, and the account screen showed a placeholder for a tablet that

@@ -1,4 +1,4 @@
-// The LOCAL SEARCH INDEX — 's one FTS5 table, driven
+// The LOCAL SEARCH INDEX — §4.1's one FTS5 table, driven
 // through the `idx_*` ABI of `sqlite-core.wasm`. Synchronous, because that is
 // the ABI's shape; `searchEngine.ts` puts it behind a worker. No network, no
 // IndexedDB, no DOM. The ABI contract, including the two traps `deserialize`
@@ -386,7 +386,7 @@ export class SearchIndex {
    * matched nothing. Measured over the real library (23,964 pages, 63,577
    * terms): a matching query costs 1.42 ms against 1.37 ms exact, so the ladder
    * is free when it does not fire; a no-match query costs 71.3 ms p50 for the
-   * whole-vocabulary scan (6,133.8 ms on the Pi,), paid
+   * whole-vocabulary scan (6,133.8 ms on the Pi), paid
    * per KEYSTROKE — which is why this class is driven from a worker.
    */
   query(text: string, limit: number, fuzzy = false): QueryResult {

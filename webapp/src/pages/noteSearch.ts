@@ -356,7 +356,7 @@ export function pendingLine(pending: number): string | null {
  * CORPUS is not finished: a document still being derived is not in the manifest,
  * so not in the index, so it cannot match — and a list of results implies "this
  * is what there is". The number comes from the live channel's `event: index`
- * frame (the pending-ness work is still live, §0). Quieter than the empty state's
+ * frame. Quieter than the empty state's
  * version because over real results it is a caveat, not an explanation.
  */
 export function resultsMayGrowLine(pending: number): string | null {

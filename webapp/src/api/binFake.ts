@@ -168,7 +168,7 @@ export interface TrashedLookup {
  * Injected rather than minted here, and that is the fix for a defect this file
  * used to carry: it wrote `` `${id}-md5` ``, which is not 32 hex. The real
  * routes are content-addressed — `/thumbnail/{hash}`, and since
- * the move into the browser the in-document text route `text/<md5>` — so a
+ * §6 step 7 the in-document text route `text/<md5>` — so a
  * path could not have carried that value at all, and `docText.ts`'s parser
  * refuses it in a record header. Every spec that searched inside a trashed note
  * therefore had to work around the fixture rather than exercise the route.

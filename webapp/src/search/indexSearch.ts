@@ -1,5 +1,5 @@
 // The browser's own FTS5 index answering the search box, behind
-// `localSearch.ts`'s result shape — since the search removal deleted
+// `localSearch.ts`'s result shape — since §6 step 6 deleted
 // the server fallback, the ONLY thing that answers a library-wide query.
 //
 //     TermsStore rows ──build──▶ SearchIndex ──query──▶ PageRef[]

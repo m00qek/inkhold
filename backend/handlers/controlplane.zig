@@ -2143,7 +2143,7 @@ const sse_headers = [_]std.http.Header{
 /// The `event: index` frame's body — how much of the caller's library is still
 /// being derived, and a version that moves when a derive lands.
 ///
-/// ONE FRAME FOR TWO READERS, deliberately.
+/// ONE FRAME FOR TWO READERS, deliberately (§4).
 /// The UI needs "N still indexing" for the sentence that qualifies a search's
 /// completeness; a client keeping its own index needs "the index changed,
 /// re-sync". Those are the same fact observed twice, and splitting them would
@@ -2169,7 +2169,7 @@ fn indexSnapshot(ctx: *Context, user_id: u64) ?pendingsvc.Snapshot {
 }
 
 // ---------------------------------------------------------------------------
-// THE CLIENT-SIDE SEARCH INDEX, phase 1
+// THE CLIENT-SIDE SEARCH INDEX — §2.1, phase 1
 // step 4
 // ---------------------------------------------------------------------------
 //
@@ -2260,7 +2260,7 @@ pub fn controlplaneSearchIndexManifest(ctx: *Context, req: *Request, params: Par
 }
 
 // ---------------------------------------------------------------------------
-// THE STITCHED STREAM, build order step 2
+// THE STITCHED STREAM — §3.2 and §3.3, build order step 2
 // ---------------------------------------------------------------------------
 
 /// The manifest as ONE request must see it: the rows in their exact order, and
@@ -2497,7 +2497,7 @@ fn eventsOneShot(ctx: *Context, req: *Request, sync_version: i64, index: ?pendin
 }
 
 // ---------------------------------------------------------------------------
-// THE PER-DOCUMENT TEXT ROUTE, build order step 7
+// THE PER-DOCUMENT TEXT ROUTE — §1.1, build order step 7
 // ---------------------------------------------------------------------------
 
 /// GET /api/controlplane/text/{md5} -> ONE document's `text/{md5}.{v}` record as

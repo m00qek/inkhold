@@ -4,15 +4,15 @@
 //!
 //! ## The question it exists to answer
 //!
-//! 's last derive-cost item. §8.3 measured the
-//! FOLD on an x86 box and extrapolated to the ARM1176 at an assumed 10-20×;
+//! The last open derive-cost item. §8.3 measured the FOLD on an x86 box and
+//! extrapolated to the ARM1176 at an assumed 10-20×;
 //! COMPRESSION — the one new CPU cost this design adds to the server — was never
 //! measured at all. Both are settled by running this on the deployment target,
 //! which is the shape every bench in this repo has taken: cross-compiled with
 //! `-Dtarget=arm-linux-musleabihf -Dcpu=arm1176jzf_s`, scp'd to the Pi, run
 //! there. It is the last of them — `search_bench.zig` went with library-wide
-//! search and `indoc_bench.zig` with the
-//! in-document reads it timed (step 7).
+//! search (§6 step 6) and `indoc_bench.zig` with the in-document reads it
+//! timed (step 7).
 //!
 //! ## It measures THIS code, not a proxy
 //!
@@ -495,9 +495,9 @@ const SplitResult = struct {
 /// the whole-fold number alone cannot say whether the target's cost is the
 /// TOKENIZER or the round trip around it — and the two have different answers.
 ///
-/// that pass took exactly this measurement on the read path
-/// ("instrumenting the three statements put 13.0 of those 13.9 ms in the
-/// vocabulary scan") and it is what turned a slow fold into a fixable one.
+/// Exactly this measurement, taken on the read path ("instrumenting the three
+/// statements put 13.0 of those 13.9 ms in the vocabulary scan"), is what
+/// turned a slow fold into a fixable one.
 ///
 /// **The two SQL literals below are `foldRows`'s, spelled a second time**, which
 /// is the one duplication in this file and is unavoidable: they are locals

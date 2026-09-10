@@ -1,4 +1,4 @@
-// The BOUNDED half of the in-document text cache.
+// The BOUNDED half of the in-document text cache — §4.4.
 //
 //     on demand    →  GET text/<md5>?v=…  →  the browser's HTTP cache  (no code)
 //     prefetched   →  GET text/<md5>?v=…  →  HERE                     (this file)

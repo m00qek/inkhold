@@ -1,5 +1,5 @@
 // The SEARCH WORKER: one `SearchIndex` on `sqlite-core.wasm`, off the main
-// thread. Design and measurements:.
+// thread. Design and measurements: §7, §8.1, §8.6.
 //
 // What this must not break:
 //   * ONE instance, reused. `idx_open()` returns the closed database's pages to

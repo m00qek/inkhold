@@ -1269,7 +1269,7 @@ pub const Service = struct {
     /// that session belongs to the account named by `email`.
     ///
     /// **Why this exists — `bindEquipment` arrives unauthenticated.** Captured
-    /// from a real Nomad (docs/scratch/nomad-login.log): login returns a token at
+    /// from a real Nomad: login returns a token at
     /// t+0ms, the device fires `bindEquipment` at t+9ms, and only STORES the token
     /// at t+15ms. So the one call that carries the device's name, model and
     /// firmware goes out with no `x-access-token` header, we answered 401, and the

@@ -1,4 +1,4 @@
-// ONE DOCUMENT'S TEXT — 's other half of the index.
+// ONE DOCUMENT'S TEXT — §1.1's other half of the index.
 //
 //     GET /api/controlplane/text/<md5>?v=<index_version>
 //

@@ -1,7 +1,7 @@
 /*
  * THE DOCUMENT'S OWN LINKS — one layer, two viewers.
  *
- * `pages/pdfLinkLayer.ts` renders real `<a>` elements over a rendered page, and
+ * `pages/linkLayer.ts` renders real `<a>` elements over a rendered page, and
  * it is used by BOTH the PDF viewer (a `.pdf`'s own link annotations) and the
  * reader (the links a PDF used as a `.note`'s template brought with it,
  * `note-format.md` §14). The two differ only in the unit the rects arrive in —

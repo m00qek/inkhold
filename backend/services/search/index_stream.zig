@@ -1,5 +1,5 @@
 //! The walk behind `/api/controlplane/search-index/stream`: manifest rows plus a
-//! `want=` bitmap in, one stitched gzip out.
+//! `want=` bitmap in, one stitched gzip out (§3.2, §3.3).
 //! `http/gzip_stitch.zig` owns the container, `store/derived.zig` the stored file
 //! (a 12-byte header with the plaintext CRC32 and length, then a raw-deflate
 //! fragment), `index_export.zig` the row order a bitmap position is read against.

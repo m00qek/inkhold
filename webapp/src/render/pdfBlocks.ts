@@ -34,16 +34,15 @@ export interface RangeResult {
 export type RangeFetcher = (start: number, end: number) => Promise<RangeResult>;
 
 /**
- * 32 KB — NOT the 512 KB the plan guessed, and the difference is measured.
+ * 32 KB, and the size is MEASURED rather than reasoned.
  *
- * a 512 KB block is ~2.7 s of 3G
- * transfer against 0.15 s of round trip, ~5% overhead, where 64 KB would be 30%.
- * That arithmetic is right and it is about the wrong thing, because it assumes
- * the bytes in a block get USED. Recording every read MuPDF makes for page 1 of
- * the two real documents (§6.2) says they do not: the pattern is ~100 SCATTERED
- * 32 KB object lookups — the page-tree walk alone touches all 77 page objects,
- * spread through 79 MB — with almost no sequential run. So the block size barely
- * moves the request count and moves the byte count enormously:
+ * The overhead argument for a big block (512 KB is ~2.7 s of 3G transfer against
+ * 0.15 s of round trip, ~5%, where 64 KB would be 30%) assumes the bytes in a
+ * block get USED. Recording every read MuPDF makes for page 1 of two real
+ * documents says they do not: the pattern is ~100 SCATTERED 32 KB object
+ * lookups — the page-tree walk alone touches all 77 page objects, spread through
+ * 79 MB — with almost no sequential run. So the block size barely moves the
+ * request count and moves the byte count enormously:
  *
  * | 79.5 MB, linearized | requests | fetched | 3G, serial |
  * |---|---:|---:|---:|
@@ -72,14 +71,13 @@ export const CACHE_CAP_BYTES = 32 * 1024 * 1024;
 /**
  * Blocks fetched speculatively past a read that CONTINUES the previous one.
  *
- * The "sequential" qualifier is the whole of it. Read-ahead applied to every
- * read — which is what the plan said, and what this did first — was a pure loss
- * on both real documents: it roughly DOUBLED the request count (69 → 129 at
- * 16 KB) and added 25-60% to the bytes, because a scattered lookup's next read
- * is nowhere near this one. Restricted to reads that begin exactly where the
- * last one ended, four blocks cost one extra request across both documents and
- * are still there for the case this is insurance against — a page whose content
- * is one large image stream, read straight through.
+ * The "sequential" qualifier is the whole of it. Read-ahead applied to EVERY
+ * read is a pure loss on both real documents: it roughly DOUBLES the request
+ * count (69 → 129 at 16 KB) and adds 25-60% to the bytes, because a scattered
+ * lookup's next read is nowhere near this one. Restricted to reads that begin
+ * exactly where the last one ended, four blocks cost one extra request across
+ * both documents and are still there for the case this insures against — a page
+ * whose content is one large image stream, read straight through.
  */
 export const READ_AHEAD_BLOCKS = 4;
 
@@ -89,21 +87,16 @@ export const READ_AHEAD_BLOCKS = 4;
  *
  * Measured, not guessed. Opening page 1 of a 79.5 MB document issues 65
  * requests, and **19 of them land in these two windows** — 13 in the first 1 MB
- * and 6 in the last 512 KB, which is where the trailer and the xref live.
- * MuPDF reaches the tail immediately (its second read of that document is
- * `[79521777, 1024]`, the trailer) and then walks back and forth between the two
- * regions. Two speculative requests cover all 19.
+ * and 6 in the last 512 KB, which is where the trailer and the xref live. Two
+ * speculative requests cover all 19.
  *
- * Why these ARE worth speculating on, when read-ahead generally is not: they are
- * the only two regions every PDF is guaranteed to need. The trailer says where
- * the xref is, the xref says where everything else is, and the header identifies
- * the file — none of that is optional and none of it depends on which page is
- * wanted. The scattered mid-file object reads that make up the other 46 requests
- * are genuinely unpredictable, which is why blind read-ahead lost (§5.7).
+ * Why these ARE worth speculating on when read-ahead generally is not: they are
+ * the only two regions every PDF is guaranteed to need, whichever page is
+ * wanted. The scattered mid-file object reads making up the other 46 requests
+ * are genuinely unpredictable, which is why blind read-ahead lost.
  *
  * The cost is ~0.7 MB fetched and not used, against ~17 saved round trips —
- * 7 seconds on a 400 ms link. On a fast link it is a small waste; on the link
- * this design targets it is the trade the whole file exists to make.
+ * 7 seconds on a 400 ms link.
  */
 export const PREFETCH_HEAD_BYTES = 1024 * 1024;
 export const PREFETCH_TAIL_BYTES = 512 * 1024;
@@ -111,16 +104,12 @@ export const PREFETCH_TAIL_BYTES = 512 * 1024;
 /**
  * How many `(offset, length)` reads and issued ranges to remember.
  *
- * 512, down from 20,000. NOTHING IN THE APP READS THESE — the only consumers
- * are `pdfBlocks.test.ts`, which asserts exact contents on fixtures a few reads
- * long, and the throttled acceptance spec's `report()`, which prints the first
- * 40 and a median. Page 1 of the largest document measured is 101 reads, so the
- * whole subject of every measurement fits well inside this.
- *
- * 20,000 two-element arrays apiece is a couple of megabytes of worker heap held
- * for nobody, and `stats()` shallow-copies both on every call — once per
- * document opened. A ceiling that no measurement approaches is not a safety
- * margin, it is just a bigger number.
+ * NOTHING IN THE APP READS THESE — the only consumers are `pdfBlocks.test.ts`,
+ * which asserts exact contents on fixtures a few reads long, and the throttled
+ * acceptance spec's `report()`, which prints the first 40 and a median. Page 1
+ * of the largest document measured is 101 reads, so the whole subject of every
+ * measurement fits well inside this, and `stats()` shallow-copies both logs on
+ * every call.
  */
 const LOG_LIMIT = 512;
 
@@ -352,14 +341,13 @@ export class BlockCache {
   /**
    * Queue `[from, to]` as one request, and register every block against it.
    *
-   * The range asked for is the FULL span of those blocks, never clamped to the
-   * length we think the document has. Two reasons, and the second one is a bug
-   * this had: a server clamps an over-long range itself and tells us the real
-   * length in `content-range`, so asking long is how the length gets corrected
-   * for free; and clamping to a length that turns out to be TOO SMALL stores a
-   * SHORT BLOCK, which then answers reads past its end with EOF. A 76 MB
-   * document opened with a stale 400 KB size did exactly that — MuPDF saw the
-   * file end at 400 KB, declared it damaged and went into repair.
+   * The range asked for is the FULL span of those blocks, NEVER clamped to the
+   * length we think the document has. A server clamps an over-long range itself
+   * and reports the real length in `content-range`, so asking long is how the
+   * length gets corrected for free; and clamping to a length that turns out to
+   * be TOO SMALL stores a SHORT BLOCK, which then answers reads past its end
+   * with EOF. A 76 MB document opened with a stale 400 KB size did exactly that
+   * — MuPDF saw the file end at 400 KB, declared it damaged and went into repair.
    */
   private request(from: number, to: number): Promise<void> {
     const start = from * this.bs;

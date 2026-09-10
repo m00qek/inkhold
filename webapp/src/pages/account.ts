@@ -212,7 +212,7 @@ export function failureMessage(e: unknown): string {
  * user's sessions, so the Supernote's dies with them — and unlike a browser it
  * cannot sign itself back in, because it authenticates with the password it has
  * stored. So sync stops until somebody walks over and types the new one. The
- * binding itself survives; nothing needs re-pairing.
+ * binding itself survives (user_options.md §9.1); nothing needs re-pairing.
  *
  * A browser is one click away; the tablet is across the room. Someone who read
  * only the old line would discover their Supernote had stopped syncing hours

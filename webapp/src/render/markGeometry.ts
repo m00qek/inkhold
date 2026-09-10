@@ -108,7 +108,7 @@ export interface PageRect {
  *
  * THE ONE PAGE→SCREEN MAPPING, and it is here rather than beside either of its
  * callers because there are now two of them. The document's own links
- * (`pdfLinks.placeLink`) and find's highlights (`pages/pdfFind.ts`) both start
+ * (`pdfWire.placeLink`) and find's highlights (`pages/pdfFind.ts`) both start
  * from a rect the decoder already resolved into display space, and both have to
  * land on the same pixels as the `.mark` ink that {@link placePanelOverPage}
  * puts over the same canvas. Two arithmetics for one page is precisely how a
