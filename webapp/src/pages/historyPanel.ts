@@ -40,8 +40,14 @@ export interface HistoryControllerDeps {
    * Open the reader in preview mode for `version` of `noteId`. The shell owns
    * viewer activation and the history reroute (`historyScope`), so this module
    * only says WHICH version to preview.
+   *
+   * `annotationsOn` carries {@link HistoryOpenOptions.annotationsOn} straight
+   * back out: when it is set, `noteId` is a `.mark` and the thing to open is the
+   * DOCUMENT it annotates, live, with the ink rerouted to this version. The panel
+   * does not know how that is done — it only refuses to lose the one fact the
+   * caller gave it.
    */
-  openPreview: (noteId: Id, version: FileVersion) => void;
+  openPreview: (noteId: Id, version: FileVersion, annotationsOn?: Id) => void;
   /**
    * Restore `version` as the file's current one — confirm + call + refresh +
    * toast. Resolves true on success. Provided by the shell so both the panel and
@@ -60,6 +66,22 @@ export interface HistoryOpenOptions {
   /** The md5 of the version currently being PREVIEWED, so its row shows `Viewing`.
    *  Absent when opened from a library card (nothing is on screen). */
   viewingMd5?: string;
+  /**
+   * THESE VERSIONS ARE A DOCUMENT'S ANNOTATIONS, and this is the id of the
+   * document they are on. Set by the two surfaces that reach a paired `.mark`'s
+   * history — the PDF card's ⋯ menu and the PDF viewer's versions control —
+   * where the file being versioned (the mark) is NOT the file the reader is
+   * looking at (the PDF).
+   *
+   * It changes what the panel SAYS (an "Annotation history" eyebrow plus the
+   * caption that restoring touches only the handwriting) and it is handed back to
+   * {@link HistoryControllerDeps.openPreview} so the shell can open the right
+   * file. Passed IN rather than sniffed off `fileType` inside here: a `.mark`
+   * opened on its own — orphaned into a listing, or from the bin — really is a
+   * file with its own history, and the panel must not start calling that an
+   * annotation history because of its extension.
+   */
+  annotationsOn?: Id;
 }
 
 export interface HistoryController {
@@ -113,15 +135,37 @@ export function createHistoryController(deps: HistoryControllerDeps): HistoryCon
     // Pages are shown ONLY for a `.note`; every other kind reads its byte size.
     const isNote = (note.fileType || "").trim().toLowerCase() === "note";
 
+    // WHOSE history this is. An annotation history lists the versions of the
+    // `.mark` beside a document, under the DOCUMENT's name — so the eyebrow has
+    // to say which of the two is being versioned, or the panel reads as a claim
+    // that the document has past versions (it does not; only the ink does).
+    const annotations = opts.annotationsOn != null;
+    const heading = annotations ? "Annotation history" : "Version history";
+
     const list = el("ul", { class: "vh__list" });
     // The section eyebrow, exactly like the ⋯ menu's DOWNLOAD / ACTIONS: a mono,
     // uppercase, letter-spaced --ink-faint label. No file-name title, no header.
     const pop = el(
       "div",
-      { class: "vh menu__pop--float", role: "menu", "aria-label": `Version history for ${note.name}` },
-      el("div", { class: "vh__eyebrow", "aria-hidden": "true", text: "Version history" }),
+      { class: "vh menu__pop--float", role: "menu", "aria-label": `${heading} for ${note.name}` },
+      el("div", { class: "vh__eyebrow", "aria-hidden": "true", text: heading }),
       list,
     );
+    // AND ONE LINE OF PROSE, only here. Every other history panel is versions of
+    // the thing you were looking at, and needs no explaining. This one is not:
+    // what it lists is handwriting, the rows are dated blobs with nothing on them
+    // to say so, and Restore would otherwise be an unqualified promise about a
+    // document nobody is offering to change. The caption is where that promise
+    // gets its scope.
+    if (annotations) {
+      pop.insertBefore(
+        el("p", {
+          class: "vh__caption",
+          text: "The handwriting on this document. Restoring changes only the annotations — the document itself is untouched.",
+        }),
+        list,
+      );
+    }
 
     // This panel's registration in the shared open-popover registry: a click on
     // its anchor (trigger) OR the portaled pop is "inside" and must not dismiss.
@@ -163,7 +207,11 @@ export function createHistoryController(deps: HistoryControllerDeps): HistoryCon
       if (versions.length === 0) {
         // A file always has at least its current version, so an empty list means
         // the server could not resolve one — say so plainly rather than blank.
-        state("No version history for this file yet.");
+        state(
+          annotations
+            ? "No annotation history for this document yet."
+            : "No version history for this file yet.",
+        );
         return;
       }
       rowEls = versions.map((v, i) => row(v, versions[i + 1]));
@@ -228,7 +276,7 @@ export function createHistoryController(deps: HistoryControllerDeps): HistoryCon
       // keeps the row uniform; the shell no-ops a same-version reopen.
       li.addEventListener("click", () => {
         close();
-        deps.openPreview(note.id, version);
+        deps.openPreview(note.id, version, opts.annotationsOn);
       });
       li.addEventListener("mouseenter", () => li.classList.add("is-hover"));
       li.addEventListener("mouseleave", () => li.classList.remove("is-hover"));

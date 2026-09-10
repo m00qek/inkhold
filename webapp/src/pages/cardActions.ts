@@ -23,7 +23,7 @@ import { download, savedPdfMessage, type Exporter } from "../export/exporter";
 import { exportSpdPng, exportSpdOra } from "./spdExport";
 import { buildSpdExportModel } from "../export/spdModel";
 import type { Api } from "../api/types";
-import type { Entry, NoteSummary } from "../core/types";
+import type { Entry, Id, NoteSummary } from "../core/types";
 
 /**
  * What the card-menu matrix needs from the shell. The controller keeps owning
@@ -64,6 +64,16 @@ export interface CardActionsCtx {
    * stays in the DOM as the anchor).
    */
   onHistory: (note: NoteSummary, anchor: HTMLElement) => void;
+  /**
+   * Open the ANNOTATION history for a document that has a paired `.mark` — the
+   * versions of the handwriting, not of `doc`.
+   *
+   * A separate seam from {@link onHistory} because it names a DIFFERENT file:
+   * the panel lists `annotationsId`'s versions and heads them with `doc`'s name,
+   * which is a pair no `NoteSummary` can express. The shell owns the panel, the
+   * preview and the restore, exactly as it does for a note's own history.
+   */
+  onAnnotationHistory: (doc: NoteSummary, annotationsId: Id, anchor: HTMLElement) => void;
 }
 
 export interface CardActions {
@@ -285,6 +295,29 @@ export function createCardActions(ctx: CardActionsCtx): CardActions {
         // (an anticlockwise return arrow) reads as "go back to a past version".
         entry.kind === "note" && canPreviewHistory(entry.fileType)
           ? { label: "Version history", icon: "restore", onSelect: () => ctx.onHistory(entry, historyAnchor()) }
+          : null,
+        // "ANNOTATION HISTORY" — the SECOND, separate case, and the label differs
+        // from the one above on purpose.
+        //
+        // A `.mark` is folded out of every listing (it is a layer of the
+        // document, not a document), so it has no card of its own — and every
+        // superseded version of it is retained AND charged to the user's quota.
+        // Without this row the only way to reach any of it was to trash the PDF,
+        // which unpairs the mark and lets it list: the ink's history became
+        // visible exactly when the document it annotates was gone.
+        //
+        // The row does NOT claim the document has versions, which is why
+        // `canPreviewHistory("pdf")` stays false: there is no past version of a
+        // PDF here, only past versions of the handwriting over it. The menu is
+        // the first place that can say so, so it says so — and the panel opens
+        // under the DOCUMENT's name, because `foo.pdf.mark` is a filename the
+        // reader never chose and would not recognise.
+        entry.kind === "note" && entry.annotationsId !== null
+          ? {
+              label: "Annotation history",
+              icon: "restore",
+              onSelect: () => ctx.onAnnotationHistory(entry, entry.annotationsId!, historyAnchor()),
+            }
           : null,
         // RENAME, directly above Move to bin — a note OR a folder (the menu serves
         // both). Hidden on the fixed category-root folders the device relies on

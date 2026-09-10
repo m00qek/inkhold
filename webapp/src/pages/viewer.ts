@@ -56,6 +56,36 @@ export interface Viewer {
 }
 
 /**
+ * THE FILE WHOSE VERSIONS A VIEWER IS TALKING ABOUT.
+ *
+ * For every viewer but the PDF one that is simply the open file, and a `NoteMeta`
+ * satisfies this shape as it stands — which is why the reader, the `.spd` viewer
+ * and the `.txt` viewer pass their own `meta` and nothing about them changed.
+ *
+ * A PDF is the exception, and it is the reason this type exists: a `.pdf` has no
+ * version history of its own (nothing can paint a past PDF beside the live one),
+ * but the `.mark` written over it does — retained, quota-charged, and previously
+ * unreachable. So the PDF viewer's versions control names the MARK as the subject
+ * and the DOCUMENT as the name, and the shell can tell the two cases apart
+ * without knowing anything about file types.
+ */
+export interface VersionSubject {
+  /** The file the versions belong to — the paired `.mark` for a PDF's annotations. */
+  id: Id;
+  /** What to head the panel with — the DOCUMENT's name, always. */
+  name: string;
+  /** The subject's own kind (`"mark"` for annotations), for the panel's content signal. */
+  fileType: string;
+  /**
+   * Set ONLY when these are annotations: the id of the document they are on.
+   * It is what tells the shell to preview over the LIVE document rather than
+   * opening `id` as a file, what the panel's "Annotation history" wording keys
+   * off, and where a restore returns to.
+   */
+  annotationsOn?: Id;
+}
+
+/**
  * What every viewer is built with. Deliberately the SAME set the reader already
  * takes (`ReaderDeps`), so one object wires the reader and the stubs alike and the
  * universal actions — Back, the one `bin.trash` path behind Move to bin — cannot
@@ -64,7 +94,7 @@ export interface Viewer {
 export interface ViewerDeps {
   api: Api;
   /**
-   * The ONE in-document search: one document's
+   * The ONE in-document search (§1.1): one document's
    * `text/<md5>` in the same wasm FTS5 instance the library search uses. On the
    * shared deps object rather than per viewer so a session holds one instance
    * and one built index — §8.1 measured that documents through a reused instance
@@ -103,21 +133,27 @@ export interface ViewerDeps {
   onRestore?: (meta: NoteMeta) => void;
   onPurge?: (meta: NoteMeta) => void;
   /**
-   * Restore the version being PREVIEWED (the reader's history-preview mode). Only
-   * the reader uses it — a `.spd`/`.txt` viewer has no version-preview mode and
-   * ignores it — but it rides `ViewerDeps` so the one shared deps object wires it,
-   * exactly like the bin-origin callbacks above.
+   * Restore the version being PREVIEWED (the reader's history-preview mode). It
+   * rides `ViewerDeps` so the one shared deps object wires it, exactly like the
+   * bin-origin callbacks above.
+   *
+   * `subject` says WHOSE version this is (see {@link VersionSubject}) — the open
+   * file for the reader and the `.spd`/`.txt` viewers, the paired `.mark` for a
+   * PDF's annotations. Restoring a PDF's annotations re-points the mark and
+   * leaves the document exactly where it was.
    */
-  onRestoreVersion?: (meta: NoteMeta, version: { md5: string; createdAt: number }) => void;
+  onRestoreVersion?: (subject: VersionSubject, version: { md5: string; createdAt: number }) => void;
   /**
    * Open the file's VERSION HISTORY (hot-cache versioning) — the same panel the
    * library card's ⋯ menu opens, reached now from inside the viewer for
    * discoverability. The viewer hands over the file's meta, the toolbar button the
    * floating panel anchors to, and (in a history preview) the previewed version's
    * md5 so its row is marked `Viewing`. The reader wires it for a live `.note` and
-   * mid-preview; a `.spd`/`.txt` viewer wires it only while previewing.
+   * mid-preview; a `.spd`/`.txt` viewer wires it only while previewing; the PDF
+   * viewer wires it whenever the document has a `.mark`, and hands over the MARK
+   * as the subject (see {@link VersionSubject}).
    */
-  onVersions?: (meta: NoteMeta, anchor: HTMLElement, viewingMd5?: string) => void;
+  onVersions?: (subject: VersionSubject, anchor: HTMLElement, viewingMd5?: string) => void;
   /**
    * The viewer's position changed (page / in-file query) — the shell rewrites the
    * URL. Two mutually-exclusive flags pick WHICH form:

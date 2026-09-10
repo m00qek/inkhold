@@ -22,7 +22,7 @@ const menu = (page: Page): Locator => page.locator(".vh");
 const rows = (page: Page): Locator => page.locator(".vh-row");
 
 /**
- * The version preview's find, served.
+ * The version preview's find, served (§1.1, §6 step 7).
  *
  * `/note/:id/history/:md5/search` is gone. A preview searches the RETAINED
  * blob's own `text/<md5>` and nothing reroutes anywhere — which is §1.1's
@@ -109,7 +109,7 @@ test.describe("version history", () => {
     // pages; this retained version has 19, sourced from `historyMeta`, so the
     // pager reads "1 / 19". Previously the preview rendered the live note's 20
     // slots (the surplus one a blank 404), which this pins against.
-    await expect(page.locator(".pager__count")).toHaveText("1 / 19");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 19");
   });
 
   test("find-in-preview searches the VERSION's own blob, not the live note's", async ({ page }) => {
@@ -281,7 +281,7 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
     await page.reload();
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await expect(page.locator(".reader .version-banner")).toContainText("not the current note");
-    await expect(page.locator(".pager__count")).toHaveText("1 / 19");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 19");
     expect(page.url()).toBe(versionUrl);
   });
 
@@ -297,7 +297,7 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
     await page.goto(`/#/note/141/version/${short}`);
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await expect(page.locator(".reader .version-banner")).toContainText("not the current note");
-    await expect(page.locator(".pager__count")).toHaveText("1 / 19");
+    await expect(page.locator(".pager__count")).toHaveValue("1 / 19");
   });
 
   test("a short matching the CURRENT md5 canonicalises to the bare note URL (live-first)", async ({ page }) => {
@@ -583,5 +583,157 @@ test.describe("addressable version previews — raw-based kinds (.spd / .txt / i
     await expect(page.locator(".viewer--spd .version-banner")).toBeHidden();
     await expect(page.locator(".toast")).toContainText(/no longer available/i);
     await expect(page).toHaveURL(bareSpdRe);
+  });
+});
+
+// ============================================================================
+// TASK 3: an ANNOTATED PDF's history — the INK's, from the DOCUMENT's card.
+// ============================================================================
+//
+// §7. A `.mark` is folded out of every
+// listing, so it has no card; a `.pdf` is excluded from `canPreviewHistory`, so
+// its card offered no history row. Meanwhile retention keeps — and quota charges
+// for — every superseded `.mark`. The data existed, cost the household storage,
+// and the only way to reach it was to trash the PDF, which unpairs the mark and
+// lets it list: the ink's history became visible exactly when the document it
+// annotates was gone.
+//
+// The row that fixes it says ANNOTATION history, and the difference from the
+// note wording is the point — a PDF has no past version here, only past
+// handwriting, and everything below asserts that the app never claims otherwise.
+
+const PDF_BYTES = readFileSync(
+  fileURLToPath(new URL("../../wasm/tests/fixtures/two-page.pdf", import.meta.url)),
+);
+
+/** Serve the raw-file route with a real PDF, so the viewer has something to open. */
+async function servePdfBytes(page: Page): Promise<void> {
+  await page.route(
+    (url) => url.pathname.startsWith("/file/"),
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/pdf",
+        headers: { "x-content-type-options": "nosniff" },
+        body: PDF_BYTES,
+      });
+    },
+  );
+}
+
+/** Open the ⋯ menu on a named card in the Files folder, without choosing a row. */
+async function cardMenuFor(page: Page, name: string): Promise<Locator> {
+  await page.goto("/#/folder/files");
+  await railSettled(page);
+  const card = page.locator(".card", { hasText: name });
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: `Actions for ${name}` }).click();
+  return page.locator(".menu-portal");
+}
+
+test.describe("annotation history, from the PDF's card", () => {
+  test("the ⋯ menu offers Annotation history on an annotated PDF — and never Version history", async ({
+    page,
+  }) => {
+    await signedIn(page);
+    const portal = await cardMenuFor(page, "Appliance manual");
+    await expect(portal.getByRole("menuitem", { name: "Annotation history" })).toBeVisible();
+    // NOT "Version history": that would promise a past version of the document,
+    // and there is none — `canPreviewHistory("pdf")` stays false on purpose.
+    await expect(portal.getByRole("menuitem", { name: "Version history" })).toHaveCount(0);
+  });
+
+  test("a PDF with no annotations offers neither row", async ({ page }) => {
+    // 142 ("Apartment lease — signed") is the plain PDF: no `.mark`, so there is
+    // no ink history to reach and nothing to offer.
+    await signedIn(page);
+    await page.goto("/#/folder/document");
+    await railSettled(page);
+    const card = page.locator(".card", { hasText: "Apartment lease — signed" });
+    await expect(card).toBeVisible();
+    await card.getByRole("button", { name: "Actions for Apartment lease — signed" }).click();
+    const portal = page.locator(".menu-portal");
+    await expect(portal.getByRole("menuitem", { name: "Move to bin" })).toBeVisible();
+    await expect(portal.getByRole("menuitem", { name: "Annotation history" })).toHaveCount(0);
+    await expect(portal.getByRole("menuitem", { name: "Version history" })).toHaveCount(0);
+  });
+
+  test("it opens the MARK's versions, headed by the DOCUMENT's name and scoped by a caption", async ({
+    page,
+  }) => {
+    await signedIn(page);
+    const portal = await cardMenuFor(page, "Appliance manual");
+    await portal.getByRole("menuitem", { name: "Annotation history" }).click();
+    await expect(menu(page)).toBeVisible();
+
+    // THE EYEBROW. "Version history" here would be a claim about the PDF.
+    await expect(menu(page).locator(".vh__eyebrow")).toHaveText("Annotation history");
+    // AND THE CAPTION, which is the only place the promise gets its scope: the
+    // rows are dated blobs with nothing on them to say they are handwriting, and
+    // Restore would otherwise be an unqualified offer about the document.
+    const caption = menu(page).locator(".vh__caption");
+    await expect(caption).toContainText("The handwriting on this document");
+    await expect(caption).toContainText("only the annotations");
+    await expect(caption).toContainText("the document itself is untouched");
+
+    // The mark's own history: current + two retained, exactly like every other
+    // previewable kind. `foo.pdf.mark` never appears — the panel is headed by the
+    // name the reader recognises.
+    await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
+    await expect(menu(page)).toHaveAttribute("aria-label", "Annotation history for Appliance manual");
+  });
+
+  test("previewing a version opens the LIVE document with the older ink over it", async ({ page }) => {
+    await signedIn(page);
+    await servePdfBytes(page);
+    const portal = await cardMenuFor(page, "Appliance manual");
+    await portal.getByRole("menuitem", { name: "Annotation history" }).click();
+    await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
+    await rows(page).nth(1).click();
+    await expect(menu(page)).toBeHidden();
+
+    // THE PDF VIEWER, on the live document — no second handle, no new viewer.
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect(region).toBeVisible();
+    await freezeMotion(page);
+
+    const banner = region.locator(".version-banner");
+    await expect(banner).toBeVisible();
+    // The `annotations` voice. The shared banner's default ends "this is not the
+    // current note", which here would be a straight lie about the document.
+    await expect(banner).toContainText("the annotations from");
+    await expect(banner).toContainText("the document itself is current");
+    await expect(banner).not.toContainText("not the current note");
+
+    // The mark is SPARSE and names PDF page 2, so the ink is there and nowhere
+    // else — a preview does not move the handwriting.
+    await expect(region.locator(".pdf-mark")).toBeHidden();
+    await region.getByRole("button", { name: "Next page" }).click();
+    await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
+    await expect(region.locator(".pdf-mark")).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator(".pdf-mark canvas").first()).toBeAttached({ timeout: 20_000 });
+  });
+
+  test("Restore restores the annotations, and says so undoably", async ({ page }) => {
+    await signedIn(page);
+    await servePdfBytes(page);
+    const portal = await cardMenuFor(page, "Appliance manual");
+    await portal.getByRole("menuitem", { name: "Annotation history" }).click();
+    await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
+    await rows(page).nth(1).click();
+
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    const banner = region.locator(".version-banner");
+    await expect(banner).toBeVisible();
+    await banner.getByRole("button", { name: "Restore this version" }).click();
+    const confirm = page.locator("dialog.confirm");
+    await expect(confirm).toBeVisible();
+    await confirm.getByRole("button", { name: "Restore this version" }).click();
+
+    await expect(page.locator(".toast")).toContainText("kept in this file's history");
+    // ON THE DOCUMENT, not on `Appliance manual.pdf.mark`: the mark is what got
+    // re-pointed, the document is what the reader was looking at.
+    await expect(page).toHaveURL(/#\/note\/178/);
+    await expect(banner).toBeHidden();
   });
 });

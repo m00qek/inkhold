@@ -73,6 +73,19 @@
   color: var(--ink-faint);
   padding: 15px 16px 9px;
 }
+/* The ANNOTATION-history caption, under the eyebrow and above the rows — the one
+   line of prose this panel ever carries, and only in the one case where the rows
+   are versions of something other than the file you were looking at. Sized and
+   coloured as secondary text, not as a row: it is context for the whole list, so
+   it must not read as a first entry. The eyebrow above it already owns the top
+   padding, so this only closes the gap down to the list. */
+.vh__caption {
+  margin: 0;
+  padding: 0 16px 10px;
+  font-size: var(--fs-caption);
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
 .vh__list {
   margin: 0;
   padding: 0;

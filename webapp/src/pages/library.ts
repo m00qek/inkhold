@@ -20,6 +20,7 @@
 
 import { el } from "../ui/dom";
 import { ICONS, svg, type IconName } from "../ui/icons";
+import { brandMark } from "../ui/chrome";
 import { closeOpenMenu } from "../ui/menu";
 import { currentTheme, setTheme } from "../ui/theme";
 import { formatBytes, fileKind, UPLOAD_ACCEPT_ATTR } from "../core/fileKind";
@@ -762,6 +763,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     el(
       "div",
       { class: "brand" },
+      el("span", { class: "brand__mark", html: brandMark() }),
       el("span", { text: "INKHOLD" }),
     ),
     nav,
@@ -1173,7 +1175,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   // and the reader use, so an expired session mid-search reaches the composition
   // root instead of quietly rendering as "no matches".
   //
-  // THE ENGINE IS THE SEAM the search removal LANDS ON, and step 6 left ONE
+  // THE ENGINE IS THE SEAM §6 LANDS ON, and step 6 left ONE
   // producer behind it: `src/search/searchService.ts` is the browser's own
   // index and nothing else. NO `api` IS PASSED and that absence is the boundary
   // — there is no library-wide search route left to call, so a query the index
@@ -1247,7 +1249,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   // actions drifting apart between viewers: they are literally the same closures.
   const viewerDeps: ViewerDeps = {
     api,
-    // IN-DOCUMENT SEARCH, and it is 's whole point: the
+    // IN-DOCUMENT SEARCH, and it is §1.1's whole point: the
     // same wasm FTS5 engine the library search runs on, pointed at ONE document's
     // `text/<md5>` instead of the terms index. Built HERE, once, and handed to
     // every viewer — the reader, the `.txt` viewer and the PDF viewer all search
@@ -1310,12 +1312,27 @@ export function createAppShell(deps: AppDeps): AppShell {
     // Restore the version being PREVIEWED (the history banner's action). Routes
     // through the SAME `restoreVersion` the list row uses — one confirm, one
     // quota-error path, one refresh — so the two entry points cannot drift.
-    onRestoreVersion: (meta, version) => void restoreVersion(meta.id, version, meta.name),
-    // The reader's "Versions" control — the SAME history panel the card ⋯ menu
+    //
+    // `subject.id` is what gets re-pointed and `annotationsOn` is where we land
+    // afterwards, and for a PDF's annotations those are two different files: the
+    // `.mark` is restored, the DOCUMENT is what reopens. Routing to the mark
+    // instead would take the reader to `foo.pdf.mark` in the note reader — a file
+    // they never asked for, showing the thing they just restored out of context.
+    onRestoreVersion: (subject, version) =>
+      void restoreVersion(subject.id, version, subject.name, subject.annotationsOn ?? subject.id),
+    // The viewer's versions control — the SAME history panel the card ⋯ menu
     // opens (`historyController.open`), never a second one. A forward reference to
     // the controller built below; only ever called on a click, long after.
-    onVersions: (meta, anchor, viewingMd5) =>
-      historyController.open({ id: meta.id, name: meta.name, fileType: meta.fileType }, { anchor, viewingMd5 }),
+    //
+    // The PDF viewer hands over the paired `.mark` as the subject plus the
+    // document as `annotationsOn`, so the panel heads itself "Annotation history"
+    // and previews over the live document; every other viewer hands over its own
+    // meta and nothing here can tell the difference.
+    onVersions: (subject, anchor, viewingMd5) =>
+      historyController.open(
+        { id: subject.id, name: subject.name, fileType: subject.fileType },
+        { anchor, viewingMd5, annotationsOn: subject.annotationsOn },
+      ),
     // The viewer moved, or its find query changed. Each rewrites the hash WITHOUT
     // a history entry (see `router.ts`), so the URL keeps describing what is on
     // screen while Back stays one step out of the note. WHICH form depends on the
@@ -1491,7 +1508,15 @@ export function createAppShell(deps: AppDeps): AppShell {
     host: root,
     toast,
     handled,
-    openPreview: (noteId, version) => void openHistoryPreview(noteId, version),
+    // TWO PREVIEWS, ONE PANEL. `annotationsOn` is the whole difference: with it,
+    // `noteId` is a `.mark` and what opens is the DOCUMENT it annotates, live,
+    // with the ink rerouted to this version; without it, `noteId` is the file and
+    // what opens is that file's past version. The panel does not know either
+    // story — it hands back the fact it was given.
+    openPreview: (noteId, version, annotationsOn) =>
+      void (annotationsOn != null
+        ? openAnnotationsPreview(annotationsOn, noteId, version)
+        : openHistoryPreview(noteId, version)),
     restore: (noteId, version, noteName) => restoreVersion(noteId, version, noteName),
   });
   /**
@@ -1547,6 +1572,15 @@ export function createAppShell(deps: AppDeps): AppShell {
       historyController.open(
         { id: noteSummary.id, name: noteSummary.name, fileType: noteSummary.fileType },
         { anchor },
+      ),
+    // THE MARK'S history, under the DOCUMENT's name. The same panel and the same
+    // preview/restore machinery as above — only the subject and the wording move,
+    // because what is versioned here is the handwriting and the document on
+    // screen is always the live one.
+    onAnnotationHistory: (doc, annotationsId, anchor) =>
+      historyController.open(
+        { id: annotationsId, name: doc.name, fileType: "mark" },
+        { anchor, annotationsOn: doc.id },
       ),
   });
   const galleryCards: GalleryCards = createGalleryCards({
@@ -2272,16 +2306,87 @@ root,
   }
 
   /**
+   * Preview a past version of a document's ANNOTATIONS — the `.mark` beside a
+   * `.pdf` (§7).
+   *
+   * IT OPENS THE LIVE DOCUMENT. There is no past version of the PDF here and this
+   * deliberately does not invent one: a `.pdf` was not authored on the device, the
+   * document is always the current one, and what has a history is the ink over it.
+   * So the document opens exactly as it always does — same viewer, same
+   * range-served bytes, same raster — and the ONLY thing rerouted is the mark's
+   * page bytes, by arming the generic history scope with the MARK's id.
+   *
+   * That is the whole preview mechanism, and it is the mechanism that already
+   * existed: `historyScope` wraps the shell's `Api` once and every viewer reads
+   * through it, so `deps.api.getPageBytes(markId, ref)` — the line the PDF viewer
+   * already had for its overlay — answers with the retained version's bytes and
+   * nothing else in the rendering path changes. No second document handle, no
+   * second reroute, no new viewer.
+   *
+   * NOT ADDRESSABLE, unlike every other version preview, and that is a fact about
+   * the route rather than an omission: `#/note/:id/version/:short` resolves the
+   * short against THAT file's history, and this version is not in the document's
+   * history — it is in the mark's. Minting one would produce a link that can only
+   * answer "that version is no longer available". So no URL is seeded here: the
+   * viewer's own `onPosition` publishes the document's plain `#/note/:id/page/:n`
+   * when it is already on a note route and leaves the folder URL alone when the
+   * preview came from a card, and a reload of either lands on the live document.
+   * That is the honest answer — the document IS what those addresses name, and
+   * only the ink was ever a preview.
+   */
+  async function openAnnotationsPreview(
+    documentId: Id,
+    markId: Id,
+    version: FileVersion,
+  ): Promise<void> {
+    const mine = ++routeToken;
+    try {
+      const base = await api.getNoteMeta(documentId);
+      if (mine !== routeToken) return; // navigated away while fetching
+      const origin: ReaderOrigin = {
+        kind: "history",
+        folderPath: currentFolderPath(),
+        version: { md5: version.md5, createdAt: version.createdAt },
+        // A trashed document's annotations are browsable but not restorable —
+        // restore the FILE first. (In practice the bin nulls `annotationsId`, so
+        // this arm is defence rather than a reachable state.)
+        viewOnly: bin.isTrashed(documentId),
+      };
+      readerBack = folderHref(folderId); // Back leaves the preview for the folder
+      const viewer = viewerFor(base.fileType);
+      activate(viewer);
+      // AFTER activate (which may hide a prior viewer), BEFORE open (whose first
+      // ink read goes through the wrapped api). Armed on the MARK — arming it on
+      // the document would reroute page reads the document does not make and
+      // leave the ink live, which is the reroute exactly backwards.
+      historyScope.setActive(markId, version.md5);
+      viewer.open(synthesizeSummary(base), Promise.resolve(base), 0, origin, "");
+      setReading(true);
+    } catch (e) {
+      historyScope.clear();
+      if (handled(e)) return;
+      toast("Couldn't open those annotations.");
+    }
+  }
+
+  /**
    * Restore a version as the file's current one (phase 6) — the ONE path behind
    * both the list row's Restore and the preview banner's. Confirms with honest
    * undoable framing, then on success drops the preview reroute, refreshes the
-   * folder listing + rail badges, and routes to the note so it reopens as its new
-   * current version. `runRestore` owns the toast and the 507 (over-quota) message.
+   * folder listing + rail badges, and routes to `returnTo` so it reopens as its
+   * new current version. `runRestore` owns the toast and the 507 (over-quota)
+   * message.
+   *
+   * `returnTo` defaults to `noteId` and differs in exactly one case: restoring a
+   * PDF's ANNOTATIONS re-points the `.mark` but returns to the DOCUMENT, because
+   * the document is what the reader was looking at and the mark is a file they
+   * have never seen the name of.
    */
   function restoreVersion(
     noteId: Id,
     version: { md5: string; createdAt: number },
     _noteName: string,
+    returnTo: Id = noteId,
   ): Promise<boolean> {
     return runRestore({
       api,
@@ -2294,7 +2399,7 @@ root,
         historyScope.clear();
         void refetch(folderId, folderCache.get(folderId));
         rail.build();
-        go(noteHref(noteId));
+        go(noteHref(returnTo));
       },
     });
   }
@@ -2584,7 +2689,7 @@ root,
    * REPAINTS ONLY THE SEARCH, and only when the number really moved. The frame
    * arrives at the poll interval whenever a derive lands, and the search list is
    * the one surface making a completeness claim the count can falsify — the
-   * gallery claims nothing, so it has nothing to correct.
+   * gallery claims nothing, so it has nothing to correct (§6).
    */
   function onIndex(status: IndexStatus): void {
     if (status.pending === indexPending) return;
@@ -2978,5 +3083,9 @@ export function synthesizeSummary(meta: NoteMeta): NoteSummary {
     fileHash: meta.fileHash,
     hasRecognizedText: meta.pages.some((p) => p.textHash !== null),
     thumbAspect: undefined,
+    // Carried straight through: the meta is the authority on the pairing (it is
+    // the field the listing's own copy mirrors), and a summary synthesized for a
+    // viewer must not tell the viewer a paired mark went away.
+    annotationsId: meta.annotationsId,
   };
 }

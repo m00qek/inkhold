@@ -28,11 +28,10 @@
 //!     refcount drops, where `note_index`/`note_page_fts` go, where the on-disk
 //!     blob is GC'd, and where `addUsed(-bytes)` finally happens.
 //!
-//! Before the bin, a tombstone decref'd in the same transaction: the blob could
-//! be GC'd from disk while the tombstone survived, pointing at bytes that no
-//! longer existed. `deleted = 1` was a sync tombstone, not a bin, and restore was
-//! impossible. Because the blob now stays alive, and the md5-keyed `note_index`
-//! rows with it, `restore` is a flag flip rather than a re-index.
+//! Because a tombstone holds its blob alive, and the md5-keyed `note_index` rows
+//! with it, `restore` is a flag flip rather than a re-index. A tombstone that
+//! decref'd would let the blob be GC'd from disk while the row survived, pointing
+//! at bytes that no longer exist.
 //!
 //! Quota keeps charging while an entry is trashed. The bytes still occupy disk,
 //! and refunding at trash time would let a user exceed real usage by cycling the
@@ -59,12 +58,9 @@
 //! to a person — raising it spends their own allotment.
 //!
 //! `userBlobRefs` (files only) survives alongside it and is NOT interchangeable.
-//! It existed for SEARCH — segment rows followed live file references, because
-//! text from content no file holds had to stop being findable whatever history
-//! said — and schema v14 removed that reader. What keeps it is
-//! `holdsBlob`, the ownership gate on md5-keyed reads: "may this account see
-//! bytes derived from this content" is the FILES question, and a `file_history`
-//! row is not a thing anyone browses.
+//! It backs `holdsBlob`, the ownership gate on md5-keyed reads: "may this account
+//! see bytes derived from this content" is the FILES question, and a
+//! `file_history` row is not a thing anyone browses.
 //!
 //! Under quota pressure the write paths **evict the user's oldest versions rather
 //! than refuse**, and refuse only when the live files alone do not fit — see
@@ -88,6 +84,7 @@ const thumbnail = @import("thumbnail.zig");
 const spdindex = @import("spd_index.zig");
 const txtindex = @import("txt_index.zig");
 const deferredmod = @import("deferred.zig");
+const markpair = @import("mark_pairing.zig");
 
 const md5_len = blobstore.md5_hex_len;
 const log = std.log.scoped(.files);
@@ -100,6 +97,21 @@ pub const Entry = struct {
     md5: ?[]const u8, // owned; null for folders
     size: u64,
     updated_at: i64,
+    /// The id of the LIVE `.mark` paired with this row, or null when it has none
+    /// — the ink, named after the document (`foo.pdf` → `foo.pdf.mark`, same
+    /// folder). Resolved by `mark_pairing.pairedMarkId` inside the reading query, never
+    /// by a second lookup per row: a listing carries it, so a per-row call would
+    /// be one extra statement per card.
+    ///
+    /// **NULL ON EVERY TRASHED READ, and that is not an omission.** The mark this
+    /// names is a live row; offering one against a document in the bin would
+    /// composite today's ink onto a deleted document. `getTrashed`/`getAnyState`
+    /// therefore select a literal NULL here rather than the subquery — the same
+    /// rule `ControlPlaneService.noteMetaIn` states for `annotationsId`.
+    ///
+    /// Deliberately NOT defaulted: every producer of an `Entry` has to say what
+    /// this row's ink is, so a new one cannot inherit "no ink" by silence.
+    mark_id: ?u64,
 };
 
 /// One RETAINED version of a file (a `file_history` row), for the hot-cache
@@ -200,7 +212,7 @@ pub const Files = struct {
     /// `removeBlobFiles` whenever a blob leaves disk.
     thumbs: thumbstore.ThumbStore,
     /// The two per-document derived stores, `terms/<md5>.<v>` and
-    /// `text/<md5>.<v>`. Optional because most tests
+    /// `text/<md5>.<v>` (§2.1). Optional because most tests
     /// and the CLI never derive: a null store is "this deployment does not keep
     /// them", which the derive paths treat as nothing to write, not as an error.
     /// Cleanup rides `removeBlobFiles` exactly as the thumbnail's does.
@@ -230,7 +242,7 @@ pub const Files = struct {
     /// at the compiled default by `init` (keep = 5); production overwrites it
     /// from `Config.history` in http/transport.zig. `keep = 0` disables
     /// versioning: no `file_history` rows are written and supersede prunes the
-    /// old blob exactly as it did before this feature.
+    /// old blob outright.
     history: config.History = .{},
 
     /// True on a REpooled-reader VIEW of this service (see `readerView`). Nothing
@@ -277,141 +289,18 @@ pub const Files = struct {
 
     // ---- reads ----
 
-    /// What the device appends — never substitutes — to a document's FULL name to
-    /// name the file its ink goes in: `foo.pdf` -> `foo.pdf.mark`
-    /// (`parsers/note/note-format.md` §13.2).
-    pub const mark_ext = ".mark";
-
-    /// `mark_ext.len` as a SQL literal, so the `substr` offsets below cannot drift
-    /// from the string they are slicing off.
-    const mark_len = std.fmt.comptimePrint("{d}", .{mark_ext.len});
-
-    /// THE PAIRING RULE, as SQL, generated once for whichever listing applies it.
-    /// `a` is the alias the outer query gave `files`; `deleted` is the state the
-    /// two members must SHARE ("0" for the library, "1" for the bin).
-    ///
-    /// The device writes annotations to a SEPARATE file named after the annotated
-    /// document's full name plus `.mark`. That file is not a document — it is a
-    /// layer belonging to one — and listing it beside its document shows the
-    /// household two entries for one thing, the second of which opens as a page of
-    /// disembodied handwriting. So a pair is ONE row wherever files are listed,
-    /// and the row is the document's.
-    ///
-    /// **RELATIONAL, NOT A FORMAT WHITELIST.** A row is a paired mark iff a
-    /// SIBLING file exists whose `name || '.mark'` is this row's name. Nothing
-    /// here asks what the document is. The rule used to require `%.pdf.mark`,
-    /// which quietly made it PDF-only: the device also annotates formats this
-    /// server does not render (EPUB is the obvious one, and the set is open), and
-    /// an annotated `book.epub` syncs a `book.epub.mark` that the old predicate
-    /// did not recognise — so it listed as a file of its own, did not travel with
-    /// its document through trash/restore/move, and surfaced in search. Enumerating
-    /// the extensions we happen to know about is the same bug with more entries;
-    /// the sibling's existence is the only fact that decides it, and that stays
-    /// correct for formats nobody has thought of yet.
-    ///
-    /// The one thing the rule refuses is a CHAIN: the document may not itself end
-    /// in `.mark` (`substr(p.name, -5) <> '.mark'`). Without that, `a`, `a.mark`
-    /// and `a.mark.mark` would hide as a chain of pairs while `pairOf` — which
-    /// matches one partner, not a chain — carried only two of the three, and the
-    /// leftover would be un-hidden by the very delete that was meant to take it.
-    /// A mark is not a document, so nothing is annotating one.
-    ///
-    /// **NEITHER HALF IS EVER A FOLDER** (`is_folder = 0` on both sides). The
-    /// document side has always said so; the MARK side did not, and that was a
-    /// live divergence from `pairOf`, which returns null for a folder outright. A
-    /// folder called `plan.pdf.mark` beside a file `plan.pdf` was therefore hidden
-    /// from every listing — with its whole subtree unreachable behind it — and
-    /// then left where it stood by the delete that took `plan.pdf`, at which point
-    /// it reappeared. That is the conjuring bug exactly, wearing a folder. It
-    /// predates the format-agnostic rewrite (`%.pdf.mark` had the same hole) but
-    /// only for folders named after a PDF; the relational rule made it every
-    /// extension, which is what turned it up. Ink is a file.
-    ///
-    /// **Both members must be in the SAME state**, which is why `deleted` is a
-    /// parameter rather than a literal `0`. A live document and a trashed mark are
-    /// not a pair — the mark is in the bin as a thing of its own, and the bin is
-    /// where it must stay reachable. This is also exactly the state `pairOf`
-    /// matches, so what a listing folds away is precisely what a mutation carries:
-    /// nothing can be hidden here and left behind there (the bug this rule used to
-    /// have — a trashed PDF un-hid its mark, conjuring a file the user never made).
-    ///
-    /// An ORPHANED mark still lists. With no document beside it in the same state,
-    /// the mark is the only remaining trace of that ink; hiding it would make it
-    /// unreachable through the UI while it went on consuming quota. It has no pair,
-    /// so it also travels alone — one rule, no exception.
-    ///
-    /// SHARED BY `list`, `childCount`, `liveSubtreeCount` and the bin listing —
-    /// and, until the search removal retired them, by library-wide search and
-    /// its coverage count, which is the leak the backlog reported. That is the
-    /// whole reason it is generated rather than typed out, and why it is `pub`:
-    /// a count that disagreed with the listing
-    /// beside it is "the one place the bin leaked back into view", and copies of a
-    /// predicate this fiddly do not stay equal.
-    ///
-    /// Cost is one index seek per `.mark` in the folder, and none for anything
-    /// else: the suffix test fails first for every other row, and the `EXISTS`
-    /// rides the `files_live_name` UNIQUE index. Dropping the `%.pdf.mark` gate
-    /// did not widen that — `.mark` was always the selective half of it. The tail
-    /// is matched case-SENSITIVELY (`substr(name, -5)`) and the stem exactly,
-    /// because those are the two things `pairOf` can look up by equality — the
-    /// predicate and the lookup have to admit the same set or the gap between them
-    /// is a bug. A row named exactly `.mark` has an empty stem, which matches no
-    /// name, so it is an orphan and lists — same answer in both.
-    pub fn hidePairedMark(comptime a: []const u8, comptime deleted: []const u8) []const u8 {
-        return " AND NOT (" ++ a ++ ".is_folder = 0" ++
-            " AND substr(" ++ a ++ ".name, -" ++ mark_len ++ ") = '" ++ mark_ext ++ "'" ++
-            " AND EXISTS (SELECT 1 FROM files p" ++
-            " WHERE p.user_id = " ++ a ++ ".user_id" ++
-            " AND COALESCE(p.parent_id, 0) = COALESCE(" ++ a ++ ".parent_id, 0)" ++
-            " AND p.name = substr(" ++ a ++ ".name, 1, length(" ++ a ++ ".name) - " ++ mark_len ++ ")" ++
-            " AND substr(p.name, -" ++ mark_len ++ ") <> '" ++ mark_ext ++ "'" ++
-            " AND p.is_folder = 0 AND p.deleted = " ++ deleted ++ "))";
-    }
-
-    /// The rule read from the DOCUMENT's side: a boolean SQL expression, true when
-    /// the row aliased `a` has a live `.mark` companion. Same equality as
-    /// `hidePairedMark` and `liveMarkIdFor`, generated from the same place so the
-    /// three cannot drift — "does this file carry ink" and "is this file the ink"
-    /// are one fact asked from two ends.
-    ///
-    /// Nothing in the backend consumes it yet. It exists because
-    /// the search redesign wants "anything with a `.mark` companion" as a
-    /// tier-2 signal, and the moment that is written as its own SQL there are two
-    /// copies of the pairing rule to keep equal. `is_folder = 0` on both sides: a
-    /// folder is never half of a pair.
-    pub fn hasPairedMark(comptime a: []const u8) []const u8 {
-        return "(" ++ a ++ ".is_folder = 0 AND substr(" ++ a ++ ".name, -" ++ mark_len ++ ") <> '" ++ mark_ext ++ "'" ++
-            " AND EXISTS (SELECT 1 FROM files m" ++
-            " WHERE m.user_id = " ++ a ++ ".user_id" ++
-            " AND COALESCE(m.parent_id, 0) = COALESCE(" ++ a ++ ".parent_id, 0)" ++
-            " AND m.name = " ++ a ++ ".name || '" ++ mark_ext ++ "'" ++
-            " AND m.is_folder = 0 AND m.deleted = 0))";
-    }
+    /// `pairedMarkId` for the `f` alias every live row-read uses — the listing and
+    /// the single-row `get`. Named for the same reason `hide_paired_mark` is: the
+    /// two readers must be looking at one expression, not two copies of it.
+    const paired_mark_id = markpair.pairedMarkId("f");
 
     /// The rule over LIVE rows — the library's view of a folder.
-    const hide_paired_mark = hidePairedMark("f", "0");
+    const hide_paired_mark = markpair.hidePairedMark("f", "0");
 
     /// The same rule over TRASHED rows — the bin's view. A trashed pair is one
     /// row there too, so Restore and Delete-permanently are offered once, on the
     /// document, and there is no way to reach half a pair.
-    const hide_paired_bin_mark = hidePairedMark("f", "1");
-
-    /// The name of the document `name` would be the ink for — `foo.epub.mark` ->
-    /// `foo.epub` — or null when it could not be anybody's mark. THE ZIG SIDE OF
-    /// `hidePairedMark`, and it must admit exactly the same set: the `.mark` tail
-    /// exact (it is what the rule appends and looks up by equality), the stem
-    /// non-empty (a bare `.mark` names nothing, and no row is named "") and the
-    /// stem not itself a mark (no chains — see there).
-    ///
-    /// What the stem's EXTENSION looks like is deliberately not asked. Whether the
-    /// mark is actually paired is a question about the folder rather than the
-    /// name, and only `pairOf` and the SQL answer that.
-    pub fn markStemOf(name: []const u8) ?[]const u8 {
-        if (!std.mem.endsWith(u8, name, mark_ext)) return null;
-        const stem = name[0 .. name.len - mark_ext.len];
-        if (stem.len == 0 or std.mem.endsWith(u8, stem, mark_ext)) return null;
-        return stem;
-    }
+    const hide_paired_bin_mark = markpair.hidePairedMark("f", "1");
 
     /// The other half of a pair. `id` is the PARTNER's row; `entry_is_mark` says
     /// which way round the two are, because every derived name is anchored on the
@@ -464,7 +353,7 @@ pub const Files = struct {
         // The partner's name, derived by the rule and nothing else. No format is
         // consulted in either direction: ANY file may be the document, because the
         // device annotates formats this server does not render (`hidePairedMark`).
-        const entry_is_mark = std.mem.endsWith(u8, name, mark_ext);
+        const entry_is_mark = std.mem.endsWith(u8, name, markpair.mark_ext);
         var owned_want: ?[]u8 = null;
         defer if (owned_want) |w| self.gpa.free(w);
         var want: []const u8 = undefined;
@@ -472,9 +361,9 @@ pub const Files = struct {
             // A name ending in `.mark` is never the DOCUMENT half — the rule
             // refuses chains — so the only partner it can have is the document it
             // is named after, and `markStemOf` is null when there is no such name.
-            want = markStemOf(name) orelse return null;
+            want = markpair.markStemOf(name) orelse return null;
         } else {
-            owned_want = try std.fmt.allocPrint(self.gpa, "{s}" ++ mark_ext, .{name});
+            owned_want = try std.fmt.allocPrint(self.gpa, "{s}" ++ markpair.mark_ext, .{name});
             want = owned_want.?;
         }
 
@@ -499,7 +388,7 @@ pub const Files = struct {
     pub fn liveMarkIdFor(self: Files, user_id: u64, parent_id: ?u64, name: []const u8) !?u64 {
         var s = try self.db.prepare(
             "SELECT id FROM files WHERE user_id = ?1 AND COALESCE(parent_id, 0) = COALESCE(?2, 0) " ++
-                "AND name = ?3 || '" ++ mark_ext ++ "' AND is_folder = 0 AND deleted = 0;",
+                "AND name = ?3 || '" ++ markpair.mark_ext ++ "' AND is_folder = 0 AND deleted = 0;",
         );
         defer s.finalize();
         s.bindInt(1, @intCast(user_id));
@@ -516,7 +405,13 @@ pub const Files = struct {
         errdefer freeList(self.gpa, &out);
 
         var s = try self.db.prepare(
-            "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at FROM files f " ++
+            "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at, " ++
+                // The paired mark's id, resolved IN this statement — see
+                // `pairedMarkId`. The listing is the one place the ink can be
+                // announced from, because `hide_paired_mark` on the line below
+                // has already folded the mark's own row away.
+                paired_mark_id ++
+                " FROM files f " ++
                 "WHERE f.user_id = ?1 AND COALESCE(f.parent_id, 0) = COALESCE(?2, 0) AND f.deleted = 0 " ++
                 hide_paired_mark ++
                 " ORDER BY f.is_folder DESC, f.name;",
@@ -589,8 +484,14 @@ pub const Files = struct {
     /// Fetches one live entry by id (scoped to `user_id`), or null.
     pub fn get(self: Files, user_id: u64, id: u64) !?Entry {
         var r = (try self.db.row(
-            "SELECT id, parent_id, name, is_folder, md5, size, updated_at FROM files " ++
-                "WHERE id = ?1 AND user_id = ?2 AND deleted = 0;",
+            "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at, " ++
+                // A LIVE row, so it may carry its ink — and it must, because the
+                // rename/move/upload responses are built from this through the
+                // same `entryVO` builder the listing uses. A row that came back
+                // from here without a mark id would make a renamed PDF's card
+                // silently lose its ink until the next listing.
+                paired_mark_id ++
+                " FROM files f WHERE f.id = ?1 AND f.user_id = ?2 AND f.deleted = 0;",
             &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
         )) orelse return null;
         defer r.finalize();
@@ -614,8 +515,14 @@ pub const Files = struct {
     /// is distinguishable from the others through this endpoint.
     pub fn getTrashed(self: Files, user_id: u64, id: u64) !?Entry {
         var r = (try self.db.row(
-            "SELECT id, parent_id, name, is_folder, md5, size, updated_at FROM files " ++
-                "WHERE id = ?1 AND user_id = ?2 AND deleted = 1;",
+            // NULL, NOT `pairedMarkId`, and that is the whole point of writing it
+            // out: this row is in the BIN. The mark the subquery would find is a
+            // LIVE one, so answering here would offer today's ink against a
+            // deleted document — the trap `noteMetaIn` documents for
+            // `annotationsId`, spelled in the SQL so the read cannot acquire one
+            // by having the column added around it.
+            "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at, NULL " ++
+                "FROM files f WHERE f.id = ?1 AND f.user_id = ?2 AND f.deleted = 1;",
             &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
         )) orelse return null;
         defer r.finalize();
@@ -634,8 +541,13 @@ pub const Files = struct {
     /// through `get`, so ownership is enforced identically.
     pub fn getAnyState(self: Files, user_id: u64, id: u64) !?Entry {
         var r = (try self.db.row(
-            "SELECT id, parent_id, name, is_folder, md5, size, updated_at FROM files " ++
-                "WHERE id = ?1 AND user_id = ?2;",
+            // NULL for the same reason as `getTrashed`, and one more: this read is
+            // state-BLIND, so it cannot know whether the row it returned is in the
+            // bin. A mark id it could not scope correctly is one it must not give.
+            // Its callers are the device's delete/move idempotency gates, which
+            // want identity and nothing else.
+            "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at, NULL " ++
+                "FROM files f WHERE f.id = ?1 AND f.user_id = ?2;",
             &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
         )) orelse return null;
         defer r.finalize();
@@ -885,6 +797,7 @@ pub const Files = struct {
             .md5 = null,
             .size = 0,
             .updated_at = ts,
+            .mark_id = null, // a folder is never half of a pair
         };
     }
 
@@ -978,11 +891,10 @@ pub const Files = struct {
         //
         // `removeBlobFiles`, not `blobs.remove`: linking INDEXES the blob on the
         // way through, and indexing writes a thumbnail. Removing only the blob
-        // left that thumbnail behind, keyed by an md5 no file references — the
-        // nine other cleanup paths in this file all clear both, and this was one
-        // of two that cleared half. `thumbs.remove` is a no-op when there is
-        // nothing there, so the symmetric call costs nothing on the paths that
-        // never got as far as a thumbnail.
+        // leaves that thumbnail behind, keyed by an md5 no file references.
+        // `thumbs.remove` is a no-op when there is nothing there, so the
+        // symmetric call costs nothing on the paths that never got as far as a
+        // thumbnail.
         errdefer if (!res.deduped) self.removeBlobFiles(&res.md5);
 
         return self.linkBlob(user_id, parent_id, name, &res.md5, res.size);
@@ -1082,7 +994,7 @@ pub const Files = struct {
         }
 
         // ---- `terms/<md5>.<v>` + `text/<md5>.<v>` for a `.note`, HERE and not
-        // inside the transaction ----: "a file write is
+        // inside the transaction ---- §2.5: "a file write is
         // not in a transaction at all". The thumbnail above is the precedent and
         // the argument is the same one — a crash between the write and the
         // commit can only orphan a content-keyed, regenerable file, which
@@ -1120,13 +1032,6 @@ pub const Files = struct {
         // (`userChargedRefs`), which since §6 includes `file_history`. A retained
         // version occupies disk, so the user is charged for it, exactly as a
         // trashed file is charged.
-        //
-        // There used to be a SECOND pair of booleans beside it, read through
-        // `userBlobRefs`, because SEARCH counted only LIVE FILE rows: a blob held
-        // only by a retained version had to stop being searchable, or
-        // find-in-library would surface text from content no live file held. The
-        // two were deliberately separate so fusing them could not silently
-        // re-break one. schema v14 removed the search half.
         var new_charge = false; // the user held NO reference of any kind to the new content
         if (!same_content) new_charge = try self.userChargedRefs(user_id, md5) == 0;
 
@@ -1172,15 +1077,6 @@ pub const Files = struct {
         if (!same_content) try self.incref(md5);
 
         try self.bumpSync(user_id); // an upload/replace changed the tree
-
-        // (A REPLACE USED TO MAINTAIN SEARCH HERE. The owner's segment rows
-        // followed the content they held, in this same transaction, so search
-        // atomically saw exactly one version — `flipOwnerBlob` when this row was
-        // both their last reference to the old content and their first to the
-        // new, and a drop and/or a mint when the reference counts said
-        // otherwise. schema v14 deleted that index. What the
-        // client sees a new version of instead is the derived files, which are
-        // keyed by md5 and so need no per-owner bookkeeping at all.)
 
         // Release the replaced blob. RETAIN-ON-SUPERSEDE (H1): when versioning is
         // on, record the superseded version FIRST, so the `file_history` row is in
@@ -1262,6 +1158,13 @@ pub const Files = struct {
             .md5 = try self.gpa.dupe(u8, md5),
             .size = size,
             .updated_at = ts,
+            // One index probe on a path that has just written a blob, parsed it
+            // and rebuilt an index — and it is not optional, because the web
+            // upload's response IS a listing row (`entryVO`). Uploading the PDF
+            // after its `.mark` is the ordinary case on a device sync, so a row
+            // that answered "no ink" here would be answering wrongly, not merely
+            // incompletely.
+            .mark_id = try self.liveMarkIdFor(user_id, parent_id, name),
         };
     }
 
@@ -1368,16 +1271,13 @@ pub const Files = struct {
     ///     DOCUMENT's FINAL one (autorename included).
     ///   - **A rename that could not leave them a pair is REFUSED**
     ///     (`error.InvalidMove`), in either direction, and the pairing rule decides
-    ///     what "could not" means. Since the rule stopped being PDF-only that is a
-    ///     much smaller set than it used to be: a paired document may be renamed to
+    ///     what "could not" means, and because that rule is format-agnostic the
+    ///     refused set is small: a paired document may be renamed to
     ///     ANY name that does not itself end in `.mark`, because the mark simply
     ///     follows it (`foo.pdf` + `foo.pdf.mark` -> `foo.epub` + `foo.epub.mark`),
     ///     and only a name that would make the document a mark is refused. A paired
     ///     MARK may only be renamed to another name a mark can hold (`markStemOf`),
-    ///     because its stem has to name its document. The old rule refused
-    ///     `foo.pdf` -> `foo.txt` on the grounds that no name for the mark would
-    ///     pair with it; that was true only while pairing meant `%.pdf.mark`, and
-    ///     keeping it would have made an annotated EPUB unrenameable. Silently
+    ///     because its stem has to name its document. Silently
     ///     unpairing them is still the bug, and is still what this refuses. The
     ///     browser cannot reach the refusal: its rename dialog holds the extension
     ///     immutable and never offers the (hidden) mark. The device and the API
@@ -1426,8 +1326,8 @@ pub const Files = struct {
         var pdf_want: []const u8 = new_name;
         if (partner) |p| {
             if (p.entry_is_mark) {
-                pdf_want = markStemOf(new_name) orelse return error.InvalidMove;
-            } else if (std.mem.endsWith(u8, new_name, mark_ext)) {
+                pdf_want = markpair.markStemOf(new_name) orelse return error.InvalidMove;
+            } else if (std.mem.endsWith(u8, new_name, markpair.mark_ext)) {
                 // The document may take any name at all EXCEPT one ending in
                 // `.mark`: that would make the pair a chain, which the rule
                 // refuses, so the two rows would come out of this transaction no
@@ -1455,12 +1355,12 @@ pub const Files = struct {
 
             // BOTH targets must be free, and of the same ` (n)`: a suffix free for
             // the document but taken for its ink would move a pair apart.
-            if (!try self.nameFree(user_id, new_parent_id, pdf_want, mark_ext)) {
+            if (!try self.nameFree(user_id, new_parent_id, pdf_want, markpair.mark_ext)) {
                 if (!autorename) return error.NameConflict; // never clobber, never unpair
-                owned_pdf = try self.freeName(user_id, new_parent_id, pdf_want, mark_ext);
+                owned_pdf = try self.freeName(user_id, new_parent_id, pdf_want, markpair.mark_ext);
                 pdf_final = owned_pdf.?;
             }
-            owned_mark = try std.fmt.allocPrint(self.gpa, "{s}" ++ mark_ext, .{pdf_final});
+            owned_mark = try std.fmt.allocPrint(self.gpa, "{s}" ++ markpair.mark_ext, .{pdf_final});
             final_name = if (p.entry_is_mark) owned_mark.? else pdf_final;
         } else {
             // The occupant IS this row — it already sits at the destination under
@@ -1504,7 +1404,7 @@ pub const Files = struct {
             // returns null for one, and the SQL requires `is_folder = 0`), so a
             // folder called `Docs` beside a file `Docs.mark` adopts nothing and
             // must not be refused for it.
-            const pair_guard: ?[]const u8 = if (is_folder) null else mark_ext;
+            const pair_guard: ?[]const u8 = if (is_folder) null else markpair.mark_ext;
             if (!try self.nameFree(user_id, new_parent_id, new_name, pair_guard)) {
                 if (!autorename) return error.NameConflict; // never clobber, never adopt
                 owned_pdf = try self.freeName(user_id, new_parent_id, new_name, pair_guard);
@@ -1553,6 +1453,11 @@ pub const Files = struct {
             .md5 = if (has_md5) try self.gpa.dupe(u8, &md5buf) else null,
             .size = size,
             .updated_at = ts,
+            // Read AFTER the move, at the destination: the pair travelled here
+            // together (`pairOf` above), so this is where the mark now is. The
+            // rename response is a listing row, and a card that lost its ink on
+            // being renamed would be this field's most visible failure.
+            .mark_id = if (is_folder) null else try self.liveMarkIdFor(user_id, new_parent_id, final_name),
         };
     }
 
@@ -1660,6 +1565,9 @@ pub const Files = struct {
             .md5 = try self.gpa.dupe(u8, md5),
             .size = size,
             .updated_at = ts,
+            // Asked of the DESTINATION name, which after a `(2)` suffix is not
+            // the source's — so the answer is about the copy, not the original.
+            .mark_id = try self.liveMarkIdFor(user_id, new_parent_id, final_name),
         };
     }
 
@@ -1779,9 +1687,9 @@ pub const Files = struct {
     /// earlier `deleted_at`) untouched, and lands both callers in the same state.
     ///
     /// **A PAIR GOES TOGETHER** (`pairOf`): trashing a PDF takes its `.mark` with
-    /// it, and trashing a mark takes its PDF. Before this the mark was left
-    /// behind AND un-hidden by the PDF's departure, so a delete CONJURED a file
-    /// the household had never seen. Both tombstones land in this ONE transaction
+    /// it, and trashing a mark takes its PDF. Otherwise the mark is left behind
+    /// AND un-hidden by the PDF's departure, so a delete CONJURES a file the
+    /// household has never seen. Both tombstones land in this ONE transaction
     /// under ONE `bumpSync` — one user-visible change, and no instant at which
     /// half a pair is in the bin.
     pub fn trash(self: Files, user_id: u64, id: u64) !void {
@@ -1920,10 +1828,10 @@ pub const Files = struct {
             const pdf_id = if (p.entry_is_mark) p.id else id;
             const mark_id = if (p.entry_is_mark) id else p.id;
 
-            const pdf_row = try self.restoreRow(user_id, pdf_id, .{ .pair = mark_ext });
+            const pdf_row = try self.restoreRow(user_id, pdf_id, .{ .pair = markpair.mark_ext });
             errdefer self.gpa.free(pdf_row.name);
 
-            const want = try std.fmt.allocPrint(self.gpa, "{s}" ++ mark_ext, .{pdf_row.name});
+            const want = try std.fmt.allocPrint(self.gpa, "{s}" ++ markpair.mark_ext, .{pdf_row.name});
             defer self.gpa.free(want);
             const mark_row = try self.restoreRow(user_id, mark_id, .{ .name = want });
 
@@ -2141,24 +2049,15 @@ pub const Files = struct {
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
 
-        // (The account's search world used to go FIRST here, while the md5-keyed
-        // text the FTS deletes read still existed: every posting in the user's
-        // partitions, the segment rows, and the partition mapping rows.
-        // schema v14 deleted all three, and the derived files
-        // this account's blobs may still have are reaped with the BLOBS below —
-        // they are md5-keyed and shared, so they were never per-account.)
-
         // EVERY file row, tombstoned ones included.
         //
-        // This used to read `AND deleted = 0`, because `deleteEntry` decref'd at
-        // tombstone time and counting a tombstone here would have decremented the
-        // blob twice. With the recycle bin that reasoning inverts: `trash` HOLDS
-        // the reference and only `purge` releases it, so a tombstoned row is
-        // still a live reference in `blobs.refcount`. Skipping it now would be
-        // the bug — the account's rows all vanish below, and any blob whose last
-        // reference happened to be sitting in the bin would keep a refcount that
-        // nothing can ever decrement: a leaked blob, its index, and its
-        // searchable OCR text, surviving the account forever.
+        // NOT `AND deleted = 0`, which reads like the obvious scoping and is the
+        // bug: `trash` HOLDS the blob reference and only `purge` releases it, so
+        // a tombstoned row is still a live reference in `blobs.refcount`. The
+        // account's rows all vanish below, and any blob whose last reference
+        // happened to be sitting in the bin would keep a refcount that nothing
+        // can ever decrement — a leaked blob and its index, surviving the
+        // account forever.
         {
             var s = try self.db.prepare(
                 "SELECT md5 FROM files WHERE user_id = ?1 AND is_folder = 0;",
@@ -2473,8 +2372,8 @@ pub const Files = struct {
     /// a purge of this one frees", and purging frees both blobs; showing only the
     /// document's would make the bin's headline figure and its per-row promise
     /// both understate what the button does. The gate on the correlated sum is the
-    /// pairing rule's own no-chain clause and nothing else: it used to read
-    /// `f.name LIKE '%.pdf'`, which meant an annotated EPUB's row understated its
+    /// pairing rule's own no-chain clause and nothing else — narrowing it to
+    /// `f.name LIKE '%.pdf'` would make an annotated EPUB's row understate its
     /// purge by the size of its ink. A row that ends in `.mark` is never the
     /// document half, and for anything else with no hidden mark the subquery finds
     /// nothing and adds 0; a mark that ISN'T hidden has its own row carrying its
@@ -2602,16 +2501,6 @@ pub const Files = struct {
             _ = try s.step();
         }
 
-        // (A SEARCH PASS used to sit here, between the deletes and the decrefs.
-        // The owner's segment rows followed LIVE FILE references, so it asked
-        // `userBlobRefs` per distinct doomed blob: a blob no file of theirs held
-        // any more had to stop being findable, whatever `file_history` said. It
-        // ran after the deletes so it saw the final state, and before the decrefs
-        // because the FTS 'delete' read the md5-keyed text a refcount-0 GC would
-        // take away. schema v14 removed the index; a purge's
-        // only remaining search effect is the derived files a reaped blob takes
-        // with it, which `removeBlobFiles` handles below.)
-
         // Refund the mirror image of what `linkBlobIndexed` charged: one refund
         // per DISTINCT blob, and only for a blob this user no longer references
         // in ANY charged sense. Two of the user's files sharing content were
@@ -2654,12 +2543,10 @@ pub const Files = struct {
     /// This is the per-user counterpart to `blobs.refcount` (which is global, so
     /// it cannot answer "does THIS user still hold this blob?").
     ///
-    /// **Its one caller is `holdsBlob`.** It used to be quota's predicate too,
-    /// and stopped being one when §6 made a retained version chargeable —
-    /// `userChargedRefs` is that question now. It also used to gate the search
-    /// index's per-owner rows, and §6 step 8 removed those. What is left is the
-    /// ownership boundary on md5-keyed reads, which is genuinely this question
-    /// and not the wider one.
+    /// **Its one caller is `holdsBlob`.** It is NOT quota's predicate —
+    /// `userChargedRefs` is, because a retained version is chargeable and this
+    /// does not count one. What is left here is the ownership boundary on
+    /// md5-keyed reads, which is genuinely this question and not the wider one.
     fn userBlobRefs(self: Files, user_id: u64, md5: []const u8) !u64 {
         var r = (try self.db.row(
             "SELECT COUNT(*) FROM files WHERE user_id = ?1 AND is_folder = 0 AND md5 = ?2;",
@@ -2733,7 +2620,7 @@ pub const Files = struct {
 
     /// True when `user_id` can reach blob `md5` by ANY path they already have —
     /// the ownership boundary for `/api/controlplane/text/{md5}`
-    ///
+    /// (§1.1).
     ///
     /// **It is one predicate because the five in-document routes it replaces
     /// were three gates over the same question.** A caller reaches a blob's text
@@ -2899,7 +2786,7 @@ pub const Files = struct {
     fn nameFree(self: Files, user_id: u64, parent_id: ?u64, cand: []const u8, pair: ?[]const u8) !bool {
         if (try self.liveChild(user_id, parent_id, cand) != null) return false;
         const suffix = pair orelse return true;
-        if (markStemOf(cand)) |stem| return (try self.liveChild(user_id, parent_id, stem)) == null;
+        if (markpair.markStemOf(cand)) |stem| return (try self.liveChild(user_id, parent_id, stem)) == null;
         const twin = try std.fmt.allocPrint(self.gpa, "{s}{s}", .{ cand, suffix });
         defer self.gpa.free(twin);
         return (try self.liveChild(user_id, parent_id, twin)) == null;
@@ -3254,7 +3141,7 @@ pub const Files = struct {
         self.blobs.remove(md5);
         self.thumbs.remove(md5);
         // Every version, because this side does not know which ones exist
-        // (— purge rides the blob GC).
+        // (§2.7 — purge rides the blob GC).
         if (self.terms) |t| t.removeAll(md5);
         if (self.text) |t| t.removeAll(md5);
     }
@@ -3313,12 +3200,6 @@ pub const Files = struct {
         // Truly unreferenced. The blob's index dies with it, in this same
         // transaction — otherwise we leak rows for deleted content. (The schema's
         // ON DELETE CASCADE is the backstop; this is the intent.)
-        //
-        // An FTS pass used to go FIRST here, and could not be folded into the
-        // cascade: an external-content FTS5 delete read the text back out of
-        // `note_page_index` to know which postings to subtract, so it only worked
-        // while those rows were still there. schema v14 deleted
-        // that index, and the ordering constraint with it.
         try noteindex.deleteForBlob(self.db, md5);
         try spdindex.deleteForBlob(self.db, md5); // intent; the FK cascade is the backstop
         var s = try self.db.prepare("DELETE FROM blobs WHERE md5 = ?1;");
@@ -3375,9 +3256,9 @@ pub const Files = struct {
     ///       until the install-wide retained footprint is under the ceiling.
     ///
     /// **(b) is now a per-user eviction against a global ceiling, and that is the
-    /// §6 fix.** It used to pick the globally-oldest history row, so one person's
-    /// churn evicted another person's versions — an invisible cross-account
-    /// effect with no way for either to see it. Now that every user's retained
+    /// §6 fix.** Picking the globally-oldest history row lets one person's churn
+    /// evict another person's versions — an invisible cross-account effect with
+    /// no way for either to see it. Now that every user's retained
     /// bytes are charged to their own allotment, their quota is the primary
     /// control and `max_bytes` demotes to what it should always have been: a
     /// backstop on the whole install's disk, honoured by having the user doing the
@@ -3401,13 +3282,12 @@ pub const Files = struct {
             const before = evicted.items.len;
 
             // COLLECT, THEN DELETE — the file's own discipline (see `deleteUser`'s
-            // "collect their md5s first", and `restore`'s id list). This loop used
-            // to step a `DELETE FROM file_history` while its own SELECT over
-            // `file_history` was mid-cursor. It happened to be safe, because the
-            // `ORDER BY … OFFSET` forces SQLite to materialise the result through a
-            // sorter before emitting a row — but that is a property of the query
-            // plan, which the next person to touch this ORDER BY is under no
-            // obligation to preserve. Collecting first does not depend on it.
+            // "collect their md5s first", and `restore`'s id list). Stepping a
+            // `DELETE FROM file_history` while this SELECT is mid-cursor would be
+            // safe only because the `ORDER BY … OFFSET` forces SQLite to
+            // materialise through a sorter first — a property of the query plan,
+            // which the next person to touch this ORDER BY is under no obligation
+            // to preserve. Collecting first does not depend on it.
             var doomed_ids: std.ArrayList(i64) = .empty;
             defer doomed_ids.deinit(self.gpa);
             {
@@ -3428,8 +3308,7 @@ pub const Files = struct {
                 }
             }
             {
-                // Prepared once and rebound per row, the house pattern (sync.zig),
-                // rather than re-prepared inside the loop as before.
+                // Prepared once and rebound per row, the house pattern (sync.zig).
                 var d = try self.db.prepare("DELETE FROM file_history WHERE rowid = ?1;");
                 defer d.finalize();
                 for (doomed_ids.items) |rowid| {
@@ -3687,6 +3566,11 @@ pub const Files = struct {
             .md5 = if (is_folder or m.len == 0) null else try self.gpa.dupe(u8, m),
             .size = @intCast(s.columnInt(5)),
             .updated_at = s.columnInt(6),
+            // Column 7 is `pairedMarkId` on the live reads and a literal NULL on
+            // the trashed/state-blind ones — every SELECT that feeds this carries
+            // it, so the shape is one shape and the scoping decision is visible in
+            // the query rather than here.
+            .mark_id = if (s.columnIntOpt(7)) |mid| @intCast(mid) else null,
         };
     }
 
@@ -4112,13 +3996,11 @@ test "HISTORY: keep = K retains only the newest K superseded versions; evicted b
 }
 
 test "HISTORY: eviction never DELETEs with a cursor open on file_history" {
-    // THE DISCIPLINE, NOT THE OUTCOME. Both eviction arms used to step a
-    // `DELETE FROM file_history` while their own SELECT over `file_history` was
-    // mid-cursor. It was de-facto safe — the `ORDER BY … OFFSET` forces SQLite to
-    // materialise the result through a sorter first — so every row-count and
-    // blob-presence assertion in the tests around this one passes identically
-    // against the old shape. There is nothing to assert but the discipline itself,
-    // which is what `sqlite.CursorWatch` exists to see (see its own test).
+    // THE DISCIPLINE, NOT THE OUTCOME. Deleting from `file_history` under its own
+    // open SELECT is de-facto safe here — the `ORDER BY … OFFSET` forces SQLite to
+    // materialise through a sorter first — so every row-count and blob-presence
+    // assertion around this one passes either way. There is nothing to assert but
+    // the discipline itself, which `sqlite.CursorWatch` exists to see.
     //
     // BOTH arms are driven, in separate phases, because they are bounded by
     // different things and one configuration cannot reach both: (a) needs K to
@@ -4258,9 +4140,9 @@ test "§6: a user AT their allotment can still EDIT — history gives way, the e
 }
 
 test "§6: eviction is PER-USER — one person's churn can no longer evict another's versions" {
-    // Before §6 the `max_bytes` loop picked the globally-oldest history row, so a
-    // housemate syncing hard silently ate someone else's version history — an
-    // effect neither of them could see. Now every user's retained bytes are
+    // A `max_bytes` loop that picked the globally-oldest history row would let a
+    // housemate syncing hard silently eat someone else's version history — an
+    // effect neither of them could see. Every user's retained bytes are
     // charged to their own allotment, `max_bytes` is only a backstop on the whole
     // install's disk, and the user doing the writing is the one who gives ground.
     var f = try Fixture.init();
@@ -6376,9 +6258,7 @@ test "repairDerivedThumb (.note) heals a stale row and a wiped row — restoring
     try testing.expect((try f.files.noteCover(md5)) != null); // location restored
 
     // 2. Row wiped entirely (a pre-index blob): repair restores the row + its
-    // cover location. (This used to have to wipe `segment_fts` and
-    // `segment_search` first — their FK blocked deleting pages from under them.
-    // schema v14 removed both.)
+    // cover location.
     try f.db.exec("DELETE FROM note_index;");
     try testing.expect(f.files.thumbNeedsRepair(md5));
     f.files.repairDerivedThumb(NoLock{}, md5);
@@ -6408,7 +6288,7 @@ test "purging the last reference removes the .note cover file along with the blo
 
 /// A real device capture, and the reason it is this one: two pages, page 0
 /// finished (`"Test\nMiddle\nTest"`) and page 1 still recognising. Both halves
-/// of — a row, and a page that must not produce one —
+/// of §2.2 — a row, and a page that must not produce one —
 /// in one blob, from a device rather than from the synthetic builder.
 const sample2_note = @embedFile("sample-2.note");
 
@@ -6678,11 +6558,8 @@ test "SEARCH-NEUTRALITY: a renamed + relocated note leaves the blob-keyed index 
     // nothing. Derivation-neutrality is the property that belongs here; what the
     // browser can then find is the browser's, off `text/<md5>`.
     //
-    // It used to count `segment_search` rows, which were per owner x blob and
-    // therefore the thing a path-aware mechanism would have disturbed. Those went
-    // with schema v14, so the same question is asked of the row
-    // set that survives: the blob's page index, and its `indexed_at` stamp, which
-    // a re-derive would move even if the row count came out the same.
+    // The stamp matters as much as the count: a re-derive moves `indexed_at` even
+    // when the row count comes out the same.
     const IndexState = struct { rows: i64, indexed_at: i64 };
     const read = struct {
         fn get(db: sqlite.Db, md5: []const u8) !IndexState {
@@ -6864,6 +6741,111 @@ fn nameOf(f: *Fixture, arena: std.mem.Allocator, id: u64) ![]const u8 {
     var r = (try f.db.row("SELECT name FROM files WHERE id = ?1;", &.{.{ .int = @intCast(id) }})) orelse return "";
     defer r.finalize();
     return arena.dupe(u8, r.text(0));
+}
+
+/// The listing row named `name`, or a failed expectation. The rows are owned by
+/// the caller, so this returns a borrow into them.
+fn rowNamed(rows: []Entry, name: []const u8) !Entry {
+    for (rows) |e| {
+        if (std.mem.eql(u8, e.name, name)) return e;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "a listing row carries the id of the .mark hidden behind it" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const p = try putPair(&f, null, "manual", "aaaa", "bbbb");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+
+    // ONE ROW for the pair — the mark has no card of its own — and that one row
+    // is the only place the ink can be announced from. Before this field it could
+    // not even say the ink existed.
+    const rows = try f.files.list(1, null);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("manual.pdf", rows[0].name);
+    try testing.expectEqual(@as(?u64, p.mark.id), rows[0].mark_id);
+}
+
+test "mark id on a listing row: absent for a lonely file, a folder, and a mark's own row" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // A PDF with nothing beside it. Null, not the mark of some other document.
+    const lonely = try putBytes(&f, 1, null, "lease.pdf", "aaaa");
+    defer freeEntry(lonely);
+
+    // A FOLDER called `Notes`, with an ORPHAN `Notes.mark` beside it. The orphan
+    // lists (it is nobody's ink), and the folder is not annotated by it: a folder
+    // is never half of a pair, which the `is_folder = 0` guard on the outer row
+    // is there to say.
+    const folder = try f.files.createFolder(1, null, "Notes");
+    defer testing.allocator.free(folder.name);
+    const orphan = try putBytes(&f, 1, null, "Notes.mark", "bbbb");
+    defer freeEntry(orphan);
+
+    const rows = try f.files.list(1, null);
+    defer Files.freeEntries(testing.allocator, rows);
+    try testing.expectEqual(@as(?u64, null), (try rowNamed(rows, "lease.pdf")).mark_id);
+    try testing.expectEqual(@as(?u64, null), (try rowNamed(rows, "Notes")).mark_id);
+
+    // And the orphan mark does not claim a `Notes.mark.mark` — no chains, the
+    // same refusal `markStemOf` and `pairedMarkId` make.
+    try testing.expectEqual(@as(?u64, null), (try rowNamed(rows, "Notes.mark")).mark_id);
+}
+
+test "a mark id is a LIVE fact on both sides — the bin never carries one" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // A trashed document with a LIVE mark beside it. Reachable because the mark
+    // arrived AFTER the document went to the bin — trashing the pair together
+    // (`pairOf`) is what stops it happening the ordinary way, not this field.
+    const doc = try putBytes(&f, 1, null, "old.pdf", "aaaa");
+    defer freeEntry(doc);
+    try f.files.trash(1, doc.id);
+    const late_mark = try putBytes(&f, 1, null, "old.pdf.mark", "bbbb");
+    defer freeEntry(late_mark);
+    try testing.expectEqual(@as(i64, 1), try deletedFlagOf(&f, doc.id));
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, late_mark.id));
+
+    // THE TRAP, refused: the bin's own read answers null. Offering the live mark
+    // here would composite today's ink onto a deleted document — which is why
+    // `getTrashed` selects a literal NULL rather than the subquery.
+    const trashed = (try f.files.getTrashed(1, doc.id)).?;
+    defer freeEntry(trashed);
+    try testing.expectEqual(@as(?u64, null), trashed.mark_id);
+
+    // The state-blind read is null for the same reason and one more: it cannot
+    // tell which side of the bin the row it returned is on.
+    const blind = (try f.files.getAnyState(1, doc.id)).?;
+    defer freeEntry(blind);
+    try testing.expectEqual(@as(?u64, null), blind.mark_id);
+
+    // THE OTHER DIRECTION. A live document whose mark is in the bin has no ink to
+    // offer either — the mark's own `deleted = 0` in the subquery.
+    const live = try putBytes(&f, 1, null, "new.pdf", "cccc");
+    defer freeEntry(live);
+    const ink = try putBytes(&f, 1, null, "new.pdf.mark", "dddd");
+    defer freeEntry(ink);
+    {
+        const before = try f.files.list(1, null);
+        defer Files.freeEntries(testing.allocator, before);
+        try testing.expectEqual(@as(?u64, ink.id), (try rowNamed(before, "new.pdf")).mark_id);
+    }
+
+    // Trash the MARK ALONE, behind the pairing rule's back — `trash` would take
+    // the PDF with it, and the point here is the PDF staying live.
+    var s = try f.db.prepare("UPDATE files SET deleted = 1, deleted_at = 1 WHERE id = ?1;");
+    defer s.finalize();
+    s.bindInt(1, @intCast(ink.id));
+    _ = try s.step();
+
+    const after = try f.files.list(1, null);
+    defer Files.freeEntries(testing.allocator, after);
+    try testing.expectEqual(@as(?u64, null), (try rowNamed(after, "new.pdf")).mark_id);
 }
 
 test "trashing the MARK takes its PDF too — the rule runs both ways" {
@@ -7413,9 +7395,9 @@ test "restoring a trashed pdf leaves a LIVE mark of the same name alone" {
 // The device appends `.mark` to the annotated document's FULL name, and it
 // annotates formats this server does not render — EPUB is the obvious one and
 // the set is open, since the rule has to keep working for formats nobody here
-// has thought of. The predicate used to require `%.pdf.mark`, which made every
-// one of those a file listing on its own, travelling on its own, and surfacing
-// in search on its own. These tests pin the general rule and, just as important,
+// has thought of. A `%.pdf.mark` predicate would make every one of those a file
+// listing on its own, travelling on its own, and surfacing in search on its own.
+// These tests pin the general rule and, just as important,
 // the two things it must NOT swallow: an orphan, and a chain.
 
 test "a mark of a format we do not render is folded away exactly like a PDF's" {
@@ -7449,8 +7431,8 @@ test "a mark of a format we do not render is folded away exactly like a PDF's" {
     try testing.expectEqual(@as(i64, 0), try f.files.childCount(1, docs.id));
 
     // The bin shows ONE row, sized as the pair — "bytes a purge of this one
-    // frees" is 4 + 6, and the `f.name LIKE '%.pdf'` gate on that sum used to
-    // make an annotated EPUB understate its own purge by the size of its ink.
+    // frees" is 4 + 6, where an `f.name LIKE '%.pdf'` gate on that sum would make
+    // an annotated EPUB understate its own purge by the size of its ink.
     const bin = try f.files.listBin(a, 1);
     try testing.expectEqual(@as(usize, 1), bin.len);
     try testing.expectEqualStrings("novel.epub", bin[0].name);
@@ -7535,9 +7517,9 @@ test "a mark of a mark is nobody's pair — the rule refuses to CHAIN" {
     // A row named exactly `.mark` has an empty stem, which names nothing, so it
     // is an orphan in both the SQL and `markStemOf` — the two must agree or the
     // gap between them is the bug.
-    try testing.expect(Files.markStemOf(".mark") == null);
-    try testing.expect(Files.markStemOf("a.note.mark.mark") == null);
-    try testing.expectEqualStrings("a.note", Files.markStemOf("a.note.mark").?);
+    try testing.expect(markpair.markStemOf(".mark") == null);
+    try testing.expect(markpair.markStemOf("a.note.mark.mark") == null);
+    try testing.expectEqualStrings("a.note", markpair.markStemOf("a.note.mark").?);
 }
 
 test "PLAN PIN: the pairing rule is an indexed sibling seek in the library AND the bin" {
@@ -7593,6 +7575,22 @@ test "PLAN PIN: the pairing rule is an indexed sibling seek in the library AND t
     }
     try testing.expect(sized);
     try testing.expect(hidden);
+
+    // AND THE LISTING'S MARK-ID SUBQUERY, which fires for every non-mark file row
+    // in the folder — the price of answering "does this document carry ink"
+    // without a second statement per card. It has to be the same seek: 200 index
+    // probes inside one statement is the trade being made, and 200 library walks
+    // is not.
+    var ids = try f.db.prepare("EXPLAIN QUERY PLAN SELECT f.id, " ++ Files.paired_mark_id ++
+        " FROM files f WHERE f.user_id = ?1 AND f.deleted = 0;");
+    defer ids.finalize();
+    var seeks = false;
+    while (try ids.step()) {
+        const detail = ids.columnText(3);
+        if (std.mem.indexOf(u8, detail, "SEARCH m ") != null and
+            std.mem.indexOf(u8, detail, "files_live_name (") != null) seeks = true;
+    }
+    try testing.expect(seeks);
 }
 
 // ---- a move must not ADOPT ink it did not arrive with ----
