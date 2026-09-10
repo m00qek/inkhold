@@ -31,7 +31,7 @@ import { createReaderExports } from "./readerExports";
 import { OVAL_VIEWBOX, ovalsFor } from "./findOvals";
 import { createToolbar } from "./toolbar";
 import { svg, VIEWER_IC } from "./viewerIcons";
-import { createPager, createZoomStepper } from "./viewerControls";
+import { createPager, createZoomStepper, FIT_PAGE, FIT_WIDTH } from "./viewerControls";
 import { createViewerExportMenu } from "./viewerExportMenu";
 import {
   VIEWER_DEBOUNCE_MS,
@@ -234,22 +234,22 @@ export interface Reader {
   destroy(): void;
 }
 
-const ZOOMS = ["Fit", "100%", "150%"] as const;
+const ZOOMS = [FIT_PAGE, "100%", "150%"] as const;
 
 /**
  * The IMAGE ladder, which is not the note's.
  *
- * A note page is a fixed-size document, so `Fit` sits near 100% and three steps
+ * A note page is a fixed-size document, so `Fit ⇕` sits near 100% and three steps
  * cover it. An image has whatever dimensions a camera or a screenshot gave it:
- * `Fit` on a large photo can land at 20%, and the note's ladder then offers no
+ * `Fit ⇕` on a large photo can land at 20%, and the note's ladder then offers no
  * way down and stops at 150% — barely a zoom, and useless for reading small text
  * in a screenshot, which is the thing images are most often opened for.
  *
- * Steps below `Fit` come first so zooming out from it does something. `Fit width`
- * sits above `Fit` because it drops the height term and can only grow; it is
+ * Steps below `Fit ⇕` come first so zooming out from it does something. `Fit ⇔`
+ * sits above it because it drops the height term and can only grow; it is
  * here for the tall screenshot, the same case that earned the PDF viewer one.
  */
-const IMAGE_ZOOMS = ["25%", "50%", "Fit ⇕", "Fit ↔", "100%", "200%", "400%"] as const;
+const IMAGE_ZOOMS = ["25%", "50%", FIT_PAGE, FIT_WIDTH, "100%", "200%", "400%"] as const;
 type Zoom = (typeof ZOOMS)[number] | (typeof IMAGE_ZOOMS)[number];
 /**
  * NOTE-PAGE factors only, and the type says so: keyed by the note ladder rather
@@ -257,7 +257,11 @@ type Zoom = (typeof ZOOMS)[number] | (typeof IMAGE_ZOOMS)[number];
  * are tuned to the 640px height heuristic below — "100%" is 1.18 — which is
  * exactly why `sizeImage` refuses to reuse them and reads its own label instead.
  */
-const ZOOM_SCALE: Record<(typeof ZOOMS)[number], number> = { Fit: 1, "100%": 1.18, "150%": 1.68 };
+const ZOOM_SCALE: Record<(typeof ZOOMS)[number], number> = {
+  [FIT_PAGE]: 1,
+  "100%": 1.18,
+  "150%": 1.68,
+};
 const DPR_CAP = 2;
 
 /**
@@ -406,16 +410,17 @@ export function createReader(deps: ReaderDeps): Reader {
   // their own width, took their own class: `.spd-zoom`, `.txt-zoom`, `.pdf-zoom`.
   const zoomStepper = createZoomStepper({
     readoutClass: "zoom",
-    initial: "Fit" as Zoom,
+    initial: FIT_PAGE as Zoom,
     format: (z: Zoom) => z,
     onStep: (dir) => {
       // The ladder is the CALLER's, which is why one shared stepper serves a
-      // note and an image without knowing either. Falling back to `Fit` covers
+      // note and an image without knowing either. Falling back to `Fit ⇕` covers
       // a value the current ladder does not hold — `open` resets to it anyway,
-      // so this is the belt rather than the mechanism.
+      // so this is the belt rather than the mechanism. BOTH ladders carry that
+      // rung, which is why the fallback can name it rather than hunt for it.
       const ladder: readonly Zoom[] = mode === "image" ? IMAGE_ZOOMS : ZOOMS;
       const at = ladder.indexOf(zoom);
-      const from = at < 0 ? Math.max(0, ladder.findIndex((z) => z.startsWith("Fit"))) : at;
+      const from = at < 0 ? Math.max(0, ladder.indexOf(FIT_PAGE)) : at;
       const i = Math.max(0, Math.min(ladder.length - 1, from + dir));
       zoom = ladder[i]!;
       if (mode === "image") sizeImage();
@@ -743,7 +748,7 @@ export function createReader(deps: ReaderDeps): Reader {
    */
   let summaryRecognized = false;
   let pageIndex = 0;
-  let zoom: Zoom = "Fit";
+  let zoom: Zoom = FIT_PAGE;
   let open = false;
   let paintToken = 0;
   /**
@@ -1584,7 +1589,7 @@ export function createReader(deps: ReaderDeps): Reader {
     let h = Math.min(Math.max(rect.height - 56, 120), 1000);
     // Reached only in note mode, where `zoom` is always a note-ladder value; the
     // narrowing is what lets the map stay keyed to that ladder.
-    if (zoom !== "Fit" && zoom in ZOOM_SCALE) h = 640 * ZOOM_SCALE[zoom as keyof typeof ZOOM_SCALE];
+    if (zoom !== FIT_PAGE && zoom in ZOOM_SCALE) h = 640 * ZOOM_SCALE[zoom as keyof typeof ZOOM_SCALE];
     let w = h * aspect;
     // The recognized-text aside shares the stage, so its width is not the page's
     // — and the layers panel, when open over a live stack, takes its slice too.
@@ -1800,7 +1805,7 @@ export function createReader(deps: ReaderDeps): Reader {
 
   /** Apply the current zoom step to the image preview. */
   function sizeImage(): void {
-    if (zoom === "Fit" || zoom === "Fit ⇕") {
+    if (zoom === FIT_PAGE) {
       // Back to the CSS rule: fit the stage in both axes.
       fileImg.style.width = "";
       fileImg.style.maxWidth = "";
@@ -1812,7 +1817,7 @@ export function createReader(deps: ReaderDeps): Reader {
     // would silently do nothing.
     fileImg.style.maxWidth = "none";
     fileImg.style.maxHeight = "none";
-    if (zoom === "Fit ↔") {
+    if (zoom === FIT_WIDTH) {
       // Fill the stage across and let the height run off the bottom, which is
       // the whole point for a tall screenshot. Unlike `Fit` this DOES enlarge a
       // small image, so it is the one step that can exceed natural size without
@@ -2080,8 +2085,8 @@ export function createReader(deps: ReaderDeps): Reader {
         // A deep link to a page that no longer exists — the note was edited since
         // the transcript was indexed — lands on the last page rather than nowhere.
         pageIndex = Math.max(0, Math.min(meta.pages.length - 1, Math.floor(startPage)));
-        zoom = "Fit";
-        zoomStepper.set("Fit");
+        zoom = FIT_PAGE;
+        zoomStepper.set(FIT_PAGE);
         header.setSubtitle(
           subtitle(origin, `${meta.pages.length} ${meta.pages.length === 1 ? "page" : "pages"}`),
         );

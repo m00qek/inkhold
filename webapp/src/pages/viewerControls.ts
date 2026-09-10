@@ -7,6 +7,27 @@ import { el } from "../ui/dom";
 import { svg, VIEWER_IC } from "./viewerIcons";
 
 /**
+ * THE TWO FIT LABELS, spelled once for every viewer that shows one.
+ *
+ * A fit is a fit ALONG AN AXIS, and two of the viewers offer both — so the label
+ * has to say which, and saying it in words ("Fit" / "Fit width") cost the readout
+ * most of its width for the rarer of the two. The arrows say the same thing in
+ * one glyph, and they are a MATCHED PAIR on purpose: U+21D5 and U+21D4 are the
+ * same double-stroke family, so the two read as one control's two settings
+ * rather than as two unrelated marks. (U+2194, the single-stroke horizontal, is
+ * the near-miss — it pairs with U+2195, not with the double-stroke vertical.)
+ *
+ * Shared rather than re-typed per viewer for the same reason the readout's width
+ * is shared (10-toolbar.css): every viewer is mounted at once and a reader steps
+ * between them, so a glyph that drifted in one would show up as the control
+ * changing shape between file types. The LADDERS stay with their viewers — only
+ * the two words on the rungs live here.
+ */
+export const FIT_PAGE = "Fit ⇕";
+/** Fit ACROSS only — the page fills the stage's width and may run off the bottom. */
+export const FIT_WIDTH = "Fit ⇔";
+
+/**
  * The `− [readout] +` stepper every viewer's zoom (and the `.txt` font/width)
  * controls share: a `.pager` holding two `.icon-btn`s around a readout `<span>`.
  *
@@ -19,8 +40,8 @@ import { svg, VIEWER_IC } from "./viewerIcons";
  * The readout keeps its PER-VIEWER class (`.zoom` / `.spd-zoom` / `.txt-zoom` /
  * `.pdf-zoom`): every viewer is mounted at once, so a shared class would make a
  * bare `.zoom` Playwright locator resolve to several elements. It is a parameter
- * here, never a constant. It also buys per-viewer WIDTH — `.pdf-zoom` is wider
- * because only that ladder carries a `Fit width` step.
+ * here, never a constant. (It no longer buys per-viewer WIDTH: every readout
+ * shares one width now — see 10-toolbar.css.)
  */
 export interface ZoomStepper<V> {
   /** The `.pager` element — a toolbar `view` slot (also the thing a viewer hides). */

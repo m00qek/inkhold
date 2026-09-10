@@ -179,7 +179,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     // that already overflowed would make every assertion below meaningless.
     expect(fit.scrollW).toBeLessThanOrEqual(fit.clientW + 1);
 
-    // TWO steps, because `Fit width` sits between Fit and 150% and on THIS
+    // TWO steps, because `Fit ⇔` sits between `Fit ⇕` and 150% and on THIS
     // fixture it is a no-op: 200 x 100 pt in a 992 x ~550 stage is already
     // width-bound, so fit-page and fit-width are the same scale. That is the
     // control being honest — the page fills the width at Fit already — and it is
@@ -226,10 +226,10 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     expect(edges.atEnd.right).toBeGreaterThanOrEqual(0); // right edge in view
   });
 
-  test("Fit width fills the stage across and lets the page run off the bottom", async ({ page }) => {
+  test("Fit ⇔ fills the stage across and lets the page run off the bottom", async ({ page }) => {
     // The step Fit cannot be: on a PORTRAIT page in a landscape window fit-page
     // is bound by HEIGHT, so the page sits in a column with dead margins either
-    // side and the type comes out small. Fit width drops the height term, which
+    // side and the type comes out small. `Fit ⇔` drops the height term, which
     // is the trade every PDF reader offers — bigger type, and you scroll.
     //
     // The panel fixture is used because the default one is 2:1 landscape, where
@@ -254,7 +254,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
           css: c.getBoundingClientRect().width,
           // `availableBox` measures the BORDER box less padding, so this is the
           // width the raster was asked for — not `clientWidth`, which loses the
-          // scrollbar that Fit width itself brings into being.
+          // scrollbar that `Fit ⇔` itself brings into being.
           avail: wrap.getBoundingClientRect().width - padX,
           scrollH: wrap.scrollHeight,
           clientH: wrap.clientHeight,
@@ -267,7 +267,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     expect(fit.scrollH).toBeLessThanOrEqual(fit.clientH + 1);
 
     await region.getByRole("button", { name: "Zoom in" }).click();
-    await expect(region.locator(".pdf-zoom")).toHaveText("Fit width");
+    await expect(region.locator(".pdf-zoom")).toHaveText("Fit ⇔");
 
     // The page now measures the stage exactly — that is the whole definition of
     // the step, and a Fit-width that merely rounded up would drift here.
@@ -310,7 +310,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
 
     const atFit = await ratio();
     const zoomIn = region.getByRole("button", { name: "Zoom in" });
-    for (const step of ["Fit width", "150%", "200%", "300%"]) {
+    for (const step of ["Fit ⇔", "150%", "200%", "300%"]) {
       await zoomIn.click();
       await expect
         .poll(async () => Math.abs((await ratio()) - atFit) < 0.02, { timeout: 20_000 })
@@ -318,7 +318,7 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
       expect(await ratio(), `ink out of register at ${step}`).toBeCloseTo(atFit, 1);
     }
 
-    // …and a PANEL narrows the desk, so "Fit" has to mean fit against what is
+    // …and a PANEL narrows the desk, so `Fit ⇕` has to mean fit against what is
     // LEFT of it. `availableBox` subtracted the Pages panel and not this one, so
     // a page opened with Annotations up was rastered for a stage 342px wider
     // than it had. While `max-width` was still in the stylesheet that showed up
@@ -1954,7 +1954,7 @@ test.describe("PDF links", () => {
     };
 
     const fit = await settled();
-    // TWO steps to 150%: `Fit width` sits between it and `Fit`. This test wants a
+    // TWO steps to 150%: `Fit ⇔` sits between it and `Fit ⇕`. This test wants a
     // scale that is decisively bigger than Fit whatever the page's aspect, and
     // fit-width on a landscape page can be Fit exactly.
     await region.getByRole("button", { name: "Zoom in" }).click();

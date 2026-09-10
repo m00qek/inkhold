@@ -223,8 +223,8 @@ test.describe(".txt viewer", () => {
     expect(zoom).toEqual(font);
     // And it is the real treatment, not two coincidentally-unstyled pills: the
     // shared rule pins one min-width for every viewer's readout and centres the
-    // label. 62px holds the widest label any of them shows — `Fit ↔` in the
-    // reader's image mode, `Fit width` in the PDF viewer — and the others carry
+    // label. 62px holds the widest label any of them shows — `400%` and `Fit ⇔`
+    // in the reader's image mode and the PDF viewer — and the others carry
     // the slack, because the readout sits between two buttons and a label that
     // outgrows its box would move them.
     expect(zoom.minWidth).toBe("62px");

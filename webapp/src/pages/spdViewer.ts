@@ -38,7 +38,7 @@ import type { NoteMeta, NoteSummary } from "../core/types";
 import { formatBytes, rawFileUrl, historyFileUrl } from "../core/fileKind";
 import { createToolbar } from "./toolbar";
 import { svg, VIEWER_IC } from "./viewerIcons";
-import { createZoomStepper } from "./viewerControls";
+import { createZoomStepper, FIT_PAGE } from "./viewerControls";
 import { createViewerExportMenu } from "./viewerExportMenu";
 import { backWord, createViewerHeader, createViewerBody, createVersionBanner } from "./viewerChrome";
 import { createBinViewerActions } from "../ui/binViewerActions";
@@ -107,7 +107,7 @@ export interface SpdViewerOptions {
   decodeTile?: (png: Uint8Array) => Promise<TileBitmap>;
 }
 
-const ZOOMS = ["Fit", "100%", "150%"] as const;
+const ZOOMS = [FIT_PAGE, "100%", "150%"] as const;
 
 // ============================================================================
 // The `.spd` THUMB PAINTER. The panel itself (rows, eyes, opacity steppers,
@@ -539,10 +539,10 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
     return doc ? spdBaseDims(doc, bbox) : { w: 1404, h: 1872 };
   }
 
-  /** The scale for the current zoom step. `Fit` fits the drawing to the stage. */
+  /** The scale for the current zoom step. `Fit ⇕` fits the whole drawing to the stage. */
   function zoomScale(): number {
     const z = ZOOMS[zoomIdx]!;
-    if (z !== "Fit") return Number.parseInt(z, 10) / 100;
+    if (z !== FIT_PAGE) return Number.parseInt(z, 10) / 100;
     const { w, h } = baseDims();
     const rect = stage.getBoundingClientRect();
     const availW = Math.max(rect.width - 48, 64);

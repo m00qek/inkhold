@@ -16,13 +16,13 @@ describe("the fit", () => {
     expect(fitScaleIn(842, 595, box, false)).toBeCloseTo(800 / 842, 12);
   });
 
-  it("drops the height term for `Fit width`, and runs off the bottom", () => {
+  it("drops the height term for `Fit ⇔` (fit width), and runs off the bottom", () => {
     expect(fitScaleIn(595, 842, box, true)).toBeCloseTo(800 / 595, 12);
     expect(fitScaleIn(595, 842, box, true)).toBeGreaterThan(fitScaleIn(595, 842, box, false));
   });
 
   it("is ASCENDING on a portrait page, which is what the stepper's arrows promise", () => {
-    // `Fit` -> `Fit width` must be a step UP or the ladder lies about direction.
+    // `Fit ⇕` -> `Fit ⇔` must be a step UP or the ladder lies about direction.
     expect(fitScaleIn(595, 842, box, true)).toBeGreaterThanOrEqual(
       fitScaleIn(595, 842, box, false),
     );

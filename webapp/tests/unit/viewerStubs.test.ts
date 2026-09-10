@@ -15,6 +15,7 @@ import { createSpdViewer } from "../../src/pages/spdViewer";
 import { createTxtViewer, type TxtSeam } from "../../src/pages/txtViewer";
 import { createPdfViewer, type PdfSeam } from "../../src/pages/pdfViewer";
 import type { Viewer, ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
+import { FIT_PAGE } from "../../src/pages/viewerControls";
 import type { NoteMeta } from "../../src/core/types";
 import { synthesizeSummary } from "../../src/pages/library";
 
@@ -448,9 +449,9 @@ describe(".pdf viewer, past the shared seam", () => {
   });
 
   it("a new document resets the zoom READOUT, not just the scale behind it", async () => {
-    // `open` sets the zoom state back to Fit and renders there. The stepper owns
+    // `open` sets the zoom state back to `Fit ⇕` and renders there. The stepper owns
     // its own label, so without an explicit reset the toolbar went on showing the
-    // LAST document's zoom over a page drawn at Fit — and the next step then
+    // LAST document's zoom over a page drawn at fit — and the next step then
     // moved from the number on screen rather than from the page in front of you.
     const v = createPdfViewer(deps(), INERT_PDF_SEAM);
     document.body.append(v.el);
@@ -461,15 +462,15 @@ describe(".pdf viewer, past the shared seam", () => {
 
     const first = meta({ id: "n-first", fileType: "pdf" });
     await v.open(synthesizeSummary(first), Promise.resolve(first), 0, FOLDER, "");
-    expect(readout.textContent).toBe("Fit");
+    expect(readout.textContent).toBe(FIT_PAGE);
 
     zoomIn.click();
     zoomIn.click();
-    expect(readout.textContent).not.toBe("Fit");
+    expect(readout.textContent).not.toBe(FIT_PAGE);
 
     const second = meta({ id: "n-second", fileType: "pdf" });
     await v.open(synthesizeSummary(second), Promise.resolve(second), 0, FOLDER, "");
-    expect(readout.textContent).toBe("Fit");
+    expect(readout.textContent).toBe(FIT_PAGE);
     v.destroy();
   });
 

@@ -241,7 +241,7 @@ test.describe("the initial route is dispatched once", () => {
     await page.evaluate(() => document.dispatchEvent(new Event("DOMContentLoaded", { bubbles: true })));
     await page.waitForTimeout(300);
 
-    // A second dispatch calls `reader.open()`, which resets zoom to "Fit" and
+    // A second dispatch calls `reader.open()`, which resets zoom to `Fit ⇕` and
     // `ocr.reset()`s the panel shut. Both still as the user left them.
     await expect(page.locator(".reader .zoom")).toHaveText("100%");
     await expect(page.locator(".ocr")).toBeVisible();

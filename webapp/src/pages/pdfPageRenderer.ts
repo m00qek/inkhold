@@ -23,6 +23,7 @@ import type { ViewerBody } from "./viewerChrome";
 import type { LayersPanel } from "./layersPanel";
 import type { NoteLayersController } from "./noteLayers";
 import { toPanelLayers } from "./noteLayers";
+import { FIT_PAGE, FIT_WIDTH } from "./viewerControls";
 import type { LinkLayer } from "./linkLayer";
 import type { PdfSelectionLayer } from "./pdfSelectionLayer";
 import type { PdfFindController } from "./pdfFind";
@@ -41,18 +42,18 @@ import type { PdfSession } from "../render/pdfClient";
  * panel-sized exports — a 7x spread. With absolute steps, "zoom in" from Fit
  * SHRINKS a small page.
  *
- * `Fit width` sits SECOND because the ladder has to be ascending — that is what
+ * `Fit ⇔` (fit width) sits SECOND because the ladder has to be ascending — that is what
  * the stepper's arrows promise. On a portrait page dropping the height term can
- * only make the scale larger, so `Fit` → `Fit width` is a step up; on a
+ * only make the scale larger, so `Fit ⇕` → `Fit ⇔` is a step up; on a
  * landscape page wide enough that width was already binding the two coincide.
- * Its multiplier is 1 for the same reason `Fit`'s is: the branch lives in
+ * Its multiplier is 1 for the same reason `Fit ⇕`'s is: the branch lives in
  * `fitScale`, not here.
  */
-export const ZOOMS = ["Fit", "Fit width", "150%", "200%", "300%"] as const;
+export const ZOOMS = [FIT_PAGE, FIT_WIDTH, "150%", "200%", "300%"] as const;
 export type Zoom = (typeof ZOOMS)[number];
 const ZOOM_SCALE: Record<Zoom, number> = {
-  Fit: 1,
-  "Fit width": 1,
+  [FIT_PAGE]: 1,
+  [FIT_WIDTH]: 1,
   "150%": 1.5,
   "200%": 2,
   "300%": 3,
@@ -73,7 +74,7 @@ export const PDF_LAYER_ID = -1;
  * The scale that fits a page into a box, in MuPDF's points-per-unit — the FIT
  * half of the ladder, with no zoom multiplier and no clamp on it.
  *
- * `Fit width` is fit-page with the height term dropped: the page fills the
+ * `Fit ⇔` is fit-page with the height term dropped: the page fills the
  * stage across and runs off the bottom, which is how an A4 page is actually
  * read on a narrow screen. It cannot run away — {@link clampRasterScale} is
  * what bounds the raster, and a tall page at fit-width is exactly the case
@@ -226,7 +227,7 @@ export function createPdfPageRenderer(opts: PdfPageRendererOptions): PdfPageRend
    *
    * NOT measured from `.pdf-stage`, which is circular — the stage is sized BY
    * the canvas, so a page that overflowed measures a stage that has already
-   * grown to fit it, and "Fit" never fits.
+   * grown to fit it, and `Fit ⇕` never fits.
    *
    * EVERY panel, not just Pages. Annotations docks in the same flex row and
    * takes the same width out of the page's box; counting only Pages fits the
@@ -246,7 +247,7 @@ export function createPdfPageRenderer(opts: PdfPageRendererOptions): PdfPageRend
 
   /** The scale that fits the page to the stage, in MuPDF's points-per-unit. */
   function fitScale(pageWidthPt: number, pageHeightPt: number): number {
-    return fitScaleIn(pageWidthPt, pageHeightPt, availableBox(), state.zoom() === "Fit width");
+    return fitScaleIn(pageWidthPt, pageHeightPt, availableBox(), state.zoom() === FIT_WIDTH);
   }
 
   /**

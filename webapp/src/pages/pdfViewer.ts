@@ -24,7 +24,7 @@ import type { Id, NoteMeta, NoteSummary, PageRef } from "../core/types";
 import { formatBytes, rawFileUrl } from "../core/fileKind";
 import { createToolbar } from "./toolbar";
 import { svg, VIEWER_IC } from "./viewerIcons";
-import { createPager, createZoomStepper } from "./viewerControls";
+import { createPager, createZoomStepper, FIT_PAGE } from "./viewerControls";
 import { createViewerExportMenu } from "./viewerExportMenu";
 import {
   backWord,
@@ -137,7 +137,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   let open_ = false;
   let pageIndex = 0;
   let pageCount = 0;
-  let zoom: Zoom = "Fit";
+  let zoom: Zoom = FIT_PAGE;
   let fromBin = false;
   /**
    * The open document's metadata — what the bin actions act ON.
@@ -254,8 +254,8 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
 
   // OWN readout class (`pdf-zoom`), like `.spd-zoom` / `.txt-zoom`: a shared
   // `.zoom` locator resolves to several elements with every viewer mounted at
-  // once, and this is the only readout that has to hold `Fit width` (~60px
-  // against the shared rule's 46px).
+  // once. The class buys NO width of its own — all four readouts share one
+  // (10-toolbar.css), so the control keeps its shape between file types.
   const zoomStepper = createZoomStepper<Zoom>({
     readoutClass: "pdf-zoom",
     initial: zoom,
@@ -1158,11 +1158,11 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     // metadata lands — on a slow link, what you want in order to decide whether
     // to wait — and finally the page count, below, once it is known.
     header.setSubtitle(originSubtitle(origin, summary.fileType?.toUpperCase() || "PDF"));
-    zoom = "Fit";
+    zoom = FIT_PAGE;
     // The READOUT too, not just the state behind it: the stepper keeps its own
     // label, so without this a document opened after zooming the last one
     // renders at Fit while the toolbar still says 300%.
-    zoomStepper.set("Fit");
+    zoomStepper.set(FIT_PAGE);
     pageIndex = Math.max(0, page);
     body.showPlaceholder(summary.name, "Opening this PDF…");
     syncPager();
