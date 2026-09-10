@@ -1103,7 +1103,7 @@ test "v3: fresh and stepwise-migrated databases carry an identical users table" 
     try from_v1.exec("PRAGMA user_version = 1;");
     try migrate(from_v1);
 
-    // And one stamped at v2 (the shipped hot-cache-versioning schema).
+    // And one stamped at v2 (the schema as it shipped, before the bump).
     var from_v2 = try sqlite.Db.openMemory();
     defer from_v2.close();
     try from_v2.exec(ddl_v1);

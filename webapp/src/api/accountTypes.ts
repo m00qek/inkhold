@@ -104,7 +104,7 @@ export interface StorageByKind {
    *
    * **THE FIGURE MEANS "WHAT EMPTYING THE BIN RETURNS"**, and it only means that
    * with the trashed files' retained versions inside it — history follows a file
-   * into the bin and is purged with it (hot-cache-versioning H10). A line
+   * into the bin and is purged with it. A line
    * promising 600 KB that frees 900 KB would be wrong in the user's favour,
    * which is still wrong.
    *
