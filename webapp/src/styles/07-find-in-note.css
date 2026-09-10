@@ -159,6 +159,14 @@
   position: relative;
   overflow: auto;
   display: grid;
+  /* A DEFINITE ROW, so the image's `max-height: 100%` has something to resolve
+     against. Implicit rows are content-sized, which makes that percentage
+     indefinite — so it silently did nothing and `Fit` fitted the WIDTH only,
+     making it identical to `Fit ↔` and the second step pointless. `minmax(0, 1fr)`
+     rather than `1fr` because a bare `1fr` floors at min-content, which a tall
+     image would push past. A second child (the unpreviewable-file message) still
+     gets an implicit auto row beneath. */
+  grid-template-rows: minmax(0, 1fr);
   place-items: center;
   padding: 28px;
   min-height: 0;

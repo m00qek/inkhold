@@ -222,8 +222,12 @@ test.describe(".txt viewer", () => {
     const zoom = await chrome(zoomReadout);
     expect(zoom).toEqual(font);
     // And it is the real treatment, not two coincidentally-unstyled pills: the
-    // shared rule pins a 46px min-width and centres the label.
-    expect(zoom.minWidth).toBe("46px");
+    // shared rule pins one min-width for every viewer's readout and centres the
+    // label. 62px holds the widest label any of them shows — `Fit ↔` in the
+    // reader's image mode, `Fit width` in the PDF viewer — and the others carry
+    // the slack, because the readout sits between two buttons and a label that
+    // outgrows its box would move them.
+    expect(zoom.minWidth).toBe("62px");
     expect(zoom.textAlign).toBe("center");
 
     // The font-size stepper beside it is unaffected — still its own `.zoom`

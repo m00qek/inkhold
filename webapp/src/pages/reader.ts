@@ -235,8 +235,29 @@ export interface Reader {
 }
 
 const ZOOMS = ["Fit", "100%", "150%"] as const;
-type Zoom = (typeof ZOOMS)[number];
-const ZOOM_SCALE: Record<Zoom, number> = { Fit: 1, "100%": 1.18, "150%": 1.68 };
+
+/**
+ * The IMAGE ladder, which is not the note's.
+ *
+ * A note page is a fixed-size document, so `Fit` sits near 100% and three steps
+ * cover it. An image has whatever dimensions a camera or a screenshot gave it:
+ * `Fit` on a large photo can land at 20%, and the note's ladder then offers no
+ * way down and stops at 150% — barely a zoom, and useless for reading small text
+ * in a screenshot, which is the thing images are most often opened for.
+ *
+ * Steps below `Fit` come first so zooming out from it does something. `Fit width`
+ * sits above `Fit` because it drops the height term and can only grow; it is
+ * here for the tall screenshot, the same case that earned the PDF viewer one.
+ */
+const IMAGE_ZOOMS = ["25%", "50%", "Fit ⇕", "Fit ↔", "100%", "200%", "400%"] as const;
+type Zoom = (typeof ZOOMS)[number] | (typeof IMAGE_ZOOMS)[number];
+/**
+ * NOTE-PAGE factors only, and the type says so: keyed by the note ladder rather
+ * than by `Zoom`, so an image-only step can never be looked up here. The numbers
+ * are tuned to the 640px height heuristic below — "100%" is 1.18 — which is
+ * exactly why `sizeImage` refuses to reuse them and reads its own label instead.
+ */
+const ZOOM_SCALE: Record<(typeof ZOOMS)[number], number> = { Fit: 1, "100%": 1.18, "150%": 1.68 };
 const DPR_CAP = 2;
 
 /**
@@ -388,8 +409,15 @@ export function createReader(deps: ReaderDeps): Reader {
     initial: "Fit" as Zoom,
     format: (z: Zoom) => z,
     onStep: (dir) => {
-      const i = Math.max(0, Math.min(ZOOMS.length - 1, ZOOMS.indexOf(zoom) + dir));
-      zoom = ZOOMS[i]!;
+      // The ladder is the CALLER's, which is why one shared stepper serves a
+      // note and an image without knowing either. Falling back to `Fit` covers
+      // a value the current ladder does not hold — `open` resets to it anyway,
+      // so this is the belt rather than the mechanism.
+      const ladder: readonly Zoom[] = mode === "image" ? IMAGE_ZOOMS : ZOOMS;
+      const at = ladder.indexOf(zoom);
+      const from = at < 0 ? Math.max(0, ladder.findIndex((z) => z.startsWith("Fit"))) : at;
+      const i = Math.max(0, Math.min(ladder.length - 1, from + dir));
+      zoom = ladder[i]!;
       if (mode === "image") sizeImage();
       else void showPage(pageIndex);
       return zoom;
@@ -1554,7 +1582,9 @@ export function createReader(deps: ReaderDeps): Reader {
     const rect = stage.getBoundingClientRect();
     const aspect = page.width / page.height;
     let h = Math.min(Math.max(rect.height - 56, 120), 1000);
-    if (zoom !== "Fit") h = 640 * ZOOM_SCALE[zoom];
+    // Reached only in note mode, where `zoom` is always a note-ladder value; the
+    // narrowing is what lets the map stay keyed to that ladder.
+    if (zoom !== "Fit" && zoom in ZOOM_SCALE) h = 640 * ZOOM_SCALE[zoom as keyof typeof ZOOM_SCALE];
     let w = h * aspect;
     // The recognized-text aside shares the stage, so its width is not the page's
     // — and the layers panel, when open over a live stack, takes its slice too.
@@ -1770,7 +1800,7 @@ export function createReader(deps: ReaderDeps): Reader {
 
   /** Apply the current zoom step to the image preview. */
   function sizeImage(): void {
-    if (zoom === "Fit") {
+    if (zoom === "Fit" || zoom === "Fit ⇕") {
       // Back to the CSS rule: fit the stage in both axes.
       fileImg.style.width = "";
       fileImg.style.maxWidth = "";
@@ -1782,6 +1812,14 @@ export function createReader(deps: ReaderDeps): Reader {
     // would silently do nothing.
     fileImg.style.maxWidth = "none";
     fileImg.style.maxHeight = "none";
+    if (zoom === "Fit ↔") {
+      // Fill the stage across and let the height run off the bottom, which is
+      // the whole point for a tall screenshot. Unlike `Fit` this DOES enlarge a
+      // small image, so it is the one step that can exceed natural size without
+      // naming a number.
+      fileImg.style.width = "100%";
+      return;
+    }
     // NOT `ZOOM_SCALE`: those factors are tuned for a note page, whose height is
     // derived from a 640px heuristic, so "100%" there is 1.18. An image has real
     // pixel dimensions, so the label has to mean what it says — 100% is natural

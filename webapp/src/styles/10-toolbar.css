@@ -134,17 +134,19 @@
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
   color: var(--ink-soft);
-  min-width: 46px;
-  text-align: center;
-}
-/* …and the PDF viewer's is the one that has to hold `Fit width`, which measures
-   ~60px at this face and would otherwise widen the control on that one step —
-   the readout is the only thing between two buttons, so a label that outgrows
-   the box moves them. The width lives HERE and not on the shared rule because
-   the other three readouts top out at `100%` / `300%` / `16px` and would just
-   carry 14px of dead space in every toolbar. */
-.pdf-zoom {
+  /* ONE WIDTH FOR ALL FOUR, and the reason it is shared rather than per-viewer:
+     the readout sits between two buttons, so a label that outgrows the box moves
+     them — and a reader stepping between viewers would see the controls shift.
+     62px holds the widest label any of them shows (`Fit ↔`, `Fit width`); the
+     others top out well short of it and carry the slack, which costs a toolbar
+     nothing and costs a clipped label a whole word.
+
+     It USED to be 46px here with the PDF viewer overriding to 62, on the
+     reasoning that only it had a long label. The reader's image mode gained one
+     too, and the `.txt` viewer has a test asserting its readout matches the
+     shared chrome exactly — which a second override would have broken. */
   min-width: 62px;
+  text-align: center;
 }
 
 /* --- the viewer's BIN-MODE cluster ------------------------------------------
