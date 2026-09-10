@@ -53,6 +53,30 @@ export interface PageText {
 }
 
 /**
+ * One link on a page — TWO PRODUCERS, ONE TYPE. It arrives from the server for
+ * a `.note`'s links (`PageLinks`, `api/types.ts`) and from the wasm decoder for
+ * a `.pdf`'s (`render/pdfWire.ts`, `ink_page_links`), and the layer, the
+ * allowlist and the exporter are written once because those are the same
+ * record. That is why it lives here and not with the decoder.
+ *
+ * `x,y,w,h` are the box in the page's own DISPLAY space — top-left origin, y
+ * down. The UNIT differs by producer (see `Api.getPageLinks`); the shape does
+ * not.
+ *
+ * `page` is the resolved 0-based target of an INTERNAL link, or -1 for an
+ * external one. For a `.pdf` the resolving happens in the decoder, where the
+ * document is.
+ */
+export interface PdfLink {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  page: number;
+  uri: string;
+}
+
+/**
  * A layer's identity on the wire — the SNPG record's slot byte, spelled out.
  * Five fixed slots is the `.note` format's own vocabulary (`MAINLAYER`,
  * `LAYER1..3`, `BGLAYER`); the server pairs every payload record with exactly
@@ -178,6 +202,30 @@ export interface PageRef {
    * producers (caches, fixtures, synthesized refs) state nothing about layers.
    */
   layers?: PageLayer[] | null;
+  /**
+   * Whether anything is DRAWN on this page — `true` when some non-background
+   * layer carries a mark, `false` when the page is empty, and `undefined` when
+   * the server has not looked yet.
+   *
+   * THREE STATES, AND THE THIRD IS NOT `false`. The server computes this at
+   * ingest and back-fills pages indexed before the fact existed, so a page can
+   * legitimately be unknown for a while. `undefined` must render as NO CLAIM —
+   * the same as an inked page minus its mark — because painting it as empty
+   * tells someone their notebook is blank while the worker is still catching up.
+   * The wire says so by OMITTING the field, exactly as it omits
+   * {@link sourcePage}, so `undefined` here is the server's own silence and not
+   * a not-yet-shipped stub.
+   *
+   * A FLAG, NOT A COUNT, deliberately: the indicator is yes/no, and the scan
+   * that answers it stops at the first stroke rather than walking a whole layer
+   * to produce a number nothing displays.
+   *
+   * For a `.mark` this is what separates an annotated PDF page from one whose
+   * annotations were erased back to nothing: {@link sourcePage} says which PDF
+   * page a mark page belongs to, and this says whether it still has anything on
+   * it.
+   */
+  hasInk?: boolean;
 }
 
 /** A subfolder in a listing. */
@@ -274,6 +322,21 @@ export interface NoteSummary {
    * decode. Only the RATIO is consumed; the numbers are the source's own pixels.
    */
   thumbAspect?: { w: number; h: number };
+  /**
+   * The id of the live `.mark` that annotates this file, or `null` — the LISTING
+   * half of {@link NoteMeta.annotationsId}, with exactly the same shape and
+   * meaning.
+   *
+   * It exists because a paired `.mark` has no card of its own: the server folds
+   * it out of every listing (a mark is a LAYER of the document, not a document),
+   * so the only place its retained versions can be reached from is the
+   * DOCUMENT's row. Without this field the card would have to fetch the meta of
+   * every entry to find out whether to offer the row at all.
+   *
+   * Only a `.pdf` ever has one, and most do not. Omitted on the wire when there
+   * is none; the seam normalizes absent-or-unusable to `null`.
+   */
+  annotationsId: Id | null;
 }
 
 /** A single row in a folder listing: either a subfolder or a note. */

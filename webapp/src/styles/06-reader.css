@@ -73,7 +73,62 @@
   display: flex;
   flex-direction: column;
   align-items: center;
+  /* The number is a CAPTION under the page, not a line of it. Sitting flush
+     against the thumbnail's bottom edge it read as part of the sheet — the row
+     is a fixed 124px and the thumbnail 101px, so the slack was all pooling
+     BELOW the number instead of between the two things it had to separate. */
+  gap: var(--sp-1);
   height: var(--preview-h-filmstrip);
+  /* THE INK GUTTER, reserved on every row whether or not it draws a stroke, so
+     the thumbnails do not shift sideways as the rail fills in. It belongs to the
+     ROW rather than to `.filmstrip` because `VirtualList` positions each row
+     absolutely (`left: 0; right: 0`) — a gutter on the container would be
+     stepped over by the row's own placement, and the stroke would sit under the
+     thumbnail instead of beside it. It also has to clear the `aria-current`
+     outline, which is 1.5px at `outline-offset: 2px` on the thumb. */
+  padding-left: var(--sp-3);
+}
+
+/* ── The ink edge ──────────────────────────────────────────────────────────
+   One stroke per page that carries ink, in the gutter, and nothing at all on a
+   page that does not.
+
+   IT IS THE THUMBNAIL'S HEIGHT, NOT THE ROW'S — reversed 2026-09-09, on
+   looking at it. The stroke ran the full row on the argument that a filmstrip is
+   a book seen edge-on, so consecutive written pages would meet as one unbroken
+   line and an empty page would be a clean break in it. That argument was made
+   about a diagram and it did not survive the screen: at row height the stroke
+   also spans the page NUMBER and the gap under it, so it reads as a rule running
+   down the panel rather than as a mark on a page, and the thing it is supposedly
+   about — the thumbnail — is the part it lines up with worst.
+
+   The mark belongs to the PAGE, and the thumbnail is the page; the number is a
+   caption. Matching it costs the continuous edge, and that is the right trade:
+   the rail was never going to be read as one line while a 23px gap of caption
+   sat inside it, and a mark that starts and stops with the thing it describes
+   needs no explaining.
+
+   `--paper-ink` is "handwriting rendered onto a note page" — the token that
+   already means the user's own marks, and it inverts for the dark theme for
+   free. `--accent` would have said "search", which is the badge four pixels
+   away at the row's other corner.
+
+   Square ends, no radius: at two pixels a corner is noise, and the app's 2px
+   corner belongs to controls. The mark carries its meaning by POSITION, not by
+   hue, so it survives a colour-blind reader and an e-ink screen. It is
+   decorative here and named in words on the row instead (`pages/pageIndex.ts`). */
+.filmstrip__page--inked::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  /* Top-aligned with the thumbnail, which sits at the row's top edge (the row is
+     a flex column that packs from the start), so this needs no offset — and it
+     stays right if the caption below ever changes height. */
+  top: 0;
+  width: 2px;
+  height: var(--preview-h-panel);
+  background: var(--paper-ink);
+  pointer-events: none;
 }
 /* Match density across the notebook, on UI that already exists. */
 .filmstrip__hits {

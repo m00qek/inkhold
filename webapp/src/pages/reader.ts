@@ -30,23 +30,22 @@ import { createFindController, type FindState } from "./findInNote";
 import { createReaderExports } from "./readerExports";
 import { OVAL_VIEWBOX, ovalsFor } from "./findOvals";
 import { createToolbar } from "./toolbar";
+import { svg, VIEWER_IC } from "./viewerIcons";
+import { createPager, createZoomStepper } from "./viewerControls";
+import { createViewerExportMenu } from "./viewerExportMenu";
 import {
-  svg,
-  VIEWER_IC,
   VIEWER_DEBOUNCE_MS,
   backWord,
   originSubtitle,
   createViewerHeader,
-  createZoomStepper,
-  createViewerExportMenu,
 } from "./viewerChrome";
 import { createBinViewerActions, type BinRetention } from "../ui/binViewerActions";
 import { relativeTime, absoluteTime } from "../ui/relativeTime";
 import { createLayersPanel } from "./layersPanel";
-import { createSidePanel, sidePanelState } from "../ui/sidePanel";
+import { createSidePanel, sidePanelState, tokenPx, MIN_PAGE_W } from "../ui/sidePanel";
 import { createPageIndex } from "./pageIndex";
-import { createPdfLinkLayer } from "./pdfLinkLayer";
-import type { PdfLink } from "../render/pdfLinks";
+import { createLinkLayer } from "./linkLayer";
+import type { PdfLink } from "../core/types";
 import { binNotePageHref, notePageHref } from "../router";
 import { DEFAULT_PAGE_DIMS, skeletonPage } from "../core/noteSkeleton";
 import {
@@ -59,7 +58,7 @@ import type { PageLayer } from "../core/types";
 export interface ReaderDeps {
   api: Api;
   /**
-   * The ONE in-document search: one document's
+   * The ONE in-document search (§1.1): one document's
    * `text/<md5>` in the same wasm FTS5 instance the library search uses. Shared
    * across the reader and the `.txt`/`.pdf` viewers so a session holds one
    * instance and one built index — §8.1 measured that documents through a reused
@@ -241,20 +240,6 @@ const ZOOM_SCALE: Record<Zoom, number> = { Fit: 1, "100%": 1.18, "150%": 1.68 };
 const DPR_CAP = 2;
 
 /**
- * A px-valued CSS token read off `:root`. The reader's relayout has to subtract
- * exactly the width a docked side panel takes from the stage — and that width is
- * a token now (`--panel-w`, `--panel-w-wide`, `--panel-gap` in 00-tokens.css). So
- * the JS reads the very same value the stylesheet uses rather than duplicating it
- * as a hand-synced constant that quietly drifts. `fallback` matches the token's
- * authored value for any environment where the property is not yet resolvable.
- */
-function tokenPx(name: string, fallback: number): number {
-  if (typeof getComputedStyle !== "function" || typeof document === "undefined") return fallback;
-  const n = Number.parseInt(getComputedStyle(document.documentElement).getPropertyValue(name), 10);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-/**
  * The reader's second line. The folder is prepended EXACTLY WHEN Back is not
  * already carrying it: from a search result or the bin the note's folder is new
  * information, and from the folder itself it would be the duplication that
@@ -275,7 +260,6 @@ export function createReader(deps: ReaderDeps): Reader {
     onBack: () => deps.onBack(),
   });
   const back = header.back;
-  const pagerCount = el("span", { class: "pager__count", text: "1 / 1" });
   const pageCanvas = el("canvas");
   // The focused page's PER-LAYER canvas stack (pages/noteLayers.ts) — mounted
   // over the composite canvas and shown INSTEAD of it whenever the page's meta
@@ -283,11 +267,11 @@ export function createReader(deps: ReaderDeps): Reader {
   // the stack degrades, the reader never breaks.
   const noteLayerCtl = createNoteLayersController({ getTemplate: createTemplateProvider(api) });
   // The page's OWN links, as real anchors — the SAME component the PDF viewer
-  // uses (`pages/pdfLinkLayer.ts`), because a link is a link whichever container
+  // uses (`pages/linkLayer.ts`), because a link is a link whichever container
   // it came out of. Mounted LAST, so it stacks ABOVE both the composite canvas
   // and the layer stack: a link under a scribble is exactly the case that
   // occurs, because people annotate around the things they care about.
-  const linkLayer = createPdfLinkLayer();
+  const linkLayer = createLinkLayer();
   const pageEl = el("div", { class: "page" }, pageCanvas, noteLayerCtl.el, linkLayer.el);
 
   // The recognized-text aside sits BESIDE the page inside .page-wrap (per the
@@ -387,13 +371,18 @@ export function createReader(deps: ReaderDeps): Reader {
   const fileBody = el("div", { class: "empty filestage__empty" });
   const fileStage = el("div", { class: "filestage", hidden: true }, fileImg, fileBody);
 
-  const prev = el("button", { class: "icon-btn", type: "button", "aria-label": "Previous page", html: svg(VIEWER_IC.prev, 1.8) });
-  const next = el("button", { class: "icon-btn", type: "button", "aria-label": "Next page", html: svg(VIEWER_IC.next, 1.8) });
+  // The shared control (`viewerChrome.createPager`) — the PDF viewer mounts the
+  // same one. The reader GAINS bounds from it: its Forward button used to stay
+  // live on the last page, and its counter moved without announcing.
+  const pager = createPager({ readoutClass: "pager__count", onGo: (index) => goToPage(index) });
   // The zoom stepper (`− [Fit] +`). `onStep` walks the fixed ZOOMS ladder,
   // mutating the reader's own `zoom` state (read by `sizeImage`/`showPage`) and
   // re-rendering the affected surface — the image is CSS-resized, a note page
-  // re-decoded at the new scale. Bare `.zoom` readout class (the reader is the
-  // only viewer using it) — the others keep `.spd-zoom`/`.txt-zoom` apart.
+  // re-decoded at the new scale. Bare `.zoom` readout class, which the `.txt`
+  // viewer's FONT stepper also wears — harmless because the two live in
+  // different viewer regions, so every locator that reaches either is scoped to
+  // one. The readouts that had to be told apart WITHIN a bar, or that needed
+  // their own width, took their own class: `.spd-zoom`, `.txt-zoom`, `.pdf-zoom`.
   const zoomStepper = createZoomStepper({
     readoutClass: "zoom",
     initial: "Fit" as Zoom,
@@ -620,13 +609,12 @@ export function createReader(deps: ReaderDeps): Reader {
   // hide exactly them. A pager over a single image, or a "Recognized text" toggle
   // on a PDF, would be chrome that does nothing — the same species of lie as the
   // blank canvas this change removes.
-  const pagerEl = el("div", { class: "pager" }, prev, pagerCount, next);
   // Find reads the RECOGNITION of a `.note`, so it is meaningless over a PDF or
   // an image — absent there rather than present and dead.
   // Zoom is deliberately NOT in here. A scanned page or a screenshot is exactly
   // the thing someone wants to enlarge, and the control already exists — it was
   // hidden only because it lived in the note-only group.
-  const noteOnly: HTMLElement[] = [findToggle, ocrToggle, layersToggle, pagesToggle, pagerEl, exportMenu.el];
+  const noteOnly: HTMLElement[] = [findToggle, ocrToggle, layersToggle, pagesToggle, pager.el, exportMenu.el];
 
   // Present only in the non-note modes (image, no-preview). An `<a download>`
   // rather than a button: the browser already knows how to save a URL, and the
@@ -667,7 +655,7 @@ export function createReader(deps: ReaderDeps): Reader {
     className: "reader__bar",
     leading: [{ el: back, focus: [back] }, { el: title }],
     view: [
-      { kind: "custom", key: "pager", el: pagerEl, focus: [prev, next] },
+      { kind: "custom", key: "pager", el: pager.el, focus: pager.focus },
       { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus },
       { kind: "custom", key: "find", el: findToggle, focus: [findToggle] },
       { kind: "custom", key: "ocr", el: ocrToggle, focus: [ocrToggle] },
@@ -1355,7 +1343,7 @@ export function createReader(deps: ReaderDeps): Reader {
    * this floor, so the page index yields to the tool the user just opened. Two
    * docks always trip it.
    */
-  const MIN_PAGE_W = 360;
+
 
   /**
    * Is the layers panel actually ON SCREEN? THE one predicate the toggle, the
@@ -1525,7 +1513,7 @@ export function createReader(deps: ReaderDeps): Reader {
     // now rather than after the paint, which is what a jump across a long
     // notebook should look like.
     pageIndexPanel.setCurrent(pageIndex);
-    pagerCount.textContent = `${pageIndex + 1} / ${meta.pages.length}`;
+    pager.set(pageIndex, meta.pages.length);
 
     // WHAT THE LAYERS AFFORDANCE MAY SAY, decided HERE — from the metadata, in
     // the same synchronous breath as the pager — rather than when the decode
@@ -1716,6 +1704,19 @@ export function createReader(deps: ReaderDeps): Reader {
       return;
     }
     pageIndexPanel.setPages(meta.pages.length);
+    // WHICH PAGES WERE WRITTEN ON — the one question the strip answers that a
+    // thumbnail cannot, because the strip is virtualised and most rows have
+    // never been painted. It comes down with the page list rather than out of a
+    // decode, so it is true for page 900 while you are looking at page 3.
+    //
+    // A page the server has not looked at yet carries no `hasInk` at all, and it
+    // is LEFT OUT rather than guessed at: the strip takes a map that must cover
+    // the document, and draws nothing anywhere if it does not.
+    const inked = new Map<number, boolean>();
+    meta.pages.forEach((page, i) => {
+      if (page.hasInk !== undefined) inked.set(i, page.hasInk);
+    });
+    pageIndexPanel.setInk(inked);
     pageIndexPanel.setCurrent(pageIndex);
   }
 
@@ -1749,10 +1750,22 @@ export function createReader(deps: ReaderDeps): Reader {
       return;
     }
 
-    // Paging keys belong to the page, not to the field someone is typing in.
+    // Paging keys belong to the page, not to the field someone is typing in —
+    // which now includes the pager's own page field, reached through this same
+    // guard.
     if (e.target instanceof HTMLInputElement) return;
     if (e.key === "ArrowRight") goToPage(pageIndex + 1);
     else if (e.key === "ArrowLeft") goToPage(pageIndex - 1);
+    // Home/End are PREVENTED where the arrows are not: unclaimed they scroll the
+    // document to its ends, and a jump to page 1 that also threw the stage to the
+    // top would read as two things happening.
+    else if (e.key === "Home") {
+      e.preventDefault();
+      goToPage(0);
+    } else if (e.key === "End" && meta) {
+      e.preventDefault();
+      goToPage(meta.pages.length - 1);
+    }
   }
 
   /** Apply the current zoom step to the image preview. */
@@ -1780,8 +1793,6 @@ export function createReader(deps: ReaderDeps): Reader {
     }
   }
 
-  prev.addEventListener("click", () => goToPage(pageIndex - 1));
-  next.addEventListener("click", () => goToPage(pageIndex + 1));
   ocrToggle.addEventListener("click", () => {
     ocr.toggle();
     // A right dock just opened; on a narrow stage collapse the page index so the

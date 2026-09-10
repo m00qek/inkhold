@@ -12,8 +12,6 @@
 //! | 16 MB `.txt` (`max_file_bytes`) | ~1.2 s | **48-60 s** |
 //!
 //! A minute of held connection for a file the user is allowed to upload today.
-//! This is a repair for shipped behaviour, not groundwork; it was measured first.
-//!
 //!
 //! ## The job store is a QUERY, not a queue
 //!
@@ -27,27 +25,16 @@
 //!     note arriving during a long job is taken next; a queue frozen at enqueue
 //!     time could not do that
 //!
-//! It also matches the self-healing posture the index paths already have
-//! (`ensureIndexed`): no backfill migration is ever required.
-//!
 //! ## One worker IS the serialization
 //!
-//! "If there is no queue, what serializes?" — a queue never serialized
-//! anything. A queue with ten consumers is not serialized; one consumer with no
-//! queue is. The serializer is the single worker, so there is no claiming, no
-//! lease, no `status` column: those exist to stop two workers taking the same
-//! row, and there is one worker, in one process, against one SQLite file.
+//! There is no claiming, no lease, no `status` column: those exist to stop two
+//! workers taking the same row, and there is one worker, in one process,
+//! against one SQLite file.
 //!
-//! **This is also the memory story.** Before this, N concurrent uploads meant N
-//! concurrent derives; peak RSS scaled with how many people hit save at once.
-//! Now it is one file's cost, whatever the traffic — which is what has to be
-//! true for the 50 MB budget on a Pi to hold once bigger formats arrive.
-//!
-//! ## Adding a tenant
-//!
-//! Write a `Tenant` and add it to `tenants`. The contract is the whole
-//! interface: `pending_sql` says what is outstanding, `run` does one blob's
-//! work. Nothing else in here knows what a `.txt` is.
+//! **This is also the memory story.** N concurrent uploads would otherwise mean
+//! N concurrent derives, with peak RSS scaling with how many people hit save at
+//! once. One file's cost whatever the traffic is what has to be true for the
+//! 50 MB budget on a Pi to hold once bigger formats arrive.
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
@@ -56,6 +43,7 @@ const derivedstore = @import("../store/derived.zig");
 const derivesearch = @import("derive_search.zig");
 const txtindex = @import("txt_index.zig");
 const noteindex = @import("note_index.zig");
+const inkscan = @import("ink_scan.zig");
 const pdfindex = @import("pdf_index.zig");
 const pdftext = @import("pdf_text.zig");
 const pdfprobe = @import("../pdf/probe.zig");
@@ -67,22 +55,16 @@ const log = std.log.scoped(.deferred);
 ///
 /// THE BACKSTOP, and it is why startup needs no special case: work left behind
 /// by a restart, or created by a path that forgot to signal, is found by the
-/// next tick rather than waiting for the next upload. Same belt-and-braces
-/// reasoning as `startupSweeps`.
+/// next tick rather than waiting for the next upload.
 pub const idle_tick_ns: u64 = 30 * std.time.ns_per_s;
 
-/// One kind of post-upload work.
-///
-/// A tenant is two things: a QUESTION (`pending_sql` — what do I still owe?)
-/// and an ANSWER (`run` — do one blob's worth). The worker owns the thread, the
-/// ordering and the lock discipline; a tenant owns its own format entirely.
+/// One kind of post-upload work. The worker owns the thread, the ordering and
+/// the lock discipline; a tenant owns its own format entirely.
 pub const Tenant = struct {
     /// For logs. Not an identifier — the SQL and the function are.
     name: []const u8,
 
-    /// Lower runs first. Ties break on blob size ascending (shortest-job-first),
-    /// so fifty small files produce fifty quick wins rather than queueing behind
-    /// one enormous one.
+    /// Lower runs first; ties break on blob size ascending, in `discovery`.
     priority: u8,
 
     /// THE PREDICATE: a bare FROM/WHERE naming the blobs this tenant still owes
@@ -96,11 +78,8 @@ pub const Tenant = struct {
     /// **A clause rather than a statement, because there are two readers of it.**
     /// This file takes the next job out of it (`discovery` below, `LIMIT 1`);
     /// `pending.zig` COUNTS over it to tell a user how many of their documents
-    /// are still being indexed. Pending-ness is not a second fact about the
-    /// worker — it IS the worker's own question, asked with a different verb —
-    /// and a hand-written second copy of the clause is precisely how the count
-    /// and the worker would come to disagree. A count that says "nothing
-    /// pending" while a derive is running is worse than no count at all.
+    /// are still being indexed. A hand-written second copy is precisely how the
+    /// count and the worker would come to disagree.
     ///
     /// A reader may only ADD a bound to it (`AND f.user_id = ?`, `AND f.md5 = ?`)
     /// — never narrow or restate what is already there.
@@ -111,9 +90,8 @@ pub const Tenant = struct {
     pending_sql: []const u8,
 
     /// Do one blob's work. Called WITHOUT the DB lock held: the tenant takes it
-    /// itself, around its own transaction, after the expensive part is done.
-    /// That is the rule this whole file exists to enforce — parse off the lock,
-    /// write under it.
+    /// itself, around its own transaction, after the expensive part is done —
+    /// parse off the lock, write under it.
     ///
     /// Errors are logged and the blob is left outstanding; the discovery query
     /// will offer it again. A tenant that can never succeed on a given blob
@@ -135,10 +113,7 @@ pub const Job = struct {
     /// A name the blob is known by. Any holder's name will do — the extension
     /// is the whole gate, and a blob's holders cannot disagree about it.
     name: []const u8,
-    // (A `now` used to ride here, threaded into every band mint so a partition's
-    // `created_at` and a job's clock agreed. schema v14 deleted
-    // the partitions; nothing a tenant writes is timestamped any more.)
-    /// The two derived stores, or null where this
+    /// The two derived stores (§2.1), or null where this
     /// deployment keeps none — every test that does not wire them, and
     /// `drainNow`. Null means "do not write them", never an error.
     terms: ?derivedstore.DerivedStore = null,
@@ -147,9 +122,8 @@ pub const Job = struct {
     /// Is this blob's `.txt` work still outstanding, asked under the lock?
     ///
     /// The discovery query already said yes, but it said so before the derive,
-    /// and an upload can heal the same blob in between. Cheap — two indexed
-    /// single-row selects — and it is what keeps a duplicate derive from
-    /// becoming a duplicate write.
+    /// and an upload can heal the same blob in between. Two indexed single-row
+    /// selects, and what keeps a duplicate derive from becoming a duplicate write.
     fn check(self: Job) !bool {
         self.lock.lockUncancelable(self.io);
         defer self.lock.unlock(self.io);
@@ -188,12 +162,6 @@ fn discovery(comptime from_where: []const u8) []const u8 {
 }
 
 /// `.txt` paragraph segments (`txt_index.zig`) — the first tenant.
-///
-/// The predicate lives in `txt_index.pending_from_where`, beside
-/// `txtindex.needsDerive`, whose memo it mirrors — and the two are asserted to
-/// agree in this file's tests. It is a second expression of the same question,
-/// which is a cost; the alternative is a worker that cannot tell finished work
-/// from outstanding work without calling into every tenant, which is worse.
 const txt_tenant: Tenant = .{
     .name = "txt",
     .priority = 1,
@@ -205,18 +173,8 @@ const txt_tenant: Tenant = .{
 fn runTxt(job: Job) anyerror!void {
     // THE THREE-STEP SHAPE EVERY TENANT FOLLOWS, and the reason the lock is
     // passed in rather than taken around the whole call: the middle step is the
-    // expensive one and it must not hold the connection.
-    //
-    // `txt_index` itself stays lock-agnostic — it knows about paragraphs, not
-    // about threading — so the discipline lives here, where the threading does.
-    //
-    // **STEP 3 USED TO BE A CHUNKED WRITE.** A 1,703-segment document written in
-    // one transaction held the global `db_lock` 137 ms on the dev box and 13.9 s
-    // on the Pi, so the paragraph rows were written reserve / chunk / finish,
-    // one transaction per chunk. schema v14 deleted those rows
-    // and every one of those transactions with them: what this tenant writes to
-    // the database now is ONE verdict, and §8.5's 98.1 s of held lock per
-    // whole-library ingest is what that removes.
+    // expensive one and it must not hold the connection. `txt_index` itself
+    // stays lock-agnostic, so the discipline lives here, where the threading is.
 
     // 1. Re-check under the lock. The discovery query said so a moment ago, but
     //    an upload may have healed it since; `needsDerive` is the authority.
@@ -227,10 +185,8 @@ fn runTxt(job: Job) anyerror!void {
     var d = (try txtindex.deriveStored(job.gpa, job.blobs, job.md5)) orelse return;
     defer d.deinit();
 
-    // 2b. The two derived FILES, still off the lock — §2.5's *"a file write is
-    //     not in a transaction at all"*. They are now the ONLY output of this
-    //     pass a reader ever sees, but a failure is still logged rather than
-    //     fatal: they are regenerable from the blob, and `reconcileDerived`
+    // 2b. The two derived FILES, still off the lock. A failure is logged rather
+    //     than fatal: they are regenerable from the blob, and `reconcileDerived`
     //     finds a document whose files are missing by asking the DISK.
     //
     //     It can be off the lock BECAUSE THE FOLD DOES NOT TOUCH THIS DATABASE.
@@ -250,10 +206,8 @@ fn runTxt(job: Job) anyerror!void {
     // 3. The verdict, under the lock, in one transaction. Re-asked first because
     //    the derive above ran without the lock, so an ingest — or a second pass
     //    of this worker — may have answered the same question about the same blob
-    //    meanwhile. (It also arbitrated against the listing path's lazy heal,
-    //    `txt_index.ensureIndexed`, until that was removed for writing this
-    //    verdict WITHOUT the files it stands for.) Every early return above
-    //    leaves the blob outstanding, which is safe: a re-run derives it again.
+    //    meanwhile. Every early return above leaves the blob outstanding, which
+    //    is safe: a re-run derives it again.
     job.lock.lockUncancelable(job.io);
     defer job.lock.unlock(job.io);
     if (!try txtindex.needsDerive(job.db, job.md5)) return;
@@ -263,9 +217,7 @@ fn runTxt(job: Job) anyerror!void {
     try job.db.exec("COMMIT;");
 }
 
-/// `terms/<md5>.<v>` and `text/<md5>.<v>` for one `.txt`. All of the work is in
-/// `derive_search.writeDerived` and `txt_index.Pages`; what is left here is the
-/// decision that this tenant writes them at all.
+/// `terms/<md5>.<v>` and `text/<md5>.<v>` for one `.txt`.
 fn writeTxtFiles(job: Job, d: txtindex.Derived) !void {
     const terms_store = job.terms orelse return;
     const text_store = job.text orelse return;
@@ -283,12 +235,11 @@ fn writeTxtFiles(job: Job, d: txtindex.Derived) !void {
 /// A `.pdf`'s shape (`pdf_index.zig`) and then its TEXT (`pdf_text.zig`) — page
 /// count, the page-1 box, whether the file opens at all, and what it says.
 ///
-/// AFTER `.txt` on purpose, and now for a second reason as well. A note or a
-/// text file is what somebody just synced and is about to look for; a PDF's tile
-/// shape can wait a beat. The costs run the same way round: probing a
-/// 1,703-page document is 13.2 MB and walks its page tree, and the text pass
-/// behind it is ~2 minutes on the deployment target — the biggest and least
-/// urgent job this worker has.
+/// AFTER `.txt` on purpose. A note or a text file is what somebody just synced
+/// and is about to look for; a PDF's tile shape can wait a beat. The costs run
+/// the same way round: probing a 1,703-page document is 13.2 MB and walks its
+/// page tree, and the text pass behind it is ~2 minutes on the deployment
+/// target — the biggest and least urgent job this worker has.
 ///
 /// ONE tenant asking two questions, not two tenants — see
 /// `pdf_index.pending_from_where` for why the forward-progress guard makes that
@@ -344,17 +295,6 @@ fn runPdfProbe(job: Job) anyerror!void {
 /// The PDF text pass — the tenant's second question, and back inside the
 /// three-step shape.
 ///
-/// **IT USED TO BE THE EXCEPTION, AND schema v14 ENDED THAT.**
-/// A 1,450-page PDF's `kind = 2` rows written in one transaction held the global
-/// `db_lock` for 13.9-24.4 s, so the row write was CHUNKED —
-/// extract off the lock, commit under it, around a band of masked rowids
-/// reserved up front — and the derived files were a SECOND MuPDF walk of the
-/// same book, ~0.10 s/page on the target, accepted because the two consumers
-/// could not share one pull loop. Step 8 deleted the rows, the bands and the
-/// chunked write, and with them the second walk: what is left is one extraction,
-/// straight into `derive_search.writeDerived`, and one transaction for the
-/// verdict.
-///
 /// **Every early return leaves the blob outstanding**, which is safe because the
 /// whole pass is simply redone: `pdf_text` is still NULL, so the discovery query
 /// offers the blob again.
@@ -387,12 +327,8 @@ fn runPdfText(job: Job) anyerror!void {
 
     // 2b. THE WALK, off the lock: one page at a time out of MuPDF and straight
     //     into the two derived files. Failure is logged, never fatal — the files
-    //     are regenerable and `reconcileDerived` asks the DISK for them.
-    //
-    //     BEFORE the verdict, and that ordering is the point. §2.4 makes the
-    //     FILE the fact that a document is derived; write it after the verdict
-    //     and a crash in between leaves a blob the discovery query will never
-    //     offer again and a file nothing will ever write.
+    //     are regenerable and `reconcileDerived` asks the DISK for them. BEFORE
+    //     the verdict, for the reason `runTxt`'s step 2b gives.
     var src = pdftext.Pages.init(job.gpa, &ex);
     defer src.deinit();
     writePdfFiles(job, &src, doc_pages) catch |e| {
@@ -419,42 +355,83 @@ fn runPdfText(job: Job) anyerror!void {
 
 /// `terms/<md5>.<v>` and `text/<md5>.<v>` for one `.pdf`.
 ///
-/// The page source is the CALLER'S, and that is the change §6 step 8 made here.
+/// The page source is the CALLER'S, so this walks the extractor no second time:
+/// a second walk costs ~0.10 s/page on the deployment target, which on the
+/// 1,703-page harshest subject on record is ~2 minutes against ~4.
 ///
-/// This used to own the source and walk the extractor a SECOND time — ~0.10
-/// s/page on the deployment target, taking the 1,703-page harshest subject on
-/// record from ~2 minutes to ~4. It was accepted rather than overlooked: the
-/// chunked `kind = 2` write and `writeDerived` are both PULL loops, and fusing
-/// them meant either inverting `writeDerived` into a callback (exactly the shape
-/// §2.2's per-page record removed) or putting `job.db`, the lock and the
-/// reserved bands inside a format-blind page source. Step 8 deleted the other
-/// loop, so the source moved out to the caller and the second extraction is
-/// simply gone.
-///
-/// **A SCAN needs no special case any more.** Its source yields nothing, and
-/// `writeDerived` over an empty source writes exactly the header-only pair the
-/// old `NoPages` shortcut wrote by hand — the right artifact, not an omission:
-/// §2.4 makes the file's existence the fact that the document is derived, and a
-/// scan genuinely is.
+/// A SCAN needs no special case. Its source yields nothing, and `writeDerived`
+/// over an empty source writes a header-only pair — the right artifact, not an
+/// omission: §2.4 makes the file's existence the fact that the document is
+/// derived, and a scan genuinely is.
 fn writePdfFiles(job: Job, src: *pdftext.Pages, doc_pages: u32) !void {
     const terms_store = job.terms orelse return;
     const text_store = job.text orelse return;
     try derivesearch.writeDerived(job.gpa, terms_store, text_store, job.md5, doc_pages, src);
 }
 
+/// `has_ink` for a `.note` whose page rows predate the column
+/// (`ink_scan.ink_pending_from_where`) — §2.4's back-fill.
+///
+/// LAST, at priority 3, and deliberately so. The other two tenants make a
+/// just-synced document searchable; this one heals a fact about documents the
+/// user has had for months, and the page index reads NULL as "not yet looked"
+/// until it does — an omitted mark, never a wrong one. Nothing waits on it.
+///
+/// **THE ONLY TENANT THAT WRITES NO VERDICT COLUMN**, because it does not need
+/// one: its work IS the rows, so `has_ink IS NULL` is at once the outstanding
+/// set and the missing answer. That is what `ddl_v16`'s tri-state buys, and it
+/// is why this feature cost no `index_version` bump — the rows heal where a bump
+/// would have re-folded every note's terms on the deployment target.
+const ink_tenant: Tenant = .{
+    .name = "ink",
+    .priority = 3,
+    .from_where = inkscan.ink_pending_from_where,
+    .pending_sql = discovery(inkscan.ink_pending_from_where),
+    .run = runInk,
+};
+
+fn runInk(job: Job) anyerror!void {
+    // 1. Lift the outstanding pages out under the lock. Nothing here is
+    //    proportional to the note: it is the packed layer records, tens of bytes
+    //    per page, copied so the statement can die with the lock.
+    var scan = blk: {
+        job.lock.lockUncancelable(job.io);
+        defer job.lock.unlock(job.io);
+        if (!try inkscan.inkNeedsScan(job.db, job.md5)) return;
+        break :blk try inkscan.pendingInk(job.gpa, job.db, job.md5);
+    };
+    defer scan.deinit();
+    if (scan.pages.len == 0) return;
+
+    // 2. Scan OFF the lock. Ranged reads that stop at each page's first stroke —
+    //    the part that touches the blob, and the whole reason this is a job
+    //    rather than a statement.
+    inkscan.scanInk(job.blobs, job.md5, &scan);
+
+    // 3. The answers, under the lock, in one transaction. The UPDATE is itself
+    //    scoped to `has_ink IS NULL`, so an ingest that re-indexed the same blob
+    //    while we were reading keeps its fresher answer and this writes nothing.
+    job.lock.lockUncancelable(job.io);
+    defer job.lock.unlock(job.io);
+    try job.db.exec("BEGIN IMMEDIATE;");
+    errdefer job.db.exec("ROLLBACK;") catch {};
+    try inkscan.storeInk(job.db, job.md5, scan);
+    try job.db.exec("COMMIT;");
+}
+
 /// Every tenant, in one named place so the SET of them can be tested rather
 /// than only the individual tenants — the same reason `startupSweeps` exists.
 /// A sweep that nothing calls is a sweep that silently never runs.
-pub const tenants = [_]Tenant{ txt_tenant, pdf_tenant };
+pub const tenants = [_]Tenant{ txt_tenant, pdf_tenant, ink_tenant };
 
 // ---------------------------------------------------------------------------
 // Reconcile — the backfill the tenant predicates structurally cannot do
 // ---------------------------------------------------------------------------
 
 /// `terms/<md5>.<v>` and `text/<md5>.<v>` for one `.note`, the reconcile twin of
-/// `files.writeNoteDerived`. The `.note` format has no tenant of its own: it
-/// derives inside the upload path (§2.4), so this is the ONLY code that can give
-/// a note that predates the feature its files.
+/// `files.writeNoteDerived`. The `.note` format has no tenant of its own — it
+/// derives inside the upload path (§2.4) — so this is the ONLY code that can
+/// give a note that predates the feature its files.
 ///
 /// `!p.indexable` returns rather than writing header-only files, and that is
 /// deliberate agreement with the ingest side: a blob the note parser rejects is
@@ -479,35 +456,24 @@ fn writeNoteFiles(job: Job, p: *const noteindex.Parsed) !void {
 
 /// THE RECONCILE PREDICATE — and the whole point of it is what it does NOT say.
 ///
-/// **The bug it repairs.** The derived-file writes were hung off the tenants'
-/// `pending_from_where`, which ask *"does this blob still owe INDEX work?"*.
-/// Every blob indexed before the feature existed answers **no**, so it is never
-/// offered and never gets its files. MEASURED against the dev database: **0 of 4
-/// `.txt` blobs would be offered — all four are already indexed** — and the 22
-/// `.note` blobs fail from the other side, deriving at ingest with a dedup'd
-/// re-link taking no fresh parse. the search redesign states the rule the
-/// old question violates: *"derived is the existence of the file, for every
-/// format, with no tenant predicate involved."*
+/// There is no `txt_index IS NULL`, no `pdf_probe IS NULL`, no index state of
+/// any kind here, because a tenant's "does this blob still owe INDEX work?"
+/// answers **no** for every blob indexed before the derived files existed, and
+/// that blob then never gets them. This clause says only **"a live document of
+/// a format we can derive"**; whether its files exist is asked of the DISK, one
+/// `has` per document, because §2.4 makes the file the authority and a column
+/// would be a second opinion that needs a migration to acquire.
 ///
-/// So there is no `txt_index IS NULL`, no `pdf_probe IS NULL`, no index state of
-/// any kind here. This clause says only **"a live document of a format we can
-/// derive"**; whether its files exist is asked of the DISK, one `has` per
-/// document, because §2.4 makes the file the authority and a column would be a
-/// second opinion that needs a migration to acquire.
-///
-/// **`ni.indexable` is the FORMAT question, not a work question**, and it is
-/// how both tenants already spell "is this really a note" (*"a real `.note` is
-/// never chunked, whatever it is called"*). Taking it from the parsed content
-/// rather than from the name is strictly better here than an extension test
-/// would be: a `.note` whose bytes do not parse is correctly not a candidate
-/// (nothing to derive, so an extension rule would re-parse it every tick for
-/// ever), and a note living under some other name is correctly still one.
+/// **`ni.indexable` is the FORMAT question, not a work question**, and taking it
+/// from the parsed content rather than from the name is deliberate: a `.note`
+/// whose bytes do not parse is correctly not a candidate (an extension rule
+/// would re-parse it every tick for ever), and a note living under some other
+/// name is correctly still one.
 ///
 /// **The `note_index` join is `txt_index.pending_from_where`'s ORDER CONTRACT,
 /// inherited on purpose.** A blob with no row, or a stale one, is not offered —
 /// it cannot be, because `indexable` is what picks the parser. It becomes
-/// visible once `ensureIndexed` heals the row, which is the same self-healing
-/// posture the rest of this file rests on.
+/// visible once `ensureIndexed` heals the row.
 ///
 /// Bound 1 is the index version; bound 2 is the CURSOR — see `nextCandidate`.
 const reconcile_sql =
@@ -539,10 +505,9 @@ const Candidate = struct {
 
 /// Derive one document's two files from its stored blob, dispatching on format.
 ///
-/// Called WITHOUT the DB lock, like every `Tenant.run`, and for the same reason:
-/// this is the parse, and the parse is the expensive half. Unlike a tenant it
-/// writes nothing to the database at all, so there is no transaction to take the
-/// lock back for.
+/// Called WITHOUT the DB lock, like every `Tenant.run`: this is the parse, and
+/// the parse is the expensive half. Unlike a tenant it writes nothing to the
+/// database at all, so there is no transaction to take the lock back for.
 fn deriveOne(job: Job, indexable: bool) !void {
     if (indexable) return deriveNote(job);
     if (txtindex.wants(job.name)) return deriveTxt(job);
@@ -669,9 +634,8 @@ pub const Worker = struct {
         // ONCE AT START, and on THIS thread rather than the boot path. Deriving
         // a library that has none is minutes of MuPDF and note parsing on a Pi
         // 1 B+, and boot must not wait for it — where `nice19` above has already
-        // put this thread at the priority the PDF measurements measured at 1.4 ms of
-        // foreground cost. It is the same argument `sweepTmp` makes for running
-        // at startup, applied to work too big to run at startup.
+        // put this thread at the priority §9.8 measured at 1.4 ms of
+        // foreground cost.
         self.reconcileDerived();
 
         while (!self.stopping.load(.acquire)) {
@@ -699,12 +663,6 @@ pub const Worker = struct {
     }
 
     /// Give every live document its two derived files, whatever the index thinks.
-    ///
-    /// **The backfill `reconcile_sql` explains, and the reason it cannot be a
-    /// tenant.** A tenant is discovered through its own "what do I still owe?"
-    /// clause; this pass exists precisely because that question has the wrong
-    /// answer for every blob derived — or indexed — before the files existed.
-    /// It asks the DISK instead, once per document.
     ///
     /// **ONE DOCUMENT AT A TIME, through a CURSOR rather than a batch.** The
     /// candidate list is read `LIMIT 1` at a time under the lock, keyed on the
@@ -746,8 +704,7 @@ pub const Worker = struct {
 
             // ADVANCE FIRST. Everything below is allowed to fail, and a cursor
             // moved only on success would re-offer the failing document for ever
-            // — a hot loop on the one core this server is allowed to have, which
-            // is the same hazard `drain`'s forward-progress guard exists for.
+            // — a hot loop on the one core this server is allowed to have.
             cursor_buf = c.md5;
             cursor = &cursor_buf;
 
@@ -805,11 +762,8 @@ pub const Worker = struct {
         // under its `files` row, the probe hit a transient failure — and when it
         // does, it records nothing, so the discovery query hands back the SAME
         // blob on the next turn of this loop. That is not a slow loop, it is a
-        // hot one: on a single-core Pi it is the whole machine.
-        //
-        // So a blob is offered at most once per drain. If it comes back
-        // unchanged we stop and let the idle tick pace the retry, which is the
-        // same posture as a failed job.
+        // hot one: on a single-core Pi it is the whole machine. So a blob is
+        // offered at most once per drain, and the idle tick paces the retry.
         var last: ?[32]u8 = null;
         while (!self.stopping.load(.acquire)) {
             const found = self.next() catch |e| {
@@ -860,18 +814,15 @@ pub const Worker = struct {
     }
 };
 
-/// Drops the CALLING THREAD to nice 19 — the other half of the scheduling
-/// answer, and the half an earlier design got the wrong way round.
+/// Drops the CALLING THREAD to nice 19.
 ///
-/// **MEASURED on the Pi**. A CPU-bound background pass against
+/// **MEASURED on the Pi** (§9.8). A CPU-bound background pass against
 /// the single ARM1176 core doubles foreground latency at nice 0 (19.8 → 40.0 ms
 /// p50); at nice 19 it costs **1.4 ms** (19.8 → 21.2). That one call is the
 /// whole reason the PDF parse does not have to be resumable — and resumability
 /// would be expensive, because each reopen costs ~1 s and yielding often would
-/// add tens of seconds per document.
-///
-/// It applies to the PARSE, which is CPU and off the lock. It does nothing for
-/// the WRITE, which is a lock; that half is chunked instead (`runPdfText`).
+/// add tens of seconds per document. It applies to the PARSE, which is CPU and
+/// off the lock; it does nothing for the WRITE, which is a lock.
 ///
 /// ON THE WORKER THREAD ONLY, which is exactly the scope wanted: nice on Linux
 /// is per-TASK, not per-process, and `who = 0` means the calling thread. The
@@ -982,10 +933,6 @@ const Fixture = struct {
 
     /// Has the `.txt` tenant finished with this blob? The VERDICT, which is what
     /// the tenant writes to the database and the only thing it writes.
-    ///
-    /// It used to count the blob's `kind = 1` paragraph rows;
-    /// §6 step 8 deleted them, and the derived FILES the tenant now produces are
-    /// asserted directly in the tests that wire the stores.
     fn txtDone(f: *Fixture, md5: []const u8) !bool {
         return !(try txtindex.needsDerive(f.db, md5));
     }
@@ -994,10 +941,8 @@ const Fixture = struct {
 const two_paragraphs = "First paragraph, with words in it.\n\nSecond paragraph, also with words.\n";
 
 test "the .txt tenant writes BOTH derived files, and they inflate to the §2.2 record" {
-    // The wiring test for `writeTxtFiles`: the two stores exist, the worker is
-    // given them, and a drain leaves real files behind. Everything upstream of
-    // this is unit-tested in `store/derived.zig` and `services/derive_search.zig`;
-    // what is only testable here is that the tenant actually calls them.
+    // The wiring test for `writeTxtFiles`: what is only testable here is that
+    // the tenant actually calls them.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -1068,8 +1013,6 @@ test "no stores wired means no files and no failure" {
 }
 
 test "an upload does NOT derive the .txt, and a drain does" {
-    // The whole point. `putFile` used to chunk the file while the client held
-    // the connection — 15-19 s for 5 MB on the deployment target.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -1095,9 +1038,8 @@ test "a second drain finds nothing — the query excludes finished work, so the 
 }
 
 test "`pending_sql` and `needsDerive` agree — the two expressions of one predicate" {
-    // The SQL is a second statement of `txtindex.needsDerive`, which is a real
-    // cost; this is what stops the two drifting into disagreeing about whether a
-    // file is done. Checked on BOTH sides of the work.
+    // Checked on BOTH sides of the work: a drift either way is a worker that
+    // spins on finished work, or one that never offers outstanding work.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -1137,11 +1079,6 @@ test "THE .txt DERIVE WRITES IN READING ORDER, and the verdict comes AFTER the f
     //     un-derived blob finished for ever — the discovery query would never
     //     offer it again and nothing would ever write its files.
     //
-    // This used to assert the same two things about a CHUNKED ROW WRITE, through
-    // triggers on `note_page_index` and `note_index` — the only honest observer
-    // of order from outside those transactions. schema v14
-    // deleted the rows and the chunking, so the order is now observable directly:
-    // the records are in the file, and the verdict is in the row.
     var f = try Fixture.init();
     defer f.deinit();
     const s = try f.stores();
@@ -1355,9 +1292,8 @@ test "ONE JOB answers both of the .pdf tenant's questions — the shape, then th
     try std.testing.expectEqual(@as(?i64, 0), r.intOpt(1)); // pdfindex.Verdict.ok
     try std.testing.expectEqual(@as(?i64, 0), r.intOpt(2)); // pdftext.Verdict.ok
 
-    // And the text pass wrote no rows. It used to leave 120 `kind = 2` rows here;
-    // §6 step 8 made the two derived files its whole output, and those are
-    // asserted against real bytes in "the .pdf tenant writes BOTH derived files".
+    // And the text pass wrote no rows: the two derived files are its whole
+    // output, asserted in "the .pdf tenant writes BOTH derived files".
     var pages = (try f.db.row(
         "SELECT COUNT(*) FROM note_page_index WHERE blob_md5 = ?1;",
         &.{.{ .text = &md5 }},
@@ -1486,7 +1422,7 @@ test "a SCANNED PDF still gets its two files, and they are the header alone" {
     // fact that a document is derived, so a scan has to leave one behind or it
     // reports pending for ever; and an image-only page is SKIPPED rather than
     // written as an empty row, so what it leaves behind is a header and nothing
-    // else. It is also the one document `writePdfFiles` declines to walk twice.
+    // else.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -1521,7 +1457,7 @@ test "a SCANNED PDF still gets its two files, and they are the header alone" {
 }
 
 test "NICE 19 IS PER-THREAD — the worker yields the core, the request threads do not" {
-    // The scheduling half of the answer: a CPU-bound pass at
+    // The scheduling half of the answer (§9.8): a CPU-bound pass at
     // nice 0 doubles foreground latency on the single ARM1176 core, at nice 19 it
     // costs 1.4 ms. The property that makes that safe is that nice on Linux is
     // per-TASK — so this asserts BOTH halves: the spawned thread really moved,
@@ -1575,26 +1511,22 @@ test "every tenant's pending_sql is valid SQL against the real schema" {
 }
 
 test "a tenant's discovery statement CONTAINS its predicate, so a second reader cannot drift from it" {
-    // The structural half of the no-drift argument, and the reason `from_where`
-    // is a field rather than a convention. `pending.zig` counts over exactly
-    // these bytes; if a tenant ever hand-writes its `pending_sql` again, the
-    // count and the worker are free to disagree about what is outstanding, and
-    // the symptom is a UI that says "nothing pending" while a derive is running.
-    // Behavioural agreement is asserted separately (`pending.zig`'s tests, and
-    // the `needsDerive`/`needsProbe` tests above); this pins that there is
-    // literally ONE copy of the clause.
+    // The reason `from_where` is a field rather than a convention: `pending.zig`
+    // counts over exactly these bytes, and a hand-written `pending_sql` lets the
+    // count and the worker disagree — a UI saying "nothing pending" while a
+    // derive is running. Behavioural agreement is asserted separately; this pins
+    // that there is literally ONE copy of the clause.
     for (&tenants) |*t| {
         try std.testing.expect(std.mem.indexOf(u8, t.pending_sql, t.from_where) != null);
     }
 }
 
 test "the predicate answers PER BLOB as well as per install — one bound parameter, not a fourth copy" {
-    // the pending-ness work needs "is THIS blob still being
+    // §4.1 needs "is THIS blob still being
     // derived?" for a cache decision, and getting it wrong loses data silently:
     // a client that caches a not-yet-derived blob's empty term set never asks
-    // again. That endpoint is not built here, but the predicate it will be built
-    // ON is — so this asserts the shape composes, rather than leaving the next
-    // author to discover it does not and write the rule out a fourth time.
+    // again. This asserts the shape composes, so the next author does not
+    // discover it does not and write the rule out a fourth time.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -1634,6 +1566,146 @@ test "the predicate answers PER BLOB as well as per install — one bound parame
 }
 
 // ---------------------------------------------------------------------------
+// The `ink` tenant
+// ---------------------------------------------------------------------------
+
+/// How many of this blob's pages nobody has looked at yet — the tenant's whole
+/// memo, asked directly.
+fn unlookedPages(f: *Fixture, md5: []const u8) !i64 {
+    var r = (try f.db.row(
+        "SELECT COUNT(*) FROM note_page_index WHERE blob_md5 = ?1 AND has_ink IS NULL;",
+        &.{.{ .text = md5 }},
+    )).?;
+    defer r.finalize();
+    return r.int(0);
+}
+
+test "INK: a NULL page is offered once, back-filled, and never offered again" {
+    // A `.note` uploaded TODAY owes nothing — ingest answered every page on the
+    // way in — so the state under test has to be forced, and it is exactly the
+    // state a database migrated from schema v15 is in: rows with no answer and
+    // no way to acquire one except this tenant.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const md5 = try f.put("notes.note", sample2_note);
+
+    // The upload already looked, so there is nothing outstanding. This half is
+    // as load-bearing as the rest: a tenant that offered every note for ever
+    // would spin the one core this server has.
+    try testing.expectEqual(@as(i64, 0), try unlookedPages(&f, &md5));
+    try std.testing.expect(!try inkscan.inkNeedsScan(f.db, &md5));
+    try std.testing.expectEqual(@as(?Found, null), try nextJob(testing.allocator, f.db));
+
+    // Now the legacy state.
+    try f.db.exec("UPDATE note_page_index SET has_ink = NULL;");
+    try testing.expectEqual(@as(i64, 2), try unlookedPages(&f, &md5));
+    try std.testing.expect(try inkscan.inkNeedsScan(f.db, &md5));
+
+    // Offered — by the `ink` tenant, and not by one of the other two mistaking a
+    // `.note` for something it derives.
+    {
+        const found = (try nextJob(testing.allocator, f.db)).?;
+        defer testing.allocator.free(found.name);
+        try std.testing.expectEqualStrings(&md5, &found.md5);
+        try std.testing.expectEqualStrings("ink", found.tenant.name);
+    }
+
+    f.drain();
+
+    // Filled, and the answers are the real ones — `sample-2.note` is a written
+    // note, so both its pages carry ink.
+    try testing.expectEqual(@as(i64, 0), try unlookedPages(&f, &md5));
+    {
+        var r = (try f.db.row(
+            "SELECT COUNT(*) FROM note_page_index WHERE blob_md5 = ?1 AND has_ink = 1;",
+            &.{.{ .text = &md5 }},
+        )).?;
+        defer r.finalize();
+        try testing.expectEqual(@as(i64, 2), r.int(0));
+    }
+
+    // And not offered again — the discovery query excludes finished work, so a
+    // second drain is a no-op rather than an infinite loop.
+    try std.testing.expect(!try inkscan.inkNeedsScan(f.db, &md5));
+    try std.testing.expectEqual(@as(?Found, null), try nextJob(testing.allocator, f.db));
+    var w: Worker = .{ .gpa = testing.allocator, .db = f.db, .blobs = f.files.blobs, .lock = &f.lock, .io = testing.io };
+    w.drain();
+    try std.testing.expectEqual(@as(usize, 0), w.done.load(.acquire));
+}
+
+test "INK: what the tenant owes is EXACTLY the NULL rows, and it answers only those" {
+    // The memo IS the rows, so "outstanding" and "unanswered" have to be the
+    // same set — this tenant has no verdict column to let them drift. Driven by
+    // blanking ONE page of two: the blob is still owed, and the back-fill must
+    // touch that page and leave the other alone.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const md5 = try f.put("notes.note", sample2_note);
+    // Page 1 answered, page 0 not — and page 1's answer is deliberately WRONG
+    // (`sample-2.note` is written on both pages), so a back-fill that re-scanned
+    // rows it was not offered would be visible here.
+    try f.db.exec("UPDATE note_page_index SET has_ink = NULL WHERE page_index = 0;");
+    try f.db.exec("UPDATE note_page_index SET has_ink = 0 WHERE page_index = 1;");
+
+    try testing.expectEqual(@as(i64, 1), try unlookedPages(&f, &md5));
+    try std.testing.expect(try inkscan.inkNeedsScan(f.db, &md5));
+
+    f.drain();
+
+    try testing.expectEqual(@as(i64, 0), try unlookedPages(&f, &md5));
+    var s = try f.db.prepare(
+        "SELECT has_ink FROM note_page_index WHERE blob_md5 = ?1 ORDER BY page_index;",
+    );
+    defer s.finalize();
+    s.bindText(1, &md5);
+    try std.testing.expect(try s.step());
+    try testing.expectEqual(@as(i64, 1), s.columnInt(0)); // scanned: really inked
+    try std.testing.expect(try s.step());
+    try testing.expectEqual(@as(i64, 0), s.columnInt(0)); // untouched, wrong and left alone
+}
+
+test "INK: a trashed note is not offered, and neither is a `.txt` or a `.pdf`" {
+    // The `files` visibility rules and the FORMAT gate, both of which live
+    // inside the clause rather than at its call sites. `ni.indexable = 1` is
+    // what keeps the other formats out: `has_ink` is a fact about drawn layers,
+    // and a text file has none.
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const md5 = try f.put("notes.note", sample2_note);
+    _ = try f.put("notes.txt", two_paragraphs);
+    _ = try f.put("doc.pdf", rotate90_pdf);
+    f.drain(); // clear the other two tenants' work
+
+    try f.db.exec("UPDATE note_page_index SET has_ink = NULL;");
+    try f.db.exec("UPDATE files SET deleted = 1 WHERE name = 'notes.note';");
+    // The bin is not a work queue — here as everywhere else.
+    try std.testing.expectEqual(@as(?Found, null), try nextJob(testing.allocator, f.db));
+
+    try f.db.exec("UPDATE files SET deleted = 0 WHERE name = 'notes.note';");
+    const found = (try nextJob(testing.allocator, f.db)).?;
+    defer testing.allocator.free(found.name);
+    try std.testing.expectEqualStrings(&md5, &found.md5);
+    try std.testing.expectEqualStrings("ink", found.tenant.name);
+}
+
+test "INK: `pending_sql` and `inkNeedsScan` agree, on both sides of the work" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const md5 = try f.put("notes.note", sample2_note);
+    try f.db.exec("UPDATE note_page_index SET has_ink = NULL;");
+    try std.testing.expect(try inkscan.inkNeedsScan(f.db, &md5));
+
+    f.drain();
+
+    try std.testing.expect(!try inkscan.inkNeedsScan(f.db, &md5));
+    try std.testing.expectEqual(@as(?Found, null), try nextJob(testing.allocator, f.db));
+}
+
+// ---------------------------------------------------------------------------
 // Reconcile
 // ---------------------------------------------------------------------------
 
@@ -1642,13 +1714,11 @@ test "the predicate answers PER BLOB as well as per install — one bound parame
 const sample2_note = @embedFile("sample-2.note");
 
 test "RECONCILE: an ALREADY-INDEXED .txt gets its files, and a drain cannot give them" {
-    // THE BUG, stated as a test. The library was indexed before the derived
-    // stores existed, so every tenant predicate answers "nothing owed" — and
-    // hanging the file writes off those predicates means the document never gets
-    // its files, for ever, with no error. MEASURED on the dev database: 0 of 4
-    // `.txt` blobs would be offered. Both halves are asserted, because only the
-    // second one is new: the drain must NOT produce the files, the reconcile
-    // pass must.
+    // THE BUG, stated as a test. A library indexed before the derived stores
+    // existed answers "nothing owed" to every tenant predicate, so hanging the
+    // file writes off those predicates means the document never gets its files,
+    // for ever, with no error. MEASURED on the dev database: 0 of 4 `.txt` blobs
+    // would be offered.
     var f = try Fixture.init();
     defer f.deinit();
 
@@ -1668,8 +1738,8 @@ test "RECONCILE: an ALREADY-INDEXED .txt gets its files, and a drain cannot give
         .text = s.text,
     };
 
-    // The tenants have nothing to say about this blob — which is the defect,
-    // not an accident of the fixture.
+    // The tenants have nothing to say about this blob — the defect, not an
+    // accident of the fixture.
     w.drain();
     try testing.expectEqual(@as(usize, 0), w.done.load(.acquire));
     try testing.expect(!s.terms.has(&md5, derivesearch.index_version));

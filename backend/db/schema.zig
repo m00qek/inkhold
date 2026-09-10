@@ -91,7 +91,7 @@ const sqlite = @import("sqlite.zig");
 ///
 /// v14 DROPS THE WHOLE SERVER-SIDE SEARCH INDEX — `segment_fts`, `segment_text`,
 /// `segment_search`, `search_partitions` and the `kind = 1`/`kind = 2` rows of
-/// `note_page_index`. schema v14: library and in-document
+/// `note_page_index`. §6 step 8: library and in-document
 /// search are the browser's, off the two derived stores, so every one of these
 /// was being written on each ingest and read by nothing. Irreversible in DATA on
 /// the same terms as v13, and much more of it.
@@ -100,7 +100,10 @@ const sqlite = @import("sqlite.zig");
 /// instead of travelling into the index (`pdf_text.stripPrivateUse`). It clears
 /// the `pdf_text` memo rather than touching a row of text, and the deferred
 /// worker rewrites the derived files from there.
-pub const version: i64 = 15;
+/// v16 adds `note_page_index.has_ink` — one page-level tri-state saying whether
+/// anything is drawn on the page. Pure DDL, no backfill and NO `index_version`
+/// bump: NULL is "nobody has looked yet" and the deferred worker fills it in.
+pub const version: i64 = 16;
 
 /// Default per-user quota for a household (10 GiB) — the ONE definition.
 ///
@@ -114,7 +117,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 /// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
 /// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
 /// missed on a bump). The comptime check below makes the drift a build error.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12, ddl_v13, ddl_v14, ddl_v15 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12, ddl_v13, ddl_v14, ddl_v15, ddl_v16 };
 
 comptime {
     if (steps.len != version) @compileError(
@@ -166,6 +169,25 @@ fn userVersion(db: sqlite.Db) !i64 {
     defer r.finalize();
     return r.int(0);
 }
+
+/// The FTS5 tokenizer BOTH engines must use — the server's fold
+/// (`search/fuzzy.zig`) and the index the BROWSER builds in
+/// `webapp/wasm/sqlite_core.zig`. Declared here, in the lowest layer, because
+/// both of those already reach it and neither reaches the other.
+///
+/// **One declaration, or find-in-document breaks silently.** The terms the
+/// server ships are the output of this tokenizer; a browser index built with a
+/// different one would fold a query differently from the terms it is matching
+/// against and just miss — no error, no empty state, a search that quietly finds
+/// less. `remove_diacritics 2` is the setting that makes `reuniao` find
+/// `reunião`, and `webapp/wasm/tests/sqlite_core_abi.mjs` pins that behaviour on
+/// the real tokenizer rather than on this string.
+///
+/// `segment_fts` in `ddl_v1` below is built from it by concatenation rather than
+/// typed out — the baseline's text is compared byte-for-byte against a migrated
+/// install, so the literal has to be GENERATED to stay in step with a change
+/// here.
+pub const fts_tokenizer = "unicode61 remove_diacritics 2";
 
 // The full schema as authored objects only. The FTS5 virtual table
 // `segment_fts` brings its own shadow tables (`segment_fts_config/data/docsize/
@@ -337,12 +359,14 @@ const ddl_v1 =
     \\
     \\CREATE VIRTUAL TABLE segment_fts USING fts5(
     \\  txt, content='segment_text', content_rowid='rowid',
-    \\  tokenize='unicode61 remove_diacritics 2');
+    \\  tokenize='
+++ fts_tokenizer ++
+    \\');
     \\
     \\CREATE INDEX files_deleted_at ON files(deleted_at) WHERE deleted = 1;
     \\
     \\-- Uniqueness for a folder's live children, and the key the `.mark` pairing
-    \\-- rule looks a sibling up by (`Files.hidePairedMark` / `pairOf` — a plan pin
+    \\-- rule looks a sibling up by (`mark_pairing.hidePairedMark` / `Files.pairOf` — a plan pin
     \\-- names it). `files_bin_name` in v12 is the same key over TRASHED rows,
     \\-- non-unique because the bin can legitimately hold two rows under one name.
     \\--
@@ -360,7 +384,7 @@ const ddl_v1 =
     \\-- LOAD-BEARING BY PLAN, and it USED to be load-bearing by name: search's
     \\-- `files` join stated `INDEXED BY files_md5`, so losing this index failed
     \\-- loudly at prepare time rather than quietly at runtime. That statement went
-    \\-- with the read face when search moved into the browser, and no statement names
+    \\-- with the read face in §6 step 7, and no statement names
     \\-- the index any more — but the derivation still reaches `files` by md5 with
     \\-- no owner to seek on, and losing this turns each arm into a scan
     \\-- (MEASURED: 8,647 VM steps per document). What catches that now is the
@@ -637,7 +661,7 @@ const ddl_v11 =
 ///
 /// LOAD-BEARING BY SHAPE, and the shape is the `.mark` pairing rule: `(user_id,
 /// COALESCE(parent_id, 0), name) WHERE deleted = 1`, the exact key
-/// `Files.hidePairedMark` and the bin listing's pair-size subquery look a sibling
+/// `mark_pairing.hidePairedMark` and the bin listing's pair-size subquery look a sibling
 /// up by. `files_live_name` is the same key over LIVE rows and is what makes that
 /// lookup one seek in the library; the bin had no counterpart, so every sibling
 /// probe over trashed rows fell back to `files_user_parent (user_id=?)` — an
@@ -668,7 +692,7 @@ const ddl_v12 =
 
 /// v13 — `doc_terms` goes.
 ///
-/// the search redesign states its only reason to exist: FTS5 is indexed
+/// §5.3 states its only reason to exist: FTS5 is indexed
 /// `term -> documents`, and IN-DOCUMENT typo correction needed
 /// `document -> terms`. Its only reader was the fuzzy candidate pool, and §6
 /// step 6 moved that ladder into the browser's own engine — so this is a table
@@ -692,7 +716,7 @@ const ddl_v13 =
 
 /// v14 — the server-side search index goes, all of it.
 ///
-/// schema v14. `segment_fts` was the FTS5 posting list,
+/// §6 step 8. `segment_fts` was the FTS5 posting list,
 /// `segment_search` the per-owner masked rowids that scoped it, `segment_text`
 /// the view FTS5 read its external content through, `search_partitions` the
 /// generation counter the mask was built from, and `kind = 1` / `kind = 2` rows
@@ -732,7 +756,7 @@ const ddl_v13 =
 /// `note_index.txt_index` / `pdf_text`, which this does not touch.
 /// v15 — every PDF's text is re-extracted, because the RULE changed.
 ///
-/// A PDF's icon fonts map their glyphs into the Private Use
+/// §3. A PDF's icon fonts map their glyphs into the Private Use
 /// Area and MuPDF extracts them faithfully, so codepoints no keyboard can
 /// produce reached the index. `unicode61` treats them as token CHARACTERS, so a
 /// glyph glued to a word took the word out of the index with it: MEASURED,
@@ -754,7 +778,7 @@ const ddl_v13 =
 ///
 /// **ONLY PDFs, and no `index_version` bump.** A bump would re-fold every note
 /// and every `.txt` as well, and the per-page fold is the 113x this project's
-/// deployment target pays. `.txt` is untouched for a
+/// deployment target pays (§8.4). `.txt` is untouched for a
 /// second reason: `sanitizeUtf8` is shared with it, its PUA is the user's own
 /// content rather than a font artefact, and its segments are addressed by byte
 /// range into the raw blob.
@@ -766,6 +790,39 @@ const ddl_v15 =
     \\UPDATE note_index SET pdf_text = NULL WHERE pdf_text = 0;
 ;
 
+/// v16 — a page says whether anything is drawn on it.
+///
+/// §2.4. One column, three states, and the NULL is the
+/// load-bearing one:
+///
+///     has_ink INTEGER   -- 1 = a mark on some non-background layer, 0 = none,
+///                       -- NULL = not yet looked
+///
+/// `0` is "this page is empty"; NULL is "nobody has looked yet". A reader that
+/// painted NULL as empty would tell someone their notebook is blank while the
+/// worker was still catching up, so the two must be different values and not a
+/// `DEFAULT 0`.
+///
+/// **NO BACKFILL HERE, and no `index_version` bump either.** Every existing row
+/// lands at NULL and is filled by the deferred worker's `ink` tenant, which
+/// discovers exactly the NULL rows (`ink_scan.ink_pending_from_where`); new
+/// pages get the value at ingest. That is the whole reason for the three-state
+/// column — it makes the fact heal-able without re-deriving anything, and in
+/// particular without re-folding every note's terms on the deployment target,
+/// which §8.4 measures at 113x this feature's own cost.
+///
+/// **And the no-bump claim survives v15, which had to make the opposite one.**
+/// The test is not "does the database change" but "does anything the CLIENT
+/// caches under `(md5, index_version)` change". v15 changed the derived TERMS,
+/// which the browser holds under exactly that key. This adds a column and a
+/// `noteMeta` field and leaves `terms/` and `text/` byte-identical, so the key
+/// still names what it named.
+///
+/// Reversible: a revert leaves an unread column behind and nothing else.
+const ddl_v16 =
+    \\ALTER TABLE note_page_index ADD COLUMN has_ink INTEGER;
+;
+
 const ddl_v14 =
     \\DROP TABLE segment_fts;
     \\DROP VIEW segment_text;
@@ -773,6 +830,56 @@ const ddl_v14 =
     \\DROP TABLE search_partitions;
     \\DELETE FROM note_page_index WHERE kind <> 0;
 ;
+
+test "v16: `has_ink` arrives NULL on every existing page, and nothing else moves" {
+    // The step is one ALTER, and what has to be pinned is that it is ONLY that:
+    // every page already in the table comes out at NULL rather than at a
+    // `DEFAULT 0`, because 0 means "this page is empty" and would be a lie about
+    // a page nobody has scanned yet. The tri-state is the whole design, and a
+    // default would collapse it silently.
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    inline for (steps[0..15], 1..) |ddl, n| try applyStep(db, n, ddl);
+    try std.testing.expectEqual(@as(i64, 15), try userVersion(db));
+
+    try db.exec(
+        \\INSERT INTO blobs(md5, size, refcount, created_at) VALUES('n', 10, 1, 0);
+        \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, indexed_at)
+        \\  VALUES('n', 16, 1, 2, 0);
+        \\INSERT INTO note_page_index(blob_md5, kind, page_index, content_hash, width, height, layers, recogn_status)
+        \\  VALUES('n', 0, 0, 'h0', 1404, 1872, x'', 0);
+        \\INSERT INTO note_page_index(blob_md5, kind, page_index, content_hash, width, height, layers, recogn_status)
+        \\  VALUES('n', 0, 1, 'h1', 1404, 1872, x'', 0);
+    );
+
+    try applyStep(db, 16, ddl_v16);
+    try std.testing.expectEqual(@as(i64, 16), try userVersion(db));
+
+    // Both rows are UNKNOWN, not empty. This is the state the deferred `ink`
+    // tenant discovers, and the count of what it owes is exactly these.
+    try std.testing.expectEqual(
+        @as(i64, 2),
+        try countOf(db, "SELECT COUNT(*) FROM note_page_index WHERE has_ink IS NULL;"),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 0),
+        try countOf(db, "SELECT COUNT(*) FROM note_page_index WHERE has_ink IS NOT NULL;"),
+    );
+    // And the column really holds all three states — 0 and 1 are storable, so
+    // the back-fill has somewhere to put "empty" that is not "unknown".
+    try db.exec("UPDATE note_page_index SET has_ink = 1 WHERE page_index = 0;");
+    try db.exec("UPDATE note_page_index SET has_ink = 0 WHERE page_index = 1;");
+    try std.testing.expectEqual(@as(i64, 1), try countOf(db, "SELECT COUNT(*) FROM note_page_index WHERE has_ink = 1;"));
+    try std.testing.expectEqual(@as(i64, 1), try countOf(db, "SELECT COUNT(*) FROM note_page_index WHERE has_ink = 0;"));
+
+    // Nothing was deleted and nothing was re-derived: two pages in, two out,
+    // with the rest of the row untouched.
+    try std.testing.expectEqual(@as(i64, 2), try countOf(db, "SELECT COUNT(*) FROM note_page_index;"));
+    try std.testing.expectEqual(
+        @as(i64, 2),
+        try countOf(db, "SELECT COUNT(*) FROM note_page_index WHERE width = 1404 AND height = 1872;"),
+    );
+}
 
 test "v15: only the DERIVED PDFs are re-asked, and a failure verdict is left alone" {
     // The step re-extracts text whose rule changed, and the interesting half is

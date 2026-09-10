@@ -11,8 +11,6 @@
 //! page count, per-page content hash, per-page dimensions, whether the blob is
 //! even a `.note` — comes from `note_index` / `note_page_index`
 //! and `note_index.zig`. They open no file.
-//! Previously each of them read and parsed a whole `.note` per request, and a
-//! listing did so **once per note in the folder**.
 //!
 //! A blob with no index row, or one at a stale `index_version`, is backfilled on
 //! the spot (`noteindex.ensureIndexed`) and the request continues. That is what
@@ -42,9 +40,7 @@
 //! emits the header and pulls each layer's block out of the blob in fixed
 //! `blobstore.chunk_len` windows, straight to the socket.
 //!
-//! Nothing on this path is proportional to the note or the page. `readBlob` —
-//! which buffered up to 64 MiB of note to emit one page — is gone with the last
-//! of its callers, which is what makes the memory claim
+//! Nothing on this path is proportional to the note or the page.
 
 const std = @import("std");
 const Files = @import("files.zig").Files;
@@ -117,16 +113,29 @@ pub const PageRefVO = struct {
     /// Carried on `noteMeta`'s page list AND on a listing/bin row's
     /// `firstPage`, from the same `layerVOsFromBlob` serializer over the same
     /// `note_page_index.layers` blob, so the two can never describe page 0
-    /// differently. The listing used to omit it on the theory that "nothing
-    /// outside the reader is layer-aware" — but the reader now OPENS from a
-    /// listing summary and fills `noteMeta` in behind itself, so without this
-    /// the Layers toggle has to guess for the one page the user actually
-    /// landed on, and the first paint is a flat composite that gets re-decoded
-    /// into a layer stack the moment the metadata lands (a visible swap).
+    /// differently. The listing carries it because the reader OPENS from a
+    /// listing summary and fills `noteMeta` in behind itself: without it the
+    /// Layers toggle has to guess for the one page the user actually landed on,
+    /// and the first paint is a flat composite that gets re-decoded into a layer
+    /// stack the moment the metadata lands (a visible swap).
     /// Descriptors only — at most `note_index.max_layers` of
     /// `{slot,name,visible,isCurrent}`, no image data, and no extra query: the
     /// blob is one more column on a row the listing already reads.
     layers: ?[]const LayerVO = null,
+    /// **Is anything drawn on this page?** True when some non-background layer
+    /// carries a mark, false when the page is empty — and OMITTED when the
+    /// server has not looked yet (`note_page_index.has_ink` NULL).
+    ///
+    /// The omission is the contract, exactly as it is for `sourcePage`, and here
+    /// it is load-bearing rather than merely tidy: a NULL sent as `false` would
+    /// tell a reader their notebook is blank while the deferred `ink` tenant is
+    /// still catching up on rows that predate the column. Absent means UNKNOWN,
+    /// so the page strip draws no mark either way and never a wrong one.
+    ///
+    /// A FLAG, NOT A COUNT (§2.4): the mark the strip draws is
+    /// yes/no, and a count would have to walk every byte of every layer where
+    /// this stops at the first stroke.
+    hasInk: ?bool = null,
 };
 
 /// One layer of a page, for the panel. View-state facts are DEVICE-AUTHORED
@@ -150,8 +159,8 @@ pub const LayerVO = struct {
 
 /// The frozen shape of the preview a listing row will render: the source
 /// image's own pixel dims, served WITH the listing so the masonry layout can
-/// reserve every tile's height before a single image byte arrives (decision 3
-/// of — reflow-free needs the aspect first).
+/// reserve every tile's height before a single image byte arrives — a
+/// reflow-free wall needs the aspect first.
 ///
 /// Optional everywhere it appears, and ABSENT — never null, never 0×anything —
 /// when the server holds no aspect fact: the client falls back to its own
@@ -212,14 +221,36 @@ pub const EntryVO = struct {
     /// cover when it ships a decodable one, else its page 0's EFFECTIVE dims
     /// (orientation applied — a landscape note serves 1872×1404); a `.spd`'s
     /// embedded-thumbnail dims. Omitted for folders, images, `.txt` and every
-    /// other type — those shapes are the client's concern (decision 5 of
-    /// ).
+    /// other type — those shapes are the client's concern.
     thumbAspect: ?AspectVO = null,
     /// FOLDER-ONLY, and optional for the same reason every field above is: a note
     /// row must keep serializing to exactly the `NoteSummary` shape it does today,
     /// so this stays null there and is omitted. See `Files.childCount` — direct
     /// children only, live rows only, every kind counted.
     itemCount: ?i64 = null,
+    /// The id of the live `.mark` holding this row's ink, or omitted when there
+    /// is none — **the same value `NoteMetaVO.annotationsId` reports for the same
+    /// file**, by construction: one fact, one answer, whichever route asks.
+    ///
+    /// It is on the LISTING because the listing is the only place it can be. A
+    /// paired `.mark` is folded out of every folder view (`hidePairedMark`) — it
+    /// is a layer of the document, not a document — so it has no card of its own,
+    /// and the document's card is therefore the sole place its ink can be offered
+    /// from. Without this the card could not so much as tell that ink exists,
+    /// which is what left an annotated PDF's retained mark versions kept, quota-
+    /// charged and unreachable — an annotated PDF had version history on
+    /// neither half of the pair.
+    ///
+    /// OMITTED, not null, when there is none — the same way `sourcePage` and
+    /// `hasInk` are omitted on a page ref. A folder of 200 unannotated files ships
+    /// no bytes for this at all, which on the 3G link this app is designed around
+    /// is the difference the omission is for.
+    ///
+    /// **PDF-ONLY, exactly as `noteMetaIn` is**, and gated on the same verified
+    /// `fileType` rather than on the name — see `entryVO` for why the pairing rule
+    /// underneath is looser than this and why the two routes are nonetheless made
+    /// to agree.
+    annotationsId: ?[]const u8 = null,
 };
 
 /// The contents of one folder plus the freshness token.
@@ -230,7 +261,6 @@ pub const ListingVO = struct {
     syncVersion: i64,
 };
 
-/// The full page list for a single note (the reader opens this).
 /// The full page list for a single file, plus what the file actually **is**.
 ///
 /// `fileType`/`fileHash`/`size` are here — duplicating `EntryVO` — because the
@@ -558,9 +588,8 @@ pub const ControlPlaneService = struct {
         const entries = try self.files.list(user_id, parent_id);
         defer Files.freeEntries(self.files.gpa, entries);
 
-        // ONE BUILDER, shared with the rename response. Both shapes used to be
-        // written out here as well as in `entryVO`, field for field — two places
-        // that had to agree about ten fields with nothing making them. A folder
+        // ONE BUILDER, shared with the rename response, so the two shapes cannot
+        // disagree about any of ten fields. A folder
         // costs one indexed probe for its child count (`Files.childCount`); a
         // listing holds a handful of folders, so that is a handful of lookups
         // rather than the tree scan a recursive count would need.
@@ -599,6 +628,25 @@ pub const ControlPlaneService = struct {
             .fileHash = if (e.md5) |m| try arena.dupe(u8, m) else null,
             .hasRecognizedText = s.has_recognized_text,
             .thumbAspect = s.aspect,
+            // NO QUERY HERE. `e.mark_id` was resolved inside the statement that
+            // read the row (`mark_pairing.pairedMarkId`), so a folder of 200 files costs
+            // 200 index seeks inside one listing statement rather than 200 extra
+            // statements — the shape `annotationsIdFor` must NOT be given, since
+            // it runs `liveMarkIdFor` and this loop runs once per card.
+            //
+            // GATED ON THE VERIFIED PDF TYPE, matching `noteMetaIn` exactly. The
+            // pairing rule underneath is format-agnostic on purpose (an
+            // `.epub.mark` pairs, and `move` refuses to break one), so this gate
+            // is strictly narrower than what the SQL found — and it is applied
+            // anyway, because the two routes answer the same question about the
+            // same file and a card that offered ink the reader then denied would
+            // be a divergence nobody could see until it bit. Widening this to
+            // every format changes what `annotationsId` MEANS; whichever way it
+            // moves, it moves in both places at once.
+            .annotationsId = if (isPdf(s.file_type))
+                if (e.mark_id) |m| try idStr(arena, m) else null
+            else
+                null,
         };
     }
 
@@ -626,18 +674,16 @@ pub const ControlPlaneService = struct {
                 var indexable = false;
                 var marker: ?[4]u8 = null;
                 if (r.md5) |md5| {
-                    // HEAL here (`indexRowEnsuring`, not the bare `indexRow`). The
-                    // original "no backfill on a list screen" reasoning assumed a
-                    // blob indexed while live STAYS current — but `index_version`
-                    // bumped four times in a week (v3 landscape, v4 covers, v5/v6
-                    // segments+txt), and every bump strands a trashed note whose
-                    // row is now stale: `indexRow` filters on the current version,
-                    // returns null, and the note loses its `firstPage` (→ a generic
-                    // doc tile instead of its rendered page) and its `thumbAspect`.
-                    // The library self-corrects because it heals on view; the bin
-                    // has no other surface to heal on. The cost is bounded — the
-                    // bin is small, and a note already healed by a library visit is
-                    // just the same cheap version-check `indexRowEnsuring` protects.
+                    // HEAL here (`indexRowEnsuring`, not the bare `indexRow`),
+                    // even though this is a list screen. A blob indexed while
+                    // live does NOT stay current — `index_version` has bumped
+                    // four times in a week — and every bump strands a trashed
+                    // note whose row is now stale: `indexRow` filters on the
+                    // current version, returns null, and the note loses its
+                    // `firstPage` (→ a generic doc tile instead of its rendered
+                    // page) and its `thumbAspect`. The library self-corrects
+                    // because it heals on view; the bin has no other surface to
+                    // heal on, and it is small.
                     if (try self.indexRowEnsuring(md5)) |row| {
                         indexable = row.indexable;
                         marker = row.filetype;
@@ -719,11 +765,17 @@ pub const ControlPlaneService = struct {
     /// `foo.mark`: the extension is appended, not replaced, which is what two
     /// real captures show.
     ///
+    /// **THE PER-FILE ROUTE ONLY.** A listing does not come through here: it
+    /// carries `Entry.mark_id`, resolved by `mark_pairing.pairedMarkId` inside the
+    /// listing's own SELECT, because calling this once per row is one extra
+    /// statement per card. Both are the same rule from the same generator and are
+    /// pinned to agree by test; if either gate below changes, the listing's gate
+    /// in `entryVO` changes with it.
+    ///
     /// **The lookup itself is `Files.liveMarkIdFor`**, which is also the half of
-    /// `Files.pairOf` that carries a mark through trash/restore/purge/move. This
-    /// used to be a second hand-written copy of the query, reaching into
-    /// `files.db` from here; a rule the tree's owner enforces on every mutation
-    /// cannot also be re-derived by a reader that does not know when it changed.
+    /// `Files.pairOf` that carries a mark through trash/restore/purge/move: a
+    /// rule the tree's owner enforces on every mutation must not also be
+    /// re-derived by a reader that does not know when it changed.
     ///
     /// The gate is looser than the pairing rule on purpose, and stays so now that
     /// the pairing rule is format-agnostic. Pairing keys off the NAME — a sibling
@@ -804,6 +856,11 @@ pub const ControlPlaneService = struct {
             .md5 = &version.md5,
             .size = version.size,
             .updated_at = entry.updated_at,
+            // Borrowed with the rest of the live row's identity. Nothing here
+            // reads it — a retained version's meta carries no `annotationsId`,
+            // because the ink that goes with a past version of a PDF is a past
+            // version of the MARK, which is its own file's history.
+            .mark_id = entry.mark_id,
         };
 
         const described = try self.describe(arena, version_entry);
@@ -998,8 +1055,7 @@ pub const ControlPlaneService = struct {
     /// Pure DB, like every other read on this face: the transcript was extracted
     /// at index time and stored, so nothing here opens a `.note`. It is the one
     /// blob-derived thing held whole in memory, and deliberately so — a page of
-    /// handwriting transcribes to KB-scale text, not blob data (see the carve-outs
-    /// in).
+    /// handwriting transcribes to KB-scale text, not blob data.
     pub fn pageText(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, n: u64) !?PageText {
         return self.pageTextIn(arena, user_id, id, n, .live);
     }
@@ -1055,11 +1111,7 @@ pub const ControlPlaneService = struct {
 
         // The word boxes: the one thing on this path that is not a pure DB read.
         // `recogn_offset`/`recogn_length` were stored by the indexer for exactly
-        // this — "for lazily fetching the rich form (elements + bounding boxes)"
-        // (`db/schema.zig`) — so this is a
-        // single KB-scale ranged read, not a note parse. Read it BEFORE the
-        // statement is finalized only in the sense that the offsets are copied
-        // out first; nothing below borrows the row.
+        // this, so it is a single KB-scale ranged read, not a note parse.
         if (!r.isNull(2) and !r.isNull(3)) {
             const offset = r.int(2);
             const length = r.int(3);
@@ -1380,11 +1432,11 @@ pub const ControlPlaneService = struct {
             const p = first_page orelse return null;
             return positivePair(p.width, p.height);
         }
-        // A `.pdf`'s shape, from `pdf_index.zig`. WIDENED rather than folded into
-        // `indexable`, which means "is this a real `.note`" and is asked that way
-        // by every other caller: a row with a positive width/height has a shape
-        // worth serving, whatever produced it. Before this, a PDF reached here
-        // with nothing to offer and the gallery guessed 3:4.
+        // A `.pdf`'s shape, from `pdf_index.zig`. NOT folded into `indexable`,
+        // which means "is this a real `.note`" and is asked that way by every
+        // other caller: a row with a positive width/height has a shape worth
+        // serving, whatever produced it. Without this a PDF reaches here with
+        // nothing to offer and the gallery guesses 3:4.
         return positivePair(row.spd_surface_w, row.spd_surface_h) orelse
             positivePair(row.spd_thumb_w, row.spd_thumb_h) orelse
             positivePair(row.width, row.height);
@@ -1438,36 +1490,24 @@ pub const ControlPlaneService = struct {
         ) catch {};
     }
 
-    // THE `.txt` HALF OF THE LAZY HEAL IS GONE, and this is where it was.
+    // THERE IS NO `.txt` TWIN OF `backfill`, and the asymmetry is deliberate.
     //
-    // `txtBackfill` called `txt_index.ensureIndexed` once per listing row: it
-    // parsed the blob (up to 16 MB, ranged) and wrote `note_index.txt_index`, so
-    // that a `.txt` the deferred worker had not reached yet recorded its verdict
-    // on a READ. That was worth its cost while the verdict meant "the paragraphs
-    // are in `segment_fts`"; schema v14 deleted that index, and
-    // what the verdict came to mean is "`terms/<md5>` and `text/<md5>` exist" —
-    // which this path never wrote.
-    //
-    // So it did not merely cost a parse on the wrong path. `deferred.runTxt`
-    // writes the two FILES and *then* the verdict, and states why the order is
-    // load-bearing (§2.4: the file is the fact). Writing the verdict alone
-    // inverted it: the blob stopped being offered to the worker, and
-    // `pending.owesDerive` — the manifest's `Derivation` byte — reported
-    // `derived` for a document whose derived files did not exist. It cost no
-    // data (the client's `manifestDiff` deliberately ignores `derivation`, and
-    // `reconcileDerived` writes the files on a later idle tick), but it was the
+    // A lazy heal here could only write `note_index.txt_index` — the VERDICT —
+    // and `deferred.runTxt` writes the two derived FILES first for a reason
+    // (§2.4: the file is the fact). A verdict written alone inverts that: the
+    // blob stops being offered to the worker, and `pending.owesDerive` reports
+    // `derived` for a document whose derived files do not exist, which is the
     // one direction that column is documented never to lie in.
     //
-    // Nothing replaces it. Every blob this could reach is a LIVE, non-folder
-    // `files` row, which is exactly the set `txt_index.pending_from_where`
-    // offers the worker — and `Files.putFile` signals the worker on commit, so
-    // the normal case never waits for the 30 s tick. The bin never called this
-    // (`bin` heals the note half only), so no reach is lost there either.
+    // Nothing is lost by its absence. Every blob a heal here could reach is a
+    // LIVE, non-folder `files` row — exactly the set
+    // `txt_index.pending_from_where` offers the worker — and `Files.putFile`
+    // signals the worker on commit, so the normal case never waits for the tick.
 
     /// One page's ref straight out of `note_page_index`. The dims are the stored
     /// **effective** per-page dims (the note's real header size, orientation
-    /// applied) — not a hardcoded device size, which is what used to make this
-    /// disagree with the SNPG payload on anything but a 1404×1872 device.
+    /// applied) — not a hardcoded device size, which disagrees with the SNPG
+    /// payload on anything but a 1404×1872 device.
     ///
     /// Carries the page's layer panel too, through the SAME `layerVOsFromBlob`
     /// the reader's page list uses — this is the LISTING's page 0, and the
@@ -1499,7 +1539,7 @@ pub const ControlPlaneService = struct {
     fn pageRefsFromIndex(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8) ![]const PageRefVO {
         var out: std.ArrayList(PageRefVO) = .empty;
         var s = try self.files.db.prepare(
-            "SELECT page_index, content_hash, width, height, text_hash, layers, source_page, links_hash " ++
+            "SELECT page_index, content_hash, width, height, text_hash, layers, source_page, links_hash, has_ink " ++
                 "FROM note_page_index " ++
                 "WHERE blob_md5 = ?1 ORDER BY page_index;",
         );
@@ -1521,6 +1561,9 @@ pub const ControlPlaneService = struct {
                     break :blk if (n == 0 or n == s.columnInt(0) + 1) null else n;
                 },
                 .linksHash = if (s.columnIsNull(7)) null else try arena.dupe(u8, s.columnText(7)),
+                // Three states, two of which travel: NULL is "not yet looked"
+                // and is OMITTED rather than sent as `false` — see the field.
+                .hasInk = if (s.columnIsNull(8)) null else s.columnInt(8) != 0,
             });
         }
         return out.items;
@@ -1598,9 +1641,6 @@ pub const ControlPlaneService = struct {
                 if (indexable and count > 0) first = try self.pageRefAt(arena, md5, 0);
                 aspect = aspectOf(row, first);
             }
-            // NO `.txt` HEAL HERE ANY MORE — see the deleted `txtBackfill` above.
-            // A listing row is built from the `note_index` row and nothing else;
-            // the `.txt` derivation is the deferred worker's alone.
         }
 
         const file_type = try fileTypeFor(arena, indexable, marker, entry.name);
@@ -1616,14 +1656,10 @@ pub const ControlPlaneService = struct {
         return .{
             .page = fb.page,
             // THE ROW'S COUNT WINS WHEN IT HAS ONE. `first` is set only for an
-            // indexable `.note`, so a `.pdf` always lands here — and
-            // `fallbackFirst` hardcodes 1, which is why every PDF card read
-            // "1 page" no matter how long the document was. The probe
-            // (`pdf_index.zig`) fills `page_count` in for exactly this, and it
-            // was being thrown away one line after being read.
-            //
-            // Still 1 for a `.spd` or a `.txt`, whose `page_count` is 0: those
-            // have no pages to count and the fallback is the honest answer.
+            // indexable `.note`, so a `.pdf` always lands here and
+            // `fallbackFirst` hardcodes 1 — but the probe (`pdf_index.zig`)
+            // filled `page_count` in for exactly this. Still 1 for a `.spd` or
+            // a `.txt`, whose `page_count` is 0: those have no pages to count.
             .count = if (count > 0) count else fb.count,
             .file_type = file_type,
             .has_recognized_text = has_text,
@@ -1669,13 +1705,10 @@ const no_extension = "file";
 /// THE file-type rule, in one place. VERIFIED, not claimed: `indexable` means the
 /// indexer actually parsed a `.note` container out of these bytes, whatever the
 /// file is called; only an unparseable blob falls back to its extension.
-/// The type the app reports for a blob: what the PARSER verified, not what the
-/// filename claims.
 ///
-/// An indexable blob used to report the literal "note" whatever it was, which is
-/// why a `.mark` — the device's PDF-annotation sibling, structurally a thin
-/// `.note` — has always been indistinguishable from a notebook. The signature's
-/// 4-byte marker now decides, so a mark says so.
+/// A `.mark` — the device's PDF-annotation sibling — is structurally a thin
+/// `.note` and so is indexable too, which is why the signature's 4-byte marker,
+/// not `indexable` alone, decides between the two.
 ///
 /// UNKNOWN MARKERS STILL SAY "note". The marker is NULL for the ASA family and
 /// for rows written before schema v6, and it could be some fourth thing a future
@@ -2366,12 +2399,10 @@ test "cross-user isolation: another user can't read the note" {
 /// same `PageRefVO`s for real device captures. Deleting it would delete the
 /// evidence that the migration changed nothing on the wire.
 ///
-/// It is a frozen snapshot of the OLD behaviour, so it keeps the `1090` swap
-/// verbatim — which index v2 dropped and v3 reinstated as the settled behaviour
-/// once landscape storage was proven natively landscape (see
-/// `note_index.NoteHeader`). Both sample captures are `ORIENTATION = 1000`
-/// throughout, so the branch is dead here; the live decision is asserted
-/// directly against a landscape fixture in `note_index.zig`.
+/// It is a frozen snapshot, so it keeps the `1090` swap verbatim rather than
+/// tracking `note_index.NoteHeader`. Both sample captures are
+/// `ORIENTATION = 1000` throughout, so the branch is dead here; the live
+/// decision is asserted against a landscape fixture in `note_index.zig`.
 fn legacyPageRefs(arena: std.mem.Allocator, bytes: []const u8, file_md5: ?[]const u8) ![]const PageRefVO {
     const note = sn.parse(arena, bytes) catch {
         const one = try arena.alloc(PageRefVO, 1);
@@ -2469,8 +2500,6 @@ test "cold path: an unindexed blob is backfilled on first read, then served with
 }
 
 test "a STALE index row is still repaired, though nothing asks isCurrent first" {
-    // The read paths used to call `backfill` (gated by `isCurrent`) and then
-    // `indexRow` — two identical single-row lookups per note, per listing. Now
     // `indexRowEnsuring` reads first and repairs only on a miss, which is only
     // correct because `indexRow` filters on `index_version` exactly as
     // `isCurrent` does: a row at the WRONG version has to read as absent, or a
@@ -2621,7 +2650,7 @@ test "hasRecognizedText means finished pages, not recognition merely enabled" {
     // document has a page of FINISHED recognition whose text carries the term.
     // Asked of `note_page_index` directly because that row is what `text/<md5>`
     // is derived from and what the browser's own index is built out of —
-    // in-document search moved into the browser in the move into the browser,
+    // in-document search moved into the browser in §6 step 7,
     // so there is no server-side find left to ask.
     for (root.entries) |e| {
         var s = try f.db.prepare(
@@ -2707,11 +2736,8 @@ test "THE MEMORY CLAIM: serving a page holds one chunk, not the page and not the
     // > The server never holds a whole note or a whole page in memory; every blob
     // > read and write is bounded by a fixed 64 KB chunk.
     //
-    // Before this step, `pageBytesOf` read the whole note into an arena
-    // (`readBlob`, capped at 64 MiB) and then built the whole payload in a second
-    // allocation, to emit ONE page. This measures the replacement end to end: the
-    // service is handed a peak-tracking allocator and asked to plan and stream a
-    // page whose single layer is 8 MiB.
+    // Measured end to end: the service is handed a peak-tracking allocator and
+    // asked to plan and stream a page whose single layer is 8 MiB.
     const gpa = testing.allocator;
     var f = try Fixture.init();
     defer f.deinit();
@@ -2955,6 +2981,103 @@ test "noteMeta: a PDF finds the .mark beside it, by full name and same folder" {
     try testing.expect(sm.annotationsId == null);
 }
 
+test "listing: a document's row names the .mark folded out from behind it" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+    const mark_bytes = try nb.serialize(gpa, .{
+        .filetype = "mark",
+        .pages = &.{.{ .number = 2, .layers = &.{.{ .slot = .main, .bitmap = &bmp }} }},
+    });
+    defer gpa.free(mark_bytes);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+
+    const folder = try f.files.createFolder(1, null, "Docs");
+    testing.allocator.free(folder.name);
+    const pdf_id = try seedBytes(&f, null, "manual.pdf", "%PDF-1.7\n%%EOF\n");
+    const mark_id = try seedBytes(&f, null, "manual.pdf.mark", mark_bytes);
+    _ = try seedBytes(&f, null, "lease.pdf", "%PDF-1.7\n%%EOF\n");
+
+    const root = try svc.listing(a, 1, null);
+
+    // THE PAIR IS ONE ROW, and that row names the ink. `hidePairedMark` gave the
+    // mark no card, so this is the only place its id can be offered from — which
+    // is what §7 needs to put "Version history" on a PDF card.
+    for (root.entries) |e| try testing.expect(!std.mem.eql(u8, e.name, "manual.pdf.mark"));
+    const doc = try entryNamed(root, "manual.pdf");
+    try testing.expectEqualStrings(try idStr(a, mark_id), doc.annotationsId.?);
+
+    // ONE FACT, ONE ANSWER. The per-file route runs a different query
+    // (`liveMarkIdFor`) from a different gate; the two must not be able to
+    // disagree about the same file, so the property pinned here is their
+    // EQUALITY, not either value on its own.
+    const meta = (try svc.noteMeta(a, 1, pdf_id)).?;
+    try testing.expectEqualStrings(meta.annotationsId.?, doc.annotationsId.?);
+
+    // A PDF with nothing beside it, and a FOLDER, both say so — and say it by
+    // OMITTING the key, not by shipping a null. A folder of 200 unannotated files
+    // must not cost 200 nulls on the wire.
+    const opts: std.json.Stringify.Options = .{ .emit_null_optional_fields = false };
+    const alone = try entryNamed(root, "lease.pdf");
+    try testing.expect(alone.annotationsId == null);
+    try testing.expect(std.mem.indexOf(u8, try std.json.Stringify.valueAlloc(a, alone, opts), "annotationsId") == null);
+    const dir = try entryNamed(root, "Docs");
+    try testing.expect(dir.annotationsId == null);
+    try testing.expect(std.mem.indexOf(u8, try std.json.Stringify.valueAlloc(a, dir, opts), "annotationsId") == null);
+    // …while the annotated row does carry it, so the omission above is the
+    // absence of a value rather than the absence of the field.
+    try testing.expect(std.mem.indexOf(u8, try std.json.Stringify.valueAlloc(a, doc, opts), "annotationsId") != null);
+
+    // THE VERIFIED TYPE GATES IT, exactly as `noteMetaIn`'s does: a `.note`
+    // container named `sneaky.pdf` is a note however it is spelled, so it is not
+    // offered ink even with a plausible `sneaky.pdf.mark` beside it — and the
+    // listing agrees with the reader about that too.
+    const book = try nb.serialize(gpa, .{ .pages = &.{.{ .layers = &.{.{ .slot = .main, .bitmap = &bmp }} }} });
+    defer gpa.free(book);
+    const sneaky = try seedBytes(&f, null, "sneaky.pdf", book);
+    _ = try seedBytes(&f, null, "sneaky.pdf.mark", mark_bytes);
+    const again = try svc.listing(a, 1, null);
+    const s_row = try entryNamed(again, "sneaky.pdf");
+    try testing.expectEqualStrings("note", s_row.fileType.?);
+    try testing.expect(s_row.annotationsId == null);
+    try testing.expect((try svc.noteMeta(a, 1, sneaky)).?.annotationsId == null);
+}
+
+test "listing: a trashed document is never offered a live mark" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+
+    // Document to the bin FIRST, ink after — the only order that leaves a live
+    // mark beside a trashed document, since `trash` carries a pair together.
+    const doc = try seedBytes(&f, null, "old.pdf", "%PDF-1.7\n%%EOF\n");
+    try f.files.trash(1, doc);
+    _ = try seedBytes(&f, null, "old.pdf.mark", "bbbb");
+
+    // The live listing does not show it at all…
+    const root = try svc.listing(a, 1, null);
+    try testing.expectError(error.TestUnexpectedResult, entryNamed(root, "old.pdf"));
+
+    // …and the bin's own rows are `BinEntryVO`, which has no `annotationsId` to
+    // carry — the trap is closed by the shape as well as by the query. What the
+    // bin CAN be asked is the per-file meta, and that answers null.
+    const b = try svc.bin(a, 1);
+    var seen = false;
+    for (b.entries) |e| {
+        if (std.mem.eql(u8, e.name, "old.pdf")) seen = true;
+    }
+    try testing.expect(seen);
+    try testing.expect((try svc.binNoteMeta(a, 1, doc)).?.annotationsId == null);
+}
+
 test "noteMeta: a sparse .mark carries sourcePage; a notebook omits it entirely" {
     var f = try Fixture.init();
     defer f.deinit();
@@ -3012,6 +3135,64 @@ test "noteMeta: a sparse .mark carries sourcePage; a notebook omits it entirely"
     }
     const zeroed = (try svc.noteMeta(arena.allocator(), 1, mark_id)).?;
     for (zeroed.pages) |pg| try testing.expect(pg.sourcePage == null);
+}
+
+test "noteMeta: hasInk travels for a page that was looked at, and is OMITTED for one that was not" {
+    // The wire half of §2.4, in the same shape `sourcePage`'s
+    // test takes — and for a sharper reason. `sourcePage` omits a DERIVABLE
+    // value; this omits an UNKNOWN one, and the two absences must not be
+    // conflated by a client: `false` is an answer and rides the wire, while a
+    // page nobody has scanned carries no field at all. Sending NULL as `false`
+    // would tell a reader their notebook is blank while the worker catches up.
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+
+    // A `.mark` of two pages, one written and one ERASED BACK TO NOTHING — the
+    // case §2.1 names, where `sourcePage` alone would light a PDF page that has
+    // nothing on it any more.
+    const stroke = [_]u8{ 0x62, 0xFF, 0x61, 0x20, 0x62, 0xFF };
+    const rubbed_out = [_]u8{ 0x62, 0xFF, 0x62, 0xFF };
+    const mark = try nb.serialize(gpa, .{
+        .filetype = "mark",
+        .pages = &.{
+            .{ .number = 2, .layers = &.{.{ .slot = .main, .bitmap = &stroke }} },
+            .{ .number = 5, .layers = &.{.{ .slot = .main, .bitmap = &rubbed_out }} },
+        },
+    });
+    defer gpa.free(mark);
+    const id = try seedBytes(&f, null, "annotated.pdf.mark", mark);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+
+    const mm = (try svc.noteMeta(a, 1, id)).?;
+    try testing.expectEqual(@as(usize, 2), mm.pages.len);
+    try testing.expectEqual(@as(?bool, true), mm.pages[0].hasInk);
+    try testing.expectEqual(@as(?bool, false), mm.pages[1].hasInk);
+    // Both name their PDF page, and only one of them has anything on it: that
+    // pair IS the annotated-page question.
+    try testing.expectEqual(@as(i64, 2), mm.pages[0].sourcePage.?);
+    try testing.expectEqual(@as(i64, 5), mm.pages[1].sourcePage.?);
+
+    // On the wire, BOTH answers travel — `false` is a fact, not an absence.
+    const opts: std.json.Stringify.Options = .{ .emit_null_optional_fields = false };
+    const inked_json = try std.json.Stringify.valueAlloc(a, mm.pages[0], opts);
+    try testing.expect(std.mem.indexOf(u8, inked_json, "\"hasInk\":true") != null);
+    const empty_json = try std.json.Stringify.valueAlloc(a, mm.pages[1], opts);
+    try testing.expect(std.mem.indexOf(u8, empty_json, "\"hasInk\":false") != null);
+
+    // And a page nobody has looked at carries NO FIELD — the state every row of
+    // a database migrated from schema v15 is in, until the deferred `ink` tenant
+    // reaches it. Forced by writing that state directly, exactly as the
+    // `sourcePage` test forces its pre-v7 zero.
+    try f.db.exec("UPDATE note_page_index SET has_ink = NULL;");
+    const unlooked = (try svc.noteMeta(a, 1, id)).?;
+    for (unlooked.pages) |pg| try testing.expect(pg.hasInk == null);
+    const omitted_json = try std.json.Stringify.valueAlloc(a, unlooked.pages[0], opts);
+    try testing.expect(std.mem.indexOf(u8, omitted_json, "hasInk") == null);
 }
 
 test "thumbAspect: cover dims when a cover ships, page-0 EFFECTIVE dims otherwise, absent for the shapeless" {
@@ -3138,4 +3319,406 @@ test "thumbAspect: the bin HEALS a stale note index row (firstPage + aspect rest
     try testing.expect(b.entries[0].thumbAspect != null);
     // And the row is genuinely current again — not a one-shot.
     try testing.expect((try svc.bin(a, 1)).entries[0].firstPage != null);
+}
+
+// ---------------------------------------------------------------------------
+// §8.4 — THE WIRE CONTRACT FIXTURES
+// ---------------------------------------------------------------------------
+//
+// The control plane's HTTP surface is described three times — the VOs above,
+// `webapp/src/core/types.ts`, and `webapp/src/api/fake.ts` — and until these
+// tests existed it was pinned nowhere. That is the gap that dropped `hasInk`:
+// the server emitted it, `normalizePage` rebuilt the record field by field and
+// discarded it, and both halves' suites stayed green.
+//
+// So: each test below builds a VO through the ORDINARY code path, serialises it
+// with the handlers' own options, and compares the bytes against a committed
+// file under `webapp/tests/fixtures/wire/`. `webapp/tests/unit/wireContract.ts`
+// reads those same files back through the real client normalizers and asserts
+// every key was given a decision. A field added on one side and forgotten on
+// the other now fails a test, in whichever direction it was forgotten.
+//
+// The fixtures are the EXACT response bytes — minified, `emit_null_optional_fields
+// = false`, no trailing newline — so an omitted key is genuinely absent from the
+// file rather than merely null in it, which is the half of the contract that a
+// hand-written fixture always gets wrong.
+//
+// Regenerate with `INK_UPDATE_WIRE_FIXTURES=1 zig build test`, then read
+// `git diff`: it is a description of what changed on the wire. Without the
+// variable the tests are read-only.
+
+/// Where the committed wire fixtures live, relative to the repo root.
+const wire_dir = "webapp/tests/fixtures/wire";
+
+/// Set this (to anything non-empty) to WRITE the fixtures instead of comparing.
+const wire_update_env = "INK_UPDATE_WIRE_FIXTURES";
+
+/// The exact options every control-plane handler serialises with. The one that
+/// matters is `emit_null_optional_fields = false` — it is what turns a null
+/// optional into an ABSENT KEY, which several fields on these VOs (`hasInk`,
+/// `sourcePage`, `annotationsId`, `thumbAspect`, …) use as their third state.
+const wire_opts: std.json.Stringify.Options = .{ .emit_null_optional_fields = false };
+
+/// Timestamps are the only thing on these VOs that is not a function of the
+/// input: `updated_at` is wall-clock at seed time, so a golden fixture has to
+/// pin it or every run is a diff. Pinned to a fixed epoch-ms constant, which is
+/// also what lets the TS side assert the value and not merely the key.
+const wire_time_ms: i64 = 1_700_000_000_000;
+
+/// True when the regeneration variable is set to a non-empty value. `std.c` is
+/// available because this module links libc (sqlite + MuPDF).
+fn wireUpdating() bool {
+    const v = std.c.getenv(wire_update_env) orelse return false;
+    return v[0] != 0;
+}
+
+/// The repo root, found by walking UP from the test's cwd — Zig test binaries
+/// run with an unspecified working directory, and everything else in this repo
+/// solves the same problem with `@embedFile`, which cannot reach outside
+/// `backend/` and cannot write. `webapp/src/api/client.ts` is the marker
+/// because it is unambiguous: a nested package (`parsers/note`) has its own
+/// `build.zig.zon` and would otherwise stop the walk early.
+fn openRepoRoot() !std.Io.Dir {
+    for ([_][]const u8{ ".", "..", "../..", "../../..", "../../../.." }) |rel| {
+        var d = std.Io.Dir.cwd().openDir(testing.io, rel, .{}) catch continue;
+        if (d.access(testing.io, "webapp/src/api/client.ts", .{})) |_| return d else |_| {}
+        d.close(testing.io);
+    }
+    std.debug.print(
+        "\nwire fixtures: could not find the repo root by walking up from the test's cwd\n" ++
+            "(looked for webapp/src/api/client.ts). Run the suite as `zig build test` from the repo root.\n",
+        .{},
+    );
+    return error.RepoRootNotFound;
+}
+
+/// Serialise `vo` the way the handler would and hold it against
+/// `webapp/tests/fixtures/wire/<name>` — or, under `INK_UPDATE_WIRE_FIXTURES`,
+/// write the file instead.
+fn expectWireFixture(name: []const u8, vo: anytype) !void {
+    const gpa = testing.allocator;
+    const json = try std.json.Stringify.valueAlloc(gpa, vo, wire_opts);
+    defer gpa.free(json);
+
+    var root = try openRepoRoot();
+    defer root.close(testing.io);
+
+    var path_buf: [256]u8 = undefined;
+    const rel = try std.fmt.bufPrint(&path_buf, wire_dir ++ "/{s}", .{name});
+
+    if (wireUpdating()) {
+        try root.createDirPath(testing.io, wire_dir);
+        return root.writeFile(testing.io, .{ .sub_path = rel, .data = json });
+    }
+
+    const have = root.readFileAlloc(testing.io, rel, gpa, .limited(1 << 20)) catch |err| {
+        std.debug.print(
+            "\nwire fixture {s} could not be read ({t}).\n" ++
+                "Regenerate it with: INK_UPDATE_WIRE_FIXTURES=1 zig build test\n",
+            .{ rel, err },
+        );
+        return err;
+    };
+    defer gpa.free(have);
+
+    if (!std.mem.eql(u8, have, json)) {
+        std.debug.print(
+            "\nWIRE CONTRACT DRIFT in {s}\n" ++
+                "The server no longer produces the committed bytes for this shape. If the\n" ++
+                "change is intended, regenerate and read the diff as a wire change:\n" ++
+                "    INK_UPDATE_WIRE_FIXTURES=1 zig build test && git diff {s}\n" ++
+                "Then update the key table in webapp/tests/unit/wireContract.test.ts, which\n" ++
+                "is what decides whether the client consumes the new field.\n",
+            .{ rel, rel },
+        );
+        try testing.expectEqualStrings(have, json);
+        return error.WireFixtureMismatch; // unreachable in practice; the line above fails first
+    }
+}
+
+/// `e` with its wall-clock stamp replaced by `wire_time_ms`. See that constant.
+fn pinEntryTime(e: EntryVO) EntryVO {
+    var out = e;
+    if (out.updatedAt != null) out.updatedAt = wire_time_ms;
+    return out;
+}
+
+/// `vo` with every row's stamp pinned — the arena copy exists because the
+/// service hands back `[]const`, and a golden fixture must not depend on when
+/// it was generated.
+fn pinListingTimes(a: std.mem.Allocator, vo: ListingVO) !ListingVO {
+    const entries = try a.alloc(EntryVO, vo.entries.len);
+    for (vo.entries, entries) |src, *dst| dst.* = pinEntryTime(src);
+    return .{ .folderId = vo.folderId, .path = vo.path, .entries = entries, .syncVersion = vo.syncVersion };
+}
+
+/// The same for a version list. Successive versions are pinned one second
+/// apart so the fixture still shows a newest-first ORDER rather than a tie.
+fn pinHistoryTimes(a: std.mem.Allocator, vo: HistoryVO) !HistoryVO {
+    const versions = try a.alloc(HistoryVersionVO, vo.versions.len);
+    for (vo.versions, versions, 0..) |src, *dst, i| {
+        dst.* = src;
+        dst.createdAt = wire_time_ms - @as(i64, @intCast(i)) * 1000;
+    }
+    return .{ .id = vo.id, .versions = versions };
+}
+
+/// A two-page N6 note whose FIRST page is recognized and carries the links an
+/// imported PDF template brought with it, and whose second page has neither.
+///
+/// One file, because the three per-page optionals that ride the page list —
+/// `textHash`, `linksHash` and (via the note header) `pxPerMm` — have to be
+/// PRESENT somewhere in the fixture set or the TS side's "every mapped key
+/// survives" assertion has nothing to check them against; and ABSENT somewhere,
+/// or the omission half of the contract goes unpinned. Page 0 is the present
+/// case and page 1 the absent one. N6 is the ONLY code in the millimetre
+/// allowlist (`types.CanvasMm.forEquipment`), so it is also the only one that
+/// ships `pxPerMm` at all.
+fn wireRecognizedNote(gpa: std.mem.Allocator, bmp: []const u8) ![]u8 {
+    const words = [_]nb.WordSpec{
+        .{ .label = "hello", .box = .{ .x = 10.5, .y = 20.25, .width = 15.0, .height = 6.5 } },
+        .{ .label = "world", .box = .{ .x = 27.0, .y = 20.25, .width = 17.5, .height = 6.5 } },
+    };
+    const els = [_]nb.ElementSpec{.{ .label = "hello world", .words = &words }};
+    const links = [_]nb.LinkSpec{.{ .x = 100, .y = 200, .w = 300, .h = 40, .uri = "https://example.org/" }};
+    return nb.serialize(gpa, .{
+        .header = &.{.{ .key = "APPLY_EQUIPMENT", .value = "N6" }},
+        .pages = &.{
+            .{
+                .style = "style_white",
+                .layers = &.{.{ .slot = .main, .bitmap = bmp }},
+                .recogn_status = 1,
+                .recogn_elements = &els,
+                .links = &links,
+            },
+            .{ .style = "style_white", .layers = &.{.{ .slot = .main, .bitmap = bmp }} },
+        },
+    });
+}
+
+/// A three-page `.mark` over PDF pages 2, 5 and 6 — page 5's ink erased back to
+/// nothing, which is the `hasInk = false` case that `sourcePage` alone cannot
+/// tell from an annotated one.
+fn wireMarkBytes(gpa: std.mem.Allocator) ![]u8 {
+    const stroke = [_]u8{ 0x62, 0xFF, 0x61, 0x20, 0x62, 0xFF };
+    const rubbed_out = [_]u8{ 0x62, 0xFF, 0x62, 0xFF };
+    return nb.serialize(gpa, .{
+        .filetype = "mark",
+        .pages = &.{
+            .{ .number = 2, .layers = &.{.{ .slot = .main, .bitmap = &stroke }} },
+            .{ .number = 5, .layers = &.{.{ .slot = .main, .bitmap = &rubbed_out }} },
+        },
+    });
+}
+
+test "wire contract: PageRefVO — a page nobody has scanned omits BOTH hasInk and sourcePage" {
+    // The deliberate omitted-key case. `sourcePage` is absent because it would
+    // be derivable (`index + 1` on every notebook page); `hasInk` is absent
+    // because the server has not looked yet, which is a THIRD state and not
+    // `false`. The client must read one as `null` and the other as `undefined`
+    // — see `PageRef` in `core/types.ts` — and `wireContract.test.ts` asserts
+    // exactly that against this file.
+    var f = try Fixture.init();
+    defer f.deinit();
+    const id = try seedNote(&f, null, "n.note", &.{"AAAA"});
+
+    // The state every row migrated from schema v15 is in until the deferred
+    // `ink` tenant reaches it, forced directly as the `hasInk` test above does.
+    try f.db.exec("UPDATE note_page_index SET has_ink = NULL;");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var svc = ControlPlaneService.init(&f.files);
+
+    const meta = (try svc.noteMeta(arena.allocator(), 1, id)).?;
+    try testing.expect(meta.pages[0].hasInk == null);
+    try testing.expect(meta.pages[0].sourcePage == null);
+    try expectWireFixture("page-ref.json", meta.pages[0]);
+}
+
+test "wire contract: PageRefVO — a mark page carries sourcePage and hasInk, true and false" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+
+    const mark = try wireMarkBytes(gpa);
+    defer gpa.free(mark);
+    const id = try seedBytes(&f, null, "annotated.pdf.mark", mark);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var svc = ControlPlaneService.init(&f.files);
+
+    const meta = (try svc.noteMeta(arena.allocator(), 1, id)).?;
+    try testing.expectEqual(@as(usize, 2), meta.pages.len);
+
+    // Both optionals present, and `hasInk` true: the annotated page.
+    try testing.expectEqual(@as(i64, 2), meta.pages[0].sourcePage.?);
+    try testing.expectEqual(@as(?bool, true), meta.pages[0].hasInk);
+    try expectWireFixture("page-ref-inked.json", meta.pages[0]);
+
+    // Same shape, `hasInk` FALSE — a mark page whose annotations were erased.
+    // `false` travels; only the unknown is omitted.
+    try testing.expectEqual(@as(i64, 5), meta.pages[1].sourcePage.?);
+    try testing.expectEqual(@as(?bool, false), meta.pages[1].hasInk);
+    try expectWireFixture("page-ref-sparse-mark.json", meta.pages[1]);
+}
+
+test "wire contract: NoteMetaVO — a recognized N6 note, and an annotated PDF" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+
+    const note = try wireRecognizedNote(gpa, &bmp);
+    defer gpa.free(note);
+    const note_id = try seedBytes(&f, null, "recognized.note", note);
+
+    const mark = try wireMarkBytes(gpa);
+    defer gpa.free(mark);
+    const pdf_id = try seedBytes(&f, null, "manual.pdf", "%PDF-1.7\n%%EOF\n");
+    _ = try seedBytes(&f, null, "manual.pdf.mark", mark);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+
+    // The `.note`: two pages, the first recognized (so `textHash` is real) and
+    // `pxPerMm` present because N6 is in the millimetre allowlist. Nothing on
+    // this VO is wall-clock, so it needs no pinning.
+    const meta = (try svc.noteMeta(a, 1, note_id)).?;
+    try testing.expect(meta.pages[0].textHash != null);
+    try testing.expect(meta.pages[0].linksHash != null);
+    try testing.expect(meta.pages[1].textHash == null);
+    try testing.expect(meta.pages[1].linksHash == null);
+    try testing.expect(meta.pxPerMm != null);
+    try testing.expect(meta.annotationsId == null);
+    try expectWireFixture("note-meta.json", meta);
+
+    // The PDF: no `pxPerMm`, a placeholder page, and an `annotationsId` naming
+    // the `.mark` folded out from behind it.
+    const doc = (try svc.noteMeta(a, 1, pdf_id)).?;
+    try testing.expectEqualStrings("pdf", doc.fileType.?);
+    try testing.expect(doc.annotationsId != null);
+    try testing.expect(doc.pxPerMm == null);
+    try expectWireFixture("note-meta-pdf-with-mark.json", doc);
+}
+
+test "wire contract: EntryVO — a note row, and a PDF row naming its mark" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+
+    const note = try wireRecognizedNote(gpa, &bmp);
+    defer gpa.free(note);
+    _ = try seedBytes(&f, null, "recognized.note", note);
+
+    const mark = try wireMarkBytes(gpa);
+    defer gpa.free(mark);
+    _ = try seedBytes(&f, null, "manual.pdf", "%PDF-1.7\n%%EOF\n");
+    _ = try seedBytes(&f, null, "manual.pdf.mark", mark);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+    const root = try svc.listing(a, 1, null);
+
+    // A `.note` row: every note-only optional populated, `annotationsId` and
+    // `itemCount` OMITTED (a note has neither).
+    const row = try entryNamed(root, "recognized.note");
+    try testing.expect(row.hasRecognizedText.?);
+    try testing.expect(row.thumbAspect != null);
+    try testing.expect(row.annotationsId == null);
+    try testing.expect(row.itemCount == null);
+    try expectWireFixture("entry.json", pinEntryTime(row));
+
+    // The document's row is the ONLY place a paired mark's id can be offered
+    // from — `hidePairedMark` gives the mark no card of its own.
+    const doc = try entryNamed(root, "manual.pdf");
+    try testing.expect(doc.annotationsId != null);
+    try expectWireFixture("entry-annotated-pdf.json", pinEntryTime(doc));
+}
+
+test "wire contract: ListingVO — a subfolder listing, breadcrumb and all" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+
+    // Listed from a SUBFOLDER, so `folderId` and a non-empty `path` are both
+    // exercised — the root listing omits `folderId` entirely and has no
+    // breadcrumb, which would leave two keys unpinned.
+    const docs = try f.files.createFolder(1, null, "Docs");
+    defer testing.allocator.free(docs.name);
+    const sub = try f.files.createFolder(1, docs.id, "Sub");
+    defer testing.allocator.free(sub.name);
+
+    const note = try wireRecognizedNote(gpa, &bmp);
+    defer gpa.free(note);
+    _ = try seedBytes(&f, docs.id, "recognized.note", note);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+
+    const vo = try svc.listing(a, 1, docs.id);
+    // The breadcrumb crumb carries NO count (it is a path, not rows to render);
+    // the child folder row does. Both spellings of `FolderVO` in one fixture.
+    try testing.expectEqual(@as(usize, 1), vo.path.len);
+    try testing.expect(vo.path[0].itemCount == null);
+    try testing.expectEqual(@as(usize, 2), vo.entries.len);
+    try expectWireFixture("listing.json", try pinListingTimes(a, vo));
+}
+
+test "wire contract: HistoryVO — the live version flagged, a retained one behind it" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+
+    // The same name twice: the second upload supersedes the first and retains
+    // it, which is the only way to get a two-row history.
+    const v1 = try nb.serialize(gpa, .{ .pages = &.{.{ .layers = &.{.{ .slot = .main, .bitmap = &bmp }} }} });
+    defer gpa.free(v1);
+    const id = try seedBytes(&f, null, "n.note", v1);
+    const v2 = try wireRecognizedNote(gpa, &bmp);
+    defer gpa.free(v2);
+    _ = try seedBytes(&f, null, "n.note", v2);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+
+    const vo = (try svc.history(a, 1, id)).?;
+    try testing.expectEqual(@as(usize, 2), vo.versions.len);
+    try testing.expect(vo.versions[0].current);
+    // `current = false` is a DEFAULT, so it is emitted rather than omitted —
+    // `bool` is not optional here. The retained row proves it.
+    try testing.expect(!vo.versions[1].current);
+    try expectWireFixture("history.json", try pinHistoryTimes(a, vo));
+}
+
+test "wire contract: PageTextVO — the transcript and its positioned words, in millimetres" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+
+    const note = try wireRecognizedNote(gpa, &bmp);
+    defer gpa.free(note);
+    const id = try seedBytes(&f, null, "recognized.note", note);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var svc = ControlPlaneService.init(&f.files);
+
+    const pt = (try svc.pageText(arena.allocator(), 1, id, 0)).?;
+    try testing.expect(pt.vo.text != null);
+    try testing.expect(pt.vo.words != null);
+    try expectWireFixture("page-text.json", pt.vo);
 }

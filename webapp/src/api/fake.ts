@@ -5,7 +5,7 @@
 // loading states and lazy behaviour are exercised realistically.
 
 import type { Api, PageLinks } from "./types";
-import type { PdfLink } from "../render/pdfLinks";
+import type { PdfLink } from "../core/types";
 // The bin half of this fake, in its own module — see the `--- BIN WRITES ---`
 // marker below and `binFake.ts`'s header for why it is not inline.
 import { createBinFake, BIN_SEED_NOTES } from "./binFake";
@@ -109,6 +109,19 @@ const RECOGNIZED_FROM: Record<string, number> = {};
  */
 const LINKED_NOTE_ID: Id = "122";
 
+/**
+ * A page with NOTHING WRITTEN ON IT, in the reader's own fixture note (`141`).
+ *
+ * The ink rail's whole job is to make an unwritten page visible in a run of
+ * written ones (§2.5), so a corpus where every page carries ink
+ * cannot fail the way a real notebook does. This is the gap the strip has to
+ * draw — a break in an otherwise continuous edge — and it sits in the MIDDLE
+ * rather than at either end, because an edge is only unbroken on both sides of
+ * a page that has neighbours.
+ */
+const BLANK_PAGE_NOTE_ID: Id = "141";
+const BLANK_PAGE_INDEX = 4;
+
 function fakeTextHash(noteId: Id, index: number, recognized: boolean, from = 0): string | null {
   if (!recognized || index < from || index % 3 === 2) return null;
   return fakeHash(`${noteId}:${index}:recogntext`);
@@ -136,6 +149,15 @@ function pages(
     // A `.note` page: its number is always `index + 1`, so there is nothing
     // to carry (see `PageRef.sourcePage`).
     sourcePage: null,
+    // WRITTEN ON, except for the one deliberate gap. The real server answers
+    // this per page from a scan at ingest; a fixture note is handwriting all the
+    // way through, which is exactly the notebook case the rail is designed for —
+    // a solid edge, and one page you can find by the break in it.
+    //
+    // Note this is `false`, not absent: a fixture that omitted the field would
+    // put every strip in the "nobody has looked yet" state and quietly assert
+    // nothing at all, since the rail refuses to draw on an incomplete map.
+    hasInk: !(noteId === BLANK_PAGE_NOTE_ID && index === BLANK_PAGE_INDEX),
   }));
 }
 
@@ -244,6 +266,8 @@ interface NoteOpts {
    * (its embedded thumbnail's dims, which the listing cannot derive from pages).
    */
   thumbAspect?: { w: number; h: number };
+  /** The paired live `.mark`'s id. Default null — only an annotated `.pdf` has one. */
+  annotationsId?: Id;
 }
 function note(id: Id, name: string, pageCount: number, updatedAt: number, opts: NoteOpts = {}): NoteSummary {
   const fileType = opts.fileType ?? "note";
@@ -275,6 +299,12 @@ function note(id: Id, name: string, pageCount: number, updatedAt: number, opts: 
     //  - images/`.txt`/everything else → ABSENT, exactly like the server.
     thumbAspect:
       opts.thumbAspect ?? (fileType === "note" && first ? { w: first.width, h: first.height } : undefined),
+    // The listing half of the pairing the meta already states. The server folds
+    // the mark itself out of the listing, so this field is the ONLY thing on a
+    // row that says the document has handwriting beside it — and the only thing
+    // the card's "Annotation history" can key off without fetching a meta per
+    // entry. Omitted (→ null) everywhere but the one paired fixture.
+    annotationsId: opts.annotationsId ?? null,
   };
 }
 
@@ -560,7 +590,13 @@ const CHILDREN: Record<string, Entry[]> = {
     // A `.txt` carries NO thumbAspect either — its snippet's shape is the
     // client-side constant (we rasterise it, we fix it).
     note("177", "readme", 1, NOW - 7 * DAY, { fileType: "txt" }),
-    note("178", "Appliance manual", 4, NOW - 8 * DAY, { fileType: "pdf" }),
+    // THE ANNOTATED PDF — the one fixture with a `.mark` beside it. The mark has
+    // no row of its own (the server folds a paired mark out of every listing),
+    // so this field is what makes its version history reachable at all.
+    note("178", "Appliance manual", 4, NOW - 8 * DAY, {
+      fileType: "pdf",
+      annotationsId: PDF_MARK_ID,
+    }),
   ],
 };
 
@@ -603,13 +639,35 @@ for (const s of BIN_SEED_NOTES) {
 }
 
 /**
- * A note summary by id — the live library first, then the recycle-bin fixture.
- * The per-id generators (transcript, version history) resolve through this so
- * they answer for a TRASHED id, while the library-wide walks stay on `ALL_NOTES`
- * alone (a trashed note is unfindable in a live-wide listing).
+ * The paired `.mark`'s own summary — registered by id ONLY, deliberately outside
+ * BOTH `CHILDREN` and `ALL_NOTES`.
+ *
+ * That is not a shortcut, it is the fixture mirroring the defect this feature
+ * exists for: the real server's `hide_paired_mark` folds a live mark out of every
+ * listing, so it has no row, no card and no ⋯ menu — and a mark that DID appear in
+ * `ALL_NOTES` would show up in the library-wide walks (search, quota) that no real
+ * listing would ever put it in.
+ *
+ * It exists so the per-id generators can answer for the mark: `baseVersions`
+ * resolves through {@link noteSummary}, and `canPreviewHistory("mark")` is true,
+ * so the mark accrues the same current-plus-two-retained history every other
+ * previewable kind has. Without this the mark's history was an empty list — which
+ * is exactly what the household saw.
+ */
+const PDF_MARK_SUMMARY: NoteSummary = note(PDF_MARK_ID, "Appliance manual.pdf.mark", 1, NOW - 8 * DAY, {
+  fileType: "mark",
+});
+
+/**
+ * A note summary by id — the live library first, then the recycle-bin fixture,
+ * then the paired mark. The per-id generators (transcript, version history)
+ * resolve through this so they answer for a TRASHED id (and for a mark that has
+ * no listing row), while the library-wide walks stay on `ALL_NOTES` alone (a
+ * trashed note is unfindable in a live-wide listing, and neither is a paired
+ * mark).
  */
 function noteSummary(id: Id): NoteSummary | undefined {
-  return ALL_NOTES[id] ?? BIN_NOTES[id];
+  return ALL_NOTES[id] ?? BIN_NOTES[id] ?? (id === PDF_MARK_ID ? PDF_MARK_SUMMARY : undefined);
 }
 
 // Parent of each folder (null = root), derived from CHILDREN. Lets listFolder
@@ -683,6 +741,11 @@ function markMeta(): NoteMeta {
         // carries no `EXTERNALLINKINFO` — the PDF's links come from the PDF.
         linksHash: null,
         sourcePage: PDF_MARK_SOURCE_PAGE,
+        // The mark's one page is the one somebody drew on — so the PDF's strip
+        // marks exactly the row `sourcePage` names and no other. A mark page
+        // erased back to nothing would carry `false` here and light nothing,
+        // which is the distinction the flag exists to make.
+        hasInk: true,
         layers,
       },
     ],
@@ -860,6 +923,17 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     async historyPageBytes(_id: Id, md5: string, index: number): Promise<ArrayBuffer> {
       await delay(latency);
+      // A PAST VERSION OF THE INK IS STILL INK. The PDF viewer's annotation
+      // preview reroutes `getPageBytes(markId, ref)` through here, and the
+      // overlay is decoded for real — so shape-only junk would paint nothing and
+      // a preview that showed no handwriting at all would look like success.
+      // Same payload the live route serves, which is the honest limit of what a
+      // fixture can say here: it makes the preview path renderable end to end,
+      // and deliberately does not pretend to be a second set of handwriting.
+      if (_id === PDF_MARK_ID) {
+        const payload = layeredPagePayload(0);
+        if (payload) return payload.slice().buffer as ArrayBuffer;
+      }
       // The fake renderer paints from the preview meta's page.hash (which the
       // reader keys per-version), so these bytes are shape-only — a stable buffer
       // seeded by the version + page, mirroring `getPageBytes`.

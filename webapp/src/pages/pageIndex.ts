@@ -27,7 +27,7 @@
 import { el } from "../ui/dom";
 import { createSidePanel } from "../ui/sidePanel";
 import { VirtualList } from "../ui/virtualList";
-import { svg, VIEWER_IC } from "./viewerChrome";
+import { svg, VIEWER_IC } from "./viewerIcons";
 
 /**
  * The fixed row height, in px — `--preview-h-filmstrip` (the thumbnail's
@@ -88,6 +88,14 @@ export interface PageIndexOptions {
   aspect?(index: number): number | null;
   /** The row starts in the loading treatment. */
   loading?(index: number): boolean;
+  /**
+   * The word the row's accessible name uses for a page that carries ink —
+   * "written" for a notebook, "annotated" for a PDF's mark. Same fact, and the
+   * two viewers genuinely mean different things by it: a `.note` page was
+   * WRITTEN, a PDF page someone drew on was ANNOTATED. The stroke itself is one
+   * device for both (it is the same fact); only the word forks.
+   */
+  inkWord?: string;
 }
 
 export interface PageIndex {
@@ -102,6 +110,21 @@ export interface PageIndex {
    * built later — by a scroll, or by a rebuild — carry the badge they are due.
    */
   setBadges(counts: ReadonlyMap<number, number>): void;
+  /**
+   * Which pages carry ink, by page index: `true` draws the stroke, `false`
+   * draws nothing — and a MISSING entry is the third state, "the server has not
+   * looked at this page yet". Held like {@link setBadges}, so rows the virtual
+   * window builds later wear the mark they are due.
+   *
+   * ALL-OR-NOTHING, and the component enforces it rather than trusting the
+   * caller: if the map does not cover every page, NO row draws a stroke. A rail
+   * that is half filled in reads as "those other pages are empty" about pages
+   * nobody has looked at — the exact misreading the missing-entry state exists
+   * to prevent, arriving through the eye instead of through the API. This is
+   * why the argument is a map and not the set of inked pages: a set cannot tell
+   * "empty" from "not yet looked", so it could not make this check.
+   */
+  setInk(ink: ReadonlyMap<number, boolean>): void;
   /**
    * The row's thumbnail canvas IF that row is inside the rendered window — the
    * reader's blur-up source. `null` for a page whose row does not currently
@@ -132,6 +155,8 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
   let total = 0;
   let current = 0;
   let badges: ReadonlyMap<number, number> = new Map();
+  let ink: ReadonlyMap<number, boolean> = new Map();
+  const inkWord = opts.inkWord ?? "written";
   /** The rows inside the virtual window, by index. Mirrors the list's own set. */
   const rows = new Map<number, PageIndexRow>();
 
@@ -146,6 +171,27 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
     if (!n) return;
     const label = `${n} ${n === 1 ? "match" : "matches"} on page ${row.index + 1}`;
     row.el.append(el("span", { class: "filmstrip__hits", text: String(n), title: label }));
+  }
+
+  /**
+   * The ink stroke, and the row's accessible name along with it.
+   *
+   * THE CLAIM IS ONLY EVER POSITIVE. `true` marks the row; `false` and "not yet
+   * looked" are both drawn — and both NAMED — identically, as an unmarked row.
+   * So the absence of a stroke never asserts that a page is empty, which is the
+   * safe direction for a fact the server is still filling in behind the reader.
+   *
+   * The stroke is a `::before` and stays out of the accessibility tree; the fact
+   * reaches a screen reader as a WORD on the row's own name instead, because a
+   * decorative rule that is announced would say "image" on every written page.
+   */
+  function applyInk(row: PageIndexRow): void {
+    // A map that does not cover the document is not partial information here —
+    // it is no information (see `setInk`).
+    const known = total > 0 && ink.size >= total;
+    const inked = known && ink.get(row.index) === true;
+    row.el.classList.toggle("filmstrip__page--inked", inked);
+    row.el.setAttribute("aria-label", inked ? `Page ${row.index + 1}, ${inkWord}` : `Page ${row.index + 1}`);
   }
 
   function buildRow(index: number): HTMLElement {
@@ -186,6 +232,7 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
     btn.addEventListener("click", () => opts.onPick(index));
     rows.set(index, row);
     applyBadge(row);
+    applyInk(row);
     opts.mount(row);
     return btn;
   }
@@ -250,6 +297,11 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
     setBadges(counts: ReadonlyMap<number, number>): void {
       badges = counts;
       for (const row of rows.values()) applyBadge(row);
+    },
+
+    setInk(next: ReadonlyMap<number, boolean>): void {
+      ink = next;
+      for (const row of rows.values()) applyInk(row);
     },
 
     thumbCanvas(index: number): HTMLCanvasElement | null {

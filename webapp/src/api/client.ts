@@ -9,7 +9,7 @@
 
 import { challengeHash, md5Hex } from "./crypto";
 import { historyFileUrl } from "../core/fileKind";
-import { parsePageLinks } from "../render/pdfLinks";
+import { parsePageLinks } from "../render/pdfWire";
 import type { Api, PageLinks } from "./types";
 import type {
   Entry,
@@ -568,7 +568,7 @@ export function dispatchApiFailure(sink: ApiFailureSink, e: unknown, noteId?: Id
  * disabled) rather than `undefined`, which would let the reader fetch a transcript
  * that isn't there. A real absent-optional — not a not-yet-shipped stub.
  */
-function normalizePage(p: PageRef): PageRef {
+export function normalizePage(p: PageRef): PageRef {
   return {
     index: p.index,
     hash: p.hash,
@@ -584,6 +584,19 @@ function normalizePage(p: PageRef): PageRef {
     // number is 1-based, so 0 (or anything below it) is not a page and is
     // treated as absence rather than trusted onto a document.
     sourcePage: typeof p.sourcePage === "number" && p.sourcePage > 0 ? p.sourcePage : null,
+    // The ONE optional here that normalizes to `undefined` rather than to
+    // `null`, and the difference is the whole point of the field. The others are
+    // two-state — a hash is there or it is not — so absence collapses safely
+    // onto `null`. This one is THREE-state: `true` (ink), `false` (empty), and
+    // "the server has not looked yet", which the wire says by omitting the key.
+    // Fold that third state onto either of the first two and the page index
+    // either claims a notebook is blank while the back-fill is still running, or
+    // claims ink on a page nobody has scanned.
+    //
+    // So anything that is not a boolean becomes absence, which is the same
+    // conservative direction `sourcePage` takes with a number it cannot use: an
+    // unknown page draws no mark, and a mark is only ever drawn on a positive.
+    hasInk: typeof p.hasInk === "boolean" ? p.hasInk : undefined,
     layers: normalizeLayers(p.layers),
   };
 }
@@ -696,7 +709,7 @@ function normalizeAspect(a: { w?: number; h?: number } | undefined | null): { w:
  * `?? false` / `?? fileTypeFromName(name)` defaults keep the OCR marker off cards
  * that shouldn't have it and stop the badge rendering the literal `undefined`.
  */
-function normalizeEntry(e: Entry): Entry {
+export function normalizeEntry(e: Entry): Entry {
   return e.kind === "note"
     ? {
         ...e,
@@ -709,6 +722,14 @@ function normalizeEntry(e: Entry): Entry {
         // Absent for most entries (only `.note`/`.spd` state a shape); the
         // gallery reads `undefined` as "unknown" and falls back — see the type.
         thumbAspect: normalizeAspect(e.thumbAspect),
+        // The paired live `.mark`, when the server resolved one. OMITTED for
+        // every entry that has none (most of them), so absent is the common
+        // case and reads as `null` — and anything that is not a non-empty
+        // string is unusable as an id, so it reads as `null` too rather than
+        // becoming a menu row that opens the history of nothing. Same
+        // conservative direction `sourcePage` takes with a number it cannot use.
+        annotationsId:
+          typeof e.annotationsId === "string" && e.annotationsId !== "" ? e.annotationsId : null,
       }
     : {
         ...e,

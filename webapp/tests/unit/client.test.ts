@@ -345,3 +345,132 @@ describe("PageRef.sourcePage off the wire", () => {
     expect(api.pages.map((p) => p.sourcePage)).toEqual([null, null, null]);
   });
 });
+
+describe("PageRef.hasInk off the wire", () => {
+  // The page index's ink rail, and the one optional on a page ref that must
+  // survive normalization as `undefined` rather than `null`. `sourcePage` above
+  // is two-state, so absence collapses onto `null` safely; this one is three-
+  // state, and the third state is what stops the rail claiming a notebook is
+  // blank while the server's back-fill is still working through it.
+  const page = (over: Record<string, unknown>) => ({
+    index: 0,
+    hash: "b".repeat(32),
+    width: 1404,
+    height: 1872,
+    ...over,
+  });
+
+  async function metaWith(pages: unknown[]) {
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({
+        "file/metadata": () =>
+          jsonResponse({ success: true, id: "n-2", name: "written.note", pages }),
+      }),
+    );
+    return createHttpApi().getNoteMeta("n-2" as never);
+  }
+
+  it("carries both answers through", async () => {
+    // The regression this exists for: `normalizePage` rebuilds a page ref field
+    // by field, so a field nobody adds here is silently dropped between the
+    // server and the strip — the rail would have stayed blank on a document the
+    // server had fully scanned, with the right values sitting in the response.
+    const api = await metaWith([page({ hasInk: true }), page({ index: 1, hasInk: false })]);
+    expect(api.pages.map((p) => p.hasInk)).toEqual([true, false]);
+  });
+
+  it("keeps an omitted field UNDEFINED, not null and not false", async () => {
+    const api = await metaWith([page({}), page({ index: 1 })]);
+    expect(api.pages.map((p) => p.hasInk)).toEqual([undefined, undefined]);
+    // Explicitly not the falsy neighbours: either one would read downstream as
+    // "this page is empty", which is the claim the omission exists to withhold.
+    expect(api.pages[0]?.hasInk).not.toBeNull();
+  });
+
+  it("treats a non-boolean as not yet known", async () => {
+    const api = await metaWith([
+      page({ hasInk: 1 }),
+      page({ index: 1, hasInk: "true" }),
+      page({ index: 2, hasInk: null }),
+    ]);
+    expect(api.pages.map((p) => p.hasInk)).toEqual([undefined, undefined, undefined]);
+  });
+});
+
+describe("Entry.annotationsId off the wire", () => {
+  // The listing half of the pairing. It exists because a paired `.mark` has NO
+  // listing row of its own — the server folds it out — so the document's row is
+  // the only place its retained versions can be reached from, and this field is
+  // the only thing on that row which says there are any.
+  //
+  // Same `emit_null_optional_fields = false` shape as `fileHash`: absent is the
+  // common case (almost nothing has a mark), and absent must read as `null`, not
+  // `undefined` — the card tests `!== null`, and an unusable value must not
+  // become a menu row that opens the history of nothing.
+  const entry = (over: Record<string, unknown>) => ({
+    kind: "note",
+    id: "e-1",
+    name: "Appliance manual.pdf",
+    pageCount: 4,
+    firstPage: { index: 0, hash: "c".repeat(32), width: 612, height: 792 },
+    updatedAt: 0,
+    fileType: "pdf",
+    fileHash: "d".repeat(32),
+    ...over,
+  });
+
+  /** `listFolder` over a stubbed transport serving exactly `entries`. */
+  async function listWith(entries: unknown[]) {
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({
+        "controlplane/tree": () =>
+          jsonResponse({ success: true, folderId: "files", path: [], entries, syncVersion: 1 }),
+      }),
+    );
+    return createHttpApi().listFolder("files" as never);
+  }
+
+  it("carries the paired mark's id through", async () => {
+    // The regression this exists for: `normalizeEntry` rebuilds a note entry
+    // field by field, so a field nobody adds here is dropped between the server
+    // and the card — the ⋯ menu would offer nothing on a document the server had
+    // correctly paired, with the right id sitting in the response.
+    const listing = await listWith([entry({ annotationsId: "179" })]);
+    expect(listing.entries.map((e) => (e.kind === "note" ? e.annotationsId : "folder"))).toEqual(["179"]);
+  });
+
+  it("turns an omitted field into null — the case almost every entry is", async () => {
+    const listing = await listWith([entry({}), entry({ id: "e-2", annotationsId: null })]);
+    expect(listing.entries.map((e) => (e.kind === "note" ? e.annotationsId : "folder"))).toEqual([
+      null,
+      null,
+    ]);
+  });
+
+  it("refuses a value that cannot address a file", async () => {
+    // A non-string (or an empty one) is unusable as an id, and the conservative
+    // direction is the one `sourcePage` takes: `null`, so the row is simply not
+    // offered — rather than a menu item that opens a panel for nothing.
+    const listing = await listWith([
+      entry({ annotationsId: 179 }),
+      entry({ id: "e-2", annotationsId: "" }),
+      entry({ id: "e-3", annotationsId: { id: "179" } }),
+    ]);
+    expect(listing.entries.map((e) => (e.kind === "note" ? e.annotationsId : "folder"))).toEqual([
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  it("says nothing about a folder row", async () => {
+    // `Entry` is a union and the field lives on the note arm alone: a folder has
+    // no bytes, no versions and no annotations, and must not grow the field just
+    // because it shares a listing with things that do.
+    const listing = await listWith([{ kind: "folder", id: "sub", name: "Manuals", updatedAt: 0 }]);
+    expect(listing.entries[0]?.kind).toBe("folder");
+    expect(listing.entries[0]).not.toHaveProperty("annotationsId");
+  });
+});

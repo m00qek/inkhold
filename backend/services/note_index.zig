@@ -1,6 +1,6 @@
 //! The `.note` blob index: parse a container once, at ingest, and keep the
 //! per-page facts the hot read paths need in SQLite (`note_index` +
-//! `note_page_index`). See for the design.
+//! `note_page_index`).
 //!
 //! ## Two halves, on purpose
 //!
@@ -33,100 +33,31 @@ const thumbstore = @import("../store/thumbs.zig");
 const blob_source = @import("../store/blob_source.zig");
 const thumbnail = @import("thumbnail.zig");
 const derivesearch = @import("derive_search.zig");
+const inkscan = @import("ink_scan.zig");
 const sn = @import("supernote");
 
 const Md5 = std.crypto.hash.Md5;
 const Allocator = std.mem.Allocator;
 
-/// Bump when the stored shape or its derivation changes: rows at an older
-/// version are re-parsed by `ensureIndexed` the next time they are read.
+/// Bump when anything the CLIENT caches under `(md5, index_version)` changes:
+/// rows at an older version are re-parsed by `ensureIndexed` the next time they
+/// are read, and the version is also the browser's cache key
+/// (§2.1: same bytes, new parser, different output). v16 is
+/// the worked example — PDF text extraction started replacing Private Use Area
+/// codepoints with spaces (`pdf_text.stripPrivateUse`), so a browser holding
+/// `(md5, 15)` would have served the old vocabulary for ever, the manifest
+/// advertising a key it already had.
 ///
-/// - **1** → the original shape.
-/// - **2** → per-page `width`/`height` were the note's base (bitmap) dims for
-///   every page, including `ORIENTATION = 1090` — the agreement-over-accuracy
-///   posture taken while landscape storage was an open question.
-/// - **3** → per-page `width`/`height` are the EFFECTIVE dims (swapped for
-///   `1090`), and the SNPG header carries the page's effective dims too. The
-///   open question closed: a landscape page's raster is stored natively
-///   landscape, so the swapped dims ARE its decode geometry. See *Orientation*
-///   at `NoteHeader`.
-/// - **4** → the device-rendered COVER rides the parse: `cover_w`/`cover_h`
-///   memoize its pixel dims (NULL = no cover, 0 = undecodable) and the bytes
-///   land in `thumbs/<blob_md5>` — the `.spd` thumbnail's exact shape, served
-///   by the same `/thumbnail/{hash}` route. v3 rows re-derive lazily on their
-///   next `ensureIndexed`/repair touch; no sweep.
-/// - **5** → the layer panel: the packed `layers` records gain the SNPG v2
-///   slot id + `hidden` flag, plus the per-layer display name and `isCurrent`
-///   from `LAYERINFO` (variable-stride blob — see `packLayers`). The emit
-///   list becomes "LAYERINFO order minus deleted" (hidden layers ride the
-///   wire flagged; fallback: the old LAYERSEQ list), and pages are served as
-///   SNPG **v2**. v4 rows (9-byte fixed-stride records, v1 wire) re-derive
-///   lazily like every bump before them.
-/// - **6** → `.txt` segments (`txt_index.zig`): text blobs gain `kind = 1`
-///   paragraph rows in `note_page_index`, and this bump exists FOR them — a
-///   pre-existing `.txt` sits at v5 and heals on its first listing view,
-///   where the ensure path now learns the file NAME (the extension is the
-///   derivation gate). The `.note` shape itself is UNCHANGED: notes re-parse
-///   once, cheaply, to byte-identical rows — the goldens must not move.
-/// - **7** → recognized-text ordering (`recognition.plainText`): the stored
-///   page `text` now honors the device's own layout — regions joined with
-///   `"\n"` (was a space), stable-sorted by first-placed-word `y`, and a
-///   region with no top-level `label` reconstructed from its words instead of
-///   dropped. Only the `text` column content changes (raster/SNPG goldens are
-///   untouched); notes re-derive it lazily on the next `ensureIndexed`.
-/// - **8** → canonical document order (in-doc-search plan): the heal re-minted
-///   any holder's segment band a PAST incremental flip left OUT of page order,
-///   so `rowid ASC == reading order` for legacy notes too. **RETIRED** by
-///   schema v14 along with the bands themselves. Kept in the
-///   list because the number is spent. No stored-column change either way — the
-///   raster/SNPG/text goldens were untouched.
-/// - **9** → per-document term set (in-doc-search entry 8b): backfilled each
-///   note's `doc_terms` — the in-doc fuzzy candidate pool — on the same
-///   canonical-order heal. **RETIRED**: the search removal
-///   moved the typo ladder into the browser and schema v13 dropped the table, so
-///   this bump now heals nothing that still exists. Kept in the list because the
-///   number is spent: a client that saw 9 must not see it again meaning
-///   something else. No stored-column change; the goldens are unmoved.
-/// - **10** → the COVER is served ON-DEMAND, streamed from the blob instead of
-///   copied into `thumbs/`. `cover_offset`/`cover_length` memoize the cover
-///   image block's byte offset + length INSIDE the blob and `cover_mime` its
-///   sniffed type; the parse reads only the block's 4-byte length prefix and a
-///   small header slice (for dims + MIME), never the whole cover, and NOTHING
-///   is written to the thumbs store for a `.note`. This also lifts the cover
-///   ceiling from 2 MB (`max_thumbnail_bytes`) to 20 MB (`max_cover_bytes`) —
-///   real user-set covers are multi-MB PNGs. `cover_w`/`cover_h` keep their v4
-///   meaning. v9 rows re-derive lazily on their next `ensureIndexed`/repair
-///   touch (a v9 row has NULL `cover_offset`, so it serves no cover until it
-///   heals). The raster/SNPG/text goldens are untouched.
-/// - **11** → custom IMAGE templates: a page
-///   whose custom-style background does NOT decode as RATTA_RLE
-///   (`decoder.decodesToExactly`) is a browser-native image. Its background
-///   record in the `layers` blob gains a `raster_image` flag (packed bit3),
-///   and `note_page_index.bg_hash` records the page's `PAGESTYLEMD5` (NULL
-///   otherwise) so `GET /note/{id}/template/{hash}` resolves hash → the byte
-///   range already in `layers`. Served pages carry the asset HASH on the SNPG
-///   wire (bit2) instead of the image bytes. A note with NO custom-image
-///   background re-derives to byte-identical rows — the raster/SNPG/text
-///   goldens must not move; only image pages change. v10 rows heal lazily.
-// v12: ORIENTATION 1270 (270° landscape) is now recognized as horizontal, so a
-// 1270 page's stored EFFECTIVE dims flip to landscape (were wrongly portrait,
-// which sheared the decode). Re-derive heals the stored dims for existing notes;
-// the SNPG serve path already reads them live, so its geometry fixes on rebuild.
-// v15: a page's `EXTERNALLINKINFO` range (`links_offset`/`links_length`) and the
-// md5 of its content (`links_hash`) — the links a PDF used as this page's
-// template brought with it (note-format.md §14). NULL on every page that has no
-// such block, which is every page of every note not built on a PDF template, so
-// re-deriving changes nothing for them.
-// v16: PDF text extraction replaces Private Use Area codepoints with spaces
-// (`pdf_text.stripPrivateUse`), so a PDF's derived terms MEAN something
-// different than they did at 15 — and the version is the client's cache key
-// (same bytes, new parser, different output). Without
-// this bump a browser holding `(md5, 15)` would serve the old vocabulary for
-// ever, because the manifest would advertise the same key it already has.
-//
-// It costs a re-index and a re-fold of EVERY document, not just the PDFs, which
-// is what a global version buys, and separating the two is recorded as worth
-// doing one day. Off the write lock, in the deferred worker.
+/// The test is NOT "does the database change". `has_ink` (schema v16,
+/// §2.4) added a column and a `noteMeta` field and left `terms/`
+/// and `text/` byte-identical, so it took NO bump — existing rows heal through
+/// the deferred `ink` tenant instead. A bump there would have re-folded every
+/// note and every `.txt` for a field neither of them travels in.
+///
+/// A bump costs a re-index and a re-fold of EVERY document, not just the ones
+/// whose derivation moved — what a single global version buys, and what §12
+/// records as worth separating one day. It runs off the write
+/// lock, in the deferred worker. Numbers are spent once and never reused.
 pub const index_version: i64 = 16;
 
 /// Chunk used when hashing a layer's bytes out of a ranged source. Bounds the
@@ -278,6 +209,21 @@ pub const PageRow = struct {
     /// built-in-RLE / no-custom-style pages. The resolve key for
     /// `GET /note/{id}/template/{hash}`.
     bg_hash: ?[]const u8 = null,
+    /// **Is anything drawn on this page?** True when some NON-background layer
+    /// carries a run that is not transparent (`ink_scan.pageHasInk`); false when none
+    /// does; null when a layer could not be read and the answer is genuinely
+    /// unknown — the deferred `ink` tenant asks again.
+    ///
+    /// §2.1: the background does not count. A `.note` built on
+    /// a PDF template carries the template as its background, and a page with a
+    /// full-colour template and nothing written on it is EMPTY in the sense the
+    /// page index means. A HIDDEN layer with ink does count — hidden is a view
+    /// state, not an erasure.
+    ///
+    /// A FLAG, NOT A COUNT (§2.4, decided 2026-09-09): the mark the strip draws
+    /// is yes/no, and a count has to walk every byte of every layer while this
+    /// stops at the first stroke. Compute what you display.
+    has_ink: ?bool = null,
 };
 
 /// Everything `store` needs, owning its own memory — deliberately free of any
@@ -298,7 +244,7 @@ pub const Parsed = struct {
 };
 
 /// The `.note` half of `derive_search`'s page source — the whole of this
-/// format's contribution to.
+/// format's contribution to §2.2.
 ///
 /// **A page with no text is skipped, not yielded empty.** `PageRow.text` is
 /// null whenever the page has no FINISHED transcript, which on this format is
@@ -428,6 +374,12 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
                 .layers = indexed,
                 .recogn_status = page.recognitionStatus(),
                 .bg_hash = bg_hash,
+                // Is there a mark on this page? Streams each NON-background
+                // layer through `decoder.InkFinder` and stops at the first
+                // stroke — §2.2, computed once here because the
+                // client's page strip is virtualised and can only ever see the
+                // dozen rows on screen.
+                .has_ink = inkscan.pageHasInk(src, refs),
             };
 
             // Recognition: keep both the plain transcript (search) and the raw
@@ -715,16 +667,13 @@ pub fn unpackLayers(blob: []const u8, buf: *[max_layers]LayerRef) Error![]const 
 // Write — inside the caller's transaction.
 // ---------------------------------------------------------------------------
 
-// NEITHER `pdf_text` NOR `pdf_probe` IS RESET HERE, and that is deliberate in
-// both directions.
+// NEITHER `pdf_text`, `pdf_probe` NOR `txt_index` IS RESET HERE, and that is
+// deliberate.
 //
-// This upsert used to clear `pdf_text`, because `store` ended by deleting every
-// `note_page_index` row at or past the parsed page count — which for a blob the
-// note parser REJECTED (a PDF) is zero, so a note re-index wiped the PDF's
-// `kind = 2` segments outright and the memo had to be reset to admit it. That
-// delete is now scoped to `kind = 0` (see `store`), so the segments survive, the
-// memo stays TRUE, and clearing it would force a full re-extraction — minutes
-// of work per book on the target — for a heal that touched none of its rows.
+// `pdf_text` and `txt_index` stay TRUE because the tail delete below is scoped
+// to `kind = 0`: their rows survive a note heal that touched none of them, and
+// clearing either memo would force a full re-extraction — minutes of work per
+// book on the target — for nothing.
 //
 // `pdf_probe` is a different hole and is closed on the READER's side instead:
 // the shape lives in the note columns and this statement really does overwrite
@@ -732,11 +681,6 @@ pub fn unpackLayers(blob: []const u8, buf: *[max_layers]LayerRef) Error![]const 
 // outstanding work rather than trusting the memo. Asking the data rather than
 // the memo keeps knowledge of PDFs out of the note half — which is the coupling
 // that made both holes possible.
-//
-// `txt_index` is left alone here for the `pdf_text` reason exactly: the
-// `kind = 1` rows survive the scoped delete, so its memo (`txt_index`, schema
-// v11) stays true and the paragraphs are not re-derived by a note heal that
-// touched none of them.
 const upsert_note_sql =
     \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, signature,
     \\                       signature_version, equipment, width, height, rle_variant,
@@ -758,25 +702,20 @@ const upsert_note_sql =
 const upsert_page_sql =
     \\INSERT INTO note_page_index(blob_md5, page_index, content_hash, width, height, layers,
     \\                            recogn_status, text_hash, recogn_offset, recogn_length, text, bg_hash,
-    \\                            source_page, links_offset, links_length, links_hash)
-    \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+    \\                            source_page, links_offset, links_length, links_hash, has_ink)
+    \\VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
     \\ON CONFLICT(blob_md5, page_index) DO UPDATE SET
     \\  content_hash=excluded.content_hash, width=excluded.width, height=excluded.height,
     \\  layers=excluded.layers, recogn_status=excluded.recogn_status,
     \\  text_hash=excluded.text_hash, recogn_offset=excluded.recogn_offset,
     \\  recogn_length=excluded.recogn_length, text=excluded.text, bg_hash=excluded.bg_hash,
     \\  source_page=excluded.source_page, links_offset=excluded.links_offset,
-    \\  links_length=excluded.links_length, links_hash=excluded.links_hash;
+    \\  links_length=excluded.links_length, links_hash=excluded.links_hash,
+    \\  has_ink=excluded.has_ink;
 ;
 
 /// One page row: raster geometry, layers, the recognition columns, the link
 /// block. `buf` is the caller's scratch for `packLayers`.
-///
-/// It used to be a `PageUpsert` context handed to `search.reconcilePage`, which
-/// wrapped it in the posting dance — diff the stored text, subtract the old
-/// postings, upsert, then either refresh them in place or mint a fresh masked
-/// rowid. schema v14 deleted the index those postings fed, so
-/// what is left is the upsert the adapter always owned, called directly.
 fn upsertPage(db: sqlite.Db, blob_md5: []const u8, page: PageRow, buf: []u8) !void {
     var s = try db.prepare(upsert_page_sql);
     defer s.finalize();
@@ -796,6 +735,9 @@ fn upsertPage(db: sqlite.Db, blob_md5: []const u8, page: PageRow, buf: []u8) !vo
     s.bindIntOpt(14, if (page.links_offset) |v| @intCast(v) else null);
     s.bindIntOpt(15, if (page.links_length) |v| @intCast(v) else null);
     if (page.links_hash) |*h| s.bindText(16, h) else s.bindNull(16);
+    // Three states, spelt as three: 1, 0, or NULL for "not yet looked". A page
+    // whose layers could not be read binds NULL and the `ink` tenant asks again.
+    s.bindIntOpt(17, if (page.has_ink) |v| @as(i64, if (v) 1 else 0) else null);
     _ = try s.step();
 }
 
@@ -804,13 +746,6 @@ fn upsertPage(db: sqlite.Db, blob_md5: []const u8, page: PageRow, buf: []u8) !vo
 /// lifetime). Upserts throughout, so two racing parses of the same blob are
 /// wasteful but never a constraint violation, and a page row keeps its `id`
 /// across a re-index.
-///
-/// **It writes rows and nothing else now.** Until schema v14
-/// this was also the "re-parse of the SAME blob" search path: each page's stored
-/// text was diffed before the upsert, and a page whose text had changed had its
-/// FTS postings subtracted and re-inserted at the same masked rowids so the
-/// owners' recency survived a re-index. That index is gone, and with it the diff
-/// — a re-parse is now `page_count` upserts and a tail delete.
 pub fn store(db: sqlite.Db, blob_md5: []const u8, p: Parsed, now: i64) !void {
     {
         var s = try db.prepare(upsert_note_sql);
@@ -844,12 +779,10 @@ pub fn store(db: sqlite.Db, blob_md5: []const u8, p: Parsed, now: i64) !void {
     // A re-index at a new `index_version` could in principle yield fewer pages;
     // drop any tail left over from the previous shape.
     //
-    // SCOPED TO `kind = 0` — the note half's own rows. The table had three
-    // tenants when this was written, and for a blob the note parser REJECTED (a
-    // PDF, a `.txt`) `page_count` is zero, so an unscoped tail delete was not a
-    // tail delete at all: it was "drop every row anyone wrote for this blob".
-    // §6 step 8 retired the other two tenants, so the scope is belt and braces
-    // now — kept because the column still exists and the rule still holds.
+    // SCOPED TO `kind = 0` — the note half's own rows. For a blob the note
+    // parser REJECTED (a PDF, a `.txt`) `page_count` is zero, so an unscoped
+    // tail delete is not a tail delete at all: it is "drop every row anyone
+    // wrote for this blob".
     {
         var s = try db.prepare(
             "DELETE FROM note_page_index WHERE blob_md5 = ?1 AND page_index >= ?2 AND kind = 0;",
@@ -966,8 +899,7 @@ pub fn deleteForBlob(db: sqlite.Db, blob_md5: []const u8) !void {
 ///
 /// **Never buffers the note.** It reads through `BlobSource`, i.e. positional
 /// `readRange` calls for the addresses the container itself names, so a device
-/// syncing a 40 MB note no longer costs 40 MB of RSS in `upload/finish` — the
-/// one flow that used to stream end to end and regressed when indexing landed.
+/// syncing a 40 MB note does not cost 40 MB of RSS in `upload/finish`.
 /// `io` is unused (the blob store carries its own) and is kept so the call
 /// sites, which thread it everywhere, do not have to change.
 pub fn parseStoredBlob(gpa: Allocator, io: std.Io, blobs: blobstore.BlobStore, md5: []const u8) !?Parsed {
@@ -1023,12 +955,11 @@ pub const SliceSource = struct {
 /// `width`/`height` are the note's BASE (portrait) dims; the header's decode
 /// geometry comes from the per-page row instead — see *Orientation* below.
 ///
-/// ## Orientation: SETTLED — effective dims everywhere
+/// ## Orientation: effective dims everywhere
 ///
 /// A page with `ORIENTATION = 1090` (landscape) has its RATTA_RLE raster stored
 /// **natively landscape**: the same flat byte stream, but the true row width is
-/// the swapped base width (1872 on a Nomad). No longer an open question —
-/// settled from both directions:
+/// the swapped base width (1872 on a Nomad). Settled from both directions:
 ///
 ///  - **empirically**, on a real Nomad capture (`horizontal_layers.note`:
 ///    2 pages, both `1090`, 4 ink layers on page 2), which decodes coherently
@@ -1043,15 +974,9 @@ pub const SliceSource = struct {
 /// fact), `pagePlan` writes those same per-page dims into the SNPG header (the
 /// wasm decoder's geometry), and `noteMeta` advertises them for the page box.
 /// All three read the same stored value, so the payload and the box can never
-/// describe different rectangles — the invariant v2 protected — and the
-/// rectangle is now also the RIGHT one for a landscape page, which v2's base
-/// dims were not (they sheared: a flat RLE stream decoded at the wrong width
-/// fails silently, not loudly).
-///
-/// v1 swapped the stored dims but left the payload header unswapped — a
-/// guaranteed distortion. v2 stored base dims in both places — agreement, at
-/// the cost of shearing real landscape pages. v3 stores effective dims in both
-/// places: agreement AND accuracy.
+/// describe different rectangles, and the rectangle is the RIGHT one for a
+/// landscape page. Getting this wrong is silent: a flat RLE stream decoded at
+/// the wrong width shears, it does not fail.
 pub const NoteHeader = struct { width: u32, height: u32, rle_variant: u8, page_count: u32 };
 
 pub fn noteHeader(db: sqlite.Db, blob_md5: []const u8) !?NoteHeader {
