@@ -1,5 +1,5 @@
 //! The SERVER SIDE of the client's search index: **the manifest and its
-//! tiering** — the caller's COMPLETE live document
+//! tiering** (§2.3) — the caller's COMPLETE live document
 //! set, which is also the only mechanism by which a trashed file ever stops
 //! matching in the browser.
 //!
@@ -58,8 +58,7 @@ fn nibble(c: u8) EncodeError!u8 {
 }
 
 // ---------------------------------------------------------------------------
-// THE MANIFEST, and the tiering it carries,
-//
+// THE MANIFEST — §2.2, and the tiering it carries, §3
 // ---------------------------------------------------------------------------
 
 // ## The manifest is COMPLETE or it is broken. There is no third option.
@@ -99,10 +98,11 @@ fn nibble(c: u8) EncodeError!u8 {
 
 const sqlite = @import("../../db/sqlite.zig");
 const filesvc = @import("../files.zig");
+const markpair = @import("../mark_pairing.zig");
 const pending = @import("../pending.zig");
 const derivedstore = @import("../../store/derived.zig");
 
-/// Which pass of the fill this document belongs to,
+/// Which pass of the fill this document belongs to — §3,
 /// in its order, so `ORDER BY tier` IS the fill order and no second table maps
 /// one to the other.
 ///
@@ -134,7 +134,7 @@ pub const Tier = enum(u8) {
 ///
 /// `derived` here is *"no tenant of the deferred worker owes this blob work"*,
 /// and that is narrower than the plain-English "its text has been extracted".
-/// the pending-ness work records the gap and it is deliberate: the count and
+/// §11.4 records the gap and it is deliberate: the count and
 /// this column agree with the WORKER, which is the property §3 exists to keep,
 /// and the worker offers a blob only once its `note_index` row is current. So a
 /// blob whose note half is STALE reports `derived` while genuinely underived —
@@ -143,7 +143,7 @@ pub const Tier = enum(u8) {
 ///
 /// **That under-report is why the client's rule is `unknown` => `pending` and
 /// why an empty term set is only cacheable together with its `index_version`.**
-/// Caching a false empty loses that document for
+/// §4.1: caching a false empty loses that document for
 /// ever — no error, no retry, no symptom. The `(md5, index_version)` key is what
 /// makes the stale-note window survivable: the heal bumps the row to the current
 /// version, and a client keyed on the old one refetches instead of trusting the
@@ -166,7 +166,7 @@ pub const Derivation = enum(u8) {
     unknown = 2,
 };
 
-/// THE SEAM, FILLED.
+/// THE SEAM, FILLED — §3 and §4.1.
 ///
 /// That plan is emphatic that pending-ness IS the deferred tenants' own
 /// predicate, extracted and shared: *"any other definition would be a second
@@ -219,23 +219,30 @@ fn hasRecognisedText(comptime a: []const u8) []const u8 {
         ".md5 AND recogn_status = 1 AND " ++ has_text ++ ")";
 }
 
-/// 's three passes as one SQL expression over the row
+/// §3's three passes as one SQL expression over the row
 /// aliased `a`. Exported because §9.1's cold fill is *"one bundle per tier"*, so
 /// the terms route (step 4) selects by tier and must ask the same question this
 /// manifest answered — one expression, or the client's tier 2 and the server's
 /// tier 2 are different sets.
 ///
-/// **Tier 2 is `Files.hasPairedMark`, and it is deliberately not spelt here.**
+/// **Tier 2 is `mark_pairing.pairedMarkId`, and it is deliberately not spelt here.**
 /// The pairing rule was made RELATIONAL — a sibling exists whose `name || '.mark'`
 /// is this row's — precisely because the old `LIKE '%.pdf.mark'` was silently
 /// PDF-only, and the device annotates formats this server has never heard of. An
 /// annotated `book.epub` is a tier-2 document. Nothing in this file may ask what
 /// the document IS; the sibling's existence is the whole answer, and
-/// `files.zig` owns it (the search redesign records why there is
+/// `files.zig` owns it (§0.2 records why there is
 /// exactly one copy).
+///
+/// The ladder wants a boolean and the generator answers with the mark's id, so
+/// the arm is `IS NOT NULL` over it. There used to be a `hasPairedMark` spelling
+/// exactly that; it admitted the same set (same WHERE, and `m.id` is a rowid
+/// primary key, so never NULL when a row matches) and was deleted rather than
+/// kept in step, which is one fewer copy of the rule for this file's tier 2 and
+/// the library's listing to disagree over.
 pub fn tierExpr(comptime a: []const u8) []const u8 {
     return "CASE WHEN " ++ isNote(a) ++ " THEN 1" ++
-        " WHEN " ++ filesvc.Files.hasPairedMark(a) ++ " THEN 2" ++
+        " WHEN " ++ markpair.pairedMarkId(a) ++ " IS NOT NULL THEN 2" ++
         " ELSE 3 END";
 }
 
@@ -245,7 +252,7 @@ pub fn tierExpr(comptime a: []const u8) []const u8 {
 /// document of the manifest's and not a row of anybody's coverage denominator.
 /// An ORPHANED mark still lists, here as everywhere: it is the only remaining
 /// trace of that ink.
-const hide_paired_mark = filesvc.Files.hidePairedMark("d", "0");
+const hide_paired_mark = markpair.hidePairedMark("d", "0");
 
 /// How much of the caller's library is searchable at all — the two numbers the
 /// browser's empty state reads out as a sentence ("12 of your 40 notes have no
@@ -267,7 +274,7 @@ pub const Coverage = struct {
     /// How many of those carry no recognised text, and are therefore invisible
     /// to search however it is spelled. PERMANENT, and not to be confused with
     /// `Derivation.pending`, which is transient and resolves itself
-    /// (— two numbers, two sentences).
+    /// (§2 — two numbers, two sentences).
     unsearchable: i64 = 0,
 };
 
@@ -296,8 +303,8 @@ pub const Row = struct {
 
 /// The whole manifest, materialised. Convenient, and honest about its cost: the
 /// manifest is complete by construction, so this is O(the caller's library) in
-/// memory as well as in work. At the 1,222-file corpus of
-/// §1 that is tens of kilobytes (MEASURED — see the measurement test), which is
+/// memory as well as in work. At the 1,222-file corpus this was measured on
+/// that is tens of kilobytes (see the measurement test), which is
 /// inside the 50 MB budget with room to spare; a household ten times that size
 /// should stream `Cursor` instead, which is why `Cursor` is the primitive and
 /// this is built on it.
@@ -333,7 +340,7 @@ pub const Manifest = struct {
 /// Tier first (`.note`, then annotated, then bulk), `updated_at` DESC inside a
 /// tier, `f.id` last so that two documents saved in the same second have a
 /// stable order rather than SQLite's. The client fetches in the order it
-/// receives, so this ordering IS 's
+/// receives, so this ordering IS §3's
 /// "download by relevance" and the client re-sorting would be a second opinion.
 ///
 /// It costs one sort of the caller's library — the ORDER BY cannot ride an index
@@ -449,7 +456,7 @@ pub const Cursor = struct {
             // `derived`. That would be the one wrong answer here: `derived` is a
             // licence to cache an empty term set for ever, and a client that
             // took it on a column the server had failed to compute would lose
-            // that document permanently.
+            // that document permanently (§4.1).
             .derivation = if (self.stmt.columnIsNull(col_derivation))
                 .unknown
             else if (self.stmt.columnInt(col_derivation) != 0) .pending else .derived,
@@ -515,8 +522,7 @@ pub fn manifest(
 }
 
 // ---------------------------------------------------------------------------
-// THE MANIFEST ON THE WIRE, decided by
-// §9.2's measurement
+// THE MANIFEST ON THE WIRE — §3 step 4, decided by §9.2's measurement
 // ---------------------------------------------------------------------------
 
 /// How the manifest is SPELT. Separate from `format_version` above (the term
@@ -536,7 +542,7 @@ pub const manifest_header_len = manifest_magic.len + 1 + 4;
 /// The manifest as BYTES — the format §9.2's measurement chose over JSON, and
 /// the numbers are the whole argument.
 ///
-/// MEASURED, 1,222 documents ('s corpus size), gzip
+/// MEASURED, 1,222 documents (§1's corpus size), gzip
 /// level 6:
 ///
 ///     JSON             143,139 raw   38,597 gzip
@@ -645,7 +651,7 @@ pub fn writeManifest(gpa: std.mem.Allocator, out: *std.ArrayList(u8), m: Manifes
 ///     lost a row goes on matching a deleted document for ever, because absence
 ///     from the manifest is the ONLY removal channel this design has (§2.2).
 ///   * `pending.Pulse.version` is **restart-relative and not persisted**
-///     (the pending-ness work says in as many words that it is "wrong for
+///     (§11.3 says in as many words that it is "wrong for
 ///     anything that tries to store it across a reboot"). An ETag is stored
 ///     across reboots, by every browser, by definition.
 ///
@@ -772,7 +778,7 @@ const Fixture = struct {
     /// thread would. The REAL worker and the real tenants: a fixture that wrote
     /// `note_index.txt_index` by hand would be asserting the manifest agrees with
     /// the fixture's opinion of what "derived" means, which is the second opinion
-    /// exists to forbid.
+    /// §3 exists to forbid.
     fn drain(f: *Fixture) void {
         deferred.drainNow(testing.allocator, f.db, f.files.blobs, &f.lock, testing.io);
     }
@@ -806,7 +812,7 @@ test "the manifest arrives in the fill order: notes, then anything annotated, th
 
     // One document per tier, uploaded in the WRONG order and timestamped so that
     // recency alone would reverse them — the bulk file is the newest thing in the
-    // library. Tier has to win, or 's whole argument
+    // library. Tier has to win, or §3's whole argument
     // (684 bytes and the household's own handwriting is searchable) collapses
     // into "whatever was touched last".
     const bulk = try f.putBytes(1, "Don Quijote.txt", "windmills");
@@ -893,7 +899,7 @@ test "an annotated EPUB is tier 2, because the rule asks for a sibling and never
     // §3 forbids, not naming a format at all. Asserted over the whole statement
     // this line would only ever be satisfiable by NOT sharing the predicate,
     // which is the opposite of what it is guarding.
-    // `.mark` is NOT on the list and never was: `hasPairedMark` spells it, which
+    // `.mark` is NOT on the list and never was: `pairedMarkId` spells it, which
     // is the pairing rule itself rather than a format test.
     inline for ([_][]const u8{ ".pdf", ".epub", ".note", ".txt" }) |ext| {
         try testing.expect(std.mem.indexOf(u8, tier_expr_d, ext) == null);
@@ -1017,7 +1023,7 @@ test "the version a row reports is the STORE's, so the client never asks for a f
     // written only where there was some. Reporting the column raw put 18 of a
     // real library's 41 rows into the client's `want` set permanently: the
     // stream skips what it cannot open, the empty answer changes nothing, and
-    // the next tick asks again (2026-09-08).
+    // the next tick asks again.
     const png = try f.putBytes(1, "scan.png", "\x89PNG not text at any point");
     const blank = try f.putNote(1, "blank.note", &.{});
     const written = try f.putNote(1, "handwriting.note", &.{"caligrafia"});
@@ -1126,7 +1132,7 @@ test "a just-uploaded document is PENDING, and stops being pending when the work
     var f = try Fixture.init();
     defer f.deinit();
 
-    // THE SEAM, FILLED — 's first sentence, asked of the
+    // THE SEAM, FILLED — §8's first sentence, asked of the
     // manifest instead of the count. This replaces the tripwire that pinned
     // "every row says `unknown`"; that test existed only to make the seam
     // impossible to fill silently, and it has done its job.
@@ -1137,7 +1143,7 @@ test "a just-uploaded document is PENDING, and stops being pending when the work
     // licence to cache that emptiness for ever; `pending` is an instruction to
     // ask again. Getting it backwards on this row would make `notes.txt`
     // unsearchable in the browser permanently, with no error anywhere
-    //
+    // (§4.1).
     const txt = try f.putBytes(1, "notes.txt", "Primeiro parágrafo.\n\nSegundo parágrafo.\n");
     try testing.expectEqual(Derivation.pending, (try f.rowFor(1, txt)).?.derivation);
 
@@ -1201,7 +1207,7 @@ test "CAVEAT: a stale note_index row reports DERIVED though nothing has derived 
     var f = try Fixture.init();
     defer f.deinit();
 
-    // THE UNDER-REPORT, DRIVEN RATHER THAN FOOTNOTED.
+    // THE UNDER-REPORT, DRIVEN RATHER THAN FOOTNOTED — §11.4.
     // Every tenant's clause requires a CURRENT `note_index` row, because the note
     // half heals first and its heal rewrites what the tenant writes into. So a
     // blob whose row is stale is not offered to the worker, is therefore not
@@ -1464,8 +1470,8 @@ test "PLAN PIN: the manifest seeks every table it touches and sorts the caller's
     //     falls to the autoindex and never scans, so it is NAMING the index that
     //     makes this line able to fail (VERIFIED — see the note below).
     //  3/4. BOTH DIRECTIONS OF THE PAIRING RULE ride `files_live_name` — `p` is
-    //     `hidePairedMark` (is this row ink?) and `m` is `hasPairedMark` (does
-    //     this row carry ink?). `schema.zig` says a plan pin names this index;
+    //     `hidePairedMark` (is this row ink?) and `m` is `pairedMarkId` (does
+    //     this row carry ink, and which row is it?). `schema.zig` says a plan pin names this index;
     //     this is that pin. Tier 2 asks the question once per document, so an
     //     unindexed probe here is a full library walk per row.
     //  5. EXACTLY ONE temp b-tree. The ORDER BY cannot ride an index because
@@ -1614,7 +1620,7 @@ test "WORK PIN: the manifest costs the caller's own live library, and nothing el
     // row already has the name and the md5 the arms go and re-read, so a
     // hand-written `d.name LIKE '%_.txt' AND ni.txt_index IS NULL` would answer
     // most rows without touching `files` at all. That is precisely the second
-    // opinion forbids — *"free to drift from what the worker
+    // opinion §3 forbids — *"free to drift from what the worker
     // actually does"* — and the failure it buys is silent: the manifest would
     // report `derived` for a blob the worker still owes, the client would cache
     // that document's emptiness for ever, and nothing anywhere would error. The
@@ -1628,7 +1634,7 @@ test "WORK PIN: the manifest costs the caller's own live library, and nothing el
     //
     // AND WHAT IT COSTS IN TIME, because VM steps are not milliseconds. MEASURED
     // on the deployment target — Pi 1 B+, the 1,222-file install
-    // the pending-ness work measured on, 322 live documents for the owner under
+    // §11.1 measured on, 322 live documents for the owner under
     // test, warm cache, 40 iterations — the statement itself, both spellings:
     //
     //     owes_derive_expr = NULL          127.27 ms p50   141.51 ms p95
@@ -1692,8 +1698,8 @@ fn writeJson(gpa: std.mem.Allocator, out: *std.ArrayList(u8), m: Manifest) !void
     try out.appendSlice(gpa, "]}");
 }
 
-/// gzip at LEVEL 6 — the setting every other size figure in this tree was
-/// taken at, so these numbers sit beside those without a footnote.
+/// gzip at LEVEL 6 — the setting every other figure in this tree was taken at,
+/// so these numbers sit beside those without a footnote.
 fn gzipLen(gpa: std.mem.Allocator, bytes: []const u8) !usize {
     var sink: std.Io.Writer.Allocating = try .initCapacity(gpa, 4096);
     defer sink.deinit();
@@ -1712,7 +1718,7 @@ test "MEASUREMENT: what one manifest costs on the wire, and how it grows" {
     // that document. It is a test rather than a note so that the numbers cannot
     // go stale without something going red.
     //
-    // The library is sized to 's real corpus — 1,222
+    // The library is sized to §1's real corpus — 1,222
     // undeleted non-folder files — and the timestamps are SPREAD over two years
     // rather than left at the ingest clock, because a manifest whose rows all
     // shared one second would delta-encode to nothing and flatter the binary form

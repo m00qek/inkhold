@@ -1,7 +1,7 @@
 //! The search package's leaf: the tokenizer and the fold. Imports nothing of the
 //! package's.
 //!
-//! The half of the old module that survived the search removal's sweep, and
+//! The half of the old module that survived §6's sweep, and
 //! the basis of parity by construction (§2.2): the derive step folds through
 //! this tokenizer to produce the `terms/` records the browser indexes, so the
 //! two engines agree about what a word is because one declaration made both.
@@ -11,11 +11,14 @@
 
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
+const schema = @import("../../db/schema.zig");
 
-/// MUST stay identical to `webapp/wasm/sqlite_core.zig`'s `tokenizer` — the
-/// `tokenize=` of the index the BROWSER builds from the `terms/` records this
-/// fold produces (§2.2). Both files say so.
-pub const fts_tokenizer = "unicode61 remove_diacritics 2";
+/// The tokenizer this fold runs, re-exported from `db/schema.zig` rather than
+/// declared: `webapp/wasm/sqlite_core.zig` builds the BROWSER's index with the
+/// same constant, so the two engines cannot be configured differently by
+/// forgetting to edit one of them (§2.2). Kept as a name here because this is
+/// the search package's leaf and its callers read the tokenizer off it.
+pub const fts_tokenizer = schema.fts_tokenizer;
 
 /// A one-row FTS5 table with the index's tokenizer, created ONCE per connection
 /// and reused for every fold on it.
@@ -68,7 +71,6 @@ pub fn foldTerms(arena: std.mem.Allocator, db: sqlite.Db, tok: []const u8) ![]co
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
-const schema = @import("../../db/schema.zig");
 
 /// Rows of `temp.token_fold`'s `%_data` shadow table — what the vocabulary scan
 /// walks. Counted rather than timed so the pin is deterministic on a loaded box.

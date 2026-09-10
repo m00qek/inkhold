@@ -1,5 +1,5 @@
-// `render/pdfLinks.ts` — the payload's shape, the scheme allowlist and where a
-// link's rect lands, at the numbers.
+// `render/pdfWire.ts`'s LINK half — the payload's shape, the scheme allowlist
+// and where a link's rect lands, at the numbers.
 //
 // The allowlist is the one that matters most. It is enforced TWICE — once in
 // `pdf_shim.c`, so the payload never carries a uri we will not follow, and again
@@ -15,7 +15,7 @@ import {
   parsePageLinks,
   placeLink,
   type PdfLink,
-} from "../../src/render/pdfLinks";
+} from "../../src/render/pdfWire";
 
 function link(over: Partial<PdfLink> = {}): PdfLink {
   return { x: 10, y: 20, w: 30, h: 40, page: -1, uri: "https://example.invalid/", ...over };
@@ -43,14 +43,13 @@ describe("parsePageLinks", () => {
     expect(parsePageLinks("[]")).toEqual([]);
   });
 
-  it("drops a record that is not a usable rect", () => {
+  it("drops a record with nothing to draw or nowhere to go", () => {
+    // The refusals that survive §2.7, and both are about CONTENT the DOCUMENT
+    // supplied: a uri naming nowhere, and a rect with no area to click.
     const good = '{"x":1,"y":2,"w":3,"h":4,"page":-1,"uri":"https://a.invalid/"}';
     const cases = [
       '{"x":1,"y":2,"w":0,"h":4,"page":-1,"uri":"https://a.invalid/"}', // no width
       '{"x":1,"y":2,"w":3,"h":-4,"page":-1,"uri":"https://a.invalid/"}', // negative height
-      '{"x":null,"y":2,"w":3,"h":4,"page":-1,"uri":"https://a.invalid/"}', // no x
-      '{"y":2,"w":3,"h":4,"page":-1,"uri":"https://a.invalid/"}', // missing x
-      '{"x":1,"y":2,"w":3,"h":4,"page":1.5,"uri":"https://a.invalid/"}', // half a page
       '{"x":1,"y":2,"w":3,"h":4,"page":-1,"uri":""}', // nowhere to go
       '{"x":1,"y":2,"w":3,"h":4,"page":-1}', // no uri at all
       "null",
@@ -61,6 +60,17 @@ describe("parsePageLinks", () => {
       // reason to throw the page's other links away.
       expect(parsePageLinks(`[${bad},${good}]`), bad).toHaveLength(1);
     }
+  });
+
+  it("no longer re-checks the SHAPE of a record our own shim wrote (§2.7)", () => {
+    // `pdf_shim.c` wrote this JSON microseconds ago. A non-numeric coordinate or
+    // a fractional `page` would mean the shim is broken, and the ABI test says
+    // so long before a user does — so these records are admitted now, and this
+    // pins that as a decision rather than an oversight. What they cost if it
+    // ever did happen is a link box CSS ignores, not a page.
+    expect(
+      parsePageLinks('[{"y":2,"w":3,"h":4,"page":1.5,"uri":"https://a.invalid/"}]'),
+    ).toHaveLength(1);
   });
 });
 

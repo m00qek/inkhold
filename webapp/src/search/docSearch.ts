@@ -1,5 +1,5 @@
-// IN-DOCUMENT SEARCH on the same engine as the library
-// §1.1. One document's real text (`docText.ts`) goes into a wasm FTS5 instance
+// IN-DOCUMENT SEARCH on the same engine as the library — §1.1.
+// One document's real text (`docText.ts`) goes into a wasm FTS5 instance
 // through the same `idx_query` fold; the three highlight adapters
 // (`findInNote.ts`, `txtFind.ts`, `pdfFind.ts`) read the one record shape here.
 //
@@ -18,6 +18,7 @@
 import type { CoreLoader, TermsDocument } from "./indexEngine";
 import { createSearchEngine, type SearchEngine } from "./searchEngine";
 import { httpTextTransport, type DocumentText, type TextTransport } from "./docText";
+import { words } from "./fold";
 import { openTextStore, type TextStore } from "../cache/textStore";
 import type { Expansion } from "./localSearch";
 
@@ -96,24 +97,6 @@ export interface DocSearchOptions {
 }
 
 /**
- * Case- and accent-insensitive form — the SAME fold `unicode61
- * remove_diacritics 2` applies to the index, and byte-for-byte the one the
- * three adapters apply to a word before comparing it with a term (`avaliacao`
- * has to mark `avaliação`).
- *
- * IT NEVER DECIDES A MATCH. Membership is FTS5's; this only names, among the
- * words of a segment the engine ALREADY matched, which ones to point at. So a
- * divergence here costs a mark, never a result.
- */
-export function fold(s: string): string {
-  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-}
-
-/** Word runs as `unicode61` splits them: anything not a letter or digit is a
- *  boundary, so `page-range` is two words. */
-const WORD_RE = /[\p{L}\p{N}]+/gu;
-
-/**
  * What the marks look for, derived from the SAME string handed to `idx_query`.
  * `exact` holds every term searched as a whole word; `prefix` the one term
  * prefix-matched, or null.
@@ -150,7 +133,7 @@ export function planMarks(query: string, expansions: readonly Expansion[] = []):
   const perToken: string[][] = [];
   for (const raw of query.split(/\s+/)) {
     if (raw === "") continue;
-    const terms = fold(raw).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const terms = words(raw);
     perToken.push(terms);
     for (const alt of alts.get(raw) ?? []) exact.add(alt);
   }
@@ -180,10 +163,7 @@ export function planMarks(query: string, expansions: readonly Expansion[] = []):
 export function countMarks(text: string, plan: MarkPlan): { terms: string[]; matches: number } {
   const terms = new Set<string>();
   let matches = 0;
-  WORD_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = WORD_RE.exec(text)) !== null) {
-    const w = fold(m[0]);
+  for (const w of words(text)) {
     if (!plan.exact.has(w) && !(plan.prefix !== null && w.startsWith(plan.prefix))) continue;
     terms.add(w);
     matches++;

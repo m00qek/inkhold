@@ -4,7 +4,7 @@
 //! `spd_decode.zig` and compiled in below) and the local search index (`idx_*`,
 //! here). They are ONE artifact because splitting them would ship the ~290 KB
 //! amalgamation TWICE to avoid ~10 KB of Zig a given page happens not to call —
-//! which also explains the file's name: an
+//! §5, which also explains the file's name: an
 //! artifact called `spd-decode` that also runs search is a lie in the build graph.
 //!
 //! ## The flags, and the one that is dangerous
@@ -16,23 +16,22 @@
 //! that spilled to temp STORAGE would spill to a temp FILE and fail. Forcing temp
 //! storage to memory is a prerequisite for FTS5 under `OS_OTHER=1`, and the
 //! failure it prevents *"surfaces as a corrupt index in production rather than as
-//! a build error"*.
+//! a build error"* (§0).
 //!
 //! **And it cannot be tested by behaviour, which is why `idx_open` refuses.**
-//! MEASURED while building this: with the flag REMOVED, the module is
+//! MEASURED while building this: with the flag REMOVED the module is
 //! indistinguishable — 80,000 documents built, an 80,000-row `ORDER BY rank`
 //! stepped to completion, hundreds of autocommitted inserts forcing level-0
-//! merges, the query fold's `temp.` table, all identical. Nothing at household
-//! scale reaches `vdbeSorterOpenTempFile`, so the flag protects a path a test
-//! cannot provoke and a household might. `idx_open`/`idx_deserialize` therefore
-//! ask the COMPILED AMALGAMATION (`sqlite3_compileoption_used`, not a build
-//! variable that could agree with itself) and refuse to hand back an index they
-//! cannot vouch for. `tests/sqlite_core_abi.mjs` asserts that refusal, so
-//! dropping the flag is a red test rather than a silent corruption later.
+//! merges, all identical. Nothing at household scale reaches
+//! `vdbeSorterOpenTempFile`, so the flag protects a path a test cannot provoke
+//! and a household might. `idx_open`/`idx_deserialize` therefore ask the
+//! COMPILED AMALGAMATION (`sqlite3_compileoption_used`, not a build variable
+//! that could agree with itself) and refuse to hand back an index they cannot
+//! vouch for; `tests/sqlite_core_abi.mjs` asserts that refusal.
 //!
 //! ## Two ABI traps, both silent until they are not
 //!
-//! Recorded where they cost a debugging cycle, and
+//! Recorded in §6, where they cost a debugging cycle, and
 //! both are consequences of the flag set rather than of anything here:
 //!
 //!   1. the `sqlite3_deserialize` target must come from **`sqlite3_malloc`**, not
@@ -50,76 +49,56 @@
 //! It owns the SCHEMA and the FOLD, because both are parity surfaces:
 //!
 //!   * `schema_version` is exported so the TypeScript record that caches a
-//!     serialized image cannot drift from the DDL that produced it. A change to
-//!     the table definition or its `tokenize=` makes a stored image stale with no
-//!     server-side version moving.
+//!     serialized image cannot drift from the DDL that produced it — a change to
+//!     the table definition or its `tokenize=` makes a stored image stale with
+//!     no server-side version moving.
 //!   * `idx_query` takes the user's RAW string and folds it through the index's
 //!     own tokenizer before building the MATCH expression. A JS-side fold would
 //!     be the second tokenizer implementation the whole design exists to avoid,
-//!     and a JS-side escaper would have to decide what FTS5 does with `-` — this
-//!     way punctuation simply folds to no terms.
+//!     and a JS-side escaper would have to decide what FTS5 does with `-`.
 //!   * `idx_fuzzy` owns the TYPO LADDER for the same reason twice over: the
 //!     distance is measured on the folded token against the folded vocabulary
-//!     (`foldToken`), and the vocabulary it scans is inside this module. See the
-//!     "Typo tolerance" section below.
+//!     (`foldToken`), and the vocabulary it scans is inside this module.
 //!
-//! `search/query.ts` keeps ranking policy, snippets and the staleness count;
-//! §9.4 (tier-1 order vs bm25 order) is a client decision and nothing here
-//! forecloses it — `idx_query` reports bm25 rank order and the exact total, and
-//! the client is free to reorder what it is given.
+//! `search/query.ts` keeps ranking policy, snippets and the staleness count —
+//! `idx_query` reports bm25 rank order and the exact total, and the client is
+//! free to reorder what it is given.
 //!
 //! ## `idx_*` ABI (pointers are byte offsets into exported `memory`)
 //!
-//! Buffers:
-//!   u8*  idx_alloc(usize len) / void idx_free(u8*, usize)
+//! `tests/sqlite_core_abi.mjs` pins every export; what follows is what it
+//! cannot say. A negative return is `-rc` for a SQLite result code, with
+//! `-SQLITE_MISUSE` (-21) for "no open database" and `-100` for "built without
+//! `-DSQLITE_TEMP_STORE=3`" — deliberately outside SQLite's range, because
+//! nothing went wrong at runtime and the binary is wrong.
 //!
-//! Identity:
 //!   u32  idx_schema_version()   — bump when the DDL or `tokenize=` changes.
-//!
-//! Build:
-//!   i32  idx_open()             — fresh `:memory:` db + the FTS5 table. 0, or -rc.
-//!   void idx_close()
-//!   i32  idx_begin() / idx_commit()
-//!   i32  idx_add(u32 doc_id, u8* text, usize len)  — one document. 0, or -rc.
-//!
-//! Query:
-//!   i32  idx_query(u8* q, usize len, u32 limit)    — TOTAL matches, or -rc.
-//!   i32  idx_hit(u32 i)         — doc id of hit `i` (i < min(total, limit)), or -1.
-//!
-//! Typo fallback:
+//!   i32  idx_open()             — fresh `:memory:` db + the FTS5 table. Also
+//!                                 the "start over" call.
+//!   i32  idx_add(u32 doc_id, u8* text, usize len)  — `doc_id` is the FTS5
+//!        rowid; a repeat is a constraint failure, never a silent overwrite.
+//!   i32  idx_query(u8* q, usize len, u32 limit)    — the TOTAL, exact, not a
+//!        floor; `idx_hit(i)` reads the first `min(total, limit)` of them.
 //!   i32  idx_fuzzy(u8* q, usize len, u32 limit)
-//!        `idx_query` with the ladder attached. IDENTICAL to it — same total,
-//!        same `idx_hit` buffer, same errors — whenever the query AS TYPED
-//!        matched anything at all; only a total of 0 goes on to re-run a widened
-//!        expression. So a caller may switch to it wholesale and nothing about a
-//!        query that matches changes.
+//!        `idx_query` with the ladder attached, and IDENTICAL to it — same
+//!        total, same `idx_hit` buffer, same errors — whenever the query AS
+//!        TYPED matched anything. Only a total of 0 re-runs a widened
+//!        expression, so a caller may switch to it wholesale.
 //!   u8*  idx_expansion_ptr() / u32 idx_expansion_len()
 //!        WHAT was substituted, so the UI can say "matched **reunião**": UTF-8
 //!        `typed \t matched \n` per pair, in the order the expression names
-//!        them. Rewritten by EVERY query — an exact query that matched leaves it
-//!        empty, which is the fallback rule made visible. A length of 0 means
-//!        nothing was substituted and the pointer must not be dereferenced.
-//!        Neither half can contain a delimiter: `typed` is a whitespace-
-//!        delimited token, and `matched` is an fts5 term, which `unicode61`
-//!        cannot emit containing a tab or a newline (it splits on both).
-//!
-//! Persistence:
-//!   i32  idx_serialize()        — image length, or -rc. Bytes at `idx_image_ptr`.
-//!   u8*  idx_image_ptr()
+//!        them. Rewritten by EVERY query, so an exact query that matched leaves
+//!        it empty. Neither half can contain a delimiter — `typed` is
+//!        whitespace-delimited and `matched` is an fts5 term, which `unicode61`
+//!        cannot emit containing a tab or a newline.
+//!   i32  idx_serialize()        — image length; bytes at `idx_image_ptr`.
 //!   u8*  idx_image_alloc(usize len)                — trap 1 above; SQLite's heap.
 //!   i32  idx_deserialize(u8* img, usize len)       — SQLite TAKES OWNERSHIP.
-//!
-//! Errors:
 //!   u8*  idx_errmsg_ptr() / u32 idx_errmsg_len()
-//!        Set on FAILURE and not cleared on success, so read it only after a
+//!        Set on FAILURE and NOT cleared on success, so read it only after a
 //!        negative return — otherwise it is whatever failed last, which reads
-//!        like a fresh diagnosis and is not one. A length of 0 means no message
-//!        has ever been set and the pointer must not be dereferenced.
-//!
-//! Negative returns are `-rc` for a SQLite result code; `-SQLITE_MISUSE` (-21)
-//! means there is no open database, and `-100` means this artifact was built
-//! without `-DSQLITE_TEMP_STORE=3` (see above — it is a build defect, so it is
-//! deliberately outside SQLite's result-code range).
+//!        like a fresh diagnosis and is not one. Length 0 means never set, and
+//!        the pointer must not be dereferenced.
 //!
 //! ## Lifetime rules (the same hazard `spd_decode.zig` documents)
 //!
@@ -147,12 +126,14 @@ const gpa = if (builtin.target.cpu.arch.isWasm())
 else
     std.heap.page_allocator;
 
-/// MUST stay identical to `backend/services/search/fuzzy.zig`'s `fts_tokenizer`
-/// — the ONE remaining anchor, since schema v14 deleted
-/// `segment_fts` and the server stopped holding an index of its own. The terms
-/// the server ships are the output of that tokenizer; a different one here would
-/// index a folded term against a differently-folded query and quietly miss.
-const tokenizer = "unicode61 remove_diacritics 2";
+/// The FTS5 tokenizer, TAKEN from the server rather than restated: one
+/// declaration in `backend/db/schema.zig`. The terms the server ships are the
+/// output of that tokenizer, and a different one here would index a folded term
+/// against a differently-folded query and quietly miss — so the two cannot be
+/// configured apart. `tests/sqlite_core_abi.mjs` pins what it DOES (an accented
+/// query finding an unaccented term), so behaviour is guarded as well as
+/// spelling.
+const tokenizer = @import("schema").fts_tokenizer;
 
 /// How the local index is SHAPED. Bumped when `index_ddl` or `tokenizer`
 /// changes — a stored image built under an older shape is unusable, and nothing
@@ -160,21 +141,19 @@ const tokenizer = "unicode61 remove_diacritics 2";
 const schema_version: u32 = 1;
 
 /// No `prefix=` option, deliberately: the server's own index has none
-/// (blames it for the Pi's seek storm), the bench
+/// (§213 blames it for the Pi's seek storm), the bench
 /// measured prefix queries at 0.034–0.075 ms without one, and a prefix index
 /// would grow the serialized image the client has to store for no measured gain.
 const index_ddl = "CREATE VIRTUAL TABLE docs USING fts5(body, tokenize='" ++ tokenizer ++ "');";
 
 /// A one-row FTS5 table used purely to see the user's query the way the index
-/// saw its own text — the same device, and the same two statements, as
-/// `fuzzy.zig`'s `fold_ddl`.
+/// saw its own text.
 ///
 /// `content=''` is not a space saving: it is the precondition for `'delete-all'`
 /// below. `DELETE FROM` does not empty an FTS5 index, it appends tombstones, so
-/// on a long-lived instance every fold would keep paying for the biggest thing
-/// ever folded. That failure — "search gets slower the longer the tab has been
-/// open" — is, measured server-side at 0.4 ms → 13.9 ms.
-/// A search worker is exactly as long-lived as the connections that found it.
+/// on a long-lived instance every fold keeps paying for the biggest thing ever
+/// folded — "search gets slower the longer the tab has been open", measured
+/// server-side at 0.4 ms → 13.9 ms.
 const fold_ddl =
     "CREATE VIRTUAL TABLE IF NOT EXISTS temp.token_fold USING fts5(t, content='', tokenize='" ++ tokenizer ++ "');" ++
     "CREATE VIRTUAL TABLE IF NOT EXISTS temp.token_fold_vocab USING fts5vocab('temp','token_fold','row');";
@@ -257,9 +236,6 @@ export fn idx_errmsg_len() u32 {
     return @intCast(errbuf.items.len);
 }
 
-/// Open a fresh in-memory database and create the FTS5 table. Any previously
-/// open database is closed first, so this is also the "start over" call.
-///
 /// A build without FTS5 fails HERE, on the DDL ("no such module: fts5"), which
 /// is loud enough on its own; the flag that needs the guard above is the one
 /// whose absence changes nothing until it changes everything.
@@ -319,10 +295,9 @@ export fn idx_commit() i32 {
     return -rc;
 }
 
-/// Index one document under `doc_id`, which becomes the FTS5 rowid and is what
-/// `idx_hit` hands back. A repeated id is a constraint failure rather than a
-/// silent overwrite — the client's ordinals come from one manifest, so a
-/// collision means the caller mixed two.
+/// A repeated `doc_id` is a constraint failure rather than a silent overwrite —
+/// the client's ordinals come from one manifest, so a collision means the
+/// caller mixed two.
 export fn idx_add(doc_id: u32, ptr: [*]const u8, len: usize) i32 {
     const h = db orelse return no_db;
     if (add_stmt == null) {
@@ -380,9 +355,9 @@ fn appendQuoted(term: []const u8) !void {
 /// `foo ` keep matching `foobar`.
 ///
 /// A token that folds to nothing — punctuation, an emoji, a lone hyphen —
-/// contributes no terms and is not an error. That is the whole reason the fold
-/// is here rather than in JS: an escaper would have had to guess what FTS5 makes
-/// of `"-"`, and guessing wrong is a syntax error on a keystroke.
+/// contributes no terms and is NOT an error. That is why the fold is here rather
+/// than in JS: an escaper would have had to guess what FTS5 makes of `"-"`, and
+/// guessing wrong is a syntax error on a keystroke.
 fn buildMatch(h: *c.sqlite3, query: []const u8) i32 {
     match.clearRetainingCapacity();
 
@@ -476,14 +451,11 @@ fn foldToken(
     return 0;
 }
 
-/// Run `query` and return how many documents matched IN TOTAL, buffering the
-/// first `limit` of them for `idx_hit`.
-///
-/// The total is exact and free here, which is the point: §9.5 retires the
-/// server's "N+" floors precisely because they existed only to avoid paying for
-/// matches early termination had skipped, and a client holding the index has
-/// already paid. Stepping the whole rank-ordered result costs 12 ms at the
-/// bench's pathological `con*` over 24k segments and 0.06 ms at tier 1.
+/// The total is EXACT and free here, which is why the server's "N+" floors are
+/// retired: they existed only to avoid paying for matches early termination had
+/// skipped, and a client holding the index has already paid. Stepping the whole
+/// rank-ordered result costs 12 ms at the bench's pathological `con*` over 24k
+/// segments and 0.06 ms at tier 1.
 export fn idx_query(ptr: [*]const u8, len: usize, limit: u32) i32 {
     const h = db orelse return no_db;
     hits.clearRetainingCapacity();
@@ -544,22 +516,16 @@ export fn idx_hit(i: u32) i32 {
 // Typo tolerance — a FALLBACK, never a widening
 // ---------------------------------------------------------------------------
 //
-// MOVED, not rewritten, from `backend/services/search/fuzzy.zig`, which
-// the sweep says is where the candidate ladder goes: "the
-// `fts5vocab` corpus walk, `VocabSource` and `betterCandidate`, which move to
-// the browser". Step 6 deletes the server's copy, so what is not here is gone.
-//
-// It is in the WASM rather than in `webapp/src/search/` for three reasons, and
-// the first is the one the design rests on:
+// IN THE WASM rather than in `webapp/src/search/` for three reasons, the first
+// of which the design rests on:
 //
 //   1. `foldToken` runs the query token through THE INDEX'S OWN TOKENIZER, so
 //      "calígrafa" and "caligrafa" reach the distance function as one string and
 //      the comparison is folded-against-folded. A TypeScript fold would be a
-//      second opinion about `remove_diacritics 2`, which is exactly what putting
-//      SQLite in the browser exists to prevent.
+//      second opinion about `remove_diacritics 2`.
 //   2. The distance is over CODEPOINTS of Portuguese text. A TypeScript decoder
 //      would be a second opinion about Unicode as well.
-//   3. The vocabulary lives inside this module's FTS5 index. Exporting tens of
+//   3. The vocabulary lives inside this module's FTS5 index; exporting tens of
 //      thousands of terms across the JS boundary on every failed search would
 //      cost far more than scanning them where they already are.
 //
@@ -582,16 +548,13 @@ export fn idx_hit(i: u32) i32 {
 // by constants, so the scan is LINEAR in V and stays linear. That shape and those
 // caps are carried over exactly.
 //
-// What does NOT carry over is the server's reason for caring so much. There, the
-// scan ran under a coarse global DB lock, so going slow did not merely make
-// search slow — it stalled device sync behind it, and the zero-hit prefix
-// `reunaio` measured 6,133.8 ms p50 on the Pi with 98% of it in this scan.
-// In the browser there is no lock and nothing is queued
-// behind the scan: the worst case is one tab's own search box, on a search that
-// already returned nothing. So the specific danger evaporates and the
-// linear-in-V assumption is all that remains — and it does remain: a large or
-// multi-tenant vocabulary would still need this replaced by an n-gram or
-// deletion-neighbour index, or a real fuzzy extension, NOT merely a bigger cap.
+// In the browser there is no lock and nothing is queued behind the scan, so the
+// worst case is one tab's own search box on a search that already returned
+// nothing — where on the Pi the zero-hit prefix `reunaio` measured 6,133.8 ms
+// p50 under the global DB lock, 98% of it in this scan.
+// What remains is the linear-in-V assumption, and it does remain: a large or
+// multi-tenant vocabulary would need this replaced by an n-gram or
+// deletion-neighbour index, or a real fuzzy extension, NOT a bigger cap.
 //
 // MEASURED here over the real library — 23,964 pages, 63,577 distinct terms —
 // through the shipped artifact: a query that MATCHES costs 1.42 ms against the
@@ -712,12 +675,10 @@ const FuzzyToken = struct {
 /// Offers one near-miss to a token, keeping its list sorted by `betterCandidate`
 /// and never longer than `cap`.
 ///
-/// A BOUNDED insertion sort rather than "collect everything, then sort": the scan
-/// walks the whole vocabulary, and a query whose budget happens to admit most of
-/// it would otherwise materialise the whole vocabulary per token before throwing
-/// nearly all of it away. Here the list is at most `cap` long at every moment, so
-/// the extra work per accepted candidate is `O(cap)` and the extra memory is
-/// `O(cap)` — the scan stays linear in vocabulary size, which is the property the
+/// A BOUNDED insertion sort rather than "collect everything, then sort": a query
+/// whose budget admits most of the vocabulary would otherwise materialise all of
+/// it per token before throwing nearly all of it away. At most `cap` long at
+/// every moment, so the scan stays LINEAR in vocabulary size — the property the
 /// scaling note above depends on.
 ///
 /// `cand.term` is BORROWED (a live `fts5vocab` row); it is duped only if it is

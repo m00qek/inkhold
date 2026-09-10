@@ -8,7 +8,7 @@ import {
 } from "../../src/export/exporter";
 import type { Api } from "../../src/api/types";
 import type { Id, PageRef } from "../../src/core/types";
-import type { PdfLink } from "../../src/render/pdfLinks";
+import type { PdfLink } from "../../src/render/pdfWire";
 
 // The exporter's pure halves. The canvas/blob path is browser-only and is
 // covered by the reader e2e specs; these are the two pieces that decide what

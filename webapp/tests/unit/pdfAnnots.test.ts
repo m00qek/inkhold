@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { annotRect, annotsEntry, pdfTextString } from "../../src/export/pdfAnnots";
-import type { PdfLink } from "../../src/render/pdfLinks";
+import type { PdfLink } from "../../src/render/pdfWire";
 
 // The links an exported `.note` page carries, at the numbers. Pure — no writer,
 // no bytes, no reader — so what is asserted here is the transform and the

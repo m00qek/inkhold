@@ -566,7 +566,12 @@ describe("createHttpApi", () => {
     // Device-authored values reaching the DOM as `href`s and a PDF as
     // annotations: a record that is not a record is dropped at the seam, by the
     // same validator the wasm decoder's payload goes through.
-    it("drops malformed records rather than passing them to the layer", async () => {
+    it("drops a record with nothing to draw or nowhere to go", async () => {
+      // The two refusals `pdfWire.ts` still makes about a link, and both are
+      // about CONTENT out of the document: a uri that names nowhere, and a rect
+      // with no area. The shape of the record is our own shim's (§2.7) and is
+      // no longer re-checked here — `{ page: 1.5 }` would need the shim to be
+      // broken, which the ABI test catches first.
       vi.stubGlobal(
         "fetch",
         recordingFetch(() =>
@@ -574,9 +579,9 @@ describe("createHttpApi", () => {
             links: [
               { x: 1, y: 2, w: 3, h: 4, page: -1, uri: "https://ok.example/" },
               { x: 1, y: 2, w: 3, h: 4, page: -1 }, // no uri
+              { x: 1, y: 2, w: 3, h: 4, page: -1, uri: "" }, // nowhere to go
               { x: 1, y: 2, w: 0, h: 4, page: -1, uri: "https://ok.example/" }, // empty rect
-              { x: 1, y: 2, w: 3, h: 4, page: 1.5, uri: "https://ok.example/" }, // fractional target
-              { x: "1", y: 2, w: 3, h: 4, page: -1, uri: "https://ok.example/" }, // not a number
+              { x: 1, y: 2, w: 3, h: -4, page: -1, uri: "https://ok.example/" }, // negative
             ],
           }),
         ).fn,

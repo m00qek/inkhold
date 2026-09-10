@@ -6,7 +6,7 @@ import {
   placePageRect,
   placePanelOverPage,
 } from "../../src/render/markGeometry";
-import { placeLink } from "../../src/render/pdfLinks";
+import { placeLink } from "../../src/render/pdfWire";
 
 // The numbers here are the ones measured against the real capture — an N6
 // (1404x1872) annotating an A4 document (595.276 x 841.89 pt). Getting this

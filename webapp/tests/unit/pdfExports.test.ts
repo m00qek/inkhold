@@ -27,7 +27,7 @@ import {
   type PdfExportState,
 } from "../../src/pages/pdfExports";
 import { flattenLayers, type CanvasFactory, type LayeredExportModel } from "../../src/export/layered";
-import { createViewerExportMenu } from "../../src/pages/viewerChrome";
+import { createViewerExportMenu } from "../../src/pages/viewerExportMenu";
 import { markExportSpace } from "../../src/render/markGeometry";
 import type { PdfInkOverlay } from "../../src/render/pdfClient";
 

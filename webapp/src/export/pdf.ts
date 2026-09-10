@@ -35,7 +35,7 @@
 
 import type { WordBox } from "../core/types";
 import { isUsableScale, withinPage, wordBoxPx } from "../core/wordBox";
-import type { PdfLink } from "../render/pdfLinks";
+import type { PdfLink } from "../core/types";
 import { annotsEntry } from "./pdfAnnots";
 
 /** A4 width in PostScript points (210 mm). Pages are sized to this. */

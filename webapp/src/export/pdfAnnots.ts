@@ -10,18 +10,19 @@
 // teacher-planner capture carries 51,256 of them, `note-format.md` §14), and an
 // export that drops them is a picture of a planner.
 //
-// PURE, and a sibling of `render/pdfLinks.ts` rather than part of it. That file
+// PURE, and a sibling of `render/pdfWire.ts` rather than part of it. That file
 // places a link on a CANVAS for the reader; this one places the same link in PDF
 // USER SPACE for a file someone else will open. Two different target spaces —
 // one y-down in CSS pixels, one y-up in points — and the y-flip is exactly the
 // difference, so keeping them apart is what lets each be tested at the numbers.
 //
-// The scheme allowlist is `render/pdfLinks.ts`' own (`linkTarget`), deliberately
+// The scheme allowlist is `render/pdfWire.ts`' own (`linkTarget`), deliberately
 // NOT a second copy: a URI this app would refuse to follow on screen must not be
 // the one it writes into a file that leaves the machine.
 
 import type { Size } from "../render/markGeometry";
-import { linkTarget, type PdfLink } from "../render/pdfLinks";
+import { linkTarget } from "../render/pdfWire";
+import type { PdfLink } from "../core/types";
 
 /** A link's box in PDF user space: bottom-left origin, y UP, points. */
 export interface AnnotRect {

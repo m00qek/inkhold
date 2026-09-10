@@ -14,7 +14,7 @@
 // a search:
 //
 //   COUNTS — the counter and the filmstrip badges — are the BROWSER's answer.
-//   One document's text is loaded into the same wasm
+//   §1.1: one document's text is loaded into the same wasm
 //   FTS5 instance the library search uses and asked the same `idx_query`. The
 //   text arrives as `text/<md5>` on the FIRST FIND (§4.1) — never on open,
 //   because reading a note needs the renderer and not a text index — and is
@@ -62,6 +62,11 @@ import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
 import type { Api } from "../api/types";
 import type { Hash, Id, PageRef, WordBox } from "../core/types";
 import type { DocSearch, DocSearchResult } from "../search/docSearch";
+// The client's imitation of the index's tokenizer, shared with `pdfFind.ts`,
+// `txtFind.ts` and `docSearch.ts` so the ovals and the counts cannot come to
+// disagree about what a word is (§8.2). Aliased because
+// `matchWords` already binds `words` to the boxes it is filtering.
+import { fold, words as wordTerms } from "../search/fold";
 
 /**
  * One matching page: the count the counter sums and the terms the ovals are
@@ -217,27 +222,6 @@ export interface FindController {
   searchSimilar(): void;
   /** Close and drop everything — a different note, or the reader closing. */
   reset(): void;
-}
-
-/**
- * Case- and accent-insensitive form. The household writes Portuguese, so
- * `avaliação` typed as `avaliacao` has to circle the word it means; the backend
- * folds the same way for its index, which is what keeps the ovals and the counts
- * describing the same matches.
- */
-function fold(s: string): string {
-  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-}
-
-/**
- * The terms one word label carries, folded — the client side of the tokenizer
- * the index applies to the transcript. `unicode61` splits on everything that is
- * not a letter or a digit, so `page-range` is two terms and `Endor,` is one.
- */
-function wordTerms(text: string): string[] {
-  return fold(text)
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter(Boolean);
 }
 
 /**

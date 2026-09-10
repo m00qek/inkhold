@@ -8,7 +8,7 @@
  *
  * It loads FIRST (see styles.css) so every later file sees the tokens. It is
  * also the ONE source of truth the living design guide imports
- * (docs/design/design-system.html `@import`s this file), so the specimen and
+ * (the guide `@import`s this file), so the specimen and
  * the app can never disagree on a colour or a size.
  *
  * HOW TO ADD A SIZE: you don't add a raw px anywhere else — you add (or reuse) a
@@ -27,8 +27,7 @@
   --font-mono: "Space Mono", ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
   color-scheme: light dark;
 
-  /* — THE COHERENCE SYSTEM (derived from the app's own clusters; see
-     docs/design/design-system.html). — */
+  /* — THE COHERENCE SYSTEM (derived from the app's own clusters). — */
 
   /* One type scale, six steps. Every font-size in the app snaps to one of
      these. Roles disambiguate near a boundary: a mono uppercase label is an

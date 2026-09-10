@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 //
-// `pages/pdfLinkLayer.ts` — what a PDF's links become in the DOM.
+// `pages/linkLayer.ts` — what a PDF's links become in the DOM.
 //
 // REAL ANCHORS ARE THE FEATURE, not an implementation detail, so this asserts
 // the things an anchor gives you and a click handler on a div does not: an
@@ -8,8 +8,8 @@
 // a tab, and an accessible name over a raster that has no text of its own.
 
 import { describe, it, expect, vi } from "vitest";
-import { createPdfLinkLayer } from "../../src/pages/pdfLinkLayer";
-import type { PdfLink } from "../../src/render/pdfLinks";
+import { createLinkLayer } from "../../src/pages/linkLayer";
+import type { PdfLink } from "../../src/render/pdfWire";
 
 function link(over: Partial<PdfLink> = {}): PdfLink {
   return { x: 20, y: 40, w: 60, h: 10, page: -1, uri: "https://example.invalid/", ...over };
@@ -47,7 +47,7 @@ describe("a link to another page of the same document", () => {
   // show a page the viewer already had: it read as a reload because it was one.
   it("turns the page in place instead of letting the route re-open the document", () => {
     const at = atJumping();
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     document.body.append(layer.el);
     layer.setLinks([link({ page: 11, uri: "#page=12" })], at);
 
@@ -71,7 +71,7 @@ describe("a link to another page of the same document", () => {
     ["middle button", { button: 1 }],
   ])("leaves a %s click to the browser, which is what the href is for", (_name, over) => {
     const at = atJumping();
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     document.body.append(layer.el);
     layer.setLinks([link({ page: 11, uri: "#page=12" })], at);
 
@@ -85,7 +85,7 @@ describe("a link to another page of the same document", () => {
 
   it("never intercepts an EXTERNAL link — it is not a page of this document", () => {
     const at = atJumping();
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     document.body.append(layer.el);
     layer.setLinks([link({ page: -1, uri: "https://example.invalid/a" })], at);
 
@@ -97,13 +97,13 @@ describe("a link to another page of the same document", () => {
 
 describe("the PDF link layer", () => {
   it("starts empty and hidden, so it can never take a click it has no link for", () => {
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     expect(layer.el.hidden).toBe(true);
     expect(anchors(layer.el)).toHaveLength(0);
   });
 
   it("places each link at the raster's scale", () => {
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     layer.setLinks([link({ x: 20, y: 40, w: 60, h: 10 })], AT);
     const [a] = anchors(layer.el);
     expect(a!.style.left).toBe("40px");
@@ -122,7 +122,7 @@ describe("the PDF link layer", () => {
   it("REPOSITIONS on a new canvas size rather than accumulating", () => {
     // What a zoom step is: the page is rastered again and this is called again,
     // with a bigger canvas and the same links. Nothing re-decodes.
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     const one = link({ x: 20, y: 40, w: 60, h: 10 });
     layer.setLinks([one], AT);
     layer.setLinks([one], { ...AT, canvas: { width: 800, height: 400 } });
@@ -136,7 +136,7 @@ describe("the PDF link layer", () => {
   it("gives an internal link the page ROUTE, in this tab", () => {
     // The router already owns `#/note/:id/page/:n` and the viewer already
     // publishes it, so following a link leaves you somewhere you can share.
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     layer.setLinks([link({ page: 11, uri: "#page=12&zoom=nan,0,0" })], AT);
     const [a] = anchors(layer.el);
     expect(a!.getAttribute("href")).toBe("#/note/n-1/page/12");
@@ -149,7 +149,7 @@ describe("the PDF link layer", () => {
     // `noopener` so the opened page cannot reach back through `window.opener`;
     // `noreferrer` so a document from someone else's device cannot learn where
     // it was being read.
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     layer.setLinks([link({ uri: "https://example.invalid/a" })], AT);
     const [a] = anchors(layer.el);
     expect(a!.getAttribute("href")).toBe("https://example.invalid/a");
@@ -160,7 +160,7 @@ describe("the PDF link layer", () => {
   it("LABELS every anchor — a rect over a raster has no text of its own", () => {
     // An unlabelled link is worse than no link: it reads out as its own href at
     // best and as "link" at worst.
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     layer.setLinks(
       [link({ uri: "mailto:someone@example.invalid" }), link({ page: 0, uri: "#page=1" })],
       AT,
@@ -174,7 +174,7 @@ describe("the PDF link layer", () => {
     // Not an anchor with a neutered href — the affordance would then lie about
     // where it goes. `javascript:` is the one that matters; the rule is an
     // allowlist, so `file:` and `data:` go the same way.
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     layer.setLinks(
       [
         link({ uri: "javascript:alert(1)" }),
@@ -189,13 +189,13 @@ describe("the PDF link layer", () => {
   });
 
   it("keeps the good links on a page that also carries a refused one", () => {
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     layer.setLinks([link({ uri: "javascript:alert(1)" }), link({ uri: "https://ok.invalid/" })], AT);
     expect(anchors(layer.el).map((a) => a.getAttribute("href"))).toEqual(["https://ok.invalid/"]);
   });
 
   it("skips a box that rounds away to nothing rather than leaving it in the tab order", () => {
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     layer.setLinks([link({ x: 0, y: 0, w: 0.2, h: 10 })], {
       ...AT,
       canvas: { width: 2, height: 1 }, // 0.01 px wide
@@ -205,7 +205,7 @@ describe("the PDF link layer", () => {
 
   it("clear() takes every anchor out of the document AND out of the tab order", () => {
     // Hiding alone would leave focusable elements over the next page.
-    const layer = createPdfLinkLayer();
+    const layer = createLinkLayer();
     layer.setLinks([link()], AT);
     expect(anchors(layer.el)).toHaveLength(1);
     layer.clear();

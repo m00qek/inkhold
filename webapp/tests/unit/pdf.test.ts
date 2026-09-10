@@ -10,7 +10,7 @@ import {
   type TextLayer,
 } from "../../src/export/pdf";
 import type { WordBox } from "../../src/core/types";
-import type { PdfLink } from "../../src/render/pdfLinks";
+import type { PdfLink } from "../../src/render/pdfWire";
 
 // The PDF writer. It is pure — pixels in, bytes out — so everything here runs in
 // Node with no canvas, and the assertions are about the FILE, not about a

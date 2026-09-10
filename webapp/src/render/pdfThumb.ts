@@ -5,13 +5,11 @@
 // facade asks for a bitmap of page 0 at the tier target and encodes it to WebP;
 // everything about MuPDF, workers and byte ranges stops here.
 //
-// WHY THIS IS A MODULE AND NOT A FUNCTION AT THE BOTTOM OF `thumbnails.ts`.
-// The facade's orchestration is deliberately Node-testable with `net`, `painter`
-// and the render seams faked — a unit test imports `createThumbnails` and never
-// loads a canvas or a `fetch`. Importing `pdfClient` from there would drag the
-// worker/wasm module graph into that import for the sake of one function. The
-// seam implementations live at the bottom of `thumbnails.ts` because they are
-// small; this one is not.
+// A MODULE AND NOT A FUNCTION AT THE BOTTOM OF `thumbnails.ts` (where the other,
+// smaller seams live) because the facade's orchestration is deliberately
+// Node-testable with `net`, `painter` and the render seams faked: importing
+// `pdfClient` from there would drag the worker/wasm module graph into that
+// import for the sake of one function.
 //
 // THREE THINGS IT OWNS, AND ONLY THESE THREE:
 //
@@ -20,27 +18,24 @@
 //     N tiles in flight would be N documents' blocks resident, and their range
 //     fetches would interleave. The queue below serialises open → size → render
 //     → CLOSE, and the close is what bounds peak memory to one document.
-//  2. A WARM SESSION, RELEASED WHEN IDLE. Compiling MuPDF is ~5.3 MB of wasm;
-//     paying that per tile would be far worse than the render it wraps, so the
-//     session survives between jobs. But a warm second wasm instance is exactly
-//     what §2's option B was rejected for, and a library tile is produced ONCE
-//     PER DOCUMENT EVER (a persistent `sn-thumbs` hit returns the stored WebP
-//     before `produce` runs, so this seam is not called at all on a revisit) —
-//     a worker kept alive for a path that will never be entered again is pure
-//     cost. So the session is torn down once the queue has been drained for
+//  2. A WARM SESSION, RELEASED WHEN IDLE. Compiling MuPDF is ~5.3 MB of wasm, so
+//     the session survives between jobs. But a library tile is produced ONCE PER
+//     DOCUMENT EVER (a persistent `sn-thumbs` hit returns the stored WebP before
+//     `produce` runs, so this seam is not called at all on a revisit), and a
+//     worker kept alive for a path that will never be entered again is pure
+//     cost. So it is torn down once the queue has been drained for
 //     {@link IDLE_RELEASE_MS}.
 //  3. THE TIER TARGET. Page 0 is rendered at the same density-bucketed width
 //     every other thumbnail producer uses (`thumbTargetWidth`), so the tile is
 //     crisp at the caller's DPR and never larger than it can be shown.
 //
-// The costs are NOT this module's to avoid: the ~1.5 MB head+tail window every
-// document open pays (`BlockCache.prime`) is a one-time toll per document per
-// device, and §7's revised order says to measure it before optimising it.
+// The ~1.5 MB head+tail window every document open pays (`BlockCache.prime`) is
+// NOT this module's to avoid: it is a one-time toll per document per device.
 
 import { ASPECT_CAP } from "../ui/tileAspect";
 import { rawFileUrl } from "../core/fileKind";
 import { thumbTargetWidth } from "./types";
-import { supportsWasmExceptions } from "./pdfDecode";
+import { supportsWasmExceptions } from "./pdfLoader";
 import { createPdfSession, type PdfSession } from "./pdfClient";
 import type { Hash, Id } from "../core/types";
 import type { PdfPageThumb } from "./thumbnails";
@@ -48,16 +43,13 @@ import type { PdfPageThumb } from "./thumbnails";
 /**
  * The byte length handed to `PdfSession.open`.
  *
- * A gallery listing entry carries NO size: `NoteSummary` has none, and only
- * `NoteMeta` does — a per-file round trip a tile has no business making. The
- * hint's only job is to choose the RANGE-SERVED path over the whole-file one
- * (`pdfWorker.open` reads `size > 0` as "this can be streamed"); the real length
- * is settled a moment later by the first response's `content-range`, because
- * `BlockCache.request` deliberately never clamps its range to the length it
- * currently believes. That is not an accident to lean on — it is the documented
- * fix for a 76 MB document opened with a stale 400 KB size, which used to store
- * a short block and send MuPDF into repair. So one byte is enough to say
- * "range-serve this", and nothing downstream ever reads this number again.
+ * A gallery listing entry carries NO size: only `NoteMeta` does, and that is a
+ * per-file round trip a tile has no business making. The hint's only job is to
+ * choose the RANGE-SERVED path over the whole-file one (`pdfWorker.open` reads
+ * `size > 0` as "this can be streamed"); the real length is settled a moment
+ * later by the first response's `content-range`, because `BlockCache.request`
+ * deliberately never clamps its range to the length it currently believes. So
+ * one byte is enough, and nothing downstream reads this number again.
  */
 const SIZE_UNKNOWN = 1;
 
@@ -71,11 +63,10 @@ const SIZE_UNKNOWN = 1;
  * does not leave a second wasm instance resident for the session.
  *
  * It is also the RECOVERY for a worker that died (an engine OOM on a very large
- * page): a dead `PdfSession` rejects every later request, and nothing here
- * inspects the failure to tell that apart from an ordinary corrupt PDF — but a
- * dead session drains the queue immediately, so the release fires and the next
- * tile gets a fresh worker. Meanwhile every failed tile is a glyph, which is the
- * facade's floor and not a broken state.
+ * page): a dead `PdfSession` rejects every later request and nothing here
+ * inspects the failure to tell that apart from a corrupt PDF — but a dead
+ * session drains the queue immediately, so the release fires and the next tile
+ * gets a fresh worker.
  */
 export const IDLE_RELEASE_MS = 15_000;
 
@@ -119,14 +110,13 @@ export interface PdfThumbs {
 /**
  * The scale that puts page 0 at the tier target.
  *
- * WIDTH-LED, because a masonry tile is width-constrained: one column wide,
- * height from its aspect. But the HEIGHT is capped at {@link ASPECT_CAP} times
- * that width, because the layout letterboxes anything taller than 2.5:1 — so a
- * receipt-shaped page would otherwise rasterise thousands of rows nothing can
- * show. PURE, so the arithmetic is unit-testable without a decoder.
+ * WIDTH-LED, because a masonry tile is width-constrained. But the HEIGHT is
+ * capped at {@link ASPECT_CAP} times that width, because the layout letterboxes
+ * anything taller than 2.5:1 — so a receipt-shaped page would otherwise
+ * rasterise thousands of rows nothing can show.
  *
- * Returns 0 for a page with no measurable box, which the caller treats as
- * "this page cannot be drawn" rather than rendering at a nonsense scale.
+ * Returns 0 for a page with no measurable box, which the caller treats as "this
+ * page cannot be drawn" rather than rendering at a nonsense scale.
  */
 export function tileScale(pageW: number, pageH: number, targetW: number): number {
   if (!(pageW > 0) || !(pageH > 0) || !(targetW > 0)) return 0;
@@ -212,16 +202,15 @@ export function createPdfThumbs(
   }
 
   const renderPdfPage: RenderPdfPage = async (fileId, hash, o = {}) => {
-    // No session, no worker, no 5.3 MB module on a browser that cannot run it —
-    // the facade turns this rejection into the glyph, which is the honest floor.
+    // No session, no worker, no 5.3 MB module on a browser that cannot run it;
+    // the facade turns this rejection into the glyph.
     if (!seam.supported()) throw new Error("this browser cannot run the PDF decoder");
     const url = rawFileUrl(fileId, hash, { bin: o.bin });
     if (!url) throw new Error("this file has no readable address");
     queued++;
     const run = chain.then(() => job(url));
-    // The chain waits on the SETTLED job (so the next open never overlaps this
-    // close) but never inherits its rejection: one corrupt PDF must not take the
-    // rest of the folder's tiles down with it.
+    // The chain waits on the SETTLED job, so the next open never overlaps this
+    // close.
     chain = run.then(
       () => {},
       () => {},

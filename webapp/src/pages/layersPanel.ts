@@ -48,7 +48,7 @@
 
 import { el } from "../ui/dom";
 import { createSidePanel, sidePanelState, type SidePanelStateKind } from "../ui/sidePanel";
-import { svg, VIEWER_IC } from "./viewerChrome";
+import { svg, VIEWER_IC } from "./viewerIcons";
 
 /**
  * One layer as the panel shows it: identity plus the state being VIEWED (the

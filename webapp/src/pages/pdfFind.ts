@@ -2,36 +2,25 @@
 // reader.ts and txtFind.ts is out of txtViewer.ts: the fetch/debounce/staleness
 // logic with the DOM injected, so it is exercisable on plain Node.
 //
-// ============================================================================
-// A THIRD FIND CONTROLLER, ON PURPOSE
-// ============================================================================
-//
-// `code-review-2` recorded find-controller UNIFICATION as WON'T-DO when there
-// were two. This is the third, and it is a consequence of that
-// decision rather than a departure from it: per-viewer controllers ARE the
-// accepted pattern here, because what the three share is a SHAPE — an in-document
-// query, terms as the one-way authority for what to mark, prev/next stepping, an
-// exact count — and nothing of their mechanism.
+// A THIRD FIND CONTROLLER, ON PURPOSE. Find-controller UNIFICATION is a
+// settled won't-do: the three share a SHAPE — an in-document query, terms
+// as the one-way authority for what to mark, prev/next stepping, an exact count
+// — and nothing of their mechanism.
 //
 //   `.note`  the device's word rectangles, in millimetres, drawn as ovals
 //   `.txt`   a byte range in a blob that IS the display, marked in the DOM
 //   `.pdf`   words the browser's own renderer locates, in the page's points
 //
-// A unified controller would be three mechanisms behind one interface plus the
-// branches to pick between them, which is more code than three small files and
-// harder to read than any of them.
-//
 // ============================================================================
 // THE DIVISION OF LABOUR, WHICH IS THE WHOLE FEATURE
 // ============================================================================
 //
-// THE INDEX decides what matched — now the browser's own, over the document's
-// `text/<md5>` loaded into the same wasm FTS5 instance the library search uses. It answers, per page, the match COUNT and the folded
-// TERMS counted. This file is a LOCATOR: it asks MuPDF where those terms sit on
-// the page in front of it and draws a mark.
-//
-// So this file never decides membership, and two things follow that are easy to
-// undo by accident:
+// THE INDEX decides what matched — the browser's own, over the document's
+// `text/<md5>` loaded into the same wasm FTS5 instance the library search uses.
+// It answers, per page, the match COUNT and the folded TERMS counted. This file
+// is a LOCATOR: it asks MuPDF where those terms sit on the page in front of it
+// and draws a mark. It never decides membership, and two things follow that are
+// easy to undo by accident:
 //
 //   1. THE COUNT IS THE INDEX'S. It is never derived from the boxes drawn.
 //   2. A PAGE THE LOCATOR CANNOT PLACE A BOX ON STAYS A MATCH, with no box.
@@ -39,25 +28,20 @@
 //      legitimately disagree — hyphenation across a line break, a ligature, a
 //      word split across two content streams — so this WILL happen. "No matches"
 //      would be a confident false statement about a document that does contain
-//      the word, which is the exact failure `countText`'s `unrecognised` state
-//      exists to prevent elsewhere. The counter is the index's; the boxes are
-//      best-effort.
+//      the word. The counter is the index's; the boxes are best-effort.
 //
 // Locating the already-folded TERM rather than the user's raw query shrinks that
-// window a long way — the same move `deepLinkQuery` makes when it carries the
-// corrected spelling on a fuzzy hit instead of the typo.
+// window a long way.
 
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
 import type { Id } from "../core/types";
 import type { DocSearch, DocSearchResult } from "../search/docSearch";
-import type { PdfWord } from "../render/pdfText";
+import type { PdfWord } from "../render/pdfWire";
+import { fold, words } from "../search/fold";
 
 /**
  * One matching page: the count the counter sums and the terms the marks are
  * located from — `docSearch.ts`'s record in this viewer's vocabulary.
- *
- * Declared here rather than shared: the seam's own match shape was the shape of
- * a SERVER response, and it went with the routes — this controller reads none.
  */
 interface FindPage {
   readonly pageIndex: number;
@@ -65,44 +49,10 @@ interface FindPage {
   readonly terms: readonly string[];
 }
 
-/** `docSearch.ts`'s answer in this viewer's vocabulary. A PDF segment ordinal IS
- *  a page, which is the whole of what §1.1 means by a format difference being
- *  data rather than a branch. */
+/** `docSearch.ts`'s answer in this viewer's vocabulary: a PDF segment ordinal IS
+ *  a page, so the format difference is data rather than a branch. */
 function toPages(result: DocSearchResult): FindPage[] {
   return result.segments.map((s) => ({ pageIndex: s.segment, matches: s.matches, terms: s.terms }));
-}
-
-/**
- * Case- and accent-insensitive form — the SAME fold `unicode61
- * remove_diacritics 2` applies to the index, and byte-for-byte the one
- * `findInNote.ts` and `txtFind.ts` apply. The household writes Portuguese, so
- * `avaliação` typed as `avaliacao` has to mark the word it means; the backend
- * folded the same way to COUNT it, which is what keeps the marks and the count
- * describing the same matches.
- *
- * IF THIS EVER DIVERGES FROM THE OTHER TWO the failure is silent and one-sided:
- * the count stays right and the marks quietly stop appearing, which reads as
- * "find is broken on PDFs" and points at nothing.
- */
-export function fold(s: string): string {
-  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-}
-
-/**
- * The terms one run carries, folded — the client side of the tokenizer the index
- * applies. `unicode61` splits on everything that is not a letter or a digit, so
- * `page-range` is two terms and `Endor,` is one.
- *
- * THIS IS WHERE MEMBERSHIP IS DECIDED, which is why the decoder's own splitting
- * need only be good enough for a BOX. `pdf_shim.c` splits on an explicit table of
- * separators; anything it glues together is pulled apart here before the
- * comparison, so a separator it does not know costs a slightly wide mark and
- * never a lost match.
- */
-export function wordTerms(text: string): string[] {
-  return fold(text)
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter(Boolean);
 }
 
 /**
@@ -116,49 +66,42 @@ export function wordTerms(text: string): string[] {
  * AN EMPTY RESULT IS NOT AN ABSENCE OF MATCHES. It means this side could not
  * name them, which the caller must not turn into "No matches" — see the header.
  */
-export function matchWords(words: readonly PdfWord[], terms: readonly string[]): PdfWord[] {
+export function matchWords(boxes: readonly PdfWord[], terms: readonly string[]): PdfWord[] {
   if (terms.length === 0) return [];
   const wanted = new Set(terms.map(fold));
-  return words.filter((w) => wordTerms(w.t).some((t) => wanted.has(t)));
+  return boxes.filter((w) => words(w.t).some((t) => wanted.has(t)));
 }
 
 /**
  * What the find bar's counter can be showing. Distinct states rather than "some
  * matches, possibly none", because the differences are what the copy turns on.
  *
- * There is no `unrecognised` here, and its absence is a decision. That state
- * exists in the reader because `textHash` answers "was this note ever recognised"
- * for free, off metadata the viewer already holds. A PDF has no such flag on this
- * side. A document whose text has not been derived yet 404s on `text/<md5>`, and
- * that reaches `error` rather than `empty` — the route deliberately cannot say
- * whether a document is underived or merely unreachable, so neither can this. A
- * freshly uploaded book therefore reads as "couldn't search this file", which is
- * honest about what happened, rather than as an absence of matches.
+ * NO `unrecognised` HERE, unlike the reader — which gets that state for free off
+ * `textHash`, a flag a PDF has no equivalent of on this side. A document whose
+ * text has not been derived yet 404s on `text/<md5>` and reaches `error` rather
+ * than `empty`, so a freshly uploaded book reads as "couldn't search this file"
+ * rather than as an absence of matches.
  */
 export type PdfFindState =
   /** The field is empty. Nothing was asked and nothing is claimed. */
   | { kind: "idle" }
   /**
-   * The query is in flight and no batch has landed. NO TOTAL, deliberately: a
-   * number that quietly revises itself is how a search loses trust, and unlike
-   * the reader this viewer has no cheap local answer to show meanwhile (the
-   * reader's phase 1 is a page of word boxes it already holds; a PDF page's words
-   * cost a structured-text run of the page).
+   * The query is in flight. NO TOTAL, deliberately: a number that quietly
+   * revises itself is how a search loses trust, and unlike the reader this
+   * viewer has no cheap local answer to show meanwhile — a PDF page's words cost
+   * a structured-text run of the page.
    */
   | { kind: "counting" }
   /**
-   * SETTLED, with matches. `at` is 0-based over the EXACT `total`.
-   *
-   * THERE IS NO FLOOR STATE: the answer comes from a local index in one call, so
-   * there are no batches to accumulate and no "N+" that later resolves. What is
-   * still progressive is the WAIT — see `counting`.
+   * SETTLED, with matches. `at` is 0-based over the EXACT `total`; there is no
+   * floor state, because the answer comes from a local index in one call.
    */
   | { kind: "settled"; at: number; total: number; fuzzy: boolean }
   /**
    * The exact search found nothing, but the typo ladder found close matches —
    * offered as opt-in rather than shown automatically, exactly as the other two
-   * viewers offer it. A deep link from a global fuzzy hit already
-   * carries the RESOLVED term, so it runs exact and never reaches here.
+   * viewers offer it. A deep link from a global fuzzy hit already carries the
+   * RESOLVED term, so it runs exact and never reaches here.
    */
   | { kind: "fuzzyPrompt" }
   /** The document WAS searched — this is a real absence. */
@@ -181,11 +124,9 @@ export interface PdfFindView {
    * Filmstrip badges, keyed by 0-based page index. Empty clears them.
    *
    * The counts are the INDEX's, not the locator's: a page the index matched but
-   * whose words this side could not place still carries its number. The badge
-   * answers "which pages is it on, and how often" — a question already answered
-   * exactly — while the marks answer "where on this page", which is best-effort.
-   * Deriving the badge from the marks would quietly turn an unplaceable match
-   * into a page with no matches.
+   * whose words this side could not place still carries its number. Deriving the
+   * badge from the marks would quietly turn an unplaceable match into a page
+   * with no matches.
    */
   setPageCounts(counts: ReadonlyMap<number, number>): void;
   /** Stepping crossed a page boundary — turn the page as it goes. */
@@ -201,19 +142,18 @@ export interface PdfFindView {
 
 export interface PdfFindDeps {
   /**
-   * The one in-document search (§1.1). Shared with the reader and the `.txt`
-   * viewer so the wasm instance and its built index are one per session.
+   * The one in-document search, shared with the reader and the `.txt` viewer so
+   * the wasm instance and its built index are one per session.
    */
   docs: DocSearch;
   view: PdfFindView;
   /**
    * The words on one page of the open document, in the page's display space.
    *
-   * INJECTED rather than reached for, because on the real path it is a message
-   * to a worker holding a MuPDF instance — and because the honesty rule's whole
-   * test is "what happens when this comes back without the term on it", which
-   * needs to be stageable. It must resolve to `[]` rather than reject for a page
-   * it cannot read: an unreadable page is a page with no boxes, not a broken find.
+   * INJECTED rather than reached for, because the honesty rule's whole test is
+   * "what happens when this comes back without the term on it", which needs to
+   * be stageable. It must resolve to `[]` rather than reject for a page it
+   * cannot read: an unreadable page is a page with no boxes, not a broken find.
    */
   words: (page: number) => Promise<PdfWord[]>;
   /** Where UNAUTHORIZED / STALE_PAGE go. Never swallow them here. */
@@ -232,8 +172,8 @@ export interface PdfFindController {
    *
    * `md5` is what the search is keyed by — `NoteMeta.fileHash`, which a version
    * preview has already rewritten to the retained blob's own md5. That is why
-   * neither `historyScope` nor `binScope` reroutes anything here: §1.1's "history
-   * and bin are not special, they are other md5s".
+   * neither `historyScope` nor `binScope` reroutes anything here: history and
+   * bin are not special, they are other md5s.
    */
   setDocument(noteId: Id | null, md5: string | null): void;
   /** The viewer moved to a page — repaint that page's marks. */
@@ -251,6 +191,18 @@ export interface PdfFindController {
   query(): string;
   /** Close and drop everything — a different document, or the viewer hiding. */
   reset(): void;
+  /**
+   * This document's words on `page`, from the one cache — find's marks and the
+   * text selection are two readers of the same structured-text run.
+   *
+   * CALL IT ON INTENT, not on every page turn: a miss RUNS the page through
+   * MuPDF's structured-text device, which pulls every font and content stream it
+   * references. A hit is free.
+   */
+  wordsFor(page: number): Promise<PdfWord[]>;
+  /** The same words if they have already landed, else null — for a caller that
+   *  cannot await. The array is stable across calls. */
+  wordsKnown(page: number): PdfWord[] | null;
 }
 
 export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
@@ -292,15 +244,29 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
   let at = -1;
 
   /**
-   * Per-document word cache, keyed by page.
+   * THE document's word cache, keyed by page — find's and the selection's both,
+   * because they want the same words of the same page.
    *
-   * NOT AN OPTIMISATION — a page's words cost a structured-text run of that page,
-   * which on a range-served book is the same class of work as rendering it. Find
-   * repaints on every keystroke, every step and every zoom, and without this each
-   * of those would re-run the page. Cleared with the document, because that is
-   * the only thing that can invalidate it: a PDF blob is immutable.
+   * NOT AN OPTIMISATION. A page's words cost a structured-text run of that page,
+   * which on a range-served book is the same class of work as rendering it, and
+   * find repaints on every keystroke, step and zoom. Cleared with the document,
+   * because that is the only thing that can invalidate it: a PDF blob is
+   * immutable.
+   *
+   * THE PROMISE IS WHAT IS CACHED, so a second caller arriving while the first
+   * is still in flight JOINS it rather than running the page twice — which is
+   * what a `pointerenter` immediately followed by a `pointerdown` does.
    */
-  const wordCache = new Map<number, PdfWord[]>();
+  const wordCache = new Map<number, Promise<PdfWord[]>>();
+  /**
+   * What has already settled, for the one caller that cannot await: the
+   * selection layer is repainted synchronously out of `paint()`.
+   *
+   * The SAME ARRAY INSTANCE every time, which is load-bearing — the layer reads
+   * a different array as a different page and drops what is selected, so a fresh
+   * one per repaint would clear the selection on every zoom step.
+   */
+  const settledWords = new Map<number, PdfWord[]>();
 
   const total = (): number => counts.reduce((sum, p) => sum + p.matches, 0);
 
@@ -348,27 +314,33 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
 
   /** The words on `page`, cached. A page that will not read is a page with no
    *  boxes — never an error that reaches the counter. */
-  async function wordsFor(page: number): Promise<PdfWord[]> {
-    const cached = wordCache.get(page);
-    if (cached !== undefined) return cached;
-    let words: PdfWord[];
-    try {
-      words = await deps.words(page);
-    } catch {
-      words = [];
+  function wordsFor(page: number): Promise<PdfWord[]> {
+    let held = wordCache.get(page);
+    if (held === undefined) {
+      held = deps
+        .words(page)
+        .catch((): PdfWord[] => [])
+        .then((got) => {
+          settledWords.set(page, got);
+          return got;
+        });
+      wordCache.set(page, held);
     }
-    wordCache.set(page, words);
-    return words;
+    return held;
+  }
+
+  function forgetWords(): void {
+    wordCache.clear();
+    settledWords.clear();
   }
 
   /**
    * Repaint the marks for the page on screen. Idempotent, and safe to call from
-   * every path that changes what is displayed — the pager, the filmstrip, the
-   * keyboard, a zoom, a panel toggle, and stepping.
+   * every path that changes what is displayed.
    *
    * NOTHING HERE TOUCHES THE COUNTER. That is the honesty rule as code: this
    * function's only outputs are boxes, so a page it can name nothing on paints
-   * nothing and the count above it — which is the server's — is untouched.
+   * nothing and the count above it is untouched.
    */
   async function paintPage(): Promise<void> {
     const terms = termsOn(pageIndex);
@@ -395,8 +367,7 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
   }
 
   /**
-   * WHERE FIND LANDS the first time matches appear, and the two halves are not
-   * the same rule — the reader's, verbatim, because the reasoning is identical:
+   * WHERE FIND LANDS the first time matches appear — the reader's rule verbatim:
    *
    *  - THIS PAGE HAS MATCHES: keep the one already there, rather than turning the
    *    page out from under someone who has started reading it;
@@ -413,11 +384,10 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
     if (mine !== token) return; // a later keystroke superseded us
     if (!open || noteId !== id) return;
 
-    // THE MANUAL-FUZZY OPT-IN, the same gate the other two viewers hold. A fuzzy
-    // fallback that FOUND something is not shown automatically — the user is
-    // offered "search similar" and it displays only on request. The ladder has
-    // already run (`idx_fuzzy` fires it only on a total of 0); only the DISPLAY
-    // is gated.
+    // THE MANUAL-FUZZY OPT-IN, the same gate the other two viewers hold: a fuzzy
+    // fallback that FOUND something is offered as "search similar" and displays
+    // only on request. The ladder has already run (`idx_fuzzy` fires it only on
+    // a total of 0); only the DISPLAY is gated.
     if (result.usedFuzzy && !optedIn) {
       landedCounts = true;
       counts = [];
@@ -469,11 +439,10 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
    *
    * The FIRST find on a book pays `text/<md5>` plus the index build; every find
    * after that is the query alone, because `docSearch.ts` keeps the built index
-   * and the response is HTTP-immutable. §8.1 measured a 1,703-segment planner at
-   * 48 ms to build and Les Misérables at 363 ms. The abort covers the fetch; the
-   * build and the query are not abortable and should not be — they are the same
-   * work the next keystroke needs, and a superseded answer is dropped by its
-   * token.
+   * and the response is HTTP-immutable. Measured: a 1,703-segment planner builds
+   * in 48 ms, Les Misérables in 363 ms. The abort covers the fetch; the build
+   * and the query are not abortable and should not be — they are the same work
+   * the next keystroke needs, and a superseded answer is dropped by its token.
    */
   async function runSearch(id: Id, md5: string, q: string, mine: number): Promise<void> {
     const ac = new AbortController();
@@ -551,11 +520,10 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
     clearPainted();
     view.setState({ kind: "counting" });
 
-    // STILL DEBOUNCED even though the query is local, and §4.6's "the debounce is
-    // void" does not reach here: the FIRST find on a document is a fetch plus a
-    // build, and firing that per keystroke would download and index the book
-    // seven times for one intent. A document with no content address cannot be
-    // searched — the route is keyed by md5.
+    // STILL DEBOUNCED even though the query is local: the FIRST find on a
+    // document is a fetch plus a build, and firing that per keystroke would
+    // download and index the book seven times for one intent. A document with no
+    // content address cannot be searched — the route is keyed by md5.
     const id = noteId;
     const md5 = docMd5;
     if (id === null || md5 === null) return;
@@ -605,7 +573,7 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
       if (changed) {
         pageIndex = 0;
         // A different document has different pages AND a different page 0.
-        wordCache.clear();
+        forgetWords();
       }
       if (open) runQuery(query);
     },
@@ -614,6 +582,9 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
       pageIndex = index;
       if (open) void paintPage();
     },
+
+    wordsFor,
+    wordsKnown: (page) => settledWords.get(page) ?? null,
 
     setQuery(raw: string): void {
       const q = raw.trim();
@@ -658,7 +629,7 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
       optedIn = false;
       at = -1;
       cancelPending();
-      wordCache.clear();
+      forgetWords();
       view.setOpen(false);
       clearPainted();
       view.setState({ kind: "idle" });
@@ -669,11 +640,11 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
 /**
  * What the counter says.
  *
- * THE COPY DECISION THIS FEATURE TURNS ON: `counting` shows NO TOTAL, and every
- * state that reports a number reports the INDEX's. There is deliberately no
- * wording for "the page matched but we could not point at it" — that page is
- * simply a match with nothing drawn, and saying anything about it would be
- * explaining an implementation detail to somebody reading a book.
+ * `counting` shows NO TOTAL, and every state that reports a number reports the
+ * INDEX's. There is deliberately no wording for "the page matched but we could
+ * not point at it" — that page is simply a match with nothing drawn, and saying
+ * anything about it would be explaining an implementation detail to somebody
+ * reading a book.
  */
 export function pdfCountText(state: PdfFindState): string {
   switch (state.kind) {

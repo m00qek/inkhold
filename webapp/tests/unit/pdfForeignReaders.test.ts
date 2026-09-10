@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildPdf, type PdfPage } from "../../src/export/pdf";
-import type { PdfLink } from "../../src/render/pdfLinks";
+import type { PdfLink } from "../../src/render/pdfWire";
 
 // THE ONLY ASSERTION THAT SETTLES THE QUESTION. Everywhere else in this suite
 // the writer is checked against our own reading of the bytes, which proves the

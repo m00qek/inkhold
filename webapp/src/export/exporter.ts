@@ -11,7 +11,7 @@
 
 import type { Api } from "../api/types";
 import type { Id, NoteMeta, PageRef, WordBox } from "../core/types";
-import type { PdfLink } from "../render/pdfLinks";
+import type { PdfLink } from "../core/types";
 import type { NoteRenderer } from "../render/types";
 import { buildPdf, placeWords, type PdfPage } from "./pdf";
 

@@ -13,24 +13,17 @@
 // THE ONE HAZARD THIS FILE EXISTS TO GET RIGHT: the byte range vs the string
 // index. A paragraph is addressed by its BYTE offset in the raw blob — the `o`/`l`
 // fields a `.txt` segment carries in its `text/<md5>` record, and the reason that
-// record has them at all (: the address is a FIELD, not a
+// record has them at all (§1.1: the address is a FIELD, not a
 // branch). The viewer holds the file as a decoded UTF-16 string. `byteToCharMap`
 // is the one conversion between them, so a multi-byte character before a match
 // cannot slide the highlight off the word.
 
 import { el } from "../ui/dom";
-
-/**
- * Case- and accent-insensitive form — the SAME fold `unicode61
- * remove_diacritics 2` applies to the index and `findInNote.ts` applies to a
- * word before comparing it with a term. The household writes Portuguese, so
- * `avaliação` typed as `avaliacao` has to mark the word it means; the backend
- * folded the same way to COUNT it, which is what keeps the marks and the count
- * describing the same matches.
- */
-export function fold(s: string): string {
-  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
-}
+// The one hand-written imitation of `unicode61 remove_diacritics 2`, shared
+// with the other two finds (§8.2). `WORD_RE` below is the
+// same split in the one form this file needs and `words` cannot give it — a
+// global regex whose match INDICES place the `<mark>` in the paragraph.
+import { fold } from "../search/fold";
 
 /** UTF-8 byte length of one code point — the inverse of what a `TextEncoder`
  *  would cost per character, computed directly so a big file maps in one pass. */

@@ -8,7 +8,7 @@ const sqlite_flags = [_][]const u8{
     // FTS5 is a *build option*, not a given: on a host SQLite built without it
     // the server fails at runtime. Vendoring turns that into a guarantee.
     //
-    // **schema v14 deleted the server's FTS5 INDEX and this
+    // **§6 step 8 deleted the server's FTS5 INDEX and this
     // flag stayed**, which §6.1 says outright: what needs FTS5 now is
     // `search/fuzzy.zig`'s contentless `temp.token_fold`, the tokenizer the
     // derive step folds every document's terms through. That fold is the whole
@@ -110,8 +110,8 @@ const sqlite_flags = [_][]const u8{
 ///                       module calls `sqlite3_initialize` explicitly.
 ///   * `OMIT_JSON` + no RTREE/GEOPOLY — every optional SQL module dropped except
 ///                       the one that is now load-bearing:
-///   * `ENABLE_FTS5`   — global search is answered in the browser.
-///                       MEASURED on this
+///   * `ENABLE_FTS5`   — global search is answered in the browser
+///                       in the browser. MEASURED on this
 ///                       artifact: 667,211 raw / 290,879 gzip without it against
 ///                       828,562 / 362,009 with, so FTS5 costs **+71,130 bytes
 ///                       gzip** and that is the whole download cost of the
@@ -122,7 +122,7 @@ const sqlite_flags = [_][]const u8{
 ///                       temp FILE and fail. `3` forces temp storage to memory
 ///                       and cannot be overridden by a pragma. Without it an
 ///                       FTS5 merge *"surfaces as a corrupt index in production
-///                       rather than as a build error"*.
+///                       rather than as a build error"* (§0).
 ///                       REMOVING IT CHANGES NOTHING OBSERVABLE — measured, up
 ///                       to 80,000 documents and an 80,000-row `ORDER BY rank`.
 ///                       So it is not defended by a behavioural test: the module
@@ -691,11 +691,24 @@ pub fn build(b: *std.Build) void {
     spd_mod.link_libc = true;
     spd_mod.addIncludePath(b.path("vendor/sqlite"));
 
+    // The server's schema, as a MODULE — not because the wasm wants a database
+    // schema, but because `db/schema.zig` is where the FTS5 tokenizer is
+    // declared and the browser's search index has to be built with the same one
+    // (`sqlite_core.zig`, §8.2). Header-only and
+    // target-less exactly like `spd_mod`: whoever imports it supplies the
+    // target, and `db/sqlite.zig`'s `@cImport` is never reached from the wasm
+    // side anyway — the constant is the only decl the browser touches.
+    const schema_mod = b.createModule(.{
+        .root_source_file = b.path("backend/db/schema.zig"),
+    });
+    schema_mod.link_libc = true;
+    schema_mod.addIncludePath(b.path("vendor/sqlite"));
+
     // ---- WebAssembly SQLite core: the `.spd` decoder AND the search index ----
     // ONE artifact, two ABIs (`spd_*` + `idx_*`), because SQLite alone is
     // ~290 KB gzip of the 362 KB artifact: two modules would ship ~580 KB to
     // avoid ~10 KB of Zig a given page happens not to call, which is the wrong
-    // trade, which also names the file:
+    // trade — §5, which also names the file:
     // an artifact called `spd-decode` that also runs search is a lie in the
     // build graph.
     //
@@ -715,6 +728,13 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSmall,
     });
     sqlite_core_mod.addImport("spd", spd_mod);
+    // The FTS5 tokenizer, from the SERVER's schema — the same import mechanism
+    // as `spd` above and for the same reason: a rule both sides run must have
+    // one declaration. `db/schema.zig` is the lowest layer that both this module
+    // and `search/fuzzy.zig` can reach, and only its `fts_tokenizer` constant is
+    // referenced, so nothing of the backend's is analysed, linked or emitted
+    // here (MEASURED: the artifact is byte-identical before and after).
+    sqlite_core_mod.addImport("schema", schema_mod);
     sqlite_core_mod.link_libc = true;
     sqlite_core_mod.addIncludePath(b.path("vendor/sqlite"));
     // The trimmed amalgamation + the null VFS, compiled into THIS artifact only
@@ -814,8 +834,8 @@ pub fn build(b: *std.Build) void {
 
     // (`zig build indoc-bench` was here. It timed the two server-side in-doc
     // reads against the `segment_fts`-free scan shape to settle
-    // — "can find-in-note lose the FTS without
-    // client work?". the move into the browser answered the question the other
+    // §7.3 — "can find-in-note lose the FTS without
+    // client work?". §6 step 7 answered the question the other
     // way and deleted BOTH subjects: in-document search is the browser's, off
     // `text/<md5>`. A bench whose two arms are both gone measures nothing.)
 
@@ -825,7 +845,7 @@ pub fn build(b: *std.Build) void {
     // this one is scp'd to the Pi and run there. It links the same vendored
     // SQLite as the server, so the pragmas and the page cache are the server's
     // and not the host distro's, and it is NOT installed by `zig build` —
-    // nothing in the server depends on it. It answers 's
+    // nothing in the server depends on it. It answers §7's
     // last derive-cost item: what the fold, deflate level 6 and the two file
     // writes cost per document on the ARM1176 the design is shaped around.
     // It calls the real `derive_search.writeDerived`, so it needs the note

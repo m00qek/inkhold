@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Freeze what the SERVER's search answers, before it stops existing.
 
-The search removal deletes the server implementation. After that there
+§6 step 6 deletes the server implementation. After that there
 is nothing left to compare the browser against -- so the window for capturing its
 answers is now, and the value of the capture is proportional to how many
 questions we think to ask inside it.

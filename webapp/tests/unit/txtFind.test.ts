@@ -6,8 +6,12 @@
 // helpers, exercised directly; the viewer's wiring is proved in txtViewer.test.ts.
 
 import { describe, it, expect } from "vitest";
+// `fold` is no longer this file's: §8.2's merge left one copy, in `search/fold`,
+// which `txtFind.ts` now imports. The spot-check below stays pointed at the
+// shared module — the `.txt` side's dependence on the exact folding is pinned
+// where it belongs, through `markParagraph`, further down.
+import { fold } from "../../src/search/fold";
 import {
-  fold,
   byteToCharMap,
   resolveFindSegments,
   totalMatches,

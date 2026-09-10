@@ -10,12 +10,12 @@
 //   getPageText  → GET  /note/{id}/page/{n}/text?v={textHash} (immutable, HTTP-cached)
 //   getPageLinks → GET  /note/{id}/page/{n}/links?v={linksHash}
 //
-// NO SEARCH OF ANY KIND LIVES HERE ANY MORE.
+// NO SEARCH OF ANY KIND LIVES HERE ANY MORE (§6 steps 6-7).
 // The browser holds every index and answers every query itself — library-wide
 // and in-document alike; `src/search/` fetches `text/<md5>` and nothing on this
 // seam is asked to interpret a query.
 
-import type { PdfLink } from "../render/pdfLinks";
+import type { PdfLink } from "../core/types";
 import type { Hash, Id, Listing, NoteMeta, PageRef, PageText } from "../core/types";
 
 /**
@@ -25,8 +25,8 @@ import type { Hash, Id, Listing, NoteMeta, PageRef, PageText } from "../core/typ
  * top-level JSON array is a shape that can never gain a field, and this one may
  * yet want to say what panel it was authored against.
  *
- * `PdfLink` is the record `render/pdfLinks.ts` already defines and
- * `pages/pdfLinkLayer.ts` already renders — deliberately the same type for a
+ * `PdfLink` is the record `render/pdfWire.ts` already defines and
+ * `pages/linkLayer.ts` already renders — deliberately the same type for a
  * `.note`'s links and a `.pdf`'s, so the layer, the allowlist and the exporter
  * are written once. See {@link Api.getPageLinks} for the one thing that differs
  * between them (the unit the rect is in).
@@ -296,8 +296,8 @@ export interface Api {
 
   // --- HISTORY (hot-cache versioning — "history of this file") ---
   //
-  // The read + restore face of the version history, phases 3-6. All note-scoped
-  // by `:id` (the same ownership gate
+  // The read + restore face of the version history. All note-scoped by `:id`
+  // (the same ownership gate
   // the sibling `/note/:id` routes use); the per-version routes are gated on
   // `:md5` being a RETAINED version of THAT file, so a stranger's md5 — or one not
   // in this file's history — is one indistinguishable 404.

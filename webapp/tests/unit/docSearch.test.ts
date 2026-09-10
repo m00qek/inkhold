@@ -4,10 +4,10 @@ import { fileURLToPath } from "node:url";
 import {
   countMarks,
   createDocSearch,
-  fold,
   planMarks,
   type DocSearchResult,
 } from "../../src/search/docSearch";
+import { fold } from "../../src/search/fold";
 import {
   DocumentTextUnavailable,
   parseDocumentText,

@@ -3,13 +3,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
-  AsyncPdfDocument,
   decoderImports,
   supportsWasmExceptions,
-  syncCalls,
   wasiShim,
   type PdfDecoderExports,
-} from "../../src/render/pdfDecode";
+} from "../../src/render/pdfLoader";
+import { AsyncPdfDocument, syncCalls } from "../../src/render/pdfDocument";
 
 // THE REAL MODULE, NOT A FAKE. The viewer tests use a fake speaking the ABI (as
 // `.spd`'s do), but this file exists to prove one specific thing a fake cannot:

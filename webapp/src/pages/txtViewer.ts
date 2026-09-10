@@ -24,7 +24,9 @@ import { formatBytes, rawFileUrl, historyFileUrl } from "../core/fileKind";
 import { readLocal, writeLocal } from "../ui/storage";
 import { bytesBudget, dispatchApiFailure } from "../api/client";
 import { createToolbar } from "./toolbar";
-import { svg, VIEWER_IC, VIEWER_DEBOUNCE_MS, backWord, createViewerHeader, createZoomStepper, createViewerBody, createVersionBanner } from "./viewerChrome";
+import { svg, VIEWER_IC } from "./viewerIcons";
+import { createZoomStepper } from "./viewerControls";
+import { VIEWER_DEBOUNCE_MS, backWord, createViewerHeader, createViewerBody, createVersionBanner } from "./viewerChrome";
 import { createBinViewerActions } from "../ui/binViewerActions";
 import type { ReaderOrigin, Viewer, ViewerDeps } from "./viewer";
 import {
@@ -180,7 +182,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
   // --- find state ----------------------------------------------------------
   // The whole file is loaded in the viewer, so find is a DOM/text operation over
   // `loadedText` — no per-page fetch, no rectangles. The browser's own index over
-  // this file's `text/<md5>` names WHICH paragraphs
+  // this file's `text/<md5>` (§1.1) names WHICH paragraphs
   // match, how many, and their BYTE RANGES; the viewer maps those ranges into the
   // string it holds, marks them and jumps between them.
   let loadedText: string | null = null;
