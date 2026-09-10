@@ -3,13 +3,12 @@ import {
   createPdfFindController,
   matchWords,
   pdfCountText,
-  wordTerms,
   type PdfFindState,
   type PdfFindView,
 } from "../../src/pages/pdfFind";
-import { parsePageWords, type PdfWord } from "../../src/render/pdfText";
+import { parsePageWords, type PdfWord } from "../../src/render/pdfWire";
 import { ovalsFor } from "../../src/pages/findOvals";
-import { fold as txtFold } from "../../src/pages/txtFind";
+import { fold, words as wordTerms } from "../../src/search/fold";
 import type { ApiFailureSink } from "../../src/api/client";
 import type { WordBox } from "../../src/core/types";
 import type { DocSearch, DocSearchResult, DocSegmentMatch } from "../../src/search/docSearch";
@@ -31,7 +30,10 @@ import type { DocSearch, DocSearchResult, DocSegmentMatch } from "../../src/sear
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 function word(t: string, i: number): PdfWord {
-  return { t, x: 10, y: 12 + i * 14, w: t.length * 6, h: 11 };
+  // One word per line, which is what these fixtures are: a stack of runs down
+  // the page. Find never reads `line` — it is the copy path's field — but a
+  // fixture that left it out would be a `PdfWord` the decoder cannot produce.
+  return { t, x: 10, y: 12 + i * 14, w: t.length * 6, h: 11, line: i };
 }
 
 /** A matching PAGE. `offset`/`length` are null because a PDF ordinal IS the
@@ -125,11 +127,16 @@ describe("matchWords", () => {
     ]);
   });
 
-  it("folds exactly as the `.txt` viewer folds, because the index folded once", () => {
-    // Three copies of two lines, and the failure if they diverge is silent and
-    // one-sided: the count stays right and the marks stop appearing.
+  it("marks a RAW word box against an already-folded term", () => {
+    // This used to read "folds exactly as the `.txt` viewer folds" and compared
+    // two copies of `fold`; §8.2's merge left one, so that pairing says nothing
+    // any more. What it still pins is the asymmetry the PDF side actually runs
+    // on: the terms arrive folded (they are what the index counted) while the
+    // boxes carry MuPDF's raw glyphs, so `matchWords` has to fold its own side
+    // before comparing. Drop that fold and every accented or capitalised word
+    // silently stops being marked while the counter keeps saying it is there.
     for (const s of ["Avaliação", "ÀÉÎÕÜ", "straße", "MiXeD"]) {
-      expect(matchWords([word(s, 0)], [txtFold(s)]).length).toBe(1);
+      expect(matchWords([word(s, 0)], [fold(s)]).length).toBe(1);
     }
   });
 });
@@ -446,9 +453,22 @@ describe("the find controller", () => {
 
 describe("parsePageWords", () => {
   it("reads the decoder's records", () => {
-    expect(parsePageWords('[{"t":"Marmalade","x":10,"y":38.5,"w":52.7,"h":11.6}]')).toEqual([
-      { t: "Marmalade", x: 10, y: 38.5, w: 52.7, h: 11.6 },
+    expect(parsePageWords('[{"t":"Marmalade","x":10,"y":38.5,"w":52.7,"h":11.6,"l":3}]')).toEqual([
+      { t: "Marmalade", x: 10, y: 38.5, w: 52.7, h: 11.6, line: 3 },
     ]);
+  });
+
+  it("keeps a word whose line id is missing or unusable, on line zero", () => {
+    // The DEGRADATION RULE (`pdfWire.ts`): the box is what find needs and it is
+    // still correct, so a word is never dropped over a field find does not read.
+    // Zero rather than one-line-per-word, because the latter would put a newline
+    // between every pair of words in a copied passage.
+    const box = '"x":1,"y":2,"w":3,"h":4';
+    for (const l of ["", ',"l":null', ',"l":"2"', ',"l":-1', ',"l":1.7']) {
+      const got = parsePageWords(`[{"t":"a",${box}${l}}]`);
+      expect(got).toHaveLength(1);
+      expect(got[0]!.line).toBe(l === ',"l":1.7' ? 1 : 0);
+    }
   });
 
   it("answers with nothing for a payload that is not an array of words", () => {
@@ -459,20 +479,24 @@ describe("parsePageWords", () => {
     }
   });
 
-  it("drops a record that is not a usable box", () => {
+  it("drops a record with no text to match or no box to draw", () => {
+    // The refusals that survive §2.7: both are about CONTENT the DOCUMENT
+    // supplied. A non-numeric coordinate is the SHIM's shape and is no longer
+    // re-checked — see `pdfLinks.test.ts` for that decision stated positively.
     const good = '{"t":"a","x":1,"y":2,"w":3,"h":4}';
     for (const bad of [
       '{"t":"","x":1,"y":2,"w":3,"h":4}', // nothing to match
       '{"x":1,"y":2,"w":3,"h":4}', // no text at all
       '{"t":"a","x":1,"y":2,"w":0,"h":4}', // no width
       '{"t":"a","x":1,"y":2,"w":3,"h":-4}', // negative height
-      '{"t":"a","x":null,"y":2,"w":3,"h":4}',
       "null",
       "7",
     ]) {
       // The good record beside it must survive: one malformed entry is not a
       // reason to lose the page's other marks.
-      expect(parsePageWords(`[${bad},${good}]`)).toEqual([{ t: "a", x: 1, y: 2, w: 3, h: 4 }]);
+      expect(parsePageWords(`[${bad},${good}]`)).toEqual([
+        { t: "a", x: 1, y: 2, w: 3, h: 4, line: 0 },
+      ]);
     }
   });
 });
@@ -502,7 +526,7 @@ describe("the oval path is untouched", () => {
     // file get" a question no code has to ask at runtime.
     const marks = matchWords([word("attention", 0)], ["attention"]);
     expect(marks).toHaveLength(1);
-    expect(marks[0]).toEqual({ t: "attention", x: 10, y: 12, w: 54, h: 11 });
+    expect(marks[0]).toEqual({ t: "attention", x: 10, y: 12, w: 54, h: 11, line: 0 });
     expect("path" in marks[0]!).toBe(false);
     expect("rotateDeg" in marks[0]!).toBe(false);
   });

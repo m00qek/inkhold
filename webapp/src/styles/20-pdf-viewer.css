@@ -214,6 +214,78 @@
   outline-color: color-mix(in srgb, var(--accent) 42%, transparent);
 }
 
+/* The selection layer — the one layer over the page that DOES take the pointer,
+   because dragging across it is the whole feature. It sits under the links
+   (which are real anchors and win the press) and under the ink, and the ink is
+   `pointer-events: none`, so the stacking answers "was that a link or a
+   selection?" without a line of code asking.
+
+   The host has no fill: it is a hit area, and an empty page must look exactly
+   like a page. The cursor is the only standing hint that a raster page has text
+   in it at all, and it appears only once the words have arrived — offering a
+   text cursor over a page whose words are still loading would promise something
+   a press could not yet deliver. */
+.pdf-select {
+  position: absolute;
+  /* TRANSPARENT UNTIL IT HAS SOMETHING TO OFFER. A page of scanned images has no
+     words, and a page whose words are still being built does not have them YET —
+     in both states this layer can do nothing with a press, so it must not take
+     one. Claiming the pointer regardless would put an invisible sheet over every
+     PDF in the app and quietly swallow clicks meant for the page beneath, which
+     is exactly what it did: it intercepted the click that focuses the canvas.
+
+     It is also what lets the words be fetched at all. With `none` here the
+     pointer reaches the page and the event bubbles to `.pdf-stage`, which is
+     where the viewer listens for the intent to select — the layer cannot listen
+     for the thing that would switch it on. */
+  pointer-events: none;
+}
+.pdf-select.is-selectable {
+  pointer-events: auto;
+  cursor: text;
+}
+/* THE SELECTION IS NOT THE FIND MARK, and the colour is what says so. Find uses
+   `--accent`, the app's green ink, everywhere it points at a hit; a selection
+   that borrowed it would read as "these words matched your search" over words
+   the reader picked by hand — and the two can be on screen at once, which is
+   precisely when the confusion would cost something. `--paper-ink` is the wrong
+   answer too: it means the user's own handwriting (the page index's rail uses
+   it for exactly that). So this takes `--ink`, the UI's own text colour, at a
+   wash: a neutral, unmistakably-not-green band that reads as "chosen" rather
+   than "found", and inverts with the theme for free.
+
+   No radius and no bleed, unlike the find mark. Adjacent words in a selected
+   line must meet as one continuous band — that is what makes a passage look
+   selected rather than word-by-word highlighted — and a rounded, outlined box
+   would put a seam between every pair of words. */
+.pdf-select__box {
+  position: absolute;
+  background: color-mix(in srgb, var(--ink) 22%, transparent);
+}
+/* The copy outcome, for a screen reader only — the same visually-hidden shape
+   the pager's live region uses. A glyph cannot say "that did not work", and on
+   the plain-HTTP address this app is usually served over, "that did not work"
+   is a real outcome rather than a theoretical one. */
+.pdf-copy__live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+/* …and its sighted half. A failed copy has to be visible on the control that
+   was pressed, because the text it failed to copy is painted on a canvas and
+   cannot be selected by hand as a fallback. */
+.btn.is-failed {
+  /* `--margin-ink`, the token the palette reserves for "things gone wrong" (it
+     is `--margin` darkened so words clear 4.5:1, and this is a glyph on a
+     button). Red keeps meaning one thing here, which is why it is not the
+     accent. */
+  color: var(--margin-ink);
+  outline: 1px solid currentColor;
+}
+
 /* The ink layer. `pointer-events: none` so it never eats a click meant for the
    page, and no background of its own — `decode_layer` returns alpha 0 wherever
    the device wrote nothing, which is what makes this an overlay rather than a
@@ -228,7 +300,7 @@
 }
 
 /* The link layer that used to live here is now `21-link-layer.css`: the
-   component (`pages/pdfLinkLayer.ts`) is shared with the `.note` reader, so its
+   component (`pages/linkLayer.ts`) is shared with the `.note` reader, so its
    styling is not the PDF viewer's to own. */
 
 /* The page itself. A PDF page is paper: it gets the sheet colour and a soft
@@ -306,4 +378,140 @@
    portrait `.note` panel, so the shared default would be the wrong guess. */
 .viewer--pdf .filmstrip__page {
   --thumb-aspect: 0.7071; /* A4 portrait, the fallback when page 0 will not measure */
+}
+
+/* ================= the outline ================= */
+/* The document's OWN table of contents (`pages/pdfOutlinePanel.ts`), docked in
+   the same left slot as the page index and mutually exclusive with it — two
+   navigation panels open at once would leave the page a sliver. It takes the
+   DEFAULT `--panel-w` track (268px): a filmstrip is happiest at the narrow 180
+   and a wrapped chapter title is unreadable there, which is why these are two
+   panels and not two tabs in one.
+
+   DEPTH IS INDENT PLUS TYPE, NEVER COLOUR. Colour in this panel means STATE —
+   the current entry, and nothing else. Tint the levels and there is nothing left
+   to say "you are here" with, on a panel whose whole job is to say it. */
+.pdf-outline {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The row. A grid of `1fr auto` — the title takes what it needs and the page
+   number sits in a column of its own, so the numbers line up down the panel
+   however deeply their titles are indented.
+
+   The indent is arithmetic: one `--sp-3` step per level, from a `--depth` the
+   component sets per row and CLAMPS at 3 (see `MAX_DEPTH` — 12px a level runs
+   out of a 268px track at five, and an outline indented into a 40px column is
+   unreadable before it is deep). */
+.pdf-outline__row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: var(--sp-2);
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  padding: var(--sp-1) var(--sp-2) var(--sp-1)
+    calc(var(--sp-3) + var(--depth, 0) * var(--sp-3));
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+/* TITLES WRAP, THEY NEVER TRUNCATE. The title is the entire content of the row
+   and an ellipsis in a table of contents hides the one thing it is for — and a
+   long chapter title is exactly the entry a reader is hunting for. `break-word`
+   rather than `anywhere` so an ordinary long title breaks between words and only
+   an unbreakable run is cut. */
+.pdf-outline__t {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+/* The page number: mono, tabular, quiet — a coordinate, not part of the title.
+   ALIGNED TO THE TITLE'S FIRST LINE (`align-self: start`), so a title that wraps
+   to three lines does not drag its number down and knock the column out of true.
+   It is drawn 1-based; the wire is 0-based, and the component converts. */
+.pdf-outline__p {
+  align-self: start;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-faint);
+}
+
+/* The type scale, one step per level and then it stops — the same clamp the
+   indent takes, so a level-6 entry reads as "deeper than a chapter" instead of
+   as a column of single characters.
+
+   Depth 0 is a PART: the display face, a heavier weight, full `--ink`, and air
+   above it, so the top level reads as structure rather than as the first row of
+   a list. It is the only rule here that adds space; the levels under it are
+   already separated by their indent. */
+.pdf-outline__row--d0 {
+  margin-top: var(--sp-2);
+  font-family: var(--font-display);
+  font-weight: 500;
+  color: var(--ink);
+}
+.pdf-outline__row--d0:first-child {
+  margin-top: 0;
+}
+.pdf-outline__row--d1 {
+  font-size: var(--fs-body);
+}
+.pdf-outline__row--d2 {
+  font-size: var(--fs-caption);
+}
+.pdf-outline__row--d3 {
+  font-size: var(--fs-caption);
+  color: var(--ink-faint);
+}
+
+.pdf-outline__row:hover {
+  background: var(--hover);
+}
+.pdf-outline__row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+/* AN ENTRY WHOSE DESTINATION WILL NOT RESOLVE is drawn and inert, not dropped:
+   it is still a line its author wrote, and a hole in a table of contents reads
+   as "there is no Chapter Four" about a chapter that is right there. It shows no
+   number, because there is none to show. */
+.pdf-outline__row:disabled {
+  cursor: default;
+  color: var(--ink-faint);
+}
+.pdf-outline__row:disabled:hover {
+  background: none;
+}
+
+/* THE CURRENT ENTRY — the one the reader is inside, which moves as they page and
+   not only as they click. The mark is the page index's own device (a 2px accent
+   stroke in the gutter, `::before`) in the colour this app already means
+   "current" by, and it costs no horizontal space — which matters when four
+   levels of indent are already spending it. The title comes up to full `--ink`
+   and the number to `--accent` with it, so the row reads as current at a glance
+   and at the number both. */
+.pdf-outline__row[aria-current="true"] {
+  color: var(--ink);
+  font-weight: 600;
+}
+.pdf-outline__row[aria-current="true"] .pdf-outline__p {
+  color: var(--accent);
+}
+.pdf-outline__row[aria-current="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
 }

@@ -24,11 +24,22 @@
 
 import { WASI } from "node:wasi";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const [, , wasmPath, pdfPath] = process.argv;
 if (!wasmPath || !pdfPath) {
   console.error("usage: node pdf_decode_abi.mjs <pdf-decode.wasm> <fixture.pdf>");
   process.exit(2);
+}
+
+/**
+ * A committed fixture, by name, read RELATIVE TO THIS FILE rather than taken
+ * from argv. The harness passes exactly one fixture path; a second one would be
+ * a `build.zig` change for every fixture a section wants, and the e2e specs
+ * already reach their own fixtures this way.
+ */
+function fixturePath(name) {
+  return fileURLToPath(new URL(`fixtures/${name}`, import.meta.url));
 }
 
 let failures = 0;
@@ -92,6 +103,8 @@ for (const name of [
   "ink_links_free",
   "ink_page_words",
   "ink_words_free",
+  "ink_load_outline",
+  "ink_outline_free",
   "ink_render",
   "ink_render_width",
   "ink_render_height",
@@ -1425,6 +1438,146 @@ if (uprightWords) {
   e.ink_close(doc);
 }
 
+/* --- the LINE id (`l`): which words share a text line ---------------------- */
+// Selection (§9) copies a range of words as a string, and the
+// string joins words with spaces INSIDE a line and a newline BETWEEN lines. The
+// walk knows where the lines are — it already ends a word at every one of them —
+// so it says so, and the client does not have to guess it back out of the
+// geometry. Guessing it back is the failure this exists to prevent: baselines
+// are not a grouping key once a page mixes sizes, superscripts or two columns,
+// and a viewer that clusters by `y` gets those pages silently wrong.
+//
+// The property under test is NOT "there is an `l`". It is that a word never
+// carries an id from a line it did not come from, which presence cannot see. The
+// fixture below is built so that the two ways of getting that wrong — restarting
+// the count, and letting an end-of-line flush spill into the next line's id —
+// both change an assertion here.
+//
+// NOT COVERED, and deliberately: the recursion into `FZ_STEXT_BLOCK_STRUCT`,
+// where a line counter held as a local would restart. `fz_init_stext_options`
+// does not set `FZ_STEXT_COLLECT_STRUCTURE`, so MuPDF builds no structure blocks
+// for this ABI at all and a tagged fixture would exercise the same flat path as
+// an untagged one. The shim carries the reasoning in a comment instead.
+
+/**
+ * A one-page PDF whose text sits on FOUR baselines 20pt apart, the third of
+ * which is blank.
+ *
+ * The gap matters twice over. 20pt between 12pt baselines is far enough that
+ * MuPDF cannot merge two of them into one stext line — the whole test would
+ * pass vacuously if it did — and the blank one is a line that emits NO words,
+ * which is what decides whether the ids are contiguous or merely ordered.
+ *
+ * Each baseline is its own `BT … ET`, which is also how a real typesetter
+ * writes them, so this is not a shape the shim only ever sees from a test.
+ */
+function multiLinePdf(lines) {
+  const content = lines
+    .map(([text, y]) => `BT /F1 12 Tf 10 ${y} Td (${text}) Tj ET`)
+    .join("\n");
+  return buildPdf([
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 120]" +
+      " /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+  ]);
+}
+
+{
+  const doc = openBytes(
+    multiLinePdf([
+      ["Alpha beta", 90],
+      ["gamma delta", 70],
+      ["   ", 50], // whitespace only: a line that contributes no word at all
+      ["epsilon", 30],
+    ]),
+  );
+  check(doc >= 1, "line ids: the fixture opens", `got ${doc}`);
+  const got = pageWords(doc, 0);
+  check(typeof got === "object", "line ids: ink_page_words succeeds", `got ${got}`);
+
+  // Every word carries one, and it is an ordinal — not a float, not a sentinel.
+  check(
+    got.words.every((w) => Number.isInteger(w.l) && w.l >= 0),
+    "line ids: every word carries a finite integer `l` >= 0",
+    got.json,
+  );
+
+  // NON-DECREASING in emission order. Emission order is reading order (asserted
+  // for the single-line fixture above), so an id that went backwards would mean
+  // the counter was reset — the exact shape of the recursion bug.
+  check(
+    got.words.every((w, i) => i === 0 || w.l >= got.words[i - 1].l),
+    "line ids: `l` never goes backwards in emission order",
+    got.json,
+  );
+
+  // The grouping itself, stated as the payload the fixture must produce. Words
+  // on one baseline share an id; words on different baselines do not. Written
+  // out in full rather than as a same/different pair, because a bug that merges
+  // two lines and a bug that splits one both have to fail it.
+  equal(
+    got.words.map((w) => `${w.t}@${w.l}`).join(" "),
+    "Alpha@0 beta@0 gamma@1 delta@1 epsilon@2",
+    "line ids: words share an id with their line and with no other",
+  );
+
+  // ...and the geometry agrees with the ids, which is what says the ids describe
+  // THIS page rather than the order the words happened to arrive in: same id
+  // means same baseline, different id means a lower one (y is measured down).
+  const rowOf = (l) => got.words.filter((w) => w.l === l);
+  check(
+    [0, 1, 2].every((l) => {
+      const row = rowOf(l);
+      return row.length > 0 && row.every((w) => Math.abs(w.y - row[0].y) < 0.5);
+    }),
+    "line ids: every word sharing an id also shares a baseline",
+    got.json,
+  );
+  check(
+    rowOf(0)[0].y < rowOf(1)[0].y && rowOf(1)[0].y < rowOf(2)[0].y,
+    "line ids: a higher id sits lower on the page",
+    got.words.map((w) => `${w.l}:${w.y}`).join(" "),
+  );
+
+  // CONTIGUOUS FROM 0, with no gaps — so `l` is usable as an index and not only
+  // as an equality key. The blank third baseline is why this is a real claim:
+  // an id is spent by a line that EMITTED a word, so a line of pure whitespace
+  // (and equally a line dropped by the word cap or a degenerate rect) leaves no
+  // hole behind it. `epsilon` is on the fourth baseline and carries id 2.
+  const ids = [...new Set(got.words.map((w) => w.l))];
+  equal(
+    ids.join(","),
+    ids.map((_, i) => i).join(","),
+    "line ids: the ids are contiguous from 0 — a wordless line spends none",
+  );
+
+  // A word is never attributed to a line that did not produce it, which for the
+  // END-OF-LINE flush means the run drained by the line ending belongs to the
+  // line that is ending. `beta` and `delta` are the last runs on their lines and
+  // are flushed by exactly that path; they are covered by the equality above,
+  // and this states why it is load-bearing rather than incidental.
+  equal(got.words.at(-1).l, 2, "line ids: the last word on the page names the last line");
+
+  // Over the CALLBACK STREAM, byte-identical — the ids are a property of the
+  // walk, and the walk must not depend on how the bytes arrived.
+  fixture = multiLinePdf([
+    ["Alpha beta", 90],
+    ["gamma delta", 70],
+    ["   ", 50],
+    ["epsilon", 30],
+  ]);
+  const sline = e.ink_open_stream(BigInt(fixture.length));
+  check(sline >= 1, "line ids: the fixture opens as a stream", `got ${sline}`);
+  equal(pageWords(sline, 0).json, got.json, "line ids: the streamed answer is byte-identical");
+  e.ink_close(sline);
+  fixture = savedFixture;
+
+  e.ink_close(doc);
+}
+
 /* --- refusals and hygiene -------------------------------------------------- */
 {
   const doc = openBytes(fs.readFileSync(pdfPath));
@@ -1439,6 +1592,215 @@ if (uprightWords) {
   // turn including the ones that failed.
   e.ink_words_free();
   e.ink_words_free();
+}
+
+// ============================================================================
+// The document's OUTLINE (`ink_load_outline`) — the table of contents
+// ============================================================================
+//
+// For a book or a manual the outline IS the navigation, and what the panel
+// needs from it is not "there are some entries" but the SHAPE: which entry is
+// nested under which, and which page each one lands on. Both of those fail
+// invisibly to a presence check, so the assertions below write the whole list
+// out as one comparable string — a merge of two levels into one, a split of one
+// into two, and an off-by-one in the page base all have to change it visibly.
+//
+// The three things being proven:
+//
+//   1. ORDER AND DEPTH. Pre-order, depth first, `d` counting from 0 — the order
+//      a reader sees the rows in, so the client can render the list without
+//      sorting it or rebuilding a tree from it.
+//
+//   2. THE PAGE BASE. `p` is 0-BASED, the index `go(pageIndex)` takes and the
+//      same base `ink_page_links` reports its `page` in. A 1-based `p` would
+//      send every reader one page past where they asked to go, on every entry,
+//      and would still look like a working outline.
+//
+//   3. ABSENCE IS ABSENCE. An entry whose destination resolves nowhere carries
+//      NO `p` key at all — not -1, not null — and is still listed. A sentinel is
+//      a page number to any client that forgets to check it.
+
+/** The outline of the document behind `handle`, parsed. */
+function outlineOf(handle) {
+  const packed = e.ink_load_outline(handle);
+  if (packed < 0n) return packed;
+  const json = Buffer.from(
+    new Uint8Array(e.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
+  ).toString("utf8");
+  e.ink_outline_free();
+  return { json, entries: JSON.parse(json) };
+}
+
+/** One row as `depth|title|page`, with `-` where there is no page at all. */
+const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
+
+{
+  // Committed fixture: 6 pages of 300x200pt and a THREE-level outline, which is
+  // the least that can tell a flattened walk from a nested one — two levels
+  // would pass a walk that never recursed past the first child.
+  const bytes = fs.readFileSync(fixturePath("outlined-six-page.pdf"));
+  const doc = openBytes(bytes);
+  check(doc >= 1, "outline: the fixture opens", `got ${doc}`);
+  equal(e.ink_page_count(doc), 6, "outline: the fixture has six pages");
+
+  const got = outlineOf(doc);
+  check(typeof got === "object", "outline: ink_load_outline succeeds", `got ${got}`);
+
+  // THE WHOLE LIST, in full. Written out rather than spot-checked because the
+  // interesting failures are structural: `Chapter C`'s child promoted to its
+  // sibling, or `Part Two` demoted under `Chapter B`, both leave every
+  // individual entry looking correct.
+  equal(
+    got.entries.map(rowOfEntry).join(" "),
+    "0|Part One|0 1|Chapter A|1 1|Chapter B|2 0|Part Two|3 1|Chapter C|4 2|Section C.1|5",
+    "outline: the flat list carries the tree's order, depth and pages",
+  );
+
+  // `d` is an ordinal — not a float, not a sentinel — and the list starts at the
+  // top level, which is what makes it renderable as indentation without a scan
+  // for the minimum first.
+  check(
+    got.entries.every((o) => Number.isInteger(o.d) && o.d >= 0),
+    "outline: every entry carries an integer `d` >= 0",
+    got.json,
+  );
+  equal(got.entries[0].d, 0, "outline: the first entry is at depth 0");
+
+  // A child is never more than one level below its predecessor. A depth that
+  // jumped would mean a level was walked but not emitted, which a panel renders
+  // as an orphan row indented under nothing.
+  check(
+    got.entries.every((o, i) => i === 0 || o.d <= got.entries[i - 1].d + 1),
+    "outline: depth never jumps by more than one",
+    got.json,
+  );
+
+  // Every page named is a real page of this document, and `p` is 0-based — the
+  // last entry naming page 5 of a six-page document is the whole claim.
+  check(
+    got.entries.every((o) => Number.isInteger(o.p) && o.p >= 0 && o.p < 6),
+    "outline: every `p` is a 0-based index into this document's pages",
+    got.json,
+  );
+  equal(got.entries.at(-1).p, 5, "outline: the last entry names the last page, 0-based");
+
+  // Over the CALLBACK STREAM the answer must be byte-identical: loading the
+  // outline walks the xref for every entry and resolving each destination walks
+  // it again, so this is the path that pulls hardest through `ink_host_read`.
+  fixture = bytes;
+  const sdocOutline = e.ink_open_stream(BigInt(bytes.length));
+  check(sdocOutline >= 1, "outline: the fixture opens as a stream", `got ${sdocOutline}`);
+  equal(outlineOf(sdocOutline).json, got.json, "outline: the streamed answer is byte-identical");
+  e.ink_close(sdocOutline);
+  fixture = savedFixture;
+
+  e.ink_close(doc);
+  equal(e.ink_load_outline(doc), -1n, "outline: a dead handle is refused");
+}
+
+/* --- a document with no outline answers [], which is a SUCCESS ------------- */
+// Not an error, and the distinction is the whole reason this is worth asserting:
+// the panel's opener is DIMMED for "this document has none" and the failure is
+// reported for "we could not read this". A shim that threw here would make every
+// outline-free PDF look broken.
+{
+  const doc = openBytes(fs.readFileSync(pdfPath));
+  const got = outlineOf(doc);
+  check(typeof got === "object", "outline: an outline-free document is not an error", `got ${got}`);
+  equal(got.json, "[]", "outline: a document with no outline answers []");
+  e.ink_close(doc);
+}
+
+/* --- a destination that resolves nowhere omits `p` entirely ----------------- */
+// The three ways an entry can have no page, in one fixture: an external URI, a
+// named destination that names nothing, and — for the title rule — an entry
+// whose /Title is empty. Every one of them is still a ROW: a hole in a table of
+// contents is worse than a blank line in one, because the rows around it keep
+// their numbers and the reader cannot tell that something is missing.
+{
+  const doc = openBytes(
+    buildPdf([
+      "<< /Type /Catalog /Pages 2 0 R /Outlines 3 0 R >>",
+      "<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+      "<< /Type /Outlines /First 5 0 R /Last 7 0 R /Count 3 >>",
+      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] >>",
+      "<< /Title (Home) /Parent 3 0 R /Dest [4 0 R /Fit] /Next 6 0 R >>",
+      "<< /Title (Website) /Parent 3 0 R /A << /S /URI /URI (https://example.com/) >>" +
+        " /Prev 5 0 R /Next 7 0 R >>",
+      "<< /Title () /Parent 3 0 R /Dest (nowhere-at-all) /Prev 6 0 R >>",
+    ]),
+  );
+  check(doc >= 1, "unresolved outline: the fixture opens", `got ${doc}`);
+  const got = outlineOf(doc);
+  check(typeof got === "object", "unresolved outline: ink_load_outline succeeds", `got ${got}`);
+
+  equal(
+    got.entries.map(rowOfEntry).join(" "),
+    "0|Home|0 0|Website|- 0||-",
+    "unresolved outline: an unfollowable entry is still a row, and a blank title still a row",
+  );
+  // OMISSION, not a sentinel. Asserted on the KEY rather than on the value,
+  // because `-1` and `null` both satisfy any check written on the value.
+  check(
+    !("p" in got.entries[1]) && !("p" in got.entries[2]),
+    "unresolved outline: `p` is absent, not -1 and not null",
+    got.json,
+  );
+  check("p" in got.entries[0], "unresolved outline: ...while a resolvable entry keeps it");
+  equal(got.entries[2].t, "", "unresolved outline: an empty title arrives as \"\"");
+  e.ink_close(doc);
+}
+
+/* --- a tree deeper than the emitted depth CLAMPS rather than drops ---------- */
+// The shim bounds two different things with two different numbers, and only one
+// of them can lose a row: the recursion is bounded far out (the C stack in wasm
+// is a fixed 64 KB), while the depth it PRINTS stops at 32 so a client's
+// indentation cannot run off the panel. Forty nested entries is past the second
+// and nowhere near the first, so all forty must arrive — the last eight sharing
+// depth 32 — and none may vanish. A shim that made the display cap structural
+// would return thirty-three rows here and look perfectly healthy doing it.
+{
+  const levels = 40;
+  const bodies = [
+    "<< /Type /Catalog /Pages 2 0 R /Outlines 3 0 R >>",
+    "<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+    "<< /Type /Outlines /First 5 0 R /Last 5 0 R /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] >>",
+  ];
+  for (let i = 0; i < levels; i++) {
+    const self = 5 + i;
+    const child = i + 1 < levels ? ` /First ${self + 1} 0 R /Last ${self + 1} 0 R /Count 1` : "";
+    const parent = i === 0 ? 3 : self - 1; // the root's parent is /Outlines itself
+    bodies.push(`<< /Title (L${i}) /Parent ${parent} 0 R /Dest [4 0 R /Fit]${child} >>`);
+  }
+  const doc = openBytes(buildPdf(bodies));
+  check(doc >= 1, "deep outline: the fixture opens", `got ${doc}`);
+  const got = outlineOf(doc);
+  check(typeof got === "object", "deep outline: ink_load_outline succeeds", `got ${got}`);
+
+  equal(got.entries.length, levels, "deep outline: every nested entry is listed");
+  equal(
+    got.entries.map((o) => o.t).join(","),
+    Array.from({ length: levels }, (_, i) => `L${i}`).join(","),
+    "deep outline: in order, with none dropped",
+  );
+  equal(
+    got.entries.map((o) => o.d).join(","),
+    Array.from({ length: levels }, (_, i) => Math.min(i, 32)).join(","),
+    "deep outline: the depth CLAMPS at 32 — the deep rows stay, flattened",
+  );
+  e.ink_close(doc);
+}
+
+/* --- refusals and hygiene -------------------------------------------------- */
+{
+  equal(e.ink_load_outline(0), -1n, "outline: handle 0 is refused");
+  equal(e.ink_load_outline(-1), -1n, "outline: a negative handle is refused");
+  equal(e.ink_load_outline(99), -1n, "outline: an out-of-range handle is refused");
+  // Idempotent, and safe with nothing outstanding — a panel calls this on close
+  // including the closes that follow a failed load.
+  e.ink_outline_free();
+  e.ink_outline_free();
 }
 
 if (failures > 0) {
