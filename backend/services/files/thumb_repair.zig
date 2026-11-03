@@ -2,6 +2,7 @@
 
 const filesmod = @import("../files.zig");
 const Files = filesmod.Files;
+const internal = @import("internal.zig");
 const noteindex = @import("../note_index.zig");
 const thumbnail = @import("../thumbnail.zig");
 const spdindex = @import("../spd_index.zig");
@@ -72,7 +73,7 @@ pub fn repairDerivedThumb(self: *Files, lk: anytype, md5: []const u8) void {
             lk.lockDb();
             defer lk.unlockDb();
             self.db.exec("BEGIN IMMEDIATE;") catch return;
-            spdindex.store(self.db, md5, derived, self.now()) catch {
+            spdindex.store(self.db, md5, derived, internal.now(self.*)) catch {
                 self.db.exec("ROLLBACK;") catch {};
                 return;
             };
@@ -88,7 +89,7 @@ pub fn repairDerivedThumb(self: *Files, lk: anytype, md5: []const u8) void {
             lk.lockDb();
             defer lk.unlockDb();
             self.db.exec("BEGIN IMMEDIATE;") catch return;
-            noteindex.store(self.db, md5, parsed, self.now()) catch {
+            noteindex.store(self.db, md5, parsed, internal.now(self.*)) catch {
                 self.db.exec("ROLLBACK;") catch {};
                 return;
             };

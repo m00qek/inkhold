@@ -5,6 +5,7 @@ const testing = std.testing;
 const filesmod = @import("../files.zig");
 const binmod = @import("bin.zig");
 const Files = filesmod.Files;
+const internal = @import("internal.zig");
 const Entry = filesmod.Entry;
 const markpair = @import("../mark_pairing.zig");
 const fx = @import("fixture.zig");
@@ -782,8 +783,8 @@ test "PLAN PIN: the pairing rule is an indexed sibling seek in the library AND t
     // bin index a 40-row bin listing went from ~4k to ~222k VM steps. Needles
     // include the trailing " (" so a renamed index cannot match.
     const pins = .{
-        .{ "SELECT f.id FROM files f WHERE f.user_id = ?1 AND f.deleted = 0" ++ Files.hide_paired_mark ++ ";", "files_live_name (" },
-        .{ "SELECT f.id FROM files f WHERE f.user_id = ?1 AND f.deleted = 1" ++ Files.hide_paired_bin_mark ++ ";", "files_bin_name (" },
+        .{ "SELECT f.id FROM files f WHERE f.user_id = ?1 AND f.deleted = 0" ++ internal.hide_paired_mark ++ ";", "files_live_name (" },
+        .{ "SELECT f.id FROM files f WHERE f.user_id = ?1 AND f.deleted = 1" ++ internal.hide_paired_bin_mark ++ ";", "files_bin_name (" },
     };
     inline for (pins) |pin| {
         var s = try f.db.prepare("EXPLAIN QUERY PLAN " ++ pin[0]);
@@ -810,7 +811,7 @@ test "PLAN PIN: the pairing rule is an indexed sibling seek in the library AND t
     try testing.expect(sized);
     try testing.expect(hidden);
 
-    var ids = try f.db.prepare("EXPLAIN QUERY PLAN SELECT f.id, " ++ Files.paired_mark_id ++
+    var ids = try f.db.prepare("EXPLAIN QUERY PLAN SELECT f.id, " ++ internal.paired_mark_id ++
         " FROM files f WHERE f.user_id = ?1 AND f.deleted = 0;");
     defer ids.finalize();
     var seeks = false;

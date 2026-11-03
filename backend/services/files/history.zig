@@ -3,6 +3,7 @@
 const std = @import("std");
 const filesmod = @import("../files.zig");
 const Files = filesmod.Files;
+const internal = @import("internal.zig");
 const Entry = filesmod.Entry;
 const HistoryVersion = filesmod.HistoryVersion;
 const HistoryScope = filesmod.HistoryScope;
@@ -101,11 +102,11 @@ pub fn setVersionPolicy(self: Files, user_id: u64, want: u32) !VersionPolicyChan
     var settled: std.ArrayList([md5_len]u8) = .empty;
     defer settled.deinit(self.gpa);
     var delta: i64 = 0;
-    for (evicted.items) |*e| try self.settleRefund(user_id, &e.md5, e.size, &settled, &delta);
-    if (delta != 0) try self.addUsed(user_id, delta);
+    for (evicted.items) |*e| try internal.settleRefund(self, user_id, &e.md5, e.size, &settled, &delta);
+    if (delta != 0) try internal.addUsed(self, user_id, delta);
 
     try self.db.exec("COMMIT;");
-    for (gc.items) |*m| self.removeBlobFiles(m);
+    for (gc.items) |*m| internal.removeBlobFiles(self, m);
 
     return .{
         .policy = .{ .keep = keep, .max_keep = ceiling },
@@ -231,7 +232,7 @@ pub fn evictOldestVersion(self: Files, user_id: u64, gc: *std.ArrayList([md5_len
         d.bindInt(1, doomed_rowid);
         _ = try d.step();
     }
-    if (try self.reapIfUnreferenced(&out.md5)) try gc.append(self.gpa, out.md5);
+    if (try internal.reapIfUnreferenced(self, &out.md5)) try gc.append(self.gpa, out.md5);
     return out;
 }
 
@@ -319,6 +320,6 @@ pub fn reapDistinct(self: Files, md5s: []const [md5_len]u8, gc: *std.ArrayList([
     outer: for (md5s) |*m| {
         for (seen.items) |*s| if (std.mem.eql(u8, s, m)) continue :outer;
         try seen.append(self.gpa, m.*);
-        if (try self.reapIfUnreferenced(m)) try gc.append(self.gpa, m.*);
+        if (try internal.reapIfUnreferenced(self, m)) try gc.append(self.gpa, m.*);
     }
 }

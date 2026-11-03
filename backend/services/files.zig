@@ -16,6 +16,7 @@ const thumbnail = @import("thumbnail.zig");
 const spdindex = @import("spd_index.zig");
 const deferredmod = @import("deferred.zig");
 const markpair = @import("mark_pairing.zig");
+const internal = @import("files/internal.zig");
 const bin = @import("files/bin.zig");
 const uploads = @import("files/uploads.zig");
 const quota = @import("files/quota.zig");
@@ -142,72 +143,11 @@ pub const Files = struct {
         return v;
     }
 
-    pub fn now(self: Files) i64 {
-        return std.Io.Clock.real.now(self.io).toSeconds();
-    }
-
     // ---- reads ----
-
-    /// Shared by the listing and `get`, so both read one expression.
-    pub const paired_mark_id = markpair.pairedMarkId("f");
-
-    pub const hide_paired_mark = markpair.hidePairedMark("f", "0");
-
-    /// The bin's view: a trashed pair is one row there too.
-    pub const hide_paired_bin_mark = markpair.hidePairedMark("f", "1");
 
     /// `id` is the partner's row. Names are anchored on the document: the mark's
     /// name is the document's plus `.mark`.
-    const Paired = struct { id: u64, entry_is_mark: bool };
-
-    /// The other half of a pair, or null. The only entry point for the two-way
-    /// rule: `trash`, `restore`, `purge` and `move` call it once and then work a
-    /// flat id set (applying it per row would bounce back). Same state only, the
-    /// set `hidePairedMark` folds. Folders never pair.
-    pub fn pairOf(self: Files, user_id: u64, id: u64) !?Paired {
-        var parent_id: ?u64 = null;
-        var deleted: i64 = 0;
-        var name: []u8 = undefined;
-        {
-            var r = (try self.db.row(
-                "SELECT parent_id, name, is_folder, deleted FROM files WHERE id = ?1 AND user_id = ?2;",
-                &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
-            )) orelse return null;
-            defer r.finalize();
-            if (r.int(2) != 0) return null; // a folder is never half of a pair
-            const pid = r.int(0);
-            parent_id = if (pid == 0) null else @intCast(pid);
-            // No length cap: the SQL predicate has none, so a capped name would be hidden
-            // yet left behind by mutations.
-            name = try self.gpa.dupe(u8, r.text(1));
-            deleted = r.int(3);
-        }
-        defer self.gpa.free(name);
-
-        const entry_is_mark = std.mem.endsWith(u8, name, markpair.mark_ext);
-        var owned_want: ?[]u8 = null;
-        defer if (owned_want) |w| self.gpa.free(w);
-        var want: []const u8 = undefined;
-        if (entry_is_mark) {
-            // A `.mark` name can only pair with the document it is named after.
-            want = markpair.markStemOf(name) orelse return null;
-        } else {
-            owned_want = try std.fmt.allocPrint(self.gpa, "{s}" ++ markpair.mark_ext, .{name});
-            want = owned_want.?;
-        }
-
-        var s = try self.db.prepare(
-            "SELECT id FROM files WHERE user_id = ?1 AND COALESCE(parent_id, 0) = COALESCE(?2, 0) " ++
-                "AND name = ?3 AND is_folder = 0 AND deleted = ?4;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        bindOpt(s, 2, parent_id);
-        s.bindText(3, want);
-        s.bindInt(4, deleted);
-        if (!try s.step()) return null;
-        return .{ .id = @intCast(s.columnInt(0)), .entry_is_mark = entry_is_mark };
-    }
+    pub const Paired = struct { id: u64, entry_is_mark: bool };
 
     /// The live `.mark` beside `name` in `parent_id`, or null. Exposed for
     /// `annotationsId`, which needs it for a content-verified PDF without the extension.
@@ -218,7 +158,7 @@ pub const Files = struct {
         );
         defer s.finalize();
         s.bindInt(1, @intCast(user_id));
-        bindOpt(s, 2, parent_id);
+        internal.bindOpt(s, 2, parent_id);
         s.bindText(3, name);
         if (!try s.step()) return null;
         return @intCast(s.columnInt(0));
@@ -231,15 +171,15 @@ pub const Files = struct {
 
         var s = try self.db.prepare(
             "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at, " ++
-                paired_mark_id ++
+                internal.paired_mark_id ++
                 " FROM files f " ++
                 "WHERE f.user_id = ?1 AND COALESCE(f.parent_id, 0) = COALESCE(?2, 0) AND f.deleted = 0 " ++
-                hide_paired_mark ++
+                internal.hide_paired_mark ++
                 " ORDER BY f.is_folder DESC, f.name;",
         );
         defer s.finalize();
         s.bindInt(1, @intCast(user_id));
-        bindOpt(s, 2, parent_id);
+        internal.bindOpt(s, 2, parent_id);
         while (try s.step()) try out.append(self.gpa, try self.rowToEntry(&s));
         return out.toOwnedSlice(self.gpa);
     }
@@ -249,7 +189,7 @@ pub const Files = struct {
     pub fn childCount(self: Files, user_id: u64, folder_id: u64) !i64 {
         var r = (try self.db.row(
             "SELECT COUNT(*) FROM files f WHERE f.user_id = ?1 AND f.parent_id = ?2 AND f.deleted = 0" ++
-                hide_paired_mark ++ ";",
+                internal.hide_paired_mark ++ ";",
             &.{ .{ .int = @intCast(user_id) }, .{ .int = @intCast(folder_id) } },
         )) orelse return 0;
         defer r.finalize();
@@ -263,23 +203,12 @@ pub const Files = struct {
         return r.int(0);
     }
 
-    /// Callers holding a transaction bump inside it, so it commits atomically.
-    pub fn bumpSync(self: Files, user_id: u64) !void {
-        var s = try self.db.prepare(
-            "INSERT INTO sync_state(user_id, version) VALUES(?1, 1) " ++
-                "ON CONFLICT(user_id) DO UPDATE SET version = version + 1;",
-        );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        _ = try s.step();
-    }
-
     /// One live entry by id (scoped to `user_id`), or null.
     pub fn get(self: Files, user_id: u64, id: u64) !?Entry {
         var r = (try self.db.row(
             "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at, " ++
                 // Live, so it carries its ink: rename/move/upload responses are built from it.
-                paired_mark_id ++
+                internal.paired_mark_id ++
                 " FROM files f WHERE f.id = ?1 AND f.user_id = ?2 AND f.deleted = 0;",
             &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } },
         )) orelse return null;
@@ -378,7 +307,7 @@ pub const Files = struct {
         );
         defer s.finalize();
         s.bindInt(1, @intCast(user_id));
-        bindOpt(s, 2, parent_id);
+        internal.bindOpt(s, 2, parent_id);
         while (try s.step()) {
             const name = try alloc.dupe(u8, s.columnText(1));
             // Root → "/name", nested → "parent/name".
@@ -437,7 +366,7 @@ pub const Files = struct {
         var found: ?u64 = null;
         var it = std.mem.tokenizeScalar(u8, path, '/');
         while (it.next()) |seg| {
-            const c = (try self.liveChild(user_id, parent, seg)) orelse return null;
+            const c = (try internal.liveChild(self, user_id, parent, seg)) orelse return null;
             parent = c.id;
             found = c.id;
         }
@@ -497,20 +426,22 @@ pub const Files = struct {
     /// Errors: NotFound / NotAFolder (bad parent), NameConflict.
     pub fn createFolder(self: Files, user_id: u64, parent_id: ?u64, name: []const u8) !Entry {
         try self.assertFolder(user_id, parent_id);
-        if (try self.liveChild(user_id, parent_id, name) != null) return error.NameConflict;
+        if (try internal.liveChild(self, user_id, parent_id, name) != null) return error.NameConflict;
 
-        const ts = self.now();
+        const ts = internal.now(
+            self,
+        );
         var s = try self.db.prepare(
             "INSERT INTO files(user_id, parent_id, name, is_folder, created_at, updated_at) VALUES(?1,?2,?3,1,?4,?4);",
         );
         defer s.finalize();
         s.bindInt(1, @intCast(user_id));
-        bindOpt(s, 2, parent_id);
+        internal.bindOpt(s, 2, parent_id);
         s.bindText(3, name);
         s.bindInt(4, ts);
         _ = try s.step();
         const new_id = self.db.lastInsertRowId();
-        try self.bumpSync(user_id);
+        try internal.bumpSync(self, user_id);
         return .{
             .id = @intCast(new_id),
             .parent_id = parent_id,
@@ -530,7 +461,7 @@ pub const Files = struct {
         var leaf: ?u64 = null;
         var it = std.mem.tokenizeScalar(u8, path, '/');
         while (it.next()) |seg| {
-            if (try self.liveChild(user_id, parent, seg)) |c| {
+            if (try internal.liveChild(self, user_id, parent, seg)) |c| {
                 if (!c.is_folder) return error.NameConflict;
                 parent = c.id;
             } else {
@@ -553,7 +484,7 @@ pub const Files = struct {
         var name = it.next() orelse return error.NotFound; // "" / "/" name nothing
 
         while (it.next()) |next_seg| {
-            if (try self.liveChild(user_id, parent, name)) |c| {
+            if (try internal.liveChild(self, user_id, parent, name)) |c| {
                 if (!c.is_folder) return error.NameConflict;
                 parent = c.id;
             } else {
@@ -564,7 +495,7 @@ pub const Files = struct {
             name = next_seg;
         }
 
-        if (try self.liveChild(user_id, parent, name)) |c| {
+        if (try internal.liveChild(self, user_id, parent, name)) |c| {
             if (!autorename) {
                 if (!c.is_folder) return error.NameConflict;
                 return (try self.get(user_id, c.id)) orelse error.NotFound;
@@ -583,7 +514,7 @@ pub const Files = struct {
 
         const res = try self.blobs.put(reader, expected_md5);
         // Not a dedup: drop the blob and the thumbnail its indexing wrote.
-        errdefer if (!res.deduped) self.removeBlobFiles(&res.md5);
+        errdefer if (!res.deduped) internal.removeBlobFiles(self, &res.md5);
 
         return self.linkBlob(user_id, parent_id, name, &res.md5, res.size);
     }
@@ -647,7 +578,7 @@ pub const Files = struct {
 
         try self.ensureBlobRow(md5, size);
 
-        const existing = try self.liveChild(user_id, parent_id, name);
+        const existing = try internal.liveChild(self, user_id, parent_id, name);
         if (existing) |e| if (e.is_folder) return error.NameConflict;
 
         const old_md5: ?[md5_len]u8 = if (existing) |e| e.md5 else null;
@@ -656,10 +587,12 @@ pub const Files = struct {
         // ---- reference counts, read before any row write ----
         // Quota follows anything keeping bytes on disk, incl. `file_history`.
         var new_charge = false;
-        if (!same_content) new_charge = try self.userChargedRefs(user_id, md5) == 0;
+        if (!same_content) new_charge = try internal.userChargedRefs(self, user_id, md5) == 0;
 
         var file_id: u64 = undefined;
-        const ts = self.now();
+        const ts = internal.now(
+            self,
+        );
 
         // Rolls back with the link.
         if (parsed) |p| try noteindex.store(self.db, md5, p.*, ts);
@@ -682,7 +615,7 @@ pub const Files = struct {
             );
             defer s.finalize();
             s.bindInt(1, @intCast(user_id));
-            bindOpt(s, 2, parent_id);
+            internal.bindOpt(s, 2, parent_id);
             s.bindText(3, name);
             s.bindText(4, md5);
             s.bindInt(5, @intCast(size));
@@ -693,7 +626,7 @@ pub const Files = struct {
 
         if (!same_content) try self.incref(md5);
 
-        try self.bumpSync(user_id); // an upload/replace changed the tree
+        try internal.bumpSync(self, user_id); // an upload/replace changed the tree
 
         // Retain on supersede: write the history row before the decref, so the GC gate
         // keeps the blob. Refcount drops but the charge stays. `keep == 0` prunes and
@@ -707,7 +640,7 @@ pub const Files = struct {
         if (old_md5) |om| {
             if (!same_content) {
                 if (keep > 0) try history.recordHistory(self, file_id, &om, existing.?.size, ts);
-                gc_old = try self.decref(&om);
+                gc_old = try internal.decref(self, &om);
                 // K per file, then the global max_bytes ceiling.
                 if (keep > 0) try history.evictHistory(self, user_id, file_id, keep, &gc_hist, &evicted);
             }
@@ -719,9 +652,9 @@ pub const Files = struct {
         defer settled.deinit(self.gpa);
         var delta: i64 = if (new_charge) @as(i64, @intCast(size)) else 0;
         if (old_md5) |om| {
-            if (!same_content) try self.settleRefund(user_id, &om, @intCast(existing.?.size), &settled, &delta);
+            if (!same_content) try internal.settleRefund(self, user_id, &om, @intCast(existing.?.size), &settled, &delta);
         }
-        for (evicted.items) |*e| try self.settleRefund(user_id, &e.md5, e.size, &settled, &delta);
+        for (evicted.items) |*e| try internal.settleRefund(self, user_id, &e.md5, e.size, &settled, &delta);
 
         // Never refuse an edit for the version it displaced: evict the user's oldest
         // versions until it fits, and refuse only when live files alone do not.
@@ -729,16 +662,16 @@ pub const Files = struct {
         const cap = try self.capacity(user_id);
         while (cap.used + delta > cap.total) {
             const dropped = (try history.evictOldestVersion(self, user_id, &gc_hist)) orelse break;
-            try self.settleRefund(user_id, &dropped.md5, dropped.size, &settled, &delta);
+            try internal.settleRefund(self, user_id, &dropped.md5, dropped.size, &settled, &delta);
         }
         if (cap.used + delta > cap.total) return error.QuotaExceeded; // errdefer rolls back
-        try self.addUsed(user_id, delta);
+        try internal.addUsed(self, user_id, delta);
 
         try self.db.exec("COMMIT;");
         // After commit, or the worker may find nothing and sleep.
         if (self.deferred) |w| w.signal();
-        if (gc_old) self.removeBlobFiles(&old_md5.?);
-        for (gc_hist.items) |*m| self.removeBlobFiles(m);
+        if (gc_old) internal.removeBlobFiles(self, &old_md5.?);
+        for (gc_hist.items) |*m| internal.removeBlobFiles(self, m);
 
         return .{
             .id = file_id,
@@ -823,7 +756,7 @@ pub const Files = struct {
         if (is_folder and try self.wouldCycle(user_id, new_parent_id, id)) return error.InvalidMove;
 
         // The rule, spent once (see `pairOf`).
-        const partner = try self.pairOf(user_id, id);
+        const partner = try internal.pairOf(self, user_id, id);
 
         // The document's requested name anchors both rows.
         var pdf_want: []const u8 = new_name;
@@ -846,7 +779,7 @@ pub const Files = struct {
             const pdf_id = if (p.entry_is_mark) p.id else id;
 
             // Already in place: a true no-op.
-            if (try self.liveChild(user_id, new_parent_id, pdf_want)) |occ| {
+            if (try internal.liveChild(self, user_id, new_parent_id, pdf_want)) |occ| {
                 if (occ.id == pdf_id) return (try self.get(user_id, id)) orelse error.NotFound;
             }
 
@@ -860,7 +793,7 @@ pub const Files = struct {
             final_name = if (p.entry_is_mark) owned_mark.? else pdf_final;
         } else {
             // Checked first: `bin.nameFree` would count the row's own name as taken.
-            if (try self.liveChild(user_id, new_parent_id, new_name)) |occ| {
+            if (try internal.liveChild(self, user_id, new_parent_id, new_name)) |occ| {
                 if (occ.id == id) return (try self.get(user_id, id)) orelse error.NotFound;
             }
 
@@ -876,7 +809,9 @@ pub const Files = struct {
             }
         }
 
-        const ts = self.now();
+        const ts = internal.now(
+            self,
+        );
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
         {
@@ -884,7 +819,7 @@ pub const Files = struct {
                 "UPDATE files SET parent_id = ?1, name = ?2, updated_at = ?3 WHERE id = ?4 AND user_id = ?5;",
             );
             defer s.finalize();
-            bindOpt(s, 1, new_parent_id);
+            internal.bindOpt(s, 1, new_parent_id);
             s.bindText(2, final_name);
             s.bindInt(3, ts);
             s.bindInt(4, @intCast(id));
@@ -897,14 +832,14 @@ pub const Files = struct {
                 "UPDATE files SET parent_id = ?1, name = ?2, updated_at = ?3 WHERE id = ?4 AND user_id = ?5;",
             );
             defer s.finalize();
-            bindOpt(s, 1, new_parent_id);
+            internal.bindOpt(s, 1, new_parent_id);
             s.bindText(2, if (p.entry_is_mark) pdf_final else owned_mark.?);
             s.bindInt(3, ts);
             s.bindInt(4, @intCast(p.id));
             s.bindInt(5, @intCast(user_id));
             _ = try s.step();
         }
-        try self.bumpSync(user_id);
+        try internal.bumpSync(self, user_id);
         try self.db.exec("COMMIT;");
 
         return .{
@@ -948,20 +883,22 @@ pub const Files = struct {
         var owned_name: ?[]u8 = null;
         defer if (owned_name) |n| self.gpa.free(n);
         var final_name: []const u8 = new_name;
-        if (try self.liveChild(user_id, new_parent_id, new_name)) |_| {
+        if (try internal.liveChild(self, user_id, new_parent_id, new_name)) |_| {
             if (!autorename) return error.NameConflict;
             owned_name = try bin.freeName(self, user_id, new_parent_id, new_name, null);
             final_name = owned_name.?;
         }
 
-        const ts = self.now();
+        const ts = internal.now(
+            self,
+        );
         try self.db.exec("BEGIN IMMEDIATE;");
         errdefer self.db.exec("ROLLBACK;") catch {};
 
         try self.ensureBlobRow(md5, size); // idempotent — the source already made it
 
         // Zero for a copy of one's own file; computed as uploads do.
-        const delta: i64 = if (try self.userChargedRefs(user_id, md5) == 0) @intCast(size) else 0;
+        const delta: i64 = if (try internal.userChargedRefs(self, user_id, md5) == 0) @intCast(size) else 0;
 
         var file_id: u64 = undefined;
         {
@@ -970,7 +907,7 @@ pub const Files = struct {
             );
             defer s.finalize();
             s.bindInt(1, @intCast(user_id));
-            bindOpt(s, 2, new_parent_id);
+            internal.bindOpt(s, 2, new_parent_id);
             s.bindText(3, final_name);
             s.bindText(4, md5);
             s.bindInt(5, @intCast(size));
@@ -983,9 +920,9 @@ pub const Files = struct {
 
         const cap = try self.capacity(user_id);
         if (cap.used + delta > cap.total) return error.QuotaExceeded; // errdefer rolls back
-        try self.addUsed(user_id, delta);
+        try internal.addUsed(self, user_id, delta);
 
-        try self.bumpSync(user_id); // the tree gained a row
+        try internal.bumpSync(self, user_id); // the tree gained a row
         try self.db.exec("COMMIT;");
 
         return .{
@@ -1012,38 +949,6 @@ pub const Files = struct {
         return @intCast(r.int(0));
     }
 
-    /// The user's charged references to `md5`: `files` rows (live or trashed) plus
-    /// their `file_history` rows. The quota predicate.
-    fn userChargedRefs(self: Files, user_id: u64, md5: []const u8) !u64 {
-        var r = (try self.db.row(
-            "SELECT (SELECT COUNT(*) FROM files WHERE user_id = ?1 AND is_folder = 0 AND md5 = ?2) + " ++
-                "(SELECT COUNT(*) FROM file_history fh JOIN files f ON f.id = fh.file_id " ++
-                "  WHERE f.user_id = ?1 AND fh.md5 = ?2);",
-            &.{ .{ .int = @intCast(user_id) }, .{ .text = md5 } },
-        )) orelse return 0;
-        defer r.finalize();
-        return @intCast(r.int(0));
-    }
-
-    /// Refunds `size` if `md5` is now unreferenced by the user, once per
-    /// transaction (superseded and evicted blobs can coincide). Reads current
-    /// state, so call after the writes.
-    pub fn settleRefund(
-        self: Files,
-        user_id: u64,
-        md5: []const u8,
-        size: i64,
-        settled: *std.ArrayList([md5_len]u8),
-        delta: *i64,
-    ) !void {
-        for (settled.items) |*s| if (std.mem.eql(u8, s, md5)) return;
-        if (try self.userChargedRefs(user_id, md5) != 0) return;
-        var buf: [md5_len]u8 = undefined;
-        @memcpy(&buf, md5[0..md5_len]);
-        try settled.append(self.gpa, buf);
-        delta.* -= size;
-    }
-
     /// Whether the user holds any file (live or trashed) on blob `md5`: the
     /// ownership gate for content-keyed reads like `/thumbnail/{hash}`. A
     /// non-holder gets the same answer as a missing hash (no existence oracle).
@@ -1057,15 +962,7 @@ pub const Files = struct {
     /// is a 404 indistinguishable from "not derived".
     pub fn reachesBlob(self: Files, user_id: u64, md5: []const u8) !bool {
         if (md5.len != md5_len) return false;
-        return (try self.userChargedRefs(user_id, md5)) > 0;
-    }
-
-    /// `parent_id` in any state; `restore` chases trashed ancestors with it.
-    pub fn parentOf(self: Files, user_id: u64, id: u64) !?u64 {
-        var r = (try self.db.row("SELECT parent_id FROM files WHERE id = ?1 AND user_id = ?2;", &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } })) orelse return null;
-        defer r.finalize();
-        const pid = r.int(0);
-        return if (pid == 0) null else @intCast(pid);
+        return (try internal.userChargedRefs(self, user_id, md5)) > 0;
     }
 
     /// Whether moving folder `id` under `new_parent` would create a cycle (walks
@@ -1077,28 +974,9 @@ pub const Files = struct {
             if (c == id) return true;
             guard += 1;
             if (guard > 256) break;
-            cur = try self.parentOf(user_id, c);
+            cur = try internal.parentOf(self, user_id, c);
         }
         return false;
-    }
-
-    /// Ensures a `capacity` row exists; otherwise `addUsed` matches zero rows for
-    /// users created without one and quota is silently off.
-    fn ensureCapacity(self: Files, user_id: u64) !void {
-        var s = try self.db.prepare("INSERT OR IGNORE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, ?2);");
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindInt(2, default_total_bytes);
-        _ = try s.step();
-    }
-
-    pub fn addUsed(self: Files, user_id: u64, delta: i64) !void {
-        try self.ensureCapacity(user_id); // or the UPDATE no-ops
-        var s = try self.db.prepare("UPDATE capacity SET used_bytes = used_bytes + ?1 WHERE user_id = ?2;");
-        defer s.finalize();
-        s.bindInt(1, delta);
-        s.bindInt(2, @intCast(user_id));
-        _ = try s.step();
     }
 
     fn ensureBlobRow(self: Files, md5: []const u8, size: u64) !void {
@@ -1106,7 +984,9 @@ pub const Files = struct {
         defer s.finalize();
         s.bindText(1, md5);
         s.bindInt(2, @intCast(size));
-        s.bindInt(3, self.now());
+        s.bindInt(3, internal.now(
+            self,
+        ));
         _ = try s.step();
     }
 
@@ -1117,95 +997,7 @@ pub const Files = struct {
         _ = try s.step();
     }
 
-    /// Removes a blob and every derived file after the releasing transaction
-    /// commits. Every post-commit GC site calls this, never `blobs.remove`.
-    pub fn removeBlobFiles(self: Files, md5: []const u8) void {
-        self.blobs.remove(md5);
-        self.thumbs.remove(md5);
-        // Every version: this side does not know which exist.
-        if (self.terms) |t| t.removeAll(md5);
-        if (self.text) |t| t.removeAll(md5);
-    }
-
-    /// Decrements `blobs.refcount` (live-file references) and runs the GC gate.
-    /// True means: remove the bytes after commit.
-    pub fn decref(self: Files, md5: []const u8) !bool {
-        {
-            var s = try self.db.prepare("UPDATE blobs SET refcount = refcount - 1 WHERE md5 = ?1;");
-            defer s.finalize();
-            s.bindText(1, md5);
-            _ = try s.step();
-        }
-        return self.reapIfUnreferenced(md5);
-    }
-
-    /// The single GC gate: reaps a blob (FTS, note/`.spd` index, `blobs` row) only
-    /// when no live file and no `file_history` row holds it. Separate from
-    /// `decref` because history eviction reaps without decrementing again.
-    pub fn reapIfUnreferenced(self: Files, md5: []const u8) !bool {
-        var rc: i64 = 0;
-        {
-            if (try self.db.row("SELECT refcount FROM blobs WHERE md5 = ?1;", &.{.{ .text = md5 }})) |r| {
-                defer r.finalize();
-                rc = r.int(0);
-            }
-        }
-        if (rc > 0) return false; // a live file still references it
-
-        // Checked even with `keep == 0`, so disabling versioning cannot strand a row.
-        {
-            var s = try self.db.prepare("SELECT 1 FROM file_history WHERE md5 = ?1 LIMIT 1;");
-            defer s.finalize();
-            s.bindText(1, md5);
-            if (try s.step()) return false;
-        }
-
-        // The index dies with the blob, in this transaction (CASCADE is the backstop).
-        try noteindex.deleteForBlob(self.db, md5);
-        try spdindex.deleteForBlob(self.db, md5); // intent; the FK cascade is the backstop
-        var s = try self.db.prepare("DELETE FROM blobs WHERE md5 = ?1;");
-        defer s.finalize();
-        s.bindText(1, md5);
-        _ = try s.step();
-        return true;
-    }
-
-    const Child = struct { id: u64, is_folder: bool, md5: [md5_len]u8, size: u64 };
-
-    pub fn liveChild(self: Files, user_id: u64, parent_id: ?u64, name: []const u8) !?Child {
-        var r = (try self.db.row(
-            "SELECT id, is_folder, md5, size FROM files " ++
-                "WHERE user_id = ?1 AND COALESCE(parent_id, 0) = COALESCE(?2, 0) AND name = ?3 AND deleted = 0;",
-            &.{
-                .{ .int = @intCast(user_id) },
-                .{ .int_opt = if (parent_id) |p| @intCast(p) else null },
-                .{ .text = name },
-            },
-        )) orelse return null;
-        defer r.finalize();
-        var c: Child = .{ .id = @intCast(r.int(0)), .is_folder = r.int(1) != 0, .md5 = undefined, .size = @intCast(r.int(3)) };
-        const m = r.text(2);
-        if (m.len == md5_len) @memcpy(&c.md5, m) else @memset(&c.md5, 0);
-        return c;
-    }
-
-    /// Existence in any state, scoped to the user.
-    pub fn exists(self: Files, user_id: u64, id: u64) !bool {
-        var s = try self.db.prepare("SELECT 1 FROM files WHERE id = ?1 AND user_id = ?2;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(id));
-        s.bindInt(2, @intCast(user_id));
-        return try s.step();
-    }
-
-    /// In the bin only; `purge` relies on it.
-    pub fn existsTrashed(self: Files, user_id: u64, id: u64) !bool {
-        var s = try self.db.prepare("SELECT 1 FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(id));
-        s.bindInt(2, @intCast(user_id));
-        return try s.step();
-    }
+    pub const Child = struct { id: u64, is_folder: bool, md5: [md5_len]u8, size: u64 };
 
     /// `parent_id` is null (root) or a live folder owned by the user.
     fn assertFolder(self: Files, user_id: u64, parent_id: ?u64) !void {
@@ -1282,10 +1074,6 @@ pub const Files = struct {
     pub const noteCover = thumb_repair.noteCover;
     pub const repairDerivedThumb = thumb_repair.repairDerivedThumb;
 };
-
-fn bindOpt(s: sqlite.Stmt, idx: c_int, v: ?u64) void {
-    if (v) |x| s.bindInt(idx, @intCast(x)) else s.bindNull(idx);
-}
 
 fn freeList(gpa: std.mem.Allocator, list: *std.ArrayList(Entry)) void {
     for (list.items) |e| {

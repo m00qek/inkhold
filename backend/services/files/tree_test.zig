@@ -4,6 +4,7 @@ const std = @import("std");
 const testing = std.testing;
 const filesmod = @import("../files.zig");
 const Files = filesmod.Files;
+const internal = @import("internal.zig");
 const blobstore = @import("../../store/blobs.zig");
 const fx = @import("fixture.zig");
 const Fixture = fx.Fixture;

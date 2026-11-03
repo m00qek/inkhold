@@ -3,6 +3,7 @@
 const std = @import("std");
 const filesmod = @import("../files.zig");
 const Files = filesmod.Files;
+const internal = @import("internal.zig");
 const BinEntry = filesmod.BinEntry;
 const md5_len = filesmod.md5_len;
 const markpair = @import("../mark_pairing.zig");
@@ -65,20 +66,22 @@ pub fn liveSubtreeCount(self: Files, user_id: u64, id: u64) !usize {
 /// request, keeping earlier `deleted_at`s. A pair goes together in one
 /// transaction, or the mark would surface as a conjured file.
 pub fn trash(self: Files, user_id: u64, id: u64) !void {
-    if (!try self.exists(user_id, id)) return error.NotFound;
+    if (!try internal.exists(self, user_id, id)) return error.NotFound;
 
     try self.db.exec("BEGIN IMMEDIATE;");
     errdefer self.db.exec("ROLLBACK;") catch {};
 
     // The rule, spent once, before any write.
-    const partner = try self.pairOf(user_id, id);
+    const partner = try internal.pairOf(self, user_id, id);
 
-    const ts = self.now();
+    const ts = internal.now(
+        self,
+    );
     var changed = try trashSubtree(self, user_id, id, ts);
     if (partner) |p| changed += try trashSubtree(self, user_id, p.id, ts);
 
     // A no-op retry must not invalidate every cached listing.
-    if (changed > 0) try self.bumpSync(user_id);
+    if (changed > 0) try internal.bumpSync(self, user_id);
     try self.db.exec("COMMIT;");
 }
 
@@ -115,13 +118,13 @@ pub const Restored = struct {
 /// restored first and its free-name search skips suffixes whose `.mark` is
 /// taken, so the mark follows it. Restoring a live entry is a no-op.
 pub fn restore(self: Files, user_id: u64, id: u64) !Restored {
-    if (!try self.exists(user_id, id)) return error.NotFound;
+    if (!try internal.exists(self, user_id, id)) return error.NotFound;
 
     try self.db.exec("BEGIN IMMEDIATE;");
     errdefer self.db.exec("ROLLBACK;") catch {};
 
     // Spent once, while both members are still trashed.
-    const partner = try self.pairOf(user_id, id);
+    const partner = try internal.pairOf(self, user_id, id);
 
     var ancestors: usize = 0;
     var descendants: usize = 0;
@@ -130,13 +133,13 @@ pub fn restore(self: Files, user_id: u64, id: u64) !Restored {
     {
         var chain: std.ArrayList(u64) = .empty; // leaf-first
         defer chain.deinit(self.gpa);
-        var cur = try self.parentOf(user_id, id);
+        var cur = try internal.parentOf(self, user_id, id);
         var guard: usize = 0;
         while (cur) |pid| {
             guard += 1;
             if (guard > 256) break; // cycle guard (should never trigger)
             try chain.append(self.gpa, pid);
-            cur = try self.parentOf(user_id, pid);
+            cur = try internal.parentOf(self, user_id, pid);
         }
         var i = chain.items.len;
         while (i > 0) {
@@ -189,7 +192,7 @@ pub fn restore(self: Files, user_id: u64, id: u64) !Restored {
         }
     }
 
-    try self.bumpSync(user_id); // the tree changed; the device re-downloads
+    try internal.bumpSync(self, user_id); // the tree changed; the device re-downloads
     try self.db.exec("COMMIT;");
     return .{
         .name = self_row.name,
@@ -204,7 +207,7 @@ pub fn restore(self: Files, user_id: u64, id: u64) !Restored {
 /// so a live file is never one mistyped id away. A pair is destroyed together,
 /// or the mark's bytes would stay charged with no row to purge.
 pub fn purge(self: Files, user_id: u64, id: u64) !void {
-    if (!try self.existsTrashed(user_id, id)) return error.NotFound;
+    if (!try internal.existsTrashed(self, user_id, id)) return error.NotFound;
 
     var gc: std.ArrayList([md5_len]u8) = .empty;
     defer gc.deinit(self.gpa);
@@ -224,10 +227,10 @@ pub fn purge(self: Files, user_id: u64, id: u64) !void {
     try addPairs(self, user_id, &ids);
 
     try releaseIds(self, user_id, ids.items, &gc);
-    try self.bumpSync(user_id);
+    try internal.bumpSync(self, user_id);
     try self.db.exec("COMMIT;");
 
-    for (gc.items) |*m| self.removeBlobFiles(m); // GC on disk after the commit
+    for (gc.items) |*m| internal.removeBlobFiles(self, m); // GC on disk after the commit
 }
 
 /// Purges the whole bin. Returns the count the bin listing showed (hidden
@@ -242,7 +245,7 @@ pub fn emptyBin(self: Files, user_id: u64) !usize {
     const shown: usize = blk: {
         var r = (try self.db.row(
             "SELECT COUNT(*) FROM files f WHERE f.user_id = ?1 AND f.deleted = 1" ++
-                Files.hide_paired_bin_mark ++ ";",
+                internal.hide_paired_bin_mark ++ ";",
             &.{.{ .int = @intCast(user_id) }},
         )) orelse break :blk 0;
         defer r.finalize();
@@ -259,17 +262,19 @@ pub fn emptyBin(self: Files, user_id: u64) !usize {
     }
 
     try releaseIds(self, user_id, ids.items, &gc);
-    if (ids.items.len > 0) try self.bumpSync(user_id);
+    if (ids.items.len > 0) try internal.bumpSync(self, user_id);
     try self.db.exec("COMMIT;");
 
-    for (gc.items) |*m| self.removeBlobFiles(m);
+    for (gc.items) |*m| internal.removeBlobFiles(self, m);
     return shown;
 }
 
 /// Purges entries trashed more than `max_age_s` ago, for every user, one user
 /// at a time (quota is per user), each expanded to its subtree closure.
 pub fn sweepBin(self: Files, max_age_s: i64) !usize {
-    return self.sweepBinBefore(self.now() - max_age_s);
+    return self.sweepBinBefore(internal.now(
+        self,
+    ) - max_age_s);
 }
 
 /// `sweepBin` against a cutoff computed by `settings.sweepCutoff` (which
@@ -311,10 +316,10 @@ pub fn sweepBinForUser(self: Files, user_id: u64, cutoff: i64) !usize {
     try addPairs(self, user_id, &ids);
 
     try releaseIds(self, user_id, ids.items, &gc);
-    if (ids.items.len > 0) try self.bumpSync(user_id);
+    if (ids.items.len > 0) try internal.bumpSync(self, user_id);
     try self.db.exec("COMMIT;");
 
-    for (gc.items) |*m| self.removeBlobFiles(m);
+    for (gc.items) |*m| internal.removeBlobFiles(self, m);
     return ids.items.len;
 }
 
@@ -373,13 +378,13 @@ pub fn purgeUser(self: Files, user_id: u64) !void {
     var gc: std.ArrayList([md5_len]u8) = .empty;
     defer gc.deinit(self.gpa);
     for (doomed.items) |*m| {
-        if (try self.decref(m)) try gc.append(self.gpa, m.*);
+        if (try internal.decref(self, m)) try gc.append(self.gpa, m.*);
     }
     try history.reapDistinct(self, hist_doomed.items, &gc);
 
     try self.db.exec("COMMIT;");
 
-    for (gc.items) |*m| self.removeBlobFiles(m); // GC on disk after the commit
+    for (gc.items) |*m| internal.removeBlobFiles(self, m); // GC on disk after the commit
 }
 
 /// Tombstones the subtree at ?1, freezing each row's current path into
@@ -461,7 +466,7 @@ pub const bin_listing_sql =
     \\       (f.parent_id IS NULL OR NOT EXISTS (
     \\          SELECT 1 FROM files p WHERE p.id = f.parent_id AND p.deleted = 1))
     \\FROM files f WHERE f.user_id = ?1 AND f.deleted = 1
-++ Files.hide_paired_bin_mark ++
+++ internal.hide_paired_bin_mark ++
     \\
     \\ORDER BY COALESCE(f.deleted_at, 0) DESC, f.id DESC;
 ;
@@ -473,7 +478,7 @@ pub const live_subtree_count_sql =
     \\  SELECT id FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 0
     \\  UNION
     \\  SELECT f.id FROM files f JOIN sub ON f.parent_id = sub.id WHERE f.deleted = 0
-++ Files.hide_paired_mark ++
+++ internal.hide_paired_mark ++
     \\
     \\)
     \\SELECT COUNT(*) FROM sub;
@@ -485,7 +490,7 @@ pub fn addPairs(self: Files, user_id: u64, ids: *std.ArrayList(u64)) !void {
     const n = ids.items.len; // snapshot: added rows are pairs already
     var i: usize = 0;
     while (i < n) : (i += 1) {
-        const p = (try self.pairOf(user_id, ids.items[i])) orelse continue;
+        const p = (try internal.pairOf(self, user_id, ids.items[i])) orelse continue;
         if (std.mem.indexOfScalar(u64, ids.items, p.id) != null) continue;
         try ids.append(self.gpa, p.id);
     }
@@ -542,12 +547,12 @@ pub fn releaseIds(self: Files, user_id: u64, ids: []const u64, gc: *std.ArrayLis
     var settled: std.ArrayList([md5_len]u8) = .empty;
     defer settled.deinit(self.gpa);
     var delta: i64 = 0;
-    for (doomed.items) |*d| try self.settleRefund(user_id, &d.md5, d.size, &settled, &delta);
-    for (hist_doomed.items) |*h| try self.settleRefund(user_id, &h.md5, h.size, &settled, &delta);
-    if (delta != 0) try self.addUsed(user_id, delta);
+    for (doomed.items) |*d| try internal.settleRefund(self, user_id, &d.md5, d.size, &settled, &delta);
+    for (hist_doomed.items) |*h| try internal.settleRefund(self, user_id, &h.md5, h.size, &settled, &delta);
+    if (delta != 0) try internal.addUsed(self, user_id, delta);
 
     for (doomed.items) |*d| {
-        if (try self.decref(&d.md5)) try gc.append(self.gpa, d.md5);
+        if (try internal.decref(self, &d.md5)) try gc.append(self.gpa, d.md5);
     }
 
     // Reap blobs whose last keeper was a cascaded history row, after the decrefs.
@@ -601,7 +606,9 @@ pub fn restoreRow(self: Files, user_id: u64, id: u64, opts: RestoreName) !Restor
     );
     defer s.finalize();
     s.bindText(1, final);
-    s.bindInt(2, self.now());
+    s.bindInt(2, internal.now(
+        self,
+    ));
     s.bindInt(3, @intCast(id));
     _ = try s.step();
     return .{ .name = final, .was_trashed = true, .renamed = !std.mem.eql(u8, final, name) };
@@ -633,12 +640,12 @@ pub fn freeName(self: Files, user_id: u64, parent_id: ?u64, wanted: []const u8, 
 /// for a document name `cand ++ pair` must be free; for a mark name its stem
 /// must be.
 pub fn nameFree(self: Files, user_id: u64, parent_id: ?u64, cand: []const u8, pair: ?[]const u8) !bool {
-    if (try self.liveChild(user_id, parent_id, cand) != null) return false;
+    if (try internal.liveChild(self, user_id, parent_id, cand) != null) return false;
     const suffix = pair orelse return true;
-    if (markpair.markStemOf(cand)) |stem| return (try self.liveChild(user_id, parent_id, stem)) == null;
+    if (markpair.markStemOf(cand)) |stem| return (try internal.liveChild(self, user_id, parent_id, stem)) == null;
     const twin = try std.fmt.allocPrint(self.gpa, "{s}{s}", .{ cand, suffix });
     defer self.gpa.free(twin);
-    return (try self.liveChild(user_id, parent_id, twin)) == null;
+    return (try internal.liveChild(self, user_id, parent_id, twin)) == null;
 }
 
 /// Strips one trailing ` (n)` (all digits), so `Budget (draft)` survives.
