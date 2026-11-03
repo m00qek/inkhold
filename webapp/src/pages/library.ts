@@ -5,15 +5,11 @@
 // writers of the state that URL describes (see `router.ts`).
 
 import { el } from "../ui/dom";
-import { ICONS, svg, type IconName } from "../ui/icons";
 import { brandMark } from "../ui/chrome";
 import { closeOpenMenu } from "../ui/menu";
 import { currentTheme, setTheme } from "../ui/theme";
-import { formatBytes, fileKind, UPLOAD_ACCEPT_ATTR } from "../core/fileKind";
-import { api as authApi } from "../api/client";
 import { SORT_KEY, readLocal, writeLocal } from "../ui/storage";
 import {
-  current,
   accountHref,
   binNotePageHref,
   destinationHref,
@@ -21,7 +17,6 @@ import {
   go,
   noteHref,
   notePageHref,
-  noteVersionHref,
   redirect,
   replaceBinNotePosition,
   replaceNotePosition,
@@ -52,27 +47,27 @@ import {
 } from "../render/thumbnails";
 import { createPdfThumbs, type PdfThumbs } from "../render/pdfThumb";
 import { classify, reconcile } from "../sync/freshness";
-import { createReader, type Reader, type ReaderOrigin } from "./reader";
-// A file's type picks a `Viewer` (`pages/viewer.ts`) in `viewerFor`.
-import { createSpdViewer } from "./spdViewer";
-import { createTxtViewer } from "./txtViewer";
-import { createPdfViewer } from "./pdfViewer";
-import type { Viewer, ViewerDeps } from "./viewer";
+import type { ReaderOrigin } from "./reader";
+import type { ViewerDeps } from "./viewer";
+import { createViewerSet, type ViewerSet } from "./viewerSet";
+import { createMasonry, type Masonry } from "./masonry";
+import { createNameplate, createQuotaMeter } from "./railFooter";
+import { createTopbar, type SortKey, type Topbar, type View } from "./libraryTopbar";
+import { createVersionPreviews, type VersionPreviews } from "./versionPreview";
+import { createAdminDestination, type AdminDestination } from "./adminDestination";
 import { createNoteSearch, MIN_GLOBAL_QUERY_LEN, type SearchState } from "./noteSearch";
 import { createSearchService } from "../search/searchService";
 import { createDocSearch } from "../search/docSearch";
 import { createGalleryCards, type GalleryCards } from "./galleryCards";
 import { createCardActions } from "./cardActions";
-import { createHistoryScope, versionMeta, rawVersionMeta } from "./historyScope";
-import { createHistoryController, runRestore, confirmRestore } from "./historyPanel";
+import { createHistoryScope } from "./historyScope";
+import { createHistoryController } from "./historyPanel";
 import type { FileVersion } from "../core/types";
 import { createGallerySearch, type GallerySearch } from "./gallerySearch";
 // The breadcrumb is painted here, but its flattening rule is the rail's.
 import { createRail, createRailView, crumbPath, type RailController } from "./rail";
 // Paints into `gallery`; `renderGallery()` closes it, so no teardown hook.
 import { BIN_KEY, createBin, createBinScope, createBinView, type BinController } from "./bin";
-// Type only, so the console stays a separate chunk loaded by `import("./admin")`.
-import type { AdminPanel } from "./admin";
 // Static, unlike the console: small, and every user has one.
 import { createAccountPage, type AccountHost, type AccountPage } from "./account";
 
@@ -135,21 +130,11 @@ export interface AppShell {
   // A destination is a line in `DESTINATIONS` plus an arm in `showDestination`.
 }
 
-type SortKey = "recent" | "title" | "pages";
 
 /** Validated, not cast: localStorage may hold a stale or hand-edited key. */
 function readStoredSort(): SortKey {
   const raw = readLocal(SORT_KEY);
   return raw === "title" || raw === "pages" || raw === "recent" ? raw : "recent";
-}
-type View = "grid" | "list";
-
-function initials(email: string): string {
-  const name = (email || "").split("@")[0] ?? "";
-  const parts = name.split(/[.\-_]+/).filter(Boolean);
-  const a = parts[0]?.[0] ?? "?";
-  const b = parts[1]?.[0] ?? parts[0]?.[1] ?? "";
-  return (a + b).toUpperCase();
 }
 
 export function createAppShell(deps: AppDeps): AppShell {
@@ -161,119 +146,6 @@ export function createAppShell(deps: AppDeps): AppShell {
   */
   const binScope = createBinScope();
 
-  /** Created on first entry (dynamic import) and kept for the shell's life. */
-  let admin: AdminPanel | null = null;
-
-  /**
-  * Called on user-driven navigation only, not from `renderGallery`, which also
-  * runs on a live sync bump and must not eject an admin mid-confirmation.
-  */
-  function leaveAdmin(): void {
-    // Also drop the import stand-in, or it would sit over the requested folder.
-    hideAdminBooting(false);
-    admin?.close();
-  }
-
-  /**
-  * Stand-in painted over the `import("./admin")` round trip, so the old gallery
-  * doesn't linger under the Admin highlight. Reuses `.admin-notice` so the swap
-  * is a change of words. Built lazily, once.
-  */
-  let adminBooting: HTMLElement | null = null;
-
-  function adminNotice(title: string, text: string): HTMLElement {
-    return el(
-      "section",
-      { class: "admin-notice" },
-      el("h2", { class: "admin-notice__title", text: title }),
-      el("p", { class: "admin-notice__text", text }),
-    );
-  }
-
-  function showAdminBooting(): void {
-    if (!adminBooting) {
-      adminBooting = el("section", { class: "admin-booting" });
-      content.append(adminBooting);
-    }
-    adminBooting.replaceChildren(adminNotice("Loading…", "Opening the admin console."));
-    adminBooting.hidden = false;
-    // Same as `AdminPanel.chrome(true)`; `lockBtn` stays hidden.
-    gallery.hidden = true;
-    sortWrap.hidden = true;
-    segmented.hidden = true;
-    setDestinationMode("admin", true);
-    {
-      const home = el("button", { type: "button", text: "Library" });
-      home.addEventListener("click", () => go(folderHref(null)));
-      crumbs.replaceChildren(
-        home,
-        el("span", { class: "crumbs__sep", text: "/" }),
-        el("span", { class: "crumbs__here", text: "Admin" }),
-      );
-    }
-    rail.build(); // the highlight reads `destination`, already ADMIN_KEY
-  }
-
-  /** `handOver`: the real console takes this chrome as is, so don't flash the gallery. */
-  function hideAdminBooting(handOver: boolean): void {
-    if (!adminBooting || adminBooting.hidden) return;
-    adminBooting.hidden = true;
-    if (handOver) return;
-    gallery.hidden = false;
-    sortWrap.hidden = false;
-    segmented.hidden = false;
-    setDestinationMode("admin", false);
-  }
-
-  /**
-  * A cold start always builds a fresh panel and shows the gate; re-entry in one
-  * session reuses it, since elevation is the server's fact.
-  */
-  function openAdmin(): void {
-    if (admin) {
-      admin.open();
-      rail.build();
-      return;
-    }
-    // Painted before the import is issued.
-    showAdminBooting();
-    void import("./admin")
-      .then((m) => {
-        admin = m.createAdminPanel({
-          api,
-          account: identity.email,
-          content,
-          gallery,
-          crumbs,
-          sortWrap,
-          segmented,
-          lockBtn: lockAdminBtn,
-          setMode: (open) => setDestinationMode("admin", open),
-          // Elevation changes only inside the panel (unlock, lock, 428); rebuild the
-          // rail so the padlock never lies.
-          onElevationChanged: () => rail.build(),
-          toast,
-          onSessionExpired: sessionDidExpire,
-        });
-        // A route change can land during the import.
-        if (destination !== ADMIN_KEY) {
-          hideAdminBooting(false);
-          return;
-        }
-        // Hand over rather than tear down, to avoid flashing the gallery.
-        hideAdminBooting(true);
-        admin.open();
-        rail.build(); // the console is open now; repaint the highlight
-      })
-      .catch(() => {
-        // The chunk failed (dropped link, or a stale tab after a redeploy); a loading
-        // state must not outlive what it describes.
-        if (destination !== ADMIN_KEY || !adminBooting) return;
-        adminBooting.replaceChildren(
-          adminNotice("The console could not be loaded", "Check your connection and try again."),
-        );
-      });
-  }
   // Two composed `Api` wrappers: version preview and bin. They never both fire
   // (previews are of live notes) and pass through when inactive.
   const historyScope = createHistoryScope();
@@ -380,7 +252,7 @@ export function createAppShell(deps: AppDeps): AppShell {
         // Read through `isElevated()`, the panel's fact. Locked before the console was
         // ever imported, which is also what the gate will show.
         case ADMIN_KEY:
-          return admin?.isElevated()
+          return adminDest.isElevated()
             ? { icon: "unlock", label: "Admin console unlocked" }
             : { icon: "lock", label: "Admin console locked" };
         // The bin has a count, and a row has room for one badge.
@@ -393,62 +265,9 @@ export function createAppShell(deps: AppDeps): AppShell {
     onLabelsSettled: () => relabelFolders(),
   });
 
-  // The footer is one nameplate button opening the account page; sign out and
-  // the theme toggle live there now, which gives the name column room.
-  const nameplate = el(
-    "button",
-    {
-      class: "account",
-      type: "button",
-      // Says what pressing does and who it's about.
-      "aria-label": `Your account: ${identity.email || "signed in"}`,
-      title: "Your account",
-    },
-    el("span", { class: "avatar", "aria-hidden": "true", text: initials(identity.email) }),
-    el(
-      "span",
-      { class: "account__who" },
-      el("span", { class: "account__name", text: (identity.email || "").split("@")[0] || "Signed in" }),
-      el("span", { class: "account__mail", text: identity.email }),
-    ),
-    el("span", { class: "account__chevron", "aria-hidden": "true", html: svg(ICONS.chevron, 1.8) }),
-  );
-  nameplate.addEventListener("click", () => go(accountHref()));
-
-  // Hidden until `usage()` resolves; red over quota.
-  const quotaUsed = el("span", { class: "quota__used" });
-  const quotaTotal = el("span", { class: "quota__total" });
-  const quotaFill = el("div", { class: "quota__fill" });
-  const quota = el(
-    "div",
-    { class: "quota", hidden: true, role: "img", "aria-label": "Storage used" },
-    quotaUsed,
-    el("div", { class: "quota__track" }, quotaFill),
-    quotaTotal,
-  );
-  /**
-  * Draws the bar and feeds the upload pre-flight, so a doomed transfer is
-  * refused on drop. Null means unknown, never "no room".
-  */
-  let usage: { used: number; total: number } | null = null;
-
-  function refreshUsage(): void {
-    void authApi.usage().then((u) => {
-      usage = u && u.total > 0 ? u : null;
-      if (!usage) return;
-      const pct = Math.max(0, Math.min(100, (usage.used / usage.total) * 100));
-      quotaFill.style.width = `${pct}%`;
-      quotaUsed.textContent = formatBytes(usage.used);
-      quotaTotal.textContent = formatBytes(usage.total);
-      quota.classList.toggle("is-over", usage.used > usage.total);
-      quota.setAttribute(
-        "aria-label",
-        `Storage used: ${formatBytes(usage.used)} of ${formatBytes(usage.total)}`,
-      );
-      quota.hidden = false;
-    });
-  }
-  refreshUsage();
+  const nameplate = createNameplate(identity.email, () => go(accountHref()));
+  const quota = createQuotaMeter();
+  quota.refresh();
 
   // The storage meter stays under the nameplate: room for the file you're about
   // to drop should be visible at a glance.
@@ -463,52 +282,25 @@ export function createAppShell(deps: AppDeps): AppShell {
     ),
     nav,
     nameplate,
-    quota,
+    quota.el,
   );
 
   // ---- DOM: topbar ----
-  const crumbs = el("div", { class: "crumbs", id: "crumbs" });
-  const searchInput = el("input", {
-    class: "search__input",
-    id: "search",
-    type: "search",
-    autocomplete: "off",
-    placeholder: "Search across every note — typed and handwritten",
-    "aria-label": "Search notes",
+  const topbar: Topbar = createTopbar({
+    initialSort: sort,
+    folderId: () => folderId,
+    applyQuery: (q) => applyQuery(q),
+    onSort: (next) => {
+      sort = next;
+      writeLocal(SORT_KEY, sort);
+      renderGallery();
+    },
+    onView: (next) => setView(next),
+    onEmptyBin: () => bin.empty(),
+    onLockAdmin: () => adminDest.lock(),
+    onFiles: (files) => uploadZone.add(files),
   });
-  // The first letter pushes (folder to results is a navigation); later letters
-  // and clearing replace, so one search episode is one history entry.
-  // Entering via a hash navigation resets focus to `<body>`, losing the caret on
-  // the first keystroke; it's captured here and restored by `showSearch`, which
-  // runs after the reset.
-  let pendingSearchCaret: number | null = null;
-  function restoreSearchFocus(): void {
-    if (pendingSearchCaret === null) return;
-    const caret = pendingSearchCaret;
-    pendingSearchCaret = null;
-    searchInput.focus();
-    const input = searchInput as HTMLInputElement;
-    // Guard only for DOMs without selection ranges (headless tests).
-    try {
-      input.setSelectionRange(caret, caret);
-    } catch {
-    }
-  }
-
-  searchInput.addEventListener("input", () => {
-    const next = searchInput.value;
-    // A blank query is the folder `folderId` still holds.
-    const target = next.trim() === "" ? folderHref(folderId) : searchHref(next);
-    if (current().name !== "search") {
-      // Arm the caret restore only when entering search.
-      if (next.trim() !== "") pendingSearchCaret = (searchInput as HTMLInputElement).selectionStart ?? next.length;
-      go(target);
-      return;
-    }
-    replaceRoute(target);
-    // `replaceRoute` doesn't fire the route, so paint here.
-    applyQuery(next);
-  });
+  const { crumbs, searchInput, sortWrap, segmented, uploadBtn, toolsSep, emptyBinBtn, lockAdminBtn } = topbar;
 
   /** Shared by keystrokes and the `#/search?q=` route; doesn't touch the URL. */
   function applyQuery(next: string): void {
@@ -521,31 +313,6 @@ export function createAppShell(deps: AppDeps): AppShell {
     search.setQuery(query);
     renderGallery({ rail: false });
   }
-
-  const sortSelect = el(
-    "select",
-    { id: "sort", "aria-label": "Sort notes" },
-    el("option", { value: "recent", text: "Recent" }),
-    el("option", { value: "title", text: "Title" }),
-    el("option", { value: "pages", text: "Pages" }),
-  ) as HTMLSelectElement;
-  // Otherwise the select shows its first option while sorted by another.
-  sortSelect.value = sort;
-  sortSelect.addEventListener("change", () => {
-    sort = sortSelect.value as SortKey;
-      writeLocal(SORT_KEY, sort);
-    renderGallery();
-  });
-
-  const gridBtn = el("button", { type: "button", "aria-label": "Grid view", "aria-pressed": "true", html: svg(ICONS.grid, 1.7) });
-  const listBtn = el("button", { type: "button", "aria-label": "List view", "aria-pressed": "false", html: svg(ICONS.list, 1.7) });
-
-  gridBtn.addEventListener("click", () => setView("grid"));
-  listBtn.addEventListener("click", () => setView("list"));
-
-  // Both are hidden over results: they describe a folder listing.
-  const sortWrap = el("span", { class: "select" }, sortSelect, el("span", { html: svg(ICONS.chevron, 1.8) }));
-  const segmented = el("div", { class: "segmented", role: "group", "aria-label": "View" }, gridBtn, listBtn);
 
   // ---- destination mode ----
   // `is-destination` hides the search box (it would search a library not on
@@ -573,80 +340,6 @@ export function createAppShell(deps: AppDeps): AppShell {
     if (!destinationsOpen.admin) lockAdminBtn.hidden = true;
   }
 
-  /** Glyph then words, never icon-only; `hidden` per `.topbar__action[hidden]`. */
-  function topbarAction(opts: {
-    id: string;
-    label: string;
-    icon: IconName;
-    ariaLabel?: string;
-    danger?: boolean;
-    /** Only for an unambiguous icon. */
-    iconOnly?: boolean;
-  }): HTMLButtonElement {
-    const b = el("button", {
-      class: `btn topbar__action${opts.iconOnly ? " topbar__action--icon" : ""}${opts.danger ? " is-danger" : ""}`,
-      // Two of these share `.tools`; the id tells them apart in tests.
-      id: opts.id,
-      type: "button",
-      hidden: true,
-      // Only when the label isn't the whole story; an `aria-label` that omits the
-      // visible text breaks WCAG Label in Name.
-      ...(opts.ariaLabel ? { "aria-label": opts.ariaLabel } : {}),
-    });
-    b.append(el("span", { class: "topbar__action-mark", html: svg(ICONS[opts.icon], 1.7) }));
-    if (opts.iconOnly) b.title = opts.ariaLabel ?? opts.label;
-    else b.append(el("span", { text: opts.label }));
-    return b;
-  }
-
-  // View-level, so beside sort and view. Red (destructive); disabled, not
-  // removed, over an empty bin. The confirm rides on `bin.empty()`.
-  const emptyBinBtn = topbarAction({
-    id: "empty-bin",
-    label: "Empty bin",
-    icon: "trash",
-    ariaLabel: "Delete everything in the recycle bin permanently",
-    danger: true,
-  });
-  emptyBinBtn.addEventListener("click", () => bin.empty());
-
-  // Not `danger`: locking destroys nothing.
-  const lockAdminBtn = topbarAction({
-    id: "lock-console",
-    label: "Lock console",
-    icon: "lock",
-  });
-  lockAdminBtn.addEventListener("click", () => void admin?.lock());
-
-  // The discoverable, keyboard- and touch-reachable twin of drag and drop; both
-  // hand files to the same `uploadZone.add`. Shown only over a folder listing.
-  const uploadBtn = topbarAction({
-    id: "upload",
-    label: "Upload",
-    icon: "export",
-    ariaLabel: "Upload a file to this folder",
-    // Icon-only: a universal mark for a non-destructive secondary route.
-    iconOnly: true,
-  });
-  const toolsSep = el("span", { class: "tools__sep", hidden: true, "aria-hidden": "true" });
-  const filePicker = el("input", {
-    class: "upload__picker",
-    type: "file",
-    multiple: true,
-    // A hint for the OS dialog only; drag and drop bypasses it, so pre-flight always runs.
-    accept: UPLOAD_ACCEPT_ATTR,
-    hidden: true,
-    "aria-hidden": "true",
-    tabindex: "-1",
-  }) as HTMLInputElement;
-  filePicker.addEventListener("change", () => {
-    const picked = Array.from(filePicker.files ?? []);
-    // Reset first: picking the same file twice fires no `change`.
-    filePicker.value = "";
-    if (picked.length > 0) uploadZone.add(picked);
-  });
-  uploadBtn.addEventListener("click", () => filePicker.click());
-
   function setBinMode(open: boolean, count: number, busy = false): void {
     setDestinationMode("bin", open);
     emptyBinBtn.hidden = !open;
@@ -654,22 +347,6 @@ export function createAppShell(deps: AppDeps): AppShell {
     // reports failure for a success.
     emptyBinBtn.disabled = count === 0 || busy;
   }
-
-  const topbar = el(
-    "div",
-    { class: "topbar" },
-    crumbs,
-    el(
-      "div",
-      { class: "search" },
-      el("span", { class: "search__glyph-wrap", html: `<svg class="search__glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">${ICONS.search}</svg>` }),
-      searchInput,
-      // `aria-hidden`: the placeholder already says it.
-      el("span", { class: "search__ocr", "aria-hidden": "true", text: "OCR" }),
-    ),
-    el("div", { class: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, lockAdminBtn),
-    filePicker,
-  );
 
   // ---- DOM: content (gallery + reader) ----
   const gallery = el("section", { class: "gallery", id: "gallery", "aria-label": "Notes" });
@@ -816,64 +493,40 @@ export function createAppShell(deps: AppDeps): AppShell {
           : replaceNotePosition(noteId, page, q),
   };
 
-  const reader: Reader = createReader(viewerDeps);
-  content.append(reader.el);
-  // Mounted once beside the reader, hidden until `activate` shows one.
-  const spdViewer: Viewer = createSpdViewer(viewerDeps);
-  content.append(spdViewer.el);
-  const txtViewer: Viewer = createTxtViewer(viewerDeps);
-  content.append(txtViewer.el);
-  const pdfViewer: Viewer = createPdfViewer(viewerDeps);
-  content.append(pdfViewer.el);
-
-  /** Exactly one viewer paints at a time. */
-  let activeViewer: Viewer | null = null;
-
-  /**
-  * By server-verified `fileType`; the reader is the default. Membership must
-  * match `hasDedicatedViewer` (core/fileKind.ts), which the bin uses.
-  */
-  function viewerFor(fileType: string): Viewer {
-    switch ((fileType || "").toLowerCase()) {
-      // --- SPD VIEWER ---
-      case "spd":
-        return spdViewer;
-      // --- TXT VIEWER ---
-      case "txt":
-        return txtViewer;
-      // A `.mark` doesn't come here: it parses as a note and the reader paints it.
-      case "pdf":
-        return pdfViewer;
-      default:
-        return reader; // note, image, and every other kind
-    }
-  }
-
-  /** `v.open()` shows `v.el`; this only hides the prior viewer. */
-  function activate(v: Viewer): void {
-    if (activeViewer && activeViewer !== v) activeViewer.hide();
-    activeViewer = v;
-    // Hide the gallery, not just cover it: IntersectionObserver ignores occlusion,
-    // so tiles (expensive for PDFs) kept rendering behind the viewer.
-    gallery.hidden = true;
-  }
+  const viewers: ViewerSet = createViewerSet(viewerDeps, content, gallery);
+  const { reader, viewerFor } = viewers;
+  const activate = viewers.activate;
 
   function hideActiveViewer(): void {
     // The next live read must not stay pinned to a retained version.
     historyScope.clear();
-    if (activeViewer) {
-      activeViewer.hide();
-      activeViewer = null;
-    }
-    gallery.hidden = false;
+    viewers.hideActive();
   }
 
   const root = el(
     "div",
     { class: "sn-root" },
-    el("div", { class: "app" }, sidebar, el("main", { class: "main" }, topbar, content)),
+    el("div", { class: "app" }, sidebar, el("main", { class: "main" }, topbar.el, content)),
     toastEl,
   );
+
+  const adminDest: AdminDestination = createAdminDestination({
+    api,
+    account: identity.email,
+    content,
+    gallery,
+    crumbs,
+    sortWrap,
+    segmented,
+    lockBtn: lockAdminBtn,
+    setMode: (open) => setDestinationMode("admin", open),
+    rebuildRail: () => rail.build(),
+    isCurrent: () => destination === ADMIN_KEY,
+    toast,
+    onSessionExpired: sessionDidExpire,
+  });
+  const leaveAdmin = (): void => adminDest.leave();
+  const openAdmin = (): void => adminDest.open();
 
   const bin: BinController = createBin({
     api,
@@ -996,7 +649,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   * rail's identity resolution.
   */
   function uploadDestination(): UploadDestination | null {
-    if (destination !== null || activeViewer !== null) return null;
+    if (destination !== null || viewers.active() !== null) return null;
     if (query.trim() !== "" || rail.pending() !== null) return null;
     return {
       id: folderId,
@@ -1013,7 +666,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     listHost: root,
     destination: uploadDestination,
     // Unknown never blocks; the server's 413 is the authority.
-    remainingBytes: () => (usage === null ? null : Math.max(0, usage.total - usage.used)),
+    remainingBytes: () => quota.remainingBytes(),
     // File names only: an upload never replaces a folder. Null means unknown, so
     // the zone doesn't ask.
     existingNames: (id) => {
@@ -1036,7 +689,7 @@ export function createAppShell(deps: AppDeps): AppShell {
           renderGallery();
         }
       }
-      refreshUsage();
+      quota.refresh();
       void refetch(folderId, folderCache.get(folderId));
       void folderCache.prefetch(true);
     },
@@ -1166,44 +819,9 @@ root,
     rail?: boolean;
   }
 
-  // ---- masonry spans + tile aspect ----
-  // CSS-grid row-span masonry (04-library-gallery.css). CSS decides heights; the
-  // span pass only measures, and reruns only when a height can change.
-
-  let spanScheduled = false;
+  const masonry: Masonry = createMasonry(gallery, () => view === "grid" && query.trim() === "");
   function scheduleSpan(): void {
-    if (spanScheduled) return;
-    spanScheduled = true;
-    requestAnimationFrame(() => {
-      spanScheduled = false;
-      spanTiles();
-    });
-  }
-
-  // A late webfont swap reflows captions, so span once more when fonts load.
-  // `document.fonts` is absent in unit tests.
-  if (typeof document !== "undefined" && document.fonts) {
-    void document.fonts.ready.then(() => scheduleSpan());
-  }
-
-  /**
-  * Rows = ⌈(outer height + gap) / row unit⌉, with unit and gap read off the
-  * live grid. Only the icon masonry spans.
-  */
-  function spanTiles(): void {
-    if (view !== "grid" || query.trim() !== "") return;
-    const grid = getComputedStyle(gallery);
-    const unit = parseFloat(grid.gridAutoRows);
-    const gap = parseFloat(grid.getPropertyValue("--masonry-gap"));
-    if (!Number.isFinite(unit) || unit <= 0) return; // not the masonry right now
-    for (const child of gallery.children) {
-      if (!(child instanceof HTMLElement)) continue;
-      const height = child.getBoundingClientRect().height;
-      if (height <= 0) continue;
-      const cs = getComputedStyle(child);
-      const outer = height + (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
-      child.style.gridRowEnd = `span ${Math.max(1, Math.ceil((outer + (Number.isFinite(gap) ? gap : 0)) / unit))}`;
-    }
+    masonry.schedule();
   }
 
   function renderGallery(opts: RenderOpts = {}): void {
@@ -1363,125 +981,42 @@ root,
     root.classList.toggle("is-reading", reading);
   }
 
-  /**
-  * A retained version in the reused viewer, read-only. The URL is replaced
-  * (not pushed) with `#/note/:id/version/:short` so reload and copy-link
-  * reproduce it. `.note` uses the version's own meta (`historyMeta`), falling
-  * back to live geometry; the reroute is armed before the first paint.
-  */
-  async function openHistoryPreview(noteId: Id, version: FileVersion, startPage = 0): Promise<void> {
-    const mine = ++routeToken;
-    try {
-      const base = await api.getNoteMeta(noteId);
-      if (mine !== routeToken) return; // navigated away while fetching
-      const type = base.fileType.trim().toLowerCase();
-      // A trashed file's version preview is view-only (restore the file first);
-      // raw viewers read the bin-scoped history route.
-      const viewOnly = bin.isTrashed(noteId);
-      const origin: ReaderOrigin = {
-        kind: "history",
-        folderPath: currentFolderPath(),
-        version: { md5: version.md5, createdAt: version.createdAt },
-        viewOnly,
-      };
-
-      // Raw kinds decode the version blob (`historyFileUrl`): no reroute, no
-      // `historyMeta`. Seed the canonical URL before opening.
-      if (type === "spd" || type === "txt" || fileKind(type) === "image") {
-        readerBack = folderHref(folderId);
-        const viewer = viewerFor(base.fileType);
-        activate(viewer);
-        replaceRoute(noteVersionHref(noteId, shortMd5(version.md5), startPage));
-        const meta = rawVersionMeta(base, version);
-        viewer.open(synthesizeSummary(meta), Promise.resolve(meta), startPage, origin, "");
-        setReading(true);
-        return;
-      }
-
-      let template = base;
-      try {
-        const vmeta = await api.historyMeta(noteId, version.md5);
-        if (mine !== routeToken) return;
-        template = vmeta;
-      } catch {
-        // Degraded preview (live geometry) beats none.
-      }
-      readerBack = folderHref(folderId); // Back leaves the preview for the folder
-      activate(reader);
-      // After activate (may hide a prior viewer), before open (first paint reads through it).
-      historyScope.setActive(noteId, version.md5);
-      replaceRoute(noteVersionHref(noteId, shortMd5(version.md5), startPage));
-      const meta = versionMeta(template, version.md5);
-      reader.open(synthesizeSummary(meta), Promise.resolve(meta), startPage, origin, "");
-      setReading(true);
-    } catch (e) {
-      historyScope.clear();
-      if (handled(e)) return;
-      toast("Couldn't open that version.");
-    }
+  const previews: VersionPreviews = createVersionPreviews({
+    api,
+    viewers,
+    historyScope,
+    host: root,
+    isTrashed: (id) => bin.isTrashed(id),
+    currentFolderPath,
+    folderHref: () => folderHref(folderId),
+    setReaderBack: (href) => {
+      readerBack = href;
+    },
+    setReading,
+    nextRoute: () => ++routeToken,
+    isRoute: (token) => token === routeToken,
+    synthesizeSummary,
+    onRestored: (returnTo) => {
+      void refetch(folderId, folderCache.get(folderId));
+      rail.build();
+      go(noteHref(returnTo));
+    },
+    toast,
+    handled,
+  });
+  function openHistoryPreview(noteId: Id, version: FileVersion, startPage = 0): Promise<void> {
+    return previews.openHistory(noteId, version, startPage);
   }
-
-  /**
-  * A past version of a PDF's `.mark`: the live document opens unchanged and
-  * only the mark's page bytes are rerouted through `historyScope`. Not
-  * addressable: the version belongs to the mark's history, so a document
-  * version URL could only answer "no longer available".
-  */
-  async function openAnnotationsPreview(
-    documentId: Id,
-    markId: Id,
-    version: FileVersion,
-  ): Promise<void> {
-    const mine = ++routeToken;
-    try {
-      const base = await api.getNoteMeta(documentId);
-      if (mine !== routeToken) return; // navigated away while fetching
-      const origin: ReaderOrigin = {
-        kind: "history",
-        folderPath: currentFolderPath(),
-        version: { md5: version.md5, createdAt: version.createdAt },
-        // Defensive: the bin nulls `annotationsId` in practice.
-        viewOnly: bin.isTrashed(documentId),
-      };
-      readerBack = folderHref(folderId); // Back leaves the preview for the folder
-      const viewer = viewerFor(base.fileType);
-      activate(viewer);
-      // Armed on the mark, not the document; after activate, before open.
-      historyScope.setActive(markId, version.md5);
-      viewer.open(synthesizeSummary(base), Promise.resolve(base), 0, origin, "");
-      setReading(true);
-    } catch (e) {
-      historyScope.clear();
-      if (handled(e)) return;
-      toast("Couldn't open those annotations.");
-    }
+  function openAnnotationsPreview(documentId: Id, markId: Id, version: FileVersion): Promise<void> {
+    return previews.openAnnotations(documentId, markId, version);
   }
-
-  /**
-  * The one restore path behind the panel and the banner; `runRestore` owns the
-  * toast and 507 message. `returnTo` differs only for PDF annotations: the
-  * `.mark` is restored, the document reopens.
-  */
   function restoreVersion(
     noteId: Id,
     version: { md5: string; createdAt: number },
     _noteName: string,
     returnTo: Id = noteId,
   ): Promise<boolean> {
-    return runRestore({
-      api,
-      noteId,
-      md5: version.md5,
-      confirm: () => confirmRestore(root, version),
-      toast,
-      handled,
-      onRestored: () => {
-        historyScope.clear();
-        void refetch(folderId, folderCache.get(folderId));
-        rail.build();
-        go(noteHref(returnTo));
-      },
-    });
+    return previews.restore(noteId, version, returnTo);
   }
 
   /**
@@ -1647,7 +1182,7 @@ root,
   function onIndex(status: IndexStatus): void {
     if (status.pending === indexPending) return;
     indexPending = status.pending;
-    if (query.trim() !== "" && destination === null && activeViewer === null) renderGallery();
+    if (query.trim() !== "" && destination === null && viewers.active() === null) renderGallery();
   }
   const unsubscribe = live.subscribe(onBump, onIndex);
 
@@ -1660,8 +1195,7 @@ root,
   // ---- view / theme ----
   function setView(next: View): void {
     view = next;
-    gridBtn.setAttribute("aria-pressed", String(next === "grid"));
-    listBtn.setAttribute("aria-pressed", String(next === "list"));
+    topbar.setView(next);
     renderGallery();
   }
 
@@ -1744,7 +1278,7 @@ root,
       if (searchInput.value !== q) searchInput.value = q;
       applyQuery(q);
       // After the arriving-keystroke navigation's blur; a no-op otherwise.
-      restoreSearchFocus();
+      topbar.restoreSearchFocus();
     },
 
     showDestination(key: string): void {
@@ -1902,10 +1436,8 @@ root,
       // Kills the debounce timer and orphans in-flight queries.
       search.reset();
       bin.destroy();
-      reader.destroy();
-      spdViewer.destroy();
-      txtViewer.destroy();
-      admin?.destroy();
+      viewers.destroy();
+      adminDest.destroy();
       accountPage?.destroy();
       // Aborts uploads and drops the document-level drag swallowers.
       uploadZone.destroy();
