@@ -1,81 +1,12 @@
-//! Freestanding WebAssembly entry points for the browser `.note` page renderer.
+//! Freestanding WASM entry points for the browser `.note` page renderer: SNPG
+//! payload in (`parsers/note/src/page_payload.zig`), RGBA8888 out. The
+//! container is never parsed here.
 //!
-//! This is the real decoder behind the frontend's `NoteRenderer` seam. It takes
-//! ONE page's bytes — the compact "SNPG" payload the server's Option-3 endpoint
-//! (`GET /note/{id}/page/{n}`) returns — and produces an RGBA8888 pixel buffer
-//! the browser wraps into an `ImageBitmap`. The container is never parsed here;
-//! all container knowledge lives server-side (see
-//! `parsers/note/src/page_payload.zig`, which also defines the payload format
-//! and its native producer).
-//!
-//! ## C-ABI (little-endian linear memory)
-//!
-//!   u8* alloc(usize len)          — allocate `len` bytes; JS copies the page
-//!                                   payload in. Returns 0 (null) on OOM.
-//!   void free(u8* ptr, usize len) — free a buffer from `alloc`.
-//!
-//!   i32  decode_page(u8* ptr, usize len)
-//!        Decode+composite the SNPG payload at [ptr, ptr+len) — the DEFAULT
-//!        (device-authored) composite: SNPG v2 records flagged `hidden` are
-//!        skipped, so the pixels match what the device shows. v1 payloads
-//!        (older client caches) still decode.
-//!        Returns 0 on success; a negative error code otherwise:
-//!          -1 bad/short/unsupported payload
-//!          -2 RLE decode failed (a layer's size did not match width*height)
-//!          -3 out of memory
-//!        On success the result is retained until the next decode call and
-//!        read via the getters below. The input buffer may be freed immediately.
-//!
-//!   i32  decode_layer(u8* ptr, usize len, u32 layer_index)
-//!        Decode ONE layer record (bottom-to-top record order, hidden ones
-//!        included — that is what they ship for) of the same payload into
-//!        RGBA where the transparent value (0xff) has alpha 0: the
-//!        stacked-canvas input for the layer panel. Same return codes, plus:
-//!          -4 layer_index at or past the payload's layer_count
-//!        Shares the result slot with decode_page: after EVERY call, re-read
-//!        result_ptr()/result_len() — any decode invalidates the previous
-//!        result's memory.
-//!
-//!   u8*  result_ptr()    — pointer to RGBA8888 pixels (row-major, w*h*4 bytes).
-//!   usize result_len()   — byte length of the pixel buffer (== w*h*4).
-//!   u32  result_width()  — image width in pixels.
-//!   u32  result_height() — image height in pixels.
-//!
-//!   u8*  template_hash_ptr() — pointer to the last `decode_page`'s image-
-//!        template asset HASH (UTF-8), or null when that page had no bit2 image
-//!        background. The browser turns it into `GET /note/{id}/template/{hash}`
-//!        and underlays the image. Reset (length 0) at the start of every
-//!        `decode_page`; copied into a static buffer, so it is independent of the
-//!        input payload's lifetime. `decode_layer` does not touch it.
-//!   usize template_hash_len() — byte length of that hash (0 = none).
-//!
-//!   i32  snpg_enumerate(u8* ptr, usize len)
-//!        Enumerate the SNPG v2 record heads of the payload at [ptr, ptr+len)
-//!        for the layers panel — NO RLE is decoded, and this is independent of
-//!        the `decode_page`/`decode_layer` result slot. Returns the record count
-//!        (1..5) on success, or -1 for anything the stacked panel cannot present
-//!        (v1 / foreign / truncated / unknown slot / over-claim / bad count /
-//!        trailing junk). On success the dims + per-record identity are read via
-//!        the getters below; any raster-image hash is copied into a static
-//!        buffer, so it survives after the input buffer is freed. State is reset
-//!        at the start of every call.
-//!   u32  snpg_width()  / u32 snpg_height() — the enumerated page's dims (0 none).
-//!   i32  snpg_record_slot(usize i)  — record i's wire slot id (0=main..4=bg), or
-//!        -1 out of range.
-//!   i32  snpg_record_flags(usize i) — record i's panel flag bits (bit1 excluded,
-//!        bit2 raster-image), or -1 out of range.
-//!   u8*  snpg_record_hash_ptr(usize i) / usize snpg_record_hash_len(usize i) —
-//!        record i's asset HASH (UTF-8) for a raster-image background, else
-//!        length 0. Valid until the next `snpg_enumerate`.
-//!
-//! `decode_page` pixels are opaque grayscale mapped to RGBA — black ink on a
-//! white page, committing to no light/dark theme. The JS caller applies the
-//! theme (e.g. invert the RGB channels for dark mode) before/while drawing.
-//! `decode_layer` pixels are the same mapping except transparent (alpha 0)
-//! where the layer has no ink.
-//!
-//! Imports the shared `supernote` module but references only `page_payload`, so
-//! the freestanding build pulls in no parser/test/debug code it does not need.
+//! Return codes: -1 bad payload, -2 RLE size mismatch, -3 OOM, -4 layer index
+//! out of range. `decode_page` and `decode_layer` share one result slot, so
+//! re-read `result_*` after every call. `snpg_enumerate` (record count or -1)
+//! has its own state. Hashes are copied into static buffers, so the input may
+//! be freed right after any call.
 
 const std = @import("std");
 const sn = @import("supernote");
@@ -84,37 +15,27 @@ const gpa = std.heap.wasm_allocator;
 
 var result: ?sn.page_payload.Rgba = null;
 
-/// The last `decode_page`'s image-template asset hash, COPIED here so it outlives
-/// the input payload (which JS may free immediately after decode). Read via
-/// `template_hash_ptr`/`template_hash_len`; reset to length 0 each `decode_page`.
-/// 256 bytes is far above any real asset hash (a 32-char `PAGESTYLEMD5`); a
-/// longer one is truncated rather than overrun — a truncated hash simply misses
-/// its template and degrades to ink-on-white, never a memory error.
+/// The last `decode_page`'s template hash, copied so it outlives the input. A
+/// hash past 256 bytes is truncated and simply misses its template.
 var tmpl_hash_buf: [256]u8 = undefined;
 var tmpl_hash_len: usize = 0;
 
-/// Allocate `len` bytes in wasm memory; returns null on OOM.
 export fn alloc(len: usize) ?[*]u8 {
     const buf = gpa.alloc(u8, len) catch return null;
     return buf.ptr;
 }
 
-/// Free a buffer previously returned by `alloc`.
 export fn free(ptr: [*]u8, len: usize) void {
     gpa.free(ptr[0..len]);
 }
 
-/// Decode+composite the SNPG page payload at [ptr, ptr+len) into RGBA (the
-/// default composite — hidden layers skipped). See the file header for the
-/// return-code contract.
+/// The default composite (hidden layers skipped).
 export fn decode_page(ptr: [*]const u8, len: usize) i32 {
     dropResult();
     tmpl_hash_len = 0; // reset before decode; stays 0 on any failure path
     const payload = ptr[0..len];
     const img = sn.page_payload.decodeRgba(gpa, payload) catch |err| return errCode(err);
     result = img;
-    // Extract the bit2 image-template hash (aliases `payload`) and COPY it into
-    // our static buffer, so it survives after JS frees the input buffer.
     if (sn.page_payload.backgroundImageHash(payload)) |hash| {
         const n = @min(hash.len, tmpl_hash_buf.len);
         @memcpy(tmpl_hash_buf[0..n], hash[0..n]);
@@ -123,9 +44,7 @@ export fn decode_page(ptr: [*]const u8, len: usize) i32 {
     return 0;
 }
 
-/// Decode ONE layer record of the payload into RGBA with transparent (0xff)
-/// pixels at alpha 0 — the stacked-canvas input. Same result slot as
-/// `decode_page`; re-read the result pointers after every call.
+/// One record into RGBA with 0xff at alpha 0, hidden records included.
 export fn decode_layer(ptr: [*]const u8, len: usize, layer_index: u32) i32 {
     dropResult();
     const img = sn.page_payload.decodeLayerRgba(gpa, ptr[0..len], layer_index) catch |err| return errCode(err);
@@ -149,7 +68,6 @@ fn errCode(err: anyerror) i32 {
     };
 }
 
-/// Pointer to the last decode's RGBA8888 pixels (4 bytes/pixel, row-major).
 export fn result_ptr() ?[*]u8 {
     return if (result) |r| r.pixels.ptr else null;
 }
@@ -163,8 +81,7 @@ export fn result_height() u32 {
     return if (result) |r| r.height else 0;
 }
 
-/// Pointer to the last `decode_page`'s image-template asset hash (UTF-8), or null
-/// when that page had no bit2 image background. Valid until the next decode.
+/// The last `decode_page`'s template hash (UTF-8), or null.
 export fn template_hash_ptr() ?[*]const u8 {
     return if (tmpl_hash_len > 0) &tmpl_hash_buf else null;
 }
@@ -172,17 +89,12 @@ export fn template_hash_len() usize {
     return tmpl_hash_len;
 }
 
-// ---------------------------------------------------------------------------
-// SNPG record enumeration for the layers panel. Independent of the decode
-// result slot: the browser enumerates once, then decodes records by index.
-// ---------------------------------------------------------------------------
+// ---- SNPG record enumeration for the layers panel ----
 
 const max_records = sn.page_payload.max_layers;
 
-/// The last `snpg_enumerate`'s result, flattened into plain arrays the C ABI can
-/// read one field at a time. Any raster-image hash is COPIED into `snpg_hash`,
-/// so it outlives the (potentially freed) input payload — the `data` slices
-/// `enumerateRecords` returns alias that input and must not escape.
+/// The last `snpg_enumerate`'s result as flat arrays. Hashes are copied: the
+/// `data` slices alias the input and must not escape.
 var snpg_count: usize = 0;
 var snpg_w: u32 = 0;
 var snpg_h: u32 = 0;
@@ -191,9 +103,7 @@ var snpg_flags: [max_records]u8 = undefined;
 var snpg_hash_len: [max_records]usize = undefined;
 var snpg_hash: [max_records][256]u8 = undefined;
 
-/// Enumerate the SNPG v2 record heads at [ptr, ptr+len). Returns the record
-/// count (1..5), or -1 for anything the panel cannot present. See the file
-/// header for the getter contract.
+/// Record count (1..5), or -1 for anything the panel cannot present.
 export fn snpg_enumerate(ptr: [*]const u8, len: usize) i32 {
     snpg_count = 0;
     snpg_w = 0;

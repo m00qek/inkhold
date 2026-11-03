@@ -1,32 +1,7 @@
-// ABI check for `sqlite-core.wasm` (`zig build wasm-sqlite-core-test`).
-//
-// The point is NOT that the module links. Three things are asserted that a
-// linking, export-complete shell would fail:
-//
-//   1. **THE BUILD FLAG.** `-DSQLITE_TEMP_STORE=3` is the most dangerous line in
-//      this artifact's flag set — the null VFS cannot open a file, so temp
-//      storage that fell back to a temp FILE would fail rather than run slowly.
-//      MEASURED while writing this: removing the flag changes NOTHING observable
-//      at any scale reachable from here (80,000 documents, an 80,000-row
-//      `ORDER BY rank`, hundreds of autocommitted inserts forcing level-0
-//      merges). So there is no behavioural test to write, and the module instead
-//      refuses to open an index it cannot vouch for. This file asserts the
-//      refusal — which is what turns a dropped flag into a red test rather than
-//      into a corrupt index in somebody's browser months later.
-//   2. **THE FUSION.** One artifact carries both ABIs (§5). The same instance
-//      parses the `.spd` fixture and answers a search, so
-//      a build that quietly dropped one half fails here.
-//   3. **THE RESTORE PATH.** Serialize, then rebuild in a FRESH instance through
-//      `idx_image_alloc`/`idx_deserialize` and ask the same questions. That path
-//      carries both ABI traps §6 records, and its first
-//      call into SQLite is `idx_image_alloc` — which is exactly where
-//      `OMIT_AUTOINIT` bites.
-//   4. **THE TYPO LADDER.** It moved out of the server
-//      (§6.1) and step 6 deletes the copy it came from, so
-//      what is asserted here is the only remaining description of how it
-//      behaves: the rungs, the best-tier-only rule, and above all that it is a
-//      FALLBACK — `idx_fuzzy` must answer a query that matched exactly the way
-//      `idx_query` does, and substitute nothing.
+// ABI check for `sqlite-core.wasm` (`zig build wasm-sqlite-core-test`): the
+// TEMP_STORE refusal (a dropped flag is otherwise unobservable), both ABIs in
+// one instance, the serialize/restore path through a fresh instance, and the
+// typo ladder (its only description since it left the server).
 //
 // Usage: node sqlite_core_abi.mjs <sqlite-core.wasm> <fixture.spd>
 
@@ -52,9 +27,8 @@ function equal(actual, expected, what) {
 const bytes = fs.readFileSync(wasmPath);
 const mod = await WebAssembly.compile(bytes);
 
-// Node's real WASI rather than ENOSYS stubs, for the same reason the PDF ABI
-// test uses it: the `OS_OTHER` build should never reach a syscall, and a real
-// WASI turns an accidental one into a wrong answer instead of a swallowed error.
+// Real WASI, so an accidental syscall from the OS_OTHER build is a wrong answer
+// rather than a swallowed error.
 async function freshInstance() {
   const wasi = new WASI({ version: "preview1", args: [], env: {} });
   const instance = await WebAssembly.instantiate(mod, wasi.getImportObject());
@@ -65,11 +39,8 @@ async function freshInstance() {
 let e = await freshInstance();
 
 /**
- * Copy a JS string into wasm memory as UTF-8. Returns [ptr, byteLength].
- *
- * One byte more than the text is always allocated, because the empty query is a
- * real case (the search box before anything is typed) and a zero-length
- * allocation has no address worth handing across the boundary.
+ * Copies a string into wasm memory as UTF-8; returns [ptr, byteLength]. One
+ * extra byte, since the empty query is real and needs an address.
  */
 function put(text) {
   const buf = Buffer.from(text, "utf8");
@@ -82,14 +53,12 @@ function drop([ptr, len]) {
   e.idx_free(ptr, len + 1);
 }
 
-/** The module's last error message, or "" if it set none. */
 function errorText() {
   const n = e.idx_errmsg_len();
   if (n === 0) return "";
   return Buffer.from(new Uint8Array(e.memory.buffer, e.idx_errmsg_ptr(), n)).toString("utf8");
 }
 
-/** Run `text` and return { total, hits } — hits capped at `limit`. */
 function query(text, limit = 10) {
   const buf = put(text);
   const total = e.idx_query(buf[0], buf[1], limit);
@@ -101,7 +70,6 @@ function query(text, limit = 10) {
   return { total, hits, expansion: expansionText() };
 }
 
-/** The same through `idx_fuzzy` — the exact pass plus the typo ladder. */
 function fuzzy(text, limit = 10) {
   const buf = put(text);
   const total = e.idx_fuzzy(buf[0], buf[1], limit);
@@ -114,11 +82,8 @@ function fuzzy(text, limit = 10) {
 }
 
 /**
- * What the ladder substituted, as `typed>matched` pairs joined by `,` — a shape
- * a failure message can be read out of directly. "" when nothing was.
- *
- * Read AFTER the call that produced it and copied out immediately: `memory` can
- * grow on any call and detach the view (the module header's lifetime rule).
+ * What the ladder substituted, as `typed>matched` pairs joined by `,`; "" when
+ * nothing. Copied out right away: `memory` can grow on any call.
  */
 function expansionText() {
   const n = e.idx_expansion_len();
@@ -131,10 +96,7 @@ function expansionText() {
     .join(",");
 }
 
-// ---- exports ----------------------------------------------------------------
-// Both ABIs, from one module. `spd_*` is the `.spd` viewer's and predates this
-// file; it is listed here because the whole point of the artifact is that the
-// two travel together.
+// ---- exports (both ABIs, one module) ----
 for (const name of [
   "idx_alloc", "idx_free", "idx_schema_version",
   "idx_open", "idx_close", "idx_begin", "idx_add", "idx_commit",
@@ -150,10 +112,8 @@ for (const name of [
 }
 if (failures > 0) process.exit(1);
 
-// ---- the build flag ---------------------------------------------------------
-// -100 is the module's "this artifact was built without -DSQLITE_TEMP_STORE=3".
-// Reported with its message, because a bare code here would send a reader to the
-// wrong place entirely — nothing is wrong at runtime, the binary is wrong.
+// ---- the build flag ----
+// -100: built without -DSQLITE_TEMP_STORE=3.
 const opened = e.idx_open();
 check(
   opened !== -100,
@@ -165,17 +125,14 @@ if (failures > 0) process.exit(1);
 
 check(e.idx_schema_version() >= 1, "the module reports a schema version for the stored image to carry");
 
-// ---- build ------------------------------------------------------------------
-// Portuguese with real diacritics on purpose: `remove_diacritics 2` is the half
-// of the tokenizer contract that a wrong `tokenize=` would silently change, and
-// document 1 and document 2 spell the same word differently.
+// ---- build ----
+// Real diacritics: documents 1 and 2 spell the same word differently.
 const CORPUS = [
   [11, "reunião de caligrafia às terças"],
   [12, "reuniao semanal do projeto"],
   [13, "caligrafia japonesa"],
   [14, "notas sobre o projeto de dados"],
-  // `test` and `set` in one vocabulary, purely so the ladder's ranking rule has
-  // the case it was written for: `tset` is one edit from BOTH.
+  // `tset` is one edit from both `test` and `set`.
   [15, "test do set"],
 ];
 
@@ -187,8 +144,7 @@ for (const [id, body] of CORPUS) {
 }
 equal(e.idx_commit(), 0, "the build transaction commits");
 
-// A repeated document id is a collision between two manifests, so it must be
-// refused rather than silently replacing a document the caller still believes in.
+// A repeated document id must be refused, not overwrite.
 {
   const buf = put("outro documento");
   check(e.idx_add(11, buf[0], buf[1]) !== 0, "a repeated document id is refused, not overwritten");
@@ -196,10 +152,8 @@ equal(e.idx_commit(), 0, "the build transaction commits");
   drop(buf);
 }
 
-// ---- query ------------------------------------------------------------------
-// THE DIACRITIC ASSERTION, and it is the one that pins `tokenize=` to the
-// server's: "reunião" and "reuniao" are one term, so both documents come back
-// however the query is spelt.
+// ---- query ----
+// "reunião" and "reuniao" are one term: pins `tokenize=` to the server's.
 {
   const a = query("reunião ");
   const b = query("REUNIAO ");
@@ -208,32 +162,24 @@ equal(e.idx_commit(), 0, "the build transaction commits");
   equal(a.hits.slice().sort().join(","), "11,12", "...and they are the right two documents");
 }
 
-// THE PREFIX RULE, asserted from BOTH sides. A prefix on the last token is what
-// makes search answer while the user is still typing; a trailing space is the
-// user saying the word is finished, and prefix-matching anyway would leave
-// "cali " matching "caligrafia" for ever.
+// A prefix on the last token, but not after a trailing space.
 equal(query("cali").total, 2, "an unfinished last word matches as a prefix");
 equal(query("cali ").total, 0, "...and a trailing space turns that off");
 equal(query("caligrafia ").total, 2, "a completed word still matches exactly");
 
-// Multiple tokens are ANDed: "projeto" is in 12 and 14, "reuni*" only in 11/12.
 {
   const r = query("projeto reuni");
   equal(r.total, 1, "two tokens narrow rather than widen");
   equal(r.hits[0], 12, "...to the document that has both");
 }
 
-// THE REASON THE FOLD LIVES IN WASM. A JS-side escaper would have to decide what
-// FTS5 makes of these; the tokenizer already knows, and the answer is "no terms".
-// Each of these was a plausible syntax error on a keystroke.
+// These fold to no terms; each would be a plausible FTS5 syntax error.
 for (const junk of ["", "   ", "-", "\"", "\"\"", "...", "( )", "*"]) {
   equal(query(junk).total, 0, `\`${JSON.stringify(junk)}\` is no results rather than an error`);
 }
-// ...and a quote mixed with real text must still find the real text.
 equal(query('"caligrafia" ').total, 2, "a quoted word searches for the word");
 
-// The total is EXACT and independent of `limit` — §9.5 retires the server's
-// "N+" floors precisely because a client holding the index can say the number.
+// The total is exact and independent of `limit`.
 {
   const r = query("caligrafia ", 1);
   equal(r.total, 2, "the total counts every match, not just the ones returned");
@@ -242,14 +188,9 @@ equal(query('"caligrafia" ').total, 2, "a quoted word searches for the word");
   equal(e.idx_hit(99), -1, "an out-of-range hit index is -1");
 }
 
-// ---- the typo ladder --------------------------------------------------------
-// `idx_fuzzy` is `idx_query` with a FALLBACK attached, and every assertion below
-// is about that word. The ladder moved here from the server
-// (§6.1), and after step 6 there is no other copy of it.
+// ---- the typo ladder ----
 
-// IT IS A FALLBACK, NOT A WIDENING, and the module enforces that rather than
-// trusting the caller: a query that matched anything is answered exactly, and
-// says so by leaving the expansion empty.
+// A query that matched is answered exactly, with an empty expansion.
 {
   const r = fuzzy("caligrafia ");
   equal(r.total, 2, "a query that matches is answered by the exact pass");
@@ -258,18 +199,14 @@ equal(query('"caligrafia" ').total, 2, "a quoted word searches for the word");
   equal(fuzzy("reuniao ").expansion, "", "...and reports no substitution");
 }
 
-// ...and `idx_query` itself is untouched. It NEVER expands, whatever it finds —
-// which is what lets the shadow harness go on comparing exact answers with a
-// server that no longer exists.
+// `idx_query` never expands.
 {
   const r = query("reunaio ");
   equal(r.total, 0, "`idx_query` alone still answers a typo with nothing");
   equal(r.expansion, "", "...and sets no expansion");
 }
 
-// THE TRANSPOSITION, which is the case plain Levenshtein misses: swapping two
-// adjacent characters costs ONE edit here, so "reunaio" is inside a 7-character
-// token's budget of 1 and reaches "reuniao".
+// A swap is one edit, so "reunaio" reaches "reuniao".
 {
   const r = fuzzy("reunaio ");
   equal(r.total, 2, "a transposed query falls back onto the real word");
@@ -277,10 +214,7 @@ equal(query('"caligrafia" ').total, 2, "a quoted word searches for the word");
   equal(r.hits.slice().sort().join(","), "11,12", "...finding the same two documents");
 }
 
-// THE RUNGS, asserted from both sides of the ≤3 boundary. "das" is one deletion
-// from "as" and gets NOTHING, because at three characters one edit is a
-// different word rather than a typo; "nota" is one insertion from "notas" and is
-// corrected. The ladder MUST scale with length or short tokens match anything.
+// The ≤3 rung: "das" gets nothing, "nota" reaches "notas".
 {
   const short = fuzzy("das ");
   equal(short.total, 0, "a 3-character token gets no expansion");
@@ -290,9 +224,7 @@ equal(query('"caligrafia" ').total, 2, "a quoted word searches for the word");
   equal(long.expansion, "nota>notas", "...to the vocabulary term one edit away");
 }
 
-// ONLY THE BEST-RANKED TIER IS OFFERED. `tset` is one edit from `test` (a swap,
-// delta 0) and one edit from `set` (a deletion, delta 1). Offering both would let
-// bm25 score them alike, which is how `set` used to win; the ranking drops it.
+// Only the best tier: `tset` gets `test` (swap, delta 0), not `set` (delta 1).
 {
   const r = fuzzy("tset ");
   equal(r.expansion, "tset>test", "the closest reading wins outright");
@@ -300,8 +232,7 @@ equal(query('"caligrafia" ').total, 2, "a quoted word searches for the word");
   equal(r.hits[0], 15, "...which is the one holding `test`");
 }
 
-// THE AND SURVIVES THE OR-GROUP. FTS5 needs the operator written out once a
-// token becomes a parenthesised group, so a multi-token query must still NARROW.
+// A multi-token query still narrows (explicit AND around the OR-group).
 {
   const r = fuzzy("projeto reunaio ");
   equal(r.total, 1, "an expanded token still ANDs with the token beside it");
@@ -309,30 +240,22 @@ equal(query('"caligrafia" ').total, 2, "a quoted word searches for the word");
   equal(r.expansion, "reunaio>reuniao", "...and only the misspelt token expands");
 }
 
-// MID-TYPING. The candidate is truncated to what has been typed so far, or
-// "calugraf" would be three edits from "caligrafia" and out of reach; against
-// "caligrafia"[0..8] it is one.
+// Mid-typing, "calugraf" is compared with "caligrafia"[0..8]: one edit.
 {
   const r = fuzzy("calugraf");
   equal(r.total, 2, "a typo inside a half-typed word is still corrected");
   equal(r.expansion, "calugraf>caligrafia", "...to the term it was truncated against");
 }
 
-// Nothing to expand is not an error, and must not re-run the identical query.
 for (const junk of ["", "   ", "-", "..."]) {
   equal(fuzzy(junk).total, 0, `fuzzy ${JSON.stringify(junk)} is no results rather than an error`);
   equal(fuzzy(junk).expansion, "", `...and substitutes nothing`);
 }
-// A word with no near neighbour at all: the vocabulary is scanned and offers
-// nothing, which is a plain zero and not a widened one.
 equal(fuzzy("xilofone ").total, 0, "a word the vocabulary cannot approach stays unmatched");
 equal(fuzzy("xilofone ").expansion, "", "...and reports no substitution");
 
-// THE LONG-LIVED-INSTANCE DISCIPLINE. The query
-// fold is a contentless FTS5 table reset with 'delete-all' rather than DELETE,
-// because FTS5 records a deletion as a new entry in a new segment — so a worker
-// that stayed open would otherwise get slower and, worse, keep folding against
-// the residue. 200 queries, and the last must answer like the first.
+// The fold table is reset with 'delete-all' (DELETE leaves FTS5 tombstones),
+// so the 200th query answers like the first.
 {
   let drifted = 0;
   for (let i = 0; i < 200; i++) {
@@ -341,10 +264,8 @@ equal(fuzzy("xilofone ").expansion, "", "...and reports no substitution");
   equal(drifted, 0, "the query fold does not accumulate across 200 searches");
 }
 
-// ---- the .spd half of the SAME instance ------------------------------------
-// The fusion, asserted rather than assumed: one SQLite, two features, and an
-// open search index does not disturb the viewer. Values are the ones locked into
-// `parsers/spd/tests/spd_test.zig`.
+// ---- the .spd half of the same instance ----
+// Values match `parsers/spd/tests/spd_test.zig`.
 {
   const spd = fs.readFileSync(spdPath);
   const ptr = e.spd_alloc(spd.length);
@@ -366,48 +287,37 @@ equal(fuzzy("xilofone ").expansion, "", "...and reports no substitution");
   e.spd_close();
 }
 
-// ...and the search index survived the `.spd` traffic beside it.
 equal(query("reunião ").total, 2, "the search index still answers after a .spd parse");
 
-// ---- serialize / restore ----------------------------------------------------
-// The second visit. `idx_serialize` hands over bytes an IndexedDB record would
-// hold; a FRESH instance restores them and must be warm immediately.
+// ---- serialize / restore ----
 const imageLen = e.idx_serialize();
 check(imageLen > 0, "the index serializes to an image", `got ${imageLen} (${errorText()})`);
 const image = Buffer.from(new Uint8Array(e.memory.buffer, e.idx_image_ptr(), imageLen));
 e.idx_close();
 
-// A closed module answers nothing rather than dereferencing a stale handle.
-// -21 is SQLITE_MISUSE: no database, as distinct from a statement that failed.
+// -21 is SQLITE_MISUSE: no open database.
 equal(query("reunião ").total, -21, "a query with no open index is refused");
 equal(fuzzy("reunaio ").total, -21, "...and so is a fuzzy one, with the same code");
 
 {
   e = await freshInstance();
-  // TRAP 1 and TRAP 2 in one call (§6). The target must
-  // come from SQLite's own heap, or FREEONCLOSE frees a Zig-allocated pointer;
-  // and on a fresh instance `sqlite3_malloc64` traps outright until
-  // `sqlite3_initialize` has run, because OMIT_AUTOINIT leaves the memory
-  // subsystem's vtable null. THIS is that first call — nothing else has run.
+  // Both traps: the target must be on SQLite's heap, and this is the fresh
+  // instance's first call, where OMIT_AUTOINIT would trap `sqlite3_malloc64`.
   const dst = e.idx_image_alloc(image.length);
   check(dst !== 0, "idx_image_alloc works as the FIRST call into a fresh instance");
   new Uint8Array(e.memory.buffer, dst, image.length).set(image);
   equal(e.idx_deserialize(dst, image.length), 0, "the image deserializes");
 
-  // The restored index must be fully warm on its first query — the bench measured
-  // 0.4 ms and the whole droppability invariant (§4.1) rests on it.
   equal(query("reunião ").total, 2, "the restored index answers the accented query");
   equal(query("cali").total, 2, "...and still expands a prefix");
   equal(query("projeto reuni").hits[0], 12, "...and still ANDs two tokens");
 
-  // Restoring does not have to re-create the fold table by hand: the module's
-  // `IF NOT EXISTS` DDL runs per query, so a deserialized connection folds too.
+  // The per-query `IF NOT EXISTS` DDL recreates the fold table on a new
+  // connection.
   equal(query("-").total, 0, "...and still folds punctuation to nothing");
 
-  // The ladder's candidate pool is a temp `fts5vocab` table, and temp tables
-  // belong to a CONNECTION — `idx_deserialize` opens a new one, so a restored
-  // index has none until the per-call DDL makes it. This is the assertion that
-  // catches a pool created once at open time instead.
+  // Likewise the temp `fts5vocab` pool, which a pool created once at open
+  // would miss.
   {
     const r = fuzzy("reunaio ");
     equal(r.total, 2, "the restored index still corrects a typo");
@@ -415,7 +325,6 @@ equal(fuzzy("reunaio ").total, -21, "...and so is a fuzzy one, with the same cod
     equal(fuzzy("caligrafia ").expansion, "", "...and still leaves a matching query alone");
   }
 
-  // The image round-trips: serializing the restored index gives the same bytes.
   const again = e.idx_serialize();
   equal(again, imageLen, "the restored index serializes back to the same length");
   e.idx_close();

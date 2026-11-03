@@ -1,21 +1,8 @@
 /*
- * Null SQLite VFS for the WebAssembly `.spd` decoder.
- *
- * The wasm build compiles the vendored SQLite amalgamation with
- * `SQLITE_OS_OTHER=1`, which removes the built-in unix/win VFS entirely — the
- * single largest chunk of the OS layer, and the part that would drag in file
- * I/O, byte-range locking, mmap and the process randomness/time syscalls the
- * browser has no business exposing. `sqlite3_initialize` still requires a
- * *default* VFS to exist, so this file supplies a minimal one and registers it
- * from the `sqlite3_os_init` hook SQLITE_OS_OTHER hands the application.
- *
- * The `.spd` read path never touches a file: it opens `:memory:` and attaches
- * an image via `sqlite3_deserialize(...READONLY)`. So every file method here is
- * a stub — none is reachable through that path. Only the process-scoped hooks
- * (randomness, time, sleep) could in principle be called; they are trivial and
- * deterministic. A read-only SELECT over the deserialized image needs neither
- * real randomness nor a real clock, so stubbing them changes nothing observable
- * (verified: the ABI test decodes the real fixture identically to native).
+ * Null SQLite VFS for the WebAssembly `.spd` decoder. `SQLITE_OS_OTHER=1`
+ * removes the built-in OS layer, but `sqlite3_initialize` still needs a
+ * default VFS. The read path only deserializes into `:memory:`, so every file
+ * method is an unreachable stub and randomness/time are fixed.
  */
 #include "sqlite3.h"
 #include <string.h>
@@ -42,8 +29,7 @@ static int nullFullPathname(sqlite3_vfs *v, const char *n, int sz, char *out) {
     out[l] = 0;
     return SQLITE_OK;
 }
-/* Read-only reinterpretation of a memory image needs no entropy; a fixed seed
-   is correct and reproducible. */
+/* A fixed seed: reading a memory image needs no entropy. */
 static int nullRandomness(sqlite3_vfs *v, int n, char *out) {
     (void)v;
     memset(out, 0, (size_t)n);
@@ -53,7 +39,6 @@ static int nullSleep(sqlite3_vfs *v, int micro) {
     (void)v; (void)micro;
     return 0;
 }
-/* Unix epoch expressed as a Julian day number — a fixed, valid clock. */
 static int nullCurrentTime(sqlite3_vfs *v, double *t) {
     (void)v;
     *t = 2440587.5;

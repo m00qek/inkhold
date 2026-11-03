@@ -1,91 +1,21 @@
 //! WASI-reactor entry points for the browser PDF viewer: a thin Zig module over
-//! MuPDF 1.28.1 (pinned in `build.zig.zon`, built by `zig build
-//! wasm-pdf-decode`), rendering client side so the 50 MB server budget never
-//! sees a rasteriser.
+//! MuPDF (pinned in `build.zig.zon`). Every MuPDF call lives in `pdf_shim.c`,
+//! because `fz_try` is `setjmp`/`longjmp` and a `longjmp` past a Zig frame
+//! would skip its `defer`s. `tests/pdf_decode_abi.mjs` pins the export shapes.
 //!
-//! Every MuPDF call lives in `pdf_shim.c`, because `fz_try`/`fz_catch` is
-//! `setjmp`/`longjmp` and a `longjmp` past a Zig frame would skip its `defer`s.
-//! This file owns the ABI, the handle table and nothing else.
+//! Every `i64` export returns `(ptr << 32) | len`, negative on error (so `ptr`
+//! must stay under 2 GiB), valid until the next call of the same kind. `-1` bad
+//! arguments or dead handle, `-2` shim refused (`ink_error_ptr` says why), `-3`
+//! not packable; `ink_open` adds `-2` no context, `-3` unopenable, `-4` no slot.
+//! `ink_open` takes ownership of its buffer on every path. `[]` from the JSON
+//! exports is success ("nothing here"), not failure. Coordinates are points,
+//! top-left origin, y down. `ink_annotate_page` mutates the open document and
+//! `ink_export_incremental` returns only the delta to append to the original.
 //!
-//! ## C-ABI (little-endian; pointers are byte offsets into exported `memory`)
-//!
-//! `webapp/wasm/tests/pdf_decode_abi.mjs` pins the shape of every export; what
-//! follows is what that test cannot say.
-//!
-//! **Packed returns.** Every `i64` export answers `(ptr << 32) | len`. NEGATIVE
-//! is the error channel, so the pointer must stay under 2 GiB for the packed
-//! value to read as positive. The buffer is valid only until the next call of
-//! the same kind, so JS copies it out.
-//!
-//! **Error codes.** `-1` bad arguments or a dead handle, `-2` the shim refused
-//! (`ink_error_ptr` says why), `-3` the buffer cannot be described by the packed
-//! return. `ink_open` adds `-2` MuPDF context unavailable, `-3` not a document
-//! we can open, `-4` no free handle slot; `ink_render` uses `-3`/`-4` for a
-//! pixmap that is not the tightly-packed RGBA the ABI promises and `-5` for a
-//! size the packed return cannot carry.
-//!
-//! **Ownership.** `ink_open` takes its buffer on EVERY path, success or failure:
-//! JS must not free it or read it afterwards. `ink_free` is only for a buffer
-//! that never reached `ink_open`.
-//!
-//! **Coordinates.** Every rect and point in the JSON is in the space
-//! `ink_page_size` reports: top-left origin, y down, points (1/72").
-//!
-//! **`[]` is a SUCCESS** — from `ink_page_links`, `ink_page_words` and
-//! `ink_load_outline` alike. "Nothing here" and "we could not read this" are
-//! different answers and the caller acts differently on them.
-//!
-//! Payloads: links are `{x,y,w,h,page,uri}`, where `page` is the resolved
-//! 0-based target of an INTERNAL link and -1 for an external one, and a uri
-//! whose scheme is not http/https/mailto is DROPPED, never described (see
-//! `pdf_shim.c`). Words are `{t,x,y,w,h}`. The outline is a FLAT array in
-//! document order (pre-order, depth first) of `{d,t,p}` — depth (0 at the top),
-//! title, 0-BASED destination page; `p` IS OMITTED when the destination resolves
-//! to no page, and the entry is still listed.
-//!
-//! Render pixels are straight (NOT premultiplied) RGBA8888, row-major, tightly
-//! packed at `ink_render_width() * 4` bytes per row; read the dimensions AFTER
-//! the `ink_render` that produced the buffer.
-//!
-//! **The two export routes.** `ink_export_page` grafts one page whole into a
-//! fresh document — text stays selectable, vectors stay vectors, page size
-//! unchanged. `ink_annotate_page` + `ink_export_incremental` handles the whole
-//! document instead: annotate each written-on page IN PLACE, then write once.
-//! That route MUTATES the open document — every later render of an annotated
-//! page shows the ink, and a second annotate draws it twice — and returns **the
-//! delta only**, the bytes that belong AFTER the original file, which the caller
-//! concatenates (`new Blob([original, delta])`). Not a PDF on its own.
-//!
-//! Both take `alpha`, `w*h` coverage bytes with 255 = full ink, placed by the
-//! matrix `a..f` mapping the alpha image's OWN PIXEL SPACE onto the page;
-//! covering the page is `w_pt/w, 0, 0, h_pt/h, 0, 0`.
-//!
-//! ## The one IMPORT
-//!
-//!   i32 ink.host_read(i64 off, u8* dst, i32 len) — fill `dst` with `len` bytes
-//!        from `off`; return the count written, or negative to fail the read.
-//!        Declared in `pdf_shim.c`, and REQUIRED AT INSTANTIATION even by a
-//!        caller that only uses `ink_open` — a declared import the embedder
-//!        omits is a link error.
-//!
-//! ## Suspension
-//!
-//! Every document call can suspend, because the embedder may wrap `host_read`
-//! in `WebAssembly.Suspending`: on the streamed path, loading a page, resolving
-//! a destination or building structured text all pull through it. So every such
-//! export must be in the JS side's JSPI promising list — a promising import
-//! under a non-promising export is a trap, not a slow path. Nothing in Zig sits
-//! on that stack; the shim owns the `fz_try`.
-//!
-//! ## Handles, not pointers
-//!
-//! `ink_open` returns a small integer into a fixed table, the same posture
-//! `spd_decode.zig` takes: a handle JS held across a `ink_close` is a rejected
-//! integer, where a raw `fz_document*` would be a wild pointer into a heap that
-//! has since been reused.
-//!
-//! `memory` can grow on any `ink_alloc`/`ink_open`/`ink_render` call, so JS must
-//! re-read every pointer AFTER the call that produced it.
+//! The one import, `ink.host_read(off, dst, len)`, is required at instantiation.
+//! The embedder may wrap it in `WebAssembly.Suspending`, so every document call
+//! must be in JS's JSPI promising list. `memory` can grow on
+//! `ink_alloc`/`ink_open`/`ink_render`; re-read pointers after each call.
 
 const std = @import("std");
 
@@ -143,26 +73,17 @@ extern fn ink_shim_drop_document(doc: *Document) void;
 extern fn ink_shim_shrink_store() void;
 extern fn ink_shim_error() [*:0]const u8;
 
-// libc's allocator, not `std.heap.wasm_allocator`: the input buffer is handed
-// straight to MuPDF (`fz_new_buffer_from_data`), which frees it through its own
-// default allocator — and that is `free`. Two allocators over one buffer is how
-// you get a heap corruption that only shows up on the third document opened.
+// libc's allocator: MuPDF frees the input buffer (`fz_new_buffer_from_data`)
+// through `free`, so it must come from `malloc`.
 extern fn malloc(len: usize) ?*anyopaque;
 extern fn free(ptr: ?*anyopaque) void;
 
-/// Eight is generous for a viewer that shows one document at a time and keeps
-/// at most a couple around for a page cache; a FIXED array also means
-/// `ink_open` cannot be turned into an unbounded allocator by a caller that
-/// forgets to close.
+/// A fixed table, so a caller that forgets to close cannot grow it unboundedly.
 const max_documents = 8;
 var documents: [max_documents]?*Document = @splat(null);
 
-/// One live buffer per kind, module-scoped rather than per-document: a viewer
-/// paints and exports one page at a time, and one resident pixmap is the memory
-/// ceiling we want. The four JSON/export slots are SEPARATE rather than one
-/// shared slot because their lifetimes overlap — find asks for a page's words
-/// while the outline panel is open and the reader follows that page's links,
-/// and a shared slot would free one out from under another.
+/// One live buffer per kind (one resident pixmap is the memory ceiling). The
+/// JSON/export slots are separate because their lifetimes overlap.
 var last_pixmap: ?*Pixmap = null;
 var last_width: i32 = 0;
 var last_height: i32 = 0;
@@ -171,21 +92,20 @@ var last_links: ?*Buffer = null;
 var last_words: ?*Buffer = null;
 var last_outline: ?*Buffer = null;
 
-// ---- Buffers ----
+// ---- buffers ----
 
 export fn ink_alloc(len: u32) ?*anyopaque {
     if (len == 0) return null;
     return malloc(len);
 }
 
-/// `len` is accepted for symmetry with the note/spd modules' ABI and is unused
-/// (libc tracks the size).
+/// `len` is unused (libc tracks the size), kept for ABI symmetry.
 export fn ink_free(ptr: ?*anyopaque, len: u32) void {
     _ = len;
     free(ptr);
 }
 
-// ---- Document ----
+// ---- document ----
 
 export fn ink_open(ptr: ?*anyopaque, len: u32) i32 {
     if (ptr == null or len == 0) {
@@ -205,9 +125,7 @@ export fn ink_open(ptr: ?*anyopaque, len: u32) i32 {
     return @intCast(slot + 1);
 }
 
-/// `total_len` is the document's byte length, which the caller already knows
-/// (the file listing carries it), so nothing has to probe for it. Nothing is
-/// consumed on failure here — there is no buffer to own.
+/// `total_len` is known from the file listing. Consumes nothing on failure.
 export fn ink_open_stream(total_len: i64) i32 {
     if (total_len <= 0) return -1;
     if (ink_shim_context() == null) return -2;
@@ -224,8 +142,8 @@ fn freeSlot() ?usize {
     return null;
 }
 
-/// Null for 0, negatives, out-of-range and already-closed handles alike — a
-/// stale handle is an integer, never a pointer.
+/// Null for any invalid or closed handle: a stale handle is an integer, never
+/// a pointer.
 fn lookup(handle: i32) ?*Document {
     if (handle < 1 or handle > max_documents) return null;
     return documents[@intCast(handle - 1)];
@@ -242,9 +160,7 @@ export fn ink_page_size(handle: i32, page: i32, w: *f32, h: *f32) i32 {
     return ink_shim_page_size(doc, page, w, h);
 }
 
-/// The links on `page`, as UTF-8 JSON. `pdf_shim.c` builds the payload and
-/// states the two coordinate traps it exists to close and the scheme allowlist
-/// it enforces.
+/// The links on `page` as UTF-8 JSON; see `pdf_shim.c`.
 export fn ink_page_links(handle: i32, page: i32) i64 {
     const doc = lookup(handle) orelse return -1;
     if (page < 0) return -1;
@@ -261,13 +177,8 @@ export fn ink_links_free() void {
     }
 }
 
-/// The words on `page` and where they sit, as UTF-8 JSON.
-///
-/// THE MODULE IS A LOCATOR, NOT A MATCHER. No needle crosses this boundary: the
-/// server decided which pages matched and named the folded terms it counted, and
-/// the client compares those against these words with the SAME fold the `.note`
-/// and `.txt` find controllers use. `pdf_shim.c` states why that split is load
-/// bearing rather than tidy.
+/// The words on `page` as UTF-8 JSON. A locator, not a matcher: the client
+/// folds and compares terms itself.
 export fn ink_page_words(handle: i32, page: i32) i64 {
     const doc = lookup(handle) orelse return -1;
     if (page < 0) return -1;
@@ -284,9 +195,7 @@ export fn ink_words_free() void {
     }
 }
 
-/// The document's OUTLINE — its table of contents — as UTF-8 JSON. The nesting
-/// is carried by `d` rather than by shape; `pdf_shim.c` says why a tree would
-/// cost both sides more to say the same thing.
+/// The outline as a flat UTF-8 JSON array, depth in `d`.
 export fn ink_load_outline(handle: i32) i64 {
     const doc = lookup(handle) orelse return -1;
     ink_outline_free();
@@ -309,35 +218,29 @@ export fn ink_close(handle: i32) void {
     const doc = documents[slot] orelse return;
     documents[slot] = null;
     ink_shim_drop_document(doc);
-    // Nothing is left holding the store's contents once the last document goes,
-    // and a viewer that closed a 400 MB book should not keep its decoded images
-    // resident for the rest of the tab's life.
+    // Release the store once the last document goes, so a closed book's decoded
+    // images don't stay resident.
     for (documents) |d| {
         if (d != null) return;
     }
     dropLastRender();
     ink_shim_shrink_store();
-    // NOT `ink_export_free()`. An exported PDF is a finished artefact that owes
-    // the document nothing, and the natural call order is export, close, then
-    // hand the bytes to the UI — freeing here would pull the buffer out from
-    // under that. It is bounded anyway: one buffer, replaced by the next export.
+    // Not `ink_export_free()`: the natural order is export, close, then hand the
+    // bytes to the UI.
 }
 
-// ---- Rendering ----
+// ---- rendering ----
 
 export fn ink_render(handle: i32, page: i32, scale: f32) i64 {
     const doc = lookup(handle) orelse return -1;
     if (page < 0 or !(scale > 0) or !std.math.isFinite(scale)) return -1;
 
-    // Drop the previous render FIRST: at browser zoom levels a single page is
-    // tens of megabytes, and holding two while the new one rasterises is the
-    // difference between a re-render and an out-of-memory tab.
+    // Drop the previous render first: two zoomed pages can exhaust the tab.
     dropLastRender();
 
     const pix = ink_shim_render(doc, page, scale) orelse return -2;
     if (ink_shim_pixmap_components(pix) != 4) {
-        // The shim always asks for RGBA; a different component count means the
-        // build changed under us. Refuse rather than hand JS a mislabelled buffer.
+        // Not RGBA means the build changed under us; refuse.
         ink_shim_drop_pixmap(pix);
         return -3;
     }
@@ -347,14 +250,11 @@ export fn ink_render(handle: i32, page: i32, scale: f32) i64 {
         ink_shim_drop_pixmap(pix);
         return -4;
     }
-    // MuPDF's `fz_new_pixmap_with_bbox` allocates exactly `w * n` per row, so
-    // this holds — but it is a promise JS indexes on, so check rather than assume.
+    // JS indexes on the stride, so check it.
     if (ink_shim_pixmap_stride(pix) != w * 4) {
         ink_shim_drop_pixmap(pix);
         return -4;
     }
-    // A page can be scaled past what a u32 byte count can address; catch it here
-    // rather than truncating the length JS reads.
     const pixels = std.math.mul(u64, @intCast(w), @intCast(h)) catch {
         ink_shim_drop_pixmap(pix);
         return -5;
@@ -364,8 +264,7 @@ export fn ink_render(handle: i32, page: i32, scale: f32) i64 {
         return -5;
     };
     const ptr: u64 = @intFromPtr(ink_shim_pixmap_samples(pix));
-    // Checked, not assumed, so a heap over 2 GiB fails as `-5` rather than as a
-    // packed value JS reads as an error code.
+    // A heap over 2 GiB fails as `-5`, not as a negative packed value.
     if (len > std.math.maxInt(u32) or ptr > std.math.maxInt(i32)) {
         ink_shim_drop_pixmap(pix);
         return -5;
@@ -386,28 +285,21 @@ export fn ink_render_height() i32 {
     return last_height;
 }
 
-// ---- Export ----
+// ---- export ----
 
-/// Shared by the two export routes, which take exactly the same overlay and
-/// place it exactly the same way.
 fn inkArgsOk(page: i32, w: u32, h: u32, a: f32, b: f32, c: f32, d: f32, e: f32, f: f32) bool {
     if (page < 0 or w == 0 or h == 0) return false;
     if (w > std.math.maxInt(c_int) or h > std.math.maxInt(c_int)) return false;
-    // `w * h` is the length of a buffer JS already allocated, so it fits — but
-    // the shim would multiply it out inside an `fz_try`, and an overflow there
-    // is a wildly undersized allocation followed by a read off the end of the
-    // heap rather than an exception. Refuse it here instead.
+    // The shim multiplies `w * h` inside `fz_try`, where overflow would be an
+    // undersized allocation rather than an exception.
     _ = std.math.mul(u32, w, h) catch return false;
     for ([_]f32{ a, b, c, d, e, f }) |v| {
-        // A NaN or an infinity reaches the content stream as the literal "nan",
-        // which makes the page unparseable to every reader — a silently broken
-        // export, which is worse than a refused one.
+        // A NaN reaches the content stream as "nan" and breaks the page.
         if (!std.math.isFinite(v)) return false;
     }
     return true;
 }
 
-/// Whatever `slot` held is the caller's to have released first.
 fn holdBuffer(slot: *?*Buffer, buf: *Buffer) i64 {
     const written = ink_shim_buffer_len(buf);
     const data = ink_shim_buffer_data(buf);
@@ -417,7 +309,6 @@ fn holdBuffer(slot: *?*Buffer, buf: *Buffer) i64 {
     }
     const len: u64 = @intCast(written);
     const ptr: u64 = @intFromPtr(data.?);
-    // Checked, not assumed: see `ink_render`.
     if (ptr > std.math.maxInt(i32)) {
         ink_shim_drop_buffer(buf);
         return -3;
@@ -426,10 +317,8 @@ fn holdBuffer(slot: *?*Buffer, buf: *Buffer) i64 {
     return @intCast((ptr << 32) | len);
 }
 
-/// Export one page, structure intact, with `alpha` inked over it. `pdf_shim.c`
-/// explains the PDF-level choices, including the one thing that does NOT
-/// survive the graft (/Annots). Rotation, a /CropBox offset and an off-origin
-/// /MediaBox are all handled on the far side.
+/// Exports one page with `alpha` inked over it, grafted into a new document
+/// (see `pdf_shim.c`; /Annots do not survive the graft).
 export fn ink_export_page(
     handle: i32,
     page: i32,
@@ -465,17 +354,9 @@ export fn ink_export_page(
     return holdBuffer(&last_export, buf);
 }
 
-/// Draw `alpha` onto `page` of the OPEN document, in place — the first half of
-/// the whole-document export.
-///
-/// WHY THIS EXISTS BESIDE `ink_export_page`. Grafting every page would lose the
-/// `/Annots` of every page — the links and highlights the original carried —
-/// because `pdf_graft_page` does not copy them. So the whole-document route does
-/// not graft at all: it annotates in place and writes an INCREMENTAL UPDATE,
-/// which keeps the original's bytes untouched. `pdf_shim.c` states the three
-/// things MuPDF will not guard on that path and which of them are refused here.
-///
-/// THERE IS NO UNDO: a second annotate of the same page draws the ink twice.
+/// Draws `alpha` onto `page` of the open document in place, for the
+/// whole-document incremental export that keeps every page's /Annots. No undo:
+/// annotating twice draws twice.
 export fn ink_annotate_page(
     handle: i32,
     page: i32,
@@ -498,15 +379,8 @@ export fn ink_annotate_page(
     return 0;
 }
 
-/// THE DELTA ONLY, not a PDF on its own. `original || delta` is, and building it
-/// that way is the whole memory argument: the browser concatenates two blobs,
-/// which are disk-backed, so a 76 MB document is exported without any of it
-/// entering a JS heap or this one.
-///
-/// THIS ONE READS THE WHOLE ORIGINAL: MuPDF's incremental write begins by
-/// copying the file it is appending to, which the shim sinks byte for byte. On
-/// the streamed path that is `ink.host_read` over the entire document, which is
-/// why the worker points it at a local copy for the duration.
+/// The incremental delta only; the browser concatenates `original || delta` as
+/// disk-backed blobs. Reads the whole original via `host_read`.
 export fn ink_export_incremental(handle: i32) i64 {
     const doc = lookup(handle) orelse return -1;
     ink_export_free();
@@ -522,11 +396,9 @@ export fn ink_export_free() void {
     }
 }
 
-// ---- Diagnostics ----
+// ---- diagnostics ----
 
-/// The ABI's negative codes say which call failed; this says why, which is the
-/// difference between "this PDF will not open" and "this PDF is encrypted".
-/// Stable until the next failing call.
+/// Why the last call failed; stable until the next failing call.
 export fn ink_error_ptr() [*:0]const u8 {
     return ink_shim_error();
 }

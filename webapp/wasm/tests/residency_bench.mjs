@@ -1,24 +1,7 @@
-// Client residency + build latency for `sqlite-core.wasm` — the measurement
-// §7 asked for before step 7, recorded in its §8.1.
-//
-// NOT a test and NOT wired into `build.zig`: it needs a corpus, and the corpus
-// is a dev database rather than a fixture. It lives next to `sqlite_core_abi.mjs`
-// because it drives the SAME shipped artifact through the SAME `idx_*` ABI, and
-// because §7 still has follow-on numbers to take (build time from a real stream,
-// what 1,755 `.note` pages do to row count) that want this harness rather than a
-// new one.
-//
-// **Why Node is legitimate here**, given that §3.1 found Node lies about the
-// transport: linear-memory growth is a wasm-spec property of the module's own
-// allocator plus SQLite's heap, and V8 is the engine Chromium ships. There is no
-// browser-side behaviour to miss. `Content-Encoding` was a networking-stack
-// property, which is exactly why Node was the wrong place to check it.
-//
-// Input is NDJSON, one page per line: {"p": <ordinal>, "t": "<text>"}. Extract it
-// from `note_page_index` (`page_index`, `text`) for whichever blob you care about;
-// for the global-index shape, one line per page of the whole library whose `t` is
-// that page's deduplicated folded terms.
-//
+// Client residency and build-latency bench for `sqlite-core.wasm`. Not a test:
+// it needs a dev-database corpus. Node is fine here, since memory growth is a
+// wasm/V8 property. Input is NDJSON, one page per line: {"p": <ordinal>,
+// "t": "<text>"} (from `note_page_index`).
 // Usage:
 //   node residency_bench.mjs doc       <wasm> <doc.ndjson>...       # one doc at a time, fresh instance each
 //   node residency_bench.mjs reuse     <wasm> <doc.ndjson>...       # all through ONE instance (does it stack?)
@@ -49,9 +32,7 @@ async function freshInstance() {
 
 /** The `idx_*` calls, bound to one instance. */
 function api(e) {
-  // memory.buffer can be replaced by any call that grows it, so every pointer is
-  // re-read after the call that produced it — the lifetime rule sqlite_core.zig
-  // states in its header.
+  // `memory.buffer` can be replaced by any growing call: re-read pointers.
   const put = (text) => {
     const buf = Buffer.from(text, "utf8");
     const ptr = e.idx_alloc(buf.length + 1);
@@ -86,12 +67,11 @@ function api(e) {
     e.idx_free(ptr, len + 1);
     return { total, ms };
   };
-  /** Serialize and copy the image out, the way the client does before IndexedDB. */
   const snapshot = () => {
     const n = must(e.idx_serialize(), "idx_serialize");
     return Buffer.from(new Uint8Array(e.memory.buffer, e.idx_image_ptr(), n));
   };
-  /** Restore from an image; returns end-to-end ms (alloc + copy in + deserialize). */
+  /** Restores an image; returns ms for alloc + copy in + deserialize. */
   const restore = (image) => {
     const t0 = performance.now();
     const dst = e.idx_image_alloc(image.length);
@@ -104,8 +84,7 @@ function api(e) {
   return { put, must, build, query, snapshot, restore, mem };
 }
 
-// A short common prefix is the pathological case: the last term of a query gets
-// a `*` unless it ends in whitespace, so "con" expands and "que " does not.
+// "con" is the pathological short prefix; "que " has no `*`.
 const QUERIES = ["misere", "jean valjean", "con", "que ", "zzzznotpresent"];
 
 if (mode === "doc") {
@@ -137,9 +116,8 @@ if (mode === "doc") {
     e.idx_close();
   }
 } else if (mode === "reuse") {
-  // Does one instance STACK across documents? It should not: idx_open() returns
-  // the closed database's pages to SQLite's heap inside linear memory, and the
-  // next build reuses them. §8.1 — this is what refuted §4.1's teardown rule.
+  // One instance should not stack across documents: idx_open() returns the
+  // closed database's pages to SQLite's heap for reuse.
   const e = await freshInstance();
   const a = api(e);
   console.log(`instantiate            ${mb(a.mem())} MB  (module static footprint)`);
@@ -158,10 +136,8 @@ if (mode === "doc") {
   }
   console.log(`\nHIGH WATER over ${rest.length} documents in ONE instance: ${mb(peak)} MB`);
 } else {
-  // The real §4.1 lifecycle: global index -> FIND inside a document (which
-  // destroys it) -> restore the global index. Reported for both the first visit
-  // (build + serialize) and the second (deserialize only), because the second is
-  // the steady state and is much the cheaper of the two.
+  // Global index -> find inside a document (destroying it) -> restore, for the
+  // first visit (build + serialize) and the second (deserialize only).
   const [globalPath, docPath] = rest;
   const globalPages = load(globalPath);
   const docPages = load(docPath);

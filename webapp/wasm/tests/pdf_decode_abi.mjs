@@ -1,24 +1,8 @@
 // ABI + render check for `pdf-decode.wasm` (`zig build wasm-pdf-decode-test`).
-//
-// The point is NOT that the module links — a dead-stripped shell links fine and
-// exports the right names. The point is that a real PDF goes in and real pixels
-// come out: the fixture's page 0 is 200x100 pt with a 60x40 pt black rectangle
-// at (20,20), so at scale 2 we assert exact 400x200 dimensions, a fully opaque
-// alpha channel (the ABI promises straight, non-premultiplied RGBA), black at
-// the rectangle's centre, white outside it, and a black-pixel count that matches
-// the rectangle's area. That last one is what a stub cannot fake.
-//
-// Also exercised: content sniffing with no filename, the second page's different
-// size, and the handle discipline — a closed handle must come back as a rejected
-// integer rather than crash.
-//
-// The last section is the EXPORT ROUND TRIP: `ink_export_page` grafts a page
-// into a one-page PDF with ink over it, and the produced bytes go straight back
-// through the same module to be rendered. The assertion that carries the weight
-// is a PIXEL DIFF against the source page — identical everywhere the ink is not,
-// inked everywhere it is. A stub cannot fake it, and a placement that ignores
-// the page's own transform fails it (which is how the `/Rotate 90` bug was
-// caught; that case has a fixture of its own below).
+// Real pixels from a real PDF: the fixture's page 0 is 200x100 pt with a 60x40
+// pt black rectangle at (20,20), so its black-pixel count is something a stub
+// cannot fake. Exports are round-tripped through the same module and
+// pixel-diffed against the source page.
 //
 // Usage: node pdf_decode_abi.mjs <pdf-decode.wasm> <fixture.pdf>
 
@@ -32,12 +16,7 @@ if (!wasmPath || !pdfPath) {
   process.exit(2);
 }
 
-/**
- * A committed fixture, by name, read RELATIVE TO THIS FILE rather than taken
- * from argv. The harness passes exactly one fixture path; a second one would be
- * a `build.zig` change for every fixture a section wants, and the e2e specs
- * already reach their own fixtures this way.
- */
+/** A committed fixture, read relative to this file (the harness passes one). */
 function fixturePath(name) {
   return fileURLToPath(new URL(`fixtures/${name}`, import.meta.url));
 }
@@ -52,27 +31,18 @@ function equal(actual, expected, what) {
   check(actual === expected, what, `expected ${expected}, got ${actual}`);
 }
 
-// The module imports wasi_snapshot_preview1 because wasi-libc is linked, but the
-// memory-only ABI never reaches a syscall. Node's real WASI is used here rather
-// than ENOSYS stubs precisely so that an accidental filesystem call would show
-// up as a wrong answer instead of being silently swallowed.
+// Real WASI, so an accidental filesystem call is a wrong answer, not swallowed.
 const wasi = new WASI({ version: "preview1", args: [], env: {} });
 const mod = await WebAssembly.compile(fs.readFileSync(wasmPath));
 
-// The module also declares ONE non-WASI import, `ink.host_read` — the callback
-// `ink_open_stream` pulls its bytes through. It has to be supplied even here,
-// where the whole-file entry point is what most of this file exercises: a
-// declared import the embedder omits is a link error, not a lazily-bound symbol.
-//
-// Here it reads straight out of the fixture, synchronously. In the browser the
-// same import is wrapped in `WebAssembly.Suspending` and may await a range
-// fetch; a synchronous answer is exactly what a block-cache HIT looks like, so
-// this covers the C stream's `next`/`seek` bookkeeping without needing JSPI.
+// `ink.host_read` must be supplied even here (an omitted import is a link
+// error). It answers synchronously, like a block-cache hit in the browser, which
+// exercises the stream's `next`/`seek` bookkeeping without JSPI.
 let fixture = fs.readFileSync(pdfPath);
 const savedFixture = fixture;
 const hostReads = [];
 let hostFails = false;
-/** Past this offset the host answers 0 — a range that came back empty. */
+/** Past this offset the host answers 0, an empty range. */
 let hostZeroFrom = Infinity;
 const imports = {
   ...wasi.getImportObject(),
@@ -119,7 +89,6 @@ for (const name of [
 }
 if (failures > 0) process.exit(1);
 
-// ---- open ----
 const pdf = fs.readFileSync(pdfPath);
 const buf = e.ink_alloc(pdf.length);
 check(buf !== 0, "ink_alloc returned a buffer");
@@ -129,7 +98,6 @@ const doc = e.ink_open(buf, pdf.length); // no magic: MuPDF sniffs the content
 check(doc >= 1, "ink_open returned a handle", `got ${doc}`);
 equal(e.ink_page_count(doc), 2, "ink_page_count");
 
-// ---- page size, in points ----
 const scratch = e.ink_alloc(8);
 check(e.ink_page_size(doc, 0, scratch, scratch + 4) === 0, "ink_page_size(page 0) succeeded");
 let dv = new DataView(e.memory.buffer);
@@ -140,11 +108,9 @@ dv = new DataView(e.memory.buffer);
 equal(dv.getFloat32(scratch, true), 300, "page 1 width (pt)");
 equal(dv.getFloat32(scratch + 4, true), 150, "page 1 height (pt)");
 
-// Out-of-range page and stale handles must be rejected, not dereferenced.
 check(e.ink_page_size(doc, 99, scratch, scratch + 4) < 0, "page 99 rejected");
 check(e.ink_page_count(doc + 100) < 0, "out-of-range handle rejected");
 
-// ---- render ----
 const scale = 2;
 const packed = e.ink_render(doc, 0, scale);
 check(packed > 0n, "ink_render succeeded", `got ${packed}`);
@@ -158,14 +124,11 @@ equal(len, width * height * 4, "packed length matches w*h*4 (RGBA)");
 
 const px = new Uint8Array(e.memory.buffer, ptr, len);
 
-// Alpha must be fully opaque everywhere: that is what makes the promised
-// "straight RGBA" identical to MuPDF's premultiplied buffer.
 let transparent = 0;
 for (let i = 3; i < px.length; i += 4) if (px[i] !== 255) transparent += 1;
 equal(transparent, 0, "every pixel is opaque");
 
-// PDF's origin is bottom-left, the pixmap's is top-left. The 60x40 rect at
-// (20,20) therefore lands at x 40..160, y 200-120=80..160 in device pixels.
+// PDF's origin is bottom-left: the rect lands at x 40..160, y 80..160 in pixels.
 function rgb(x, y) {
   const o = (y * width + x) * 4;
   return [px[o], px[o + 1], px[o + 2]];
@@ -175,22 +138,18 @@ check(rgb(300, 40).every((c) => c > 224), "outside the rectangle is white", rgb(
 
 let dark = 0;
 for (let i = 0; i < px.length; i += 4) if (px[i] < 128) dark += 1;
-// 60pt x 40pt at 2x = 120 x 80 = 9600 px. Antialiasing moves the edges by a
-// pixel at most, so a few percent of slack is right and a stub returning a blank
-// or a fully black page fails on either side.
+// 120 x 80 = 9600 px, with a few percent of antialiasing slack.
 check(
   Math.abs(dark - 9600) < 400,
   "dark pixel count matches the rectangle's area",
   `expected ~9600, got ${dark}`,
 );
 
-// Rendering page 1 must replace the buffer, not accumulate.
 const packed2 = e.ink_render(doc, 1, 1);
 check(packed2 > 0n, "ink_render(page 1) succeeded", `got ${packed2}`);
 equal(e.ink_render_width(), 300, "page 1 rendered width (300pt @ 1x)");
 equal(e.ink_render_height(), 150, "page 1 rendered height (150pt @ 1x)");
 
-// ---- close ----
 e.ink_close(doc);
 check(e.ink_page_count(doc) < 0, "handle is rejected after close");
 e.ink_close(doc); // idempotent
@@ -198,14 +157,12 @@ e.ink_close(0);
 e.ink_close(-7);
 e.ink_free(scratch, 8);
 
-// A non-document must be refused rather than opened as an empty one, and the
-// buffer must still be consumed (no leak, no double free on the next open).
+// A non-document is refused, and its buffer still consumed.
 const junkLen = 64;
 const junk = e.ink_alloc(junkLen);
 new Uint8Array(e.memory.buffer, junk, junkLen).fill(0x7a);
 check(e.ink_open(junk, junkLen) < 0, "garbage bytes are refused");
 
-// ...and MuPDF's reason for refusing survives the ABI boundary.
 const errLen = e.ink_error_len();
 check(errLen > 0, "ink_error_len reports a message after a failure");
 const message = Buffer.from(
@@ -213,7 +170,6 @@ const message = Buffer.from(
 ).toString("utf8");
 check(message.length === errLen, "ink_error_ptr bytes match ink_error_len", message);
 
-// And the module is still usable afterwards.
 const buf2 = e.ink_alloc(pdf.length);
 new Uint8Array(e.memory.buffer, buf2, pdf.length).set(pdf);
 const doc2 = e.ink_open(buf2, pdf.length);
@@ -222,10 +178,7 @@ equal(e.ink_page_count(doc2), 2, "page count after reopen");
 e.ink_close(doc2);
 
 // ---- the callback stream (`ink_open_stream`) ----
-// Same document, same pixels, but pulled through `ink.host_read` instead of
-// handed over as a buffer. Byte-for-byte equality is the check that matters:
-// a stream whose `seek`/`pos` bookkeeping is off by a window still renders
-// something plausible, just of the wrong part of the file.
+// Byte-for-byte equality: an off-by-a-window stream still renders something.
 hostReads.length = 0;
 const sdoc = e.ink_open_stream(BigInt(pdf.length));
 check(sdoc >= 1, "ink_open_stream returned a handle", `got ${sdoc}`);
@@ -249,14 +202,12 @@ const wholeFile = Buffer.from(
 check(streamed.equals(wholeFile), "streamed pixels are identical to whole-file pixels");
 e.ink_close(wdoc);
 
-// The window in `ink_stream_seek` earns its place: without it this 688-byte
-// fixture cost seven host reads of the same 688 bytes, because `fz_seek` has no
-// in-buffer fast path and drops the window on every backwards seek.
+// Without the in-window seek this fixture cost seven host reads.
 check(hostReads.length <= 2, "the stream does not re-read what it holds", `${hostReads.length} reads`);
 e.ink_close(sdoc);
 
-// A host that cannot read must surface as a MuPDF error and leave the module
-// usable — on the real path this is an aborted range fetch, not a corrupt file.
+// A failing host read (an aborted range fetch) is a MuPDF error, and the module
+// stays usable.
 hostFails = true;
 check(e.ink_open_stream(BigInt(pdf.length)) < 0, "a failing host_read fails the open");
 hostFails = false;
@@ -265,27 +216,12 @@ check(sdoc2 >= 1, "the module still opens a stream afterwards", `got ${sdoc2}`);
 e.ink_close(sdoc2);
 check(e.ink_open_stream(0n) < 0, "a zero length is refused");
 
-// ============================================================================
-// The export round trip (`ink_export_page`)
-// ============================================================================
-//
-// Export a page, then REOPEN THE PRODUCED BYTES THROUGH THIS SAME MODULE and
-// render them. Three things are asserted, in rising order of what they can
-// catch:
-//
-//   1. the export is one page, at the source page's exact point size — a graft
-//      that lost the geometry, or brought its siblings along, fails here;
-//   2. every pixel the ink does not touch is BYTE-IDENTICAL to the source page —
-//      which is the whole claim of a structure-preserving export, and is what a
-//      "write a fresh raster at A4 width" implementation cannot pass;
-//   3. the ink is dark exactly where the caller's matrix said, in DISPLAY space.
-//
-// (3) is why the `/Rotate 90` fixture below exists. Ink placed without inverting
-// the page's own transform lands 90 degrees out — and note that it would still
-// pass a plain "the dark pixel count went up by the ink's area" check, because
-// the same number of pixels is inked, just in the wrong place.
+// ---- the export round trip (`ink_export_page`) ----
+// One page at the source's point size; untouched pixels byte-identical to the
+// source; ink dark exactly where the matrix put it in display space (a
+// misplaced ink keeps the same dark-pixel count, so position is checked).
 
-/** Render `page` and COPY the pixels out — the module's buffer is reused. */
+/** Renders `page` and copies the pixels out (the module's buffer is reused). */
 function renderCopy(handle, page, scale) {
   const packed = e.ink_render(handle, page, scale);
   if (packed <= 0n) return null;
@@ -299,10 +235,8 @@ function renderCopy(handle, page, scale) {
 }
 
 /**
- * A minimal one-page PDF, assembled here rather than committed as a fixture:
- * the point of these is the PAGE DICTIONARY (`/Rotate`, an off-origin box), and
- * a generator makes the thing under test visible at the call site. Every byte is
- * ASCII, so a JS string's length is the byte length the xref needs.
+ * A minimal one-page PDF built here so the page dictionary under test is
+ * visible at the call site. All ASCII, so string length is byte length.
  */
 function buildPdf(bodies) {
   let out = "%PDF-1.4\n";
@@ -330,15 +264,8 @@ function tinyPdf(mediaBox, extra, content) {
 }
 
 /**
- * An N-page PDF where EVERY page carries an `/Annots` array — the thing the
- * incremental export exists to preserve and the thing grafting destroys.
- *
- * A `/Link` is used because it has no appearance stream, so it changes no
- * pixels: the pixel diff below stays a statement about the ink alone, while
- * `/Annots` is still there to be found (or lost) in the bytes.
- *
- * Three objects per page — page, contents, annotation — so the numbering is
- * arithmetic rather than a running counter.
+ * An N-page PDF where every page carries `/Annots`, as `/Link`s (no appearance
+ * stream, so no pixels change). Three objects per page.
  */
 function annotatedPdf(count, mediaBox = [0, 0, 200, 100], padBytes = 0) {
   const bodies = [
@@ -347,8 +274,7 @@ function annotatedPdf(count, mediaBox = [0, 0, 200, 100], padBytes = 0) {
       ` /Count ${count} >>`,
   ];
   for (let i = 0; i < count; i++) {
-    // A distinct rectangle per page, so a page drawn in place of another shows
-    // up in the diff rather than passing for it.
+    // A distinct rectangle per page, so a swapped page shows in the diff.
     const content = `0 0 0 rg\n${10 + i * 15} 20 40 30 re f`;
     bodies.push(
       `<< /Type /Page /Parent 2 0 R /MediaBox [${mediaBox.join(" ")}]` +
@@ -361,9 +287,7 @@ function annotatedPdf(count, mediaBox = [0, 0, 200, 100], padBytes = 0) {
         ` /A << /Type /Action /S /URI /URI (https://example.invalid/p${i}) >> >>`,
     );
   }
-  // Filler, so a fixture can be made big enough that reading it back takes MORE
-  // THAN ONE host read (the stream's window is 32 KB). Unreferenced, which is
-  // legal: an incremental write collects no garbage, so nothing prunes it.
+  // Unreferenced filler to exceed one 32 KB host read.
   if (padBytes > 0) {
     bodies.push(`<< /Length ${padBytes} >>\nstream\n${"%".repeat(padBytes)}\nendstream`);
   }
@@ -376,7 +300,6 @@ function openBytes(bytes) {
   return e.ink_open(at, bytes.length);
 }
 
-/** `w*h` coverage bytes, `value` inside `[x0,x1) x [y0,y1)` and 0 elsewhere. */
 function coverage(w, h, boxes) {
   const a = new Uint8Array(w * h);
   for (const [x0, y0, x1, y1, value] of boxes) {
@@ -385,7 +308,6 @@ function coverage(w, h, boxes) {
   return a;
 }
 
-/** Export `page` with `alpha` over it, and copy the produced PDF out. */
 function exportPage(handle, page, alpha, w, h, m) {
   const at = e.ink_alloc(alpha.length);
   if (!at) return null;
@@ -393,7 +315,7 @@ function exportPage(handle, page, alpha, w, h, m) {
   const packed = e.ink_export_page(handle, page, at, w, h, ...m);
   let bytes = null;
   if (packed > 0n) {
-    // AFTER the call: the export can grow linear memory and detach the old view.
+    // After the call: the export can grow memory and detach the old view.
     bytes = Buffer.from(
       new Uint8Array(e.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
     );
@@ -403,7 +325,6 @@ function exportPage(handle, page, alpha, w, h, m) {
   return { packed, bytes };
 }
 
-/** Is `(x,y)` inside any of `boxes`, each grown (or shrunk) by `slack`? */
 function within(boxes, x, y, slack) {
   return boxes.some(
     ([x0, y0, x1, y1]) =>
@@ -412,17 +333,9 @@ function within(boxes, x, y, slack) {
 }
 
 /**
- * The round trip proper.
- *
- * `t.inked` lists every display-space box the coverage bitmap paints into, in
- * pixels at scale 1; `t.solid` is the subset painted at full coverage. Outside
- * `inked` the page must be untouched; inside `solid` the result must be dark.
- *
- * ONE PIXEL OF SLACK ON EACH BOUNDARY, and no more. An image's edge is
- * anti-aliased into the pixel it half-covers, so a box's outline is neither
- * fully inked nor fully clean; the slack exempts that one row. Widening it
- * further would start hiding the misplacement the test is here to catch — a
- * quarter-page error has to stay a failure.
+ * Exports, reopens and diffs. `t.inked` lists every display-space box the
+ * coverage paints (scale 1); `t.solid` the full-coverage subset. One pixel of
+ * slack on each boundary for anti-aliasing; more would hide misplacement.
  */
 function roundTrip(label, t) {
   const src = openBytes(t.source);
@@ -431,8 +344,7 @@ function roundTrip(label, t) {
   const before = renderCopy(src, 0, 1);
   check(before !== null, `${label}: source renders`);
 
-  // The painted region must start out BLANK in the source, or "the ink is dark
-  // there" proves nothing. This is a check on the fixture, not on the module.
+  // Check the fixture: the painted region must start out blank.
   let blank = true;
   for (let y = 0; y < before.h; y++) {
     for (let x = 0; x < before.w; x++) {
@@ -447,8 +359,6 @@ function roundTrip(label, t) {
   if (packed <= 0n) return;
   check(bytes.subarray(0, 5).toString("latin1") === "%PDF-", `${label}: the bytes are a PDF`);
 
-  // Reopen through the same module. The source stays open so its pixels can be
-  // diffed against, which also proves the export does not disturb it.
   const out = openBytes(bytes);
   check(out >= 1, `${label}: the export reopens`, `got ${out}`);
   if (out < 1) return;
@@ -465,9 +375,7 @@ function roundTrip(label, t) {
   check(after !== null && after.w === before.w && after.h === before.h,
     `${label}: the export renders at the source's dimensions`);
 
-  // THE ASSERTION THAT MATTERS. Outside the ink: byte-identical to the source
-  // page. Inside the solid ink: dark. Both are counted rather than
-  // short-circuited so a failure reports how wrong it is.
+  // Outside the ink byte-identical, inside the solid ink dark; both counted.
   let disturbed = 0;
   let missing = 0;
   for (let y = 0; y < before.h; y++) {
@@ -487,14 +395,8 @@ function roundTrip(label, t) {
   return { before, after };
 }
 
-// --- Upright, with a half-tone patch ---------------------------------------
-// The committed fixture's page 0: 200x100 pt, a 60x40 black rectangle at
-// (20,20) in PDF (bottom-left) coordinates, i.e. display x 20..80, y 40..80.
-//
-// The coverage bitmap is 100x50 — deliberately NOT the page's pixel size — so
-// the matrix has real work to do: `2 0 0 2 0 0` maps its pixels onto the full
-// 200x100 display box. The solid patch lands at display x 20..80, y 10..30,
-// clear of the rectangle.
+// --- upright, with a half-tone patch ---
+// Coverage is 100x50, not the page's size, so `2 0 0 2 0 0` does real work.
 const upright = roundTrip("upright", {
   source: fs.readFileSync(pdfPath),
   alphaW: 100,
@@ -511,10 +413,7 @@ const upright = roundTrip("upright", {
   solid: [[20, 10, 80, 30]],
 });
 
-// ANTI-ALIASING SURVIVES. The ink is a /DeviceGray image with an 8-bit /SMask
-// rather than a 1-bit /ImageMask precisely so the pen's 16 grey levels come
-// through; a stencil would render this patch solid black. Display x 90..100,
-// y 10..30 is the alpha-128 column.
+// The alpha-128 column stays grey (8-bit /SMask, not a stencil).
 if (upright) {
   const at = (x, y) => upright.after.px[(y * upright.after.w + x) * 4];
   const grey = at(95, 20);
@@ -522,13 +421,9 @@ if (upright) {
   check(at(95, 5) === 255, "the alpha-0 margin above it is untouched", `got ${at(95, 5)}`);
 }
 
-// --- /Rotate 90 -------------------------------------------------------------
-// The failure this guards: `ink_page_size` reports the CROPPED, ROTATED box,
-// while a content stream is written in unrotated MediaBox space. A 200x100 page
-// with /Rotate 90 displays as 100x200, and its rectangle displays at x 20..60,
-// y 20..80. Placing the ink without inverting the page's own transform put it 90
-// degrees out — with exactly the same number of inked pixels, so only a
-// positional check catches it.
+// --- /Rotate 90 ---
+// The page displays as 100x200; ink placed in unrotated space lands 90 degrees
+// out with the same pixel count.
 const rotated = tinyPdf([0, 0, 200, 100], " /Rotate 90", "0 0 0 rg\n20 20 60 40 re f");
 const rdoc = openBytes(rotated);
 check(rdoc >= 1, "the /Rotate 90 fixture opens", `got ${rdoc}`);
@@ -550,12 +445,8 @@ roundTrip("rotated", {
   solid: [[10, 100, 50, 140]],
 });
 
-// --- An off-origin /MediaBox with a /CropBox inside it -----------------------
-// `pdf_page_transform_box(…, FZ_CROP_BOX)` is what makes display space start at
-// the CROP box's corner rather than the user-space origin. Here the media box
-// starts at (50,30) and the crop box takes a 120x60 window out of it, so a
-// caller placing ink at display (0,0) means the crop box's top-left — not
-// user-space (0,0), which is off the page entirely.
+// --- an off-origin /MediaBox with a /CropBox inside it ---
+// Display (0,0) is the crop box's top-left, not user-space (0,0).
 const cropped = tinyPdf(
   [50, 30, 250, 130],
   " /CropBox [70 50 190 110]",
@@ -571,10 +462,8 @@ roundTrip("cropped", {
   solid: [[20, 4, 100, 24]],
 });
 
-// --- Refusals ---------------------------------------------------------------
-// A non-PDF has no PDF page to graft, and the caller's fallback is the
-// rasterising exporter — which needs a sentence to explain itself with, so the
-// refusal carries a message rather than only a code.
+// --- refusals ---
+// A non-PDF is refused with a message for the rasterising fallback.
 const html = Buffer.from("<html><body><p>a document MuPDF opens but cannot graft</p></body></html>");
 const hdoc = openBytes(html);
 check(hdoc >= 1, "MuPDF opens the HTML document", `got ${hdoc}`);
@@ -587,16 +476,8 @@ const refusal = Buffer.from(
 check(/PDF/.test(refusal), "the refusal says why", refusal);
 e.ink_close(hdoc);
 
-// Argument hygiene: a zero-sized bitmap, a null pointer, an out-of-range page
-// and a non-finite matrix all have to be rejected BEFORE MuPDF sees them. A NaN
-// in particular would reach the content stream as the literal `nan` and produce
-// a file no reader can parse — a silently broken export, worse than a refused
-// one.
-//
-// AGAINST A LIVE, EXPORTABLE DOCUMENT. Aiming these at a closed handle would
-// have proved nothing: every one of them would come back -1 from the handle
-// lookup alone, and the argument checks could all be deleted with the suite
-// still green. (They were, and it was.)
+// Argument hygiene, against a live document: on a closed handle every check
+// would pass via the handle lookup alone.
 const argdoc = openBytes(fs.readFileSync(pdfPath));
 check(argdoc >= 1, "a live handle for the argument checks", `got ${argdoc}`);
 check(
@@ -614,34 +495,20 @@ equal(
   -1n,
   "an infinite matrix is refused",
 );
-// A page MuPDF cannot load is the shim's refusal, not the ABI's, so it comes
-// back as -2 with a message rather than -1.
+// An unloadable page is the shim's refusal (-2 with a message), not the ABI's.
 equal(e.ink_export_page(argdoc, 99, alphaAt, 4, 4, 1, 0, 0, 1, 0, 0), -2n, "a missing page is refused");
 e.ink_close(argdoc);
 equal(e.ink_export_page(argdoc, 0, alphaAt, 4, 4, 1, 0, 0, 1, 0, 0), -1n, "a dead handle is refused");
 e.ink_free(alphaAt, 16);
 
-// `ink_export_free` is idempotent and safe with nothing outstanding.
 e.ink_export_free();
 e.ink_export_free();
 
-// ============================================================================
-// The WHOLE-DOCUMENT export (`ink_annotate_page` + `ink_export_incremental`)
-// ============================================================================
-//
-// Not a loop over `ink_export_page`: grafting drops `/Annots`, so a 77-page
-// document exported that way would lose every link and highlight it had, 77
-// times. This route mutates the OPEN document's pages and writes an INCREMENTAL
-// UPDATE — the original's bytes verbatim, plus only what changed.
-//
-// THE ASSERTION THAT CARRIES THE WEIGHT is that the ORIGINAL'S OWN ANNOTATIONS
-// survive, which the per-page path fails by construction; it is asserted BOTH
-// ways below, against the same fixture, so the difference is visible rather than
-// claimed. The rest: the original is a verbatim prefix of the output, the page
-// count is unchanged, the ink lands on the annotated page and NOWHERE ELSE, and
-// a reader (this module) opens the concatenation.
+// ---- whole-document export (`ink_annotate_page` + `ink_export_incremental`) ----
+// The original's own annotations must survive (grafting drops them; asserted
+// both ways below), the original is a verbatim prefix, and ink lands only on
+// the annotated page.
 
-/** Copy the last export out and release the module's buffer. */
 function takeExport(packed) {
   if (packed <= 0n) return null;
   const bytes = Buffer.from(
@@ -651,7 +518,6 @@ function takeExport(packed) {
   return bytes;
 }
 
-/** Draw `alpha` onto `page` of the open document, in place. */
 function annotate(handle, page, alpha, w, h, m) {
   const at = e.ink_alloc(alpha.length);
   new Uint8Array(e.memory.buffer, at, alpha.length).set(alpha);
@@ -665,10 +531,8 @@ function errorText() {
   return Buffer.from(new Uint8Array(e.memory.buffer, e.ink_error_ptr(), n)).toString("utf8");
 }
 
-// --- the round trip ---------------------------------------------------------
-// Three pages, every one of them carrying a /Link. Only page 1 is written on —
-// the real corpus is 7 annotated pages out of 77, and a route that quietly
-// touched the other 70 would be a different (and worse) feature.
+// --- the round trip ---
+// Three pages with a /Link each; only page 1 is written on.
 const source = annotatedPdf(3);
 check(/\/Annots/.test(source.toString("latin1")), "the fixture really has /Annots");
 
@@ -680,8 +544,6 @@ check(
   "the fixture's three pages render",
 );
 
-// Display x 20..80, y 10..30 on page 1 — clear of that page's own rectangle,
-// which sits at display y 50..80.
 const inkBox = [[20, 10, 80, 30]];
 const mask = coverage(100, 50, [[10, 5, 40, 15, 255]]);
 equal(annotate(wdoc2, 1, mask, 100, 50, [2, 0, 0, 2, 0, 0]), 0, "ink_annotate_page(page 1)");
@@ -691,34 +553,27 @@ check(delta !== null, "ink_export_incremental produced a delta", errorText());
 e.ink_close(wdoc2);
 
 if (delta) {
-  // A DELTA, NOT A DOCUMENT. It must be a small fraction of the original and
-  // must NOT begin with a header — if it did, the module would be handing back
-  // a whole rewritten file and the memory argument would be a fiction.
+  // A delta, not a document: small, and no header.
   check(
     delta.subarray(0, 5).toString("latin1") !== "%PDF-",
     "the delta is not a whole document",
   );
   check(delta.length > 0, "the delta is not empty");
-  // NOTHING OF THE ORIGINAL IS RE-ENCODED — the memory claim, stated as bytes.
-  // The pages' own content streams are uncompressed ASCII in the fixture, so an
-  // implementation that rewrote the document rather than appending to it would
+  // The fixture's content streams are uncompressed ASCII, so a rewrite would
   // carry them here.
   check(
     delta.indexOf(Buffer.from("re f", "latin1")) === -1,
     "the delta does not carry the original's content streams",
   );
 
-  // THE DIFFERENTIATOR, half one: the rewritten page object still carries the
-  // annotation array it had. The page dict IS rewritten (its /Contents now
-  // points at the ink), so a mutation that dropped /Annots would supersede the
-  // original's copy and lose it — which the prefix check below cannot see.
+  // The rewritten page object must keep its /Annots, which the prefix check
+  // cannot see.
   check(
     /\/Annots/.test(delta.toString("latin1")),
     "the rewritten page keeps its own /Annots",
   );
 
   const whole = Buffer.concat([source, delta]);
-  // THE INCREMENTAL PROMISE ITSELF: nothing of the original is re-encoded.
   check(source.equals(whole.subarray(0, source.length)), "the original is a verbatim prefix");
 
   const rdoc2 = openBytes(whole);
@@ -726,9 +581,8 @@ if (delta) {
   if (rdoc2 >= 1) {
     equal(e.ink_page_count(rdoc2), 3, "the export still has three pages");
 
-    // THE DIFFERENTIATOR, half two: a reader that actually parses the result
-    // still finds the link. `ink_page_count` proves the xref offsets in the
-    // delta resolve at all — an unbiased offset (trap 2) would fail here.
+    // A parser still finds the link; `ink_page_count` proves the delta's xref
+    // offsets resolve.
     for (const p of [0, 1, 2]) {
       const after = renderCopy(rdoc2, p, 1);
       const before = beforePages[p];
@@ -754,13 +608,8 @@ if (delta) {
   }
 }
 
-// --- two annotated pages that SHARE one /Resources dictionary ---------------
-// The common real shape — one document in the corpus gives all 26 of its pages
-// the same /Resources object — and the reason the ink's XObject is named per
-// page. Under a single fixed name the second annotate OVERWRITES the first
-// page's entry in the dictionary they share, and page 0's content stream, still
-// saying `Do` on that name, draws page 1's handwriting. The pixel diff below is
-// what sees it: the two masks paint different boxes.
+// --- two annotated pages sharing one /Resources dictionary ---
+// Under a fixed XObject name page 0 would draw page 1's ink.
 {
   const shared = buildPdf([
     "<< /Type /Catalog /Pages 2 0 R >>",
@@ -773,7 +622,6 @@ if (delta) {
   ]);
   const sdoc = openBytes(shared);
   check(sdoc >= 1, "the shared-resources fixture opens", `got ${sdoc}`);
-  // Page 0's ink -> display x 20..80, y 10..30. Page 1's -> x 100..160, y 60..80.
   const m0 = coverage(100, 50, [[10, 5, 40, 15, 255]]);
   const m1 = coverage(100, 50, [[50, 30, 80, 40, 255]]);
   equal(annotate(sdoc, 0, m0, 100, 50, [2, 0, 0, 2, 0, 0]), 0, "shared: annotate page 0");
@@ -805,14 +653,9 @@ if (delta) {
   }
 }
 
-// --- a page whose /Resources are INHERITED from its /Pages node -------------
-// /Resources is one of the five keys a page may inherit, and plenty of real
-// documents put it on the tree node once instead of on every page. Reading only
-// the page's own key finds nothing there, and writing a fresh /Resources onto
-// the page to hold the ink then SHADOWS the inherited one — so the page's own
-// text loses the font it was set in, and the export is a page with a hole in it.
-// The ink still lands correctly, which is why only a diff of the page's OWN
-// pixels sees this.
+// --- a page whose /Resources are inherited from /Pages ---
+// Writing a fresh /Resources onto the page would shadow the inherited font; only
+// a diff of the page's own pixels sees it.
 {
   const text = "BT /F1 24 Tf 20 40 Td (Hello) Tj ET";
   const inherited = buildPdf([
@@ -827,11 +670,8 @@ if (delta) {
   const beforeInk = renderCopy(idoc, 0, 1);
   let inkyBefore = 0;
   for (let i = 0; i < beforeInk.px.length; i += 4) if (beforeInk.px[i] < 128) inkyBefore += 1;
-  // A check on the FIXTURE: if the text never drew, losing it proves nothing.
   check(inkyBefore > 200, "the inherited font really draws text", `${inkyBefore} dark px`);
 
-  // Ink well clear of the text (display y 5..15 is the top strip; the text sits
-  // at display y ~36..60).
   equal(
     annotate(idoc, 0, coverage(100, 50, [[60, 1, 90, 6, 255]]), 100, 50, [2, 0, 0, 2, 0, 0]),
     0,
@@ -845,12 +685,8 @@ if (delta) {
     check(out >= 1, "inherited: the concatenation opens", `got ${out}`);
     const f = renderCopy(out, 0, 1);
     const inkedBox = [[120, 2, 180, 12]];
-    // TOLERANCE OF 8, and it is not slack. The ink image covers the WHOLE page
-    // (its coverage is zero outside the box, not its extent), and compositing a
-    // fully transparent image over an ANTIALIASED grey rounds it by a unit —
-    // the same 8-bit rounding `ink_shim_render` documents when it forces the
-    // alpha channel opaque. Losing the inherited font turns 291 dark pixels
-    // white, a difference of 255, so this still catches the thing it is for.
+    // Tolerance 8: a transparent full-page image over antialiased grey rounds
+    // by a unit; losing the font is a difference of 255.
     let disturbed = 0;
     for (let y = 0; y < beforeInk.h; y++) {
       for (let x = 0; x < beforeInk.w; x++) {
@@ -860,7 +696,6 @@ if (delta) {
     }
     let darkAfter = 0;
     for (let i = 0; i < f.px.length; i += 4) if (f.px[i] < 128) darkAfter += 1;
-    // The ink's own 60x10 box, and the text still under it.
     check(
       Math.abs(darkAfter - (inkyBefore + 600)) < 40,
       "inherited: the page keeps its text AND gains the ink",
@@ -871,10 +706,8 @@ if (delta) {
   }
 }
 
-// --- and the per-page path FAILS the same assertion --------------------------
-// Stated as a test rather than as a comment, because it is the entire reason
-// this second route exists. If `pdf_graft_page` ever learns to copy /Annots this
-// goes red, and the honest response is to re-read the plan, not to relax it.
+// --- and the per-page path fails the same assertion ---
+// If `pdf_graft_page` ever copies /Annots this goes red.
 const gdoc = openBytes(source);
 const grafted = takeExport(
   (() => {
@@ -894,29 +727,19 @@ if (grafted) {
 }
 e.ink_close(gdoc);
 
-// --- refusal: junk before the version marker (trap 2) ------------------------
-// `pdf_save_document` sets `opts.bias = doc->bias` for an incremental write;
-// `pdf_write_document` — the only entry point a memory-only ABI can use — never
-// does, and the field it would set is internal. So every xref offset in the
-// delta would be written unbiased and point at the wrong byte, producing a file
-// that opens to nothing. It is detectable and not fixable from outside, so the
-// shim reads `doc->bias` and refuses.
+// --- refusal: junk before the version marker ---
+// `pdf_write_document` never applies `doc->bias`, so the shim refuses.
 const biased = Buffer.concat([Buffer.from("%not a pdf yet\n"), annotatedPdf(1)]);
 const bdoc = openBytes(biased);
 check(bdoc >= 1, "MuPDF opens a file with junk before %PDF-", `got ${bdoc}`);
 equal(annotate(bdoc, 0, mask, 100, 50, [2, 0, 0, 2, 0, 0]), -2, "a biased file is refused");
 check(/%PDF-/.test(errorText()), "the bias refusal names the cause", errorText());
-// Refused BEFORE anything is mutated: the export refuses on its own terms too,
-// with the same sentence, rather than with "nothing was annotated".
 equal(e.ink_export_incremental(bdoc), -2n, "...and the write refuses as well");
 check(/%PDF-/.test(errorText()), "the write's refusal names the same cause", errorText());
 e.ink_close(bdoc);
 
-// --- refusal: a repaired file (trap 3) --------------------------------------
-// MuPDF refuses incremental on a repaired file outright, and would do so from
-// inside `pdf_write_document` AFTER the pages had been mutated. Pre-empting it
-// in `ink_annotate_page` is what keeps a refusal from leaving a half-annotated
-// document behind for the next render to draw.
+// --- refusal: a repaired file ---
+// Pre-empted in `ink_annotate_page`, before any page is mutated.
 const sound = annotatedPdf(1);
 const broken = Buffer.from(
   sound.toString("latin1").replace(/startxref\n(\d+)/, (_, n) => `startxref\n${"9".repeat(n.length)}`),
@@ -929,18 +752,13 @@ equal(annotate(pdoc, 0, mask, 100, 50, [2, 0, 0, 2, 0, 0]), -2, "a repaired file
 check(/repair/i.test(errorText()), "the repair refusal says so", errorText());
 e.ink_close(pdoc);
 
-// --- refusal: nothing was annotated -----------------------------------------
-// An empty delta concatenates to a byte-identical copy of the original, which
-// the raw-download row already offers; shipping it under a name that promises
-// ink would be a lie the user cannot see.
+// --- refusal: nothing was annotated ---
 const edoc = openBytes(annotatedPdf(1));
 equal(e.ink_export_incremental(edoc), -2n, "an unannotated document is refused");
 check(/no ink/i.test(errorText()), "...and says nothing was added", errorText());
 e.ink_close(edoc);
 
-// --- argument hygiene, against a LIVE handle --------------------------------
-// Aimed at a closed handle these would all come back -1 from the lookup alone
-// and the checks could be deleted with the suite still green.
+// --- argument hygiene, against a live handle ---
 const adoc = openBytes(annotatedPdf(2));
 const alphaAt2 = e.ink_alloc(16);
 new Uint8Array(e.memory.buffer, alphaAt2, 16).fill(255);
@@ -961,7 +779,6 @@ equal(e.ink_annotate_page(adoc, 0, alphaAt2, 4, 4, 1, 0, 0, 1, 0, 0), -1, "a dea
 equal(e.ink_export_incremental(adoc), -1n, "the write refuses a dead handle");
 e.ink_free(alphaAt2, 16);
 
-// A document MuPDF opens but that has no PDF objects at all.
 const hdoc2 = openBytes(
   Buffer.from("<html><body><p>a document MuPDF opens but cannot annotate</p></body></html>"),
 );
@@ -972,11 +789,8 @@ equal(e.ink_export_incremental(hdoc2), -2n, "a non-PDF cannot be written increme
 e.ink_free(alphaAt3, 16);
 e.ink_close(hdoc2);
 
-// --- the streamed path -------------------------------------------------------
-// The real viewer opens a large document over `ink.host_read`, and the
-// incremental write READS THE WHOLE ORIGINAL back through it (MuPDF's copy of
-// the file it is appending to, which the shim sinks). That the delta is the same
-// either way is what says the sink is honest about its offsets.
+// --- the streamed path ---
+// The incremental write reads the whole original back through `host_read`.
 if (delta) {
   fixture = annotatedPdf(3);
   check(fixture.equals(source), "the streamed run uses the same bytes as the buffered one");
@@ -986,10 +800,7 @@ if (delta) {
   const streamDelta = takeExport(e.ink_export_incremental(sdoc3));
   check(streamDelta !== null, "the streamed incremental export succeeds", errorText());
   if (streamDelta) {
-    // NOT byte-equality: the trailer's /ID is regenerated per write, so two
-    // deltas of the same edit differ in those bytes and nowhere else. Length is
-    // the check that stays true and still catches a sink that dropped or
-    // duplicated the original.
+    // Length, not bytes: the trailer's /ID differs per write.
     equal(streamDelta.length, delta.length, "the streamed delta is the same size");
     const sWhole = Buffer.concat([fixture, streamDelta]);
     const sOut = openBytes(sWhole);
@@ -999,14 +810,8 @@ if (delta) {
   }
   e.ink_close(sdoc3);
 
-  // AND WHAT HAPPENS WHEN THE SOURCE GOES SHORT. The delta is produced by
-  // SINKING MuPDF's copy of the original — everything below the original's
-  // length is dropped on the floor — so a `doc->file` that stops early would
-  // sink the real objects too and hand back a delta whose offsets are all
-  // wrong: a file that opens to a blank page rather than one that fails. The
-  // shim checks the cursor against the delta it produced, which is what turns
-  // that into a refusal. A host answering 0 mid-file is an empty range
-  // response, which is exactly how this arrives in a browser.
+  // A source that goes short mid-file (a host answering 0) must be refused, not
+  // yield a delta with wrong offsets.
   fixture = annotatedPdf(3, [0, 0, 200, 100], 40 * 1024);
   const zdoc = e.ink_open_stream(BigInt(fixture.length));
   check(zdoc >= 1, "the stream opens before the host goes short", `got ${zdoc}`);
@@ -1019,33 +824,11 @@ if (delta) {
   fixture = savedFixture;
 }
 
-// ============================================================================
-// The page's own LINKS (`ink_page_links`)
-// ============================================================================
-//
-// The claim is not "a link exists" — a shim that returned a plausible-looking
-// array would pass that, and so would one whose rects are in the wrong space.
-// Every assertion below is on COORDINATES or on an exact uri, because the two
-// ways this feature goes wrong are both invisible to a presence check:
-//
-//   1. THE PAGE BOX ORIGIN. `ink_page_size` hands over `fz_bound_page`'s EXTENT
-//      and throws its origin away, so a page whose box does not start at (0,0)
-//      would put link rects in a space the client has never heard of. The
-//      `cropped` fixture below has its media box at (50,30) and takes a 120x60
-//      crop out of it; the link rects have to be measured from the CROP box's
-//      top-left, which is the only origin `ink_page_size` describes.
-//
-//   2. ROTATION. `fz_bound_page` reports the TRANSFORMED box, so a /Rotate 90
-//      page reports its rotated extent and its links must land in that same
-//      rotated space. This is where the export put ink ninety degrees out, with
-//      exactly the right number of inked pixels — so it is verified on a
-//      fixture rather than reasoned about.
-//
-// And the third thing, which is not geometry: the uri comes out of a file that
-// arrived by device sync. `javascript:` — and `file:` and `data:` — must not
-// survive at all, not survive with a flag for someone downstream to check.
+// ---- the page's links (`ink_page_links`) ----
+// Assertions are on coordinates and exact uris: a box origin not at (0,0) and
+// /Rotate 90 both put rects in the wrong space invisibly, and refused schemes
+// must leave no record.
 
-/** The links on `page`, parsed. Throws if the payload is not valid JSON. */
 function pageLinks(handle, page) {
   const packed = e.ink_page_links(handle, page);
   if (packed < 0n) return packed;
@@ -1057,9 +840,8 @@ function pageLinks(handle, page) {
 }
 
 /**
- * A TWO-PAGE PDF whose first page carries `annots` — two, so an internal link
- * has somewhere to go and a resolved target of 1 is distinguishable from a
- * shim that answers 0 for everything.
+ * A two-page PDF whose first page carries `annots`, so an internal link
+ * resolving to 1 is distinguishable from a shim answering 0.
  */
 function linkedPdf(mediaBox, extra, annots) {
   const refs = annots.map((_, i) => `${6 + i} 0 R`).join(" ");
@@ -1080,7 +862,6 @@ function linkAnnot(rect, action) {
     ` /A << ${action} >> >>`;
 }
 
-/** One of each: two we follow, one internal, and four we refuse. */
 const LINK_ANNOTS = [
   linkAnnot([20, 20, 80, 60], "/S /URI /URI (https://example.invalid/a)"),
   linkAnnot([100, 20, 160, 60], "/S /GoTo /D [5 0 R /XYZ 0 100 0]"),
@@ -1098,10 +879,7 @@ const LINK_ANNOTS = [
   const got = pageLinks(doc, 0);
   check(typeof got === "object", "links: ink_page_links succeeds", `got ${got}`);
 
-  // THE ALLOWLIST. Seven annotations in, three out: https, the internal GoTo,
-  // and mailto. `javascript:` (both spellings), `file:` and `data:` are not
-  // dropped to a neutered href — they produce no record at all, so nothing
-  // downstream can render an affordance that lies about where it goes.
+  // Seven in, three out: https, the internal GoTo, mailto.
   equal(got.links.length, 3, "links: four refused schemes leave no record");
   check(
     !/javascript/i.test(got.json) && !/file:/.test(got.json) && !/data:/.test(got.json),
@@ -1109,8 +887,7 @@ const LINK_ANNOTS = [
     got.json,
   );
 
-  // PDF's origin is bottom-left and this space's is top-left, so the annot at
-  // (20,20)-(80,60) on a 100pt-tall page displays at y 100-60 = 40.
+  // The annot at (20,20)-(80,60) on a 100pt page displays at y 40.
   const ext = got.links.find((l) => l.uri.startsWith("https:"));
   check(ext !== undefined, "links: the external link is there");
   equal(ext.x, 20, "links: external x");
@@ -1120,7 +897,6 @@ const LINK_ANNOTS = [
   equal(ext.page, -1, "links: an external link resolves to no page");
   equal(ext.uri, "https://example.invalid/a", "links: the external uri survives intact");
 
-  // RESOLVED IN C. The client never sees `5 0 R`; it sees the page number.
   const internal = got.links.find((l) => l.page >= 0);
   check(internal !== undefined, "links: the internal link is there");
   equal(internal.page, 1, "links: the internal link resolves to page 1 (0-based)");
@@ -1131,9 +907,7 @@ const LINK_ANNOTS = [
   check(mail !== undefined, "links: mailto is allowed");
   equal(mail.y, 10, "links: mailto y (PDF 70..90 on a 100pt page -> display 10..30)");
 
-  // THE SPACE THE RECTS ARE IN IS THE SPACE `ink_page_size` REPORTS. Stated as
-  // an assertion rather than as a comment, because it is the whole contract:
-  // the client's transform is one scale, and that is only true if these agree.
+  // The rects are in the space `ink_page_size` reports.
   const at = e.ink_alloc(8);
   e.ink_page_size(doc, 0, at, at + 4);
   const sz = new DataView(e.memory.buffer);
@@ -1146,14 +920,10 @@ const LINK_ANNOTS = [
   );
   e.ink_free(at, 8);
 
-  // Page 1 has no /Annots at all. `[]` is a SUCCESS — "no links" and "could not
-  // read this page" are different answers and the caller acts differently.
+  // Page 1 has no /Annots: `[]` is success.
   const empty = pageLinks(doc, 1);
   equal(empty.json, "[]", "links: a page with no annotations answers []");
 
-  // The same document over the CALLBACK STREAM. Listing links loads the page
-  // and resolving the internal destination walks the xref again, so both go
-  // through `ink_host_read` on this path — and the answer has to be identical.
   fixture = linkedPdf([0, 0, 200, 100], "", LINK_ANNOTS);
   const sdocL = e.ink_open_stream(BigInt(fixture.length));
   check(sdocL >= 1, "links: the fixture opens as a stream", `got ${sdocL}`);
@@ -1165,14 +935,9 @@ const LINK_ANNOTS = [
   equal(e.ink_page_links(doc, 0), -1n, "links: a dead handle is refused");
 }
 
-/* --- TRAP 1: a page box that does not start at (0,0) ----------------------- */
-// Media box at (50,30), crop box (70,50)-(190,110) inside it. `ink_page_size`
-// reports 120x60 — the crop box's extent, its origin discarded — so a link rect
-// must be measured from the CROP BOX'S TOP-LEFT, which in PDF coordinates is
-// (70,110). The annot at (80,60)-(110,80) is therefore at display x 80-70 = 10,
-// y 110-80 = 30, 30 wide and 20 tall. Any implementation that measures from
-// user-space (0,0) puts it at x 80, y -50: off the page, and the same "a link
-// exists" check passes either way.
+/* --- a page box that does not start at (0,0) --- */
+// Media box at (50,30), crop (70,50)-(190,110): the annot at (80,60)-(110,80)
+// displays at x 10, y 30, 30x20.
 {
   const cropAnnots = [
     linkAnnot([80, 60, 110, 80], "/S /URI /URI (https://example.invalid/crop)"),
@@ -1195,13 +960,8 @@ const LINK_ANNOTS = [
   e.ink_close(doc);
 }
 
-/* --- TRAP 2: /Rotate 90 ---------------------------------------------------- */
-// A 200x100 page with /Rotate 90 DISPLAYS as 100x200, and `ink_page_size` says
-// so. The link rects have to be in that same rotated space, or the client scales
-// them against a width they were never measured in. The annot at (20,20)-(80,60)
-// lands at display x 20..60, y 20..80 — note that its extent is 40x60 where the
-// unrotated one is 60x40, so a shim that forgot the rotation produces a box of
-// the wrong SHAPE as well as the wrong place.
+/* --- /Rotate 90 --- */
+// The annot lands at x 20..60, y 20..80: 40x60, the rotated shape.
 {
   const rotAnnots = [linkAnnot([20, 20, 80, 60], "/S /URI /URI (https://example.invalid/rot)")];
   const doc = openBytes(linkedPdf([0, 0, 200, 100], " /Rotate 90", rotAnnots));
@@ -1222,22 +982,13 @@ const LINK_ANNOTS = [
   e.ink_close(doc);
 }
 
-/* --- a hostile uri, and the numbers JSON will not take --------------------- */
-// Two ways the payload stops being parseable, both of which take the whole
-// page's links down rather than one link:
-//
-//   - a uri carrying a quote, a backslash or a control byte, which would close
-//     the string and let the file write its own fields;
-//   - MuPDF's own `%g`, which writes 0.5 as `.5` (printf.c, `fmtfloat`) — legal
-//     nowhere in JSON. One half-point edge would be enough, so the shim formats
-//     its own numbers and this fixture has a rect on half-points.
+/* --- a hostile uri, and numbers JSON will not take --- */
+// A quote/backslash/control byte in a uri, and MuPDF's `%g` writing 0.5 as `.5`.
 {
-  // x0 = 0.5 ON PURPOSE: `%g` writes a value BELOW ONE as `.5`, and only below
-  // one — a rect at 10.5 comes out fine and would let the bug through.
+  // Only values below one print as `.5`.
   const nasty = linkAnnot(
     [0.5, 10.25, 30.5, 20.75],
-    // PDF literal-string escapes: `\\` is one backslash, `\001` is one control
-    // byte. The decoded uri is: https://x.invalid/?a="b"\<SOH>
+    // Decoded uri: https://x.invalid/?a="b"\<SOH>
     String.raw`/S /URI /URI (https://x.invalid/?a="b"\\\001)`,
   );
   const doc = openBytes(linkedPdf([0, 0, 200, 100], "", [nasty]));
@@ -1254,7 +1005,6 @@ const LINK_ANNOTS = [
     "hostile links: they are ESCAPED in the payload, not passed through",
     got.json,
   );
-  // Display y of the PDF rect 10.25..20.75 on a 100pt page is 79.25..89.75.
   equal(got.links[0].x, 0.5, "hostile links: a sub-1 x is a valid JSON number, not `.5`");
   equal(got.links[0].y, 79.25, "hostile links: a quarter-point y survives too");
   equal(got.links[0].w, 30, "hostile links: w");
@@ -1269,40 +1019,17 @@ const LINK_ANNOTS = [
   check(e.ink_error_len() > 0, "links: ...with a message");
   equal(e.ink_page_links(doc, -1), -1n, "links: a negative page is refused");
   equal(e.ink_page_links(doc + 100, 0), -1n, "links: an out-of-range handle is refused");
-  // A document with no links at all still answers, and answers `[]`.
   equal(pageLinks(doc, 0).json, "[]", "links: a link-free document answers []");
   e.ink_close(doc);
-  // Idempotent, and safe with nothing outstanding — a viewer calls this on every
-  // page turn including the ones that failed.
   e.ink_links_free();
   e.ink_links_free();
 }
 
-// ============================================================================
-// The page's WORDS (`ink_page_words`) — find-in-PDF's locator
-// ============================================================================
-//
-// What this proves is not "there is text on the page". It is the three things
-// the highlight is built on, each of which fails invisibly to a presence check:
-//
-//   1. THE SPACE. The boxes are in the same top-left-origin, y-down, points
-//      space `ink_page_size` and `ink_page_links` report — so the viewer's whole
-//      transform is the raster's scale, and one mapping serves the ink, the
-//      links and the highlight alike. Verified on the /Rotate 90 fixture, where
-//      a horizontal word becomes a TALL box: a shim that reported unrotated
-//      coordinates gives a box of the wrong SHAPE as well as the wrong place.
-//
-//   2. THE SPLIT. The runs are split as the index tokenises, near enough:
-//      punctuation is a boundary and an accented letter is not. `avaliação` has
-//      to arrive as ONE word or the Portuguese household's fold has nothing to
-//      compare against.
-//
-//   3. NO MATCHING HAPPENS HERE. There is no needle in the ABI — the server
-//      decided what matched and the client folds. That is asserted by what is
-//      absent (no query argument) and by the payload carrying every word on the
-//      page rather than a selected few.
+// ---- the page's words (`ink_page_words`) ----
+// Boxes in page-size space (checked on /Rotate 90, where a word becomes tall),
+// split near the index's tokenizer (`avaliação` is one word), and no matching:
+// every word on the page comes back.
 
-/** The words on `page`, parsed. Throws if the payload is not valid JSON. */
 function pageWords(handle, page) {
   const packed = e.ink_page_words(handle, page);
   if (packed < 0n) return packed;
@@ -1314,11 +1041,8 @@ function pageWords(handle, page) {
 }
 
 /**
- * A two-page PDF whose FIRST page carries `text` in 12pt Helvetica and whose
- * second is blank — so "a page with words" and "a page with none" come out of
- * one fixture. `/WinAnsiEncoding` is named explicitly: without it a base-14
- * Type1 font is read in StandardEncoding, where byte 0xE7 is not `ç`, and the
- * accented-word assertion would be testing the encoding rather than the split.
+ * Two pages, the first with `text` in 12pt Helvetica, the second blank.
+ * `/WinAnsiEncoding` is explicit: in StandardEncoding 0xE7 is not `ç`.
  */
 function textPdf(mediaBox, extra, text) {
   const content = `BT /F1 12 Tf 10 50 Td (${text}) Tj ET`;
@@ -1335,8 +1059,7 @@ function textPdf(mediaBox, extra, text) {
   ]);
 }
 
-// `\347` is ç and `\343` is ã in WinAnsi; the parentheses are escaped because a
-// PDF literal string counts them.
+// `\347` is ç, `\343` is ã in WinAnsi; parentheses escaped.
 const WORDS_TEXT = String.raw`Marmalade, avalia\347\343o \(quince\) page-range`;
 
 let uprightWords = null;
@@ -1346,16 +1069,13 @@ let uprightWords = null;
   const got = pageWords(doc, 0);
   check(typeof got === "object", "words: ink_page_words succeeds", `got ${got}`);
 
-  // THE SPLIT. Five runs out of one line: the comma, the parentheses and the
-  // hyphen are boundaries; the cedilla and the tilde are not.
+  // Five runs: comma, parentheses and hyphen split; cedilla and tilde do not.
   equal(
     got.words.map((w) => w.t).join(" "),
     "Marmalade avaliação quince page range",
     "words: punctuation splits a run and an accented letter does not",
   );
 
-  // THE SPACE. Every box lies inside the page `ink_page_size` describes, and the
-  // text sits at PDF y 50 on a 100pt page — display y ~41..50 for a 12pt face.
   const at = e.ink_alloc(8);
   e.ink_page_size(doc, 0, at, at + 4);
   const sz = new DataView(e.memory.buffer);
@@ -1374,7 +1094,6 @@ let uprightWords = null;
     "words: y is measured DOWN from the top (PDF y 50 -> display ~41)",
     `${first.y}..${first.y + first.h}`,
   );
-  // Reading order, left to right — what makes a match index mean something.
   check(
     got.words.every((w, i) => i === 0 || w.x > got.words[i - 1].x),
     "words: the runs arrive in reading order",
@@ -1382,13 +1101,8 @@ let uprightWords = null;
   );
   uprightWords = got.words;
 
-  // A page with no text answers `[]`, which is a SUCCESS — a scan has no words
-  // and that is an answer, not a fault.
   equal(pageWords(doc, 1).json, "[]", "words: a page with no text answers []");
 
-  // Over the CALLBACK STREAM the answer must be identical: building the
-  // structured text RUNS the page, so every font and content stream it names is
-  // pulled through `ink_host_read` on that path.
   fixture = textPdf([0, 0, 300, 100], "", WORDS_TEXT);
   const swords = e.ink_open_stream(BigInt(fixture.length));
   check(swords >= 1, "words: the fixture opens as a stream", `got ${swords}`);
@@ -1400,11 +1114,7 @@ let uprightWords = null;
   equal(e.ink_page_words(doc, 0), -1n, "words: a dead handle is refused");
 }
 
-/* --- /Rotate 90: a horizontal word becomes a TALL box ---------------------- */
-// The same trap the links and the export both fell into. `ink_page_size` reports
-// the rotated extent, so a word box measured in unrotated space is scaled
-// against a width it was never measured in — and the failure is invisible to any
-// check that only asks whether a box exists.
+/* --- /Rotate 90: a horizontal word becomes a tall box --- */
 if (uprightWords) {
   const doc = openBytes(textPdf([0, 0, 300, 100], " /Rotate 90", WORDS_TEXT));
   check(doc >= 1, "rotated words: the fixture opens", `got ${doc}`);
@@ -1438,38 +1148,15 @@ if (uprightWords) {
   e.ink_close(doc);
 }
 
-/* --- the LINE id (`l`): which words share a text line ---------------------- */
-// Selection (§9) copies a range of words as a string, and the
-// string joins words with spaces INSIDE a line and a newline BETWEEN lines. The
-// walk knows where the lines are — it already ends a word at every one of them —
-// so it says so, and the client does not have to guess it back out of the
-// geometry. Guessing it back is the failure this exists to prevent: baselines
-// are not a grouping key once a page mixes sizes, superscripts or two columns,
-// and a viewer that clusters by `y` gets those pages silently wrong.
-//
-// The property under test is NOT "there is an `l`". It is that a word never
-// carries an id from a line it did not come from, which presence cannot see. The
-// fixture below is built so that the two ways of getting that wrong — restarting
-// the count, and letting an end-of-line flush spill into the next line's id —
-// both change an assertion here.
-//
-// NOT COVERED, and deliberately: the recursion into `FZ_STEXT_BLOCK_STRUCT`,
-// where a line counter held as a local would restart. `fz_init_stext_options`
-// does not set `FZ_STEXT_COLLECT_STRUCTURE`, so MuPDF builds no structure blocks
-// for this ABI at all and a tagged fixture would exercise the same flat path as
-// an untagged one. The shim carries the reasoning in a comment instead.
+/* --- the line id (`l`) --- */
+// Selection joins words with spaces within a line and newlines between lines,
+// and baselines are not a reliable grouping key. Asserts a word never carries
+// another line's id. The `FZ_STEXT_BLOCK_STRUCT` recursion is unreachable
+// (no `FZ_STEXT_COLLECT_STRUCTURE`), so it is not covered.
 
 /**
- * A one-page PDF whose text sits on FOUR baselines 20pt apart, the third of
- * which is blank.
- *
- * The gap matters twice over. 20pt between 12pt baselines is far enough that
- * MuPDF cannot merge two of them into one stext line — the whole test would
- * pass vacuously if it did — and the blank one is a line that emits NO words,
- * which is what decides whether the ids are contiguous or merely ordered.
- *
- * Each baseline is its own `BT … ET`, which is also how a real typesetter
- * writes them, so this is not a shape the shim only ever sees from a test.
+ * Text on four baselines 20pt apart (too far for MuPDF to merge), the third
+ * blank, so contiguity of ids is a real claim.
  */
 function multiLinePdf(lines) {
   const content = lines
@@ -1498,35 +1185,26 @@ function multiLinePdf(lines) {
   const got = pageWords(doc, 0);
   check(typeof got === "object", "line ids: ink_page_words succeeds", `got ${got}`);
 
-  // Every word carries one, and it is an ordinal — not a float, not a sentinel.
   check(
     got.words.every((w) => Number.isInteger(w.l) && w.l >= 0),
     "line ids: every word carries a finite integer `l` >= 0",
     got.json,
   );
 
-  // NON-DECREASING in emission order. Emission order is reading order (asserted
-  // for the single-line fixture above), so an id that went backwards would mean
-  // the counter was reset — the exact shape of the recursion bug.
+  // Non-decreasing: a reset counter would go backwards.
   check(
     got.words.every((w, i) => i === 0 || w.l >= got.words[i - 1].l),
     "line ids: `l` never goes backwards in emission order",
     got.json,
   );
 
-  // The grouping itself, stated as the payload the fixture must produce. Words
-  // on one baseline share an id; words on different baselines do not. Written
-  // out in full rather than as a same/different pair, because a bug that merges
-  // two lines and a bug that splits one both have to fail it.
   equal(
     got.words.map((w) => `${w.t}@${w.l}`).join(" "),
     "Alpha@0 beta@0 gamma@1 delta@1 epsilon@2",
     "line ids: words share an id with their line and with no other",
   );
 
-  // ...and the geometry agrees with the ids, which is what says the ids describe
-  // THIS page rather than the order the words happened to arrive in: same id
-  // means same baseline, different id means a lower one (y is measured down).
+  // Same id means same baseline; a higher id is lower on the page.
   const rowOf = (l) => got.words.filter((w) => w.l === l);
   check(
     [0, 1, 2].every((l) => {
@@ -1542,11 +1220,7 @@ function multiLinePdf(lines) {
     got.words.map((w) => `${w.l}:${w.y}`).join(" "),
   );
 
-  // CONTIGUOUS FROM 0, with no gaps — so `l` is usable as an index and not only
-  // as an equality key. The blank third baseline is why this is a real claim:
-  // an id is spent by a line that EMITTED a word, so a line of pure whitespace
-  // (and equally a line dropped by the word cap or a degenerate rect) leaves no
-  // hole behind it. `epsilon` is on the fourth baseline and carries id 2.
+  // Contiguous from 0: the blank baseline spends no id, so `epsilon` is 2.
   const ids = [...new Set(got.words.map((w) => w.l))];
   equal(
     ids.join(","),
@@ -1554,15 +1228,9 @@ function multiLinePdf(lines) {
     "line ids: the ids are contiguous from 0 — a wordless line spends none",
   );
 
-  // A word is never attributed to a line that did not produce it, which for the
-  // END-OF-LINE flush means the run drained by the line ending belongs to the
-  // line that is ending. `beta` and `delta` are the last runs on their lines and
-  // are flushed by exactly that path; they are covered by the equality above,
-  // and this states why it is load-bearing rather than incidental.
+  // The run drained by a line ending belongs to the line that is ending.
   equal(got.words.at(-1).l, 2, "line ids: the last word on the page names the last line");
 
-  // Over the CALLBACK STREAM, byte-identical — the ids are a property of the
-  // walk, and the walk must not depend on how the bytes arrived.
   fixture = multiLinePdf([
     ["Alpha beta", 90],
     ["gamma delta", 70],
@@ -1585,42 +1253,16 @@ function multiLinePdf(lines) {
   check(e.ink_error_len() > 0, "words: ...with a message");
   equal(e.ink_page_words(doc, -1), -1n, "words: a negative page is refused");
   equal(e.ink_page_words(doc + 100, 0), -1n, "words: an out-of-range handle is refused");
-  // The committed fixture is two filled rectangles and no text at all.
   equal(pageWords(doc, 0).json, "[]", "words: a text-free document answers []");
   e.ink_close(doc);
-  // Idempotent, and safe with nothing outstanding — find calls this on every page
-  // turn including the ones that failed.
   e.ink_words_free();
   e.ink_words_free();
 }
 
-// ============================================================================
-// The document's OUTLINE (`ink_load_outline`) — the table of contents
-// ============================================================================
-//
-// For a book or a manual the outline IS the navigation, and what the panel
-// needs from it is not "there are some entries" but the SHAPE: which entry is
-// nested under which, and which page each one lands on. Both of those fail
-// invisibly to a presence check, so the assertions below write the whole list
-// out as one comparable string — a merge of two levels into one, a split of one
-// into two, and an off-by-one in the page base all have to change it visibly.
-//
-// The three things being proven:
-//
-//   1. ORDER AND DEPTH. Pre-order, depth first, `d` counting from 0 — the order
-//      a reader sees the rows in, so the client can render the list without
-//      sorting it or rebuilding a tree from it.
-//
-//   2. THE PAGE BASE. `p` is 0-BASED, the index `go(pageIndex)` takes and the
-//      same base `ink_page_links` reports its `page` in. A 1-based `p` would
-//      send every reader one page past where they asked to go, on every entry,
-//      and would still look like a working outline.
-//
-//   3. ABSENCE IS ABSENCE. An entry whose destination resolves nowhere carries
-//      NO `p` key at all — not -1, not null — and is still listed. A sentinel is
-//      a page number to any client that forgets to check it.
+// ---- the outline (`ink_load_outline`) ----
+// The whole list is compared as one string: pre-order with `d` from 0,
+// 0-based `p`, and an unresolved destination omits `p` but keeps the row.
 
-/** The outline of the document behind `handle`, parsed. */
 function outlineOf(handle) {
   const packed = e.ink_load_outline(handle);
   if (packed < 0n) return packed;
@@ -1631,13 +1273,10 @@ function outlineOf(handle) {
   return { json, entries: JSON.parse(json) };
 }
 
-/** One row as `depth|title|page`, with `-` where there is no page at all. */
 const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
 
 {
-  // Committed fixture: 6 pages of 300x200pt and a THREE-level outline, which is
-  // the least that can tell a flattened walk from a nested one — two levels
-  // would pass a walk that never recursed past the first child.
+  // Six 300x200pt pages, three levels (two would pass a non-recursive walk).
   const bytes = fs.readFileSync(fixturePath("outlined-six-page.pdf"));
   const doc = openBytes(bytes);
   check(doc >= 1, "outline: the fixture opens", `got ${doc}`);
@@ -1646,19 +1285,12 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
   const got = outlineOf(doc);
   check(typeof got === "object", "outline: ink_load_outline succeeds", `got ${got}`);
 
-  // THE WHOLE LIST, in full. Written out rather than spot-checked because the
-  // interesting failures are structural: `Chapter C`'s child promoted to its
-  // sibling, or `Part Two` demoted under `Chapter B`, both leave every
-  // individual entry looking correct.
   equal(
     got.entries.map(rowOfEntry).join(" "),
     "0|Part One|0 1|Chapter A|1 1|Chapter B|2 0|Part Two|3 1|Chapter C|4 2|Section C.1|5",
     "outline: the flat list carries the tree's order, depth and pages",
   );
 
-  // `d` is an ordinal — not a float, not a sentinel — and the list starts at the
-  // top level, which is what makes it renderable as indentation without a scan
-  // for the minimum first.
   check(
     got.entries.every((o) => Number.isInteger(o.d) && o.d >= 0),
     "outline: every entry carries an integer `d` >= 0",
@@ -1666,17 +1298,13 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
   );
   equal(got.entries[0].d, 0, "outline: the first entry is at depth 0");
 
-  // A child is never more than one level below its predecessor. A depth that
-  // jumped would mean a level was walked but not emitted, which a panel renders
-  // as an orphan row indented under nothing.
+  // A child is at most one level below its predecessor.
   check(
     got.entries.every((o, i) => i === 0 || o.d <= got.entries[i - 1].d + 1),
     "outline: depth never jumps by more than one",
     got.json,
   );
 
-  // Every page named is a real page of this document, and `p` is 0-based — the
-  // last entry naming page 5 of a six-page document is the whole claim.
   check(
     got.entries.every((o) => Number.isInteger(o.p) && o.p >= 0 && o.p < 6),
     "outline: every `p` is a 0-based index into this document's pages",
@@ -1684,9 +1312,6 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
   );
   equal(got.entries.at(-1).p, 5, "outline: the last entry names the last page, 0-based");
 
-  // Over the CALLBACK STREAM the answer must be byte-identical: loading the
-  // outline walks the xref for every entry and resolving each destination walks
-  // it again, so this is the path that pulls hardest through `ink_host_read`.
   fixture = bytes;
   const sdocOutline = e.ink_open_stream(BigInt(bytes.length));
   check(sdocOutline >= 1, "outline: the fixture opens as a stream", `got ${sdocOutline}`);
@@ -1698,11 +1323,7 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
   equal(e.ink_load_outline(doc), -1n, "outline: a dead handle is refused");
 }
 
-/* --- a document with no outline answers [], which is a SUCCESS ------------- */
-// Not an error, and the distinction is the whole reason this is worth asserting:
-// the panel's opener is DIMMED for "this document has none" and the failure is
-// reported for "we could not read this". A shim that threw here would make every
-// outline-free PDF look broken.
+/* --- no outline answers [], a success --- */
 {
   const doc = openBytes(fs.readFileSync(pdfPath));
   const got = outlineOf(doc);
@@ -1711,12 +1332,9 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
   e.ink_close(doc);
 }
 
-/* --- a destination that resolves nowhere omits `p` entirely ----------------- */
-// The three ways an entry can have no page, in one fixture: an external URI, a
-// named destination that names nothing, and — for the title rule — an entry
-// whose /Title is empty. Every one of them is still a ROW: a hole in a table of
-// contents is worse than a blank line in one, because the rows around it keep
-// their numbers and the reader cannot tell that something is missing.
+/* --- an unresolved destination omits `p` --- */
+// An external URI, a named destination naming nothing, and an empty /Title:
+// each is still a row.
 {
   const doc = openBytes(
     buildPdf([
@@ -1739,8 +1357,7 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
     "0|Home|0 0|Website|- 0||-",
     "unresolved outline: an unfollowable entry is still a row, and a blank title still a row",
   );
-  // OMISSION, not a sentinel. Asserted on the KEY rather than on the value,
-  // because `-1` and `null` both satisfy any check written on the value.
+  // Asserted on the key: `-1` and `null` would pass a value check.
   check(
     !("p" in got.entries[1]) && !("p" in got.entries[2]),
     "unresolved outline: `p` is absent, not -1 and not null",
@@ -1751,14 +1368,8 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
   e.ink_close(doc);
 }
 
-/* --- a tree deeper than the emitted depth CLAMPS rather than drops ---------- */
-// The shim bounds two different things with two different numbers, and only one
-// of them can lose a row: the recursion is bounded far out (the C stack in wasm
-// is a fixed 64 KB), while the depth it PRINTS stops at 32 so a client's
-// indentation cannot run off the panel. Forty nested entries is past the second
-// and nowhere near the first, so all forty must arrive — the last eight sharing
-// depth 32 — and none may vanish. A shim that made the display cap structural
-// would return thirty-three rows here and look perfectly healthy doing it.
+/* --- deeper than the emitted depth clamps rather than drops --- */
+// Forty levels: all arrive, the last eight at depth 32.
 {
   const levels = 40;
   const bodies = [
@@ -1797,8 +1408,6 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
   equal(e.ink_load_outline(0), -1n, "outline: handle 0 is refused");
   equal(e.ink_load_outline(-1), -1n, "outline: a negative handle is refused");
   equal(e.ink_load_outline(99), -1n, "outline: an out-of-range handle is refused");
-  // Idempotent, and safe with nothing outstanding — a panel calls this on close
-  // including the closes that follow a failed load.
   e.ink_outline_free();
   e.ink_outline_free();
 }

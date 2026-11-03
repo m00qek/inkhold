@@ -1,16 +1,6 @@
-/* MuPDF <-> Zig shim for the browser PDF viewer (`zig build wasm-pdf-decode`).
- *
- * WHY THIS FILE EXISTS AT ALL. `fz_try`/`fz_catch` is `setjmp`/`longjmp` under
- * a macro, and a `longjmp` past a Zig frame would skip its `defer`s and unwind
- * state Zig believes it owns. Every MuPDF call is therefore made here, and every
- * function below is exception-free at its boundary: it returns NULL or a
- * negative int instead of throwing. `pdf_decode.zig` owns the handle table, the
- * ABI and the pointer hygiene; this file owns MuPDF.
- *
- * The only other thing here is a `mkstemp` stub (bottom): wasi-libc lacks it,
- * MuPDF references it from a path we never take, and clang 21 makes an implicit
- * declaration a hard error.
- */
+/* MuPDF <-> Zig shim for the browser PDF viewer. `fz_try` is setjmp/longjmp,
+ * so every MuPDF call lives here and every function is exception-free at its
+ * boundary (NULL or a negative int). `pdf_decode.zig` owns the ABI. */
 
 #include <mupdf/fitz.h>
 #include <mupdf/pdf.h> /* the export path builds a PDF, not just reads one */
@@ -19,18 +9,13 @@
 #include <stdlib.h>
 #include <string.h> /* strlen, for the ink's content-stream fragment */
 
-/* Resource store cap. MuPDF's default (FZ_STORE_DEFAULT) is 256 MB, a server
- * number: it caches decoded images and fonts, and on a page-at-a-time browser
- * viewer it buys almost nothing while being the one allocation that can grow a
- * wasm heap without bound. 16 MB leaves room for one large photographic page's
- * resources to survive a re-render at a new zoom. */
+/* Store cap. MuPDF's 256 MB default can grow a wasm heap without bound; 16 MB
+ * keeps one large page's resources across a re-render. */
 #define INK_STORE_LIMIT (16 << 20)
 
 static fz_context *g_ctx;
 
-/* Last MuPDF error message. The ABI's negative return codes say WHICH call
- * failed but not why, and "this PDF will not open" is exactly the report where
- * the reason matters (encrypted? truncated? unsupported filter?). */
+/* Last MuPDF error message: return codes say which call failed, not why. */
 static char g_error[256];
 
 static void ink_set_error(const char *msg)
@@ -46,23 +31,18 @@ static void ink_set_error(const char *msg)
 	g_error[i] = 0;
 }
 
-/* Only valid inside an `fz_catch` — `fz_caught_message` reads the context's
- * current exception. A refusal we decide ourselves (see `ink_shim_export_page`,
- * which turns down anything that is not a PDF) goes through `ink_set_error`
- * instead, so the browser gets a sentence either way. */
+/* Only valid inside `fz_catch`; our own refusals use `ink_set_error`. */
 static void ink_record_error(fz_context *ctx)
 {
 	ink_set_error(fz_caught_message(ctx));
 }
 
-/* NUL-terminated; valid until the next failing call. Never NULL. */
 const char *ink_shim_error(void)
 {
 	return g_error;
 }
 
-/* Lazily create the single context, with the document handlers registered.
- * Returns NULL if either step fails; callers must tolerate that. */
+/* Lazily creates the single context; NULL on failure. */
 fz_context *ink_shim_context(void)
 {
 	if (g_ctx)
@@ -81,18 +61,9 @@ fz_context *ink_shim_context(void)
 	return g_ctx;
 }
 
-/* Open a document from bytes the caller allocated with `ink_alloc` (= libc
- * `malloc`, which is also what MuPDF's default allocator frees with).
- *
- * OWNERSHIP: on every path this function consumes `data` — either the fz_buffer
- * takes it (and frees it when the document is dropped) or we free it here. The
- * caller must not touch `data` afterwards. Returns NULL if the bytes are not a
- * document we can open.
- *
- * The magic is the EMPTY STRING, not NULL: MuPDF rejects a NULL magic outright
- * ("missing file type", `document.c:449`), while an empty one means "no filename
- * hint, recognise by content" — which lets one entry point serve
- * PDF/EPUB/FB2/CBZ/XPS without the caller classifying the bytes first. */
+/* Opens bytes allocated with libc `malloc`, consuming `data` on every path.
+ * The magic is "" not NULL: NULL is rejected ("missing file type"), "" means
+ * recognise by content (PDF/EPUB/FB2/CBZ/XPS). */
 fz_document *ink_shim_open(void *data, unsigned int len)
 {
 	fz_context *ctx = ink_shim_context();
@@ -123,28 +94,16 @@ fz_document *ink_shim_open(void *data, unsigned int len)
 	return doc;
 }
 
-/* --- The callback stream ------------------------------------------------- */
+/* --- the callback stream --- */
 
-/* Fill `dst` with `len` bytes from `off`; return the count written, or <0.
- *
- * IMPORTED FROM JS. The two attributes are not decoration: without them wasm-ld
- * reports `undefined symbol: ink_host_read` and the link fails, because a plain
- * `extern` is a promise that some object file defines it, not a request for an
- * import. With them the module declares `(import "ink" "host_read" ...)`, which
- * every embedder must then supply — see `decoderImports` in `pdfDecode.ts`.
- *
- * On the JSPI path the JS side is wrapped in `WebAssembly.Suspending`, so this
- * ordinary-looking synchronous call MAY SUSPEND THE WHOLE WASM STACK and resume
- * when a `fetch` settles. That is safe inside `fz_try`, and is verified against
- * this very module. */
+/* Imported from JS as `ink.host_read`; without the import attributes wasm-ld
+ * reports an undefined symbol. May suspend the whole wasm stack under JSPI,
+ * which is safe inside `fz_try`. */
 __attribute__((import_module("ink"), import_name("host_read")))
 extern int ink_host_read(long long off, unsigned char *dst, int len);
 
-/* How much one `next` pulls. This is NOT the network block size — the block
- * cache in the worker owns that. It is the granularity of the JS<->wasm hop, so
- * it wants to be big enough that walking a 2 MB content stream is not 500 calls
- * and small enough that a seek-then-read-20-bytes does not memcpy a megabyte.
- * 32 KB is 64 hops per megabyte and 1/16th of a 512 KB block. */
+/* Granularity of the JS<->wasm hop, not the network block size (the worker's
+ * block cache owns that). */
 #define INK_STREAM_CHUNK (32 * 1024)
 
 typedef struct {
@@ -155,13 +114,9 @@ typedef struct {
 	unsigned char buf[INK_STREAM_CHUNK];
 } ink_stream_state;
 
-/* `stm->pos` is the file offset of `wp` — the END of what is buffered — which is
- * what `fz_tell` subtracts `wp - rp` from. Getting that backwards silently
- * offsets every object in the file.
- *
- * The window is tracked in `win_off`/`win_len` RATHER THAN read back off
- * `rp`/`wp`, because MuPDF resets those (at EOF, and on the seek below) and we
- * would then have forgotten which bytes we are still holding. */
+/* `stm->pos` is the file offset of `wp` (the end of the buffer); `fz_tell`
+ * subtracts `wp - rp`. The window is tracked in `win_off`/`win_len` because
+ * MuPDF resets `rp`/`wp` at EOF and on seek. */
 static int ink_stream_next(fz_context *ctx, fz_stream *stm, size_t max)
 {
 	ink_stream_state *st = stm->state;
@@ -177,8 +132,7 @@ static int ink_stream_next(fz_context *ctx, fz_stream *stm, size_t max)
 		want = (int)(st->total - st->pos);
 	got = ink_host_read(st->pos, st->buf, want);
 	if (got < 0)
-		/* `%ld`, NOT `%lld`: MuPDF has its own printf, and one `l` there already
-		 * means 64 bits. `%lld` comes out as the literal "%ld" in the message. */
+		/* `%ld`, not `%lld`: in MuPDF's printf one `l` is already 64 bits. */
 		fz_throw(ctx, FZ_ERROR_SYSTEM, "cannot read %d bytes at %ld", want, st->pos);
 	st->win_off = st->pos;
 	st->win_len = got;
@@ -191,16 +145,8 @@ static int ink_stream_next(fz_context *ctx, fz_stream *stm, size_t max)
 	return *stm->rp++;
 }
 
-/* `fz_seek` resolves SEEK_CUR into an absolute offset before calling us, so in
- * practice this sees whence 0 and 2. All three are handled anyway — a stream
- * whose seek quietly mishandles a whence is a bug that shows up only on the one
- * document that uses it.
- *
- * THE IN-WINDOW CASE IS NOT AN OPTIMISATION WE COULD SKIP. `fz_seek` has no
- * fast path of its own (unlike `fz_read`), so a PDF parser walking an xref
- * table — seek, read a 20-byte entry, seek, read — would otherwise discard the
- * window on every entry and pull a fresh 32 KB chunk through the host for each
- * one: the 688-byte fixture alone went from 7 host reads to 2. */
+/* `fz_seek` has no fast path, so an in-window seek must keep the window or an
+ * xref walk pulls a fresh chunk per entry. */
 static void ink_stream_seek(fz_context *ctx, fz_stream *stm, int64_t offset, int whence)
 {
 	ink_stream_state *st = stm->state;
@@ -233,12 +179,8 @@ static void ink_stream_drop(fz_context *ctx, void *state)
 	fz_free(ctx, state);
 }
 
-/* Open a document that pulls its bytes through `ink_host_read`. `total` is the
- * document's length, known up front (the file listing already carries it), so
- * MuPDF's seek-to-end-and-find-startxref costs no round trip of its own.
- *
- * NULL if the bytes at the front are not a document we can open — which on this
- * path also covers "the host could not read them". */
+/* Opens a document that pulls bytes through `ink_host_read`. `total` is known
+ * up front, so finding startxref costs no extra round trip. */
 fz_document *ink_shim_open_stream(long long total)
 {
 	fz_context *ctx = ink_shim_context();
@@ -272,7 +214,6 @@ fz_document *ink_shim_open_stream(long long total)
 	return doc;
 }
 
-/* Page count, or -1 if the document refuses to report one. */
 int ink_shim_page_count(fz_document *doc)
 {
 	fz_context *ctx = g_ctx;
@@ -291,7 +232,7 @@ int ink_shim_page_count(fz_document *doc)
 	return n;
 }
 
-/* Page size in points. 0 on success, -1 on failure (`*w`/`*h` untouched). */
+/* Page size in points; 0 on success, -1 on failure. */
 int ink_shim_page_size(fz_document *doc, int number, float *w, float *h)
 {
 	fz_context *ctx = g_ctx;
@@ -319,46 +260,23 @@ int ink_shim_page_size(fz_document *doc, int number, float *w, float *h)
 	return 0;
 }
 
-/* --- Links on a page ------------------------------------------------------ */
+/* --- links on a page ---
+ * A uri that is not http/https/mailto is dropped, never flagged: it is
+ * untrusted text from a synced file. The client checks again at its own trust
+ * boundary. */
 
-/* JSON AND NOT A PACKED STRUCT ARRAY: the only interesting field is a
- * VARIABLE-LENGTH STRING, the payload is measured in hundreds of bytes, and this
- * project already moves JSON across boundaries where the shape is irregular
- * (LAYERINFO, RECOGNTEXT and HIGHLIGHTINFO inside the container itself).
- *
- * A URI THAT IS NOT http/https/mailto NEVER APPEARS HERE. The uri is
- * attacker-controlled text out of a file that arrived by device sync, and
- * `javascript:` above all — but also `file:` and `data:` — has no business
- * becoming a link. It is DROPPED rather than emitted with a flag, so nothing
- * downstream can forget to check. The client refuses the same set again before
- * it builds an `<a href>`; the duplication is deliberate, because these are two
- * different trust boundaries and the browser only ever sees the second one.
- */
-
-/* Longer than this and the link is dropped rather than truncated: a truncated
- * URI is a link that goes somewhere other than where it says, which is worse
- * than no link. Real http URLs do not approach this. */
+/* Longer links are dropped, not truncated (a truncated URI goes elsewhere). */
 #define INK_MAX_URI 4096
 
-/* Rects come out of a file we did not write. An infinite one (`fz_infinite_rect`
- * is what a malformed /Rect degrades to) would reach the client as a box the
- * size of the universe, and MuPDF's own float formatter turns a NaN into 0 and
- * an infinity into FLT_MAX rather than refusing — so the refusing happens here.
- * 1e6 pt is 350 metres; the largest page PDF allows is 14400. */
+/* A malformed /Rect degrades to infinite, and MuPDF's formatter prints NaN as 0
+ * and infinity as FLT_MAX, so non-finite values are refused here. */
 static int ink_finite(float v)
 {
 	return v > -1e6f && v < 1e6f;
 }
 
-/* Append `v` as a JSON number.
- *
- * NOT `%g`, AND THIS IS NOT A STYLE PREFERENCE. MuPDF has its own printf, and
- * its `fmtfloat` (`source/fitz/printf.c`) writes 0.5 as `.5` — which C's printf
- * would never do and which JSON.parse rejects outright. One link rect with a
- * half-point edge would make the whole page's payload unparseable. So the number
- * is written here: a sign, an integer part, and at most three decimals. A
- * thousandth of a point is 0.35 microns, which is far below anything a rect
- * needs to be right about. */
+/* Appends `v` as a JSON number. Not `%g`: MuPDF's `fmtfloat` writes 0.5 as
+ * `.5`, which JSON.parse rejects. Three decimals at most. */
 static void ink_json_number(fz_context *ctx, fz_buffer *out, float v)
 {
 	int neg = v < 0;
@@ -381,8 +299,6 @@ static void ink_json_number(fz_context *ctx, fz_buffer *out, float v)
 			fz_append_byte(ctx, out, digits[--n]);
 	}
 	if (frac != 0) {
-		/* Trailing zeros are legal JSON but noise on the wire, and the payload
-		 * is read by a human as often as by a parser. `10.5`, not `10.500`. */
 		fz_append_byte(ctx, out, '.');
 		fz_append_byte(ctx, out, (char)('0' + frac / 100));
 		if (frac % 100 != 0) {
@@ -393,15 +309,8 @@ static void ink_json_number(fz_context *ctx, fz_buffer *out, float v)
 	}
 }
 
-/* Append the first `n` bytes of `s` as a JSON string literal.
- *
- * Escapes the two characters JSON reserves and every C0 control, which is what
- * keeps a hostile uri from closing the string and writing its own fields. Bytes
- * at or above 0x80 pass through: MuPDF hands back UTF-8, and anything malformed
- * becomes U+FFFD in the browser's `TextDecoder` rather than breaking the parse.
- *
- * The length is taken rather than assumed so a caller that has to TRUNCATE can
- * do it here instead of copying into a scratch buffer first. */
+/* Appends `n` bytes of `s` as a JSON string, escaping `"`, `\` and C0 controls
+ * so a hostile uri cannot close the string. Bytes >= 0x80 pass through. */
 static void ink_json_string_n(fz_context *ctx, fz_buffer *out, const char *s, size_t n)
 {
 	static const char hex[] = "0123456789abcdef";
@@ -424,18 +333,12 @@ static void ink_json_string_n(fz_context *ctx, fz_buffer *out, const char *s, si
 	fz_append_byte(ctx, out, '"');
 }
 
-/* Append the whole of the NUL-terminated `s` as a JSON string literal. */
 static void ink_json_string(fz_context *ctx, fz_buffer *out, const char *s)
 {
 	ink_json_string_n(ctx, out, s, strlen(s));
 }
 
-/* The largest prefix of `s` that is at most `max` bytes long AND does not end
- * inside a UTF-8 rune.
- *
- * Cutting mid-rune turns a long title into a MALFORMED one: `TextDecoder` shows
- * the truncation as U+FFFD, which reads as corruption rather than as a title
- * that was too long. */
+/* The longest prefix of `s` within `max` bytes that does not cut a UTF-8 rune. */
 static size_t ink_utf8_trunc(const char *s, size_t max)
 {
 	size_t n = strlen(s);
@@ -448,10 +351,7 @@ static size_t ink_utf8_trunc(const char *s, size_t max)
 	return n;
 }
 
-/* Is `uri`'s scheme one a viewer may follow? http, https, mailto and nothing
- * else — see the section header. Case-insensitive, because a scheme is, and
- * anchored at byte zero, so a leading space or a `\njavascript:` cannot sneak
- * past the way it can past a naive "contains". */
+/* http, https or mailto, case-insensitive, anchored at byte zero. */
 static int ink_allowed_scheme(const char *uri)
 {
 	static const char *const allowed[] = { "http://", "https://", "mailto:" };
@@ -471,20 +371,9 @@ static int ink_allowed_scheme(const char *uri)
 	return 0;
 }
 
-/* The 0-BASED page index `uri` names, or -1 if it names no page of this
- * document — an external uri, a broken destination, a named destination that
- * resolves nowhere, or an empty one.
- *
- * ONE RESOLVER FOR THE WHOLE FILE. Links and the outline are two routes to the
- * same act, and a client that got `page` from a link and `p` from an outline
- * entry hands both to the same `go(pageIndex)`. Two copies would agree today and
- * drift the first time one of them learns about chapters.
- *
- * Chapters are why it is two calls and not one. `fz_resolve_link` answers in the
- * document's own (chapter, page) space — EPUB counts pages inside chapters — and
- * `fz_page_number_from_location` flattens that to the index every other call in
- * this ABI speaks. For a PDF the chapter is always 0 and the flattening is the
- * identity, which is exactly why doing it wrong would never show up here. */
+/* The 0-based page `uri` names, or -1. Shared by links and the outline.
+ * `fz_resolve_link` answers in (chapter, page) and
+ * `fz_page_number_from_location` flattens it (EPUB has chapters). */
 static int ink_page_for_uri(fz_context *ctx, fz_document *doc, const char *uri)
 {
 	fz_location loc;
@@ -499,38 +388,12 @@ static int ink_page_for_uri(fz_context *ctx, fz_document *doc, const char *uri)
 	return number < 0 ? -1 : number;
 }
 
-/* The links on `number`, as a UTF-8 JSON array. NULL on failure.
- *
- *     [{"x":72,"y":118.5,"w":180,"h":12,"page":11,"uri":"#page=12"}]
- *
- * `x,y,w,h` are in THE SAME SPACE `ink_shim_page_size` reports — top-left
- * origin, y down, points — so the client's whole transform is one uniform
- * scale. Two things have to be true for that, and both are load-bearing:
- *
- *  1. THE BOX ORIGIN. `ink_shim_page_size` hands over `fz_bound_page`'s EXTENT
- *     and throws its origin away, so `box.x0`/`box.y0` are subtracted here and
- *     the two agree BY CONSTRUCTION. For a PDF this is arithmetic on zero, but
- *     `fz_bound_page` is document-type-agnostic and nothing promises that of an
- *     EPUB or an XPS page. Agreeing by luck is how the export put ink ninety
- *     degrees out.
- *
- *  2. ROTATION. `fz_bound_page` reports the TRANSFORMED box, and
- *     `pdf_load_link_annots` (`source/pdf/pdf-link.c:768`) builds link rects
- *     through the very same `pdf_page_transform`. Verified on a fixture rather
- *     than reasoned about (`pdf_decode_abi.mjs`).
- *
- * `page` is resolved HERE, through `ink_page_for_uri`, because this is where the
- * document is; making the client resolve would be a round trip per link.
- *
- * A link is DROPPED — never emitted degraded — when its uri is empty, longer
- * than `INK_MAX_URI`, of a scheme we will not follow, or (for an internal one)
- * points at a page that does not resolve; and when its rect is empty or not
- * finite.
- *
- * ON THE STREAMED PATH THIS CAN SUSPEND: loading the page and resolving a
- * destination both walk the xref, which pulls through `ink_host_read`. Safe
- * because no Zig frame is inside the `fz_try` — the rule for every call here.
- */
+/* The links on `number` as JSON `[{"x","y","w","h","page","uri"}]`, in the
+ * space `ink_shim_page_size` reports: the box origin is subtracted (nothing
+ * promises a zero origin for non-PDF pages), and `pdf_load_link_annots` uses
+ * the same `pdf_page_transform` as `fz_bound_page`, so rotation agrees. Links
+ * with an empty, overlong, disallowed or unresolvable uri, or a degenerate
+ * rect, are dropped. NULL on failure. */
 fz_buffer *ink_shim_page_links(fz_document *doc, int number)
 {
 	fz_context *ctx = g_ctx;
@@ -609,53 +472,20 @@ fz_buffer *ink_shim_page_links(fz_document *doc, int number)
 	return out;
 }
 
-/* --- Words on a page ------------------------------------------------------ */
+/* --- words on a page ---
+ * Words, not `fz_search_page`: the server's index folds with SQLite's
+ * `unicode61 remove_diacritics 2`, which MuPDF's matcher does not, so the
+ * client folds and matches. Output `[{"t","x","y","w","h","l"}]` in page-size
+ * space; `l` is the page-wide text line ordinal, contiguous from 0. */
 
-/* WHY WORDS AND NOT `fz_search_page`. The SERVER decides what matched
- * (§6), and its tokenizer is SQLite's `unicode61
- * remove_diacritics 2` — a fold MuPDF's matcher does not implement. A household
- * writing Portuguese would have the index count `avaliação` for a query of
- * `avaliacao` and the page's own renderer fail to find a single one of them.
- *
- * So this hands over the page's WORDS and where they sit, and the fold happens
- * in TypeScript, in the same `fold()` the `.note` and `.txt` find controllers
- * already share. The client is a locator, never a judge of membership.
- *
- * `x,y,w,h` are in THE SAME SPACE `ink_shim_page_size` and `ink_shim_page_links`
- * report — top-left origin, y down, points — with the page box's own origin
- * subtracted, for the two reasons `ink_shim_page_links` spells out.
- *
- * `l` is the ordinal of the TEXT LINE the run came from, counted over the whole
- * page in emission order and CONTIGUOUS from 0. It exists because selection has
- * to know which words share a line — the string a drag copies joins words with
- * spaces inside a line and a newline between lines — and the walk knows that for
- * free, while the client would have to guess it back out of the geometry.
- *
- *     [{"t":"Marmalade","x":10,"y":38,"w":52.7,"h":11.6,"l":0}]
- */
-
-/* Longer than this and the run is BROKEN, not dropped: the pieces are still
- * locatable words and the client re-tokenises anyway. No real word approaches
- * it; a run that does is a CJK paragraph with no spaces in it. */
+/* Longer runs are split, not dropped. */
 #define INK_MAX_WORD_BYTES 192
 
-/* A page contributing more words than this stops contributing them. It costs
- * BOXES, never MATCHES — the count on screen is the server's and is unaffected,
- * which is the honesty rule (§6) applied at the C boundary. 20,000 words is
- * about thirty times a dense typeset page. */
+/* Past this a page contributes no more words: it costs boxes, never matches. */
 #define INK_MAX_WORDS 20000
 
-/* Is `c` part of a word?
- *
- * AN APPROXIMATION OF `unicode61`, AND DELIBERATELY THE CHEAP HALF OF IT: an
- * explicit table of the separators that occur in the household's documents,
- * everything else — every accented letter, every digit — a word character.
- *
- * THE INVARIANT THAT MAKES THAT SAFE: this decides where a BOX ends, never
- * whether a word MATCHES. The client re-tokenises each run with the index's own
- * rule before comparing it with the server's terms (`render/pdfText.ts`), so a
- * separator missed here yields a box a little too wide and one invented here
- * yields two boxes instead of one. Neither can invent or lose a match. */
+/* A cheap approximation of `unicode61` separators. Safe because it only
+ * decides box extents; the client re-tokenises with the index's rule. */
 static int ink_word_char(int c)
 {
 	if (c <= 0x20 || c == 0x7f)
@@ -676,25 +506,15 @@ static int ink_word_char(int c)
 	return 1;
 }
 
-/* One word run being accumulated: its UTF-8 bytes and the union of its glyph
- * quads. `n == 0` means "no run open", which is why the flush below is safe to
- * call after every character. */
+/* One word run being accumulated; `n == 0` means none open. */
 struct ink_word {
 	char text[INK_MAX_WORD_BYTES + 8]; /* +8: one rune never straddles the cap */
 	int n;
 	fz_rect box;
 };
 
-/* Emit the open run, if there is one, and close it.
- *
- * A run is DROPPED rather than emitted degraded when its rect is empty or not
- * finite — the same rule links take, and for the same reason: a box the size of
- * the universe reaches the client as a highlight over the whole document.
- *
- * `line` is taken by VALUE and the run carries none of its own, because every
- * one of the four call sites flushes a run accumulated under the line id it
- * passes — the end-of-line flush drains the run on every path out of a line, so
- * the CURRENT line id is always the run's own. */
+/* Emits and closes the open run, dropping degenerate or non-finite rects.
+ * `line` is the current line id, which is always the run's own. */
 static void ink_flush_word(fz_context *ctx, fz_buffer *out, struct ink_word *w,
 			   fz_point origin, int *first, int *count, int line)
 {
@@ -730,36 +550,14 @@ static void ink_flush_word(fz_context *ctx, fz_buffer *out, struct ink_word *w,
 	ink_json_number(ctx, out, bw);
 	fz_append_string(ctx, out, ",\"h\":");
 	ink_json_number(ctx, out, bh);
-	/* The line the run came from, so the client can tell which words share a
-	 * text line without re-deriving it from the geometry — baselines are not a
-	 * reliable grouping key once a page mixes sizes, superscripts or two
-	 * columns, and the walk already knows the answer. */
 	fz_append_printf(ctx, out, ",\"l\":%d", line);
 	fz_append_byte(ctx, out, '}');
 }
 
-/* Walk one list of blocks, emitting its words. RECURSIVE over
- * `FZ_STEXT_BLOCK_STRUCT`, which is where a tagged PDF keeps its text: a walk
- * that only visited `FZ_STEXT_BLOCK_TEXT` at the top level would find nothing at
- * all in a document produced by anything modern, and "no boxes" is exactly the
- * silent half-failure §6 is about.
- *
- * Depth is bounded by `depth`, because the tree comes out of a file we did not
- * write and this recurses on the C stack — which in wasm is a fixed 64 KB.
- *
- * `line` IS THREADED BY POINTER, EXACTLY AS `first` AND `count` ARE, AND MUST
- * STAY THAT WAY. It numbers text lines over the whole PAGE, not over one block
- * list, and the lines of a structure subtree are page lines like any other. Held
- * as a local — the obvious "simplification", since every call site but the
- * recursive one would still look right — the numbering would restart at each
- * structure boundary and two genuinely different lines would come out sharing an
- * id, which the client cannot distinguish from two words on one line.
- *
- * NOT REACHABLE TODAY, so the test suite cannot catch it:
- * `FZ_STEXT_BLOCK_STRUCT` blocks exist only under `FZ_STEXT_COLLECT_STRUCTURE`,
- * which `fz_init_stext_options` does not set. Which is exactly why the pointer
- * has to be the guarantee — the day the options grow that flag, nothing will
- * fail and the ids will quietly be wrong. */
+/* Walks one block list, recursing into `FZ_STEXT_BLOCK_STRUCT` (tagged PDFs
+ * keep text there), bounded by `depth` because the wasm C stack is 64 KB.
+ * `line` must stay a pointer: lines are numbered per page, across structure
+ * subtrees. Unreachable today (needs `FZ_STEXT_COLLECT_STRUCTURE`). */
 static void ink_words_in_blocks(fz_context *ctx, fz_buffer *out, fz_stext_block *first_block,
 				fz_point origin, int depth, int *first, int *count, int *line)
 {
@@ -781,12 +579,8 @@ static void ink_words_in_blocks(fz_context *ctx, fz_buffer *out, fz_stext_block 
 		if (block->type != FZ_STEXT_BLOCK_TEXT)
 			continue;
 		for (line_it = block->u.t.first_line; line_it; line_it = line_it->next) {
-			/* THE ID ADVANCES ONLY WHEN THE LINE ACTUALLY CONTRIBUTED A
-			 * WORD, which is what `*count` already records. Burning an id
-			 * on a line of pure whitespace, on one whose every run had a
-			 * degenerate rect, or on one past `INK_MAX_WORDS` would leave
-			 * holes — so the ids are CONTIGUOUS from 0 and usable as an
-			 * index, not merely as an equality key. */
+			/* The id advances only when the line emitted a word, so ids stay
+			 * contiguous. */
 			int emitted_before = *count;
 
 			for (ch = line_it->first_char; ch; ch = ch->next) {
@@ -802,35 +596,19 @@ static void ink_words_in_blocks(fz_context *ctx, fz_buffer *out, fz_stext_block 
 				w.box = w.n == 0 ? r : fz_union_rect(w.box, r);
 				w.n += fz_runetochar(w.text + w.n, ch->c);
 			}
-			/* A LINE ENDS A WORD. MuPDF joins nothing across lines, so
-			 * carrying a run over would union two rects on different
-			 * baselines into a box spanning the gap between them. This is
-			 * also where a hyphenated word legitimately becomes two, which
-			 * is the §6 window and is why the count is not derived here.
-			 *
-			 * IT ALSO HAS TO HAPPEN BEFORE THE ID ADVANCES, which is why it
-			 * is inside the line loop and not after it: this run belongs to
-			 * the line that is ending, not to the one about to start. */
+			/* A line ends a word (no rects spanning baselines), and the flush
+			 * must precede the id advance. */
 			ink_flush_word(ctx, out, &w, origin, first, count, *line);
 			if (*count > emitted_before)
 				(*line)++;
 		}
 	}
-	/* A safety net rather than a path: the end-of-line flush above drains the
-	 * run on every way out of a line, so `w.n` is 0 here. Were it not, `*line`
-	 * would name a line no word came from — which is why it is one PAST the last
-	 * line that emitted, never the id of some earlier one. */
+	/* Safety net: the end-of-line flush already drained the run. */
 	ink_flush_word(ctx, out, &w, origin, first, count, *line);
 }
 
-/* The words on `number`, as a UTF-8 JSON array. NULL on failure.
- *
- * An empty page answers `[]`, which is a SUCCESS — a page of scanned images has
- * no words and that is an answer, not a fault.
- *
- * ON THE STREAMED PATH THIS CAN SUSPEND, and more deeply than anything else
- * here: building the structured text RUNS the page, so every font, every image
- * and every content stream it references is pulled through `ink_host_read`. */
+/* The words on `number` as JSON; an empty page is `[]`. Building stext runs
+ * the page, so on the streamed path every resource is pulled through. */
 fz_buffer *ink_shim_page_words(fz_document *doc, int number)
 {
 	fz_context *ctx = g_ctx;
@@ -858,10 +636,7 @@ fz_buffer *ink_shim_page_words(fz_document *doc, int number)
 		origin.x = box.x0;
 		origin.y = box.y0;
 		fz_init_stext_options(ctx, &opts);
-		/* IMAGES OFF (the default) and no other flag. Ligatures are EXPANDED,
-		 * which is what the index sees too — `ﬁ` in a content stream is `fi`
-		 * in the extracted text on both sides, so the fold has the same
-		 * letters to work with. */
+		/* Default options: images off, ligatures expanded, as the index sees. */
 		text = fz_new_stext_page_from_page(ctx, page, &opts);
 		fz_append_byte(ctx, out, '[');
 		ink_words_in_blocks(ctx, out, text->first_block, origin, 16, &first, &count,
@@ -882,54 +657,26 @@ fz_buffer *ink_shim_page_words(fz_document *doc, int number)
 	return out;
 }
 
-/* --- The document outline -------------------------------------------------- */
+/* --- the document outline ---
+ * A flat pre-order list with depth `d`, not a tree: a panel needs only the
+ * indent. Depth, emitted depth and entry count are capped. */
 
-/* WHY A FLAT LIST AND NOT A TREE. A panel indents a row by its depth and needs
- * nothing else — no child arrays, no ids, no parent links — so the depth is what
- * crosses the boundary and the shape stays a list, in the order the reader sees
- * on screen. Pre-order, depth first: document order.
- *
- * A generated document can nest as deeply and count as high as its writer
- * pleased, so the depth, the emitted depth and the entry count all have caps;
- * the three below say which of them drops and which merely clamps. */
-
-/* Deeper than this and the subtree is not walked. THE ONE PLACE AN ENTRY CAN
- * VANISH, set where nothing real reaches it: a table of contents in the wild is
- * three to five levels deep, ten in a legal document showing off. The bound is
- * on the C STACK, a fixed 64 KB in wasm — an unbounded tree traps and takes the
- * module down, where a lost 257th level is a row nobody could have read. */
+/* Deeper subtrees are not walked (the wasm C stack is 64 KB): the one place an
+ * entry can vanish. */
 #define INK_MAX_OUTLINE_DEPTH 256
 
-/* The deepest `d` ever EMITTED. Entries below it are still emitted — at this
- * depth — because an entry the reader can see in another viewer must not vanish
- * here, and a row indented 40 times is indistinguishable from a row indented 32
- * times to everything except the arithmetic. So the cap the client meets clamps;
- * only the far-off structural bound above drops. */
+/* Deeper entries are still emitted, clamped to this depth. */
 #define INK_MAX_OUTLINE_LEVEL 32
 
-/* An outline contributing more entries than this stops contributing them. A
- * 1,200-page technical manual carries about two thousand; ten thousand is the
- * same kind of margin `INK_MAX_WORDS` leaves, and it is what stops a hostile
- * document from turning one call into an unbounded buffer. */
+/* Bounds one call's buffer against a hostile document. */
 #define INK_MAX_OUTLINE_ENTRIES 10000
 
-/* Titles are read out of the file, so they are as long as the file says. Longer
- * than this and the title is TRUNCATED, not dropped: the first half-kilobyte of
- * a runaway title still identifies the row, and the row still carries its page. */
+/* Longer titles are truncated, not dropped. */
 #define INK_MAX_OUTLINE_TITLE 512
 
-/* Walk one chain of outline entries and their children, emitting each as an
- * object. `level` is the depth to emit, `budget` the recursion left.
- *
- * `first` and `count` ARE THREADED BY POINTER for the reason
- * `ink_words_in_blocks` spells out: held as locals the comma placement would
- * break at every subtree boundary and the entry cap would apply per level
- * instead of per document.
- *
- * The two bounds are separate on purpose and do different jobs — `budget` guards
- * the stack and `level` guards only the number that is printed. Collapsing them
- * into one would make the display cap structural, which is how a legitimate
- * 33rd-level entry would disappear from a document that renders fine elsewhere. */
+/* Walks one chain and its children. `first`/`count` are pointers so commas and
+ * the cap span the document. `budget` guards the stack, `level` only the
+ * printed depth; keep them separate. */
 static void ink_outline_entries(fz_context *ctx, fz_buffer *out, fz_document *doc,
 				fz_outline *chain, int level, int budget, int *first,
 				int *count)
@@ -944,12 +691,7 @@ static void ink_outline_entries(fz_context *ctx, fz_buffer *out, fz_document *do
 
 		if (*count >= INK_MAX_OUTLINE_ENTRIES)
 			return;
-		/* THE SAME TWO CALLS THE LINKS LAYER MAKES, through the same helper.
-		 * `fz_load_outline` already resolved this uri into the entry's own
-		 * `page` field, but that is an `fz_location` and flattening it is the
-		 * second of the two calls anyway — so the shared resolver costs one
-		 * xref lookup and buys a link and an outline entry pointing at the same
-		 * place reporting the same number. */
+		/* The same resolver as links, so both report the same page. */
 		page = ink_page_for_uri(ctx, doc, node->uri);
 		title = node->title ? node->title : "";
 
@@ -959,11 +701,7 @@ static void ink_outline_entries(fz_context *ctx, fz_buffer *out, fz_document *do
 		(*count)++;
 		fz_append_printf(ctx, out, "{\"d\":%d,\"t\":", level);
 		ink_json_string_n(ctx, out, title, ink_utf8_trunc(title, INK_MAX_OUTLINE_TITLE));
-		/* THE KEY IS OMITTED, never emitted as -1 or null, when the
-		 * destination does not resolve. Omission is how this app says "no
-		 * value" on the wire; a sentinel is a page number to every client that
-		 * forgets to check it, and this one would be a page number the reader
-		 * gets sent to. */
+		/* `p` is omitted, never -1 or null, when unresolved. */
 		if (page >= 0)
 			fz_append_printf(ctx, out, ",\"p\":%d", page);
 		fz_append_byte(ctx, out, '}');
@@ -975,28 +713,9 @@ static void ink_outline_entries(fz_context *ctx, fz_buffer *out, fz_document *do
 	}
 }
 
-/* The document's OUTLINE — its table of contents — as a UTF-8 JSON array. NULL
- * on failure.
- *
- *     [{"d":0,"t":"Part One","p":0},{"d":1,"t":"Chapter A","p":1}]
- *
- * `d` is the nesting depth, 0 for a top-level entry. `t` is the title. `p` is
- * the destination's 0-BASED page index, the same base `ink_shim_page_links`
- * reports its `page` in — AND IT IS ABSENT ENTIRELY when the destination
- * resolves to no page of this document. The row is still emitted, because an
- * entry that cannot be followed is still part of what the document says it
- * contains.
- *
- * A NULL OR EMPTY TITLE ALSO STILL GETS A ROW, as `"t":""`. A dropped row
- * silently changes what the outline claims about the document.
- *
- * A DOCUMENT WITH NO OUTLINE ANSWERS `[]`, WHICH IS A SUCCESS: the first dims
- * the panel's opener where the second is a failure to report.
- *
- * ON THE STREAMED PATH THIS CAN SUSPEND: loading the outline walks the xref for
- * every entry and resolving each destination walks it again. The JS side has to
- * have this call in its JSPI promising list, or the suspend lands on a stack
- * that cannot take it. */
+/* The outline as JSON `[{"d","t","p"}]`: depth, title, 0-based page (omitted
+ * when unresolved). Every entry gets a row, an empty title as `""`. No outline
+ * is `[]`. NULL on failure. Must be in JS's JSPI promising list. */
 fz_buffer *ink_shim_outline(fz_document *doc)
 {
 	fz_context *ctx = g_ctx;
@@ -1013,8 +732,7 @@ fz_buffer *ink_shim_outline(fz_document *doc)
 		int count = 0;
 
 		out = fz_new_buffer(ctx, 256);
-		/* NULL for a document that has no outline at all, which the walk
-		 * below reads as an empty chain and answers `[]` — not an error. */
+		/* NULL for no outline, read as an empty chain. */
 		outline = fz_load_outline(ctx, doc);
 		fz_append_byte(ctx, out, '[');
 		ink_outline_entries(ctx, out, doc, outline, 0, INK_MAX_OUTLINE_DEPTH, &first,
@@ -1023,10 +741,7 @@ fz_buffer *ink_shim_outline(fz_document *doc)
 	}
 	fz_always(ctx)
 	{
-		/* THE TREE IS DROPPED ON EVERY PATH OUT, the error one included —
-		 * which is why the drop is in `fz_always` and not at the end of the
-		 * `fz_try`. This viewer stays open for hours over a document whose
-		 * outline a panel may ask for on every open. */
+		/* Dropped in `fz_always`, on every path out. */
 		fz_drop_outline(ctx, outline);
 	}
 	fz_catch(ctx)
@@ -1038,12 +753,8 @@ fz_buffer *ink_shim_outline(fz_document *doc)
 	return out;
 }
 
-/* Render one page at `scale` into a fresh RGBA pixmap. NULL on failure.
- *
- * CLEARED TO 0xFF RATHER THAN RENDERED WITHOUT ALPHA. The ABI promises straight
- * (non-premultiplied) RGBA and MuPDF's alpha pixmaps are premultiplied; opaque
- * white makes every pixel alpha 255, where premultiplied == straight. So the
- * browser hands the buffer to `ImageData` with no second copy. */
+/* Renders one page into an RGBA pixmap cleared to opaque white, so the
+ * premultiplied output equals the straight RGBA the ABI promises. */
 fz_pixmap *ink_shim_render(fz_document *doc, int number, float scale)
 {
 	fz_context *ctx = g_ctx;
@@ -1081,12 +792,7 @@ fz_pixmap *ink_shim_render(fz_document *doc, int number, float scale)
 		return NULL;
 	}
 
-	/* Force the alpha channel fully opaque. Clearing to white makes the page
-	 * opaque in principle, but MuPDF's 8-bit compositing ROUNDS: on real
-	 * documents a few thousand pixels out of two million come back with alpha
-	 * 254. Invisible, yet it is the difference between "premultiplied and
-	 * straight RGBA are the same buffer" and "they differ by a rounding error",
-	 * and the ABI promises straight. */
+	/* Force alpha to 255: MuPDF's 8-bit compositing rounds some pixels to 254. */
 	{
 		unsigned char *row = pix->samples;
 		int y, x;
@@ -1100,7 +806,6 @@ fz_pixmap *ink_shim_render(fz_document *doc, int number, float scale)
 	return pix;
 }
 
-/* Pixmap accessors: `fz_pixmap` is opaque to Zig, so its fields are read here. */
 unsigned char *ink_shim_pixmap_samples(fz_pixmap *pix) { return pix->samples; }
 int ink_shim_pixmap_width(fz_pixmap *pix) { return pix->w; }
 int ink_shim_pixmap_height(fz_pixmap *pix) { return pix->h; }
@@ -1119,53 +824,23 @@ void ink_shim_drop_document(fz_document *doc)
 		fz_drop_document(g_ctx, doc);
 }
 
-/* Drop everything cached that is not currently referenced. Called after the
- * last document closes, so a viewer that opened one big book does not keep its
- * decoded images resident for the rest of the tab's life. */
+/* Drops unreferenced cache; called after the last document closes. */
 void ink_shim_shrink_store(void)
 {
 	if (g_ctx)
 		fz_shrink_store(g_ctx, 0);
 }
 
-/* --- Structure-preserving single-page export ----------------------------- */
+/* --- structure-preserving single-page export ---
+ * `pdf_graft_page` copies the original page's /Contents, /Resources and boxes
+ * into a fresh document, ink on top. `pdf_graft_mapped_page` copies a fixed key
+ * list, so /Annots (links, forms, highlights) and a page /Group are dropped. */
 
-/* Export ONE page as a one-page PDF holding the ORIGINAL page plus our ink.
- *
- * WHY THIS EXISTS BESIDE `webapp/src/export/pdf.ts`, which rasterises to
- * grayscale images at A4 width: there the page's real text and vectors are gone
- * and its geometry has been replaced. `pdf_graft_page` deep-copies the page's
- * own /Contents, /Resources and boxes into a fresh document, so what comes out
- * is the publisher's page with the `.mark` ink drawn over it.
- *
- * KNOWN LIMITATION: /Annots ARE SILENTLY DROPPED. `pdf_graft_mapped_page`
- * (`source/pdf/pdf-graft.c`) copies a fixed list and nothing else: /Contents,
- * /Resources, /MediaBox, /CropBox, /BleedBox, /TrimBox, /ArtBox, /Rotate,
- * /UserUnit. So LINKS, form fields and any highlights the source PDF already
- * carried do not survive into the exported page, and neither does a page-level
- * /Group (transparency group). That is defensible — an /Annot can reference
- * other pages, which a one-page document no longer has — but it is a real loss
- * and nothing in the file warns about it, so it is stated here. OUR ink is not
- * affected: it goes into the content stream, not into an annotation.
- */
-
-/* Build the ink as an image XObject in `dst`. Returns a reference the caller
- * must `pdf_drop_obj`. `alpha` is w*h coverage bytes, 255 = full ink.
- *
- * /DEVICEGRAY + AN 8-BIT /SMASK, NOT A 1-BIT /IMAGEMASK. A stencil mask is the
- * obvious encoding for "black ink or nothing" and about ten times smaller, but
- * the real ink is anti-aliased with 16 grey levels and at export resolution a
- * stencil is visibly staircased — a REGRESSION against the rasterising exporter.
- * Deflated it costs ~7.6 KB over the bare page on a real annotated page, and
- * 29.9 KB on a synthetic worst case (1240x1754 coverage, 150,000 pixels inked).
- *
- * THE BLACK PLANE IS 1 BIT PER COMPONENT, THE MASK IS 8, and both are w x h. A
- * /SMask whose dimensions differ from the base image's is RESAMPLED to them, so
- * a cheap 1x1 black base would throw the ink's resolution away; shrinking the
- * base's DEPTH instead costs w*h/8 transient bytes rather than w*h — 329 KB
- * instead of 2.6 MB on a 1404x1872 page — and all-zero 1-bit DeviceGray samples
- * are black under the default /Decode, so the result is identical.
- */
+/* Builds the ink as an image XObject; caller drops the reference. A 1-bit
+ * DeviceGray base with an 8-bit /SMask, not an /ImageMask: the ink is
+ * anti-aliased and a stencil staircases. The base keeps w x h (a smaller
+ * /SMask base would resample the mask) but at 1 bit, and all-zero samples are
+ * black under the default /Decode. */
 static pdf_obj *ink_shim_add_ink_image(fz_context *ctx, pdf_document *dst,
 	const unsigned char *alpha, int w, int h)
 {
@@ -1223,9 +898,7 @@ static pdf_obj *ink_shim_add_ink_image(fz_context *ctx, pdf_document *dst,
 	return image;
 }
 
-/* Add `text` to `dst` as a content stream object. Returns a reference the caller
- * must drop (or push with `pdf_array_push_drop`). Uncompressed: `do_compress`
- * deflates it at write time, and these fragments are a few dozen bytes. */
+/* Adds `text` as an uncompressed content stream (deflated at write time). */
 static pdf_obj *ink_shim_add_ops(fz_context *ctx, pdf_document *dst, const char *text)
 {
 	fz_buffer *buf = fz_new_buffer_from_copied_data(ctx,
@@ -1241,43 +914,17 @@ static pdf_obj *ink_shim_add_ops(fz_context *ctx, pdf_document *dst, const char 
 	return obj;
 }
 
-/* The XObject name the ink is drawn through, for page `number`.
- *
- * PER-PAGE, AND THAT IS NOT COSMETIC. A page's /Resources dictionary is
- * frequently SHARED between pages — one real document gives all 26 of its pages
- * the same object (see the write options below) — so a fixed `/InkholdInk` would
- * have page 7's ink OVERWRITE page 3's entry in the dictionary they share, and
- * page 3's content stream, still saying `/InkholdInk Do`, would then draw page
- * 7's handwriting. Invisible on the single-page export, which touches one page;
- * fatal on the whole-document one, which touches seven.
- *
- * `dst` must have room for ~24 bytes.
- */
+/* The ink XObject name, per page: /Resources are often shared between pages,
+ * so a fixed name would let one page's ink overwrite another's. */
 static void ink_shim_xobject_name(char *dst, size_t len, int number)
 {
 	fz_snprintf(dst, len, "InkholdInk%d", number);
 }
 
-/* Put the ink into the page's own /Contents, as `[ (q) original… (Q + ink) ]`.
- *
- * A CONTENT STREAM RATHER THAN AN ANNOTATION. Both render identically; the
- * tie-breaker is what a viewer can do to them. An annotation can be hidden by a
- * "show/hide annotations" toggle, may not print depending on its flags, and is
- * discarded by anything that flattens.
- *
- * THE BRACKETING `q`/`Q` protects the ink from whatever graphics state the
- * original content leaves behind — a stray `cm`, a clip, a non-default blend
- * mode — because the ink's `cm` below is RELATIVE to the CTM in force when it
- * runs. It covers one level of imbalance, which is what a stream that forgets a
- * `Q` produces; `do_sanitize` (see the write options) rebalances the rest. If
- * ink ever turns up displaced on a real document, the bulletproof variant is to
- * wrap the original in a Form XObject, whose `Do` saves and restores
- * unconditionally — at the cost of concatenating the original content into one
- * decompressed buffer.
- *
- * PDF concatenates the streams of a /Contents array into ONE stream, with
- * whitespace between them, so splitting our additions into their own objects
- * costs nothing and leaves the original's bytes untouched and unparsed. */
+/* Wraps /Contents as `[ (q) original… (Q + ink) ]`: a content stream, not an
+ * annotation, so it can't be hidden or flattened away. `q`/`Q` shields the ink
+ * from leftover graphics state (its `cm` is relative); `do_sanitize`
+ * rebalances deeper imbalance. */
 static void ink_shim_wrap_contents(fz_context *ctx, pdf_document *dst,
 	pdf_obj *page_obj, pdf_obj *image, const char *name, const char *tail)
 {
@@ -1286,13 +933,8 @@ static void ink_shim_wrap_contents(fz_context *ctx, pdf_document *dst,
 	pdf_obj *old;
 	pdf_obj *contents = NULL;
 
-	/* INHERITABLE, not `pdf_dict_get`. /Resources is one of the five keys a page
-	 * may inherit from its /Pages node, and a great many real documents put it
-	 * there once rather than on every page. Reading only the page's own key
-	 * finds nothing on those, and the `put_dict` below then writes an EMPTY
-	 * /Resources onto the page — which does not merely fail to help, it SHADOWS
-	 * the inherited one, and the page's original text loses every font it was
-	 * using. */
+	/* Inheritable: /Resources often lives on /Pages, and writing an empty one
+	 * onto the page would shadow it and lose every font. */
 	resources = pdf_dict_get_inheritable(ctx, page_obj, PDF_NAME(Resources));
 	if (!pdf_is_dict(ctx, resources))
 		resources = pdf_dict_put_dict(ctx, page_obj, PDF_NAME(Resources), 2);
@@ -1307,8 +949,7 @@ static void ink_shim_wrap_contents(fz_context *ctx, pdf_document *dst,
 	{
 		contents = pdf_new_array(ctx, dst, 4);
 		pdf_array_push_drop(ctx, contents, ink_shim_add_ops(ctx, dst, "q\n"));
-		/* The old streams are pushed BEFORE /Contents is replaced: pushing keeps
-		 * a reference, and the only one holding them until then is `page_obj`. */
+		/* Push the old streams before replacing /Contents, which holds them. */
 		if (pdf_is_array(ctx, old)) {
 			int i, n = pdf_array_len(ctx, old);
 			for (i = 0; i < n; i++)
@@ -1325,16 +966,8 @@ static void ink_shim_wrap_contents(fz_context *ctx, pdf_document *dst,
 		fz_rethrow(ctx);
 }
 
-/* Draw `alpha` onto page `number` of the ALREADY-OPEN `doc`, in place.
- *
- * The whole of the ink work, shared by the two export routes: the single-page
- * one draws onto page 0 of the fresh document it grafted into, the incremental
- * one draws onto page N of the document the user opened. Throws on failure.
- *
- * `a`..`f` map the ALPHA IMAGE'S OWN PIXEL SPACE — (0,0) at its top-left pixel,
- * (w,h) at its bottom-right, y downwards — onto the page in DISPLAY SPACE, the
- * top-left-origin cropped-and-rotated box the viewer already draws in.
- */
+/* Draws `alpha` onto page `number` of the open `doc` in place; throws. `a`..`f`
+ * map the alpha image's pixel space onto the page in display space. */
 static void ink_shim_draw_ink(fz_context *ctx, pdf_document *doc, int number,
 	const unsigned char *alpha, int w, int h,
 	float a, float b, float c, float d, float e, float f)
@@ -1353,28 +986,11 @@ static void ink_shim_draw_ink(fz_context *ctx, pdf_document *doc, int number,
 
 		image = ink_shim_add_ink_image(ctx, doc, alpha, w, h);
 
-		/* PLACEMENT, AND THE BUG IT EXISTS TO AVOID. A content stream is written
-		 * in the page's UNROTATED, MediaBox-origin user space. Every coordinate
-		 * the viewer — and therefore the caller — works in is display space: the
-		 * CROPPED, ROTATED box `fz_bound_page` reports, y downwards. Placing the
-		 * ink naively drew it 90 degrees out on a `/Rotate 90` page, and it would
-		 * also have been offset on any page whose /CropBox or /MediaBox does not
-		 * start at the origin. `pdf_page_transform_box` produces exactly the
-		 * matrix MuPDF applies when it renders, so its INVERSE takes display
-		 * space back to user space, and all three cases fall out of the one call.
-		 *
-		 * FZ_CROP_BOX IS DOCUMENTATION HERE, NOT A CHOICE. In
-		 * `pdf_page_obj_transform_box` (`source/pdf/pdf-page.c`) the box
-		 * argument selects only the RECT handed back; the matrix is built under
-		 * a comment reading "Always use CropBox to set origin to top left", so
-		 * FZ_MEDIA_BOX yields a different `box` and an IDENTICAL `place`.
-		 * Naming it keeps the call site honest about which box the ink is
-		 * placed against.
-		 *
-		 * `unit` is the other half: `Do` paints an image into the UNIT SQUARE
-		 * with the image's first row along the top edge, so a caller who thinks
-		 * in image pixels needs (u,v) -> (u*w, (1-v)*h) in front of their matrix.
-		 * MuPDF's `fz_concat(A, B)` means "A, then B". */
+		/* Content streams are in unrotated MediaBox user space; the caller is
+		 * in cropped, rotated display space. The inverse of
+		 * `pdf_page_transform_box` maps back (FZ_CROP_BOX only selects the rect
+		 * returned; the matrix is the same). `unit` maps image pixels onto the
+		 * unit square `Do` paints. `fz_concat(A, B)` is "A, then B". */
 		page = pdf_load_page(ctx, doc, number);
 		pdf_page_transform_box(ctx, page, &box, &place, FZ_CROP_BOX);
 		display = fz_make_matrix(a, b, c, d, e, f);
@@ -1397,17 +1013,8 @@ static void ink_shim_draw_ink(fz_context *ctx, pdf_document *doc, int number,
 		fz_rethrow(ctx);
 }
 
-/* Export page `number` of `doc` as a one-page PDF with `alpha` (w*h coverage
- * bytes) drawn over it. `a`..`f` map the ALPHA IMAGE'S OWN PIXEL SPACE — (0,0)
- * at its top-left pixel, (w,h) at its bottom-right, y downwards — onto the page
- * in DISPLAY SPACE, the top-left-origin cropped-and-rotated box the viewer
- * already draws in. Covering the whole page is therefore `pageW/w, 0, 0,
- * pageH/h, 0, 0`. Returns a buffer the caller must drop, or NULL (message in
- * `ink_shim_error`).
- *
- * ON THE STREAMED PATH THIS CAN SUSPEND: the graft reads the source document,
- * which pulls through `ink_host_read`.
- */
+/* Exports page `number` as a one-page PDF with `alpha` drawn over it (see
+ * `ink_shim_draw_ink`). Caller drops the buffer; NULL on failure. */
 fz_buffer *ink_shim_export_page(fz_document *doc, int number,
 	const unsigned char *alpha, int w, int h,
 	float a, float b, float c, float d, float e, float f)
@@ -1421,10 +1028,8 @@ fz_buffer *ink_shim_export_page(fz_document *doc, int number,
 	if (!ctx || !doc || !alpha || w <= 0 || h <= 0)
 		return NULL;
 
-	/* REFUSE ANYTHING THAT IS NOT A PDF. `pdf_specifics` answers NULL for EPUB,
-	 * CBZ, XPS and friends, and there is no page to graft out of a document that
-	 * has no PDF objects. The caller's fallback is the rasterising exporter, and
-	 * it needs a sentence to show for why. */
+	/* Not a PDF (EPUB, CBZ, XPS): refuse with a message so the caller can fall
+	 * back to the rasterising exporter. */
 	src = pdf_specifics(ctx, doc);
 	if (!src) {
 		ink_set_error("only a PDF can be exported with its page structure intact");
@@ -1442,29 +1047,9 @@ fz_buffer *ink_shim_export_page(fz_document *doc, int number,
 		pdf_graft_page(ctx, dst, 0, src, number);
 		ink_shim_draw_ink(ctx, dst, 0, alpha, w, h, a, b, c, d, e, f);
 
-		/* WRITE OPTIONS, AND WHY THE CLEANING IS NOT OPTIONAL. `do_clean` +
-		 * `do_sanitize` re-parse every content stream and rebuild each one's
-		 * /Resources from what it actually references; `do_garbage = 3` then
-		 * drops whatever that detached and de-duplicates the rest.
-		 *
-		 * That matters because a page's /Resources are frequently SHARED. One
-		 * real document gives all 26 pages the same dictionary, so grafting a
-		 * single page dragged the whole document's fonts with it: 175 KB, cut to
-		 * 53 KB by the cleaning, pixel-identical either way. A synthetic case —
-		 * two pages sharing a resource dict with two fat form XObjects, one of
-		 * them unused by the page being exported — pins down which option does
-		 * what:
-		 *
-		 *     compress only .................... 20,547 B
-		 *     + garbage 3, no clean/sanitize ... 20,547 B  (nothing to collect:
-		 *                                        the copied /Resources still
-		 *                                        references the unused form)
-		 *     + clean/sanitize, no garbage ..... 20,724 B  (BIGGER)
-		 *     all three ........................ 10,724 B
-		 *
-		 * So: TAKE ALL THREE OR NONE. Cleaning alone rewrites tidy content into
-		 * longer equivalents and has nothing to prune; collecting alone finds
-		 * nothing unreferenced. Only together do they pay. */
+		/* `do_clean` + `do_sanitize` + `do_garbage = 3` together, or none: they
+		 * rebuild each page's /Resources from what it references and drop the
+		 * rest of a shared dictionary. Either alone gains nothing or grows. */
 		opts.do_compress = 1;
 		opts.do_compress_images = 1;
 		opts.do_compress_fonts = 1;
@@ -1491,46 +1076,13 @@ fz_buffer *ink_shim_export_page(fz_document *doc, int number,
 	return out_buf;
 }
 
-/* --- Whole-document export, as an INCREMENTAL UPDATE --------------------- */
+/* --- whole-document export as an incremental update ---
+ * Keeps the original's bytes verbatim (and every page's /Annots) and appends
+ * only changed objects; the browser concatenates the delta. MuPDF does not
+ * guard three things here (`ink_shim_incremental_refusal`): a document with no
+ * backing file, a nonzero `doc->bias` (never applied on this path), and a
+ * repaired file (refused before any page is mutated). */
 
-/* WHY THIS IS NOT "LOOP THE ONE ABOVE". `pdf_graft_page` silently drops
- * /Annots, so grafting all 77 pages of a document would lose every link and
- * highlight the original carried, 77 times over. An incremental update instead
- * keeps the ORIGINAL FILE'S BYTES VERBATIM and appends only the objects that
- * changed: nothing is re-encoded, so the export keeps its text, vectors,
- * bookmarks, forms, metadata, structure tree AND its own annotations. The bigger
- * export is the one that loses less.
- *
- * It is also the only shape that fits the memory budget: the DELTA ALONE is
- * typically tens of kilobytes, and the browser concatenates it onto the original
- * with `new Blob([original, delta])`, which is disk-backed — a 76 MB document is
- * exported without a megabyte of it entering the JS heap or this one.
- *
- * THREE THINGS MuPDF WILL NOT DO FOR US ON THIS PATH, all verified in
- * `source/pdf/pdf-write.c` and all handled by `ink_shim_incremental_refusal`:
- *
- *  1. `pdf_write_document` (2896) LACKS the `!doc->file` guard that
- *     `pdf_save_document` (2953) has, so writing incrementally from a document
- *     with no backing file produces a bad delta SILENTLY. We check it ourselves.
- *  2. `opts.bias` is never set on the `pdf_write_document` path AND CANNOT BE
- *     SET FROM OUTSIDE. `pdf_save_document` assigns it at 3009 (`opts.bias =
- *     doc->bias`, under `if (do_incremental)`) — but that `opts` is the internal
- *     `pdf_write_state`, not the `pdf_write_options` a caller hands in. For a
- *     file with junk before `%PDF-` every xref offset in the delta would be
- *     written unbiased and point at the wrong byte. `doc->bias` is public, so we
- *     read it and refuse. Detectable, not fixable, and MuPDF stays unpatched.
- *  3. MuPDF itself refuses incremental on a REPAIRED file, with `do_garbage`,
- *     and with any encryption change. The repair case is pre-empted here so the
- *     refusal arrives BEFORE any page is mutated; the other two are simply not
- *     asked for. `do_clean`/`do_sanitize`/`do_garbage` — which the single-page
- *     export needs, because grafting drags shared resources along — are neither
- *     available nor wanted here: nothing is grafted, so nothing is duplicated.
- *
- * Each refusal is a sentence the UI can show. Falling back to grafting every
- * page is NOT an option: that is the exact fidelity loss this route avoids.
- */
-
-/* Why `src` cannot take an incremental update, or NULL if it can. */
 static const char *ink_shim_incremental_refusal(pdf_document *src)
 {
 	if (!src->file)
@@ -1542,27 +1094,10 @@ static const char *ink_shim_incremental_refusal(pdf_document *src)
 	return NULL;
 }
 
-/* The output the delta is written through: absolute file positions in, only the
- * bytes at or after `base` kept.
- *
- * WHY NOT `fz_new_output_with_buffer`. Because of what MuPDF does FIRST on an
- * incremental write: `do_pdf_save_document` calls
- * `ensure_initial_incremental_contents(ctx, doc->file, out, doc->file_size)`,
- * whose contract is that the output must ALREADY CONTAIN the original file. It
- * checks by reading the output back through `fz_stream_from_output`, and a
- * buffer output has no `as_stream`, so it takes the other branch and COPIES the
- * whole original into the buffer — which would hand back original+delta, tens of
- * megabytes, and throw away the entire point.
- *
- * So the output DISCARDS everything written below `base`. MuPDF's copy loop
- * writes the original into a sink, which leaves the cursor at exactly `base` and
- * every real byte after it; every offset MuPDF records afterwards —
- * `fz_tell_output` is what fills the xref — is a true file offset, because
- * `tell` answers in the original's coordinates rather than the delta's. No
- * MuPDF state is poked and no documented behaviour is bent; the cost is that the
- * original is READ once through `doc->file`, which is why the browser points
- * `ink.host_read` at its own local copy for the duration (`pdfWorker.ts`).
- */
+/* The delta's output: absolute positions in, bytes below `base` discarded.
+ * MuPDF's incremental write first copies the whole original into the output
+ * (`ensure_initial_incremental_contents`), and a buffer output would keep that
+ * copy; discarding it keeps `fz_tell_output` in true file offsets. */
 typedef struct {
 	fz_buffer *delta; /* owned reference; the bytes from `base` onwards */
 	int64_t base;     /* the original file's length */
@@ -1590,10 +1125,8 @@ static void ink_delta_write(fz_context *ctx, void *opaque, const void *data, siz
 		fz_append_data(ctx, st->delta, p, n);
 		return;
 	}
-	/* A backwards seek followed by a write. The only writer that does this is
-	 * the signature path (`pdf-write.c:1816`), which we never reach — but a
-	 * position-addressed output that silently appended instead would corrupt the
-	 * delta rather than fail, so it is handled rather than asserted. */
+	/* A backwards seek then write (only the signature path does this) is
+	 * handled rather than silently appended. */
 	while (st->delta->len < off + n)
 		fz_append_byte(ctx, st->delta, 0);
 	memcpy(st->delta->data + off, p, n);
@@ -1639,18 +1172,9 @@ static void ink_delta_drop(fz_context *ctx, void *opaque)
 	fz_free(ctx, st);
 }
 
-/* Draw `alpha` onto page `number` of the OPEN document, in place. Writes
- * nothing; call once per annotated page, then `ink_shim_export_incremental`.
- * 0 on success, -1 with a message in `ink_shim_error` on failure.
- *
- * THE REFUSALS ARE CHECKED HERE TOO, and that is the point of checking them
- * early: a document that cannot be written incrementally is turned down before
- * its first page is touched, so a refusal never leaves a half-annotated document
- * behind for the next render to draw.
- *
- * ON THE STREAMED PATH THIS CAN SUSPEND — loading a page walks the xref, which
- * pulls through `ink_host_read`.
- */
+/* Draws `alpha` onto page `number` of the open document; call once per page,
+ * then `ink_shim_export_incremental`. Refusals are checked first so a document
+ * is never left half-annotated. 0 on success, -1 on failure. */
 int ink_shim_annotate_page(fz_document *doc, int number,
 	const unsigned char *alpha, int w, int h,
 	float a, float b, float c, float d, float e, float f)
@@ -1683,21 +1207,15 @@ int ink_shim_annotate_page(fz_document *doc, int number,
 	return 0;
 }
 
-/* Write the changes made by `ink_shim_annotate_page` as an incremental update,
- * and hand back THE DELTA ONLY — the bytes that belong after the original file.
- * The caller must drop the buffer. NULL on failure (message in
- * `ink_shim_error`).
- *
- * The result is not a PDF on its own: `original bytes || delta` is.
- */
+/* Writes the annotations as an incremental update and returns only the delta
+ * (`original || delta` is the PDF). Caller drops; NULL on failure. */
 fz_buffer *ink_shim_export_incremental(fz_document *doc)
 {
 	fz_context *ctx = g_ctx;
 	pdf_document *src;
 	const char *refusal;
 	ink_delta_state *st = NULL;
-	/* A NON-OWNING alias, live only inside the `fz_try`: `out` owns `st` and
-	 * drops it, and the invariant has to be read after the write finishes. */
+	/* A non-owning alias, valid only inside `fz_try`. */
 	ink_delta_state *check = NULL;
 	fz_buffer *out_buf = NULL;
 	fz_output *out = NULL;
@@ -1715,10 +1233,7 @@ fz_buffer *ink_shim_export_incremental(fz_document *doc)
 		ink_set_error(refusal);
 		return NULL;
 	}
-	/* An empty delta is a valid answer to "nothing changed", and a useless one
-	 * to a caller who asked for an annotated document: the concatenation would
-	 * be the original file, which the raw-download row already offers. Refusing
-	 * says so rather than shipping a copy under a name that promises ink. */
+	/* An empty delta would just be the original, so refuse. */
 	if (!pdf_has_unsaved_changes(ctx, src)) {
 		ink_set_error("no ink was added to this document");
 		return NULL;
@@ -1732,14 +1247,8 @@ fz_buffer *ink_shim_export_incremental(fz_document *doc)
 	{
 		pdf_write_options opts = pdf_default_write_options;
 
-		/* Compression of the NEW objects only — in an incremental write the
-		 * unchanged ones are not written at all, so nothing of the original is
-		 * re-encoded. It is not optional: one page's coverage mask is w*h raw
-		 * bytes (2.5 MB for A4 at the pen's resolution) and deflates to a few
-		 * kilobytes. `do_clean`/`do_sanitize`/`do_garbage` are absent because
-		 * MuPDF forbids garbage collection here and because the reason the
-		 * single-page path needs them — a graft dragging a shared resource
-		 * dictionary along — does not exist when nothing is grafted. */
+		/* Compress the new objects; MuPDF forbids garbage collection on an
+		 * incremental write. */
 		opts.do_incremental = 1;
 		opts.do_compress = 1;
 		opts.do_compress_images = 1;
@@ -1749,12 +1258,7 @@ fz_buffer *ink_shim_export_incremental(fz_document *doc)
 		st = fz_malloc_struct(ctx, ink_delta_state);
 		st->delta = fz_keep_buffer(ctx, out_buf);
 		st->base = src->file_size;
-		/* Position ZERO, not `base`: MuPDF's first act is to write the whole
-		 * original into this output, and those `base` bytes are what carry the
-		 * cursor to the end of it. Starting at `base` would double-count them
-		 * and put every appended object `base` bytes further on than the xref
-		 * says. The invariant below is what makes that a thrown error rather
-		 * than a file that opens and shows nothing. */
+		/* Start at 0: MuPDF's copy of the original carries the cursor to `base`. */
 		st->pos = 0;
 		out = fz_new_output(ctx, 0, st, ink_delta_write, NULL, ink_delta_drop);
 		check = st;
@@ -1766,13 +1270,8 @@ fz_buffer *ink_shim_export_incremental(fz_document *doc)
 		pdf_write_document(ctx, src, out, &opts);
 		fz_close_output(ctx, out);
 
-		/* THE INVARIANT THAT MAKES THE DISCARD SAFE: the cursor must have ended
-		 * exactly `base` bytes above the delta, which holds iff MuPDF's copy of
-		 * the original wrote every one of its `file_size` bytes. A short read of
-		 * `doc->file` (an aborted range fetch on the streamed path) would
-		 * otherwise sink real objects too and hand back a delta whose offsets
-		 * are all wrong — a file that opens to a blank page rather than one that
-		 * fails. */
+		/* The copy must have written all `file_size` bytes; a short read would
+		 * yield a delta with wrong offsets (a blank-opening file). */
 		if (check->pos != check->base + (int64_t)check->delta->len)
 			fz_throw(ctx, FZ_ERROR_LIBRARY,
 				"could not read the whole of the original while writing the update");
@@ -1789,7 +1288,6 @@ fz_buffer *ink_shim_export_incremental(fz_document *doc)
 	return out_buf;
 }
 
-/* Buffer accessors: `fz_buffer` is opaque to Zig, as `fz_pixmap` is. */
 unsigned char *ink_shim_buffer_data(fz_buffer *buf)
 {
 	unsigned char *data = NULL;
@@ -1817,20 +1315,10 @@ void ink_shim_drop_buffer(fz_buffer *buf)
 		fz_drop_buffer(g_ctx, buf);
 }
 
-/* --- JPX stubs (upstream bug workaround) --------------------------------- */
-
-/* MuPDF 1.28.1's `source/fitz/load-jpx.c` has a real bug: its
- * `FZ_ENABLE_JPX == 0` stub for `fz_load_jpx_info` is missing the trailing
- * `fz_colorspace *defcs` parameter that the declaration in `image-imp.h` — and
- * the enabled definition — both have. On x86 the extra argument is harmlessly
- * ignored; on wasm, `wasm-ld` sees the signature mismatch and substitutes a
- * TRAPPING stub, so a JPX-bearing PDF would abort the module instead of raising
- * `FZ_ERROR_UNSUPPORTED`. Zig additionally refuses to link through the warning.
- *
- * `load-jpx.c` is therefore excluded from the build (`build.zig`) and its two
- * disabled-path stubs are supplied here with the CORRECT signatures. MuPDF stays
- * unpatched, and a JPX image degrades to "unsupported" the way it was meant to.
- * Worth reporting upstream; the fix there is one line. */
+/* --- JPX stubs ---
+ * MuPDF 1.28.1's disabled-JPX stub of `fz_load_jpx_info` lacks the trailing
+ * `defcs` parameter; wasm-ld turns the mismatch into a trapping stub. So
+ * `load-jpx.c` is excluded in `build.zig` and correct stubs live here. */
 
 fz_pixmap *fz_load_jpx(fz_context *ctx, const unsigned char *data, size_t size, fz_colorspace *defcs)
 {
@@ -1854,13 +1342,10 @@ void fz_load_jpx_info(fz_context *ctx, const unsigned char *data, size_t size,
 	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "JPX support disabled");
 }
 
-/* --- wasi-libc gap ------------------------------------------------------- */
+/* --- wasi-libc gap --- */
 
-/* MuPDF calls `mkstemp` only from the temporary-FILE path used when saving a
- * document to a path. `ink_shim_export_page` does write a PDF, but into an
- * `fz_output` over a memory buffer, which never goes near it. wasi-libc has no
- * filesystem-creating `mkstemp`, so this stub keeps the module linkable and
- * fails honestly if it were ever reached. */
+/* wasi-libc has no `mkstemp`; MuPDF only uses it on a save-to-path we never
+ * take, so this stub keeps the module linkable and fails if reached. */
 int mkstemp(char *template)
 {
 	(void)template;
