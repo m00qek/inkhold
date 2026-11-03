@@ -31,6 +31,32 @@ const cover_header_probe: usize = 64 * 1024;
 pub const LayerRef = sn.page_payload.LayerRef;
 pub const max_layers = sn.page_payload.max_layers;
 
+const note_index_parse = @import("note_index_parse.zig");
+const note_index_serve = @import("note_index_serve.zig");
+pub const parseBlob = note_index_parse.parseBlob;
+pub const parseBlobSource = note_index_parse.parseBlobSource;
+pub const pageContentHash = note_index_parse.pageContentHash;
+pub const packLayers = note_index_parse.packLayers;
+pub const LayerRecord = note_index_parse.LayerRecord;
+pub const unpackLayerRecords = note_index_parse.unpackLayerRecords;
+pub const unpackLayers = note_index_parse.unpackLayers;
+pub const SliceSource = note_index_serve.SliceSource;
+pub const NoteHeader = note_index_serve.NoteHeader;
+pub const noteHeader = note_index_serve.noteHeader;
+pub const max_bg_hash = note_index_serve.max_bg_hash;
+pub const PagePlan = note_index_serve.PagePlan;
+pub const pagePlan = note_index_serve.pagePlan;
+pub const TemplateLocation = note_index_serve.TemplateLocation;
+pub const templateLocation = note_index_serve.templateLocation;
+pub const streamPage = note_index_serve.streamPage;
+pub const serializeFromIndex = note_index_serve.serializeFromIndex;
+const layers_edited = fixture.layers_edited;
+const Fixture = fixture.Fixture;
+const Blobs = fixture.Blobs;
+const PeakAllocator = fixture.PeakAllocator;
+const indexInto = fixture.indexInto;
+const coveredNote = fixture.coveredNote;
+
 /// A layer as stored: the wire ref plus panel-only facts `noteMeta` serves.
 /// `name` is empty when the page has no usable `LAYERINFO`.
 pub const IndexedLayer = struct {
@@ -383,32 +409,6 @@ const testing = std.testing;
 const schema = @import("../db/schema.zig");
 const nb = @import("note_builder");
 const fixture = @import("note_index/fixture.zig");
-
-const note_index_parse = @import("note_index_parse.zig");
-const note_index_serve = @import("note_index_serve.zig");
-pub const parseBlob = note_index_parse.parseBlob;
-pub const parseBlobSource = note_index_parse.parseBlobSource;
-pub const pageContentHash = note_index_parse.pageContentHash;
-pub const packLayers = note_index_parse.packLayers;
-pub const LayerRecord = note_index_parse.LayerRecord;
-pub const unpackLayerRecords = note_index_parse.unpackLayerRecords;
-pub const unpackLayers = note_index_parse.unpackLayers;
-pub const SliceSource = note_index_serve.SliceSource;
-pub const NoteHeader = note_index_serve.NoteHeader;
-pub const noteHeader = note_index_serve.noteHeader;
-pub const max_bg_hash = note_index_serve.max_bg_hash;
-pub const PagePlan = note_index_serve.PagePlan;
-pub const pagePlan = note_index_serve.pagePlan;
-pub const TemplateLocation = note_index_serve.TemplateLocation;
-pub const templateLocation = note_index_serve.templateLocation;
-pub const streamPage = note_index_serve.streamPage;
-pub const serializeFromIndex = note_index_serve.serializeFromIndex;
-const layers_edited = fixture.layers_edited;
-const Fixture = fixture.Fixture;
-const Blobs = fixture.Blobs;
-const PeakAllocator = fixture.PeakAllocator;
-const indexInto = fixture.indexInto;
-const coveredNote = fixture.coveredNote;
 
 test "a v4 row (fixed-stride layers, no identity) lazily re-derives to v5 with slots+names" {
     var f = try Fixture.init();

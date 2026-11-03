@@ -17,6 +17,14 @@ const pdftextpass = @import("../pdf/text.zig");
 
 const log = std.log.scoped(.deferred);
 
+const deferred_worker = @import("deferred_worker.zig");
+pub const Worker = deferred_worker.Worker;
+pub const drainNow = deferred_worker.drainNow;
+const nice19 = deferred_worker.nice19;
+const Fixture = fixture.Fixture;
+const two_paragraphs = fixture.two_paragraphs;
+const rotate90_pdf = fixture.rotate90_pdf;
+
 /// Idle sleep, and the backstop: work left by a restart or an unsignalled path
 /// is found by the next tick.
 pub const idle_tick_ns: u64 = 30 * std.time.ns_per_s;
@@ -374,14 +382,6 @@ pub fn nextJob(gpa: std.mem.Allocator, db: sqlite.Db) !?Found {
 const schema = @import("../db/schema.zig");
 const testing = std.testing;
 const fixture = @import("deferred/fixture.zig");
-
-const deferred_worker = @import("deferred_worker.zig");
-pub const Worker = deferred_worker.Worker;
-pub const drainNow = deferred_worker.drainNow;
-const nice19 = deferred_worker.nice19;
-const Fixture = fixture.Fixture;
-const two_paragraphs = fixture.two_paragraphs;
-const rotate90_pdf = fixture.rotate90_pdf;
 
 test "NICE 19 IS PER-THREAD — the worker yields the core, the request threads do not" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
