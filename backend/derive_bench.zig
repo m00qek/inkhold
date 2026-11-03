@@ -1,54 +1,8 @@
-//! MEASUREMENT ONLY — `zig build derive-bench`. Not part of the server, not
-//! reachable from it, and it changes nothing about it: a standalone executable
-//! that opens an EXISTING corpus read-only and times the DERIVE path over it.
-//!
-//! ## The question it exists to answer
-//!
-//! The last open derive-cost item. §8.3 measured the FOLD on an x86 box and
-//! extrapolated to the ARM1176 at an assumed 10-20×;
-//! COMPRESSION — the one new CPU cost this design adds to the server — was never
-//! measured at all. Both are settled by running this on the deployment target,
-//! which is the shape every bench in this repo has taken: cross-compiled with
-//! `-Dtarget=arm-linux-musleabihf -Dcpu=arm1176jzf_s`, scp'd to the Pi, run
-//! there. It is the last of them — `search_bench.zig` went with library-wide
-//! search (§6 step 6) and `indoc_bench.zig` with the in-document reads it
-//! timed (step 7).
-//!
-//! ## It measures THIS code, not a proxy
-//!
-//! The derive pass calls the real `derive_search.writeDerived` into a real
-//! `derived.DerivedStore` — the real fold, the real `Fragment`, deflate level 6,
-//! the real CRC, the real fsync and atomic rename. Nothing here reimplements the
-//! record format.
-//!
-//! **Which is also where the compression measurement gets its plaintext.** The
-//! bytes fed to the compressor are recovered by INFLATING what `writeDerived`
-//! just wrote, rather than by a second rendering of the record that could drift
-//! from the first. The level-6 figure this bench reports must therefore come out
-//! byte-identical to the file on disk, and the run asserts exactly that
-//! (`FIDELITY`) — the compressed sizes match, and the header's CRC32 of the
-//! plaintext matches a CRC32 taken over the recovered bytes. A mismatch means
-//! the levels below are being compared over the wrong input.
-//!
-//! ## Three passes, kept separate on purpose
-//!
-//! `fold` is the per-page tokenizer cost alone — `fuzzy.foldRows` and the terms
-//! line, no writer attached. It is the number §8.3 is stated in, so it is the
-//! one that can be divided by §8.3 to get a REAL x86:ARM multiplier.
-//!
-//! `derive` is fold + compress + write, end to end, per document: what the
-//! `nice 19` worker actually spends. Its peak RSS is the one that means
-//! something against the 50 MB budget, because the derive path streams and holds
-//! no document.
-//!
-//! `compress` re-runs deflate over the recovered plaintext at each requested
-//! level, so the size/time trade behind the level-6 choice has data under it.
-//! **This pass holds a whole document's plaintext in memory and the server never
-//! does** — read its RSS as the bench's, not as the server's.
-//!
-//! The corpus is opened `openReadOnly` and never written. The derived files go
-//! to `--out` (default `derive-bench-out`), which is removed on exit unless
-//! `--keep` is passed.
+//! Measurement only (`zig build derive-bench`): opens an existing corpus
+//! read-only and times the real derive path (`derive_search.writeDerived`) on
+//! the target, in three passes: `fold` alone, `derive` end to end, and
+//! `compress` at each requested level. Only `compress` holds a whole document
+//! in memory, so read its RSS as the bench's, not the server's.
 
 const std = @import("std");
 const sqlite = @import("db/sqlite.zig");
@@ -148,7 +102,6 @@ pub fn main(init: std.process.Init) !void {
     const corpus = try sqlite.Db.openReadOnly(path_z);
     defer corpus.close();
 
-    // The stores. Two roots under `--out`, exactly as the server lays them out.
     var out_root = try Dir.cwd().createDirPathOpen(io, out_dir_path, .{});
     defer out_root.close(io);
     var terms_root = try out_root.createDirPathOpen(io, "terms", .{});
@@ -206,8 +159,7 @@ pub fn main(init: std.process.Init) !void {
             total.split.vocab += best.vocab;
             total.split.total += best.total;
             try emitSplit(io, best, doc.rows);
-            // The gate: one undecomposed fold, and the two must agree
-            // character for character about what they folded.
+            // The decomposed fold must agree with the whole one exactly.
             const whole = try foldPass(gpa, io, corpus, doc);
             try emit(io, "  FIDELITY split vs fold: {s} — terms_chars {d} vs {d}\n", .{
                 if (whole.terms_chars == best.terms_chars) "OK" else "**MISMATCH**",
@@ -229,11 +181,8 @@ pub fn main(init: std.process.Init) !void {
         }
         total.derive_ns += best_derive;
 
-        // `--levels ''` STOPS HERE, and that is the one way to read a true peak
-        // RSS off this bench. Everything below holds a whole document's
-        // plaintext in memory and the derive path never does — so with the
-        // compress pass off, `VmHWM` is the streaming write's own high water and
-        // can be put against the 50 MB budget.
+        // `--levels ''` stops here: the only way to read a true streaming peak
+        // RSS, since everything below holds a whole document's plaintext.
         if (levels.items.len == 0) {
             try emit(io, "  derive   {d:>10.1} ms  (no compress pass; peak RSS is the write path's)\n", .{
                 msOf(best_derive),
@@ -245,9 +194,7 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
 
-        // What is on disk, and what went into it. `stored` is the whole file,
-        // header included, because that is what the blob costs the disk and what
-        // the stream route reads.
+        // `stored` is the whole file, header included.
         const terms_file = try recover(gpa, io, terms_store, doc.md5);
         defer gpa.free(terms_file.plain);
         const text_file = try recover(gpa, io, text_store, doc.md5);
@@ -278,9 +225,7 @@ pub fn main(init: std.process.Init) !void {
                     x.bytes, msOf(x.ns), mbps(text_file.plain.len, x.ns),
                 },
             );
-            // THE GATE. Level 6 through this pass must reproduce the payload
-            // `writeDerived` actually wrote, or the rows above are timing
-            // something other than the shipped record.
+            // Level 6 here must reproduce the payload `writeDerived` wrote.
             if (lvl == 6) {
                 const ok = t.bytes + derived.header_len == terms_file.stored and
                     x.bytes + derived.header_len == text_file.stored and
@@ -291,8 +236,6 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        // Household scale, one document at a time: the files are not needed once
-        // measured, and leaving a library of them behind on a Pi is rude.
         if (!keep) {
             terms_store.removeAll(doc.md5);
             text_store.removeAll(doc.md5);
@@ -342,13 +285,10 @@ pub fn main(init: std.process.Init) !void {
 const Doc = struct {
     md5: []const u8,
     name: []const u8,
-    /// `note_page_index.kind`: 0 `.note`, 1 `.txt`, 2 `.pdf`. It decides whether
-    /// the byte range travels — see `pageSource`.
+    /// `note_page_index.kind`: 0 `.note`, 1 `.txt`, 2 `.pdf`.
     kind: i64,
-    /// The ADDRESS SPACE, `max(page_index) + 1`, which is what the record header
-    /// carries (`derive_search.writeHeader`), not the row count.
+    /// The address space, `max(page_index) + 1`, not the row count.
     n: u32,
-    /// Rows that actually have text — what the fold and both writers see.
     rows: usize,
     text_bytes: usize,
 };
@@ -387,16 +327,9 @@ fn listDocs(
     return out;
 }
 
-/// A `writeDerived` page source over `note_page_index`, standing in for the
-/// three real ones (`txt_index.Pages`, `note_index.Pages`, `pdf_text.Pages`).
-///
-/// It borrows the statement's column memory and hands it straight out, which is
-/// legal for exactly the reason the `.pdf` source's arena lifetime is legal:
-/// `writeDerived` consumes a `Page` completely — folds it and writes it — before
-/// asking for the next one.
-///
-/// A NULL or empty `text` is SKIPPED, matching `note_index.Pages`: a page whose
-/// transcript is unfinished has no row, and `n` stays the full address space.
+/// A `writeDerived` page source over `note_page_index`. Borrows the
+/// statement's column memory, legal because `writeDerived` consumes each `Page`
+/// before the next. NULL or empty text is skipped.
 const Pages = struct {
     stmt: sqlite.Stmt,
     ranged: bool,
@@ -409,9 +342,8 @@ const Pages = struct {
             return .{
                 .ordinal = self.stmt.columnInt(0),
                 .text = text,
-                // Only `.txt` carries a byte range into the raw blob; for a page
-                // addressed by ordinal these columns hold the RECOGNTEXT range,
-                // which is a different thing and must not reach the record.
+                // Only `.txt` carries a blob byte range; for other kinds these
+                // columns hold the RECOGNTEXT range and must not reach the record.
                 .offset = if (self.ranged) blk: {
                     break :blk if (self.stmt.columnIntOpt(2)) |o| @intCast(o) else null;
                 } else null,
@@ -440,18 +372,11 @@ fn pageSource(db: sqlite.Db, doc: Doc) !Pages {
 
 const FoldResult = struct {
     ns: u64,
-    /// Characters of folded terms produced — the payload the terms record is
-    /// mostly made of, reported so the fold's output size is visible beside its
-    /// cost.
     terms_chars: usize,
 };
 
-/// The tokenizer cost alone: `fuzzy.foldRows` per page plus the assembly of that
-/// page's terms line, which is `TermsWriter.page` with the fragment removed.
-///
-/// The connection is a PRIVATE in-memory one, which is not a benchmark
-/// convenience — it is what the derive path does (`writeDerived` opens one per
-/// document) and it is why the fold can run off the global write lock at all.
+/// The tokenizer cost alone: `fuzzy.foldRows` per page plus the terms line,
+/// on a private in-memory connection as the derive path uses.
 fn foldPass(gpa: std.mem.Allocator, io: Io, db: sqlite.Db, doc: Doc) !FoldResult {
     var fold = try sqlite.Db.openMemory();
     defer fold.close();
@@ -491,19 +416,9 @@ const SplitResult = struct {
     terms_chars: usize = 0,
 };
 
-/// The fold, decomposed into the four statements `fuzzy.foldRows` runs, because
-/// the whole-fold number alone cannot say whether the target's cost is the
-/// TOKENIZER or the round trip around it — and the two have different answers.
-///
-/// Exactly this measurement, taken on the read path ("instrumenting the three
-/// statements put 13.0 of those 13.9 ms in the vocabulary scan"), is what
-/// turned a slow fold into a fixable one.
-///
-/// **The two SQL literals below are `foldRows`'s, spelled a second time**, which
-/// is the one duplication in this file and is unavoidable: they are locals
-/// there, not exported constants like `fold_ddl` and `fold_reset_sql`. The
-/// `FIDELITY` line guards it — this pass must produce character-for-character
-/// the same terms as `foldPass`, or it is decomposing something else.
+/// The fold decomposed into `fuzzy.foldRows`'s four statements, to tell the
+/// tokenizer from the round trip. The two SQL literals duplicate locals in
+/// `foldRows`; the `FIDELITY` check guards the copy.
 fn splitPass(gpa: std.mem.Allocator, io: Io, db: sqlite.Db, doc: Doc) !SplitResult {
     var fold = try sqlite.Db.openMemory();
     defer fold.close();
@@ -588,21 +503,15 @@ fn share(part: u64, whole: u64) f64 {
 }
 
 const Recovered = struct {
-    /// The whole file on disk, header included.
     stored: u64,
-    /// The bytes `writeDerived` fed the compressor.
     plain: []u8,
-    /// The header's CRC32 of the plaintext, re-taken over `plain` and compared.
+    /// The header's CRC32 re-taken over `plain` and compared.
     crc_ok: bool,
 };
 
-/// Read a stored record back and inflate it, so the compress pass runs over
-/// exactly the bytes the real writer compressed rather than a second rendering
-/// of the record.
-///
-/// The stored fragment is `flush()`ed and not `finish()`ed — it carries no
-/// BFINAL block, because it is built to concatenate (§3.2) — so an empty final
-/// stored block is appended here, which is what the serve path does too.
+/// Reads a stored record back and inflates it. The fragment is flushed, not
+/// finished (no BFINAL, so fragments concatenate), so an empty final stored
+/// block is appended, as the serve path does.
 fn recover(gpa: std.mem.Allocator, io: Io, store: derived.DerivedStore, md5: []const u8) !Recovered {
     var file = try store.open(md5, derivesearch.index_version);
     defer file.close(io);
@@ -637,10 +546,8 @@ fn recover(gpa: std.mem.Allocator, io: Io, store: derived.DerivedStore, md5: []c
 
 const Compressed = struct { bytes: usize, ns: u64 };
 
-/// Deflate `plain` at `level`, best of `iters`. Same container (`.raw`) and same
-/// window as `derived.beginFragment`; only the level moves, which is the knob
-/// under test. The sink is a fixed buffer rather than a file so the number is
-/// CPU and not the Pi's SD card — the write is timed separately, inside `derive`.
+/// Deflate `plain` at `level`, best of `iters`, with `derived.beginFragment`'s
+/// container and window, into memory so the number is CPU, not SD card.
 fn timeCompress(gpa: std.mem.Allocator, io: Io, plain: []const u8, level: u8, iters: usize) !Compressed {
     const opts: std.compress.flate.Compress.Options = switch (level) {
         1 => .level_1,
@@ -709,10 +616,8 @@ fn mbps(bytes: usize, ns: u64) f64 {
         (@as(f64, @floatFromInt(ns)) / 1_000_000_000.0);
 }
 
-/// `/proc/self/status`, read the same way `health.zig` reads it and for the same
-/// stated reason: a `/proc` file reports `st_size = 0`,
-/// so the size-driven whole-file helpers return an empty slice and every figure
-/// silently reads as "unknown" on the one platform that can answer.
+/// A `/proc` file reports `st_size = 0`, so size-driven whole-file reads return
+/// empty; read it as a stream.
 fn statusKb(io: Io, key: []const u8) ?u64 {
     if (@import("builtin").os.tag != .linux) return null;
     var file = Dir.cwd().openFile(io, "/proc/self/status", .{}) catch return null;

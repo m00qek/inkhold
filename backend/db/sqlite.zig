@@ -1,9 +1,4 @@
 //! Thin idiomatic wrapper over SQLite (C API via @cImport).
-//!
-//! Currently links the system libsqlite3; switching to a vendored/fetched
-//! amalgamation for a self-contained static binary is a build.zig change only —
-//! this file is unaffected. Opens with WAL + foreign keys + a small, explicit
-//! page cache (per the 50 MB budget).
 
 const std = @import("std");
 
@@ -11,17 +6,10 @@ const c = @cImport({
     @cInclude("sqlite3.h");
 });
 
-// sqliteTransient() = (void*)-1: tell SQLite to copy bound blobs/text, so callers
-// needn't keep the source alive past bind. (@cImport can't translate the macro.)
-//
-// The sentinel address `0xFFFF…F` is deliberately UNaligned, and on 32-bit ARM a
-// function pointer has alignment > 1 — so a *comptime* `@ptrFromInt` to the
-// destructor type is a hard "requires aligned address" error there (x86-64
-// happened to accept it, its fn-ptr alignment being 1). It is a value SQLite
-// only ever COMPARES, never calls, so we build it at RUNTIME: the `noinline`
-// barrier hides the address from comptime evaluation, and safety-off skips the
-// runtime alignment assert. Portable to armv6; a couple of instructions on any
-// target, dwarfed by the C bind call that consumes it.
+// SQLITE_TRANSIENT, (void*)-1: SQLite copies bound text/blobs. @cImport can't
+// translate the macro, and a comptime `@ptrFromInt` of this unaligned address
+// to a fn-pointer type is a compile error on 32-bit ARM. SQLite only compares
+// it, so build it at runtime behind `noinline` with safety off.
 noinline fn transientAddr() usize {
     return @bitCast(@as(isize, -1));
 }
@@ -37,21 +25,12 @@ pub const Error = error{
     Step,
 };
 
-/// Whether `exec` logs SQLite's own message for a statement that failed. Always
-/// true in the server; a TEST that deliberately drives a statement into failure
-/// clears it for the duration of that call, because Zig's test runner counts
-/// every `std.log.err` as a test failure — the diagnostic would fail the very
-/// test asserting the error. Single-threaded test affordance, not a knob.
+/// Whether `exec` logs SQLite's message on failure. Tests that drive a statement
+/// into failure clear it, since the test runner fails on any `std.log.err`.
 pub var log_exec_errors: bool = true;
 
-/// Page cache a POOLED READER gets, in KiB (the pragma takes it negative).
-///
-/// Half the writer's 2 MB, and the number to turn if the trade ever looks wrong:
-/// a reader re-reads pages the writer would have kept, which costs I/O, and the
-/// pool multiplies whatever this is by its size. 1 MB × 3 readers ≈ 3 MB of page
-/// cache — file-backed and reclaimable, which is the half of the RSS figure the
-/// kernel does not charge us for. It is a lazily-filled
-/// CEILING, not an upfront allocation.
+/// Page cache a pooled reader gets, in KiB (the pragma takes it negative).
+/// Multiplied by the pool size; it is a lazily-filled ceiling.
 pub const reader_cache_size_kib = 1000;
 
 pub const Db = struct {
@@ -70,46 +49,17 @@ pub const Db = struct {
         try db.exec("PRAGMA foreign_keys = ON;");
         try db.exec("PRAGMA busy_timeout = 5000;");
         try db.exec("PRAGMA cache_size = -2000;"); // ~2 MB page cache (negative = KiB)
-        // Memory-mapped reads: skip the read() syscall + copy into the private page
-        // cache. The gain is I/O latency, not caching, so it is invisible on a warm
-        // NVMe dev box and largest on the SD-card/Pi target. 32 MB (not more) is
-        // deliberate: VmRSS counts mapped file pages, and `health.zig` measures the
-        // ~50 MB budget against VmRSS — a larger map over a growing DB would inflate
-        // that number with nothing actually wrong. RssAnon is reported alongside so
-        // the "memory this process owns" figure stays honest once this is on.
+        // 32 MB and no more: VmRSS counts mapped file pages, and the memory
+        // budget in `health.zig` is measured against VmRSS.
         try db.exec("PRAGMA mmap_size = 33554432;"); // 32 MB
         return db;
     }
 
-    /// Opens an EXISTING database read-only — the connection kind the reader pool
-    /// hands out (`db/reader_pool.zig`).
-    ///
-    /// Three differences from `open`, each of them load-bearing:
-    ///
-    ///   - `sqlite3_open_v2` with `SQLITE_OPEN_READONLY`, so SQLite itself refuses
-    ///     any write with `SQLITE_READONLY`. That is what turns a misclassified
-    ///     `read_only` route from silent corruption into a loud failure, and it is
-    ///     the property the route audit test in `backend/test/reader_pool.zig`
-    ///     rests on. It also means this NEVER creates the file: a missing database
-    ///     is `error.Open` rather than a fresh empty one that would answer every
-    ///     query with nothing.
-    ///   - `SQLITE_OPEN_NOMUTEX`. The build is `SQLITE_THREADSAFE=1` (serialized),
-    ///     which puts a mutex inside every connection; a pooled reader is borrowed
-    ///     exclusively for one operation, so that mutex is pure overhead. **This
-    ///     is only safe while the pool's borrow really is exclusive** — see
-    ///     `reader_pool.Pool.acquire`.
-    ///   - **No `journal_mode`.** WAL is a property of the DATABASE, set once by
-    ///     the writer; a read-only connection cannot set it and would fail here on
-    ///     the pragma rather than on the first query.
-    ///
-    /// `cache_size` is deliberately smaller than the writer's (see
-    /// `reader_cache_size_kib`). `busy_timeout` is kept: a WAL reader does not
-    /// contend for the write lock, but a checkpoint can briefly block it.
-    ///
-    /// **Operational note:** a read-only connection to a WAL database still needs
-    /// the `-shm` file to exist and be writable — SQLite coordinates readers
-    /// through shared memory. The writer holds the database open, so that is
-    /// always true here; it would NOT be true of a genuinely read-only mount.
+    /// Opens an existing database read-only, for the reader pool. SQLite then
+    /// refuses every write, and a missing file is `error.Open`, not a new empty db.
+    /// `NOMUTEX` is safe only because a pool lease is exclusive. No
+    /// `journal_mode`: WAL is set by the writer and a reader cannot set it.
+    /// The `-shm` file must exist and be writable, which the open writer ensures.
     pub fn openReadOnly(path: [:0]const u8) Error!Db {
         var handle: ?*c.sqlite3 = null;
         const flags = c.SQLITE_OPEN_READONLY | c.SQLITE_OPEN_NOMUTEX;
@@ -121,9 +71,7 @@ pub const Db = struct {
         errdefer db.close();
         try db.exec("PRAGMA busy_timeout = 5000;");
         try db.exec(std.fmt.comptimePrint("PRAGMA cache_size = -{d};", .{reader_cache_size_kib}));
-        // Same 32 MB window as the writer, and cheaper here than it looks: the
-        // kernel page cache holds ONE physical copy of the mapped file across
-        // every connection that maps it, so N readers do not cost N times the
+        // Mapped pages are shared in the kernel page cache across connections.
         try db.exec("PRAGMA mmap_size = 33554432;");
         return db;
     }
@@ -132,12 +80,8 @@ pub const Db = struct {
         return open(":memory:");
     }
 
-    /// Serializes the "main" database into a fresh `gpa`-owned buffer — the inverse
-    /// of a deserialize-into-`:memory:` open (the untrusted-`.spd` read path, which
-    /// now lives entirely in the shared `parsers/spd` parser). Only used by tests,
-    /// to build a `.spd` fixture hermetically (an in-memory SQLite db → bytes)
-    /// rather than committing a large binary. `error.Serialize` if SQLite cannot
-    /// produce the image.
+    /// Serializes the "main" database into a `gpa`-owned buffer. Tests use it
+    /// to build `.spd` fixtures without committing binaries.
     pub fn serializeAlloc(self: Db, gpa: std.mem.Allocator) ![]u8 {
         var size: c.sqlite3_int64 = 0;
         const p = c.sqlite3_serialize(self.handle, "main", &size, 0);
@@ -171,13 +115,9 @@ pub const Db = struct {
         return .{ .stmt = stmt.? };
     }
 
-    /// Prepares `sql`, binds `binds[i]` to parameter `?(i+1)`, and steps once —
-    /// the single-row read shape (`prepare → bind* → step → column*`) in one call.
-    /// Returns `null` (finalizing the statement) when there is no row; otherwise a
-    /// `Row` wrapping the positioned statement. The caller reads columns THEN calls
-    /// `Row.finalize` — `text`/`blob` columns alias SQLite memory that `finalize`
-    /// invalidates, so this deliberately hands back a positioned-stmt wrapper rather
-    /// than mapping columns into a struct (whose `[]const u8` fields would dangle).
+    /// Prepares `sql`, binds `binds[i]` to `?(i+1)` and steps once; null when
+    /// there is no row. Read columns before `Row.finalize`: `text`/`blob` alias
+    /// SQLite memory that finalize frees.
     pub fn row(self: Db, sql: []const u8, binds: []const Bind) Error!?Row {
         var stmt = try self.prepare(sql);
         errdefer stmt.finalize();
@@ -201,13 +141,11 @@ pub const Db = struct {
         return .{ .stmt = stmt };
     }
 
-    /// rowid of the most recent successful INSERT.
     pub fn lastInsertRowId(self: Db) i64 {
         return c.sqlite3_last_insert_rowid(self.handle);
     }
 
-    /// Rows changed by the most recent INSERT/UPDATE/DELETE (for "did anything
-    /// match?" checks after a keyed UPDATE/DELETE).
+    /// Rows changed by the most recent INSERT/UPDATE/DELETE.
     pub fn changes(self: Db) i64 {
         return c.sqlite3_changes(self.handle);
     }
@@ -217,30 +155,16 @@ pub const Db = struct {
     }
 };
 
-/// Watches for a row mutation issued while a SELECT over the SAME table is still
-/// mid-cursor — the "DELETE inside an open cursor" hazard the services layer's
-/// collect-then-delete discipline exists to avoid.
-///
-/// **This is the only way that discipline can be TESTED.** SQLite tolerates the
-/// overlap, so the rows deleted are identical either way and every outcome
-/// assertion passes against both shapes; the difference is internal cursor state,
-/// and it stops being harmless the day a query plan stops materialising the
-/// result through a sorter. `sqlite3_update_hook` fires per mutated row, and
-/// `sqlite3_stmt_busy` says which statements on the connection have been stepped
-/// and not yet reset — together they observe exactly the overlap.
-///
-/// Only READERS count: the mutating statement is itself busy inside its own hook,
-/// so a statement is an offender only if its SQL starts with SELECT and names the
-/// table being mutated.
+/// Counts row mutations made while a SELECT over the same table is mid-cursor,
+/// to test the collect-then-delete discipline. SQLite tolerates the overlap, so
+/// outcome assertions cannot see it. The mutator is busy in its own hook, so only
+/// statements starting with SELECT count.
 pub const CursorWatch = struct {
     db: Db,
-    /// Watch only this table when set (a whole-service call path mutates many;
-    /// naming one keeps a test about `file_history` from answering for `blobs`).
+    /// Watch only this table when set.
     table: ?[]const u8 = null,
-    /// Row mutations seen while a SELECT over the same table was mid-cursor.
     overlaps: usize = 0,
-    /// Row mutations seen at all — so a test can tell "no overlap" from
-    /// "the code under test never ran".
+    /// Row mutations seen at all, to tell "no overlap" from "never ran".
     mutations: usize = 0,
 
     pub fn arm(self: *CursorWatch) void {
@@ -278,7 +202,6 @@ test "CursorWatch sees a DELETE issued inside an open cursor, and not one issued
     try db.exec("CREATE TABLE t(k INTEGER);");
     try db.exec("INSERT INTO t(k) VALUES(1),(2),(3);");
 
-    // The hazardous shape: delete each row as the cursor emits it.
     {
         var w: CursorWatch = .{ .db = db };
         w.arm();
@@ -295,7 +218,6 @@ test "CursorWatch sees a DELETE issued inside an open cursor, and not one issued
         try std.testing.expectEqual(@as(usize, 3), w.overlaps);
     }
 
-    // The disciplined shape: collect inside the cursor, delete after it is closed.
     try db.exec("INSERT INTO t(k) VALUES(1),(2),(3);");
     {
         var w: CursorWatch = .{ .db = db };
@@ -323,29 +245,15 @@ test "CursorWatch sees a DELETE issued inside an open cursor, and not one issued
     }
 }
 
-/// Counts row mutations in ONE attached database, for the `read_only` route
-/// audit (`test/http_integration.zig`).
-///
-/// **Why it exists alongside a read-only connection rather than instead of it.**
-/// `SQLITE_OPEN_READONLY` catches a write that is ATTEMPTED and propagated. It
-/// cannot catch one whose failure is swallowed — the lazy index backfill on the
-/// control-plane read paths discards its own error by design, so on a reader it
-/// would answer 200 with quietly degraded data. Armed on the WRITER while the
-/// same routes run, this sees the mutation whichever way it goes.
-///
-/// **`database` is not decoration.** `temp` is per-connection scratch and is
-/// writable even on a read-only connection — `search/fuzzy.zig` tokenizes through
-/// a `temp.token_fold` table, which is a legitimate write that must not read as a
-/// misclassification. Watching `main` alone is the difference between an audit
-/// that means something and one that has to be switched off.
+/// Counts row mutations in one attached database, for the `read_only` route
+/// audit. Armed on the writer, it also catches writes a reader would have failed
+/// silently (e.g. a swallowed lazy-backfill error). Only `main` is watched:
+/// `temp` scratch is a legitimate write even on a read-only connection.
 pub const WriteWatch = struct {
     db: Db,
-    /// Which attached database to count mutations in. `temp` and any other
-    /// attachment are ignored.
     database: []const u8 = "main",
     mutations: usize = 0,
-    /// The last table mutated, so a failure names something. Truncated, and only
-    /// ever read after `mutations` is non-zero.
+    /// The last table mutated, truncated, so a failure names something.
     last_table: [64]u8 = @splat(0),
     last_len: usize = 0,
 
@@ -381,7 +289,6 @@ test "WriteWatch counts mutations in main and ignores the temp scratch a reader 
     w.arm();
     defer w.disarm();
 
-    // A pure read moves nothing.
     {
         var s = try db.prepare("SELECT COUNT(*) FROM t;");
         defer s.finalize();
@@ -389,32 +296,18 @@ test "WriteWatch counts mutations in main and ignores the temp scratch a reader 
     }
     try std.testing.expectEqual(@as(usize, 0), w.mutations);
 
-    // `temp` is per-connection scratch — the in-document search tokenizes through
-    // one on every query — so it must NOT read as a write to the database.
     try db.exec("INSERT INTO temp.scratch(k) VALUES(1),(2);");
     try std.testing.expectEqual(@as(usize, 0), w.mutations);
 
-    // A real row in `main` does.
     try db.exec("INSERT INTO t(k) VALUES(1);");
     try std.testing.expectEqual(@as(usize, 1), w.mutations);
     try std.testing.expectEqualStrings("t", w.lastTable());
 }
 
-/// Every `Stmt.bind*` routes its SQLite return code through here.
-///
-/// It ASSERTS rather than returning an error, deliberately. A bind fails for two
-/// reasons: `SQLITE_RANGE` — the index does not exist in the statement, i.e. the
-/// bind list and the SQL have drifted apart — or `SQLITE_NOMEM`. The first is a
-/// programming error, and the second is not a condition 390 call sites across 14
-/// files can each do something useful about. Propagating would mean touching
-/// nearly every service and handler in the repo to thread an error that, at every
-/// one of those sites, means "this code is wrong".
-///
-/// Silence was the thing worth fixing: a discarded code left the parameter NULL,
-/// so a keyed `UPDATE … WHERE id = ?1` quietly matched nothing and reported
-/// success. An assert turns that into a loud stop in every debug and test build —
-/// which is exactly where a wrong index is introduced — and, since the server
-/// ships ReleaseSafe (see the Makefile), in production too.
+/// Asserts every bind's return code. A failed bind (`SQLITE_RANGE`: bind list and
+/// SQL drifted apart) otherwise leaves the parameter NULL, so a keyed UPDATE
+/// silently matches nothing. The server ships ReleaseSafe, so this holds in
+/// production too.
 fn checkBind(rc: c_int) void {
     std.debug.assert(rc == c.SQLITE_OK);
 }
@@ -432,30 +325,25 @@ pub const Stmt = struct {
     pub fn bindNull(self: Stmt, index: c_int) void {
         checkBind(c.sqlite3_bind_null(self.stmt, index));
     }
-    /// Binds arbitrary bytes as a BLOB (no encoding, no NUL semantics) — for
-    /// packed fixed-stride records that are always read back as a unit.
+    /// Binds arbitrary bytes as a BLOB.
     pub fn bindBlob(self: Stmt, index: c_int, bytes: []const u8) void {
         checkBind(c.sqlite3_bind_blob64(self.stmt, index, bytes.ptr, @intCast(bytes.len), sqliteTransient()));
     }
-    /// Binds `text`, or SQL NULL when it is absent.
     pub fn bindTextOpt(self: Stmt, index: c_int, text: ?[]const u8) void {
         if (text) |t| self.bindText(index, t) else self.bindNull(index);
     }
-    /// Binds `value`, or SQL NULL when it is absent.
     pub fn bindIntOpt(self: Stmt, index: c_int, value: ?i64) void {
         if (value) |v| self.bindInt(index, v) else self.bindNull(index);
     }
-    /// Binds a REAL. SQLite stores all floats as 8-byte IEEE doubles, so `f64`
-    /// is the native width; narrower values widen losslessly at the call site.
+    /// Binds a REAL (SQLite floats are 8-byte doubles).
     pub fn bindFloat(self: Stmt, index: c_int, value: f64) void {
         checkBind(c.sqlite3_bind_double(self.stmt, index, value));
     }
-    /// Binds `value`, or SQL NULL when it is absent.
     pub fn bindFloatOpt(self: Stmt, index: c_int, value: ?f64) void {
         if (value) |v| self.bindFloat(index, v) else self.bindNull(index);
     }
 
-    /// Advances the statement. Returns true if a row is available, false when done.
+    /// Returns true if a row is available, false when done.
     pub fn step(self: Stmt) Error!bool {
         return switch (c.sqlite3_step(self.stmt)) {
             c.SQLITE_ROW => true,
@@ -484,44 +372,27 @@ pub const Stmt = struct {
         return @as([*]const u8, @ptrCast(ptr))[0..@intCast(len)];
     }
 
-    /// True when the column holds SQL NULL (distinguishable from "" / 0, which
-    /// `columnText` / `columnInt` would report identically).
+    /// True for SQL NULL, which `columnText` / `columnInt` report as "" / 0.
     pub fn columnIsNull(self: Stmt, col: c_int) bool {
         return c.sqlite3_column_type(self.stmt, col) == c.SQLITE_NULL;
     }
 
-    /// The column as an optional integer — null for SQL NULL. The mirror of
-    /// `bindIntOpt`, for nullable timestamp columns where 0 is a legitimate value
-    /// and `columnInt` alone could not tell it from "absent".
+    /// The column as an optional integer, null for SQL NULL.
     pub fn columnIntOpt(self: Stmt, col: c_int) ?i64 {
         return if (self.columnIsNull(col)) null else self.columnInt(col);
     }
 
-    /// A REAL column as `f64` (SQLite's native float width).
     pub fn columnFloat(self: Stmt, col: c_int) f64 {
         return c.sqlite3_column_double(self.stmt, col);
     }
-    /// The column as an optional float — null for SQL NULL, the mirror of
-    /// `bindFloatOpt` (0.0 is a legitimate stored value, so `columnFloat` alone
-    /// could not tell it from "absent").
+    /// The column as an optional float, null for SQL NULL.
     pub fn columnFloatOpt(self: Stmt, col: c_int) ?f64 {
         return if (self.columnIsNull(col)) null else self.columnFloat(col);
     }
 
-    /// Virtual-machine steps this statement has run since it was prepared or last
-    /// reset — the work SQLite ACTUALLY did, counted rather than timed.
-    ///
-    /// For plan pins. A wall-clock assertion on a query is a flake generator on a
-    /// loaded machine; this counter is deterministic for a given plan and a given
-    /// row set, so a test can say "this must not grow with the library" and mean
-    /// exactly that.
-    ///
-    /// **CUMULATIVE for the statement's lifetime, NOT per-execution.** `reset()`
-    /// does not zero it — `sqlite3VdbeRewind` never touches `aCounter`; only
-    /// `sqlite3_stmt_status`'s own reset flag clears it, which this call does not
-    /// pass. A test that resets and re-steps expecting a fresh count reads the
-    /// running total and passes for the wrong reason. Prepare a new statement per
-    /// measurement, as `sync.zig`'s pin does.
+    /// VM steps since prepare: a deterministic work count for plan pins, where
+    /// wall-clock asserts would flake. Cumulative for the statement's lifetime;
+    /// `reset()` does not zero it, so prepare a fresh statement per measurement.
     pub fn vmSteps(self: Stmt) i64 {
         return c.sqlite3_stmt_status(self.stmt, c.SQLITE_STMTSTATUS_VM_STEP, 0);
     }
@@ -534,8 +405,7 @@ pub const Stmt = struct {
     }
 };
 
-/// One bound parameter for `Db.row`. Each variant mirrors a `Stmt.bind*` method;
-/// a `binds` slice position `i` binds to SQL parameter `?(i+1)`.
+/// One bound parameter for `Db.row`; slice position `i` binds `?(i+1)`.
 pub const Bind = union(enum) {
     int: i64,
     text: []const u8,
@@ -547,9 +417,8 @@ pub const Bind = union(enum) {
     float_opt: ?f64,
 };
 
-/// A statement positioned on its single result row (see `Db.row`). Read the
-/// columns you need, then `finalize`. Column readers delegate straight to the
-/// underlying `Stmt`; `text`/`blob` slices are valid only until `finalize`.
+/// A statement positioned on its single result row (see `Db.row`); `text`/`blob`
+/// slices are valid only until `finalize`.
 pub const Row = struct {
     stmt: Stmt,
 
@@ -637,37 +506,23 @@ test "open in-memory db, DDL, insert with bind, query back" {
 }
 
 test "an out-of-range bind index is a real error, not a silent no-op" {
-    // The premise `checkBind` rests on. SQLite does NOT ignore a parameter index
-    // the statement has no slot for — it reports SQLITE_RANGE and leaves the
-    // statement's other parameters alone. Discarding that code was what turned a
-    // keyed `UPDATE … WHERE id = ?1` into a no-op that reported success.
     var db = try Db.openMemory();
     defer db.close();
     try db.exec("CREATE TABLE t(id INTEGER PRIMARY KEY);");
 
     var s = try db.prepare("SELECT id FROM t WHERE id = ?1;");
     defer s.finalize();
-    // `?2` does not exist in that SQL. Called through `s.bindInt(2, 1)` this would
-    // trip the assert, i.e. panic — and Zig 0.16 has no `std.testing.expectPanic`
-    // (checked: `std.testing` exports no panic-catching helper), and a panic cannot
-    // otherwise be caught in-process. So the contract is pinned one level down: the
-    // code SQLite returns here is non-OK, and the test below proves every bind
-    // checks it.
+    // Binding `?2` via `bindInt` would panic, which Zig 0.16 tests cannot catch,
+    // so pin the raw return code instead.
     try std.testing.expectEqual(c.SQLITE_RANGE, c.sqlite3_bind_int64(s.stmt, 2, 1));
     try std.testing.expect(c.SQLITE_RANGE != c.SQLITE_OK);
 
-    // The in-range bind on the same statement still works, so this is about the
-    // index and not about the statement having been poisoned.
     s.bindInt(1, 1);
     try std.testing.expect(!try s.step());
 }
 
 test "no bind discards its SQLite return code" {
-    // Mechanized inspection, standing in for the panic test Zig 0.16 cannot write.
-    // The property is "every `sqlite3_bind_*` call in this file goes through
-    // `checkBind`", and a new `bind*` helper that drops the code is exactly the
-    // regression that would restore the silent-NULL bug — so it fails here instead
-    // of six months later in a no-op UPDATE.
+    // Stands in for the panic test Zig 0.16 cannot write: no bind may drop its code.
     const src = @embedFile("sqlite.zig");
     const discarded = "_ = c.sqlite3_bind"; // the pre-fix shape: code thrown away
     const checked = "checkBind(c.sqlite3_bind";
@@ -679,7 +534,6 @@ test "no bind discards its SQLite return code" {
         if (std.mem.startsWith(u8, code, discarded)) return error.BindDiscardsReturnCode;
         if (std.mem.startsWith(u8, code, checked)) checked_count += 1;
     }
-    // text / int64 / null / blob64 / double — the five raw bind calls that exist.
     try std.testing.expect(checked_count >= 5);
 }
 
@@ -699,7 +553,6 @@ test "Db.row: no-row returns null, one-row reads int + text with int/text/null b
         try std.testing.expect(!try s.step());
     }
 
-    // No-row case: null (and the statement is finalized inside `row`).
     try std.testing.expect(
         (try db.row(
             "SELECT id FROM t WHERE email = ?1 AND note IS ?2;",
@@ -707,7 +560,6 @@ test "Db.row: no-row returns null, one-row reads int + text with int/text/null b
         )) == null,
     );
 
-    // One-row case: bind an int, a text, and a NULL; read an int and a text column.
     var r = (try db.row(
         "SELECT id, email FROM t WHERE id = ?1 AND email = ?2 AND note IS ?3;",
         &.{ .{ .int = 7 }, .{ .text = "a@example.com" }, .null },

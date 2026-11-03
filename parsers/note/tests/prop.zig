@@ -1,31 +1,17 @@
-//! A tiny, dependency-free property-testing harness.
-//!
-//! Zig has no built-in property testing. This runs a `property` over many
-//! generated inputs and, on failure, prints the seed needed to reproduce the
-//! exact case. Runs are deterministic by default (base seed 0) so CI is stable;
-//! pass a different `seed` to explore more of the space.
-//!
-//! There is no automatic shrinking — instead we report the failing seed so you
-//! can re-run that single case under a debugger:
-//!
-//!     try prop.check(MyInput, alloc, gen, property, .{ .seed = 12345, .runs = 1 });
+//! A tiny property-testing harness: runs a property over generated inputs and,
+//! on failure, prints the seed to reproduce the case (no shrinking).
 
 const std = @import("std");
 
 pub const Options = struct {
-    /// Number of generated cases to try.
     runs: usize = 1000,
     /// Base seed; case `i` uses `seed +% i`. Deterministic by default.
     seed: u64 = 0,
-    /// Suppress the failure-reproduction print (used when a failure is expected,
-    /// e.g. the harness's own negative self-test).
+    /// Suppress the reproduction print (for expected failures).
     quiet: bool = false,
 };
 
-/// Runs `property` against `runs` generated inputs.
-///
-/// `gen` receives a PRNG and an arena allocator scoped to a single case (freed
-/// after each run), so generators may allocate freely without leaking.
+/// Runs `property` against `runs` inputs; `gen` gets a per-case arena.
 pub fn check(
     comptime Input: type,
     allocator: std.mem.Allocator,
@@ -53,7 +39,6 @@ pub fn check(
     }
 }
 
-// A self-test: a property that must hold for all generated inputs.
 test "check runs the property for every generated case" {
     const G = struct {
         fn gen(r: std.Random, _: std.mem.Allocator) anyerror!u32 {
@@ -72,7 +57,6 @@ test "check surfaces a violated property as an error" {
             return r.int(u32);
         }
         fn prop(x: u32) anyerror!void {
-            // Deliberately false in general; must fail.
             try std.testing.expect(x == 0);
         }
     };

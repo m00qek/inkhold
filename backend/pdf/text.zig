@@ -1,57 +1,23 @@
-//! The Zig face of `text.c` — a PDF's pages as plain text, one page at a time.
-//!
-//! Everything that touches MuPDF is on the other side of this boundary and has
-//! to stay there: `fz_try`/`fz_catch` are `setjmp`/`longjmp`, and a Zig frame
-//! inside one is undefined behaviour. So this file declares three C entry points
-//! and owns the parts that are better in Zig — page iteration, the reopen
-//! schedule, and the failed-page count.
-//!
-//! ## What lives here rather than in C, and why
-//!
-//! **The reopen schedule.** §9.6-§9.9 measured this to death: with the
-//! store capped at 4 MB the memory curve is nearly flat in batch size while TIME
-//! is not, and the knee that matters is between 256 and held-open. **Batch 32,
-//! store 4 MB, never held open** is a DECISION with its reasoning recorded
-//! (§9.9's "DECIDED" block, including why 64 was declined) — not a default to
-//! re-tune here. The loop that implements it is four lines of Zig instead of a
-//! second piece of state inside a `setjmp` frame.
-//!
-//! **The failed-page count.** A page MuPDF cannot render to text is a result,
-//! not a verdict: every measured run reported "zero failed pages", so there has
-//! to be something that could report otherwise. The pass carries on.
-//!
-//! ## The borrow
-//!
-//! `Extractor.page` returns a slice of a buffer owned by the C handle, valid
-//! only until the next call. That is deliberate: the caller copies it into a
-//! segment row immediately, so an allocation dance in either direction would buy
-//! nothing. It also bounds the pass at ONE page's text in flight, which is the
-//! per-page half of the memory story.
+//! Zig face of `text.c`: a PDF's pages as plain text, one page at a time, with
+//! the reopen schedule and the failed-page count.
 
 const std = @import("std");
 const probe = @import("probe.zig");
 
-/// Why a PDF yields no text — the SAME set `probe.zig` uses, because `text.c`
-/// returns the same integers for the same reasons. One error set rather than two
-/// parallel ones: a caller that already knows how to record a probe verdict
-/// knows how to record this.
+/// The same set as `probe.zig`: `text.c` returns the same integers.
 pub const Error = probe.Error;
 
-/// Pages between reopens. **DECIDED, not tuned** — see the module docs and
-/// §9.9. Held open, the 446 MB book costs +6.5 MB and leaves 0.3 MB
-/// of the server's budget; at 32 it is 12.90 MB on the real Pi.
+/// Pages between reopens; a measured decision, not a knob. Held open, a 446 MB
+/// book costs +6.5 MB and leaves 0.3 MB of the server's budget.
 pub const batch_pages: u32 = 32;
 
-/// The opaque C handle (`struct ink_pdf_text`). No MuPDF type ever appears on
-/// this side.
 const Handle = opaque {};
 
 extern fn ink_pdf_text_open(fd: c_int, out: *?*Handle) c_int;
 extern fn ink_pdf_text_page(t: *Handle, number: i32, out: *[*]const u8) i32;
 extern fn ink_pdf_text_close(t: ?*Handle) void;
 
-/// `text.c`'s "this page did not render to text". Distinct from the negative
-/// codes that are verdicts about the whole file.
+/// `text.c`'s "this page did not render to text".
 const page_failed: i32 = -5;
 
 fn verdictOf(code: c_int) Error {
@@ -60,35 +26,21 @@ fn verdictOf(code: c_int) Error {
         -2 => Error.Unopenable,
         -3 => Error.Encrypted,
         -4 => Error.NoPages,
-        // The C side returns only those four negatives from `open`. A new code
-        // reaching here means the two files have drifted, which is worth failing
-        // loudly over rather than silently calling "unopenable".
         else => Error.Unopenable,
     };
 }
 
-/// A PDF opened for a text pass: `page(n)` in any order, reopening underneath
-/// every `batch_pages` extractions.
-///
-/// A FILE, NOT A PATH, exactly as `probe.probeFile` takes one and for the same
-/// reasons (the blob store hands out descriptors and holds only a directory
-/// handle). MuPDF dups it and never closes the caller's copy, so the descriptor
-/// must outlive the extractor.
+/// A PDF opened for a text pass, reopening every `batch_pages` extractions.
+/// The descriptor must outlive the extractor; MuPDF dups it.
 pub const Extractor = struct {
     file: std.Io.File,
-    /// Pages between reopens. A field rather than a constant only so a test can
-    /// drive the reopen boundary without a 33-page fixture; production takes the
-    /// default.
+    /// A field only so a test can drive the reopen boundary.
     batch: u32 = batch_pages,
     handle: ?*Handle = null,
-    /// What `fz_count_pages` said. Re-read on every reopen and asserted stable —
-    /// a document whose page count moved underneath us is a changed file, and
-    /// the band arithmetic downstream is indexed by page.
+    /// Asserted stable across reopens: downstream bands are indexed by page.
     pages: u32 = 0,
-    /// Pages extracted since the last open. The reopen trigger.
     since_open: u32 = 0,
-    /// Pages that opened but could not be rendered to text. A recorded fact, not
-    /// a failure — see the module docs.
+    /// Pages that opened but could not be rendered to text.
     failed_pages: u32 = 0,
 
     pub fn open(file: std.Io.File) Error!Extractor {
@@ -97,9 +49,8 @@ pub const Extractor = struct {
         return ex;
     }
 
-    /// Opens (or re-opens) the document underneath. The page count must not
-    /// move: the caller has already reserved a band of that many masked rowids,
-    /// and a shorter document would leave holes it never asked for.
+    /// The page count must not move: the caller reserved a band of that many
+    /// masked rowids.
     fn reopen(self: *Extractor) Error!void {
         ink_pdf_text_close(self.handle);
         self.handle = null;
@@ -114,10 +65,7 @@ pub const Extractor = struct {
     }
 
     /// Page `n`'s text (0-based), borrowed until the next call, or null when
-    /// that one page could not be rendered.
-    ///
-    /// The reopen happens HERE, before the extraction, so the batch counts pages
-    /// actually read rather than calls attempted.
+    /// that page could not be rendered. Batches count pages read, not calls.
     pub fn page(self: *Extractor, n: u32) Error!?[]const u8 {
         if (n >= self.pages) return Error.NoPages;
         if (self.since_open >= self.batch) try self.reopen();
@@ -145,8 +93,7 @@ pub const Extractor = struct {
 
 const testing = std.testing;
 
-/// Open `path` relative to the build root and start a text pass. Test-only: the
-/// server gets its descriptor from the blob store, never from a path.
+/// Test-only: the server gets descriptors from the blob store.
 fn openPath(path: []const u8) Error!struct { f: std.Io.File, ex: Extractor } {
     const f = std.Io.Dir.cwd().openFile(testing.io, path, .{}) catch return Error.Unopenable;
     errdefer f.close(testing.io);
@@ -162,8 +109,6 @@ test "a missing file is Unopenable rather than a hang or a panic" {
 }
 
 test "every page of a text PDF comes back, in page order, as its own string" {
-    // The fixture is three pages of Helvetica, one distinct sentence each, so
-    // "which page did this text come from" is answerable by reading the test.
     var o = openPath("backend/pdf/testdata/text-three-page.pdf") catch |e| switch (e) {
         Error.Unopenable => return error.SkipZigTest, // not run from the build root
         else => return e,
@@ -176,8 +121,7 @@ test "every page of a text PDF comes back, in page order, as its own string" {
     for (want, 0..) |w, i| {
         const text = (try o.ex.page(@intCast(i))).?;
         try testing.expect(std.mem.indexOf(u8, text, w) != null);
-        // Each page's text is ITS OWN — page 2's word must not appear on page 1,
-        // which is what a leaked or accumulated buffer would look like.
+        // A leaked or accumulated buffer would show another page's word.
         for (want, 0..) |other, j| {
             if (i == j) continue;
             try testing.expect(std.mem.indexOf(u8, text, other) == null);
@@ -200,10 +144,7 @@ test "MuPDF's text is valid UTF-8, so the index copy needs no repair on the happ
 }
 
 test "a PDF with no text at all yields empty pages — a result, not a failure" {
-    // `three-page.pdf` is three bare `/MediaBox` pages with no content stream:
-    // the degenerate shape of a scan, minus the image. The pass must report
-    // three empty strings, NOT an error — "opens but has nothing to index" is a
-    // verdict the caller records, and it can only record it if it gets here.
+    // Bare `/MediaBox` pages with no content stream: empty strings, not errors.
     var o = openPath("backend/pdf/testdata/three-page.pdf") catch |e| switch (e) {
         Error.Unopenable => return error.SkipZigTest,
         else => return e,
@@ -217,10 +158,7 @@ test "a PDF with no text at all yields empty pages — a result, not a failure" 
 }
 
 test "THE REOPEN: the document is re-opened on the batch boundary and the text does not change" {
-    // The rule the 50 MB budget rests on (§9.7: held open, the 446 MB
-    // book costs +6.5 MB and leaves 0.3 MB of headroom). Memory cannot be
-    // asserted in a unit test; that the reopen HAPPENS and is transparent can
-    // be, with a batch of 1 so every page crosses the boundary.
+    // Batch of 1 so every page crosses the reopen boundary.
     var o = openPath("backend/pdf/testdata/text-three-page.pdf") catch |e| switch (e) {
         Error.Unopenable => return error.SkipZigTest,
         else => return e,
@@ -235,7 +173,6 @@ test "THE REOPEN: the document is re-opened on the batch boundary and the text d
         const t = (try o.ex.page(@intCast(i))).?;
         @memcpy(bufs[i][0..t.len], t);
         whole[i] = bufs[i][0..t.len];
-        // Every page after the first crossed a reopen, and the counter resets.
         try testing.expectEqual(@as(u32, 1), o.ex.since_open);
     }
     try testing.expect(std.mem.indexOf(u8, whole[2], "Sourdough") != null);

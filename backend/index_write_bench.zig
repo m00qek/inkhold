@@ -1,59 +1,8 @@
-//! MEASUREMENT ONLY — `zig build index-write-bench`. Not part of the server, not
-//! reachable from it, and it changes nothing about it: a standalone executable
-//! that copies an EXISTING database to a scratch file and reports what the
-//! server's old write-side search maintenance occupies in it.
-//!
-//! ## The question it existed to answer, and the half of it that is left
-//!
-//! §6 step 8 deletes `segment_fts`,
-//! `segment_search`, `search_partitions`, the reserved-band machinery and the
-//! `kind = 1` / `kind = 2` rows in `note_page_index`, and said plainly:
-//!
-//! > re-measure upload latency and worker lock holds: **removing that
-//! > maintenance is the actual prize and nobody has measured what it is worth.**
-//!
-//! A before/after needs the BEFORE taken while the machinery still exists. This
-//! is the instrument that took it — **§8.5, on the ARM1176, 2026-09-08**, and
-//! the headline is **98.1 s of held `db_lock` for a whole-library ingest**. The
-//! shape is `derive_bench.zig`'s, for its reasons: cross-compiled
-//! `-Dtarget=arm-linux-musleabihf -Dcpu=arm1176jzf_s`, scp'd to the deployment
-//! target, run there — the numbers wanted are the ARM1176's, and a
-//! cross-compiled test binary cannot be `zig build test`-run from the dev box.
-//!
-//! **STEP 8 HAS NOW LANDED, and the timing half of this file went with its
-//! subject.** `whole`, `split` and `mint` drove `txt_index.reserve` /
-//! `storeChunk` / `finish` — the shipped `search.reserveOwnerBlobBands`,
-//! `fillBandChunk` and `finishOwnerBlobBands` with the tenant's row upsert
-//! around them. Those functions no longer exist, and a bench that reimplemented
-//! them would be timing a museum piece rather than the server: the BEFORE column
-//! is taken, and re-taking it is not possible or wanted. What remains is
-//! `probe`, which is the AFTER measurement.
-//!
-//! ## What `probe` says, and why that IS the after-number
-//!
-//! `probe` reports what the machinery OCCUPIES — segment rows, partitions,
-//! `kind = 1`/`kind = 2` rows, the FTS index's own bytes — and every count is
-//! guarded on its table existing. Against a migrated database every one of them
-//! reads `— (gone)` or zero, beside a `database bytes` figure that can be
-//! compared with the same run before the migration. That is the whole AFTER
-//! column: **every millisecond §8.5's BEFORE records is now structurally zero,
-//! because the statements that spent them are not in the binary.**
-//!
-//! `whole`, `split` and `mint` are still accepted and still named in `--mode`,
-//! and they print `machinery absent` and do nothing. Kept rather than removed so
-//! a re-run of the exact §8.5 command line answers the question instead of
-//! failing on an argument.
-//!
-//! `machinery` below is the comptime gate that decides which of those two things
-//! happens, and it is computed from `@hasDecl` over the tenant that owned the
-//! write. It is not a switch: it reads the code.
-//!
-//! ## Being a guest on the target
-//!
-//! `--db` is opened only to be COPIED; every write lands in `--scratch`, which
-//! is removed on exit unless `--keep`. Put the scratch file on the SD card and
-//! never in `/tmp` — `/tmp` is a tmpfs on this box, and a commit that never
-//! reaches an SD card is not the commit the server pays for.
+//! Measurement only (`zig build index-write-bench`): copies an existing database
+//! to a scratch file and reports what the old write-side search machinery
+//! occupies in it. The timing modes (`whole`, `split`, `mint`) print
+//! `machinery absent` since that machinery is gone. Put `--scratch` on the SD
+//! card, not `/tmp` (a tmpfs on the target).
 
 const std = @import("std");
 const sqlite = @import("db/sqlite.zig");
@@ -62,15 +11,8 @@ const txtindex = @import("services/txt_index.zig");
 const Io = std.Io;
 const Dir = std.Io.Dir;
 
-/// Does the write-side maintenance step 8 removes still exist?
-///
-/// The one comptime gate in this file, and it ASKS THE CODE rather than being
-/// set by hand: these are the `.txt` tenant's four entry points into the write,
-/// and every one of them was `search.reserveOwnerBlobBands` /
-/// `fillBandChunk` / `finishOwnerBlobBands` with a row upsert around it. If they
-/// ever come back, this file's header is wrong and should be read again.
-///
-/// It is `false` as of §6 step 8 — verified by building, not promised.
+/// Whether the removed write-side maintenance still exists, read from the code
+/// with `@hasDecl` rather than set by hand.
 const machinery =
     @hasDecl(txtindex, "reserve") and
     @hasDecl(txtindex, "storeChunk") and
@@ -159,8 +101,7 @@ pub fn main(init: std.process.Init) !void {
         \\
     , .{ label, db_path, scratch_path, mode, passes, if (machinery) "present" else "ABSENT" });
 
-    // The copy. Everything below writes to `scratch`, so `--db` is never opened
-    // for writing and a live server's database is never at risk from a run.
+    // Everything below writes to `scratch`; `--db` is never opened for writing.
     try copyDb(io, db_path, scratch_path);
     defer if (!keep) removeDb(io, scratch_path);
 
@@ -188,9 +129,8 @@ pub fn main(init: std.process.Init) !void {
 // The scratch copy
 // ---------------------------------------------------------------------------
 
-/// Copies `src` to `dst`, and unlinks `dst`'s `-wal`/`-shm` first so a leftover
-/// pair from a previous run can never be replayed onto a fresh copy. Streamed in
-/// 1 MiB blocks: a 30 MB database is not held in memory on a 426 MB box.
+/// Unlinks `dst`'s `-wal`/`-shm` first so a stale pair is never replayed onto
+/// the copy. Streamed in 1 MiB blocks.
 fn copyDb(io: Io, src: []const u8, dst: []const u8) !void {
     removeDb(io, dst);
     var in = try Dir.cwd().openFile(io, src, .{});
@@ -217,14 +157,8 @@ fn removeDb(io: Io, path: []const u8) void {
     }
 }
 
-/// What the machinery occupies, in rows and in bytes — and, after §6 step 8, the
-/// AFTER measurement: every row of it at zero and every table of it gone.
-///
-/// **`needs` is asked of `sqlite_master` FIRST rather than letting the count
-/// fail.** A missing table is the expected answer here, not a fault, and
-/// `sqlite.Db.prepare` logs `std.log.err` for a statement that will not compile —
-/// so probing by failure printed five error lines above the very result they
-/// were reporting. Asking whether the object exists says the same thing quietly.
+/// What the machinery occupies, in rows and bytes. Existence is asked of
+/// `sqlite_master` first because a failed `prepare` logs at error level.
 fn emitProbe(io: Io, db: sqlite.Db, tag: []const u8) !void {
     try emit(io, "\n{s}:\n", .{tag});
     const counts = [_]struct { label: []const u8, needs: ?[]const u8 = null, sql: []const u8 }{
@@ -253,8 +187,7 @@ fn emitProbe(io: Io, db: sqlite.Db, tag: []const u8) !void {
     }
 }
 
-/// Does `sqlite_master` carry an object of this name? Includes FTS5's shadow
-/// tables, which is what the probe asks about.
+/// Includes FTS5's shadow tables.
 fn hasObject(db: sqlite.Db, name: []const u8) !bool {
     var r = (try db.row(
         "SELECT count(*) FROM sqlite_master WHERE name = ?1;",
@@ -264,9 +197,7 @@ fn hasObject(db: sqlite.Db, name: []const u8) !bool {
     return r.int(0) > 0;
 }
 
-/// The p-th percentile of an ALREADY SORTED slice, nearest-rank. Nearest-rank
-/// and not interpolated because a lock hold is a real event: p95 should name a
-/// transaction that actually happened.
+/// Nearest-rank percentile of a sorted slice, so p95 names a real transaction.
 fn pct(sorted: []const u64, p: usize) u64 {
     if (sorted.len == 0) return 0;
     const rank = (p * sorted.len + 99) / 100; // ceil
@@ -286,10 +217,8 @@ fn share(part: u64, whole: u64) f64 {
     return 100.0 * @as(f64, @floatFromInt(part)) / @as(f64, @floatFromInt(whole));
 }
 
-/// `/proc/self/status`, read the same way `derive_bench.zig` and `health.zig`
-/// read it and for the same stated reason: a `/proc` file reports `st_size = 0`,
-/// so the size-driven whole-file helpers return an empty slice and every figure
-/// silently reads as "unknown" on the one platform that can answer.
+/// A `/proc` file reports `st_size = 0`, so size-driven whole-file reads return
+/// empty; read it as a stream.
 fn statusKb(io: Io, key: []const u8) ?u64 {
     if (@import("builtin").os.tag != .linux) return null;
     var file = Dir.cwd().openFile(io, "/proc/self/status", .{}) catch return null;

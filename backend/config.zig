@@ -1,121 +1,53 @@
-//! Server configuration, loaded from a ZON file (native Zig object notation:
-//! typed, comment-friendly, no extra dependency). All fields have defaults, so
-//! a missing or partial config file still yields a usable server.
+//! Server configuration, loaded from ZON. Every field has a default.
 
 const std = @import("std");
 
 pub const Tls = struct {
-    /// Terminate TLS in-process. When false the server speaks plaintext HTTP.
     enabled: bool = false,
     cert_path: []const u8 = "certs/cert.pem",
     key_path: []const u8 = "certs/key.pem",
-    /// TLS 1.3 cipher-suite names to allow, most-preferred first. Empty = the
-    /// library default set. Names must match tls.zig's `CipherSuite` enum tags
-    /// (e.g. "AES_256_GCM_SHA384", "AES_128_GCM_SHA256", "CHACHA20_POLY1305_SHA256").
+    /// TLS 1.3 suite names (tls.zig `CipherSuite` tags), most preferred first;
+    /// empty = library default.
     cipher_suites: []const []const u8 = &.{},
 };
 
-/// Hot-cache versioning ("history of this file"). A synced edit RETAINS the
-/// superseded version instead of pruning it: the old blob stays on disk, a
-/// `file_history` row records it, and only the search rows are dropped (the
-/// render index rides along with the retained blob).
-/// Bounded two ways, both required.
+/// File version history: a synced edit retains the superseded blob in
+/// `file_history` instead of pruning it.
 pub const History = struct {
-    /// Recent versions kept hot, per file (the single K, H6) — now the DEFAULT
-    /// and the CEILING for the per-user `users.history_keep`, rather than the
-    /// only value. A user who has never chosen
-    /// gets this; a user who has is clamped to it, so lowering it here takes
-    /// effect for everyone immediately and no household member can set the whole
-    /// install's disk policy. `keep = 0` disables versioning cleanly — back to
-    /// prune-on-supersede, no history rows written.
+    /// Default versions kept per file, and the clamp on `users.history_keep`.
+    /// 0 disables versioning.
     keep: u32 = 5,
-    /// The CEILING a person may raise their own `keep` to — separate from the
-    /// default above, which is what `keep` alone could not express.
-    ///
-    /// One number could not be both. Raising the ceiling to let somebody keep
-    /// more also raised everyone's default, which is most of what §6 set out to
-    /// fix: K only becomes safely user-settable if choosing a different value is
-    /// actually available. So the admin now says two things — where everyone
-    /// starts, and how far anyone may go.
-    ///
-    /// **The quota is the real limit, not this.** Since §6 charges retained
-    /// versions to their owner's allotment, someone raising their K spends their
-    /// own space and is self-limiting; this only stops one household member from
-    /// deciding the install's disk policy. `max_bytes` stays behind both.
-    ///
-    /// Read through `@max(keep, max_keep)` wherever the ceiling is needed, so a
-    /// config setting `keep` above it cannot produce a DEFAULT NOBODY MAY CHOOSE
-    /// — an install that had raised `keep` on its own keeps working untouched,
-    /// which a bare clamp would have quietly undone.
+    /// The most a user may raise their own `keep` to. Read as
+    /// `@max(keep, max_keep)`, so a config with `keep` above it still works. Quota
+    /// is the real limit; this stops one person setting the install's disk policy.
     max_keep: u32 = 15,
-    /// Global ceiling on the retained-history store, in bytes (H4) — the SD
-    /// guard. Since §6 charges retained versions to their owner's quota, this is
-    /// a BACKSTOP rather than the primary control: each account is already bounded
-    /// by its own allotment, and eviction against this ceiling now takes only the
-    /// WRITING user's oldest versions, so one person's churn can no longer evict
-    /// another's. Backup-independent.
+    /// Global byte ceiling on retained history, a backstop behind per-user quota;
+    /// eviction takes only the writing user's oldest versions.
     max_bytes: u64 = 500_000_000,
 };
 
 pub const Config = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 8089,
-    /// SQLite database file (created if absent). ":memory:" for an ephemeral db.
+    /// SQLite file (created if absent); ":memory:" for an ephemeral db.
     db_path: []const u8 = "inkhold.db",
-    /// Path to the 32-byte credential-encryption key, held OUTSIDE the DB (and
-    /// ideally outside the backup path) so a stolen `inkhold.db` yields no
-    /// recoverable credentials. Generated + persisted 0600 on first run if absent.
-    /// **Losing this file makes every stored credential unrecoverable → forced
-    /// password resets** — back it up.
+    /// The 32-byte credential-encryption key, kept outside the DB (ideally outside
+    /// the backup) so a stolen `inkhold.db` yields no credentials. Created 0600 on
+    /// first run. Losing it forces every password reset.
     cred_key_path: []const u8 = "cred.key",
-    /// Directory for the content-addressed blob store and render cache.
     data_dir: []const u8 = "data",
-    /// Path to the built web SPA (`dist/`) to serve as static files. Empty
-    /// disables static serving (404 on any non-API route, as before). When set,
-    /// this same process serves the browser UI (control-plane Face 2 + the SPA)
-    /// alongside the device sync API — one port for everything. See http/static.zig.
+    /// Built SPA to serve as static files; empty disables static serving.
     web_dir: []const u8 = "",
-    /// Email/login of the auto-created first-run administrator.
-    ///
-    /// IT HAS TO BE AN EMAIL, and the default used to be `"admin"`, which is not
-    /// one. The sign-in field is `type="email"`, so the browser refused to submit
-    /// the very account the server had just minted: a fresh `make serve` install
-    /// printed a temporary password for an account nothing could log in as, and
-    /// the CLI has no create-or-rename command to undo it. `config.example.zon`
-    /// always said `admin@home.lan`, so only the path that takes the DEFAULT —
-    /// `make serve`, which is what the README's quick start tells a new user to
-    /// run — was broken. Reported from a clean build (inkhold-beta#11).
-    ///
-    /// `looksLikeEmail` rejects the rest at startup rather than at first sign-in.
+    /// The first-run admin's login. Must be an email: the sign-in field is
+    /// `type="email"`, so a non-email default could never sign in.
     admin_email: []const u8 = "admin@home.lan",
-    /// Maximum connections in flight at once. Serve mode runs a thread per
-    /// connection, so this is what bounds thread (and therefore memory) growth
-    /// under a connection flood: `max_connections * http.transport.conn_stack_size`
-    /// is the reserved-stack ceiling. Over the cap, new connections are closed
-    /// immediately and accepting continues.
-    ///
-    /// Needs headroom, because slots are held for a connection's whole LIFETIME,
-    /// not per request: HTTP keep-alive means a browser parks ~6 idle connections
-    /// per tab, and the device holds a persistent Socket.IO WebSocket. 32 covers a
-    /// household — several browser tabs plus the device — and is the largest cap
-    /// that keeps the reserved-stack ceiling (32 x 1 MiB = 32 MB) inside the
-    /// project's ~50 MB budget with room for the heap, SQLite and the blob I/O.
-    ///
-    /// The ceiling is reserved address space, not RSS: only the pages a thread
-    /// actually touches become resident — ~68 KiB for an idle keep-alive
-    /// connection (the socket buffers), ~576 KiB for one running a big transfer.
-    /// Raise this only together with the RSS budget.
-    ///
-    /// 96, up from 32: household demand is ~80 sockets (12 browsers x ~6 + 8
-    /// devices), and the old cap refused ~8 of them at 72 sockets while the lock
-    /// still had headroom — refusing a connection does not make the box faster.
-    /// The deliberate cost is ~6.4 MB resident worst-case (96 idle keep-alives),
-    /// a spend against the ~50 MB budget, not a free win; chosen at 96 over 128
-    /// because idle threads still carry a glibc descriptor + static TLS.
+    /// Concurrent connection cap; serve runs a thread per connection, so this
+    /// bounds reserved stack at `max_connections * conn_stack_size`. Over the cap,
+    /// new connections are closed. Slots last a connection's lifetime (browsers
+    /// park ~6 keep-alives per tab). Stacks are address space, not RSS (~68 KiB
+    /// resident idle); 96 idle connections cost ~6.4 MB of the ~50 MB budget.
     max_connections: u16 = 96,
     tls: Tls = .{},
-    /// Hot-cache versioning bounds (see `History`). Defaults keep the last 5
-    /// versions per file under a 500 MB global ceiling.
     history: History = .{},
 };
 
@@ -129,19 +61,11 @@ pub const Loaded = struct {
     }
 };
 
-/// Is `s` shaped like an email — something `<input type="email">` will submit?
-///
-/// DELIBERATELY THE BROWSER'S RULE, not RFC 5322. The only thing that matters is
-/// whether the sign-in form will accept the identity the server minted, so this
-/// mirrors the HTML5 constraint: a non-empty local part, one `@`, a non-empty
-/// domain, and no whitespace. Note it does NOT require a dot — `admin@home` is a
-/// valid HTML5 email and a perfectly good household login, and rejecting it here
-/// would refuse an account the browser would have accepted.
+/// Shaped like an email by the HTML5 rule, not RFC 5322: the question is whether
+/// the sign-in form will submit it. No dot required (`admin@home` is valid).
 pub fn looksLikeEmail(s: []const u8) bool {
     const at = std.mem.indexOfScalar(u8, s, '@') orelse return false;
     if (at == 0 or at + 1 == s.len) return false;
-    // A SECOND `@` is not an email. `indexOfScalar` finds the first, so without
-    // this `a@b@c` would pass on the strength of its first one.
     if (std.mem.indexOfScalarPos(u8, s, at + 1, '@') != null) return false;
     for (s) |c| if (std.ascii.isWhitespace(c)) return false;
     return true;
@@ -149,7 +73,6 @@ pub fn looksLikeEmail(s: []const u8) bool {
 
 pub const ParseError = error{ OutOfMemory, ParseZon };
 
-/// Parse a config from a null-terminated ZON source. Omitted fields use defaults.
 pub fn parse(gpa: std.mem.Allocator, source: [:0]const u8) ParseError!Loaded {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
@@ -157,26 +80,8 @@ pub fn parse(gpa: std.mem.Allocator, source: [:0]const u8) ParseError!Loaded {
     return .{ .config = cfg, .arena = arena };
 }
 
-/// Rewrites every relative path in `cfg` to be relative to `dir` — the
-/// directory the config file itself lives in.
-///
-/// **WHY THE CONFIG'S OWN DIRECTORY, AND NOT THE WORKING DIRECTORY.** These
-/// paths used to resolve against the cwd, which is invisible in the config and
-/// different for every caller. A config saying `db_path = "server/8089/mini.db"`
-/// therefore named a DIFFERENT DATABASE depending on where the process happened
-/// to be standing — the server (cwd = repo root) and a CLI run from a sibling
-/// checkout resolved the same file to two different installs.
-///
-/// That is not hypothetical. `users make-admin` was pointed at another
-/// checkout's config with `-c`, promoted the account, reported success, and
-/// changed a database nobody was looking at; the browser showed no change
-/// because from its side nothing had happened. `openExisting`'s refuse-to-create
-/// check could not catch it, because the wrong database EXISTED.
-///
-/// Resolving against the config's own directory makes `-c <path>` mean "that
-/// install" from anywhere, which is the only reading under which pointing a
-/// recovery tool at a config is a safe thing to do. Absolute paths are left
-/// exactly as written.
+/// Rewrites relative paths against the config file's own directory, so
+/// `-c <path>` names that install from any cwd. Absolute paths are kept.
 fn rebase(arena: std.mem.Allocator, cfg: *Config, dir: []const u8) !void {
     if (dir.len == 0) return;
     const fields = [_]*[]const u8{
@@ -195,12 +100,7 @@ fn rebase(arena: std.mem.Allocator, cfg: *Config, dir: []const u8) !void {
     }
 }
 
-/// Load config from `path`; if the file does not exist, return defaults.
-///
-/// Relative paths inside the file are resolved against the FILE's directory
-/// (see `rebase`). When the file is absent the defaults are returned untouched,
-/// so they keep meaning "relative to the working directory" — there is no config
-/// directory to be relative to, and that is the first-run case.
+/// Loads config from `path`, or defaults if absent (then relative to cwd).
 pub fn loadFileOrDefault(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Loaded {
     const src = std.Io.Dir.cwd().readFileAllocOptions(
         io,
@@ -226,13 +126,7 @@ pub fn loadFileOrDefault(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !
 }
 
 test "relative paths resolve against the CONFIG's directory, not the caller's cwd" {
-    // THE BUG THIS EXISTS FOR. `users make-admin` was pointed at another
-    // checkout's config with `-c`; the config said `db_path =
-    // "server/8089/minicloud.db"`, which resolved against the CLI's working
-    // directory rather than the config's, so it promoted an account in a
-    // DIFFERENT install, reported success, and left the browser showing nothing
-    // because from its side nothing had happened. The refuse-to-create check
-    // could not catch it: the wrong database existed.
+    // A cwd-relative `db_path` once made a CLI run change a different install.
     var loaded = try parse(std.testing.allocator,
         \\.{
         \\    .db_path = "minicloud.db",
@@ -247,8 +141,6 @@ test "relative paths resolve against the CONFIG's directory, not the caller's cw
     try std.testing.expectEqualStrings("server/8089/minicloud.db", loaded.config.db_path);
     try std.testing.expectEqualStrings("server/8089/cred.key", loaded.config.cred_key_path);
     try std.testing.expectEqualStrings("server/8089/data", loaded.config.data_dir);
-    // Escaping upward is allowed and left intact — a config in a subdirectory
-    // legitimately reaches repo-level assets.
     try std.testing.expectEqualStrings("server/8089/../../webapp/dist", loaded.config.web_dir);
 }
 
@@ -261,8 +153,7 @@ test "rebase leaves absolute paths alone, and leaves an empty field empty" {
 
     try std.testing.expectEqualStrings("/srv/inkhold/mini.db", loaded.config.db_path);
     try std.testing.expectEqualStrings("/etc/inkhold/data", loaded.config.data_dir);
-    // `web_dir` defaults to "" and MEANS "serve nothing" — rebasing it would
-    // turn a disabled feature into a directory that happens to exist.
+    // "" means serve nothing; rebasing it would invent a directory.
     try std.testing.expectEqualStrings("", loaded.config.web_dir);
 }
 
@@ -271,7 +162,6 @@ test "a config in the CURRENT directory is unchanged, so the common case is unto
         \\.{ .db_path = "inkhold.db", .data_dir = "data" }
     );
     defer loaded.deinit();
-    // `dirname("config.zon")` is null -> "" -> no rebase at all.
     try rebase(loaded.arena.allocator(), &loaded.config, std.fs.path.dirname("config.zon") orelse "");
 
     try std.testing.expectEqualStrings("inkhold.db", loaded.config.db_path);
@@ -310,23 +200,15 @@ test "defaults fill in for a minimal config" {
     try std.testing.expectEqualStrings("certs/cert.pem", loaded.config.tls.cert_path);
     try std.testing.expectEqualStrings("inkhold.db", loaded.config.db_path);
     try std.testing.expectEqualStrings("data", loaded.config.data_dir);
-    // AN EMAIL, because the sign-in field is `type="email"` and will not submit
-    // anything else. The default was `"admin"`, which locked a fresh `make serve`
-    // install out of the account it had just created (inkhold-beta#11).
     try std.testing.expectEqualStrings("admin@home.lan", loaded.config.admin_email);
     try std.testing.expect(looksLikeEmail(loaded.config.admin_email));
-    // Hot-cache versioning defaults.
     try std.testing.expectEqual(@as(u32, 5), loaded.config.history.keep);
     try std.testing.expectEqual(@as(u64, 500_000_000), loaded.config.history.max_bytes);
 }
 
 test "looksLikeEmail accepts what the sign-in field accepts, and nothing else" {
-    // THE ONE THAT MATTERS: the old default. It reached the database, printed a
-    // password, and then could never be typed into a `type="email"` field.
     try std.testing.expect(!looksLikeEmail("admin"));
 
-    // No dot required — `admin@home` is a valid HTML5 email and a fine household
-    // login. Rejecting it would refuse an account the browser would have taken.
     try std.testing.expect(looksLikeEmail("admin@home"));
     try std.testing.expect(looksLikeEmail("admin@home.lan"));
     try std.testing.expect(looksLikeEmail("a@b"));

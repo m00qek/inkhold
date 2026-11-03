@@ -1,30 +1,5 @@
-//! The `.note` blob index: parse a container once, at ingest, and keep the
-//! per-page facts the hot read paths need in SQLite (`note_index` +
-//! `note_page_index`).
-//!
-//! ## Two halves, on purpose
-//!
-//! `parseBlob` is **pure CPU and touches no database**; `store` writes rows and
-//! must run inside the caller's transaction. That split is a hard structural
-//! constraint, not a stylistic one: `upload/finish` runs under the whole-handler
-//! global DB lock, so a naive "index inside `linkBlob`'s transaction" would hold
-//! the global lock across a multi-MB parse and serialise a device syncing 100
-//! notes against every other request. Parse first, unlocked; write rows locked.
-//!
-//! ## Self-healing, so no backfill migration is ever needed
-//!
-//! Rows are written eagerly at ingest (`Files.linkBlob`) and lazily on read
-//! (`ensureIndexed`): a missing row, or one at a stale `index_version`, is
-//! re-parsed on the spot. Because the parse is unlocked, two callers can
-//! genuinely race — every write is therefore an upsert, so a duplicated parse is
-//! merely wasteful and never a constraint violation.
-//!
-//! ## Keyed by blob md5
-//!
-//! Blobs are content-addressed and immutable, so an index row can never be
-//! stale, and it is shared by every file that dedups onto the same content. The
-//! flip side — index rows are NOT per-user — is why any future search must join
-//! through `files` on `user_id`/`deleted` rather than querying the text alone.
+//! The `.note` blob index: parse a container once and keep the per-page facts
+//! the hot read paths need in `note_index` + `note_page_index`.
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
@@ -39,80 +14,46 @@ const sn = @import("supernote");
 const Md5 = std.crypto.hash.Md5;
 const Allocator = std.mem.Allocator;
 
-/// Bump when anything the CLIENT caches under `(md5, index_version)` changes:
-/// rows at an older version are re-parsed by `ensureIndexed` the next time they
-/// are read, and the version is also the browser's cache key
-/// (§2.1: same bytes, new parser, different output). v16 is
-/// the worked example — PDF text extraction started replacing Private Use Area
-/// codepoints with spaces (`pdf_text.stripPrivateUse`), so a browser holding
-/// `(md5, 15)` would have served the old vocabulary for ever, the manifest
-/// advertising a key it already had.
-///
-/// The test is NOT "does the database change". `has_ink` (schema v16,
-/// §2.4) added a column and a `noteMeta` field and left `terms/`
-/// and `text/` byte-identical, so it took NO bump — existing rows heal through
-/// the deferred `ink` tenant instead. A bump there would have re-folded every
-/// note and every `.txt` for a field neither of them travels in.
-///
-/// A bump costs a re-index and a re-fold of EVERY document, not just the ones
-/// whose derivation moved — what a single global version buys, and what §12
-/// records as worth separating one day. It runs off the write
-/// lock, in the deferred worker. Numbers are spent once and never reused.
+/// Bump when anything the client caches under `(md5, index_version)` changes
+/// (it is the browser's cache key); stale rows re-parse lazily. A schema change
+/// that leaves `terms/`/`text/` byte-identical takes no bump. Never reuse a number.
 pub const index_version: i64 = 16;
 
-/// Chunk used when hashing a layer's bytes out of a ranged source. Bounds the
-/// memory a content hash costs, independent of how large the layer is. Shared
-/// with every other blob-byte path — see `blobstore.chunk_len`.
+/// Bounds the memory a layer content hash costs.
 const hash_chunk_len = blobstore.chunk_len;
 
-/// The bounded header window the index reads out of a cover block to sniff its
-/// MIME and decode its dimensions — never the whole (multi-MB) block. Covers are
-/// device-rendered PNGs (IHDR in the first 24 bytes); this is generous headroom
-/// that also catches a JPEG's SOF, and it is the hard bound on the RSS one cover
-/// costs at INDEX time (the SERVE path streams the body in `chunk_len` windows).
+/// Header window read from a cover block to sniff MIME and dims; the hard bound
+/// on one cover's RSS at index time.
 const cover_header_probe: usize = 64 * 1024;
 
-/// One emitted layer's location + wire facts (slot id, hidden, all_blank).
-/// Re-exported from the shared producer so the indexer and
-/// `page_payload.serialize` cannot hold differing opinions about which layers a
-/// page emits, in what order, with what flags.
+/// Re-exported so the indexer and `page_payload.serialize` share one emit list.
 pub const LayerRef = sn.page_payload.LayerRef;
 pub const max_layers = sn.page_payload.max_layers;
 
-/// One layer as the index stores it: the wire ref plus the panel-only facts
-/// (`LAYERINFO` display name, `isCurrentLayer`) that `noteMeta` serves without
-/// touching the blob. `name` is empty when the page carries no usable
-/// `LAYERINFO` — the fallback emit list has no names to offer.
+/// A layer as stored: the wire ref plus panel-only facts `noteMeta` serves.
+/// `name` is empty when the page has no usable `LAYERINFO`.
 pub const IndexedLayer = struct {
     ref: LayerRef,
     name: []const u8 = "",
     is_current: bool = false,
 };
 
-/// v5 packed record in the `layers` blob — variable stride:
-///   u32 offset, u32 length, u8 flags, u8 slot (wire id), u8 name_len,
-///   name_len bytes of display name.
-/// (v4 and earlier used a fixed 9-byte `offset,length,flags` record; those
-/// blobs only exist under stale `index_version` rows, which every reader
-/// filters out, so no unpacker ever meets one.)
+/// v5 packed record in the `layers` blob, variable stride: u32 offset,
+/// u32 length, u8 flags, u8 slot (wire id), u8 name_len, name bytes.
 pub const layer_rec_head_size = 11;
-/// Longest display name a packed record can carry; longer names truncate.
-/// `name_len` is one byte, and no device name approaches this.
+/// Longest display name a record carries (`name_len` is one byte); longer truncates.
 pub const max_layer_name = 255;
 pub const max_layer_rec_size = layer_rec_head_size + max_layer_name;
 
-// Packed-record flag bits. bit0/bit1 mirror the SNPG wire flags on purpose
-// (same facts); bit2 is index-only panel state; bit3 mirrors the SNPG wire's
-// bit2 raster-image fact but sits at bit3 here because bit2 is already taken by
-// `current` — `page_payload.recordFlags` maps it back to wire bit2 when serving.
+// bit0/bit1 mirror the SNPG wire flags; bit2 is index-only; bit3 is the wire's
+// bit2 (raster image), remapped by `page_payload.recordFlags` when serving.
 const flag_all_blank: u8 = 0x01;
 const flag_hidden: u8 = 0x02;
 const flag_current: u8 = 0x04;
 const flag_raster_image: u8 = 0x08;
 
 pub const Error = error{
-    /// A stored range does not fit the bytes it is being read from — a corrupt
-    /// or tampered index row, refused rather than read past EOF.
+    /// A stored range does not fit the bytes it is read from.
     BadRange,
     /// The `layers` blob is not a whole number of records, or holds too many.
     BadLayerBlob,
@@ -120,26 +61,17 @@ pub const Error = error{
     NotIndexed,
 };
 
-// ---------------------------------------------------------------------------
-// The parsed shape (what gets written)
-// ---------------------------------------------------------------------------
+// ---- parsed shape ----
 
 pub const NoteRow = struct {
     page_count: u32 = 0,
     signature: ?[]const u8 = null,
     signature_version: u32 = 0,
-    /// The 4-byte file-type marker — "note" for a notebook, "mark" for the
-    /// PDF-annotation sibling. NULL for the original/ASA family, whose signature
-    /// starts at offset 0 and so has no marker in front of it.
-    ///
-    /// `detect()` never gated on this value, which is why a `.mark` has always
-    /// parsed and rendered as a note. Recording it is what lets anything
-    /// downstream tell the two apart.
+    /// 4-byte file-type marker: "note" or "mark" (PDF annotation). NULL for the
+    /// original/ASA family, whose signature starts at offset 0.
     filetype: ?[]const u8 = null,
     equipment: ?[]const u8 = null,
-    /// Base (portrait) dimensions (`note.dimensions()`) — a note-level fact.
-    /// The SNPG header carries the per-page EFFECTIVE dims from `PageRow`, not
-    /// these.
+    /// Base (portrait) dims; per-page effective dims are on `PageRow`.
     width: u32 = 0,
     height: u32 = 0,
     /// 0 = RATTA_RLE, 1 = RATTA_RLE X2 (highres grayscale).
@@ -147,93 +79,61 @@ pub const NoteRow = struct {
     recogn_type: ?[]const u8 = null,
     recogn_language: ?[]const u8 = null,
     recognized_page_count: u32 = 0,
-    /// The COVER image's own pixel dims (a landscape note's cover is
-    /// 1872×1404). NULL = the source ships no cover (`COVER_0=0` placeholder,
-    /// or no COVER key); 0 = a cover is present but `thumbnail.imageDims`
-    /// could not decode it (still served — the masonry aspect just falls back).
-    /// Mirrors `spd_index.thumb_w/thumb_h` exactly.
+    /// The cover image's own pixel dims. NULL = no cover; 0 = present but
+    /// undecodable (still served). Mirrors `spd_index.thumb_w/thumb_h`.
     cover_w: ?u32 = null,
     cover_h: ?u32 = null,
-    /// WHERE the cover image bytes sit inside the immutable blob — the byte
-    /// offset (past the block's 4-byte length prefix) and the byte length — plus
-    /// the MIME `thumbnail.sniffMime` recognised them under. The serve path
-    /// seeks here and STREAMS `cover_length` bytes straight from the blob, so a
-    /// multi-MB cover is never resident. NULL = no cover (kept in lockstep with
-    /// `cover_w` NULL). A cover block larger than `thumbnail.max_cover_bytes`
-    /// is refused from the length prefix and recorded as no cover. `cover_mime`
-    /// is a static string from `sniffMime` (no allocation, no arena borrow).
+    /// Cover bytes' location inside the blob (offset past the 4-byte length
+    /// prefix) and sniffed MIME; the serve path streams from here. NULL in
+    /// lockstep with `cover_w`. Covers over `thumbnail.max_cover_bytes` are
+    /// recorded as none. `cover_mime` is a static string.
     cover_offset: ?u64 = null,
     cover_length: ?u32 = null,
     cover_mime: ?[]const u8 = null,
 };
 
 pub const PageRow = struct {
-    /// The page's POSITION in the container, 0-based. The addressing key.
+    /// Position in the container, 0-based; the addressing key.
     page_index: u32,
-    /// The page's OWN number from its footer `PAGE<n>` key, 1-based, or 0 when
-    /// the container did not give one. Equal to `page_index + 1` for a notebook
-    /// and NOT for a `.mark`, which stores only annotated pages and names them
-    /// by the PDF page they belong to (`note-format.md` §13.2).
+    /// The footer `PAGE<n>` number, 1-based, 0 if absent. Differs from
+    /// `page_index + 1` for a `.mark`, which stores only annotated pages under
+    /// their PDF page numbers.
     source_page: u32 = 0,
-    /// Produced by `pageContentHash` — the browser's immutable `?v=` cache key.
+    /// The browser's immutable `?v=` cache key.
     content_hash: [32]u8,
-    /// EFFECTIVE dims: the note's base dims with this page's `ORIENTATION`
-    /// applied (`Dimensions.oriented` — swapped for `1090`). These are both the
-    /// decode geometry the SNPG header advertises and the box `noteMeta` sizes,
-    /// because a landscape page's raster is stored natively landscape (v3; v2
-    /// stored base dims here while that was unproven).
+    /// Effective dims (orientation applied); both the SNPG decode geometry and
+    /// the `noteMeta` page box.
     width: u32,
     height: u32,
-    /// Emit order (LAYERINFO-minus-deleted, fallback LAYERSEQ). Concatenating
-    /// these refs' ranges after an SNPG header IS the page; the names/current
-    /// flags ride along for `noteMeta`.
+    /// Emit order (LAYERINFO minus deleted, fallback LAYERSEQ); these ranges
+    /// concatenated after an SNPG header are the page.
     layers: []const IndexedLayer,
     recogn_status: u8 = 0,
     /// md5 of the raw `RECOGNTEXT` block; null unless `recogn_status == 1`.
     text_hash: ?[32]u8 = null,
     recogn_offset: ?u32 = null,
     recogn_length: ?u32 = null,
-    /// The page's `EXTERNALLINKINFO` content range, and the md5 of what is in
-    /// it. All three are null together, and null is the overwhelming case: only
-    /// a page rasterised from an imported PDF template carries link records at
-    /// all. The RANGE is stored rather than the records — see the schema's
-    /// `ddl_v8` for why 51,256 records is not a thing to keep in a table.
+    /// `EXTERNALLINKINFO` range and md5, null together. Only pages rasterised
+    /// from an imported PDF template have links; the range is stored rather than
+    /// the records (one page can hold tens of thousands).
     links_offset: ?u32 = null,
     links_length: ?u32 = null,
     links_hash: ?[32]u8 = null,
     /// `recognition.plainText()`; null when the page has no finished text.
     text: ?[]const u8 = null,
-    /// The custom IMAGE template's asset hash (`PAGESTYLEMD5`), set only when
-    /// the page's background is a browser-native raster image (its `layers`
-    /// background record then carries `raster_image`). NULL for blank /
-    /// built-in-RLE / no-custom-style pages. The resolve key for
-    /// `GET /note/{id}/template/{hash}`.
+    /// `PAGESTYLEMD5` of a custom raster-image template background; the resolve
+    /// key for `GET /note/{id}/template/{hash}`. NULL otherwise.
     bg_hash: ?[]const u8 = null,
-    /// **Is anything drawn on this page?** True when some NON-background layer
-    /// carries a run that is not transparent (`ink_scan.pageHasInk`); false when none
-    /// does; null when a layer could not be read and the answer is genuinely
-    /// unknown — the deferred `ink` tenant asks again.
-    ///
-    /// §2.1: the background does not count. A `.note` built on
-    /// a PDF template carries the template as its background, and a page with a
-    /// full-colour template and nothing written on it is EMPTY in the sense the
-    /// page index means. A HIDDEN layer with ink does count — hidden is a view
-    /// state, not an erasure.
-    ///
-    /// A FLAG, NOT A COUNT (§2.4, decided 2026-09-09): the mark the strip draws
-    /// is yes/no, and a count has to walk every byte of every layer while this
-    /// stops at the first stroke. Compute what you display.
+    /// See `ink_scan.pageHasInk`; null means unknown and is retried. A flag, not
+    /// a count: the scan stops at the first stroke.
     has_ink: ?bool = null,
 };
 
-/// Everything `store` needs, owning its own memory — deliberately free of any
-/// borrow from the `.note` bytes, so the (large) buffer can be released before
-/// the DB lock is taken.
+/// Owns its memory (no borrow from the `.note` bytes), so the buffer can be
+/// freed before the DB lock is taken.
 pub const Parsed = struct {
     arena: std.heap.ArenaAllocator,
-    /// False when the blob is not a parseable `.note`. Recorded explicitly (see
-    /// `indexable` in the schema) so other file types living in the tree are not
-    /// re-parsed on every read forever.
+    /// False for a non-`.note` blob; recorded so it is not re-parsed every read.
     indexable: bool,
     note: NoteRow,
     pages: []const PageRow,
@@ -243,21 +143,8 @@ pub const Parsed = struct {
     }
 };
 
-/// The `.note` half of `derive_search`'s page source — the whole of this
-/// format's contribution to §2.2.
-///
-/// **A page with no text is skipped, not yielded empty.** `PageRow.text` is
-/// null whenever the page has no FINISHED transcript, which on this format is
-/// ordinary rather than exceptional: a device syncs pages long before the
-/// recogniser reaches them, and `sample-2.note` is one finished page and one
-/// still recognising. Both writers would drop an empty row anyway (`TermsWriter`
-/// because a termless FTS5 row can never match), so yielding one would only buy
-/// a fold per blank page.
-///
-/// The ordinal is the row's own `page_index`. That is the addressing key
-/// `note_page_index`, `pagePlan` and the viewer's deep link all use, so taking
-/// it from the row rather than re-deriving it from the loop is one fewer place
-/// where the derived address could drift from the stored one.
+/// The `.note` page source for `derive_search`. Pages with no finished
+/// transcript are skipped (common: devices sync before recognition finishes).
 pub const Pages = struct {
     p: *const Parsed,
     i: usize = 0,
@@ -270,44 +157,29 @@ pub const Pages = struct {
         while (self.i < self.p.pages.len) {
             const page = self.p.pages[self.i];
             self.i += 1;
-            // `offset`/`len` stay null: a note page's address IS its ordinal.
             if (page.text) |t| return .{ .ordinal = page.page_index, .text = t };
         }
         return null;
     }
 };
 
-// ---------------------------------------------------------------------------
-// Parse — pure CPU. MUST be called outside the DB lock.
-// ---------------------------------------------------------------------------
+// ---- parse: pure CPU, call outside the DB lock ----
 
-/// `parseBlobSource` for a caller that already holds the whole file (tests, and
-/// any read path still buffering). Identical results, identical cost.
 pub fn parseBlob(gpa: Allocator, bytes: []const u8) Allocator.Error!Parsed {
     return parseBlobSource(gpa, sn.Source.fromSlice(bytes));
 }
 
-/// Derives the index rows for whatever `src` addresses. Never fails on bad
-/// input: anything that does not parse — or that references a range outside the
-/// file — comes back as `indexable = false`, which is a recorded fact rather
-/// than an error. Only allocation can fail.
-///
-/// **Nothing here is proportional to the file size.** The parse reads addressed
-/// blocks; layer tables cost 4 bytes per layer (`emitLayers`); content hashing
-/// streams in `hash_chunk_len` chunks; only the recognition block — KB-scale
-/// metadata, and only on finished pages — is ever materialised. So indexing a
-/// 40 MB note over a blob source allocates kilobytes, not 40 MB.
+/// Derives the index rows for `src`. Never fails on bad input: anything that
+/// does not parse or names an out-of-file range is `indexable = false`. Memory is
+/// not proportional to file size; only recognition text is materialised.
 pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
     const a = arena.allocator();
 
-    // `null` == unindexable. Note the arena is only copied into the returned
-    // `Parsed` at the very end: an `ArenaAllocator` value snapshots its state, so
-    // taking the copy early would strand everything allocated after it.
+    // `null` == unindexable. Copy the arena into `Parsed` only at the end: an
+    // `ArenaAllocator` value snapshots its state.
     const derived: ?struct { note: NoteRow, pages: []const PageRow } = derive: {
-        // The Note owns its metadata but reads content lazily through `src`;
-        // everything we keep is copied into `arena`.
         var note = sn.parseSource(gpa, src) catch break :derive null;
         defer note.deinit();
 
@@ -316,19 +188,15 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
 
         var recognized: u32 = 0;
         for (note.pages, 0..) |page, i| {
-            // Validates every layer range against the real file length: a corrupt
-            // or hostile container fails here, so no stored offset can read past
-            // EOF at serve time.
+            // Validate every layer range against the file length, so no stored
+            // offset can read past EOF at serve time.
             var refs_buf: [max_layers]LayerRef = undefined;
             const refs = sn.page_payload.emitLayers(note, i, &refs_buf) catch break :derive null;
             for (refs) |r| {
                 if (@as(u64, r.offset) + r.len > src.size()) break :derive null;
             }
 
-            // The panel facts ride along: each emitted ref is joined to its
-            // LAYERINFO entry (by slot) for the display name + isCurrent. A
-            // page without usable LAYERINFO gets empty names — the fallback
-            // emit list has none to offer.
+            // Join each ref to its LAYERINFO entry by slot for name + isCurrent.
             const indexed = try a.alloc(IndexedLayer, refs.len);
             for (refs, indexed) |r, *il| {
                 il.* = .{ .ref = r };
@@ -339,19 +207,12 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
                 }
             }
 
-            // EFFECTIVE dims: swapped for a 1090 page, whose raster is stored
-            // natively landscape — see the *Orientation* note above `noteHeader`.
+            // Swapped for a 1090 (landscape) page; see `noteHeader`.
             const eff = dims.oriented(page.orientation());
 
-            // Custom IMAGE template: a page with a custom style
-            // (`PAGESTYLEMD5 != "0"`, not `style_white`) whose background block
-            // does NOT decode as RATTA_RLE is a browser-native image. Stream the
-            // background block through the RLE totalizer (bounded RSS — one
-            // chunk, never the whole image) and, when it fails to total the
-            // page's pixels, mark the background record `raster_image` (bit3 in
-            // the packed blob → SNPG wire bit2) and record its `PAGESTYLEMD5` in
-            // `bg_hash` — the `/template/{hash}` resolve key. Built-in RLE
-            // templates pass the gate too but classify as RLE (cheap KB read).
+            // Custom-style page whose background does not total as RATTA_RLE is a
+            // raster image template: mark it `raster_image` and record
+            // `PAGESTYLEMD5` as `bg_hash`. Streamed, one chunk of RSS.
             var bg_hash: ?[]const u8 = null;
             if (page.hasCustomStyle()) {
                 const expected_px: u64 = @as(u64, eff.width) * eff.height;
@@ -374,22 +235,17 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
                 .layers = indexed,
                 .recogn_status = page.recognitionStatus(),
                 .bg_hash = bg_hash,
-                // Is there a mark on this page? Streams each NON-background
-                // layer through `decoder.InkFinder` and stops at the first
-                // stroke — §2.2, computed once here because the
-                // client's page strip is virtualised and can only ever see the
-                // dozen rows on screen.
+                // Computed at ingest: the client's virtualised strip only sees
+                // the rows on screen.
                 .has_ink = inkscan.pageHasInk(src, refs),
             };
 
-            // Recognition: keep both the plain transcript (search) and the raw
-            // range (for lazily re-reading elements + bounding boxes when
-            // highlight-in-place on the canvas is wanted).
+            // Recognition: plain transcript for search, raw range for re-reading
+            // elements and bounding boxes later.
             const addr = page.recognitionAddress();
             if (row.recogn_status == 1 and addr != 0) {
-                // The one thing that IS materialised — deliberately. It is
-                // KB-scale text metadata, and both the md5 and the JSON decode
-                // need it contiguous. Freed before the next page.
+                // The one materialised block (KB-scale, needed contiguous for md5
+                // and JSON). Freed before the next page.
                 const held = src.blockHeld(gpa, addr) catch break :derive null;
                 defer held.deinit(gpa);
                 const content = held.bytes;
@@ -407,19 +263,14 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
                 } else |_| {} // undecodable RECOGNTEXT: keep the range, drop the text
             }
 
-            // The links a PDF template brought with it. RANGE + HASH ONLY — the
-            // records are decoded at serve time, one page at a time, out of the
-            // block this points at. The block is read here for exactly one
-            // reason (its md5, which is the serve URL's `?v=`), and it is
-            // KB-scale: the corpus's heaviest page is 123 records, ~11 KB.
+            // PDF-template links: range + md5 only (the md5 is the serve `?v=`);
+            // records are decoded at serve time.
             const links_addr = page.linksAddress();
             if (links_addr != 0) {
                 const held = src.blockHeld(gpa, links_addr) catch break :derive null;
                 defer held.deinit(gpa);
-                // A zero-length block is a page with no links, and it must not
-                // claim a hash: `links_hash != NULL` is the page list's "this
-                // page has links" signal, and a signal that is right about a
-                // page with nothing to show is what stops a pointless request.
+                // A zero-length block claims no hash: `links_hash != NULL` is the
+                // page list's "has links" signal.
                 if (held.bytes.len != 0) {
                     row.links_offset = @intCast(links_addr + 4);
                     row.links_length = @intCast(held.bytes.len);
@@ -429,16 +280,10 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
             pages[i] = row;
         }
 
-        // The device-rendered cover, riding the footer this parse already holds
-        // (newest-wins `COVER_3`/`COVER_2`/`COVER_1` — see the parser). We RECORD
-        // where it lives (offset + length) and its MIME rather than extract its
-        // bytes: the serve path streams those bytes straight from the immutable
-        // blob, so nothing multi-MB is ever resident. Best-effort and bounded —
-        // an absent, oversized (`thumbnail.max_cover_bytes`, checked from the
-        // 4-byte length prefix BEFORE any body read), unreadable, or
-        // unrecognizable cover block is "no cover", never a failed index. NULL
-        // vs 0 is the dims column contract: a cover whose dims cannot be decoded
-        // records 0, never NULL, and is still served.
+        // The device cover (newest-wins `COVER_3`/`2`/`1`): record its location
+        // and MIME, never its bytes. Best-effort: absent, oversized (checked from
+        // the length prefix before any body read), unreadable or unrecognised is
+        // "no cover". Undecodable dims record 0, not NULL.
         var cover_offset: ?u64 = null;
         var cover_length: ?u32 = null;
         var cover_mime: ?[]const u8 = null;
@@ -448,8 +293,6 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
             const addr = note.coverAddress() orelse break :cover_blk;
             const range = src.blockRange(addr) catch break :cover_blk; // prefix only
             if (range.len == 0 or range.len > thumbnail.max_cover_bytes) break :cover_blk;
-            // A bounded header window is all the sniff + dims need; the body is
-            // never materialised here (nor a `max_cover_bytes` buffer).
             const head_len: usize = @intCast(@min(@as(u64, range.len), cover_header_probe));
             const head = try gpa.alloc(u8, head_len);
             defer gpa.free(head);
@@ -472,9 +315,8 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
                 .page_count = @intCast(note.pages.len),
                 .signature = try a.dupe(u8, note.signature.raw),
                 .signature_version = note.signature.version,
-                // X-series only. The ASA family's `filetype` slice is the front
-                // of its own signature ("SN_F"), not a marker, so it is dropped
-                // rather than recorded as a lie.
+                // X-series only: on ASA the slice is the front of the signature
+                // ("SN_F"), not a marker.
                 .filetype = if (note.signature.family == .x_series)
                     try a.dupe(u8, note.signature.filetype)
                 else
@@ -507,19 +349,10 @@ fn dupeOpt(a: Allocator, v: ?[]const u8) Allocator.Error!?[]const u8 {
     return if (v) |s| try a.dupe(u8, s) else null;
 }
 
-/// A page's content hash: md5 over its present layers' bitmap bytes (the pixels'
-/// source). Stable per rendered content; changes only when that page changes.
-/// Falls back to hashing the page's metadata entries if it has no layer bitmaps.
-///
-/// This is the browser's immutable `?v=` cache key. It lives here, and the
-/// control-plane face calls THIS function, because computing it even slightly
-/// differently in the two places would invalidate every cached page URL.
-///
-/// Reads through `src` in bounded chunks, so hashing a multi-MB layer costs
-/// `hash_chunk_len` bytes. An out-of-range address is skipped exactly as before
-/// (`catch continue` on `blockRange`); a genuine I/O failure mid-layer is
-/// propagated rather than silently yielding a half-hashed value, because that
-/// value would otherwise be stored as a real cache key.
+/// md5 over the page's layer bitmap bytes (metadata entries if it has none): the
+/// browser's immutable `?v=` key. The control plane calls this same function, so
+/// every cached URL stays valid. Streamed in `hash_chunk_len` chunks; an I/O
+/// failure propagates rather than store a half-hashed key.
 pub fn pageContentHash(src: sn.Source, page: sn.types.Page) sn.source.Error![32]u8 {
     var hasher = Md5.init(.{});
     var any = false;
@@ -544,15 +377,10 @@ pub fn pageContentHash(src: sn.Source, page: sn.types.Page) sn.source.Error![32]
     return hex;
 }
 
-/// True when the background block at `[offset, offset+len)` does NOT decode as a
-/// RATTA_RLE stream of exactly `expected_pixels` — i.e. it is a browser-native
-/// image template. Streams the block through `decoder.RleTotalizer` in
-/// `hash_chunk_len` windows and bails the moment the total overflows, so
-/// classifying a multi-MB image costs one chunk of RSS and reads only its
-/// leading pairs, never the whole file. A read error is treated as "not an
-/// image" (leave it RLE) — the caller already validated the range in-bounds, so
-/// this is purely defensive. Only ever called on a custom-style page's
-/// background (the gate), so `all_blank` is false — matching `decodesToExactly`.
+/// True when the background block does not decode as RATTA_RLE of exactly
+/// `expected_pixels`, i.e. it is an image template. Streams through
+/// `RleTotalizer` and bails on overflow, so it costs one chunk. A read error
+/// counts as "not an image".
 fn backgroundIsImage(src: sn.Source, offset: u32, len: u32, expected_pixels: u64) bool {
     var t = sn.decoder.RleTotalizer.init(expected_pixels);
     var chunk: [hash_chunk_len]u8 = undefined;
@@ -585,14 +413,10 @@ fn hexEncode(out: []u8, bytes: []const u8) void {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Layer packing
-// ---------------------------------------------------------------------------
+// ---- layer packing ----
 
-/// Packs `layers` into the variable-stride v5 `layers` blob (see
-/// `layer_rec_head_size` for the record layout). Order is the emit order and
-/// is load-bearing: serving a page replays it verbatim. Names longer than
-/// `max_layer_name` are truncated.
+/// Packs `layers` into the v5 `layers` blob. Order is load-bearing: serving
+/// replays it verbatim.
 pub fn packLayers(buf: []u8, layers: []const IndexedLayer) []u8 {
     var at: usize = 0;
     for (layers) |il| {
@@ -615,18 +439,14 @@ pub fn packLayers(buf: []u8, layers: []const IndexedLayer) []u8 {
     return buf[0..at];
 }
 
-/// One record read back out of a packed blob. `name` BORROWS the blob (SQLite
-/// statement memory on the read paths) — dupe it before the statement dies.
+/// One record read back. `name` borrows the blob (statement memory): dupe it.
 pub const LayerRecord = struct {
     ref: LayerRef,
     name: []const u8,
     is_current: bool,
 };
 
-/// Inverse of `packLayers`. Rejects a malformed blob (short record, trailing
-/// bytes, too many records, an unknown slot id) rather than trusting it —
-/// stale-format blobs only exist under stale `index_version` rows, which every
-/// reader filters out before unpacking.
+/// Inverse of `packLayers`; rejects a malformed blob rather than trusting it.
 pub fn unpackLayerRecords(blob: []const u8, buf: *[max_layers]LayerRecord) Error![]const LayerRecord {
     var at: usize = 0;
     var n: usize = 0;
@@ -663,24 +483,11 @@ pub fn unpackLayers(blob: []const u8, buf: *[max_layers]LayerRef) Error![]const 
     return buf[0..rs.len];
 }
 
-// ---------------------------------------------------------------------------
-// Write — inside the caller's transaction.
-// ---------------------------------------------------------------------------
+// ---- write: inside the caller's transaction ----
 
-// NEITHER `pdf_text`, `pdf_probe` NOR `txt_index` IS RESET HERE, and that is
-// deliberate.
-//
-// `pdf_text` and `txt_index` stay TRUE because the tail delete below is scoped
-// to `kind = 0`: their rows survive a note heal that touched none of them, and
-// clearing either memo would force a full re-extraction — minutes of work per
-// book on the target — for nothing.
-//
-// `pdf_probe` is a different hole and is closed on the READER's side instead:
-// the shape lives in the note columns and this statement really does overwrite
-// it, so `pdf_index.needsProbe` treats "verdict `ok`, `page_count` zero" as
-// outstanding work rather than trusting the memo. Asking the data rather than
-// the memo keeps knowledge of PDFs out of the note half — which is the coupling
-// that made both holes possible.
+// The upsert below deliberately resets none of `pdf_text`, `pdf_probe`,
+// `txt_index`: the tail delete is scoped to `kind = 0`, and `pdf_index.needsProbe`
+// treats "ok with page_count 0" as outstanding instead.
 const upsert_note_sql =
     \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, signature,
     \\                       signature_version, equipment, width, height, rle_variant,
@@ -714,8 +521,7 @@ const upsert_page_sql =
     \\  has_ink=excluded.has_ink;
 ;
 
-/// One page row: raster geometry, layers, the recognition columns, the link
-/// block. `buf` is the caller's scratch for `packLayers`.
+/// One page row. `buf` is scratch for `packLayers`.
 fn upsertPage(db: sqlite.Db, blob_md5: []const u8, page: PageRow, buf: []u8) !void {
     var s = try db.prepare(upsert_page_sql);
     defer s.finalize();
@@ -735,17 +541,14 @@ fn upsertPage(db: sqlite.Db, blob_md5: []const u8, page: PageRow, buf: []u8) !vo
     s.bindIntOpt(14, if (page.links_offset) |v| @intCast(v) else null);
     s.bindIntOpt(15, if (page.links_length) |v| @intCast(v) else null);
     if (page.links_hash) |*h| s.bindText(16, h) else s.bindNull(16);
-    // Three states, spelt as three: 1, 0, or NULL for "not yet looked". A page
-    // whose layers could not be read binds NULL and the `ink` tenant asks again.
+    // 1, 0, or NULL ("not yet looked"; the `ink` tenant retries).
     s.bindIntOpt(17, if (page.has_ink) |v| @as(i64, if (v) 1 else 0) else null);
     _ = try s.step();
 }
 
-/// Writes `p`'s rows for `blob_md5`. Call inside the caller's transaction (the
-/// `blobs` row must already exist — the FK is what ties index lifetime to blob
-/// lifetime). Upserts throughout, so two racing parses of the same blob are
-/// wasteful but never a constraint violation, and a page row keeps its `id`
-/// across a re-index.
+/// Writes `p`'s rows for `blob_md5` inside the caller's transaction (the `blobs`
+/// row must exist; the FK ties index lifetime to blob lifetime). Upserts, so
+/// racing parses are harmless and a page keeps its `id` across re-index.
 pub fn store(db: sqlite.Db, blob_md5: []const u8, p: Parsed, now: i64) !void {
     {
         var s = try db.prepare(upsert_note_sql);
@@ -776,13 +579,9 @@ pub fn store(db: sqlite.Db, blob_md5: []const u8, p: Parsed, now: i64) !void {
     var layer_buf: [max_layers * max_layer_rec_size]u8 = undefined;
     for (p.pages) |page| try upsertPage(db, blob_md5, page, &layer_buf);
 
-    // A re-index at a new `index_version` could in principle yield fewer pages;
-    // drop any tail left over from the previous shape.
-    //
-    // SCOPED TO `kind = 0` — the note half's own rows. For a blob the note
-    // parser REJECTED (a PDF, a `.txt`) `page_count` is zero, so an unscoped
-    // tail delete is not a tail delete at all: it is "drop every row anyone
-    // wrote for this blob".
+    // Drop any tail from a previous shape. Scoped to `kind = 0`: for a blob the
+    // note parser rejected `page_count` is 0, so unscoped this would drop every
+    // other format's rows.
     {
         var s = try db.prepare(
             "DELETE FROM note_page_index WHERE blob_md5 = ?1 AND page_index >= ?2 AND kind = 0;",
@@ -794,9 +593,8 @@ pub fn store(db: sqlite.Db, blob_md5: []const u8, p: Parsed, now: i64) !void {
     }
 }
 
-/// True when this blob already has an index row at the CURRENT version — the
-/// cheap gate that keeps re-ingest and the lazy read path from re-parsing, and
-/// that makes the unindexable marker stick instead of retrying forever.
+/// True when this blob has an index row at the current version; also what makes
+/// the unindexable marker stick.
 pub fn isCurrent(db: sqlite.Db, blob_md5: []const u8) !bool {
     var s = try db.prepare("SELECT 1 FROM note_index WHERE blob_md5 = ?1 AND index_version = ?2;");
     defer s.finalize();
@@ -805,35 +603,19 @@ pub fn isCurrent(db: sqlite.Db, blob_md5: []const u8) !bool {
     return try s.step();
 }
 
-/// The no-retry repair gate for the `.note` COVER — `spd_index.needsRepair`'s
-/// analogue, consulted by the `/thumbnail/{hash}` serve path when the blob's own
-/// magic says `.note` (see `Files.thumbNeedsRepair`). A `.note` cover is served
-/// on-demand STREAMED from the immutable blob (v10), so — unlike the `.spd`
-/// thumbnail — there is NO derived `thumbs/` file that can go missing. The only
-/// thing a serve needs is the cover's recorded location, and that lives in the
-/// index row; so the only repair reason is a missing or stale row:
-///   - no row at the current `index_version` (missing, or stale after a bump —
-///     a v9-or-earlier row lands here, which is how each bump heals lazily) →
-///     re-parse to populate `cover_offset`/`cover_length`/`cover_mime`.
-/// False otherwise — INCLUDING a current row saying "no cover"
-/// (`cover_offset IS NULL`): the row is the memo, so a coverless note costs its
-/// parse once (not every gallery load) and a covered note serves straight from
-/// the row with no re-derive. `thumbs` is unused (kept for signature parity with
-/// `spd_index.needsRepair`, which the shared `Files` dispatch also calls).
+/// Cover repair gate for the `/thumbnail` serve path: true only when the row is
+/// missing or stale. A current row saying "no cover" is the memo. `thumbs` is
+/// unused, kept for parity with `spd_index.needsRepair`.
 pub fn needsRepair(db: sqlite.Db, thumbs: thumbstore.ThumbStore, md5: []const u8) !bool {
     _ = thumbs; // notes stream from the blob — no derived file to check for
     return !(try isCurrent(db, md5));
 }
 
-/// The longest MIME string a cover column holds — `thumbnail.sniffMime` returns
-/// only `image/jpeg`|`image/png`|`image/webp`|`image/gif`, all ≤ 10 bytes.
+/// `sniffMime` returns at most `image/jpeg|png|webp|gif`.
 pub const max_cover_mime_len = 16;
 
-/// Where a `.note` cover's bytes sit inside its blob, plus how to label them —
-/// the streaming serve path's entire plan, read from the index in ONE row and
-/// then usable with no further DB access. `mime` is copied INLINE because
-/// SQLite statement memory dies with the query, so a `CoverLocation` value is
-/// fully self-contained (no borrow to outlive the connection).
+/// A `.note` cover's location and MIME, read in one row; `mime` is inline so the
+/// value outlives the statement.
 pub const CoverLocation = struct {
     offset: u64,
     length: u64,
@@ -845,15 +627,9 @@ pub const CoverLocation = struct {
     }
 };
 
-/// The recorded cover location for `md5`, or null when the note ships no cover
-/// — the `/thumbnail` serve path's lookup for a `.note` (`Files.noteCover`).
-/// Reads ONLY the current-`index_version` row (a stale row is "no cover", so a
-/// serve never streams from an offset a bump may have invalidated). The length
-/// is re-checked against `thumbnail.max_cover_bytes` at this edge: a row is
-/// content-keyed and immutable, but the ceiling is enforced where the bytes are
-/// about to be read, never trusted blindly. A row with an offset but a NULL/
-/// oversized length or NULL MIME is treated as no cover rather than served
-/// wrong.
+/// The recorded cover location, or null for no cover. Only a current-version
+/// row counts, and the length is re-checked against `max_cover_bytes` here;
+/// a malformed row is treated as no cover.
 pub fn coverLocation(db: sqlite.Db, md5: []const u8) !?CoverLocation {
     var r = (try db.row(
         "SELECT cover_offset, cover_length, cover_mime FROM note_index " ++
@@ -873,9 +649,8 @@ pub fn coverLocation(db: sqlite.Db, md5: []const u8) !?CoverLocation {
     return loc;
 }
 
-/// Drops a blob's index rows. Called from the blob GC path *inside its
-/// transaction*; the schema's ON DELETE CASCADE is the structural backstop, this
-/// is the explicit statement of intent (and works with FKs off).
+/// Drops a blob's index rows, inside the blob GC transaction. ON DELETE CASCADE
+/// is the backstop; this also works with FKs off.
 pub fn deleteForBlob(db: sqlite.Db, blob_md5: []const u8) !void {
     {
         var s = try db.prepare("DELETE FROM note_page_index WHERE blob_md5 = ?1;");
@@ -889,33 +664,19 @@ pub fn deleteForBlob(db: sqlite.Db, blob_md5: []const u8) !void {
     _ = try s.step();
 }
 
-// ---------------------------------------------------------------------------
-// Parsing a stored blob (ranged reads — no whole-file buffer)
-// ---------------------------------------------------------------------------
+// ---- parsing a stored blob (ranged reads) ----
 
-/// Parses a stored blob into index rows, WITHOUT touching the database. This is
-/// the "parse first, unlocked" half; hand the result to `store` inside the
-/// transaction. Null when the blob is not on disk.
-///
-/// **Never buffers the note.** It reads through `BlobSource`, i.e. positional
-/// `readRange` calls for the addresses the container itself names, so a device
-/// syncing a 40 MB note does not cost 40 MB of RSS in `upload/finish`.
-/// `io` is unused (the blob store carries its own) and is kept so the call
-/// sites, which thread it everywhere, do not have to change.
+/// Parses a stored blob without touching the database; hand the result to
+/// `store`. Null when the blob is not on disk. Reads ranges through
+/// `BlobSource`, never buffering the note. `io` is unused.
 pub fn parseStoredBlob(gpa: Allocator, io: std.Io, blobs: blobstore.BlobStore, md5: []const u8) !?Parsed {
     _ = io;
     var bs = blob_source.BlobSource.init(blobs, md5) catch return null;
     return try parseBlobSource(gpa, bs.source());
 }
 
-/// Lazy backfill, for read paths: a no-op when the blob is already indexed at
-/// the current version, otherwise parse (unlocked) and write (in a transaction).
-/// This is what makes the index self-healing — pre-existing blobs, uploads whose
-/// eager index failed, and `index_version` bumps all repair themselves on first
-/// read, so no backfill migration is ever required.
-///
-/// Safe to race: the write is an upsert, so a concurrent duplicate parse costs
-/// CPU and nothing else.
+/// Lazy self-heal for read paths: no-op at the current version, else parse
+/// unlocked and write in a transaction. Safe to race (upserts).
 pub fn ensureIndexed(
     gpa: Allocator,
     io: std.Io,
@@ -935,13 +696,10 @@ pub fn ensureIndexed(
     try db.exec("COMMIT;");
 }
 
-// ---------------------------------------------------------------------------
-// Serving a page FROM the index
-// ---------------------------------------------------------------------------
+// ---- serving a page from the index ----
 
-/// Supplies a layer's bytes given a stored `(offset, length)` out of a whole-blob
-/// slice. The buffering source for `serializeFromIndex`; serving uses `streamPage`,
-/// which reads windows through `BlobStore.readRange` and buffers nothing.
+/// Layer bytes from a whole-blob slice; the buffering source for
+/// `serializeFromIndex`.
 pub const SliceSource = struct {
     bytes: []const u8,
 
@@ -951,32 +709,12 @@ pub const SliceSource = struct {
     }
 };
 
-/// The note-level facts an SNPG header needs, straight from `note_index`.
-/// `width`/`height` are the note's BASE (portrait) dims; the header's decode
-/// geometry comes from the per-page row instead — see *Orientation* below.
+/// The note-level facts an SNPG header needs. `width`/`height` are base dims.
 ///
-/// ## Orientation: effective dims everywhere
-///
-/// A page with `ORIENTATION = 1090` (landscape) has its RATTA_RLE raster stored
-/// **natively landscape**: the same flat byte stream, but the true row width is
-/// the swapped base width (1872 on a Nomad). Settled from both directions:
-///
-///  - **empirically**, on a real Nomad capture (`horizontal_layers.note`:
-///    2 pages, both `1090`, 4 ink layers on page 2), which decodes coherently
-///    at 1872-wide rows and shears at 1404;
-///  - **against the reference**: supernote-tool v0.7.1 swaps width/height
-///    before decoding (`decoder.py:138-139`) and renders natively landscape,
-///    never rotating (see note-format.md §9.3).
-///
-/// The decision that follows: **effective dims everywhere.** `parseBlobSource`
-/// stores each page's dims with the orientation applied
-/// (`types.Dimensions.oriented` — the parser library's single copy of the swap
-/// fact), `pagePlan` writes those same per-page dims into the SNPG header (the
-/// wasm decoder's geometry), and `noteMeta` advertises them for the page box.
-/// All three read the same stored value, so the payload and the box can never
-/// describe different rectangles, and the rectangle is the RIGHT one for a
-/// landscape page. Getting this wrong is silent: a flat RLE stream decoded at
-/// the wrong width shears, it does not fail.
+/// A `1090` (landscape) page's RLE raster is stored natively landscape (row width
+/// = swapped base width), so effective dims are stored per page and used by both
+/// `pagePlan`'s header and `noteMeta`. Decoding at the wrong width shears
+/// silently.
 pub const NoteHeader = struct { width: u32, height: u32, rle_variant: u8, page_count: u32 };
 
 pub fn noteHeader(db: sqlite.Db, blob_md5: []const u8) !?NoteHeader {
@@ -994,39 +732,21 @@ pub fn noteHeader(db: sqlite.Db, blob_md5: []const u8) !?NoteHeader {
     };
 }
 
-/// Everything needed to emit one page's SNPG payload, resolved from index rows
-/// in ONE place and then usable with **no further database access**.
-///
-/// It is deliberately a plain value with inline storage (no allocation, no
-/// borrowed slices): the page route is `manual_db_lock`, so the plan is built
-/// inside a narrow lock window and the bytes are streamed with the lock
-/// released. Anything borrowed from SQLite statement memory would be a
-/// use-after-free the moment the connection served the next query.
-///
-/// Two facts the index hands over for free, both of which the HTTP layer uses:
-///
-///  - `content_length` is exact and costs no file I/O — `20 + Σ (5 + len)` — so
-///    a streamed page still gets a precise `Content-Length` rather than chunked
-///    transfer encoding.
-///  - `content_hash` is the stored `?v=` / `ETag` value, so version checking and
-///    cache validation also touch no file.
-/// The longest asset hash a page carries on the wire — `PAGESTYLEMD5` is a
-/// 32-hex md5; this is generous headroom and a hard bound on the inline buffer.
+// `PagePlan` below has inline storage and no borrows: it is built in a narrow
+// lock window and the page is streamed after the lock is released.
+/// Bound on a page's inline asset hash (`PAGESTYLEMD5` is 32 hex).
 pub const max_bg_hash: usize = 64;
 
 pub const PagePlan = struct {
-    /// The finished 20-byte SNPG header, ready to write.
     header: [sn.page_payload.HEADER_SIZE]u8,
     layer_buf: [max_layers]LayerRef,
     layer_count: u8,
-    /// The page's content md5 (hex): the `?v=` version and the `ETag`.
+    /// Content md5 (hex): the `?v=` version and the `ETag`.
     content_hash: [32]u8,
-    /// Exact payload size in bytes.
+    /// Exact payload size, known without file I/O.
     content_length: u64,
-    /// The custom IMAGE background's asset hash — what the `raster_image`
-    /// record carries as its data ON THE WIRE (instead of the image bytes), so
-    /// the page payload stays small and the browser fetches the asset once. Set
-    /// only when a layer is `raster_image`; empty otherwise.
+    /// A `raster_image` background's asset hash, sent on the wire in place of
+    /// the image bytes. Empty otherwise.
     bg_hash_buf: [max_bg_hash]u8 = undefined,
     bg_hash_len: u8 = 0,
 
@@ -1038,16 +758,13 @@ pub const PagePlan = struct {
         return self.bg_hash_buf[0..self.bg_hash_len];
     }
 
-    /// A record's DATA length on the wire: the asset-hash length for a
-    /// `raster_image` background, the RLE byte length for every other layer.
     pub fn wireLen(self: *const PagePlan, r: LayerRef) u64 {
         return if (r.raster_image) self.bg_hash_len else r.len;
     }
 };
 
-/// Resolves page `page_index` of `blob_md5` into a `PagePlan`. **This is the only
-/// part of page serving that touches the database.** Null when the blob has no
-/// current index row (not a `.note`, or unindexable) or the page is out of range.
+/// Resolves a page into a `PagePlan`: the only DB access in page serving. Null
+/// when the blob has no current index row or the page is out of range.
 pub fn pagePlan(db: sqlite.Db, blob_md5: []const u8, page_index: u64) !?PagePlan {
     const head = (try noteHeader(db, blob_md5)) orelse return null;
 
@@ -1059,9 +776,7 @@ pub fn pagePlan(db: sqlite.Db, blob_md5: []const u8, page_index: u64) !?PagePlan
         .content_length = sn.page_payload.HEADER_SIZE,
     };
 
-    // The page row carries the EFFECTIVE dims — the decode geometry a landscape
-    // page's natively-landscape stream requires (see *Orientation* at
-    // `NoteHeader`); the note-level row contributes only the RLE variant here.
+    // Effective dims come from the page row; the note row gives the RLE variant.
     var page_dims: [2]u32 = undefined;
     const refs = blk: {
         var r = (try db.row(
@@ -1075,8 +790,7 @@ pub fn pagePlan(db: sqlite.Db, blob_md5: []const u8, page_index: u64) !?PagePlan
         if (hash.len != plan.content_hash.len) return error.NotIndexed;
         @memcpy(&plan.content_hash, hash); // copied out: the statement dies below
         page_dims = .{ @intCast(r.int(2)), @intCast(r.int(3)) };
-        // The asset hash a `raster_image` background carries on the wire. Copied
-        // INLINE (statement memory dies at the `defer`), bounded by max_bg_hash.
+        // Copied inline: statement memory dies at the `defer`.
         if (!r.isNull(4)) {
             const bg = r.text(4);
             if (bg.len > 0 and bg.len <= max_bg_hash) {
@@ -1093,14 +807,9 @@ pub fn pagePlan(db: sqlite.Db, blob_md5: []const u8, page_index: u64) !?PagePlan
     return plan;
 }
 
-/// Where a custom IMAGE template's bytes sit inside the immutable blob, resolved
-/// by asset `hash` — the `GET /note/{id}/template/{hash}` serve path's entire DB
-/// question, answered in ONE row with no `.note` parse. Every page that shares a
-/// template references the SAME background block, so all their `layers` records
-/// carry the IDENTICAL `(offset, length)`; `LIMIT 1` is therefore exact, not
-/// arbitrary, and the hash in the URL guarantees the bytes cannot change. Null
-/// when no page of this blob has an image background under that hash (a foreign
-/// or absent template — the handler 404s it, indistinguishable from unowned).
+/// Where a custom image template sits in the blob, by asset `hash`, for
+/// `GET /note/{id}/template/{hash}`. Every page sharing a template points at the
+/// same block, so `LIMIT 1` is exact. Null for an unknown hash.
 pub const TemplateLocation = struct { offset: u64, length: u64 };
 
 pub fn templateLocation(db: sqlite.Db, blob_md5: []const u8, hash: []const u8) !?TemplateLocation {
@@ -1117,10 +826,8 @@ pub fn templateLocation(db: sqlite.Db, blob_md5: []const u8, hash: []const u8) !
     return null;
 }
 
-/// The SNPG header, built from stored columns — the variant from the note-level
-/// row, `width`/`height` from the PAGE row (effective dims). The single place
-/// the payload's leading 20 bytes are produced — `serializeFromIndex` and the
-/// streamed serve path both come through here, so they cannot drift.
+/// The SNPG header from stored columns (variant from the note row, dims from the
+/// page row); the one place those 20 bytes are produced.
 fn writeSnpgHeader(
     out: *[sn.page_payload.HEADER_SIZE]u8,
     rle_variant: u8,
@@ -1139,11 +846,8 @@ fn writeSnpgHeader(
     std.mem.writeInt(u32, out[16..20], layer_count, .little);
 }
 
-/// One layer record's 6-byte SNPG v2 head (flags + slot + length). Flags come
-/// from `page_payload.recordFlags` — the one place the wire bits are written.
-/// `wire_len` is the record's DATA length on the wire: `r.len` for an RLE
-/// layer, the asset-hash length for a `raster_image` background (whose data is
-/// the hash, not the image bytes).
+/// A record's 6-byte SNPG v2 head. `wire_len` is the hash length for a
+/// `raster_image` background, else `r.len`.
 fn layerHead(r: LayerRef, wire_len: u64) [sn.page_payload.LAYER_HEADER_SIZE]u8 {
     var h: [sn.page_payload.LAYER_HEADER_SIZE]u8 = undefined;
     h[0] = sn.page_payload.recordFlags(r);
@@ -1152,16 +856,9 @@ fn layerHead(r: LayerRef, wire_len: u64) [sn.page_payload.LAYER_HEADER_SIZE]u8 {
     return h;
 }
 
-/// **Streams** page `plan`'s SNPG payload to `out`, reading each layer's bytes
-/// straight out of the blob in `blobstore.chunk_len` windows.
-///
-/// This is what makes the memory claim unqualified: the server never materialises
-/// the payload, so peak memory here is one chunk regardless of how large the page
-/// or the containing note is. Exactly `plan.content_length` bytes are written.
-///
-/// DB-FREE by contract — the caller runs it with the DB lock released. Every
-/// range came from an untrusted device's own metadata, so `readRange` re-validates
-/// it against the blob's real on-disk size on every window.
+/// Streams `plan`'s SNPG payload to `out` in `chunk_len` windows; never
+/// materialises it. DB-free: call with the lock released. Ranges come from
+/// device metadata, so `readRange` re-validates each window.
 pub fn streamPage(
     blobs: blobstore.BlobStore,
     blob_md5: []const u8,
@@ -1171,9 +868,7 @@ pub fn streamPage(
     var chunk: [blobstore.chunk_len]u8 = undefined;
     try out.writeAll(&plan.header);
     for (plan.layers()) |r| {
-        // A raster-image background carries the asset HASH inline, not the image
-        // bytes — the browser fetches the asset once via `/template/{hash}`. Emit
-        // the hash and move on; never stream the (multi-MB) image into the page.
+        // A raster background sends its asset hash, never the image bytes.
         if (r.raster_image) {
             try out.writeAll(&layerHead(r, plan.bg_hash_len));
             try out.writeAll(plan.bgHash());
@@ -1191,15 +886,8 @@ pub fn streamPage(
     }
 }
 
-/// Emits page `page_index`'s SNPG payload **purely from index rows**: the header
-/// from the note-level columns, then the stored layer blocks concatenated in
-/// stored order. That is the whole payoff of storing layers in emit order — the
-/// writer is a dumb concatenation with no opinion of its own to drift from the
-/// indexer's.
-///
-/// The buffering counterpart of `streamPage`, kept for the golden test, which
-/// asserts all three of `page_payload.serialize`, this, and `streamPage` produce
-/// identical bytes for every page of every sample note.
+/// The buffering counterpart of `streamPage`: header plus stored layer blocks in
+/// stored order. Kept for the golden test.
 pub fn serializeFromIndex(
     gpa: Allocator,
     db: sqlite.Db,
@@ -1213,8 +901,6 @@ pub fn serializeFromIndex(
     errdefer out.deinit(gpa);
     try out.appendSlice(gpa, &plan.header);
     for (plan.layers()) |r| {
-        // A raster-image background: the record's wire data is the asset hash,
-        // NOT the image bytes (mirrors `streamPage`).
         if (r.raster_image) {
             try out.appendSlice(gpa, &layerHead(r, plan.bg_hash_len));
             try out.appendSlice(gpa, plan.bgHash());
@@ -1228,20 +914,18 @@ pub fn serializeFromIndex(
     return out.toOwnedSlice(gpa);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ---- tests ----
 
 const testing = std.testing;
 const schema = @import("../db/schema.zig");
 const filesvc = @import("files.zig");
 const nb = @import("note_builder");
 
-/// Real device captures. Local fixtures only — they are not redistributed.
+/// Real device captures; local fixtures, not redistributed.
 const sample = @embedFile("sample.note");
 const sample2 = @embedFile("sample-2.note");
-/// The layer-panel capture: page 1 `#`-JSON LAYERINFO, page 2 base64 with a
-/// HIDDEN Layer 2 (bitmap persists), a renamed top layer, layerId -1 bg.
+/// Page 1 `#`-JSON LAYERINFO; page 2 base64 with a hidden Layer 2, a renamed
+/// top layer, layerId -1 background.
 const layers_edited = @embedFile("layers_edited.note");
 
 const Fixture = struct {
@@ -1266,7 +950,6 @@ const Fixture = struct {
         f.tmp.cleanup();
     }
 
-    /// Puts `data` as a file, returning its (owned) md5 hex.
     fn put(f: *Fixture, name: []const u8, data: []const u8) ![blobstore.md5_hex_len]u8 {
         var r = std.Io.Reader.fixed(data);
         const e = try f.files.putFile(1, null, name, &r, null);
@@ -1285,8 +968,7 @@ const Fixture = struct {
     }
 };
 
-/// A bare blob store on a temp dir — no database, no file tree. For the
-/// source-equivalence tests, which are about bytes and allocation, not rows.
+/// A bare blob store on a temp dir, no database.
 const Blobs = struct {
     tmp: testing.TmpDir,
     store: blobstore.BlobStore,
@@ -1302,15 +984,13 @@ const Blobs = struct {
         var r = std.Io.Reader.fixed(data);
         return (try b.store.put(&r, null)).md5;
     }
-    /// A ranged source over `data`, stored as a real blob on disk.
     fn source(b: *Blobs, md5: *const [blobstore.md5_hex_len]u8, out: *blob_source.BlobSource) !sn.Source {
         out.* = try blob_source.BlobSource.init(b.store, md5);
         return out.source();
     }
 };
 
-/// Wraps an allocator to record peak *live* bytes. The proof that the blob path
-/// does not buffer: run a parse through it and look at the high-water mark.
+/// Records peak live bytes, to prove the blob path does not buffer.
 const PeakAllocator = struct {
     child: Allocator,
     live: usize = 0,
@@ -1362,7 +1042,6 @@ fn expectSameOptStr(want: ?[]const u8, got: ?[]const u8) !void {
     if (want) |w| try testing.expectEqualStrings(w, got.?);
 }
 
-/// Every field the index stores must be identical whichever source produced it.
 fn expectSameParsed(want: Parsed, got: Parsed) !void {
     try testing.expectEqual(want.indexable, got.indexable);
     try testing.expectEqual(want.note.page_count, got.note.page_count);
@@ -1405,8 +1084,7 @@ fn expectSameParsed(want: Parsed, got: Parsed) !void {
     }
 }
 
-/// Indexes `bytes` under `md5` into a fresh in-memory DB (blobs row included, so
-/// the FK holds) and returns the db. Mirrors what `linkBlob` does.
+/// Indexes `bytes` under `md5` into `db`, blobs row included so the FK holds.
 fn indexInto(db: sqlite.Db, md5: []const u8, bytes: []const u8) !void {
     {
         var s = try db.prepare("INSERT OR IGNORE INTO blobs(md5, size, refcount, created_at) VALUES(?1,?2,1,0);");
@@ -1420,16 +1098,9 @@ fn indexInto(db: sqlite.Db, md5: []const u8, bytes: []const u8) !void {
     try store(db, md5, p, 0);
 }
 
-/// THE acceptance criterion. If this ever fails, the design does not work.
-///
-/// Three producers must agree byte for byte on every page:
-///   1. `page_payload.serialize` — parse-driven, the pre-index reference;
-///   2. `serializeFromIndex` — index-driven, buffering;
-///   3. `streamPage` — index-driven, streamed off a real on-disk blob in
-///      `chunk_len` windows. This is what actually goes on the wire, so it is the
-///      one that has to be identical, not merely equivalent.
-/// And the plan's `content_length`, computed from the index with no file read,
-/// must equal the number of bytes that come out.
+/// `page_payload.serialize`, `serializeFromIndex` and `streamPage` (off a real
+/// blob) must agree byte for byte on every page, and equal the plan's
+/// `content_length`.
 fn assertGolden(bytes: []const u8, label: []const u8) !void {
     const gpa = testing.allocator;
     var db = try sqlite.Db.openMemory();
@@ -1477,8 +1148,8 @@ test "GOLDEN: index-driven SNPG is byte-identical to parse-driven, every page of
 test "GOLDEN: synthetic notes — multi-layer, blank-background shortcut, non-highres, N5 dims" {
     const gpa = testing.allocator;
 
-    // A BGLAYER of exactly 0x140e bytes on a white-style page takes the
-    // blank-background shortcut; anything else does not.
+    // A 0x140e-byte BGLAYER on a white-style page takes the blank-background
+    // shortcut.
     const blank_bg = try gpa.alloc(u8, 0x140e);
     defer gpa.free(blank_bg);
     @memset(blank_bg, 0x62);
@@ -1553,7 +1224,6 @@ test "note-level and page-level rows carry the facts the read paths need" {
     try testing.expectEqual(@as(i64, 1), s.columnInt(8)); // one finished page
     try testing.expectEqual(@as(i64, 20260016), s.columnInt(9));
 
-    // Page 0 is recognized: transcript, text_hash and the raw range are stored.
     var ps = try db.prepare(
         "SELECT content_hash, width, height, recogn_status, text_hash, recogn_offset, " ++
             "recogn_length, text FROM note_page_index WHERE blob_md5 = ?1 ORDER BY page_index;",
@@ -1570,14 +1240,12 @@ test "note-level and page-level rows carry the facts the read paths need" {
     try testing.expect(ps.columnInt(6) > 0);
     try testing.expectEqualStrings("Test\nMiddle\nTest", ps.columnText(7)); // v7: device layout honored — regions y-sorted, newline-joined
 
-    // Page 1 is still recognising (status 2): no text, no hash, no range.
     try testing.expect(try ps.step());
     try testing.expectEqual(@as(i64, 2), ps.columnInt(3));
     try testing.expect(ps.columnIsNull(4));
     try testing.expect(ps.columnIsNull(5));
     try testing.expect(ps.columnIsNull(7));
 
-    // The stored content hash is exactly what the control-plane face advertises.
     var note = try sn.parse(gpa, sample2);
     defer note.deinit();
     ps.reset();
@@ -1589,8 +1257,7 @@ test "note-level and page-level rows carry the facts the read paths need" {
 test "a truncated or corrupt note is refused at index time, never read past EOF" {
     const gpa = testing.allocator;
 
-    // 1. Truncated: the footer address lives in the last 4 bytes, so a cut file
-    //    does not parse at all.
+    // 1. Truncated: the footer address is in the last 4 bytes.
     {
         var p = try parseBlob(gpa, sample2[0 .. sample2.len / 2]);
         defer p.deinit();
@@ -1598,9 +1265,8 @@ test "a truncated or corrupt note is refused at index time, never read past EOF"
         try testing.expectEqual(@as(usize, 0), p.pages.len);
     }
 
-    // 2. Structurally valid, but a layer block claims a length past EOF. The
-    //    container still parses (the parser never reads bitmap content), so this
-    //    is exactly the case only offset validation catches.
+    // 2. A layer block claims a length past EOF; the container still parses,
+    //    so only offset validation catches it.
     {
         const rle = [_]u8{ 0xAB, 0xCD, 0xEF, 0x42 };
         const bytes = try nb.serialize(gpa, .{ .pages = &.{.{ .layers = &.{
@@ -1608,15 +1274,13 @@ test "a truncated or corrupt note is refused at index time, never read past EOF"
         } }} });
         defer gpa.free(bytes);
 
-        // Sanity: intact, it indexes.
         {
             var ok = try parseBlob(gpa, bytes);
             defer ok.deinit();
             try testing.expect(ok.indexable);
         }
 
-        // Blow up the bitmap block's u32 length prefix (it sits 4 bytes before
-        // the RLE payload) so it overruns the buffer.
+        // The u32 length prefix sits 4 bytes before the RLE payload.
         const at = std.mem.indexOf(u8, bytes, &rle).?;
         std.mem.writeInt(u32, bytes[at - 4 ..][0..4], 0xFFFF_FFF0, .little);
 
@@ -1629,8 +1293,6 @@ test "a truncated or corrupt note is refused at index time, never read past EOF"
         try testing.expect(!p.indexable); // but is refused as unindexable
     }
 
-    // 3. A stored range that does not fit the bytes it is replayed against is
-    //    refused at serve time too.
     var src = SliceSource{ .bytes = "short" };
     try testing.expectError(error.BadRange, src.read(0, 99));
 }
@@ -1641,7 +1303,6 @@ test "a non-.note blob is marked unindexable once and never reparsed" {
 
     const md5 = try f.put("photo.jpg", "\xff\xd8\xff\xe0 not a supernote file at all");
 
-    // `linkBlob` indexed it eagerly, as an explicit unindexable marker.
     var s = try f.db.prepare("SELECT indexable, page_count, index_version, indexed_at FROM note_index WHERE blob_md5 = ?1;");
     defer s.finalize();
     s.bindText(1, &md5);
@@ -1651,7 +1312,6 @@ test "a non-.note blob is marked unindexable once and never reparsed" {
     try testing.expectEqual(index_version, s.columnInt(2));
     const first_indexed_at = s.columnInt(3);
 
-    // The marker sticks: the lazy path sees a current row and does no work.
     try testing.expect(try isCurrent(f.db, &md5));
     try ensureIndexed(testing.allocator, testing.io, f.db, f.files.blobs, &md5, first_indexed_at + 1000);
     s.reset();
@@ -1669,7 +1329,6 @@ test "lazy backfill repairs a missing or stale row and is idempotent under repea
     const md5 = try f.put("n.note", sample2);
     try testing.expectEqual(@as(i64, 2), try f.countRows("SELECT COUNT(*) FROM note_page_index;"));
 
-    // Simulate a pre-existing blob (indexed before this feature existed).
     try f.db.exec("DELETE FROM note_index;");
     try testing.expectEqual(@as(i64, 0), try f.countRows("SELECT COUNT(*) FROM note_page_index;")); // cascaded
     try testing.expect(!try isCurrent(f.db, &md5));
@@ -1678,17 +1337,14 @@ test "lazy backfill repairs a missing or stale row and is idempotent under repea
     try testing.expect(try isCurrent(f.db, &md5));
     try testing.expectEqual(@as(i64, 2), try f.countRows("SELECT COUNT(*) FROM note_page_index;"));
 
-    // Page rowids must be stable across a re-index — the upsert is what makes a
-    // heal cheap, and a heal that renumbered would be a delete-and-rewrite.
+    // Page rowids stay stable across a re-index.
     const rowid_before = try f.countRows("SELECT id FROM note_page_index ORDER BY page_index LIMIT 1;");
 
-    // Repeated calls are no-ops; nothing duplicates, nothing moves.
     for (0..3) |_| try ensureIndexed(gpa, testing.io, f.db, f.files.blobs, &md5, 200);
     try testing.expectEqual(@as(i64, 1), try f.countRows("SELECT COUNT(*) FROM note_index;"));
     try testing.expectEqual(@as(i64, 2), try f.countRows("SELECT COUNT(*) FROM note_page_index;"));
     try testing.expectEqual(rowid_before, try f.countRows("SELECT id FROM note_page_index ORDER BY page_index LIMIT 1;"));
 
-    // A stale index_version forces a rebuild (self-healing, no migration needed).
     try f.db.exec("UPDATE note_index SET index_version = 0, page_count = 0;");
     try testing.expect(!try isCurrent(f.db, &md5));
     try ensureIndexed(gpa, testing.io, f.db, f.files.blobs, &md5, 300);
@@ -1696,7 +1352,6 @@ test "lazy backfill repairs a missing or stale row and is idempotent under repea
     try testing.expectEqual(@as(i64, 2), try f.countRows("SELECT page_count FROM note_index;"));
     try testing.expectEqual(rowid_before, try f.countRows("SELECT id FROM note_page_index ORDER BY page_index LIMIT 1;"));
 
-    // And a rebuilt index still serves byte-identical payloads.
     var note = try sn.parse(gpa, sample2);
     defer note.deinit();
     for (0..note.pages.len) |i| {
@@ -1712,13 +1367,11 @@ test "index rows are reaped with the blob, and survive while another file still 
     var f = try Fixture.init();
     defer f.deinit();
 
-    // Two files, identical content → one blob, one shared index (dedup).
     _ = try f.put("a.note", sample2);
     _ = try f.put("b.note", sample2);
     try testing.expectEqual(@as(i64, 1), try f.countRows("SELECT COUNT(*) FROM note_index;"));
     try testing.expectEqual(@as(i64, 2), try f.countRows("SELECT COUNT(*) FROM note_page_index;"));
 
-    // Trashing holds the reference, so the index is untouched either way.
     try f.files.trash(1, 1);
     try f.files.trash(1, 2);
     try testing.expectEqual(@as(i64, 1), try f.countRows("SELECT COUNT(*) FROM note_index;"));
@@ -1744,8 +1397,6 @@ test "the blob source and the slice source parse a note to identical results" {
         var bs: blob_source.BlobSource = undefined;
         const ranged = try b.source(&md5, &bs);
 
-        // 1. The index rows — page count, dims, content hashes, layer refs,
-        //    recognition status/range/text-hash/transcript — must all agree.
         var from_slice = try parseBlob(gpa, bytes);
         defer from_slice.deinit();
         var from_blob = try parseBlobSource(gpa, ranged);
@@ -1753,9 +1404,8 @@ test "the blob source and the slice source parse a note to identical results" {
         try testing.expect(from_slice.indexable);
         try expectSameParsed(from_slice, from_blob);
 
-        // 2. The parsed Notes themselves, including a full page serialization —
-        //    so `emitLayers` (4-byte length reads) and `serialize` (the layer
-        //    bodies) are both proven over the ranged source, byte for byte.
+        // 2. A full page serialization over both sources proves `emitLayers` and
+        //    `serialize` byte for byte.
         var note_slice = try sn.parse(gpa, bytes);
         defer note_slice.deinit();
         var note_blob = try sn.parseSource(gpa, ranged);
@@ -1773,7 +1423,6 @@ test "the blob source and the slice source parse a note to identical results" {
             defer gpa.free(b_bytes);
             try testing.expectEqualSlices(u8, a_bytes, b_bytes);
 
-            // Recognition text, read lazily through each source.
             var rec_a = try sn.recognition.forPage(gpa, note_slice, i);
             defer if (rec_a) |*r| r.deinit();
             var rec_b = try sn.recognition.forPage(gpa, note_blob, i);
@@ -1795,9 +1444,7 @@ test "a truncated or corrupt note read through the blob source fails cleanly" {
     var b = try Blobs.init();
     defer b.deinit();
 
-    // 1. Truncated: the footer address lives in the last 4 bytes, so a cut file
-    //    cannot parse. Must be `indexable = false`, not a panic or a read past
-    //    the end of the blob.
+    // 1. Truncated: the footer address is in the last 4 bytes.
     {
         const md5 = try b.put(sample2[0 .. sample2.len / 2]);
         var bs: blob_source.BlobSource = undefined;
@@ -1807,9 +1454,7 @@ test "a truncated or corrupt note read through the blob source fails cleanly" {
         try testing.expectEqual(@as(usize, 0), p.pages.len);
     }
 
-    // 2. Structurally valid container, but a layer block claims a length past
-    //    EOF — the case only range validation catches, since the parser never
-    //    touches bitmap bodies.
+    // 2. A layer block claims a length past EOF; only range validation sees it.
     {
         const rle = [_]u8{ 0xAB, 0xCD, 0xEF, 0x42 };
         const bytes = try nb.serialize(gpa, .{ .pages = &.{.{ .layers = &.{
@@ -1823,10 +1468,8 @@ test "a truncated or corrupt note read through the blob source fails cleanly" {
         var bs: blob_source.BlobSource = undefined;
         const ranged = try b.source(&md5, &bs);
 
-        // The container still parses over the ranged source...
         var note = try sn.parseSource(gpa, ranged);
         defer note.deinit();
-        // ...but the bad layer range is refused, as an error, at every level.
         var refs: [max_layers]LayerRef = undefined;
         try testing.expectError(error.Truncated, sn.page_payload.emitLayers(note, 0, &refs));
         try testing.expectError(error.Truncated, sn.page_payload.serialize(gpa, note, 0));
@@ -1836,7 +1479,6 @@ test "a truncated or corrupt note read through the blob source fails cleanly" {
         try testing.expect(!p.indexable);
     }
 
-    // 3. Random bytes that are not a `.note` at all: unindexable, no error.
     {
         const md5 = try b.put("\xff\xd8\xff\xe0 not a supernote file at all");
         var bs: blob_source.BlobSource = undefined;
@@ -1851,8 +1493,7 @@ test "indexing over the blob source allocates nothing proportional to file size"
     var b = try Blobs.init();
     defer b.deinit();
 
-    // A note whose bitmap dwarfs everything else: 8 MiB in one layer. If the
-    // parse buffered the file — as `readBlobBytes` did — peak would exceed it.
+    // 8 MiB in one layer: a buffering parse would peak above it.
     const big = try gpa.alloc(u8, 8 * 1024 * 1024);
     defer gpa.free(big);
     @memset(big, 0x62);
@@ -1875,14 +1516,10 @@ test "indexing over the blob source allocates nothing proportional to file size"
     try testing.expectEqual(@as(u32, 1), p.note.page_count);
     try testing.expectEqual(big.len, @as(usize, p.pages[0].layers[0].ref.len)); // it really read it
 
-    // The bar: peak live bytes stay a fixed small budget, three orders of
-    // magnitude under the file. (The layer is hashed in `hash_chunk_len` chunks
-    // through a stack buffer, so it never lands on the heap at all.)
+    // Layers hash through a stack buffer, so peak stays small.
     try testing.expect(counter.peak < 64 * 1024);
     try testing.expect(counter.peak * 100 < bytes.len);
 
-    // And the slice path, for contrast, is the same parse — the abstraction
-    // costs the in-memory caller nothing.
     var counter2 = PeakAllocator{ .child = gpa };
     var p2 = try parseBlob(counter2.allocator(), bytes);
     defer p2.deinit();
@@ -1890,9 +1527,7 @@ test "indexing over the blob source allocates nothing proportional to file size"
     try testing.expect(counter2.peak < 64 * 1024);
 }
 
-/// A note whose SECOND page is landscape (`ORIENTATION = 1090`). Landscape
-/// storage is settled — the raster is natively landscape (see `NoteHeader`) —
-/// so v3 stores and serves the swapped (effective) dims for that page.
+/// A note whose second page is landscape (`ORIENTATION = 1090`).
 fn landscapeNote(gpa: Allocator) ![]u8 {
     const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
     return nb.serialize(gpa, .{
@@ -1913,8 +1548,7 @@ test "ORIENTATION 1090: the stored dims and the payload header agree, and are th
     const bytes = try landscapeNote(gpa);
     defer gpa.free(bytes);
 
-    // The fixture really does carry both orientations (guard against the builder
-    // silently dropping the key and making this test vacuous).
+    // Guard against the builder silently dropping the key.
     {
         var note = try sn.parse(gpa, bytes);
         defer note.deinit();
@@ -1926,11 +1560,8 @@ test "ORIENTATION 1090: the stored dims and the payload header agree, and are th
     const md5 = blobstore.md5HexOf(bytes);
     try indexInto(db, &md5, bytes);
 
-    // THE DECISION, asserted: a landscape page stores its EFFECTIVE (swapped)
-    // dims — its raster is natively landscape, so 1872×1404 is its real decode
-    // geometry — while its portrait neighbour keeps the base dims. (v2 stored
-    // base dims for both while landscape storage was unproven; that sheared a
-    // real 1090 page.)
+    // A landscape page stores its effective (swapped) dims; base dims shear a
+    // real 1090 page.
     const want = [2][2]i64{ .{ 1404, 1872 }, .{ 1872, 1404 } };
     var s = try db.prepare("SELECT width, height FROM note_page_index WHERE blob_md5 = ?1 ORDER BY page_index;");
     defer s.finalize();
@@ -1941,10 +1572,6 @@ test "ORIENTATION 1090: the stored dims and the payload header agree, and are th
         try testing.expectEqual(dims[1], s.columnInt(1));
     }
 
-    // And the payload header the client decodes with carries exactly those
-    // per-page dims. The header is the decode geometry; storing and serving the
-    // same value is what stops the payload and the `noteMeta` box from ever
-    // describing different rectangles.
     for (want, 0..) |dims, i| {
         const plan = (try pagePlan(db, &md5, i)).?;
         try testing.expectEqual(@as(u32, @intCast(dims[0])), std.mem.readInt(u32, plan.header[8..12], .little));
@@ -1961,14 +1588,11 @@ test "a v2 row (base dims) self-heals to v3 effective dims on first read" {
     defer gpa.free(bytes);
     const md5 = try f.put("landscape.note", bytes); // eagerly indexed at v3
 
-    // Regress the rows to v2's shape: stale version, base dims on every page —
-    // exactly what an existing database holds across the v3 upgrade.
+    // Regress to v2's shape: stale version, base dims on every page.
     try f.db.exec("UPDATE note_index SET index_version = 2;");
     try f.db.exec("UPDATE note_page_index SET width = 1404, height = 1872;");
     try testing.expect(!try isCurrent(f.db, &md5));
 
-    // The lazy read-path gate re-parses, and the landscape page comes back
-    // swapped — no migration, no backfill job.
     try ensureIndexed(gpa, testing.io, f.db, f.files.blobs, &md5, 42);
     try testing.expect(try isCurrent(f.db, &md5));
 
@@ -1999,8 +1623,7 @@ test "a multi-MB page streams byte-exactly, at the Content-Length the index pred
     var b = try Blobs.init();
     defer b.deinit();
 
-    // One 8 MiB layer — 128 chunks, so the streaming loop is genuinely exercised
-    // across window boundaries rather than emitting a single short read.
+    // 128 chunks, so window boundaries are exercised.
     const big = try gpa.alloc(u8, 8 * 1024 * 1024);
     defer gpa.free(big);
     for (big, 0..) |*byte, i| byte.* = @truncate(i * 31 + 7); // not memset: catches a misordered window
@@ -2012,22 +1635,15 @@ test "a multi-MB page streams byte-exactly, at the Content-Length the index pred
     const md5 = try b.put(bytes);
     try indexInto(db, &md5, bytes);
 
-    // The plan costs no file I/O, so the exact Content-Length is known before a
-    // single byte is read.
     const plan = (try pagePlan(db, &md5, 0)).?;
     const expected = sn.page_payload.HEADER_SIZE + sn.page_payload.LAYER_HEADER_SIZE + big.len;
     try testing.expectEqual(@as(u64, expected), plan.content_length);
     try testing.expect(expected > 100 * blobstore.chunk_len);
 
-    // Stream to a sink that hashes and discards — a stand-in for the socket, so
-    // the test measures the streamer instead of a collector.
     var sink = HashingSink.init();
     try streamPage(b.store, &md5, plan, &sink.writer);
     try testing.expectEqual(@as(u64, expected), sink.total);
 
-    // ...and the bytes are exactly the reference payload, at 8 MiB, chunk seams
-    // and all. (The reference DOES buffer; that is the test's allocation, and the
-    // point of comparison.)
     var note = try sn.parse(gpa, bytes);
     defer note.deinit();
     const reference = try sn.page_payload.serialize(gpa, note, 0);
@@ -2035,7 +1651,6 @@ test "a multi-MB page streams byte-exactly, at the Content-Length the index pred
     try testing.expectEqualStrings(&md5Hex(reference), &sink.digest());
 }
 
-/// A `std.Io.Writer` that md5s the bytes written through it and drops them.
 const HashingSink = struct {
     writer: std.Io.Writer,
     hasher: Md5,
@@ -2087,13 +1702,10 @@ test "packed layer records round-trip (slot, hidden, current, name), and a malfo
         try testing.expectEqual(want.is_current, g.is_current);
     }
 
-    // The refs-only view agrees, in order.
     var ref_buf: [max_layers]LayerRef = undefined;
     const refs = try unpackLayers(packed_bytes, &ref_buf);
     for (layers, refs) |want, r| try testing.expectEqual(want.ref, r);
 
-    // Malformed shapes are refused: a truncated record, a name_len past the
-    // end, too many records, an unknown slot byte.
     try testing.expectError(error.BadLayerBlob, unpackLayerRecords(packed_bytes[0 .. packed_bytes.len - 1], &out));
     try testing.expectError(error.BadLayerBlob, unpackLayerRecords(packed_bytes[0..5], &out));
     var too_many: [(max_layers + 1) * layer_rec_head_size]u8 = @splat(0);
@@ -2102,7 +1714,6 @@ test "packed layer records round-trip (slot, hidden, current, name), and a malfo
     bad_slot[9] = 0xEE;
     try testing.expectError(error.BadLayerBlob, unpackLayerRecords(&bad_slot, &out));
 
-    // An overlong name truncates at pack time rather than corrupting the blob.
     const long_name = "n" ** 300;
     const long = [_]IndexedLayer{.{ .ref = .{ .offset = 1, .len = 2, .slot = .main, .all_blank = false, .hidden = false }, .name = long_name }};
     const packed_long = packLayers(&buf, &long);
@@ -2110,15 +1721,12 @@ test "packed layer records round-trip (slot, hidden, current, name), and a malfo
     try testing.expectEqual(@as(usize, max_layer_name), got_long[0].name.len);
 }
 
-/// A real minimal PNG head whose IHDR carries 320×240 — decodable dims.
 const mini_png = "\x89PNG\r\n\x1a\n" ++
     "\x00\x00\x00\x0d" ++ "IHDR" ++
     "\x00\x00\x01\x40" ++ "\x00\x00\x00\xf0" ++ // 320 × 240
     "\x08\x02\x00\x00\x00" ++ ("p" ** 16);
 
-/// A one-page note carrying `cover` as its `COVER_2` block (null = coverless).
-/// A `.mark` — the device's PDF-annotation sibling. Structurally a `.note` with
-/// a different 4-byte marker, which is the whole reason it has always parsed.
+/// A `.mark`: a `.note` with a different 4-byte marker.
 fn markFile(a: Allocator) ![]u8 {
     const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
     return nb.serialize(a, .{
@@ -2134,9 +1742,8 @@ test "the signature's file-type marker is recorded, so a .mark is distinguishabl
     defer db.close();
     try schema.migrate(db);
 
-    // A `.mark` parses EXACTLY like a note — `detect()` never gated on the
-    // marker's value — so `indexable` cannot tell them apart. Only the recorded
-    // marker can.
+    // `detect()` never gates on the marker, so only the recorded marker tells a
+    // `.mark` from a note.
     {
         const bytes = try markFile(gpa);
         defer gpa.free(bytes);
@@ -2156,7 +1763,6 @@ test "the signature's file-type marker is recorded, so a .mark is distinguishabl
         try testing.expectEqualStrings("mark", r.text(0));
     }
 
-    // And an ordinary notebook still says "note".
     {
         const bytes = try coveredNote(gpa, null);
         defer gpa.free(bytes);
@@ -2181,9 +1787,7 @@ test "the cover is LOCATED not extracted: offset/length/mime + dims recorded; co
     defer db.close();
     try schema.migrate(db);
 
-    // A real cover: sniffed, dims decoded, and its LOCATION recorded (offset +
-    // length + mime) — NOT its bytes. The recorded window addresses the cover
-    // verbatim inside the blob, which is exactly what the serve path streams.
+    // A real cover: location recorded (offset + length + mime), not bytes.
     {
         const bytes = try coveredNote(gpa, mini_png);
         defer gpa.free(bytes);
@@ -2210,14 +1814,13 @@ test "the cover is LOCATED not extracted: offset/length/mime + dims recorded; co
         try testing.expectEqual(@as(i64, mini_png.len), s.columnInt(3));
         try testing.expectEqualStrings("image/png", s.columnText(4));
 
-        // And `coverLocation` resolves that row into a self-contained serve plan.
         const loc = (try coverLocation(db, &md5)).?;
         try testing.expectEqual(@as(u64, at), loc.offset);
         try testing.expectEqual(@as(u64, mini_png.len), loc.length);
         try testing.expectEqualStrings("image/png", loc.mime());
     }
 
-    // Coverless: NULL, the "source ships no cover" fact — distinct from 0.
+    // Coverless: NULL, distinct from 0.
     {
         const bytes = try coveredNote(gpa, null);
         defer gpa.free(bytes);
@@ -2238,8 +1841,7 @@ test "the cover is LOCATED not extracted: offset/length/mime + dims recorded; co
         try testing.expectEqual(@as(i64, 1), s.columnInt(1));
     }
 
-    // Sniffable PNG magic, corrupt IHDR: the cover is still LOCATED (served),
-    // but dims record 0 — the masonry aspect falls back, the image still renders.
+    // PNG magic, corrupt IHDR: still served, dims record 0.
     {
         const corrupt_png = "\x89PNG\r\n\x1a\n" ++ "\x00\x00\x00\x0d" ++ "NOPE" ++ ("z" ** 16);
         const bytes = try coveredNote(gpa, corrupt_png);
@@ -2252,7 +1854,6 @@ test "the cover is LOCATED not extracted: offset/length/mime + dims recorded; co
         try testing.expectEqual(@as(?u32, 0), p.note.cover_h);
     }
 
-    // Not a recognizable image at all: no cover, everything NULL (never a wrong MIME).
     {
         const bytes = try coveredNote(gpa, "just some bytes, not an image");
         defer gpa.free(bytes);
@@ -2268,13 +1869,12 @@ test "the cover is LOCATED not extracted: offset/length/mime + dims recorded; co
 test "a large cover (>2 MB, and at the 20 MB ceiling) is LOCATED without materializing it; the window streams byte-identical" {
     const gpa = testing.allocator;
 
-    // Two sizes: one comfortably past the OLD 2 MB thumbnail cap (the exact bug
-    // — a real user cover ran to 6.5 MB), one right at the 20 MB ceiling.
+    // Past the old 2 MB thumbnail cap (a real cover ran to 6.5 MB), and at the
+    // 20 MB ceiling.
     for ([_]usize{ 3 * 1024 * 1024, thumbnail.max_cover_bytes }) |cover_len| {
         const cover = try gpa.alloc(u8, cover_len);
         defer gpa.free(cover);
         @memset(cover, 0x7e);
-        // A valid 1404×1872 PNG IHDR so it sniffs AND decodes dims.
         @memcpy(cover[0..8], "\x89PNG\r\n\x1a\n");
         @memcpy(cover[8..12], "\x00\x00\x00\x0d");
         @memcpy(cover[12..16], "IHDR");
@@ -2284,8 +1884,6 @@ test "a large cover (>2 MB, and at the 20 MB ceiling) is LOCATED without materia
         const bytes = try coveredNote(gpa, cover);
         defer gpa.free(bytes);
 
-        // Over a REAL ranged blob source, wrapped so we can watch the high-water
-        // mark: the index parse must NOT buffer the multi-MB cover.
         var blobs = try Blobs.init();
         defer blobs.deinit();
         const md5 = try blobs.put(bytes);
@@ -2301,14 +1899,10 @@ test "a large cover (>2 MB, and at the 20 MB ceiling) is LOCATED without materia
         try testing.expectEqualStrings("image/png", p.note.cover_mime.?);
         try testing.expectEqual(@as(?u32, 1404), p.note.cover_w);
         try testing.expectEqual(@as(?u32, 1872), p.note.cover_h);
-        // Non-resident: peak LIVE bytes stay far below the cover size — only the
-        // 64 KiB header window and KB-scale metadata are ever allocated.
+        // Only the 64 KiB header window and metadata are allocated.
         try testing.expect(peak.peak < cover_len);
         try testing.expect(peak.peak <= cover_header_probe + 512 * 1024);
 
-        // The recorded window addresses the cover verbatim in the blob — read it
-        // back through the store in chunks and confirm byte-identity, the exact
-        // thing the streaming serve path does.
         const at = p.note.cover_offset.?;
         const chunk_n = 128 * 1024;
         const buf = try gpa.alloc(u8, chunk_n);
@@ -2351,15 +1945,12 @@ test "needsRepair: missing or stale row only — no derived file exists for a .n
     defer gpa.free(bytes);
     const md5 = try f.put("covered.note", bytes);
 
-    // A `.note` cover streams from the blob, so ingest writes NO thumbs file —
-    // and a current row needs no repair regardless.
+    // A `.note` cover streams from the blob, so ingest writes no thumbs file.
     try testing.expect(!f.files.thumbs.has(&md5));
     try testing.expect(!try needsRepair(f.db, f.files.thumbs, &md5));
     try testing.expect((try coverLocation(f.db, &md5)) != null); // resolvable from the row
 
-    // Stale index_version (any older row after a bump) → repair; the current
-    // version → none. Built from the `index_version` constant so a later bump
-    // does not silently pin this at a stale number.
+    // Built from `index_version` so a later bump does not pin a stale number.
     try f.db.exec("UPDATE note_index SET index_version = 9;");
     try testing.expect(try needsRepair(f.db, f.files.thumbs, &md5));
     {
@@ -2369,15 +1960,13 @@ test "needsRepair: missing or stale row only — no derived file exists for a .n
     }
     try testing.expect(!try needsRepair(f.db, f.files.thumbs, &md5));
 
-    // The no-retry gate: a current row with NO cover is a memoized 404 — never a
-    // re-derive, and `coverLocation` resolves to null.
+    // A current coverless row is a memoised 404.
     const coverless = try coveredNote(gpa, null);
     defer gpa.free(coverless);
     const md5_2 = try f.put("coverless.note", coverless);
     try testing.expect(!try needsRepair(f.db, f.files.thumbs, &md5_2));
     try testing.expect((try coverLocation(f.db, &md5_2)) == null);
 
-    // And a missing row entirely (pre-existing blob) → repair (then memoize).
     try f.db.exec("DELETE FROM note_index;");
     try testing.expect(try needsRepair(f.db, f.files.thumbs, &md5_2));
 }
@@ -2391,8 +1980,7 @@ test "a stale row lazily re-derives to the current version and gains its cover l
     defer gpa.free(bytes);
     const md5 = try f.put("covered.note", bytes); // eagerly indexed at the current version
 
-    // Regress the row to a pre-cover-location shape: stale version, cover columns
-    // wiped — what an existing database holds across the 9→10 upgrade.
+    // Regress to the pre-cover-location shape (the 9->10 upgrade).
     try f.db.exec("UPDATE note_index SET index_version = 3, cover_w = NULL, cover_h = NULL, " ++
         "cover_offset = NULL, cover_length = NULL, cover_mime = NULL;");
     try testing.expect(!try isCurrent(f.db, &md5));
@@ -2416,9 +2004,7 @@ test "a v4 row (fixed-stride layers, no identity) lazily re-derives to v5 with s
 
     const md5 = try f.put("layers.note", layers_edited); // eagerly indexed at v5
 
-    // Regress page 2's row to v4's shape: stale version, and the OLD 9-byte
-    // fixed-stride `(offset,len,flags)` records — exactly what an existing
-    // database holds across the v5 upgrade. (Layout mirrors v4's packLayers.)
+    // Regress page 2 to v4's 9-byte fixed-stride `(offset,len,flags)` records.
     {
         var p = try parseBlob(gpa, layers_edited);
         defer p.deinit();
@@ -2437,11 +2023,8 @@ test "a v4 row (fixed-stride layers, no identity) lazily re-derives to v5 with s
     }
     try f.db.exec("UPDATE note_index SET index_version = 4;");
     try testing.expect(!try isCurrent(f.db, &md5));
-    // The stale row is invisible to the serving gate — never unpacked.
     try testing.expect((try noteHeader(f.db, &md5)) == null);
 
-    // The lazy read-path gate re-parses; the packed records come back in the
-    // v5 shape: slot ids, the hidden flag on LAYER2, display names, isCurrent.
     try ensureIndexed(gpa, testing.io, f.db, f.files.blobs, &md5, 42);
     try testing.expect(try isCurrent(f.db, &md5));
 
@@ -2485,7 +2068,6 @@ test "pagePlan serves SNPG v2: version byte, per-record slot + hidden flag, exac
     try testing.expectEqual(sn.page_payload.VERSION, plan.header[4]);
     try testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, plan.header[16..20], .little));
 
-    // Exactly one record is hidden — LAYER2 — and every record carries its slot.
     var hidden_count: usize = 0;
     for (plan.layers()) |r| {
         if (r.hidden) {
@@ -2495,9 +2077,7 @@ test "pagePlan serves SNPG v2: version byte, per-record slot + hidden flag, exac
     }
     try testing.expectEqual(@as(usize, 1), hidden_count);
 
-    // The served bytes decode to the device-authored composite — the hidden
-    // stream rides the wire without touching the default render — and the
-    // default composite equals the parse-driven render byte for byte.
+    // The hidden stream rides the wire without touching the default composite.
     const payload = try serializeFromIndex(gpa, db, &md5, 1, SliceSource{ .bytes = layers_edited });
     defer gpa.free(payload);
     const rgba = try sn.page_payload.decodeRgba(gpa, payload);
@@ -2509,7 +2089,6 @@ test "pagePlan serves SNPG v2: version byte, per-record slot + hidden flag, exac
     defer gray.deinit(gpa);
     for (gray.pixels, 0..) |g, i| try testing.expectEqual(g, rgba.pixels[i * 4]);
 
-    // And the hidden layer is individually decodable from the same payload.
     const l2 = try sn.page_payload.decodeLayerRgba(gpa, payload, 2);
     defer l2.deinit(gpa);
     try testing.expectEqual(rgba.width, l2.width);
@@ -2519,36 +2098,28 @@ test "eager indexing at ingest does not disturb the file tree it rides along wit
     var f = try Fixture.init();
     defer f.deinit();
 
-    // A real note gets a full index at link time, with no read path involved.
     const md5 = try f.put("n.note", sample);
     try testing.expect(try isCurrent(f.db, &md5));
     try testing.expectEqual(@as(i64, 1), try f.countRows("SELECT page_count FROM note_index;"));
 
-    // Re-linking identical content dedups and does not duplicate index rows.
     _ = try f.put("copy.note", sample);
     try testing.expectEqual(@as(i64, 1), try f.countRows("SELECT COUNT(*) FROM note_index;"));
     try testing.expectEqual(@as(i64, 1), try f.countRows("SELECT COUNT(*) FROM note_page_index;"));
 
-    // Quota accounting and the tree itself are untouched by indexing.
     const entries = try f.files.list(1, null);
     defer filesvc.Files.freeEntries(testing.allocator, entries);
     try testing.expectEqual(@as(usize, 2), entries.len);
     try testing.expectEqual(@as(i64, 2), try f.countRows("SELECT COUNT(*) FROM files;"));
 }
 
-// ---------------------------------------------------------------------------
-// Custom image templates
-// ---------------------------------------------------------------------------
+// ---- custom image templates ----
 
-/// PNG magic + a little IHDR — bytes that cannot decode as a RATTA_RLE stream of
-/// a full page, so the classifier treats them as a browser-native image.
+/// PNG magic + IHDR: cannot decode as a full-page RATTA_RLE stream.
 const fake_png = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52 };
-/// A valid RATTA_RLE background: 0x62 transparent, length 0xFF (special) — one
-/// pair, so it decodes as RLE regardless of page size (never treated as image).
+/// A valid one-pair RATTA_RLE background (0x62 transparent, 0xFF special length).
 const rle_bg = [_]u8{ 0x62, 0xFF };
 const template_hash = "deadbeefdeadbeefdeadbeefdeadbeef";
 
-/// Walks an SNPG payload's records, returning the one for `want_slot` (or null).
 const SnpgRecord = struct { flags: u8, slot: u8, data: []const u8 };
 fn snpgRecordForSlot(payload: []const u8, want_slot: u8) ?SnpgRecord {
     const pp = sn.page_payload;
@@ -2570,9 +2141,7 @@ fn snpgRecordForSlot(payload: []const u8, want_slot: u8) ?SnpgRecord {
     return null;
 }
 
-/// A two-page note: page 0 has a CUSTOM IMAGE background (non-RLE bytes under a
-/// custom style + PAGESTYLEMD5); page 1 is an ordinary blank/RLE page. Shared by
-/// the ingest, wire, and endpoint tests below.
+/// Page 0 has a custom image background; page 1 is ordinary RLE.
 fn imageTemplateNote(gpa: Allocator) ![]u8 {
     return nb.serialize(gpa, .{ .pages = &.{
         .{
@@ -2604,8 +2173,6 @@ test "ingest: a custom image background sets raster_image + bg_hash; a normal pa
     const md5 = try f.put("template.note", bytes);
     try testing.expect(try isCurrent(f.db, &md5));
 
-    // Page 0: bg_hash is the PAGESTYLEMD5, and the packed background record is
-    // flagged raster_image.
     {
         var s = try f.db.prepare("SELECT bg_hash, layers FROM note_page_index WHERE blob_md5 = ?1 AND page_index = 0;");
         defer s.finalize();
@@ -2623,7 +2190,6 @@ test "ingest: a custom image background sets raster_image + bg_hash; a normal pa
         try testing.expect(bg_seen);
     }
 
-    // Page 1: no custom style → bg_hash NULL, background NOT raster_image.
     {
         var s = try f.db.prepare("SELECT bg_hash, layers FROM note_page_index WHERE blob_md5 = ?1 AND page_index = 1;");
         defer s.finalize();
@@ -2647,8 +2213,6 @@ test "SNPG wire: an image background carries the asset hash (bit2), not the imag
 
     const plan = (try pagePlan(f.db, &md5, 0)).?;
 
-    // Streamed payload == index-buffered payload (the serve paths agree), and
-    // both are exactly plan.content_length bytes.
     var sink = std.Io.Writer.Allocating.init(gpa);
     defer sink.deinit();
     try streamPage(f.files.blobs, &md5, plan, &sink.writer);
@@ -2658,14 +2222,11 @@ test "SNPG wire: an image background carries the asset hash (bit2), not the imag
     try testing.expectEqualSlices(u8, buffered, streamed);
     try testing.expectEqual(plan.content_length, streamed.len);
 
-    // The background record carries the HASH as its data, flagged raster_image,
-    // and NOT the (fake_png) image bytes.
     const bg = snpgRecordForSlot(streamed, sn.types.LayerSlot.background.wireId()).?;
     try testing.expect(bg.flags & sn.page_payload.FLAG_RASTER_IMAGE != 0);
     try testing.expectEqualStrings(template_hash, bg.data);
     try testing.expect(!std.mem.eql(u8, bg.data, &fake_png));
 
-    // Page 1's background is ordinary RLE — no bit2, its own bytes on the wire.
     const plan1 = (try pagePlan(f.db, &md5, 1)).?;
     var sink1 = std.Io.Writer.Allocating.init(gpa);
     defer sink1.deinit();
@@ -2676,12 +2237,8 @@ test "SNPG wire: an image background carries the asset hash (bit2), not the imag
 }
 
 test "ingest: a sparse .mark keeps the PDF pages it names; a notebook stays 1..N" {
-    // The whole point of `source_page`. A `.mark` holds only the pages that were
-    // annotated and names them by the PDF page they belong to, so its footer
-    // reads `<PAGE2:…><PAGE5:…><PAGE6:…>` and its three pages sit at POSITIONS
-    // 0, 1, 2 while BELONGING to pages 2, 5, 6. Storing only the position — what
-    // the index did — makes it indistinguishable from a 3-page notebook, and
-    // there is nothing left to composite the PDF against.
+    // A `.mark` holds only annotated pages, at positions 0, 1, 2 belonging to
+    // PDF pages 2, 5, 6.
     var f = try Fixture.init();
     defer f.deinit();
     const gpa = testing.allocator;
@@ -2707,9 +2264,7 @@ test "ingest: a sparse .mark keeps the PDF pages it names; a notebook stays 1..N
     }
     try testing.expect(!try s.step());
 
-    // …and a NOTEBOOK is unchanged: contiguous footer, so the number is just the
-    // position plus one. A test that only checked the mark would pass just as
-    // happily if every file had started reporting the mark's numbering.
+    // A notebook's number is still position + 1.
     const book = try nb.serialize(gpa, .{ .pages = &.{ .{}, .{}, .{} } });
     defer gpa.free(book);
     const bmd5 = try f.put("book.note", book);
@@ -2737,11 +2292,9 @@ test "templateLocation: resolves hash to the image byte range; wrong hash is nul
 
     const loc = (try templateLocation(f.db, &md5, template_hash)).?;
     try testing.expectEqual(@as(u64, fake_png.len), loc.length);
-    // The recorded range points at the image bytes in the blob.
     var buf: [fake_png.len]u8 = undefined;
     const got = try f.files.blobs.readRange(&md5, loc.offset, loc.length, &buf);
     try testing.expectEqualSlices(u8, &fake_png, got);
 
-    // A hash no page references resolves to nothing.
     try testing.expect((try templateLocation(f.db, &md5, "00000000000000000000000000000000")) == null);
 }

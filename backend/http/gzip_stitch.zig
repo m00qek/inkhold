@@ -1,36 +1,25 @@
-//! Stitching stored deflate fragments into ONE gzip stream (§3.2): serving
-//! costs a header, N file reads and a trailer — no compression,
-//! no decompression — on a Pi 1 B+.
+//! Stitches stored raw-deflate fragments into one gzip stream: serving costs a
+//! header, N file reads and a trailer, with no (de)compression.
 //!
-//! Must not break:
-//!   * Concatenated `.gz` MEMBERS are not an option: under `Content-Encoding:
-//!     gzip` Chromium and curl decode the FIRST member only and report success
-//!     (37 bytes of 7,980, §3.1). Node's zlib decodes them all, so a Node test
-//!     passes on a stream the browser truncates.
-//!   * Fragments are raw deflate, byte-aligned, `flush()` and never `finish()`
-//!     (`byteAlignBlocks()`), so none carries BFINAL and they concatenate into
-//!     one deflate stream under a single header and trailer.
-//!   * `std.hash.Crc32` has no combine primitive; `crc32Combine` is zlib's.
-//!   * `std.compress.flate.Decompress` reads the gzip footer and NEVER verifies
-//!     it: `WrongGzipChecksum` is declared in std and raised nowhere. A check
-//!     must compare `container_metadata.gzip` against its own hash of the
-//!     output, as the tests do. `gzip -t` and every browser do reject on it.
+//! Concatenated gzip members won't do: Chromium and curl decode only the first
+//! and report success (Node's zlib decodes all, so Node tests lie). Fragments
+//! are `flush()`ed, never `finish()`ed, so none carries BFINAL. Zig's
+//! `flate.Decompress` never verifies the gzip footer (`WrongGzipChecksum` is
+//! never raised), so tests compare it explicitly; gzip and browsers do check.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Writer = std.Io.Writer;
 
-/// The 10-byte gzip header, straight from `std.compress.flate`.
 pub const header = std.compress.flate.Container.gzip.header();
 
-/// The empty FINAL stored block (BFINAL=1, BTYPE=00, padded to a byte). No
-/// fragment carries one; exactly one goes at the end.
+/// The empty final stored block (BFINAL=1, BTYPE=00); exactly one, at the end.
 pub const terminator = [_]u8{ 0x03, 0x00 };
 
 // --- crc32Combine -----------------------------------------------------------
 
 const dim = 32;
-/// CRC-32, reflected — `std.hash.Crc32` (ISO-HDLC) and gzip's polynomial.
+/// CRC-32, reflected: gzip's polynomial.
 const poly: u32 = 0xedb88320;
 
 /// GF(2) bit-vector times bit-matrix: XOR the rows the vector selects.
@@ -47,24 +36,15 @@ fn matrixTimes(mat: *const [dim]u32, vec_in: u32) u32 {
     return sum;
 }
 
-/// `square = mat * mat` — the operator for twice as many zero bits.
 fn matrixSquare(square: *[dim]u32, mat: *const [dim]u32) void {
     for (0..dim) |n| square[n] = matrixTimes(mat, mat[n]);
 }
 
-/// `crc(A ++ B)` from `crc(A)`, `crc(B)` and B's length — no plaintext needed.
-///
-/// CRC32 is linear over GF(2), so appending `len_b` zero bytes is a linear
-/// operator: `crc(A ++ B) = zeros_op(len_b) * crc(A) XOR crc(B)`. zlib's
-/// method: "advance one zero BIT" as a 32x32 GF(2) bit-matrix, squared to get
-/// "advance 2^k bits", walking the bits of `len_b` — O(log n).
-///
-/// Operates on FINAL, post-conditioned values (what `std.hash.Crc32.final()`
-/// returns): gzip's `init`/`xorout` conditionings cancel across the
-/// concatenation, so the missing unconditioning is correct, not an omission.
+/// `crc(A ++ B)` from `crc(A)`, `crc(B)` and B's length (zlib's GF(2)
+/// matrix-squaring method, O(log n)). Takes final, post-conditioned values;
+/// the conditionings cancel across the concatenation.
 pub fn crc32Combine(crc_a: u32, crc_b: u32, len_b: u64) u32 {
-    // Not only an identity: the loop is do-while shaped and would apply one
-    // squaring to a zero length.
+    // The loop below would apply one squaring to a zero length.
     if (len_b == 0) return crc_a;
 
     var odd: [dim]u32 = undefined;
@@ -83,7 +63,6 @@ pub fn crc32Combine(crc_a: u32, crc_b: u32, len_b: u64) u32 {
 
     var crc = crc_a;
     var len = len_b;
-    // Walks the bits of `len_b`, alternating buffers to avoid a copy.
     while (true) {
         matrixSquare(&even, &odd);
         if (len & 1 != 0) crc = matrixTimes(&even, crc);
@@ -101,13 +80,11 @@ pub fn crc32Combine(crc_a: u32, crc_b: u32, len_b: u64) u32 {
 
 // --- the accumulator a serve path uses --------------------------------------
 
-/// Accumulates the trailer while fragments stream past: write `header`, then per
-/// fragment its bytes and `append(crc, len)` from the numbers stored beside it,
-/// then `finish`. A missing fragment is simply not appended (§3.3).
+/// Accumulates the trailer while fragments stream past: `header`, then per
+/// fragment its bytes and `append(crc, len)` from stored metadata, then `finish`.
 pub const Trailer = struct {
     crc: u32 = 0,
-    /// Truncated only when written: ISIZE is defined modulo 2^32, so wrapping
-    /// is correct rather than an overflow to guard.
+    /// ISIZE is modulo 2^32, so truncating on write is correct.
     len: u64 = 0,
     empty: bool = true,
 
@@ -122,7 +99,6 @@ pub const Trailer = struct {
         t.len += fragment_len;
     }
 
-    /// The terminating block, then the 8-byte gzip trailer.
     pub fn finish(t: *const Trailer, w: *Writer) Writer.Error!void {
         try w.writeAll(&terminator);
         try w.writeInt(u32, t.crc, .little);
@@ -134,8 +110,6 @@ pub const Trailer = struct {
 
 const testing = std.testing;
 
-/// The property the trailer depends on: combining per-fragment CRCs must equal
-/// the CRC of the whole plaintext.
 fn expectCombines(parts: []const []const u8) !void {
     var whole: std.hash.Crc32 = .init();
     for (parts) |p| whole.update(p);
@@ -164,8 +138,7 @@ test "crc32Combine: an empty fragment is the identity" {
 }
 
 test "crc32Combine: lengths straddling powers of two" {
-    // The combine walks the BITS of the length, so uniform sizes would exercise
-    // one path through the loop and hide the alternation between `odd`/`even`.
+    // The combine walks the bits of the length; vary them to hit both buffers.
     var buf: [65537]u8 = undefined;
     for (&buf, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
     for ([_]usize{
@@ -192,8 +165,7 @@ test "crc32Combine: many fragments, JSONL-shaped like the real stream" {
     try expectCombines(parts.items);
 }
 
-/// Compress `payload` the way DERIVE TIME does: raw deflate, `flush()` and never
-/// `finish()`, so the fragment carries no BFINAL block and is byte-aligned.
+/// Compresses like derive time: raw deflate, flushed, never finished.
 fn deriveFragment(a: std.mem.Allocator, payload: []const u8) ![]u8 {
     var out: Writer.Allocating = try .initCapacity(a, 4096);
     errdefer out.deinit();
@@ -209,9 +181,6 @@ test "a stitched stream is one valid gzip, and its trailer comes only from store
     defer arena.deinit();
     const a = arena.allocator();
 
-    // Derive time: each document compressed independently. Only the fragment,
-    // its CRC and its length are kept — the plaintext is NOT retained by the
-    // serve path, and `expected` below exists solely so the test can check.
     var fragments: std.ArrayList([]const u8) = .empty;
     var crcs: std.ArrayList(u32) = .empty;
     var lens: std.ArrayList(u64) = .empty;
@@ -229,7 +198,6 @@ test "a stitched stream is one valid gzip, and its trailer comes only from store
         try expected.writer.writeAll(doc);
     }
 
-    // Serve time: header, fragments, trailer. No compression, no plaintext.
     var stream: Writer.Allocating = .init(a);
     try stream.writer.writeAll(header);
     var trailer: Trailer = .{};
@@ -239,18 +207,12 @@ test "a stitched stream is one valid gzip, and its trailer comes only from store
     }
     try trailer.finish(&stream.writer);
 
-    // The trailer must match a CRC taken over the real concatenation...
     const plaintext = expected.written();
     try testing.expectEqual(std.hash.Crc32.hash(plaintext), trailer.crc);
     try testing.expectEqual(plaintext.len, trailer.len);
 
-    // ...and the whole thing must decode as ONE gzip member, recovering every
-    // document. This is what proves the fragments concatenate: 64 independently
-    // compressed pieces, one deflate stream.
-    //
-    // NOTE `Decompress` does NOT check the footer (see the header), so the
-    // trailer is verified explicitly against what it parsed — which is exactly
-    // the comparison `gzip -t` and the browser make.
+    // Must decode as one gzip member. `Decompress` doesn't check the footer, so
+    // compare it explicitly.
     var input: std.Io.Reader = .fixed(stream.written());
     var window: [std.compress.flate.max_window_len]u8 = undefined;
     var d = std.compress.flate.Decompress.init(&input, .gzip, &window);
@@ -281,9 +243,7 @@ test "a corrupt trailer disagrees with the payload, which is what gzip rejects o
     var window: [std.compress.flate.max_window_len]u8 = undefined;
     var d = std.compress.flate.Decompress.init(&input, .gzip, &window);
     var got: Writer.Allocating = .init(a);
-    // Zig decodes it happily — it does not validate. The payload is intact; it
-    // is the TRAILER that lies, and a validating decoder (gzip, every browser)
-    // is what turns that into "invalid compressed data--crc error".
+    // Zig decodes it without validating; gzip and browsers reject the CRC.
     _ = try d.reader.streamRemaining(&got.writer);
     try testing.expectEqualStrings(doc, got.written());
     try testing.expect(d.container_metadata.gzip.crc != std.hash.Crc32.hash(got.written()));

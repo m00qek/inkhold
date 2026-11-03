@@ -1,26 +1,11 @@
-//! Sweeping for the small in-memory maps that expire.
-//!
-//! Three of them exist — download capability tokens, rate-limit buckets, and
-//! login challenges — and each had written this loop out itself, identically,
-//! down to the 128-entry buffer. The third copy was added by following the
-//! comment in the second saying the first had it right, which is a good sign the
-//! shape wanted a name.
-//!
-//! **The subtlety worth having in one place is why it collects first.** Removing
-//! from a `HashMap` while iterating it invalidates the iterator, so the keys are
-//! gathered into a fixed buffer and removed after the walk. A bounded buffer
-//! rather than an allocation because a sweep must not fail: it runs on the path
-//! that is trying to make room, and an OOM there would turn a full table into a
-//! permanently full one. Anything past the buffer waits for the next sweep,
-//! which is the correct trade for a table whose entries expire anyway.
+//! Sweeping for the small in-memory maps that expire. Keys are collected into a
+//! fixed buffer and removed after the walk (removing invalidates the iterator);
+//! no allocation, because a sweep must not fail on the path making room.
 
 const std = @import("std");
 
-/// Removes every entry `isExpired` accepts, freeing each key with `gpa`.
-///
-/// At most 128 per call — see the module comment. `now` is whatever clock the
-/// caller's expiry is measured in; this does not care, and deliberately does not
-/// read one, so a test can drive it.
+/// Removes up to 128 entries `isExpired` accepts, freeing each key with `gpa`.
+/// `now` is in the caller's clock.
 pub fn sweep(
     comptime V: type,
     gpa: std.mem.Allocator,
@@ -90,9 +75,6 @@ test "a sweep that finds nothing leaves the map alone" {
 }
 
 test "sweeping past the buffer takes 128 and leaves the rest for next time" {
-    // The bound is deliberate, not a limit nobody meant: a sweep runs on the
-    // path trying to make room, so it must not allocate and must not fail. What
-    // it does not reach this time it reaches next time.
     const gpa = std.testing.allocator;
     const V = struct { expires: i64 };
     var map: std.StringHashMapUnmanaged(V) = .empty;

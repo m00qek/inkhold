@@ -1,8 +1,5 @@
-//! Auth service: user provisioning, the random-code + login challenge flow,
-//! session issuance, and device binding — operating on the SQLite database.
-//!
-//! HTTP handlers are thin wrappers over this; these functions are what the
-//! integration tests drive directly against an in-memory database.
+//! Auth service: user provisioning, the challenge login flow, sessions and
+//! device binding, over the SQLite database.
 
 const std = @import("std");
 const expiring = @import("../../expiring.zig");
@@ -22,79 +19,43 @@ pub const Error = error{
     NoChallenge,
     InvalidPassword,
     SamePassword,
-    /// The `currentPassword` supplied to `changePassword` is not the account's
-    /// credential. Distinct from `InvalidCredentials` INSIDE the service (that one
-    /// also means "no such user" / "unreadable credential blob"), but deliberately
-    /// answered to the client with the same `INVALID_CREDENTIALS` code — the
-    /// account page already renders that as "That isn't your current password."
+    /// Wrong `currentPassword`; answered to the client as `INVALID_CREDENTIALS`.
     WrongCurrentPassword,
-    /// An admin aimed the console's reset at their OWN row (see `resetPassword`).
     CannotResetSelf,
-    /// An admin aimed the console's delete at their OWN row (see `deleteUser`).
     CannotDeleteSelf,
     LastAdmin,
-    /// No such account. Only ever raised by the ADMIN-scoped lookups, which are
-    /// already past an `isAdmin` check — an admin may legitimately learn that an
-    /// id is unused, and the console needs to tell "gone" from "broken".
+    /// Only raised by admin-scoped lookups.
     UserNotFound,
-    /// The named user holds no binding for that serial. Deliberately the SAME
-    /// error whether the serial is unknown or belongs to SOMEBODY ELSE — see
-    /// `adminUnlinkDevice`.
+    /// Also returned for a serial bound to someone else, so it is no cross-account probe.
     DeviceNotFound,
-    /// A quota that is not a byte count (negative). Note that a quota BELOW
-    /// current usage is not this: see `setUserQuota`.
     InvalidQuota,
-    /// A mutation was attempted on a pooled READER view of this service (see
-    /// `readerView`) — i.e. a route that writes is marked `read_only`. Only ever
-    /// a wiring bug, never anything a caller did.
+    /// A write on a `readerView`: a route wrongly marked `read_only`.
     ReadOnlyService,
 } || sqlite.Error || std.mem.Allocator.Error;
 
-/// Default per-user quota for a household (10 GiB). An alias: the value is
-/// defined in the db layer, which is where the v10 repair migration also has to
-/// write it in SQL. See `schema.default_capacity_bytes`.
+/// 10 GiB, defined in the db layer so migrations can write it in SQL.
 pub const default_capacity: i64 = schema.default_capacity_bytes;
 
-pub const code_len = 16; // hex chars (a 64-bit challenge nonce: anti-replay / anti-offline-brute headroom; single-use, 5-min TTL)
+pub const code_len = 16; // hex chars: a 64-bit single-use nonce, 5-min TTL
 const token_len = 32; // hex chars (16 random bytes)
 const challenge_ttl: i64 = 300; // 5 min
 
-/// Longest `account` a challenge may be keyed by.
-///
-/// The entry cap alone would NOT bound bytes: `account` is an arbitrary string
-/// out of the request body, and `json.zig` allows a 64 KiB body — 4096 × 64 KiB
-/// is far past the whole 50 MB budget. With this bound the worst case is
-/// 4096 × ~278 B ≈ 1.1 MB.
-///
-/// 254 is RFC 5321's maximum for an email address, and `getUser` resolves an
-/// account against `users.email`, so a longer string can never name a real
-/// account — refusing it here cannot block a login that would otherwise work.
+/// Bounds challenge-map bytes (4096 entries × ~278 B); 254 is RFC 5321's email
+/// maximum, so no real account is refused.
 pub const max_account_len: usize = 254;
 
-/// Scope-dependent session lifetime, generalising the elevation model
-/// (`elevationLive`) to whole sessions: an ABSOLUTE cap measured from creation
-/// (enforced by `caller` AND reclaimed by `sweepExpiredSessions`) plus, for
-/// scopes that have one, an IDLE deadline measured from `last_used_at` (enforced
-/// ONLY at resolve time in `caller` — the sweeper stays absolute-only).
-///
-///   | scope        | idle           | absolute        |
-///   |--------------|----------------|-----------------|
-///   | device       | none           | ~2 years        | revoke via UNLINK, not expiry
-///   | controlplane | 14 days        | 90 days         |
-///   | pending      | —              | 15 min          | the first-login window
-///
-/// Device tokens are near-permanent by design (the Nomad holds one indefinitely);
-/// they age out only on the 2-year absolute cap, and are revoked by device unlink.
+/// Session lifetimes. Absolute caps (from creation) are enforced by `caller` and
+/// reclaimed by the sweeper; idle windows (from `last_used_at`) only by `caller`.
+/// Device tokens are near-permanent and are revoked by unlink, not expiry.
 pub const device_absolute_s: i64 = 2 * 365 * 24 * 3600;
 pub const controlplane_idle_s: i64 = 14 * 24 * 3600;
 pub const controlplane_absolute_s: i64 = 90 * 24 * 3600;
 pub const pending_absolute_s: i64 = 15 * 60;
 
-/// Granularity for the lazy `last_used_at` bump: only rewrite the column when it
-/// has moved by more than this, so a session-resolve is not a write per request.
+/// Rewrite `last_used_at` only when it moved this much, so a resolve is not a
+/// write per request.
 const last_used_bump_s: i64 = 60;
 
-/// The absolute lifetime cap for a scope, measured from creation.
 fn absoluteCap(scope: Scope) i64 {
     return switch (scope) {
         .device => device_absolute_s,
@@ -104,8 +65,6 @@ fn absoluteCap(scope: Scope) i64 {
     };
 }
 
-/// The idle window for a scope (since `last_used_at`), or null when the scope has
-/// none — device (near-permanent) and pending (absolute-only).
 fn idleWindow(scope: Scope) ?i64 {
     return switch (scope) {
         .controlplane => controlplane_idle_s,
@@ -113,68 +72,39 @@ fn idleWindow(scope: Scope) ?i64 {
     };
 }
 
-/// Admin elevation: the window slides on admin activity but can never outlive the
-/// absolute ceiling measured from the moment the password was re-entered.
-///
-/// 15 minutes idle is roughly "you walked away from the machine"; the 60-minute
-/// ceiling is what stops a console left open in a background tab from renewing
-/// itself indefinitely off its own polling. Without the ceiling the sliding window
-/// alone would make elevation effectively permanent for anyone who keeps the page
-/// open — which is exactly the tablet-on-the-table case the gate exists for.
+/// Admin elevation slides on activity up to an absolute ceiling from the password
+/// re-entry, so a console left open cannot renew itself forever by polling.
 pub const elevation_idle_s: i64 = 15 * 60;
 pub const elevation_absolute_s: i64 = 60 * 60;
 
-/// A server-generated temporary password (diceware), handed back in plaintext
-/// exactly once. A value type carrying its own buffer — read it via `.slice()`.
 pub const TempPassword = password.TempPassword;
 
-/// What `createUser` returns: the new account's id plus the ONE-TIME plaintext.
 pub const NewUser = struct { id: u64, temp_password: TempPassword };
 
 pub const Session = struct {
     token: [token_len]u8,
     user_id: u64,
-    /// `.pending` for a first-login (must-change-password) token, else `.controlplane`/`.device`.
     audience: Scope,
 };
 
-/// One of a user's device bindings, for the admin console's per-person device
-/// list (F6). Every slice is an owned copy — free the slice via `freeDevices`.
-///
-/// `model`/`firmware` are nullable because `devices` rows are created by
-/// `bindDevice` with only a serial: a device that has logged in but never sent
-/// its `bindEquipment` details has a row with both columns NULL, and the console
-/// must render that rather than invent a model name.
+/// One device binding for the console. Slices are owned; free via `freeDevices`.
+/// `model`/`firmware` are null until the device sends `bindEquipment`.
 pub const DeviceInfo = struct {
     equipment_no: []const u8,
     name: []const u8,
     model: ?[]const u8,
     firmware: ?[]const u8,
-    /// `user_devices.status = 'Y'`. Revocation is a soft flip to `'N'`, not a
-    /// row delete, which is exactly what makes an unlinked device re-pairable —
-    /// so a revoked binding stays in this listing rather than vanishing from it.
+    /// Revocation flips `status` to 'N' (re-pairable), so revoked rows stay listed.
     active: bool,
-    /// When the binding was made (epoch seconds) — the row's "since".
     created_at: i64,
-    /// **"Last seen", not "last synced"** — the newest `sessions.last_used_at`
-    /// across this serial's `device`-audience sessions, i.e. the last REQUEST the
-    /// tablet made. That is usually a sync and is NOT the same claim, and
-    /// the account screen chose the narrower word against the data rather than
-    /// the wish. Maintained lazily on a 60 s granularity (see `caller`), so it is
-    /// accurate to about a minute.
-    ///
-    /// NULL when the device holds no session row at all — a binding that has never
-    /// been used since the last sweep, which must render as "never seen" rather
-    /// than as the epoch. `user_devices` carries only `created_at`; nothing needed
-    /// to be added to it, because `sessions.last_used_at` already carries this.
+    /// Last request (not last sync) from this serial's device sessions, accurate to
+    /// the 60 s bump granularity; null if it holds no session.
     last_seen: ?i64,
 };
 
-/// A user's storage accounting for the admin console's meter (F7). Mirrors
-/// `Files.Cap`, in the units the wire uses.
 pub const Quota = struct { used_bytes: i64, total_bytes: i64 };
 
-/// A user row for admin listing (`email` is an owned copy — free via `freeUsers`).
+/// `email` is owned; free via `freeUsers`.
 pub const UserInfo = struct {
     id: u64,
     email: []const u8,
@@ -187,17 +117,11 @@ pub const Service = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     db: sqlite.Db,
-    /// The 32-byte key that encrypts the md5 credential at rest (`users.cred_enc`).
-    /// Loaded at boot from a 0600 key file outside the DB; see `config.cred_key_path`.
+    /// Encrypts `users.cred_enc`; loaded at boot from a 0600 key file outside the DB.
     cred_key: [password.cred_key_len]u8,
-    /// Transient login challenges, keyed by account (owned copies).
     challenges: std.StringHashMapUnmanaged(Challenge) = .empty,
-    /// Soft cap on live challenges, mirroring `download_tokens.max_tokens` and
-    /// `ratelimit.max_keys`. Household scale is single digits; this exists so the
-    /// public `random/code` route cannot grow the table without bound. A field, not
-    /// a constant, so tests can drive the full case without minting 4096 codes.
+    /// Soft cap so the public `random/code` route cannot grow the map unboundedly.
     max_challenges: usize = 4096,
-    /// True on a pooled-reader VIEW of this service (see `readerView`).
     read_only: bool = false,
 
     const Challenge = struct { code: [code_len]u8, expires: i64 };
@@ -207,18 +131,9 @@ pub const Service = struct {
         return .{ .gpa = gpa, .io = io, .db = db, .cred_key = cred_key };
     }
 
-    /// This service bound to a POOLED READ-ONLY connection, for the duration of
-    /// one `read_only` route (`http/transport.zig`). A value, for the same
-    /// lifetime reason as `Files.readerView`.
-    ///
-    /// **`challenges` does not travel, and that is the interesting part.** It is
-    /// the one thing this service owns that is NOT in the database, so it is the
-    /// one thing `SQLITE_OPEN_READONLY` cannot protect: a misclassified
-    /// `random/code` route would mint a challenge into a copy that dies with the
-    /// request, and the user's next login would fail with `NoChallenge` — a
-    /// silent break with nothing pointing at the flag that caused it. An empty
-    /// map plus the refusal in `getRandomCode` turns that into an immediate,
-    /// attributable failure on the route itself.
+    /// A copy bound to one request's pooled read-only connection. `challenges` is
+    /// emptied: the in-memory map is the one thing READONLY cannot protect, and
+    /// `getRandomCode` refuses on a view so a misclassified route fails loudly.
     pub fn readerView(self: *const Service, db: sqlite.Db) Service {
         var v = self.*;
         v.db = db;
@@ -227,13 +142,11 @@ pub const Service = struct {
         return v;
     }
 
-    /// Encrypt an md5 credential for storage in `users.cred_enc` (fresh nonce).
     fn encryptCred(self: *Service, md5: []const u8) [password.cred_enc_hex_len]u8 {
         var src: std.Random.IoSource = .{ .io = self.io };
         return password.encryptCred(self.cred_key, md5, src.interface());
     }
 
-    /// Decrypt a `users.cred_enc` blob back to the md5 credential.
     fn decryptCred(self: *Service, cred_enc_hex: []const u8) password.CredError!password.Md5Hex {
         return password.decryptCred(self.cred_key, cred_enc_hex);
     }
@@ -244,7 +157,7 @@ pub const Service = struct {
         self.challenges.deinit(self.gpa);
     }
 
-    /// Wall-clock epoch seconds (via the Io clock; 0.16 has no std.time.timestamp).
+    /// Epoch seconds (0.16 has no `std.time.timestamp`).
     fn now(self: *Service) i64 {
         return std.Io.Clock.real.now(self.io).toSeconds();
     }
@@ -262,8 +175,6 @@ pub const Service = struct {
         return out;
     }
 
-    /// A fresh temporary password, via the ONE generator (`password.generateTemp`)
-    /// that first-run bootstrap also uses.
     fn tempPassword(self: *Service) TempPassword {
         var src: std.Random.IoSource = .{ .io = self.io };
         return password.generateTemp(src.interface());
@@ -271,21 +182,13 @@ pub const Service = struct {
 
     // ---- users ----
 
-    /// Creates the first-run administrator (no acting user). Takes plaintext —
-    /// the only place we have it, since bootstrap generates the temp password.
+    /// First-run administrator; takes plaintext because bootstrap generated it.
     pub fn bootstrapAdmin(self: *Service, email: []const u8, plaintext: []const u8) Error!u64 {
         return self.insertUser(email, &password.md5Hex(plaintext), true);
     }
 
-    /// Admin-only user creation. **The SERVER chooses the temporary password**,
-    /// returns the plaintext exactly once, and stores only its hash.
-    ///
-    /// It used to take `password_md5` from the caller, which meant an admin
-    /// invented a housemate's credential and knew it forever after — and left the
-    /// UI nothing to "show once", because the person who typed it already had it.
-    /// Inverting it is what makes "this cannot be shown again" true rather than
-    /// theatrical. The account starts `must_change_password = 1`, so the temporary
-    /// password unlocks nothing but its own replacement.
+    /// Admin-only. The server chooses the temporary password and returns it once,
+    /// so no admin ever knows a housemate's credential; must-change is set.
     pub fn createUser(self: *Service, actor_user_id: u64, email: []const u8, is_admin: bool) Error!NewUser {
         if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
         const temp = self.tempPassword();
@@ -293,37 +196,12 @@ pub const Service = struct {
         return .{ .id = id, .temp_password = temp };
     }
 
-    /// Admin-only: deletes a user. FK `ON DELETE CASCADE` removes their sessions,
-    /// device bindings, and capacity — revoking all their tokens. Refuses to
-    /// remove the last remaining admin (which would lock out administration).
-    ///
-    /// Takes `files` because the cascade is not enough on its own: it deletes the
-    /// account's `files` rows but cannot decrement the `blobs.refcount` those rows
-    /// were counted in, which would strand the blobs and their note/FTS index rows.
-    /// `purgeUser` runs the same decref path as an ordinary delete first, so a blob
-    /// shared with another user is decremented rather than reaped.
+    /// Admin-only. `purgeUser` runs first because the FK cascade cannot decrement
+    /// `blobs.refcount`, which would strand blobs and their index rows.
     pub fn deleteUser(self: *Service, actor_user_id: u64, target_user_id: u64, files: filesvc.Files) Error!void {
         if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
-        // **AN ADMIN MAY NOT DELETE THEMSELVES**, the same rule as `resetPassword`
-        // and for the same reason: every verb in this console points OUTWARD, and
-        // a control aimed at your own row is a footgun wearing a feature's
-        // clothing. `LastAdmin` below is a WEAKER guard that only looks like this
-        // one — it saves the household, not you, so with two admins it would let
-        // you purge your own account, files and all.
-        //
-        // BEFORE `purgeUser`, which is the part that matters: that call destroys
-        // the account's files. A refusal after it would be an error message
-        // printed on top of a data loss.
-        //
-        // Deliberately no way around it in this service. If an account genuinely
-        // must go, another admin removes it — and if there is no other admin,
-        // `LastAdmin` was going to refuse anyway.
-        // LAST-ADMIN FIRST, and the order carries meaning. `CannotDeleteSelf` says
-        // "another administrator has to remove your account" — which is
-        // impossible advice for the only administrator there is. The sole admin
-        // deleting themselves gets `LastAdmin` (the household needs somebody);
-        // one of two admins gets `CannotDeleteSelf` (go ask the other one). Both
-        // are true, and each is only useful in its own case.
+        // LastAdmin before CannotDeleteSelf: a sole admin gets the error whose
+        // advice applies. Both refuse before `purgeUser` destroys anything.
         if (try self.isAdmin(target_user_id) and (try self.adminCount()) <= 1) return error.LastAdmin;
         if (actor_user_id == target_user_id) return error.CannotDeleteSelf;
         try files.purgeUser(target_user_id);
@@ -333,53 +211,22 @@ pub const Service = struct {
         _ = try s.step();
     }
 
-    /// Admin-only: sets a user's password to a **server-generated** temporary one,
-    /// flags must-change, and revokes their sessions — the account-recovery path.
-    /// Returns the plaintext exactly once; only its hash is stored.
-    ///
-    /// Same inversion as `createUser`, and the same reason: an admin recovering a
-    /// housemate's account has no business knowing the credential that housemate
-    /// will keep using. Revoking every session also drops any elevation those
-    /// sessions held, since elevation lives on the session ROW.
-    /// The ADMIN's reset, aimed at somebody else — and only ever at somebody else.
-    ///
-    /// **An admin may not reset their OWN password here.** This is the verb that
-    /// started: a beta tester opened the console, saw "Reset
-    /// password" on their own row, pressed it, and locked themselves out of their
-    /// own server. Every verb under `/api/admin` points OUTWARD by design, and
-    /// this one pointed outward at everybody except the person holding it.
-    ///
-    /// The account page is where you change your own password, and it is strictly
-    /// better at it: it verifies the current one, it hands you a session rather
-    /// than a temporary password to retype, and it tells you what the change
-    /// costs before you make it. Refusing here is not a restriction, it is a
-    /// signpost — and the console's own UI no longer offers the button, so
-    /// reaching this error means somebody went around it.
+    /// Admin-only recovery of another account: server-generated temp password,
+    /// must-change, all sessions (and their elevation) revoked. Refuses the admin's
+    /// own row; the account page is where you change your own password.
     pub fn resetPassword(self: *Service, actor_user_id: u64, target_user_id: u64) Error!TempPassword {
         if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
         if (actor_user_id == target_user_id) return error.CannotResetSelf;
         return self.resetPasswordFor(target_user_id);
     }
 
-    /// **THE MECHANISM, with no policy in it** — the same split `changePassword`
-    /// uses: the function that DOES the thing
-    /// takes no actor, and whoever calls it is responsible for having decided
-    /// that they may.
-    ///
-    /// It exists because the recovery CLI has no actor and cannot invent one.
-    /// That is not a hole: `inkhold reset-password` is authorised by read/write
-    /// access to the data directory, which on a self-hosted server already
-    /// implies `minicloud.db` AND `cred.key` — i.e. the caller could decrypt
-    /// every credential with `sqlite3` and more patience.
-    ///
-    /// **Nothing over HTTP may call this directly.** The admin-checked
-    /// `resetPassword` above is the only route in from a request, and it is
-    /// unchanged: the handler still passes its actor and still gets `NotAdmin`.
+    /// The mechanism without policy. The recovery CLI calls it with no actor (it is
+    /// authorised by data-dir access, which already implies `cred.key`); HTTP must
+    /// go through `resetPassword`.
     pub fn resetPasswordFor(self: *Service, target_user_id: u64) Error!TempPassword {
         const temp = self.tempPassword();
         {
-            // The credential is stored ENCRYPTED (`cred_enc`); `password_md5` is
-            // blanked. See §5b — md5 must stay recoverable, so it is encrypted, not hashed.
+            // Stored encrypted in `cred_enc`; `password_md5` is blanked.
             var s = try self.db.prepare("UPDATE users SET cred_enc = ?1, password_md5 = '', must_change_password = 1 WHERE id = ?2;");
             defer s.finalize();
             s.bindText(1, &self.encryptCred(&password.md5Hex(temp.slice())));
@@ -390,31 +237,9 @@ pub const Service = struct {
         return temp;
     }
 
-    /// **THE MECHANISM** for the admin flag: sets or clears it on one account.
-    /// Returns true when the flag actually MOVED, so an idempotent caller can
-    /// say "is now" or "already was" without reading the row twice.
-    ///
-    /// There was no way to change `is_admin` at all before this: `insertUser`
-    /// wrote it once at creation and nothing ever updated it, so the only route
-    /// to a second admin was creating a whole new account — the wrong shape for
-    /// a household, where the person who should hold the spare key is the one who
-    /// already has a Nomad and their notes on it.
-    ///
-    /// **The last-admin guard is written here, with the mechanism, and not with
-    /// the verb that first needs it.** Only promotion is exposed today
-    /// (`inkhold make-admin`), so the demotion branch is unreachable from the
-    /// CLI — but the console's promote/demote pair is the next thing to be built
-    /// on this, and a demote that could take the count to
-    /// zero would create precisely the lockout this whole feature exists to
-    /// prevent. It mirrors `deleteUser`'s guard exactly, for exactly that reason.
-    ///
-    /// No actor: policy belongs to the caller. The CLI's authorisation is the
-    /// filesystem; an HTTP route built on this must do its own `isAdmin` check
-    /// the way `resetPassword` does.
-    ///
-    /// A demotion needs nothing else to take effect — `caller` reads `is_admin`
-    /// by JOIN on every request rather than caching it on the session row, so the
-    /// next request already sees it, elevation included.
+    /// Sets or clears the admin flag; true when it changed. Policy-free like
+    /// `resetPasswordFor`, but keeps the last-admin guard. `caller` reads `is_admin`
+    /// by JOIN per request, so a demotion takes effect immediately.
     pub fn setAdmin(self: *Service, target_user_id: u64, is_admin: bool) Error!bool {
         if (!try self.userExists(target_user_id)) return error.UserNotFound;
         const was = try self.isAdmin(target_user_id);
@@ -428,15 +253,14 @@ pub const Service = struct {
         return true;
     }
 
-    /// The account id behind an address, or null when there is none. The CLI's
-    /// only lookup: a person knows their address, not their row id.
+    /// The account id behind an address, or null.
     pub fn userIdByEmail(self: *Service, email: []const u8) Error!?u64 {
         var r = (try self.db.row("SELECT id FROM users WHERE email = ?1;", &.{.{ .text = email }})) orelse return null;
         defer r.finalize();
         return @intCast(r.int(0));
     }
 
-    /// Lists all users (admin view). Caller owns the result — free via `freeUsers`.
+    /// Caller owns the result; free via `freeUsers`.
     pub fn listUsers(self: *Service, gpa: std.mem.Allocator) Error![]UserInfo {
         var list: std.ArrayList(UserInfo) = .empty;
         errdefer {
@@ -465,42 +289,18 @@ pub const Service = struct {
     }
 
     // ---- admin: one person's devices, and their quota ----
-    //
-    // Everything below is `actor` + `target`, never "the caller's". That change of
-    // subject IS the security surface of these endpoints: the caller-scoped
-    // versions (`unlinkDevice`, `Files.capacity`) got their safety for free from
-    // passing `caller.user_id` into the WHERE clause, and here the id comes off the
-    // URL instead. So each one re-derives the ownership it needs from the TARGET
-    // and refuses anything that does not belong to them.
+    // The target id comes off the URL, so each function re-derives ownership from
+    // the target rather than relying on `caller.user_id` in the WHERE clause.
 
-    /// May `actor` act on `target`'s bindings? Either because they ARE `target`,
-    /// or because they administer the household.
-    ///
-    /// **The self case is what lets the account screen exist at all.** A non-admin
-    /// cannot see their own device bindings today, because the only listing is
-    /// admin-only — and the fix must NOT be a second,
-    /// self-scoped copy of the query with its own idea of ownership. Two places
-    /// deciding who owns a device is how they come to disagree. So the self-service
-    /// routes call the SAME `listUserDevices` / `adminUnlinkDevice` with the caller
-    /// as both actor and target, and this is the one gate that widens.
-    ///
-    /// Nothing about the admin path changes: acting on SOMEBODY ELSE still demands
-    /// `is_admin` (and, at the route layer, a live elevation), and
-    /// `adminUnlinkDevice`'s per-binding ownership assertion still runs afterwards
-    /// — so a self-service caller naming a serial that is not theirs is refused by
-    /// that check exactly as a mistaken admin is.
+    /// Self, or an admin. Self-service routes reuse these admin functions with
+    /// actor = target so ownership is decided in one place.
     fn assertMayManage(self: *Service, actor_user_id: u64, target_user_id: u64) Error!void {
         if (actor_user_id == target_user_id) return;
         if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
     }
 
-    /// Every device bound to `target_user_id`, active and revoked alike, newest
-    /// binding first. Caller owns the result — free via `freeDevices`.
-    ///
-    /// A LEFT JOIN, not an inner one: `user_devices` is the binding and `devices`
-    /// is the hardware, and an inner join would silently drop a binding whose
-    /// device row is missing — turning a data-integrity problem into "that tablet
-    /// is not linked", which is the one thing this screen exists to answer.
+    /// Newest binding first, revoked included; free via `freeDevices`. LEFT JOIN so
+    /// a binding with a missing device row still shows.
     pub fn listUserDevices(self: *Service, gpa: std.mem.Allocator, actor_user_id: u64, target_user_id: u64) Error![]DeviceInfo {
         try self.assertMayManage(actor_user_id, target_user_id);
         if (!try self.userExists(target_user_id)) return error.UserNotFound;
@@ -510,9 +310,8 @@ pub const Service = struct {
             for (list.items) |d| freeDevice(gpa, d);
             list.deinit(gpa);
         }
-        // The `last_seen` correlated subquery is scoped by BOTH `user_id` and
-        // `equipment_no`: a serial re-bound to a different housemate must not
-        // report the other household member's activity as this binding's.
+        // `last_seen` is scoped by user_id too: a re-bound serial must not report
+        // a previous owner's activity.
         var s = try self.db.prepare(
             "SELECT ud.equipment_no, ud.name, d.model, d.firmware, ud.status, ud.created_at, " ++
                 "  (SELECT MAX(s.last_used_at) FROM sessions s " ++
@@ -556,31 +355,15 @@ pub const Service = struct {
         gpa.free(devices);
     }
 
-    /// Admin-only: revoke a device binding belonging to `target_user_id`.
-    ///
-    /// **THE OWNERSHIP CHECK IS THE POINT OF THIS FUNCTION.** `unlinkDevice` below
-    /// is already scoped — its UPDATE names both `user_id` and `equipment_no`, so
-    /// it physically cannot touch another account's row. What it does instead is
-    /// silently match zero rows, which as a caller-scoped self-service action is
-    /// fine (idempotent) but as an admin action is not: an admin who mistypes an id
-    /// and unlinks "Rui's tablet" from Ana's row would get a 200 and believe it
-    /// happened. So the binding is asserted to exist for THIS user first.
-    ///
-    /// A serial that belongs to a DIFFERENT household member is refused with the
-    /// exact same `DeviceNotFound` an unknown serial gets. A distinct error would
-    /// make this endpoint a cross-account probe — "does anyone else have this
-    /// tablet?" — which is precisely the id confusion the check exists to stop.
-    ///
-    /// An ALREADY-REVOKED binding is not an error: the row exists for this user, so
-    /// the unlink is a no-op and answers 200. That keeps a double-click harmless
-    /// without weakening the check, since `status` is never what is being asserted.
+    /// Asserts the binding exists for this user first, so a mistaken id fails
+    /// instead of a silent zero-row 200. A serial owned by someone else gets the same
+    /// `DeviceNotFound`; an already-revoked binding is a no-op 200.
     pub fn adminUnlinkDevice(self: *Service, actor_user_id: u64, target_user_id: u64, equipment_no: []const u8) Error!void {
         try self.assertMayManage(actor_user_id, target_user_id);
         if (!try self.hasBinding(target_user_id, equipment_no)) return error.DeviceNotFound;
         try self.unlinkDevice(target_user_id, equipment_no);
     }
 
-    /// Whether `user_id` holds a binding for this serial, in ANY status.
     fn hasBinding(self: *Service, user_id: u64, equipment_no: []const u8) Error!bool {
         var s = try self.db.prepare("SELECT 1 FROM user_devices WHERE user_id = ?1 AND equipment_no = ?2 LIMIT 1;");
         defer s.finalize();
@@ -589,10 +372,7 @@ pub const Service = struct {
         return try s.step();
     }
 
-    /// Admin-only: a user's used/allotted bytes, for the console's meter.
-    /// A user with no `capacity` row reads as the server default, exactly as
-    /// `Files.capacity` does — a missing row means "nothing stored yet", and the
-    /// two must not disagree about what that shows.
+    /// Admin-only. No `capacity` row reads as the default, matching `Files.capacity`.
     pub fn userQuota(self: *Service, actor_user_id: u64, target_user_id: u64) Error!Quota {
         if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
         if (!try self.userExists(target_user_id)) return error.UserNotFound;
@@ -602,18 +382,8 @@ pub const Service = struct {
         return .{ .used_bytes = r.int(0), .total_bytes = r.int(1) };
     }
 
-    /// Admin-only: set a user's allotment, and report the resulting quota.
-    ///
-    /// **LOWERING IT BELOW CURRENT USAGE IS ALLOWED AND DELETES NOTHING.** That is
-    /// the intended behaviour, not an edge case to reject: the new allotment stops
-    /// further syncs until the owner frees space, and their existing notes stay
-    /// exactly where they are. Clamping the write up to `used_bytes` would silently
-    /// refuse the one instruction an admin most wants here ("stop growing"), and
-    /// enforcing it by deleting would make an accounting change destructive.
-    ///
-    /// The only rejection is a negative total, which is not a byte count at all.
-    /// Zero is deliberately legal — it is "no new uploads", the strongest form of
-    /// the same instruction.
+    /// Admin-only. Below current usage is allowed and deletes nothing (it just stops
+    /// further syncs); zero means "no new uploads".
     pub fn setUserQuota(self: *Service, actor_user_id: u64, target_user_id: u64, total_bytes: i64) Error!Quota {
         if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
         if (!try self.userExists(target_user_id)) return error.UserNotFound;
@@ -637,8 +407,7 @@ pub const Service = struct {
     }
 
     fn insertUser(self: *Service, email: []const u8, password_md5: []const u8, is_admin: bool) Error!u64 {
-        // `password_md5` (the md5 hex) is stored ENCRYPTED in `cred_enc`; the legacy
-        // plaintext column is written blank so nothing recoverable lives in it.
+        // The md5 goes encrypted into `cred_enc`; the legacy column stays blank.
         var s = try self.db.prepare("INSERT INTO users(email, password_md5, cred_enc, is_admin, created_at) VALUES(?1,'',?2,?3,?4);");
         defer s.finalize();
         s.bindText(1, email);
@@ -651,8 +420,7 @@ pub const Service = struct {
         return id;
     }
 
-    /// Fetches a single user's info by id (for the web "who am I" endpoint).
-    /// Caller owns `email` — free it.
+    /// Caller owns `email`.
     pub fn userInfo(self: *Service, gpa: std.mem.Allocator, user_id: u64) Error!?UserInfo {
         var r = (try self.db.row("SELECT id, email, is_admin, must_change_password, created_at FROM users WHERE id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return null;
         defer r.finalize();
@@ -667,20 +435,13 @@ pub const Service = struct {
 
     // ---- the caller's own account ----
 
-    /// Everything the account screen's identity block reads about the CALLER.
-    /// `email` / `name` are owned copies — free via `freeAccount`.
+    /// The caller's identity block; free via `freeAccount`.
     pub const AccountInfo = struct {
         email: []const u8,
         name: []const u8,
         is_admin: bool,
-        /// When the account was created (epoch seconds).
         created_at: i64,
-        /// When the password was last changed, or NULL for "never changed".
-        ///
-        /// The column only became true the day it landed (schema v3), so every
-        /// account that predates it reads NULL until its owner next changes their
-        /// password. **The copy has to say "never changed" and not imply the
-        /// account is stale** — the fact was unknowable before, not neglected.
+        /// Null means never changed, or changed before schema v3 tracked it.
         password_changed_at: ?i64,
     };
 
@@ -707,27 +468,15 @@ pub const Service = struct {
         gpa.free(a.name);
     }
 
-    /// "This browser, since Tuesday" + "2 other browsers signed in".
     pub const SessionSummary = struct {
-        /// `sessions.created_at` for the presented token, or null when the token
-        /// names no row (which the router makes unreachable — it resolved the
-        /// caller from that very row — but the read is written not to assume it).
+        /// Created-at of the presented token's row.
         this_since: ?i64,
-        /// Other LIVE `controlplane` sessions of this user, the presented one
-        /// excluded. Browsers only: a bound tablet is a `device` session and is
-        /// shown as a device, not as a signed-in browser.
+        /// Other live `controlplane` sessions; tablets are `device` sessions, not counted.
         other_browsers: i64,
     };
 
-    /// The two session facts, for the token the caller actually presented — which
-    /// the handler passes in RAW and this hashes itself, because the raw token
-    /// never touches disk and `sessions` is keyed by `sha256(token)`.
-    ///
-    /// "Live" applies the SAME two deadlines `caller` enforces per request: the
-    /// absolute cap in `expires_at` AND the idle window measured from
-    /// `last_used_at`. Counting rows that `caller` would refuse would tell a person
-    /// that somebody is signed in somewhere when nobody could actually use it —
-    /// the one number on this screen that would send them looking for an intruder.
+    /// Takes the raw token and hashes it. "Live" applies both deadlines `caller`
+    /// enforces, so no unusable session is reported as signed in.
     pub fn sessionSummary(self: *Service, user_id: u64, token: []const u8) Error!SessionSummary {
         const th = password.hashToken(token);
         const t = self.now();
@@ -757,19 +506,9 @@ pub const Service = struct {
         return .{ .this_since = this_since, .other_browsers = others };
     }
 
-    /// "Sign out everywhere else": drop every one of this user's sessions except
-    /// the presented one. Returns how many rows went.
-    ///
-    /// The honest answer to "I think someone else has been in my account", and
-    /// distinct from sign-out: it must NOT log the caller out of the browser they
-    /// are asking from, or the confirmation of the thing they just did is a login
-    /// screen. `changePassword` already revokes ALL sessions as a side effect; this
-    /// is that primitive offered on its own, minus the row the caller is holding.
-    ///
-    /// **Device sessions go too**, and that is deliberate: a tablet whose session
-    /// is dropped re-authenticates from its stored credential, so sync resumes on
-    /// its own — while a session token that leaked really is revoked. The binding
-    /// (`user_devices`) is untouched; unlinking is the separate, deliberate act.
+    /// Deletes every session of the user except the presented one; returns the count.
+    /// Device sessions go too (tablets re-authenticate from their stored credential);
+    /// bindings are untouched.
     pub fn signOutOtherSessions(self: *Service, user_id: u64, token: []const u8) Error!i64 {
         const th = password.hashToken(token);
         var s = try self.db.prepare("DELETE FROM sessions WHERE user_id = ?1 AND token_hash <> ?2;");
@@ -780,7 +519,7 @@ pub const Service = struct {
         return self.db.changes();
     }
 
-    /// True if an account with this email exists (device `check/exists/server`).
+    /// Device `check/exists/server`.
     pub fn userExistsByEmail(self: *Service, email: []const u8) Error!bool {
         var s = try self.db.prepare("SELECT 1 FROM users WHERE email = ?1 LIMIT 1;");
         defer s.finalize();
@@ -788,21 +527,14 @@ pub const Service = struct {
         return try s.step();
     }
 
-    /// True if any account exists — used to decide first-run admin bootstrap.
     pub fn hasAnyUser(self: *Service) Error!bool {
         var s = try self.db.prepare("SELECT 1 FROM users LIMIT 1;");
         defer s.finalize();
         return try s.step();
     }
 
-    /// True on a BRAND-NEW server: the only account is the bootstrap admin and it
-    /// still holds its temporary password (`must_change_password = 1`) — i.e. no
-    /// one has finished onboarding yet. Drives the login page's first-run
-    /// rendering, read pre-auth via `GET /api/controlplane/server-info`.
-    ///
-    /// Exactly one user AND that user is an admin still owing a password change.
-    /// A second account, or the admin having changed its password, both flip this
-    /// to false — onboarding is then considered done.
+    /// Exactly one user, an admin still owing its first password change. Drives the
+    /// pre-auth first-run login page.
     pub fn isFirstRun(self: *Service) Error!bool {
         var s = try self.db.prepare(
             \\SELECT (SELECT COUNT(*) FROM users) = 1
@@ -822,8 +554,7 @@ pub const Service = struct {
     fn getUser(self: *Service, email: []const u8) Error!?User {
         var r = (try self.db.row("SELECT id, cred_enc, is_admin, must_change_password FROM users WHERE email = ?1;", &.{.{ .text = email }})) orelse return null;
         defer r.finalize();
-        // The credential is decrypted just-in-time here (the md5_len invariant now
-        // lives on the decrypted value). A missing/corrupt blob is InvalidCredentials.
+        // A missing or corrupt blob is InvalidCredentials.
         const md5 = self.decryptCred(r.text(1)) catch return error.InvalidCredentials;
         return .{
             .id = @intCast(r.int(0)),
@@ -833,10 +564,7 @@ pub const Service = struct {
         };
     }
 
-    /// Guarantees a `capacity` row for the user at the given quota WITHOUT
-    /// clobbering an existing one (INSERT OR IGNORE). Used at user creation and on
-    /// device bind — the device must not be able to set or raise its own quota, so
-    /// bind ensures the row exists at the server default but never overwrites it.
+    /// INSERT OR IGNORE: device bind must never set or raise its own quota.
     pub fn ensureCapacity(self: *Service, user_id: u64, total: i64) Error!void {
         var s = try self.db.prepare("INSERT OR IGNORE INTO capacity(user_id, total_bytes) VALUES(?1, ?2);");
         defer s.finalize();
@@ -845,11 +573,7 @@ pub const Service = struct {
         _ = try s.step();
     }
 
-    /// Sets a user's total quota (the device bind reports its `totalCapacity`).
-    /// UPSERTS: normally the row exists from user creation, but a freshly-onboarded
-    /// account may not have one yet, so we create it on conflict rather than
-    /// silently no-op'ing an UPDATE (which would leave the upload quota check
-    /// hitting a missing row). `used_bytes` is untouched (0 on insert).
+    /// Upsert, since a freshly onboarded account may lack the row.
     pub fn setCapacityTotal(self: *Service, user_id: u64, total_bytes: i64) Error!void {
         var s = try self.db.prepare(
             "INSERT INTO capacity(user_id, total_bytes) VALUES(?1, ?2) " ++
@@ -861,7 +585,7 @@ pub const Service = struct {
         _ = try s.step();
     }
 
-    /// A user's total quota in bytes (for the device `user/query` VO). 0 if absent.
+    /// For the device `user/query` VO; 0 if absent.
     pub fn userCapacity(self: *Service, user_id: u64) Error!i64 {
         var r = (try self.db.row("SELECT total_bytes FROM capacity WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return 0;
         defer r.finalize();
@@ -870,44 +594,13 @@ pub const Service = struct {
 
     // ---- login challenge + session ----
 
-    /// Issues a single-use random code for `account` (held in memory, 5-min TTL).
-    ///
-    /// **Bounded, because nothing else bounds it.** The route is `.public` and
-    /// takes an attacker-chosen account string — an entry was inserted for ANY
-    /// string and removed only by a same-account re-request, a login, or an
-    /// elevation, so at the route's 20/min/IP limit the table grew by ~29k entries
-    /// a day per IP and never shrank, on a server holding itself to 50 MB. This is
-    /// `http/download_tokens.zig`'s shape verbatim: sweep the expired before
-    /// growing, and refuse to grow past a soft cap even after the sweep.
-    ///
-    /// **REFUSES rather than evicting the oldest**, like `download_tokens` — and
-    /// unlike `ratelimit`, which fails open because failing open there costs only
-    /// a skipped limit. The obvious objection is that refusing blocks a legitimate
-    /// login, and it is the right trade anyway:
-    ///
-    ///   - A caller already holding a live challenge is `found_existing`, so it is
-    ///     never refused. Only a *new* account string is, and only while the table
-    ///     is genuinely full of unexpired entries.
-    ///   - Eviction would move the failure somewhere much worse. The legitimate
-    ///     caller's `getRandomCode` would succeed and their entry could then be
-    ///     evicted by the flood before their `login` POST arrived — surfacing as
-    ///     `NoChallenge`, which the client renders as a credential problem. A
-    ///     refusal here is one honest 500 at the moment of the cause.
-    ///   - Eviction also needs an oldest-entry scan or an ordering structure; a
-    ///     5-minute TTL plus a sweep already keeps the table empty in practice.
-    ///
-    /// The account is NOT checked for existence: answering differently for an
-    /// unknown account would turn this route into an enumeration oracle, and
-    /// `check/exists` is the one place that distinction is deliberately made.
+    /// Single-use code for `account`, in memory, 5-min TTL. The route is public and
+    /// the account attacker-chosen, so expired entries are swept and a new account is
+    /// refused at the cap rather than evicting (eviction would surface later as a
+    /// confusing `NoChallenge`). Existence is not checked: no enumeration oracle.
     pub fn getRandomCode(self: *Service, account: []const u8) Error![code_len]u8 {
-        // A challenge is state this service owns OUTSIDE the database, so the
-        // read-only connection a pooled view carries cannot refuse it — minting
-        // one here would succeed into a copy that dies with the request and break
-        // the next login for no visible reason. Refuse instead, on the route that
-        // was misclassified. (`random/code` is a write and must never carry
-        // `read_only`; this is what makes that a 500 rather than a mystery.)
+        // Minting into a pooled view would vanish with the request.
         if (self.read_only) return error.ReadOnlyService;
-        // Length bound first: without it the entry cap would not bound bytes.
         if (account.len > max_account_len) return error.OutOfMemory;
 
         const code = self.randomHex(code_len);
@@ -917,10 +610,8 @@ pub const Service = struct {
             return error.OutOfMemory;
         }
 
-        // getOrPut rather than dropChallenge + put: re-requesting for an account
-        // that already has a challenge reuses the owned key and simply overwrites
-        // the code, which is the same single-use semantics with no free/dupe churn
-        // — and no window in which a refusal could destroy a live challenge.
+        // getOrPut: a re-request overwrites the code in place, no window where a
+        // refusal could destroy a live challenge.
         const gop = try self.challenges.getOrPut(self.gpa, account);
         if (!gop.found_existing) {
             const owned = self.gpa.dupe(u8, account) catch |e| {
@@ -933,10 +624,6 @@ pub const Service = struct {
         return code;
     }
 
-    /// Drops expired challenges (best-effort, capped per call — `getRandomCode`
-    /// sweeps every time, so the table stays bounded). Mirrors
-    /// `download_tokens.sweepLocked`, including the fixed stale scratch: removing
-    /// while iterating the map is not safe, so keys are collected first.
     fn sweepChallenges(self: *Service, now_s: i64) void {
         expiring.sweep(Challenge, self.gpa, &self.challenges, now_s, struct {
             fn f(c: Challenge, at: i64) bool {
@@ -949,12 +636,8 @@ pub const Service = struct {
         if (self.challenges.fetchRemove(account)) |old| self.gpa.free(old.key);
     }
 
-    /// Verifies the challenge response and issues a session. The FACE is decided by
-    /// the caller (`is_device`), not inferred from `equipment_no`: the official app
-    /// is a device client that logs in WITHOUT a serial (supplying it per-request),
-    /// so the handler reads the client's self-declared `equipment` kind and passes
-    /// the verdict here. `equipment_no` is still stored on the session when present
-    /// (null for the app — unknown until its first file call).
+    /// The face comes from the caller (`is_device`), not from `equipment_no`: the
+    /// official app is a device client that logs in without a serial.
     pub fn login(self: *Service, account: []const u8, submitted_password: []const u8, is_device: bool, equipment_no: ?[]const u8) Error!Session {
         const ch = self.challenges.get(account) orelse return error.NoChallenge;
         if (self.now() > ch.expires) {
@@ -967,8 +650,7 @@ pub const Service = struct {
         }
         self.dropChallenge(account); // single-use
 
-        // A user who must change their password gets a limited `pending` token —
-        // usable only for the change-password route — regardless of face.
+        // must-change accounts get a `pending` token regardless of face.
         const audience: Scope = if (user.must_change) .pending else if (is_device) .device else .controlplane;
         return self.issueSession(user.id, audience, equipment_no);
     }
@@ -979,51 +661,25 @@ pub const Service = struct {
         return .{ .token = token, .user_id = user_id, .audience = audience };
     }
 
-    /// Sets a new password (`md5_hex(new_plaintext)`, computed by the client),
-    /// clears must-change, **revokes ALL of the user's sessions** (logs out every
-    /// device/browser — the pending first-login token included), and returns a
-    /// fresh full **control-plane** session for the caller to swap to. Rejects reusing the
-    /// current password.
-    ///
-    /// `current_md5` is `md5_hex(current_plaintext)`, or null when the caller
-    /// supplies none. **This function is the MECHANISM, not the policy**: whenever
-    /// a current password is supplied it is VERIFIED, whoever the caller is — so a
-    /// first-login `pending` caller that sends a wrong one is refused just like a
-    /// self-service one. WHO MUST SUPPLY IT is decided one layer up, in
-    /// `handlers/auth.changePassword`, which requires it of a `controlplane`
-    /// caller. Splitting it this way means the check cannot be dodged by choosing
-    /// a caller: the only way to skip verification is to send no current password
-    /// at all, and that door is shut by the handler for every audience that has a
-    /// password to check.
-    ///
-    /// **The verification happens BEFORE the UPDATE, before `revokeAllSessions`
-    /// and before `issueSession`, and it must stay there.** A wrong current
-    /// password must leave the account exactly as it was, sessions included —
-    /// otherwise a typo signs a person out of every browser and device, which is
-    /// the lockout this whole feature exists to prevent.
+    /// Sets `md5_hex(new)` (client-computed), clears must-change, revokes all
+    /// sessions and returns a fresh control-plane session. A supplied `current_md5`
+    /// is always verified; which callers must supply it is the handler's policy.
+    /// Verification precedes every write so a wrong password changes nothing.
     pub fn changePassword(self: *Service, user_id: u64, current_md5: ?[]const u8, new_md5: []const u8) Error!Session {
         if (new_md5.len != password.md5_len) return error.InvalidPassword;
         {
             var r = (try self.db.row("SELECT cred_enc FROM users WHERE id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return error.InvalidCredentials;
             defer r.finalize();
-            // Same-password check against the DECRYPTED current credential.
             const cur = self.decryptCred(r.text(0)) catch return error.InvalidCredentials;
-            // Verified FIRST, ahead of the same-password check: `SamePassword` is
-            // itself an oracle ("is X the current password?"), so it must not be
-            // answerable by someone who could not prove the current password.
+            // Verify before the same-password check, which is itself an oracle.
             if (current_md5) |given| {
                 if (!password.verifyCurrent(&cur, given)) return error.WrongCurrentPassword;
             }
             if (std.mem.eql(u8, &cur, new_md5)) return error.SamePassword;
         }
         {
-            // `password_changed_at` is stamped HERE and only here — this is the one
-            // path a person's own credential changes through (the first-login
-            // `pending` caller and the self-service one both land in this function).
-            // `resetPassword` deliberately does NOT stamp it: an admin issuing a
-            // temporary password has not chosen the credential the account will keep,
-            // and the screen's "last changed" line would then be measuring somebody
-            // else's action. The forced change that follows the reset stamps it.
+            // Only path that stamps `password_changed_at`; an admin reset does not
+            // choose the kept credential, so it doesn't.
             var s = try self.db.prepare("UPDATE users SET cred_enc = ?1, password_md5 = '', must_change_password = 0, password_changed_at = ?3 WHERE id = ?2;");
             defer s.finalize();
             s.bindText(1, &self.encryptCred(new_md5));
@@ -1035,8 +691,7 @@ pub const Service = struct {
         return try self.issueSession(user_id, .controlplane, null);
     }
 
-    /// Deletes the given session token (logout). Keyed by `sha256(token)`, since
-    /// that is what the row stores (§token-at-rest).
+    /// Keyed by `sha256(token)`.
     pub fn logout(self: *Service, token: []const u8) Error!void {
         var s = try self.db.prepare("DELETE FROM sessions WHERE token_hash = ?1;");
         defer s.finalize();
@@ -1044,7 +699,6 @@ pub const Service = struct {
         _ = try s.step();
     }
 
-    /// Deletes all of a user's sessions ("log out everywhere").
     fn revokeAllSessions(self: *Service, user_id: u64) Error!void {
         var s = try self.db.prepare("DELETE FROM sessions WHERE user_id = ?1;");
         defer s.finalize();
@@ -1052,8 +706,7 @@ pub const Service = struct {
         _ = try s.step();
     }
 
-    /// Housekeeping: delete sessions past their expiry (they are already rejected;
-    /// this just reclaims rows). Cheap — run at startup and occasionally.
+    /// Reclaims rows past the absolute cap.
     pub fn sweepExpiredSessions(self: *Service) Error!void {
         var s = try self.db.prepare("DELETE FROM sessions WHERE expires_at < ?1;");
         defer s.finalize();
@@ -1068,7 +721,7 @@ pub const Service = struct {
         );
         defer s.finalize();
         const now_ts = self.now();
-        s.bindText(1, &password.hashToken(token)); // store the HASH; the raw token never touches disk
+        s.bindText(1, &password.hashToken(token)); // the raw token never touches disk
         s.bindInt(2, @intCast(user_id));
         s.bindText(3, @tagName(audience));
         if (equipment_no) |e| s.bindText(4, e) else s.bindNull(4);
@@ -1078,11 +731,9 @@ pub const Service = struct {
         _ = try s.step();
     }
 
-    /// Resolves a session token to a Caller, or null if unknown/expired.
-    /// (equipment identity for device requests comes from the request header, so
-    /// it is not populated here.)
+    /// Null if unknown or expired. Equipment identity comes from the request header.
     pub fn caller(self: *Service, token: []const u8) Error!?Caller {
-        const th = password.hashToken(token); // stored key + the lazy-bump key
+        const th = password.hashToken(token);
         const t = self.now();
         var who: Caller = undefined;
         var last_used: i64 = 0;
@@ -1090,7 +741,7 @@ pub const Service = struct {
             var r = (try self.db.row(
                 "SELECT s.user_id, s.audience, s.expires_at, u.is_admin, s.elevated_at, s.elevated_until, s.last_used_at " ++
                     "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?1;",
-                &.{.{ .text = &th }}, // look up by the stored hash
+                &.{.{ .text = &th }},
             )) orelse return null;
             defer r.finalize();
             if (t > r.int(2)) return null; // absolute cap
@@ -1101,7 +752,6 @@ pub const Service = struct {
                 .pending
             else
                 .controlplane;
-            // Idle expiry (since last use), enforced here rather than by the sweeper.
             last_used = r.int(6);
             if (idleWindow(audience)) |idle| {
                 if (t > last_used + idle) return null;
@@ -1113,9 +763,7 @@ pub const Service = struct {
                 .elevated = elevationLive(t, r.intOpt(4), r.intOpt(5)),
             };
         }
-        // Slide the idle window forward LAZILY — only when it has moved past the
-        // granularity, so an ordinary request is not a write. Best-effort: a failed
-        // bump must never turn a valid session into a rejected one.
+        // Lazy, best-effort bump: a failed write must not reject a valid session.
         if (t - last_used > last_used_bump_s) {
             if (self.db.prepare("UPDATE sessions SET last_used_at = ?1 WHERE token_hash = ?2;")) |u| {
                 defer u.finalize();
@@ -1129,33 +777,15 @@ pub const Service = struct {
 
     // ---- admin elevation (re-authentication) ----
 
-    /// Whether an elevation is live at `t`: inside the sliding idle deadline AND
-    /// inside the absolute ceiling measured from when the password was re-entered.
-    /// Pure, so both the read path and the renewal path agree by construction.
     fn elevationLive(t: i64, elevated_at: ?i64, elevated_until: ?i64) bool {
         const started = elevated_at orelse return false;
         const idle_deadline = elevated_until orelse return false;
         return t < idle_deadline and t < started + elevation_absolute_s;
     }
 
-    /// Re-authenticate an existing session to grant admin elevation, and return the
-    /// idle deadline it now holds.
-    ///
-    /// **Reuses the login challenge flow** (`getRandomCode` + `sha256(md5(pw)+code)`)
-    /// rather than accepting a plain password. This deployment is plaintext HTTP
-    /// over a LAN by default, where anything replayable is exposed on the wire —
-    /// a "just POST the password" endpoint would be a real regression, and a second
-    /// credential path to keep correct forever after.
-    ///
-    /// Every rejection is `InvalidCredentials`, including "you are not an admin"
-    /// and "you still owe a password change": a non-admin probing this must not be
-    /// able to tell a wrong password from a right one, or the endpoint becomes an
-    /// oracle for who in the household is an administrator.
-    ///
-    /// A `must_change_password` account is refused outright — that flag exists to
-    /// force a password change, and elevation must not route around it. (The route
-    /// also omits `.pending` from its scopes, so such a session is turned away
-    /// before it ever reaches here; this is the belt to that suspenders.)
+    /// Grants admin elevation via the login challenge flow (no replayable plain
+    /// password on LAN HTTP); returns the idle deadline. Every rejection, including
+    /// not-admin and must-change, is `InvalidCredentials` so it is no admin oracle.
     pub fn elevate(self: *Service, user_id: u64, token: []const u8, submitted_password: []const u8) Error!i64 {
         const info = (try self.userInfo(self.gpa, user_id)) orelse return error.InvalidCredentials;
         defer self.gpa.free(info.email);
@@ -1182,10 +812,7 @@ pub const Service = struct {
         return until;
     }
 
-    /// Drop this session's elevation immediately ("Lock console"). Idempotent, and
-    /// deliberately the whole of revocation — clearing the two columns is all there
-    /// is to undo, which is the payoff for elevation being a session capability
-    /// rather than a second token with its own lifetime to chase.
+    /// Clears this session's elevation ("Lock console"); idempotent.
     pub fn lockElevation(self: *Service, token: []const u8) Error!void {
         var s = try self.db.prepare("UPDATE sessions SET elevated_at = NULL, elevated_until = NULL WHERE token_hash = ?1;");
         defer s.finalize();
@@ -1193,15 +820,8 @@ pub const Service = struct {
         _ = try s.step();
     }
 
-    /// Slide a LIVE elevation's idle deadline forward on admin activity, clamped to
-    /// the absolute ceiling. Returns the new deadline, or null if there was no live
-    /// elevation to renew.
-    ///
-    /// It can only ever extend an elevation that is already live: a NULL, a lapsed
-    /// or a ceiling-exceeded one is left exactly as it was. That is what lets the
-    /// caller (transport) renew unconditionally on every admin request without
-    /// having to decide first whether the request will be authorized — renewal can
-    /// never grant elevation, only prolong one.
+    /// Extends only an already-live elevation, clamped to the ceiling; null if none.
+    /// So transport can renew on every admin request without granting anything.
     pub fn renewElevation(self: *Service, token: []const u8) Error!?i64 {
         const t = self.now();
         var started: i64 = undefined;
@@ -1222,8 +842,7 @@ pub const Service = struct {
 
     // ---- devices ----
 
-    /// Registers a device and binds it to the user (idempotent). Called after a
-    /// successful device login (auto-bind).
+    /// Registers the device and binds it (after device login).
     pub fn bindDevice(self: *Service, user_id: u64, equipment_no: []const u8, name: []const u8) Error!void {
         {
             var s = try self.db.prepare("INSERT OR IGNORE INTO devices(equipment_no, created_at) VALUES(?1, ?2);");
@@ -1233,22 +852,9 @@ pub const Service = struct {
             _ = try s.step();
         }
         {
-            // AN UPSERT THAT REACTIVATES, not `INSERT OR IGNORE`.
-            //
-            // `unlinkDevice` marks the binding `status = 'N'` and KEEPS the row,
-            // so `INSERT OR IGNORE` found it already there and did nothing —
-            // which made unlinking a ONE-WAY DOOR. Pairing the same tablet to the
-            // same account again could never bring it back: the device logged in
-            // and got a live session, while its binding stayed revoked for ever.
-            // The webapp then showed no device for a Supernote that was sitting
-            // there syncing, and there was no way, from either side, to fix it.
-            //
-            // An ordinary re-bind of an ALREADY-ACTIVE device still changes
-            // nothing, exactly as before — this path runs on every device login,
-            // so it must not churn the name or the date. Only a REVOKED row is
-            // touched, and then it is treated as the fresh binding it is: active
-            // again, and re-dated, because the previous binding ended when it was
-            // unlinked and `created_at` is what the screen calls "Linked".
+            // Upsert that reactivates: unlink keeps the row as 'N', so OR IGNORE
+            // would make unlinking permanent. An active row is untouched (this
+            // runs every login); a revoked one is renamed and re-dated.
             var s = try self.db.prepare(
                 "INSERT INTO user_devices(user_id, equipment_no, name, status, created_at) VALUES(?1,?2,?3,'Y',?4) " ++
                     "ON CONFLICT(user_id, equipment_no) DO UPDATE SET " ++
@@ -1265,26 +871,10 @@ pub const Service = struct {
         }
     }
 
-    /// The user id behind a LIVE device session for `equipment_no`, but ONLY when
-    /// that session belongs to the account named by `email`.
-    ///
-    /// **Why this exists — `bindEquipment` arrives unauthenticated.** Captured
-    /// from a real Nomad: login returns a token at
-    /// t+0ms, the device fires `bindEquipment` at t+9ms, and only STORES the token
-    /// at t+15ms. So the one call that carries the device's name, model and
-    /// firmware goes out with no `x-access-token` header, we answered 401, and the
-    /// tablet kept the placeholder name for ever while syncing perfectly.
-    ///
-    /// This is the token's evidence obtained from state we already hold: somebody
-    /// completed a login on THIS serial, for THIS account, seconds ago, and the
-    /// session proving it is in the table. It is deliberately not the same as
-    /// trusting the body — a serial with no live session, or one whose session
-    /// belongs to a different account, still gets nothing. So it cannot be used to
-    /// bind a serial to an account you could not already log into, which is the
-    /// whole risk of accepting an unauthenticated bind.
-    ///
-    /// Device sessions have no idle window (see `idleWindow`), so the absolute
-    /// `expires_at` is the only clock that matters here.
+    /// The user behind a live device session for this serial, only if it belongs to
+    /// `email`. The Nomad sends `bindEquipment` ~9 ms after login but stores the token
+    /// at ~15 ms, so that call carries no `x-access-token`; this stands in for it
+    /// without letting a body bind a serial to an account nobody logged into.
     pub fn deviceSessionOwner(self: *Service, equipment_no: []const u8, email: []const u8) Error!?u64 {
         if (equipment_no.len == 0 or email.len == 0) return null;
         var r = (try self.db.row(
@@ -1297,20 +887,8 @@ pub const Service = struct {
         return @intCast(r.int(0));
     }
 
-    /// Adopts the name the DEVICE reports for itself ("Supernote Nomad AA").
-    ///
-    /// Separate from `bindDevice` because the two callers know different things.
-    /// The file-call path binds a serial it has only just seen and has no name
-    /// for, so it stamps a placeholder; `bindEquipment` is the device introducing
-    /// itself and its name is the authoritative one. `bindDevice` deliberately
-    /// does not overwrite an existing label — it runs on every login, and a
-    /// placeholder must never overwrite a real name — so the authoritative name
-    /// needs its own door, or it never lands: the row already exists by then and
-    /// every account showed the literal "Supernote app" for a tablet that had
-    /// told the server exactly what it was called.
-    ///
-    /// Only ever called with a name the device actually sent, never with a
-    /// fallback, so this cannot overwrite a good label with a generic one.
+    /// The device's self-reported name from `bindEquipment`; `bindDevice` never
+    /// overwrites a label, so this is the only way a real name replaces the placeholder.
     pub fn nameDevice(self: *Service, user_id: u64, equipment_no: []const u8, name: []const u8) Error!void {
         if (name.len == 0) return;
         var s = try self.db.prepare("UPDATE user_devices SET name = ?3 WHERE user_id = ?1 AND equipment_no = ?2;");
@@ -1339,14 +917,8 @@ pub const Service = struct {
         }
     }
 
-    /// Best-effort device unlink by serial across all users: marks every binding
-    /// of this serial inactive and drops its sessions. A no-op if the serial is
-    /// unknown.
-    ///
-    /// NOTE: this is deliberately NOT wired to the public pre-login
-    /// `equipment/unlink` route — doing so was an unauthenticated LAN DoS (any
-    /// client could unbind + log out the household device by its printed serial).
-    /// Retained for an authenticated/admin-scoped teardown path and its own test.
+    /// Unlinks a serial across all users. Must never back the public pre-login
+    /// `equipment/unlink` route: that would be an unauthenticated LAN DoS.
     pub fn unlinkDeviceGlobal(self: *Service, equipment_no: []const u8) Error!void {
         {
             var s = try self.db.prepare("UPDATE user_devices SET status = 'N' WHERE equipment_no = ?1;");
@@ -1362,8 +934,7 @@ pub const Service = struct {
         }
     }
 
-    /// True if this device is actively bound to the user (login reports this so
-    /// the device knows whether it still needs to bind).
+    /// Login reports this so the device knows whether to bind.
     pub fn isDeviceBound(self: *Service, user_id: u64, equipment_no: []const u8) Error!bool {
         var s = try self.db.prepare(
             "SELECT 1 FROM user_devices WHERE user_id = ?1 AND equipment_no = ?2 AND status = 'Y' LIMIT 1;",
@@ -1374,7 +945,6 @@ pub const Service = struct {
         return try s.step();
     }
 
-    /// Count of active devices bound to a user.
     pub fn deviceCount(self: *Service, user_id: u64) Error!i64 {
         var s = try self.db.prepare("SELECT COUNT(*) FROM user_devices WHERE user_id = ?1 AND status = 'Y';");
         defer s.finalize();
@@ -1394,13 +964,9 @@ fn testService(db: sqlite.Db) !Service {
     return Service.init(std.testing.allocator, std.testing.io, db, test_cred_key);
 }
 
-/// A fixed, obviously-fake credential-encryption key for tests. Production loads a
-/// real random key from `config.cred_key_path`.
 const test_cred_key: [password.cred_key_len]u8 = @splat(0xA5);
 
-/// The storage half `deleteUser` needs: a blob store on a temp dir plus the
-/// `Files` service over it. Account deletion releases blob references, so these
-/// tests can't hand it a stub.
+/// `deleteUser` releases blob references, so it needs a real store.
 const TestStorage = struct {
     tmp: std.testing.TmpDir,
     files: filesvc.Files,
@@ -1418,17 +984,11 @@ const TestStorage = struct {
     }
 };
 
-/// Client-side: what a device/browser computes for the login password field.
 fn clientHash(plaintext: []const u8, code: [code_len]u8) [password.sha256_len]u8 {
     return password.challengeHash(&password.md5Hex(plaintext), &code);
 }
 
-/// Admin-creates a user and completes the mandatory first-login change, leaving
-/// the account "onboarded" with `final_pw`. Returns the user id.
-///
-/// It logs in with the temporary password the SERVER generated (there is no
-/// caller-chosen one any more), which is also the only handover path a real
-/// household user has.
+/// Creates a user and completes the forced first-login change with `final_pw`.
 fn onboardUser(svc: *Service, admin: u64, email: []const u8, final_pw: []const u8) !u64 {
     const created = try svc.createUser(admin, email, false);
     const code = try svc.getRandomCode(email);
@@ -1445,17 +1005,14 @@ test "admin logs in (must change first) and creates a user" {
 
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
 
-    // First admin login yields a limited `pending` token.
     const code = try svc.getRandomCode("admin@home");
     const first = try svc.login("admin@home", &clientHash("adminpw", code), false, null);
     try std.testing.expectEqual(Scope.pending, first.audience);
 
-    // Changing the password revokes it and returns a full web session.
     const full = try svc.changePassword(admin, null, &password.md5Hex("adminnew"));
     try std.testing.expectEqual(Scope.controlplane, full.audience);
     try std.testing.expect((try svc.caller(&first.token)) == null);
 
-    // Admin creates a household user; a non-admin cannot.
     const alice = (try svc.createUser(admin, "alice@home", false)).id;
     try std.testing.expect(alice != admin);
     try std.testing.expectError(error.NotAdmin, svc.createUser(alice, "bob@home", false));
@@ -1477,7 +1034,6 @@ test "onboarded user logs in as web client and gets a working token" {
     try std.testing.expectEqual(alice, who.user_id);
     try std.testing.expectEqual(Scope.controlplane, who.audience);
 
-    // Wrong password is rejected.
     const code2 = try svc.getRandomCode("alice@home");
     try std.testing.expectError(
         error.InvalidCredentials,
@@ -1499,7 +1055,6 @@ test "onboarded user logs in as device client, gets a token, and registers a dev
     try std.testing.expectEqual(Scope.device, sess.audience);
     try std.testing.expectEqual(alice, sess.user_id);
 
-    // Auto-bind on device login (idempotent).
     try svc.bindDevice(sess.user_id, equipment_no, "Alice's Nomad");
     try svc.bindDevice(sess.user_id, equipment_no, "Alice's Nomad");
     try std.testing.expectEqual(@as(i64, 1), try svc.deviceCount(alice));
@@ -1518,22 +1073,18 @@ test "first login issues a limited token; change reissues a full one" {
     const alice = created.id;
     const temp = created.temp_password; // server-generated; the admin hands it over once
 
-    // First login → limited `pending` token (both session and resolved caller).
     const code = try svc.getRandomCode("alice@home");
     const pending = try svc.login("alice@home", &clientHash(temp.slice(), code), false, null);
     try std.testing.expectEqual(Scope.pending, pending.audience);
     try std.testing.expectEqual(Scope.pending, (try svc.caller(&pending.token)).?.audience);
 
-    // Reusing the current password is rejected.
     try std.testing.expectError(error.SamePassword, svc.changePassword(alice, null, &password.md5Hex(temp.slice())));
 
-    // Change revokes the pending token and returns a full web session.
     const upgraded = try svc.changePassword(alice, null, &password.md5Hex("brandnew"));
     try std.testing.expectEqual(Scope.controlplane, upgraded.audience);
     try std.testing.expect((try svc.caller(&pending.token)) == null); // limited token dead
     try std.testing.expectEqual(Scope.controlplane, (try svc.caller(&upgraded.token)).?.audience);
 
-    // Subsequent logins are full; the old password no longer works.
     {
         const c = try svc.getRandomCode("alice@home");
         try std.testing.expectEqual(Scope.controlplane, (try svc.login("alice@home", &clientHash("brandnew", c), false, null)).audience);
@@ -1545,11 +1096,6 @@ test "first login issues a limited token; change reissues a full one" {
 }
 
 test "changePassword VERIFIES a supplied current password, and refuses without touching anything" {
-    // The MECHANISM half, at the service boundary: `current_md5` is checked
-    // whenever it is present, whatever audience the caller holds — the handler
-    // decides only WHO must present one. A wrong one is `WrongCurrentPassword`,
-    // distinct from the `InvalidCredentials` that also means "no such user", and
-    // it costs the caller nothing else: the session lives, the credential stands.
     var db = try sqlite.Db.openMemory();
     defer db.close();
     var svc = try testService(db);
@@ -1562,33 +1108,26 @@ test "changePassword VERIFIES a supplied current password, and refuses without t
         error.WrongCurrentPassword,
         svc.changePassword(alice, &password.md5Hex("not-alicepw"), &password.md5Hex("alicepw2")),
     );
-    // A too-short current password is a mismatch, not an index-past-the-end.
     try std.testing.expectError(
         error.WrongCurrentPassword,
         svc.changePassword(alice, "abc", &password.md5Hex("alicepw2")),
     );
-    // NOTHING happened: the session that asked still resolves and the old
-    // password still logs in. This is the lockout guard — verification runs
-    // before the UPDATE, before `revokeAllSessions`, before `issueSession`.
+    // A refusal must leave sessions and credential intact.
     try std.testing.expect((try svc.caller(&sess.token)) != null);
     _ = try webLogin(&svc, "alice@home", "alicepw");
 
-    // `SamePassword` is itself an oracle ("is X the current password?"), so a
-    // caller who cannot prove the current one is told `WrongCurrentPassword`
-    // even when the new password happens to BE the current one.
+    // `SamePassword` must not answer for a caller who failed verification.
     try std.testing.expectError(
         error.WrongCurrentPassword,
         svc.changePassword(alice, &password.md5Hex("wrong"), &password.md5Hex("alicepw")),
     );
 
-    // The right one goes through and rotates the credential.
     const fresh = try svc.changePassword(alice, &password.md5Hex("alicepw"), &password.md5Hex("alicepw2"));
     try std.testing.expectEqual(Scope.controlplane, fresh.audience);
     try std.testing.expect((try svc.caller(&sess.token)) == null);
     _ = try webLogin(&svc, "alice@home", "alicepw2");
 }
 
-/// Logs `email` in as a web client and returns the session.
 fn webLogin(svc: *Service, email: []const u8, pw: []const u8) !Session {
     const code = try svc.getRandomCode(email);
     return svc.login(email, &clientHash(pw, code), false, null);
@@ -1617,7 +1156,6 @@ test "changing the password revokes every existing session and reissues one" {
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
     const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
 
-    // Two live sessions: a browser and a device.
     const web = try webLogin(&svc, "alice@home", "alicepw");
     const equipment_no = "SN2026NOMAD0001";
     const dev = blk: {
@@ -1628,7 +1166,6 @@ test "changing the password revokes every existing session and reissues one" {
     try std.testing.expect((try svc.caller(&web.token)) != null);
     try std.testing.expect((try svc.caller(&dev.token)) != null);
 
-    // A voluntary password change logs out everywhere and hands back a fresh session.
     const fresh = try svc.changePassword(alice, null, &password.md5Hex("rotated!"));
     try std.testing.expectEqual(Scope.controlplane, fresh.audience);
     try std.testing.expect((try svc.caller(&web.token)) == null); // browser revoked
@@ -1659,12 +1196,8 @@ test "unlinking a device marks the binding inactive and kills its sessions" {
 }
 
 test "re-pairing an UNLINKED device brings it back — unlink is not a one-way door" {
-    // `unlinkDevice` KEEPS the row and flips it to 'N', and `bindDevice` was
-    // `INSERT OR IGNORE` — so the row already being there made every later
-    // pairing a silent no-op. The tablet signed in, got a live device session,
-    // and its binding stayed revoked for ever: the account screen showed no
-    // device for a Supernote that was sitting there syncing, and there was no
-    // way to undo it from the webapp OR from the device.
+    // Regression: `bindDevice` was INSERT OR IGNORE, so a revoked row could never
+    // come back.
     var db = try sqlite.Db.openMemory();
     defer db.close();
     var svc = try testService(db);
@@ -1679,8 +1212,6 @@ test "re-pairing an UNLINKED device brings it back — unlink is not a one-way d
     try svc.unlinkDevice(alice, equipment_no);
     try std.testing.expectEqual(@as(i64, 0), try svc.deviceCount(alice));
 
-    // Signing back in on the tablet runs exactly this — and it must bring the
-    // binding back rather than leave a live session attached to a revoked one.
     try svc.bindDevice(alice, equipment_no, "Alice's Nomad");
     try std.testing.expectEqual(@as(i64, 1), try svc.deviceCount(alice));
 
@@ -1691,9 +1222,7 @@ test "re-pairing an UNLINKED device brings it back — unlink is not a one-way d
 }
 
 test "re-binding an ACTIVE device changes nothing — this path runs on every login" {
-    // The other half of the upsert. `bindDevice` runs on every device login, so
-    // a version that always wrote would reset the date on each sync — the screen
-    // would read "linked seconds ago" for a tablet paired last year.
+    // Runs every login, so it must not re-date or rename an active binding.
     var db = try sqlite.Db.openMemory();
     defer db.close();
     var svc = try testService(db);
@@ -1719,12 +1248,6 @@ test "re-binding an ACTIVE device changes nothing — this path runs on every lo
 }
 
 test "the device's OWN name replaces the placeholder the file path stamped" {
-    // `resolveEquipment` binds a serial it has only just seen on the first file
-    // call, with the literal "Supernote app" — it has no name yet. `bindEquipment`
-    // is the device introducing itself, and by then the row already exists, so
-    // `bindDevice` (which never overwrites a label, because it runs on every
-    // login) left the placeholder in place for ever. The account screen showed
-    // "Supernote app" for a tablet that had reported "Supernote Nomad AA".
     var db = try sqlite.Db.openMemory();
     defer db.close();
     var svc = try testService(db);
@@ -1742,9 +1265,6 @@ test "the device's OWN name replaces the placeholder the file path stamped" {
 }
 
 test "an empty reported name never blanks the one already there" {
-    // The handler only calls this with a name the device actually sent, but the
-    // guard is here too: a device that reports "" must not erase a good label and
-    // leave a nameless row the screen has to fall back to the serial for.
     var db = try sqlite.Db.openMemory();
     defer db.close();
     var svc = try testService(db);
@@ -1762,10 +1282,6 @@ test "an empty reported name never blanks the one already there" {
 }
 
 test "an admin may not delete themselves — and the sole admin is told the other reason" {
-    // Two guards, two audiences. `CannotDeleteSelf` says "another administrator
-    // has to remove your account", which is impossible advice for the only
-    // administrator there is, so the sole admin gets `LastAdmin` instead. Order
-    // is the whole of it — see `deleteUser`.
     var db = try sqlite.Db.openMemory();
     defer db.close();
     var svc = try testService(db);
@@ -1775,31 +1291,21 @@ test "an admin may not delete themselves — and the sole admin is told the othe
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
     const bob = try onboardUser(&svc, admin, "bob@home", "bobpw");
 
-    // Sole admin deleting himself: the household reason, not the "ask somebody
-    // else" reason, because there IS nobody else.
     try std.testing.expectError(error.LastAdmin, svc.deleteUser(admin, admin, storage.files));
 
-    // With a second admin, the self rule is what bites.
     _ = try svc.setAdmin(bob, true);
     try std.testing.expectError(error.CannotDeleteSelf, svc.deleteUser(admin, admin, storage.files));
     try std.testing.expectError(error.CannotDeleteSelf, svc.deleteUser(bob, bob, storage.files));
 
-    // BOTH ACCOUNTS SURVIVED. The guards run before `purgeUser`, which destroys
-    // files — a refusal after that would be an error message on top of a data
-    // loss, which is the failure this ordering exists to prevent.
+    // Both guards run before `purgeUser` destroys files.
     const users = try svc.listUsers(std.testing.allocator);
     defer Service.freeUsers(std.testing.allocator, users);
     try std.testing.expectEqual(@as(usize, 2), users.len);
 
-    // And deleting SOMEBODY ELSE still works: this removes a footgun, not a verb.
     try svc.deleteUser(admin, bob, storage.files);
 }
 
 test "an admin may NOT reset their own password from the console" {
-    // The incident that started: a beta tester saw "Reset
-    // password" against their own row, pressed it, and locked themselves out of
-    // their own server. Every verb in that console points OUTWARD; this one
-    // pointed outward at everybody except the person holding it.
     var db = try sqlite.Db.openMemory();
     defer db.close();
     var svc = try testService(db);
@@ -1809,16 +1315,12 @@ test "an admin may NOT reset their own password from the console" {
 
     try std.testing.expectError(error.CannotResetSelf, svc.resetPassword(admin, admin));
 
-    // ...and their own credential is untouched by the attempt — the refusal has
-    // to happen BEFORE the write, or it is only an error message.
     const sess = try webLogin(&svc, "admin@home", "adminpw");
     try std.testing.expect((try svc.caller(&sess.token)) != null);
 
-    // Aimed at somebody else it still works: this removes a footgun, not a verb.
     _ = try svc.resetPassword(admin, alice);
 
-    // And the CLI's own path is unaffected — it has no actor, which is the whole
-    // reason it exists. A locked-out admin is recovered from the command line.
+    // The CLI recovery path has no actor and is unaffected.
     _ = try svc.resetPasswordFor(admin);
 }
 
@@ -1835,12 +1337,10 @@ test "deleting a user (admin-only) cascades away their sessions" {
     const sess = try webLogin(&svc, "alice@home", "alicepw");
     try std.testing.expect((try svc.caller(&sess.token)) != null);
 
-    // A non-admin cannot delete anyone.
     try std.testing.expectError(error.NotAdmin, svc.deleteUser(alice, admin, storage.files));
 
     try svc.deleteUser(admin, alice, storage.files);
     try std.testing.expect((try svc.caller(&sess.token)) == null); // cascade revoked the session
-    // The account is gone: a login attempt fails on credential lookup.
     const code = try svc.getRandomCode("alice@home");
     try std.testing.expectError(error.InvalidCredentials, svc.login("alice@home", &clientHash("alicepw", code), false, null));
 }
@@ -1855,7 +1355,6 @@ test "expired sessions are swept but live ones survive" {
 
     const live = try webLogin(&svc, "alice@home", "alicepw");
 
-    // Plant an already-expired session row (expires_at in the past).
     {
         var s = try db.prepare(
             "INSERT INTO sessions(token_hash, user_id, audience, equipment_no, created_at, expires_at) " ++
@@ -1883,15 +1382,11 @@ test "token entropy comes from the OS CSPRNG: two fresh services never replay a 
     var svc2 = try testService(db2);
     defer svc2.deinit();
 
-    // A broken RNG makes token-at-rest and everything else moot. A seeded userspace
-    // PRNG (fixed seed) would make two INDEPENDENTLY constructed services draw the
-    // SAME first token; the OS CSPRNG (getrandom, via std.Random.IoSource) does not.
+    // A fixed-seed PRNG would make two independent services draw the same token.
     const a = svc1.randomHex(token_len);
     const b = svc2.randomHex(token_len);
     try std.testing.expect(!std.mem.eql(u8, &a, &b));
 
-    // And successive draws within one service differ — not a stuck / all-zero source
-    // — and are lowercase hex spanning more than one symbol.
     const c = svc1.randomHex(token_len);
     const d = svc1.randomHex(token_len);
     try std.testing.expect(!std.mem.eql(u8, &c, &d));
@@ -1913,49 +1408,34 @@ test "the login challenge nonce is a 64-bit (16 hex) single-use code" {
     try std.testing.expectEqual(@as(usize, 16), code.len); // 16 hex = 64 bits
     for (code) |ch| try std.testing.expect(std.ascii.isHex(ch) and !std.ascii.isUpper(ch));
 
-    // Re-issuing supersedes the prior code (single-use) with a fresh one.
     const code2 = try svc.getRandomCode("someone@home");
     try std.testing.expect(!std.mem.eql(u8, &code, &code2));
-    // ...and does not grow the table: one account, one entry.
     try std.testing.expectEqual(@as(u32, 1), svc.challenges.count());
 }
 
 test "issuing a challenge reclaims OTHER accounts' expired ones" {
-    // THE LEAK. `random/code` is public and keyed by an attacker-chosen account
-    // string, and nothing ever removed an expired entry — `dropChallenge` only
-    // fired for the SAME account on re-request. At the route's 20/min/IP that is
-    // ~29k entries a day per IP, kept for ever, on a 50 MB budget.
-    //
-    // Asserted on the DURABLE fact — the live entry count — not on the code that
-    // comes back, which the leaking version returned identically.
+    // Regression: expired entries for other accounts were never removed.
     var db = try sqlite.Db.openMemory();
     defer db.close();
     var svc = try testService(db);
     defer svc.deinit();
 
-    // Three junk accounts, then age them past the TTL. (The clock is the real one,
-    // so the expiry is moved rather than the clock.)
+    // The clock is real, so expiry is moved instead.
     for ([_][]const u8{ "junk1@x", "junk2@x", "junk3@x" }) |a| _ = try svc.getRandomCode(a);
     try std.testing.expectEqual(@as(u32, 3), svc.challenges.count());
     var it = svc.challenges.valueIterator();
     while (it.next()) |v| v.expires = 0;
 
-    // A fourth request sweeps them: one live entry, not four.
     _ = try svc.getRandomCode("real@home");
     try std.testing.expectEqual(@as(u32, 1), svc.challenges.count());
     try std.testing.expect(svc.challenges.contains("real@home"));
 
-    // The sweep is expiry-driven, not a blanket clear: a LIVE entry survives the
-    // next issue, so the flow still works for two people logging in at once.
     _ = try svc.getRandomCode("other@home");
     try std.testing.expectEqual(@as(u32, 2), svc.challenges.count());
     try std.testing.expect(svc.challenges.contains("real@home"));
 }
 
 test "the challenge table refuses to grow past its cap, but never refuses a live account" {
-    // The sweep alone is not a bound: every entry inside one 5-minute TTL window is
-    // unexpired, so a flood still grows the table freely. The cap is what bounds it,
-    // and `download_tokens` is the pattern — refuse, do not evict.
     var db = try sqlite.Db.openMemory();
     defer db.close();
     var svc = try testService(db);
@@ -1966,21 +1446,16 @@ test "the challenge table refuses to grow past its cap, but never refuses a live
     _ = try svc.getRandomCode("bob@home");
     try std.testing.expectEqual(@as(u32, 2), svc.challenges.count());
 
-    // Full of UNEXPIRED entries: a new account is refused, and the refusal does not
-    // grow or corrupt the table.
     try std.testing.expectError(error.OutOfMemory, svc.getRandomCode("flood@x"));
     try std.testing.expectEqual(@as(u32, 2), svc.challenges.count());
     try std.testing.expect(!svc.challenges.contains("flood@x"));
 
-    // The legitimate-login worry, pinned: someone who already holds a challenge is
-    // `found_existing`, so a full table never refuses THEM — and the refusal path
-    // must not have destroyed the challenge they are about to redeem.
+    // A holder of a live challenge is never refused, and keeps its code.
     const again = try svc.getRandomCode("alice@home");
     try std.testing.expectEqual(@as(u32, 2), svc.challenges.count());
     try std.testing.expect(std.mem.eql(u8, &again, &svc.challenges.get("alice@home").?.code));
 
-    // Once an entry expires the sweep makes room again, so the cap is a bound, not
-    // a latch that wedges logins for ever after one flood.
+    // Expiry frees room again: a bound, not a latch.
     svc.challenges.getPtr("bob@home").?.expires = 0;
     _ = try svc.getRandomCode("carol@home");
     try std.testing.expectEqual(@as(u32, 2), svc.challenges.count());
@@ -1988,9 +1463,6 @@ test "the challenge table refuses to grow past its cap, but never refuses a live
 }
 
 test "an account longer than any real email is refused, so the entry cap bounds BYTES" {
-    // The entry cap alone bounds entries, not memory: `account` comes out of a body
-    // `json.zig` allows to be 64 KiB, so 4096 such keys would be ~256 MB against a
-    // 50 MB budget.
     var db = try sqlite.Db.openMemory();
     defer db.close();
     var svc = try testService(db);
@@ -2000,8 +1472,6 @@ test "an account longer than any real email is refused, so the entry cap bounds 
     try std.testing.expectError(error.OutOfMemory, svc.getRandomCode(&long));
     try std.testing.expectEqual(@as(u32, 0), svc.challenges.count());
 
-    // Exactly at the bound is still accepted — the limit is the RFC 5321 maximum
-    // for an address, so it cannot refuse a login that would otherwise work.
     const at = [_]u8{'a'} ** max_account_len;
     _ = try svc.getRandomCode(&at);
     try std.testing.expectEqual(@as(u32, 1), svc.challenges.count());
@@ -2016,11 +1486,8 @@ test "a session token authenticates, but the DB stores only its sha256 hash" {
     const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
 
     const sess = try webLogin(&svc, "alice@home", "alicepw");
-    // The RAW token resolves to the caller...
     try std.testing.expectEqual(alice, (try svc.caller(&sess.token)).?.user_id);
 
-    // ...yet the stored key is sha256(token): a row exists under the hash, and NONE
-    // under the raw token — so a stolen DB backup hands over no usable tokens.
     {
         var s = try db.prepare("SELECT COUNT(*) FROM sessions WHERE token_hash = ?1;");
         defer s.finalize();
@@ -2036,7 +1503,6 @@ test "a session token authenticates, but the DB stores only its sha256 hash" {
         try std.testing.expectEqual(@as(i64, 0), s.columnInt(0));
     }
 
-    // Logout (keyed by the hash) still drops it.
     try svc.logout(&sess.token);
     try std.testing.expect((try svc.caller(&sess.token)) == null);
 }
@@ -2050,7 +1516,6 @@ test "scope-dependent expiry: idle lapses controlplane but never device; pending
     const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
     _ = alice;
 
-    // A live web session and a live device session.
     const web = try webLogin(&svc, "alice@home", "alicepw");
     const equipment_no = "SN2026NOMAD0001";
     const dev = blk: {
@@ -2060,18 +1525,12 @@ test "scope-dependent expiry: idle lapses controlplane but never device; pending
     try std.testing.expect((try svc.caller(&web.token)) != null);
     try std.testing.expect((try svc.caller(&dev.token)) != null);
 
-    // Wind BOTH sessions' last use back past the control-plane idle window (the
-    // absolute cap stays far in the future). The web session lapses on IDLE; the
-    // device session has no idle window and survives — it ages out only on unlink
-    // or the ~2-year cap.
     const t = nowSeconds();
     try setLastUsed(&db, &web.token, t - controlplane_idle_s - 10);
     try setLastUsed(&db, &dev.token, t - controlplane_idle_s - 10);
     try std.testing.expect((try svc.caller(&web.token)) == null); // idle-expired
     try std.testing.expect((try svc.caller(&dev.token)) != null); // device: no idle expiry
 
-    // A pending (first-login) session is absolute-only: past its 15-minute cap it
-    // is gone, with no idle window in play.
     const bob = try svc.createUser(admin, "bob@home", false);
     const pending = blk: {
         const code = try svc.getRandomCode("bob@home");
@@ -2091,16 +1550,13 @@ test "user existence, capacity set/read, and pre-login global device unlink" {
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
     const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
 
-    // Existence probe.
     try std.testing.expect(try svc.userExistsByEmail("alice@home"));
     try std.testing.expect(!try svc.userExistsByEmail("nobody@home"));
 
-    // Capacity defaults to the household quota; can be overridden (device bind).
     try std.testing.expectEqual(default_capacity, try svc.userCapacity(alice));
     try svc.setCapacityTotal(alice, 25485312 * 1024);
     try std.testing.expectEqual(@as(i64, 25485312 * 1024), try svc.userCapacity(alice));
 
-    // A device session, then a pre-login global unlink (no user context) kills it.
     const equipment_no = "SN2026NOMAD0001";
     const dev = blk: {
         const code = try svc.getRandomCode("alice@home");
@@ -2115,16 +1571,13 @@ test "user existence, capacity set/read, and pre-login global device unlink" {
     try svc.unlinkDeviceGlobal("UNKNOWN-SERIAL"); // no-op, no error
 }
 
-/// Counts session rows by their STORED key (`token_hash`). Callers pass the value
-/// the row holds: a planted literal, or `password.hashToken(raw)` for a real token.
+/// Keyed by the stored value: a planted literal, or `hashToken(raw)`.
 fn sessionRowCount(db: *sqlite.Db, token_hash: []const u8) i64 {
     var r = (db.row("SELECT COUNT(*) FROM sessions WHERE token_hash = ?1;", &.{.{ .text = token_hash }}) catch return -1) orelse return -1;
     defer r.finalize();
     return r.int(0);
 }
 
-/// Overwrites a session's `last_used_at` (keyed by the RAW token's hash) so a test
-/// can place the idle window anywhere without waiting out the 14-day clock.
 fn setLastUsed(db: *sqlite.Db, token: []const u8, v: i64) !void {
     var s = try db.prepare("UPDATE sessions SET last_used_at = ?1 WHERE token_hash = ?2;");
     defer s.finalize();
@@ -2133,8 +1586,6 @@ fn setLastUsed(db: *sqlite.Db, token: []const u8, v: i64) !void {
     _ = try s.step();
 }
 
-/// Overwrites a session's `expires_at` (keyed by the RAW token's hash) — the only
-/// knob that matters for an absolute-only scope like `pending`.
 fn setExpires(db: *sqlite.Db, token: []const u8, v: i64) !void {
     var s = try db.prepare("UPDATE sessions SET expires_at = ?1 WHERE token_hash = ?2;");
     defer s.finalize();
@@ -2158,12 +1609,10 @@ test "admin user management: list users, last-admin guard, and password reset" {
         try std.testing.expectEqual(@as(usize, 2), users.len);
     }
 
-    // The last remaining admin cannot be deleted (would lock out administration).
     var storage = try TestStorage.init(db);
     defer storage.deinit();
     try std.testing.expectError(error.LastAdmin, svc.deleteUser(admin, admin, storage.files));
 
-    // Reset logs the target out everywhere and re-flags must-change.
     const sess = try svc.changePassword(bob, null, &password.md5Hex("bobreal0")); // clears must_change, mints a session
     try std.testing.expect((try svc.caller(&sess.token)) != null);
     const temp = try svc.resetPassword(admin, bob);
@@ -2175,8 +1624,6 @@ test "admin user management: list users, last-admin guard, and password reset" {
         if (std.mem.eql(u8, u.email, "bob@home")) try std.testing.expect(u.must_change);
     }
 
-    // The reset password is the SERVER's, handed back once: it works, the old one
-    // does not, and nothing stored can reproduce the plaintext.
     {
         const c = try svc.getRandomCode("bob@home");
         try std.testing.expectEqual(Scope.pending, (try svc.login("bob@home", &clientHash(temp.slice(), c), false, null)).audience);
@@ -2196,29 +1643,20 @@ test "setAdmin promotes and demotes, reports whether the flag moved, and will no
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
     const bob = (try svc.createUser(admin, "bob@home", false)).id;
 
-    // The guard, BEFORE there is a second admin: the last one cannot be demoted.
-    // Same shape as `deleteUser`'s — demoting your way to zero admins is the same
-    // lockout as deleting your way there, and this is the one that has no HTTP
-    // route yet (the mechanism
-    // rather than waiting for the console verb that will first need it).
     try std.testing.expectError(error.LastAdmin, svc.setAdmin(admin, false));
 
-    // Promotion is asserted THROUGH an admin-only call, not by reading the flag.
+    // Promotion is asserted through an admin-only call.
     try std.testing.expectError(error.NotAdmin, svc.createUser(bob, "carol@home", false));
     try std.testing.expect(try svc.setAdmin(bob, true));
     const carol = (try svc.createUser(bob, "carol@home", false)).id;
 
-    // Idempotent: a second promotion is a no-op, not an error — the CLI's
     // `make-admin` reports "already an administrator" off this false.
     try std.testing.expect(!try svc.setAdmin(bob, true));
 
-    // With two admins the guard lifts, and demotion really removes the capability.
     try std.testing.expect(try svc.setAdmin(admin, false));
     try std.testing.expectError(error.NotAdmin, svc.createUser(admin, "dave@home", false));
 
-    // Down to one again, and the guard is back.
     try std.testing.expectError(error.LastAdmin, svc.setAdmin(bob, false));
-    // A demotion that changes nothing is still a no-op rather than a guard trip.
     try std.testing.expect(!try svc.setAdmin(carol, false));
     try std.testing.expectError(error.UserNotFound, svc.setAdmin(9999, true));
 }
@@ -2244,15 +1682,10 @@ test "the server, not the admin, chooses temporary passwords — and stores only
     const bob = try svc.createUser(admin, "bob@home", false);
     const carol = try svc.createUser(admin, "carol@home", false);
 
-    // Generated, not chosen: two accounts made in a row do not share a password.
     try std.testing.expect(bob.temp_password.len > 0 and bob.temp_password.len <= password.max_temp_len);
     try std.testing.expect(!std.mem.eql(u8, bob.temp_password.slice(), carol.temp_password.slice()));
 
-    // Nothing recoverable is stored: the legacy `password_md5` column is blanked,
-    // and the credential lives ENCRYPTED in `cred_enc` — which holds neither the
-    // temp password nor even its bare md5, only a ciphertext that decrypts (with the
-    // server key) back to md5(temp). So "it cannot be shown again" is a fact about
-    // the database, and a stolen backup yields nothing usable either.
+    // `password_md5` is blank and `cred_enc` holds neither plaintext nor bare md5.
     {
         var s = try db.prepare("SELECT password_md5, cred_enc FROM users WHERE email = 'bob@home';");
         defer s.finalize();
@@ -2265,12 +1698,10 @@ test "the server, not the admin, chooses temporary passwords — and stores only
         try std.testing.expectEqualStrings(&password.md5Hex(bob.temp_password.slice()), &md5); // decrypts to md5(temp)
     }
 
-    // And the account owes a password change, so that secret unlocks nothing else.
     const info = (try svc.userInfo(std.testing.allocator, bob.id)).?;
     defer std.testing.allocator.free(info.email);
     try std.testing.expect(info.must_change);
 
-    // A non-admin still cannot create or reset.
     try std.testing.expectError(error.NotAdmin, svc.createUser(bob.id, "dave@home", false));
     try std.testing.expectError(error.NotAdmin, svc.resetPassword(bob.id, carol.id));
 }
@@ -2287,7 +1718,6 @@ test "admin device listing: every binding of the named user, revoked ones includ
 
     try svc.bindDevice(alice, "SN-NOMAD-1", "Alice's Nomad");
     try svc.bindDevice(alice, "SN-MANTA-2", "Alice's Manta");
-    // Model/firmware are set by the device's own bind call, not by ours.
     try db.exec("UPDATE devices SET model = 'N6', firmware = 'SN100.B000' WHERE equipment_no = 'SN-NOMAD-1';");
 
     {
@@ -2301,17 +1731,12 @@ test "admin device listing: every binding of the named user, revoked ones includ
                 try std.testing.expectEqualStrings("N6", d.model.?);
                 try std.testing.expectEqualStrings("SN100.B000", d.firmware.?);
             } else {
-                // A device that never sent its details has NULL model/firmware, and
-                // the console must be able to render that rather than be handed "".
                 try std.testing.expect(d.model == null);
                 try std.testing.expect(d.firmware == null);
             }
         }
     }
 
-    // Unlinking is a soft status flip, so the binding STAYS in the listing —
-    // that is what makes it re-pairable, and hiding it would misreport the tablet
-    // as never having been linked.
     try svc.adminUnlinkDevice(admin, alice, "SN-MANTA-2");
     const devices = try svc.listUserDevices(std.testing.allocator, admin, alice);
     defer Service.freeDevices(std.testing.allocator, devices);
@@ -2333,26 +1758,20 @@ test "admin device unlink: A's admin action can NEVER reach B's binding by id co
     const bob = try onboardUser(&svc, admin, "bob@home", "bobpw123");
 
     try svc.bindDevice(alice, "SN-ALICE-1", "Alice's Nomad");
-    // Bob's tablet, and a live device session on it, so a stray unlink would be
-    // visible twice over: as a status flip AND as his tablet being logged out.
+    // A live session on Bob's tablet makes a stray unlink visible twice.
     const bob_session = blk: {
         const code = try svc.getRandomCode("bob@home");
         break :blk try svc.login("bob@home", &clientHash("bobpw123", code), true, "SN-BOB-1");
     };
     try svc.bindDevice(bob, "SN-BOB-1", "Bob's Manta");
 
-    // THE CASE: an elevated admin names Alice's user id and Bob's serial. The
-    // caller-scoped `unlinkDevice` would have matched zero rows and reported
-    // success, leaving the admin believing Bob's tablet was cut off.
+    // Alice's id with Bob's serial: the scoped UPDATE would match zero rows and 200.
     try std.testing.expectError(error.DeviceNotFound, svc.adminUnlinkDevice(admin, alice, "SN-BOB-1"));
     try std.testing.expectEqual(@as(i64, 1), try svc.deviceCount(bob)); // still bound
     try std.testing.expect((try svc.caller(&bob_session.token)) != null); // still signed in
 
-    // A serial NOBODY has is refused identically — the two must be
-    // indistinguishable, or this endpoint becomes a cross-account probe.
     try std.testing.expectError(error.DeviceNotFound, svc.adminUnlinkDevice(admin, alice, "SN-NOBODY"));
 
-    // And the same for reading: listing is scoped to the named user, never merged.
     {
         const devices = try svc.listUserDevices(std.testing.allocator, admin, alice);
         defer Service.freeDevices(std.testing.allocator, devices);
@@ -2360,40 +1779,26 @@ test "admin device unlink: A's admin action can NEVER reach B's binding by id co
         try std.testing.expectEqualStrings("SN-ALICE-1", devices[0].equipment_no);
     }
 
-    // The correct pairing works, and takes the tablet's sessions with it.
     try svc.adminUnlinkDevice(admin, bob, "SN-BOB-1");
     try std.testing.expectEqual(@as(i64, 0), try svc.deviceCount(bob));
     try std.testing.expect((try svc.caller(&bob_session.token)) == null);
 
-    // Idempotent on an already-revoked binding: the row still belongs to Bob, so
-    // this is a no-op rather than a 404 — a double-click must not read as an error.
     try svc.adminUnlinkDevice(admin, bob, "SN-BOB-1");
 
-    // A NON-admin reaches their OWN row through these same two calls, and nothing
-    // else. That is the self-service half of the account screen: until it existed,
-    // a household member could not see their own bindings at all (
-    // §5), and the fix must not be a second self-scoped copy of the query with its
-    // own idea of ownership — so the SAME functions widen by exactly one case.
-    // Alice is not an admin.
+    // Self-service: non-admin Alice reaches only her own row via the same calls.
     {
         const mine = try svc.listUserDevices(std.testing.allocator, alice, alice);
         defer Service.freeDevices(std.testing.allocator, mine);
         try std.testing.expectEqual(@as(usize, 1), mine.len);
         try std.testing.expectEqualStrings("SN-ALICE-1", mine[0].equipment_no);
     }
-    // Bob's row stays out of reach in BOTH directions — reading and acting.
     try std.testing.expectError(error.NotAdmin, svc.listUserDevices(std.testing.allocator, alice, bob));
     try std.testing.expectError(error.NotAdmin, svc.adminUnlinkDevice(alice, bob, "SN-BOB-1"));
-    // And naming her OWN id with somebody else's serial is refused by the same
-    // per-binding ownership check an admin hits, with the same `DeviceNotFound` an
-    // unknown serial gets — so self-service is no cross-account probe either.
     try std.testing.expectError(error.DeviceNotFound, svc.adminUnlinkDevice(alice, alice, "SN-BOB-1"));
     try std.testing.expectError(error.DeviceNotFound, svc.adminUnlinkDevice(alice, alice, "SN-NOBODY"));
-    // Her own binding, she may revoke.
     try svc.adminUnlinkDevice(alice, alice, "SN-ALICE-1");
     try std.testing.expectEqual(@as(i64, 0), try svc.deviceCount(alice));
 
-    // An unknown TARGET is a plain not-found — an admin may learn an id is unused.
     try std.testing.expectError(error.UserNotFound, svc.listUserDevices(std.testing.allocator, admin, 9999));
 }
 
@@ -2407,33 +1812,27 @@ test "admin quota: read defaults, write, and lowering BELOW usage is allowed and
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
     const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
 
-    // A fresh account reads the household default with nothing used.
     {
         const q = try svc.userQuota(admin, alice);
         try std.testing.expectEqual(@as(i64, 0), q.used_bytes);
         try std.testing.expectEqual(default_capacity, q.total_bytes);
     }
 
-    // Plant real usage, as a sync would.
     try db.exec("UPDATE capacity SET used_bytes = 5000 WHERE user_id = (SELECT id FROM users WHERE email = 'alice@home');");
 
-    // Raising the allotment is unremarkable.
     {
         const q = try svc.setUserQuota(admin, alice, 1_000_000);
         try std.testing.expectEqual(@as(i64, 5000), q.used_bytes);
         try std.testing.expectEqual(@as(i64, 1_000_000), q.total_bytes);
     }
 
-    // THE POINT OF THE ITEM: an allotment BELOW current usage is accepted, is
-    // stored verbatim (not clamped up to `used_bytes`), and destroys nothing. It
-    // means "stop growing", and the meter has to be able to draw used > total.
+    // Below usage: stored verbatim, nothing deleted; the meter draws used > total.
     {
         const q = try svc.setUserQuota(admin, alice, 100);
         try std.testing.expectEqual(@as(i64, 100), q.total_bytes); // NOT clamped to 5000
         try std.testing.expectEqual(@as(i64, 5000), q.used_bytes); // usage untouched
         try std.testing.expect(q.used_bytes > q.total_bytes);
     }
-    // Nothing was deleted to make the numbers agree.
     {
         var s = try db.prepare("SELECT used_bytes FROM capacity WHERE user_id = ?1;");
         defer s.finalize();
@@ -2442,14 +1841,11 @@ test "admin quota: read defaults, write, and lowering BELOW usage is allowed and
         try std.testing.expectEqual(@as(i64, 5000), s.columnInt(0));
     }
 
-    // Zero is legal — the strongest form of the same instruction.
     try std.testing.expectEqual(@as(i64, 0), (try svc.setUserQuota(admin, alice, 0)).total_bytes);
-    // A negative total is not a byte count, and a rejected write changes nothing.
     try std.testing.expectError(error.InvalidQuota, svc.setUserQuota(admin, alice, -1));
     try std.testing.expectEqual(@as(i64, 0), (try svc.userQuota(admin, alice)).total_bytes);
 
-    // Authorization: non-admins are refused both ways, including on themselves —
-    // a quota is an allotment, not a self-service setting.
+    // A quota is an allotment, not a self-service setting.
     try std.testing.expectError(error.NotAdmin, svc.userQuota(alice, alice));
     try std.testing.expectError(error.NotAdmin, svc.setUserQuota(alice, alice, 1 << 40));
     try std.testing.expectError(error.UserNotFound, svc.userQuota(admin, 9999));
@@ -2458,16 +1854,13 @@ test "admin quota: read defaults, write, and lowering BELOW usage is allowed and
 
 // ---- admin elevation ----
 
-/// Overwrites a session's elevation columns directly, so a test can place the
-/// window anywhere relative to now without waiting out a 15-minute clock. The
-/// production path only ever writes `now`-relative values; this is the only way
-/// to exercise the boundaries themselves.
+/// Writes elevation columns directly, to test the window boundaries.
 fn plantElevation(db: *sqlite.Db, token: []const u8, at: ?i64, until: ?i64) !void {
     var s = try db.prepare("UPDATE sessions SET elevated_at = ?1, elevated_until = ?2 WHERE token_hash = ?3;");
     defer s.finalize();
     s.bindIntOpt(1, at);
     s.bindIntOpt(2, until);
-    s.bindText(3, &password.hashToken(token)); // callers pass the RAW token; the row is keyed by its hash
+    s.bindText(3, &password.hashToken(token));
     _ = try s.step();
 }
 
@@ -2483,36 +1876,28 @@ test "elevation: an admin re-authenticates through the challenge flow; a session
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
     _ = try svc.changePassword(admin, null, &password.md5Hex("adminnew")); // clear must_change
 
-    // A fresh session is NOT elevated. Signing in is not proving you are at the
-    // keyboard right now, which is the whole premise of the gate.
     const sess = try webLogin(&svc, "admin@home", "adminnew");
     try std.testing.expect(!(try svc.caller(&sess.token)).?.elevated);
 
-    // Elevation requires a challenge code, exactly like login — there is no
-    // second, replayable credential path.
     try std.testing.expectError(
         error.NoChallenge,
         svc.elevate(admin, &sess.token, &clientHash("adminnew", "abcdef0123456789".*)),
     );
 
-    // Wrong password with a valid code: refused, and the session stays un-elevated.
     {
         const code = try svc.getRandomCode("admin@home");
         try std.testing.expectError(error.InvalidCredentials, svc.elevate(admin, &sess.token, &clientHash("wrongpw", code)));
         try std.testing.expect(!(try svc.caller(&sess.token)).?.elevated);
     }
 
-    // Right password: elevated, with a deadline one idle window out.
     const before = nowSeconds();
     const code = try svc.getRandomCode("admin@home");
     const until = try svc.elevate(admin, &sess.token, &clientHash("adminnew", code));
     try std.testing.expect(until >= before + elevation_idle_s);
     try std.testing.expect((try svc.caller(&sess.token)).?.elevated);
 
-    // The challenge was single-use: replaying the very same response fails.
     try std.testing.expectError(error.NoChallenge, svc.elevate(admin, &sess.token, &clientHash("adminnew", code)));
 
-    // Elevation is per SESSION, not per user: a second browser is still outside.
     const other = try webLogin(&svc, "admin@home", "adminnew");
     try std.testing.expect(!(try svc.caller(&other.token)).?.elevated);
     try std.testing.expect((try svc.caller(&sess.token)).?.elevated); // and the first is unaffected
@@ -2528,10 +1913,6 @@ test "elevation: a non-admin is refused indistinguishably from a wrong password"
 
     const sess = try webLogin(&svc, "alice@home", "alicepw");
 
-    // Alice's password is CORRECT here. She is simply not an administrator, and
-    // the error she gets must be the same one a wrong password produces — a
-    // distinct "not an admin" would turn this endpoint into an oracle for who in
-    // the household can administer the server.
     const right = blk: {
         const code = try svc.getRandomCode("alice@home");
         break :blk svc.elevate(alice, &sess.token, &clientHash("alicepw", code));
@@ -2551,8 +1932,7 @@ test "elevation: a session that still owes a password change cannot elevate arou
     var svc = try testService(db);
     defer svc.deinit();
 
-    // The bootstrap admin before the mandatory first change: an ADMIN, with the
-    // right password, holding a `pending` session.
+    // Bootstrap admin, right password, `pending` session.
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
     const pending = blk: {
         const code = try svc.getRandomCode("admin@home");
@@ -2560,13 +1940,10 @@ test "elevation: a session that still owes a password change cannot elevate arou
     };
     try std.testing.expectEqual(Scope.pending, pending.audience);
 
-    // `must_change_password` exists to force a password change; elevation must not
-    // be a way around it.
     const code = try svc.getRandomCode("admin@home");
     try std.testing.expectError(error.InvalidCredentials, svc.elevate(admin, &pending.token, &clientHash("adminpw", code)));
     try std.testing.expect(!(try svc.caller(&pending.token)).?.elevated);
 
-    // After the change, the fresh session can elevate normally.
     const full = try svc.changePassword(admin, null, &password.md5Hex("adminnew"));
     const code2 = try svc.getRandomCode("admin@home");
     _ = try svc.elevate(admin, &full.token, &clientHash("adminnew", code2));
@@ -2583,8 +1960,6 @@ test "elevation: the window slides on activity but the absolute ceiling still en
     const sess = try webLogin(&svc, "admin@home", "adminnew");
     const tok = &sess.token;
 
-    // Elevated a while ago, well inside both bounds: activity slides the idle
-    // deadline forward by a full window.
     {
         const t = nowSeconds();
         try plantElevation(&db, tok, t - 60, t + 60);
@@ -2593,9 +1968,7 @@ test "elevation: the window slides on activity but the absolute ceiling still en
         try std.testing.expect((try svc.caller(tok)).?.elevated);
     }
 
-    // Near the CEILING: the slide is clamped to `elevated_at + absolute`, not
-    // `now + idle`. Without this clamp a console polling in a background tab would
-    // renew itself forever and elevation would never actually end.
+    // Near the ceiling the slide clamps to `elevated_at + absolute`.
     {
         const t = nowSeconds();
         const started = t - (elevation_absolute_s - 120); // 2 min of ceiling left
@@ -2605,9 +1978,6 @@ test "elevation: the window slides on activity but the absolute ceiling still en
         try std.testing.expect(renewed < t + elevation_idle_s); // clamped, not a full window
     }
 
-    // PAST the ceiling, with the idle deadline still in the future: not elevated,
-    // and activity cannot resurrect it. This is the case a single stored timestamp
-    // could not have expressed.
     {
         const t = nowSeconds();
         try plantElevation(&db, tok, t - elevation_absolute_s - 60, t + 600);
@@ -2615,7 +1985,6 @@ test "elevation: the window slides on activity but the absolute ceiling still en
         try std.testing.expect((try svc.renewElevation(tok)) == null);
     }
 
-    // IDLE lapsed, ceiling still fine: also not elevated, also not renewable.
     {
         const t = nowSeconds();
         try plantElevation(&db, tok, t - 120, t - 1);
@@ -2623,8 +1992,6 @@ test "elevation: the window slides on activity but the absolute ceiling still en
         try std.testing.expect((try svc.renewElevation(tok)) == null);
     }
 
-    // A never-elevated session is not renewable either — renewal extends, it never
-    // grants, which is what makes it safe to call before authorization.
     try plantElevation(&db, tok, null, null);
     try std.testing.expect((try svc.renewElevation(tok)) == null);
     try std.testing.expect(!(try svc.caller(tok)).?.elevated);
@@ -2638,7 +2005,6 @@ test "elevation: lock clears it at once, and a password reset takes it with the 
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
     _ = try svc.changePassword(admin, null, &password.md5Hex("adminnew"));
 
-    // A second admin, so the reset below is not the last-admin case.
     const other = try svc.createUser(admin, "other@home", true);
     _ = try svc.changePassword(other.id, null, &password.md5Hex("otherpw1"));
 
@@ -2649,13 +2015,11 @@ test "elevation: lock clears it at once, and a password reset takes it with the 
     }
     try std.testing.expect((try svc.caller(&sess.token)).?.elevated);
 
-    // Lock takes effect on the very next resolve — no cached capability outlives it.
     try svc.lockElevation(&sess.token);
     try std.testing.expect(!(try svc.caller(&sess.token)).?.elevated);
     try svc.lockElevation(&sess.token); // idempotent
     try std.testing.expect((try svc.caller(&sess.token)) != null); // the SESSION survives; only elevation went
 
-    // Re-elevate, then have the other admin reset this account's password.
     {
         const code = try svc.getRandomCode("admin@home");
         _ = try svc.elevate(admin, &sess.token, &clientHash("adminnew", code));
@@ -2664,9 +2028,6 @@ test "elevation: lock clears it at once, and a password reset takes it with the 
 
     _ = try svc.resetPassword(other.id, admin);
 
-    // The session row is gone, so the elevation on it is gone with it — this is
-    // the payoff for elevation being a column on `sessions` rather than a second
-    // token with a lifetime of its own to remember to revoke.
     try std.testing.expect((try svc.caller(&sess.token)) == null);
     try std.testing.expectEqual(@as(i64, 0), sessionRowCount(&db, &password.hashToken(&sess.token)));
 }

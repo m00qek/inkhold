@@ -1,6 +1,4 @@
-//! Auth handlers: version, login-code issuance, login, change-password, logout,
-//! and the SPA session-restore (`/me`). Thin HTTP shells over the auth `Service`:
-//! parse the body, call the service, respond with the official envelope.
+//! Auth handlers: login challenge, login, password change, logout, `/me`.
 
 const std = @import("std");
 const router = @import("../http/router.zig");
@@ -25,14 +23,10 @@ pub const api_version = "0.0.1";
 const RandomCodeReq = struct { account: []const u8, countryCode: ?[]const u8 = null };
 const RandomCodeVO = struct { success: bool = true, randomCode: []const u8, timestamp: i64 };
 
-/// `password` is the login challenge: `sha256_hex(md5_hex(pw) + randomCode)`.
-///
-/// Device-ness is read from `equipment` (the client's self-declared face: 1 web ·
-/// 2 app · 3 terminal · 4 user platform), NOT from `equipmentNo`. The official
-/// Android app logs in with `equipmentNo: null` but `equipment: 2`, supplying its
-/// serial per-request instead — so `equipmentNo != null` misses it. `equipment`
-/// is type-loose on the wire (the app sends the int `2`, the web the string
-/// `"1"`), hence `json.LooseInt`.
+/// `password` is `sha256_hex(md5_hex(pw) + randomCode)`. Device-ness comes from
+/// `equipment` (1 web, 2 app, 3 terminal, 4 user platform), not `equipmentNo`:
+/// the Android app logs in with `equipmentNo: null`, `equipment: 2`. The field is
+/// an int from the app and a string from the web, hence `LooseInt`.
 const LoginReq = struct {
     account: []const u8,
     password: []const u8,
@@ -42,44 +36,31 @@ const LoginReq = struct {
 const LoginVO = struct {
     success: bool = true,
     token: ?[]const u8 = null,
-    /// Whether the account itself is usable/provisioned — the app reads this to
-    /// confirm the login "took". Always `"Y"` for a successful device login (the
-    /// household account is always provisioned). Distinct from `isBindEquipment`,
-    /// which is about the SERIAL, not the account.
+    /// Always "Y" on a device login; the app reads it to confirm the login took.
+    /// `isBindEquipment` is about the serial.
     isBind: ?[]const u8 = null,
     isBindEquipment: ?[]const u8 = null,
-    /// The issued session is a first-login `pending` one — the client must route
-    /// to the change-password page before anything else works.
+    /// A `pending` session: the client must change the password first.
     mustChangePassword: bool = false,
 };
 
-/// Whether a login body describes a DEVICE client (sync/file face) rather than
-/// the web SPA. True when a serial is present (the Nomad's `login/equipment`) OR
-/// the client self-declares an app/terminal face via `equipment` ∈ {2,3}. The
-/// web SPA sends neither (`equipment` 1/absent), so it stays control-plane.
+/// A serial present (Nomad `login/equipment`) or `equipment` in {2,3}.
 fn isDeviceLogin(in: LoginReq) bool {
     if (in.equipmentNo != null) return true;
     if (in.equipment) |e| return e.value == 2 or e.value == 3;
     return false;
 }
 
-/// GET /api/user/me — lets the SPA restore its session after a reload (the
-/// session cookie is HttpOnly, so JS can't inspect it directly).
+/// The session cookie is HttpOnly, so the SPA restores its session through `/me`.
 const MeVO = struct { success: bool = true, email: []const u8, isAdmin: bool, mustChangePassword: bool };
 
-/// `newPassword` is `md5_hex(new_plaintext)`, computed by the client.
-///
-/// `currentPassword` is `md5_hex(current_plaintext)`, hashed at the same client
-/// seam so an existing password is no more exposed on the wire than a new one.
-/// It is OPTIONAL on the wire and REQUIRED by policy of a `controlplane` caller —
-/// see the handler, which is where that policy lives. A first-login `pending`
-/// caller omits it: it has nothing to check against but the temporary password it
-/// proved seconds ago.
+/// Both fields are `md5_hex` of the plaintext, hashed client-side.
+/// `currentPassword` is required of a `controlplane` caller (see the handler);
+/// a `pending` caller omits it.
 const ChangePasswordReq = struct { newPassword: []const u8, currentPassword: ?[]const u8 = null };
 
 // ---- handlers ----
 
-/// GET /api/version -> the API version string.
 pub fn version(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = ctx;
     _ = params;
@@ -88,7 +69,6 @@ pub fn version(ctx: *Context, req: *Request, params: Params) anyerror!void {
     });
 }
 
-/// POST …/query/random/code -> issue a single-use login challenge code.
 pub fn randomCode(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
@@ -100,10 +80,8 @@ pub fn randomCode(ctx: *Context, req: *Request, params: Params) anyerror!void {
     try json.respond(ctx.gpa, req, .ok, RandomCodeVO{ .randomCode = &code, .timestamp = now_ms }, null);
 }
 
-/// POST …/login/new (or /login/equipment) -> verify the challenge and issue a
-/// session. Control-plane logins get an HttpOnly cookie; device logins get the
-/// token in the body plus `isBindEquipment` telling them whether they still need
-/// to bind.
+/// POST …/login/new and /login/equipment. Control-plane logins get an HttpOnly
+/// cookie; device logins get the token in the body.
 pub fn loginNew(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
@@ -111,8 +89,6 @@ pub fn loginNew(ctx: *Context, req: *Request, params: Params) anyerror!void {
     defer parsed.deinit();
     const in = parsed.value;
 
-    // Discriminate the face by the client's self-declared kind, not by whether it
-    // supplied a serial — the app is a device client that logs in without one.
     const is_device = isDeviceLogin(in);
 
     const session = svc.login(in.account, in.password, is_device, in.equipmentNo) catch |err| switch (err) {
@@ -123,10 +99,8 @@ pub fn loginNew(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
     const must_change = session.audience == .pending;
     if (is_device) {
-        // Token in the BODY: a device client reads `token` from JSON and carries
-        // it in `x-access-token`. `isBindEquipment` reports whether the SUPPLIED
-        // serial (the Nomad sends one; the app does not) is already bound — the app
-        // self-binds lazily on its first file call, so "N" here is expected for it.
+        // The app sends no serial and self-binds on its first file call, so "N" is
+        // expected for it.
         const bound = if (in.equipmentNo) |eno| (svc.isDeviceBound(session.user_id, eno) catch false) else false;
         try json.respond(ctx.gpa, req, .ok, LoginVO{
             .token = &session.token,
@@ -141,23 +115,10 @@ pub fn loginNew(ctx: *Context, req: *Request, params: Params) anyerror!void {
     }
 }
 
-/// PUT /api/user/password -> change password. Revokes every existing session and
-/// issues a fresh control-plane session (delivered as a new cookie). Reachable by
-/// a first-login `pending` token or a full control-plane session.
-///
-/// **This handler owns the POLICY half of the current-password check; the service
-/// owns the MECHANISM half.** Here: a `controlplane` caller MUST supply
-/// `currentPassword`, because a live session is a longer-lived thing than a
-/// password prompt — a borrowed laptop, an unlocked screen — and without the
-/// demand anyone who reaches a signed-in window can lock the owner out of their
-/// own household cloud. A `pending` caller must
-/// NOT be made to supply one: the only credential it could offer is the temporary
-/// password it proved seconds ago.
-///
-/// In the service: whenever a current password IS supplied it is verified, for
-/// every audience. The two halves together mean the check cannot be dodged by
-/// picking a caller — a `pending` token with a WRONG current password is refused
-/// too, it simply is not required to send one.
+/// PUT /api/user/password. Revokes every session and issues a fresh
+/// control-plane cookie. A `controlplane` caller must prove the current password
+/// (a live session outlasts a password prompt); a `pending` one need not, but the
+/// service verifies any password supplied, whatever the audience.
 pub fn changePassword(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
@@ -165,9 +126,7 @@ pub fn changePassword(ctx: *Context, req: *Request, params: Params) anyerror!voi
     var parsed = json.readBody(ChangePasswordReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
-    // POLICY. Answered with the SAME code a wrong one gets: "you did not prove the
-    // current password" is one outcome, not two, and the account page renders it
-    // as "That isn't your current password." either way.
+    // Same code as a wrong password: one outcome.
     if (caller.audience == .controlplane and parsed.value.currentPassword == null)
         return fail(ctx, req, .ok, "INVALID_CREDENTIALS", "current password required");
 
@@ -182,7 +141,6 @@ pub fn changePassword(ctx: *Context, req: *Request, params: Params) anyerror!voi
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, cookie);
 }
 
-/// POST /api/user/logout -> delete the presented token and clear the cookie.
 pub fn logout(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
@@ -192,7 +150,6 @@ pub fn logout(ctx: *Context, req: *Request, params: Params) anyerror!void {
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, cleared);
 }
 
-/// GET /api/user/me -> the caller's identity, for SPA session restore on reload.
 pub fn me(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
@@ -209,8 +166,7 @@ pub fn me(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
 // ---- helpers ----
 
-/// Builds a session Set-Cookie value into `buf`. `Secure` is added only under
-/// TLS (otherwise a dev browser on plain HTTP would never send it back).
+/// `Secure` only under TLS, or a plain-HTTP dev browser never sends it back.
 fn sessionCookie(buf: []u8, token: []const u8, secure: bool, max_age: i64) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}={s}; HttpOnly; SameSite=Strict; Path=/; Max-Age={d}{s}", .{
         context.session_cookie_name, token, max_age, if (secure) "; Secure" else "",

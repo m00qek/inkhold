@@ -1,44 +1,14 @@
-//! `LAYERINFO` parser — the per-page layer-panel state (tier-2 page data).
-//!
-//! A page block may carry a `LAYERINFO` value: a JSON array describing the FULL
-//! layer stack in **top-to-bottom order, including hidden and deleted entries**.
-//! `LAYERSEQ` is that same order filtered down to the layers the device actually
-//! draws (hidden and deleted both omitted) — capture-proven on
-//! `tests/fixtures/layers_edited.note`. Display names live ONLY here: the layer
-//! block's `LAYERNAME` is a slot constant (`LAYER3`), never the user's name.
-//!
-//! ## Two encodings, both real — mixed per page within one file
-//!
-//! - **`#`-JSON** (legacy): literal JSON with `#` standing in where JSON syntax
-//!   expects `:`. First byte `[` or `{`.
-//! - **base64 of plain JSON**: an on-device layer-panel edit REWRITES that
-//!   page's `LAYERINFO` as base64-encoded ordinary JSON. First byte is neither
-//!   `[` nor `{`.
-//!
-//! `layers_edited.note` carries both at once (page 1 `#`-JSON, page 2 base64),
-//! which is why detection is per-value, on the first byte.
-//!
-//! The `#` fixup is applied **only at structural positions** — while scanning
-//! OUTSIDE a JSON string (with escape handling) — never inside one, so a layer
-//! *name* containing a literal `#` survives. A naive global replace would
-//! corrupt it.
-//!
-//! ## Hostile-input posture
-//!
-//! Mirrors the container parser's: malformed `LAYERINFO` (bad base64, junk
-//! JSON, an id that fits no layer model) is a **recorded absence**, never an
-//! error — the note still parses. Only `Allocator.Error` escapes `parse`.
+//! `LAYERINFO` parser: per-page layer-panel state, full stack top-to-bottom
+//! (see `note-format.md` §4.3). Encoding is detected per value on the first
+//! byte. Malformed values are a recorded absence, never an error.
 
 const std = @import("std");
 
-/// One layer's panel state, typed. Order within the parsed slice is the file's
-/// order: the full stack, top-to-bottom.
+/// One layer's panel state, in file order (top-to-bottom).
 pub const Entry = struct {
-    /// `0` = MAINLAYER, `1..3` = LAYER1..LAYER3, `-1` = BGLAYER (the
-    /// background/template layer; `is_background` is set on the same entry).
+    /// `0` = MAINLAYER, `1..3` = LAYER1..3, `-1` = BGLAYER.
     layer_id: i32,
-    /// The user-visible display name (user-renamable, e.g. "Layer Renamed").
-    /// This is the ONLY place display names exist in the format.
+    /// The user's display name; the only place names exist in the format.
     name: []const u8,
     is_visible: bool,
     is_deleted: bool,
@@ -46,9 +16,7 @@ pub const Entry = struct {
     is_background: bool,
 };
 
-/// The JSON shape the device writes. Unknown fields (`isAllowAdd`,
-/// `isAllowUp`, `isAllowDown`) are ignored; `layerId` is required — an entry
-/// without one describes no layer and marks the whole value malformed.
+/// The device's JSON shape; `layerId` is required, unknown fields ignored.
 const Wire = struct {
     layerId: i64,
     name: []const u8 = "",
@@ -58,13 +26,8 @@ const Wire = struct {
     isDeleted: bool = false,
 };
 
-/// Parses a raw `LAYERINFO` value into typed entries, or **null when the value
-/// is malformed in any way** (the recorded-absence posture above). Detection is
-/// on the first byte: `[`/`{` → `#`-JSON, anything else → base64.
-///
-/// Everything allocated (including the returned slice and the names it holds)
-/// comes from `a`, which is expected to be an arena: intermediate buffers are
-/// not individually freed, and names may alias them.
+/// Parses a raw `LAYERINFO` value, or null when malformed. `[`/`{` first means
+/// `#`-JSON, anything else base64. Allocates from `a`, expected to be an arena.
 pub fn parse(a: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error!?[]const Entry {
     if (raw.len == 0) return null;
 
@@ -86,7 +49,6 @@ pub fn parse(a: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error!?[]c
     const out = try a.alloc(Entry, wires.len);
     for (wires, out) |w, *entry| {
         entry.* = .{
-            // An id outside i32 fits no layer model this format has ever shown.
             .layer_id = std.math.cast(i32, w.layerId) orelse return null,
             .name = w.name,
             .is_visible = w.isVisible,
@@ -98,11 +60,8 @@ pub fn parse(a: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error!?[]c
     return out;
 }
 
-/// Copies `raw` and turns `#` back into `:` at STRUCTURAL positions only —
-/// scanning with JSON string/escape state, so a `#` inside a quoted name is
-/// left alone. This is the tokenizer-level substitution the encoding calls for:
-/// the device wrote `#` wherever JSON syntax wanted `:` (the `:` would not
-/// survive the `<KEY:VALUE>` grammar of its own metadata parser).
+/// Turns `#` back into `:` only outside JSON strings, so a `#` in a layer name
+/// survives.
 fn decodeHashJson(a: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]u8 {
     const out = try a.dupe(u8, raw);
     var in_string = false;
@@ -133,14 +92,10 @@ fn decodeBase64(a: std.mem.Allocator, raw: []const u8) (std.mem.Allocator.Error 
     return buf;
 }
 
-// ---------------------------------------------------------------------------
-// Tests. Real-value strings are verbatim from the captures; the full-fixture
-// assertions live in tests/note_test.zig.
-// ---------------------------------------------------------------------------
+// ---- tests (strings verbatim from captures) ----
 
 const testing = std.testing;
 
-/// A verbatim `#`-JSON entry pair from the captures' shape.
 const hash_json =
     "[{\"layerId\"#0,\"name\"#\"Main Layer\",\"isBackgroundLayer\"#false," ++
     "\"isAllowAdd\"#false,\"isCurrentLayer\"#true,\"isVisible\"#true," ++
@@ -204,24 +159,15 @@ test "parse: hostile inputs are a recorded absence, never an error" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    // Truncated base64 (a real base64 prefix cut mid-quantum).
     try testing.expectEqual(@as(?[]const Entry, null), try parse(a, "W3sibGF5ZXJJZCI6"));
-    // Base64 alphabet, but the decoded bytes are not JSON.
     try testing.expectEqual(@as(?[]const Entry, null), try parse(a, "aGVsbG8gd29ybGQ="));
-    // Junk that is neither JSON-first-byte nor base64.
     try testing.expectEqual(@as(?[]const Entry, null), try parse(a, "!!not a thing!!"));
-    // JSON, but not the array shape.
     try testing.expectEqual(@as(?[]const Entry, null), try parse(a, "{\"layerId\"#0}"));
-    // An array of the wrong element shape (no layerId).
     try testing.expectEqual(@as(?[]const Entry, null), try parse(a, "[{\"name\"#\"x\"}]"));
-    // Truncated #-JSON.
     try testing.expectEqual(@as(?[]const Entry, null), try parse(a, "[{\"layerId\"#0,"));
-    // A layerId that fits no layer model.
     try testing.expectEqual(@as(?[]const Entry, null), try parse(a, "[{\"layerId\"#99999999999}]"));
-    // Empty value.
     try testing.expectEqual(@as(?[]const Entry, null), try parse(a, ""));
 
-    // An empty ARRAY is well-formed: present, zero entries.
     const empty = (try parse(a, "[]")).?;
     try testing.expectEqual(@as(usize, 0), empty.len);
 }

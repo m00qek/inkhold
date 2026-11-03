@@ -1,54 +1,22 @@
-//! Where the `.note` parser gets its bytes from.
-//!
-//! The format is purely **address-based** — the last 4 bytes give the footer
-//! address, the footer indexes the header and every page, each page indexes its
-//! layers, and every one of those is a length-prefixed block at an absolute
-//! offset. Nothing is ever scanned linearly. So the parser does not need a
-//! contiguous buffer; it needs "give me the 4 bytes at N" and "give me the block
-//! at N". That is exactly what a `Source` is.
-//!
-//! Two backings exist:
-//!
-//!   - `.slice` — the caller already holds the whole file (CLI, wasm, tests).
-//!     Reads are `@memcpy`, and `view` hands back a borrowed sub-slice, so this
-//!     costs precisely what a plain `[]const u8` parser would cost.
-//!   - `.ranged` — a positional reader (e.g. a blob store's `readRange`).
-//!     Nothing is buffered: peak memory is the size of the individual blocks
-//!     read, not the size of the file. This backing is what makes the tiered
-//!     API (see `note.zig`) worth having: `metadata()` over a ranged source is
-//!     a handful of small absolute reads.
-//!
-//! It is a **tagged union, not a vtable**, for two reasons: the slice case stays
-//! a plain slice with no indirection and a real zero-copy path, and `Note` stays
-//! a single concrete type (a generic `Note(Source)` would infect `render`,
-//! `recognition`, `page_payload` and every caller).
-//!
-//! ## Bounds are checked here, once
-//!
-//! Every offset the parser uses comes from the file itself — i.e. from data an
-//! untrusted device wrote. `read`, `view` and `blockRange` all validate against
-//! `size()` with a checked add, so a hostile length can never wrap into a
-//! plausible range or read past EOF; the error is `OutOfBounds`, never a panic.
-//! (The tier layer in `note.zig` reports `OutOfBounds` as `error.Truncated` —
-//! see the taxonomy there.)
+//! Where the `.note` parser gets its bytes: a whole `.slice`, or a `.ranged`
+//! positional reader (peak memory = the blocks read). The format is purely
+//! address-based, so nothing is scanned linearly. Every offset comes from
+//! untrusted file data, so all reads are bounds-checked here with checked adds.
 
 const std = @import("std");
 
 pub const Error = error{
-    /// A read would fall outside the source (or its offset arithmetic wrapped).
     OutOfBounds,
-    /// The backing store failed to produce bytes for an in-bounds range.
     ReadFailed,
 };
 
-/// A validated `[offset, offset+len)` window inside a source.
 pub const Range = struct {
     offset: u64,
     len: u32,
 };
 
-/// A block payload that is *borrowed* when the source is slice-backed and
-/// *owned* when it is not. Callers treat both alike and always `deinit`.
+/// A block payload, borrowed when slice-backed and owned otherwise; always
+/// `deinit`.
 pub const Held = struct {
     bytes: []const u8,
     owned: ?[]u8 = null,
@@ -58,14 +26,10 @@ pub const Held = struct {
     }
 };
 
-/// A positional byte source that is not a contiguous slice.
 pub const Ranged = struct {
     ctx: *anyopaque,
-    /// The total size of the underlying object, in bytes.
     size: u64,
-    /// Fills `dest` **completely** from `offset`, or fails. The caller has
-    /// already bounds-checked `offset + dest.len` against `size`; a short read
-    /// is `error.ReadFailed`, never a silent partial fill.
+    /// Fills `dest` completely or fails; a short read is `error.ReadFailed`.
     readFn: *const fn (ctx: *anyopaque, offset: u64, dest: []u8) Error!void,
 };
 
@@ -84,7 +48,6 @@ pub const Source = union(enum) {
         };
     }
 
-    /// True when the whole source is already in memory as one slice.
     pub fn isSlice(self: Source) bool {
         return self == .slice;
     }
@@ -94,8 +57,7 @@ pub const Source = union(enum) {
         return end <= self.size();
     }
 
-    /// A zero-copy view of `[offset, offset+len)` — non-null only when the
-    /// source is slice-backed and the window is in bounds.
+    /// A zero-copy view, non-null only when slice-backed and in bounds.
     pub fn view(self: Source, offset: u64, len: u64) ?[]const u8 {
         switch (self) {
             .slice => |b| {
@@ -106,8 +68,6 @@ pub const Source = union(enum) {
         }
     }
 
-    /// Fills `dest` from `offset`. Exact: on success every byte of `dest` is
-    /// real file content.
     pub fn read(self: Source, offset: u64, dest: []u8) Error!void {
         if (!self.inBounds(offset, dest.len)) return error.OutOfBounds;
         switch (self) {
@@ -116,16 +76,14 @@ pub const Source = union(enum) {
         }
     }
 
-    /// Reads a little-endian `u32` at `offset`.
     pub fn u32le(self: Source, offset: u64) Error!u32 {
         var buf: [4]u8 = undefined;
         try self.read(offset, &buf);
         return std.mem.readInt(u32, &buf, .little);
     }
 
-    /// Locates the length-prefixed block at `address` — a `u32` byte length
-    /// followed by that many payload bytes — and validates that the whole
-    /// payload lies inside the source. Reads 4 bytes, never the body.
+    /// Locates the block at `address` (`u32` length + payload) and validates
+    /// it; reads 4 bytes, never the body.
     pub fn blockRange(self: Source, address: u64) Error!Range {
         const len = try self.u32le(address);
         const offset = address + 4; // the u32le read proved address+4 <= size
@@ -133,8 +91,7 @@ pub const Source = union(enum) {
         return .{ .offset = offset, .len = len };
     }
 
-    /// The payload of the block at `address`: borrowed when slice-backed,
-    /// otherwise copied into `gpa`. For data used and dropped within a call.
+    /// The block payload, borrowed when slice-backed, else copied into `gpa`.
     pub fn blockHeld(self: Source, gpa: std.mem.Allocator, address: u64) (Error || std.mem.Allocator.Error)!Held {
         const r = try self.blockRange(address);
         if (self.view(r.offset, r.len)) |v| return .{ .bytes = v };
@@ -144,9 +101,8 @@ pub const Source = union(enum) {
         return .{ .bytes = buf, .owned = buf };
     }
 
-    /// The payload of the block at `address`, **always** copied into `gpa`.
-    /// This is what the parsed results retain: owning unconditionally is what
-    /// lets the slice and ranged paths behave identically (see `note.zig`).
+    /// The block payload, always copied into `gpa`, so both backings behave
+    /// identically for retained results.
     pub fn blockAlloc(self: Source, gpa: std.mem.Allocator, address: u64) (Error || std.mem.Allocator.Error)![]u8 {
         const r = try self.blockRange(address);
         const buf = try gpa.alloc(u8, r.len);
@@ -155,9 +111,7 @@ pub const Source = union(enum) {
         return buf;
     }
 
-    /// Feeds `[offset, offset+len)` to `hasher.update` in `buf`-sized chunks, so
-    /// hashing a multi-MB layer costs `buf.len` bytes rather than `len` bytes.
-    /// Slice-backed sources hash the view directly, with no copy at all.
+    /// Hashes a range in `buf`-sized chunks (slice sources hash the view).
     pub fn hashRange(self: Source, hasher: anytype, offset: u64, len: u64, buf: []u8) Error!void {
         std.debug.assert(buf.len > 0);
         if (self.view(offset, len)) |v| {
@@ -175,19 +129,12 @@ pub const Source = union(enum) {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Test double
-// ---------------------------------------------------------------------------
+// ---- test double ----
 
 const testing = std.testing;
 
-/// A `.ranged` source over a slice — the test stand-in for a blob store, and the
-/// thing that proves the two backings are interchangeable without any I/O.
-///
-/// It **accounts for every read**: count, largest size, and (up to `max_log`)
-/// the exact `[offset, offset+len)` windows in call order. The window log is
-/// what turns "metadata() is lazy" from a hope into a contract — the tier tests
-/// assert which byte ranges were touched (see tests/note_test.zig).
+/// A `.ranged` source over a slice that logs every read window, so tests can
+/// assert which byte ranges a tier touched.
 pub const TestRanged = struct {
     bytes: []const u8,
     reads: usize = 0,
@@ -195,16 +142,14 @@ pub const TestRanged = struct {
     log_buf: [max_log]Range = undefined,
     log_len: usize = 0,
 
-    /// Fixed log capacity: recording saturates, `reads` keeps counting. A test
-    /// that inspects `log()` must therefore assert `reads == log().len`, so
-    /// saturation can never silently hide a read from the laziness proof.
+    /// Log capacity; `reads` keeps counting past it, so tests assert
+    /// `reads == log().len`.
     pub const max_log = 64;
 
     pub fn source(self: *TestRanged) Source {
         return .{ .ranged = .{ .ctx = self, .size = self.bytes.len, .readFn = readFn } };
     }
 
-    /// Every window read so far, in call order (up to `max_log`).
     pub fn log(self: *const TestRanged) []const Range {
         return self.log_buf[0..self.log_len];
     }
@@ -229,12 +174,9 @@ pub const TestRanged = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ---- tests ----
 
 test "slice and ranged sources agree on every accessor" {
-    // length = 3, payload = "abc", then junk.
     const bytes = [_]u8{ 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c', 'X' };
     var tr = TestRanged{ .bytes = &bytes };
     const sources = [_]Source{ Source.fromSlice(&bytes), tr.source() };
@@ -256,7 +198,6 @@ test "slice and ranged sources agree on every accessor" {
         try testing.expectEqualStrings("abc", owned);
     }
 
-    // Only the slice source gives a borrowed view; the ranged one always copies.
     try testing.expect(sources[0].view(4, 3) != null);
     try testing.expect(sources[1].view(4, 3) == null);
     try testing.expect((try sources[0].blockHeld(testing.allocator, 0)).owned == null);

@@ -1,16 +1,7 @@
-//! The EFF "large" diceware wordlist (7776 words), embedded as static rodata.
-//!
-//! Source: https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt (public
-//! domain, CC0). Word column only (the leading dice digits are dropped). Used by
-//! `password.generateTemp` to mint human-transcribable temporary passwords (4 words
-//! -> ~52 bits). All lowercase ASCII (four entries carry a hyphen, e.g. "t-shirt");
-//! index range 0..7775, and 7776 = 6^5 so a single 0..7775 draw is one uniform word.
-//!
-//! ~60 KB of read-only string data — a deliberate, budgeted spend: a temporary
-//! password handed to a person once must be typeable, not 18 hex chars.
+//! The EFF large diceware wordlist (7776 = 6^5 words, CC0), from
+//! https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt, word column only.
 
-/// The longest word in the list (9: "zoologist"). `password.max_temp_len` is sized
-/// from this — 4 words + 3 hyphen separators.
+/// Longest word ("zoologist"); sizes `password.max_temp_len`.
 pub const max_word_len = 9;
 
 pub const words = [_][]const u8{
@@ -989,7 +980,5 @@ pub const words = [_][]const u8{
 };
 
 comptime {
-    // Exactly 6^5 entries — what makes one 0..7775 draw a whole die-roll of uniform
-    // entropy per word, and keeps rejection sampling's accepted range clean.
     if (words.len != 7776) @compileError("EFF large wordlist must be exactly 7776 words");
 }

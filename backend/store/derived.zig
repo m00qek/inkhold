@@ -1,24 +1,12 @@
-//! Derived per-document files keyed by `(source md5, index_version)`, on disk as
-//! `<subdir>/<md5>.<index_version>`: `data/terms/` (§2.2) and `data/text/`.
-//!
-//! `store/thumbs.zig`'s shape — flat, staged in `tmp/` then fsync'd then
-//! atomically renamed, cleaned up by the source blob's GC, a malformed key naming
-//! nothing — with two differences:
-//!   * The version is in the FILENAME (§2.1), so a parser
-//!     bump cannot serve text derived by the old one. `has(md5, v)` IS the
-//!     derivation state; a DB column may cache it, and is never the authority.
-//!   * Writes STREAM through a handle (`begin`, write, `commit`): `.pdf` text
-//!     arrives 50 pages at a time and terms are written per page. Nothing is
-//!     visible before the rename, so a partial derive is invisible, not corrupt.
-//!
-//! `Staged` and `Fragment` are initialised THROUGH A POINTER: each owns the
-//! buffer its writer points into, and returned by value that pointer would aim
-//! at the dead copy.
+//! Derived per-document files (`data/terms/`, `data/text/`) on disk as
+//! `<subdir>/<md5>.<index_version>`; `has(md5, v)` is the derivation state.
+//! Streamed writes staged in `tmp/` and atomically renamed, so a partial derive
+//! is invisible. `Staged`/`Fragment` are initialised through a pointer: each
+//! owns the buffer its writer points into.
 
 const std = @import("std");
 const blobstore = @import("blobs.zig");
-// This import is why `zig test backend/store/derived.zig` alone does not
-// resolve; the suite is `zig build test`.
+// This import is why the file only tests under `zig build test`.
 const gzip_stitch = @import("../http/gzip_stitch.zig");
 
 const Io = std.Io;
@@ -27,13 +15,11 @@ const File = std.Io.File;
 
 const md5_hex_len = blobstore.md5_hex_len;
 
-/// `<32 hex>` + `.` + up to 20 digits of version.
 const max_name_len = md5_hex_len + 1 + 20;
 
 pub const DerivedStore = struct {
     io: Io,
-    /// Owned by the caller; must be on the same filesystem as its `tmp/` subdir
-    /// so the publish rename is atomic.
+    /// Owned by the caller; must share a filesystem with its `tmp/` for the rename.
     root: Dir,
 
     pub fn init(io: Io, root: Dir) !DerivedStore {
@@ -41,12 +27,10 @@ pub const DerivedStore = struct {
         return .{ .io = io, .root = root };
     }
 
-    /// An in-progress write. Anything not committed leaves no trace.
     pub const Staged = struct {
         store: DerivedStore,
         file: File,
         fw: File.Writer,
-        /// Valid between `begin` and `commit`.
         interface: *std.Io.Writer,
         md5: [md5_hex_len]u8,
         version: i64,
@@ -66,9 +50,8 @@ pub const DerivedStore = struct {
             s.done = true;
             s.file.close(s.store.io);
 
-            // Only once the new version is durable and named. A crash between
-            // the rename and here leaves two versions, which is safe — readers
-            // ask for one by name — and the next commit clears it.
+            // Only once the new version is durable; a crash here leaves two versions,
+            // which is safe and cleared by the next commit.
             s.store.removeOtherVersions(&s.md5, s.version);
         }
 
@@ -85,8 +68,6 @@ pub const DerivedStore = struct {
         }
     };
 
-    /// `error.InvalidMd5` for a key that is not 32 characters, before anything
-    /// is created.
     pub fn begin(self: DerivedStore, s: *Staged, md5: []const u8, version: i64) !void {
         if (md5.len != md5_hex_len) return error.InvalidMd5;
         s.store = self;
@@ -112,15 +93,13 @@ pub const DerivedStore = struct {
         try s.commit();
     }
 
-    /// Caller closes. `error.InvalidMd5` for a bad key, `error.FileNotFound`
-    /// for a missing file.
+    /// Caller closes.
     pub fn open(self: DerivedStore, md5: []const u8, version: i64) !File {
         var buf: [max_name_len]u8 = undefined;
         const rel = finalRel(&buf, md5, version) orelse return error.InvalidMd5;
         return self.root.openFile(self.io, rel, .{});
     }
 
-    /// THE derivation state. A malformed md5 names nothing: a miss, not an error.
     pub fn has(self: DerivedStore, md5: []const u8, version: i64) bool {
         var buf: [max_name_len]u8 = undefined;
         const rel = finalRel(&buf, md5, version) orelse return false;
@@ -128,15 +107,13 @@ pub const DerivedStore = struct {
         return true;
     }
 
-    /// Missing is not an error.
     pub fn remove(self: DerivedStore, md5: []const u8, version: i64) void {
         var buf: [max_name_len]u8 = undefined;
         const rel = finalRel(&buf, md5, version) orelse return;
         self.root.deleteFile(self.io, rel) catch {};
     }
 
-    /// Every version — the blob-GC face, which does not know what versions
-    /// exist. No-op for a malformed key.
+    /// Every version (the blob-GC face). No-op for a malformed key.
     pub fn removeAll(self: DerivedStore, md5: []const u8) void {
         if (md5.len != md5_hex_len) return;
         self.removeMatching(md5[0..md5_hex_len].*, null);
@@ -146,8 +123,6 @@ pub const DerivedStore = struct {
         self.removeMatching(md5.*, keep);
     }
 
-    /// Unlink `<md5>.*`, optionally sparing one version. O(entries), on a path
-    /// that runs when a blob dies rather than when one is read.
     fn removeMatching(self: DerivedStore, md5: [md5_hex_len]u8, keep: ?i64) void {
         var keep_buf: [max_name_len]u8 = undefined;
         const keep_rel: ?[]const u8 = if (keep) |v| finalRel(&keep_buf, &md5, v) else null;
@@ -158,7 +133,6 @@ pub const DerivedStore = struct {
         while (it.next(self.io) catch null) |entry| {
             if (entry.kind != .file) continue;
             const name = entry.name;
-            // `<md5>` `.` `<digits>` — anything else in this directory is not ours.
             if (name.len < md5_hex_len + 2) continue;
             if (!std.mem.eql(u8, name[0..md5_hex_len], &md5)) continue;
             if (name[md5_hex_len] != '.') continue;
@@ -167,8 +141,7 @@ pub const DerivedStore = struct {
         }
     }
 
-    /// Staging files are never referenced until renamed, so any that remain are
-    /// abandoned writes from a prior crash.
+    /// Removes staging files abandoned by a crash.
     pub fn sweepTmp(self: DerivedStore) void {
         self.root.deleteTree(self.io, "tmp") catch {};
         ensureDir(self.io, self.root, "tmp") catch {};
@@ -190,9 +163,7 @@ fn ensureDir(io: Io, root: Dir, sub: []const u8) !void {
     d.close(io);
 }
 
-/// `<md5>.<version>`, or null. The length check lives at the one place a key
-/// becomes a path, so no entry point can index a short key out of bounds; a
-/// negative version is not representable and is refused for the same reason.
+/// `<md5>.<version>`, or null for a short key or negative version.
 fn finalRel(buf: *[max_name_len]u8, md5: []const u8, version: i64) ?[]const u8 {
     if (md5.len != md5_hex_len) return null;
     if (version < 0) return null;
@@ -236,7 +207,6 @@ test "streaming put/open/has round-trip" {
 
     try testing.expect(!store.has(md5_a, 7));
 
-    // Written in pieces, as a derive path does: a header line then pages.
     var s: DerivedStore.Staged = undefined;
     try store.begin(&s, md5_a, 7);
     errdefer s.abort();
@@ -263,7 +233,6 @@ test "nothing is visible until commit, and abort leaves no trace" {
     try testing.expect(!store.has(md5_a, 3));
     s.abort(); // idempotent
 
-    // The staging file is gone, not merely unreferenced.
     var d = try tmp.dir.openDir(io, "tmp", .{ .iterate = true });
     defer d.close(io);
     var it = d.iterate();
@@ -280,8 +249,6 @@ test "commit retires every OTHER version of the same md5" {
     try store.put(md5_b, 5, "a different document");
     try testing.expect(store.has(md5_a, 5));
 
-    // The parser bumps: the new version lands, the old one is unlinked, and the
-    // OTHER document is untouched.
     try store.put(md5_a, 6, "derived by parser 6");
     try testing.expect(store.has(md5_a, 6));
     try testing.expect(!store.has(md5_a, 5));
@@ -307,8 +274,7 @@ test "removeAll drops every version; remove drops one" {
     defer tmp.cleanup();
     const store = try DerivedStore.init(io, tmp.dir);
 
-    // Two versions of the same md5 can coexist after a crash between the rename
-    // and the retirement, so GC must not assume there is only one.
+    // Two versions can coexist after a crash, so GC must not assume one.
     try store.put(md5_a, 5, "v5");
     try store.put(md5_b, 5, "other");
     var s: DerivedStore.Staged = undefined;
@@ -366,7 +332,6 @@ test "removeAll ignores files that are not ours" {
     defer tmp.cleanup();
     const store = try DerivedStore.init(io, tmp.dir);
 
-    // A prefix match that is NOT `<md5>.<digits>` must survive.
     const f = try tmp.dir.createFile(io, md5_a ++ "-notours", .{});
     f.close(io);
     try store.put(md5_a, 4, "ours");
@@ -391,36 +356,22 @@ test "sweepTmp clears staging and the store keeps working" {
     try testing.expect(store.has(md5_b, 1));
 }
 
-// ---------------------------------------------------------------------------
-// The stored FORMAT: a 12-byte header, then one raw-deflate fragment.
-// ---------------------------------------------------------------------------
+// ---- the stored format: a 12-byte header, then one raw-deflate fragment ----
 
-/// On disk:
-///
-///     [0..4)   magic "IDF1"
-///     [4..8)   CRC32 of the UNCOMPRESSED payload, little-endian
-///     [8..12)  uncompressed length, little-endian u32
-///     [12..)   the payload as a byte-aligned raw-deflate fragment
-///
-/// The CRC and length are in the FILE so the stream route can accumulate the
-/// gzip trailer from the bytes it is already reading — no DB lookup, and no
-/// write lock, on the read path (§3.3). The fragment is `Container.raw` +
-/// `flush()`, never `finish()`, so it carries no BFINAL block and concatenates
-/// with any other (§3.2).
-///
-/// The magic versions the CONTAINER; `index_version` in the filename versions
-/// the CONTENT. They move for different reasons.
+/// `[0..4)` magic "IDF1", `[4..8)` CRC32 of the uncompressed payload (LE),
+/// `[8..12)` uncompressed length (LE u32), then a byte-aligned raw-deflate
+/// fragment. CRC/length in the file let the stream route build the gzip trailer
+/// without touching the DB. Written with `flush()`, never `finish()`, so there
+/// is no BFINAL block and fragments concatenate.
 pub const header_len = 12;
 const magic = "IDF1";
 
 pub const Header = struct {
     crc: u32,
-    /// u32 because gzip's ISIZE is; `crc32Combine` takes it widened.
+    /// u32 because gzip's ISIZE is.
     len: u32,
 };
 
-/// `error.BadFragment` for anything that is not one — a truncated write that
-/// got published, or a future format.
 pub fn readHeader(io: Io, file: File) !Header {
     var buf: [header_len]u8 = undefined;
     const n = try file.readPositionalAll(io, &buf, 0);
@@ -432,13 +383,8 @@ pub fn readHeader(io: Io, file: File) !Header {
     };
 }
 
-/// Read a stored file back to its PLAINTEXT — the inverse of `Fragment`. Caller
-/// owns the slice. For tests and debugging; the serve route streams untouched.
-///
-/// The terminator MUST be appended: no fragment carries a final block, so alone
-/// it is an incomplete deflate stream, and without it the read ends by
-/// starvation — `error.ReadFailed` with an EMPTY result, not a short one. An
-/// early test swallowed that and asserted against nothing.
+/// A stored file's plaintext, for tests and debugging. Caller owns the slice.
+/// Appends the terminator: without it the read starves and returns empty.
 pub fn readPlain(gpa: std.mem.Allocator, store: DerivedStore, md5: []const u8, version: i64) ![]u8 {
     var file = try store.open(md5, version);
     defer file.close(store.io);
@@ -465,9 +411,8 @@ pub fn readPlain(gpa: std.mem.Allocator, store: DerivedStore, md5: []const u8, v
     return out.toOwnedSlice();
 }
 
-/// A streaming write of one document: plaintext in, header + deflate fragment
-/// on disk. Embeds deflate's 64 KB window, so hold it off a deep stack frame,
-/// one per document rather than per page.
+/// Plaintext in, header + deflate fragment out. Embeds deflate's 64 KB window,
+/// so keep it off a deep stack frame.
 pub const Fragment = struct {
     staged: DerivedStore.Staged,
     window: [std.compress.flate.max_window_len]u8,
@@ -475,15 +420,13 @@ pub const Fragment = struct {
     crc: std.hash.Crc32,
     len: u64,
 
-    /// The CRC and length are of the PLAINTEXT — what the gzip trailer is
-    /// defined over.
+    /// CRC and length are of the plaintext, as the gzip trailer requires.
     pub fn write(f: *Fragment, bytes: []const u8) !void {
         f.crc.update(bytes);
         f.len += bytes.len;
         try f.compress.writer.writeAll(bytes);
     }
 
-    /// `flush()`, never `finish()`: no BFINAL block (see the format note).
     pub fn commit(f: *Fragment) !void {
         try f.compress.writer.flush();
 
@@ -492,8 +435,6 @@ pub const Fragment = struct {
         std.mem.writeInt(u32, head[4..8], f.crc.final(), .little);
         std.mem.writeInt(u32, head[8..12], @truncate(f.len), .little);
 
-        // The header reserved at `begin` is filled in now, into the STAGING
-        // file, before `Staged.commit`'s fsync and rename.
         try f.staged.interface.flush();
         try f.staged.file.writePositionalAll(f.staged.store.io, &head, 0);
         try f.staged.commit();
@@ -510,7 +451,6 @@ pub fn beginFragment(store: DerivedStore, f: *Fragment, md5: []const u8, version
     errdefer f.staged.abort();
     f.crc = .init();
     f.len = 0;
-    // Placeholder header, overwritten by `commit`.
     try f.staged.interface.writeAll(&[_]u8{0} ** header_len);
     f.compress = try std.compress.flate.Compress.init(
         f.staged.interface,
@@ -535,7 +475,6 @@ test "a fragment round-trips through the header and inflates" {
     defer testing.allocator.destroy(f);
     try beginFragment(store, f, md5_a, 7);
     errdefer f.abort();
-    // Written in pieces, as a derive path does: a line at a time.
     var it = std.mem.splitScalar(u8, payload, '\n');
     while (it.next()) |line| {
         if (line.len == 0) continue;
@@ -550,8 +489,6 @@ test "a fragment round-trips through the header and inflates" {
     try testing.expectEqual(std.hash.Crc32.hash(payload), h.crc);
     try testing.expectEqual(@as(u32, payload.len), h.len);
 
-    // The body past the header must be a raw-deflate fragment that inflates to
-    // exactly the plaintext -- i.e. usable as one piece of a stitched stream.
     var raw: [8192]u8 = undefined;
     const total = try file.readPositionalAll(io, &raw, 0);
     var body: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -574,11 +511,7 @@ test "two stored fragments concatenate into one deflate stream" {
     defer tmp.cleanup();
     const store = try DerivedStore.init(io, tmp.dir);
 
-    // This is the property the stream route depends on and the reason `commit`
-    // uses `flush()` rather than `finish()`. Wrapping the result in a gzip
-    // header and a `crc32_combine` trailer is `http/gzip_stitch.zig`'s job and
-    // has its own tests there; what must hold HERE is that two independently
-    // stored fragments are one valid deflate stream when placed end to end.
+    // Two independently stored fragments must form one deflate stream end to end.
     const a_text = "{\"p\":0,\"t\":\"alpha beta\"}\n";
     const b_text = "{\"p\":0,\"t\":\"gamma delta\"}\n";
     for ([_][2][]const u8{ .{ md5_a, a_text }, .{ md5_b, b_text } }) |pair| {
@@ -607,10 +540,7 @@ test "two stored fragments concatenate into one deflate stream" {
     try testing.expectEqual(@as(u32, a_text.len + b_text.len), total_len);
     try testing.expectEqual(std.hash.Crc32.hash(b_text), crc); // per-fragment, not combined
 
-    // The empty FINAL stored block that ends a deflate stream -- what the serve
-    // path appends after the last fragment (`gzip_stitch.terminator`). Without
-    // it the stream is legitimately incomplete: every fragment was written with
-    // `flush()` precisely so that none of them carries a BFINAL block.
+    // The empty final stored block that ends the stream.
     try joined.writer.writeAll(&gzip_stitch.terminator);
 
     var input: std.Io.Reader = .fixed(joined.written());

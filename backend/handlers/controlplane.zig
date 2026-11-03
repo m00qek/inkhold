@@ -36,8 +36,7 @@ const serverError = reply.serverError;
 
 const UnbindReq = struct { equipmentNo: []const u8 };
 
-/// POST /api/controlplane/equipment/unlink -> revoke a device (browser
-/// device-management action).
+/// POST /api/controlplane/equipment/unlink -> revoke a device.
 pub fn controlplaneUnlink(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
@@ -49,9 +48,7 @@ pub fn controlplaneUnlink(ctx: *Context, req: *Request, params: Params) anyerror
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
 }
 
-/// GET /api/controlplane/usage -> the caller's OWN storage usage, for the rail's
-/// quota bar. Raw VO like the other control-plane reads. `Files.capacity` never
-/// errors on a missing row (reads 0 / the server default), so this can't 404.
+/// GET /api/controlplane/usage -> the caller's own storage usage.
 const UsageVO = struct { used_bytes: i64, total_bytes: i64 };
 
 pub fn controlplaneUsage(ctx: *Context, req: *Request, params: Params) anyerror!void {
@@ -64,58 +61,23 @@ pub fn controlplaneUsage(ctx: *Context, req: *Request, params: Params) anyerror!
 
 // ---- the account screen ----
 //
-// "Administering other people and managing yourself are different surfaces, and
-// the second one does not exist yet" (§2). These four routes are that second
-// surface's backend. Everything they touch is the CALLER's: there is no `:id` on
-// any of them, and none of them takes a user id from a body — the session says
-// who this is, which is the whole difference between this face and `/api/admin`.
-//
-// Two of the reads are the admin console's own service calls with the target
-// fixed to the caller (`listUserDevices`, `adminUnlinkDevice`), NOT reimplemented
-// self-scoped copies. See `Service.assertMayManage` for why that matters.
-//
-// **A NULL optional is OMITTED from the JSON, not sent as `null`** (`respond`
-// uses `emit_null_optional_fields = false`), so the client must read every `?`
-// field below as "absent = the fact does not exist", never as 0.
+// Everything here is the caller's own: no `:id`, no user id from a body.
+// Null optionals are omitted from the JSON, not sent as `null`.
 
-/// One device binding, as this face reports it. Same field names as the admin
-/// console's `DevicesVO` rows (they are the same service struct, serialized
-/// verbatim), plus `last_seen`.
+/// One device binding; the same struct as the admin console's `DevicesVO` rows.
 const MyDeviceVO = authsvc.DeviceInfo;
 
-/// `keep` is what this account currently keeps of each file; `maxKeep` is the
-/// admin's configured ceiling AND the default. `keep == 0` is a real setting
-/// (versioning off), not a disabled control.
-///
-/// `retainedPerFile` is what lets the control say "Keeping 3 will remove 8
-/// versions now" before the button is pressed.
-///
-/// There is deliberately NO `bytes` here. It carried the version total and was
-/// dropped when the figure left the control: the storage panel already owns that
-/// number, off its own route, and a second copy nobody reads is an invitation to
-/// use it and let the two diverge — which is exactly the bug the `refcount = 0`
-/// correction fixed. It also cost a `storageBreakdown` scan on every load of
-/// this route for a field with no reader.
+/// `maxKeep` is the admin ceiling and the default; `keep == 0` is versioning off.
+/// `retainedPerFile` lets the control predict what a lower `keep` removes.
 const VersionPolicyVO = struct {
     keep: u32,
     maxKeep: u32,
     retainedPerFile: []const u32,
 };
 
-/// GET /api/controlplane/account — everything the screen's identity, Signing in
-/// and Devices sections read, in one request. Storage is a separate route (it is
-/// the one figure that costs a scan, and it is what a person refetches after
-/// emptying the bin).
-///
-/// `passwordChangedAt` absent = never changed. That is every account created
-/// before schema v3, and it must render as "never changed" rather than as a
-/// stale-password warning — the fact was unknowable before the column, not
-/// neglected (§8).
-///
-/// `thisSessionSince` is `sessions.created_at` for the token this very request
-/// presented; `otherBrowsers` counts the caller's other LIVE control-plane
-/// sessions, that one excluded. Devices are bindings, not browsers, and appear
-/// only in `devices`.
+/// GET /api/controlplane/account -> identity, sessions and devices in one read.
+/// `passwordChangedAt` absent means never changed (accounts before schema v3).
+/// `otherBrowsers` counts the caller's other live sessions, this one excluded.
 const AccountVO = struct {
     success: bool = true,
     email: []const u8,
@@ -142,8 +104,7 @@ pub fn controlplaneAccount(ctx: *Context, req: *Request, params: Params) anyerro
 
     const sessions = svc.sessionSummary(caller.user_id, token) catch return serverError(ctx, req);
 
-    // The admin listing with the target fixed to the caller — same query, same
-    // ownership gate, no self-scoped second copy.
+    // The admin listing with the target fixed to the caller.
     const devices = svc.listUserDevices(ctx.gpa, caller.user_id, caller.user_id) catch return serverError(ctx, req);
     defer authsvc.Service.freeDevices(ctx.gpa, devices);
 
@@ -167,18 +128,9 @@ pub fn controlplaneAccount(ctx: *Context, req: *Request, params: Params) anyerro
     }, null);
 }
 
-/// PUT /api/controlplane/account/versions — set how many versions of each file
-/// this account keeps, evicting down to it immediately.
-///
-/// Returns what the change actually did (`removedVersions`, `freedBytes`) rather
-/// than only the new policy, so the interface can confirm the number it predicted
-/// from `retainedPerFile` instead of asserting it twice. A value above the admin's
-/// ceiling is CLAMPED, not refused, and the returned `versions.keep` says what
-/// took effect — the same rule `versionPolicy` reads by.
-///
-/// This is the one route on the account screen that DESTROYS data: the versions it
-/// drops do not go to the recycle bin. That is why the control states the cost
-/// first, and why this reports the cost back.
+/// PUT /api/controlplane/account/versions -> set the per-file version count,
+/// evicting now. Values above the ceiling are clamped. Dropped versions skip the
+/// bin, so the response reports what was removed.
 pub fn controlplaneSetVersions(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
@@ -204,8 +156,7 @@ pub fn controlplaneSetVersions(ctx: *Context, req: *Request, params: Params) any
     }, null);
 }
 
-/// Signed, so a negative is a BAD REQUEST rather than a huge unsigned `keep` that
-/// clamps to the ceiling — the opposite of what the caller asked for.
+/// Signed so a negative is a 400, not a huge `keep` clamped to the ceiling.
 const SetVersionsReq = struct { keep: i64 };
 
 const SetVersionsVO = struct {
@@ -215,12 +166,8 @@ const SetVersionsVO = struct {
     freedBytes: i64,
 };
 
-/// GET /api/controlplane/account/storage — the meter and the five lines under it.
-///
-/// The five figures are a PARTITION of `used_bytes`: every charged blob lands in
-/// exactly one, and they sum to it exactly. `Files.storageBreakdown` owns the
-/// precedence that makes that true; the partition test in `services/files.zig`
-/// keeps it true after every mutation.
+/// GET /api/controlplane/account/storage. The five figures partition `used_bytes`
+/// exactly (`Files.storageBreakdown` owns the precedence).
 const StorageVO = struct {
     success: bool = true,
     used_bytes: i64,
@@ -249,19 +196,9 @@ pub fn controlplaneAccountStorage(ctx: *Context, req: *Request, params: Params) 
     }, null);
 }
 
-/// POST /api/controlplane/account/devices/unlink `{equipmentNo}` -> revoke one of
-/// the CALLER's own bindings -> `{success}`.
-///
-/// It goes through `adminUnlinkDevice` with the caller as both actor and target,
-/// which is what makes the ownership check apply: a serial that is not this
-/// caller's is `DEVICE_NOT_FOUND`, exactly as an unknown serial is, so this
-/// endpoint is not a probe for which tablets other housemates hold.
-///
-/// It is NOT the same as `/api/controlplane/equipment/unlink`, which calls the
-/// unchecked caller-scoped `unlinkDevice` and answers 200 for a serial that
-/// matched no row. That is fine for the device-management screen it was built for
-/// and wrong for a list a person is acting on item by item, where "done" must
-/// mean something happened.
+/// POST /api/controlplane/account/devices/unlink `{equipmentNo}`. Goes through
+/// `adminUnlinkDevice` so another user's serial is `DEVICE_NOT_FOUND`, like an
+/// unknown one; `/equipment/unlink` instead answers 200 when nothing matched.
 pub fn controlplaneUnlinkMyDevice(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
@@ -276,12 +213,8 @@ pub fn controlplaneUnlinkMyDevice(ctx: *Context, req: *Request, params: Params) 
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
 }
 
-/// POST /api/controlplane/account/sign-out-others -> drop every session of this
-/// account except the one making the request -> `{success, revoked}`.
-///
-/// The caller's own browser stays signed in on purpose: the confirmation of "sign
-/// out everywhere else" must not be a login screen. `revoked` is the row count,
-/// so the UI can say what it did rather than "done".
+/// POST /api/controlplane/account/sign-out-others -> drop every session but this
+/// request's; `revoked` is the row count.
 const SignedOutVO = struct { success: bool = true, revoked: i64 };
 
 pub fn controlplaneSignOutOthers(ctx: *Context, req: *Request, params: Params) anyerror!void {
@@ -295,17 +228,11 @@ pub fn controlplaneSignOutOthers(ctx: *Context, req: *Request, params: Params) a
 
 // ---- server-info (the onboarding bootstrap fact) ----
 
-/// The response VO. Serialized RAW (no `{success}` envelope), like every other
-/// control-plane read: the SPA's `request()` passes a body without an explicit
-/// `success:false` straight through, and `api.serverInfo()` reads exactly these
-/// two top-level fields (`address`, `firstRun`).
+/// Serialized raw (no `{success}` envelope), like the other control-plane reads.
 const ServerInfoVO = struct { address: []const u8, firstRun: bool };
 
-/// libc `struct ifaddrs` — only the fields we read. std has no portable
-/// interface enumerator, so we go through getifaddrs (libc is linked) to learn
-/// the host's own LAN IPv4, the one fact the browser cannot determine itself for
-/// onboarding's connect step (a client that reached us over `localhost` has no
-/// idea what the machine's network address is).
+/// libc `struct ifaddrs`, read fields only. std has no portable interface
+/// enumerator, and onboarding needs the host's LAN IPv4.
 const ifaddrs = extern struct {
     next: ?*ifaddrs,
     name: ?[*:0]u8,
@@ -330,14 +257,8 @@ fn isPrivate(o: [4]u8) bool {
         (o[0] == 192 and o[1] == 168); // 192.168.0.0/16
 }
 
-/// Interface-name prefixes for virtual/bridge devices that commonly carry a
-/// private-range IPv4 but are NOT the household LAN: Docker's bridge + its veth
-/// pairs, libvirt (`virbr`), VirtualBox/VMware (`vboxnet`/`vmnet`), WireGuard/
-/// ZeroTier/Tailscale tunnels, generic bridges (`br-`), and loopback. Skipping
-/// them stops `primaryIpv4` handing the Supernote an address like `docker0`'s
-/// 172.17.0.1, which nothing on the real LAN can reach. A blind scan otherwise
-/// returns whichever of these `getifaddrs` lists first, and on a dev box that is
-/// often the bridge. A bare Pi has only `eth0`/`wlan0`, so this is a no-op there.
+/// Virtual, bridge and tunnel interfaces that carry private IPv4 but are not the
+/// LAN (e.g. `docker0`'s 172.17.0.1, which the Supernote cannot reach).
 fn isVirtualIface(name_z: [*:0]const u8) bool {
     const name = std.mem.span(name_z);
     const skip = [_][]const u8{
@@ -349,13 +270,8 @@ fn isVirtualIface(name_z: [*:0]const u8) bool {
     return false;
 }
 
-/// The host's primary IPv4 as four octets, or null when none is usable.
-/// Enumerates interfaces, SKIPS virtual/bridge devices by name (see
-/// `isVirtualIface` — so `docker0` &c. never win over the real NIC), and among
-/// what remains PREFERS a private-range address (a household LAN is 10/8,
-/// 172.16/12, 192.168/16), otherwise the first IPv4 that is neither loopback
-/// (127/8) nor link-local (169.254/16). Portable native code — getifaddrs is
-/// POSIX, so this builds for the ARM Pi target.
+/// The host's primary IPv4, skipping virtual interfaces and preferring a
+/// private-range address over any other non-loopback, non-link-local one.
 fn primaryIpv4() ?[4]u8 {
     var list: ?*ifaddrs = null;
     if (getifaddrs(&list) != 0) return null;
@@ -378,24 +294,16 @@ fn primaryIpv4() ?[4]u8 {
     return fallback;
 }
 
-/// The server's LAN address as `host:port` for the connect step. The port is
-/// always the configured one; the host is the detected primary IPv4, or — when
-/// detection fails — the configured bind host (and `""` if even that will not
-/// format, at which point the frontend falls back to `window.location`).
+/// `host:port` for the connect step; falls back to the bind host, then `""`
+/// (the frontend then uses `window.location`).
 fn serverAddress(buf: []u8, cfg: config.Config) []const u8 {
     if (primaryIpv4()) |o|
         return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{ o[0], o[1], o[2], o[3], cfg.port }) catch "";
     return std.fmt.bufPrint(buf, "{s}:{d}", .{ cfg.host, cfg.port }) catch "";
 }
 
-/// GET /api/controlplane/server-info -> `{ address, firstRun }`, the onboarding
-/// bootstrap fact the login page reads BEFORE anyone can sign in.
-///
-/// **PUBLIC scope on purpose.** On a single-household LAN tool "this server is
-/// new" is not a secret, and the whole first-run experience turns on knowing it
-/// pre-auth (the login page switches to its terminal-guidance rendering, and the
-/// connect step shows the LAN address the household should point their Supernote
-/// at — which the browser cannot compute itself).
+/// GET /api/controlplane/server-info -> `{ address, firstRun }`. Public on purpose:
+/// the login page needs first-run state and the LAN address before sign-in.
 pub fn controlplaneServerInfo(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?; // set at startup, present on every route incl. public
@@ -410,33 +318,12 @@ pub fn controlplaneServerInfo(ctx: *Context, req: *Request, params: Params) anye
 
 // ---- the recycle bin ----
 //
-// ## CSRF, and why there is no token here
-//
-// These are the control plane's first WRITE routes (it was entirely `GET` until
-// now, plus the one `controlplaneUnlink` POST). They introduce no CSRF machinery
-// and deliberately follow that existing write's precedent: the session cookie is
-// `HttpOnly; SameSite=Strict` (see `http/context.zig`), so a browser will not
-// attach it to a request originating from another site — which is the whole of
-// what a token would buy on a same-origin SPA with no cross-site form posts. A
-// token scheme invented here would be a second, unshared mechanism guarding the
-// same boundary the cookie already guards, and the day it drifted out of step
-// with the cookie policy the drift would be silent.
-//
-// ## Ownership
-//
-// Every one of these funnels through a `Files` call scoped by `caller.user_id`,
-// which reports a foreign id as `NotFound` — so a foreign id is answered exactly
-// as a missing one and the endpoints are not an existence oracle over the id
-// space. That matters more here than on the read routes: blobs are deduplicated,
-// so two households can hold the same bytes, and only the `files` row says whose
-// they are.
+// No CSRF token: the session cookie is `SameSite=Strict`. Every call is scoped by
+// `caller.user_id` and answers a foreign id as `NotFound`, so these routes are not
+// an existence oracle.
 
-/// GET /api/controlplane/bin -> the caller's recycle bin: every trashed entry,
-/// newest deletion first, each carrying the path it had when it was deleted.
-///
-/// The response is a FLAT list (`BinVO`) — see `Files.listBin` for why the
-/// grouping the UI renders is the client's to derive rather than the server's to
-/// impose.
+/// GET /api/controlplane/bin -> the caller's trashed entries, newest deletion
+/// first, as a flat list; grouping is the client's.
 pub fn controlplaneBin(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
@@ -449,29 +336,15 @@ pub fn controlplaneBin(ctx: *Context, req: *Request, params: Params) anyerror!vo
     try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 
-/// DELETE /api/controlplane/entry/{id} -> move a LIVE entry to the recycle bin
-/// (U5). The browser had no way to delete anything at all before this, which is
-/// what made the bin unreachable from it.
-///
-/// A folder takes its whole subtree with it. The device does that walk itself and
-/// sends one request per entity; the browser sends one request, so the walk
-/// happens server-side in `Files.trash`'s single recursive UPDATE.
-///
-/// Reversible, so no confirmation is expected of the client — but the response
-/// states the fanout (`entries`) so the undo toast can say "and the 2 notes
-/// inside it" when the operation exceeds the row that was clicked. The count is
-/// taken BEFORE the trash, because afterwards there is nothing live left to count.
-///
-/// Nothing here refunds quota and nothing decrefs: trashing holds every blob
-/// reference. `purge` is where the bytes come back.
+/// DELETE /api/controlplane/entry/{id} -> move a live entry and its subtree to the
+/// bin. `entries` is the fanout for the undo toast, counted before the trash. No
+/// quota refund here; `purge` frees the bytes.
 pub fn controlplaneTrash(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
 
-    // `get`, not `getAnyState`: a row already in the bin is not something a web
-    // delete acts on (that is purge), and answering NotFound keeps "already
-    // trashed" and "never existed" from being distinguishable either.
+    // `get`, not `getAnyState`: an already-trashed row is a 404, like a missing one.
     const entry = (files.get(caller.user_id, id) catch return serverError(ctx, req)) orelse
         return fail(ctx, req, .not_found, "NOT_FOUND", "no such entry");
     defer ctx.gpa.free(entry.name);
@@ -493,26 +366,10 @@ pub fn controlplaneTrash(ctx: *Context, req: *Request, params: Params) anyerror!
     }, null);
 }
 
-/// The fixed category folders the browser rail navigates by and the device
-/// re-provisions on sync. **This MIRRORS webapp `rail.ts` `CATEGORIES`, and the
-/// two lists MUST STAY IN SYNC** — renaming any of these breaks the rail's
-/// path-based category resolution (it resolves e.g. `["NOTE","Note"]`) and the
-/// device's re-provisioning of its known paths.
-///
-/// There is no backend constant seeding them: they arrive as device-supplied path
-/// strings at bind (`device.bindEquipment` → `Files.ensureFolderPath`), so nothing
-/// marks a row "reserved" in the DB — the guard matches by NAME AND SHAPE. Two
-/// shapes, because the device tree NESTS categories:
-///
-///   - ROOT containers / single-segment categories, matched at `parent_id == null`
-///     by name: `NOTE`, `DOCUMENT`, `EXPORT`, `SCREENSHOT`, `INBOX`.
-///   - ANCHOR subfolders, matched as `[parent.name, entry.name]` where the parent
-///     is itself root-level: `NOTE/Note`, `NOTE/MyStyle`, `DOCUMENT/Document`.
-///
-/// Names are EXACT-CASE (uppercase containers `NOTE`/`DOCUMENT`; mixed-case
-/// `Note`/`MyStyle`/`Document`). So a user's own folder merely named `Note` that is
-/// NOT directly under a root-level `NOTE` (deeper nesting, or a different parent)
-/// is not an anchor and renames fine.
+/// Fixed category folders the rail navigates by and the device re-provisions.
+/// Must match webapp `rail.ts` `CATEGORIES`. Nothing marks them in the DB, so the
+/// guard matches exact-case names: roots at `parent_id == null`, anchors as
+/// `[root-level parent, entry]`.
 const category_roots = [_][]const u8{ "NOTE", "DOCUMENT", "EXPORT", "SCREENSHOT", "INBOX" };
 const category_anchors = [_][2][]const u8{
     .{ "NOTE", "Note" },
@@ -533,27 +390,10 @@ fn isCategoryAnchor(parent_name: []const u8, name: []const u8) bool {
 
 const RenameReq = struct { name: []const u8 };
 
-/// POST /api/controlplane/entry/{id}/rename -> rename a LIVE entry (file or
-/// folder) in place. Body `{ "name": "<new full filename incl. extension>" }` —
-/// the client sends the complete name (stem + re-appended extension), so `name` is
-/// treated as the whole filename.
-///
-/// A rename is a `move` whose destination parent is the entry's CURRENT parent, so
-/// the name-update, collision resolution and `bumpSync` are the same battle-tested
-/// path the device's `move_v3` takes — only with `autorename = false`, because a
-/// person who just typed a name wants a 409, not a silent " (2)" suffix (the device
-/// keeps `autorename = true`; its behaviour is unchanged).
-///
-/// Never touches blobs, quota or version history — a rename is metadata only. The
-/// updated entry is returned as a listing-shaped `EntryVO` so the client reconciles
-/// the row it already holds.
-///
-/// Status contract: 200 + the updated entry on success; 409 on a sibling
-/// name-clash; 400 for an empty/whitespace name or one containing '/'; 403 for a
-/// fixed category-root folder; 404 for a foreign / missing / TRASHED id (all
-/// indistinguishable — `Files.get` hardcodes `deleted = 0`, so a bin item is a 404,
-/// which is right: rename is a live-only action with restore/purge as the bin's own
-/// verbs).
+/// POST /api/controlplane/entry/{id}/rename `{name}` (the full filename). A `move`
+/// to the current parent with `autorename = false`, so a clash is 409 rather than a
+/// " (2)" suffix. 400 empty or '/'; 403 category folder; 404 foreign, missing or
+/// trashed. Metadata only.
 pub fn controlplaneRename(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -563,31 +403,21 @@ pub fn controlplaneRename(ctx: *Context, req: *Request, params: Params) anyerror
     defer parsed.deinit();
     const new_name = std.mem.trim(u8, parsed.value.name, " \t\r\n");
 
-    // Validate server-side too — never rely on the client. `move` would also reject
-    // an empty name, but a '/' would silently be read as a path separator by nothing
-    // here yet is not a legal filename component, so both are 400s with a clear code.
+    // Validate server-side too; '/' is not a legal filename component.
     if (new_name.len == 0)
         return fail(ctx, req, .bad_request, "INVALID_NAME", "a name can't be empty");
     if (std.mem.indexOfScalar(u8, new_name, '/') != null)
         return fail(ctx, req, .bad_request, "INVALID_NAME", "a name can't contain '/'");
 
-    // Resolve the caller's LIVE entry for its current parent + kind. `get` is the
-    // shared ownership boundary and hardcodes `deleted = 0`, so a foreign, missing
-    // or trashed id is one indistinguishable 404 (same as `controlplaneTrash`).
+    // `get` hardcodes `deleted = 0`: foreign, missing and trashed are one 404.
     const entry = (files.get(caller.user_id, id) catch return serverError(ctx, req)) orelse
         return fail(ctx, req, .not_found, "NOT_FOUND", "no such entry");
     defer ctx.gpa.free(entry.name);
     defer if (entry.md5) |m| ctx.gpa.free(m);
 
-    // Guard the fixed category folders (see `category_roots` / `category_anchors`).
-    // A root-level container/category folder, or a two-segment anchor subfolder
-    // directly under a root-level container, may not be renamed — device sync and
-    // the browser rail resolve these by path.
     if (entry.is_folder) {
         if (entry.parent_id) |pid| {
-            // Anchor case: the parent must itself be root-level for `[parent, entry]`
-            // to be a category anchor. A "Note" folder deeper in the tree, or under a
-            // non-root parent, is a user folder and renames fine.
+            // An anchor's parent must itself be root-level.
             if (files.get(caller.user_id, pid) catch return serverError(ctx, req)) |parent| {
                 defer ctx.gpa.free(parent.name);
                 defer if (parent.md5) |m| ctx.gpa.free(m);
@@ -616,22 +446,9 @@ pub fn controlplaneRename(ctx: *Context, req: *Request, params: Params) anyerror
 
 // ---- web upload (POST /api/controlplane/folder/{id}/upload) -------------------
 
-/// The extensions a web upload accepts. This list is the FEATURE — the point of
-/// the endpoint is getting a file onto the Nomad, so what the DEVICE can open is
-/// what we take:
-///
-///   - the device's own native set: `.note`, PDF, EPUB, Word, text, PNG/JPG/WebP,
-///     CBZ, FB2, XPS;
-///   - `.spd`, which is absent from Ratta's public import list because it is
-///     device-AUTHORED rather than an advertised import type. It is accepted
-///     anyway: restoring a sketch from a backup is a real case, and Inkhold has
-///     its own `.spd` viewer, so the file is first-class on the web;
-///   - the MOBI family, which reads through the bundled Kindle app rather than
-///     natively. Uploadable, but it does not imply a native open.
-///
-/// Matched case-insensitively on the trailing extension. Everything else is a
-/// 415 rather than a silent store: a file the device will simply ignore is worse
-/// sitting in the library than refused at the door.
+/// Extensions a web upload accepts: what the device can open, plus `.spd`
+/// (device-authored, so absent from Ratta's import list, but restorable from a
+/// backup) and the MOBI family (read via the bundled Kindle app). Else 415.
 const upload_extensions = [_][]const u8{
     ".note", ".spd",
     ".pdf",  ".epub",
@@ -644,9 +461,7 @@ const upload_extensions = [_][]const u8{
     ".azw3",
 };
 
-/// True if `name` ends in an accepted extension. `>` not `>=` on purpose: a bare
-/// `.pdf` is all extension and no stem, so it is not an accepted PDF — it is a
-/// dotfile whose whole name happens to read like a suffix.
+/// `>` not `>=`: a bare `.pdf` is a dotfile, not a PDF.
 fn acceptedUploadExt(name: []const u8) bool {
     for (upload_extensions) |ext| {
         if (name.len > ext.len and std.ascii.endsWithIgnoreCase(name, ext)) return true;
@@ -654,26 +469,9 @@ fn acceptedUploadExt(name: []const u8) bool {
     return false;
 }
 
-/// True if `name` is safe to become a tree path component.
-///
-/// The filename arrives in a `Content-Disposition` header written by whatever
-/// posted the body, so it is exactly as trustworthy as the `uploadId` query
-/// parameter that once let a caller escape the blob store's staging directory
-/// (see `device.validUploadId`) — same posture here, one level looser because a
-/// filename legitimately carries spaces and non-ASCII where an upload id does
-/// not. `multipart.Prologue` has already reduced the value to a basename, so
-/// this is the second gate, not the only one:
-///
-///   - non-empty and within `multipart.max_filename`;
-///   - no `/` or `\` — the two path separators, so the name can never be read as
-///     a path by us or by the device;
-///   - no `..` anywhere — the traversal token. Rejecting every occurrence (not
-///     just the bare `..` component) costs the vanishingly rare `a..b.pdf` and
-///     buys a rule with no edge cases;
-///   - no control characters (`< 0x20`, `0x7F`), which would corrupt the device's
-///     path-based protocol and any log line the name appears in;
-///   - valid UTF-8, because the name becomes SQLite TEXT and is compared against
-///     siblings — invalid bytes would round-trip unpredictably.
+/// True if `name` is safe as a tree path component; a second gate after
+/// `multipart.Prologue`'s basename. Rejects separators, any `..`, control chars
+/// (they break the device's path-based protocol) and invalid UTF-8.
 fn validUploadName(name: []const u8) bool {
     if (name.len == 0 or name.len > multipart.max_filename) return false;
     if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
@@ -684,77 +482,32 @@ fn validUploadName(name: []const u8) bool {
     return true;
 }
 
-/// What an upload does when the destination folder already holds a LIVE file of
-/// the same name. The caller chooses with `?onConflict=`; the person dropping the
-/// file is the only one who knows which of the two they meant.
-///
-///   - `rename` — keep both. The arriving file takes the next free ` (n)` suffix
-///     and the occupant is untouched. This is the DEFAULT, and it is the default
-///     because it is the one that cannot lose anything.
-///   - `replace` — this is a new version OF that file. It links onto the existing
-///     name, which is `linkBlob`'s ordinary path: the row keeps its id and the
-///     superseded blob is written to `file_history`, so the previous file is a
-///     retained version restorable from the history UI, not a deletion. That
-///     retention is precisely why the choice can be offered at all.
-///
-/// An absent or unrecognised value is `rename`. That direction is deliberate: a
-/// client too old to know about this parameter, or one that mistypes it, must
-/// never be interpreted as asking to overwrite.
+/// What an upload does when a live file already holds the name. `rename` (the
+/// default) keeps both with a ` (n)` suffix; `replace` supersedes via `linkBlob`,
+/// so the old file stays a restorable version. Unknown values mean `rename`, so an
+/// old or mistyped client never overwrites.
 const OnConflict = enum { rename, replace };
 
-/// Reads `?onConflict=` off the raw request target. Must be called BEFORE the
-/// body read, like every other head string — the enum it returns is a value, so
-/// it survives where the slice would not.
+/// Read before the body: reading the body invalidates head strings.
 fn onConflictFromTarget(target: []const u8) OnConflict {
     const v = reply.queryParam(target, "onConflict") orelse return .rename;
     if (std.ascii.eqlIgnoreCase(v, "replace")) return .replace;
     return .rename; // absent, misspelled, or anything else: never overwrite by accident
 }
 
-/// POST /api/controlplane/folder/{id}/upload -> store an uploaded file into the
-/// caller's tree. `{id}` is the destination folder; the literal `root` is the
-/// library root. Body is `multipart/form-data` with ONE file part, whose
-/// `filename` names the entry. `?onConflict=rename|replace` (default `rename`)
-/// decides what happens when that name is already taken — see `OnConflict`.
-///
-/// **This does not speak the device protocol, and does not need to.** The Nomad
-/// pulls down whatever the server says it holds (confirmed on a
-/// real device), so the whole job is: put the blob in the store and leave the
-/// tree in the state a sync reads. That is precisely what the device's own
-/// `upload/finish` does at the end of its three-step dance, so this shares its
-/// tree-link (`Files.placeUpload` → `Files.linkBlob`) and skips the dance.
-///
-/// **Lock discipline.** The route is `manual_db_lock`, like `/oss/put`, because
-/// the body is a multi-MB transfer: the ingest (socket → md5 → filesystem, no DB
-/// at all) runs UNLOCKED, and `ctx.db_lock` is held only for the destination
-/// lookup, the quota headroom read, and the final link. The default whole-handler
-/// lock would serialize every other request — including device sync — behind one
-/// browser upload.
-///
-/// **Order of refusals.** The destination and the name are checked BEFORE a byte
-/// is stored: `readPrologue` stops at the part headers, so a 400/415 costs the
-/// headers and nothing else. Quota is charged on the real ingested size inside the
-/// link transaction, because the declared size of an upload is not evidence of
-/// anything (the device path learned that the hard way) — but the ingest itself is
-/// CAPPED at the caller's remaining headroom as the bytes arrive, so a body that
-/// could never be linked stops costing disk the moment it passes the point of no
-/// return rather than at the end. A rejected link leaves the blob unreferenced on
-/// disk for the sweep, exactly as `upload/finish` does; a body rejected for length
-/// leaves nothing at all.
-///
-/// Status contract: 200 + the created (or superseded) entry as a listing-shaped
-/// `EntryVO` (the same shape `rename` returns); 413 `QUOTA_EXCEEDED`; 415
-/// `UNSUPPORTED_TYPE`; 400 `INVALID_NAME`; 404 for a destination that is missing,
-/// foreign, trashed or not a folder (all indistinguishable — upload is a
-/// live-only action, and a stranger's folder id must not be an existence oracle);
-/// 409 `NAME_TAKEN` when a FOLDER holds the name — a file cannot supersede a
-/// folder, under either conflict mode.
+/// POST /api/controlplane/folder/{id}/upload -> store one multipart file part into
+/// the caller's tree (`{id}` may be `root`). No device protocol needed: the Nomad
+/// pulls whatever the server holds, so this shares `upload/finish`'s tree-link.
+/// `manual_db_lock`: the ingest runs unlocked; the lock covers only the destination
+/// lookup, the quota read and the link. Name and type are refused before any byte
+/// is stored, and the ingest is capped at remaining quota as bytes arrive.
+/// 200 `EntryVO`; 413 quota; 415 type; 400 name; 404 bad destination; 409 when a
+/// folder holds the name.
 pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
 
-    // Copy everything we need out of the request HEAD before touching the body —
-    // reading the body invalidates head strings (the `/oss/put` rule).
+    // Copy what we need out of the head first; reading the body invalidates it.
     const id_raw = params.get("id") orelse return badRequest(ctx, req);
     var id_buf: [24]u8 = undefined;
     if (id_raw.len == 0 or id_raw.len > id_buf.len) return badRequest(ctx, req);
@@ -768,10 +521,8 @@ pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror
     var bnd_buf: [multipart.max_term]u8 = undefined;
     const boundary = multipart.boundaryFromContentType(ct, &bnd_buf) orelse return badRequest(ctx, req);
 
-    // Resolve + own the destination. `root` is the library root (parent null);
-    // anything else must be a LIVE folder this caller owns — `Files.get` is the
-    // shared ownership boundary and hardcodes `deleted = 0`, so foreign, missing
-    // and trashed collapse into one 404. DB touch #1 of 3 (skipped for `root`).
+    // `root` is the library root; anything else must be a live folder this caller
+    // owns (`Files.get`: foreign, missing and trashed are one 404).
     var parent: ?u64 = null;
     if (!std.mem.eql(u8, id_str, "root")) {
         const id = std.fmt.parseInt(u64, id_str, 10) catch return badRequest(ctx, req);
@@ -786,15 +537,8 @@ pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror
         parent = id;
     }
 
-    // THE CAP, read before a byte is accepted. This route has no `upload/apply`
-    // step and therefore no declared size to hold the body to — so it is held to
-    // the user's REMAINING QUOTA instead, which is the figure `linkBlob` is about
-    // to enforce anyway. Bytes past it could never be kept; accepting them only to
-    // refuse them at the end is precisely how an authenticated caller filled the
-    // disk before this existed. (The SPA already refuses the same files client-side
-    // — `preflightUpload` compares the file size against the remaining headroom —
-    // so this takes no feature away from the UI; see `upload_cap.slack_bytes` for
-    // the one behaviour it does change, at-quota dedup.) DB touch #2 of 3.
+    // There is no declared size to hold the body to, so cap it at the remaining
+    // quota `linkBlob` will enforce anyway (see `upload_cap.slack_bytes`).
     const limit = blk: {
         ctx.lockDb();
         defer ctx.unlockDb();
@@ -806,7 +550,6 @@ pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror
     var rbuf: [blobstore.chunk_len]u8 = undefined;
     const reader = req.readerExpectContinue(&rbuf) catch return badRequest(ctx, req);
 
-    // The part headers only — the filename is vetted before any byte is stored.
     var pro: multipart.Prologue = .{};
     multipart.readPrologue(reader, &pro) catch return badRequest(ctx, req);
     const name = std.mem.trim(u8, pro.filename(), " \t\r\n");
@@ -815,15 +558,12 @@ pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror
     if (!acceptedUploadExt(name))
         return fail(ctx, req, .unsupported_media_type, "UNSUPPORTED_TYPE", "the Nomad can't open that file type");
 
-    // Stream the part straight into a new blob — UNLOCKED, 64 KB at a time, the
-    // whole file never in RAM (the RSS budget is structural here).
+    // Stream unlocked into a new blob, never whole in RAM.
     var wbuf: [blobstore.chunk_len]u8 = undefined;
     var ing = files.blobs.beginIngest(&wbuf) catch return serverError(ctx, req);
     var sink = upload_cap.Capped(blobstore.Ingest).init(&ing, limit);
     multipart.streamPart(reader, boundary, &pro, &sink) catch |err| {
-        // `abort` drops the temp file, so a body refused for length leaves nothing
-        // on disk — it is the same end state as the link-time refusal below, just
-        // reached before the bytes were paid for.
+        // `abort` drops the temp file, so a refused body leaves nothing on disk.
         ing.abort();
         if (err == error.UploadTooLarge)
             return fail(ctx, req, .payload_too_large, "QUOTA_EXCEEDED", "not enough space");
@@ -835,13 +575,8 @@ pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror
     };
     ing.deinit();
 
-    // Link it in. DB touch #3 of 3 — the lock covers the quota check, the row
-    // write, the `incref` and the `bumpSync`, and nothing else. A dedup hit
-    // charges ZERO: quota is per DISTINCT blob per user, which is what the
-    // content-addressed store actually occupies. A `replace` that supersedes a
-    // file releases the old blob's charge only when this row held the user's LAST
-    // reference to it — a retained history version keeps the bytes on disk but
-    // does NOT keep them on the live quota, which is what `used_bytes` measures.
+    // Link it in under the lock. A dedup hit charges zero: quota is per distinct
+    // blob per user.
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena.deinit();
     var svc = controlplane.ControlPlaneService.init(files);
@@ -850,16 +585,13 @@ pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror
     {
         ctx.lockDb();
         defer ctx.unlockDb();
-        // The ONE difference between the two modes: which name the blob is linked
-        // under. `replace` is `linkBlob` unmodified — the same call the device's
-        // `upload/finish` makes, retention and all.
+        // `replace` is `linkBlob` unmodified, the call `upload/finish` makes.
         const linked = switch (on_conflict) {
             .rename => files.placeUpload(caller.user_id, parent, name, &res.md5, res.size),
             .replace => files.linkBlob(caller.user_id, parent, name, &res.md5, res.size),
         };
         const entry = linked catch |err| {
-            // The blob is unreferenced now. Drop it unless it deduped onto content
-            // something else still holds — the `putFile` rule.
+            // The blob is unreferenced now; drop it unless it deduped (the `putFile` rule).
             if (!res.deduped) files.blobs.remove(&res.md5);
             return switch (err) {
                 error.QuotaExceeded => fail(ctx, req, .payload_too_large, "QUOTA_EXCEEDED", "not enough space"),
@@ -870,22 +602,15 @@ pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror
         };
         defer ctx.gpa.free(entry.name);
         defer if (entry.md5) |m| ctx.gpa.free(m);
-        // Built here, under the same lock: `entryVO` reads the DB (child count /
-        // page summary). The arena outlives the block, so the VO does too.
+        // Under the same lock: `entryVO` reads the DB.
         vo = svc.entryVO(arena.allocator(), caller.user_id, entry) catch return serverError(ctx, req);
     }
     try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 
-/// POST /api/controlplane/bin/{id}/restore -> bring a trashed entry back.
-///
-/// **The response reports what actually happened, not what was asked**, because
-/// restore routinely does more than the user selected and the UI cannot tell the
-/// truth otherwise: it restores the ancestor chain (a live row under a trashed
-/// parent would be an orphan, visible in no listing), it restores every trashed
-/// descendant of a folder, and it auto-renames when a live entry has taken the
-/// name in the meantime — `files_live_name` is UNIQUE only `WHERE deleted = 0`.
-/// So `name`/`renamed`/`ancestors`/`descendants` are all load-bearing.
+/// POST /api/controlplane/bin/{id}/restore -> bring a trashed entry back. Reports
+/// what happened: restore also revives the ancestor chain and descendants, and
+/// auto-renames when a live entry took the name.
 pub fn controlplaneRestore(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -905,14 +630,8 @@ pub fn controlplaneRestore(ctx: *Context, req: *Request, params: Params) anyerro
     }, null);
 }
 
-/// DELETE /api/controlplane/bin/{id} -> destroy one trashed entry (and its
-/// subtree) permanently. Irreversible.
-///
-/// A LIVE id is a 404, not a hard delete: `Files.purge` refuses anything outside
-/// the bin, so destroying a live file is never one mistyped id away. This is the
-/// only route on this face that reaches `decref` — where blob refcounts drop, the
-/// note index and FTS rows go, the blob leaves disk, and the bytes finally come
-/// off the user's quota.
+/// DELETE /api/controlplane/bin/{id} -> destroy one trashed entry and its subtree.
+/// A live id is a 404 (`Files.purge` refuses anything outside the bin).
 pub fn controlplanePurge(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -926,7 +645,6 @@ pub fn controlplanePurge(ctx: *Context, req: *Request, params: Params) anyerror!
 }
 
 /// DELETE /api/controlplane/bin -> destroy everything in the caller's bin.
-/// Irreversible and bulk; the client confirms it (U4). Returns the count removed.
 pub fn controlplaneEmptyBin(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
@@ -936,17 +654,9 @@ pub fn controlplaneEmptyBin(ctx: *Context, req: *Request, params: Params) anyerr
     try json.respond(ctx.gpa, req, .ok, controlplane.EmptiedVO{ .entries = @intCast(n) }, null);
 }
 
-/// GET /api/controlplane/bin/file/metadata/{id} -> the page list of a TRASHED item.
-///
-/// The bin-scoped twin of `controlplaneNote`, and the reason it has to exist:
-/// `Files.get` hardcodes `deleted = 0`, so a trashed item 404s from `noteMeta`,
-/// from page bytes and from the raw-file route — and deciding whether to restore
-/// something deleted a fortnight ago means looking at it first. `Files.get` is
-/// NOT relaxed to allow that; these three routes read through
-/// `Files.getTrashed`, which sees trashed rows and nothing else.
-///
-/// It works at all only because trash holds the blob reference. Under the old
-/// behaviour the bytes were already gone by the time anyone wanted to look.
+/// GET /api/controlplane/bin/file/metadata/{id} -> the page list of a trashed item.
+/// The bin routes read through `Files.getTrashed`, which sees only trashed rows;
+/// `Files.get` stays live-only.
 pub fn controlplaneBinNote(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -960,23 +670,9 @@ pub fn controlplaneBinNote(ctx: *Context, req: *Request, params: Params) anyerro
     try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 
-/// GET /api/controlplane/bin/note/{id}/page/{n}/text -> page {n}'s recognized
-/// transcript + per-word boxes for a TRASHED note — the bin twin of the live
-/// `/note/{id}/page/{n}/text`, keyed on the trashed file's CURRENT md5 through
-/// `ControlPlaneService.binPageText` (`.trashed` lookup → `pageTextForMd5`).
-///
-/// This closes the "no on-page ovals in the bin" gap: the transcript is retained
-/// md5-keyed after trash (the FTS is tombstoned by `deleted = 1`, not dropped — H10),
-/// so the same builder the live route uses serves it verbatim. A live id here is a
-/// 404, exactly as it is on the sibling bin page/file routes.
-///
-/// SAME `PageTextVO` body shape as the live route, and `no-cache` for the SAME
-/// reason: the body is serialised from a Zig struct whose SHAPE nothing in the URL
-/// pins, so it must never be `immutable` (the cited `words`-field regression). No
-/// `?v=` (unlike the live route): a trashed blob cannot be re-synced, so page {n}'s
-/// text can never change under this id — like the history text route, the md5 the
-/// handler resolves pins the content. NOT `manual_db_lock`: pure DB + one KB-scale
-/// ranged read, nothing streams.
+/// GET /api/controlplane/bin/note/{id}/page/{n}/text -> a trashed note's page
+/// transcript (retained md5-keyed after trash). A live id is a 404. `no-cache`,
+/// never `immutable`: nothing in the URL pins the JSON shape.
 pub fn controlplaneBinPageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -991,27 +687,14 @@ pub fn controlplaneBinPageText(ctx: *Context, req: *Request, params: Params) any
     const pt = (svc.binPageText(arena.allocator(), caller.user_id, id, n) catch return serverError(ctx, req)) orelse
         return reply.notFound(req);
 
-    // NOT `immutable` — see the header comment and the live text route: the id
-    // versions the transcript, not the JSON shape it is wrapped in.
     try json.respondWith(ctx.gpa, req, .ok, pt.vo, &.{
         .{ .name = "cache-control", .value = "no-cache" },
     });
 }
 
-/// GET /api/controlplane/tree?parent={id} -> a folder's child folders + note
-/// summaries, its breadcrumb, and the user's syncVersion. `parent` omitted or
-/// `root` = the user's root.
-///
-/// NOT `manual_db_lock`, so the whole handler runs under the global DB lock —
-/// which is affordable precisely because `listing` is now a pure index read: a
-/// handful of single-row `SELECT`s per entry, no file opened, no `.note` parsed.
-/// It previously read and parsed **every note in the folder** under this lock.
-///
-/// The one exception is a cold blob (never indexed, or at a stale
-/// `index_version`): it is backfilled in-flight, which parses under the lock. A
-/// folder of N unindexed notes therefore costs N ranged parses once — no worse
-/// than the old steady state, which parsed N whole notes on *every* request —
-/// and it drains permanently on the first listing.
+/// GET /api/controlplane/tree?parent={id} -> a folder's children, breadcrumb and
+/// syncVersion (`parent` omitted or `root` = the root). A pure index read under the
+/// global lock; only a cold blob is backfilled (parsed) in-flight, once.
 pub fn controlplaneTree(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
@@ -1032,14 +715,8 @@ pub fn controlplaneTree(ctx: *Context, req: *Request, params: Params) anyerror!v
     try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 
-/// GET /api/controlplane/file/metadata/{id} -> the full page list (per-page
-/// content hash + dims). The GENERIC per-item metadata endpoint every previewable
-/// kind opens with (hence `/file/metadata/`, not the `/note/` noun) — the handler
-/// symbol stays `controlplaneNote`/`noteMeta` because the VO is unchanged.
-///
-/// Also a pure index read (one row per page, one statement), so holding the
-/// global lock for the whole handler costs a few microseconds rather than a
-/// whole-file read plus parse. Same cold-blob caveat as `controlplaneTree`.
+/// GET /api/controlplane/file/metadata/{id} -> the full page list (per-page content
+/// hash and dims), for every previewable kind. A pure index read.
 pub fn controlplaneNote(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -1053,52 +730,18 @@ pub fn controlplaneNote(ctx: *Context, req: *Request, params: Params) anyerror!v
     try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 
-/// GET /note/{id}/page/{n}?v={hash} -> the immutable per-page byte payload. The
-/// `?v=` content hash makes the response cacheable forever (`immutable` +
-/// `ETag`), so a repeat view is a browser-cache hit. A missing page or a stale
-/// `?v=` is a 404, prompting the client to refetch the note's metadata.
-///
-/// ## Why `immutable` IS honest here (unlike the page-text route below)
-///
-/// The rule is: `immutable` is safe only when the cache key covers everything
-/// that can change about the response. The body here is layer bitmaps lifted
-/// verbatim out of the blob — opaque bytes, and `?v=` is exactly their md5. There
-/// is no Zig struct serialised into this response that could gain a field on a
-/// deploy, which is precisely what made `/text` unsafe.
-///
-/// The one thing `?v=` does NOT cover is the 20-byte SNPG envelope the server
-/// synthesises around those bytes. That is deliberate and bounded: SNPG is
-/// **self-describing and versioned in band** (`page_payload.MAGIC` +
-/// `page_payload.VERSION`), and the decoder rejects a foreign magic or version
-/// with `BadPayload`. So a format change is a loud, attributable decode error
-/// rather than a silently truncated response — the opposite of the `/text` bug.
-/// The decoder itself (`/note-decode.wasm`) is un-fingerprinted and therefore
-/// revalidated, so it can never lag the payload format. **Bumping
-/// `page_payload.VERSION` still requires turning over the `?v=` domain** (see
-/// `note_index.pageContentHash`), or year-old cache entries outlive the decoder
-/// that can read them.
-///
-/// `manual_db_lock` (same shape as `device.ossGet`): the lookup and the plan run
-/// inside one narrow `ctx.db_lock` window, then the payload is **streamed** with
-/// the lock released. Opening a note fires ~10 of these (stage + neighbour
-/// prefetch + filmstrip thumbnails), so under the default whole-handler lock they
-/// serialized against each other AND stalled device sync behind them.
-///
-/// The response body is never assembled: the plan carries the SNPG header, the
-/// stored layer ranges, the exact `Content-Length` and the `ETag`, and
-/// `writePage` pumps each layer's block out of the blob in 64 KB windows. So the
-/// peak cost of serving a page is a fixed pair of buffers, whatever the page
-/// weighs — and because `Content-Length` is computed from the index rather than
-/// measured, the response is a plain sized body, not chunked.
+/// GET /note/{id}/page/{n}?v={hash} -> the immutable per-page payload. A missing
+/// page or stale `?v=` is a 404, prompting a metadata refetch. `immutable` is honest
+/// because the body is opaque layer bitmaps whose md5 is `?v=`; the 20-byte SNPG
+/// envelope is versioned in band, so bumping `page_payload.VERSION` must also turn
+/// over the `?v=` domain (`note_index.pageContentHash`). `manual_db_lock`: plan
+/// under the lock, then stream unlocked with a computed `Content-Length`.
 pub fn controlplanePage(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return pageBytes(ctx, req, params, .live);
 }
 
-/// GET /api/controlplane/bin/note/{id}/page/{n}?v={hash} -> the same payload for
-/// a TRASHED note, so the reader can open a bin item (U2b). Identical in every
-/// respect except the lookup: `.trashed` resolves through `Files.getTrashed`, so
-/// this route can never serve a live note and `/note/{id}/page/{n}` can never
-/// serve a trashed one. See `controlplaneBinNote` for why the split exists.
+/// GET /api/controlplane/bin/note/{id}/page/{n}?v={hash} -> the same for a trashed
+/// note; `.trashed` can never serve a live note, nor the live route a trashed one.
 pub fn controlplaneBinPage(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return pageBytes(ctx, req, params, .trashed);
 }
@@ -1114,14 +757,8 @@ fn pageBytes(ctx: *Context, req: *Request, params: Params, scope: controlplane.C
 
     var svc = controlplane.ControlPlaneService.init(files);
 
-    // The ONLY DB touches in this handler — the route is `manual_db_lock`, so we
-    // take `ctx.db_lock` for exactly these two calls and nothing more.
-    // `pagePlanOf` REQUIRES the lock (it reads `note_index`, and backfills a cold
-    // blob); `writePage` below runs unlocked and is contractually DB-free.
-    //
-    // The plan is a plain value with inline storage — no borrow of SQLite
-    // statement memory survives the unlock, which is what makes streaming it
-    // outside the lock safe on a shared connection.
+    // The only DB touches. `pagePlanOf` needs the lock; `writePage` is DB-free. The
+    // plan is inline storage with no borrow of statement memory, so it outlives the unlock.
     const planned = blk: {
         ctx.lockDb();
         defer ctx.unlockDb();
@@ -1132,25 +769,15 @@ fn pageBytes(ctx: *Context, req: *Request, params: Params, scope: controlplane.C
         break :blk svc.pagePlanOf(entry, n) catch return serverError(ctx, req);
     } orelse return reply.notFound(req);
 
-    // The version must name the exact content we hold, or the client is stale.
-    // Checked against the STORED hash, so a stale `?v=` costs no file I/O at all.
+    // Checked against the stored hash, so a stale `?v=` costs no file I/O.
     if (v == null or !std.ascii.eqlIgnoreCase(v.?, &planned.plan.content_hash))
         return reply.notFound(req);
 
     return writePageResponse(ctx, req, svc, planned);
 }
 
-/// Streams a resolved page's SNPG payload under the immutable, content-addressed
-/// page contract — the shared tail of `pageBytes` (live/trashed) and
-/// `controlplaneHistoryPage`. The caller has already resolved `planned` under the
-/// DB lock AND, where its route requires it, validated `?v=`; this emits the head
-/// (ETag = the page content hash, `immutable`) and pumps the layers off the blob
-/// with the lock released.
-///
-/// `immutable` is honest on every caller: the body is opaque layer bitmaps whose
-/// md5 IS `content_hash`. On the live/trashed routes `?v=` pins that; on the
-/// history route the URL's `{md5}` pins the whole blob (a fixed blob's page N
-/// never changes), so no `?v=` is needed there.
+/// Streams a resolved page's SNPG payload with ETag = content hash and `immutable`.
+/// The caller resolved `planned` under the lock and validated `?v=` where needed.
 fn writePageResponse(ctx: *Context, req: *Request, svc: controlplane.ControlPlaneService, planned: controlplane.PagePlan) anyerror!void {
     var etag_buf: [36]u8 = undefined;
     const etag = std.fmt.bufPrint(&etag_buf, "\"{s}\"", .{planned.plan.content_hash}) catch
@@ -1166,47 +793,26 @@ fn writePageResponse(ctx: *Context, req: *Request, svc: controlplane.ControlPlan
         } },
     }) catch return;
 
-    // A mid-stream failure (a blob deleted under us, a dead socket) can no longer
-    // be turned into a status code — the head is already on the wire. On failure we
-    // abandon the body and return, which closes the connection: a content-length
-    // body cut short by a connection close is exactly how HTTP signals truncation
-    // (same as `ossGet`). We must NOT fall through to `body.end()` on that path —
-    // `end()` asserts the body reached its `Content-Length`, and that assert is live
-    // in a safe build, so ending a short body panics ("reached unreachable code").
-    // Returning also forces the close a truncated content-length body requires: a
-    // reused connection would let the client read the next response as this body's
-    // missing tail. `end()` therefore runs only when every byte was written.
+    // The head is already sent, so a mid-stream failure must close the connection
+    // (truncation signal). Never call `body.end()` on a short body: it asserts the
+    // `Content-Length` was reached and panics in safe builds.
     svc.writePage(planned, &body.writer) catch return error.StreamTruncated;
     body.end() catch {};
 }
 
-// ---- hot-cache versioning: history of this file (phases 3-6) ----
+// ---- history of this file ----
 //
-// The read/write endpoints the "history of this file" UI consumes. Every one is
-// note-scoped by `{id}` (the same ownership gate the sibling `/note/{id}/...`
-// routes use) and, for the per-version routes, gated on `{md5}` being a RETAINED
-// version of THAT file (`Files.historyVersion`) — so a stranger's md5, or an md5
-// not in this file's history, is one indistinguishable 404. Being in
-// `file_history` is itself the guarantee the blob + its `note_index` are on disk
-// (H1/H2), so nothing here re-parses; preview reuses the page path and restore
-// reuses the supersede path (`linkBlobIndexed`), verbatim.
+// Per-version routes are gated on `{md5}` being a retained version of that file
+// (`Files.historyVersion`), so a stranger's or unknown md5 is one 404.
 
-/// GET /api/controlplane/note/{id}/history -> the file's versions, newest first:
-/// the CURRENT blob (`current: true`) then each retained `file_history` row
-/// (`{md5, size, createdAt}`). The UI renders timestamps and pulls each version's
-/// thumbnail from the existing content-addressed `/thumbnail/{md5}` — no new
-/// thumbnail work here. A foreign / missing id, or a folder, is a 404.
+/// GET /api/controlplane/note/{id}/history -> the file's versions, newest first,
+/// current one flagged.
 pub fn controlplaneHistory(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return historyList(ctx, req, params, .live);
 }
 
-/// GET /api/controlplane/bin/note/{id}/history -> the version list of a TRASHED
-/// file (view-only). The bin twin of `controlplaneHistory`, delegating to the SAME
-/// handler with the trashed scope: `.trashed` reads the file live-vs-trashed through
-/// `Files.getTrashed` and lists its RETAINED `file_history` (H10). A live id here is
-/// a 404, exactly as a trashed id is on the live route. There is deliberately NO
-/// per-version restore twin — the bin's restore story is "restore the FILE" (via
-/// `/bin/{id}/restore`), then restore a version in the live viewer.
+/// GET /api/controlplane/bin/note/{id}/history -> the version list of a trashed
+/// file, view-only; restore the file first to restore a version.
 pub fn controlplaneBinHistory(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return historyList(ctx, req, params, .trashed);
 }
@@ -1224,20 +830,9 @@ fn historyList(ctx: *Context, req: *Request, params: Params, scope: controlplane
     try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 
-/// GET /api/controlplane/note/{id}/history/{md5}/meta -> the page list + geometry
-/// of a RETAINED version, read from ITS OWN retained `note_index` (H7): the
-/// version's real page count, per-page dims and its `fileType`/`pxPerMm`. The
-/// preview reader consumes it exactly like `/file/metadata/{id}` (`NoteMetaVO` on
-/// both, one normalizer), so a version whose page count differs from the current note
-/// previews with its OWN geometry rather than the live note's slots. `fileHash` is
-/// the version md5 and `size` is the version's; `id`/`name` stay the file's.
-///
-/// A pure index read like `/file/metadata/{id}` — NOT `manual_db_lock`: nothing
-/// streams, so the whole handler runs under the global DB lock, and its cache policy
-/// is non-immutable (JSON serialised from a struct), exactly like the sibling
-/// `/file/metadata/{id}` and `/history` reads. An md5 not in this file's history, or a
-/// foreign / missing id, is one indistinguishable 404 — the gate every per-version
-/// route shares (`Files.historyVersion`).
+/// GET /api/controlplane/note/{id}/history/{md5}/meta -> a retained version's page
+/// list and geometry from its own `note_index`, as `NoteMetaVO`. `fileHash` and
+/// `size` are the version's; `id` and `name` stay the file's.
 pub fn controlplaneHistoryMeta(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -1252,26 +847,14 @@ pub fn controlplaneHistoryMeta(ctx: *Context, req: *Request, params: Params) any
     try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 
-/// GET /api/controlplane/note/{id}/history/{md5}/page/{n} -> page `n` of a
-/// RETAINED version, served through the SAME internals as the live page route
-/// (`note_index` → `BlobStore.readRange` → SNPG), only keyed by `{md5}` instead
-/// of the file's current blob. `manual_db_lock`, exactly like `/note/{id}/page/{n}`.
-///
-/// No `?v=` (unlike the live route): `{md5}` already pins the immutable blob, so
-/// page `n`'s bytes can never change under this URL — the content addressing the
-/// live route gets from `?v=` this route gets from `{md5}` itself. A 404 covers an
-/// md5 not in this file's history, a page that does not exist, and a non-`.note`.
+/// GET /api/controlplane/note/{id}/history/{md5}/page/{n} -> page `n` of a retained
+/// version. No `?v=`: `{md5}` already pins the blob. `manual_db_lock`.
 pub fn controlplaneHistoryPage(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return historyPage(ctx, req, params, .live);
 }
 
-/// GET /api/controlplane/bin/note/{id}/history/{md5}/page/{n} -> page {n} of a
-/// retained version of a TRASHED file — the bin twin of `controlplaneHistoryPage`,
-/// delegating to the SAME handler with the trashed scope. Identical in every
-/// respect except the gate's state (`historyVersionIn(.trashed)` requires
-/// `deleted = 1`), so a live file's md5 here is a 404 and a trashed file's is one on
-/// the live route. `manual_db_lock` + `immutable`, exactly like its live twin (the
-/// `{md5}` pins the whole blob).
+/// GET /api/controlplane/bin/note/{id}/history/{md5}/page/{n} -> the same for a
+/// trashed file.
 pub fn controlplaneBinHistoryPage(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return historyPage(ctx, req, params, .trashed);
 }
@@ -1286,15 +869,10 @@ fn historyPage(ctx: *Context, req: *Request, params: Params, scope: controlplane
 
     var svc = controlplane.ControlPlaneService.init(files);
 
-    // The ONLY DB touches in this handler — the route is `manual_db_lock`, so we
-    // take `ctx.db_lock` for exactly the gate + the plan (both indexed reads), then
-    // stream with the lock released. The plan is inline storage with no borrow of
-    // statement memory, so streaming it unlocked is safe (same as `pageBytes`).
+    // The only DB touches (gate and plan), then stream unlocked, as in `pageBytes`.
     const planned = blk: {
         ctx.lockDb();
         defer ctx.unlockDb();
-        // The gate: `{md5}` must be a retained version of THIS file, owned by the
-        // caller and in `scope`'s deleted-state. A miss breaks to null → the shared 404.
         if ((files.historyVersionIn(scope, caller.user_id, id, md5) catch return serverError(ctx, req)) == null)
             break :blk null;
         break :blk svc.pagePlanForMd5(md5, n) catch return serverError(ctx, req);
@@ -1303,16 +881,9 @@ fn historyPage(ctx: *Context, req: *Request, params: Params, scope: controlplane
     return writePageResponse(ctx, req, svc, planned);
 }
 
-/// POST /api/controlplane/note/{id}/history/{md5}/restore -> re-point the file at
-/// a RETAINED version, through the SAME supersede path an upload takes
-/// (`Files.restoreVersion` → `linkBlobIndexed`) — NEVER a raw `UPDATE files SET
-/// md5`. That re-derives the version as CURRENT (re-indexes it into the FTS,
-/// regenerates thumbnails) and retains the DISPLACED current as a new history
-/// row, which is what makes restore inherently UNDOABLE ("undo" = restore the
-/// displaced version). Returns the file's new current version.
-///
-/// An md5 not in this file's history is a 404; a restore that would exceed the
-/// owner's quota is a 507 and changes nothing.
+/// POST /api/controlplane/note/{id}/history/{md5}/restore -> re-point the file at a
+/// retained version through `linkBlobIndexed`, never a raw `UPDATE`, so it is
+/// re-derived and the displaced current is retained (undoable). 507 over quota.
 pub fn controlplaneHistoryRestore(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -1334,42 +905,16 @@ pub fn controlplaneHistoryRestore(ctx: *Context, req: *Request, params: Params) 
     }, null);
 }
 
-/// GET /api/controlplane/note/{id}/history/{md5}/raw[?download=1] -> the RAW
-/// stored bytes of a RETAINED version — the raw-by-version twin of the live
-/// `/file/{id}?v=` route. It exists for the client-side viewers that fetch a WHOLE
-/// blob rather than per-page SNPG like `.note`: `.spd` (→ `spd_decode` WASM),
-/// `.txt` (→ `.text()`), and images (→ native `<img>`). Their live preview goes
-/// through `/file/{id}?v=`, which serves the CURRENT blob only; this is how a
-/// retained version reaches those same viewers.
-///
-/// Bytes + headers are IDENTICAL to `/file/{id}` for this file's name, only keyed
-/// by the version `{md5}` instead of the current blob: same inline allowlist
-/// (`attachment` for `.spd`/`.note`, inline for image/pdf), same `nosniff`, same
-/// `?download=1` override, same streaming (`streamRawBlob`, shared with the live
-/// route). The version shares the live file's NAME — so the same extension, the
-/// same disposition — read from the same owner-scoped `lookup` the live route uses.
-///
-/// The gate is `Files.historyVersion` — the SAME shared gate the sibling
-/// `/history/...` routes use — so a stranger's md5, an md5 not in THIS file's
-/// history, and a foreign/trashed/missing id are one indistinguishable 404. No
-/// `?v=` (unlike the live route): the path's `{md5}` already pins the immutable
-/// blob, so these bytes can never change under this URL — the content addressing
-/// the live route gets from `?v=` this route gets from `{md5}` itself.
-///
-/// `immutable`, like `/history/{md5}/page/{n}`: the `{md5}` pins the whole blob.
-/// `manual_db_lock`, exactly like `/file/{id}`: the gate + the name lookup are two
-/// indexed reads under one narrow lock window, then a possibly multi-MB blob
-/// streams with the lock RELEASED.
+/// GET /api/controlplane/note/{id}/history/{md5}/raw[?download=1] -> a retained
+/// version's raw bytes, for the whole-blob viewers (`.spd`, `.txt`, images). Same
+/// headers as `/file/{id}` for the file's name; `{md5}` pins the blob, so no `?v=`.
+/// `manual_db_lock`, streamed unlocked.
 pub fn controlplaneHistoryRaw(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return historyRaw(ctx, req, params, .live);
 }
 
-/// GET /api/controlplane/bin/note/{id}/history/{md5}/raw[?download=1] -> the raw
-/// bytes of a retained version of a TRASHED file — the bin twin of
-/// `controlplaneHistoryRaw`, delegating to the SAME handler with the trashed scope.
-/// The `.spd`/`.txt`/image half of previewing a past version in the bin. Both the
-/// gate and the name lookup run under `scope`, so a live file's md5/id here is a 404.
-/// `manual_db_lock` + `immutable`, exactly like its live twin.
+/// GET /api/controlplane/bin/note/{id}/history/{md5}/raw[?download=1] -> the same
+/// for a trashed file.
 pub fn controlplaneBinHistoryRaw(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return historyRaw(ctx, req, params, .trashed);
 }
@@ -1387,22 +932,15 @@ fn historyRaw(ctx: *Context, req: *Request, params: Params, scope: controlplane.
 
     var svc = controlplane.ControlPlaneService.init(files);
 
-    // The ONLY DB touches in this handler — the route is `manual_db_lock`, so we
-    // take `ctx.db_lock` for exactly the gate + the name lookup (both indexed
-    // reads), then stream with the lock released. `name` is `gpa.dupe`d by
-    // `rowToEntry` (hence the free below), so it is no borrow of statement memory.
+    // The only DB touches (gate and name lookup). `name` is duped by `rowToEntry`,
+    // so it is no borrow of statement memory.
     const resolved = blk: {
         ctx.lockDb();
         defer ctx.unlockDb();
-        // The gate: `{md5}` must be a retained version of THIS file, owned by the
-        // caller and in `scope`'s deleted-state (returns the version's `{md5, size}`).
-        // A miss → the shared 404.
         const v = (files.historyVersionIn(scope, caller.user_id, id, md5) catch return serverError(ctx, req)) orelse
             break :blk null;
-        // The version shares the file's name (→ its extension → its disposition). The
-        // lookup is the SAME owner-scoped resolve under `scope` the gate used; they
-        // resolve in lock-step. We keep only `name`; the current md5 is irrelevant
-        // here (we stream the VERSION's md5), so free it now.
+        // The version shares the file's name (hence its disposition); the current
+        // md5 is irrelevant here.
         const entry = (svc.lookup(scope, caller.user_id, id) catch return serverError(ctx, req)) orelse
             break :blk null;
         if (entry.md5) |m| ctx.gpa.free(m);
@@ -1413,41 +951,16 @@ fn historyRaw(ctx: *Context, req: *Request, params: Params, scope: controlplane.
     return streamRawBlob(ctx, req, resolved.name, &resolved.md5_hex, resolved.size, forced_download);
 }
 
-/// GET /api/controlplane/note/{id}/history/{md5}/page/{n}/text -> page `n`'s
-/// recognized transcript + per-word boxes for a RETAINED version — the per-version
-/// twin of the live `/note/{id}/page/{n}/text` route, read from ITS OWN retained
-/// `note_page_index` (the version's `text` row + the rich `RECOGNTEXT` range via
-/// `recogn_offset`/`recogn_length`). A version whose page N text differs from the
-/// current blob's returns the OLD text and boxes — a pure DB read plus one KB-scale
-/// ranged read, NEVER a re-parse (retention keeps the version's index, H2).
-///
-/// SAME body shape as the live route (`PageTextVO`: `{ text, words: [ … ] }`) so the
-/// reader reuses its transcript/box rendering. No `?v=` (unlike the live route): the
-/// path's `{md5}` already pins the immutable blob, so page N's text can never change
-/// under this URL — the content addressing the live route earns from `?v=` this one
-/// gets from `{md5}` for free.
-///
-/// NOT `immutable`, exactly like the live text route: the body is serialised from a
-/// Zig struct, whose SHAPE the URL's `{md5}` does NOT cover (a new field would freeze
-/// an old shape on a URL that never changes — the very regression the cache-policy
-/// pin guards). `no-cache` lets the browser store but revalidate. NOT `manual_db_lock`,
-/// also like the live text route: it is pure DB + one KB-scale ranged read, nothing
-/// streams, so the whole handler runs under the global DB lock.
-///
-/// The gate is `Files.historyVersion` — the SAME shared gate the sibling
-/// `/history/...` routes use — so a stranger's md5, an md5 not in THIS file's
-/// history, and a foreign/trashed/missing id are one indistinguishable 404. A page
-/// with no finished recognition falls out as a 404 too (no servable transcript row),
-/// exactly as on the live route.
+/// GET /api/controlplane/note/{id}/history/{md5}/page/{n}/text -> a retained
+/// version's page transcript and word boxes from its own `note_page_index`, never a
+/// re-parse. Same `PageTextVO` and `no-cache` policy as the live text route: `{md5}`
+/// pins the content, not the JSON shape. No finished recognition is a 404.
 pub fn controlplaneHistoryPageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return historyPageText(ctx, req, params, .live);
 }
 
-/// GET /api/controlplane/bin/note/{id}/history/{md5}/page/{n}/text -> page {n}'s
-/// transcript + word boxes for a retained version of a TRASHED file — the bin twin
-/// of `controlplaneHistoryPageText`, delegating to the SAME handler with the trashed
-/// scope. Same `PageTextVO`, same `no-cache`/never-`immutable` policy; only the
-/// gate's state differs (`historyVersionIn(.trashed)`), so a live file's md5 is a 404.
+/// GET /api/controlplane/bin/note/{id}/history/{md5}/page/{n}/text -> the same for
+/// a trashed file.
 pub fn controlplaneBinHistoryPageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return historyPageText(ctx, req, params, .trashed);
 }
@@ -1464,48 +977,25 @@ fn historyPageText(ctx: *Context, req: *Request, params: Params, scope: controlp
     defer arena.deinit();
     var svc = controlplane.ControlPlaneService.init(files);
 
-    // The gate: `{md5}` must be a retained version of THIS file, owned by the
-    // caller and in `scope`'s deleted-state. A miss → the shared 404.
     const version = (files.historyVersionIn(scope, caller.user_id, id, md5) catch return serverError(ctx, req)) orelse
         return reply.notFound(req);
 
-    // Keyed by the version's md5, not the file's current blob — so it reads the
-    // VERSION's own retained transcript. `.hash` is unused here (`{md5}` pins the
-    // blob, so there is no `?v=` to revalidate against).
+    // Keyed by the version's md5, so it reads that version's own transcript.
     const pt = (svc.pageTextForMd5(arena.allocator(), &version.md5, n) catch return serverError(ctx, req)) orelse
         return reply.notFound(req);
 
-    // NOT `immutable` — see the header comment: `{md5}` versions the transcript, not
-    // the JSON shape it is wrapped in. Same policy as the live text route.
     try json.respondWith(ctx.gpa, req, .ok, pt.vo, &.{
         .{ .name = "cache-control", .value = "no-cache" },
     });
 }
 
-/// One entry of the **inline allowlist**: an extension we are willing to let the
-/// browser render in-page, and the `Content-Type` we label it with.
+/// An extension the browser may render inline, and its `Content-Type`.
 const InlineType = struct { ext: []const u8, mime: []const u8 };
 
-/// The types `/file/{id}` may serve with `Content-Disposition: inline`.
-///
-/// THE SECURITY BOUNDARY OF THIS ENDPOINT. These are device-authored bytes served
-/// from the app's OWN ORIGIN, so anything the browser renders inline runs in the
-/// session's context — an inline-rendered HTML or SVG file is stored XSS with
-/// access to the session cookie. So the rule is an allowlist, not a denylist:
-/// only these render inline, and **everything else is `attachment`**, which turns
-/// an unknown or hostile type into a download rather than a page.
-///
-/// **`svg` is deliberately absent even though it is an image.** SVG is an XML
-/// document format: it can carry `<script>`, `<foreignObject>` with HTML, and
-/// event-handler attributes, and browsers execute all of it when an SVG is
-/// navigated to or rendered as a document. `image/svg+xml` from an untrusted
-/// author is the classic same-origin stored-XSS vector, so an `.svg` in `EXPORT/`
-/// is an attachment like any other unrecognised file. (It is still safe in an
-/// `<img>` tag — that context never runs script — but this endpoint cannot know
-/// which context the response lands in, so it refuses the inline disposition.)
-///
-/// PDF is included: browsers open it in a sandboxed viewer, not as a document in
-/// this origin, so it cannot reach the session the way inline markup can.
+/// The types `/file/{id}` may serve inline; everything else is `attachment`. This
+/// is the endpoint's security boundary: device-authored bytes served same-origin,
+/// so inline HTML or SVG would be stored XSS. `svg` is absent on purpose (it can
+/// carry script). PDF opens in the browser's sandboxed viewer.
 const inline_types = [_]InlineType{
     .{ .ext = "png", .mime = "image/png" },
     .{ .ext = "jpg", .mime = "image/jpeg" },
@@ -1515,11 +1005,7 @@ const inline_types = [_]InlineType{
     .{ .ext = "pdf", .mime = "application/pdf" },
 };
 
-/// The allowlist entry for `name`'s extension, or null when the file is not
-/// inline-renderable (which includes every extension we do not know, and `svg`).
-/// Matched case-insensitively on the extension ALONE — never on the file's
-/// contents — so the label we send is the one the name declares, and `nosniff`
-/// stops the browser from second-guessing it.
+/// Matched on the name's extension alone, never contents; `nosniff` holds the label.
 fn inlineTypeOf(name: []const u8) ?InlineType {
     const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return null;
     if (dot == 0 or dot + 1 == name.len) return null;
@@ -1530,64 +1016,17 @@ fn inlineTypeOf(name: []const u8) ?InlineType {
     return null;
 }
 
-/// GET /file/{id}?v={md5}[&download=1] -> the file's RAW stored bytes.
-///
-/// **One endpoint for both preview and download**; the only difference is the
-/// `Content-Disposition`, which is not worth a second route. The browser face
-/// needs this because a folder is not all `.note`: an exported PNG or a synced
-/// PDF used to open into the reader's blank canvas, since `fallbackPage`
-/// fabricates a placeholder page for any non-parseable blob. With `fileType` now
-/// server-verified the SPA can branch, and this is where the bytes come from.
-///
-/// **The universal raw-bytes primitive.** This route returns the exact stored
-/// bytes of ANY file, `.note` INCLUDED — it is the `.note` download path (the
-/// reader builds it via `rawFileUrl(..., {download:true})`). There is deliberately
-/// no `.note`-specific download route: the per-page SNPG path (`/note/{id}/page/{n}`)
-/// is a `.note` RENDER convenience layered on top of these same bytes, never the
-/// way to fetch a `.note`'s bytes. One blob-fetch primitive for every type; the
-/// integration test "raw file: /file serves a .note's exact bytes as attachment"
-/// pins that a `.note` flows through here like any other blob.
-///
-/// It is NOT `/oss/get/{id}?t=`: that is the device face, authorized by a URL
-/// capability token because the device sends no session credential on its
-/// download GET. This one is `.controlplane`, cookie-authed, and ownership-scoped
-/// through `files.get(caller.user_id, id)` exactly like every other read here.
-///
-/// **404, not 403, for another user's file.** `files.get` is scoped by
-/// `user_id`, so a foreign id is indistinguishable from a missing one — and that
-/// is the answer we want: a 403 would confirm that the id exists and belongs to
-/// somebody, turning the endpoint into an existence oracle over the whole id
-/// space. Same rule the page route already follows.
-///
-/// `?v=` is REQUIRED and must equal the blob md5, exactly as `?v=` on the page
-/// route must equal the page content hash. That is what makes the URL
-/// content-addressed, and therefore what makes `immutable` honest: a file
-/// replaced by a later sync gets a different md5 and so a different URL, and no
-/// year-long cache entry can outlive the bytes it described. A stale `?v=` is a
-/// 404 meaning "refetch the listing", costing no file I/O at all.
-///
-/// `manual_db_lock` (same shape as `device.ossGet`): the single `files.get` runs
-/// inside one narrow `ctx.db_lock` window and the transfer runs with the lock
-/// RELEASED. A PDF is the largest thing on this face; holding the one global DB
-/// lock for the length of its download would stall every other request, including
-/// device sync, behind it.
-///
-/// **Streaming, and bounded.** The body is never assembled: `Content-Length` is
-/// `files.size` (authoritative since the ingested-size fix, so the response is a
-/// plain sized body rather than chunked), and the bytes are pumped straight from
-/// the blob through a fixed `blobstore.chunk_len` read buffer into a fixed
-/// `blobstore.chunk_len` write buffer. Peak cost is those two buffers whatever the
-/// file weighs — the streaming-memory claim
-/// holds here too. `streamExact64` bounds the pump by `Content-Length` itself, so
-/// a blob that grew under us cannot overrun the declared length.
+/// GET /file/{id}?v={md5}[&download=1] -> the file's raw stored bytes, for preview
+/// and download alike (including `.note` downloads). Cookie-authed and owner-scoped:
+/// a foreign id is a 404, not a 403, so it is no existence oracle. `?v=` must equal
+/// the blob md5, which makes `immutable` honest. `manual_db_lock`: one lookup under
+/// the lock, then a fixed-buffer stream bounded by `Content-Length`.
 pub fn controlplaneFile(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return rawFile(ctx, req, params, .live);
 }
 
-/// GET /api/controlplane/bin/file/{id}?v={md5} -> the same raw bytes for a
-/// TRASHED file: the image/PDF half of previewing something before deciding
-/// whether to restore it (U2b). Same allowlist, same `nosniff`, same
-/// content-addressed `?v=`; only the lookup differs. See `controlplaneBinNote`.
+/// GET /api/controlplane/bin/file/{id}?v={md5} -> the same raw bytes for a trashed
+/// file.
 pub fn controlplaneBinFile(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return rawFile(ctx, req, params, .trashed);
 }
@@ -1603,10 +1042,8 @@ fn rawFile(ctx: *Context, req: *Request, params: Params, scope: controlplane.Con
     else
         false;
 
-    // The ONLY DB touch in this handler — the route is `manual_db_lock`, so we
-    // take `ctx.db_lock` for exactly this call and nothing more. Safe to use
-    // `entry` after the unlock: `rowToEntry` `gpa.dupe`s `name` and `md5` (hence
-    // the frees below), so neither is a borrow of SQLite statement memory.
+    // The only DB touch. `rowToEntry` dupes `name` and `md5`, so `entry` is safe
+    // after the unlock.
     var svc = controlplane.ControlPlaneService.init(files);
     const got = blk: {
         ctx.lockDb();
@@ -1624,14 +1061,9 @@ fn rawFile(ctx: *Context, req: *Request, params: Params, scope: controlplane.Con
     return streamRawBlob(ctx, req, entry.name, md5, entry.size, forced_download);
 }
 
-/// Streams a resolved raw blob under the `/file/{id}` contract — the shared tail
-/// of `rawFile` (live/trashed) and `controlplaneHistoryRaw`. The caller has
-/// already resolved `name` (which drives the inline-vs-attachment disposition
-/// through `inlineTypeOf`), the blob `md5` (content-addressed → `immutable` +
-/// `ETag = md5`) and its `size` (`Content-Length`) under the DB lock, and has
-/// verified ownership; this opens the blob and pumps it with the lock RELEASED,
-/// applying the same inline allowlist, `nosniff`, `?download=1` override, and
-/// truncation discipline the live route documents.
+/// Streams a resolved raw blob under the `/file/{id}` contract (inline allowlist,
+/// `nosniff`, `?download=1`, ranges) with the lock released. The caller resolved
+/// `name`, `md5` and `size` and checked ownership.
 fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []const u8, size: u64, forced_download: bool) anyerror!void {
     const files = ctx.files orelse return serverError(ctx, req);
     if (md5.len != blobstore.md5_hex_len) return reply.notFound(req);
@@ -1647,14 +1079,8 @@ fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []const u8
     var etag_buf: [36]u8 = undefined;
     const etag = std.fmt.bufPrint(&etag_buf, "\"{s}\"", .{md5}) catch return serverError(ctx, req);
 
-    // RANGE. The client half of this is the PDF viewer, which pulls a document
-    // through MuPDF's stream a window at a time instead of downloading 76 MB to
-    // paint page 1. It costs the server nothing
-    // it was not already paying: the same fixed-buffer pump over
-    // `blobs.readRange`, for FEWER bytes and a shorter-held connection than the
-    // whole-file reply. Blobs are immutable and content-addressed, so there is
-    // no `If-Range` to honour — the `?v=` in the URL already names the bytes,
-    // and a given md5 can never answer with different content.
+    // Range support, for the PDF viewer's windowed reads. Blobs are immutable and
+    // content-addressed, so there is no `If-Range` to honour.
     var range_buf: [128]u8 = undefined;
     const want = byte_range.parse(router.headerCopy(req, "range", &range_buf), size);
     if (want == .unsatisfiable) {
@@ -1692,15 +1118,12 @@ fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []const u8
     const common = [_]std.http.Header{
         .{ .name = "content-type", .value = mime },
         .{ .name = "content-disposition", .value = cd },
-        // The label above is derived from the NAME, so it can be wrong. This
-        // header is what stops a wrong label from being "corrected" by content
-        // sniffing into text/html — which would re-open the same-origin script
-        // execution the allowlist exists to close.
+        // The label comes from the name and can be wrong; `nosniff` stops it being
+        // sniffed into text/html.
         .{ .name = "x-content-type-options", .value = "nosniff" },
         .{ .name = "cache-control", .value = "public, max-age=31536000, immutable" },
         .{ .name = "etag", .value = etag },
-        // Advertised on EVERY reply, not just partial ones: it is how a client
-        // learns it may ask at all.
+        // On every reply, so a client learns it may ask.
         .{ .name = "accept-ranges", .value = "bytes" },
     };
     const partial_headers = common ++ [_]std.http.Header{.{ .name = "content-range", .value = content_range }};
@@ -1714,15 +1137,10 @@ fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []const u8
         },
     }) catch return;
 
-    // A mid-stream failure (a blob deleted under us, a dead socket) can no longer
-    // become a status code — the head is already on the wire. On failure we return,
-    // closing the connection short of `content_length` — the truncation signal —
-    // rather than falling through to `body.end()`, which asserts the full length was
-    // written and would panic. See the page route (`controlplanePage`) for the why.
+    // Head already sent: on failure return (closing short of `content_length`),
+    // never `body.end()`, which would assert and panic.
     var rbuf: [blobstore.chunk_len]u8 = undefined;
     if (want == .partial) {
-        // The windowed pump, identical in shape to `streamBlobRange`: one fixed
-        // buffer, no allocation, no seek state kept across chunks.
         var at: u64 = off;
         var left: u64 = len;
         while (left > 0) {
@@ -1739,54 +1157,18 @@ fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []const u8
     body.end() catch {};
 }
 
-/// GET /thumbnail/{hash} -> the raw bytes of the embedded thumbnail derived
-/// from the blob with md5 `{hash}` — a `.spd`'s `config.thumbnail`, or a
-/// `.note`'s device-rendered COVER — streamed from the `thumbs/` derived store
-/// with a `Content-Type` sniffed from the file's own magic. The client routes
-/// here only for types it knows may ship an embedded thumbnail (it holds the
-/// file type), so there is no discriminating envelope.
-///
-/// **404 when the blob ships no embedded thumbnail** — a coverless `.note`
-/// (most of them: covers are user-set), a `.txt`, an empty `.spd`, a corrupt
-/// one — and, indistinguishably, when the caller does not hold the blob. The
-/// scoping lives in `ControlPlaneService.thumbnailAllowed`
-/// (`Files.holdsBlob`): a foreign or absent hash is answered exactly as "no
-/// thumbnail", so the endpoint is no existence oracle over the deduplicated
-/// blob space — the same rule `/file/{id}` follows for a foreign id.
-///
-/// **This is the on-demand heal.** Inside the same lock window as the
-/// ownership check, `files.thumbNeedsRepair` asks whether the derived data is
-/// missing or stale — dispatching on the blob's OWN magic (the URL carries no
-/// filename) to the right format's memo (a pre-v13 database, a pre-cover
-/// `note_index` row, an `index_version` bump, a restore that skipped the
-/// backup-skippable `thumbs/` dir). If so the lock is RELEASED and
-/// `files.repairDerivedThumb` re-derives — single-flight behind its own mutex,
-/// taking the db lock itself only for the brief row write. The row is the
-/// memo: a current row saying "no thumbnail" serves 404 with no derive, so a
-/// corrupt `.spd` costs its deserialize — and a coverless `.note` its parse —
-/// once, ever.
-///
-/// **Content-addressed and immutable, exactly like page bytes.** The URL is
-/// keyed by the source blob md5 and the thumbnail is derived from that
-/// immutable content, so a given hash maps to the same bytes forever:
-/// `immutable` is honest, the `ETag` is the hash. `nosniff` because the label
-/// comes from the stored bytes' own magic, not the caller's assertion; a file
-/// whose magic no longer sniffs (torn on disk) is a 404, as is a size-0 file.
-///
-/// `manual_db_lock` (the `rawFile` shape): the DB is touched only for the
-/// ownership check + repair gate, then the bytes stream fs→socket with the
-/// lock released — and, sharper than the streaming argument, the repair path
-/// MUST run off the handler lock (the `.spd` derive buffers up to 16 MiB of
-/// untrusted SQLite, the `.note` one is a full container parse, and the lock
-/// order is repair-mutex → db-lock; see `Files.thumb_repair`).
+/// GET /thumbnail/{hash} -> the embedded thumbnail of blob `{hash}` (a `.spd`'s
+/// `config.thumbnail` or a `.note`'s cover). 404 when there is none or the caller
+/// does not hold the blob, indistinguishably. Heals on demand: if
+/// `thumbNeedsRepair`, re-derive with the db lock released (lock order is
+/// repair-mutex then db-lock, see `Files.thumb_repair`); the row memoizes "no
+/// thumbnail" so a bad file is parsed once. Immutable, ETag = hash, `nosniff`.
 pub fn controlplaneThumbnail(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const hash = params.get("hash") orelse return badRequest(ctx, req);
 
-    // The ONLY handler-held lock window: ownership + the repair gate. Both are
-    // indexed single-row reads (`thumbNeedsRepair` adds one `access(2)` probe
-    // and a `source_probe_len` head read for the format dispatch).
+    // The only handler-held lock window: ownership and the repair gate.
     var svc = controlplane.ControlPlaneService.init(files);
     const gate: struct { allowed: bool, repair: bool } = blk: {
         ctx.lockDb();
@@ -1798,17 +1180,10 @@ pub fn controlplaneThumbnail(ctx: *Context, req: *Request, params: Params) anyer
     };
     if (!gate.allowed) return reply.notFound(req);
 
-    // Heal on demand, with the db lock RELEASED (repairDerivedThumb manages its
-    // own locking; taking it while holding the lock would deadlock — see the
-    // lock-order note on `Files.thumb_repair`). Best-effort: a failed repair
-    // just leaves the miss in place and we 404 below.
+    // Best-effort; a failed repair just 404s below.
     if (gate.repair) files.repairDerivedThumb(ctx, hash);
 
-    // Dispatch on the blob's own magic (the URL carries no filename): a `.note`
-    // COVER is STREAMED straight from the immutable blob at the location the
-    // index recorded — never a resident copy, no `thumbs/` file — while a `.spd`
-    // thumbnail is served from the `thumbs/` derived store below. `.none` (and a
-    // note that ships no cover) is 404, indistinguishable from a foreign hash.
+    // A `.note` cover streams from the blob itself; a `.spd` thumbnail from `thumbs/`.
     switch (files.thumbnailSourceKind(hash)) {
         .note => return streamNoteCover(ctx, req, files, hash),
         .spd => {}, // the stored-thumbnail path below
@@ -1820,8 +1195,7 @@ pub fn controlplaneThumbnail(ctx: *Context, req: *Request, params: Params) anyer
     const size = (file.stat(ctx.io) catch return reply.notFound(req)).size;
     if (size == 0) return reply.notFound(req); // defensive: a torn file must not serve
 
-    // The label comes from the bytes themselves. Ingest only ever wrote bytes
-    // that passed `sniffMime`, so a failure here means on-disk corruption → 404.
+    // Ingest only wrote bytes that pass `sniffMime`, so a failure here is corruption.
     var magic: [16]u8 = undefined;
     const head_len: usize = @intCast(@min(size, magic.len));
     const got = file.readPositionalAll(ctx.io, magic[0..head_len], 0) catch return reply.notFound(req);
@@ -1845,49 +1219,26 @@ pub fn controlplaneThumbnail(ctx: *Context, req: *Request, params: Params) anyer
         },
     }) catch return;
 
-    // A mid-stream failure returns, closing the connection short of `content_length`
-    // — the truncation signal — instead of falling through to `body.end()`, which
-    // asserts the full length and would panic; same as `rawFile` and the page route.
+    // On failure return short of `content_length`, never `body.end()` (see `rawFile`).
     var rbuf: [blobstore.chunk_len]u8 = undefined;
     var fr = file.reader(ctx.io, &rbuf);
     fr.interface.streamExact64(&body.writer, size) catch return error.StreamTruncated;
     body.end() catch {};
 }
 
-/// Streams a `.note` COVER straight from the immutable blob — the on-demand,
-/// NEVER-RESIDENT half of `/thumbnail/{hash}` (the `.spd` half above serves a
-/// stored `thumbs/` file). The cover's byte offset + length + MIME come from the
-/// index row (`Files.noteCover`); the bytes are read from the blob in
-/// `blobstore.chunk_len` windows and written to the response as they go, so a
-/// 20 MB cover costs one chunk of RSS, never the whole image. 404 when the note
-/// ships no cover (the memoized negative case) — indistinguishable, like every
-/// branch here, from a foreign or absent hash. Same contract as the `.spd`
-/// thumbnail: sniffed/recorded `Content-Type`, `nosniff`, immutable caching, an
-/// exact `Content-Length`, and a mid-stream failure that ends short of it to
-/// signal truncation.
+/// Streams a `.note` cover from the immutable blob at the index-recorded range, a
+/// chunk at a time; 404 when the note has none.
 fn streamNoteCover(ctx: *Context, req: *Request, files: *filesvc.Files, hash: []const u8) anyerror!void {
     const loc = (files.noteCover(hash) catch return reply.notFound(req)) orelse return reply.notFound(req);
-    // `loc` (and the MIME it hands out) is a stack value that lives for this
-    // whole function — including the `streamBlobRange` call below, which runs
-    // while this frame is still on the stack — so the header slice stays valid
-    // across the streamed write. The cover's own hash IS its blob key.
+    // The cover's own hash is its blob key.
     return streamBlobRange(ctx, req, files, hash, hash, loc.offset, loc.length, loc.mime());
 }
 
-/// The shared never-resident tail of `streamNoteCover` and `streamNoteTemplate`:
-/// stream a byte RANGE of an immutable blob under the fixed thumbnail/template
-/// response contract. The caller has already resolved WHAT to stream — the blob
-/// key `blob_key` to read from, the `offset`/`length` of the range, its `mime`
-/// label, and the `etag_hash` the ETag is built from (the same as `blob_key` for
-/// a cover, but the URL's `PAGESTYLEMD5` for a template, whose blob key is a
-/// different md5). Emits the recorded/sniffed `Content-Type`, `nosniff`,
-/// immutable caching, an exact `Content-Length`, and — on a read or write
-/// failure mid-stream — returns short of `content_length` (the truncation
-/// signal) rather than reaching `body.end()`, whose length assert would panic;
-/// see the page route (`controlplanePage`) for the why. Every window is
-/// re-validated against the blob's real on-disk size by `readRange` (the
-/// recorded offset/length came from an untrusted device's metadata). `end()`
-/// runs only on a full stream.
+/// Stream a byte range of an immutable blob under the thumbnail/template contract.
+/// `etag_hash` equals `blob_key` for a cover but is the URL's `PAGESTYLEMD5` for a
+/// template. `readRange` re-validates each window against the real blob size,
+/// since the range came from device metadata. On failure return short of
+/// `content_length`; `end()` runs only on a full stream.
 fn streamBlobRange(
     ctx: *Context,
     req: *Request,
@@ -1898,8 +1249,7 @@ fn streamBlobRange(
     length: u64,
     mime: []const u8,
 ) anyerror!void {
-    // `max_template_hash_len` (64) is the larger of the two callers' hashes, so
-    // this buffer also fits a cover's 32-hex hash.
+    // `max_template_hash_len` (64) also fits a cover's 32-hex hash.
     var etag_buf: [controlplane.max_template_hash_len + 2]u8 = undefined;
     const etag = std.fmt.bufPrint(&etag_buf, "\"{s}\"", .{etag_hash}) catch return serverError(ctx, req);
 
@@ -1929,35 +1279,21 @@ fn streamBlobRange(
     body.end() catch {};
 }
 
-/// GET /note/{id}/template/{hash} -> the page's custom IMAGE template
-/// (PNG/JPG/JPEG/WEBP background), streamed straight from the immutable blob.
-///
-/// A near-verbatim clone of the page route + `streamNoteCover`: NOTE-SCOPED (the
-/// `{id}` ownership check is the same gate the page bytes get), content-addressed
-/// by `{hash}` (→ immutable caching, ETag = hash), and `manual_db_lock` so the
-/// resolve runs in one narrow lock window and the bytes stream with the lock
-/// released. The whole resolution is **pure DB + one ranged read, zero `.note`
-/// parsing**: `templatePlanOf` reads the byte range already recorded in the
-/// page's `layers` blob (see `note_index.templateLocation`), then the handler
-/// sniffs the MIME from the range's first bytes and streams it. 404 — always
-/// indistinguishable from a foreign/absent hash — when the note isn't owned,
-/// isn't a `.note`, has no image background under that hash, or the range is
-/// empty/over the size cap.
+/// GET /note/{id}/template/{hash} -> the page's custom image template, streamed from
+/// the blob. Note-scoped, content-addressed (immutable, ETag = hash),
+/// `manual_db_lock`, and no `.note` parse: the range is read from the page's
+/// recorded `layers`. 404 for anything unowned, absent or over the size cap.
 pub fn controlplaneTemplate(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const hash = params.get("hash") orelse return badRequest(ctx, req);
-    // A template hash is a short content hash (PAGESTYLEMD5, md5 hex). Bound the
-    // path segment so a hostile URL cannot smuggle an absurd string into the
-    // lookup (it is a bound SQL parameter regardless, but implausible = 404).
+    // A template hash is PAGESTYLEMD5; an implausible length is a 404.
     if (hash.len == 0 or hash.len > controlplane.max_template_hash_len) return reply.notFound(req);
 
     var svc = controlplane.ControlPlaneService.init(files);
 
-    // The ONLY DB touches in this handler — the route is `manual_db_lock`. The
-    // plan is inline storage with no borrow of statement memory, so streaming it
-    // outside the lock is safe on the shared connection (same as the page route).
+    // The only DB touches; the plan has no borrow of statement memory.
     const planned = blk: {
         ctx.lockDb();
         defer ctx.unlockDb();
@@ -1971,11 +1307,8 @@ pub fn controlplaneTemplate(ctx: *Context, req: *Request, params: Params) anyerr
     return streamNoteTemplate(ctx, req, files, planned, hash);
 }
 
-/// Streams a resolved custom template's bytes from the immutable blob — the
-/// never-resident tail of `controlplaneTemplate`, mirroring `streamNoteCover`.
-/// Sniffs the `Content-Type` from the range's own magic (`nosniff`), caps the
-/// stream at the cover's 20 MB ceiling (`thumbnail.max_cover_bytes` — a 404 above
-/// it), and ends short on a mid-stream failure to signal truncation.
+/// Streams a resolved template's range, MIME sniffed from its own bytes, capped at
+/// `thumbnail.max_cover_bytes`.
 fn streamNoteTemplate(
     ctx: *Context,
     req: *Request,
@@ -1983,71 +1316,25 @@ fn streamNoteTemplate(
     plan: controlplane.TemplatePlan,
     hash: []const u8,
 ) anyerror!void {
-    // Reuse the cover's 20 MB stream cap (Ratta removed the device-side limit);
-    // refuse anything larger rather than stream it.
+    // The cover's 20 MB cap (Ratta removed the device-side limit).
     if (plan.length == 0 or plan.length > thumbnailmod.max_cover_bytes) return reply.notFound(req);
 
-    // The label comes from the range's own bytes, never the caller's assertion.
     var magic: [16]u8 = undefined;
     const head_len: usize = @intCast(@min(plan.length, @as(u64, magic.len)));
     const got = files.blobs.readRange(&plan.md5, plan.offset, head_len, magic[0..head_len]) catch
         return reply.notFound(req);
     const mime = thumbnailmod.sniffMime(got) orelse return reply.notFound(req);
 
-    // The blob key is the plan's md5 (a different hash from the URL's
-    // `PAGESTYLEMD5`, which is the ETag hash); the streamed tail is shared with
-    // the cover route.
+    // The blob key is the plan's md5; the ETag uses the URL's `PAGESTYLEMD5`.
     return streamBlobRange(ctx, req, files, &plan.md5, hash, plan.offset, plan.length, mime);
 }
 
-/// GET /note/{id}/page/{n}/text?v={textHash} -> one page's recognized (on-device
-/// OCR) transcript: `{ text?: string }`, a raw VO with no `{success}` envelope.
-///
-/// The sibling of the page-bytes route and versioned the same way, except by
-/// `text_hash` — the md5 of the page's `RECOGNTEXT` block — so the URL turns over
-/// exactly when the recognition does and never when the strokes change.
-///
-/// ## Why this is `no-cache` and the page-bytes route is not
-///
-/// It WAS `immutable, max-age=1y`, and that was a bug. `?v={text_hash}` versions
-/// the *content* — it says nothing about the *shape* of the JSON we wrap that
-/// content in. `PageTextVO` is a Zig struct; the day it gained `words`, every
-/// browser holding a cached response kept its old, wordless copy for a YEAR, on a
-/// URL that could never change and with no validator to revalidate against. The
-/// failure was silent end to end: the note metadata (not immutably cached) carried
-/// `pxPerMm` fine, the match counter came from a different request and was
-/// correct, and the page simply had nothing circled on it. No error, no console
-/// warning, and it looked note-specific because different notes had been cached at
-/// different moments.
-///
-/// The rule this route now follows: **`immutable` is safe only when the cache key
-/// covers everything that can change about the response.** A content hash covers
-/// opaque bytes. It cannot cover a struct that can gain or lose a field on any
-/// deploy, so a response serialised from one does not get to be `immutable`.
-///
-/// `no-cache` still lets the browser STORE the response; it just forbids blind
-/// reuse, so a shape change is picked up on the next load instead of the next
-/// year. The cost is one small request, and this is the route that can afford it:
-/// it is pure DB plus one KB-scale ranged read (2–10 KB of JSON), it is explicitly
-/// NOT `manual_db_lock` because the streaming argument does not apply to it, and
-/// the frontend already memoises transcripts and word boxes per note — so a page
-/// is fetched at most once per session either way. Contrast `/note/:id/page/:n`,
-/// which is multi-MB, fires ~10 times on every note open, and carries opaque
-/// bytes: it keeps `immutable`, and the comments there say why.
-///
-/// **404 means "your metadata is stale, refetch it"**, same contract as page
-/// bytes, and it covers three cases with one rule — no such note/page, a `?v=`
-/// that doesn't match, and a page with no finished recognition. The last falls
-/// out rather than being special-cased: with no `text_hash` there is no `?v=`
-/// that could match. A client following the contract never asks (`PageRef.textHash`
-/// is null, and `Api.getPageText` short-circuits on it), so reaching this is
-/// either a hand-made URL or a stale page list — and "refetch the metadata" is
-/// the right answer to both.
-///
-/// Pure DB: the transcript was extracted at index time. No `.note` is opened.
-///
-/// The body is **device-authored content**. It is emitted as a JSON string and
-/// nothing here presumes it is markup; the frontend sets it via `textContent`.
+/// GET /note/{id}/page/{n}/text?v={textHash} -> one page's on-device OCR transcript,
+/// versioned by the md5 of its `RECOGNTEXT` block. `no-cache`, not `immutable`:
+/// `?v=` covers the content, not the JSON shape, and an immutable cache once froze
+/// the pre-`words` shape for a year. 404 means "refetch metadata" (no such page,
+/// stale `?v=`, or no recognition). The text is device-authored; the client sets
+/// it via `textContent`.
 pub fn controlplanePageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -2065,46 +1352,17 @@ pub fn controlplanePageText(ctx: *Context, req: *Request, params: Params) anyerr
         return reply.notFound(req);
     if (v == null or !std.ascii.eqlIgnoreCase(v.?, &pt.hash)) return reply.notFound(req);
 
-    // NOT `immutable` — see the header comment. `?v=` versions the transcript,
-    // not the JSON shape it is wrapped in.
+    // Not `immutable`: `?v=` versions the transcript, not the JSON shape.
     try json.respondWith(ctx.gpa, req, .ok, pt.vo, &.{
         .{ .name = "cache-control", .value = "no-cache" },
     });
 }
 
-/// GET /note/{id}/page/{n}/links?v={linksHash} -> the links a PDF used as this
-/// page's template brought with it: `{ links: [ {x,y,w,h,page,uri} ] }`, a raw VO
-/// with no `{success}` envelope.
-///
-/// The sibling of `controlplanePageText` in every respect that matters, and
-/// deliberately so — same URL shape, same versioning discipline, same 404
-/// contract, same cost profile:
-///
-///   * **Versioned by `links_hash`**, the md5 of the page's `EXTERNALLINKINFO`
-///     block, so the URL turns over exactly when the links do and never when the
-///     strokes change.
-///   * **`no-cache`, not `immutable`**, for the rule the text route learned the
-///     hard way: `?v=` versions the block's BYTES, not the JSON struct they are
-///     wrapped in. `LinkVO` is a Zig struct and can gain a field on any deploy;
-///     a year-long immutable cache entry on a URL that cannot change is how the
-///     old shape outlives the new one, silently.
-///   * **404 means "your metadata is stale, refetch it"** — no such note/page, a
-///     `?v=` that doesn't match, or a page with no link block at all. The last
-///     falls out rather than being special-cased: with no `links_hash` there is
-///     no `?v=` that could match, and a client following the contract
-///     (`PageRef.linksHash` null ⇒ no request) never asks. That is the common
-///     case by a wide margin — an ordinary `.note` has no imported template and
-///     therefore no page with links.
-///
-/// The links are decoded HERE rather than stored: one KB-scale ranged read of a
-/// block the indexer already located (`links_offset`/`links_length`), never a
-/// note parse. Per-page and not per-document on purpose — the corpus behind §14
-/// is one notebook with 51,256 records in it.
-///
-/// The URIs are **device-authored content**. The scheme allowlist is applied on
-/// this side (`allowedLinkScheme`) as well as in the browser, because the PDF
-/// exporter reads this same endpoint and a refused link must not survive into a
-/// file that leaves the machine.
+/// GET /note/{id}/page/{n}/links?v={linksHash} -> the links a PDF template brought
+/// to this page. Same contract as the text route: versioned by the md5 of
+/// `EXTERNALLINKINFO`, `no-cache`, 404 means stale. Decoded per request from one
+/// ranged read. The scheme allowlist (`allowedLinkScheme`) runs here too, because
+/// the PDF exporter reads this endpoint.
 pub fn controlplanePageLinks(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -2122,17 +1380,13 @@ pub fn controlplanePageLinks(ctx: *Context, req: *Request, params: Params) anyer
         return reply.notFound(req);
     if (v == null or !std.ascii.eqlIgnoreCase(v.?, &pl.hash)) return reply.notFound(req);
 
-    // NOT `immutable` — see the header comment.
     try json.respondWith(ctx.gpa, req, .ok, pl.vo, &.{
         .{ .name = "cache-control", .value = "no-cache" },
     });
 }
 
-/// The response headers shared by both shapes of this endpoint. `no-store` and
-/// `nosniff` are hygiene; `x-accel-buffering: no` is the load-bearing one — a
-/// buffering reverse proxy would hold each frame back until its buffer filled,
-/// which for a stream that emits ~20 bytes a minute means the live channel never
-/// delivers anything at all while looking perfectly healthy.
+/// `x-accel-buffering: no` matters: a buffering reverse proxy would hold back a
+/// stream that emits ~20 bytes a minute indefinitely.
 const sse_headers = [_]std.http.Header{
     .{ .name = "content-type", .value = "text/event-stream" },
     .{ .name = "cache-control", .value = "no-store" },
@@ -2140,91 +1394,36 @@ const sse_headers = [_]std.http.Header{
     .{ .name = "x-accel-buffering", .value = "no" },
 };
 
-/// The `event: index` frame's body — how much of the caller's library is still
-/// being derived, and a version that moves when a derive lands.
-///
-/// ONE FRAME FOR TWO READERS, deliberately (§4).
-/// The UI needs "N still indexing" for the sentence that qualifies a search's
-/// completeness; a client keeping its own index needs "the index changed,
-/// re-sync". Those are the same fact observed twice, and splitting them would
-/// mean two pollers, two costs and two chances to disagree about when a derive
-/// finished.
-///
-/// JSON rather than the bare integer `event: sync` uses, because it carries two
-/// numbers — and because a named object is what lets a third be added later
-/// without moving what the first two mean.
+/// The `event: index` frame: how much of the library is still being derived, and a
+/// version that moves when a derive lands. One frame serves both the UI's
+/// "N still indexing" and a client index's "re-sync".
 fn writeIndexFrame(w: *std.Io.Writer, snap: pendingsvc.Snapshot) !void {
     try w.print("event: index\ndata: {{\"pending\":{d},\"version\":{d}}}\n\n", .{ snap.pending, snap.version });
 }
 
-/// The caller's index state, or null when this server does not report it (no
-/// `Pulse` — the integration harness, or a build with no worker).
-///
-/// Takes NO lock here: `Pulse` takes `db_lock` itself, and only on the rare tick
-/// where it actually counts. Calling this inside a `lockDb` bracket would
-/// deadlock on the non-reentrant mutex, which is the one way to get this wrong.
+/// The caller's index state, or null with no `Pulse`. Must not be called under
+/// `lockDb`: `Pulse` takes `db_lock` itself and the mutex is non-reentrant.
 fn indexSnapshot(ctx: *Context, user_id: u64) ?pendingsvc.Snapshot {
     const pulse = ctx.pending orelse return null;
     return pulse.forUser(user_id);
 }
 
-// ---------------------------------------------------------------------------
-// THE CLIENT-SIDE SEARCH INDEX — §2.1, phase 1
-// step 4
-// ---------------------------------------------------------------------------
+// ---- the client-side search index ----
 //
-// Two reads, both additive and both inert until a client asks: nothing else in
-// the server changed, `/api/controlplane/search` still answers exactly as it
-// did, and the browser does not know these exist yet. §3 calls this "the
-// natural place to stop and ship if phase 1 stalls", and it is left in that
-// state deliberately.
-//
-// All the query logic is `services/search/index_export.zig`; these are the HTTP
-// shells over it — the parse, the cache headers and nothing else.
-//
-// **Both bodies are BYTES, not JSON**, and §9.2's measurement is the whole
-// argument: 143,139 raw JSON against 27,663 raw for the same 1,222-document
-// manifest, because md5s are 72.6% of the payload and a hash does not compress.
-// This server sends no `content-encoding` on API responses (only precompressed
-// static assets, `http/static.zig`), so the raw column is the one that travels
-// and the saving is 5.2x rather than the 30% the gzip columns show.
+// HTTP shells over `services/search/index_export.zig`. Both bodies are binary, not
+// JSON: md5s dominate the payload and do not compress, and API responses are not
+// content-encoded.
 
-/// GET /api/controlplane/search-index/manifest -> the caller's COMPLETE live
-/// document set, as `index_export`'s `SMAN` payload.
-///
-/// ## `no-cache` + an ETag, which is the OPPOSITE of `immutable`
-///
-/// The terms route below is content-addressed and immutable; this one is the
-/// caller's mutable library and must never be served from a cache without
-/// asking. `no-cache` does not mean "do not store" — it means "store it, and
-/// revalidate every time", which is exactly the contract this payload wants: the
-/// browser keeps the bytes and spends one conditional request per visit, and a
-/// household whose library has not moved pays a 304 with no body instead of
-/// 27 KB.
-///
-/// **This is §9.2's open question answered.** That section measured the manifest
-/// and closed with *"still open, and NOT decided by this measurement: how often
-/// it is refetched … the shape that would is a conditional request, and that is
-/// step 4's design."* The answer is that there is no refresh interval, because
-/// there is nothing to tune: the client may refetch on every visit and on every
-/// `event: index` frame, and an unchanged manifest costs a few hundred bytes.
-/// A polling cadence would have been a guess about how often a household edits;
-/// a validator is not a guess.
-///
-/// `private`, because the manifest is one person's library and this household
-/// may sit behind a shared proxy.
-///
-/// The ETag is a hash of the BODY (`index_export.bodyEtag`) rather than a
-/// version counter — see that function for why a counter would be both a second
-/// opinion about what changes the manifest and, in `pending.Pulse.version`'s
-/// case, restart-relative where an ETag outlives reboots.
+/// GET /api/controlplane/search-index/manifest -> the caller's complete live
+/// document set (`SMAN`). `private, no-cache` with an ETag hashed from the body
+/// (`index_export.bodyEtag`), so an unchanged library costs a 304 and the client
+/// may refetch on every visit.
 pub fn controlplaneSearchIndexManifest(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
 
-    // READ THE REQUEST BEFORE RESPONDING — responding invalidates the head's
-    // strings, and this one has to survive until after the body is built.
+    // Read the header before responding; responding invalidates head strings.
     var inm_buf: [64]u8 = undefined;
     const if_none_match = router.headerCopy(req, "if-none-match", &inm_buf);
 
@@ -2240,9 +1439,7 @@ pub fn controlplaneSearchIndexManifest(ctx: *Context, req: *Request, params: Par
     const hex = index_export.bodyEtag(body.items);
     const etag = std.fmt.bufPrint(&etag_buf, "\"{s}\"", .{hex}) catch return serverError(ctx, req);
 
-    // The ETag rides on the 304 as well as the 200: a validator the client is
-    // not re-told is one it may drop, and the next visit would then be a full
-    // fetch of bytes it already holds.
+    // The ETag rides on the 304 too, so the client keeps the validator.
     const headers = [_]std.http.Header{
         .{ .name = "content-type", .value = "application/octet-stream" },
         .{ .name = "cache-control", .value = "private, no-cache" },
@@ -2250,37 +1447,23 @@ pub fn controlplaneSearchIndexManifest(ctx: *Context, req: *Request, params: Par
         .{ .name = "x-content-type-options", .value = "nosniff" },
     };
 
-    // Byte equality, not a weak comparison: this server mints exactly one form of
-    // this validator, so anything else is either a different manifest or a
-    // different server.
+    // Byte equality: this server mints exactly one form of this validator.
     if (std.mem.eql(u8, if_none_match, etag)) {
         return req.respond("", .{ .status = .not_modified, .extra_headers = &headers });
     }
     try req.respond(body.items, .{ .status = .ok, .extra_headers = &headers });
 }
 
-// ---------------------------------------------------------------------------
-// THE STITCHED STREAM — §3.2 and §3.3, build order step 2
-// ---------------------------------------------------------------------------
+// ---- the stitched stream ----
 
-/// The manifest as ONE request must see it: the rows in their exact order, and
-/// the ETag of the bytes `writeManifest` would emit for them.
+/// The manifest as one request sees it: rows in order, and the body's ETag.
 const ManifestGate = struct {
     rows: []const index_export.Row,
     etag: [32]u8,
 };
 
-/// Re-run the manifest query and hash what it would serialize to.
-///
-/// **The bytes exist only to be hashed**, so they come from `gpa` and are
-/// released here, while the ROWS come from the request arena that has to outlive
-/// the whole stream. 27 KB against 1,222 documents (§9.2) is not a lot, but it
-/// is 27 KB held for the length of a 3G download for nothing.
-///
-/// Hashing the real body rather than comparing some cheaper summary is not an
-/// implementation detail either: `index_export.bodyEtag`'s own docs record why a
-/// version counter was rejected, and the gate below is only as trustworthy as
-/// the validator it compares.
+/// Re-run the manifest query and hash what it would serialize to. The bytes come
+/// from `gpa` and are freed here; the rows live in the request arena.
 fn manifestGate(
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
@@ -2288,8 +1471,7 @@ fn manifestGate(
     user_id: u64,
     terms: ?derived.DerivedStore,
 ) !ManifestGate {
-    // THE SAME STORE THE MANIFEST ROUTE PASSES, or the two build different
-    // bodies and this gate rejects the very ETag that route just minted.
+    // Must be the same store the manifest route passes, or the ETags differ.
     const m = try index_export.manifest(arena, db, user_id, terms);
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(gpa);
@@ -2298,107 +1480,34 @@ fn manifestGate(
 }
 
 /// GET /api/controlplane/search-index/stream?m=<manifest etag>&want=<base64url>
-/// -> the requested documents' terms records as ONE gzip stream, stitched from
-/// the fragments `terms/<md5>.<v>` already holds.
-///
-/// ## What is on the wire, and why it is not N gzip files
-///
-/// Ten bytes of gzip header, each wanted document's stored raw-deflate fragment
-/// verbatim, `03 00`, and an 8-byte trailer whose CRC32 is `crc32_combine` over
-/// the per-fragment CRCs. No compression, no decompression, no query
-/// interpretation: a header, N file reads and a footer, because the thing doing
-/// it is a Pi 1 B+.
-///
-/// The obvious alternative — concatenated `.gz` MEMBERS under
-/// `Content-Encoding: gzip` — **fails silently** (§3.1, MEASURED 2026-08-21):
-/// Chromium 141 and `curl --compressed` decode the FIRST MEMBER ONLY and report
-/// success, 37 bytes of 7,980, `fetch()` resolving happily. Node's zlib decodes
-/// all of them, so a Node-based test passes on a stream the browser truncates by
-/// 99.5%. `http/gzip_stitch.zig` exists to make that shape unreachable and
-/// `test/http_integration.zig` asserts on the DECODED byte and document counts
-/// rather than on the request succeeding, for exactly this reason.
-///
-/// ## `Content-Encoding: gzip` regardless of `Accept-Encoding`
-///
-/// Not content negotiation, and not an oversight. There is no identity form of
-/// this body to serve: the fragments only exist compressed, and inflating them
-/// to satisfy a hypothetical client would spend the Pi's CPU undoing the one
-/// thing this design is for. Every client that will ever call this route is ours
-/// and speaks gzip; §3.2 measured four independent inflate implementations
-/// accepting the result.
-///
-/// ## CHUNKED, deliberately — and this is the one call worth arguing
-///
-/// `content_length` is knowable up front (10 + Σ fragment sizes + 10) at the
-/// cost of a stat pass, and it would buy the client a real progress bar. It is
-/// refused because **it cannot coexist with the skip rule.** The length is
-/// promised before the walk; a skip is discovered during it. A blob GC'd between
-/// the stat pass and the read pass leaves bytes owed that no longer exist, and
-/// the only ways out are both worse than no progress bar:
-///
-///   * hold every file OPEN from the stat pass to the walk, so the size cannot
-///     change under us — 1,222 descriptors for one household's library, times
-///     three concurrent first visits, on a box whose whole posture is a 50 MB
-///     budget; or
-///   * finish short of `content_length`, which is a truncated body — §3.1's
-///     failure mode, reintroduced by the fix for a progress bar.
-///
-/// Chunked costs a few bytes of framing per flush. And the progress the client
-/// actually shows is not a byte count anyway: it parses documents as they land
-/// off a `TextDecoderStream`, first one usable at 8 ms of a 193 ms stream (§3.2).
-///
-/// ## `manual_db_lock`, with the reader borrowed HERE
-///
-/// The route is a pure read and wants a pooled connection, but it cannot be
-/// `read_only`: that flag holds its lease for the whole dispatch, which on this
-/// route means for the whole download. A 3G client would park one of the pool's
-/// readers for a second or more — and when the pool is empty `read_only` falls
-/// back to the WRITER under `db_lock`, so a slow reader would block device sync
-/// for the length of its download. `router.readOnlyConflict` anticipates this in
-/// as many words: *"a streaming route that wants a reader needs the reader
-/// threaded through its own brackets."*
-///
-/// So this handler borrows the reader itself, around the manifest query and
-/// nothing else, and falls back to a narrow `lockDb` window when the pool is
-/// empty. Both are released before a single byte of body is written.
+/// -> the wanted documents' terms as one gzip stream stitched from stored
+/// raw-deflate fragments (`http/gzip_stitch.zig`). Not concatenated gzip members:
+/// browsers decode only the first member and report success. Always
+/// `Content-Encoding: gzip`, since no identity form exists. Chunked, because a
+/// fragment GC'd mid-walk would break a promised `Content-Length`.
+/// `manual_db_lock`, not `read_only`: the reader is borrowed only around the
+/// manifest query, so a slow download never parks a pooled reader or the writer.
 pub fn controlplaneSearchIndexStream(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
-    // A deployment with no terms store cannot answer this at all. Serving an
-    // empty-but-valid stream would be worse than an error: the client would
-    // record every document as arrived, and §2.4's rule is that arrival is the
-    // fact — it would stop asking.
+    // No terms store: an empty-but-valid stream would make the client record
+    // every document as arrived and stop asking.
     const terms = files.terms orelse return serverError(ctx, req);
 
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena.deinit();
     const a = arena.allocator();
 
-    // READ THE TARGET BEFORE RESPONDING, and COPY it. `want.encoded` is a slice
-    // into the request head and the walk reads it once per manifest row, long
-    // after the response head has gone out — the same borrow-after-respond that
-    // `router.headerCopy` exists for on the header side.
+    // Copy the params: the walk reads them after the response head has gone out.
     const m_param = a.dupe(u8, reply.queryParam(req.head.target, "m") orelse return badRequest(ctx, req)) catch
         return serverError(ctx, req);
-    // An absent `want` is the empty set, not an error: it is what a client with
-    // nothing left to fetch would send, and it must be cheap. The terms route
-    // answers a request naming no md5s the same way.
+    // An absent `want` is the empty set, not an error.
     const want_param = a.dupe(u8, reply.queryParam(req.head.target, "want") orelse "") catch
         return serverError(ctx, req);
 
-    // --- THE ETAG GATE, and it runs BEFORE the bitmap is even parsed ---------
-    //
-    // §3.3 puts it in this order on purpose: a bitmap indexes into the exact row
-    // order `writeManifest` emitted, so reading one against a manifest that has
-    // moved is the failure the whole scheme is built to make unreachable. Doing
-    // the syntactic check first would save a ~127-177 ms query on a garbage
-    // query string; it would also mean the server had interpreted positions
-    // before it knew whose ordering they were positions in.
-    //
-    // No per-user cache of the last manifest, either. That is new shared mutable
-    // state with an invalidation problem of its own, and the query is cheap,
-    // read-only and off the write lock.
+    // The ETag gate runs before the bitmap is parsed: positions mean nothing
+    // until we know the manifest ordering they index.
     const gate = blk: {
         if (ctx.borrowReader()) |lease| {
             defer ctx.returnReader(lease);
@@ -2411,21 +1520,15 @@ pub fn controlplaneSearchIndexStream(ctx: *Context, req: *Request, params: Param
             return serverError(ctx, req);
     };
 
-    // The BARE hex, not the quoted entity-tag the header carries: a quoted string
-    // in a query needs percent-encoding and buys nothing. Byte equality, like the
-    // manifest route's `if-none-match` comparison, because this server mints
-    // exactly one spelling of this validator.
+    // The bare hex, not the quoted entity-tag; byte equality.
     if (!std.mem.eql(u8, m_param, &gate.etag)) {
         return fail(ctx, req, .precondition_failed, "MANIFEST_MOVED", "manifest changed; refetch it");
     }
 
     const want = wantbitmap.parse(want_param, gate.rows.len) catch |err| switch (err) {
-        // A string no encoder of ours produces. 400, because refetching the
-        // manifest would not help.
+        // No encoder of ours produces this; refetching would not help.
         error.MalformedWant => return badRequest(ctx, req),
-        // The client is addressing documents this ordering does not have, which
-        // means the two disagree about the ordering despite the ETag matching.
-        // Same answer as a moved manifest, for the same reason.
+        // The ordering disagrees despite the ETag matching; treat as moved.
         error.WantLongerThanManifest, error.WantBitPastManifest => return fail(
             ctx,
             req,
@@ -2436,54 +1539,32 @@ pub fn controlplaneSearchIndexStream(ctx: *Context, req: *Request, params: Param
     };
 
     const headers = [_]std.http.Header{
-        // The decoded body is JSONL, one document per fragment; the encoding is
-        // the transport (see above), not a variant of some other representation.
+        // The decoded body is JSONL, one document per fragment.
         .{ .name = "content-type", .value = "application/x-ndjson" },
         .{ .name = "content-encoding", .value = "gzip" },
-        // `no-store`, which is stricter than the manifest's `no-cache`, and the
-        // reason is the skip rule: two identical `(m, want)` requests may
-        // legitimately differ, because a document that was still deriving the
-        // first time arrives the second. A cached copy would freeze the first
-        // answer and the client would never see the document appear.
+        // `no-store`: a document still deriving on the first request may arrive by
+        // the second, and a cached copy would hide it.
         .{ .name = "cache-control", .value = "private, no-store" },
         .{ .name = "x-content-type-options", .value = "nosniff" },
     };
 
-    // 16 KB each, and that pair is the whole per-request memory cost of this
-    // route besides the manifest arena: file -> socket, never read-all-then-write
-    // (§3.3). Three concurrent first visits are ~96 KB rather than three whole
-    // libraries.
+    // Two 16 KB buffers are the whole per-request cost besides the manifest arena.
     var wbuf: [16 * 1024]u8 = undefined;
     var body = req.respondStreaming(&wbuf, .{
         .respond_options = .{ .extra_headers = &headers },
     }) catch return;
 
-    // From here nothing can become a status code — the head is on the wire. A
-    // mid-fragment failure returns without `end()`, closing the connection short
-    // of the trailer, which every decoder reports as a truncated gzip. That is
-    // the loud failure; finishing a stitched stream around half a fragment would
-    // be the quiet one.
+    // Head already sent: a mid-fragment failure returns without `end()`, so
+    // decoders see a truncated gzip (loud) rather than a quietly short stream.
     var rbuf: [16 * 1024]u8 = undefined;
     _ = indexstream.write(ctx.io, terms, gate.rows, want, &body.writer, &rbuf) catch
         return error.StreamTruncated;
     body.end() catch {};
 }
 
-/// The DEGRADED shape of `/api/controlplane/events`: one `event: sync` frame
-/// carrying the current version (plus an `event: index` frame when this server
-/// reports one), then close.
-///
-/// Not an error path — a deliberate fallback, and the *only* behaviour this
-/// endpoint had before streaming existed. The client cannot tell the two apart
-/// beyond the connection closing, and `EventSource` reacts to a closed stream by
-/// reconnecting after `retry:`. So an over-cap or non-serve-mode caller silently
-/// becomes a `retry_ms` poller and stays correct; nothing in the frontend needs
-/// to know which shape it got.
-///
-/// THE INDEX FRAME BELONGS HERE TOO, and that is not symmetry for its own sake:
-/// a degraded caller is the one whose next frame is furthest away (`retry_ms`,
-/// 5 s), so it is the one that most needs the current answer in the response it
-/// already has.
+/// The degraded shape of `/api/controlplane/events`: one `event: sync` frame (plus
+/// `event: index` when available), then close. `EventSource` reconnects after
+/// `retry:`, so an over-cap or non-serve-mode caller becomes a correct poller.
 fn eventsOneShot(ctx: *Context, req: *Request, sync_version: i64, index: ?pendingsvc.Snapshot) anyerror!void {
     var buf: [192]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
@@ -2496,125 +1577,28 @@ fn eventsOneShot(ctx: *Context, req: *Request, sync_version: i64, index: ?pendin
     });
 }
 
-// ---------------------------------------------------------------------------
-// THE PER-DOCUMENT TEXT ROUTE — §1.1, build order step 7
-// ---------------------------------------------------------------------------
+// ---- the per-document text route ----
 
-/// GET /api/controlplane/text/{md5} -> ONE document's `text/{md5}.{v}` record as
-/// a single gzip stream: the header line plus one line per segment, each with the
-/// segment's ordinal, its address and its real text (`derive_search.TextWriter`).
-///
-/// ## This route is five routes
-///
-/// §1.1: *"All five in-doc routes collapse to 'authorize, serve `text/<md5>`.'"*
-/// They are gone as of §6 step 7: global search and in-document search are the
-/// same mechanism pointed at different data, so find-in-note, find-in-txt,
-/// find-in-PDF, find-in-a-version and find-in-the-bin stopped being five server
-/// answers and became one file the browser loads into the FTS5 instance it
-/// already has. **Format differences stop being code and become data** — a
-/// segment's ordinal and its address are fields in a record here, not a branch in
-/// a query.
-///
-/// The one that had a real reason to exist was the history scan: an arbitrary
-/// historic md5 is not in the caller's live set, so the FTS partition mask could
-/// not scope it and it read `note_page_index` by `blob_md5` instead. That reason
-/// evaporates when nothing is scoping an index. What is left of all five is the
-/// gate below.
-///
-/// ## The gate, which is the whole of what is left
-///
-/// `Files.reachesBlob` — a live file of theirs, a trashed one, or a retained
-/// version of one — and its header argues why the three collapse into a single
-/// query. History and the bin are not special: they are other md5s, gated exactly
-/// as they are gated today.
-///
-/// **404 covers BOTH refusals and they are indistinguishable from outside**: an
-/// md5 the caller cannot reach and an md5 that is simply not derived answer
-/// identically, so the route is no existence oracle over the deduplicated blob
-/// space. That is the same boundary `/thumbnail/{hash}` draws for the same
-/// reason — a content-addressed URL has no file id to scope through.
-///
-/// ## The body is the STORED fragment, wrapped
-///
-/// Ten bytes of gzip header, the file's raw-deflate fragment verbatim, `03 00`,
-/// and the 8-byte trailer built from the CRC32 and length in the file's OWN
-/// 12-byte header. No compression and no decompression: the derive step
-/// compressed these bytes once and this route never touches a plaintext byte,
-/// because the thing doing it is a Pi 1 B+.
-///
-/// `content-encoding: gzip` regardless of `Accept-Encoding`, exactly as the
-/// stitched stream sends it: there is no identity form of this body to negotiate
-/// down to, and inflating one to produce it would spend the Pi's CPU undoing the
-/// one thing the design is for.
-///
-/// ## `content_length`, which the STREAM route refuses and this one takes
-///
-/// The stream route argues at length for chunked, and the argument is entirely
-/// about the SKIP RULE: it promises a length before a walk that discovers
-/// mid-flight that a document is gone, and the ways out are 1,222 held
-/// descriptors or a truncated body. **Neither applies to one document.** There is
-/// no walk to skip inside; the file is open before the head goes out, and a blob
-/// GC'd a moment later cannot shorten an open fd (the store only ever publishes
-/// by rename, so a named file's bytes are fixed for its whole life). So the
-/// length is knowable, honest, and worth having: the client shows real progress
-/// on a document that may be megabytes over 3G.
-///
-/// It also makes a std bug unreachable rather than merely avoided.
-/// `File.Reader.streamRemaining` is the obvious spelling for the copy below and
-/// **panics against a CHUNKED response** — it lowers to `sendFile`, and
-/// `chunkedSendFile` sizes its chunk header from a LOWER bound, leaving
-/// `state.chunk_len` mid-chunk when the transfer writes fewer bytes than
-/// promised (REPRODUCED on Zig 0.16.0; see `index_stream.zig`). A declared
-/// `content_length` takes a sendFile path that keeps no such state.
-///
-/// ## `private, immutable` — and NO `max-age`, which is the interesting half
-///
-/// The file's key is `(md5, index_version)`; this URL carries only the md5. Those
-/// bytes cannot change under the URL while the parser stands still — the store is
-/// content-addressed and publishes by rename — but an `index_version` bump
-/// re-derives the SAME md5 into a new file and unlinks the old one, so what this
-/// URL serves does change, once, per parser release.
-///
-/// So `immutable` says the true thing ("these bytes will not change under you")
-/// and the response grants no freshness lifetime to hold it in. That is the
-/// deliberate difference from the ten `public, max-age=31536000, immutable`
-/// routes: every one of THOSE names its content in the URL, so a year-long entry
-/// can never outlive what it described. A year here would strand a browser on
-/// text an old parser produced, on a URL that cannot change to tell it — which is
-/// the `PageTextVO.words` regression the cache-policy pin exists to prevent,
-/// wearing a search hat. §4.4's *"the browser's own cache does the storing, no
-/// code"* is still what happens: a revalidated hit costs a conditional request,
-/// and the tier 1/tier 2 prefetch that wants a real promise goes to IndexedDB
-/// precisely because the HTTP cache cannot make one.
-///
-/// `private` rather than `public` for the manifest's reason: this is one person's
-/// document text and the household may sit behind a shared proxy on a plain-HTTP
-/// origin.
-///
-/// ## `manual_db_lock`, with the reader borrowed HERE
-///
-/// The same reasoning as the stitched stream, and it is not weaker for being one
-/// file: `read_only` holds its lease for the WHOLE dispatch, which on a download
-/// route means for the whole download, and an empty pool degrades `read_only` to
-/// the WRITER under `db_lock` — so one 3G client fetching one book's text would
-/// stall device sync for the length of it. The gate is two indexed COUNTs; it
-/// gets a borrowed reader (or a narrow `lockDb` window when the pool is empty),
-/// released before a single byte of body is written, and the file → socket copy
-/// that follows touches the DB not at all.
+/// GET /api/controlplane/text/{md5} -> one document's `text/{md5}.{v}` record as a
+/// gzip stream (header line plus one line per segment), for in-document search of
+/// every kind. Gated by `Files.reachesBlob` (live, trashed or retained version);
+/// unreachable and underived are one 404, so no existence oracle. The stored
+/// raw-deflate fragment is wrapped verbatim in a gzip header and trailer.
+/// Unlike the stitched stream this sends `Content-Length`: one open fd cannot be
+/// shortened by GC (the store publishes by rename), and it avoids a Zig 0.16
+/// `chunkedSendFile` panic (see `index_stream.zig`). Caching: `private, immutable`
+/// with no `max-age` unless `?v=` names the current `index_version`, because a
+/// parser bump re-derives the same md5. `manual_db_lock` with a borrowed reader,
+/// as in the stitched stream.
 pub fn controlplaneDocumentText(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const md5 = params.get("md5") orelse return badRequest(ctx, req);
 
-    // A deployment that keeps no text store has no derived file for ANY md5 —
-    // the underived case for every document at once, and answered as such. NOT a
-    // 500 like the stream route's missing terms store: there the empty-but-valid
-    // stream would have told the client "every document arrived" and it would
-    // have stopped asking, while a 404 here is simply "find-in-document has
-    // nothing to load", which is the truth.
+    // No text store: a 404 ("nothing to load") is the truth here, unlike the
+    // stream route's missing terms store.
     const text = files.text orelse return reply.notFound(req);
 
-    // THE GATE, in its own lock window and nothing else in it.
     const reachable = blk: {
         if (ctx.borrowReader()) |lease| {
             defer ctx.returnReader(lease);
@@ -2627,29 +1611,16 @@ pub fn controlplaneDocumentText(ctx: *Context, req: *Request, params: Params) an
     };
     if (!reachable) return reply.notFound(req);
 
-    // From here the DB is never touched again. `open` before `stat` before the
-    // head: every one of these is a 404 that a caller cannot tell from the
-    // refusal above, which is what makes "not derived" and "not yours" one answer.
+    // The DB is done. Each failure below is a 404 indistinguishable from the gate.
     var file = text.open(md5, derivesearch.index_version) catch return reply.notFound(req);
     defer file.close(ctx.io);
     const size = (file.stat(ctx.io) catch return reply.notFound(req)).size;
-    // Also the format check: a truncated or foreign-format file is refused here
-    // rather than streamed as half a deflate stream that no trailer can make whole.
+    // Also the format check: a truncated or foreign file is refused, not streamed.
     const h = derived.readHeader(ctx.io, file) catch return reply.notFound(req);
     if (size <= derived.header_len) return reply.notFound(req); // a header and no fragment
 
-    // DOES THE URL NAME WHAT IT SERVES? `?v=` carries the `index_version`, which
-    // is the other half of the store's key and which the manifest already ships
-    // per row. When it matches, a year-long entry cannot outlive what it
-    // described — the property every other `max-age=31536000, immutable` route
-    // has by naming its content in the path, reached here through the query
-    // string instead. `/file/{id}?v={fileHash}` is the same device.
-    //
-    // When it is absent or stale, the year is refused and only `immutable`
-    // stands: the bytes will not change under this URL while the parser does,
-    // but a parser bump re-derives the same md5 and unlinks the old file, so
-    // without the version there is nothing to invalidate the entry — which is
-    // the `PageTextVO.words` regression wearing a search hat.
+    // `?v=` carries the `index_version`, the other half of the store key. Only when
+    // it matches does the response get a year's `max-age`.
     var vbuf: [24]u8 = undefined;
     const named = if (reply.queryParam(req.head.target, "v")) |v|
         std.mem.eql(u8, v, std.fmt.bufPrint(&vbuf, "{d}", .{derivesearch.index_version}) catch "")
@@ -2659,9 +1630,7 @@ pub fn controlplaneDocumentText(ctx: *Context, req: *Request, params: Params) an
     var trailer: gzip_stitch.Trailer = .{};
     trailer.append(h.crc, h.len);
 
-    // The wire length, from the one file we hold open: the gzip header, the
-    // fragment (everything past the stored 12-byte one), the terminating block
-    // and the 8-byte trailer.
+    // Gzip header, the fragment past the stored 12-byte header, terminator, trailer.
     const content_length = gzip_stitch.header.len +
         (size - derived.header_len) +
         gzip_stitch.terminator.len + 8;
@@ -2671,8 +1640,6 @@ pub fn controlplaneDocumentText(ctx: *Context, req: *Request, params: Params) an
         .content_length = content_length,
         .respond_options = .{
             .extra_headers = &.{
-                // The decoded body is JSONL, one line per segment; the encoding is
-                // the transport, not a variant of another representation.
                 .{ .name = "content-type", .value = "application/x-ndjson" },
                 .{ .name = "content-encoding", .value = "gzip" },
                 .{ .name = "cache-control", .value = if (named) "private, max-age=31536000, immutable" else "private, immutable" },
@@ -2681,17 +1648,10 @@ pub fn controlplaneDocumentText(ctx: *Context, req: *Request, params: Params) an
         },
     }) catch return;
 
-    // Past the head nothing can become a status code. A failure below returns
-    // WITHOUT `end()`, closing the connection short of `content_length` — the
-    // truncation signal every decoder reports — instead of reaching `end()`,
-    // which asserts the full length and would panic. Same discipline as the
-    // thumbnail and page routes.
+    // Head sent: on failure return short of `content_length`, never `end()`.
     body.writer.writeAll(gzip_stitch.header) catch return error.StreamTruncated;
 
-    // POSITIONAL READS INTO ONE 16 KB BUFFER, bounded by `size` so the walk
-    // delivers exactly what the head promised. Never read-all-then-write: the
-    // largest document in the corpus is 1.35 MB stored and three concurrent
-    // finds must not be that many megabytes of RSS on a 50 MB budget.
+    // Positional reads into one buffer, bounded by `size`.
     var rbuf: [16 * 1024]u8 = undefined;
     var off: u64 = derived.header_len;
     while (off < size) {
@@ -2706,56 +1666,12 @@ pub fn controlplaneDocumentText(ctx: *Context, req: *Request, params: Params) an
     body.end() catch {};
 }
 
-/// GET /api/controlplane/events -> the live-freshness (SSE) channel: the caller's
-/// `syncVersion`, pushed whenever it CHANGES, on a held connection.
-///
-/// ## Why this can hold a connection now
-///
-/// It could not before: serve mode ran a single-threaded accept loop, so a parked
-/// stream wedged it and nothing else could be served. Serve mode now spawns a
-/// thread per connection, so a parked stream costs one thread and one connection
-/// slot and blocks nobody. `ctx.event_streams` is what says so — it is set only by
-/// `transport.run`, and a null one (the integration harness, which drives
-/// `handle()` over in-memory buffers with no thread to park on) takes the one-shot
-/// path below.
-///
-/// ## `manual_db_lock`, and why it is not optional here
-///
-/// THE WHOLE-HANDLER DB LOCK AND A HELD STREAM ARE INCOMPATIBLE. Under the default
-/// policy this handler would hold the one global `db_lock` for the stream's entire
-/// lifetime — minutes — and every other request on the server would block on it:
-/// not just the browser, but DEVICE SYNC. A single open browser tab would stop the
-/// Nomad from syncing, and the symptom (sync mysteriously stalls while the web UI
-/// works) points nowhere near here.
-///
-/// So the route is `manual_db_lock` and follows the discipline `/oss/get/:id`,
-/// `/note/:id/page/:n` and `/file/:id` already established: take `ctx.db_lock`
-/// around each DB touch and NOTHING else. This handler's own DB access is a
-/// single `files.syncVersion` — one indexed single-row SELECT — inside its own
-/// `lockDb`/`unlockDb` bracket. The lock is never held across the sleep, the
-/// socket write, or the flush.
-///
-/// The pending count is the ONE touch that is not this handler's: `pending.Pulse`
-/// takes `db_lock` itself, and only on the rare tick where it actually counts.
-/// So `indexSnapshot` is called OUTSIDE every bracket here — the mutex is not
-/// reentrant, and calling it inside one is the single way to deadlock this loop.
-///
-/// ## The loop
-///
-/// Poll `syncVersion` every `poll_interval_ms`; emit `event: sync` only when it
-/// differs from what we last sent (see `event_streams.zig` for why polling rather
-/// than a broadcast from the write path). Emit a `: ping` comment frame when
-/// nothing has gone out for `heartbeat_ms`, so a dead connection is detected by
-/// both ends rather than parked forever. End cleanly after `max_lifetime_ms`.
-///
-/// ## Teardown
-///
-/// Every exit — a closed tab, a dropped link, a lifetime expiry, a DB error —
-/// leaves the loop, runs the `defer` that returns the stream slot, and returns
-/// from the handler; `serve` then finds the connection dead, `connThread`
-/// releases its connection slot and the thread ends. A disconnected client is
-/// discovered by the first write that fails, which is exactly what the heartbeat
-/// guarantees will happen within `heartbeat_ms` even on a stream with no news.
+/// GET /api/controlplane/events -> the live-freshness SSE channel: `syncVersion`
+/// pushed on change over a held connection. Without `ctx.event_streams` (the test
+/// harness) it answers one-shot. `manual_db_lock` is mandatory: the default lock
+/// held for a minutes-long stream would stall device sync. Each tick takes the lock
+/// only around `files.syncVersion`; `indexSnapshot` runs outside every bracket.
+/// A `: ping` every `heartbeat_ms` surfaces dead peers as write errors.
 pub fn controlplaneEvents(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
@@ -2768,20 +1684,16 @@ pub fn controlplaneEvents(ctx: *Context, req: *Request, params: Params) anyerror
         break :blk files.syncVersion(caller.user_id) catch 0;
     };
 
-    // OUTSIDE the bracket above, on purpose: `Pulse` takes `db_lock` itself on
-    // the rare tick where it counts, and this handler's mutex is not reentrant.
+    // Outside the bracket above: `Pulse` takes `db_lock` itself.
     const initial_index = indexSnapshot(ctx, caller.user_id);
 
     const streams = ctx.event_streams orelse return eventsOneShot(ctx, req, initial, initial_index);
     if (!streams.tryAcquire(ctx.io, caller.user_id)) return eventsOneShot(ctx, req, initial, initial_index);
-    // THE slot-balance guarantee: one release per successful acquire, on every
-    // path out of the handler including the error returns below.
+    // One release per successful acquire, on every path out.
     defer streams.release(ctx.io, caller.user_id);
 
-    // No `content_length` -> chunked, which is what lets the body stay open. A
-    // failure from here on cannot become a status code (the head is on the wire),
-    // so every write is `catch break`/`catch return` and the client sees the
-    // stream end — which `EventSource` handles by reconnecting.
+    // No `content_length` -> chunked. Write failures end the stream; `EventSource`
+    // reconnects.
     var wbuf: [256]u8 = undefined;
     var body = req.respondStreaming(&wbuf, .{
         .respond_options = .{ .keep_alive = false, .extra_headers = &sse_headers },
@@ -2802,20 +1714,15 @@ pub fn controlplaneEvents(ctx: *Context, req: *Request, params: Params) anyerror
         lived_ms += streams.poll_interval_ms;
         since_write_ms += streams.poll_interval_ms;
 
-        // The version tick. Narrow bracket, taken and released every tick — this
-        // is the difference between a stream that costs microseconds of global
-        // lock per second and one that freezes device sync for its whole life.
-        // A read error is treated as "no change": a transient DB failure must not
-        // fabricate a version bump that would make every client refetch.
+        // Narrow bracket each tick. A read error counts as "no change", so a
+        // transient failure never fabricates a refetch.
         const current: i64 = blk: {
             ctx.lockDb();
             defer ctx.unlockDb();
             break :blk files.syncVersion(caller.user_id) catch last;
         };
 
-        // The index tick. Free unless something says the count moved (see
-        // `pending.Pulse`), and OUTSIDE the lock bracket above for the same
-        // reason the initial read is.
+        // Outside the lock, as above.
         const index_now = indexSnapshot(ctx, caller.user_id);
 
         var wrote = false;
@@ -2824,8 +1731,7 @@ pub fn controlplaneEvents(ctx: *Context, req: *Request, params: Params) anyerror
             body.writer.print("event: sync\ndata: {d}\n\n", .{current}) catch break;
             wrote = true;
         }
-        // ON CHANGE ONLY, exactly as `event: sync` is. A frame per tick would be
-        // 2 frames/s down a link this project treats as 3G, saying nothing.
+        // On change only, like `event: sync`.
         if (index_now) |now| {
             const moved = last_index == null or
                 now.pending != last_index.?.pending or now.version != last_index.?.version;
@@ -2840,8 +1746,7 @@ pub fn controlplaneEvents(ctx: *Context, req: *Request, params: Params) anyerror
             body.flush() catch break;
         } else if (since_write_ms >= streams.heartbeat_ms) {
             since_write_ms = 0;
-            // A comment frame: `EventSource` ignores it, but the bytes are what
-            // make a dead peer surface as a write error rather than a silent park.
+            // `EventSource` ignores comments; the bytes surface a dead peer.
             body.writer.writeAll(": ping\n\n") catch break;
             body.flush() catch break;
         }

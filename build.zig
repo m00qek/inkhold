@@ -1,141 +1,56 @@
 const std = @import("std");
 
 /// Compile-time configuration for the vendored SQLite amalgamation
-/// (`vendor/sqlite`, 3.53.3). Every flag is deliberate — see `linkSqlite`.
+/// (`vendor/sqlite`, 3.53.3).
 const sqlite_flags = [_][]const u8{
-    // ---- Required by our code ----
-
-    // FTS5 is a *build option*, not a given: on a host SQLite built without it
-    // the server fails at runtime. Vendoring turns that into a guarantee.
-    //
-    // **§6 step 8 deleted the server's FTS5 INDEX and this
-    // flag stayed**, which §6.1 says outright: what needs FTS5 now is
-    // `search/fuzzy.zig`'s contentless `temp.token_fold`, the tokenizer the
-    // derive step folds every document's terms through. That fold is the whole
-    // basis of parity-by-construction with the browser's own index (§2.2), so
-    // this is more load-bearing than it was when a table declared it — it is now
-    // the only thing standing between the two engines and a silent disagreement
-    // about what a word is. It also still runs during migration: `ddl_v1`
-    // creates `segment_fts` and `ddl_v14` drops it again (see `schema.zig` v14
-    // for why the baseline is not edited).
+    // FTS5 is a build option, so vendoring guarantees it. Still required after
+    // the server index went: `search/fuzzy.zig`'s `temp.token_fold` folds terms
+    // through it for parity with the browser index, and migrations create and
+    // drop `segment_fts`.
     "-DSQLITE_ENABLE_FTS5",
 
-    // Serialized. serve mode runs one thread per connection over a SINGLE
-    // shared connection, and `ctx.db_lock` already serializes access — so
-    // mode 2 (multi-thread) would also be correct *today*. We pick 1 anyway:
-    //   - db_lock is NOT made redundant by this. Mode 1 protects individual
-    //     API calls; our multi-statement transactions still need db_lock for
-    //     atomicity. So mode 1 is purely a safety net under the real lock.
-    //   - The failure mode of mode 2 is silent memory corruption the moment
-    //     any future code (a WAL checkpointer, an index worker) touches the
-    //     connection off the lock. Mode 1 degrades that to "merely slow".
-    //   - The cost is an uncontended mutex per call, which is nothing at
-    //     single-household scale.
+    // Serialized. `db_lock` is still needed for multi-statement atomicity; mode 1
+    // turns any future off-lock use into slowness instead of memory corruption.
     "-DSQLITE_THREADSAFE=1",
 
-    // ~2 MB page cache (negative = KiB), matching the figure the resource
-    // budget counts on. `sqlite.zig` also sets this via PRAGMA at open time;
-    // pinning the compiled-in default means a connection opened by any other
-    // path cannot silently inherit SQLite's much larger upstream default.
+    // ~2 MB page cache, so a connection that skips the PRAGMA cannot inherit
+    // upstream's much larger default.
     "-DSQLITE_DEFAULT_CACHE_SIZE=-2000",
 
-    // ---- Omissions: each is verified unused by the code today ----
+    // ---- Omissions, each verified unused ----
 
-    // No sqlite3_*_text16/column_text16 anywhere; the wrapper is UTF-8 only
-    // and `unicode61` tokenizes UTF-8. Removes the whole UTF-16 transcoding
-    // layer and its collations.
     "-DSQLITE_OMIT_UTF16",
 
-    // Nothing loads extensions, and FTS5 above is compiled in statically
-    // rather than loaded. Also drops the `load_extension()` SQL function,
-    // which is worth removing on its own given the device-facing surface.
+    // Also removes the `load_extension()` SQL function from the device-facing surface.
     "-DSQLITE_OMIT_LOAD_EXTENSION",
 
-    // The deprecated API set (sqlite3_profile, sqlite3_trace,
-    // sqlite3_aggregate_count, ...) — none appear in src/.
     "-DSQLITE_OMIT_DEPRECATED",
 
-    // Shared-cache mode is deprecated upstream and we never open with it.
     "-DSQLITE_OMIT_SHARED_CACHE",
 
-    // sqlite3_progress_handler is never installed.
     "-DSQLITE_OMIT_PROGRESS_CALLBACK",
 
-    // ---- Hardening / size, no behaviour we rely on ----
+    // ---- Hardening / size ----
 
-    // Double-quoted string literals off. Upstream's own recommendation: with
-    // DQS on, a misspelled column name silently degrades to a string literal
-    // instead of erroring. Audited — every string literal in our SQL is
-    // single-quoted, and the double quotes any MATCH expression carries are
-    // parsed by FTS5's query parser (from a *bound parameter*), never by the SQL
-    // tokenizer, so they are unaffected.
+    // With DQS on, a misspelled column silently becomes a string literal. All our
+    // literals are single-quoted; MATCH quotes come from bound parameters.
     "-DSQLITE_DQS=0",
 
-    // sqlite3_status/_db_status are never read, so the allocator's global
-    // bookkeeping is pure overhead.
     "-DSQLITE_DEFAULT_MEMSTATUS=0",
 
-    // A LIKE against a blob never matches. We only LIKE over TEXT columns.
     "-DSQLITE_LIKE_DOESNT_MATCH_BLOBS",
 
-    // Deliberately NOT omitted:
-    //   SQLITE_OMIT_JSON — unused today, but a `json_extract()` in some
-    //     future migration would fail at *runtime* ("no such function"),
-    //     which is exactly the trap vendoring is meant to close. ~30 KB is
-    //     not worth reopening it.
-    //   SQLITE_OMIT_AUTOINIT — would need an explicit sqlite3_initialize()
-    //     call that is easy to forget on a new entry point.
-    //   spellfix1 / editdist3 / soundex — considered and rejected: phonetic
-    //     matching is English-oriented, the same reason `porter` was ruled
-    //     out for a Portuguese corpus.
+    // Kept on purpose: JSON (a future migration's `json_extract()` would fail only
+    // at runtime) and AUTOINIT (an explicit init is easy to forget).
 };
 
-/// Hard-trimmed SQLite for the browser (`zig build wasm-sqlite-core`).
-///
-/// The browser needs SQLite for exactly two things — `sqlite3_deserialize` a
-/// `.spd` image and run a handful of `SELECT`s over `config`/`surface_*`, and
-/// build and query the local FTS5 search index. No files, no threads. So this
-/// profile drops everything neither path touches, on top of the backend's
-/// omissions:
-///
-///   * `THREADSAFE=0`  — the wasm instance is single-threaded; no mutexes.
-///   * `OS_OTHER=1`    — remove the built-in unix/win VFS wholesale (file I/O,
-///                       byte-range locking, mmap, the process randomness/time
-///                       syscalls). `webapp/wasm/sqlite_vfs_null.c` supplies the
-///                       minimal default VFS `sqlite3_initialize` still requires.
-///   * `OMIT_WAL`      — the parser rewrites a real `.spd`'s WAL header to
-///                       rollback-journal before deserialize (`neutralizeWalMode`),
-///                       and `:memory:` never runs WAL, so the WAL module is dead.
-///   * `OMIT_AUTOINIT` — every entry point that can be the first call into the
-///                       module calls `sqlite3_initialize` explicitly.
-///   * `OMIT_JSON` + no RTREE/GEOPOLY — every optional SQL module dropped except
-///                       the one that is now load-bearing:
-///   * `ENABLE_FTS5`   — global search is answered in the browser
-///                       in the browser. MEASURED on this
-///                       artifact: 667,211 raw / 290,879 gzip without it against
-///                       828,562 / 362,009 with, so FTS5 costs **+71,130 bytes
-///                       gzip** and that is the whole download cost of the
-///                       feature. `precompress.mjs` pins the total.
-///   * `TEMP_STORE=3`  — **THE DANGEROUS ONE.** The null VFS cannot open a file
-///                       (`nullOpen` returns `SQLITE_IOERR` unconditionally), so
-///                       anything that spilled to temp storage would spill to a
-///                       temp FILE and fail. `3` forces temp storage to memory
-///                       and cannot be overridden by a pragma. Without it an
-///                       FTS5 merge *"surfaces as a corrupt index in production
-///                       rather than as a build error"* (§0).
-///                       REMOVING IT CHANGES NOTHING OBSERVABLE — measured, up
-///                       to 80,000 documents and an 80,000-row `ORDER BY rank`.
-///                       So it is not defended by a behavioural test: the module
-///                       asks the compiled amalgamation for it
-///                       (`sqlite3_compileoption_used`) and `idx_open` refuses
-///                       to open without it, which is what
-///                       `webapp/wasm/tests/sqlite_core_abi.mjs` asserts.
-///   * the read-only-safe omissions (UTF16, LOAD_EXTENSION, DEPRECATED,
-///     SHARED_CACHE, PROGRESS_CALLBACK, AUTHORIZATION, COMPLETE, DECLTYPE,
-///     TRACE, AUTOVACUUM) + `UNTESTABLE` + `DQS=0` + `MEMSTATUS=0`.
-///
-/// Honest caveat: there is no "read-only" flag — the b-tree/pager/SQL core stays
-/// to run any SELECT. The win is dropping every optional module + the OS layer.
+/// Hard-trimmed SQLite for the browser (`zig build wasm-sqlite-core`): `.spd`
+/// deserialize + SELECTs, and the FTS5 search index. No files, no threads.
+/// `OS_OTHER` drops the OS VFS (`sqlite_vfs_null.c` supplies a null one), and
+/// `OMIT_WAL` is safe because the parser rewrites `.spd` WAL headers first.
+/// `TEMP_STORE=3` is essential: the null VFS cannot open files, so a temp spill
+/// (an FTS5 merge) would corrupt the index. Its absence is invisible in tests, so
+/// `idx_open` checks `sqlite3_compileoption_used` and refuses to run without it.
 const sqlite_core_wasm_flags = [_][]const u8{
     "-DSQLITE_THREADSAFE=0",
     "-DSQLITE_OS_OTHER=1",
@@ -158,17 +73,12 @@ const sqlite_core_wasm_flags = [_][]const u8{
     "-DSQLITE_LIKE_DOESNT_MATCH_BLOBS",
     "-DSQLITE_ENABLE_FTS5",
     "-DSQLITE_TEMP_STORE=3",
-    // NB: the grammar-altering omissions (OMIT_TRIGGER/VIEW/WINDOWFUNC/CTE/
-    // ATTACH/PRAGMA/…) are deliberately NOT used. They require regenerating the
-    // Lemon parser, which the vendored *amalgamation* ships pre-built — enabling
-    // them makes `sqlite3.c` fail to compile (the parser tables still reference
-    // the removed routines). Every flag above is amalgamation-safe.
+    // No grammar-altering omissions (OMIT_TRIGGER/VIEW/CTE/...): they need a
+    // regenerated Lemon parser, and the amalgamation then fails to compile.
 };
 
-/// Compiles the vendored SQLite amalgamation into `mod`, replacing what used
-/// to be `mod.linkSystemLibrary("sqlite3", .{})`. This is what makes the
-/// binary self-contained AND what makes FTS5 a compile-time fact rather than
-/// a property of whatever libsqlite3 the host distro happens to ship.
+/// Compiles the vendored SQLite amalgamation into `mod`, so the binary is
+/// self-contained and FTS5 is guaranteed.
 fn linkSqlite(b: *std.Build, mod: *std.Build.Module) void {
     mod.link_libc = true;
     // `@cImport({ @cInclude("sqlite3.h") })` in db/sqlite.zig resolves here.
@@ -180,61 +90,37 @@ fn linkSqlite(b: *std.Build, mod: *std.Build.Module) void {
 }
 
 // ---------------------------------------------------------------------------
-// MuPDF -> wasm (`zig build wasm-pdf-decode`)
+// MuPDF (`zig build wasm-pdf-decode`, and the native server library)
 // ---------------------------------------------------------------------------
 //
-// MuPDF 1.28.1 is a PINNED TARBALL DEPENDENCY (`build.zig.zon`), not vendored:
-// it is ~72 MB of source of which we compile maybe a fifth, and a tree that size
-// in the repo would dwarf everything else in it. `b.dependency("mupdf", .{})`
-// unpacks it into the gitignored `zig-pkg/`.
-//
-// Nothing below patches MuPDF. The two shims are ours (`webapp/wasm/pdf_shim.c`).
+// MuPDF 1.28.1 is a pinned tarball dependency (`build.zig.zon`), unpacked into
+// `zig-pkg/`, and is never patched. Our shims are `webapp/wasm/pdf_shim.c` and
+// `backend/pdf/*.c`.
 
-/// Compile-time trim for the wasm build. Measured, not guessed —
-/// object sizes were ranked to find these:
-///
-///   * `NO_CJK` (-881 KB) is the single biggest win and the one nobody guesses.
-///     It drops `pdf-cmap-load.c`'s embedded Adobe predefined-CMap tables — an
-///     899 KB object. `TOFU_CJK` does NOT cover it: that flag drops CJK *fonts*,
-///     this one drops CJK *encodings*. Consistent to take both.
-///   * `FZ_ENABLE_HYPHEN=0` (-643 KB) drops `resources/hyphen/hyph-all.zip`,
-///     which is otherwise linked unconditionally.
-///   * `TOFU`/`TOFU_CJK` drop the embedded Noto/SIL/Han/Droid fonts, leaving the
-///     14 URW base-35 faces a PDF actually needs. Documents that embed their
-///     fonts (nearly all of them) are unaffected.
-///   * `FZ_ENABLE_JPX=0` (-227 KB) drops openjpeg. JPEG 2000 in a PDF is rare and
-///     degrades to "unsupported image", not a broken page.
-///
-/// The format set is deliberate: PDF + EPUB + FB2 + CBZ + XPS. §9.5 measured all
-/// five at only +106 KB gzip over PDF-only, which is the whole reason MuPDF beat
-/// PDF.js here. What IS turned off is everything with no viewer story and a real
-/// cost: SVG, Markdown (would pull in cmark-gfm), MOBI, Office, barcodes, the
-/// JS interpreter (mujs), brotli, and every document *writer*.
-/// The wasm target's own flags. Everything BELOW this is shared with the native
-/// build (`mupdf_trim_flags`) — the split exists so the measured decisions
-/// cannot drift between the two targets, which is the one thing that would make
-/// the browser and the server disagree about a document.
+/// Flags only the wasm target uses; `mupdf_trim_flags` is shared with the native
+/// build so the browser and server cannot disagree about a document.
 const mupdf_wasm_only = [_][]const u8{
-    // --- The wasm exception-handling contract. See `buildMupdfWasm`. ---
+    // The wasm exception-handling contract (see `buildMupdfWasm`).
     "-fwasm-exceptions",
     "-mllvm",
     "-wasm-enable-sjlj",
 
-    // wasi-libc has no `mkstemp` and clang 21 makes an implicit declaration a
-    // hard error. `pdf_shim.c` supplies a stub; this lets the reference compile.
-    // Native libc has the real thing, so this is wasm-only.
+    // wasi-libc has no `mkstemp`; `pdf_shim.c` stubs it and clang 21 errors on
+    // the implicit declaration otherwise.
     "-Wno-implicit-function-declaration",
 };
 
+// Size trim, measured: NO_CJK drops the CJK CMap tables (-881 KB, not covered by
+// TOFU_CJK), HYPHEN (-643 KB), TOFU/TOFU_CJK keep only the 14 base-35 fonts, JPX
+// (-227 KB) degrades to "unsupported image". Formats kept: PDF, EPUB, FB2, CBZ,
+// XPS.
 const mupdf_trim_flags = [_][]const u8{
     "-DNDEBUG",
 
-    // --- Fonts and encodings ---
     "-DTOFU",
     "-DTOFU_CJK",
     "-DNO_CJK",
 
-    // --- Formats/features off ---
     "-DFZ_ENABLE_JS=0",
     "-DFZ_ENABLE_JPX=0",
     "-DFZ_ENABLE_HYPHEN=0",
@@ -248,52 +134,22 @@ const mupdf_trim_flags = [_][]const u8{
     "-DFZ_ENABLE_ODT_OUTPUT=0",
     "-DFZ_ENABLE_OCR_OUTPUT=0",
 
-    // lcms2 here is Artifex's multi-threaded fork under a symbol prefix; MuPDF's
-    // own sources need both defines to see the right declarations.
+    // lcms2 is Artifex's multi-threaded fork, under a symbol prefix.
     "-DHAVE_LCMS2MT",
     "-DLCMS2MT_PREFIX=lcms2mt_",
 
-    // Upstream's warnings are upstream's business — MuPDF and its thirdparty
-    // tree are noisy under clang and none of it is ours to fix.
     "-w",
 };
 
-/// UBSan OFF — for the VENDORED tree only, and never for `backend/pdf/*.c`,
-/// which is ours and keeps every check. `addMupdfSources` appends this; the two
-/// files we wrote do not get it.
-///
-/// **Not a preference. A crash.** `zig cc` compiles C at Debug and ReleaseSafe
-/// with `-fsanitize=undefined -fsanitize-trap=undefined`, so a violation is a
-/// `ud2`: the process dies with "Illegal instruction" and no message, and there
-/// is nothing to catch. MuPDF and its eight thirdparty trees were never written
-/// to be UBSan-clean, and at least two sites are reachable from a single text
-/// extraction:
-///
-///   - x86-64 traps in lcms2's `cmsPipelineEval16` — upstream casts an
-///     interpolation routine to the pipeline's own function-pointer type
-///     (`cmsopt.c:781`, differing only in `const _cms_interp_struc*` versus
-///     `const void*`) and then calls through it. Identical ABI, formally UB.
-///   - armv6 traps at a DIFFERENT site in the same call chain
-///     (`cmsxform.c:2740`, transform creation), so it is not one cast and a
-///     per-category opt-out does not travel across targets. `-fsanitize=function`
-///     is not even emitted on 32-bit ARM.
-///
-/// **Found the hard way, and worth stating.** The probe never reaches the colour
-/// pipeline — it opens, counts and bounds a page — so this lay dormant from the
-/// day MuPDF was linked in. The TEXT pass interprets page content, which converts
-/// colours: every text test died at ReleaseSafe while every one of them passed at
-/// Debug, and ReleaseSafe is what `make serve` and every release artifact build.
-/// A blanket per-file `-fno-sanitize=undefined` was the alternative to shipping a
-/// server that segfaults on the first PDF; scoping it to code we do not maintain
-/// is the part that keeps it honest.
+/// UBSan off for vendored MuPDF only (never `backend/pdf/*.c`). `zig cc` traps
+/// UB at Debug/ReleaseSafe with no message, and lcms2 in the text pass's colour
+/// pipeline trips it (a function-pointer cast in `cmsopt.c` on x86-64, a
+/// different site in `cmsxform.c` on armv6), so a narrower opt-out does not work.
 const mupdf_vendor_only = [_][]const u8{"-fno-sanitize=undefined"};
 
-/// What `buildMupdfWasm` compiles with: the target's contract plus the shared trim.
 const mupdf_wasm_flags = mupdf_wasm_only ++ mupdf_trim_flags;
 
-/// What `buildMupdfNative` compiles with: the shared trim and nothing else. The
-/// server needs no exception-handling contract (ordinary `setjmp`/`longjmp`) and
-/// no `mkstemp` stub.
+/// Native flags: no exception-handling contract and no `mkstemp` stub needed.
 const mupdf_native_flags = mupdf_trim_flags;
 
 /// Per-library build flags, mirroring MuPDF's own `Makelists` (`*_BUILD_CFLAGS`).
@@ -321,22 +177,15 @@ const mupdf_harfbuzz_flags = [_][]const u8{
     "-DHAVE_UCDN",
     "-DHB_NO_MT",
     "-DHB_NO_PRAGMA_GCC_DIAGNOSTIC",
-    // HarfBuzz allocates through MuPDF's allocator, so the store cap actually
-    // bounds shaping too.
+    // HarfBuzz allocates through MuPDF's allocator, so the store cap bounds shaping too.
     "-Dhb_malloc_impl=fz_hb_malloc",
     "-Dhb_calloc_impl=fz_hb_calloc",
     "-Dhb_free_impl=fz_hb_free",
     "-Dhb_realloc_impl=fz_hb_realloc",
 };
 
-/// MuPDF sources we deliberately do NOT compile, keyed by file name.
-///
-/// The Makefile takes `$(wildcard source/fitz/*.c)` wholesale and lets the
-/// `FZ_ENABLE_*` guards empty the files it does not want; we skip them outright
-/// so the C++ toolchain and the OCR/barcode thirdparty trees never enter the
-/// picture. `office.c`/`mobi.c` have no internal guard (only their registration
-/// in `document-all.c` does), so they must be excluded here rather than defined
-/// away.
+/// MuPDF sources we skip. `office.c`/`mobi.c` are not guarded internally, so the
+/// `FZ_ENABLE_*` flags alone do not remove them.
 const mupdf_excluded_sources = [_][]const u8{
     "tessocr.cpp", // OCR — needs tesseract + leptonica
     "zxingbarcode.cpp", // barcodes — needs zxing-cpp + zint (C++20)
@@ -344,28 +193,15 @@ const mupdf_excluded_sources = [_][]const u8{
     "office.c", // FZ_ENABLE_OFFICE=0, but the file itself is unguarded
     "mobi.c", // FZ_ENABLE_MOBI=0, ditto
     "md.c", // FZ_ENABLE_MD=0 — guarded, but would want cmark-gfm's headers
-    // Upstream bug, not a choice: `encode-jpx.c` puts `#include <openjpeg.h>`
-    // ABOVE its `#if FZ_ENABLE_JPX`, so the file cannot compile with JPX off
-    // however the flags are set. It is the JPX *writer*; a viewer never needs it.
+    // Upstream bug: includes `<openjpeg.h>` above its `FZ_ENABLE_JPX` guard.
     "encode-jpx.c",
-    // A second, worse upstream bug in the same area: `load-jpx.c`'s disabled-path
-    // `fz_load_jpx_info` stub is missing the `fz_colorspace *defcs` parameter its
-    // own header declares. Harmless on x86, but `wasm-ld` replaces the mismatched
-    // call with a TRAPPING stub — a JPX-bearing PDF would kill the module instead
-    // of raising `FZ_ERROR_UNSUPPORTED`. Correctly-typed stubs live in
-    // `pdf_shim.c` instead; MuPDF itself stays unpatched.
+    // Upstream bug: its disabled stub has the wrong signature, which `wasm-ld`
+    // turns into a trapping call. `pdf_shim.c` provides correct stubs.
     "load-jpx.c",
 };
 
-/// Read a `*_SRC += path` list out of MuPDF's own `Makelists`.
-///
-/// The thirdparty trees CANNOT be directory-walked: FreeType's `src/` holds many
-/// files that are `#include`d into one another and must not be compiled
-/// separately, and HarfBuzz ships tests and unused shapers beside the real ones.
-/// `Makelists` IS the authoritative list, it is a flat `VAR += path` format with
-/// no conditionals in the parts we read, and it arrives with the pinned tarball —
-/// so parsing it cannot drift from the source it describes, which a hand-copied
-/// list in this file certainly would.
+/// Read a `*_SRC += path` list out of MuPDF's own `Makelists`. Thirdparty trees
+/// cannot be directory-walked (FreeType `#include`s sources into each other).
 fn mupdfListedSources(
     b: *std.Build,
     dep: *std.Build.Dependency,
@@ -396,9 +232,7 @@ fn mupdfListedSources(
     return out.toOwnedSlice(b.allocator) catch @panic("OOM");
 }
 
-/// List MuPDF's OWN sources in `sub_path` — the `$(wildcard source/fitz/*.c)`
-/// the Makefile uses, done natively. Unlike the thirdparty trees these really are
-/// "every file in the directory", so a walk is the faithful translation.
+/// List MuPDF's own sources in `sub_path`, sorted (the Makefile's wildcard).
 fn mupdfDirSources(
     b: *std.Build,
     dep: *std.Build.Dependency,
@@ -417,8 +251,7 @@ fn mupdfDirSources(
         if (isExcludedMupdfSource(entry.name)) continue;
         out.append(b.allocator, b.pathJoin(&.{ sub_path, b.dupe(entry.name) })) catch @panic("OOM");
     }
-    // Directory order is filesystem order and would make the build's cache key
-    // (and any diff of it) unstable across machines. Sort, as the Makefile does.
+    // Sorted so the build's cache key is stable across filesystems.
     const files = out.toOwnedSlice(b.allocator) catch @panic("OOM");
     std.mem.sort([]const u8, files, {}, struct {
         fn lessThan(_: void, a: []const u8, c: []const u8) bool {
@@ -436,32 +269,8 @@ fn isExcludedMupdfSource(path: []const u8) bool {
     return false;
 }
 
-/// Build MuPDF (+ its thirdparty deps + our shim) into a static library for
-/// `wasm32-wasi` **with the exception-handling CPU feature on**.
-///
-/// THE SPLIT-TARGET DANCE, AND WHY IT IS NOT OPTIONAL. MuPDF's `fz_try`/`fz_catch`
-/// is `setjmp`-based, and wasi-libc's `setjmp.h` `#error`s unless
-/// `__wasm_exception_handling__` is defined — so every C compile here needs
-/// `wasm32-wasi+exception_handling` plus `-fwasm-exceptions -mllvm -wasm-enable-sjlj`.
-/// But the FINAL LINK must use the plain `wasm32-wasi` triple *without* that
-/// feature: Zig rebuilds wasi-libc as part of linking, and its own copy of the
-/// setjmp runtime fails to compile with the feature on ("undefined tag symbol
-/// cannot be weak"). Hence a static library at one target linked into an
-/// executable at another — the only arrangement that satisfies both.
-///
-/// That leaves the setjmp runtime itself missing (`__wasm_setjmp`,
-/// `__wasm_longjmp`, `__wasm_setjmp_test`): Zig ships no wasm setjmp runtime but
-/// DOES vendor the source, so we compile its `rt.c` ourselves here — with
-/// `-fwasm-exceptions` but WITHOUT `-mllvm -wasm-enable-sjlj`, which that file
-/// does not survive.
-///
-/// The consequence for the browser: the module carries a `tag` section and needs
-/// Wasm exceptions — **Chrome 95+, Firefox 131+, Safari 18.4+**. That is a floor
-/// no other part of Inkhold imposes, and Phase 2 must feature-detect it.
-/// Include order mirrors MuPDF's `THIRD_CFLAGS`, which are applied to its own
-/// sources too. `include/mupdf` goes LAST and exists only for HarfBuzz, which
-/// takes its Unicode tables from MuPDF's bundled `ucdn.h`. Shared by both
-/// targets — a divergence here is a divergence in what the two builds parse.
+/// Include order mirrors MuPDF's `THIRD_CFLAGS`; `include/mupdf` goes last and
+/// is only for HarfBuzz's `ucdn.h`.
 const mupdf_includes = [_][]const u8{
     "include",
     "thirdparty/freetype/include",
@@ -476,15 +285,8 @@ const mupdf_includes = [_][]const u8{
     "include/mupdf",
 };
 
-/// MuPDF's own source directories. `source/svg` is excluded (FZ_ENABLE_SVG=0);
-/// `source/tools`, `source/tests` and `source/helpers` are the CLI, the test
-/// harness and the pthread/OpenSSL helpers.
-///
-/// The NATIVE build keeps the same set as the wasm one deliberately, even though
-/// it registers only the PDF handler: `--gc-sections` already drops what nothing
-/// reaches (measured — registering every handler cost only 0.4 MB), so trimming
-/// the source list would buy almost nothing and would be a second, subtly
-/// different MuPDF.
+/// MuPDF's own source directories. Native keeps the wasm set: `--gc-sections`
+/// already drops the unused handlers.
 const mupdf_source_dirs = [_][]const u8{
     "source/fitz",
     "source/pdf",
@@ -504,9 +306,7 @@ const mupdf_third_groups = [_]MupdfGroup{
     .{ .name = "JBIG2DEC", .extra = &mupdf_jbig2dec_flags },
 };
 
-/// Adds MuPDF's own sources, its fonts and its thirdparty tree to `mod`, with
-/// `flags`. The ONE description of what MuPDF is, for both targets; only the
-/// flags and the per-target shim differ.
+/// Adds MuPDF's own sources, fonts and thirdparty tree to `mod`, for both targets.
 fn addMupdfSources(
     b: *std.Build,
     dep: *std.Build.Dependency,
@@ -515,9 +315,7 @@ fn addMupdfSources(
 ) void {
     for (&mupdf_includes) |inc| mod.addIncludePath(dep.path(inc));
 
-    // The one place the vendored opt-out is applied — see `mupdf_vendor_only`.
-    // Every `addCSourceFiles` below is upstream's code; `backend/pdf/*.c` is
-    // added by the CALLER with `flags` and never sees this.
+    // Vendored code only; `backend/pdf/*.c` is added by the caller without this.
     const vflags = concatFlags(b, flags, &mupdf_vendor_only);
 
     for (&mupdf_source_dirs) |sub| {
@@ -528,7 +326,6 @@ fn addMupdfSources(
         });
     }
     // The 14 URW base-35 faces, pre-hexdumped in the tarball's `generated/`.
-    // Everything else under `resources/fonts` is dropped by TOFU/TOFU_CJK.
     mod.addCSourceFiles(.{
         .root = dep.path(""),
         .files = mupdfDirSources(b, dep, "generated/resources/fonts/urw", ".c"),
@@ -548,13 +345,7 @@ fn addMupdfSources(
     });
 }
 
-/// MuPDF for the SERVER (`backend/pdf/probe.c`) — page count, page-1 box, and
-/// whether the file opens at all.
-///
-/// Everything about what MuPDF *is* comes from `addMupdfSources`, shared with the
-/// wasm build. What differs is only what a native target needs: no
-/// exception-handling contract (ordinary `setjmp`/`longjmp` works), no wasm
-/// setjmp runtime, and our own shim instead of the browser's ABI.
+/// MuPDF for the server (`backend/pdf/probe.c`, `backend/pdf/text.c`).
 fn buildMupdfNative(
     b: *std.Build,
     dep: *std.Build.Dependency,
@@ -569,10 +360,8 @@ fn buildMupdfNative(
         .file = b.path("backend/pdf/probe.c"),
         .flags = &mupdf_native_flags,
     });
-    // The text pass (`backend/pdf/text.zig`). A SECOND file rather than more of
-    // `probe.c`, because the two have opposite store contracts — the probe runs
-    // at `FZ_STORE_DEFAULT` and never approaches it, the text pass caps at 4 MB
-    // and is the reason the 50 MB budget closes. See the header of each.
+    // Separate from `probe.c`: the text pass caps the MuPDF store at 4 MB, the
+    // probe runs at the default.
     mod.addCSourceFile(.{
         .file = b.path("backend/pdf/text.c"),
         .flags = &mupdf_native_flags,
@@ -580,6 +369,11 @@ fn buildMupdfNative(
     return b.addLibrary(.{ .name = "mupdf-native", .root_module = mod, .linkage = .static });
 }
 
+// MuPDF compiles at `wasm32-wasi+exception_handling` (wasi-libc's setjmp.h
+// requires it for `fz_try`), but the final link must use plain `wasm32-wasi`
+// because Zig's rebuilt wasi-libc fails with the feature on. So: a static library
+// at one target linked at another, plus Zig's vendored setjmp `rt.c` compiled
+// without `-wasm-enable-sjlj`. Browser floor: Chrome 95, Firefox 131, Safari 18.4.
 fn buildMupdfWasm(b: *std.Build, dep: *std.Build.Dependency) *std.Build.Step.Compile {
     const eh_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
@@ -588,20 +382,16 @@ fn buildMupdfWasm(b: *std.Build, dep: *std.Build.Dependency) *std.Build.Step.Com
     });
     const mod = b.createModule(.{ .target = eh_target, .optimize = .ReleaseSmall });
     mod.link_libc = true;
-    // HarfBuzz is C++ (`.cc`); this is what puts libc++'s headers on the compile.
     mod.link_libcpp = true;
 
     addMupdfSources(b, dep, mod, &mupdf_wasm_flags);
 
-    // --- Ours ---
     mod.addCSourceFile(.{
         .file = b.path("webapp/wasm/pdf_shim.c"),
         .flags = &mupdf_wasm_flags,
     });
 
-    // The setjmp runtime, from Zig's own vendored wasi-libc source tree. Taken
-    // from `b.graph.zig_lib_directory` rather than a hard-coded `/usr/lib/zig`
-    // so a CI toolchain unpacked anywhere still finds it.
+    // Zig's vendored setjmp runtime, located via the lib dir so any toolchain works.
     const zig_lib = b.graph.zig_lib_directory.path orelse
         @panic("mupdf: no Zig lib directory — cannot find the wasm setjmp runtime");
     mod.addCSourceFile(.{
@@ -625,39 +415,23 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // `-Dstrip=true` drops the server binary's debug info. OFF by default,
-    // because a panic trace with no symbols is a bug report nobody can act on.
-    // The container images turn it on: MEASURED on x86_64-linux-musl,
-    // ReleaseSafe, 58.4 MB -> 10.1 MB, which is most of what "minimal" means
-    // for an image whose only other content is the SPA.
+    // Off by default so panic traces have symbols; container images strip
+    // (58.4 MB -> 10.1 MB, ReleaseSafe musl).
     const strip = b.option(bool, "strip", "Strip debug info from the server binary") orelse false;
 
-    // `inkhold --version`. Read from `build.zig.zon` rather than restated here,
-    // so the number a user quotes in a bug report is the package version and
-    // there is exactly one place to bump at release time. (This is the SERVER's
-    // version — deliberately not `routes.api_version`, which is the sync-protocol
-    // number and is not what somebody filing a bug report means.)
+    // The package version from `build.zig.zon`, not `routes.api_version`.
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
 
-    // The standalone `.note` parser (`parsers/note`), the shared library module
-    // (.note parse + render). Target-agnostic so both native (backend, CLI) and
-    // wasm (frontend) importers can use it — a module import crosses subsystem
-    // boundaries that a relative path cannot. Pure Zig, no C to compile. Its own
-    // `build.zig` stays for `cd parsers/note && zig build test`, which runs the
-    // parser's unit + integration suite (same arrangement as `parsers/spd`).
+    // The `.note` parser as a target-agnostic module for native and wasm importers.
     const supernote = b.addModule("supernote", .{
         .root_source_file = b.path("parsers/note/src/root.zig"),
     });
 
-    // ---- WebAssembly render module (browser reader) ----
-    // Imports the parser/renderer directly, so it carries no test/debug code.
     const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
 
-    // ---- WebAssembly single-page decoder (Option-3 NoteRenderer seam) ----
-    // Consumes one page's "SNPG" payload and
-    // outputs RGBA8888. References only `page_payload`, so no container/parser
-    // code is compiled in. Separate from the whole-file `wasm` module above.
+    // ---- WebAssembly single-page decoder ----
+    // One page's "SNPG" payload to RGBA8888; references only `page_payload`.
     const note_decode_mod = b.createModule(.{
         .root_source_file = b.path("webapp/wasm/note_decode.zig"),
         .target = wasm_target,
@@ -670,57 +444,31 @@ pub fn build(b: *std.Build) void {
     const note_decode_step = b.step("wasm-note-decode", "Build the single-page RGBA decoder wasm");
     note_decode_step.dependOn(&b.addInstallArtifact(note_decode, .{}).step);
 
-    // ---- TLS (ianic/tls.zig, zig-0.16.x) — first-class in-process TLS ----
+    // ---- TLS (ianic/tls.zig) ----
     const tls_dep = b.dependency("tls", .{ .target = target, .optimize = optimize });
     const tls_mod = tls_dep.module("tls");
 
-    // The standalone `.spd` parser (`parsers/spd`), imported natively by the
-    // backend for embedded-thumbnail extraction at ingest. It shares the
-    // backend's SINGLE vendored SQLite: only the headers go on this module (so
-    // its `@cImport(@cInclude("sqlite3.h"))` resolves), while the amalgamation
-    // itself is compiled EXACTLY ONCE — by `linkSqlite` into whichever artifact
-    // imports the module (serve_exe / backend tests). The parser's own
-    // standalone `build.zig` SQLite compile is deliberately NOT pulled in here;
-    // both the backend's `db/sqlite.zig` externs and the parser's `sqlite.zig`
-    // externs then resolve to that one compiled copy at link time. (The parser's
-    // `build.zig` stays only for `cd parsers/spd && zig build test`, a separate
-    // binary that compiles its own SQLite.)
+    // The `.spd` parser, sharing the backend's single SQLite compile: only the
+    // headers go here, and `linkSqlite` in the importing artifact supplies the
+    // symbols.
     const spd_mod = b.createModule(.{
         .root_source_file = b.path("parsers/spd/src/root.zig"),
     });
     spd_mod.link_libc = true;
     spd_mod.addIncludePath(b.path("vendor/sqlite"));
 
-    // The server's schema, as a MODULE — not because the wasm wants a database
-    // schema, but because `db/schema.zig` is where the FTS5 tokenizer is
-    // declared and the browser's search index has to be built with the same one
-    // (`sqlite_core.zig`, §8.2). Header-only and
-    // target-less exactly like `spd_mod`: whoever imports it supplies the
-    // target, and `db/sqlite.zig`'s `@cImport` is never reached from the wasm
-    // side anyway — the constant is the only decl the browser touches.
+    // The schema as a header-only module, so the wasm search index imports
+    // `fts_tokenizer` from the same declaration as the server.
     const schema_mod = b.createModule(.{
         .root_source_file = b.path("backend/db/schema.zig"),
     });
     schema_mod.link_libc = true;
     schema_mod.addIncludePath(b.path("vendor/sqlite"));
 
-    // ---- WebAssembly SQLite core: the `.spd` decoder AND the search index ----
-    // ONE artifact, two ABIs (`spd_*` + `idx_*`), because SQLite alone is
-    // ~290 KB gzip of the 362 KB artifact: two modules would ship ~580 KB to
-    // avoid ~10 KB of Zig a given page happens not to call, which is the wrong
-    // trade — §5, which also names the file:
-    // an artifact called `spd-decode` that also runs search is a lie in the
-    // build graph.
-    //
-    // The `.spd` half is the SAME `parsers/spd` parser the backend uses, so the
-    // browser viewer never re-parses `.spd` in JS (the drift the PoC proved).
-    // SQLite is compiled in RIGHT HERE with the hard-trimmed, OS-less profile
-    // (`sqlite_core_wasm_flags`) plus the null VFS — a second copy distinct from
-    // the backend's full-featured one. Targets wasm32-WASI, not freestanding:
-    // the SQLite amalgamation needs libc HEADERS (<string.h>, <stdlib.h>) that
-    // only wasi-libc provides. The `OS_OTHER` VFS means no WASI syscall is
-    // exercised — the imports are present but inert (the ABI test verifies it by
-    // instantiating under a REAL WASI, so a stray syscall would show up).
+    // ---- WebAssembly SQLite core: the `.spd` decoder and the search index ----
+    // One artifact, two ABIs: SQLite is ~290 KB gzip of 362 KB, so two modules
+    // would ship it twice. Targets WASI only for libc headers; the null VFS makes
+    // no syscalls, which the ABI test checks under a real WASI.
     const wasi_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
     const sqlite_core_mod = b.createModule(.{
         .root_source_file = b.path("webapp/wasm/sqlite_core.zig"),
@@ -728,17 +476,9 @@ pub fn build(b: *std.Build) void {
         .optimize = .ReleaseSmall,
     });
     sqlite_core_mod.addImport("spd", spd_mod);
-    // The FTS5 tokenizer, from the SERVER's schema — the same import mechanism
-    // as `spd` above and for the same reason: a rule both sides run must have
-    // one declaration. `db/schema.zig` is the lowest layer that both this module
-    // and `search/fuzzy.zig` can reach, and only its `fts_tokenizer` constant is
-    // referenced, so nothing of the backend's is analysed, linked or emitted
-    // here (MEASURED: the artifact is byte-identical before and after).
     sqlite_core_mod.addImport("schema", schema_mod);
     sqlite_core_mod.link_libc = true;
     sqlite_core_mod.addIncludePath(b.path("vendor/sqlite"));
-    // The trimmed amalgamation + the null VFS, compiled into THIS artifact only
-    // (never the native modules, which linkSqlite their own full build).
     sqlite_core_mod.addCSourceFile(.{
         .file = b.path("vendor/sqlite/sqlite3.c"),
         .flags = &sqlite_core_wasm_flags,
@@ -748,21 +488,15 @@ pub fn build(b: *std.Build) void {
         .flags = &sqlite_core_wasm_flags,
     });
     const sqlite_core = b.addExecutable(.{ .name = "sqlite-core", .root_module = sqlite_core_mod });
-    // WASI *reactor*: exports `_initialize` (runs libc/C ctors) and the ABI
-    // functions, with no `_start`/`main`. This is the shape a browser wants —
-    // instantiate, call `_initialize` once, then call the ABI. (Plain
-    // `entry = .disabled` still emitted a command-style `_start` here because
-    // wasi-libc is linked; the exec model is the right knob.)
+    // WASI reactor: `_initialize` plus the ABI, no `_start` (`entry = .disabled`
+    // still emits one when wasi-libc is linked).
     sqlite_core.wasi_exec_model = .reactor;
     sqlite_core.rdynamic = true; // keep the `export fn`s
     const sqlite_core_step = b.step("wasm-sqlite-core", "Build the .spd decoder + search index wasm");
     sqlite_core_step.dependOn(&b.addInstallArtifact(sqlite_core, .{}).step);
 
-    // The proof that the module WORKS rather than merely links, and the only
-    // place `-DSQLITE_TEMP_STORE=3` is checked — the flag whose absence would
-    // otherwise surface as a corrupt index in a browser rather than as a build
-    // failure. Its own step, like the PDF one, because `zig build test` is
-    // Zig-only and must stay runnable without Node.
+    // Node-driven ABI test; the only check of `TEMP_STORE=3`. Separate from
+    // `zig build test`, which must run without Node.
     const sqlite_core_abi_test = b.addSystemCommand(&.{ "node", "webapp/wasm/tests/sqlite_core_abi.mjs" });
     sqlite_core_abi_test.addFileArg(sqlite_core.getEmittedBin());
     sqlite_core_abi_test.addFileArg(b.path("parsers/spd/tests/fixtures/layers_hidden.spd"));
@@ -775,11 +509,7 @@ pub fn build(b: *std.Build) void {
     sqlite_core_test_step.dependOn(&sqlite_core_abi_test.step);
 
     // ---- WebAssembly PDF decoder (MuPDF) ----
-    //  `.spd` above — a thin Zig
-    // module over a compiled-in C library, reactor-model, memory-only ABI — but
-    // the library is MuPDF, so the C build is the interesting part and lives in
-    // `buildMupdfWasm` above. The link deliberately uses the PLAIN `wasi_target`
-    // shared with `.spd`, not the exception-handling one the library is built at.
+    // Linked at plain `wasi_target`; see `buildMupdfWasm`.
     const mupdf_dep = b.dependency("mupdf", .{});
     const pdf_decode_mod = b.createModule(.{
         .root_source_file = b.path("webapp/wasm/pdf_decode.zig"),
@@ -794,11 +524,7 @@ pub fn build(b: *std.Build) void {
     const pdf_decode_step = b.step("wasm-pdf-decode", "Build the PDF viewer decoder wasm (MuPDF)");
     pdf_decode_step.dependOn(&b.addInstallArtifact(pdf_decode, .{}).step);
 
-    // The proof that the artifact is a working module and not a dead-stripped
-    // shell that merely links: instantiate it under Node's WASI, open a fixture
-    // PDF from memory and render its pages. Deliberately its OWN step rather
-    // than part of `zig build test` — that suite is Zig-only and must stay
-    // runnable without Node.
+    // Instantiates the module under Node's WASI and renders a fixture PDF.
     const pdf_decode_abi_test = b.addSystemCommand(&.{ "node", "webapp/wasm/tests/pdf_decode_abi.mjs" });
     pdf_decode_abi_test.addFileArg(pdf_decode.getEmittedBin());
     pdf_decode_abi_test.addFileArg(b.path("webapp/wasm/tests/fixtures/two-page.pdf"));
@@ -822,8 +548,7 @@ pub fn build(b: *std.Build) void {
     serve_mod.addImport("spd", spd_mod); // native .spd parser for thumbnail extraction
     serve_mod.addOptions("build_options", build_options); // `--version`
     linkSqlite(b, serve_mod);
-    // MuPDF for the server's PDF probe (`backend/pdf/probe.c`). ~6.7 MB of
-    // binary, measured.
+    // MuPDF for the PDF probe and text pass (~6.7 MB of binary).
     serve_mod.linkLibrary(buildMupdfNative(b, mupdf_dep, target, optimize));
     const serve_exe = b.addExecutable(.{ .name = "inkhold", .root_module = serve_mod });
     b.installArtifact(serve_exe);
@@ -832,25 +557,8 @@ pub fn build(b: *std.Build) void {
     const serve_step = b.step("serve", "Run the Inkhold server");
     serve_step.dependOn(&run_serve.step);
 
-    // (`zig build indoc-bench` was here. It timed the two server-side in-doc
-    // reads against the `segment_fts`-free scan shape to settle
-    // §7.3 — "can find-in-note lose the FTS without
-    // client work?". §6 step 7 answered the question the other
-    // way and deleted BOTH subjects: in-document search is the browser's, off
-    // `text/<md5>`. A bench whose two arms are both gone measures nothing.)
-
-    // The DERIVE bench — a standalone executable rather than a `test "BENCH …"`
-    // because the numbers wanted are the DEPLOYMENT TARGET'S, and a
-    // cross-compiled test binary cannot be `zig build test`-run from the dev box:
-    // this one is scp'd to the Pi and run there. It links the same vendored
-    // SQLite as the server, so the pragmas and the page cache are the server's
-    // and not the host distro's, and it is NOT installed by `zig build` —
-    // nothing in the server depends on it. It answers §7's
-    // last derive-cost item: what the fold, deflate level 6 and the two file
-    // writes cost per document on the ARM1176 the design is shaped around.
-    // It calls the real `derive_search.writeDerived`, so it needs the note
-    // parser the derive path's neighbours import; it does NOT need MuPDF,
-    // because it reads page text from the corpus rather than extracting it.
+    // Derive-path bench: a standalone executable so it can be cross-compiled and
+    // run on the Pi. Not installed by default; needs no MuPDF.
     const derive_mod = b.createModule(.{
         .root_source_file = b.path("backend/derive_bench.zig"),
         .target = target,
@@ -863,19 +571,7 @@ pub fn build(b: *std.Build) void {
     const derive_step = b.step("derive-bench", "Build the derive-path bench (measurement only)");
     derive_step.dependOn(&b.addInstallArtifact(derive_exe, .{}).step);
 
-    // The WRITE-SIDE bench, and the sibling of the one above: `derive_bench`
-    // times what the new derive path costs, this one measured
-    // what the OLD index cost beside it — the reserved bands, the
-    // `segment_search` rows, the `segment_fts` postings and the `kind = 1`/
-    // `kind = 2` rows §6 step 8 deleted. Step 8 said "nobody has measured what it
-    // is worth"; the BEFORE was taken with this binary on the ARM1176 and is
-    // §8.5's table.
-    //
-    // **STEP 8 HAS LANDED, so its timing modes are gone with their subject** and
-    // what is left is `--mode probe`: the tables and rows at zero, beside a
-    // database size that can be compared with the same run before the migration.
-    // Cross-compiled and run on the ARM1176 for the same reason as its sibling,
-    // and it still needs no MuPDF.
+    // Write-side bench (`--mode probe`), same arrangement.
     const idxwrite_mod = b.createModule(.{
         .root_source_file = b.path("backend/index_write_bench.zig"),
         .target = target,
@@ -891,8 +587,7 @@ pub fn build(b: *std.Build) void {
     // ---- Tests ----
     const test_step = b.step("test", "Run all tests");
 
-    // Backend tests: rooted at backend/main.zig (so http/ can import ../config),
-    // aggregating config/app/transport/router. Imports tls (transport uses it).
+    // Rooted at backend/main.zig so http/ can import ../config.
     const backend_test_mod = b.createModule(.{
         .root_source_file = b.path("backend/main.zig"),
         .target = target,
@@ -901,10 +596,7 @@ pub fn build(b: *std.Build) void {
     backend_test_mod.addImport("tls", tls_mod);
     backend_test_mod.addImport("supernote", supernote);
     backend_test_mod.addImport("spd", spd_mod);
-    // The parser package's synthetic `.note` builder, reused by the backend's
-    // own tests (golden byte-equality, recognition seeding). One copy of the
-    // builder exists — in `parsers/note/tests/` — and it imports the parser
-    // under the package-local name "note", so wire that name here.
+    // The shared `.note` fixture builder, which imports the parser as "note".
     const note_builder_mod = b.createModule(.{
         .root_source_file = b.path("parsers/note/tests/note_builder.zig"),
     });
@@ -912,11 +604,8 @@ pub fn build(b: *std.Build) void {
     backend_test_mod.addImport("note_builder", note_builder_mod);
     backend_test_mod.addOptions("build_options", build_options); // cli.zig's `--version`
     linkSqlite(b, backend_test_mod);
-    // The same MuPDF the server links, so `pdf/probe.zig`'s tests exercise the
-    // real library rather than a stub.
     backend_test_mod.linkLibrary(buildMupdfNative(b, mupdf_dep, target, optimize));
-    // Real device captures, for the `.note` index golden test. Wired in as named
-    // imports because @embedFile cannot reach outside its module's directory.
+    // Device captures for the golden test; @embedFile cannot leave its module dir.
     for ([_][]const u8{ "sample.note", "sample-2.note", "layers_edited.note" }) |fixture| {
         backend_test_mod.addAnonymousImport(fixture, .{
             .root_source_file = b.path(b.pathJoin(&.{ "parsers/note/tests/fixtures", fixture })),
@@ -924,9 +613,7 @@ pub fn build(b: *std.Build) void {
     }
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = backend_test_mod })).step);
 
-    // The `.note` parser's own unit tests, run here as well so the root suite
-    // stays self-contained. Its fixture/property integration tests live in
-    // `parsers/note/tests/` and run via `cd parsers/note && zig build test`.
+    // The `.note` parser's own unit tests.
     const note_unit_mod = b.createModule(.{
         .root_source_file = b.path("parsers/note/src/root.zig"),
         .target = target,

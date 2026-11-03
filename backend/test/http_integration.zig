@@ -1,12 +1,6 @@
-//! HTTP-level integration tests for the auth flow.
-//!
-//! These drive real requests through the full stack — `std.http.Server` head
-//! parsing, `transport.handle` (caller resolution + routing), the handlers in
-//! the handlers in `handlers/`, the auth `Service`, and an in-memory SQLite — over an in-memory
-//! reader/writer pair (no sockets, no threads). They assert on the response
-//! status, JSON body, and Set-Cookie, and chain sessions across requests exactly
-//! as a real client would. Only TLS/socket transport is out of scope (that is
-//! covered by the manual curl smoke).
+//! HTTP-level integration tests: real requests through `std.http.Server`,
+//! `transport.handle`, the handlers and services, over an in-memory SQLite and
+//! an in-memory reader/writer pair (no sockets, no threads).
 
 const std = @import("std");
 const app = @import("../routes.zig");
@@ -46,7 +40,6 @@ const Response = struct {
     head: []const u8, // the raw header block (status line + headers), for header assertions
 };
 
-/// Serialize an HTTP/1.1 request into `buf` and return the written slice.
 fn buildRequest(buf: []u8, method: []const u8, path: []const u8, headers: []const Header, body: []const u8) ![]const u8 {
     var w = std.Io.Writer.fixed(buf);
     try w.print("{s} {s} HTTP/1.1\r\n", .{ method, path });
@@ -57,7 +50,6 @@ fn buildRequest(buf: []u8, method: []const u8, path: []const u8, headers: []cons
     return buf[0..w.end];
 }
 
-/// Run one request end-to-end through the real transport + router + handlers.
 fn roundtrip(ctx: *Context, req_bytes: []const u8, out_buf: []u8) !Response {
     var in = std.Io.Reader.fixed(req_bytes);
     var out = std.Io.Writer.fixed(out_buf);
@@ -67,15 +59,8 @@ fn roundtrip(ctx: *Context, req_bytes: []const u8, out_buf: []u8) !Response {
     return parseResponse(out_buf[0..out.end]);
 }
 
-/// `roundtrip` plus HOW MUCH OF THE REQUEST THE SERVER READ.
-///
-/// The ingest cap is a claim about *where a body stops*, and the end state of a
-/// refusal-during-ingest is indistinguishable from the end state of the old
-/// refusal-after-ingest: both answer QUOTA_EXCEEDED, publish no blob, charge
-/// nothing and leave no row. The only observable difference is that the capped
-/// one never read the rest of the body — which is the entire point, because the
-/// bytes it did not read are the bytes it did not write to disk. So the tests
-/// assert on this number, not merely on the aftermath.
+/// `roundtrip` plus how many request bytes the server read: the ingest cap is
+/// about where a body stops, so tests assert on this, not just the aftermath.
 const Sent = struct { resp: Response, consumed: usize };
 
 fn roundtripCounting(ctx: *Context, req_bytes: []const u8, out_buf: []u8) !Sent {
@@ -120,15 +105,13 @@ fn cookieToken(set_cookie: []const u8) ?[]const u8 {
     return rest[0..end];
 }
 
-/// What a client computes for the login password field: `sha256_hex(md5_hex(pw) +
-/// randomCode)` over the FULL challenge nonce.
+/// The login password field: `sha256_hex(md5_hex(pw) + randomCode)` over the
+/// full nonce.
 fn challenge(pw: []const u8, code: []const u8) [password.sha256_len]u8 {
     return password.challengeHash(&password.md5Hex(pw), code);
 }
 
-/// Fetch a random code for `account` and return it copied into an owned array
-/// (the response buffer is reused by the next request). Sized to the server's
-/// `code_len`, so a nonce-length bump needs no edit here.
+/// A random code for `account`, copied out (the response buffer is reused).
 fn getCode(ctx: *Context, account: []const u8) ![authsvc.code_len]u8 {
     var bodybuf: [256]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
@@ -147,8 +130,8 @@ fn getCode(ctx: *Context, account: []const u8) ![authsvc.code_len]u8 {
     return code;
 }
 
-/// Logs `account` in with its temp password, changes to `final_pw`, and returns
-/// the resulting full **web** session token (32 hex chars) — as a browser would.
+/// Logs in with the temp password, changes to `final_pw`, returns the web
+/// session token.
 fn onboardWeb(ctx: *Context, account: []const u8, temp: []const u8, final_pw: []const u8) ![32]u8 {
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
@@ -167,10 +150,6 @@ fn onboardWeb(ctx: *Context, account: []const u8, temp: []const u8, final_pw: []
         @memcpy(&pending, cookieToken(resp.set_cookie.?).?);
     }
 
-    // `currentPassword` is sent even though a first-login `pending` caller is not
-    // required to: `temp` genuinely IS the current credential here, and some
-    // callers of this helper are already past their forced change (so they log in
-    // control-plane, where it IS required). One truthful body serves both.
     const new_md5 = password.md5Hex(final_pw);
     const cur_md5 = password.md5Hex(temp);
     const change_body = try std.fmt.allocPrint(gpa, "{{\"currentPassword\":\"{s}\",\"newPassword\":\"{s}\"}}", .{ cur_md5[0..], new_md5[0..] });
@@ -181,10 +160,8 @@ fn onboardWeb(ctx: *Context, account: []const u8, temp: []const u8, final_pw: []
     return web;
 }
 
-/// POST /api/admin/elevate for `tok`, re-authenticating through the SAME
-/// challenge flow login uses: fetch a random code, send
-/// `sha256(md5(pw) + code)`. Returns the raw response so failure cases can
-/// assert on it.
+/// POST /api/admin/elevate through the login challenge flow; returns the raw
+/// response.
 fn tryElevate(ctx: *Context, obuf: []u8, reqbuf: []u8, account: []const u8, pw: []const u8, tok: []const u8) !Response {
     const code = try getCode(ctx, account);
     const hash = challenge(pw, &code);
@@ -193,14 +170,11 @@ fn tryElevate(ctx: *Context, obuf: []u8, reqbuf: []u8, account: []const u8, pw: 
     return requestWithCookie(ctx, obuf, reqbuf, "POST", "/api/admin/elevate", tok, body);
 }
 
-/// `tryElevate`, asserting it succeeded — for the many tests that only need an
-/// admin session that can actually reach the console.
 fn elevate(ctx: *Context, obuf: []u8, reqbuf: []u8, account: []const u8, pw: []const u8, tok: []const u8) !void {
     const resp = try tryElevate(ctx, obuf, reqbuf, account, pw, tok);
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 }
 
-/// A ready-to-use test context (in-memory DB, migrated, service wired in).
 const Fixture = struct {
     db: sqlite.Db,
     svc: authsvc.Service,
@@ -209,9 +183,8 @@ const Fixture = struct {
     files: filesmod.Files,
     tmp: std.testing.TmpDir,
     ctx: Context,
-    /// Set only by `initPooled`. A reader pool needs a database FILE — a second
-    /// connection to `:memory:` opens a different, empty database — so the pooled
-    /// fixture is on disk while the default one stays in memory.
+    /// Set only by `initPooled`: a second connection to `:memory:` opens a
+    /// different, empty database, so the pooled fixture is on disk.
     path_buf: [128]u8 = undefined,
     pool: ?readerpool.Pool = null,
     db_lock: std.Io.Mutex = .init,
@@ -221,9 +194,8 @@ const Fixture = struct {
         return initWith(false, readerpool.default_size);
     }
 
-    /// The fixture the reader pool needs: an on-disk database, a real `db_lock`,
-    /// the per-route histogram, and `readers` of the requested size. `readers = 0`
-    /// is the "pool always empty" case, i.e. the server this change replaced.
+    /// On-disk DB, real `db_lock`, per-route histogram and `readers` readers
+    /// (`0` = pool always empty).
     fn initPooled(readers: usize) !*Fixture {
         return initWith(true, readers);
     }
@@ -261,9 +233,8 @@ const Fixture = struct {
             .client_ip = "203.0.113.7", // a stable test client IP
         };
         if (f.pool) |*p| {
-            // Only the pooled fixture runs with a real lock and a stats table:
-            // the in-memory one is what almost every test here uses, and giving
-            // it a lock would change the path they exercise.
+            // Only the pooled fixture gets a real lock and stats table; giving the
+            // in-memory one a lock would change the path most tests exercise.
             f.ctx.readers = p;
             f.ctx.db_lock = &f.db_lock;
             f.ctx.lock_stats = &f.stats;
@@ -275,17 +246,13 @@ const Fixture = struct {
         f.svc.deinit();
         f.limiter.deinit();
         f.dltokens.deinit();
-        // Readers before the writer: they coordinate through the `-shm` file the
-        // writer keeps alive, which is the same order `app.run` gets from its
-        // defers.
+        // Readers close before the writer, which keeps the `-shm` file alive.
         if (f.pool) |*p| p.close(gpa);
         f.db.close();
         f.tmp.cleanup();
         gpa.destroy(f);
     }
 
-    /// The histogram slot for `path` in `table`. Tests assert on windows, so they
-    /// need the same route index dispatch attributes them to.
     fn slotFor(f: *Fixture, table: []const router.Route, path: []const u8) *const lockstats.Slot {
         for (table, 0..) |r, i| {
             if (std.mem.eql(u8, r.path, path)) return &f.stats.slots[i];
@@ -294,8 +261,8 @@ const Fixture = struct {
     }
 };
 
-/// A slot's carried (seconds, remainder) total as plain nanoseconds — the pair
-/// exists because ARMv6 has no 64-bit atomic, not because callers care.
+/// A slot's (seconds, remainder) pair as nanoseconds (the pair exists because
+/// ARMv6 has no 64-bit atomic).
 fn nsOfSlot(s: *const lockstats.Slot) u64 {
     return @as(u64, s.total_s) * std.time.ns_per_s + s.total_ns_rem;
 }
@@ -311,7 +278,6 @@ test "control-plane first login is limited, change-password revokes it and unloc
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
 
-    // random code + control-plane login (no equipmentNo) -> a pending session in a cookie.
     const code = try getCode(ctx, "admin");
     const hash = challenge("temp0000", &code);
     const login_body = try std.fmt.allocPrint(gpa, "{{\"account\":\"admin\",\"password\":\"{s}\"}}", .{hash[0..]});
@@ -328,10 +294,8 @@ test "control-plane first login is limited, change-password revokes it and unloc
         @memcpy(&pending_tok, tok);
     }
 
-    // The pending cookie cannot reach a normal web route.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/equipment/unlink", &pending_tok, "{\"equipmentNo\":\"X\"}", 403);
 
-    // Change the password: revokes all sessions, returns a fresh control-plane session cookie.
     var web_tok: [32]u8 = undefined;
     {
         const new_md5 = password.md5Hex("newpass1");
@@ -344,13 +308,10 @@ test "control-plane first login is limited, change-password revokes it and unloc
         try std.testing.expect(!std.mem.eql(u8, &pending_tok, &web_tok)); // rotated
     }
 
-    // Old pending token is dead now -> 401 on a protected route.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/equipment/unlink", &pending_tok, "{\"equipmentNo\":\"X\"}", 401);
 
-    // The fresh web token works on a web route (idempotent unlink -> 200).
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/equipment/unlink", &web_tok, "{\"equipmentNo\":\"X\"}", 200);
 
-    // Logout deletes it; afterwards it is rejected.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/user/logout", &web_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -360,22 +321,11 @@ test "control-plane first login is limited, change-password revokes it and unloc
 }
 
 // ---- self-service password change ----
-//
-// The endpoint was built for the FORCED first-login change, where a `pending`
-// token is the proof of identity, and it took the new password and nothing else.
-// From a live session that is wrong: a session outlives a password prompt (a
-// borrowed laptop, an unlocked screen), so it must demand and CHECK the current
-// password. The split these tests pin:
-//
-//   POLICY (handler)   — a `controlplane` caller MUST send `currentPassword`.
-//   MECHANISM (service)— whenever one IS sent it is verified, for ANY audience.
-//
-// Together those mean the check cannot be dodged by choosing a caller.
+// A `controlplane` caller must send `currentPassword` (handler policy); one that
+// is sent is verified for any audience (service mechanism).
 
-/// Log `account` in over HTTP with a password it already owns (no forced change
-/// pending) and return the control-plane session token. Unlike `onboardWeb` this
-/// spends no `PUT /api/user/password` budget, so the rate-limit test can start
-/// from a full bucket.
+/// Logs in with an owned password and returns the control-plane token; spends
+/// no `PUT /api/user/password` budget, unlike `onboardWeb`.
 fn webLogin(ctx: *Context, account: []const u8, pw: []const u8) ![32]u8 {
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
@@ -393,9 +343,7 @@ fn webLogin(ctx: *Context, account: []const u8, pw: []const u8) ![32]u8 {
     return tok;
 }
 
-/// A `PUT /api/user/password` body. `current` null omits the field entirely —
-/// which is what a first-login client sends, and what a control-plane one must
-/// not get away with.
+/// A `PUT /api/user/password` body; `current` null omits the field.
 fn changePasswordBody(current: ?[]const u8, new_pw: []const u8) ![]u8 {
     const new_md5 = password.md5Hex(new_pw);
     if (current) |c| {
@@ -411,7 +359,6 @@ fn tryChangePassword(ctx: *Context, obuf: []u8, reqbuf: []u8, tok: []const u8, c
     return requestWithCookie(ctx, obuf, reqbuf, "PUT", "/api/user/password", tok, body);
 }
 
-/// `users.password_changed_at`, the "last changed" stamp the account screen reads.
 fn passwordChangedAt(f: *Fixture, user_id: u64) !?i64 {
     var r = (try f.db.row("SELECT password_changed_at FROM users WHERE id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return error.NoSuchUser;
     defer r.finalize();
@@ -419,11 +366,8 @@ fn passwordChangedAt(f: *Fixture, user_id: u64) !?i64 {
 }
 
 test "CHANGE PASSWORD: a WRONG current password is refused and leaves every session standing" {
-    // THE ORDERING TEST, and the reason this feature exists at all (§1: a beta
-    // tester locked themselves out). Verification happens BEFORE the UPDATE,
-    // before `revokeAllSessions` and before `issueSession` — so a typo costs a
-    // typo, not every session the person holds. Move the check below
-    // `revokeAllSessions` and this test goes red on the line after the refusal.
+    // Verification must precede the UPDATE, `revokeAllSessions` and
+    // `issueSession`, so a typo does not sign out every session.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -439,17 +383,13 @@ test "CHANGE PASSWORD: a WRONG current password is refused and leaves every sess
     const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &desk, "not-my-password", "adminpw2");
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try expectFailure(resp.body, "INVALID_CREDENTIALS");
-    // No session was minted, so no cookie was handed back either.
     try std.testing.expect(resp.set_cookie == null);
 
-    // THE DURABLE FACT: the session that made the mistake still resolves, and so
-    // does the other browser. Not "the response said no" — that is the momentary
-    // half, and a refusal issued AFTER the revocation would satisfy it perfectly.
+    // A refusal issued after revocation would pass the status check; this is
+    // the durable half.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &desk, "", 200);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &phone, "", 200);
 
-    // And nothing about the credential moved: the old password still logs in, the
-    // one that was never accepted does not, and the stamp did not advance.
     try std.testing.expectEqual(stamp_before, try passwordChangedAt(f, admin));
     _ = try webLogin(ctx, "admin", "adminpw1");
     {
@@ -477,8 +417,7 @@ test "CHANGE PASSWORD: the RIGHT current password rotates it, revokes every othe
     const desk = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
     const phone = try webLogin(ctx, "admin", "adminpw1");
 
-    // Backdate the stamp so "it moved" is a fact and not a coincidence of a suite
-    // that finishes inside one second.
+    // Backdate so "it moved" holds even when the suite finishes within a second.
     {
         var s = try f.db.prepare("UPDATE users SET password_changed_at = 0 WHERE id = ?1;");
         defer s.finalize();
@@ -496,25 +435,19 @@ test "CHANGE PASSWORD: the RIGHT current password rotates it, revokes every othe
         try std.testing.expect(!std.mem.eql(u8, &desk, &fresh)); // rotated
     }
 
-    // The browser that asked gets a NEW session; the one that asked with the old
-    // token, and every other browser, is signed out. The screen has to say this.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &fresh, "", 200);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &desk, "", 401);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &phone, "", 401);
     try std.testing.expectEqual(@as(i64, 1), try countRows(f, "SELECT COUNT(*) FROM sessions;"));
 
-    // The credential really changed, and the account screen's "last changed" line
-    // moved off the backdate.
     const stamp = (try passwordChangedAt(f, admin)) orelse return error.StampMissing;
     try std.testing.expect(stamp > 0);
     _ = try webLogin(ctx, "admin", "adminpw2");
 }
 
 test "CHANGE PASSWORD: a control-plane caller that OMITS the current password is refused" {
-    // POLICY, not mechanism: there is nothing wrong with the body except that it
-    // does not prove anything, and a live session is not proof enough. Answered
-    // with the same code a wrong one gets — "you did not prove the current
-    // password" is one outcome, not two.
+    // A live session is not proof enough; answered with the same code as a
+    // wrong password.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -530,19 +463,14 @@ test "CHANGE PASSWORD: a control-plane caller that OMITS the current password is
     try expectFailure(resp.body, "INVALID_CREDENTIALS");
     try std.testing.expect(resp.set_cookie == null);
 
-    // Refused, not "refused after the damage": the session lives and the
-    // credential is untouched.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &desk, "", 200);
     try std.testing.expectEqual(stamp_before, try passwordChangedAt(f, admin));
     _ = try webLogin(ctx, "admin", "adminpw1");
 }
 
 test "CHANGE PASSWORD: a first-login PENDING caller needs no current password — but a wrong one still refuses it" {
-    // Both halves of the split, on the one caller that shows the difference.
-    // Onboarding must keep working with no current password at all; and the
-    // mechanism still applies to a `pending` caller that supplies one, so the
-    // check cannot be dodged by picking the audience that is not required to send
-    // it.
+    // Onboarding works with no current password, yet a `pending` caller that
+    // sends one is still verified.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -552,8 +480,6 @@ test "CHANGE PASSWORD: a first-login PENDING caller needs no current password �
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
 
-    // Bob's first login: a `pending` token, which can reach this route and
-    // nothing else.
     const pending = try webLogin(ctx, "bob", bob.temp_password.slice());
 
     {
@@ -562,13 +488,9 @@ test "CHANGE PASSWORD: a first-login PENDING caller needs no current password �
         try expectFailure(resp.body, "INVALID_CREDENTIALS");
         try std.testing.expect(resp.set_cookie == null);
     }
-    // The half-onboarded person is not stranded by their own typo: the pending
-    // token still resolves and can try again.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &pending, "", 200);
     try std.testing.expectEqual(@as(?i64, null), try passwordChangedAt(f, bob.id));
 
-    // And with no current password at all — the body a first-login client sends —
-    // it goes through.
     {
         const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &pending, null, "bobpass1");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -580,19 +502,15 @@ test "CHANGE PASSWORD: a first-login PENDING caller needs no current password �
 }
 
 test "CHANGE PASSWORD is rate-limited per USER, so an unattended browser is not a password oracle" {
-    // The moment the route verifies, it answers "was that the password?" — and it
-    // is reachable from any signed-in window. 5 per 5 minutes per ACCOUNT.
-    // Deliberately by USER and not by IP: a household shares one address, and
-    // IP-keying would let one person's fumbling block a housemate mid-way through
-    // their own FORCED first-login change, the one screen they cannot go around.
+    // 5 per 5 minutes per account, not per IP: a household shares an address and
+    // must not block a housemate's forced first-login change.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
     const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
     const bob = (try f.svc.createUser(admin, "bob", false)).id;
-    // Provisioned at the service layer so both start with a FULL bucket — an
-    // onboarding round trip would have spent a token on this very route.
+    // Provisioned at the service layer so both start with a full bucket.
     _ = try f.svc.changePassword(alice, null, &password.md5Hex("alicepw1"));
     _ = try f.svc.changePassword(bob, null, &password.md5Hex("bobpw111"));
 
@@ -611,20 +529,16 @@ test "CHANGE PASSWORD is rate-limited per USER, so an unattended browser is not 
         const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &a_tok, "guess", "newpw123");
         try std.testing.expectEqual(@as(u16, 429), resp.status);
     }
-    // Even the RIGHT password is now refused — the limit is on the route, not on
-    // being wrong.
     {
         const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &a_tok, "alicepw1", "newpw123");
         try std.testing.expectEqual(@as(u16, 429), resp.status);
     }
 
-    // Same IP (the fixture has exactly one), different account: Bob sails through.
     {
         const resp = try tryChangePassword(ctx, &obuf, &reqbuf, &b_tok, "bobpw111", "bobpw222");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try expectSuccess(resp.body);
     }
-    // And Alice is rate-limited, not locked out: her ordinary session still works.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &a_tok, "", 200);
 }
 
@@ -633,7 +547,6 @@ test "device login returns a body token, binds, and cannot cross into the contro
     defer f.deinit();
     const ctx = &f.ctx;
 
-    // Arrange an onboarded (non-must-change) user directly at the service layer.
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
     _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111")); // clears must_change
@@ -641,7 +554,6 @@ test "device login returns a body token, binds, and cannot cross into the contro
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
 
-    // Device login: equipmentNo present -> token in the body, isBindEquipment "N".
     const code = try getCode(ctx, "alice");
     const hash = challenge("apass111", &code);
     var dev_tok: [32]u8 = undefined;
@@ -667,7 +579,6 @@ test "device login returns a body token, binds, and cannot cross into the contro
         @memcpy(&dev_tok, parsed.value.token);
     }
 
-    // Bind the device using its x-access-token.
     {
         const req = try buildRequest(&reqbuf, "POST", "/api/terminal/user/bindEquipment", &.{
             .{ .name = "content-type", .value = "application/json" },
@@ -679,7 +590,6 @@ test "device login returns a body token, binds, and cannot cross into the contro
     }
     try std.testing.expect(try f.svc.isDeviceBound(alice, "SN1"));
 
-    // Cross-face: a device token hitting a web route is forbidden.
     {
         const req = try buildRequest(&reqbuf, "POST", "/api/controlplane/equipment/unlink", &.{
             .{ .name = "content-type", .value = "application/json" },
@@ -702,10 +612,8 @@ test "app login (equipment:2, no serial) yields a body token, reaches device rou
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
 
-    // App login: `equipment:2` (a JSON INT), NO `equipmentNo` — the discriminator is
-    // the self-declared face, not the serial. Expect a DEVICE session: token in the
-    // body, `isBind:"Y"`, `isBindEquipment:"N"` (no serial supplied at login), and no
-    // cookie.
+    // `equipment:2` (a JSON int) with no `equipmentNo`: the self-declared face,
+    // not the serial, picks a device session.
     const code = try getCode(ctx, "alice");
     const hash = challenge("apass111", &code);
     var app_tok: [32]u8 = undefined;
@@ -731,9 +639,8 @@ test "app login (equipment:2, no serial) yields a body token, reaches device rou
         @memcpy(&app_tok, p.value.token);
     }
 
-    // The app carries its ANDROID-… serial per-request. A device route that a
-    // control-plane token gets 403 on now succeeds, and the lazy auto-bind
-    // registers the serial against the account (it never calls bindEquipment).
+    // The app sends its ANDROID-… serial per request and is auto-bound lazily;
+    // it never calls bindEquipment.
     const app_eno = "ANDROID-c0c59ca7-dead-beef";
     {
         const body = try std.fmt.allocPrint(gpa, "{{\"equipmentNo\":\"{s}\"}}", .{app_eno});
@@ -743,7 +650,6 @@ test "app login (equipment:2, no serial) yields a body token, reaches device rou
     }
     try std.testing.expect(try f.svc.isDeviceBound(alice, app_eno)); // auto-bound
 
-    // bind/status -> true once the account holds an active binding.
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/equipment/bind/status", &app_tok, app_eno, "{}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -753,7 +659,6 @@ test "app login (equipment:2, no serial) yields a body token, reaches device rou
         try std.testing.expect(p.value.bindStatus);
     }
 
-    // capacity/query -> the account's used/allotted bytes in the app's envelope.
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/capacity/query", &app_tok, app_eno, "{}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -763,8 +668,6 @@ test "app login (equipment:2, no serial) yields a body token, reaches device rou
         try std.testing.expectEqual(authsvc.default_capacity, p.value.totalCapacity);
     }
 
-    // REGRESSION GUARD: a web login (no `equipment`, no `equipmentNo`) still gets a
-    // cookie and NO body token — the SPA path must be untouched.
     {
         const code2 = try getCode(ctx, "alice");
         const hash2 = challenge("apass111", &code2);
@@ -792,7 +695,6 @@ test "login rejects a missing challenge and a wrong password" {
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
 
-    // No random code requested yet -> NO_CHALLENGE.
     {
         const body = "{\"account\":\"admin\",\"password\":\"" ++ ("0" ** 64) ++ "\"}";
         const req = try buildRequest(&reqbuf, "POST", "/api/official/user/account/login/new", &.{
@@ -803,7 +705,6 @@ test "login rejects a missing challenge and a wrong password" {
         try expectFailure(resp.body, "NO_CHALLENGE");
     }
 
-    // With a code but a wrong password -> INVALID_CREDENTIALS.
     {
         const code = try getCode(ctx, "admin");
         const hash = challenge("WRONGpw!", &code);
@@ -827,8 +728,7 @@ test "login is rate-limited by IP after too many attempts (429)" {
     var reqbuf: [1024]u8 = undefined;
     const body = "{\"account\":\"x\",\"password\":\"y\"}"; // no challenge -> 200 NO_CHALLENGE (not limited)
 
-    // The login route allows 10/min per IP (burst = 10). The first 10 pass the
-    // limiter (and fail auth with 200); the 11th is rejected with 429.
+    // Login allows 10/min per IP; the 11th is 429.
     var i: usize = 0;
     while (i < 10) : (i += 1) {
         const req = try buildRequest(&reqbuf, "POST", "/api/official/user/account/login/new", &.{
@@ -856,8 +756,6 @@ test "admin manages household users over HTTP; non-admins are forbidden (require
     const admin_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
     try elevate(ctx, &obuf, &reqbuf, "admin", "adminpw1", &admin_tok);
 
-    // Admin creates a household user. The request carries NO password — the server
-    // generates one and hands back the plaintext exactly once.
     var bob_id: u64 = undefined;
     var bob_temp_buf: [password.max_temp_len]u8 = undefined;
     var bob_temp_len: usize = 0;
@@ -873,17 +771,14 @@ test "admin manages household users over HTTP; non-admins are forbidden (require
         );
         defer parsed.deinit();
         bob_id = parsed.value.userId;
-        // Diceware: a variable-length hyphen-joined string, not a fixed 18 hex.
         try std.testing.expect(parsed.value.temporaryPassword.len > 0 and parsed.value.temporaryPassword.len <= password.max_temp_len);
         bob_temp_len = parsed.value.temporaryPassword.len;
         @memcpy(bob_temp_buf[0..bob_temp_len], parsed.value.temporaryPassword);
 
-        // Duplicate email is reported as a failure, not a crash.
         const dup = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/admin/users", &admin_tok, body);
         try expectFailure(dup.body, "EMAIL_EXISTS");
     }
 
-    // Listing shows both accounts.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &admin_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -897,16 +792,11 @@ test "admin manages household users over HTTP; non-admins are forbidden (require
         try std.testing.expectEqual(@as(usize, 2), parsed.value.users.len);
     }
 
-    // The generated password is the real credential: Bob onboards with it.
-    // (A non-admin then gets a full control-plane session but is forbidden from
-    // admin routes — plainly 403, never the elevation gate, so he learns nothing
-    // about there being one.)
+    // A non-admin gets a plain 403 on admin routes, never the elevation gate.
     const bob_temp = bob_temp_buf[0..bob_temp_len];
     const bob_tok = try onboardWeb(ctx, "bob", bob_temp, "bobpw123");
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &bob_tok, "", 403);
 
-    // Admin resets Bob's password → a NEW server-generated plaintext comes back
-    // once, and Bob's session is revoked (401 afterward).
     {
         var pbuf: [64]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/api/admin/users/{d}/reset", .{bob_id});
@@ -924,7 +814,6 @@ test "admin manages household users over HTTP; non-admins are forbidden (require
     }
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &bob_tok, "", 401);
 
-    // Admin deletes Bob.
     {
         var pbuf: [64]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/api/admin/users/{d}", .{bob_id});
@@ -957,8 +846,7 @@ test "admin devices + quota over HTTP: the gate, the 403, and the cross-user unl
 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
-    // One buffer PER path: these are held across later requests, and a shared
-    // scratch buffer would silently rewrite a path a previous line still points at.
+    // One buffer per path: these are held across later requests.
     var devbuf: [96]u8 = undefined;
     var quotabuf: [96]u8 = undefined;
     var pbuf: [96]u8 = undefined;
@@ -966,13 +854,10 @@ test "admin devices + quota over HTTP: the gate, the 403, and the cross-user unl
     const devices_path = try std.fmt.bufPrint(&devbuf, "/api/admin/users/{d}/devices", .{alice});
     const admin_tok = try onboardWeb(ctx, "admin", "admtemp0", "adminpw1");
 
-    // The gate first: an admin whose session is NOT elevated gets 428, on these
-    // routes exactly as on the user-management ones — never 401, which would sign
-    // them out of the app instead of showing the re-auth prompt.
+    // Unelevated admin gets 428, never 401 (which would sign them out).
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", devices_path, &admin_tok, "", 428);
     try elevate(ctx, &obuf, &reqbuf, "admin", "adminpw1", &admin_tok);
 
-    // Alice's devices — hers only, with the binding date and the soft status.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", devices_path, &admin_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -988,9 +873,7 @@ test "admin devices + quota over HTTP: the gate, the 403, and the cross-user unl
         try std.testing.expect(parsed.value.devices[0].active);
     }
 
-    // **THE CROSS-USER CHECK.** Alice's id, Bob's serial: 404 DEVICE_NOT_FOUND,
-    // and Bob's binding is still active afterwards. Without the ownership check in
-    // the service this answers 200 and the admin believes it worked.
+    // Alice's id with Bob's serial must 404 and leave Bob's binding active.
     {
         const unlink_path = try std.fmt.bufPrint(&pbuf, "/api/admin/users/{d}/devices/unlink", .{alice});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", unlink_path, &admin_tok, "{\"equipmentNo\":\"SN-BOB-1\"}");
@@ -999,8 +882,7 @@ test "admin devices + quota over HTTP: the gate, the 403, and the cross-user unl
     }
     try std.testing.expectEqual(@as(i64, 1), try f.svc.deviceCount(bob));
 
-    // A serial nobody holds answers IDENTICALLY — same status, same code — so the
-    // endpoint cannot be used to probe whether another housemate owns a tablet.
+    // An unheld serial answers identically, so ownership cannot be probed.
     {
         const unlink_path = try std.fmt.bufPrint(&pbuf, "/api/admin/users/{d}/devices/unlink", .{alice});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", unlink_path, &admin_tok, "{\"equipmentNo\":\"SN-NOBODY\"}");
@@ -1008,15 +890,13 @@ test "admin devices + quota over HTTP: the gate, the 403, and the cross-user unl
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "DEVICE_NOT_FOUND") != null);
     }
 
-    // The right pairing works, and the binding goes inactive rather than away.
     {
         const unlink_path = try std.fmt.bufPrint(&pbuf, "/api/admin/users/{d}/devices/unlink", .{bob});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", unlink_path, &admin_tok, "{\"equipmentNo\":\"SN-BOB-1\"}", 200);
     }
     try std.testing.expectEqual(@as(i64, 0), try f.svc.deviceCount(bob));
 
-    // Quota: read the default, then lower it BELOW usage. Accepted, and the
-    // response reports used > total rather than clamping or deleting.
+    // Quota below usage is accepted and reports used > total.
     const quota_path = try std.fmt.bufPrint(&quotabuf, "/api/admin/users/{d}/quota", .{alice});
     {
         var s = try f.db.prepare("UPDATE capacity SET used_bytes = 5000 WHERE user_id = ?1;");
@@ -1042,19 +922,14 @@ test "admin devices + quota over HTTP: the gate, the 403, and the cross-user unl
         try std.testing.expectEqual(@as(u16, 400), resp.status);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "INVALID_QUOTA") != null);
     }
-    // An unknown user is a 404 on both halves.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users/9999/quota", &admin_tok, "", 404);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users/9999/devices", &admin_tok, "", 404);
 
-    // And a NON-admin is refused with a plain 403 on every one of them — never the
-    // 428 gate, which would tell him an admin console exists behind the refusal.
     const bob_temp = (try f.svc.resetPassword(admin, bob));
     const bob_tok = try onboardWeb(ctx, "bob", bob_temp.slice(), "bobpw123");
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", devices_path, &bob_tok, "", 403);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", quota_path, &bob_tok, "", 403);
     {
-        // Bob cannot unlink his OWN device through the admin route either: the
-        // route is admin-only, and self-service lives at the control-plane unlink.
         const unlink_path = try std.fmt.bufPrint(&pbuf, "/api/admin/users/{d}/devices/unlink", .{bob});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", unlink_path, &bob_tok, "{\"equipmentNo\":\"SN-BOB-1\"}", 403);
     }
@@ -1071,14 +946,12 @@ test "admin retention and health over HTTP: the window round-trips and health na
     var reqbuf: [1024]u8 = undefined;
 
     const admin_tok = try onboardWeb(ctx, "admin", "admtemp0", "adminpw1");
-    // Both are `require_admin`, so both sit behind the gate.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/settings/retention", &admin_tok, "", 428);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/health", &admin_tok, "", 428);
     try elevate(ctx, &obuf, &reqbuf, "admin", "adminpw1", &admin_tok);
 
     const Retention = struct { retentionDays: i64, defaultDays: i64, minDays: i64, maxDays: i64, changedAt: i64 };
 
-    // A fresh install reads the compiled default and has never been changed.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/settings/retention", &admin_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -1091,8 +964,8 @@ test "admin retention and health over HTTP: the window round-trips and health na
         try std.testing.expectEqual(@as(i64, 0), p.value.changedAt);
     }
 
-    // A write round-trips, and `changedAt` is set — it is what starts the grace
-    // that keeps a shortened window from purging the bin retroactively.
+    // `changedAt` starts the grace that stops a shortened window purging the
+    // bin retroactively.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "PUT", "/api/admin/settings/retention", &admin_tok, "{\"retentionDays\":7}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -1104,8 +977,7 @@ test "admin retention and health over HTTP: the window round-trips and health na
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "PUT", "/api/admin/settings/retention", &admin_tok, "{\"retentionDays\":0}", 400);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "PUT", "/api/admin/settings/retention", &admin_tok, "{\"retentionDays\":9999}", 400);
 
-    // The recycle bin quotes the CONFIGURED window, not the constant — otherwise
-    // the bin's countdown and the console that set it would disagree.
+    // The bin quotes the configured window, not the constant.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/bin", &admin_tok, "");
         var p = try std.json.parseFromSlice(struct { retentionDays: i64 }, gpa, resp.body, .{ .ignore_unknown_fields = true });
@@ -1113,9 +985,8 @@ test "admin retention and health over HTTP: the window round-trips and health na
         try std.testing.expectEqual(@as(i64, 7), p.value.retentionDays);
     }
 
-    // Health: household-wide totals, and NO per-person field of any kind. The
-    // absence assertions are the point — a "lastSync"/"noteCount" creeping back in
-    // is the surveillance this endpoint was explicitly ruled to exclude.
+    // Household-wide totals only; the absence assertions guard against
+    // per-person fields.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/health", &admin_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -1152,9 +1023,8 @@ test "DELETE /api/admin/users releases the account's blobs, but only decrements 
     const admin_tok = try onboardWeb(ctx, "admin", "admtemp0", "adminpw1");
     try elevate(ctx, &obuf, &reqbuf, "admin", "adminpw1", &admin_tok);
 
-    // Alice owns one blob outright, and shares a second with Bob: identical bytes
-    // dedup to ONE blob at refcount 2, which is the case a "delete the departing
-    // user's blobs" fix would silently destroy for Bob.
+    // Identical bytes dedup to one blob at refcount 2; deleting Alice must not
+    // destroy Bob's copy.
     _ = try putSeed(f, alice, null, "solo.note", "alice private bytes");
     _ = try putSeed(f, alice, null, "shared.note", "bytes both of them have");
     const bob_shared = try putSeed(f, bob, null, "shared.note", "bytes both of them have");
@@ -1169,13 +1039,10 @@ test "DELETE /api/admin/users releases the account's blobs, but only decrements 
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
 
-    // Alice's sole-owned blob is gone; the shared one is merely decremented, and
-    // its bytes are still on disk so Bob's note opens.
     try std.testing.expectEqual(@as(i64, 1), try countRows(f, "SELECT COUNT(*) FROM blobs;"));
     try std.testing.expectEqual(@as(i64, 1), try countRows(f, "SELECT refcount FROM blobs;"));
     try std.testing.expect(f.files.blobs.has(&shared_md5));
 
-    // Alice's rows are gone entirely, Bob's are untouched.
     try std.testing.expectEqual(@as(usize, 0), (try f.files.list(alice, null)).len);
     const listing = try f.files.list(bob, null);
     defer filesmod.Files.freeEntries(gpa, listing);
@@ -1191,8 +1058,7 @@ test "sync supersede RETAINS the prior version: history row, old blob kept, and 
     const admin = try f.svc.bootstrapAdmin("admin", "admtemp0");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
 
-    // Default fixture config keeps history (keep = 5). A first synced upload, then
-    // an edit replacing the blob under the SAME path — the sync hot path.
+    // Default fixture keeps history (keep = 5); an edit under the same path.
     const dir = try f.files.ensureFolderPath(alice, "NOTE/Note");
     const v1 = "first-version-of-the-note";
     const v2 = "second-version-of-the-note-that-is-a-bit-longer";
@@ -1205,32 +1071,21 @@ test "sync supersede RETAINS the prior version: history row, old blob kept, and 
     const v2_id = try putSeed(f, alice, dir, "up.note", v2);
     try std.testing.expectEqual(v1_id, v2_id); // superseded the same file row, not a new one
 
-    // The old version is RETAINED: one history row, and its blob is still on disk
-    // (NOT GC'd, unlike prune-on-supersede).
+    // v1 is retained: one history row, blob not GC'd.
     try std.testing.expectEqual(@as(i64, 1), try countRows(f, "SELECT COUNT(*) FROM file_history;"));
     try std.testing.expectEqual(@as(i64, @intCast(v1.len)), try countRows(f, "SELECT size FROM file_history;"));
     try std.testing.expect(f.files.blobs.has(&old_md5));
-    // And it is CHARGED. The retained version occupies disk
-    // — its blob survives the GC gate on the strength of that history row alone —
-    // so the owner pays for it, exactly as they pay for a trashed file. Usage is
-    // the current blob PLUS the retained one; the meter used to read only the
-    // current, which is precisely the figure that was lying.
+    // The retained version is charged to the owner, like a trashed file.
     try std.testing.expectEqual(@as(i64, @intCast(v1.len + v2.len)), try usedBytes(f, alice));
-    // Two blobs coexist now (current + retained). Search stays CURRENT-ONLY —
-    // the H2 invariant — and that is no longer a property of an index that the
-    // retained version was kept out of: §6 step 8 deleted the
-    // index, and what a client is told about is the MANIFEST, which is a
-    // projection of `files` and so reaches a version only while a live row points
-    // at it. Pinned end-to-end by the recognized-text supersede test below, which
-    // asserts v1's words become unfindable and v2's findable.
+    // Two blobs coexist; search stays current-only because the manifest only
+    // reaches blobs a live row points at.
     try std.testing.expectEqual(@as(i64, 2), try countRows(f, "SELECT COUNT(*) FROM blobs;"));
 }
 
-// ---- hot-cache versioning: "history of this file" HTTP endpoints (phases 3-6) ----
+// ---- versioning: "history of this file" endpoints ----
 
-/// Seeds a one-page recognized `.note` under `name`, with page `bitmap` and
-/// recognized `labels`. Calling it twice with the SAME name makes the second
-/// upload SUPERSEDE the first (the sync hot path), retaining v1 in `file_history`.
+/// Seeds a one-page recognized `.note`; a second call with the same name
+/// supersedes the first, retaining v1 in `file_history`.
 fn seedRecognizedVersion(f: *Fixture, user_id: u64, name: []const u8, bitmap: []const u8, labels: []const []const u8) !u64 {
     const nb = @import("note_builder");
     const els = try gpa.alloc(nb.ElementSpec, labels.len);
@@ -1251,9 +1106,8 @@ fn seedRecognizedVersion(f: *Fixture, user_id: u64, name: []const u8, bitmap: []
     return e.id;
 }
 
-/// Seeds an N-page recognized `.note` under `name` (every page the same `bitmap`
-/// + one recognized `label`), superseding any same-named prior upload. Lets a test
-/// give a RETAINED version a different page count than the file's current one.
+/// N-page variant of `seedRecognizedVersion`, so a retained version can differ
+/// in page count from the current one.
 fn seedRecognizedVersionPages(f: *Fixture, user_id: u64, name: []const u8, page_count: usize, bitmap: []const u8, label: []const u8) !u64 {
     const nb = @import("note_builder");
     const els = try gpa.alloc(nb.ElementSpec, 1);
@@ -1278,8 +1132,7 @@ fn seedRecognizedVersionPages(f: *Fixture, user_id: u64, name: []const u8, page_
     return e.id;
 }
 
-/// The single retained-version md5 of `file_id` (the tests supersede exactly once
-/// before reading it).
+/// The single retained-version md5 of `file_id`.
 fn soleHistoryMd5(f: *Fixture, file_id: u64) ![32]u8 {
     var r = (try f.db.row("SELECT md5 FROM file_history WHERE file_id = ?1;", &.{.{ .int = @intCast(file_id) }})) orelse return error.NoHistory;
     defer r.finalize();
@@ -1288,7 +1141,6 @@ fn soleHistoryMd5(f: *Fixture, file_id: u64) ![32]u8 {
     return out;
 }
 
-/// The blob md5 the live `files` row currently points at.
 fn currentFileMd5(f: *Fixture, file_id: u64) ![32]u8 {
     var r = (try f.db.row("SELECT md5 FROM files WHERE id = ?1;", &.{.{ .int = @intCast(file_id) }})) orelse return error.NoFile;
     defer r.finalize();
@@ -1328,15 +1180,12 @@ test "history list: current + retained versions newest-first; foreign id is 404"
         defer parsed.deinit();
         const vs = parsed.value.versions;
         try std.testing.expectEqual(@as(usize, 2), vs.len);
-        // Newest first: the CURRENT (v2) leads, flagged; then the retained v1.
         try std.testing.expect(vs[0].current);
         try std.testing.expectEqualStrings(&v2md5, vs[0].md5);
         try std.testing.expect(!vs[1].current);
         try std.testing.expectEqualStrings(&v1md5, vs[1].md5);
     }
 
-    // A foreign / unknown note id is a 404 (not an empty list) — same gate the
-    // sibling `/note/{id}` routes use.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/note/99999/history", &web_tok, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
@@ -1353,14 +1202,11 @@ test "history list: each version carries its OWN page count (current and retaine
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
 
-    // v1 has 3 pages; v2 (the current) supersedes it with 1 page. Their retained
-    // `note_page_index` rows differ, so the two versions' page counts must differ.
     const id = try seedRecognizedVersionPages(f, admin, "hist.note", 3, "AAAA", "alpha");
     _ = try seedRecognizedVersionPages(f, admin, "hist.note", 1, "BBBB", "beta");
     const v1md5 = try soleHistoryMd5(f, id);
     const v2md5 = try currentFileMd5(f, id);
 
-    // Cross-check the served counts against the actual indexed rows per md5.
     var qbuf: [128]u8 = undefined;
     const v1_rows = try countRows(f, try std.fmt.bufPrint(&qbuf, "SELECT COUNT(*) FROM note_page_index WHERE blob_md5 = '{s}';", .{&v1md5}));
     var qbuf2: [128]u8 = undefined;
@@ -1383,7 +1229,6 @@ test "history list: each version carries its OWN page count (current and retaine
     defer parsed.deinit();
     const vs = parsed.value.versions;
     try std.testing.expectEqual(@as(usize, 2), vs.len);
-    // Newest first: current (v2) has 1 page; retained (v1) has 3 — each its own.
     try std.testing.expect(vs[0].current);
     try std.testing.expectEqual(v2_rows, vs[0].pageCount);
     try std.testing.expectEqual(@as(i64, 1), vs[0].pageCount);
@@ -1402,12 +1247,9 @@ test "history list: a non-note file's versions report pageCount == 0" {
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
 
-    // A `.pdf` — not a page-indexed type, so it has NO `note_page_index` rows
-    // (unlike `.txt`/`.spd`, which are paragraph/page-indexed). Superseded once so
-    // it also has a retained version. Neither version has a page count → both 0.
+    // A `.pdf` has no `note_page_index` rows, so both versions report 0 pages.
     const id = try putSeed(f, admin, null, "scan.pdf", "%PDF-1.4 first revision");
     _ = try putSeed(f, admin, null, "scan.pdf", "%PDF-1.4 second revision");
-    // Sanity: this blob genuinely has zero indexed rows.
     try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM note_page_index;"));
 
     const HistVersion = struct { md5: []const u8, size: i64, createdAt: i64, pageCount: i64 = 0, current: bool = false };
@@ -1434,20 +1276,14 @@ test "an unframed body-method request (POST, no Content-Length) responds instead
     const ctx = &f.ctx;
     var obuf: [4096]u8 = undefined;
 
-    // A POST carrying NEITHER a Content-Length NOR a Transfer-Encoding — a valid
-    // empty-body request (`curl -X POST` with no body sends exactly this). std's
-    // `discardBody`, run on the response path to ready the socket for keep-alive,
-    // used to assert framing for a body-bearing method and panic the connection
-    // thread the instant we responded before reading the (absent) body. The
-    // transport drops keep-alive for such a request so the assert is skipped.
-    // Without the guard this test does not fail — it CRASHES the whole run.
+    // A body-bearing method with neither Content-Length nor Transfer-Encoding:
+    // std's `discardBody` asserts on it and panics the connection thread, so the
+    // transport drops keep-alive. Without the guard this crashes the run.
 
-    // An unmatched path: the not_found responder answers 404.
     const unmatched = "POST /api/controlplane/nope HTTP/1.1\r\nhost: test\r\n\r\n";
     try std.testing.expectEqual(@as(u16, 404), (try roundtrip(ctx, unmatched, &obuf)).status);
 
-    // A real POST route, unauthenticated: the scope gate answers 401 (the exact
-    // early-reject-before-body-read path that `restore` newly exposed).
+    // Scope gate rejects before reading the body.
     const restore = "POST /api/controlplane/note/1/history/abc/restore HTTP/1.1\r\nhost: test\r\n\r\n";
     try std.testing.expectEqual(@as(u16, 401), (try roundtrip(ctx, restore, &obuf)).status);
 }
@@ -1463,13 +1299,11 @@ test "history preview: serves v1's page bytes (distinct from v2); 404 for an md5
     var reqbuf: [2048]u8 = undefined;
     var pbuf: [128]u8 = undefined;
 
-    // Distinct page bitmaps, so v1's rendered page bytes differ from v2's.
     const id = try seedRecognizedVersion(f, admin, "hist.note", "AAAA", &.{"alpha"});
     _ = try seedRecognizedVersion(f, admin, "hist.note", "ZZZZZZ", &.{"beta"});
     const v1md5 = try soleHistoryMd5(f, id);
     const v2md5 = try currentFileMd5(f, id);
 
-    // v1's page 0 through the history route — no `?v=` (the md5 pins the content).
     var v1_page: [4096]u8 = undefined;
     var v1_len: usize = 0;
     {
@@ -1481,8 +1315,6 @@ test "history preview: serves v1's page bytes (distinct from v2); 404 for an md5
         try std.testing.expect(v1_len > 0);
     }
 
-    // v2's CURRENT page 0 (via note meta → page hash → the live page route), to
-    // prove the history route served the OLD bytes, not today's.
     {
         const meta_path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/file/metadata/{d}", .{id});
         const meta = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", meta_path, &web_tok, "");
@@ -1503,8 +1335,7 @@ test "history preview: serves v1's page bytes (distinct from v2); 404 for an md5
         try std.testing.expect(!std.mem.eql(u8, v1_page[0..v1_len], resp.body)); // distinct versions
     }
 
-    // v2's md5 is the CURRENT blob, NOT a `file_history` row → 404 (the current
-    // version is never reachable as "history"). A bogus md5 → 404 too.
+    // The current blob is never reachable as "history".
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/page/0", .{ id, v2md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -1530,10 +1361,7 @@ test "history page text: serves v1's OWN retained transcript + word boxes, disti
     var pbuf: [128]u8 = undefined;
 
     const nb = @import("note_builder");
-    // Two versions of the SAME file, each with a DIFFERENT recognized word AND a
-    // DIFFERENT box. v2 supersedes v1 (same name), retaining v1 in `file_history`.
-    // The version's page text/boxes come from ITS OWN retained `note_page_index`, so
-    // the per-version route must return v1's word+box even though v2 is now current.
+    // A version's text and boxes come from its own retained `note_page_index`.
     const v1_els = [_]nb.ElementSpec{.{ .label = "alpha", .words = &.{
         .{ .label = "alpha", .box = .{ .x = 10.5, .y = 20.25, .width = 30.5, .height = 8.125 } },
     } }};
@@ -1555,9 +1383,7 @@ test "history page text: serves v1's OWN retained transcript + word boxes, disti
         } = null,
     };
 
-    // v1's page 0 transcript through the per-version route — no `?v=` (the `:md5`
-    // pins the blob). SAME `PageTextVO` shape as the live route, `no-cache` (a
-    // struct-serialised body the `:md5` cannot pin), never `immutable`.
+    // Same `PageTextVO` as the live route; `no-cache`, never `immutable`.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/page/0/text", .{ id, v1md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -1576,9 +1402,6 @@ test "history page text: serves v1's OWN retained transcript + word boxes, disti
         try std.testing.expectApproxEqAbs(@as(f32, 8.125), p.value.words.?[0].hMm, 0.001);
     }
 
-    // The CURRENT page 0 (via note meta → textHash → the live text route) carries v2's
-    // OWN word+box — proving the per-version route returned the OLD transcript, not
-    // today's.
     {
         const meta_path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/file/metadata/{d}", .{id});
         const meta = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", meta_path, &web_tok, "");
@@ -1620,19 +1443,15 @@ test "history page text: 404 (indistinguishable) for a non-history md5, a bogus 
     const v1md5 = try soleHistoryMd5(f, id);
     const v2md5 = try currentFileMd5(f, id);
 
-    // The CURRENT blob's md5 is not a `file_history` row → 404 (the live version is
-    // never reachable as "history"), exactly like the sibling per-version routes.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/page/0/text", .{ id, v2md5 });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "")).status);
     }
-    // A bogus md5 not in this file's history → 404.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/page/0/text", .{ id, "f" ** 32 });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "")).status);
     }
-    // A DIFFERENT user's file with its OWN real retained md5: admin does not own it, so
-    // `historyVersion`'s `user_id` scope 404s — indistinguishable from a missing id.
+    // Another user's real retained md5: the `user_id` scope 404s it.
     {
         const mid = try seedRecognizedVersion(f, mallory, "hers.note", "AAAA", &.{"one"});
         _ = try seedRecognizedVersion(f, mallory, "hers.note", "BBBB", &.{"two"});
@@ -1640,8 +1459,7 @@ test "history page text: 404 (indistinguishable) for a non-history md5, a bogus 
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/page/0/text", .{ mid, mv1 });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "")).status);
     }
-    // TRASH the file: `historyVersion` requires `f.deleted = 0`, so even its own owner
-    // can no longer reach the retained version through this route.
+    // `historyVersion` requires `f.deleted = 0`, even for the owner.
     {
         try f.files.trash(admin, id);
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/page/0/text", .{ id, v1md5 });
@@ -1660,8 +1478,6 @@ test "history raw: serves v1's exact bytes (distinct from v2 and the live file),
     var reqbuf: [2048]u8 = undefined;
     var pbuf: [256]u8 = undefined;
 
-    // A `.spd` (one of the client-side-rendered types this endpoint unlocks) with
-    // two versions: the second supersedes the first, retaining v1 in `file_history`.
     const v1 = "spd-version-one-raw-bytes";
     const v2 = "spd-version-two-raw-bytes-and-a-little-longer";
     const id = try putSeed(f, admin, null, "draw.spd", v1);
@@ -1669,10 +1485,8 @@ test "history raw: serves v1's exact bytes (distinct from v2 and the live file),
     const v1md5 = try soleHistoryMd5(f, id);
     const v2md5 = try currentFileMd5(f, id);
 
-    // v1's raw bytes through the history route — no `?v=` (the path `:md5` pins the
-    // blob). Headers are IDENTICAL to what live `/file/{id}` sends for a `.spd`:
-    // octet-stream + attachment (a `.spd` is never inline), nosniff, immutable,
-    // etag = the md5, and a DECLARED content-length (never chunked).
+    // Headers match live `/file/{id}` for a `.spd`: attachment, nosniff,
+    // immutable, etag = md5, declared content-length.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/raw", .{ id, v1md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -1689,8 +1503,6 @@ test "history raw: serves v1's exact bytes (distinct from v2 and the live file),
         try expectHeaderContains(resp.head, try std.fmt.bufPrint(&hbuf, "etag: \"{s}\"", .{v1md5}));
     }
 
-    // The LIVE `/file/{id}?v={v2md5}` serves v2's bytes with the same header shape —
-    // proving the history route returned the OLD bytes, distinct from today's.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ id, v2md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -1701,8 +1513,6 @@ test "history raw: serves v1's exact bytes (distinct from v2 and the live file),
         try expectHeaderContains(resp.head, "content-disposition: attachment;");
     }
 
-    // `?download=1` forces attachment on an INLINE type (an image), proving the
-    // override rides the shared streaming tail exactly as it does on `/file/{id}`.
     {
         const img1 = "img-version-one";
         const img2 = "img-version-two-differs";
@@ -1710,7 +1520,6 @@ test "history raw: serves v1's exact bytes (distinct from v2 and the live file),
         _ = try putSeed(f, admin, null, "pic.png", img2);
         const pv1 = try soleHistoryMd5(f, pid);
 
-        // Default: inline (an image is on the allowlist), and v1's exact bytes.
         {
             const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/raw", .{ pid, pv1 });
             const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -1719,7 +1528,6 @@ test "history raw: serves v1's exact bytes (distinct from v2 and the live file),
             try expectHeaderContains(resp.head, "content-type: image/png");
             try expectHeaderContains(resp.head, "content-disposition: inline;");
         }
-        // `?download=1` → attachment.
         {
             const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/raw?download=1", .{ pid, pv1 });
             const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -1747,20 +1555,15 @@ test "history raw: 404 (indistinguishable) for a non-history md5, a bogus md5, a
     const v1md5 = try soleHistoryMd5(f, id);
     const v2md5 = try currentFileMd5(f, id);
 
-    // The CURRENT blob is not a `file_history` row → 404 (the live version is never
-    // reachable as "history"), exactly like the preview route.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/raw", .{ id, v2md5 });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "")).status);
     }
-    // A bogus md5 → 404.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/raw", .{ id, "f" ** 32 });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "")).status);
     }
-    // A DIFFERENT user's file, with its OWN real retained md5: admin does not own it,
-    // so `historyVersion`'s `user_id` scope makes it 404 — indistinguishable from a
-    // missing id, no cross-account existence oracle.
+    // Another user's real retained md5 404s: no cross-account existence oracle.
     {
         const mid = try putSeed(f, mallory, null, "hers.spd", "m1");
         _ = try putSeed(f, mallory, null, "hers.spd", "m2");
@@ -1768,8 +1571,6 @@ test "history raw: 404 (indistinguishable) for a non-history md5, a bogus md5, a
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/raw", .{ mid, mv1 });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "")).status);
     }
-    // TRASH the file: `historyVersion` requires `f.deleted = 0`, so even its own live
-    // owner can no longer reach the retained version through this route.
     {
         try f.files.trash(admin, id);
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/raw", .{ id, v1md5 });
@@ -1788,14 +1589,11 @@ test "history meta: serves the VERSION's own page count, not the current note's;
     var reqbuf: [2048]u8 = undefined;
     var pbuf: [128]u8 = undefined;
 
-    // v1 has THREE pages; v2 (current) supersedes it with ONE — the "I added/removed
-    // pages since" case that used to render the CURRENT note's slot count for the
-    // preview instead of the version's own geometry.
+    // A version's meta must use its own page geometry, not the current note's.
     const id = try seedRecognizedVersionPages(f, admin, "histmeta.note", 3, "AAAA", "alpha");
     _ = try seedRecognizedVersionPages(f, admin, "histmeta.note", 1, "BBBB", "beta");
     const v1md5 = try soleHistoryMd5(f, id);
 
-    // The CURRENT note meta reports ONE page.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/file/metadata/{d}", .{id});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -1810,8 +1608,6 @@ test "history meta: serves the VERSION's own page count, not the current note's;
         try std.testing.expectEqual(@as(usize, 1), parsed.value.pages.len);
     }
 
-    // The VERSION meta reports v1's THREE pages — read from its OWN retained index,
-    // with real per-page dims and `fileHash` set to the version md5.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/meta", .{ id, v1md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -1831,13 +1627,11 @@ test "history meta: serves the VERSION's own page count, not the current note's;
         }
     }
 
-    // A foreign / missing note id is a 404.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/99999/history/{s}/meta", .{v1md5});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
-    // The current blob's md5 is NOT a history row → 404; a bogus md5 → 404 too.
     {
         const v2md5 = try currentFileMd5(f, id);
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/meta", .{ id, v2md5 });
@@ -1852,16 +1646,8 @@ test "history meta: serves the VERSION's own page count, not the current note's;
     }
 }
 
-// FIND-IN-A-RETAINED-VERSION IS THE BROWSER'S — §6 step 7.
-// `GET /note/:id/history/:md5/search` and `searchHistoryPages` are gone; the
-// browser fetches `text/<md5>` for the version it is showing and searches its own
-// index. What that route proved beyond search itself — that a retained version's
-// OWN transcript survives its supersession, distinct from the current one — is
-// proved by `/history/:md5/meta` and `/history/:md5/page/:n/text` above, and by
-// gate 2 of "the per-document text route serves ONE document's real text".
-// Its `:md5`-not-in-this-file's-history gate is the meta route's, tested there;
-// the text route cannot draw that boundary at all, having no `:id` to scope
-// through (see "unreachable and underived are ONE 404").
+// Find in a retained version is done in the browser over `text/<md5>`; the
+// server has no history search route.
 
 test "history restore: re-points via supersede, flips what is searchable, and is undoable" {
     const f = try Fixture.init();
@@ -1879,18 +1665,13 @@ test "history restore: re-points via supersede, flips what is searchable, and is
     const v1md5 = try soleHistoryMd5(f, id);
     const v2md5 = try currentFileMd5(f, id);
 
-    // Current is v2: search finds "beta", not "alpha".
     try std.testing.expectEqual(@as(usize, 1), try searchHits(f, admin, "beta"));
     try std.testing.expectEqual(@as(usize, 0), try searchHits(f, admin, "alpha"));
 
     const RestoreVO = struct { success: bool, md5: []const u8, size: i64, createdAt: i64, current: bool };
 
-    // Restore v1: the file re-points at v1, the DISPLACED v2 is retained, and what
-    // the caller can find flips to v1's content. This MUST go through the
-    // supersede path rather than a raw md5 UPDATE, and `searchHits` follows
-    // `files.md5` for exactly the reason that matters now: the search-index
-    // manifest ships the caller's live rows BY md5, so a restore that did not
-    // re-point the row would leave the browser indexing the old document.
+        // Restore goes through the supersede path, not a raw md5 UPDATE: the
+        // search manifest ships live rows by md5.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/restore", .{ id, v1md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", path, &web_tok, "{}");
@@ -1905,10 +1686,8 @@ test "history restore: re-points via supersede, flips what is searchable, and is
     try std.testing.expectEqualSlices(u8, &v1md5, &(try currentFileMd5(f, id))); // current is v1 now
     try std.testing.expectEqual(@as(usize, 1), try searchHits(f, admin, "alpha")); // v1 re-indexed
     try std.testing.expectEqual(@as(usize, 0), try searchHits(f, admin, "beta")); // v2 displaced
-    // v2 is now the retained version; the restored v1 is no longer a history row.
     try std.testing.expectEqualSlices(u8, &v2md5, &(try soleHistoryMd5(f, id)));
 
-    // Undoable: restoring v2 back flips everything the other way.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/restore", .{ id, v2md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", path, &web_tok, "{}");
@@ -1920,7 +1699,6 @@ test "history restore: re-points via supersede, flips what is searchable, and is
     try std.testing.expectEqualSlices(u8, &v1md5, &(try soleHistoryMd5(f, id)));
 }
 
-/// Scalar count/lookup against the fixture's DB, for storage assertions.
 fn countRows(f: *Fixture, sql: []const u8) !i64 {
     var s = try f.db.prepare(sql);
     defer s.finalize();
@@ -1928,7 +1706,6 @@ fn countRows(f: *Fixture, sql: []const u8) !i64 {
     return s.columnInt(0);
 }
 
-/// The md5 recorded for a single `files` row.
 fn soleMd5(f: *Fixture, file_id: u64) ![32]u8 {
     var r = (try f.db.row("SELECT md5 FROM files WHERE id = ?1;", &.{.{ .int = @intCast(file_id) }})) orelse return error.NoSuchFile;
     defer r.finalize();
@@ -1946,7 +1723,6 @@ test "control-plane login signals must-change; /api/user/me restores identity ac
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
 
-    // First login → pending session; the response flags mustChangePassword.
     var pending: [32]u8 = undefined;
     {
         const code = try getCode(ctx, "admin");
@@ -1963,8 +1739,7 @@ test "control-plane login signals must-change; /api/user/me restores identity ac
         @memcpy(&pending, cookieToken(resp.set_cookie.?).?);
     }
 
-    // /me with the pending cookie: identity + still-must-change (this is what lets
-    // the SPA route to change-password on a reload).
+    // Still-must-change on /me is what routes a reload to change-password.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &pending, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -1980,7 +1755,6 @@ test "control-plane login signals must-change; /api/user/me restores identity ac
         try std.testing.expect(p.value.mustChangePassword);
     }
 
-    // After the change, /me reports must-change cleared.
     var web: [32]u8 = undefined;
     {
         const new_md5 = password.md5Hex("adminpw1");
@@ -1997,9 +1771,8 @@ test "control-plane login signals must-change; /api/user/me restores identity ac
     }
 }
 
-// ---- M1 device-sync read path ----
+// ---- device-sync read path ----
 
-/// Runs a device-authenticated request (x-access-token + equipmentNo headers).
 fn deviceRequest(ctx: *Context, obuf: []u8, reqbuf: []u8, method: []const u8, path: []const u8, token: []const u8, eno: []const u8, body: []const u8) !Response {
     const req = try buildRequest(reqbuf, method, path, &.{
         .{ .name = "content-type", .value = "application/json" },
@@ -2009,7 +1782,6 @@ fn deviceRequest(ctx: *Context, obuf: []u8, reqbuf: []u8, method: []const u8, pa
     return roundtrip(ctx, req, obuf);
 }
 
-/// Logs `account`/`pw` in from a device (equipmentNo present) and returns the token.
 fn deviceLogin(ctx: *Context, obuf: []u8, reqbuf: []u8, account: []const u8, pw: []const u8, eno: []const u8) ![32]u8 {
     const code = try getCode(ctx, account);
     const hash = challenge(pw, &code);
@@ -2047,10 +1819,8 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
     var obuf: [8192]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
 
-    // login/equipment (device face, tolerating the extra `version` field).
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // check/exists/server: true for a real account, failure otherwise.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/official/user/check/exists/server", &.{.{ .name = "content-type", .value = "application/json" }}, "{\"email\":\"alice\"}"), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -2059,24 +1829,16 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         try expectFailure(miss.body, "USER_NOT_FOUND");
     }
 
-    // query/server connectivity ping (public).
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/api/file/query/server", &.{}, ""), &obuf);
         try expectSuccess(resp.body);
     }
 
-    // THE REAL ORDER, which is what made the naming bug possible: a file call
-    // reaches the server BEFORE `bindEquipment` and binds the serial it has just
-    // seen with a placeholder, because it has no name yet (`resolveEquipment`).
-    // Simulated with the same call that path makes. Without this line the bind
-    // below is the row's INSERT, the reported name arrives through it, and a test
-    // asserting the name passes whether or not the handler adopts it — which is
-    // exactly how the placeholder survived into every account screen.
+    // Real order: a file call arrives before `bindEquipment` and binds the
+    // serial with a placeholder name; the bind must then adopt the reported name.
     try f.svc.bindDevice(alice, "SN1", "Supernote app");
 
-    // bindEquipment: creates the default label folders. The device-reported
-    // `totalCapacity` is IGNORED — the server owns the quota, so a device cannot
-    // set or raise its own (finding #6).
+    // The device-reported `totalCapacity` is ignored: the server owns the quota.
     {
         const body =
             "{\"equipmentNo\":\"SN1\",\"name\":\"Nomad\",\"totalCapacity\":\"25485312\"," ++
@@ -2085,23 +1847,15 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
     try std.testing.expect(try f.svc.isDeviceBound(alice, "SN1"));
-    // THE DEVICE'S REPORTED NAME LANDS, over the placeholder an earlier file call
-    // will already have stamped ("Supernote app", from `resolveEquipment`). This
-    // is asserted through the ROUTE rather than against `nameDevice` directly,
-    // because the service function was never the broken part — the handler simply
-    // did not call it, and a unit test of the function stayed green while every
-    // account screen showed the placeholder for a tablet that had said its name.
+    // Asserted through the route: the handler, not `nameDevice`, was the bug.
     {
         const devs = try f.svc.listUserDevices(gpa, alice, alice);
         defer authsvc.Service.freeDevices(gpa, devs);
         try std.testing.expectEqual(@as(usize, 1), devs.len);
         try std.testing.expectEqualStrings("Nomad", devs[0].name);
     }
-    // Quota is unchanged from the server default set at user creation — the bind's
-    // reported 25485312 KB was NOT adopted.
     try std.testing.expectEqual(authsvc.default_capacity, try f.svc.userCapacity(alice));
 
-    // Root now holds exactly the three label roots (NOTE, EXPORT, INBOX).
     {
         const root = try f.files.list(alice, null);
         defer filesmod.Files.freeEntries(gpa, root);
@@ -2110,12 +1864,10 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
     }
     const note_id = try f.files.ensureFolderPath(alice, "NOTE/Note"); // idempotent → existing id
 
-    // Seed two notes; capture the expected md5 of one for the assertion.
     const a_id = try putSeed(f, alice, note_id, "a.note", "aaaa");
     _ = try putSeed(f, alice, note_id, "b.note", "bbbbbb");
     const a_md5 = blobstore.md5HexOf("aaaa");
 
-    // summary/hash → both files, with md5 + full path in metadataMap.
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/query/summary/hash", &dev_tok, "SN1", "{\"page\":0,\"size\":100}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -2140,7 +1892,6 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         try std.testing.expectEqualStrings("/NOTE/Note/a.note", first.metadataMap.path);
     }
 
-    // summary/id → full detail for the diffed id.
     {
         const body = try std.fmt.allocPrint(gpa, "{{\"ids\":[{d}]}}", .{a_id});
         defer gpa.free(body);
@@ -2156,7 +1907,6 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         try std.testing.expectEqualStrings("N", d.isSummaryGroup);
     }
 
-    // summary/group → the five folders (NOTE, Note, MyStyle, EXPORT, INBOX).
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/query/summary/group", &dev_tok, "SN1", "{\"page\":0,\"size\":100}");
         var p = try std.json.parseFromSlice(struct { totalRecords: i64, summaryDOList: []const struct { isSummaryGroup: []const u8 } }, gpa, resp.body, .{ .ignore_unknown_fields = true });
@@ -2165,7 +1915,6 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         for (p.value.summaryDOList) |g| try std.testing.expectEqualStrings("Y", g.isSummaryGroup);
     }
 
-    // user/query → the caller's user info.
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/user/query", &dev_tok, "SN1", "{}");
         var p = try std.json.parseFromSlice(struct { success: bool, email: []const u8, totalCapacity: []const u8 }, gpa, resp.body, .{ .ignore_unknown_fields = true });
@@ -2174,7 +1923,6 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         try std.testing.expectEqualStrings("alice", p.value.email);
     }
 
-    // synchronous/start (synType:true) and /end bracket the sync.
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/synchronous/start", &dev_tok, "SN1", "{\"equipmentNo\":\"SN1\"}");
         var p = try std.json.parseFromSlice(struct { success: bool, equipmentNo: []const u8, synType: bool }, gpa, resp.body, .{ .ignore_unknown_fields = true });
@@ -2187,7 +1935,6 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         try expectSuccess(resp.body);
     }
 
-    // Cross-face guard still holds: a device token reaching a web route is 403.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/equipment/unlink", &dev_tok, "{\"equipmentNo\":\"SN1\"}", 403);
 }
 
@@ -2203,16 +1950,13 @@ test "pre-login device unlink is public, returns success, but is NON-DESTRUCTIVE
     var obuf: [8192]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
 
-    // A live, bound device with an active session.
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
     try f.svc.bindDevice(alice, "SN1", "Nomad");
     try std.testing.expectEqual(@as(i64, 1), try f.svc.deviceCount(alice));
     try std.testing.expect((try f.svc.caller(&dev_tok)) != null);
 
-    // An unauthenticated caller (no token) POSTs the serial. SECURITY: this must
-    // NOT unbind the device or drop its sessions — otherwise any LAN client could
-    // force-log-out the household device by its printed serial. It returns the
-    // lenient success the device's pre-login step expects; bind re-establishes.
+    // An unauthenticated serial POST must not unbind or drop sessions (any LAN
+    // client could log the device out); it returns the lenient success.
     const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/terminal/equipment/unlink", &.{.{ .name = "content-type", .value = "application/json" }}, "{\"equipmentNo\":\"SN1\"}"), &obuf);
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try expectSuccess(resp.body);
@@ -2233,8 +1977,7 @@ test "capacity onboarding: wouldFit defaults for a user with no row; bindEquipme
     var reqbuf: [2048]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // Simulate a freshly-onboarded account with NO capacity row (drop the one that
-    // createUser made) — the exact state that used to make upload/apply 500.
+    // No capacity row: the state that used to make upload/apply 500.
     {
         var s = try f.db.prepare("DELETE FROM capacity WHERE user_id = ?1;");
         defer s.finalize();
@@ -2242,17 +1985,13 @@ test "capacity onboarding: wouldFit defaults for a user with no row; bindEquipme
         _ = try s.step();
     }
 
-    // wouldFit must NOT error on a missing row — it falls back to the default quota.
     try std.testing.expect(try f.files.wouldFit(alice, 1024));
 
-    // bindEquipment recreates the missing capacity row at the SERVER DEFAULT — the
-    // device-reported totalCapacity is ignored (finding #6: no self-set quota).
     {
         const body = "{\"equipmentNo\":\"SN1\",\"name\":\"Nomad\",\"totalCapacity\":\"25485312\",\"label\":[\"NOTE/Note\"]}";
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/terminal/user/bindEquipment", &dev_tok, "SN1", body);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
-    // The row exists again, at the server default (NOT the reported 25485312 KB).
     var s = try f.db.prepare("SELECT total_bytes FROM capacity WHERE user_id = ?1;");
     defer s.finalize();
     s.bindInt(1, @intCast(alice));
@@ -2274,7 +2013,6 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
 
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // Seed a tree: /NOTE/Note/a.note (a real blob we can download) + a root file.
     const note_id = try f.files.ensureFolderPath(alice, "NOTE/Note");
     const blob_bytes = "hello supernote download blob";
     const a_id = try putSeed(f, alice, note_id, "a.note", blob_bytes);
@@ -2284,7 +2022,6 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
     defer gpa.free(a_entry.name);
     defer if (a_entry.md5) |m| gpa.free(m);
 
-    // --- list_folder("/NOTE/Note", non-recursive) → the one direct child a.note ---
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/list_folder", &dev_tok, "SN1", "{\"path\":\"/NOTE/Note\",\"recursive\":false}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -2318,7 +2055,6 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
         try std.testing.expectEqual(a_entry.updated_at * 1000, e.lastUpdateTime); // ms (FLAGGED)
     }
 
-    // --- list_folder("/", recursive) → the whole tree (NOTE, Note, a.note, top.note) ---
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/list_folder", &dev_tok, "SN1", "{\"path\":\"/\",\"recursive\":true}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -2327,13 +2063,11 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
         }, gpa, resp.body, .{ .ignore_unknown_fields = true });
         defer p.deinit();
         try std.testing.expectEqual(@as(usize, 4), p.value.entries.len);
-        // Folders advertise is_downloadable=false.
         for (p.value.entries) |e| {
             if (std.mem.eql(u8, e.tag, "folder")) try std.testing.expect(!e.is_downloadable);
         }
     }
 
-    // --- query/by/path_v3: found → entriesVO present; not found → field OMITTED ---
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/3/files/query/by/path_v3", &dev_tok, "SN1", "{\"path\":\"/NOTE/Note/a.note\"}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -2349,12 +2083,10 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/3/files/query/by/path_v3", &dev_tok, "SN1", "{\"path\":\"/NOTE/ghost.note\"}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
-        // The absent optional means the field is not in the JSON at all.
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "entriesVO") == null);
         try expectSuccess(resp.body);
     }
 
-    // --- query_v3 by id → same VO ---
     {
         const body = try std.fmt.allocPrint(gpa, "{{\"id\":\"{d}\"}}", .{a_id});
         defer gpa.free(body);
@@ -2365,15 +2097,13 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
             entriesVO: ?struct { name: []const u8 } = null,
         }, gpa, resp.body, .{ .ignore_unknown_fields = true });
         defer p.deinit();
-        // The serial is echoed from caller.equipmentNo() AFTER the body read — this
-        // asserts the inline copy survived it (no use-after-free on the head buffer).
+        // Echoed after the body read: guards a use-after-free on the head buffer.
         try std.testing.expectEqualStrings("SN1", p.value.equipmentNo);
         try std.testing.expectEqualStrings("a.note", p.value.entriesVO.?.name);
     }
 
-    // --- download_v3 → a url back at our /oss/get/:id carrying a `?t=` capability token ---
-    // The device sends NO x-access-token on the download GET, so the URL itself
-    // authorizes it (see http/download_tokens.zig). Capture the minted token.
+    // The device sends no x-access-token on the download GET, so the URL
+    // carries a `?t=` capability token.
     var oss_url_buf: [128]u8 = undefined;
     var oss_url_len: usize = 0;
     {
@@ -2392,10 +2122,7 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
         }, gpa, resp.body, .{ .ignore_unknown_fields = true });
         defer p.deinit();
         try std.testing.expect(p.value.success);
-        // Serial echoed from caller.equipmentNo() after readBody — guards the UAF fix.
         try std.testing.expectEqualStrings("SN1", p.value.equipmentNo);
-        // buildRequest sends "host: test": the url names that host over plaintext http,
-        // points at /oss/get/<id>, and carries a `?t=` token.
         var prefix_buf: [64]u8 = undefined;
         const prefix = try std.fmt.bufPrint(&prefix_buf, "http://test/oss/get/{d}?t=", .{a_id});
         try std.testing.expect(std.mem.startsWith(u8, p.value.url, prefix));
@@ -2409,42 +2136,36 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
     const oss_url = oss_url_buf[0..oss_url_len]; // "/oss/get/<a_id>?t=<token>" after the host
     const oss_path = oss_url["http://test".len..]; // path+query the device GETs (no token header)
 
-    // --- GET /oss/get/:id?t=<token> → the RAW blob bytes streamed back (octet-stream) ---
     // No x-access-token header: the `?t=` token is the only credential.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", oss_path, &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try std.testing.expectEqualStrings(blob_bytes, resp.body); // exact bytes, raw
         try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "application/octet-stream") != null);
-        // Content-Disposition carries the filename (required for the device to materialize it).
         try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "content-disposition:") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "a.note") != null);
     }
 
-    // --- multi-use within the TTL: a SECOND GET with the same token also succeeds ---
-    // (the device may Range-request or retry; strict single-use would 403 the retry).
+    // Multi-use within the TTL: the device may Range-request or retry.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", oss_path, &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try std.testing.expectEqualStrings(blob_bytes, resp.body);
     }
 
-    // --- token failures → 403, NEVER 401 (a 401 would make the device log itself out) ---
-    // No token at all.
+    // Token failures are 403, never 401 (a 401 logs the device out).
     {
         var pbuf: [32]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/oss/get/{d}", .{a_id});
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", path, &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 403), resp.status);
     }
-    // A bad / unknown token.
     {
         var pbuf: [96]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/oss/get/{d}?t=deadbeefdeadbeefdeadbeefdeadbeef", .{a_id});
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", path, &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 403), resp.status);
     }
-    // Cross-file: a token minted for a.note cannot fetch top.note (file-scoped) → 403.
     {
         const q = std.mem.indexOfScalar(u8, oss_path, '?').?;
         var pbuf: [128]u8 = undefined;
@@ -2452,26 +2173,19 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", path, &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 403), resp.status);
     }
-    // A valid token but a foreign/missing file id is impossible (id is baked into the
-    // token); an unknown id with a mismatching token is already a 403 above.
 
-    // --- auth boundary on the still-device routes (list_folder) ---
-    // No token → 401.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/file/2/files/list_folder", &.{.{ .name = "content-type", .value = "application/json" }}, "{\"path\":\"/\"}"), &obuf);
         try std.testing.expectEqual(@as(u16, 401), resp.status);
     }
-    // A control-plane session (cookie) crossing into a .device route → 403.
     {
         const web_tok = try onboardWeb(ctx, "admin", "temp0000", "adminpw1");
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/list_folder", &web_tok, "{\"path\":\"/\"}", 403);
     }
 }
 
-// The OLD `list_folder` computation, kept HERE as the reference oracle: walk the
-// WHOLE tree, then filter in Zig. The handler no longer does this (it scopes the
-// query), so this reproduces the pre-optimization behavior to prove the scoped
-// result is the same SET. `underPath`: strict-descendant test (folder != "/").
+// Reference oracle: walk the whole tree, then filter in Zig, to prove the
+// scoped `list_folder` query returns the same set.
 fn underPathT(path: []const u8, folder: []const u8) bool {
     return path.len > folder.len and std.mem.startsWith(u8, path, folder) and path[folder.len] == '/';
 }
@@ -2495,8 +2209,7 @@ fn lessPath(_: void, x: []const u8, y: []const u8) bool {
     return std.mem.order(u8, x, y) == .lt;
 }
 
-// Hits list_folder over the wire and returns the sorted set of `path_display`
-// strings (dupes owned by `a`).
+// `list_folder` over the wire as a sorted set of `path_display` (owned by `a`).
 fn endpointPaths(a: std.mem.Allocator, ctx: *Context, obuf: []u8, reqbuf: []u8, token: []const u8, target: []const u8, recursive: bool) ![][]const u8 {
     const body = try std.fmt.allocPrint(a, "{{\"path\":\"{s}\",\"recursive\":{}}}", .{ target, recursive });
     const resp = try deviceRequest(ctx, obuf, reqbuf, "POST", "/api/file/2/files/list_folder", token, "SN1", body);
@@ -2525,8 +2238,7 @@ test "list_folder scoped query returns the SAME SET as the old whole-tree walk-a
     var reqbuf: [2048]u8 = undefined;
     const dev = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // A tree with depth, siblings, and a genuinely EMPTY folder:
-    //   /A/one.note  /A/B/deep.note  /A/empty (no children)  /root.note
+    // /A/one.note  /A/B/deep.note  /A/empty  /root.note
     const a_id = try f.files.ensureFolderPath(alice, "A");
     _ = try putSeed(f, alice, a_id, "one.note", "1");
     const b_id = try f.files.ensureFolderPath(alice, "A/B");
@@ -2538,7 +2250,6 @@ test "list_folder scoped query returns the SAME SET as the old whole-tree walk-a
     defer arena.deinit();
     const a = arena.allocator();
 
-    // For each case: the scoped endpoint result must equal the reference walk.
     const Case = struct { target: []const u8, recursive: bool, expect_len: usize };
     const cases = [_]Case{
         .{ .target = "/A", .recursive = false, .expect_len = 3 }, // one.note, B, empty
@@ -2571,13 +2282,10 @@ test "get_space_usage reports the caller's real capacity row, in the exact shape
     var reqbuf: [1024]u8 = undefined;
     const dev = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // Charge a known amount of usage, then read it back over the wire.
     _ = try putSeed(f, alice, null, "a.note", "abcdefg"); // 7 bytes
     try std.testing.expectEqual(@as(i64, 7), try usedBytes(f, alice));
 
-    // The SERIALIZED body is pinned, not just the parsed struct: the device
-    // matched these literal names (`used`, nested `allocationVO.allocated`, and
-    // the `tag`), so a field rename must fail this test.
+    // The serialized body is pinned: the device matches these literal names.
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/users/get_space_usage", &dev, "SN1", "{\"equipmentNo\":\"SN1\",\"version\":\"202407\"}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -2587,7 +2295,6 @@ test "get_space_usage reports the caller's real capacity row, in the exact shape
         );
     }
 
-    // It REFLECTS a change: charge more and `used` moves with the capacity row.
     _ = try putSeed(f, alice, null, "b.note", "xyz"); // +3 → 10
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/users/get_space_usage", &dev, "SN1", "{}");
@@ -2605,7 +2312,6 @@ test "get_space_usage reports the caller's real capacity row, in the exact shape
         try std.testing.expectEqualStrings("Individual", p.value.allocationVO.tag);
     }
 
-    // A user with NO capacity row reads the server default rather than 500ing.
     {
         var s = try f.db.prepare("DELETE FROM capacity WHERE user_id = ?1;");
         defer s.finalize();
@@ -2624,7 +2330,6 @@ test "get_space_usage reports the caller's real capacity row, in the exact shape
         try std.testing.expectEqualStrings(want, resp.body);
     }
 
-    // Scope: the device face only. No token → 401; a control-plane cookie → 403.
     {
         const req = try buildRequest(&reqbuf, "POST", "/api/file/2/users/get_space_usage", &.{
             .{ .name = "content-type", .value = "application/json" },
@@ -2638,9 +2343,8 @@ test "get_space_usage reports the caller's real capacity row, in the exact shape
     }
 }
 
-// ---- M2 device-sync upload byte-path ----
+// ---- device-sync upload byte path ----
 
-/// The user's charged capacity (`capacity.used_bytes`), read straight from the DB.
 fn usedBytes(f: *Fixture, user_id: u64) !i64 {
     var s = try f.db.prepare("SELECT used_bytes FROM capacity WHERE user_id = ?1;");
     defer s.finalize();
@@ -2649,8 +2353,8 @@ fn usedBytes(f: *Fixture, user_id: u64) !i64 {
     return s.columnInt(0);
 }
 
-/// Wraps `payload` in a single-part `multipart/form-data` body (one `name="file"`
-/// part), exactly as the device frames its `/oss/put` upload. Caller frees.
+/// A single-part `multipart/form-data` body, framed as the device frames
+/// `/oss/put`. Caller frees.
 fn buildMultipart(boundary: []const u8, payload: []const u8) ![]u8 {
     const head = try std.fmt.allocPrint(gpa, "--{s}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"up.note\"\r\nContent-Type: application/octet-stream\r\n\r\n", .{boundary});
     defer gpa.free(head);
@@ -2664,10 +2368,8 @@ fn buildMultipart(boundary: []const u8, payload: []const u8) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-/// How many files are staged under the blob store's `tmp/` directory — where a
-/// half-written ingest lives before it is published, and the only place a refused
-/// upload could strand bytes. Counted (not asserted empty inline) so a failure
-/// reports how many were left.
+/// Files staged under the blob store's `tmp/`, where a refused upload could
+/// strand bytes.
 fn blobTempCount(f: *Fixture) !usize {
     var d = try f.tmp.dir.openDir(std.testing.io, "tmp", .{ .iterate = true });
     defer d.close(std.testing.io);
@@ -2677,10 +2379,8 @@ fn blobTempCount(f: *Fixture) !usize {
     return n;
 }
 
-/// Total bytes staged under the blob store's `tmp/` directory. The per-session
-/// cap's real claim is about this number: with a per-PART cap, N chunked parts
-/// could each stage up to the cap and the sum was unbounded, so counting the
-/// files (`blobTempCount`) cannot see the difference — only their size can.
+/// Total bytes staged under `tmp/`: the per-session cap bounds this, which a
+/// file count cannot see.
 fn blobTempBytes(f: *Fixture) !u64 {
     var d = try f.tmp.dir.openDir(std.testing.io, "tmp", .{ .iterate = true });
     defer d.close(std.testing.io);
@@ -2695,16 +2395,14 @@ fn blobTempBytes(f: *Fixture) !u64 {
     return total;
 }
 
-/// `len` bytes of a deterministic non-repeating pattern — big enough to outrun
-/// the ingest cap, and containing no multipart delimiter look-alike.
+/// `len` bytes of a non-repeating pattern with no multipart delimiter look-alike.
 fn filler(len: usize) ![]u8 {
     const buf = try gpa.alloc(u8, len);
     for (buf, 0..) |*b, i| b.* = @intCast((i * 31 + 7) & 0xFF);
     return buf;
 }
 
-/// `upload/apply` announcing `size` bytes, returning the minted `innerName` —
-/// which is what the cap on the following `/oss/put` is measured against.
+/// `upload/apply` announcing `size` bytes; returns the minted `innerName`.
 fn applyUpload(ctx: *Context, obuf: []u8, reqbuf: []u8, tok: []const u8, name: []const u8, size: usize) ![16]u8 {
     const body = try std.fmt.allocPrint(
         gpa,
@@ -2722,10 +2420,8 @@ fn applyUpload(ctx: *Context, obuf: []u8, reqbuf: []u8, tok: []const u8, name: [
     return inner;
 }
 
-/// POSTs `payload` to `/oss/put/<inner>`, multipart-framed as the device frames
-/// it; `query` is appended raw (the chunk parameters). The request buffer is
-/// heap-allocated because these payloads are deliberately larger than any stack
-/// buffer in this file.
+/// POSTs `payload` multipart-framed to `/oss/put/<inner>`; `query` is appended
+/// raw. Heap request buffer: payloads exceed any stack buffer here.
 fn ossPut(ctx: *Context, obuf: []u8, tok: []const u8, inner: []const u8, payload: []const u8, query: []const u8) !Sent {
     const boundary = "----NomadUploadBoundaryZZ";
     const wire = try buildMultipart(boundary, payload);
@@ -2742,12 +2438,8 @@ fn ossPut(ctx: *Context, obuf: []u8, tok: []const u8, inner: []const u8, payload
     return roundtripCounting(ctx, req, obuf);
 }
 
-/// The most of a request body a CAPPED ingest can legitimately have read before
-/// refusing: the cap itself, plus the framing and the reader's lookahead — the
-/// multipart extractor is fed in `chunk_len` reads and holds a boundary-sized
-/// window back, and the HTTP reader fills its own `chunk_len` buffer ahead of it.
-/// Three chunks of headroom is generous and still an order of magnitude below the
-/// bodies these tests send, so "it stopped early" is unambiguous.
+/// The most a capped ingest may read before refusing: the cap plus three
+/// `chunk_len` reads of framing and lookahead headroom.
 fn cappedReadCeiling(limit: usize) usize {
     return limit + 3 * blobstore.chunk_len;
 }
@@ -2766,12 +2458,10 @@ test "device upload M2: apply → /oss/put → finish stores the blob and links 
 
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // The .note bytes the device is uploading, and their true md5.
     const file_bytes = "SUPERNOTE upload payload — the real .note bytes\x00\x01\x02\r\n--not-a-boundary";
     const md5 = blobstore.md5HexOf(file_bytes);
     const before_version = try f.files.syncVersion(alice);
 
-    // 1) upload/apply → an innerName + an /oss/put URL naming our Host.
     var inner: [16]u8 = undefined;
     {
         const body = try std.fmt.allocPrint(gpa, "{{\"path\":\"/NOTE/Note/up.note\",\"fileName\":\"up.note\",\"equipmentNo\":\"SN1\",\"size\":{d}}}", .{file_bytes.len});
@@ -2789,17 +2479,14 @@ test "device upload M2: apply → /oss/put → finish stores the blob and links 
         try std.testing.expectEqual(@as(usize, 16), p.value.innerName.len);
         try std.testing.expectEqualStrings("ufile", p.value.bucketName);
         @memcpy(&inner, p.value.innerName);
-        // buildRequest sends "host: test", so the URL names that host over http.
         var want: [64]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want, "http://test/oss/put/{s}", .{&inner}), p.value.fullUploadUrl);
     }
 
-    // 2) POST /oss/put/<inner> with the multipart-wrapped bytes → empty 200.
     {
         const boundary = "----NomadUploadBoundaryZZ";
         const wire = try buildMultipart(boundary, file_bytes);
         defer gpa.free(wire);
-        // The wire body is larger than the file by the multipart envelope.
         try std.testing.expect(wire.len > file_bytes.len);
 
         var ctbuf: [96]u8 = undefined;
@@ -2816,10 +2503,9 @@ test "device upload M2: apply → /oss/put → finish stores the blob and links 
         try std.testing.expectEqual(@as(usize, 0), resp.body.len); // empty success body
     }
 
-    // The blob is now on disk (keyed by the ORIGINAL file's md5, not the wire body).
+    // Keyed by the file's md5, not the wire body's.
     try std.testing.expect(f.files.blobs.has(&md5));
 
-    // 3) upload/finish → commit; returns the real created file id.
     var file_id: u64 = undefined;
     {
         const body = try std.fmt.allocPrint(gpa, "{{\"content_hash\":\"{s}\",\"equipmentNo\":\"SN1\",\"fileName\":\"up.note\",\"innerName\":\"{s}\",\"path\":\"/NOTE/Note/\",\"size\":\"{d}\"}}", .{ &md5, &inner, file_bytes.len });
@@ -2842,7 +2528,6 @@ test "device upload M2: apply → /oss/put → finish stores the blob and links 
         file_id = try std.fmt.parseInt(u64, p.value.id, 10);
     }
 
-    // The files entry exists with the right md5/size/parent; quota charged; version bumped.
     {
         const entry = (try f.files.get(alice, file_id)).?;
         defer gpa.free(entry.name);
@@ -2859,14 +2544,12 @@ test "device upload M2: apply → /oss/put → finish stores the blob and links 
         try std.testing.expect(try f.files.syncVersion(alice) > before_version);
     }
 
-    // The consumed session is gone.
     {
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
         try std.testing.expect((try f.files.uploadSession(arena.allocator(), alice, &inner)) == null);
     }
 
-    // The uploaded note now shows up to the device via list_folder.
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/list_folder", &dev_tok, "SN1", "{\"path\":\"/NOTE/Note\",\"recursive\":false}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -2896,7 +2579,6 @@ test "device upload M2: content_hash mismatch rejects the commit; auth is enforc
     const file_bytes = "these bytes are stored fine";
     const real_md5 = blobstore.md5HexOf(file_bytes);
 
-    // apply + /oss/put to actually store the bytes.
     var inner: [16]u8 = undefined;
     {
         const body = try std.fmt.allocPrint(gpa, "{{\"path\":\"/NOTE/Note/bad.note\",\"fileName\":\"bad.note\",\"equipmentNo\":\"SN1\",\"size\":{d}}}", .{file_bytes.len});
@@ -2923,7 +2605,6 @@ test "device upload M2: content_hash mismatch rejects the commit; auth is enforc
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
 
-    // finish with the WRONG content_hash → failure, and NO file is linked.
     {
         const wrong = "ffffffffffffffffffffffffffffffff";
         const body = try std.fmt.allocPrint(gpa, "{{\"content_hash\":\"{s}\",\"equipmentNo\":\"SN1\",\"fileName\":\"bad.note\",\"innerName\":\"{s}\",\"path\":\"/NOTE/Note/\",\"size\":\"{d}\"}}", .{ wrong, &inner, file_bytes.len });
@@ -2932,20 +2613,16 @@ test "device upload M2: content_hash mismatch rejects the commit; auth is enforc
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try expectFailure(resp.body, "HASH_MISMATCH");
     }
-    // No entry appeared, and no quota was charged (the blob is left orphaned for the sweep).
     try std.testing.expect((try f.files.resolvePath(alice, "/NOTE/Note/bad.note")) == null);
     try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, alice));
     try std.testing.expect(f.files.blobs.has(&real_md5)); // stored but unreferenced
 
-    // The age-based session sweep reclaims the stale session + its on-disk-only blob.
     {
         const swept = try f.files.sweepUploadSessions(-1); // cutoff in the future → sweep everything
         try std.testing.expectEqual(@as(usize, 1), swept);
         try std.testing.expect(!f.files.blobs.has(&real_md5)); // orphan reclaimed
     }
 
-    // --- auth boundary on /oss/put ---
-    // No token → 401.
     {
         const req = try buildRequest(&reqbuf, "POST", "/oss/put/deadbeefdeadbeef", &.{
             .{ .name = "content-type", .value = "multipart/form-data; boundary=BND" },
@@ -2953,7 +2630,6 @@ test "device upload M2: content_hash mismatch rejects the commit; auth is enforc
         const resp = try roundtrip(ctx, req, &obuf);
         try std.testing.expectEqual(@as(u16, 401), resp.status);
     }
-    // A control-plane session (cookie) crossing into the .device route → 403.
     {
         const web_tok = try onboardWeb(ctx, "admin", "temp0000", "adminpw1");
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/oss/put/deadbeefdeadbeef", &web_tok, "", 403);
@@ -2973,9 +2649,7 @@ test "device upload M2: commits the INGESTED size, not the device-declared size"
     var reqbuf: [8192]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // The device declares a huge size but uploads a tiny payload. Trusting the
-    // declared size would set files.size/quota to 5 MB (→ OOM on read, broken
-    // download framing); we must commit the real ingested 4 bytes.
+    // A declared size larger than the payload must not reach files.size or quota.
     const file_bytes = "tiny"; // 4 real bytes
     const md5 = blobstore.md5HexOf(file_bytes);
     const declared: usize = 5_000_000; // fits the default quota, so apply passes
@@ -3017,8 +2691,6 @@ test "device upload M2: commits the INGESTED size, not the device-declared size"
         file_id = try std.fmt.parseInt(u64, p.value.id, 10);
     }
 
-    // The committed size is the REAL 4 bytes, and quota is charged the real amount
-    // — NOT the 5 MB the device declared.
     const entry = (try f.files.get(alice, file_id)).?;
     defer gpa.free(entry.name);
     defer if (entry.md5) |m| gpa.free(m);
@@ -3040,7 +2712,6 @@ test "device upload chunked: parts are merged on the final part" {
 
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // The .note bytes the device is uploading, split in 3 parts
     const p1 = "SUPERNOTE upload payload ";
     const p2 = "— the real .note ";
     const p3 = "bytes\x00\x01\x02\r\n--not-a-boundary";
@@ -3049,7 +2720,6 @@ test "device upload chunked: parts are merged on the final part" {
     defer gpa.free(file_bytes);
     const md5 = blobstore.md5HexOf(file_bytes);
 
-    // 1) upload/apply
     var inner: [16]u8 = undefined;
     {
         const body = try std.fmt.allocPrint(gpa, "{{\"path\":\"/NOTE/Note/up.note\",\"fileName\":\"up.note\",\"equipmentNo\":\"SN1\",\"size\":{d}}}", .{file_bytes.len});
@@ -3065,7 +2735,6 @@ test "device upload chunked: parts are merged on the final part" {
         @memcpy(&inner, p.value.innerName);
     }
 
-    // 2) POST /oss/put/<inner> 3 times with chunk parameters
     const boundary = "----NomadUploadBoundaryZZ";
     const upload_id = "1785154238763_ad76ebd7";
     for ([_][]const u8{ p1, p2, p3 }, 1..) |part_bytes, part_num| {
@@ -3086,10 +2755,8 @@ test "device upload chunked: parts are merged on the final part" {
         try std.testing.expectEqual(@as(usize, 0), resp.body.len); // empty success body
     }
 
-    // The blob is now on disk
     try std.testing.expect(f.files.blobs.has(&md5));
 
-    // 3) upload/finish
     {
         const body = try std.fmt.allocPrint(gpa, "{{\"content_hash\":\"{s}\",\"equipmentNo\":\"SN1\",\"fileName\":\"up.note\",\"innerName\":\"{s}\",\"path\":\"/NOTE/Note/\",\"size\":\"{d}\"}}", .{ &md5, &inner, file_bytes.len });
         defer gpa.free(body);
@@ -3119,8 +2786,7 @@ test "device upload chunked: a path-traversal uploadId is rejected before it nam
 
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // Mint a session + innerName so the request gets past the ownership check and
-    // reaches the chunk path — the rejection we want to prove is the uploadId one.
+    // Get past the ownership check so the uploadId check is what rejects.
     var inner: [16]u8 = undefined;
     {
         const body = "{\"path\":\"/NOTE/Note/evil.note\",\"fileName\":\"evil.note\",\"equipmentNo\":\"SN1\",\"size\":10}";
@@ -3140,9 +2806,7 @@ test "device upload chunked: a path-traversal uploadId is rejected before it nam
     var ctbuf: [96]u8 = undefined;
     const ct = try std.fmt.bufPrint(&ctbuf, "multipart/form-data; boundary={s}", .{boundary});
 
-    // `../../pwned` carries both a slash and a dot — neither is in the uploadId
-    // allowlist, so the handler must 400 before `beginChunkIngest` ever splices it
-    // into a `tmp/<id>_1` path and escapes the staging dir.
+    // Must 400 before `beginChunkIngest` splices it into a `tmp/<id>_1` path.
     var pbuf: [160]u8 = undefined;
     const path = try std.fmt.bufPrint(&pbuf, "/oss/put/{s}?uploadId=../../pwned&totalChunks=3&partNumber=1", .{&inner});
     const req = try buildRequest(&reqbuf, "POST", path, &.{
@@ -3154,14 +2818,9 @@ test "device upload chunked: a path-traversal uploadId is rejected before it nam
     try std.testing.expectEqual(@as(u16, 400), resp.status);
 }
 
-// ---- the ingest cap: a body may not outrun what was declared ------------------
+// ---- the ingest cap: a body may not outrun what was declared ----
 
 test "device /oss/put: a body past the declared size is refused MID-STREAM, leaving no session row and nothing on disk" {
-    // Before the cap, `/oss/put` streamed whatever arrived straight onto disk and
-    // quota was consulted only at `upload/finish` — i.e. after every byte had
-    // landed. One authenticated request could therefore fill the disk with every
-    // quota check in the codebase still passing, and on the Pi a full disk takes
-    // the SQLite database with it.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -3174,7 +2833,6 @@ test "device /oss/put: a body past the declared size is refused MID-STREAM, leav
     var reqbuf: [8192]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // The device announces 4 KiB and then sends a body several caps long.
     const declared: usize = 4096;
     const inner = try applyUpload(ctx, &obuf, &reqbuf, &dev_tok, "flood.note", declared);
     const payload = try filler(declared + 4 * uploadcap.slack_bytes);
@@ -3183,28 +2841,20 @@ test "device /oss/put: a body past the declared size is refused MID-STREAM, leav
     const sent = try ossPut(ctx, &obuf, &dev_tok, &inner, payload, "");
     const resp = sent.resp;
 
-    // THE WIRE SHAPE IS THE PROTOCOL'S. The device sync protocol answers failures
-    // as HTTP 200 carrying the coded envelope — the same `QUOTA_EXCEEDED` its
-    // sibling steps (`upload/apply`, `upload/finish`) answer when there is no
-    // room. A 4xx/5xx here would read to the tablet as a network failure
-    // mid-sync rather than as a decision it can report.
+    // Device protocol failures are HTTP 200 with the coded envelope; a 4xx/5xx
+    // reads to the tablet as a network failure.
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try expectFailure(resp.body, "QUOTA_EXCEEDED");
 
-    // THE REFUSAL IS MID-STREAM, which is the whole claim: the server stopped
-    // reading near the cap instead of swallowing the body and refusing at the end
-    // (the old behaviour, which produces an identical response and an identical
-    // aftermath — see `Sent`).
+    // Refused mid-stream, near the cap (see `Sent`).
     try std.testing.expect(sent.consumed < cappedReadCeiling(uploadcap.limitFor(declared)));
 
-    // THE DURABLE FACTS, not the response: the reservation is gone, no blob was
-    // published, and nothing is staged in `tmp/` for the startup sweep to find.
+    // Reservation gone, no blob published, nothing staged in `tmp/`.
     try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
     try std.testing.expect(!f.files.blobs.has(&blobstore.md5HexOf(payload)));
     try std.testing.expectEqual(@as(usize, 0), try blobTempCount(f));
     try std.testing.expectEqual(@as(i64, 0), (try f.files.capacity(alice)).used);
 
-    // And the reservation really is unusable afterwards — `finish` finds nothing.
     {
         const md5 = blobstore.md5HexOf(payload);
         const body = try std.fmt.allocPrint(
@@ -3234,8 +2884,6 @@ test "device /oss/put: the declared size, and the cap itself, both still upload 
 
     const declared: usize = 4096;
 
-    // (a) The ordinary upload — exactly what was declared — goes all the way
-    //     through apply → put → finish and lands in the tree.
     {
         const inner = try applyUpload(ctx, &obuf, &reqbuf, &dev_tok, "normal.note", declared);
         const payload = try filler(declared);
@@ -3261,9 +2909,7 @@ test "device /oss/put: the declared size, and the cap itself, both still upload 
         try std.testing.expectEqual(@as(i64, @intCast(payload.len)), try usedBytes(f, alice));
     }
 
-    // (b) THE BOUNDARY: declared + the whole slack, to the byte, is ACCEPTED. The
-    //     refusal above is one byte past this, so the two together pin the edge
-    //     rather than "somewhere in that region".
+    // Declared + the whole slack is accepted; one byte more is refused above.
     {
         const inner = try applyUpload(ctx, &obuf, &reqbuf, &dev_tok, "edge.note", declared);
         const payload = try filler(declared + uploadcap.slack_bytes);
@@ -3276,9 +2922,7 @@ test "device /oss/put: the declared size, and the cap itself, both still upload 
 }
 
 test "device /oss/put chunked: an over-cap PART is refused with the same envelope, and takes the session with it" {
-    // The chunked path is the same hole with more steps: each part streamed to
-    // disk unmeasured. Each part is now held to the same figure — no single part
-    // can legitimately exceed the whole declared file.
+    // Each chunked part is held to the same figure.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -3301,27 +2945,18 @@ test "device /oss/put chunked: an over-cap PART is refused with the same envelop
     try expectFailure(sent.resp.body, "QUOTA_EXCEEDED");
     try std.testing.expect(sent.consumed < cappedReadCeiling(uploadcap.limitFor(declared)));
 
-    // Reservation gone, nothing published. (What the refused part had already
-    // staged under `tmp/` is bounded by the cap and reclaimed by the startup
-    // `sweepTmp`: `ChunkIngest.abort` closes the fd without unlinking, unlike its
-    // single-shot sibling — a store-level asymmetry, noted with the review.)
+    // `ChunkIngest.abort` closes without unlinking; the startup `sweepTmp`
+    // reclaims what the refused part staged.
     try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
     try std.testing.expect(!f.files.blobs.has(&blobstore.md5HexOf(payload)));
 
-    // A later part of the same upload has nothing left to attach to.
     const again = try ossPut(ctx, &obuf, &dev_tok, &inner, "small", "?uploadId=abc123&totalChunks=3&partNumber=2");
     try std.testing.expectEqual(@as(u16, 404), again.resp.status);
 }
 
 test "device /oss/put chunked: the byte cap is per SESSION — N parts cannot each stage the whole budget" {
-    // THE HOLE THE PER-PART CAP LEFT. Every part was measured against
-    // `limitFor(declared)` on its own, and `totalChunks` is a number the CALLER
-    // puts in the query string — so a device could declare 100 KB and then send
-    // part after part, each one passing the cap, until the disk was full. The cap
-    // closed the single-shot hole and left the chunked one exactly as it was.
-    //
-    // Each part below is EXACTLY the declared file size: unimpeachable on its own,
-    // absurd in aggregate. That is what the session total is for.
+    // `totalChunks` is caller-supplied, so a per-part cap alone is unbounded in
+    // aggregate. Each part here is exactly the declared size.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -3334,25 +2969,20 @@ test "device /oss/put chunked: the byte cap is per SESSION — N parts cannot ea
     var reqbuf: [8192]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // Deliberately much larger than `slack_bytes`, so "it stopped reading near the
-    // remaining budget" and "it read the whole part" are numbers far apart.
+    // Much larger than `slack_bytes`, so "stopped near the remainder" and "read
+    // the whole part" are far apart.
     const declared: usize = 400_000;
     const inner = try applyUpload(ctx, &obuf, &reqbuf, &dev_tok, "flood.note", declared);
     const part = try filler(declared);
     defer gpa.free(part);
 
-    // Part 1 is within the session budget (`declared + slack`) and is accepted —
-    // the cap removes an attack, not the feature.
     {
         const sent = try ossPut(ctx, &obuf, &dev_tok, &inner, part, "?uploadId=floodid&totalChunks=9&partNumber=1");
         try std.testing.expectEqual(@as(u16, 200), sent.resp.status);
         try std.testing.expectEqual(@as(usize, 0), sent.resp.body.len); // empty-200 success
     }
 
-    // Part 2 is the same size and, under the per-part rule, equally acceptable.
-    // Against the SESSION's remaining budget it is not, and it is refused
-    // MID-STREAM — the server stops reading near the remainder rather than taking
-    // the whole part and refusing afterwards.
+    // Part 2 exceeds the session's remaining budget and is refused mid-stream.
     const remaining = uploadcap.limitFor(declared) - declared;
     {
         const sent = try ossPut(ctx, &obuf, &dev_tok, &inner, part, "?uploadId=floodid&totalChunks=9&partNumber=2");
@@ -3361,37 +2991,19 @@ test "device /oss/put chunked: the byte cap is per SESSION — N parts cannot ea
         try std.testing.expect(sent.consumed < cappedReadCeiling(remaining));
     }
 
-    // THE DURABLE, DISTINGUISHING FACT, and the one that needs no slack in it:
-    // what this session managed to put on disk is bounded by ONE budget, however
-    // many parts it send. Exactly `limitFor(declared)`, because the refused part's
-    // sink was capped at the REMAINDER before a byte of it was written — not at
-    // the whole figure again. Under the per-part rule these two parts alone stage
-    // ~800 KB, and part 3 would have been welcome to another 400 KB.
-    //
-    // Refusing only AFTER a part has landed (the plausible half-fix: keep the
-    // per-part sink limit, add the running total, check it at the end) also fails
-    // here — it bounds the accounting but not the disk, which is the thing a full
-    // SD card cares about. `ChunkIngest.abort` leaves what it staged for the
-    // startup `sweepTmp`, so the bytes are real until the next boot.
+    // Staged bytes are bounded by one budget: the refused part's sink was capped
+    // at the remainder. A check only after a part lands would bound accounting
+    // but not the disk.
     try std.testing.expect(try blobTempBytes(f) <= uploadcap.limitFor(declared));
 
-    // And the reservation is gone, so the upload cannot simply be continued.
     try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
     const again = try ossPut(ctx, &obuf, &dev_tok, &inner, "small", "?uploadId=floodid&totalChunks=9&partNumber=3");
     try std.testing.expectEqual(@as(u16, 404), again.resp.status);
 }
 
 test "device /oss/put chunked: re-sending a part is not charged twice" {
-    // THE WAY A RUNNING TOTAL GOES WRONG. A part's temp file is named
-    // deterministically (`tmp/<uploadId>_<n>`), so re-POSTing part 2 REPLACES it.
-    // A total that only ever added would bill the session for both copies and
-    // refuse a device that retried a part after a dropped connection — mid-sync,
-    // for doing exactly what a resilient client should. `stagedPartSize` is what
-    // gives the earlier copy back.
-    //
-    // The sizes are chosen so the double-charge is the only thing that can fail
-    // it: two parts fit the budget, three do not, and the third request here is a
-    // REPEAT of the second.
+    // Part temp files are `tmp/<uploadId>_<n>`, so re-POSTing a part replaces
+    // it; `stagedPartSize` must refund the earlier copy or a retry is refused.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -3419,17 +3031,13 @@ test "device /oss/put chunked: re-sending a part is not charged twice" {
         try std.testing.expectEqual(@as(usize, 0), sent.resp.body.len);
     }
 
-    // The retry: part 2 again, byte for byte. Accepted, because it replaces what
-    // part 2 already contributed rather than adding to it.
     {
         const sent = try ossPut(ctx, &obuf, &dev_tok, &inner, part, "?uploadId=retryid&totalChunks=3&partNumber=2");
         try std.testing.expectEqual(@as(u16, 200), sent.resp.status);
         try std.testing.expectEqual(@as(usize, 0), sent.resp.body.len);
     }
 
-    // The session survived it, and its running total still reads two parts — not
-    // three. That is the durable fact: the response above would look the same if
-    // the total had been left inflated and the refusal simply deferred.
+    // The running total still reads two parts, not three.
     try std.testing.expectEqual(@as(i64, 1), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
     try std.testing.expectEqual(
         @as(i64, @intCast(2 * part.len)),
@@ -3450,8 +3058,7 @@ test "oversized device numbers are rejected, not panicked (overflow guard)" {
     var reqbuf: [2048]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // upload/apply with size == i64max would overflow the quota math → rejected
-    // with QUOTA_EXCEEDED, never a panic that would kill the single-threaded server.
+    // size == i64max must not overflow the quota math and panic.
     {
         const body = "{\"path\":\"/NOTE/Note/x.note\",\"fileName\":\"x.note\",\"equipmentNo\":\"SN1\",\"size\":9223372036854775807}";
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/3/files/upload/apply", &dev_tok, "SN1", body);
@@ -3459,8 +3066,6 @@ test "oversized device numbers are rejected, not panicked (overflow guard)" {
         try expectFailure(resp.body, "QUOTA_EXCEEDED");
     }
 
-    // bindEquipment with a totalCapacity near i64max would overflow kb*1024 → it
-    // must fall back to the household default, not panic.
     {
         const body = "{\"equipmentNo\":\"SN1\",\"name\":\"Nomad\",\"totalCapacity\":\"9223372036854775000\"}";
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/terminal/user/bindEquipment", &dev_tok, "SN1", body);
@@ -3478,7 +3083,6 @@ test "public pre-auth unlink is IP rate-limited (429 after the burst)" {
     var reqbuf: [512]u8 = undefined;
     const body = "{\"equipmentNo\":\"SN1\"}";
 
-    // The route allows 20/min per IP. The first 20 pass (200); the 21st is 429.
     var i: usize = 0;
     while (i < 20) : (i += 1) {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/terminal/equipment/unlink", &.{.{ .name = "content-type", .value = "application/json" }}, body), &obuf);
@@ -3488,10 +3092,7 @@ test "public pre-auth unlink is IP rate-limited (429 after the burst)" {
     try std.testing.expectEqual(@as(u16, 429), resp.status);
 }
 
-// ---- create_folder_v2 (the device's folder create) ----
-
-/// How many live rows a user has under `name` — the check that a retried create
-/// converged on one row instead of quietly forking the tree.
+/// Live rows a user has under `name`: a retried create must converge on one.
 fn countNamed(f: *Fixture, user_id: u64, name: []const u8) !i64 {
     var s = try f.db.prepare("SELECT COUNT(*) FROM files WHERE user_id = ?1 AND name = ?2 AND deleted = 0;");
     defer s.finalize();
@@ -3514,7 +3115,7 @@ test "create_folder_v2: a device folder reaches the server without a file in it"
     var reqbuf: [2048]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // The exact wire shape the Nomad sent: autorename present and false.
+    // The Nomad's wire shape.
     const body = "{\"equipmentNo\":\"SN1\",\"autorename\":false,\"path\":\"/NOTE/Note/Trip\"}";
     const id = blk: {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/create_folder_v2", &dev_tok, "SN1", body);
@@ -3533,9 +3134,6 @@ test "create_folder_v2: a device folder reaches the server without a file in it"
         break :blk try std.fmt.parseInt(u64, p.value.metadata.id, 10);
     };
 
-    // THE POINT of the endpoint: the folder is in the tree with nothing in it,
-    // and the device's own enumeration can see it. Before this route existed a
-    // folder appeared only once a file was uploaded into it.
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/list_folder", &dev_tok, "SN1", "{\"path\":\"/\",\"recursive\":true}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -3545,8 +3143,7 @@ test "create_folder_v2: a device folder reaches the server without a file in it"
     defer gpa.free(entry.name);
     try std.testing.expect(entry.is_folder);
 
-    // The device retries. `autorename: false` must converge on the same row
-    // rather than fail or create a second folder.
+    // A retry with `autorename: false` converges on the same row.
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/create_folder_v2", &dev_tok, "SN1", body);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -3559,7 +3156,6 @@ test "create_folder_v2: a device folder reaches the server without a file in it"
     }
     try std.testing.expectEqual(@as(i64, 1), try countNamed(f, alice, "Trip")); // not forked
 
-    // A missing path settles rather than 400s — see the handler's judgement call.
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/create_folder_v2", &dev_tok, "SN1", "{\"equipmentNo\":\"SN1\"}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -3586,24 +3182,19 @@ test "create_folder_v2 is device-scoped and cannot reach another user's tree" {
     const a_resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/create_folder_v2", &a_tok, "SN1", body);
     try std.testing.expectEqual(@as(u16, 200), a_resp.status);
 
-    // Bob creates the SAME path. It must be his own folder, not a conflict with
-    // Alice's and not a way to learn hers exists.
+    // Same path for Bob is his own folder, not a conflict or an oracle.
     const b_tok = try deviceLogin(ctx, &obuf, &reqbuf, "bob", "bpass111", "SN2");
     const b_resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/create_folder_v2", &b_tok, "SN2", body);
     try std.testing.expectEqual(@as(u16, 200), b_resp.status);
     try std.testing.expect(std.mem.indexOf(u8, b_resp.body, "\"name\":\"Shared\"") != null);
 
-    // Two distinct rows, one per owner.
     const a_id = (try f.files.resolvePath(alice, "/NOTE/Shared")).?;
     const b_id = (try f.files.resolvePath(bob, "/NOTE/Shared")).?;
     try std.testing.expect(a_id != b_id);
     try std.testing.expect((try f.files.get(bob, a_id)) == null);
 }
 
-// ---- delete_folder_v3 (the device's only delete) ----
-
-/// `SELECT deleted, deleted_at FROM files WHERE id = ?` — the tombstone as the
-/// row itself records it, not as any read path reports it.
+/// The tombstone as the row records it, not as any read path reports it.
 const Tombstone = struct { deleted: bool, deleted_at: i64 };
 fn tombstoneOf(f: *Fixture, id: u64) !Tombstone {
     var s = try f.db.prepare("SELECT deleted, COALESCE(deleted_at, 0) FROM files WHERE id = ?1;");
@@ -3621,31 +3212,10 @@ fn countTrashed(f: *Fixture, user_id: u64) !i64 {
     return s.columnInt(0);
 }
 
-/// How many of `user_id`'s OWN live files `q` is findable in.
-///
-/// §6 steps 6 and 7 deleted every server-side read that could
-/// answer this: step 6 took the library-wide one, step 7 took the five in-document
-/// ones and `search/query.zig` with them. **The server interprets no query at
-/// all now**, so there is nothing left to ask — which is why this reads the
-/// TRANSCRIPT rows directly rather than calling anything.
-///
-/// A plain case-folded substring over `note_page_index.text`, joined to `files`
-/// the way every deleted read joined it. Deliberately NOT a tokenizer:
-/// re-deriving `buildMatch`'s expression here would be re-implementing a deleted
-/// function to keep its tests alive. Every caller below searches a single ASCII
-/// word, which a substring answers identically.
-///
-/// **`kind = 0` is why this still works after step 8.** The rows it reads are
-/// `.note` page transcripts, which are RENDERING state and survive; the `.txt`
-/// and `.pdf` rows that used to sit beside them went with the index in §6 step 8.
-/// Every caller below seeds a `.note`.
-///
-/// The `files` join is what still carries the meaning: it is the same ownership
-/// + `deleted = 0` boundary the deleted reads carried, and it is what keeps
-/// "0 hits after a delete" and "1 hit after a restore" saying what they said.
-/// Note that it also means this follows `files.md5` — a superseded version's
-/// rows survive in `note_page_index` but no live row points at them, which is
-/// exactly the H2 "current-only" property the FTS had.
+/// How many of `user_id`'s own live files contain `q`, read straight from
+/// `note_page_index.text` (the server runs no queries). A case-folded substring,
+/// not a tokenizer; only `.note` rows (`kind = 0`) remain. The `files` join
+/// carries ownership, `deleted = 0`, and current-only via `files.md5`.
 fn searchHits(f: *Fixture, user_id: u64, q: []const u8) !usize {
     var s = try f.db.prepare(
         "SELECT COUNT(DISTINCT f.id) FROM files f " ++
@@ -3673,8 +3243,6 @@ test "device delete_folder_v3 soft-deletes: leaves listings and search, but the 
     var reqbuf: [2048]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // A real recognized note, so the transcript side of "leaves search" is not a
-    // stub: there is text to stop finding.
     const rec_id = try seedRecognizedNote(f, alice, "rec.note", &.{ "Zebra", "Quokka" });
     const md5 = blk: {
         const e = (try f.files.get(alice, rec_id)).?;
@@ -3688,16 +3256,13 @@ test "device delete_folder_v3 soft-deletes: leaves listings and search, but the 
     try std.testing.expect(size_before > 0);
     try std.testing.expectEqual(@as(usize, 1), try searchHits(f, alice, "Zebra"));
 
-    // --- the delete, in the exact wire shape the Nomad sent ---
     var body_buf: [128]u8 = undefined;
     const del_body = try std.fmt.bufPrint(&body_buf, "{{\"equipmentNo\":\"SN1\",\"id\":\"{d}\"}}", .{rec_id});
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/3/files/delete_folder_v3", &dev_tok, "SN1", del_body);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
 
-        // The SERIALIZED body is pinned, not just the parsed struct: the firmware
-        // matched these literal names, and the capture stub's canned "note.note"
-        // must have been replaced by the REAL name and the REAL tag.
+        // Pinned serialized: the firmware matches these literal names.
         var want_buf: [256]u8 = undefined;
         const want = try std.fmt.bufPrint(
             &want_buf,
@@ -3707,13 +3272,11 @@ test "device delete_folder_v3 soft-deletes: leaves listings and search, but the 
         try std.testing.expectEqualStrings(want, resp.body);
     }
 
-    // It is a tombstone, stamped for retention.
     const t = try tombstoneOf(f, rec_id);
     try std.testing.expect(t.deleted);
     try std.testing.expect(t.deleted_at > 0);
 
-    // Gone from the device's own enumeration — this is what stops the zombie
-    // re-download — and gone from search and from the live read path.
+    // Gone from the device's enumeration (stops the zombie re-download).
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/list_folder", &dev_tok, "SN1", "{\"path\":\"/\",\"recursive\":true}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -3722,13 +3285,9 @@ test "device delete_folder_v3 soft-deletes: leaves listings and search, but the 
     try std.testing.expectEqual(@as(usize, 0), try searchHits(f, alice, "Zebra"));
     try std.testing.expect((try f.files.get(alice, rec_id)) == null);
 
-    // QUOTA IS NOT REFUNDED — a recorded decision, not an oversight. The bytes
-    // still occupy disk until purge; refunding here would let a user exceed real
-    // usage by cycling the bin.
+    // Quota is not refunded on trash: the bytes stay on disk until purge.
     try std.testing.expectEqual(size_before, try usedBytes(f, alice));
 
-    // THE POINT OF THE BIN: the blob was never released, so the row restores to
-    // bytes that are actually still readable.
     try std.testing.expect(f.files.blobs.has(&md5));
     (try f.files.restore(alice, rec_id)).deinit(gpa);
 
@@ -3742,8 +3301,7 @@ test "device delete_folder_v3 soft-deletes: leaves listings and search, but the 
     try std.testing.expectEqual(@as(usize, @intCast(want_bytes)), read.len);
     try std.testing.expectEqualStrings(&md5, &blobstore.md5HexOf(read)); // the ORIGINAL bytes
 
-    // Restore is a flag flip, not a re-index: the md5-keyed rows survived, so the
-    // note is searchable again with no re-parse.
+    // Restore is a flag flip; the md5-keyed rows survived.
     try std.testing.expectEqual(@as(usize, 1), try searchHits(f, alice, "Zebra"));
 }
 
@@ -3760,7 +3318,6 @@ test "device delete_folder_v3: an idempotent retry succeeds without restarting t
     var reqbuf: [2048]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // The capture's shape exactly: a folder holding two notes.
     const dir = try f.files.createFolder(alice, null, "Dir");
     defer gpa.free(dir.name);
     const a_id = try putSeed(f, alice, dir.id, "a.note", "aaa");
@@ -3774,7 +3331,7 @@ test "device delete_folder_v3: an idempotent retry succeeds without restarting t
         }
     };
 
-    // seq 79-81: one request per entity, CHILDREN FIRST, parent last.
+    // The device sends one request per entity, children first, parent last.
     {
         const r1 = try del.go(ctx, &obuf, &reqbuf, &body_buf, &dev_tok, a_id);
         try std.testing.expectEqual(@as(u16, 200), r1.status);
@@ -3784,7 +3341,6 @@ test "device delete_folder_v3: an idempotent retry succeeds without restarting t
         try expectSuccess(r2.body);
         const r3 = try del.go(ctx, &obuf, &reqbuf, &body_buf, &dev_tok, dir.id);
         try std.testing.expectEqual(@as(u16, 200), r3.status);
-        // The parent arrives with its children ALREADY gone, and is still a folder.
         var want_buf: [256]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(
             &want_buf,
@@ -3798,8 +3354,6 @@ test "device delete_folder_v3: an idempotent retry succeeds without restarting t
         try std.testing.expectEqualStrings("{\"success\":true,\"equipmentNo\":\"SN1\",\"entries\":[]}", resp.body);
     }
 
-    // Backdate the tombstones to a distinct, recognizable instant so a restarted
-    // retention clock cannot hide behind a coarse test clock.
     {
         var s = try f.db.prepare("UPDATE files SET deleted_at = 1000 WHERE user_id = ?1 AND deleted = 1;");
         defer s.finalize();
@@ -3808,20 +3362,18 @@ test "device delete_folder_v3: an idempotent retry succeeds without restarting t
     }
     const ver_before = try f.files.syncVersion(alice);
 
-    // THE RETRY. The device resends; `Files.get` would 404 these rows (it hardcodes
-    // deleted = 0), which is exactly why the handler looks them up state-blind.
+    // A retry: `Files.get` hardcodes deleted = 0, so the handler looks up
+    // state-blind.
     for ([_]u64{ a_id, dir.id }) |id| {
         const r = try del.go(ctx, &obuf, &reqbuf, &body_buf, &dev_tok, id);
         try std.testing.expectEqual(@as(u16, 200), r.status);
         try expectSuccess(r.body);
     }
     try std.testing.expectEqual(@as(i64, 3), try countTrashed(f, alice));
-    // The retention clock did NOT restart — an entry cannot be kept alive forever
-    // by a device that keeps retrying.
+    // The retention clock does not restart on retry.
     try std.testing.expectEqual(@as(i64, 1000), (try tombstoneOf(f, a_id)).deleted_at);
     try std.testing.expectEqual(@as(i64, 1000), (try tombstoneOf(f, dir.id)).deleted_at);
     try std.testing.expectEqual(@as(i64, 1000), (try tombstoneOf(f, b_id)).deleted_at);
-    // And a no-op retry does not invalidate every cached listing in the browser.
     try std.testing.expectEqual(ver_before, try f.files.syncVersion(alice));
 }
 
@@ -3841,9 +3393,7 @@ test "device delete_folder_v3: scope enforced, and a foreign id is indistinguish
 
     const bob_id = try putSeed(f, bob, null, "bob.note", "bob bytes");
 
-    // Bob's id, and an id that has never existed, must produce the SAME response
-    // — byte for byte. Any difference makes the endpoint an existence oracle over
-    // another user's id space.
+    // Bob's id and a never-existing id must answer byte-identically.
     var body_buf: [128]u8 = undefined;
     var foreign_body_buf: [128]u8 = undefined;
     const missing = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/3/files/delete_folder_v3", &dev_tok, "SN1", try std.fmt.bufPrint(&body_buf, "{{\"equipmentNo\":\"SN1\",\"id\":\"{d}\"}}", .{@as(u64, 999999)}));
@@ -3856,11 +3406,8 @@ test "device delete_folder_v3: scope enforced, and a foreign id is indistinguish
     try std.testing.expectEqual(@as(u16, 200), foreign.status);
     try std.testing.expectEqualStrings(missing_body[0..missing_len], foreign.body);
 
-    // DELIBERATE: an unknown id answers success with `metadata` OMITTED — an
-    // idempotent delete. A failure would risk the device retrying forever against
-    // a state it can never reach, which is the bug this endpoint exists to fix.
+    // Unknown id: success with `metadata` omitted, or the device retries forever.
     try std.testing.expectEqualStrings("{\"success\":true,\"equipmentNo\":\"SN1\"}", foreign.body);
-    // And of course Bob's file is untouched.
     {
         const still = (try f.files.get(bob, bob_id)).?;
         defer gpa.free(still.name);
@@ -3869,19 +3416,15 @@ test "device delete_folder_v3: scope enforced, and a foreign id is indistinguish
     }
     try std.testing.expectEqual(@as(i64, 0), try countTrashed(f, bob));
 
-    // Unauthenticated → 401.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/file/3/files/delete_folder_v3", &.{.{ .name = "content-type", .value = "application/json" }}, "{\"id\":\"1\"}"), &obuf);
         try std.testing.expectEqual(@as(u16, 401), resp.status);
     }
-    // A control-plane session (cookie) crossing into this .device route → 403.
     {
         const web_tok = try onboardWeb(ctx, "admin", "temp0000", "adminpw1");
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/file/3/files/delete_folder_v3", &web_tok, "{\"id\":\"1\"}", 403);
     }
 }
-
-// ---- move_v3 (the device's move/rename) ----
 
 test "device move_v3: renames + relocates a note, provisioning the destination parent, and it stays searchable" {
     const f = try Fixture.init();
@@ -3896,12 +3439,11 @@ test "device move_v3: renames + relocates a note, provisioning the destination p
     var reqbuf: [2048]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // A real recognized note at the root, so "stays searchable" is not a stub.
     const id = try seedRecognizedNote(f, alice, "note.note", &.{ "Zebra", "Quokka" });
     try std.testing.expectEqual(@as(usize, 1), try searchHits(f, alice, "Zebra"));
 
-    // The EXACT captured wire shape: a full destination path INCLUDING the new
-    // filename, into a parent that does not exist yet, autorename false.
+    // Captured shape: full destination path including the new filename, into a
+    // parent that does not exist yet, autorename false.
     var body_buf: [256]u8 = undefined;
     const body = try std.fmt.bufPrint(
         &body_buf,
@@ -3921,14 +3463,11 @@ test "device move_v3: renames + relocates a note, provisioning the destination p
         try std.testing.expectEqualStrings("SN1", p.value.equipmentNo);
         try std.testing.expectEqualStrings("file", p.value.entriesVO.tag);
         try std.testing.expectEqualStrings("custom_template.note", p.value.entriesVO.name);
-        // The entry AFTER the move: its real, authoritative destination path.
         try std.testing.expectEqualStrings("/NOTE/Note/corpus/note/custom_template.note", p.value.entriesVO.path_display);
         try std.testing.expectEqualStrings("/NOTE/Note/corpus/note", p.value.entriesVO.parent_path);
         try std.testing.expectEqual(id, try std.fmt.parseInt(u64, p.value.entriesVO.id, 10));
     }
 
-    // The destination parent chain was PROVISIONED as folders, and the row moved
-    // there — the device's own enumeration sees it at the new path, not the old.
     try std.testing.expect((try f.files.resolvePath(alice, "/NOTE/Note/corpus/note")) != null);
     try std.testing.expectEqual(@as(?u64, id), try f.files.resolvePath(alice, "/NOTE/Note/corpus/note/custom_template.note"));
     try std.testing.expectEqual(@as(?u64, null), try f.files.resolvePath(alice, "/note.note"));
@@ -3939,7 +3478,6 @@ test "device move_v3: renames + relocates a note, provisioning the destination p
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"name\":\"note.note\"") == null);
     }
 
-    // The blob-keyed index never moved, so the renamed note is STILL searchable.
     try std.testing.expectEqual(@as(usize, 1), try searchHits(f, alice, "Zebra"));
 }
 
@@ -3959,8 +3497,8 @@ test "device move_v3 NEVER 404s: unknown and foreign ids settle as idempotent su
 
     const bob_id = try putSeed(f, bob, null, "bob.note", "bob bytes");
 
-    // An unknown id and Bob's id must produce the SAME settled body — a 404 here
-    // aborts the device's sync, and any difference is a cross-account oracle.
+    // Same settled body for unknown and foreign ids: a 404 aborts the device's
+    // sync, and a difference is an oracle.
     var mbuf: [200]u8 = undefined;
     var fbuf: [200]u8 = undefined;
     const missing = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/3/files/move_v3", &dev_tok, "SN1", try std.fmt.bufPrint(&mbuf, "{{\"id\":\"{d}\",\"to_path\":\"/x/y.note\",\"autorename\":false,\"equipmentNo\":\"SN1\"}}", .{@as(u64, 999999)}));
@@ -3971,7 +3509,6 @@ test "device move_v3 NEVER 404s: unknown and foreign ids settle as idempotent su
     try std.testing.expectEqual(@as(u16, 200), foreign.status);
     try std.testing.expectEqualStrings(missing.body, foreign.body);
 
-    // Bob's file did not move, and no phantom parent was created in his tree.
     {
         const still = (try f.files.get(bob, bob_id)).?;
         defer gpa.free(still.name);
@@ -3981,7 +3518,6 @@ test "device move_v3 NEVER 404s: unknown and foreign ids settle as idempotent su
     }
     try std.testing.expectEqual(@as(?u64, null), try f.files.resolvePath(bob, "/x"));
 
-    // A control-plane cookie crossing into this .device route → 403; unauth → 401.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/file/3/files/move_v3", &.{.{ .name = "content-type", .value = "application/json" }}, "{\"id\":\"1\",\"to_path\":\"/a.note\"}"), &obuf);
         try std.testing.expectEqual(@as(u16, 401), resp.status);
@@ -4005,7 +3541,6 @@ test "device move_v3: autorename settles a destination-name conflict and reports
     var reqbuf: [2048]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // Two notes at the root; move one ONTO the other's name with autorename true.
     const keep = try putSeed(f, alice, null, "keep.note", "kkkk");
     const mover = try putSeed(f, alice, null, "mover.note", "mmmm");
     _ = keep;
@@ -4019,14 +3554,11 @@ test "device move_v3: autorename settles a destination-name conflict and reports
         entriesVO: struct { name: []const u8, path_display: []const u8 },
     }, gpa, resp.body, .{ .ignore_unknown_fields = true });
     defer p.deinit();
-    // The server's autorename choice, learned by the device from entriesVO.
     try std.testing.expectEqualStrings("keep (2).note", p.value.entriesVO.name);
     try std.testing.expectEqualStrings("/keep (2).note", p.value.entriesVO.path_display);
     try std.testing.expectEqual(@as(?u64, mover), try f.files.resolvePath(alice, "/keep (2).note"));
     try std.testing.expectEqual(@as(i64, 1), try countNamed(f, alice, "keep.note")); // the occupant intact
 }
-
-// ---- copy_v3 (the device's copy — conflict resolution) ----
 
 test "device copy_v3: duplicates a note sharing its blob (no extra quota), both stay searchable" {
     const f = try Fixture.init();
@@ -4045,8 +3577,6 @@ test "device copy_v3: duplicates a note sharing its blob (no extra quota), both 
     try std.testing.expectEqual(@as(usize, 1), try searchHits(f, alice, "Zebra"));
     const used_before = (try f.files.capacity(alice)).used;
 
-    // The EXACT conflict-resolution wire shape: a full destination path into a
-    // parent that does not exist yet, autorename false (the device chose the name).
     var body_buf: [256]u8 = undefined;
     const body = try std.fmt.bufPrint(
         &body_buf,
@@ -4067,19 +3597,15 @@ test "device copy_v3: duplicates a note sharing its blob (no extra quota), both 
         try std.testing.expectEqualStrings("file", p.value.entriesVO.tag);
         try std.testing.expectEqualStrings("note_CONFLICT_20260726151728080.note", p.value.entriesVO.name);
         try std.testing.expectEqualStrings("/NOTE/Note/note_CONFLICT_20260726151728080.note", p.value.entriesVO.path_display);
-        // The COPY is a NEW row, not the source — a distinct id.
         try std.testing.expect(id != try std.fmt.parseInt(u64, p.value.entriesVO.id, 10));
     }
 
-    // The SOURCE is untouched and the COPY exists at the destination.
     try std.testing.expectEqual(@as(?u64, id), try f.files.resolvePath(alice, "/note.note"));
     const copy_id = (try f.files.resolvePath(alice, "/NOTE/Note/note_CONFLICT_20260726151728080.note")).?;
     try std.testing.expect(copy_id != id);
 
-    // Content-addressed: the copy shares the source's blob, so it added NO bytes.
     try std.testing.expectEqual(used_before, (try f.files.capacity(alice)).used);
 
-    // The blob-keyed index is shared, so BOTH notes are searchable — one hit per row.
     try std.testing.expectEqual(@as(usize, 2), try searchHits(f, alice, "Zebra"));
 }
 
@@ -4099,8 +3625,6 @@ test "device copy_v3 NEVER 404s: unknown and foreign ids settle as idempotent su
 
     const bob_id = try putSeed(f, bob, null, "bob.note", "bob bytes");
 
-    // An unknown id and Bob's id must produce the SAME settled body — a 404 aborts
-    // the device's sync, and any difference is a cross-account existence oracle.
     var mbuf: [200]u8 = undefined;
     var fbuf: [200]u8 = undefined;
     const missing = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/3/files/copy_v3", &dev_tok, "SN1", try std.fmt.bufPrint(&mbuf, "{{\"id\":\"{d}\",\"to_path\":\"/x/y.note\",\"autorename\":false,\"equipmentNo\":\"SN1\"}}", .{@as(u64, 999999)}));
@@ -4111,11 +3635,9 @@ test "device copy_v3 NEVER 404s: unknown and foreign ids settle as idempotent su
     try std.testing.expectEqual(@as(u16, 200), foreign.status);
     try std.testing.expectEqualStrings(missing.body, foreign.body);
 
-    // Bob's file was not copied, and no phantom parent was created in his tree.
     try std.testing.expectEqual(@as(i64, 1), try countNamed(f, bob, "bob.note"));
     try std.testing.expectEqual(@as(?u64, null), try f.files.resolvePath(bob, "/x"));
 
-    // A control-plane cookie crossing into this .device route → 403; unauth → 401.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/file/3/files/copy_v3", &.{.{ .name = "content-type", .value = "application/json" }}, "{\"id\":\"1\",\"to_path\":\"/a.note\"}"), &obuf);
         try std.testing.expectEqual(@as(u16, 401), resp.status);
@@ -4139,8 +3661,6 @@ test "device copy_v3: autorename settles a destination-name conflict and reports
     var reqbuf: [2048]u8 = undefined;
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
 
-    // Copy a note ONTO an occupied name with autorename true: the occupant is kept
-    // and the copy takes the next free suffix.
     const keep = try putSeed(f, alice, null, "keep.note", "kkkk");
     const src = try putSeed(f, alice, null, "src.note", "ssss");
     _ = keep;
@@ -4156,7 +3676,6 @@ test "device copy_v3: autorename settles a destination-name conflict and reports
     defer p.deinit();
     try std.testing.expectEqualStrings("keep (2).note", p.value.entriesVO.name);
     try std.testing.expectEqualStrings("/keep (2).note", p.value.entriesVO.path_display);
-    // The copy landed at the renamed path; the occupant and the source both intact.
     try std.testing.expect((try f.files.resolvePath(alice, "/keep (2).note")) != null);
     try std.testing.expectEqual(@as(i64, 1), try countNamed(f, alice, "keep.note"));
     try std.testing.expectEqual(@as(?u64, src), try f.files.resolvePath(alice, "/src.note"));
@@ -4181,20 +3700,16 @@ test "device copy_v3: a name conflict under autorename:false never clobbers the 
     var body_buf: [200]u8 = undefined;
     const body = try std.fmt.bufPrint(&body_buf, "{{\"id\":\"{d}\",\"to_path\":\"/keep.note\",\"autorename\":false,\"equipmentNo\":\"SN1\"}}", .{src});
     const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/3/files/copy_v3", &dev_tok, "SN1", body);
-    // Settled success, no entry — and the occupant's bytes are untouched (never lossy).
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expectEqualStrings("{\"success\":true,\"equipmentNo\":\"SN1\"}", resp.body);
     _ = keep;
-    // Exactly one "keep.note" (the occupant), and the source is still present —
-    // nothing was clobbered and no copy was written.
     try std.testing.expectEqual(@as(i64, 1), try countNamed(f, alice, "keep.note"));
     try std.testing.expectEqual(@as(?u64, src), try f.files.resolvePath(alice, "/src.note"));
 }
 
-// ---- Web-face browse/read endpoints ----
+// ---- web-face browse/read endpoints ----
 
-/// Serializes a synthetic `.note` (one main layer per page) and stores it as a
-/// file under `parent` for `user_id`; returns the new file id.
+/// Stores a synthetic `.note` (one main layer per page); returns the file id.
 fn seedNoteHttp(f: *Fixture, user_id: u64, parent: ?u64, name: []const u8, page_bitmaps: []const []const u8) !u64 {
     const nb = @import("note_builder");
     var layers = try gpa.alloc([1]nb.LayerSpec, page_bitmaps.len);
@@ -4224,24 +3739,19 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
 
-    // A full control-plane session for the admin user; and a device session to prove the
-    // .controlplane routes reject a device token.
     const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
 
-    // Seed a small tree: a folder "Work", a root note, and a 2-page note in Work.
     const work = try f.files.createFolder(admin, null, "Work");
     defer gpa.free(work.name);
     const top_id = try seedNoteHttp(f, admin, null, "top.note", &.{"AAAA"});
     _ = try seedNoteHttp(f, admin, work.id, "deep.note", &.{ "AAAA", "BBBBBB" });
 
-    // --- auth: no session → 401; device token → 403 (cross-face) ---
     {
         const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/tree", &.{}, "");
         const resp = try roundtrip(ctx, req, &obuf);
         try std.testing.expectEqual(@as(u16, 401), resp.status);
     }
     {
-        // A device session must not reach a .controlplane route.
         const alice = (try f.svc.createUser(admin, "alice", false)).id;
         _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
         const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "alice", "apass111", "SN1");
@@ -4252,7 +3762,6 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
         try std.testing.expectEqual(@as(u16, 403), resp.status);
     }
 
-    // --- /api/controlplane/tree (root) ---
     var work_id_str: [20]u8 = undefined;
     var work_id_len: usize = 0;
     {
@@ -4276,11 +3785,9 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
         try std.testing.expect(p.value.folderId == null);
         try std.testing.expectEqual(@as(usize, 0), p.value.path.len);
         try std.testing.expectEqual(@as(usize, 2), p.value.entries.len);
-        // Folders sort first.
         try std.testing.expectEqualStrings("folder", p.value.entries[0].kind);
         try std.testing.expectEqualStrings("Work", p.value.entries[0].name);
-        // A folder has no shape to freeze — and absent means OMITTED, never
-        // `"thumbAspect":null`, which a client would read as a third state.
+        // Absent is omitted, never `"thumbAspect":null`.
         try std.testing.expect(p.value.entries[0].thumbAspect == null);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"thumbAspect\":null") == null);
         const n = p.value.entries[1];
@@ -4289,7 +3796,6 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
         try std.testing.expectEqual(@as(i64, 1), n.pageCount.?);
         try std.testing.expectEqual(@as(usize, 32), n.firstPage.?.hash.len);
         try std.testing.expectEqual(@as(i64, 1404), n.firstPage.?.width);
-        // The coverless note's aspect: page 0's effective dims, on the listing.
         try std.testing.expectEqual(@as(i64, 1404), n.thumbAspect.?.w);
         try std.testing.expectEqual(@as(i64, 1872), n.thumbAspect.?.h);
         try std.testing.expect(p.value.syncVersion > 0);
@@ -4297,7 +3803,6 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
         work_id_len = p.value.entries[0].id.len;
     }
 
-    // --- /api/controlplane/tree?parent={workId} → breadcrumb + the nested note ---
     {
         var pbuf: [64]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/tree?parent={s}", .{work_id_str[0..work_id_len]});
@@ -4316,7 +3821,6 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
         try std.testing.expectEqual(@as(i64, 2), p.value.entries[0].pageCount.?);
     }
 
-    // --- /api/controlplane/note/{id} → the full page list; capture page 0's hash ---
     var page0_hash: [32]u8 = undefined;
     {
         var pbuf: [64]u8 = undefined;
@@ -4336,13 +3840,11 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
         @memcpy(&page0_hash, p.value.pages[0].hash);
     }
 
-    // A missing note id → 404 NOT_FOUND.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/file/metadata/99999", &web_tok, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
 
-    // --- /note/{id}/page/0?v={hash} → 200, SNPG payload, immutable caching ---
     {
         var pbuf: [96]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0?v={s}", .{ top_id, page0_hash[0..] });
@@ -4354,14 +3856,12 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
         try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "etag:") != null);
     }
 
-    // A stale/wrong `?v=` → 404 (client should refetch the note metadata).
     {
         var pbuf: [96]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0?v={s}", .{ top_id, "0" ** 32 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
-    // An out-of-range page → 404.
     {
         var pbuf: [96]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/9?v={s}", .{ top_id, page0_hash[0..] });
@@ -4369,7 +3869,6 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
 
-    // --- /api/controlplane/events → a one-shot SSE frame carrying the current version ---
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/events", &web_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -4379,8 +3878,7 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
     }
 }
 
-/// Seeds a one-page `.note` whose page carries finished recognition holding
-/// `labels`, so the OCR-search path has something real to find.
+/// A one-page `.note` with finished recognition holding `labels`.
 fn seedRecognizedNote(f: *Fixture, user_id: u64, name: []const u8, labels: []const []const u8) !u64 {
     return seedRecognizedElements(f, user_id, name, "N6", blk: {
         const nb = @import("note_builder");
@@ -4390,12 +3888,8 @@ fn seedRecognizedNote(f: *Fixture, user_id: u64, name: []const u8, labels: []con
     }, true);
 }
 
-/// A recognized note with full control over `APPLY_EQUIPMENT` and the per-word
-/// boxes. `equipment` may be null to seed a note whose hardware we have never
-/// measured — the case where the mm→px scale must come back absent.
-///
-/// `owns_elements` frees the slice for the shorthand above; a caller passing a
-/// literal keeps ownership.
+/// A recognized note with explicit `APPLY_EQUIPMENT` (null = unmeasured
+/// hardware) and per-word boxes. `owns_elements` frees the slice.
 fn seedRecognizedElements(
     f: *Fixture,
     user_id: u64,
@@ -4426,8 +3920,8 @@ fn seedRecognizedElements(
     return e.id;
 }
 
-/// A note whose page 0 was rasterised from an imported PDF template and kept
-/// that page's links (`note-format.md` §14), page 1 an ordinary page with none.
+/// Page 0 rasterised from a PDF template with its links (`note-format.md`
+/// §14); page 1 has none.
 fn seedLinkedNote(f: *Fixture, user_id: u64, name: []const u8) !u64 {
     const nb = @import("note_builder");
     const bytes = try nb.serialize(gpa, .{ .pages = &.{
@@ -4464,9 +3958,7 @@ test "control-plane page links: raw VO, versioned by linksHash, revalidated, 404
     const id = try seedLinkedNote(f, admin, "planner.note");
     const plain_id = try seedNoteHttp(f, admin, null, "plain.note", &.{"AAAA"});
 
-    // --- the page list carries `linksHash` for the page that has links, and
-    //     OMITS it everywhere else. That omission is what stops the reader from
-    //     asking about pages that have nothing — which is nearly all of them.
+    // `linksHash` is omitted on pages without links, so the reader never asks.
     var links_hash: [32]u8 = undefined;
     {
         var pbuf: [96]u8 = undefined;
@@ -4489,14 +3981,12 @@ test "control-plane page links: raw VO, versioned by linksHash, revalidated, 404
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "linksHash") == null);
     }
 
-    // --- the happy path: `{ links: [...] }`, no `{success}` envelope, revalidated.
     {
         var pbuf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/links?v={s}", .{ id, links_hash[0..] });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
-        // Serialised from a struct, so `?v=` versions its content and not its
-        // shape — the rule `/text` learned the hard way.
+        // Struct-serialised: `?v=` versions content, not shape, so no-cache.
         try expectHeaderContains(resp.head, "cache-control: no-cache");
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "immutable") == null);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "success") == null);
@@ -4505,18 +3995,16 @@ test "control-plane page links: raw VO, versioned by linksHash, revalidated, 404
             links: []const struct { x: f64, y: f64, w: f64, h: f64, page: i64, uri: []const u8 },
         }, gpa, resp.body, .{});
         defer p.deinit();
-        // The `javascript:` record never crossed the wire: the allowlist is
-        // applied server-side too, because the exporter reads this endpoint.
+        // The `javascript:` record is filtered server-side too (the exporter
+        // reads this endpoint).
         try std.testing.expectEqual(@as(usize, 2), p.value.links.len);
-        // 1-based page 2 → index 1; `none` → external, spelled -1.
+        // 1-based page 2 is index 1; `none` is external, spelled -1.
         try std.testing.expectEqual(@as(i64, 1), p.value.links[0].page);
         try std.testing.expectEqual(@as(f64, 901), p.value.links[0].x);
         try std.testing.expectEqual(@as(i64, -1), p.value.links[1].page);
         try std.testing.expectEqualStrings("https://onplanners.com/g?a=1,2", p.value.links[1].uri);
     }
 
-    // --- 404, one rule, four ways in: a stale version, a page with no link
-    //     block, an out-of-range page, and no such note.
     const stale = "0" ** 32;
     const cases = [_]struct { id: u64, page: []const u8, v: []const u8 }{
         .{ .id = id, .page = "0", .v = stale },
@@ -4531,7 +4019,6 @@ test "control-plane page links: raw VO, versioned by linksHash, revalidated, 404
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
-    // A missing `?v=` is the same stale case, not a 400.
     {
         var pbuf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/links", .{id});
@@ -4539,7 +4026,6 @@ test "control-plane page links: raw VO, versioned by linksHash, revalidated, 404
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
 
-    // --- scope: no session → 401; a device token → 403 (cross-face).
     {
         var pbuf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/links?v={s}", .{ id, links_hash[0..] });
@@ -4556,8 +4042,8 @@ test "control-plane page links: raw VO, versioned by linksHash, revalidated, 404
         try std.testing.expectEqual(@as(u16, 403), resp.status);
     }
 
-    // --- ownership: the row is keyed by blob md5 and shared by dedup, so a
-    //     second account holding byte-identical content must not reach this one.
+    // The row is keyed by blob md5 and shared by dedup; another account with
+    // identical bytes must not reach it.
     {
         const bob = try f.svc.createUser(admin, "bob", false);
         const bob_tok = try onboardWeb(ctx, "bob", bob.temp_password.slice(), "bpass111");
@@ -4581,8 +4067,6 @@ test "control-plane page text: raw VO, versioned by textHash, revalidated, 404 o
     const rec_id = try seedRecognizedNote(f, admin, "rec.note", &.{ "Test", "Middle" });
     const plain_id = try seedNoteHttp(f, admin, null, "plain.note", &.{"AAAA"}); // no recognition
 
-    // --- the page list now carries `textHash`, which is what the reader's Text
-    //     toggle keys off. Before this endpoint existed it was null everywhere.
     var text_hash: [32]u8 = undefined;
     {
         var pbuf: [96]u8 = undefined;
@@ -4596,7 +4080,6 @@ test "control-plane page text: raw VO, versioned by textHash, revalidated, 404 o
         try std.testing.expectEqual(@as(usize, 32), p.value.pages[0].textHash.?.len);
         @memcpy(&text_hash, p.value.pages[0].textHash.?);
     }
-    // ...and is OMITTED (not null, not "") for a page with no recognition.
     {
         var pbuf: [96]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/file/metadata/{d}", .{plain_id});
@@ -4605,15 +4088,12 @@ test "control-plane page text: raw VO, versioned by textHash, revalidated, 404 o
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "textHash") == null);
     }
 
-    // --- the happy path: `{ text }` with NO `{success}` envelope, revalidated.
     {
         var pbuf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/text?v={s}", .{ rec_id, text_hash[0..] });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
-        // This body is serialised from `PageTextVO`, so `?v=` versions its content
-        // but not its SHAPE. It was `immutable` once and pinned a year of wordless
-        // responses the day `words` was added — see the cache-policy pin below.
+        // `PageTextVO` shape can change under the same `?v=`, so no-cache.
         try expectHeaderContains(resp.head, "cache-control: no-cache");
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "immutable") == null);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "success") == null); // raw VO
@@ -4622,8 +4102,6 @@ test "control-plane page text: raw VO, versioned by textHash, revalidated, 404 o
         try std.testing.expectEqualStrings("Test\nMiddle", p.value.text.?); // v7: regions newline-joined
     }
 
-    // --- 404, one rule, three ways in: a stale version, a page with no finished
-    //     recognition, and an out-of-range page. All say "refetch the metadata".
     const stale = "0" ** 32;
     const cases = [_]struct { id: u64, page: []const u8, v: []const u8 }{
         .{ .id = rec_id, .page = "0", .v = stale }, // stale `?v=`
@@ -4638,7 +4116,6 @@ test "control-plane page text: raw VO, versioned by textHash, revalidated, 404 o
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
-    // A missing `?v=` entirely is the same stale case, not a 400.
     {
         var pbuf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/text", .{rec_id});
@@ -4646,7 +4123,6 @@ test "control-plane page text: raw VO, versioned by textHash, revalidated, 404 o
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
 
-    // --- scope: no session → 401; a device token → 403 (cross-face).
     {
         var pbuf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/text?v={s}", .{ rec_id, text_hash[0..] });
@@ -4663,8 +4139,7 @@ test "control-plane page text: raw VO, versioned by textHash, revalidated, 404 o
         try std.testing.expectEqual(@as(u16, 403), resp.status);
     }
 
-    // --- ownership: the transcript row is keyed by blob md5 and shared by dedup,
-    //     so a second account with byte-identical content must NOT reach this one.
+    // Keyed by blob md5 and shared by dedup: another account must not reach it.
     {
         const bob = try f.svc.createUser(admin, "bob", false);
         const bob_tok = try onboardWeb(ctx, "bob", bob.temp_password.slice(), "bpass111");
@@ -4676,11 +4151,8 @@ test "control-plane page text: raw VO, versioned by textHash, revalidated, 404 o
 }
 
 test "control-plane listing: hasRecognizedText tracks finished on-device recognition; textHash rides the page list" {
-    // The frontend's OCR transcript panel, in-note find, and the "has text"
-    // badges key off two wire fields: per-note `hasRecognizedText` on the tree
-    // listing, and per-page `textHash` on the note-detail page list. Assert both
-    // light up for a note WITH finished recognition and stay dark for one without,
-    // over the real transport (the FAKE api emits them in dev — this pins prod).
+    // Pins `hasRecognizedText` on the tree and `textHash` on note detail over
+    // the real transport (the fake API emits them in dev).
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -4693,7 +4165,6 @@ test "control-plane listing: hasRecognizedText tracks finished on-device recogni
     const rec_id = try seedRecognizedNote(f, admin, "rec.note", &.{ "Test", "Middle" });
     const plain_id = try seedNoteHttp(f, admin, null, "plain.note", &.{"AAAA"}); // no recognition
 
-    // --- /api/controlplane/tree → per-note `hasRecognizedText` ---
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/tree", &web_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -4712,20 +4183,15 @@ test "control-plane listing: hasRecognizedText tracks finished on-device recogni
         for (p.value.entries) |e| {
             if (std.mem.eql(u8, e.name, "rec.note")) {
                 saw_rec = true;
-                // A finished-recognition note advertises true, so the badge shows
-                // and the search filter includes it.
                 try std.testing.expectEqual(true, e.hasRecognizedText.?);
             } else if (std.mem.eql(u8, e.name, "plain.note")) {
                 saw_plain = true;
-                // No finished recognition ⇒ false (the client reads `?? false`).
                 try std.testing.expectEqual(false, e.hasRecognizedText.?);
             }
         }
         try std.testing.expect(saw_rec and saw_plain);
     }
 
-    // --- /api/controlplane/note/{id} → per-page `textHash`: present on the
-    //     recognized note's text-bearing page, absent everywhere on the plain one.
     {
         var pbuf: [96]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/file/metadata/{d}", .{rec_id});
@@ -4736,7 +4202,6 @@ test "control-plane listing: hasRecognizedText tracks finished on-device recogni
         }, gpa, resp.body, .{ .ignore_unknown_fields = true });
         defer p.deinit();
         try std.testing.expectEqual(@as(usize, 32), p.value.pages[0].textHash.?.len);
-        // `textHash` is a distinct hash from the layer-bitmap `hash`.
         try std.testing.expect(!std.mem.eql(u8, p.value.pages[0].hash, p.value.pages[0].textHash.?));
     }
     {
@@ -4744,7 +4209,6 @@ test "control-plane listing: hasRecognizedText tracks finished on-device recogni
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/file/metadata/{d}", .{plain_id});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
-        // OMITTED, not null and not "" — `emit_null_optional_fields = false`.
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "textHash") == null);
     }
 }
@@ -4760,8 +4224,8 @@ test "control-plane page text: word boxes in millimetres, separators skipped, sc
     const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
 
     const nb = @import("note_builder");
-    // One element, four words, two of which are the device's NULL-box layout
-    // separators. The boxes are millimetres on the 118.64 x 158.19 mm canvas.
+    // Two of the four words are the device's null-box layout separators. Boxes
+    // are mm on the 118.64 x 158.19 mm canvas.
     const elements = [_]nb.ElementSpec{.{ .label = "alpha beta", .words = &.{
         .{ .label = "alpha", .box = .{ .x = 10.5, .y = 20.25, .width = 30.5, .height = 8.125 } },
         .{ .label = "\n", .box = null },
@@ -4770,9 +4234,8 @@ test "control-plane page text: word boxes in millimetres, separators skipped, sc
     } }};
 
     const known_id = try seedRecognizedElements(f, admin, "known.note", "N6", &elements, false);
-    // Same content, hardware we have never measured. `Dimensions.forEquipment`
-    // still answers 1404x1872 for this — that fallback is exactly what must NOT
-    // become a millimetre scale.
+    // Unmeasured hardware: `Dimensions.forEquipment`'s 1404x1872 fallback must
+    // not become a mm scale.
     const unknown_id = try seedRecognizedElements(f, admin, "unknown.note", "N5", &elements, false);
 
     const Meta = struct {
@@ -4790,7 +4253,6 @@ test "control-plane page text: word boxes in millimetres, separators skipped, sc
         } = null,
     };
 
-    // --- known hardware: the scale is advertised on the NOTE, not the page text.
     var known_hash: [32]u8 = undefined;
     {
         var pbuf: [96]u8 = undefined;
@@ -4803,7 +4265,7 @@ test "control-plane page text: word boxes in millimetres, separators skipped, sc
         @memcpy(&known_hash, p.value.pages[0].textHash.?);
     }
 
-    // --- unknown hardware: OMITTED, not zero and not the pixel table's default.
+    // Unknown hardware: omitted, not zero or the pixel table's default.
     var unknown_hash: [32]u8 = undefined;
     {
         var pbuf: [96]u8 = undefined;
@@ -4817,27 +4279,22 @@ test "control-plane page text: word boxes in millimetres, separators skipped, sc
         @memcpy(&unknown_hash, p.value.pages[0].textHash.?);
     }
 
-    // --- the boxes themselves, on the SAME endpoint the OCR panel already uses.
     {
         var pbuf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/text?v={s}", .{ known_id, known_hash[0..] });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
-        // `words` ARRIVING HERE IS EXACTLY WHY THIS RESPONSE IS NOT IMMUTABLE.
-        // `?v={textHash}` versions the transcript, not the struct around it, so
-        // the browsers that had cached this URL before the field existed kept a
-        // wordless copy for a year and silently drew nothing. Revalidated now.
+        // `?v={textHash}` versions the transcript, not the struct; an
+        // immutable response once pinned wordless copies.
         try expectHeaderContains(resp.head, "cache-control: no-cache");
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "immutable") == null);
 
         var p = try std.json.parseFromSlice(Body, gpa, resp.body, .{ .ignore_unknown_fields = true });
         defer p.deinit();
 
-        // The shipped `{text}` consumer is untouched by the new field.
         try std.testing.expectEqualStrings("alpha beta", p.value.text.?);
 
-        // Two words, not four: the null-box separators are dropped rather than
-        // defaulted to {0,0,0,0}, which would stack them both at the origin.
+        // Null-box separators are dropped, not defaulted to {0,0,0,0}.
         const words = p.value.words.?;
         try std.testing.expectEqual(@as(usize, 2), words.len);
         try std.testing.expectEqualStrings("alpha", words[0].text);
@@ -4850,9 +4307,7 @@ test "control-plane page text: word boxes in millimetres, separators skipped, sc
         for (words) |w| try std.testing.expect(w.xMm >= 0 and w.yMm >= 0);
     }
 
-    // --- MILLIMETRES, verbatim: the payload is identical for the unknown device.
-    //     The boxes are the device's own numbers and no scale is applied here, so
-    //     hardware can only change `pxPerMm` above — never these values.
+    // Boxes are the device's mm verbatim; hardware only changes `pxPerMm`.
     {
         var pbuf: [128]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/text?v={s}", .{ unknown_id, unknown_hash[0..] });
@@ -4865,8 +4320,7 @@ test "control-plane page text: word boxes in millimetres, separators skipped, sc
         try std.testing.expectApproxEqAbs(@as(f32, 10.5), words[0].xMm, 1e-4);
     }
 
-    // --- a recognized page with no positioned words at all omits `words`
-    //     entirely rather than sending `[]` — same rule as every other optional.
+    // No positioned words: `words` is omitted, not `[]`.
     {
         const bare = try seedRecognizedNote(f, admin, "bare.note", &.{"solo"});
         var pbuf: [96]u8 = undefined;
@@ -4884,11 +4338,8 @@ test "control-plane page text: word boxes in millimetres, separators skipped, sc
     }
 }
 
-/// One header's value, copied out of the response head. Needed because the
-/// conditional-request test has to send back the exact `ETag` the server minted:
-/// asserting that a header merely EXISTS would let a server that answered a
-/// different validator every time still pass, and that server would never serve
-/// a 304 in production.
+/// One header's value copied out of the head, so a test can echo back the
+/// exact `ETag` minted.
 fn headerValue(head: []const u8, name: []const u8, buf: []u8) ![]const u8 {
     var lower_buf: [4096]u8 = undefined;
     const lower = lowerHead(&lower_buf, head);
@@ -4903,8 +4354,7 @@ fn headerValue(head: []const u8, name: []const u8, buf: []u8) ![]const u8 {
     return buf[0..value.len];
 }
 
-/// The blob md5 of a `files` row, as 32 lowercase hex — what both search-index
-/// routes key on.
+/// A `files` row's blob md5 as lowercase hex.
 fn fileMd5(f: *Fixture, id: u64) ![32]u8 {
     var s = try f.db.prepare("SELECT md5 FROM files WHERE id = ?1;");
     defer s.finalize();
@@ -4929,7 +4379,6 @@ test "the search-index manifest is served as bytes, and an unchanged one answers
     _ = keep;
     const gone = try seedRecognizedNote(f, admin, "gone.note", &.{"trimestral"});
 
-    // --- scope: no session -> 401; a device token -> 403 (crossing faces) ---
     {
         const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/search-index/manifest", &.{}, "");
         const resp = try roundtrip(ctx, req, &obuf);
@@ -4951,21 +4400,15 @@ test "the search-index manifest is served as bytes, and an unchanged one answers
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/manifest", &web_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
-        // BYTES, not JSON — the encoding §9.2's measurement chose. A body that
-        // started with `{` would be a route that had quietly reverted to the
-        // 5.2x-larger representation on the one response paid every visit.
+        // Binary (`SMAN`), not the 5.2x-larger JSON.
         try std.testing.expect(std.mem.startsWith(u8, resp.body, "SMAN"));
         try std.testing.expectEqual(@as(u8, 1), resp.body[4]);
         try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, resp.body[5..9], .little));
-        // Two notes' names are 9 and 9 bytes of UTF-8 and neither is on the wire:
-        // §3 omitted names on purpose and a locally-answered result set gets them
-        // from the file listing the app already holds.
+        // Names are deliberately not on the wire; the client has the listing.
         try std.testing.expect(std.mem.indexOf(u8, resp.body, ".note") == null);
 
         try expectHeaderContains(resp.head, "content-type: application/octet-stream");
-        // NOT `immutable`: this is the caller's mutable library, and a year-long
-        // cache entry over it would freeze a deleted document into the browser's
-        // index for ever (absence from the manifest is the only removal channel).
+        // Not `immutable`: absence from the manifest is the only removal channel.
         try expectHeaderContains(resp.head, "cache-control: private, no-cache");
         try expectHeaderAbsentSubstring(resp.head, "immutable");
         etag = try headerValue(resp.head, "etag", &etag_buf);
@@ -4975,9 +4418,7 @@ test "the search-index manifest is served as bytes, and an unchanged one answers
     var cookie_buf: [64]u8 = undefined;
     const cookie = try std.fmt.bufPrint(&cookie_buf, "sn_session={s}", .{web_tok});
 
-    // --- THE CONDITIONAL REQUEST, which is this step's answer to "how often is
-    //     the manifest refetched": as often as the client likes, because an
-    //     unchanged one costs a 304 with no body instead of the whole payload.
+    // An unchanged manifest costs a bodiless 304.
     {
         const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/search-index/manifest", &.{
             .{ .name = "cookie", .value = cookie },
@@ -4986,15 +4427,12 @@ test "the search-index manifest is served as bytes, and an unchanged one answers
         const resp = try roundtrip(ctx, req, &obuf);
         try std.testing.expectEqual(@as(u16, 304), resp.status);
         try std.testing.expectEqual(@as(usize, 0), resp.body.len);
-        // The validator rides on the 304 too: a client not re-told it may drop
-        // it, and the next visit would be a full fetch of bytes it already holds.
+        // The validator rides on the 304 too, or a client may drop it.
         try expectHeaderContains(resp.head, "etag:");
     }
 
-    // --- and a manifest that LOST A ROW must not answer 304. This is the failure
-    //     a version-counter validator would have had: absence is the only way a
-    //     deletion ever reaches the client (§2.2), so a wrong 304 leaves a
-    //     trashed document matching in the browser for ever.
+    // A manifest that lost a row must not 304 (a version-counter validator
+    // would): absence is how deletions reach the client.
     {
         try f.files.trash(admin, gone);
         const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/search-index/manifest", &.{
@@ -5007,40 +4445,18 @@ test "the search-index manifest is served as bytes, and an unchanged one answers
     }
 }
 
-// ---------------------------------------------------------------------------
-// THE STITCHED SEARCH-INDEX STREAM — §3.1/§3.2/§3.3
-// ---------------------------------------------------------------------------
-//
-// **THIS SPEC EXISTS BECAUSE THE OBVIOUS IMPLEMENTATION FAILS SILENTLY.** §3.1,
-// MEASURED 2026-08-21: concatenated `.gz` members served under
-// `Content-Encoding: gzip` are decoded by Chromium 141 and `curl --compressed`
-// down to their FIRST MEMBER — 37 bytes of 7,980 — and both report success, with
-// `fetch()` resolving happily. A client would believe it held the whole library
-// and be missing 99.5% of it.
-//
-// So every assertion below is about DECODED BYTES AND DOCUMENTS, and never about
-// the request having worked. A test that checked the status code, or that the
-// body was non-empty, or that it decompressed without error, is exactly the test
-// that misses this — the broken stream passes all three.
-//
-// Zig's own decoder behaves like the browsers here, which is what makes an
-// in-tree assertion able to pin a browser bug: `Decompress` goes to `.end` after
-// one member's footer. It is Node's zlib that is the outlier, decoding every
-// member, and §3.1 records that a Node-based test therefore PASSES on a stream
-// the browser truncates. That is the trap this file is written around.
+// ---- the stitched search-index stream ----
+// Chromium and `curl --compressed` decode concatenated gzip members down to the
+// first one and report success, as does Zig's `Decompress`; Node's zlib decodes
+// all. So these tests assert decoded bytes and documents, never just success.
 
-/// Decode a `Transfer-Encoding: chunked` body. The stream route sends no
-/// `Content-Length` (see the handler for why: a length promised up front cannot
-/// coexist with §3.3's skip rule), so the test has to unwrap the framing to see
-/// the bytes a client would.
+/// Decodes a chunked body; the stream route sends no `Content-Length`, since
+/// skipped fragments make the length unknowable up front.
 fn dechunk(a: std.mem.Allocator, raw: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     var rest = raw;
     while (true) {
         const eol = std.mem.indexOf(u8, rest, "\r\n") orelse return error.BadChunking;
-        // A chunk-size line may carry `;ext` parameters; ours never does, but
-        // parsing the whole line as hex would be a decoder that only works
-        // against this server.
         const semi = std.mem.indexOfScalar(u8, rest[0..eol], ';') orelse eol;
         const n = try std.fmt.parseInt(usize, rest[0..semi], 16);
         rest = rest[eol + 2 ..];
@@ -5052,24 +4468,11 @@ fn dechunk(a: std.mem.Allocator, raw: []const u8) ![]u8 {
     return out.items;
 }
 
-/// Inflate a stitched body the way a BROWSER does, and check the trailer the way
-/// `gzip -t` does.
-///
-/// Three separate claims, and each one has to be made by hand:
-///
-///   1. **Exactly one gzip member.** The broken shape of §3.1 is N members, and
-///      no amount of successful decoding distinguishes it. Counted on the whole
-///      10-byte header rather than the 3-byte magic, because a 3-byte needle
-///      collides by chance inside deflate output.
-///   2. **The payload decodes whole.** Zig stops after one member's footer, so a
-///      concatenation would come back as its first document and this comparison
-///      is what catches that.
-///   3. **The trailer agrees with the payload.** `std.compress.flate.Decompress`
-///      reads the gzip footer into `container_metadata` and NEVER VERIFIES IT —
-///      `Container.Error.WrongGzipChecksum` is declared in the standard library
-///      and raised nowhere in it. A Zig round trip written the obvious way passes
-///      on a stream every browser rejects, so the comparison browsers make is
-///      made here explicitly.
+/// Inflates a stitched body as a browser would and checks: exactly one gzip
+/// member (by the full 10-byte header; 3-byte magic collides in deflate
+/// output), the whole payload decodes, and the trailer matches.
+/// `std.compress.flate.Decompress` never verifies the gzip CRC, so it is
+/// checked here.
 fn inflateStitched(a: std.mem.Allocator, body: []const u8) ![]u8 {
     const gzip_stitch = @import("../http/gzip_stitch.zig");
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, gzip_stitch.header));
@@ -5085,14 +4488,8 @@ fn inflateStitched(a: std.mem.Allocator, body: []const u8) ![]u8 {
     return got.written();
 }
 
-/// The uncompressed size of a stored `terms/<md5>.<v>`, read from the file's own
-/// 12-byte header — the same number the serve path feeds into the gzip trailer.
-/// The test computes its expected decoded byte count from these, so an
-/// implementation that truncated a fragment could not satisfy it.
-///
-/// Takes the STORE rather than the fixture because both derived stores are read
-/// this way: the stitched stream's tests against `terms/`, the per-document text
-/// route's against `text/`.
+/// The uncompressed size from a stored fragment's 12-byte header, the number
+/// the serve path feeds into the gzip trailer.
 fn storedPlainLen(store: @import("../store/derived.zig").DerivedStore, md5: []const u8) !u32 {
     const derivedstore = @import("../store/derived.zig");
     const derivesearch = @import("../services/derive_search.zig");
@@ -5102,11 +4499,8 @@ fn storedPlainLen(store: @import("../store/derived.zig").DerivedStore, md5: []co
     return h.len;
 }
 
-/// Wire the two derived stores into a fixture. The default `Fixture` has none
-/// (most tests do not want the files written at ingest), and §2.4 makes the
-/// FILE the fact — so without this the manifest would describe documents whose
-/// fragments do not exist and every one of them would be skipped, which is a
-/// green test asserting nothing.
+/// Wires both derived stores into a fixture; without them every manifest row
+/// would be skipped and the test would assert nothing.
 fn withDerivedStores(f: *Fixture) !void {
     const derivedstore = @import("../store/derived.zig");
     const io = std.testing.io;
@@ -5133,10 +4527,7 @@ test "the search-index stream is ONE gzip member carrying every document, not a 
     defer arena.deinit();
     const a = arena.allocator();
 
-    // Eight documents, because §3.1's bug is a RATIO: one member of eight
-    // arriving is a stream that decodes, parses and looks like an answer. Each
-    // gets a term nothing else has, so "which documents arrived" is decidable
-    // from the decoded text alone.
+    // Eight documents, each with a unique term: the bug is a ratio.
     const words = [_][]const u8{
         "trimestral", "orcamento",  "reuniao",  "acta",
         "relatorio",  "manutencao", "projecto", "arquivo",
@@ -5148,15 +4539,11 @@ test "the search-index stream is ONE gzip member carrying every document, not a 
         md5s[i] = try fileMd5(f, id);
     }
 
-    // THE GC RACE, and it is not an edge case worth skipping: between the
-    // manifest query and the walk a blob can be collected or a derive can still
-    // be outstanding, and §3.3 says a missing file is SKIPPED rather than an
-    // error, because an error mid-stream poisons a stitched gzip for every
-    // document that was fine. Unlinking one file is exactly that state.
+    // Unlink one fragment: a missing file mid-walk (GC race) is skipped, since
+    // an error mid-stream poisons the whole stitched gzip.
     const gone = 5;
     f.files.terms.?.remove(&md5s[gone], derivesearch.index_version);
 
-    // --- the manifest, which is what the bitmap indexes into ----------------
     var etag_buf: [64]u8 = undefined;
     var etag: []const u8 = "";
     var rows: u32 = 0;
@@ -5167,47 +4554,30 @@ test "the search-index stream is ONE gzip member carrying every document, not a 
         try std.testing.expectEqual(@as(u32, words.len), rows);
         etag = try headerValue(resp.head, "etag", &etag_buf);
     }
-    // The header's quoted entity-tag; `m=` carries the bare hex inside it.
     try std.testing.expectEqual(@as(usize, 34), etag.len);
     const etag_hex = etag[1 .. etag.len - 1];
 
     var want_buf: [64]u8 = undefined;
     const want_all = wantEveryPosition(&want_buf, rows);
 
-    // --- the stream ---------------------------------------------------------
     const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want={s}", .{ etag_hex, want_all });
     const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 
-    // The transport contract. `content-encoding: gzip` is what makes the body a
-    // single gzip stream to the browser rather than an opaque blob, and it is
-    // sent regardless of `Accept-Encoding` because the fragments only exist
-    // compressed — there is no identity form to negotiate down to.
+    // `content-encoding: gzip` regardless of `Accept-Encoding`: fragments only
+    // exist compressed.
     try expectHeaderContains(resp.head, "content-encoding: gzip");
     try expectHeaderContains(resp.head, "content-type: application/x-ndjson");
     try expectHeaderContains(resp.head, "cache-control: private, no-store");
     try expectHeaderAbsentSubstring(resp.head, "content-length:");
 
     const body = try dechunk(a, resp.body);
-    // VERIFIED OUTSIDE ZIG, on this exact body dumped from this test: GNU
-    // `gzip -t` PASS (it checks CRC32 *and* ISIZE), python zlib decoding ONE
-    // member yields 551 bytes / 7 documents with zero unused bytes after it, and
-    // the wire bytes contain exactly one gzip header. That last line is the one
-    // Zig alone cannot make convincing, and it is §3.1's whole subject.
     const plain = try inflateStitched(a, body);
 
-    // --- THE ASSERTIONS THAT A TRUNCATED STREAM CANNOT SATISFY --------------
-    //
-    // 1. DOCUMENT COUNT. Every record opens with its own `{"md5":"…` header
-    //    line, so counting them counts documents. Seven, not eight: one file was
-    //    unlinked above and is skipped.
+    // Every record opens with `{"md5":"…`; seven, the unlinked one skipped.
     try std.testing.expectEqual(@as(usize, words.len - 1), std.mem.count(u8, plain, "{\"md5\":\""));
 
-    // 2. DECODED BYTE COUNT, summed from the stored files' OWN headers — the
-    //    same numbers the trailer was built from, read independently here. A
-    //    stream that dropped a fragment, or half of one, misses this by exactly
-    //    what it dropped. (§3.1's real failure was 37 bytes of 7,980; this is the
-    //    assertion that would have caught it.)
+    // Decoded byte count from the stored headers catches a dropped fragment.
     var expected_bytes: u64 = 0;
     for (md5s, 0..) |md5, i| {
         if (i == gone) continue;
@@ -5215,9 +4585,7 @@ test "the search-index stream is ONE gzip member carrying every document, not a 
     }
     try std.testing.expectEqual(expected_bytes, plain.len);
 
-    // 3. EVERY DOCUMENT INDIVIDUALLY. The count above would be satisfied by
-    //    seven copies of the first document; this is not. Each md5 appears
-    //    exactly once, each term appears, and the collected one appears nowhere.
+    // Each md5 and term exactly once; the unlinked one nowhere.
     for (md5s, words, 0..) |md5, word, i| {
         if (i == gone) {
             try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, plain, &md5));
@@ -5228,20 +4596,8 @@ test "the search-index stream is ONE gzip member carrying every document, not a 
         try std.testing.expect(std.mem.indexOf(u8, plain, word) != null);
     }
 
-    // --- SUBSETS: every position on its own, which is the coalesced-refetch
-    //     case and also the bitmap's addressing, asserted across the board.
-    //
-    // ONE POSITION AT A TIME rather than "position 0 returns one document",
-    // which is what this used to say and what made it FLAKY. The manifest orders
-    // by `updated_at DESC, id`, and the eight notes are seeded in a loop: when
-    // that loop straddles a second boundary the later ones sort FIRST, so the
-    // unlinked document can land at position 0 and the assertion saw the skip
-    // instead of a hit. Roughly one run in four.
-    //
-    // Asking for all eight singly needs no assumption about the order at all,
-    // and it claims MORE than the old line did: every position addresses exactly
-    // one document, and exactly one position — whichever it is — is the one
-    // whose file was unlinked.
+    // Each position singly: the manifest orders by `updated_at DESC, id`, so
+    // seeding across a second boundary reorders it.
     {
         var served: usize = 0;
         var skipped: usize = 0;
@@ -5267,7 +4623,6 @@ test "the search-index stream is ONE gzip member carrying every document, not a 
         try std.testing.expectEqual(@as(usize, 1), skipped);
     }
 
-    // --- and asking for NOTHING is a valid empty gzip, not a malformed body --
     {
         const none = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want=", .{etag_hex});
         const r = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", none, &web_tok, "");
@@ -5276,10 +4631,8 @@ test "the search-index stream is ONE gzip member carrying every document, not a 
     }
 }
 
-/// A bitmap with every one of `n` manifest positions set, base64url-encoded the
-/// way `webapp/src/search/wantBitmap.ts` does. Bits past `n` in the last byte
-/// stay CLEAR — a set bit up there is a 412 by design (`want_bitmap.zig`), so
-/// getting this wrong here would look like a route bug.
+/// All `n` positions set, base64url like `webapp/src/search/wantBitmap.ts`.
+/// Bits past `n` must stay clear (a set one is a 412).
 fn wantEveryPosition(buf: []u8, n: u32) []const u8 {
     var bits: [64]u8 = @splat(0);
     for (0..n) |i| bits[i >> 3] |= @as(u8, 1) << @intCast(i & 7);
@@ -5311,7 +4664,6 @@ test "the search-index stream refuses a bitmap it cannot trust: 412 on the manif
     @memcpy(&hex_buf, etag[1 .. etag.len - 1]);
     const etag_hex: []const u8 = &hex_buf;
 
-    // --- scope, before anything else: no session -> 401, device token -> 403 --
     {
         const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/search-index/stream?m=x&want=AQ", &.{}, "");
         const resp = try roundtrip(ctx, req, &obuf);
@@ -5328,19 +4680,12 @@ test "the search-index stream refuses a bitmap it cannot trust: 412 on the manif
         try std.testing.expectEqual(@as(u16, 403), resp.status);
     }
 
-    // --- no `m=` at all: a client that named no manifest is not ours ---------
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/stream?want=AQ", &web_tok, "", 400);
 
-    // --- a WRONG `m=` is 412, and it is checked BEFORE the bitmap is read ----
-    //     The `want` below is malformed (`+` is base64, not base64url) and would
-    //     be a 400 against the right manifest. That it comes back 412 is the
-    //     ordering §3.3 requires: the server must not interpret a single bitmap
-    //     position before it knows whose ordering those positions are in.
+    // A wrong `m=` is 412 before the bitmap is parsed (this `want` would be a 400).
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/stream?m=" ++ "0" ** 32 ++ "&want=+A", &web_tok, "", 412);
 
-    // --- a manifest that MOVED. The ETag was minted over two documents; trash
-    //     one and the same request must stop being answerable, because position
-    //     1 now means a different document than the client meant.
+    // Trashing a document moves the manifest, so the old ETag stops answering.
     {
         const stale = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want=Aw", .{etag_hex});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", stale, &web_tok, "", 200);
@@ -5348,23 +4693,17 @@ test "the search-index stream refuses a bitmap it cannot trust: 412 on the manif
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", stale, &web_tok, "", 412);
     }
 
-    // --- the current manifest again, and the two refusals that are NOT 412 ---
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/manifest", &web_tok, "");
         etag = try headerValue(resp.head, "etag", &etag_buf);
         @memcpy(&hex_buf, etag[1 .. etag.len - 1]);
     }
-    // Not base64url (`+` and `/` are base64's), a length no group can have, and
-    // non-canonical leftover bits in a short final group — all 400, because
-    // refetching the manifest would not help a client that cannot encode.
+    // Malformed encodings are 400: refetching the manifest would not help.
     for ([_][]const u8{ "+A", "/A", "A", "AB" }) |bad| {
         const p = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want={s}", .{ etag_hex, bad });
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", p, &web_tok, "", 400);
     }
-    // Longer than the manifest, and a bit set past its last position — both 412,
-    // because both say the two sides disagree about the ordering even though the
-    // validator matched. Skipping the stray bit would serve a stream silently
-    // misaligned with the question.
+    // Too long, or a bit past the end: 412, the two sides disagree on ordering.
     for ([_][]const u8{ "AAAA", "_g" }) |bad| {
         const p = try std.fmt.bufPrint(&pbuf, "/api/controlplane/search-index/stream?m={s}&want={s}", .{ etag_hex, bad });
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", p, &web_tok, "", 412);
@@ -5402,13 +4741,8 @@ test "the search-index stream is scoped to the caller: a housemate's documents a
         rows = std.mem.readInt(u32, resp.body[5..9], .little);
         etag = try headerValue(resp.head, "etag", &etag_buf);
     }
-    // THE SCOPE IS THE MANIFEST'S, and this is what says so: the caller's
-    // manifest has one row, so there is no position a bitmap could name that
-    // reaches the housemate's document. `index_export`'s `d.user_id = ?1` is the
-    // whole boundary and this route adds no md5-addressed second door. `text/:md5`
-    // is the one route that IS md5-addressed, and it pays for that with a
-    // `Files.reachesBlob` gate per request; a bitmap position needs none, because
-    // it can only ever name a row the caller's own manifest already listed.
+    // The scope is the manifest's (`d.user_id = ?1`): a position can only name
+    // a row the caller's manifest listed.
     try std.testing.expectEqual(@as(u32, 1), rows);
 
     var want_buf: [64]u8 = undefined;
@@ -5426,25 +4760,12 @@ test "the search-index stream is scoped to the caller: a housemate's documents a
     try std.testing.expect(std.mem.indexOf(u8, plain, "confidencial") == null);
 }
 
-// ---------------------------------------------------------------------------
-// THE PER-DOCUMENT TEXT ROUTE — §1.1, build order step 7
-// ---------------------------------------------------------------------------
-//
-// ONE route replaces five. §1.1: *"All five in-doc routes collapse to
-// 'authorize, serve `text/<md5>`.' History and bin are not special: they are
-// other md5s, gated exactly as they are gated today."* So the spec below is
-// about two things and nothing else: that a caller who can reach a blob by ANY
-// of the three paths gets the same bytes, and that a caller who cannot is told
-// the same thing an underived document is.
-//
-// The decode assertions are the stitched stream's, for the stream's reason: this
-// body is a single-member gzip too, and §3.1's failure mode — a decoder that
-// resolves successfully on 0.5% of the payload — is invisible to any check that
-// only asks whether the request worked.
+// ---- the per-document text route ----
+// One route serves live, retained and trashed text alike; a caller who cannot
+// reach a blob is told the same as for an underived one.
 
-/// GET the text record for one md5 and assert the whole transport contract, then
-/// hand back the DECODED bytes. Every caller below compares real text, never a
-/// status code.
+/// GETs one md5's text record, asserts the transport contract, returns the
+/// decoded bytes.
 fn fetchDocText(
     a: std.mem.Allocator,
     ctx: *Context,
@@ -5460,19 +4781,13 @@ fn fetchDocText(
 
     try expectHeaderContains(resp.head, "content-type: application/x-ndjson");
     try expectHeaderContains(resp.head, "content-encoding: gzip");
-    // A BARE URL GETS NO YEAR. `immutable` says the true thing — these bytes do
-    // not change under this URL — but the URL's key omits the `index_version`
-    // the FILE is keyed by, so a parser bump re-derives the same md5 and there
-    // would be nothing to invalidate a year-long entry with. See
-    // `immutable_routes` and the handler's own docstring.
+    // A bare URL is not cached for a year: its key omits the `index_version`
+    // the file is keyed by, so a parser bump could not invalidate it.
     try expectHeaderContains(resp.head, "cache-control: private, immutable");
     try expectHeaderAbsentSubstring(resp.head, "max-age");
 
     const derivesearch = @import("../services/derive_search.zig");
-    // ...AND `?v=` EARNS IT, which is the other half of the same rule: with the
-    // version in the URL the entry cannot outlive what it described, exactly as
-    // for the routes that name their content in the path. `/file/{id}?v={hash}`
-    // is the same device, and the manifest already ships this field per row.
+    // With `?v=` it can be immutable.
     {
         var vbuf: [256]u8 = undefined;
         const versioned = try std.fmt.bufPrint(&vbuf, "/api/controlplane/text/{s}?v={d}", .{ md5, derivesearch.index_version });
@@ -5480,7 +4795,6 @@ fn fetchDocText(
         try std.testing.expectEqual(@as(u16, 200), r.status);
         try expectHeaderContains(r.head, "cache-control: private, max-age=31536000, immutable");
     }
-    // A STALE version does not, because it does not name what is served.
     {
         var vbuf: [256]u8 = undefined;
         const stale = try std.fmt.bufPrint(&vbuf, "/api/controlplane/text/{s}?v={d}", .{ md5, derivesearch.index_version - 1 });
@@ -5488,9 +4802,7 @@ fn fetchDocText(
         try std.testing.expectEqual(@as(u16, 200), r.status);
         try expectHeaderAbsentSubstring(r.head, "max-age");
     }
-    // A REAL LENGTH, which is the difference from the stitched stream: there is
-    // no walk here to discover a skip mid-flight, so the one open file's size is
-    // the honest answer and the client gets a progress bar out of it.
+    // A real length: no mid-walk skip is possible here.
     try expectHeaderContains(resp.head, "content-length:");
     try expectHeaderAbsentSubstring(resp.head, "transfer-encoding:");
 
@@ -5512,16 +4824,10 @@ test "the per-document text route serves ONE document's real text, by each of th
     defer arena.deinit();
     const a = arena.allocator();
 
-    // ACCENTS ON PURPOSE, and they are the assertion that this route is not the
-    // terms route wearing a different path. `terms/` holds `unicode61
-    // remove_diacritics 2` output, so "orçamento" is "orcamento" there; `text/`
-    // holds the document's REAL text, which is what find-in-document has to
-    // highlight and deep-link into (§2.2, §4.1). A record that folded would pass
-    // every structural check below and be the wrong file.
+    // Accents on purpose: `terms/` is diacritic-folded, `text/` holds the real
+    // text find-in-document highlights.
     const live = try seedRecognizedNote(f, admin, "vivo.note", &.{"reunião de orçamento"});
-    // A SECOND upload of the same name supersedes the first and retains it in
-    // `file_history` — which is gate 2, and the only one of the three that a
-    // `files` join cannot reach.
+    // Supersede to create gate 2: a version no `files` row points at.
     _ = try seedRecognizedNote(f, admin, "vivo.note", &.{"versão revista"});
     const current_md5 = try fileMd5(f, live);
     const retained_md5 = try soleHistoryMd5(f, live);
@@ -5530,50 +4836,31 @@ test "the per-document text route serves ONE document's real text, by each of th
     const binned_md5 = try fileMd5(f, binned);
     try f.files.trash(admin, binned);
 
-    // --- gate 1: a LIVE document ------------------------------------------
     {
         const plain = try fetchDocText(a, ctx, &obuf, &reqbuf, &web_tok, &current_md5);
 
-        // The record's shape (`derive_search.writeHeader` + `TextWriter.page`):
-        // exactly one header line naming this md5 and the content version, then
-        // one line per segment carrying its ordinal and its text.
+        // One header line naming md5 and version, then one line per segment.
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, plain, "{\"md5\":\""));
         try std.testing.expect(std.mem.startsWith(u8, plain, "{\"md5\":\""));
         try std.testing.expect(std.mem.indexOf(u8, plain, &current_md5) != null);
         try std.testing.expect(std.mem.indexOf(u8, plain, "\"p\":0") != null);
         try std.testing.expect(std.mem.indexOf(u8, plain, "versão revista") != null);
 
-        // AND THE DECODED BYTE COUNT, read independently from the stored file's
-        // own 12-byte header — the same number the trailer was built from. A
-        // response that dropped the tail of the fragment satisfies every
-        // substring check above and misses this by exactly what it dropped.
         try std.testing.expectEqual(
             @as(usize, try storedPlainLen(f.files.text.?, &current_md5)),
             plain.len,
         );
     }
 
-    // --- gate 2: a RETAINED VERSION, which no `files` row points at --------
-    //
-    // This is the gate `searchHistoryPages` existed for: an arbitrary historic
-    // md5 is not in the caller's live set, so the FTS partition mask could not
-    // scope it and it scanned `note_page_index` by `blob_md5` instead. Nothing
-    // is scoping an index here, so the whole of what is left is `reachesBlob`
-    // finding the `file_history` row.
+    // Gate 2: `reachesBlob` finding the `file_history` row.
     {
         const plain = try fetchDocText(a, ctx, &obuf, &reqbuf, &web_tok, &retained_md5);
         try std.testing.expect(std.mem.indexOf(u8, plain, &retained_md5) != null);
-        // THE OLD text, not the current one — the version's own derived file.
         try std.testing.expect(std.mem.indexOf(u8, plain, "reunião de orçamento") != null);
         try std.testing.expect(std.mem.indexOf(u8, plain, "versão revista") == null);
     }
 
-    // --- gate 3: a TRASHED document ----------------------------------------
-    //
-    // The bin's ownership check is the live one without `deleted = 0`, so the
-    // flag drops out of the collapsed predicate entirely. Trashing hides the row;
-    // it does not take the bytes away, and find-in-document in the bin reads the
-    // same file the live route reads.
+    // Gate 3: trashing hides the row but the bin reads the same file.
     {
         const plain = try fetchDocText(a, ctx, &obuf, &reqbuf, &web_tok, &binned_md5);
         try std.testing.expect(std.mem.indexOf(u8, plain, &binned_md5) != null);
@@ -5601,9 +4888,7 @@ test "the per-document text route: unreachable and underived are ONE 404, byte f
     const bob = (try f.svc.createUser(admin, "bob", false)).id;
     _ = try f.svc.changePassword(bob, null, &password.md5Hex("bpass111"));
 
-    // Bob gets a live document AND a retained version, because the housemate
-    // boundary has to hold on both of the gates that admit an md5 — a predicate
-    // that leaked through `file_history` would be invisible to a live-only test.
+    // Bob has a live and a retained version: both gates must hold the boundary.
     const theirs = try seedRecognizedNote(f, bob, "deles.note", &.{"confidencial"});
     _ = try seedRecognizedNote(f, bob, "deles.note", &.{"confidencial revisto"});
     const theirs_md5 = try fileMd5(f, theirs);
@@ -5612,7 +4897,6 @@ test "the per-document text route: unreachable and underived are ONE 404, byte f
     const mine = try seedRecognizedNote(f, admin, "meu.note", &.{"inventário"});
     const mine_md5 = try fileMd5(f, mine);
 
-    // --- scope, before anything else: no session -> 401, device token -> 403 --
     {
         const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/text/" ++ "a" ** 32, &.{}, "");
         try std.testing.expectEqual(@as(u16, 401), (try roundtrip(ctx, req, &obuf)).status);
@@ -5625,23 +4909,14 @@ test "the per-document text route: unreachable and underived are ONE 404, byte f
         try std.testing.expectEqual(@as(u16, 403), (try roundtrip(ctx, req, &obuf)).status);
     }
 
-    // The route WORKS for this caller on this md5 — asserted first, so the 404s
-    // below are known to be the gate refusing rather than the fixture failing to
-    // derive anything at all.
+    // Works for the owner first, so the 404s below are the gate.
     _ = try fetchDocText(a, ctx, &obuf, &reqbuf, &web_tok, &mine_md5);
 
-    // THE UNDERIVED CASE, manufactured the way the world produces it: the blob is
-    // theirs and reachable, and the derived file is simply not there — GC'd
-    // between two requests, or a derive still outstanding (§2.4 makes the FILE
-    // the fact, so this state is ordinary rather than exotic).
+    // Underived: the blob is reachable, the derived file absent (GC'd or pending).
     f.files.text.?.remove(&mine_md5, derivesearch.index_version);
 
-    // Every way this route can say no, collected. `heads` holds the FULL response
-    // — head and body — of each, because the claim is not "all four are 404" but
-    // that they are ONE ANSWER: a caller must not be able to tell a blob it
-    // cannot reach from one that exists and is not derived, or the route becomes
-    // an existence oracle over the deduplicated blob space (the whole reason the
-    // md5 space is shared between accounts at all).
+    // All refusals must be byte-identical, or the route is an existence oracle
+    // over the shared blob space.
     const refusals = [_][]const u8{
         &mine_md5, // reachable, NOT derived
         &theirs_md5, // derived, NOT reachable — a housemate's live document
@@ -5654,9 +4929,7 @@ test "the per-document text route: unreachable and underived are ONE 404, byte f
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/text/{s}", .{md5});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
-        // A miss must carry no cache policy at all — caching a 404 on a URL that
-        // will become valid the moment the derive lands is the one way this route
-        // could break itself permanently.
+        // A miss carries no cache policy: the URL becomes valid once derived.
         try expectHeaderAbsentSubstring(resp.head, "immutable");
         try expectHeaderAbsentSubstring(resp.head, "cache-control");
 
@@ -5665,37 +4938,15 @@ test "the per-document text route: unreachable and underived are ONE 404, byte f
     }
 }
 
-// FIND-IN-NOTE IS THE BROWSER'S TOO — §6 step 7.
-// `GET /note/:id/search`, its `txt-search` twin and `searchNotePages` are gone,
-// and with them the last route that took a `q`. The scope half of what the
-// deleted spec drew is drawn on the replacing route by the two specs above:
-// no session → 401, a device token → 403, a housemate's document → refused.
-//
-// THE OWNERSHIP BOUNDARY GENUINELY CHANGED SHAPE, and both halves of the change
-// are worth stating rather than hiding behind "still covered".
-//
-// The old route answered a foreign id, a missing id and a blank query with one
-// indistinguishable empty 200. `text/:md5` is CONTENT-ADDRESSED and has no `:id`
-// to scope through, so its indistinguishable answer is a 404 covering four cases
-// instead of three — unreachable, underived, no such blob, and not even an md5 —
-// asserted byte for byte, head and body, in "unreachable and underived are ONE
-// 404". That is the stronger statement, because there is no shape left for an
-// existence oracle over the deduplicated blob space to leak through.
-//
-// What it no longer says anything about is the case the deleted spec was BUILT
-// on: two accounts whose files reference ONE deduplicated blob. Asking for a
-// housemate's note id used to be an empty answer; asking for that blob's md5 is
-// a 200, and correctly so — the caller holds a file made of those exact bytes,
-// and there is no honest sense in which the text is not theirs. The boundary
-// that survives is `reachesBlob`, and content the caller does not hold a copy of
-// is what it refuses.
+// Find-in-note is done in the browser over `text/:md5`. Content-addressing
+// means a housemate holding identical bytes gets that text; `reachesBlob` is
+// the boundary.
 
 test "static SPA serving: index, assets, wasm, path-traversal refused, API precedence, disabled=404" {
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
 
-    // A fake built SPA (`dist/`): index.html + assets/x.js + note-decode.wasm.
     var web = std.testing.tmpDir(.{});
     defer web.cleanup();
     const index_html = "<!doctype html><title>SPA</title>";
@@ -5705,23 +4956,15 @@ test "static SPA serving: index, assets, wasm, path-traversal refused, API prece
     try web.dir.writeFile(std.testing.io, .{ .sub_path = "assets/x.js", .data = "console.log(1)" });
     try web.dir.writeFile(std.testing.io, .{ .sub_path = "x.wasm", .data = "\x00asm\x01\x00\x00\x00" });
 
-    // The tmp dir lives at `.zig-cache/tmp/<sub_path>` relative to cwd (the repo
-    // root, where the tests run) — which is what the static server opens against.
+    // The tmp dir is `.zig-cache/tmp/<sub_path>` relative to the repo root.
     var wd_buf: [256]u8 = undefined;
     ctx.config.web_dir = try std.fmt.bufPrint(&wd_buf, ".zig-cache/tmp/{s}", .{web.sub_path});
 
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
 
-    // GET / -> index.html with text/html.
-    //
-    // THE SPA SHELL MUST NOT BE IMMUTABLY CACHEABLE, and it must state a policy
-    // rather than leaving one to be guessed. It is the one file whose URL never
-    // changes and the one that POINTS AT the current hashed bundle, so a stale
-    // copy pins the whole app to an old build. It shipped with no `cache-control`,
-    // no `ETag` and no `Last-Modified` at all, which drops browsers into heuristic
-    // freshness — a rebuilt app kept serving old behaviour until site data was
-    // cleared by hand. `no-cache` still permits storage; it forbids blind reuse.
+    // The shell must state `no-cache`: its URL never changes and it points at
+    // the current hashed bundle, so heuristic freshness pins an old build.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/", &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -5732,8 +4975,7 @@ test "static SPA serving: index, assets, wasm, path-traversal refused, API prece
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "max-age") == null);
     }
 
-    // GET /index.html -> same file (explicit path), same policy. Both URLs reach
-    // the shell, so a policy that only covered one of them would not cover it.
+    // Both URLs reach the shell, so both carry the policy.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/index.html", &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -5742,7 +4984,6 @@ test "static SPA serving: index, assets, wasm, path-traversal refused, API prece
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "immutable") == null);
     }
 
-    // GET /assets/x.js -> correct content-type + immutable cache header.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/assets/x.js", &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -5751,12 +4992,8 @@ test "static SPA serving: index, assets, wasm, path-traversal refused, API prece
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "immutable") != null);
     }
 
-    // GET /note-decode.wasm-style single segment -> application/wasm (the renderer prefers it).
-    //
-    // Un-fingerprinted, so it revalidates like the shell — and here that is
-    // load-bearing rather than hygiene: this is the SNPG decoder, and the page
-    // payloads it decodes ARE cached for a year. A decoder that could lag behind
-    // its own payload format is the one way that immutable page cache turns bad.
+    // Un-fingerprinted, so it revalidates: the decoder must never lag the
+    // year-cached SNPG payloads it decodes.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/x.wasm", &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -5765,26 +5002,23 @@ test "static SPA serving: index, assets, wasm, path-traversal refused, API prece
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "immutable") == null);
     }
 
-    // Path traversal must never escape web_dir -> 403 (not a file read).
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/../../etc/passwd", &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 403), resp.status);
     }
 
-    // A missing static file (no SPA fallback — hash routing) -> 404.
+    // No SPA fallback (hash routing).
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/does-not-exist.js", &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
 
-    // API routes take precedence: /api/version still hits the handler, not static.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/api/version", &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try std.testing.expectEqualStrings(app.api_version, resp.body); // the handler ran, not static
     }
 
-    // With static serving disabled (web_dir empty), an unmatched route still 404s.
     {
         ctx.config.web_dir = "";
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/", &.{}, ""), &obuf);
@@ -5797,10 +5031,8 @@ test "static serving negotiates precompressed variants: br > gzip > raw, honorin
     defer f.deinit();
     const ctx = &f.ctx;
 
-    // A fake built SPA where one asset ships precompressed siblings and another
-    // does not. The server just streams whichever file it picks — the sibling
-    // bytes are DISTINCT sentinels (not real gzip/brotli), so the response body
-    // proves which variant was chosen without decompressing anything.
+    // Sibling files hold distinct sentinels (not real gzip/brotli), so the body
+    // shows which variant was chosen.
     var web = std.testing.tmpDir(.{});
     defer web.cleanup();
     var assets = try web.dir.createDirPathOpen(std.testing.io, "assets", .{});
@@ -5811,8 +5043,6 @@ test "static serving negotiates precompressed variants: br > gzip > raw, honorin
     try web.dir.writeFile(std.testing.io, .{ .sub_path = "assets/x.js", .data = raw });
     try web.dir.writeFile(std.testing.io, .{ .sub_path = "assets/x.js.gz", .data = gz });
     try web.dir.writeFile(std.testing.io, .{ .sub_path = "assets/x.js.br", .data = br });
-    // A second asset with NO precompressed siblings: even an accepting client
-    // must get the raw bytes.
     try web.dir.writeFile(std.testing.io, .{ .sub_path = "assets/y.css", .data = "body{color:red}" });
 
     var wd_buf: [256]u8 = undefined;
@@ -5821,9 +5051,7 @@ test "static serving negotiates precompressed variants: br > gzip > raw, honorin
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
 
-    // br accepted AND a .br exists -> serve the .br bytes, Content-Encoding: br,
-    // the BASE Content-Type (text/javascript, not the suffix), Vary, and the
-    // base path's immutable cache policy (assets/*).
+    // .br bytes with the base Content-Type, Vary, and the base path's cache policy.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/assets/x.js", &.{
             .{ .name = "accept-encoding", .value = "gzip, deflate, br" },
@@ -5836,7 +5064,6 @@ test "static serving negotiates precompressed variants: br > gzip > raw, honorin
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "immutable") != null);
     }
 
-    // gzip accepted, br NOT accepted -> serve the .gz bytes, Content-Encoding: gzip.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/assets/x.js", &.{
             .{ .name = "accept-encoding", .value = "gzip, deflate" },
@@ -5847,7 +5074,6 @@ test "static serving negotiates precompressed variants: br > gzip > raw, honorin
         try expectHeaderContains(resp.head, "vary: accept-encoding");
     }
 
-    // No Accept-Encoding -> raw bytes, no Content-Encoding, no Vary.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/assets/x.js", &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -5856,7 +5082,6 @@ test "static serving negotiates precompressed variants: br > gzip > raw, honorin
         try expectHeaderAbsentSubstring(resp.head, "vary:");
     }
 
-    // identity only -> raw, no Content-Encoding (neither br nor gzip accepted).
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/assets/x.js", &.{
             .{ .name = "accept-encoding", .value = "identity" },
@@ -5866,7 +5091,6 @@ test "static serving negotiates precompressed variants: br > gzip > raw, honorin
         try expectHeaderAbsentSubstring(resp.head, "content-encoding:");
     }
 
-    // br;q=0, gzip -> q=0 disables br, so gzip wins even though a .br exists.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/assets/x.js", &.{
             .{ .name = "accept-encoding", .value = "br;q=0, gzip" },
@@ -5876,7 +5100,6 @@ test "static serving negotiates precompressed variants: br > gzip > raw, honorin
         try expectHeaderContains(resp.head, "content-encoding: gzip");
     }
 
-    // A variant absent (y.css has no .br/.gz) -> raw even when br is accepted.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/assets/y.css", &.{
             .{ .name = "accept-encoding", .value = "br, gzip" },
@@ -5890,9 +5113,7 @@ test "static serving negotiates precompressed variants: br > gzip > raw, honorin
 
 // ---- assertion helpers ----
 
-/// `requestWithCookie` plus a `Range` header — the byte routes' one conditional
-/// input. Separate rather than an optional parameter so every existing caller
-/// stays a plain read.
+/// `requestWithCookie` plus a `Range` header.
 fn requestRanged(
     ctx: *Context,
     obuf: []u8,
@@ -5964,10 +5185,8 @@ test "handle() drives requests through the db_lock path without deadlocking" {
     const f = try Fixture.init();
     defer f.deinit();
 
-    // Serve mode gives ctx a db_lock so the per-connection threads serialize DB
-    // access; the other integration tests leave it null (single-threaded). Wire one
-    // here so transport.handle's lock/unlock path is exercised — a dropped unlock
-    // would deadlock the second request below, and a mislocked path would fault.
+    // Exercise transport.handle's lock path: a dropped unlock would deadlock the
+    // second request.
     var lock: std.Io.Mutex = .init;
     f.ctx.db_lock = &lock;
     const ctx = &f.ctx;
@@ -5977,8 +5196,6 @@ test "handle() drives requests through the db_lock path without deadlocking" {
     var obuf: [8192]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
 
-    // Two sequential DB-touching requests under the same lock: both must succeed,
-    // proving the lock is acquired and released around each whole handler.
     for (0..2) |_| {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/official/user/check/exists/server", &.{.{ .name = "content-type", .value = "application/json" }}, "{\"email\":\"admin\"}"), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -5987,50 +5204,10 @@ test "handle() drives requests through the db_lock path without deadlocking" {
 }
 
 test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the raw-file routes, the thumbnail route, the SSE route, the device list_folder route and the web upload route" {
-    // Pinned deliberately. `manual_db_lock` opts a route OUT of the automatic
-    // whole-handler DB lock, so flagging a route whose handler touches the DB
-    // without taking `ctx.db_lock` itself is a silent data race on the shared
-    // SQLite connection — no crash, no failing assertion, just corruption under
-    // concurrency. Adding a route here means auditing that handler's DB touches.
-    // `/note/:id/page/:n` joined the set once its handler was narrowed to lock
-    // only its single `files.get` (the blob read + parse now run unlocked).
-    // `/file/:id` joined for the same reason and with the same audit: ONE
-    // `files.get` under `ctx.db_lock`, then a pure blob→socket stream with the
-    // lock released (a multi-MB PDF must not hold the global lock for its
-    // download). Its handler touches the DB nowhere else.
-    //
-    // `/api/controlplane/events` joined for the SHARPEST version of the argument:
-    // it holds its connection open for minutes, so the automatic whole-handler
-    // lock would park the one global DB lock for the stream's whole lifetime and
-    // block device sync behind an open browser tab. Audited the same way — its
-    // only DB touches are two `files.syncVersion` reads, each in its own
-    // `ctx.lockDb()`/`unlockDb()` bracket, with the lock held across neither the
-    // poll sleep nor a socket write.
-    //
-    // The two BIN preview byte routes are the same two handlers as
-    // `/note/:id/page/:n` and `/file/:id` — literally, via `pageBytes`/`rawFile`
-    // — differing only in whether the entry is looked up live or trashed, so the
-    // audit that admitted the originals covers them exactly.
-    //
-    // `/thumbnail/:hash` joined when its bytes moved from a DB BLOB to the
-    // `thumbs/` derived store. Audited: ownership check + `thumbNeedsRepair`
-    // gate (a blob-magic dispatch over both formats' memos) in ONE
-    // `ctx.lockDb()` window, then — with the lock RELEASED — the optional
-    // on-demand derive (`Files.repairDerivedThumb`: the `.spd` deserialize or
-    // the `.note` cover parse, taking the lock itself only around its brief
-    // row write; lock order repair-mutex → db-lock), then a pure fs→socket
-    // stream. It touches the DB nowhere else, and the repair path is exactly
-    // why it CANNOT hold the whole-handler lock: a 16 MiB untrusted-SQLite
-    // deserialize (or a container parse) under the one global lock would stall
-    // every request, and re-locking inside would deadlock the non-reentrant
-    // mutex.
-    //
-    // `/api/file/2/files/list_folder` joined for the same shape as the SSE route: a
-    // DEVICE route whose default whole-handler lock made it the burst-sync
-    // monopolizer (~1 s under lock, ~11× `/tree`). Audited: its ONLY DB touches are
-    // the scoped `resolvePath` + `walkChildren`/`walkSubtree`/`walkTree` inside one
-    // `ctx.lockDb()`/`unlockDb()` bracket; the per-entry VO build and `json.respond`
-    // run with the lock released.
+    // `manual_db_lock` opts a route out of the whole-handler DB lock; a handler
+    // that then touches the DB without `ctx.db_lock` is a silent data race.
+    // Adding a route here means auditing its DB touches: each must lock only
+    // its brief lookups and stream with the lock released.
     const expected = [_][]const u8{
         "/oss/get/:id",
         "/oss/put/:innerName",
@@ -6042,44 +5219,14 @@ test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the 
         "/api/controlplane/bin/note/:id/page/:n",
         "/api/controlplane/bin/file/:id",
         "/api/file/2/files/list_folder",
-        // The per-version preview is the same `writePageResponse` streaming tail as
-        // `/note/:id/page/:n`, only keyed by the history `:md5` — its gate + plan
-        // run in one `ctx.lockDb()` window, then the SNPG payload streams unlocked.
         "/api/controlplane/note/:id/history/:md5/page/:n",
-        // The per-version RAW blob is the same `streamRawBlob` tail as `/file/:id`,
-        // only keyed by the history `:md5` — its `historyVersion` gate + name lookup
-        // run in one `ctx.lockDb()` window, then the blob streams unlocked.
         "/api/controlplane/note/:id/history/:md5/raw",
-        // The bin history byte streamers are the SAME two handlers as their live
-        // history twins (via `historyPage`/`historyRaw`), differing only in the gate's
-        // scope (`historyVersionIn(.trashed)`) — the audit that admitted the originals
-        // covers them exactly.
         "/api/controlplane/bin/note/:id/history/:md5/page/:n",
         "/api/controlplane/bin/note/:id/history/:md5/raw",
-        // The web upload is the `/oss/put` argument on the browser face: a
-        // multi-MB body streamed socket → md5 → filesystem, which must not hold
-        // the one global lock for the transfer. Audited: its ONLY DB touches are
-        // the destination `files.get` and the final `placeUpload` + `entryVO`,
-        // each in its own `ctx.lockDb()`/`unlockDb()` bracket, with the ingest
-        // between them touching the DB not at all.
         "/api/controlplane/folder/:id/upload",
-        // The stitched search-index stream, and the ONE route here that is manual
-        // in order to get a READER rather than to escape the writer's lock. It is
-        // a pure read and would be `read_only` if that flag did not hold its lease
-        // for the whole dispatch — which on a download means for the whole
-        // download, and which degrades to the WRITER under `db_lock` when the pool
-        // is empty. Audited: its only DB touch is one `index_export.manifest`
-        // query, inside either a `ctx.borrowReader()` bracket or a `ctx.lockDb()`
-        // one, both released before the response head goes out; the fragment walk
-        // that follows is fs → socket and touches the DB not at all.
+        // Manual to get a reader: `read_only` would hold the lease for the
+        // whole download.
         "/api/controlplane/search-index/stream",
-        // The per-document text record, manual for the SAME reason as the stream
-        // above — a reader rather than an escape from the writer — and audited to
-        // the same standard. Its only DB touch is one `Files.reachesBlob` (two
-        // indexed COUNTs), inside either a `ctx.borrowReader()` bracket or a
-        // `ctx.lockDb()` one, both released before the response head goes out;
-        // the fragment copy that follows is fs → socket and touches the DB not at
-        // all.
         "/api/controlplane/text/:md5",
     };
     var found: usize = 0;
@@ -6098,87 +5245,16 @@ test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the 
     try std.testing.expectEqual(expected.len, found);
 }
 
-// ---- the cache-policy pin ----------------------------------------------------
-//
-// THE RULE, and the only rule: a response may be `cache-control: immutable` only
-// when its cache key covers EVERYTHING that can change about it. A content hash
-// covers opaque bytes. It does not cover a Zig struct, which can gain or lose a
-// field on any deploy while the key sits still.
-//
-// Both halves of this are pinned below because both halves have already been got
-// wrong, silently, in production:
-//
-//   * `/note/:id/page/:n/text` was `immutable, max-age=1y` keyed on the
-//     transcript's md5. When `PageTextVO` gained `words`, every browser that had
-//     already fetched a page kept its old, wordless copy for a YEAR, on a URL that
-//     could never change and with no validator to revalidate against. Nothing
-//     errored: `pxPerMm` arrived (note metadata is not immutably cached), the match
-//     counter was right (a different request), and the page just had nothing
-//     circled on it. It presented as "broken for this note, fine for that one",
-//     because different notes had been cached at different moments.
-//   * `index.html` carried NO cache policy at all — no `Cache-Control`, no `ETag`,
-//     no `Last-Modified` — so browsers fell back to heuristic freshness on the one
-//     file whose URL never changes and which points at the current hashed bundle.
-//     A rebuilt app kept serving the old build until site data was cleared by hand.
-//
-// Both failures are silent, which is why the guard is an EXHAUSTIVE classification
-// of the route table rather than a spot check: a route added tomorrow does not get
-// to quietly join the immutable set, and does not get to skip the decision either.
+// ---- the cache-policy pin ----
+// A response may be `immutable` only when its cache key covers everything that
+// can change about it; a content hash does not cover a serialised struct. The
+// classification below is exhaustive so no new route skips the decision.
 
-/// The ONLY routes allowed to answer `immutable`. Both serve opaque bytes under a
-/// `?v=` that is the md5 of those exact bytes, and both 404 a mismatch — so the
-/// URL is genuinely content-addressed and a year-old entry cannot outlive what it
-/// described. Neither serialises a Zig struct into its body.
-///
-/// `/note/:id/page/:n` wraps its bytes in a 20-byte SNPG envelope that `?v=` does
-/// NOT cover. That is bounded on purpose: SNPG is self-describing and versioned in
-/// band (`page_payload.MAGIC`/`VERSION`) and the decoder rejects a mismatch loudly,
-/// and the decoder itself (`/note-decode.wasm`) is un-fingerprinted and therefore
-/// revalidated, so it can never lag its own payload format.
-/// The two bin-preview twins qualify on identical grounds: same handlers, same
-/// content-addressed `?v=`, same 404-on-mismatch. Trashing does not change the
-/// bytes or the hash — it only hides the row — so a cached preview can never
-/// outlive what it described any more than the live route's can.
-/// `/thumbnail/:hash` qualifies on the same ground: the URL is the SOURCE blob
-/// md5, and the thumbnail is derived once from that immutable content and stored
-/// verbatim (write-once — re-ingest of dedup'd bytes does not re-extract), so a
-/// given hash maps to the same opaque image bytes forever. No Zig struct is
-/// serialised into the body. It has no `?v=`/404-on-mismatch because the address
-/// IS the content key; a hash the caller does not hold 404s, which caches nothing
-/// harmful (the miss is not `immutable` — `reply.notFound` sends no cache header).
-/// `/note/:id/template/:hash` qualifies exactly as `/thumbnail/:hash` does: the
-/// URL is content-addressed by the template's asset hash and the bytes are the
-/// stored image, immutable and never re-encoded, so a given hash maps to the
-/// same bytes forever. No Zig struct is serialised into the body; a foreign or
-/// absent hash 404s (which caches nothing).
-/// `/api/controlplane/note/:id/history/:md5/page/:n` qualifies for a REASON the
-/// live page route needs `?v=` to earn: the URL's `:md5` IS the whole blob's
-/// content key, so page `n`'s opaque SNPG bytes can never change under this URL
-/// (a fixed blob is fixed forever) — the content addressing `?v=` buys the live
-/// route, `:md5` buys this one for free. No Zig struct in the body; a `:md5` not
-/// in the file's history 404s (which caches nothing).
-/// `/api/controlplane/note/:id/history/:md5/raw` is the raw-blob twin of that,
-/// and qualifies identically: the URL's `:md5` IS the whole blob's content key, so
-/// the opaque raw bytes can never change under this URL — exactly what `?v=` buys
-/// the live `/file/:id`, `:md5` buys this one for free. No Zig struct in the body;
-/// a `:md5` not in the file's history 404s (which caches nothing).
-/// The two BIN history byte twins qualify on IDENTICAL grounds to their live
-/// history counterparts: same handlers, same `:md5`-pins-the-whole-blob content
-/// addressing, same 404-on-miss. Trashing hides the row, never the bytes or the
-/// hash, so a cached preview can no more outlive what it described than the live
-/// history route's can.
-///
-/// `/api/controlplane/text/:md5` is the ONE entry here that answers `immutable`
-/// with NO `max-age`, and the difference is the rule rather than an exception to
-/// it. Its body is opaque compressed bytes — no Zig struct is serialised into it,
-/// so the regression this list was written for cannot occur — and the URL's
-/// `:md5` addresses the blob. But the FILE's key is `(md5, index_version)`: a
-/// parser bump re-derives the same md5 into a new file and unlinks the old one,
-/// so what this URL serves does change, once, per parser release. A year-long
-/// entry would therefore strand a browser on text an old parser produced, on a
-/// URL that cannot change to tell it — `PageTextVO.words` again. Granting no
-/// freshness lifetime is what keeps that reachable, while `immutable` still says
-/// the true thing about the bytes themselves. See the handler.
+/// The only routes allowed to answer `immutable`: opaque bytes, no serialised
+/// struct, under a content-addressed key (`?v=` md5 with 404-on-mismatch, or a
+/// `:hash`/`:md5` in the path). SNPG's envelope is outside `?v=` but versioned
+/// in band. `text/:md5` gets no `max-age`: its file is keyed by
+/// `(md5, index_version)`, so it changes once per parser release.
 const immutable_routes = [_][]const u8{
     "/note/:id/page/:n",
     "/note/:id/template/:hash",
@@ -6193,10 +5269,8 @@ const immutable_routes = [_][]const u8{
     "/api/controlplane/text/:md5",
 };
 
-/// EVERY OTHER ROUTE IN THE TABLE. Adding a route without listing it here (or in
-/// `immutable_routes`) fails the test — that is the entire point. JSON belongs
-/// here by construction: it is serialised from a struct, so its shape is not in
-/// its cache key.
+/// Every other route; an unlisted route fails the test. JSON belongs here: its
+/// shape is not in its cache key.
 const non_immutable_routes = [_][]const u8{
     "/api/admin/elevate",
     "/api/admin/lock",
@@ -6231,11 +5305,8 @@ const non_immutable_routes = [_][]const u8{
     "/api/controlplane/note/:id/history/:md5/page/:n/text",
     "/api/controlplane/note/:id/history/:md5/restore",
     "/api/controlplane/search-index/manifest",
-    // NO-STORE, which is stricter than everything else on this list and is the
-    // skip rule's consequence rather than caution: two identical `(m, want)`
-    // requests may legitimately differ, because a document still deriving the
-    // first time is simply skipped and arrives the second. A cached copy would
-    // freeze the first answer, and the client would never see it appear.
+    // no-store: a document still deriving is skipped, so identical requests
+    // may differ.
     "/api/controlplane/search-index/stream",
     "/api/controlplane/server-info",
     "/api/controlplane/tree",
@@ -6286,9 +5357,7 @@ fn listed(list: []const []const u8, path: []const u8) bool {
 }
 
 test "cache policy: every route is classified, and only the byte routes may be immutable" {
-    // Half one: the classification is EXHAUSTIVE and unambiguous over the live
-    // route table. A new route is unclassified and fails here; a deleted route
-    // leaves a stale entry and fails here too.
+    // Exhaustive over the live route table, both new and deleted routes.
     for (app.routes) |r| {
         const a = listed(&immutable_routes, r.path);
         const b = listed(&non_immutable_routes, r.path);
@@ -6338,7 +5407,6 @@ test "cache policy: the served responses match the classification, route by rout
         @memcpy(&text_hash, p.value.pages[0].textHash.?);
     }
 
-    // --- the two routes that MAY be immutable, on their 200 path ---
     const allowed = [_][]const u8{
         try std.fmt.bufPrint(pbuf[0..96], "/note/{d}/page/0?v={s}", .{ note_id, page_hash[0..] }),
         try std.fmt.bufPrint(pbuf[96..], "/file/{d}?v={s}", .{ pic.id, pic.md5[0..] }),
@@ -6349,8 +5417,7 @@ test "cache policy: the served responses match the classification, route by rout
         try expectHeaderContains(resp.head, "cache-control: public, max-age=31536000, immutable");
     }
 
-    // --- and NOT on their 404 path. A stale `?v=` means "your metadata is old";
-    //     answering that with a year-long immutable entry would cache the miss.
+    // Not on the 404 path: that would cache the miss.
     {
         const stale = [_][]const u8{
             try std.fmt.bufPrint(pbuf[0..96], "/note/{d}/page/0?v={s}", .{ note_id, "0" ** 32 }),
@@ -6363,9 +5430,6 @@ test "cache policy: the served responses match the classification, route by rout
         }
     }
 
-    // --- every OTHER GET route the fixture can drive: no `immutable`, ever.
-    //     Statuses differ (200/403/404) and that is fine — the assertion is about
-    //     the cache policy, which must hold on every path out of the handler.
     const others = [_][]const u8{
         "/api/version",
         "/api/user/me",
@@ -6377,11 +5441,7 @@ test "cache policy: the served responses match the classification, route by rout
         "/api/controlplane/events",
         "/api/admin/users",
         "/oss/get/1?t=deadbeefdeadbeefdeadbeefdeadbeef",
-        // The per-document text route on its MISS path. It is the one entry in
-        // `immutable_routes` this fixture cannot drive to a 200 (no derived
-        // stores), and the miss is the half that matters here anyway: caching a
-        // 404 on a URL that becomes valid the moment the derive lands would break
-        // find-in-document permanently for that document.
+        // The text route's miss path (no derived stores here).
         "/api/controlplane/text/" ++ "f" ** 32,
         try std.fmt.bufPrint(pbuf[0..96], "/api/controlplane/file/metadata/{d}", .{note_id}),
         try std.fmt.bufPrint(pbuf[96..], "/note/{d}/page/0/text?v={s}", .{ note_id, text_hash[0..] }),
@@ -6391,8 +5451,6 @@ test "cache policy: the served responses match the classification, route by rout
         try expectHeaderAbsentSubstring(resp.head, "immutable");
     }
 
-    // The page-text route specifically: it is the one that regressed, so pin the
-    // exact policy rather than only the absence of `immutable`.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/text?v={s}", .{ note_id, text_hash[0..] });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -6401,9 +5459,7 @@ test "cache policy: the served responses match the classification, route by rout
     }
 }
 
-/// Fails if `needle` appears anywhere in the response head. Substring, not a
-/// header-name match: `immutable` is a cache-control TOKEN, and the point is that
-/// it must not appear under any header whatsoever.
+/// Fails if `needle` appears anywhere in the response head, under any header.
 fn expectHeaderAbsentSubstring(head: []const u8, needle: []const u8) !void {
     if (std.mem.indexOf(u8, head, needle) != null) {
         std.debug.print("unexpected `{s}` in response head:\n{s}\n", .{ needle, head });
@@ -6424,10 +5480,7 @@ test "db_lock is released after handle() for both a normal and a manual_db_lock 
     var obuf: [8192]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
 
-    // `tryLock` succeeds only on an unlocked mutex, so it detects a leaked
-    // acquire. The manual path has THREE windows (resolveCaller, plus the
-    // handler's own) against the normal path's one, so an unbalanced
-    // lock/unlock is a real risk — assert balance after each dispatch.
+    // `tryLock` succeeds only when unlocked, so it detects a leaked acquire.
     const expectUnlocked = struct {
         fn check(m: *std.Io.Mutex) !void {
             try std.testing.expect(m.tryLock()); // would fail if handle() leaked the lock
@@ -6437,16 +5490,12 @@ test "db_lock is released after handle() for both a normal and a manual_db_lock 
 
     try expectUnlocked(&lock); // sanity: the guard can tell "unlocked"
 
-    // A normal (whole-handler lock) route.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/official/user/check/exists/server", &.{.{ .name = "content-type", .value = "application/json" }}, "{\"email\":\"admin\"}"), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
     try expectUnlocked(&lock);
 
-    // A manual_db_lock route, served successfully: /oss/get with a valid token.
-    // Also asserts the narrowed lock windows didn't break the read path — the
-    // response must still be the exact blob bytes.
     const blob_bytes = "hello narrow-lock download blob";
     const file_id = try putSeed(f, admin, null, "a.note", blob_bytes);
     const now_ms = std.Io.Clock.real.now(std.testing.io).toMilliseconds();
@@ -6460,8 +5509,6 @@ test "db_lock is released after handle() for both a normal and a manual_db_lock 
     }
     try expectUnlocked(&lock);
 
-    // A manual_db_lock route on its ERROR path (bad token → 403 before any DB
-    // touch): the resolveCaller window must still be released.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/oss/get/{d}?t=deadbeefdeadbeefdeadbeefdeadbeef", .{file_id});
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", path, &.{}, ""), &obuf);
@@ -6469,10 +5516,6 @@ test "db_lock is released after handle() for both a normal and a manual_db_lock 
     }
     try expectUnlocked(&lock);
 
-    // The OTHER manual_db_lock route: /note/{id}/page/{n}. Same three windows
-    // (resolveCaller + the handler's own lookup-and-plan), and the payload is
-    // STREAMED off the blob with the lock RELEASED — so assert both that the
-    // bytes are still right and that the lock came back.
     const note_id = try seedNoteHttp(f, admin, null, "locked.note", &.{"AAAA"});
     const web_tok = try onboardWeb(ctx, "admin", "temp0000", "adminpw1");
     try expectUnlocked(&lock); // the onboarding roundtrips balanced too
@@ -6499,8 +5542,6 @@ test "db_lock is released after handle() for both a normal and a manual_db_lock 
     }
     try expectUnlocked(&lock);
 
-    // And its 404 path (stale `?v=`), which returns after the handler's own lock
-    // window has already opened and closed.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0?v={s}", .{ note_id, "0" ** 32 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -6508,9 +5549,6 @@ test "db_lock is released after handle() for both a normal and a manual_db_lock 
     }
     try expectUnlocked(&lock);
 
-    // The THIRD control-plane manual_db_lock route: /file/{id}. Its whole reason
-    // for the flag is that the blob→socket transfer runs with the lock RELEASED,
-    // so assert both the bytes and the balance, on the served and the 404 path.
     const raw_bytes = "raw png-ish bytes for the browser face";
     const pic = try putSeedHashed(f, admin, null, "shot.png", raw_bytes);
     {
@@ -6528,8 +5566,7 @@ test "db_lock is released after handle() for both a normal and a manual_db_lock 
     try expectUnlocked(&lock);
 }
 
-/// `putSeed`, but also returning the stored blob's md5 — the `?v=` version the
-/// raw-file route requires.
+/// `putSeed` plus the blob md5 (the raw-file route's `?v=`).
 const Seeded = struct { id: u64, md5: [32]u8 };
 
 fn putSeedHashed(f: *Fixture, user_id: u64, parent: ?u64, name: []const u8, data: []const u8) !Seeded {
@@ -6542,9 +5579,7 @@ fn putSeedHashed(f: *Fixture, user_id: u64, parent: ?u64, name: []const u8, data
     return out;
 }
 
-/// The `head` of a response, lowercased into `buf`, for case-insensitive header
-/// assertions. (`std.http.Server` writes our `extra_headers` verbatim, but an
-/// assertion that depends on that is an assertion about the wrong thing.)
+/// The response head lowercased into `buf`, for case-insensitive assertions.
 fn lowerHead(buf: []u8, head: []const u8) []const u8 {
     const n = @min(buf.len, head.len);
     for (head[0..n], 0..) |c, i| buf[i] = std.ascii.toLower(c);
@@ -6583,23 +5618,20 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
     var pbuf: [256]u8 = undefined;
 
     const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
-    // Mallory's sessions must be established BEFORE her device login: changing a
-    // password revokes every session the user holds, device tokens included.
+    // Before the device login: a password change revokes device tokens too.
     const mtok = try onboardWeb(ctx, "mallory", "mpass111", "mallorypw1");
     const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "mallory", "mallorypw1", "SN9");
 
     const png_bytes = "\x89PNG\r\n\x1a\n not really a png, but exactly these bytes";
     const png = try putSeedHashed(f, admin, null, "20260719_165902_Page_1.png", png_bytes);
 
-    // --- the happy path: exact bytes, exact length, inline, cacheable ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ png.id, png.md5[0..] });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try std.testing.expectEqualStrings(png_bytes, resp.body);
 
-        // Content-Length is DECLARED (from `files.size`), not measured — so the
-        // response is a plain sized body and never chunked.
+        // Content-Length is declared from `files.size`, never chunked.
         var lbuf: [64]u8 = undefined;
         try expectHeaderContains(resp.head, try std.fmt.bufPrint(&lbuf, "content-length: {d}", .{png_bytes.len}));
         try expectHeaderAbsent(resp.head, "transfer-encoding");
@@ -6611,19 +5643,16 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
         try expectHeaderContains(resp.head, try std.fmt.bufPrint(&lbuf, "etag: \"{s}\"", .{png.md5[0..]}));
     }
 
-    // --- RANGE: the PDF viewer's transport ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ png.id, png.md5[0..] });
         var lbuf: [80]u8 = undefined;
 
-        // Advertised on a PLAIN reply too — that is how a client learns it may ask.
+        // Advertised on a plain reply too.
         {
             const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
             try expectHeaderContains(resp.head, "accept-ranges: bytes");
         }
 
-        // A window: 206, the exact bytes, an inclusive content-range, and a
-        // content-length of the WINDOW rather than the file.
         {
             const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &web_tok, "bytes=4-11");
             try std.testing.expectEqual(@as(u16, 206), resp.status);
@@ -6632,48 +5661,40 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
             try expectHeaderContains(resp.head, "content-length: 8");
         }
 
-        // Open-ended: to the end.
         {
             const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &web_tok, "bytes=10-");
             try std.testing.expectEqual(@as(u16, 206), resp.status);
             try std.testing.expectEqualStrings(png_bytes[10..], resp.body);
         }
 
-        // SUFFIX: the last 5 bytes, not the first 5. Read as an offset this would
-        // serve the front of the file — which for a PDF is the one place its
-        // trailer certainly is not, so every document would fail to open.
+        // Suffix: the last 5 bytes (a PDF's trailer lives there).
         {
             const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &web_tok, "bytes=-5");
             try std.testing.expectEqual(@as(u16, 206), resp.status);
             try std.testing.expectEqualStrings(png_bytes[png_bytes.len - 5 ..], resp.body);
         }
 
-        // Past the end is 416 WITH the unsatisfied-range form, not a 200 and not
-        // a 404: the client needs the size to correct itself.
+        // 416 with the unsatisfied-range form: the client needs the size.
         {
             const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &web_tok, "bytes=99999-");
             try std.testing.expectEqual(@as(u16, 416), resp.status);
             try expectHeaderContains(resp.head, try std.fmt.bufPrint(&lbuf, "content-range: bytes */{d}", .{png_bytes.len}));
         }
 
-        // Malformed and multi-range are IGNORED — 200 with everything, per
-        // RFC 9110 — rather than refused. A client that asks badly still reads.
+        // Malformed and multi-range are ignored (200, per RFC 9110).
         for ([_][]const u8{ "bytes=abc", "bytes=9-2", "bytes=0-3,8-11", "items=0-3" }) |bad| {
             const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &web_tok, bad);
             try std.testing.expectEqual(@as(u16, 200), resp.status);
             try std.testing.expectEqualStrings(png_bytes, resp.body);
         }
 
-        // A range still obeys the route's other rules: ownership is checked
-        // BEFORE any of this, so a foreign caller gets the same 404 it always did
-        // rather than a 206 leaking a window of someone else's file.
+        // Ownership is checked first: a foreign caller gets 404, not a 206.
         {
             const resp = try requestRanged(ctx, &obuf, &reqbuf, path, &mtok, "bytes=0-3");
             try std.testing.expectEqual(@as(u16, 404), resp.status);
         }
     }
 
-    // --- the SAME route, forced to a download ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}&download=1", .{ png.id, png.md5[0..] });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -6682,7 +5703,6 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
         try expectHeaderContains(resp.head, "content-disposition: attachment;");
     }
 
-    // --- the allowlist, type by type ---
     const Case = struct { name: []const u8, mime: []const u8, disposition: []const u8 };
     const cases = [_]Case{
         .{ .name = "a.jpg", .mime = "image/jpeg", .disposition = "inline" },
@@ -6690,9 +5710,7 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
         .{ .name = "a.webp", .mime = "image/webp", .disposition = "inline" },
         .{ .name = "a.gif", .mime = "image/gif", .disposition = "inline" },
         .{ .name = "a.pdf", .mime = "application/pdf", .disposition = "inline" },
-        // THE SVG CASE. An image by every other definition, but an XML document
-        // that browsers execute script from — inline from our own origin would be
-        // stored XSS with the session cookie in reach. Attachment, always.
+        // SVG executes script: inline from our origin would be stored XSS.
         .{ .name = "a.svg", .mime = "application/octet-stream", .disposition = "attachment" },
         .{ .name = "a.html", .mime = "application/octet-stream", .disposition = "attachment" },
         .{ .name = "a.note", .mime = "application/octet-stream", .disposition = "attachment" },
@@ -6700,7 +5718,7 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
         .{ .name = "noextension", .mime = "application/octet-stream", .disposition = "attachment" },
     };
     for (cases, 0..) |c, i| {
-        // Distinct bytes per case so dedup can't collapse them onto one blob.
+        // Distinct bytes per case so dedup can't collapse them.
         var body_buf: [64]u8 = undefined;
         const bytes = try std.fmt.bufPrint(&body_buf, "payload-{d}-{s}", .{ i, c.name });
         const seed = try putSeedHashed(f, admin, null, c.name, bytes);
@@ -6713,12 +5731,10 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
         var hbuf: [128]u8 = undefined;
         try expectHeaderContains(resp.head, try std.fmt.bufPrint(&hbuf, "content-type: {s}", .{c.mime}));
         try expectHeaderContains(resp.head, try std.fmt.bufPrint(&hbuf, "content-disposition: {s};", .{c.disposition}));
-        // nosniff is unconditional: it is what stops a wrong label being
-        // "corrected" into text/html by content sniffing.
+        // nosniff stops a wrong label being sniffed into text/html.
         try expectHeaderContains(resp.head, "x-content-type-options: nosniff");
     }
 
-    // --- a device-authored filename carrying a quote and a CRLF ---
     {
         const nasty = "ev\"il\r\nX-Injected: yes.png";
         const bytes = "nasty-name-bytes";
@@ -6726,25 +5742,16 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
         const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ seed.id, seed.md5[0..] });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
 
-        // The response must still parse as ONE response with an intact body: if
-        // the CRLF had reached the wire, the head would have ended early and the
-        // body would be wrong.
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try std.testing.expectEqualStrings(bytes, resp.body);
-        // The forged name survives only as TEXT inside one header's value — never
-        // as a header of its own. That is the whole property: no CRLF reached the
-        // wire, so no new header line was ever started.
+        // The forged name survives only as text inside one header's value.
         try expectHeaderAbsent(resp.head, "\r\nx-injected:");
         try expectHeaderContains(resp.head, "content-disposition: inline; filename=\"ev_il__x-injected_ yes.png\"");
         try expectHeaderContains(resp.head, "content-type: image/png");
-        // status + 7 headers, no extras. The 7th is `accept-ranges`, added when
-        // the route learned to serve byte ranges — and this count is deliberately
-        // exact rather than a lower bound, because the property under test is
-        // that a forged filename cannot MANUFACTURE a header line.
+        // Status + exactly 7 headers: a forged filename cannot add a line.
         try std.testing.expect(std.mem.count(u8, resp.head, "\r\n") == 7);
     }
 
-    // --- versioning: `?v=` is required, and must name the bytes we hold ---
     {
         const bare = try std.fmt.bufPrint(&pbuf, "/file/{d}", .{png.id});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", bare, &web_tok, "", 404);
@@ -6752,19 +5759,14 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", stale, &web_tok, "", 404);
     }
 
-    // --- ownership: another user's file is 404, NOT 403 ---
-    // 403 would confirm the id exists and belongs to somebody, making the route an
-    // existence oracle over the id space. `files.get` is user-scoped, so a foreign
-    // id and a missing id are genuinely the same answer.
+    // Another user's file is 404, not 403 (no existence oracle).
     {
         const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ png.id, png.md5[0..] });
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", path, &mtok, "", 404);
-        // And a folder / absent id, for the same 404.
         const ghost = try std.fmt.bufPrint(&pbuf, "/file/999999?v={s}", .{png.md5[0..]});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", ghost, &web_tok, "", 404);
     }
 
-    // --- auth: no session is 401; a DEVICE session is 403 (wrong face) ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ png.id, png.md5[0..] });
         const anon = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", path, &.{}, ""), &obuf);
@@ -6778,12 +5780,8 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
 }
 
 test "raw file: /file serves a .note's exact bytes as attachment (no .note-specific download path)" {
-    // Task B pin: `/file/:id?v={hash}` is the ONE universal raw-bytes primitive —
-    // it returns the exact stored bytes of ANY file, `.note` included (it is the
-    // `.note` download path the reader builds via `rawFileUrl(..., {download:true})`).
-    // The per-page SNPG route (`/note/:id/page/:n`) is a `.note` RENDER convenience
-    // layered on top, NEVER the way to fetch `.note` bytes, and there is deliberately
-    // no `.note`-specific download route: this SAME handler serves it like any blob.
+    // `/file/:id?v=` is the one raw-bytes primitive, `.note` included; there is
+    // no `.note`-specific download route.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -6794,9 +5792,6 @@ test "raw file: /file serves a .note's exact bytes as attachment (no .note-speci
     var pbuf: [256]u8 = undefined;
     const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
 
-    // A representative `.note` blob: the container magic + ~2 KiB of opaque bytes.
-    // `/file` never parses it; the property under test is that the bytes flow
-    // through the shared raw route unchanged.
     var note_bytes: [2048]u8 = undefined;
     const magic = "noteSN_FILE_VER_20230015";
     @memcpy(note_bytes[0..magic.len], magic);
@@ -6808,15 +5803,11 @@ test "raw file: /file serves a .note's exact bytes as attachment (no .note-speci
     const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 
-    // EXACT bytes, byte-for-byte — the same handler the `.spd`/`.txt`/image viewers hit.
     try std.testing.expectEqualStrings(&note_bytes, resp.body);
 
-    // A `.note` is opaque to the browser and never on the inline allowlist, so the
-    // disposition is `attachment` (a download), exactly what the reader intends.
     try expectHeaderContains(resp.head, "content-type: application/octet-stream");
     try expectHeaderContains(resp.head, "content-disposition: attachment;");
     try expectHeaderContains(resp.head, "x-content-type-options: nosniff");
-    // Same content-addressed cache contract as every other blob on this route.
     try expectHeaderContains(resp.head, "cache-control: public, max-age=31536000, immutable");
     var lbuf: [64]u8 = undefined;
     try expectHeaderContains(resp.head, try std.fmt.bufPrint(&lbuf, "etag: \"{s}\"", .{note.md5[0..]}));
@@ -6832,13 +5823,8 @@ test "raw file route: the listing carries fileHash, and a multi-chunk blob strea
     var reqbuf: [2048]u8 = undefined;
     var pbuf: [256]u8 = undefined;
 
-    // Larger than `blobstore.chunk_len` (64 KiB) by more than one whole chunk, so
-    // the transfer HAS to loop — and, deliberately, not a multiple of it, so a
-    // short final chunk is exercised too. If the endpoint ever regressed to a
-    // read-it-all-then-send, this is still the test that stays green — the memory
-    // claim is upheld by the fixed `[chunk_len]u8` buffers in the handler, which
-    // no black-box test can observe. What this DOES prove is that the chunked pump
-    // reassembles byte-exactly across buffer boundaries.
+    // More than one 64 KiB chunk and not a multiple of it, so the pump loops
+    // and ends on a short chunk.
     const big_len = 150 * 1024 + 7;
     const big = try gpa.alloc(u8, big_len);
     defer gpa.free(big);
@@ -6851,8 +5837,6 @@ test "raw file route: the listing carries fileHash, and a multi-chunk blob strea
 
     const web_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
 
-    // The listing must advertise the version the raw route requires — otherwise
-    // the URL simply cannot be built.
     var listed_hash: [32]u8 = undefined;
     {
         const resp = try requestWithCookie(ctx, obuf, &reqbuf, "GET", "/api/controlplane/tree", &web_tok, "");
@@ -6892,10 +5876,8 @@ test "raw file route: the listing carries fileHash, and a multi-chunk blob strea
     }
 }
 
-/// A minimal `.spd` (an SQLite db with a `config` table), serialized to bytes —
-/// hermetic, no committed binary. `thumbnail` is the raw image blob to embed, or
-/// null to omit the `thumbnail` row (an "empty" drawing). Mirrors the fixture
-/// builder in `services/thumbnail.zig`'s own tests.
+/// A minimal `.spd` (SQLite with a `config` table) as bytes; `thumbnail` null
+/// omits the `thumbnail` row.
 fn buildSpdFixture(thumb: ?[]const u8) ![]u8 {
     var db = try sqlite.Db.openMemory();
     defer db.close();
@@ -6925,14 +5907,10 @@ test "GET /thumbnail/{hash}: extracted .spd preview served immutable; 404 for no
 
     const jpeg = "\xff\xd8\xff\xe0" ++ ("supernote-thumbnail-pixels" ** 8);
 
-    // A `.spd` carrying an embedded JPEG thumbnail, ingested by admin. Extraction
-    // rode `linkBlob` at put time, so serving is now a lookup.
     const spd = try buildSpdFixture(jpeg);
     defer gpa.free(spd);
     const drawing = try putSeedHashed(f, admin, null, "drawing.spd", spd);
 
-    // --- 200: the extracted bytes, the SNIFFED Content-Type, immutable caching,
-    //     and an exact Content-Length (streamed from `thumbs/`, not chunked).
     {
         const path = try std.fmt.bufPrint(&pbuf, "/thumbnail/{s}", .{drawing.md5[0..]});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "");
@@ -6946,8 +5924,7 @@ test "GET /thumbnail/{hash}: extracted .spd preview served immutable; 404 for no
         try expectHeaderAbsent(resp.head, "transfer-encoding");
     }
 
-    // --- 404: a `.txt` ships no embedded thumbnail. But `/file/{id}` DOES serve
-    //     the `.txt` bytes (the client renders its snippet from them).
+    // A `.txt` has no thumbnail, but `/file/{id}` serves its bytes for the snippet.
     const txt_body = "The quick brown fox.\nA second line the client would raster.\n";
     const note = try putSeedHashed(f, admin, null, "readme.txt", txt_body);
     {
@@ -6955,40 +5932,33 @@ test "GET /thumbnail/{hash}: extracted .spd preview served immutable; 404 for no
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", tpath, &admin_tok, "", 404);
     }
     {
-        // The `.txt` head-serving path the frontend relies on for text previews.
         const fpath = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ note.id, note.md5[0..] });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", fpath, &admin_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try std.testing.expectEqualStrings(txt_body, resp.body);
     }
 
-    // --- 404: a corrupt/garbage `.spd` skips cleanly at ingest — the upload still
-    //     succeeds (putSeedHashed returned an id), it simply has no thumbnail.
+    // A corrupt `.spd` still uploads; it just has no thumbnail.
     const corrupt = try putSeedHashed(f, admin, null, "broken.spd", "SQLite format 3\x00 then total garbage \xff\x00\xab");
     {
         const path = try std.fmt.bufPrint(&pbuf, "/thumbnail/{s}", .{corrupt.md5[0..]});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "", 404);
     }
 
-    // --- 404: a malformed / non-32-hex hash is not even a lookup.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/thumbnail/not-a-hash", &admin_tok, "", 404);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/thumbnail/ffffffffffffffffffffffffffffffff", &admin_tok, "", 404);
 
-    // --- 404: OWNERSHIP. Bob ingests his own `.spd` (a real thumbnail row exists,
-    //     keyed by its md5), but admin does not hold that blob — so to admin it is
-    //     indistinguishable from "no thumbnail". A foreign holder is no oracle.
+    // Bob's thumbnail row exists, but admin does not hold that blob: 404.
     const bob_spd = try buildSpdFixture("\x89PNG\r\n\x1a\n" ++ ("bobs-private-drawing" ** 4));
     defer gpa.free(bob_spd);
     const bob_drawing = try putSeedHashed(f, bob, null, "secret.spd", bob_spd);
     {
-        // The row exists (bob can read it — proven by seeding through the same path).
         try std.testing.expect(try f.files.holdsBlob(bob, &bob_drawing.md5));
         try std.testing.expect(!try f.files.holdsBlob(admin, &bob_drawing.md5));
         const path = try std.fmt.bufPrint(&pbuf, "/thumbnail/{s}", .{bob_drawing.md5[0..]});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "", 404);
     }
 
-    // --- auth: no cookie at all is 401, not 404 (the auth layer runs first).
     {
         const path = try std.fmt.bufPrint(&pbuf, "/thumbnail/{s}", .{drawing.md5[0..]});
         const req = try buildRequest(&reqbuf, "GET", path, &.{}, "");
@@ -7015,16 +5985,12 @@ test "GET /thumbnail/{hash}: a lost thumbs/ file heals on demand — the next GE
     const drawing = try putSeedHashed(f, admin, null, "drawing.spd", spd);
     const path = try std.fmt.bufPrint(&pbuf, "/thumbnail/{s}", .{drawing.md5[0..]});
 
-    // Served once from the ingest-derived file.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
 
-    // Delete the derived file behind its back — a restore that (correctly)
-    // skipped the backup-skippable `thumbs/` dir. The serve path must notice
-    // (`needsRepair`: the row claims a thumbnail, the file is gone), re-derive
-    // off the db lock, and serve the regenerated bytes — no restart, no sweep.
+    // A restore skipped `thumbs/`: the serve path must re-derive and serve.
     f.files.thumbs.remove(&drawing.md5);
     try std.testing.expect(!f.files.thumbs.has(&drawing.md5));
     {
@@ -7048,14 +6014,12 @@ test "GET /thumbnail/{hash}: a corrupt .spd is derived ONCE — two GETs, two 40
     var reqbuf: [1024]u8 = undefined;
     var pbuf: [128]u8 = undefined;
 
-    // SQLite magic + garbage: passes the cheap pre-check, fails the real open,
-    // so ingest memoized `indexable = 0`. Wipe the row to simulate a pre-v13
-    // database, so the FIRST GET below is what pays the derive.
+    // SQLite magic + garbage fails the real open (`indexable = 0`); wiping the
+    // row makes the first GET pay the derive.
     const corrupt = try putSeedHashed(f, admin, null, "broken.spd", "SQLite format 3\x00 then total garbage \xff\x00\xab");
     try f.db.exec("DELETE FROM spd_index;");
     const path = try std.fmt.bufPrint(&pbuf, "/thumbnail/{s}", .{corrupt.md5[0..]});
 
-    // First GET: repairs (writes the indexable = 0 memo row), serves 404.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "", 404);
     {
         var s = try f.db.prepare("SELECT indexable FROM spd_index WHERE blob_md5 = ?1;");
@@ -7065,12 +6029,9 @@ test "GET /thumbnail/{hash}: a corrupt .spd is derived ONCE — two GETs, two 40
         try std.testing.expectEqual(@as(i64, 0), s.columnInt(0)); // recorded as unparseable
     }
 
-    // Plant a sentinel timestamp: a re-derive would upsert `indexed_at = now()`
-    // and clobber it, so its survival across the next GET proves NO second
-    // derive happened (equality of two real now() calls would prove nothing).
+    // A sentinel `indexed_at` survives only if no second derive upserts it.
     try f.db.exec("UPDATE spd_index SET indexed_at = 12345;");
 
-    // Second GET: the memo short-circuits `needsRepair` — 404 with NO re-derive.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "", 404);
     {
         var s = try f.db.prepare("SELECT indexed_at FROM spd_index WHERE blob_md5 = ?1;");
@@ -7081,15 +6042,13 @@ test "GET /thumbnail/{hash}: a corrupt .spd is derived ONCE — two GETs, two 40
     }
 }
 
-/// A real minimal PNG head (320×240 IHDR): sniffs as image/png AND yields dims —
-/// the shape a `.note` cover fixture needs (the device writes complete PNGs).
+/// A real minimal PNG head (320×240 IHDR) that sniffs and yields dims.
 const cover_png = "\x89PNG\r\n\x1a\n" ++
     "\x00\x00\x00\x0d" ++ "IHDR" ++
     "\x00\x00\x01\x40" ++ "\x00\x00\x00\xf0" ++
     "\x08\x02\x00\x00\x00" ++ ("p" ** 16);
 
-/// A one-page synthetic `.note`, optionally carrying `cover` as its `COVER_2`
-/// footer block — hermetic, via the parser package's builder.
+/// A one-page `.note`, optionally with `cover` as its `COVER_2` block.
 fn buildNoteFixture(cover: ?[]const u8) ![]u8 {
     const nb = @import("note_builder");
     const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
@@ -7112,10 +6071,8 @@ test "GET /thumbnail/{hash}: a .note cover serves 200 immutable; a coverless not
     var reqbuf: [1024]u8 = undefined;
     var pbuf: [128]u8 = undefined;
 
-    // --- 200: the cover STREAMED from the blob at the location the ingest parse
-    //     recorded, recorded Content-Type, immutable caching, exact
-    //     Content-Length — the identical serve contract the `.spd` thumbnail
-    //     answers under, through the identical route.
+    // Streamed from the blob at the location the ingest parse recorded, same
+    // serve contract as the `.spd` thumbnail.
     const covered = try buildNoteFixture(cover_png);
     defer gpa.free(covered);
     const note = try putSeedHashed(f, admin, null, "covered.note", covered);
@@ -7132,9 +6089,7 @@ test "GET /thumbnail/{hash}: a .note cover serves 200 immutable; a coverless not
         try expectHeaderAbsent(resp.head, "transfer-encoding");
     }
 
-    // --- 404, memoized: a coverless `.note` (the common case — covers are
-    //     user-set). The sentinel timestamp proves the second GET did NOT
-    //     re-parse: any re-derive would upsert `indexed_at = now()` over it.
+    // Coverless (the common case) is memoized; the sentinel proves no re-parse.
     const plain = try buildNoteFixture(null);
     defer gpa.free(plain);
     const coverless = try putSeedHashed(f, admin, null, "plain.note", plain);
@@ -7173,8 +6128,7 @@ test "GET /thumbnail/{hash}: a wiped .note cover row heals on demand — the rep
     const note = try putSeedHashed(f, admin, null, "covered.note", covered);
     const path = try std.fmt.bufPrint(&pbuf, "/thumbnail/{s}", .{note.md5[0..]});
 
-    // A `.note` cover streams from the immutable blob — ingest writes NO thumbs
-    // file. Served once from the location the ingest parse recorded.
+    // A `.note` cover streams from the blob; ingest writes no thumbs file.
     try std.testing.expect(!f.files.thumbs.has(&note.md5));
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "");
@@ -7182,10 +6136,7 @@ test "GET /thumbnail/{hash}: a wiped .note cover row heals on demand — the rep
         try std.testing.expectEqualSlices(u8, cover_png, resp.body);
     }
 
-    // Wipe the index row entirely — a pre-index (pre-cover-location) blob. The
-    // magic dispatch must route the re-derive to the `.note` cover parse, which
-    // repopulates the row's recorded cover location, and the next GET streams
-    // the cover straight from the blob.
+    // No index row: the magic dispatch must route the re-derive to the cover parse.
     try f.db.exec("DELETE FROM note_index;");
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "");
@@ -7193,7 +6144,6 @@ test "GET /thumbnail/{hash}: a wiped .note cover row heals on demand — the rep
         try std.testing.expectEqualSlices(u8, cover_png, resp.body);
         try expectHeaderContains(resp.head, "content-type: image/png");
     }
-    // The row healed: a current row now carries the cover location again.
     {
         var sqlbuf: [160]u8 = undefined;
         const sql = try std.fmt.bufPrintZ(&sqlbuf, "SELECT cover_offset IS NOT NULL FROM note_index WHERE blob_md5 = ?1 AND index_version = {d};", .{noteindex.index_version});
@@ -7230,7 +6180,6 @@ test "GET /note/{id}/template/{hash}: serves the custom image template; 404 for 
     var reqbuf: [1024]u8 = undefined;
     var pbuf: [128]u8 = undefined;
 
-    // Owner: 200, the template bytes verbatim, an image content-type, immutable.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/template/{s}", .{ note.id, hash });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "");
@@ -7239,13 +6188,11 @@ test "GET /note/{id}/template/{hash}: serves the custom image template; 404 for 
         try expectHeaderContains(resp.head, "content-type: image/png");
         try expectHeaderContains(resp.head, "immutable");
     }
-    // A hash no page of this note references: 404.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/template/{s}", .{ note.id, "00000000000000000000000000000000" });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
-    // A note id that does not exist (or is not owned): 404, indistinguishable.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/template/{s}", .{ note.id + 999, hash });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "");
@@ -7254,19 +6201,11 @@ test "GET /note/{id}/template/{hash}: serves the custom image template; 404 for 
 }
 
 // ---- /api/controlplane/events: the held SSE stream ----
-//
-// These are the tests that matter for the lock discipline. The failure they
-// guard against is INVISIBLE in normal use: a stream that holds the global
-// `db_lock` for its lifetime serves the browser perfectly (it is the thing
-// holding the lock) while silently freezing every other caller — above all the
-// device, whose sync would just stop while the web UI looked healthy. Nothing
-// short of driving a held stream and a concurrent request through `handle()` at
-// the same time can catch it.
+// A stream holding `db_lock` for its lifetime looks fine to the browser while
+// freezing device sync; only a held stream plus a concurrent request catches it.
 
-/// Runs ONE `/api/controlplane/events` request on its own thread, mirroring what
-/// `connThread` does in serve mode: its own `Context` copy (so the per-request
-/// `caller` stays thread-local) and its own buffers. Keeps the raw response so a
-/// test can assert on the frames the stream emitted.
+/// Runs one events request on its own thread with its own `Context` copy, as
+/// `connThread` does, keeping the raw response.
 const StreamRunner = struct {
     ctx: *Context,
     token: [32]u8,
@@ -7293,8 +6232,7 @@ const StreamRunner = struct {
         return self.raw[0..self.raw_len];
     }
 
-    /// Block until the stream has actually taken its slot, so a test never races
-    /// the spawn and ends up asserting against a stream that never started.
+    /// Blocks until the stream holds its slot, so tests never race the spawn.
     fn waitUntilHeld(self: *StreamRunner, streams: *eventstreams.EventStreams) !void {
         for (0..2000) |_| {
             if (streams.count(std.testing.io) == 1) return;
@@ -7305,7 +6243,6 @@ const StreamRunner = struct {
     }
 };
 
-/// A logged-in control-plane session on a fresh fixture, plus the admin's id.
 fn onboardedAdmin(f: *Fixture) !struct { id: u64, token: [32]u8 } {
     const id = try f.svc.bootstrapAdmin("admin", "temp0000");
     const token = try onboardWeb(&f.ctx, "admin", "temp0000", "s3cret-pw");
@@ -7313,17 +6250,12 @@ fn onboardedAdmin(f: *Fixture) !struct { id: u64, token: [32]u8 } {
 }
 
 test "a HELD SSE stream never parks the global DB lock: concurrent requests are served throughout" {
-    // THE test this whole change exists for. A stream is held open on one thread
-    // while the main thread hammers an ordinary DB-touching route. Under the
-    // default whole-handler lock policy the first of those requests would block
-    // in `lockDb` until the stream ENDED — so "the stream is still running after
-    // N served requests" is precisely the property that distinguishes a correct
-    // `manual_db_lock` handler from one that freezes device sync.
+    // Ordinary DB routes must be served while the stream stays held.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
 
-    // Serve mode's lock. Without it the test is vacuous — lockDb is a no-op.
+    // Without serve mode's lock, lockDb is a no-op and the test is vacuous.
     var lock: std.Io.Mutex = .init;
     ctx.db_lock = &lock;
 
@@ -7341,8 +6273,6 @@ test "a HELD SSE stream never parks the global DB lock: concurrent requests are 
     defer t.join();
     try runner.waitUntilHeld(&streams);
 
-    // Served WHILE the stream is held. Each one takes the whole-handler lock, so
-    // each one proves the stream released it.
     var obuf: [8192]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
     for (0..20) |_| {
@@ -7350,7 +6280,6 @@ test "a HELD SSE stream never parks the global DB lock: concurrent requests are 
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
 
-    // Still held: the 20 requests above ran DURING the stream, not after it.
     try std.testing.expectEqual(@as(u32, 1), streams.count(std.testing.io));
 }
 
@@ -7374,9 +6303,6 @@ test "a held stream pushes a NEW syncVersion when the tree changes, then release
     const t = try std.Thread.spawn(.{}, StreamRunner.run, .{&runner});
     try runner.waitUntilHeld(&streams);
 
-    // Mutate the tree the way a device sync would — under the DB lock, exactly as
-    // a real handler does. This bumps the caller's syncVersion; the stream must
-    // notice on its next poll and emit a second frame.
     {
         lock.lockUncancelable(std.testing.io);
         defer lock.unlock(std.testing.io);
@@ -7384,33 +6310,24 @@ test "a held stream pushes a NEW syncVersion when the tree changes, then release
         gpa.free(dir.name);
     }
 
-    // Wait for the stream to end on its own (it will, at max_lifetime_ms) rather
-    // than asserting on a timer.
     t.join();
     try std.testing.expectEqual(@as(u16, 200), runner.status);
 
     const out = runner.output();
-    // Held shape: a chunked body, not a sized one-shot response.
     try std.testing.expect(std.ascii.indexOfIgnoreCase(out, "transfer-encoding: chunked") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "text/event-stream") != null);
-    // The client is told how to reconnect, on the held path too.
     try std.testing.expect(std.mem.indexOf(u8, out, "retry: ") != null);
-    // Frame 1 at connect (version 0), frame 2 for the bump (version 1).
     try std.testing.expect(std.mem.indexOf(u8, out, "data: 0") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "data: 1") != null);
 
-    // Teardown: the slot came back with the thread. A leak here is the failure
-    // that silently downgrades the endpoint to one-shot forever.
+    // A leaked slot would silently downgrade the endpoint to one-shot forever.
     try std.testing.expectEqual(@as(u32, 0), streams.count(std.testing.io));
     try std.testing.expectEqual(@as(u32, 0), streams.countFor(std.testing.io, who.id));
 }
 
 test "`event: index` is emitted when a derive completes, and NOT when an unrelated file is renamed" {
-    // The frame's whole contract, driven end to end. Two halves, and the second
-    // is the one that keeps the channel usable: a frame per poll would be two a
-    // second down a link this project treats as 3G, saying nothing new. So the
-    // change below has to move `syncVersion` (and therefore emit `event: sync`)
-    // while leaving `event: index` silent.
+    // Frames only on change (the link is treated as 3G): a tree change emits
+    // `event: sync` and leaves `event: index` silent.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -7419,7 +6336,6 @@ test "`event: index` is emitted when a derive completes, and NOT when an unrelat
 
     const who = try onboardedAdmin(f);
 
-    // A `.txt` whose derive is deferred: outstanding from the moment it lands.
     {
         lock.lockUncancelable(std.testing.io);
         defer lock.unlock(std.testing.io);
@@ -7441,8 +6357,6 @@ test "`event: index` is emitted when a derive completes, and NOT when an unrelat
         .db_lock = &lock,
         .io = std.testing.io,
         .worker = &worker,
-        // No backstop expiry during the test: every frame below must be
-        // attributable to a signal, never to the clock running out.
         .max_age_ms = 1_000_000,
     };
     ctx.pending = &pulse;
@@ -7458,35 +6372,25 @@ test "`event: index` is emitted when a derive completes, and NOT when an unrelat
     const t = try std.Thread.spawn(.{}, StreamRunner.run, .{&runner});
     try runner.waitUntilHeld(&streams);
 
-    // An UNRELATED change: the tree moves, so `syncVersion` moves, but nothing
-    // about what is outstanding does.
     {
         lock.lockUncancelable(std.testing.io);
         defer lock.unlock(std.testing.io);
         const dir = try f.files.createFolder(who.id, null, "Dir");
         gpa.free(dir.name);
     }
-    // Let the stream see it before the derive lands, so the two events cannot
-    // collapse into one frame and leave the "not on a rename" half vacuous.
+    // Let the stream see the rename before the derive, so the two can't share a frame.
     try std.testing.io.sleep(.fromMilliseconds(60), .awake);
 
-    // Now the derive: the worker finishes the `.txt` and the count drops to 0.
     worker.drain();
 
     t.join();
     try std.testing.expectEqual(@as(u16, 200), runner.status);
     const out = runner.output();
 
-    // Frame at connect: one document outstanding.
     try std.testing.expect(std.mem.indexOf(u8, out, "event: index\ndata: {\"pending\":1,") != null);
-    // …and one more once the worker is done, saying so.
     try std.testing.expect(std.mem.indexOf(u8, out, "event: index\ndata: {\"pending\":0,") != null);
-    // The sync bump really did happen, so the count below is about the INDEX
-    // frame and not about a stream that saw nothing at all.
     try std.testing.expect(std.mem.indexOf(u8, out, "event: sync") != null);
 
-    // EXACTLY TWO index frames across ~120 polls. More is the emit-on-change
-    // rule broken; fewer is a derive nobody was told about.
     var frames: usize = 0;
     var at: usize = 0;
     while (std.mem.indexOfPos(u8, out, at, "event: index")) |i| : (at = i + 1) frames += 1;
@@ -7494,10 +6398,8 @@ test "`event: index` is emitted when a derive completes, and NOT when an unrelat
 }
 
 test "with no pending pulse the endpoint says NOTHING about indexing rather than claiming zero" {
-    // `ctx.pending == null` is a server that does not report it — the
-    // integration harness, and any build with no worker. An `event: index` with
-    // `pending: 0` there would be a claim nobody checked, and the client would
-    // stop qualifying its "No matches".
+    // `ctx.pending == null` must send no `event: index`; `pending: 0` would be
+    // an unchecked claim.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -7513,9 +6415,7 @@ test "with no pending pulse the endpoint says NOTHING about indexing rather than
 }
 
 test "the DEGRADED one-shot shape carries the index frame too — it is the client furthest from the next one" {
-    // A caller over the per-user cap reconnects on `retry:` (5 s). It is exactly
-    // the client that cannot afford to wait for a pushed frame, so the one-shot
-    // response has to answer in full.
+    // An over-cap caller gets a full one-shot answer and reconnects on `retry:`.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -7556,9 +6456,7 @@ test "an idle held stream emits heartbeat comment frames" {
 
     const who = try onboardedAdmin(f);
 
-    // Nothing ever changes the tree here, so without a heartbeat this connection
-    // would emit exactly one frame and then go silent forever — the state in
-    // which a dead peer is indistinguishable from a quiet one.
+    // No tree changes: without a heartbeat a dead peer looks like a quiet one.
     var streams: eventstreams.EventStreams = .{
         .poll_interval_ms = 5,
         .heartbeat_ms = 10,
@@ -7571,16 +6469,13 @@ test "an idle held stream emits heartbeat comment frames" {
     t.join();
 
     try std.testing.expectEqual(@as(u16, 200), runner.status);
-    // `:` starts an SSE comment: ignored by EventSource, but real bytes on the
-    // wire, which is the entire point.
+    // `:` is an SSE comment: ignored by EventSource but real bytes on the wire.
     try std.testing.expect(std.mem.indexOf(u8, runner.output(), ": ping") != null);
     try std.testing.expectEqual(@as(u32, 0), streams.count(std.testing.io));
 }
 
 test "at the per-user cap the events endpoint DEGRADES to one-shot rather than refusing" {
-    // Degrading, not refusing, is the contract: an over-cap tab must still learn
-    // the current version and reconnect on `retry:` (a graceful poll). A 503 here
-    // would surface as a broken live channel in a perfectly healthy household.
+    // Over cap degrades to one-shot, not 503.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -7592,8 +6487,6 @@ test "at the per-user cap the events endpoint DEGRADES to one-shot rather than r
     var streams: eventstreams.EventStreams = .{ .max_total = 8, .max_per_user = 1 };
     ctx.event_streams = &streams;
 
-    // Occupy the caller's only slot directly — deterministic, and it isolates the
-    // admission decision from any timing.
     try std.testing.expect(streams.tryAcquire(std.testing.io, who.id));
     defer streams.release(std.testing.io, who.id);
 
@@ -7601,22 +6494,17 @@ test "at the per-user cap the events endpoint DEGRADES to one-shot rather than r
     var reqbuf: [1024]u8 = undefined;
     const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/events", &who.token, "");
 
-    // 200 and a well-formed SSE frame — NOT 429/503.
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.head, "text/event-stream") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "event: sync") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "retry: ") != null);
-    // The one-shot shape: a sized body that ended, not a held chunked stream.
     try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "content-length:") != null);
     try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "chunked") == null);
-    // It also must not have consumed a slot of its own.
     try std.testing.expectEqual(@as(u32, 1), streams.count(std.testing.io));
 }
 
 test "with no stream registry (the single-threaded harness) the endpoint is one-shot" {
-    // `ctx.event_streams == null` is how every other integration test reaches this
-    // route: there is no thread to park, so holding a connection would hang the
-    // caller outright. Pinned so nobody makes streaming unconditional.
+    // With no `ctx.event_streams` there is no thread to park; holding would hang.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -7632,11 +6520,8 @@ test "with no stream registry (the single-threaded harness) the endpoint is one-
 }
 
 test "a dead client tears the stream down and returns its slot, long before the lifetime cap" {
-    // A closed tab / dropped Wi-Fi surfaces as a failing WRITE — which is why the
-    // heartbeat exists at all: on a stream with no news, the heartbeat is the only
-    // thing that ever touches the socket, so it is the only thing that can
-    // discover the peer is gone. Modelled here by a response buffer that fills up,
-    // which is what a full/dead socket looks like from the handler's side.
+    // A dead peer surfaces only as a failing write (the heartbeat's job),
+    // modelled by a response buffer that fills up.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -7645,8 +6530,7 @@ test "a dead client tears the stream down and returns its slot, long before the 
 
     const who = try onboardedAdmin(f);
 
-    // A long lifetime on purpose: if teardown depended on the lifetime cap rather
-    // than on the write failure, this test would take 30s and time out.
+    // Long lifetime: teardown must come from the write failure.
     var streams: eventstreams.EventStreams = .{
         .poll_interval_ms = 1,
         .heartbeat_ms = 1,
@@ -7657,21 +6541,17 @@ test "a dead client tears the stream down and returns its slot, long before the 
     var reqbuf: [1024]u8 = undefined;
     var small: [640]u8 = undefined; // head + the first frame, then no room
     const started = std.Io.Timestamp.now(std.testing.io, .awake);
-    // Run inline: it must return promptly by itself.
     _ = requestWithCookie(ctx, &small, &reqbuf, "GET", "/api/controlplane/events", &who.token, "") catch {};
     const elapsed_ms = started.durationTo(std.Io.Timestamp.now(std.testing.io, .awake)).toMilliseconds();
 
-    // Returned because the WRITE failed, not because the lifetime elapsed.
     try std.testing.expect(elapsed_ms < 10_000);
-    // And the slot came back — no leaked stream, so nothing to leak a thread on.
     try std.testing.expectEqual(@as(u32, 0), streams.count(std.testing.io));
     try std.testing.expectEqual(@as(u32, 0), streams.countFor(std.testing.io, who.id));
 }
 
-// ---- the recycle bin, over HTTP (F8 + U2b) ----------------------------------
+// ---- the recycle bin, over HTTP ----
 
-/// The parsed `GET /api/controlplane/bin` body. Kept minimal on purpose: the
-/// tests assert on the facts the UI cannot render without, not on the whole VO.
+/// The parsed `GET /api/controlplane/bin` body, only the fields the UI needs.
 const BinBody = struct {
     entries: []const struct {
         kind: []const u8,
@@ -7714,9 +6594,8 @@ test "web DELETE of a folder walks the subtree itself, and the bin lists every r
     const deep = try putSeed(f, admin, sub.id, "deep.note", "deep body");
     const loose = try putSeed(f, admin, null, "loose.note", "loose");
 
-    // THE DEVICE DOES THIS WALK ITSELF, one request per entity. The browser sends
-    // ONE request, so the walk has to happen server-side — this is the assertion
-    // that it does.
+    // The device walks the subtree itself; the browser sends one request, so
+    // the server walks.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/entry/{d}", .{dir.id});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "DELETE", path, &web, "");
@@ -7731,13 +6610,10 @@ test "web DELETE of a folder walks the subtree itself, and the bin lists every r
         try std.testing.expect(p.value.success);
         try std.testing.expectEqualStrings("NOTE", p.value.name);
         try std.testing.expect(p.value.isFolder);
-        // The fanout the undo toast has to state: the user clicked one row and
-        // three entities went.
         try std.testing.expectEqual(@as(i64, 3), p.value.entries);
     }
     try std.testing.expectEqual(@as(i64, 3), try countTrashed(f, admin));
 
-    // A second, standalone delete, so the listing has both shapes in it.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/entry/{d}", .{loose});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "DELETE", path, &web, "", 200);
@@ -7748,9 +6624,7 @@ test "web DELETE of a folder walks the subtree itself, and the bin lists every r
     const bin = parsed.value;
     try std.testing.expectEqual(@as(usize, 4), bin.entries.len);
     try std.testing.expectEqual(@as(i64, 30), bin.retentionDays);
-    // 9 + 5 bytes of file content; the two FOLDER rows contribute nothing, which
-    // is what stops the "frees N bytes" figure double-counting a folder with the
-    // notes inside it.
+    // Folder rows contribute no bytes, so "frees N bytes" does not double-count.
     try std.testing.expectEqual(@as(i64, 14), bin.totalBytes);
 
     var deep_id_buf: [24]u8 = undefined;
@@ -7760,8 +6634,7 @@ test "web DELETE of a folder walks the subtree itself, and the bin lists every r
         try std.testing.expect(e.deletedAt > 0);
         if (std.mem.eql(u8, e.id, deep_id)) {
             seen_deep = true;
-            // THE PATH THROUGH TOMBSTONES. Both ancestors are themselves trashed,
-            // so a live-only parent walk would have called this `/deep.note`.
+            // Both ancestors are trashed; a live-only parent walk would say `/deep.note`.
             try std.testing.expectEqualStrings("/NOTE/Work/deep.note", e.path);
             try std.testing.expectEqualStrings("note", e.kind);
             try std.testing.expectEqualStrings("note", e.fileType.?); // not a real .note container
@@ -7780,7 +6653,6 @@ test "web DELETE of a folder walks the subtree itself, and the bin lists every r
     }
     try std.testing.expect(seen_deep);
 
-    // The bin has not leaked back into the library.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/tree", &web, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -7789,10 +6661,6 @@ test "web DELETE of a folder walks the subtree itself, and the bin lists every r
     }
 }
 
-// ---- rename (POST /api/controlplane/entry/:id/rename) ----
-
-/// Parse a rename response body to `{ kind, name }` — the load-bearing fields of
-/// the listing-shaped `EntryVO` the handler returns for reconciliation.
 const RenamedBody = struct { kind: []const u8, name: []const u8 };
 
 fn renameEntry(ctx: *Context, obuf: []u8, reqbuf: []u8, tok: []const u8, id: u64, new_name: []const u8) !Response {
@@ -7803,7 +6671,6 @@ fn renameEntry(ctx: *Context, obuf: []u8, reqbuf: []u8, tok: []const u8, id: u64
     return requestWithCookie(ctx, obuf, reqbuf, "POST", path, tok, body);
 }
 
-/// The current live name of an entry, owned by `gpa` (free it).
 fn liveName(f: *Fixture, user_id: u64, id: u64) ![]u8 {
     const e = (try f.files.get(user_id, id)).?;
     if (e.md5) |m| gpa.free(m);
@@ -7820,12 +6687,10 @@ test "web rename: renames a file and a folder in place, returns the updated entr
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
 
-    // A user subfolder and a note inside it.
     const dir = try f.files.createFolder(admin, null, "Poems");
     defer gpa.free(dir.name);
     const note = try putSeed(f, admin, dir.id, "Ozymandias.note", "I met a traveller");
 
-    // --- rename the file ---
     const v0 = try f.files.syncVersion(admin);
     {
         const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, note, "Sonnet.note");
@@ -7835,7 +6700,6 @@ test "web rename: renames a file and a folder in place, returns the updated entr
         try std.testing.expectEqualStrings("note", p.value.kind);
         try std.testing.expectEqualStrings("Sonnet.note", p.value.name);
     }
-    // The rename is a tree change, so the control-plane counter moved.
     try std.testing.expect(try f.files.syncVersion(admin) > v0);
     {
         const nm = try liveName(f, admin, note);
@@ -7843,7 +6707,6 @@ test "web rename: renames a file and a folder in place, returns the updated entr
         try std.testing.expectEqualStrings("Sonnet.note", nm);
     }
 
-    // The new name shows up in the folder listing.
     {
         var pbuf: [64]u8 = undefined;
         var idbuf: [24]u8 = undefined;
@@ -7855,7 +6718,6 @@ test "web rename: renames a file and a folder in place, returns the updated entr
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "Ozymandias.note") == null);
     }
 
-    // --- rename the folder ---
     {
         const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, dir.id, "Verse");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -7888,8 +6750,6 @@ test "web rename: a sibling name-clash is a 409 and changes nothing" {
     const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, mover, "taken.note");
     try std.testing.expectEqual(@as(u16, 409), resp.status);
 
-    // The occupant was never clobbered and the mover kept its name; nothing moved,
-    // so the sync counter did not advance either.
     {
         const nm = try liveName(f, admin, mover);
         defer gpa.free(nm);
@@ -7908,8 +6768,8 @@ test "web rename: refuses the fixed category roots and anchor subfolders (403), 
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
 
-    // Mirror the device tree: root containers NOTE / DOCUMENT, plus the rail's
-    // anchor subfolders NOTE/Note, NOTE/MyStyle, DOCUMENT/Document.
+    // Device tree: roots NOTE / DOCUMENT, anchors NOTE/Note, NOTE/MyStyle,
+    // DOCUMENT/Document.
     const root_note = try f.files.createFolder(admin, null, "NOTE");
     defer gpa.free(root_note.name);
     const root_doc = try f.files.createFolder(admin, null, "DOCUMENT");
@@ -7921,8 +6781,6 @@ test "web rename: refuses the fixed category roots and anchor subfolders (403), 
     const anchor_document = try f.files.createFolder(admin, root_doc.id, "Document");
     defer gpa.free(anchor_document.name);
 
-    // Every protected folder — the two roots exercised, and all three anchors —
-    // refuses the rename with 403 and keeps its name.
     const Guarded = struct { id: u64, name: []const u8 };
     const guarded = [_]Guarded{
         .{ .id = root_note.id, .name = "NOTE" },
@@ -7939,25 +6797,21 @@ test "web rename: refuses the fixed category roots and anchor subfolders (403), 
         try std.testing.expectEqualStrings(g.name, nm); // untouched
     }
 
-    // A user's own "Note" folder that is NOT directly under a root-level "NOTE" is
-    // not an anchor and renames fine — proving the guard keys on shape, not name.
-    // (a) A root-level "Note" (no parent container).
+    // The guard keys on shape, not name: a root-level "Note"...
     const loose_note = try f.files.createFolder(admin, null, "Note");
     defer gpa.free(loose_note.name);
     {
         const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, loose_note.id, "Journal");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
-    // (b) A "Note" nested one level deeper — its parent is the ANCHOR "Note", not a
-    // root-level "NOTE", so [parent.name, "Note"] = ["Note","Note"], not an anchor.
+    // ...a "Note" under the anchor "Note"...
     const deep_note = try f.files.createFolder(admin, anchor_note.id, "Note");
     defer gpa.free(deep_note.name);
     {
         const resp = try renameEntry(ctx, &obuf, &reqbuf, &web, deep_note.id, "Sub");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
-    // (c) A "Note" under a user folder that is itself named "NOTE" but is NOT
-    // root-level — its parent's parent is not null, so it is not an anchor.
+    // ...and a "Note" under a non-root "NOTE" all rename fine.
     const user_container = try f.files.createFolder(admin, loose_note.id, "NOTE");
     defer gpa.free(user_container.name);
     const note_under_nonroot = try f.files.createFolder(admin, user_container.id, "Note");
@@ -7981,14 +6835,12 @@ test "web rename: a foreign or missing id is one indistinguishable 404" {
 
     const bob_id = try putSeed(f, bob, null, "bob.note", "bob bytes");
 
-    // Bob's id and a never-existed id both answer 404 — the admin's session is not
-    // an existence oracle over the id space (blobs are deduplicated across users).
+    // Foreign and missing ids both 404.
     const foreign = try renameEntry(ctx, &obuf, &reqbuf, &web, bob_id, "stolen.note");
     try std.testing.expectEqual(@as(u16, 404), foreign.status);
     const missing = try renameEntry(ctx, &obuf, &reqbuf, &web, 999999, "ghost.note");
     try std.testing.expectEqual(@as(u16, 404), missing.status);
 
-    // Bob's file was untouched by the attempt.
     const nm = try liveName(f, bob, bob_id);
     defer gpa.free(nm);
     try std.testing.expectEqualStrings("bob.note", nm);
@@ -8011,19 +6863,16 @@ test "web rename: rejects an empty name and a name containing a path separator (
     const slashed = try renameEntry(ctx, &obuf, &reqbuf, &web, note, "a/b.note");
     try std.testing.expectEqual(@as(u16, 400), slashed.status);
 
-    // The file kept its name through both refusals.
     const nm = try liveName(f, admin, note);
     defer gpa.free(nm);
     try std.testing.expectEqualStrings("keep.note", nm);
 }
 
-// ---- web upload (POST /api/controlplane/folder/:id/upload) -------------------
+// ---- web upload (POST /api/controlplane/folder/:id/upload) ----
 
 const upload_boundary = "----InkholdWebUploadBoundary";
 
-/// Frames `payload` as the ONE file part of a browser upload, declaring
-/// `filename` in the part header — the shape `FormData`/`XMLHttpRequest` sends.
-/// Caller frees.
+/// `payload` as the one file part of a browser upload. Caller frees.
 fn buildUploadBody(filename: []const u8, payload: []const u8) ![]u8 {
     const head = try std.fmt.allocPrint(
         gpa,
@@ -8041,7 +6890,6 @@ fn buildUploadBody(filename: []const u8, payload: []const u8) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-/// POST one file to `dest` ("root", or a folder id rendered as decimal).
 fn uploadFile(
     ctx: *Context,
     obuf: []u8,
@@ -8054,8 +6902,7 @@ fn uploadFile(
     return uploadFileQuery(ctx, obuf, reqbuf, tok, dest, filename, payload, "");
 }
 
-/// `uploadFile`, reporting how much of the request the server read — the ingest
-/// cap's one observable (see `Sent`).
+/// `uploadFile`, reporting how much of the request the server read (see `Sent`).
 fn uploadFileCounting(
     ctx: *Context,
     obuf: []u8,
@@ -8069,8 +6916,6 @@ fn uploadFileCounting(
     return roundtripCounting(ctx, req, obuf);
 }
 
-/// `uploadFile` with a raw query string appended (`"?onConflict=replace"`), so
-/// the conflict-mode cases drive the same wire path as everything else.
 fn uploadFileQuery(
     ctx: *Context,
     obuf: []u8,
@@ -8085,7 +6930,6 @@ fn uploadFileQuery(
     return roundtrip(ctx, req, obuf);
 }
 
-/// Serializes one browser upload request into `reqbuf`.
 fn buildUploadRequest(
     reqbuf: []u8,
     tok: []const u8,
@@ -8106,13 +6950,11 @@ fn buildUploadRequest(
     }, wire);
 }
 
-/// `dest` for a folder id.
 fn destOf(buf: []u8, id: u64) ![]const u8 {
     return std.fmt.bufPrint(buf, "{d}", .{id});
 }
 
-/// The load-bearing fields of the listing-shaped `EntryVO` an upload returns —
-/// the SAME shape `rename` answers with, which the SPA's `normalizeEntry` reads.
+/// The listing-shaped `EntryVO` fields an upload returns (same as `rename`).
 const UploadedBody = struct {
     kind: []const u8,
     id: []const u8,
@@ -8134,7 +6976,6 @@ test "web upload: stores the blob, links the row, charges quota, bumps syncVersi
     const dir = try f.files.createFolder(admin, null, "Papers");
     defer gpa.free(dir.name);
 
-    // A PDF — the headline case: the web has no viewer for it, the DEVICE does.
     const bytes = "%PDF-1.7\n… pretend pdf bytes …\r\n--not-a-boundary\x00\xff";
     const md5 = blobstore.md5HexOf(bytes);
     const v0 = try f.files.syncVersion(admin);
@@ -8153,10 +6994,8 @@ test "web upload: stores the blob, links the row, charges quota, bumps syncVersi
         file_id = try std.fmt.parseInt(u64, p.value.id, 10);
     }
 
-    // The blob is on disk, content-addressed by the FILE's md5 (not the wire body's).
     try std.testing.expect(f.files.blobs.has(&md5));
 
-    // The row is linked under the destination folder with the real size…
     {
         const entry = (try f.files.get(admin, file_id)).?;
         defer gpa.free(entry.name);
@@ -8167,11 +7006,9 @@ test "web upload: stores the blob, links the row, charges quota, bumps syncVersi
         try std.testing.expectEqual(@as(u64, bytes.len), entry.size);
         try std.testing.expectEqualStrings(&md5, entry.md5.?);
     }
-    // …quota is charged the real ingested byte count, and the tree changed.
     try std.testing.expectEqual(@as(i64, @intCast(bytes.len)), try usedBytes(f, admin));
     try std.testing.expect(try f.files.syncVersion(admin) > v0);
 
-    // It shows up in the folder listing the SPA reads.
     {
         var pbuf: [64]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/tree?parent={d}", .{dir.id});
@@ -8180,7 +7017,6 @@ test "web upload: stores the blob, links the row, charges quota, bumps syncVersi
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "Ozymandias.pdf") != null);
     }
 
-    // `root` is a real destination, not only a numeric id.
     {
         const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "loose.epub", "EPUB at the root");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -8211,9 +7047,7 @@ test "web upload: identical bytes dedup onto one blob and charge zero extra quot
     const after_first = try usedBytes(f, admin);
     try std.testing.expectEqual(@as(i64, @intCast(bytes.len)), after_first);
 
-    // The SAME content under a DIFFERENT name: one blob on disk, two rows, and
-    // not one extra byte charged — quota is per distinct blob per user, which is
-    // what a content-addressed store actually occupies.
+    // Quota is per distinct blob per user: same content, new name, no charge.
     {
         const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "second.pdf", bytes);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -8233,9 +7067,7 @@ test "web upload: a name collision auto-renames instead of replacing the file al
 
     const first = try putSeed(f, admin, null, "notes.pdf", "the occupant's bytes");
 
-    // A second, DIFFERENT file that merely shares the name. The device's own
-    // link path would REPLACE (a Nomad re-uploading means "new version of this
-    // note"); a browser drop must not, so it takes the next free " (n)".
+    // A device re-upload replaces (new version); a browser drop takes " (n)".
     const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "notes.pdf", "a completely different document");
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     var p = try std.json.parseFromSlice(UploadedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
@@ -8243,7 +7075,6 @@ test "web upload: a name collision auto-renames instead of replacing the file al
     try std.testing.expectEqualStrings("notes (2).pdf", p.value.name);
     try std.testing.expect(try std.fmt.parseInt(u64, p.value.id, 10) != first);
 
-    // The occupant is untouched — same row, same name, same bytes.
     {
         const kept = (try f.files.get(admin, first)).?;
         defer gpa.free(kept.name);
@@ -8251,7 +7082,6 @@ test "web upload: a name collision auto-renames instead of replacing the file al
         try std.testing.expectEqualStrings("notes.pdf", kept.name);
         try std.testing.expectEqualStrings(&blobstore.md5HexOf("the occupant's bytes"), kept.md5.?);
     }
-    // A third drop of the same name climbs to " (3)".
     {
         const third = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "notes.pdf", "yet another document");
         try std.testing.expectEqual(@as(u16, 200), third.status);
@@ -8271,7 +7101,6 @@ test "web upload: an over-quota file is 413 and leaves the tree and the charge a
     var obuf: [16384]u8 = undefined;
     var reqbuf: [8192]u8 = undefined;
 
-    // A tiny allotment: 8 bytes total.
     {
         var s = try f.db.prepare("INSERT OR REPLACE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 8);");
         defer s.finalize();
@@ -8285,8 +7114,6 @@ test "web upload: an over-quota file is 413 and leaves the tree and the charge a
     try std.testing.expectEqual(@as(u16, 413), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "QUOTA_EXCEEDED") != null);
 
-    // Nothing linked, nothing charged, nothing bumped — and the rejected blob was
-    // dropped rather than left on disk.
     try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, admin));
     try std.testing.expectEqual(v0, try f.files.syncVersion(admin));
     try std.testing.expect(!f.files.blobs.has(&blobstore.md5HexOf(bytes)));
@@ -8297,10 +7124,7 @@ test "web upload: an over-quota file is 413 and leaves the tree and the charge a
 }
 
 test "web upload: a body past the caller's remaining quota is refused MID-STREAM and stores nothing" {
-    // The browser face has no `upload/apply`, so there is no declared size to hold
-    // it to: the cap is the caller's REMAINING QUOTA — the figure `linkBlob` is
-    // about to enforce anyway. The difference is where the bytes stop: at the cap,
-    // instead of after the whole body has been written to disk and then refused.
+    // No `upload/apply` on the browser face, so the cap is the remaining quota.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -8309,7 +7133,6 @@ test "web upload: a body past the caller's remaining quota is refused MID-STREAM
 
     var obuf: [16384]u8 = undefined;
 
-    // A tiny allotment: 8 bytes total, so the cap is 8 + the slack.
     {
         var s = try f.db.prepare("INSERT OR REPLACE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 8);");
         defer s.finalize();
@@ -8325,17 +7148,13 @@ test "web upload: a body past the caller's remaining quota is refused MID-STREAM
 
     const sent = try uploadFileCounting(ctx, &obuf, reqbuf, &web, "root", "flood.pdf", payload);
     const resp = sent.resp;
-    // The browser face is not the frozen device protocol: it answers the SPA's own
-    // shape, the same 413 + QUOTA_EXCEEDED the link-time refusal uses.
+    // The browser face answers 413, not the device protocol's 200 envelope.
     try std.testing.expectEqual(@as(u16, 413), resp.status);
     try expectFailure(resp.body, "QUOTA_EXCEEDED");
 
-    // AND IT STOPPED THERE. Without the cap this same 413 arrives too — after the
-    // whole body has been written to disk and then deleted, which is the disk-fill
-    // this closes. The read count is the only thing that tells the two apart.
+    // The read count is what distinguishes a capped refusal from a late one.
     try std.testing.expect(sent.consumed < cappedReadCeiling(uploadcap.limitFor(8)));
 
-    // Durable facts: no blob published, nothing staged, nothing charged, no row.
     try std.testing.expect(!f.files.blobs.has(&blobstore.md5HexOf(payload)));
     try std.testing.expectEqual(@as(usize, 0), try blobTempCount(f));
     try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, admin));
@@ -8345,7 +7164,6 @@ test "web upload: a body past the caller's remaining quota is refused MID-STREAM
         try std.testing.expect(std.mem.indexOf(u8, tree.body, "flood.pdf") == null);
     }
 
-    // With room, the very same body uploads — the cap is a bound, not a ban.
     {
         var s = try f.db.prepare("UPDATE capacity SET total_bytes = ?1 WHERE user_id = ?2;");
         defer s.finalize();
@@ -8372,35 +7190,27 @@ test "web upload: an off-list extension is 415 and an unsafe filename is 400, bo
     const bytes = "payload the server must never store";
     const md5 = blobstore.md5HexOf(bytes);
 
-    // 415: outside the accept-list. `.exe`, `.svg` (a script vector the browser
-    // face deliberately never inlines), and an extensionless name.
     for ([_][]const u8{ "trojan.exe", "vector.svg", "README" }) |name| {
         const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", name, bytes);
         try std.testing.expectEqual(@as(u16, 415), resp.status);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "UNSUPPORTED_TYPE") != null);
     }
-    // A bare extension is all suffix and no stem: a dotfile, not a PDF.
     {
         const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", ".pdf", bytes);
         try std.testing.expectEqual(@as(u16, 415), resp.status);
     }
 
-    // 400: the name cannot be a tree path component. The multipart parser has
-    // already stripped any directory prefix, so `../../etc/x.pdf` arrives as
-    // `x.pdf` and is FINE — these are the ones that survive that reduction.
+    // The multipart parser already strips directory prefixes; these survive it.
     for ([_][]const u8{ "", "..", "..pdf", "a\x00b.pdf", "line\nbreak.pdf", "\xff\xfe.pdf" }) |name| {
         const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", name, bytes);
         try std.testing.expectEqual(@as(u16, 400), resp.status);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "INVALID_NAME") != null);
     }
 
-    // Not one of them reached the store or the tree.
     try std.testing.expect(!f.files.blobs.has(&md5));
     try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, admin));
 
-    // A traversal attempt is NEUTRALIZED, not refused: the part header's
-    // directory prefix is stripped, so the file lands under its basename at the
-    // destination and nothing escapes anywhere.
+    // Traversal is neutralised: the file lands under its basename.
     {
         const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "../../../etc/passwd.txt", "innocent");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -8413,16 +7223,12 @@ test "web upload: an off-list extension is 415 and an unsafe filename is 400, bo
         try std.testing.expect(e.parent_id == null);
     }
 
-    // Every accepted extension IS accepted, case-insensitively — the accept-list
-    // is the feature, so pin it rather than trusting one representative.
     const accepted = [_][]const u8{
         "a.note", "b.SPD", "c.pdf",  "d.EPUB", "e.doc",  "f.docx",
         "g.txt",  "h.PNG", "i.jpg",  "j.jpeg", "k.webp", "l.cbz",
         "m.fb2",  "n.xps", "o.mobi", "p.azw",  "q.AZW3",
     };
     for (accepted, 0..) |name, i| {
-        // Distinct content per file so each is its own blob (dedup would still
-        // pass, but a distinct blob proves the link actually happened).
         var pbuf: [64]u8 = undefined;
         const payload = try std.fmt.bufPrint(&pbuf, "accepted payload number {d}", .{i});
         const resp = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", name, payload);
@@ -8456,7 +7262,6 @@ test "web upload: a missing, foreign, non-folder or trashed destination is one i
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "NOT_FOUND") != null);
     }
 
-    // A stranger's folder is not an upload destination even by accident.
     try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, bob));
 }
 
@@ -8473,9 +7278,8 @@ test "web upload: requires a control-plane session" {
     try std.testing.expectEqual(@as(u16, 401), resp.status);
 }
 
-// ---- web upload: the ?onConflict= choice --------------------------------------
+// ---- web upload: ?onConflict= ----
 
-/// One `versions` row of the history endpoint, for the supersede assertions.
 const UploadHistVersion = struct { md5: []const u8, size: i64, current: bool = false };
 
 test "web upload onConflict=replace: supersedes the same-named file, keeps the row id, and the old bytes stay a restorable version" {
@@ -8496,7 +7300,6 @@ test "web upload onConflict=replace: supersedes the same-named file, keeps the r
 
     const id = try putSeed(f, admin, null, "paper.pdf", v1);
 
-    // Replace: same name, same row, new content.
     {
         const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "paper.pdf", v2, "?onConflict=replace");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -8508,14 +7311,12 @@ test "web upload onConflict=replace: supersedes the same-named file, keeps the r
     }
     try std.testing.expectEqualSlices(u8, &v2md5, &(try currentFileMd5(f, id)));
 
-    // Exactly one row of that name — a replace adds none.
     try std.testing.expectEqual(
         @as(i64, 1),
         try countRows(f, "SELECT COUNT(*) FROM files WHERE name = 'paper.pdf' AND deleted = 0;"),
     );
 
-    // The superseded bytes are a RETAINED version, not a deletion — which is the
-    // whole reason `replace` can be offered at all.
+    // The superseded bytes are retained, which is why `replace` is offered.
     try std.testing.expectEqualSlices(u8, &v1md5, &(try soleHistoryMd5(f, id)));
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history", .{id});
@@ -8534,7 +7335,6 @@ test "web upload onConflict=replace: supersedes the same-named file, keeps the r
         try std.testing.expect(!p.value.versions[1].current);
         try std.testing.expectEqualStrings(&v1md5, p.value.versions[1].md5);
     }
-    // And it is restorable through the ordinary version-history route.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/restore", .{ id, v1md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", path, &web, "{}");
@@ -8563,7 +7363,6 @@ test "web upload onConflict=replace: with nothing of that name it is just a crea
     const id = try std.fmt.parseInt(u64, p.value.id, 10);
     try std.testing.expectEqualSlices(u8, &blobstore.md5HexOf(bytes), &(try currentFileMd5(f, id)));
     try std.testing.expectEqual(@as(i64, @intCast(bytes.len)), try usedBytes(f, admin));
-    // A create supersedes nothing, so it writes no version row.
     try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM file_history;"));
 }
 
@@ -8580,8 +7379,6 @@ test "web upload: the DEFAULT and an unrecognised onConflict both auto-rename �
     const occupant = "the file already there";
     const id = try putSeed(f, admin, null, "notes.pdf", occupant);
 
-    // The parameter absent entirely (what a client built before this shipped
-    // sends), then a set of values that are not `replace`.
     const queries = [_][]const u8{
         "",
         "?onConflict=",
@@ -8604,8 +7401,6 @@ test "web upload: the DEFAULT and an unrecognised onConflict both auto-rename �
         expected_suffix += 1;
     }
 
-    // Through every one of them the occupant kept its name, its bytes and its
-    // history — nothing was superseded.
     {
         const kept = (try f.files.get(admin, id)).?;
         defer gpa.free(kept.name);
@@ -8626,8 +7421,7 @@ test "web upload onConflict=replace: a FOLDER holding the name is still 409, and
     var obuf: [16384]u8 = undefined;
     var reqbuf: [8192]u8 = undefined;
 
-    // A folder whose name reads like a file. A file may supersede a FILE; it may
-    // never supersede a folder, under either mode.
+    // A file may never supersede a folder, under either mode.
     const dir = try f.files.createFolder(admin, null, "archive.pdf");
     defer gpa.free(dir.name);
 
@@ -8636,8 +7430,6 @@ test "web upload onConflict=replace: a FOLDER holding the name is still 409, and
     try std.testing.expectEqual(@as(u16, 409), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "NAME_TAKEN") != null);
 
-    // The folder is untouched, nothing was charged, and the rejected blob left
-    // no orphan behind.
     {
         const kept = (try f.files.get(admin, dir.id)).?;
         defer gpa.free(kept.name);
@@ -8648,7 +7440,6 @@ test "web upload onConflict=replace: a FOLDER holding the name is still 409, and
     try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, admin));
     try std.testing.expect(!f.files.blobs.has(&blobstore.md5HexOf(bytes)));
 
-    // Under the default mode the same drop lands beside the folder instead.
     {
         const ok = try uploadFile(ctx, &obuf, &reqbuf, &web, "root", "archive.pdf", bytes);
         try std.testing.expectEqual(@as(u16, 200), ok.status);
@@ -8668,52 +7459,39 @@ test "web upload onConflict=replace: quota releases the old charge only when not
     var obuf: [16384]u8 = undefined;
     var reqbuf: [8192]u8 = undefined;
 
-    // `old` is deliberately a different length from `new` so the arithmetic is
-    // visible rather than coincidentally balanced.
+    // Different lengths so the arithmetic can't balance by coincidence.
     const old_bytes = "old bytes";
     const new_bytes = "the replacement bytes, rather longer than the old";
     const old_len: i64 = @intCast(old_bytes.len);
     const new_len: i64 = @intCast(new_bytes.len);
 
-    // --- case 1: this row is the user's ONLY holder of the old blob. ---
     const solo = try putSeed(f, admin, null, "solo.pdf", old_bytes);
     try std.testing.expectEqual(old_len, try usedBytes(f, admin));
     {
         const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "solo.pdf", new_bytes, "?onConflict=replace");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
-    // The old charge is NOT released, because the bytes did not leave the disk:
-    // the retained version keeps them, so the owner keeps paying (
-    // §6). That the blob is still there is exactly what makes it restorable — and
-    // exactly why charging for it is the honest reading of the meter.
+    // The old charge stays: the retained version keeps the bytes on disk.
     try std.testing.expectEqual(old_len + new_len, try usedBytes(f, admin));
     try std.testing.expect(f.files.blobs.has(&blobstore.md5HexOf(old_bytes)));
     try std.testing.expectEqualSlices(u8, &blobstore.md5HexOf(old_bytes), &(try soleHistoryMd5(f, solo)));
 
-    // --- case 2: a SECOND live file still holds the old content. ---
-    // Two rows on one blob cost one charge; replacing one of them must NOT
-    // release it, because the other still occupies those bytes.
+    // Two rows on one blob cost one charge; replacing one releases nothing.
     const shared_a = try putSeed(f, admin, null, "shared-a.pdf", old_bytes);
     _ = try putSeed(f, admin, null, "shared-b.pdf", old_bytes);
     _ = shared_a;
     const before = try usedBytes(f, admin);
-    // The pair added NOTHING: those bytes are already on the account, held by
-    // solo.pdf's retained version. Dedup against your own history is still dedup.
+    // Dedup against your own history is still dedup.
     try std.testing.expectEqual(new_len + old_len, before);
     {
         const resp = try uploadFileQuery(ctx, &obuf, &reqbuf, &web, "root", "shared-a.pdf", "third distinct payload", "?onConflict=replace");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
-    // Only the NEW blob's charge was added; the old one stayed, held by shared-b.
     try std.testing.expectEqual(before + @as(i64, "third distinct payload".len), try usedBytes(f, admin));
 }
 
-// ---- the account screen ----
-
 test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real session" {
-    // The frontend reads these two bodies field by field, so pin the WIRE rather
-    // than the service structs behind it — a rename here is a blank line on the
-    // page, and nothing else in the suite would notice.
+    // Pins the wire, which the frontend reads field by field.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -8723,12 +7501,10 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
     var obuf: [16384]u8 = undefined;
     var reqbuf: [8192]u8 = undefined;
 
-    // One of each live kind, plus an edit so there is a retained version to show.
     _ = try putSeed(f, admin, null, "bujo.note", "notebook bytes v1");
     _ = try putSeed(f, admin, null, "bujo.note", "notebook bytes v2 (edited)");
     _ = try putSeed(f, admin, null, "sketch.spd", "sketch bytes");
     _ = try putSeed(f, admin, null, "lease.pdf", "document bytes");
-    // ...and something in the bin, the one line a person can act on immediately.
     const doomed = try putSeed(f, admin, null, "old.pdf", "trashed document bytes");
     try f.files.trash(admin, doomed);
 
@@ -8738,8 +7514,6 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
         name: []const u8,
         isAdmin: bool,
         createdAt: i64,
-        // `passwordChangedAt` is ABSENT until the password is changed, so it is
-        // optional here on purpose — the JSON omits null optionals entirely.
         passwordChangedAt: ?i64 = null,
         thisSessionSince: ?i64 = null,
         otherBrowsers: i64,
@@ -8752,11 +7526,7 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
             created_at: i64,
             last_seen: ?i64 = null,
         },
-        // `retainedPerFile` is what lets the settings control state its cost
-        // before the button is pressed; pinned here because the control cannot
-        // render without it. No `bytes`: the storage route owns that figure, and
-        // `ignore_unknown_fields = false` below means this list is exact — if one
-        // came back, this test would say so.
+        // No `bytes` (the storage route owns it); unknown fields are rejected.
         versions: struct { keep: u32, maxKeep: u32, retainedPerFile: []const u32 },
     };
 
@@ -8768,19 +7538,12 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
         try std.testing.expect(p.value.success);
         try std.testing.expectEqualStrings("admin", p.value.email);
         try std.testing.expect(p.value.isAdmin);
-        // The onboarding flow changed the password, so the column is now true —
-        // and it is a self-service change, which is the only thing that stamps it.
+        // Only a self-service change stamps this.
         try std.testing.expect(p.value.passwordChangedAt != null);
-        // This browser is the ONLY live control-plane session, and it knows when
-        // it started. `changePassword` revoked the rest on the way in.
         try std.testing.expect(p.value.thisSessionSince != null);
         try std.testing.expectEqual(@as(i64, 0), p.value.otherBrowsers);
         try std.testing.expectEqual(@as(usize, 0), p.value.devices.len); // no tablet bound here
-        // The DEFAULT and the CEILING are two different numbers now: an account
-        // that has never chosen starts at `history.keep` and may raise itself as
-        // far as `history.max_keep`. Asserting they were equal is exactly what a
-        // config with one knob looked like, and it is what the settings control
-        // could not offer a choice within.
+        // Default (`history.keep`) and ceiling (`history.max_keep`) differ.
         try std.testing.expectEqual(@as(u32, 5), p.value.versions.keep); // the config default
         try std.testing.expectEqual(@as(u32, 15), p.value.versions.maxKeep); // the config ceiling
         try std.testing.expect(p.value.versions.maxKeep > p.value.versions.keep);
@@ -8803,13 +7566,12 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
         var p = try std.json.parseFromSlice(StorageBody, gpa, resp.body, .{ .ignore_unknown_fields = false });
         defer p.deinit();
         const b = p.value;
-        // Every line is populated, so none of them is quietly always-zero...
         try std.testing.expect(b.notebooks > 0);
         try std.testing.expect(b.sketches > 0);
         try std.testing.expect(b.documents > 0);
         try std.testing.expect(b.recycle_bin > 0);
         try std.testing.expect(b.versions > 0);
-        // ...and THE PROPERTY, on the wire: the parts add up to the whole.
+        // The parts add up to the whole.
         try std.testing.expectEqual(
             b.used_bytes,
             b.notebooks + b.sketches + b.documents + b.recycle_bin + b.versions,
@@ -8818,17 +7580,13 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
         try std.testing.expect(b.total_bytes > b.used_bytes);
     }
 
-    // Self-service unlink refuses a serial that is not the caller's, with the same
-    // answer an unknown one gets — it is no probe for what other households hold.
+    // A foreign serial answers like an unknown one.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/account/devices/unlink", &web, "{\"equipmentNo\":\"SN-NOT-MINE\"}");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
 
-    // AND IT ACTUALLY UNLINKS. Only the refusal was covered, which is the half
-    // that fails safe: a unlink route that answered 200 and did nothing would
-    // have passed every test here while the tablet kept syncing. Bound, unlinked
-    // through the caller's OWN route, then read back off the account payload.
+    // Unlink must actually deactivate the binding, not just answer 200.
     {
         try f.svc.bindDevice(admin, "SN-MINE-1", "My Nomad");
         {
@@ -8849,8 +7607,7 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/account/devices/unlink", &web, "{\"equipmentNo\":\"SN-MINE-1\"}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
 
-        // The binding is no longer ACTIVE. It may still be listed — the screen
-        // shows revoked bindings too — so this asserts the status, not absence.
+        // Revoked bindings stay listed, so assert status, not absence.
         const after = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/account", &web, "");
         var p = try std.json.parseFromSlice(AccountBody, gpa, after.body, .{ .ignore_unknown_fields = false });
         defer p.deinit();
@@ -8859,8 +7616,7 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
         }
     }
 
-    // Sign out everywhere else leaves THIS browser signed in — the confirmation of
-    // the act must not be a login screen.
+    // Sign out elsewhere keeps this browser signed in.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/account/sign-out-others", &web, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -8870,16 +7626,8 @@ test "ACCOUNT SCREEN: the wire shape the panel is built against, over a real ses
 }
 
 test "abandoned upload sessions are reclaimed at startup, not left for ever" {
-    // `putChunk`/`finishUpload` deliberately strand a staged blob on a hash
-    // mismatch, a quota refusal, or a client that simply stops — each with a
-    // comment saying the sweep reclaims it. The sweep existed and was called from
-    // NOTHING but its own tests, so on a real install those blobs and their
-    // `upload_sessions` rows accumulated for ever, on exactly the Pi-class box
-    // where disk is the binding constraint.
-    //
-    // This asserts the RECLAMATION, not the call: a wiring that runs the sweep
-    // with a window so wide it never collects anything would pass a "was it
-    // called" test and leak just the same.
+    // Upload failures strand staged blobs for the sweep; assert the sweep
+    // actually reclaims them, not merely that it runs.
     const f = try Fixture.init();
     defer f.deinit();
     const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
@@ -8891,22 +7639,16 @@ test "abandoned upload sessions are reclaimed at startup, not left for ever" {
     );
     try std.testing.expectEqual(@as(i64, 1), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
 
-    // A day's window, the same one `transport.run` uses. `created_at = 0` is far
-    // outside it, so a correctly-wired sweep takes it.
+    // A day's window, as `transport.run` uses.
     const swept = try f.files.sweepUploadSessions(24 * 60 * 60);
     try std.testing.expectEqual(@as(usize, 1), swept);
     try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM upload_sessions;"));
 }
 
 test "bindEquipment WITHOUT a token: accepted only on the strength of a live session for that serial" {
-    // THE REAL NOMAD SENDS THIS UNAUTHENTICATED. Captured off the wire from a
-    // real device: login returns the token at t+0ms, the device
-    // fires bindEquipment at t+9ms, and only stores the token at t+15ms — so the
-    // one call carrying its name, model and firmware has no x-access-token. We
-    // answered 401 to every pairing, the handler never ran, and the account
-    // screen showed a placeholder for a tablet that had said what it was called.
-    // Sync worked throughout, because the binding already existed, so nothing
-    // about the failure was visible from either side.
+    // The Nomad sends bindEquipment unauthenticated: it fires the call ~9ms
+    // after login and stores the token ~6ms later, so name, model and firmware
+    // arrive with no x-access-token.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -8914,8 +7656,7 @@ test "bindEquipment WITHOUT a token: accepted only on the strength of a live ses
     _ = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
     const created = try f.svc.createUser(admin, "alice@home", false);
     const alice = created.id;
-    // Through the real first-login flow, so she has a usable password to log a
-    // DEVICE in with — a `pending` account could not reach this route at all.
+    // Real first-login flow: a `pending` account could not log a device in.
     _ = try onboardWeb(ctx, "alice@home", created.temp_password.slice(), "alicepw1");
 
     var obuf: [16384]u8 = undefined;
@@ -8926,25 +7667,20 @@ test "bindEquipment WITHOUT a token: accepted only on the strength of a live ses
         "\"totalCapacity\":\"25485312\",\"label\":[\"NOTE/Note\"],\"version\":\"202407\"}";
     const tokenless = [_]Header{.{ .name = "content-type", .value = "application/json" }};
 
-    // 1. NO SESSION for that serial -> still 401. The body alone proves nothing,
-    //    which is the whole point: this must not become a way to bind a serial to
-    //    an account you cannot already log into.
+    // No session for that serial: 401, so the body cannot bind a serial to an
+    // account you cannot log into.
     {
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/terminal/user/bindEquipment", &tokenless, bind_body), &obuf);
         try std.testing.expectEqual(@as(u16, 401), resp.status);
     }
 
-    // 2. A live session for that serial, but belonging to SOMEBODY ELSE -> 401.
     {
         _ = try deviceLogin(ctx, &obuf, &reqbuf, "admin", "adminpw1", "SN-NOMAD-9");
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/terminal/user/bindEquipment", &tokenless, bind_body), &obuf);
         try std.testing.expectEqual(@as(u16, 401), resp.status);
-        // ...and nothing was bound to alice on the way past.
         try std.testing.expect(!(try f.svc.isDeviceBound(alice, "SN-NOMAD-9")));
     }
 
-    // 3. Alice logs in on that serial — now the session says so, and the bind is
-    //    accepted with the name the device reported.
     {
         _ = try deviceLogin(ctx, &obuf, &reqbuf, "alice@home", "alicepw1", "SN-NOMAD-9");
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/terminal/user/bindEquipment", &tokenless, bind_body), &obuf);
@@ -8977,7 +7713,6 @@ test "web upload onConflict=replace: re-uploading identical bytes is a no-op, no
     defer p.deinit();
     try std.testing.expectEqual(id, try std.fmt.parseInt(u64, p.value.id, 10));
 
-    // Same content ⇒ nothing superseded: no history row, no extra charge, one row.
     try std.testing.expectEqual(@as(i64, 0), try countRows(f, "SELECT COUNT(*) FROM file_history;"));
     try std.testing.expectEqual(charged, try usedBytes(f, admin));
     try std.testing.expectEqual(
@@ -8986,20 +7721,15 @@ test "web upload onConflict=replace: re-uploading identical bytes is a no-op, no
     );
 }
 
-/// A minimal PNG whose IHDR carries 320×240 — dims the ingest-side sniff can
-/// decode, so a `.spd` embedding it gets real `thumb_w/h` columns.
+/// A minimal PNG with a 320×240 IHDR, so a `.spd` embedding it gets `thumb_w/h`.
 const aspect_png = "\x89PNG\r\n\x1a\n" ++
     "\x00\x00\x00\x0d" ++ "IHDR" ++
     "\x00\x00\x01\x40" ++ "\x00\x00\x00\xf0" ++ // 320 × 240
     "\x08\x02\x00\x00\x00" ++ ("p" ** 16);
 
 test "a PDF's tree entry carries its REAL page count and shape, not the 1-page fallback" {
-    // Every PDF card read "1 page" whatever the document was. `summaryFor` sets
-    // `first` only for an indexable `.note`, so a `.pdf` always takes the
-    // fallback return — and `fallbackFirst` hardcodes a count of 1, throwing away
-    // the `page_count` the probe had just written one line above.
-    //
-    // THREE pages on purpose: a one-page fixture would pass either way.
+    // A `.pdf` card must report its `page_count`, not the fallback's 1. Three
+    // pages, since one would pass either way.
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -9010,8 +7740,7 @@ test "a PDF's tree entry carries its REAL page count and shape, not the 1-page f
     var reqbuf: [2048]u8 = undefined;
 
     _ = try putSeed(f, admin, null, "doc.pdf", @embedFile("../pdf/testdata/three-page.pdf"));
-    // A `.txt` alongside, whose `page_count` IS 0 and which must keep the
-    // fallback: the fix must not hand a page count to something with no pages.
+    // A `.txt` (`page_count` 0) keeps the fallback.
     _ = try putSeed(f, admin, null, "readme.txt", "plain text");
 
     var lock: std.Io.Mutex = .init;
@@ -9047,9 +7776,8 @@ test "thumbAspect over HTTP: tree and bin serve the aspect fact, and omit it whe
     var obuf: [16384]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
 
-    // A coverless LANDSCAPE note (aspect = page 0's EFFECTIVE dims, honest and
-    // wide), a `.spd` embedding a 320×240 PNG thumbnail, and a text file
-    // (client-side shape by design — no server aspect).
+    // A coverless landscape note, a `.spd` with a 320×240 thumbnail, and a text
+    // file (shaped client-side, no server aspect).
     const nb = @import("note_builder");
     const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
     const wide = try nb.serialize(gpa, .{ .pages = &.{
@@ -9067,7 +7795,6 @@ test "thumbAspect over HTTP: tree and bin serve the aspect fact, and omit it whe
     const Aspect = struct { w: i64, h: i64 };
     const Row = struct { name: []const u8, thumbAspect: ?Aspect = null };
 
-    // --- the live tree ---
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/tree", &web, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -9088,13 +7815,11 @@ test "thumbAspect over HTTP: tree and bin serve the aspect fact, and omit it whe
                 try std.testing.expect(e.thumbAspect == null);
             }
         }
-        // Absent means OMITTED on the wire, never `null` — a client reading
-        // `"thumbAspect":null` would have a third state nobody defined.
+        // Absent is omitted, never `null`.
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"thumbAspect\":null") == null);
     }
 
-    // --- the bin: trashed entries still render previews, so the aspect rides
-    //     the bin rows too ---
+    // Trashed entries still render previews, so the aspect rides bin rows too.
     for ([_]u64{ note_id, spd_id, txt_id }) |id| try f.files.trash(admin, id);
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/bin", &web, "");
@@ -9119,10 +7844,8 @@ test "thumbAspect over HTTP: tree and bin serve the aspect fact, and omit it whe
     }
 }
 
-/// One layer descriptor as it appears on EITHER response — the frontend
-/// normalizes the listing's `firstPage.layers` and the metadata's
-/// `pages[].layers` through a single code path, so the two must be the same
-/// object down to field names and casing.
+/// One layer descriptor; the listing's `firstPage.layers` and the metadata's
+/// `pages[].layers` must match exactly (one client code path).
 const LayerRow = struct {
     slot: []const u8,
     name: []const u8,
@@ -9150,11 +7873,10 @@ test "layer descriptors over HTTP: tree and bin firstPage carry what /file/metad
     var obuf: [32768]u8 = undefined;
     var reqbuf: [2048]u8 = undefined;
 
-    // The real capture whose page 0 carries a `#`-JSON LAYERINFO panel...
+    // A real capture whose page 0 carries a `#`-JSON LAYERINFO panel.
     const layered_id = try putSeed(f, admin, null, "layers.note", @embedFile("layers_edited.note"));
 
-    // ...and a synthetic note whose one page carries NO layer records, which
-    // must OMIT the field rather than send `null` or `[]`.
+    // A page with no layer records must omit the field.
     const nb = @import("note_builder");
     const bare = try nb.serialize(gpa, .{ .pages = &.{.{ .style = "style_white", .layers = &.{} }} });
     defer gpa.free(bare);
@@ -9163,7 +7885,6 @@ test "layer descriptors over HTTP: tree and bin firstPage carry what /file/metad
     const Page = struct { index: i64 = 0, layers: ?[]const LayerRow = null };
     const Row = struct { name: []const u8, firstPage: ?Page = null };
 
-    // --- what the READER will eventually see for page 0 ---
     var want_buf: [8]LayerRow = undefined;
     var want_len: usize = 0;
     {
@@ -9180,8 +7901,7 @@ test "layer descriptors over HTTP: tree and bin firstPage carry what /file/metad
         defer p.deinit();
         const l0 = p.value.pages[0].layers.?;
         try std.testing.expect(l0.len > 0);
-        // Copied out (the parse arena dies with `p`) so the listing below is
-        // compared against the metadata response, not against a re-derivation.
+        // Copied out: the parse arena dies with `p`.
         for (l0, 0..) |l, i| {
             want_buf[i] = .{
                 .slot = try gpa.dupe(u8, l.slot),
@@ -9198,7 +7918,6 @@ test "layer descriptors over HTTP: tree and bin firstPage carry what /file/metad
         gpa.free(l.name);
     };
 
-    // --- the live tree: the summary the reader opens from ---
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/tree", &web, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -9223,14 +7942,12 @@ test "layer descriptors over HTTP: tree and bin firstPage carry what /file/metad
             }
         }
         try std.testing.expect(seen_layered and seen_bare);
-        // Absent is OMITTED on the wire — never `"layers":null`, never `[]`,
-        // which a client would have to treat as a third state nobody defined.
+        // Omitted, never `"layers":null` or `[]`.
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"layers\":null") == null);
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"layers\":[]") == null);
     }
 
-    // --- the bin builds its `firstPage` through the same `pageRefAt`, so a
-    //     trashed row reports exactly what it did while it was live ---
+    // The bin builds `firstPage` through the same `pageRefAt`.
     for ([_]u64{ layered_id, bare_id }) |id| try f.files.trash(admin, id);
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/bin", &web, "");
@@ -9272,7 +7989,6 @@ test "the bin's own read path previews a trashed file that every LIVE route 404s
     const note_id = try seedRecognizedNote(f, admin, "doomed.note", &.{"Zebra"});
     const pic = try putSeedHashed(f, admin, null, "shot.png", "raw bytes");
 
-    // The page hash, taken while the note is still live.
     var page_hash: [32]u8 = undefined;
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/file/metadata/{d}", .{note_id});
@@ -9289,8 +8005,7 @@ test "the bin's own read path previews a trashed file that every LIVE route 404s
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "DELETE", path, &web, "", 200);
     }
 
-    // --- every LIVE read now 404s, because `Files.get` hardcodes `deleted = 0`
-    //     and is deliberately NOT relaxed. This is the gap U2b describes.
+    // Live reads 404 (`Files.get` hardcodes `deleted = 0`, deliberately).
     {
         const live = [_][]const u8{
             try std.fmt.bufPrint(pbuf[0..80], "/api/controlplane/file/metadata/{d}", .{note_id}),
@@ -9303,8 +8018,7 @@ test "the bin's own read path previews a trashed file that every LIVE route 404s
         }
     }
 
-    // --- and the BIN-scoped twins serve them, which is the whole point: the
-    //     decision to purge is made while looking at the thing.
+    // The bin-scoped twins serve them, so purging is decided while looking.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/file/metadata/{d}", .{note_id});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
@@ -9315,9 +8029,7 @@ test "the bin's own read path previews a trashed file that every LIVE route 404s
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/page/0?v={s}", .{ note_id, page_hash[0..] });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
-        // Real bytes, not an empty 200: this works only because trash HELD the
-        // blob reference. Under the old decref-at-tombstone behaviour there would
-        // be nothing on disk to serve.
+        // Real bytes: trash holds the blob reference.
         try std.testing.expectEqualStrings("SNPG", resp.body[0..4]);
     }
     {
@@ -9327,16 +8039,13 @@ test "the bin's own read path previews a trashed file that every LIVE route 404s
         try std.testing.expectEqualStrings("raw bytes", resp.body);
     }
 
-    // --- the boundary runs BOTH ways. A LIVE id is a 404 through the bin routes,
-    //     so they cannot quietly become a second general read path.
+    // A live id 404s through the bin routes: no second general read path.
     {
         const kept = try putSeedHashed(f, admin, null, "kept.png", "kept bytes");
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/file/{d}?v={s}", .{ kept.id, kept.md5[0..] });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
-    // …and search still excludes the trashed note, so the bin has not leaked into
-    // the index either.
     try std.testing.expectEqual(@as(usize, 0), try searchHits(f, admin, "Zebra"));
 }
 
@@ -9351,11 +8060,8 @@ test "bin parity phase 1: page-text ovals serve a TRASHED note's current version
     var reqbuf: [2048]u8 = undefined;
     var pbuf: [128]u8 = undefined;
 
-    // Two versions of ONE note, each with a recognized word AND a box: v1 says
-    // "alpha", v2 (the current) "beta". v2 supersedes v1, retaining v1 in
-    // `file_history`. Then TRASH the file — its blob, `note_index` and `file_history`
-    // are all retained (H10), which is the whole reason the bin routes below can
-    // serve anything at all (ovals included).
+    // Two versions with words and boxes, then trash: blob, `note_index` and
+    // `file_history` are all retained.
     const nb = @import("note_builder");
     const v1_els = [_]nb.ElementSpec{.{ .label = "alpha", .words = &.{
         .{ .label = "alpha", .box = .{ .x = 10, .y = 20, .width = 30, .height = 8 } },
@@ -9372,8 +8078,6 @@ test "bin parity phase 1: page-text ovals serve a TRASHED note's current version
         words: ?[]const struct { text: []const u8 } = null,
     };
 
-    // --- bin page-text: the CURRENT (v2) transcript + word boxes, `no-cache`,
-    //     never `immutable`, raw VO — the same shape the live text route serves. ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/page/0/text", .{id});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
@@ -9388,23 +8092,11 @@ test "bin parity phase 1: page-text ovals serve a TRASHED note's current version
         try std.testing.expectEqualStrings("beta", p.value.words.?[0].text);
     }
 
-    // NO BIN FIND-IN-NOTE HERE ANY MORE — §6 step 7. The bin
-    // twin of `/note/:id/search` went with its live original; find-in-document in
-    // the bin fetches `text/<md5>` like everywhere else, and gate 3 of "the
-    // per-document text route serves ONE document's real text" is where the
-    // trashed-and-still-readable claim is made now. What stays here is what was
-    // never about search: the bin's own note reads, and the scope boundary.
-
-    // --- the LIVE text route 404s the now-trashed id (`Files.get` hardcodes
-    //     `deleted = 0`), so the degraded bin reads are retired on the bin
-    //     surface, not the live one. ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/text?v={s}", .{ id, "f" ** 32 });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "")).status);
     }
 
-    // --- the boundary runs BOTH ways: a LIVE note's id on the bin routes → 404,
-    //     so they cannot quietly become a second general read path. ---
     {
         const live_id = try seedRecognizedNote(f, admin, "live.note", &.{"gamma"});
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/page/0/text", .{live_id});
@@ -9423,10 +8115,8 @@ test "bin parity phase 2: view-only version history for a TRASHED note serves ea
     var reqbuf: [2048]u8 = undefined;
     var pbuf: [200]u8 = undefined;
 
-    // A `.note` with two versions (v1 "alpha", v2 "beta", each with a box), plus a
-    // `.spd` with two raw versions. v2/spd-v2 supersede v1/spd-v1, retaining v1 in
-    // `file_history`. Then TRASH both — `file_history` follows a file to the bin (H10),
-    // which is what makes the view-only history twins below reachable.
+    // A `.note` and a `.spd`, two versions each, both trashed: `file_history`
+    // follows a file to the bin.
     const nb = @import("note_builder");
     const v1_els = [_]nb.ElementSpec{.{ .label = "alpha", .words = &.{
         .{ .label = "alpha", .box = .{ .x = 10, .y = 20, .width = 30, .height = 8 } },
@@ -9448,7 +8138,6 @@ test "bin parity phase 2: view-only version history for a TRASHED note serves ea
     try f.files.trash(admin, id);
     try f.files.trash(admin, spd_id);
 
-    // --- the version list of a TRASHED note: current (flagged) + the retained v1. ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/history", .{id});
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
@@ -9466,7 +8155,6 @@ test "bin parity phase 2: view-only version history for a TRASHED note serves ea
         try std.testing.expectEqual(@as(i64, 1), p.value.versions[1].pageCount);
     }
 
-    // --- the retained version's page bytes (SNPG), no ?v= (the :md5 pins the blob). ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/history/{s}/page/0", .{ id, v1md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
@@ -9475,8 +8163,6 @@ test "bin parity phase 2: view-only version history for a TRASHED note serves ea
         try expectHeaderContains(resp.head, "cache-control: public, max-age=31536000, immutable");
     }
 
-    // --- the retained version's OWN transcript ("alpha"), DISTINCT from the current
-    //     version's ("beta", via the phase-1 bin page-text route). ---
     const PageTextBody = struct { text: ?[]const u8 = null, words: ?[]const struct { text: []const u8 } = null };
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/history/{s}/page/0/text", .{ id, v1md5 });
@@ -9497,20 +8183,12 @@ test "bin parity phase 2: view-only version history for a TRASHED note serves ea
         try std.testing.expectEqualStrings("beta", p.value.text.?); // the CURRENT text — distinct
     }
 
-    // --- an md5 that is NOT in this file's retained history is a 404, not an empty
-    //     answer. §6 step 7 deleted the `…/history/:md5/search`
-    //     twin this used to be asserted through, so it is asserted on the
-    //     page-text twin instead — the same `historyVersionIn(.trashed)` gate, on
-    //     the route that still takes a `:md5` to scope. The one route that
-    //     replaced the search twins CANNOT draw this boundary: `text/:md5` is
-    //     content-addressed with no `:id` to scope through, so for it an md5 in
-    //     another file's history is simply an md5 the caller can or cannot reach. ---
+    // An md5 not in this file's history is a 404 (`historyVersionIn(.trashed)`).
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/history/{s}/page/0/text", .{ id, "f" ** 32 });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "")).status);
     }
 
-    // --- the retained `.spd` version's raw bytes, through the bin history raw twin. ---
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/history/{s}/raw", .{ spd_id, spd_v1md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "");
@@ -9519,17 +8197,15 @@ test "bin parity phase 2: view-only version history for a TRASHED note serves ea
         try expectHeaderContains(resp.head, "cache-control: public, max-age=31536000, immutable");
     }
 
-    // --- NO per-version restore twin exists: the bin history is view-only. ---
+    // The bin history is view-only: no restore twin.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/history/{s}/restore", .{ id, v1md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", path, &web, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status); // no such route
     }
 
-    // --- the scope boundary runs BOTH ways, and the live-history gate is UNCHANGED:
-    //     the now-trashed note's id on the LIVE history routes is a 404 (the live gate
-    //     still hardcodes `deleted = 0`), and a LIVE note's id on the BIN history
-    //     routes is a 404 too. ---
+    // A trashed id on live history routes 404s, and a live id on bin history
+    // routes 404s.
     {
         const live = [_][]const u8{
             try std.fmt.bufPrint(pbuf[0..90], "/api/controlplane/note/{d}/history", .{id}),
@@ -9539,8 +8215,6 @@ test "bin parity phase 2: view-only version history for a TRASHED note serves ea
             try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "")).status);
     }
     {
-        // A LIVE note with its own retained version. Its LIVE history works (regression),
-        // but its id on the BIN history routes is a 404.
         const live_id = try seedRecognizedElements(f, admin, "kept.note", "N6", &v1_els, false);
         _ = try seedRecognizedElements(f, admin, "kept.note", "N6", &v2_els, false);
         const live_v1 = try soleHistoryMd5(f, live_id);
@@ -9581,12 +8255,11 @@ test "bin routes: restore reports the rename and the fanout, purge is the only t
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/entry/{d}", .{dir.id});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "DELETE", path, &web, "", 200);
     }
-    // TRASH REFUNDS NOTHING AND RELEASES NOTHING — a decision, not an oversight.
+    // Trash refunds and releases nothing.
     try std.testing.expectEqual(charged, try usedBytes(f, admin));
     try std.testing.expect(f.files.blobs.has(&a.md5));
 
-    // The device recreates the folder while the old one sits in the bin, so the
-    // restore has to land on an occupied live name.
+    // The device recreates the folder, so the restore lands on an occupied name.
     const squatter = try f.files.createFolder(admin, null, "Dir");
     defer gpa.free(squatter.name);
 
@@ -9603,19 +8276,17 @@ test "bin routes: restore reports the rename and the fanout, purge is the only t
         }, gpa, resp.body, .{ .ignore_unknown_fields = true });
         defer p.deinit();
         try std.testing.expect(p.value.success);
-        // `Sub` itself did not collide — its ANCESTOR did, and was renamed to make
-        // room. The count is what tells the user a second folder came back.
+        // `Sub` didn't collide; its ancestor did and was renamed.
         try std.testing.expectEqualStrings("Sub", p.value.name);
         try std.testing.expectEqual(@as(i64, 1), p.value.ancestors);
         try std.testing.expectEqual(@as(i64, 1), p.value.descendants);
     }
-    // The restored ancestor took the suffix, and both `Dir`s are live.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/tree", &web, "");
         try std.testing.expect(std.mem.indexOf(u8, resp.body, "Dir (2)") != null);
     }
 
-    // Trash it again, then PURGE — the only route that reaches `decref`.
+    // Purge is the only route that reaches `decref`.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/entry/{d}", .{a.id});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "DELETE", path, &web, "", 200);
@@ -9630,7 +8301,6 @@ test "bin routes: restore reports the rename and the fanout, purge is the only t
     try std.testing.expectEqual(@as(i64, 0), try usedBytes(f, admin)); // refunded HERE
     try std.testing.expect(!f.files.blobs.has(&a.md5)); // and GC'd HERE
 
-    // Purge refuses a LIVE id, so a hard delete is never one mistyped id away.
     const live = try putSeedHashed(f, admin, null, "live.note", "live");
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/{d}", .{live.id});
@@ -9639,8 +8309,6 @@ test "bin routes: restore reports the rename and the fanout, purge is the only t
         try std.testing.expect(f.files.blobs.has(&live.md5));
     }
 
-    // Empty what is left of the bin in one call. (The restore above emptied it,
-    // so put something back in first — the assertion is about the count.)
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/entry/{d}", .{live.id});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "DELETE", path, &web, "", 200);
@@ -9664,8 +8332,6 @@ test "bin routes: a foreign id is indistinguishable from a missing one, over a D
     const ctx = &f.ctx;
 
     const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
-    // F5 landed after this test was written: the SERVER generates the temporary
-    // password now, so it has to be carried from createUser rather than chosen here.
     const alice_new = try f.svc.createUser(admin, "alice", false);
     const alice = alice_new.id;
     const admin_web = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
@@ -9675,10 +8341,8 @@ test "bin routes: a foreign id is indistinguishable from a missing one, over a D
     var reqbuf: [2048]u8 = undefined;
     var pbuf: [160]u8 = undefined;
 
-    // THE CASE THAT ACTUALLY LEAKS. Both households hold the SAME bytes, so there
-    // is one physical blob at refcount 2 and one shared `note_index` row. Only the
-    // `files` row records whose copy is whose — every scoping claim below rests on
-    // that and nothing else.
+    // Both hold the same bytes: one blob at refcount 2 and one shared
+    // `note_index` row; only the `files` row records ownership.
     const mine = try putSeedHashed(f, alice, null, "secret.note", "identical bytes");
     const theirs = try putSeedHashed(f, admin, null, "mine.note", "identical bytes");
     try std.testing.expectEqualStrings(&mine.md5, &theirs.md5);
@@ -9688,9 +8352,7 @@ test "bin routes: a foreign id is indistinguishable from a missing one, over a D
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "DELETE", path, &alice_web, "", 200);
     }
 
-    // Admin points every bin route at ALICE's id. A missing id (99999) must
-    // produce the identical answer, or the endpoint is an existence oracle over
-    // the whole id space — and here the bytes really are sitting on admin's disk.
+    // Alice's id and a missing id must answer identically.
     for ([_]u64{ mine.id, 99999 }) |id| {
         {
             const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/{d}/restore", .{id});
@@ -9709,19 +8371,16 @@ test "bin routes: a foreign id is indistinguishable from a missing one, over a D
             try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_web, "", 404);
         }
         {
-            // Even holding the RIGHT `?v=` — admin's own blob md5, which is the
-            // same md5 — the row is not theirs, so there is nothing to serve.
+            // Even with the right `?v=` (same md5), the row is not admin's.
             const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/file/{d}?v={s}", .{ id, theirs.md5[0..] });
             try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_web, "", 404);
         }
     }
 
-    // Alice's row survived every one of those, still trashed and still hers.
     var parsed = try getBin(ctx, &obuf, &reqbuf, &alice_web);
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 1), parsed.value.entries.len);
     try std.testing.expectEqualStrings("secret.note", parsed.value.entries[0].name);
-    // Admin's bin is empty, and admin's own live copy is untouched.
     var admin_bin = try getBin(ctx, &obuf, &reqbuf, &admin_web);
     defer admin_bin.deinit();
     try std.testing.expectEqual(@as(usize, 0), admin_bin.value.entries.len);
@@ -9730,8 +8389,6 @@ test "bin routes: a foreign id is indistinguishable from a missing one, over a D
     defer gpa.free(still_theirs.name);
     defer if (still_theirs.md5) |m| gpa.free(m);
 }
-
-// ---- admin elevation (re-authentication) over HTTP ----
 
 test "the admin console is gated behind re-authentication, with a status the SPA cannot mistake for a dead session" {
     const f = try Fixture.init();
@@ -9743,13 +8400,8 @@ test "the admin console is gated behind re-authentication, with a status the SPA
     var reqbuf: [1024]u8 = undefined;
     const admin_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
 
-    // Signed in as an administrator — and still outside the console. This is the
-    // whole point: `is_admin` travels on a tablet left unlocked on a table, so it
-    // is not on its own permission to delete a housemate's notes.
-    //
-    // 428, NOT 401. The SPA's failure sink maps 401 (and 403) to "your session
-    // ended" and routes to the login page, so reusing either would sign the admin
-    // out of the entire app instead of showing the re-auth gate.
+    // `is_admin` alone is not permission. 428, not 401/403, which the SPA maps
+    // to "session ended" and a login redirect.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &admin_tok, "");
         try std.testing.expectEqual(@as(u16, 428), resp.status);
@@ -9758,36 +8410,29 @@ test "the admin console is gated behind re-authentication, with a status the SPA
         try expectFailure(resp.body, "ELEVATION_REQUIRED");
     }
 
-    // The gate covers EVERY admin route, the read-only listing above included —
-    // otherwise an idle tablet still exposes every housemate's email and quota.
+    // The gate covers every admin route, read-only ones included.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/admin/users", &admin_tok, "{\"email\":\"x\"}", 428);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "DELETE", "/api/admin/users/1", &admin_tok, "", 428);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/admin/users/1/reset", &admin_tok, "", 428);
 
-    // The ordinary control plane is untouched by the gate: elevation is not a
-    // second audience, it is a capability of one route class.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &admin_tok, "", 200);
 
-    // A wrong password does not open it, and leaves the session exactly as it was.
     {
         const resp = try tryElevate(ctx, &obuf, &reqbuf, "admin", "not-the-password", &admin_tok);
         try expectFailure(resp.body, "INVALID_CREDENTIALS");
     }
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &admin_tok, "", 428);
 
-    // Re-entering the password through the SAME challenge flow login uses opens it.
     try elevate(ctx, &obuf, &reqbuf, "admin", "adminpw1", &admin_tok);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &admin_tok, "", 200);
 
-    // Lock closes it again, immediately — the very next request is back at the gate.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/admin/lock", &admin_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &admin_tok, "", 428);
 
-    // Lock is idempotent and never itself hits the gate — a caller whose elevation
-    // already lapsed must still be able to say "lock", and get a 200 for it.
+    // Lock is idempotent and never hits the gate.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/admin/lock", &admin_tok, "", 200);
 }
 
@@ -9801,9 +8446,7 @@ test "elevation: a non-admin's failure is indistinguishable from a wrong passwor
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;
 
-    // A PENDING session (still owing a password change) is turned away by the
-    // route's scopes before it can even try: `must_change_password` exists to
-    // force a change, and elevation must not route around it.
+    // A pending session cannot elevate around `must_change_password`.
     var pending_tok: [32]u8 = undefined;
     {
         const code = try getCode(ctx, "bob");
@@ -9818,10 +8461,8 @@ test "elevation: a non-admin's failure is indistinguishable from a wrong passwor
     }
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/admin/elevate", &pending_tok, "{\"password\":\"x\"}", 403);
 
-    // Bob completes onboarding into an ordinary account, then tries to elevate
-    // with his OWN CORRECT password. He is refused with exactly the code a wrong
-    // password produces — anything more specific would make this endpoint an
-    // oracle for who in the household is an administrator.
+    // A non-admin with a correct password gets the wrong-password code: no
+    // oracle for who is an admin.
     const bob_tok = try onboardWeb(ctx, "bob", bob.temp_password.slice(), "bobpw123");
     {
         const right = try tryElevate(ctx, &obuf, &reqbuf, "bob", "bobpw123", &bob_tok);
@@ -9831,8 +8472,6 @@ test "elevation: a non-admin's failure is indistinguishable from a wrong passwor
         try std.testing.expectEqual(right.status, wrong.status);
     }
 
-    // And he is still refused the console the ordinary way — a plain 403, not the
-    // 428 gate, so he is not even told a gate exists.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &bob_tok, "", 403);
 }
 
@@ -9841,8 +8480,7 @@ test "elevate is rate-limited per USER, so one housemate's fumbling cannot lock 
     defer f.deinit();
     const ctx = &f.ctx;
 
-    // Two administrators, one household, ONE shared IP — the fixture's client_ip
-    // is a single constant for every request below, which is the whole point.
+    // Two admins, one shared IP (the fixture's `client_ip`).
     const admin = try f.svc.bootstrapAdmin("admin", "admtemp00");
     const second = try f.svc.createUser(admin, "second", true);
 
@@ -9851,8 +8489,7 @@ test "elevate is rate-limited per USER, so one housemate's fumbling cannot lock 
     const a_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
     const b_tok = try onboardWeb(ctx, "second", second.temp_password.slice(), "secondpw1");
 
-    // The first admin burns the whole bucket (5 per 5 minutes) on wrong guesses,
-    // then is limited. `elevate` is a password oracle, so it must have a limit.
+    // 5 per 5 minutes: `elevate` is a password oracle.
     var i: usize = 0;
     while (i < 5) : (i += 1) {
         const resp = try tryElevate(ctx, &obuf, &reqbuf, "admin", "wrong-guess", &a_tok);
@@ -9864,16 +8501,10 @@ test "elevate is rate-limited per USER, so one housemate's fumbling cannot lock 
         try std.testing.expectEqual(@as(u16, 429), resp.status);
     }
 
-    // THE REGRESSION THIS TEST EXISTS FOR: the limit is keyed by USER, not by IP.
-    // A household shares one address, so IP-keying (or `by = .both`) would mean one
-    // person's fumbling locks every housemate out of the console. The second admin
-    // — same IP, different account — sails straight through, correct password and
-    // all.
+    // Keyed by user, not IP: one person's fumbling must not lock out housemates.
     try elevate(ctx, &obuf, &reqbuf, "second", "secondpw1", &b_tok);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &b_tok, "", 200);
 
-    // And the first admin is only rate-limited, not locked out of the app: their
-    // ordinary session still works.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &a_tok, "", 200);
 }
 
@@ -9889,12 +8520,10 @@ test "a password reset drops the target's elevation along with their session" {
     const a_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
     const b_tok = try onboardWeb(ctx, "second", second.temp_password.slice(), "secondpw1");
 
-    // Both admins are in the console.
     try elevate(ctx, &obuf, &reqbuf, "admin", "adminpw1", &a_tok);
     try elevate(ctx, &obuf, &reqbuf, "second", "secondpw1", &b_tok);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &b_tok, "", 200);
 
-    // One resets the other's password.
     {
         var pbuf: [64]u8 = undefined;
         const path = try std.fmt.bufPrint(&pbuf, "/api/admin/users/{d}/reset", .{second.id});
@@ -9902,9 +8531,7 @@ test "a password reset drops the target's elevation along with their session" {
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
 
-    // The reset revoked the session ROW, and elevation lived on that row — so it
-    // is gone for free, with no separate revocation to remember. 401 (a genuinely
-    // dead session), NOT the 428 gate: there is nothing left to re-elevate.
+    // Elevation lived on the revoked session row; 401, not 428.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &b_tok, "", 401);
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &b_tok, "", 401);
 }
@@ -9920,10 +8547,7 @@ test "admin activity slides the elevation window; ordinary browsing does not" {
     const admin_tok = try onboardWeb(ctx, "admin", "admtemp00", "adminpw1");
     try elevate(ctx, &obuf, &reqbuf, "admin", "adminpw1", &admin_tok);
 
-    // Wind the idle deadline down to nearly-expired while leaving the ceiling far
-    // away, so a renewal is both possible and unmistakable. (Real time cannot be
-    // advanced 15 minutes inside a test; the window's arithmetic itself is covered
-    // at the service layer.)
+    // Idle deadline nearly expired, ceiling far away, so a renewal is visible.
     const nearly = std.Io.Clock.real.now(std.testing.io).toSeconds() + 5;
     {
         var s = try f.db.prepare("UPDATE sessions SET elevated_until = ?1 WHERE token_hash = ?2;");
@@ -9933,17 +8557,14 @@ test "admin activity slides the elevation window; ordinary browsing does not" {
         _ = try s.step();
     }
 
-    // Browsing the ordinary control plane is NOT admin activity: the console's
-    // window must track use of the console, not any tab the same session has open.
+    // Ordinary control-plane traffic does not renew elevation.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/user/me", &admin_tok, "", 200);
     try std.testing.expectEqual(nearly, elevatedUntil(&f.db, &admin_tok).?);
 
-    // Touching an admin route slides it forward by a fresh idle window.
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/admin/users", &admin_tok, "", 200);
     try std.testing.expect(elevatedUntil(&f.db, &admin_tok).? > nearly);
 
-    // But renewal only ever EXTENDS a live elevation — it can never grant one.
-    // That is what makes it safe to run before the request is authorized.
+    // Renewal only extends a live elevation, so it is safe before authorization.
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/admin/lock", &admin_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
@@ -9952,7 +8573,6 @@ test "admin activity slides the elevation window; ordinary browsing does not" {
     try std.testing.expect(elevatedUntil(&f.db, &admin_tok) == null); // the failed request did not revive it
 }
 
-/// A session's current elevation deadline, or null when it holds none.
 fn elevatedUntil(db: *sqlite.Db, token: []const u8) ?i64 {
     var r = (db.row("SELECT elevated_until FROM sessions WHERE token_hash = ?1;", &.{.{ .text = &password.hashToken(token) }}) catch return null) orelse return null;
     defer r.finalize();
@@ -9970,7 +8590,7 @@ test "server-info: public, reports the LAN address, and firstRun flips once onbo
 
     const Info = struct { address: []const u8, firstRun: bool };
 
-    // --- Unauthenticated (no cookie): the login page reads this pre-auth. ---
+    // Unauthenticated: the login page reads this pre-auth.
     {
         const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/server-info", &.{}, "");
         const resp = try roundtrip(ctx, req, &obuf);
@@ -9978,20 +8598,15 @@ test "server-info: public, reports the LAN address, and firstRun flips once onbo
 
         var p = try std.json.parseFromSlice(Info, gpa, resp.body, .{ .ignore_unknown_fields = true });
         defer p.deinit();
-        // A fresh single-admin server that still owes its password change.
         try std.testing.expect(p.value.firstRun);
-        // `address` is "host:port" — non-empty, carries a colon, and ends in the
-        // configured port. The exact host depends on the test box's interfaces, so
-        // assert shape rather than a literal.
+        // `address` is "host:port"; the host depends on the box, so assert shape.
         try std.testing.expect(p.value.address.len != 0);
         try std.testing.expect(std.mem.indexOfScalar(u8, p.value.address, ':') != null);
         try std.testing.expect(std.mem.endsWith(u8, p.value.address, ":8089"));
     }
 
-    // --- Finish onboarding: the admin changes its temporary password. ---
     _ = try onboardWeb(ctx, "admin", "temp0000", "adminpw1");
 
-    // --- firstRun is now false; address is unchanged and still valid. ---
     {
         const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/server-info", &.{}, "");
         const resp = try roundtrip(ctx, req, &obuf);
@@ -10005,15 +8620,10 @@ test "server-info: public, reports the LAN address, and firstRun flips once onbo
 }
 
 // ---- the reader pool ----
-//
-// These drive SYNTHETIC route tables rather than the real one, because what is
-// under test is the DISPATCH POLICY: `read_only` says "run this handler on a
-// pooled reader instead of holding `db_lock`", and that claim is about the
-// mechanism, not about any particular route. The real table's classification is
-// audited separately (see the `read_only` pin further down).
+// Synthetic route tables: the dispatch policy of `read_only` is under test,
+// not the real table's classification.
 
-/// A handler that only reads, through the same `ctx.files` every real handler
-/// uses — so a pooled dispatch is exercised end to end rather than simulated.
+/// A read-only handler through `ctx.files`, so pooled dispatch runs end to end.
 fn poolReadHandler(ctx: *Context, req: *router.Request, _: router.Params) anyerror!void {
     const files = ctx.files.?;
     _ = files.syncVersion(1) catch return serverErrorish(req);
@@ -10025,10 +8635,8 @@ fn serverErrorish(req: *router.Request) anyerror!void {
 }
 
 test "a read_only route runs on a pooled reader and a plain route does not, and the histogram says which" {
-    // §6's trap, as a test. A pooled read takes no `db_lock`, so without the
-    // reader window it would simply disappear from the per-route histogram —
-    // "global search: 3.41 s" would become "global search: absent", which reads
-    // like a fix. Both routes must appear, and the report must distinguish them.
+    // A pooled read takes no `db_lock`, so without the reader window it would
+    // vanish from the per-route histogram.
     const f = try Fixture.initPooled(2);
     defer f.deinit();
 
@@ -10051,33 +8659,25 @@ test "a read_only route runs on a pooled reader and a plain route does not, and 
     const pooled = f.slotFor(&table, "/pooled");
     const locked = f.slotFor(&table, "/locked");
 
-    // The pooled route is still attributed — it did not vanish — and its window
-    // is marked as a reader window rather than as lock occupancy.
     try std.testing.expect(pooled.count > 0);
     try std.testing.expectEqual(@as(u64, 1), pooled.read_count);
     try std.testing.expectEqual(@as(u64, 0), pooled.fallback_count);
     try std.testing.expect(pooled.read_total_s > 0 or pooled.read_total_ns_rem > 0);
 
-    // The plain route recorded a window too, and NONE of it is a reader window.
     try std.testing.expect(locked.count > 0);
     try std.testing.expectEqual(@as(u64, 0), locked.read_count);
 
-    // `totals` is the ceiling arithmetic's denominator, so it must count only
-    // time actually spent holding the one lock — the pooled read's hold is
-    // subtracted back out even though the route keeps it in its distribution.
+    // `totals` counts only real lock hold time; reader windows are subtracted.
     const t = f.stats.totals();
     try std.testing.expect(t.count > 0);
     try std.testing.expect(t.total_ns < nsOfSlot(pooled) + nsOfSlot(locked) + std.time.ns_per_s);
 
-    // Every borrow was returned: a leaked lease starves the pool into permanent
-    // fallback while the server goes on answering 200.
+    // A leaked lease starves the pool into permanent fallback.
     try std.testing.expectEqual(@as(usize, 2), f.pool.?.available());
 }
 
 test "a read_only route falls back to the write lock when every reader is busy, and says so" {
-    // §4's decision, driven: exhaustion must degrade to exactly the pre-pool
-    // behaviour — never a wait, never a 503 — which is the property that makes
-    // the pool's size a tuning knob rather than a correctness one.
+    // Exhaustion degrades to the writer under `db_lock`: never a wait or a 503.
     const f = try Fixture.initPooled(1);
     defer f.deinit();
 
@@ -10085,7 +8685,6 @@ test "a read_only route falls back to the write lock when every reader is busy, 
         .{ .method = .GET, .path = "/pooled", .scopes = &.{.public}, .handler = poolReadHandler, .read_only = true },
     };
 
-    // Hold the pool's only reader, as a concurrent request would.
     const held = f.pool.?.acquire().?;
     try std.testing.expect(f.pool.?.acquire() == null);
 
@@ -10097,7 +8696,6 @@ test "a read_only route falls back to the write lock when every reader is busy, 
     var req = try server.receiveHead();
     try transport.handle(&f.ctx, &table, &req);
 
-    // Answered normally, on the writer.
     try std.testing.expectEqual(@as(u16, 200), (try parseResponse(obuf[0..out.end])).status);
     const s = f.slotFor(&table, "/pooled");
     try std.testing.expectEqual(@as(u64, 1), s.fallback_count);
@@ -10105,7 +8703,6 @@ test "a read_only route falls back to the write lock when every reader is busy, 
     try std.testing.expect(s.count > 0); // recorded as an ordinary lock window
 
     f.pool.?.release(held);
-    // And the lock is not left behind by the fallback path.
     try std.testing.expect(f.db_lock.tryLock());
     f.db_lock.unlock(std.testing.io);
 }
@@ -10127,8 +8724,7 @@ test "a pool of zero is the server without a pool: every read falls back and not
     try std.testing.expectEqual(@as(u64, 1), f.slotFor(&table, "/pooled").fallback_count);
 }
 
-/// Shared state for the blocking test below: the handler announces that it is
-/// inside, then parks until the test lets it go.
+/// The handler announces it is inside, then parks until released.
 const SlowRead = struct {
     var inside: std.atomic.Value(bool) = .init(false);
     var let_go: std.atomic.Value(bool) = .init(false);
@@ -10158,14 +8754,8 @@ const SlowRead = struct {
 };
 
 test "a long-running READ does not block a concurrent WRITE, which is the entire point of the pool" {
-    // The feature's reason for existing, stated as the only thing that can
-    // actually prove it: while a `read_only` handler is mid-flight, `db_lock` —
-    // the lock every WRITE needs — must be free, and a write must be able to
-    // complete. "It compiles and the old tests pass" says nothing about this.
-    //
-    // Deterministic rather than timed: the reader parks INSIDE the handler and
-    // waits to be released, so `tryLock` is asked the question at a moment that
-    // is known to be mid-read.
+    // Mid-read on a `read_only` route, `db_lock` is free and a write completes.
+    // The reader parks inside the handler, so this is deterministic.
     const f = try Fixture.initPooled(2);
     defer f.deinit();
 
@@ -10177,7 +8767,6 @@ test "a long-running READ does not block a concurrent WRITE, which is the entire
     const t = try std.Thread.spawn(.{}, SlowRead.drive, .{ &ctx_copy, @as([]const router.Route, &pooled) });
     while (!SlowRead.inside.load(.seq_cst)) std.Thread.yield() catch {};
 
-    // Mid-read, the write lock is free — and a real write goes through.
     try std.testing.expect(f.db_lock.tryLock());
     try f.db.exec("INSERT INTO users(id, email, password_md5, cred_enc, is_admin, created_at) VALUES(42,'w@h','','',0,0);");
     f.db_lock.unlock(std.testing.io);
@@ -10191,9 +8780,7 @@ test "a long-running READ does not block a concurrent WRITE, which is the entire
 }
 
 test "the SAME handler without read_only DOES block the write, which is what the flag changes" {
-    // The control. Without it the test above proves only that the lock happened
-    // to be free, not that the flag is what freed it — same handler, same
-    // fixture, same moment, one field different.
+    // The control: same handler and moment, without the flag.
     const f = try Fixture.initPooled(2);
     defer f.deinit();
 
@@ -10205,9 +8792,6 @@ test "the SAME handler without read_only DOES block the write, which is what the
     const t = try std.Thread.spawn(.{}, SlowRead.drive, .{ &ctx_copy, @as([]const router.Route, &locked) });
     while (!SlowRead.inside.load(.seq_cst)) std.Thread.yield() catch {};
 
-    // The whole-handler lock is held for the read's entire duration: every write
-    // on the server is queued behind it. That is the status quo the pool exists
-    // to end.
     try std.testing.expect(!f.db_lock.tryLock());
 
     SlowRead.let_go.store(true, .seq_cst);
@@ -10217,13 +8801,9 @@ test "the SAME handler without read_only DOES block the write, which is what the
 }
 
 test "an SSE stream borrows no reader, so eight open tabs cannot exhaust the pool" {
-    // Entry 4's deadlock, expressed as a test rather than a comment. A stream
-    // that borrowed for its LIFETIME (minutes) while using microseconds of
-    // connection would let a handful of browser tabs starve every read on the
-    // server. Two things stop it, and both are asserted: the route is
-    // `manual_db_lock`, which `router.readOnlyConflict` makes impossible to
-    // combine with `read_only`; and dispatch borrows per OPERATION, so nothing
-    // holds a lease across a handler that parks.
+    // A stream borrowing for its lifetime would starve reads. The route is
+    // `manual_db_lock` (`router.readOnlyConflict` forbids combining it with
+    // `read_only`), and dispatch borrows per operation.
     const f = try Fixture.initPooled(2);
     defer f.deinit();
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
@@ -10242,30 +8822,17 @@ test "an SSE stream borrows no reader, so eight open tabs cannot exhaust the poo
     const resp = try requestWithCookie(&f.ctx, &obuf, &reqbuf, "GET", "/api/controlplane/events", &tok, "");
     try std.testing.expectEqual(@as(u16, 200), resp.status);
 
-    // The pool is untouched: no lease was taken, so none can have been kept.
     try std.testing.expectEqual(@as(usize, 2), f.pool.?.available());
 }
 
-// ---- the read_only audit (§5) ----
-//
-// The classification is the dangerous half of the reader pool: a route wrongly
-// flagged runs its writes through a connection that refuses them. So it is
-// MECHANICALLY CHECKED rather than read through once, twice over, because the two
-// checks catch different mistakes:
-//
-//   1. **Against a real reader.** SQLite answers `SQLITE_READONLY` to any write,
-//      so a misclassified route surfaces as a 5xx here rather than as corruption.
-//   2. **Against the writer, with a row-mutation hook armed.** That catches the
-//      write check (1) cannot see: a heal or a bump whose failure is swallowed by
-//      a `catch {}`, which on a reader would answer 200 with quietly degraded
-//      data. `ControlPlaneService`'s lazy index backfill is exactly that shape,
-//      and it is why the whole listing/metadata family is NOT flagged.
-//
-// A flagged route with no probe below fails the coverage assertion, so the audit
-// grows with the table instead of decaying beside it.
+// ---- the read_only audit ----
+// A wrongly flagged route runs writes on a connection that refuses them. Two
+// checks: on a real reader (`SQLITE_READONLY` surfaces as 5xx), and on the
+// writer with a row-mutation hook, which catches writes hidden by `catch {}`
+// (like `ControlPlaneService`'s lazy index backfill). Every flagged route
+// needs a probe.
 
-/// One request that reaches a `read_only` route's handler. `route` is the
-/// route's DECLARED path (the coverage key); `path` is the concrete URL.
+/// A request reaching a `read_only` handler; `route` is the declared path.
 const ReadOnlyProbe = struct {
     route: []const u8,
     path: []const u8,
@@ -10274,9 +8841,7 @@ const ReadOnlyProbe = struct {
     face: enum { none, device, web } = .none,
 };
 
-/// Drives every probe and asserts none of them fails with a 5xx. A 404 is fine —
-/// what is under test is that the handler ran to a decision without needing to
-/// write, not that the fixture happens to hold the row it asked for.
+/// Drives every probe; none may 5xx (a 404 is fine).
 fn driveReadOnlyProbes(f: *Fixture, probes: []const ReadOnlyProbe, web_tok: []const u8, dev_tok: []const u8) !void {
     var obuf: [1 << 16]u8 = undefined;
     var reqbuf: [4096]u8 = undefined;
@@ -10303,7 +8868,6 @@ fn driveReadOnlyProbes(f: *Fixture, probes: []const ReadOnlyProbe, web_tok: []co
     }
 }
 
-/// Builds the probe list against seeded rows. Paths are arena-owned.
 fn readOnlyProbes(a: std.mem.Allocator, note_id: u64) ![]const ReadOnlyProbe {
     var out: std.ArrayList(ReadOnlyProbe) = .empty;
     const fixed = [_]ReadOnlyProbe{
@@ -10318,16 +8882,12 @@ fn readOnlyProbes(a: std.mem.Allocator, note_id: u64) ![]const ReadOnlyProbe {
         .{ .route = "/api/file/query/summary/hash", .path = "/api/file/query/summary/hash", .method = "POST", .body = "{\"page\":0,\"size\":50}", .face = .device },
         .{ .route = "/api/file/query/summary/group", .path = "/api/file/query/summary/group", .method = "POST", .body = "{\"page\":0,\"size\":50}", .face = .device },
         .{ .route = "/api/file/3/files/query/by/path_v3", .path = "/api/file/3/files/query/by/path_v3", .method = "POST", .body = "{\"path\":\"/audit.note\"}", .face = .device },
-        // The manifest. `routes.zig` claims it heals nothing — it reads `files`
-        // and the index tables directly and never calls `indexRowEnsuring`, which
-        // is what puts the rest of the control-plane index family on the writer —
-        // and this is where that claim is checked rather than reviewed.
+        // The manifest never calls `indexRowEnsuring`, so it heals nothing.
         .{ .route = "/api/controlplane/search-index/manifest", .path = "/api/controlplane/search-index/manifest", .method = "GET", .face = .web },
     };
     try out.appendSlice(a, &fixed);
 
-    // The id- and md5-bearing routes, against rows that really exist — a probe
-    // that 404s before reaching the DB work would audit nothing.
+    // Against rows that exist: a probe that 404s early audits nothing.
     try out.append(a, .{
         .route = "/api/file/query/summary/id",
         .path = "/api/file/query/summary/id",
@@ -10342,15 +8902,9 @@ fn readOnlyProbes(a: std.mem.Allocator, note_id: u64) ![]const ReadOnlyProbe {
         .body = try std.fmt.allocPrint(a, "{{\"id\":\"{d}\"}}", .{note_id}),
         .face = .device,
     });
-    // The five in-document search probes that used to close this list are gone
-    // with their routes (§6 step 7). Both halves of the
-    // coverage assertion below still hold, and that is the point: a route and its
-    // probe leave together, so the audit neither loses a flagged route nor keeps
-    // a stale probe naming one that no longer exists.
     return out.items;
 }
 
-/// Seeds the rows the probes need and returns a fixture ready to audit.
 const AuditData = struct {
     web_tok: [32]u8,
     dev_tok: [32]u8,
@@ -10364,19 +8918,13 @@ fn seedAuditData(f: *Fixture) !AuditData {
     var reqbuf: [2048]u8 = undefined;
     const dev_tok = try deviceLogin(&f.ctx, &obuf, &reqbuf, "admin", "adminpw1", "SN-AUDIT");
 
-    // One real row is all the surviving id-bearing probes need. The versioned and
-    // trashed notes seeded here existed for the five in-document search probes,
-    // which went with their routes (§6 step 7); nothing
-    // `read_only` takes a `:md5` any more.
     const note_id = try seedRecognizedNote(f, admin, "audit.note", &.{"hello"});
 
     return .{ .web_tok = web_tok, .dev_tok = dev_tok, .note_id = note_id };
 }
 
 test "every read_only route has a probe, so the audit grows with the table instead of decaying" {
-    // The coverage half. Without it a new `read_only` route would simply not be
-    // audited, and the two tests below would keep passing while the claim they
-    // check stopped covering the table.
+    // Coverage: every `read_only` route has a probe.
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const probes = try readOnlyProbes(arena.allocator(), 1);
@@ -10393,8 +8941,7 @@ test "every read_only route has a probe, so the audit grows with the table inste
         }
     }
 
-    // And nothing claims to probe a route that is not flagged — a stale probe
-    // would make the coverage count look healthier than it is.
+    // And no stale probe names an unflagged route.
     for (probes) |p| {
         var found = false;
         for (app.routes) |r| {
@@ -10408,9 +8955,7 @@ test "every read_only route has a probe, so the audit grows with the table inste
 }
 
 test "every read_only route answers correctly through a genuinely read-only connection" {
-    // §5's check. The pool is real, so each of these runs on a connection SQLite
-    // will not let write — a misclassified route fails here instead of failing on
-    // a household's database.
+    // On a real reader pool: a misclassified write fails here, not in a household.
     const f = try Fixture.initPooled(2);
     defer f.deinit();
     const d = try seedAuditData(f);
@@ -10420,8 +8965,7 @@ test "every read_only route answers correctly through a genuinely read-only conn
     const probes = try readOnlyProbes(arena.allocator(), d.note_id);
     try driveReadOnlyProbes(f, probes, &d.web_tok, &d.dev_tok);
 
-    // They really did run on readers, rather than all falling back and proving
-    // nothing: at least one pooled window was recorded, and every lease came back.
+    // At least one pooled window was recorded, and every lease came back.
     var pooled: u64 = 0;
     for (&f.stats.slots) |*s| pooled += s.read_count;
     try std.testing.expect(pooled >= probes.len);
@@ -10429,15 +8973,8 @@ test "every read_only route answers correctly through a genuinely read-only conn
 }
 
 test "no read_only route mutates a row, including through a write whose failure would be swallowed" {
-    // The check a read-only connection CANNOT make. `ControlPlaneService`'s lazy
-    // index backfill writes on the read path and discards its own error, so on a
-    // reader it would answer 200 with degraded data — the exact silent
-    // misclassification this whole flag has to avoid. Driving the same routes
-    // against the WRITER with `sqlite3_update_hook` armed makes any row mutation
-    // visible whether it succeeded, failed or was ignored.
-    //
-    // Pool size 0 so every route takes the writer path: the hook can only watch
-    // the connection it is armed on.
+    // On the writer with `sqlite3_update_hook` armed, so a swallowed write is
+    // visible. Pool size 0: the hook watches only its own connection.
     const f = try Fixture.initPooled(0);
     defer f.deinit();
     const d = try seedAuditData(f);
@@ -10449,8 +8986,7 @@ test "no read_only route mutates a row, including through a write whose failure 
     var watch: sqlite.WriteWatch = .{ .db = f.db };
     watch.arm();
     defer watch.disarm();
-    // One probe at a time, so a failure NAMES the route. A single aggregate count
-    // would say "something wrote" and leave the next person to bisect by hand.
+    // One probe at a time, so a failure names the route.
     for (probes) |p| {
         const before = watch.mutations;
         const one = [_]ReadOnlyProbe{p};
@@ -10463,12 +8999,8 @@ test "no read_only route mutates a row, including through a write whose failure 
 }
 
 test "the read-modify-write routes are NOT read_only, and the default is what protects them" {
-    // The category where a mistake is corruption rather than slowness: each of
-    // these reads a row, decides on it, and writes back — `upload/finish` (decref
-    // + `addUsed`), purge, restore, elevate, login. They must hold the write lock
-    // across every statement, and the flag defaulting to FALSE is what makes that
-    // the outcome of forgetting rather than of remembering. Pinned by name so
-    // "someone flags it while sweeping through the table" is a red test.
+    // Read-decide-write routes must hold the write lock across every statement;
+    // pinned by name so flagging one is a red test.
     const must_write = [_][]const u8{
         "/api/file/2/files/upload/finish",
         "/api/controlplane/bin/:id", // purge — the only route reaching decref
@@ -10495,8 +9027,7 @@ test "the read-modify-write routes are NOT read_only, and the default is what pr
         try std.testing.expect(seen); // the pin must not silently name a route that no longer exists
     }
 
-    // The flag's default, stated where it can be checked: an undeclared route is
-    // slow, never wrong.
+    // The default: an undeclared route is slow, never wrong.
     const undeclared: router.Route = .{
         .method = .GET,
         .path = "/x",

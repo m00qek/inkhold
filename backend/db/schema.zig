@@ -1,122 +1,21 @@
-//! Database schema. Greenfield SQLite tables that preserve the *semantics* of
-//! Ratta's relevant MariaDB tables (u_user, e_equipment, e_user_equipment,
-//! f_capacity, f_user_file) plus our own sessions and index/search tables — not
-//! a 1:1 port.
-//!
-//! v1 is the whole schema, a single baseline (the app is pre-release, so the 21
-//! incremental steps this once carried were squashed away — their column adds,
-//! table drops and one-time backfills all folded into the definitions below). A
-//! fresh database is created BYTE-IDENTICAL to what the old stepwise migration
-//! produced, so an already-migrated install and a fresh one share one schema.
-//!
-//! The v1 objects:
-//!   users / devices / user_devices / capacity — accounts, bound devices, quota.
-//!   sessions          — opaque session store; the key is sha256(token) at rest,
-//!                        with admin-elevation and idle-expiry timestamps.
-//!   blobs / files     — content-addressed physical store + the per-user tree
-//!                        (adjacency list, soft-delete tombstones + a frozen bin
-//!                        path, the recycle-bin retention clock).
-//!   sync_state        — per-user monotonic change counter (control-plane SWR).
-//!   upload_sessions   — the device upload/apply→/oss/put→upload/finish handshake.
-//!   note_index / note_page_index — the per-blob `.note` index (pages/segments,
-//!                        recognized text, cover memo).
-//!   spd_index         — the per-blob `.spd` index.
-//!   (search_partitions / segment_search / segment_text / segment_fts were the
-//!    partitioned per-owner full-text index. `ddl_v1` still CREATEs them and
-//!    `ddl_v14` drops them again — see v14 for why the baseline is not edited.)
-//!
-//!   settings          — server-wide config (today: the bin retention window).
-//! Still to come with the sync-core slice: a change log.
+//! Database schema and migrations: accounts, devices, sessions, the per-user
+//! file tree over content-addressed blobs, upload sessions, and the per-blob
+//! `.note`/`.spd` indexes.
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
 
 /// Current schema version. Bump + add a migration step when the schema changes.
-///
-/// v2 adds `file_history` — the append-only version log behind hot-cache
-/// versioning. It is a pure additive
-/// step: a fresh database lays the v1 baseline then applies `ddl_v2`, and an
-/// already-migrated v1 install applies only `ddl_v2`, so the two end
-/// byte-identical (the same authored `file_history` object either way).
-///
-/// v3 adds the two `users` columns the account screen needs
-/// Same additive shape as v2: the new columns
-/// live ONLY in `ddl_v3`, never folded back into `ddl_v1`, so a fresh database
-/// reaches them by running v1 → v2 → v3 exactly as an existing install does —
-/// which is what makes the two byte-identical, rather than a second authored
-/// copy that has to be kept in step by hand.
-///
-/// v4 RECOMPUTES `capacity.used_bytes` so retained versions are charged (§6). It
-/// is a data step with no DDL, and it is its own version rather than folded into
-/// v3 for a specific reason: v3 may already have been applied by an install that
-/// took the account-screen commit, and a step folded backwards into an
-/// already-applied version never runs.
-///
-/// v5 adds `upload_sessions.received_bytes`, the running total that makes the
-/// device upload cap per-SESSION rather than per-part. Additive, same shape as
-/// v2/v3, and defaulted so every existing row is immediately valid.
-///
-/// v8 adds the three `note_page_index` columns that locate a page's
-/// `EXTERNALLINKINFO` block — the links a PDF used as a template brought with
-/// it. Additive and nullable, so every existing row is valid the moment the
-/// step lands; `index_version` is bumped alongside so the values arrive as
-/// blobs are re-read.
-///
-/// v9 adds `note_index.pdf_probe`, the verdict from `backend/pdf/probe.c`.
-/// Additive and nullable, so every existing row is valid the moment the step
-/// lands, and NULL is exactly "never probed" — which is what the deferred
-/// worker's discovery query asks for. No `index_version` bump: a bump would
-/// re-index every note in the library to fill in some PDFs, where a
-/// query-shaped job store just finds them.
-///
-/// v10 adds `note_index.pdf_text`, the verdict from the PDF TEXT pass
-/// (`backend/services/pdf_text.zig`) — the seam's third tenant, `kind = 2`.
-/// Additive and nullable on the same reasoning as v9, and with no
-/// `index_version` bump for the same reason.
-///
-/// v11 adds `note_index.txt_index`, the same memo for the `.txt` derivation —
-/// needed because that write is now CHUNKED, and "the blob has segment rows"
-/// stops meaning "the blob is fully indexed" the moment a write can be
-/// interrupted between chunks. Additive, nullable, with a one-statement
-/// backfill so no existing `.txt` is re-derived.
-///
-/// v12 adds `files_bin_name`, the bin's copy of `files_live_name`'s key. Pure
-/// DDL, no backfill: it changes what the `.mark` pairing rule COSTS over trashed
-/// rows (measured 221,780 -> 4,500 VM steps on one bin listing), not what any
-/// read answers.
-///
-/// v13 DROPS `doc_terms` — the first step that removes rather than adds, and the
-/// only one so far that is irreversible in DATA (a revert restores the table's
-/// DDL, not its rows; a re-derive would).
-///
-/// v14 DROPS THE WHOLE SERVER-SIDE SEARCH INDEX — `segment_fts`, `segment_text`,
-/// `segment_search`, `search_partitions` and the `kind = 1`/`kind = 2` rows of
-/// `note_page_index`. §6 step 8: library and in-document
-/// search are the browser's, off the two derived stores, so every one of these
-/// was being written on each ingest and read by nothing. Irreversible in DATA on
-/// the same terms as v13, and much more of it.
-/// v15 re-derives every PDF's text, because the extraction rule changed:
-/// Private Use Area codepoints — an icon font's glyphs — now become spaces
-/// instead of travelling into the index (`pdf_text.stripPrivateUse`). It clears
-/// the `pdf_text` memo rather than touching a row of text, and the deferred
-/// worker rewrites the derived files from there.
-/// v16 adds `note_page_index.has_ink` — one page-level tri-state saying whether
-/// anything is drawn on the page. Pure DDL, no backfill and NO `index_version`
-/// bump: NULL is "nobody has looked yet" and the deferred worker fills it in.
+/// Never fold a change into an earlier step: an install that already applied
+/// that version would never run it.
 pub const version: i64 = 16;
 
-/// Default per-user quota for a household (10 GiB) — the ONE definition.
-///
-/// It lives in the db layer as the canonical source: `authsvc.default_capacity`
-/// and `Files.default_total_bytes` are aliases of this, so the value a row is
-/// created with and the value a missing row reads as cannot drift apart.
+/// Default per-user quota (10 GiB); `authsvc.default_capacity` and
+/// `Files.default_total_bytes` alias it.
 pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 
 /// The migration steps in order: `steps[i]` takes a database from version `i` to
-/// version `i + 1`. Listed once, here, rather than spelled out as a ladder of
-/// `if (current < N) exec(ddl_vN)` lines — that shape let the version constant
-/// and the steps drift (the `user_version` stamp was hardcoded once, and nearly
-/// missed on a bump). The comptime check below makes the drift a build error.
+/// version `i + 1`.
 const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12, ddl_v13, ddl_v14, ddl_v15, ddl_v16 };
 
 comptime {
@@ -136,28 +35,13 @@ pub fn migrate(db: sqlite.Db) !void {
     }
 }
 
-/// Runs ONE migration step all-or-nothing: the step's statements and the
-/// `user_version` stamp that records them either all land or none do.
-///
-/// `db.exec` hands its script to `sqlite3_exec`, which auto-commits every
-/// statement. Unwrapped, a step that died partway (disk full, or power loss on
-/// the SD card this is meant to run from) left the objects it had already
-/// created behind with `user_version` still unstamped — so the next boot re-ran
-/// the step from the top and failed on the first `CREATE TABLE` with "table
-/// already exists". Permanently: the install could never boot again. DDL is
-/// transactional in SQLite, so a plain `BEGIN IMMEDIATE … COMMIT` closes it.
-///
-/// The stamp MUST stay INSIDE the transaction. `user_version` lives in the
-/// database header and is written transactionally like any other page, so a
-/// rollback takes it with the step (pinned by the test below). Stamping after
-/// the `COMMIT` would reopen the identical hole one statement later: step
-/// committed, crash, stamp lost, re-run dies on "already exists".
+/// Runs one migration step and its `user_version` stamp in one transaction.
+/// `sqlite3_exec` auto-commits each statement, so a step interrupted partway
+/// would otherwise re-run on boot and fail on "already exists" forever. The
+/// stamp must stay inside: `user_version` is transactional header state.
 fn applyStep(db: sqlite.Db, comptime n: comptime_int, ddl: [:0]const u8) !void {
     try db.exec("BEGIN IMMEDIATE;");
-    // `exec` has already logged SQLite's own message by the time we get here, and
-    // a ROLLBACK that fails because SQLite already rolled the transaction back
-    // itself (what it does on SQLITE_FULL and friends) has left us in exactly the
-    // state we were asking for.
+    // A failing ROLLBACK means SQLite already rolled back itself (e.g. SQLITE_FULL).
     errdefer db.exec("ROLLBACK;") catch {};
     try db.exec(ddl);
     try db.exec(std.fmt.comptimePrint("PRAGMA user_version = {d};", .{n}));
@@ -170,34 +54,14 @@ fn userVersion(db: sqlite.Db) !i64 {
     return r.int(0);
 }
 
-/// The FTS5 tokenizer BOTH engines must use — the server's fold
-/// (`search/fuzzy.zig`) and the index the BROWSER builds in
-/// `webapp/wasm/sqlite_core.zig`. Declared here, in the lowest layer, because
-/// both of those already reach it and neither reaches the other.
-///
-/// **One declaration, or find-in-document breaks silently.** The terms the
-/// server ships are the output of this tokenizer; a browser index built with a
-/// different one would fold a query differently from the terms it is matching
-/// against and just miss — no error, no empty state, a search that quietly finds
-/// less. `remove_diacritics 2` is the setting that makes `reuniao` find
-/// `reunião`, and `webapp/wasm/tests/sqlite_core_abi.mjs` pins that behaviour on
-/// the real tokenizer rather than on this string.
-///
-/// `segment_fts` in `ddl_v1` below is built from it by concatenation rather than
-/// typed out — the baseline's text is compared byte-for-byte against a migrated
-/// install, so the literal has to be GENERATED to stay in step with a change
-/// here.
+/// The FTS5 tokenizer the browser's index (`webapp/wasm/sqlite_core.zig`) and
+/// `search/fuzzy.zig` must share; a mismatch makes search silently miss.
+/// `remove_diacritics 2` makes `reuniao` find `reunião`.
 pub const fts_tokenizer = "unicode61 remove_diacritics 2";
 
-// The full schema as authored objects only. The FTS5 virtual table
-// `segment_fts` brings its own shadow tables (`segment_fts_config/data/docsize/
-// idx`), the view `segment_text` and any implicit objects are created by SQLite
-// — we author the CREATE VIRTUAL TABLE / VIEW and let it do the rest. A handful
-// of columns read oddly (`files` trails `, deleted_at INTEGER, deleted_path
-// TEXT)`, and similar on `users`/`sessions`/`note_index`/`note_page_index`):
-// that is the exact text the old `ALTER TABLE ... ADD COLUMN` steps left in
-// `sqlite_master`, reproduced verbatim so a fresh v1 database is byte-identical
-// to an install migrated the long way.
+// The v1 baseline, kept verbatim as the text `sqlite_master` held for installs
+// migrated the long way (hence the odd trailing `, col TYPE)` columns), so fresh
+// and migrated databases are byte-identical. Never edit it; add a step.
 const ddl_v1 =
     \\CREATE TABLE users (
     \\  id           INTEGER PRIMARY KEY,
@@ -406,15 +270,8 @@ const ddl_v1 =
     \\CREATE INDEX upload_sessions_user ON upload_sessions(user_id);
 ;
 
-// v2 — the append-only version log for hot-cache versioning (H3). One row per
-// superseded version: enough to list a file's history and resolve `md5 → blob`,
-// nothing more (offsets/MIME come from the retained `note_index`). A history row
-// is a blob KEEP-ALIVE the GC gate checks alongside `blobs.refcount`
-// (`files.zig` `reapIfUnreferenced`), so a retained version's blob is not
-// deleted while its row lives. `ON DELETE CASCADE` makes history follow its file
-// to the recycle bin and vanish when the file is purged (H10). Indexes:
-// `(file_id, created_at)` lists/evicts a file's versions; `md5` is the GC gate's
-// "does any history row still reference this blob?" probe.
+// v2: the append-only version log. A row keeps its blob alive for GC alongside
+// `blobs.refcount`, and cascades with its file.
 const ddl_v2 =
     \\CREATE TABLE file_history (
     \\  file_id    INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -428,49 +285,17 @@ const ddl_v2 =
     \\CREATE INDEX file_history_md5 ON file_history(md5);
 ;
 
-// v3 — the two columns the account screen
-// found missing. Both are ADDITIVE and both are deliberately NULLable, because
-// NULL is a meaning here rather than a placeholder:
-//
-//   `password_changed_at` — epoch seconds of the last self-service password
-//     change. NULL = never changed THROUGH THIS COLUMN, which is what every
-//     existing account is: the fact was unknowable before this migration, so
-//     backfilling `created_at` would invent a change that may never have
-//     happened. The screen has to say "never changed" for those rather than
-//     imply the account is stale (§8).
-//
-//   `history_keep` — the per-user K (how many versions of each file to retain).
-//     NULL = "follow the admin's configured default", which is exactly what
-//     every existing row has effectively been doing, so the backfill is a no-op
-//     on behaviour: nobody's history depth moves when this lands. A number here
-//     is the user's own choice, still bounded above by the config value (§7:
-//     "bounded above by whatever ceiling the admin's config sets").
+// v3: account-screen columns, NULL by meaning. `password_changed_at` NULL is
+// "never changed" (unknowable before v3); `history_keep` NULL follows the admin
+// default, which the config value also caps.
 const ddl_v3 =
     \\ALTER TABLE users ADD COLUMN password_changed_at INTEGER;
     \\ALTER TABLE users ADD COLUMN history_keep INTEGER;
 ;
 
-// v4 — retained versions count against quota.
-//
-// A version kept in `file_history` occupies disk: its blob survives the GC gate
-// on the strength of that row alone (`reapIfUnreferenced`'s keep-alive). Until
-// now it was not charged, so a user could churn edits to one note and accumulate
-// unbilled disk for ever — while a TRASHED file, whose bytes occupy disk for
-// exactly the same reason, has always been charged. History was the
-// inconsistency, not the proposal.
-//
-// **It RECOMPUTES rather than adjusts.** The total is rebuilt from `files`,
-// `file_history` and `blobs` — the same reconstruction the quota audit performs
-// — so this converges from either direction, is safe to re-run, and cannot
-// double-apply if it is somehow reached twice. An adjustment (`used_bytes = ... +
-// history`) would be correct exactly once and corrupt every time after.
-//
-// EXISTING INSTALLS WILL SEE `used_bytes` JUMP, by the size of the blobs their
-// retained versions were keeping alive for free. That is the point: the meter
-// was reading low against what the disk actually held.
-//
-// `DISTINCT` is carried by the `IN (SELECT ... UNION ...)` — a blob reachable
-// both from a live file and from some version is one blob and is charged once.
+// v4: retained versions count against quota. Recomputes from `files`,
+// `file_history` and `blobs` rather than adjusting, so it is safe to re-run; the
+// `IN (... UNION ...)` charges a blob reachable both ways once.
 const ddl_v4 =
     \\UPDATE capacity SET used_bytes = (
     \\  SELECT COALESCE(SUM(b.size), 0) FROM blobs b WHERE b.md5 IN (
@@ -484,172 +309,53 @@ const ddl_v4 =
     \\);
 ;
 
-// v5 — the device upload cap becomes per-SESSION instead of per-part.
-//
-// `handlers/upload_cap.zig` bounds an arriving `/oss/put` body at the session's
-// `declared_size` + slack. That is the right bound for ONE request and no bound
-// at all on a chunked upload: `totalChunks` is a caller-supplied u32, so N parts
-// could each stage up to the cap and the total staged before the merge stayed
-// unbounded — the very hole the cap was added to close, reachable by adding
-// `?totalChunks=` to the URL.
-//
-// `received_bytes` is the running sum of the bytes this session has actually
-// staged, so each part can be held to what is LEFT of the session's budget. It
-// lives on the row rather than being derived from disk because deriving it means
-// one stat per part per part — O(N²) syscalls over a chunk count the caller
-// chooses, which is a second denial of service in the fix for the first.
-//
-// Defaulted to 0, so every pre-existing row is valid the moment this lands: an
-// upload in flight across the upgrade is measured from zero, which at worst
-// grants it one extra budget and cannot refuse it wrongly.
+// v5: running staged total per upload session, so a chunked `/oss/put` is held
+// to the session's remaining budget (`totalChunks` is caller-chosen). Stored on
+// the row because summing staged parts from disk would be O(N²) stats.
 const ddl_v5 =
     \\ALTER TABLE upload_sessions ADD COLUMN received_bytes INTEGER NOT NULL DEFAULT 0;
 ;
 
-/// The 4-byte file-type marker the `.note` signature carries — "note", "mark",
-/// or whatever else the device writes. `signature` above stores the signature
-/// PROPER (`SN_FILE_VER_<8 digits>`), which for the X-series family begins at
-/// offset 4 and therefore EXCLUDES these bytes; they were parsed and dropped.
-///
-/// NULL means "unknown", which covers both a pre-v6 row and the original/ASA
-/// family, whose signature sits at offset 0 so there is no marker to read. It
-/// never means "not a note" — `indexable` answers that.
+/// The 4-byte file-type marker ("note", "mark", ...) preceding the X-series
+/// signature, which `signature` excludes. NULL = unknown (pre-v6 row or the
+/// original/ASA family, whose signature is at offset 0), never "not a note".
 const ddl_v6 =
     \\ALTER TABLE note_index ADD COLUMN filetype TEXT;
 ;
 
-/// The page's OWN number, read from its `PAGE<n>` key in the container footer,
-/// 1-based — as distinct from `page_index`, which is its POSITION in the file
-/// and stays the addressing key (`/note/{id}/page/{n}`, and the `UNIQUE`
-/// constraint above).
-///
-/// For a notebook the two differ only by one: the footer runs `PAGE1`, `PAGE2`,
-/// … with no gaps. For a `.mark` they diverge, because a mark holds only the
-/// pages that were ANNOTATED and names them by the PDF page they belong to — a
-/// real capture's footer reads `<PAGE2:…><PAGE5:…><PAGE6:…>`
-/// (`parsers/note/note-format.md` §13.2). Without this column a mark's three
-/// pages are indistinguishable from pages 1–3 of a short notebook, and there is
-/// nothing to composite a PDF against.
-///
-/// 0 means "not recorded" — a pre-v7 row, or a container whose footer never had
-/// a readable number. It is not a legal page number, so it cannot be mistaken
-/// for one. `index_version` is bumped alongside this, so existing blobs re-index
-/// and 0 is a transient state rather than a permanent one.
+/// The page's own 1-based number from its `PAGE<n>` footer key, as opposed to
+/// `page_index` (its position). A `.mark` holds only annotated pages, named by
+/// their PDF page (`note-format.md` §13.2). 0 = not recorded.
 const ddl_v7 =
     \\ALTER TABLE note_page_index ADD COLUMN source_page INTEGER NOT NULL DEFAULT 0;
 ;
 
-/// Where a page's `EXTERNALLINKINFO` block lives, and what is in it — the link
-/// rectangles a PDF imported as this page's template kept
-/// (`parsers/note/note-format.md` §14, decoded by `parsers/note/src/links.zig`).
-///
-/// The RANGE, not the records. It is the same arrangement `recogn_offset` /
-/// `recogn_length` make for the rich recognition form, and for the same reason:
-/// the corpus that established the format is one 1703-page notebook carrying
-/// **51,256 records**, which is emphatically not something to hold in a table or
-/// ship in `noteMeta`. The serve path re-reads one page's block — a KB-scale
-/// ranged read into an address-based container — and decodes it there.
-///
-/// `links_hash` is the md5 of the block's content and is the `?v=` version of
-/// `GET /note/{id}/page/{n}/links`, exactly as `text_hash` versions the
-/// transcript. NULL means the page has no link block at all, which is every page
-/// of every note that was not built on a PDF template — so non-NULL is also the
-/// "this page has links" signal the page list carries, and a client that checks
-/// it never asks about a page that has none.
+/// Byte range of a page's `EXTERNALLINKINFO` block (PDF-template links), re-read
+/// on demand since one notebook can hold 51k records. `links_hash` is the `?v=`
+/// of the links route; NULL means the page has no links.
 const ddl_v8 =
     \\ALTER TABLE note_page_index ADD COLUMN links_offset INTEGER;
     \\ALTER TABLE note_page_index ADD COLUMN links_length INTEGER;
     \\ALTER TABLE note_page_index ADD COLUMN links_hash TEXT;
 ;
 
-/// What a PDF is, as far as the server needs to know: how many pages, what
-/// shape page 1 is, and whether it opens at all
-/// (`backend/pdf/probe.zig`).
-///
-/// `page_count`, `width` and `height` already exist on this table and are already
-/// SERVED — `controlplane.aspectOf` reads them, the gallery card renders them.
-/// A PDF simply had no row worth reading, which is why the masonry guesses 3:4
-/// and corrects from decoded pixels. Only a producer was missing.
-///
-/// `pdf_probe` is the verdict, and it exists so a file that will never open is
-/// never probed twice:
-///
-///   NULL  never probed — what the discovery query looks for
-///   0     probed, shape recorded
-///   1     unopenable (not a PDF, or damaged past repair)
-///   2     encrypted — opens, but needs a password
-///   3     no pages, or a page 1 with a degenerate box
-///
-/// Storing the failure is not optional. `deferred.Tenant.run`'s contract says a
-/// tenant that cannot record its own dead ends will be handed the same blob for
-/// ever, and `txt_index`'s over-cap marker is the same idea.
+/// `pdf_probe` verdict (`backend/pdf/probe.zig`), recorded so a file is never
+/// probed twice: NULL never probed, 0 shape recorded, 1 unopenable, 2 encrypted,
+/// 3 no pages or degenerate page 1.
 const ddl_v9 =
     \\ALTER TABLE note_index ADD COLUMN pdf_probe INTEGER;
 ;
 
-/// Whether a PDF's TEXT has been extracted into segments, and what came of it
-/// (`backend/services/pdf_text.zig`). The segment seam's third tenant:
-/// `kind = 2` rows in `note_page_index`, one per page, reaching library search
-/// through the same `segment_search`/`segment_fts` machinery `.note` pages and
-/// `.txt` paragraphs already use.
-///
-/// A separate column from `pdf_probe` because they are separate questions asked
-/// in order: the probe is ~1 s and answers "what shape is this", the text pass
-/// is ~2 minutes on the target and answers "what does it say". A PDF that never
-/// probed is never offered for text.
-///
-///   NULL  never extracted — what the discovery query looks for
-///   0     extracted, every page
-///   1     opens but yields NO text at all (a scan). A RESULT, not a failure:
-///         recorded so the worker does not re-read a 1,450-page scanned book
-///         every idle tick for ever.
-///   2     extracted, TRUNCATED at `pdf_text.max_pages`. Recorded rather than
-///         inferred, because "indexed, and incomplete" is exactly the state
-///         nothing else on this row can express — `page_count` is the
-///         document's, not the index's.
-///   3     the text pass could not open a file the probe could. A verdict, for
-///         the same reason every `pdf_probe` failure is one.
-///
-/// **SINCE v14 IT CLAIMS NO ROWS.** The `kind = 2` rows are gone and the column
-/// records the derivation of `terms/<md5>` and `text/<md5>` instead — the same
-/// four values, about files rather than rows. (It also stopped being reset by
-/// `note_index`'s upsert well before that, once the note half's tail delete was
-/// scoped to `kind = 0`: a reset forced minutes of re-extraction per book for a
-/// heal that touched none of its rows.)
+/// `pdf_text` verdict for deriving `terms/<md5>` and `text/<md5>`: NULL never
+/// extracted, 0 every page, 1 no text (a scan), 2 truncated at
+/// `pdf_text.max_pages`, 3 could not open what the probe could.
 const ddl_v10 =
     \\ALTER TABLE note_index ADD COLUMN pdf_text INTEGER;
 ;
 
-/// Whether a `.txt` blob's paragraph segments have been derived
-/// (`backend/services/txt_index.zig`), and what came of it — the seam's FIRST
-/// tenant finally getting the memo its siblings have.
-///
-///   NULL  never derived — what the discovery query looks for
-///   0     derived; the `kind = 1` rows are in the index
-///   1     skipped: over `txt_index.max_file_bytes`, indexed as nothing and
-///         SAID so rather than left looking like an empty file
-///
-/// **It replaces "does the blob have any `kind = 1` row?", and the reason is
-/// the CHUNKED write.** That predicate answered "finished" the moment the first
-/// chunk committed, so an interrupted write would look like completed work for
-/// ever. A memo written LAST, in the transaction that closes the document, is
-/// true only when the segments are — which is exactly `pdf_text`'s rule, and
-/// this column is its twin.
-///
-/// The `UPDATE` is a DATA step in the same version, on the same reasoning as
-/// v4: every blob that already has segments is already derived, and saying so
-/// here is one statement, where leaving it to the self-heal would re-derive
-/// every `.txt` in the library once for no new rows.
-///
-/// Additive and nullable, and NO `index_version` bump: this changes how the
-/// derivation is remembered, not what it produces.
-///
-/// **SINCE v14 IT CLAIMS NO ROWS EITHER**: the `kind = 1` rows went, and the
-/// column records the derivation of `terms/<md5>` and `text/<md5>` instead. The
-/// backfill below still reads correctly on the one install that runs it — steps
-/// go in order, so v11 sees the rows three steps before v14 deletes them — and
-/// its answer stays right afterwards, because a blob that had segments is a blob
-/// whose text was successfully split.
+/// `txt_index` memo, written last in the transaction that finishes a chunked
+/// `.txt` derivation: NULL never derived, 0 derived, 1 skipped over
+/// `txt_index.max_file_bytes`. The UPDATE backfills already-derived blobs.
 const ddl_v11 =
     \\ALTER TABLE note_index ADD COLUMN txt_index INTEGER;
     \\UPDATE note_index SET txt_index = 0
@@ -657,172 +363,34 @@ const ddl_v11 =
     \\                WHERE np.blob_md5 = note_index.blob_md5 AND np.kind = 1);
 ;
 
-/// v12 — `files_bin_name`, the bin's half of `files_live_name`.
-///
-/// LOAD-BEARING BY SHAPE, and the shape is the `.mark` pairing rule: `(user_id,
-/// COALESCE(parent_id, 0), name) WHERE deleted = 1`, the exact key
-/// `mark_pairing.hidePairedMark` and the bin listing's pair-size subquery look a sibling
-/// up by. `files_live_name` is the same key over LIVE rows and is what makes that
-/// lookup one seek in the library; the bin had no counterpart, so every sibling
-/// probe over trashed rows fell back to `files_user_parent (user_id=?)` — an
-/// index whose first column selects the caller's ENTIRE library, re-walked once
-/// per bin row.
-///
-/// MEASURED on one bin listing, 400 live files + 40 trashed ones: 221,780 VM
-/// steps without this index, 4,500 with it — against 3,940 for the OLD,
-/// PDF-gated rule on the same data, which is the honest comparison. The old rule
-/// hid the cost rather than avoiding it: it gated the probe on `name LIKE
-/// '%.pdf'`, so a household whose bin held no PDFs never paid, and one whose bin
-/// held PDFs paid the full scan. Making the rule format-agnostic (any file can
-/// carry ink, because the device annotates formats this server does not render)
-/// means every bin row probes — which is what turned a latent O(bin x library)
-/// into a measured one, and what makes the index the fix rather than a tuning.
-///
-/// NOT UNIQUE, unlike its live twin. Two rows may sit in the bin under the same
-/// name in the same folder — trash `foo.pdf`, let the device sync a fresh one,
-/// trash that too — and the uniqueness the live index enforces is exactly what
-/// makes the bin need its own: it is the constraint that cannot hold here.
-///
-/// Pure DDL, no backfill, no `index_version` bump: this changes what a read
-/// costs, not what it answers.
+/// v12: `files_bin_name`, `files_live_name`'s key over trashed rows, so `.mark`
+/// pairing in the bin is a seek rather than a library walk per row. Not unique:
+/// the bin can hold two rows under one name.
 const ddl_v12 =
     \\CREATE INDEX files_bin_name
     \\  ON files(user_id, COALESCE(parent_id, 0), name) WHERE deleted = 1;
 ;
 
-/// v13 — `doc_terms` goes.
-///
-/// §5.3 states its only reason to exist: FTS5 is indexed
-/// `term -> documents`, and IN-DOCUMENT typo correction needed
-/// `document -> terms`. Its only reader was the fuzzy candidate pool, and §6
-/// step 6 moved that ladder into the browser's own engine — so this is a table
-/// nothing reads and one write path per document that nothing consumes. On the
-/// dev corpus it was 805,754 rows and ~47 MB.
-///
-/// **The baseline still CREATEs it, and that is deliberate.** `ddl_v1` is the
-/// exact text `sqlite_master` held when the long-way migrations stopped, and it
-/// is reproduced verbatim so a fresh database is byte-identical to a migrated
-/// one. Editing it would make the two diverge for every object AFTER the edit;
-/// creating the table and dropping it two steps later costs a fresh install one
-/// no-op and keeps that property intact.
-///
-/// Irreversible in DATA. A revert of this commit restores the DDL and an empty
-/// table; the rows come back only from a re-derive. That is acceptable because
-/// the rows are a pure function of `note_page_index.text` and of the tokenizer,
-/// both of which survive.
+/// v13: drops `doc_terms`, unread since fuzzy search moved to the browser.
 const ddl_v13 =
     \\DROP TABLE doc_terms;
 ;
 
-/// v14 — the server-side search index goes, all of it.
-///
-/// §6 step 8. `segment_fts` was the FTS5 posting list,
-/// `segment_search` the per-owner masked rowids that scoped it, `segment_text`
-/// the view FTS5 read its external content through, `search_partitions` the
-/// generation counter the mask was built from, and `kind = 1` / `kind = 2` rows
-/// in `note_page_index` were `.txt` paragraphs and PDF pages that existed for no
-/// other reader. Steps 6 and 7 moved library-wide and in-document search into the
-/// browser, off `search-index/manifest`, `search-index/stream` and `text/<md5>`,
-/// so all of it had been written on every ingest and consulted by nothing since.
-///
-/// **What that was costing, measured on the deployment target** (§8.5): 98.1 s of
-/// HELD `db_lock` per whole-library ingest — 38% of an ingest and 100% of the part
-/// a device sync queues behind — with a worst single hold of 8,985 ms.
-///
-/// `kind = 0` STAYS. Those rows carry page geometry, layers, `bg_hash` and the
-/// link block: rendering, not search.
-///
-/// **ORDER IS LOAD-BEARING.** `segment_fts` first, because it is an
-/// external-content table over `segment_text`; then the view; then
-/// `segment_search`, whose FK to `note_page_index(id)` the row delete would
-/// otherwise trip; then the partitions; and only then the rows. Each object's
-/// indexes (`segment_search_segment`, `search_partitions_user`) and FTS5's own
-/// shadow tables go with their parents.
-///
-/// **The baseline still CREATEs all of it**, for v13's reason exactly: `ddl_v1`
-/// is the verbatim text `sqlite_master` held when the long-way migrations
-/// stopped, and editing it would make a fresh database diverge from a migrated
-/// one for every object after the edit. A fresh install creates five objects and
-/// drops them one step later.
-///
-/// Irreversible in DATA, and by far the largest such step. A revert restores the
-/// DDL and empty tables; the rows come back only from a full re-derive — and
-/// nothing would read them if they did.
-///
-/// Safe to run MID-DERIVE. The whole step is one transaction (`applyStep`), and
-/// a deferred worker interrupted between two chunks of a document left partial
-/// `kind = 1`/`kind = 2` rows and a half-filled band — both of which this deletes
-/// outright. What decides whether that document is re-derived is
-/// `note_index.txt_index` / `pdf_text`, which this does not touch.
-/// v15 — every PDF's text is re-extracted, because the RULE changed.
-///
-/// §3. A PDF's icon fonts map their glyphs into the Private Use
-/// Area and MuPDF extracts them faithfully, so codepoints no keyboard can
-/// produce reached the index. `unicode61` treats them as token CHARACTERS, so a
-/// glyph glued to a word took the word out of the index with it: MEASURED,
-/// `alpha<U+E906>beta` matched neither `alpha` nor `beta` nor `alphabeta`. The
-/// extractor replaces them with spaces now.
-///
-/// **TWO HALVES, AND BOTH ARE NEEDED.** `note_index.index_version` goes to 16 in
-/// the same change: that is what renames the derived files and what a browser
-/// diffs its cache against, so without it a client holding `(md5, 15)` would
-/// serve the old vocabulary for ever. And the re-index alone would not re-run
-/// the TEXT pass, because the `note_index` upsert deliberately preserves
-/// `pdf_probe`/`pdf_text` across a re-index — hence this statement.
-///
-/// **THIS CLEARS A MEMO, NOT DATA.** `pdf_text` NULL is exactly the state
-/// `needsText` reads as "still owed", so the deferred worker re-extracts each
-/// document and `writeDerived` replaces its two derived files through the
-/// store's tmp+rename. Nothing is deleted and nothing is unsearchable in the
-/// meantime — the old files stay until their replacements land.
-///
-/// **ONLY PDFs, and no `index_version` bump.** A bump would re-fold every note
-/// and every `.txt` as well, and the per-page fold is the 113x this project's
-/// deployment target pays (§8.4). `.txt` is untouched for a
-/// second reason: `sanitizeUtf8` is shared with it, its PUA is the user's own
-/// content rather than a font artefact, and its segments are addressed by byte
-/// range into the raw blob.
-///
-/// Rows with a FAILURE verdict are left alone: `no_text`, `truncated` and
-/// `unopenable` are answers about the file, and re-asking would re-read every
-/// scanned PDF in the library to reach the same conclusion.
+/// v15: re-derive PDF text after Private Use Area glyphs became spaces. Only
+/// successful verdicts are cleared; `index_version` is bumped separately because
+/// the `note_index` upsert preserves `pdf_probe`/`pdf_text`.
 const ddl_v15 =
     \\UPDATE note_index SET pdf_text = NULL WHERE pdf_text = 0;
 ;
 
-/// v16 — a page says whether anything is drawn on it.
-///
-/// §2.4. One column, three states, and the NULL is the
-/// load-bearing one:
-///
-///     has_ink INTEGER   -- 1 = a mark on some non-background layer, 0 = none,
-///                       -- NULL = not yet looked
-///
-/// `0` is "this page is empty"; NULL is "nobody has looked yet". A reader that
-/// painted NULL as empty would tell someone their notebook is blank while the
-/// worker was still catching up, so the two must be different values and not a
-/// `DEFAULT 0`.
-///
-/// **NO BACKFILL HERE, and no `index_version` bump either.** Every existing row
-/// lands at NULL and is filled by the deferred worker's `ink` tenant, which
-/// discovers exactly the NULL rows (`ink_scan.ink_pending_from_where`); new
-/// pages get the value at ingest. That is the whole reason for the three-state
-/// column — it makes the fact heal-able without re-deriving anything, and in
-/// particular without re-folding every note's terms on the deployment target,
-/// which §8.4 measures at 113x this feature's own cost.
-///
-/// **And the no-bump claim survives v15, which had to make the opposite one.**
-/// The test is not "does the database change" but "does anything the CLIENT
-/// caches under `(md5, index_version)` change". v15 changed the derived TERMS,
-/// which the browser holds under exactly that key. This adds a column and a
-/// `noteMeta` field and leaves `terms/` and `text/` byte-identical, so the key
-/// still names what it named.
-///
-/// Reversible: a revert leaves an unread column behind and nothing else.
+/// v16: `has_ink` tri-state (1 inked, 0 empty, NULL not yet scanned). NULL must
+/// stay distinct from empty; the deferred `ink` tenant fills it.
 const ddl_v16 =
     \\ALTER TABLE note_page_index ADD COLUMN has_ink INTEGER;
 ;
 
+// v14: drops the server-side search index. Order matters: the FTS5 table before
+// its content view, `segment_search` (FK to pages) before the page rows.
 const ddl_v14 =
     \\DROP TABLE segment_fts;
     \\DROP VIEW segment_text;
@@ -832,11 +400,7 @@ const ddl_v14 =
 ;
 
 test "v16: `has_ink` arrives NULL on every existing page, and nothing else moves" {
-    // The step is one ALTER, and what has to be pinned is that it is ONLY that:
-    // every page already in the table comes out at NULL rather than at a
-    // `DEFAULT 0`, because 0 means "this page is empty" and would be a lie about
-    // a page nobody has scanned yet. The tri-state is the whole design, and a
-    // default would collapse it silently.
+    // Existing pages must come out NULL, not `DEFAULT 0` ("empty").
     var db = try sqlite.Db.openMemory();
     defer db.close();
     inline for (steps[0..15], 1..) |ddl, n| try applyStep(db, n, ddl);
@@ -855,8 +419,6 @@ test "v16: `has_ink` arrives NULL on every existing page, and nothing else moves
     try applyStep(db, 16, ddl_v16);
     try std.testing.expectEqual(@as(i64, 16), try userVersion(db));
 
-    // Both rows are UNKNOWN, not empty. This is the state the deferred `ink`
-    // tenant discovers, and the count of what it owes is exactly these.
     try std.testing.expectEqual(
         @as(i64, 2),
         try countOf(db, "SELECT COUNT(*) FROM note_page_index WHERE has_ink IS NULL;"),
@@ -865,15 +427,11 @@ test "v16: `has_ink` arrives NULL on every existing page, and nothing else moves
         @as(i64, 0),
         try countOf(db, "SELECT COUNT(*) FROM note_page_index WHERE has_ink IS NOT NULL;"),
     );
-    // And the column really holds all three states — 0 and 1 are storable, so
-    // the back-fill has somewhere to put "empty" that is not "unknown".
     try db.exec("UPDATE note_page_index SET has_ink = 1 WHERE page_index = 0;");
     try db.exec("UPDATE note_page_index SET has_ink = 0 WHERE page_index = 1;");
     try std.testing.expectEqual(@as(i64, 1), try countOf(db, "SELECT COUNT(*) FROM note_page_index WHERE has_ink = 1;"));
     try std.testing.expectEqual(@as(i64, 1), try countOf(db, "SELECT COUNT(*) FROM note_page_index WHERE has_ink = 0;"));
 
-    // Nothing was deleted and nothing was re-derived: two pages in, two out,
-    // with the rest of the row untouched.
     try std.testing.expectEqual(@as(i64, 2), try countOf(db, "SELECT COUNT(*) FROM note_page_index;"));
     try std.testing.expectEqual(
         @as(i64, 2),
@@ -882,11 +440,6 @@ test "v16: `has_ink` arrives NULL on every existing page, and nothing else moves
 }
 
 test "v15: only the DERIVED PDFs are re-asked, and a failure verdict is left alone" {
-    // The step re-extracts text whose rule changed, and the interesting half is
-    // what it does NOT touch: a scanned PDF that yielded no text, one that was
-    // truncated, one that would not open, and a `.txt` that has nothing to do
-    // with any of it. Re-asking those would re-read them to reach the same
-    // answer.
     var db = try sqlite.Db.openMemory();
     defer db.close();
     inline for (steps[0..14], 1..) |ddl, n| try applyStep(db, n, ddl);
@@ -914,10 +467,6 @@ test "v15: only the DERIVED PDFs are re-asked, and a failure verdict is left alo
     try applyStep(db, 15, ddl_v15);
     try std.testing.expectEqual(@as(i64, 15), try userVersion(db));
 
-    // The one that was derived is owed again — NULL beside a successful probe is
-    // precisely what `pdf_text.needsText` reads as "still owed". Scoped to the
-    // probe, because the `.txt` row's `pdf_text` was always NULL and is not
-    // evidence of anything.
     try std.testing.expectEqual(
         @as(i64, 1),
         try countOf(db, "SELECT COUNT(*) FROM note_index WHERE pdf_probe = 0 AND pdf_text IS NULL;"),
@@ -926,7 +475,6 @@ test "v15: only the DERIVED PDFs are re-asked, and a failure verdict is left alo
         @as(i64, 1),
         try countOf(db, "SELECT COUNT(*) FROM note_index WHERE blob_md5 = 'ok' AND pdf_text IS NULL;"),
     );
-    // The three verdicts about the FILE survive, and so does the `.txt` memo.
     try std.testing.expectEqual(
         @as(i64, 3),
         try countOf(db, "SELECT COUNT(*) FROM note_index WHERE pdf_text IN (1, 2, 3);"),
@@ -935,19 +483,14 @@ test "v15: only the DERIVED PDFs are re-asked, and a failure verdict is left alo
         @as(i64, 1),
         try countOf(db, "SELECT COUNT(*) FROM note_index WHERE blob_md5 = 'txt' AND txt_index = 1;"),
     );
-    // And nothing was deleted: five documents in, five out.
     try std.testing.expectEqual(@as(i64, 5), try countOf(db, "SELECT COUNT(*) FROM note_index;"));
 }
 
 test "v14: the search index is gone, `kind = 0` stays, and a mid-derive database survives it" {
-    // The one step a revert cannot undo, so it is driven against the state that
-    // makes it dangerous: a database holding all three tenants' rows, with one
-    // document HALF written — the shape an interrupted chunked write left, and
-    // the reason this step has to be one transaction rather than five statements.
+    // Driven against a half-written chunked `.txt` derivation.
     var db = try sqlite.Db.openMemory();
     defer db.close();
 
-    // Stop at v13 so the objects v14 drops are really there to be dropped.
     inline for (steps[0..13], 1..) |ddl, n| try applyStep(db, n, ddl);
     try std.testing.expectEqual(@as(i64, 13), try userVersion(db));
 
@@ -971,8 +514,6 @@ test "v14: the search index is gone, `kind = 0` stays, and a mid-derive database
         \\  VALUES('t', 1, 1, 'p1', 0, 0, x'', 1, 'para two');
         \\INSERT INTO search_partitions(user_id, active, next_seq, created_at) VALUES(1, 1, 8, 0);
     );
-    // A band over all four rows, with its postings — the FK from `segment_search`
-    // to `note_page_index` is exactly what a naive row delete would trip.
     try db.exec(
         \\INSERT INTO segment_search(id, segment_id)
         \\  SELECT (1 << 48) + p.id, p.id FROM note_page_index p;
@@ -984,8 +525,6 @@ test "v14: the search index is gone, `kind = 0` stays, and a mid-derive database
     try applyStep(db, 14, ddl_v14);
     try std.testing.expectEqual(@as(i64, 14), try userVersion(db));
 
-    // Every object of the index is gone — the FTS5 shadow tables with it, which
-    // `DROP TABLE` on a virtual table is what removes.
     for ([_][]const u8{
         "segment_fts",            "segment_text",           "segment_search",  "search_partitions",
         "segment_fts_data",       "segment_fts_docsize",    "segment_fts_idx", "segment_fts_config",
@@ -996,13 +535,10 @@ test "v14: the search index is gone, `kind = 0` stays, and a mid-derive database
         try std.testing.expectEqual(@as(i64, 0), r.int(0));
     }
 
-    // `kind = 0` STAYS — geometry and transcript are rendering, not search — and
-    // the half-written `.txt`'s rows go whether the write finished or not.
     try std.testing.expectEqual(@as(i64, 2), try countOf(db, "SELECT COUNT(*) FROM note_page_index;"));
     try std.testing.expectEqual(@as(i64, 2), try countOf(db, "SELECT COUNT(*) FROM note_page_index WHERE kind = 0;"));
     try std.testing.expectEqual(@as(i64, 2), try countOf(db, "SELECT COUNT(*) FROM note_index;")); // both memos survive
 
-    // The database is still consistent, and still migratable from here.
     {
         var r = (try db.row("PRAGMA integrity_check;", &.{})).?;
         defer r.finalize();
@@ -1012,7 +548,6 @@ test "v14: the search index is gone, `kind = 0` stays, and a mid-derive database
     try std.testing.expectEqual(version, try userVersion(db));
 }
 
-/// A one-column count, for the v14 test's many of them.
 fn countOf(db: sqlite.Db, sql: []const u8) !i64 {
     var r = (try db.row(sql, &.{})) orelse return error.NoRow;
     defer r.finalize();
@@ -1027,7 +562,6 @@ test "migrate creates the v1 schema and is idempotent" {
     try std.testing.expectEqual(version, try userVersion(db));
     try migrate(db); // second run is a no-op
 
-    // Tables are present and usable.
     try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);");
     try db.exec("INSERT INTO capacity(user_id, total_bytes) VALUES(1, 1000);");
 
@@ -1037,7 +571,6 @@ test "migrate creates the v1 schema and is idempotent" {
 }
 
 test "v2: fresh and v1-upgraded databases carry an identical file_history table" {
-    // The authored `file_history` DDL from `sqlite_master`, whichever path built it.
     const read_ddl = struct {
         fn get(db: sqlite.Db, buf: []u8) ![]const u8 {
             var r = (try db.row("SELECT sql FROM sqlite_master WHERE name = 'file_history';", &.{})) orelse return error.Missing;
@@ -1048,13 +581,11 @@ test "v2: fresh and v1-upgraded databases carry an identical file_history table"
         }
     }.get;
 
-    // Fresh: baseline + v2 in one migrate().
     var fresh = try sqlite.Db.openMemory();
     defer fresh.close();
     try migrate(fresh);
     try std.testing.expectEqual(version, try userVersion(fresh));
 
-    // Upgraded: an install stamped at v1 (baseline only), then migrated to v2.
     var upg = try sqlite.Db.openMemory();
     defer upg.close();
     try upg.exec(ddl_v1);
@@ -1066,7 +597,6 @@ test "v2: fresh and v1-upgraded databases carry an identical file_history table"
     var ubuf: [512]u8 = undefined;
     try std.testing.expectEqualStrings(try read_ddl(fresh, &fbuf), try read_ddl(upg, &ubuf));
 
-    // And the table is usable / cascades with its file.
     try fresh.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);");
     try fresh.exec("INSERT INTO files(id, user_id, name, md5, size, created_at, updated_at) VALUES(1, 1, 'a.note', 'aa', 1, 0, 0);");
     try fresh.exec("INSERT INTO file_history(file_id, md5, size, created_at) VALUES(1, 'bb', 2, 0);");
@@ -1078,10 +608,6 @@ test "v2: fresh and v1-upgraded databases carry an identical file_history table"
 }
 
 test "v3: fresh and stepwise-migrated databases carry an identical users table" {
-    // Same property the v2 test pins, for the two columns v3 adds. The columns
-    // live only in `ddl_v3` (never folded back into the v1 baseline), so this is
-    // byte-identical BY CONSTRUCTION — the test is here to keep it that way, since
-    // the tempting "just add them to the baseline too" edit breaks it silently.
     const read_ddl = struct {
         fn get(db: sqlite.Db, buf: []u8) ![]const u8 {
             var r = (try db.row("SELECT sql FROM sqlite_master WHERE name = 'users';", &.{})) orelse return error.Missing;
@@ -1096,14 +622,12 @@ test "v3: fresh and stepwise-migrated databases carry an identical users table" 
     defer fresh.close();
     try migrate(fresh);
 
-    // An install stamped at v1, then migrated all the way up.
     var from_v1 = try sqlite.Db.openMemory();
     defer from_v1.close();
     try from_v1.exec(ddl_v1);
     try from_v1.exec("PRAGMA user_version = 1;");
     try migrate(from_v1);
 
-    // And one stamped at v2 (the schema as it shipped, before the bump).
     var from_v2 = try sqlite.Db.openMemory();
     defer from_v2.close();
     try from_v2.exec(ddl_v1);
@@ -1119,8 +643,6 @@ test "v3: fresh and stepwise-migrated databases carry an identical users table" 
     try std.testing.expectEqual(version, try userVersion(fresh));
     try std.testing.expectEqual(version, try userVersion(from_v2));
 
-    // Both columns exist and read NULL for a row created without them — the
-    // "never changed" / "follow the config default" backfill.
     try fresh.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);");
     var r = (try fresh.row("SELECT password_changed_at, history_keep FROM users WHERE id = 1;", &.{})) orelse return error.TestUnexpectedResult;
     defer r.finalize();
@@ -1129,10 +651,6 @@ test "v3: fresh and stepwise-migrated databases carry an identical users table" 
 }
 
 test "v5: fresh and stepwise-migrated databases carry an identical upload_sessions table" {
-    // Same property the v2/v3 tests pin, for the column v5 adds. It lives ONLY in
-    // `ddl_v5` — never folded back into the v1 baseline — so a fresh database
-    // reaches it by running the same ladder an existing install does, which is
-    // what keeps the two byte-identical instead of two authored copies drifting.
     const read_ddl = struct {
         fn get(db: sqlite.Db, buf: []u8) ![]const u8 {
             var r = (try db.row("SELECT sql FROM sqlite_master WHERE name = 'upload_sessions';", &.{})) orelse return error.Missing;
@@ -1147,7 +665,6 @@ test "v5: fresh and stepwise-migrated databases carry an identical upload_sessio
     defer fresh.close();
     try migrate(fresh);
 
-    // An install stamped at v4 — the shipped schema before this — migrated up.
     var from_v4 = try sqlite.Db.openMemory();
     defer from_v4.close();
     try from_v4.exec(ddl_v1);
@@ -1162,9 +679,7 @@ test "v5: fresh and stepwise-migrated databases carry an identical upload_sessio
     try std.testing.expectEqual(version, try userVersion(fresh));
     try std.testing.expectEqual(version, try userVersion(from_v4));
 
-    // A session row written WITHOUT the column reads 0, not NULL — the whole point
-    // of the DEFAULT. An upload in flight across the upgrade is measured from zero,
-    // and a NULL here would make the handler's budget arithmetic meaningless.
+    // DEFAULT 0, not NULL, so an in-flight upload's budget arithmetic still works.
     try from_v4.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);");
     try from_v4.exec(
         "INSERT INTO upload_sessions(inner_name, user_id, path, file_name, declared_size, created_at) " ++
@@ -1178,9 +693,6 @@ test "v5: fresh and stepwise-migrated databases carry an identical upload_sessio
 }
 
 test "v6: fresh and stepwise-migrated databases carry an identical note_index table" {
-    // The same property v2/v3/v5 pin, for the column v6 adds. An install that has
-    // been serving since before the marker was recorded must reach byte-identical
-    // DDL by climbing the ladder.
     const read_ddl = struct {
         fn get(db: sqlite.Db, buf: []u8) ![]const u8 {
             var r = (try db.row("SELECT sql FROM sqlite_master WHERE name = 'note_index';", &.{})) orelse return error.Missing;
@@ -1195,7 +707,6 @@ test "v6: fresh and stepwise-migrated databases carry an identical note_index ta
     defer fresh.close();
     try migrate(fresh);
 
-    // An install stamped at v5 — the shipped schema before this — migrated up.
     var from_v5 = try sqlite.Db.openMemory();
     defer from_v5.close();
     try from_v5.exec(ddl_v1);
@@ -1211,12 +722,6 @@ test "v6: fresh and stepwise-migrated databases carry an identical note_index ta
     try std.testing.expectEqual(version, try userVersion(fresh));
     try std.testing.expectEqual(version, try userVersion(from_v5));
 
-    // A row written BEFORE the column existed reads NULL — "marker unknown",
-    // which `fileTypeFor` must answer as "note". Unlike v5's `received_bytes`
-    // there is deliberately NO default: a zero-length string would be a claim
-    // about the file, and NULL is the honest absence. The row survives the
-    // upgrade rather than being re-parsed, and the `index_version` bump is what
-    // eventually refreshes it through the ordinary self-healing read path.
     try from_v5.exec(
         "INSERT INTO blobs(md5, size, refcount, created_at) VALUES('0123456789abcdef0123456789abcdef', 1, 1, 0);",
     );
@@ -1234,11 +739,6 @@ test "v6: fresh and stepwise-migrated databases carry an identical note_index ta
 }
 
 test "v4: used_bytes is RECOMPUTED to charge retained versions, and converges from either direction" {
-    // The migration recomputes rather than adjusts, which is what makes it safe to
-    // re-run and correct no matter what the counter said before. This drives it
-    // from BOTH sides — a total that was too low (the real case: a v3 install whose
-    // versions were never charged) and one that was too high — and demands it land
-    // on the same reconstructed figure, twice.
     var db = try sqlite.Db.openMemory();
     defer db.close();
     try migrate(db);
@@ -1247,8 +747,7 @@ test "v4: used_bytes is RECOMPUTED to charge retained versions, and converges fr
     try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(2, 'x@y.z', '0123456789abcdef0123456789abcdef', 0);");
     try db.exec("INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(1, 0, 100000);");
     try db.exec("INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(2, 0, 100000);");
-    // Three blobs: the live current (100), a retained version (30), and one the
-    // user holds BOTH live and in history (7) — which must be charged once.
+    // 'both' is held live and in history and must be charged once.
     try db.exec("INSERT INTO blobs(md5, size, refcount, created_at) VALUES('cur', 100, 1, 0);");
     try db.exec("INSERT INTO blobs(md5, size, refcount, created_at) VALUES('old', 30, 0, 0);");
     try db.exec("INSERT INTO blobs(md5, size, refcount, created_at) VALUES('both', 7, 1, 0);");
@@ -1258,8 +757,6 @@ test "v4: used_bytes is RECOMPUTED to charge retained versions, and converges fr
     try db.exec("INSERT INTO files(id, user_id, name, md5, size, created_at, updated_at) VALUES(3, 2, 'c.note', 'theirs', 500, 0, 0);");
     try db.exec("INSERT INTO file_history(file_id, md5, size, created_at) VALUES(1, 'old', 30, 0);");
     try db.exec("INSERT INTO file_history(file_id, md5, size, created_at) VALUES(2, 'both', 7, 0);");
-    // A folder row (NULL md5) and a second history row on the same blob, so the
-    // DISTINCT-ness of the reconstruction is actually exercised.
     try db.exec("INSERT INTO files(id, user_id, name, is_folder, created_at, updated_at) VALUES(4, 1, 'Dir', 1, 0, 0);");
     try db.exec("INSERT INTO file_history(file_id, md5, size, created_at) VALUES(2, 'old', 30, 0);");
 
@@ -1271,14 +768,11 @@ test "v4: used_bytes is RECOMPUTED to charge retained versions, and converges fr
         }
     }.get;
 
-    // From BELOW — the real migration case: a counter that only ever saw live files.
     try db.exec("UPDATE capacity SET used_bytes = 107 WHERE user_id = 1;");
     try db.exec(ddl_v4);
     try std.testing.expectEqual(@as(i64, 137), try readUsed(db, 1)); // 100 + 30 + 7, each once
     try std.testing.expectEqual(@as(i64, 500), try readUsed(db, 2));
 
-    // From ABOVE, and then twice more: it converges to the same figure and is a
-    // no-op thereafter, which is what "safe to re-run" has to mean.
     try db.exec("UPDATE capacity SET used_bytes = 999999 WHERE user_id = 1;");
     try db.exec(ddl_v4);
     try std.testing.expectEqual(@as(i64, 137), try readUsed(db, 1));
@@ -1288,15 +782,6 @@ test "v4: used_bytes is RECOMPUTED to charge retained versions, and converges fr
 }
 
 test "a step that fails partway leaves the database untouched, and still migratable" {
-    // The failure the transaction wrapping exists for. Pre-fix each statement in a
-    // step auto-committed, so a step that died halfway left its first objects on
-    // disk with `user_version` unstamped — and the next boot re-ran the step from
-    // the top, onto tables that now existed, for ever.
-    //
-    // The injection is a step shaped exactly like a real one: a first statement
-    // that succeeds followed by one that cannot. No fault injection into SQLite is
-    // needed — "the second statement errors" is the same shape as "the disk filled
-    // up between the two", which is what makes this honest rather than a mock.
     var db = try sqlite.Db.openMemory();
     defer db.close();
 
@@ -1309,10 +794,7 @@ test "a step that fails partway leaves the database untouched, and still migrata
     try std.testing.expectError(error.Exec, applyStep(db, 1, half_failing));
     sqlite.log_exec_errors = true;
 
-    // Nothing the step did survived it: no half-built `users`, no version stamp.
-    // The probe is SCOPED, because a live statement over `sqlite_master` holds a
-    // schema read lock and `migrate` below now carries a `DROP TABLE` (v13),
-    // which SQLite refuses with SQLITE_LOCKED while one is open.
+    // Scoped probe: an open `sqlite_master` cursor would make v13's DROP fail SQLITE_LOCKED.
     try std.testing.expectEqual(@as(i64, 0), try userVersion(db));
     {
         var r = (try db.row(
@@ -1323,20 +805,12 @@ test "a step that fails partway leaves the database untouched, and still migrata
         try std.testing.expectEqual(@as(i64, 0), r.int(0));
     }
 
-    // Which is the whole point: the install still boots. If the rollback had left
-    // the crippled one-column `users` behind, `migrate` would die here on "table
-    // users already exists" — and the INSERT below would fail on the missing
-    // columns even if it somehow didn't.
     try migrate(db);
     try std.testing.expectEqual(version, try userVersion(db));
     try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);");
 }
 
 test "the user_version stamp rolls back with its step" {
-    // `applyStep` puts the stamp inside the step's transaction, which is only
-    // all-or-nothing if SQLite treats the `user_version` header field as ordinary
-    // transactional state. It does — but the whole fix rests on it, so it is
-    // pinned here rather than assumed.
     var db = try sqlite.Db.openMemory();
     defer db.close();
 
@@ -1351,7 +825,6 @@ test "foreign keys are enforced" {
     var db = try sqlite.Db.openMemory();
     defer db.close();
     try migrate(db);
-    // capacity references a non-existent user -> FK violation at step time.
     var s = try db.prepare("INSERT INTO capacity(user_id, total_bytes) VALUES(999, 1);");
     defer s.finalize();
     try std.testing.expectError(error.Step, s.step());
@@ -1363,22 +836,18 @@ test "files tree: folder + file insert, and unique live names per folder" {
     try migrate(db);
     try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);");
 
-    // A root folder, then a file inside it referencing a blob.
     try db.exec("INSERT INTO blobs(md5, size, refcount, created_at) VALUES('aa', 10, 1, 0);");
     try db.exec("INSERT INTO files(user_id, parent_id, name, is_folder, created_at, updated_at) VALUES(1, NULL, 'Notes', 1, 0, 0);");
     try db.exec("INSERT INTO files(user_id, parent_id, name, md5, size, created_at, updated_at) VALUES(1, 1, 'a.note', 'aa', 10, 0, 0);");
 
-    // A second live file with the same name in the same folder is rejected.
     {
         var s = try db.prepare("INSERT INTO files(user_id, parent_id, name, created_at, updated_at) VALUES(1, 1, 'a.note', 0, 0);");
         defer s.finalize();
         try std.testing.expectError(error.Step, s.step());
     }
-    // But once the first is soft-deleted, the name is free again.
     try db.exec("UPDATE files SET deleted = 1 WHERE name = 'a.note';");
     try db.exec("INSERT INTO files(user_id, parent_id, name, md5, size, created_at, updated_at) VALUES(1, 1, 'a.note', 'aa', 10, 0, 0);");
 
-    // Two different root entries with the same name also collide (COALESCE folds NULL).
     try db.exec("INSERT INTO files(user_id, parent_id, name, is_folder, created_at, updated_at) VALUES(1, NULL, 'Docs', 1, 0, 0);");
     {
         var s = try db.prepare("INSERT INTO files(user_id, parent_id, name, is_folder, created_at, updated_at) VALUES(1, NULL, 'Docs', 1, 0, 0);");

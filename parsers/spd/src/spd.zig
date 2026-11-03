@@ -1,36 +1,7 @@
-//! Reader for the Supernote Atelier `.spd` format — a layered-drawing document
-//! that is, on disk, an **SQLite database**.
-//!
-//! ## Trust model (the load-bearing decision)
-//!
-//! A `.spd` is attacker-supplied: it arrives over the sync API from a device we
-//! do not control. It is a *SQLite database*, which is a scripting surface, not
-//! an inert blob. So this reader NEVER opens it as a file and NEVER opens it
-//! read-write. It:
-//!   * copies the bytes into memory we own,
-//!   * opens a fresh `:memory:` connection, and
-//!   * attaches the image with `sqlite3_deserialize(..., SQLITE_DESERIALIZE_READONLY)`.
-//! The connection cannot write, cannot touch the filesystem, and cannot outlive
-//! the copy it borrows. The read-only guarantee is asserted by the test suite
-//! (a write against the open connection must be refused).
-//!
-//! ## What it exposes
-//!
-//! `open` → `metadata` (config values + the z-ordered layer tree) → `thumbnail`
-//! (embedded JPEG) and `iterateLayer` (streaming PNG tiles). Tiles are streamed
-//! straight out of SQLite; everything else is copied into caller-owned memory so
-//! nothing borrows past `deinit`.
-//!
-//! ## Layout facts (verified against real captures, appVersion 1.1.78 / 1.1.82,
-//! fmt_ver 2 — see spd-format.md)
-//!
-//!   * `config(name TEXT PRIMARY KEY, value BLOB)` — key/value metadata. NOTE the
-//!     `thumbnail` value carries TEXT affinity but holds binary JPEG, so it must
-//!     be read as a blob (byte count), never as text (which stops at the first
-//!     NUL and reports a nonsense length).
-//!   * `surface_<id>(tid INTEGER PRIMARY KEY, tile BLOB)` — one table per layer,
-//!     each row a 128×128 PNG tile at grid position `tid` (see `unpackTid`).
-//!   * `config['ls']` — a protobuf blob describing the layer tree (`parseLayerTree`).
+//! Reader for the Supernote Atelier `.spd` format, an SQLite database (see
+//! `spd-format.md`). The file is untrusted, so it is never opened as a file or
+//! read-write: the bytes are copied and attached to a `:memory:` connection
+//! with `SQLITE_DESERIALIZE_READONLY`.
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
@@ -38,39 +9,30 @@ const protobuf = @import("protobuf.zig");
 
 const c = sqlite.c;
 
-/// Layer id the app reserves for the template/background ("Reference Layer").
-/// The device hardcodes UI rules around it; a renderer treats an empty one as a
-/// solid white background.
+/// Layer id the app reserves for the template/background ("Reference Layer");
+/// an empty one renders as solid white.
 pub const reference_layer_id: i32 = 9999;
 
-/// Tiles are 128×128 px. Absolute pixel position is grid coordinate × this.
+/// Tiles are 128×128 px.
 pub const tile_px: u32 = 128;
 
 pub const Error = error{
-    /// The bytes do not begin with the SQLite file magic — not a database at all.
     NotSqlite,
-    /// A valid SQLite database, but without a `config` table: not an `.spd`.
     NotSpd,
-    /// A query that must succeed did not — a truncated/garbled database whose
-    /// header passed but whose pages did not. Distinguished from "field absent"
-    /// on purpose: a corrupt file must not read as a blank one.
+    /// A required query failed: a corrupt file must not read as a blank one.
     Corrupt,
-    /// A `tid` decodes to an x-tile beyond `u32` (only reachable with a crafted
-    /// oversized `tid`; legitimate files stay far inside the range).
+    /// A crafted `tid` decodes to an x-tile beyond `u32`.
     TileCoordOverflow,
-    /// A `tid` column was negative — impossible for a real file.
     BadTid,
 } || std.mem.Allocator.Error || protobuf.Error;
 
-/// One layer's metadata, as parsed from `config['ls']`.
 pub const LayerInfo = struct {
-    /// Internal id; the tile data lives in `surface_<id>`.
     id: i32,
-    /// User-facing name (owned by the parent `Metadata.arena`; "" if unnamed).
+    /// Owned by `Metadata.arena`; "" if unnamed.
     name: []const u8,
-    /// False only when the file explicitly hides the layer (protobuf field 4 = 0).
+    /// False only when protobuf field 4 is explicitly 0.
     visible: bool,
-    /// Raw 0..255 opacity as stored. Use `opacityFraction` for a 0.0..1.0 value.
+    /// Raw 0..255 opacity.
     opacity: u8,
 
     pub fn opacityFraction(self: LayerInfo) f32 {
@@ -81,12 +43,8 @@ pub const LayerInfo = struct {
     }
 };
 
-/// Document metadata: config scalars plus the layer tree. Every field is
-/// optional because a `.spd` may legitimately omit any given config key — a
-/// `null` here means "absent", which the read path keeps distinct from the
-/// `error.Corrupt` it returns when a query itself fails.
-///
-/// Owns an arena that backs `layers` and their names; call `deinit`.
+/// Config scalars plus the layer tree. `null` means the key is absent, kept
+/// distinct from `error.Corrupt`. Owns an arena; call `deinit`.
 pub const Metadata = struct {
     arena: std.heap.ArenaAllocator,
 
@@ -98,11 +56,9 @@ pub const Metadata = struct {
     vp_x: ?f32,
     vp_y: ?f32,
 
-    /// Layers in Z-order: `layers[0]` is the topmost, `layers[len-1]` bottommost
-    /// — the order the protobuf stores them (see `parseLayerTree`).
+    /// Z-order: `layers[0]` is topmost, as the protobuf stores them.
     layers: []const LayerInfo,
-    /// The count/active-layer the header declares, if present (informational;
-    /// `layers.len` is the authority on how many were actually parsed).
+    /// Informational; `layers.len` is the authority.
     declared_layer_count: ?i32,
     active_layer_id: ?i32,
 
@@ -111,26 +67,16 @@ pub const Metadata = struct {
     }
 };
 
-/// One decoded tile. `png` borrows SQLite's row memory and is valid only until
-/// the next `TileIterator.next`/`deinit` — copy it if you need to keep it.
+/// One tile. `png` borrows SQLite's row memory until the next `next`/`deinit`.
 pub const Tile = struct {
     tid: i64,
-    /// Horizontal grid coordinate (high bits of `tid`). Absolute x px = `x*128`.
     x: u32,
-    /// Vertical grid coordinate (low 12 bits of `tid`, 0..4095). Abs y px = `y*128`.
     y: u16,
     png: []const u8,
 };
 
-/// `tid` packs the two tile-grid coordinates into one integer. VERIFIED against
-/// a real drawing (only this mapping reconstructs a coherent, correctly-oriented
-/// image; the transpose scrambles it — see spd-format.md §tid):
-///
-///   x_tile = tid >> 12      (the high bits — horizontal)
-///   y_tile = tid & 0x0FFF   (the low 12 bits — vertical, 0..4095)
-///
-/// This is the OPPOSITE axis assignment to the one the human-readable spec prose
-/// and the PoC parser used; they had x and y swapped.
+/// `x_tile = tid >> 12`, `y_tile = tid & 0x0FFF`. The spec prose and the PoC
+/// had the axes swapped; only this mapping reconstructs a real drawing.
 pub fn unpackTid(tid: i64) Error!struct { x: u32, y: u16 } {
     if (tid < 0) return error.BadTid;
     const t: u64 = @intCast(tid);
@@ -139,14 +85,13 @@ pub fn unpackTid(tid: i64) Error!struct { x: u32, y: u16 } {
     return .{ .x = @intCast(x64), .y = @intCast(t & 0x0FFF) };
 }
 
-/// Inverse of `unpackTid`. `y` is a `u12` because that is the field's real range.
+/// Inverse of `unpackTid`.
 pub fn packTid(x: u32, y: u12) i64 {
     return (@as(i64, x) << 12) | @as(i64, y);
 }
 
-/// Streams a layer's PNG tiles, one prepared SQLite statement, zero buffering.
-/// A `null` statement means the layer has no table (an absent or empty layer),
-/// which yields zero tiles rather than an error.
+/// Streams a layer's PNG tiles off one prepared statement. A `null` statement
+/// (no table) yields zero tiles.
 pub const TileIterator = struct {
     stmt: ?*c.sqlite3_stmt,
 
@@ -172,53 +117,37 @@ pub const TileIterator = struct {
     }
 };
 
-/// An open, read-only `.spd`. Owns both the SQLite connection and the in-memory
-/// image the connection borrows — `deinit` tears down both, in order.
+/// An open read-only `.spd`, owning the connection and the image it borrows.
 pub const Spd = struct {
     db: *c.sqlite3,
-    /// The database image, owned by us. `sqlite3_deserialize` borrows this
-    /// pointer for the connection's whole life (we pass neither FREEONCLOSE nor
-    /// RESIZEABLE), so it must be freed only AFTER the connection is closed, and
-    /// the caller's original slice is never referenced — we copied it. This is
-    /// the deliberate answer to the PoC's zero-copy-borrow lifetime footgun.
+    /// Our copy of the database. `sqlite3_deserialize` borrows it for the
+    /// connection's life (no FREEONCLOSE/RESIZEABLE), so free it only after
+    /// closing.
     image: []u8,
     gpa: std.mem.Allocator,
 
-    /// The 16-byte magic every SQLite file starts with. Checking it first turns a
-    /// non-database blob into a fast, specific `error.NotSqlite` instead of a
-    /// deserialize that half-succeeds.
     const sqlite_magic = "SQLite format 3\x00";
 
-    /// Rewrites the two SQLite header format-version bytes (offsets 18 = write,
-    /// 19 = read) from WAL (2) to legacy rollback-journal (1). See the call site
-    /// in `open` for why. A no-op for a file that is already legacy-mode.
+    /// Rewrites header bytes 18/19 (write/read format version) from WAL (2) to
+    /// rollback-journal (1).
     fn neutralizeWalMode(image: []u8) void {
         if (image.len < 20) return; // header is 100 bytes; a real db has these
         if (image[18] == 2) image[18] = 1;
         if (image[19] == 2) image[19] = 1;
     }
 
-    /// Opens `bytes` as a read-only `.spd`. `bytes` need NOT outlive the return
-    /// value — it is copied. Fails with `NotSqlite` for a non-database blob,
-    /// `NotSpd` for a database that isn't an `.spd`, `Corrupt` for a broken one.
+    /// Opens `bytes` (copied) as a read-only `.spd`.
     pub fn open(gpa: std.mem.Allocator, bytes: []const u8) Error!Spd {
         if (bytes.len < sqlite_magic.len or !std.mem.startsWith(u8, bytes, sqlite_magic)) {
             return error.NotSqlite;
         }
 
-        // Own the image. Freed by deinit, after the connection that borrows it.
         const image = try gpa.dupe(u8, bytes);
         errdefer gpa.free(image);
 
-        // Every real `.spd` the device writes is a WAL-mode database (header
-        // bytes 18/19 == 2). `sqlite3_deserialize` into `:memory:` cannot run
-        // WAL — there is no companion `-wal` file and an in-memory db has no
-        // journal — so it would fail outright. We hold a fresh, read-only copy
-        // and the file at rest is checkpointed, so its main image already holds
-        // the committed state; rewriting the two format-version bytes to 1
-        // (legacy rollback-journal) makes SQLite read exactly that state. This
-        // is a read-time reinterpretation of OUR copy only, before any
-        // connection touches it — the original bytes are untouched.
+        // Device `.spd`s are WAL-mode, which a deserialized `:memory:` db cannot
+        // run. The file at rest is checkpointed, so marking our copy legacy-mode
+        // reads the committed state.
         neutralizeWalMode(image);
 
         var db: ?*c.sqlite3 = null;
@@ -228,8 +157,6 @@ pub const Spd = struct {
         }
         errdefer _ = c.sqlite3_close(db);
 
-        // Read-only, in place. No FREEONCLOSE: we free `image` ourselves. No
-        // RESIZEABLE: a read-only db never grows.
         const rc = c.sqlite3_deserialize(
             db,
             "main",
@@ -242,9 +169,7 @@ pub const Spd = struct {
 
         var self: Spd = .{ .db = db.?, .image = image, .gpa = gpa };
 
-        // A database is only an `.spd` if it has the `config` table. This also
-        // forces SQLite to actually read a page, catching a header-valid but
-        // body-corrupt image here rather than on first metadata read.
+        // Also forces a page read, catching a body-corrupt image here.
         if (!try self.hasTable("config")) return error.NotSpd;
 
         return self;
@@ -256,17 +181,13 @@ pub const Spd = struct {
         self.* = undefined;
     }
 
-    /// Reads config scalars and the layer tree into a caller-owned `Metadata`.
     pub fn metadata(self: *Spd, gpa: std.mem.Allocator) Error!Metadata {
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
         const a = arena.allocator();
 
-        // EVERY allocation via `a` must happen BEFORE `arena` is moved into the
-        // returned struct: `ArenaAllocator.allocator()` binds to this local's
-        // address, so allocating through `a` after the move would grow a
-        // different arena than the one the caller deinits (a leak). Same
-        // discipline as src/note/parser.zig.
+        // All `a` allocations must precede moving `arena` into the result:
+        // `allocator()` binds to this local's address.
         const fmt_ver = try self.configText(a, "fmt_ver");
         const app_version = try self.configText(a, "appVersion");
         const ppi = try self.configUint(a, "ppi");
@@ -275,9 +196,7 @@ pub const Spd = struct {
         const vp_x = try self.configFloat(a, "vp.x");
         const vp_y = try self.configFloat(a, "vp.y");
 
-        // The layer tree. A malformed `ls` is corruption we surface (never a
-        // silent empty tree) — parseLayerTree returns a protobuf error, which
-        // this propagates.
+        // A malformed `ls` is surfaced, never a silent empty tree.
         var tree: LayerTree = .{ .layers = &.{}, .count = null, .active = null };
         if (try self.readConfigBlobDup(a, "ls")) |ls| {
             tree = try parseLayerTree(a, ls);
@@ -298,9 +217,8 @@ pub const Spd = struct {
         };
     }
 
-    /// Returns the embedded JPEG thumbnail, copied into `gpa`, or `null` when the
-    /// file has none. Read as a blob by byte count — see the type-level note on
-    /// `thumbnail`'s TEXT affinity.
+    /// The embedded JPEG copied into `gpa`, or `null`. `thumbnail` has TEXT
+    /// affinity but binary content, so it is read by byte count.
     pub fn thumbnail(self: *Spd, gpa: std.mem.Allocator) Error!?[]u8 {
         const stmt = try self.prepareConfig("thumbnail");
         defer _ = c.sqlite3_finalize(stmt);
@@ -315,12 +233,8 @@ pub const Spd = struct {
         }
     }
 
-    /// Streams the tiles of `surface_<layer_id>`. A layer with no table (absent,
-    /// or an empty reference layer) yields an iterator over zero tiles rather
-    /// than an error — "no tiles" is a normal, expected state.
-    ///
-    /// The table name is built from an integer, so there is no SQL-injection
-    /// surface; a bogus id simply names a table that does not exist.
+    /// Streams `surface_<layer_id>`; a missing table yields zero tiles. The name
+    /// is built from an integer, so there is no injection surface.
     pub fn iterateLayer(self: *Spd, layer_id: i32) Error!TileIterator {
         var buf: [64]u8 = undefined;
         const sql = std.fmt.bufPrintZ(&buf, "SELECT tid, tile FROM surface_{d} ORDER BY tid", .{layer_id}) catch unreachable;
@@ -333,8 +247,6 @@ pub const Spd = struct {
 
     // ---- internals ----
 
-    /// True if a table named `name` exists. Prepared with a bound parameter, so
-    /// `name` is never interpolated into SQL.
     fn hasTable(self: *Spd, name: []const u8) Error!bool {
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1", -1, &stmt, null) != c.SQLITE_OK) {
@@ -349,8 +261,7 @@ pub const Spd = struct {
         };
     }
 
-    /// Prepares `SELECT value FROM config WHERE name = <key>` with `key` bound.
-    /// A prepare failure here is `Corrupt`: `open` already proved `config` exists.
+    /// A prepare failure is `Corrupt`: `open` already proved `config` exists.
     fn prepareConfig(self: *Spd, key: []const u8) Error!*c.sqlite3_stmt {
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, "SELECT value FROM config WHERE name = ?1", -1, &stmt, null) != c.SQLITE_OK) {
@@ -360,7 +271,6 @@ pub const Spd = struct {
         return stmt.?;
     }
 
-    /// A config value as text copied into `a`, or `null` if the key is absent.
     fn configText(self: *Spd, a: std.mem.Allocator, key: []const u8) Error!?[]const u8 {
         const stmt = try self.prepareConfig(key);
         defer _ = c.sqlite3_finalize(stmt);
@@ -376,9 +286,7 @@ pub const Spd = struct {
         }
     }
 
-    /// A config value as `f32`. `null` when the key is absent; a present-but-
-    /// unparseable value is also `null` (a stored non-number is data, not a
-    /// broken database).
+    /// A config value as `f32`; absent or unparseable is `null`.
     fn configFloat(self: *Spd, a: std.mem.Allocator, key: []const u8) Error!?f32 {
         const text = (try self.configText(a, key)) orelse return null;
         return std.fmt.parseFloat(f32, text) catch null;
@@ -386,17 +294,13 @@ pub const Spd = struct {
 
     fn configUint(self: *Spd, a: std.mem.Allocator, key: []const u8) Error!?u32 {
         const text = (try self.configText(a, key)) orelse return null;
-        // `ppi` is stored as an integer-valued string ("72"); parse leniently
-        // through f32 so a "72.0" would still read.
+        // `ppi` is an integer string ("72"); parsing as f32 also accepts "72.0".
         const f = std.fmt.parseFloat(f32, text) catch return null;
-        // 2^32 as an exact f32 — comparing against maxInt(u32) directly is
-        // rejected because that integer has no exact f32 representation.
+        // 2^32 as an exact f32 (maxInt(u32) has no exact f32).
         if (f < 0 or f >= 4294967296.0) return null;
         return @intFromFloat(f);
     }
 
-    /// A config value's raw bytes copied into `a`, or `null` if absent. Used for
-    /// the `ls` protobuf, which must be read as bytes.
     fn readConfigBlobDup(self: *Spd, a: std.mem.Allocator, key: []const u8) Error!?[]const u8 {
         const stmt = try self.prepareConfig(key);
         defer _ = c.sqlite3_finalize(stmt);
@@ -412,9 +316,8 @@ pub const Spd = struct {
     }
 };
 
-/// A borrowed view of a BLOB/TEXT column as raw bytes. Uses the byte count, not
-/// C-string semantics, so it is correct for binary values with embedded NULs
-/// (the thumbnail, the `ls` blob). Valid until the next step/reset/finalize.
+/// A BLOB/TEXT column by byte count, safe for embedded NULs. Valid until the
+/// next step/reset/finalize.
 fn columnBlob(stmt: *c.sqlite3_stmt, col: c_int) []const u8 {
     const ptr = c.sqlite3_column_blob(stmt, col);
     const len = c.sqlite3_column_bytes(stmt, col);
@@ -422,26 +325,16 @@ fn columnBlob(stmt: *c.sqlite3_stmt, col: c_int) []const u8 {
     return @as([*]const u8, @ptrCast(ptr))[0..@intCast(len)];
 }
 
-/// The parsed layer tree: layers in Z-order plus the two root scalars.
 pub const LayerTree = struct {
     layers: []const LayerInfo,
     count: ?i32,
     active: ?i32,
 };
 
-/// Parses `config['ls']` — the layer-tree protobuf. Layer names are duped into
-/// `a`. Structure (reverse-engineered, confirmed against real files):
-///   root:  field 1 = repeated Layer (Z-order: first = topmost)
-///          field 2 = total layer count, field 3 = active layer id
-///   Layer: field 1 = id, field 2 = name, field 4 = visibility (0 ⇒ hidden,
-///          field absent ⇒ visible), field 8 = opacity (0..255)
-///
-/// Any malformed byte sequence returns a `protobuf.Error` — deliberately, so a
-/// corrupt layer tree is reported, not silently flattened to "no layers".
+/// Parses `config['ls']`, duping names into `a`. Malformed bytes return a
+/// `protobuf.Error`. See `spd-format.md` for the field layout.
 pub fn parseLayerTree(a: std.mem.Allocator, blob: []const u8) Error!LayerTree {
     var layers: std.ArrayList(LayerInfo) = .empty;
-    // Names are arena-owned; on error the arena the caller passes is torn down
-    // wholesale, so there is nothing to free element-by-element here.
 
     var r = protobuf.Reader{ .data = blob };
     var count: ?i32 = null;
@@ -464,8 +357,7 @@ pub fn parseLayerTree(a: std.mem.Allocator, blob: []const u8) Error!LayerTree {
     return .{ .layers = try layers.toOwnedSlice(a), .count = count, .active = active };
 }
 
-/// Parses one Layer submessage. Returns `null` for a submessage that carried no
-/// id (nothing addressable), so callers do not append a phantom layer.
+/// One Layer submessage, or `null` if it carried no id.
 fn parseLayer(a: std.mem.Allocator, blob: []const u8) Error!?LayerInfo {
     var r = protobuf.Reader{ .data = blob };
     var id: ?i32 = null;
@@ -498,8 +390,7 @@ fn parseLayer(a: std.mem.Allocator, blob: []const u8) Error!?LayerInfo {
     };
 }
 
-/// Truncates a protobuf varint to the format's `int32` field width without
-/// panicking on an out-of-range value (attacker input may exceed 32 bits).
+/// Truncates a varint to `int32` without panicking on untrusted input.
 fn varintToI32(v: u64) i32 {
     return @bitCast(@as(u32, @truncate(v)));
 }
@@ -529,8 +420,6 @@ test "parseLayerTree reads a hand-built two-layer tree" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    // root field1 (Layer): {id=1, name="Top", opacity=128}
-    // root field1 (Layer): {id=9999, name="Ref", vis=0}
     // Layer A body: 08 01  12 03 "Top"  40 80 01(=128)
     const layer_a = [_]u8{ 0x08, 0x01, 0x12, 0x03, 'T', 'o', 'p', 0x40, 0x80, 0x01 };
     // Layer B body: 08 8F 4E(=9999)  12 03 "Ref"  20 00(vis=0)
@@ -562,7 +451,6 @@ test "parseLayerTree surfaces a malformed blob as an error, never a panic" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // A layer submessage claiming a 20-byte length inside a 4-byte body.
     const blob = [_]u8{ 0x0a, 0x14, 0x08, 0x01 };
     try std.testing.expectError(error.Malformed, parseLayerTree(a, &blob));
 }

@@ -1,31 +1,14 @@
-//! Writing the two per-document derived files (§2.2). The
-//! format lives here; `.txt` paragraphs, `.note` pages and `.pdf` pages supply
-//! `(ordinal, text)`.
-//!
-//! Must not break:
-//!   * Both writers STREAM: a page's line is written when the page is available
-//!     and never looked at again. The inverted `term -> [pages]` record this
-//!     replaced held a map until the last page — 2.84 MB for the largest
-//!     document, 11.18 MB for a pathological one, on a 50 MB budget (§8.2).
-//!   * Terms come from `fuzzy.foldRows` — FTS5's own `unicode61` in SQLite —
-//!     and the browser folds the QUERY with the same C compiled to wasm, so the
-//!     corpus cannot diverge from the query. A folded term cannot contain `"`,
-//!     `\` or a control character (unicode61 treats them as separators), so the
-//!     terms file writes bare strings with no escaping; a test pins it. The TEXT
-//!     file is raw content and is escaped.
+//! Streaming writers for the two per-document derived search files (terms, text).
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
 const derived = @import("../store/derived.zig");
 const fuzzy = @import("search/fuzzy.zig");
 
-/// The `v` in a record's header line — the CONTENT version, the same
-/// `index_version` as the filename's, so the two cannot drift.
+/// The header's `v`; shared with the filename so the two cannot drift.
 pub const index_version = @import("note_index.zig").index_version;
 
-/// The first line of both files. `n` is the document's ADDRESS SPACE — its
-/// page/paragraph count — not the row count: the two differ whenever a page has
-/// no text (an unrecognised `.note` page, an image-only PDF page).
+/// `n` is the page/paragraph count, not the row count: textless pages have no row.
 fn writeHeader(f: *derived.Fragment, md5: []const u8, n: u32) !void {
     var buf: [96]u8 = undefined;
     const line = try std.fmt.bufPrint(
@@ -40,19 +23,14 @@ fn writeHeader(f: *derived.Fragment, md5: []const u8, n: u32) !void {
 pub const Page = struct {
     ordinal: i64,
     text: []const u8,
-    /// Byte range into the RAW BLOB, for the one format addressed by range
-    /// rather than ordinal (`.txt`). Null everywhere else.
+    /// Raw-blob byte range; `.txt` only.
     offset: ?u64 = null,
     len: ?u32 = null,
 };
 
-/// Write both derived files for one document from a page source: anything with
-/// `fn next(self: *Self) !?Page` (`txt_index.Pages`, `note_index.Pages`,
-/// `pdf_text.Pages`). This is the whole per-format seam. A PULL iterator because
-/// `.pdf` text arrives 50 pages at a time and is never held whole; `anytype`
-/// because every call site is known at compile time.
-///
-/// `n` is the ADDRESS SPACE, not the number of pages the source will yield.
+/// Write both derived files from `src`, anything with `fn next(*Self) !?Page`.
+/// Pull-based so a document is never held whole. `n` is the page count, not
+/// the number of pages `src` yields.
 pub fn writeDerived(
     gpa: std.mem.Allocator,
     terms_store: derived.DerivedStore,
@@ -61,8 +39,7 @@ pub fn writeDerived(
     n: u32,
     src: anytype,
 ) !void {
-    // A private in-memory connection for nothing but the tokenizer. The fold
-    // reads no table, which is what keeps this off the global write lock (§2.5).
+    // Private in-memory connection for the tokenizer: keeps off the write lock.
     var fold = try sqlite.Db.openMemory();
     defer fold.close();
 
@@ -91,7 +68,6 @@ pub fn writeDerived(
 pub const TermsWriter = struct {
     frag: derived.Fragment,
     db: sqlite.Db,
-    /// Reused for the whole document.
     line: std.ArrayList(u8),
     gpa: std.mem.Allocator,
 
@@ -111,8 +87,7 @@ pub const TermsWriter = struct {
         try writeHeader(&w.frag, md5, n);
     }
 
-    /// A page that folds to NOTHING is skipped, not written as an empty row: an
-    /// FTS5 row with no terms can never match.
+    /// A page that folds to nothing writes no row.
     pub fn page(w: *TermsWriter, ordinal: i64, text: []const u8) !void {
         w.line.clearRetainingCapacity();
 
@@ -130,19 +105,17 @@ pub const TermsWriter = struct {
 
         var head: [48]u8 = undefined;
         try w.frag.write(try std.fmt.bufPrint(&head, "{{\"p\":{d},\"t\":\"", .{ordinal}));
-        // No escaping: a folded term cannot contain `"` or `\` (header).
+        // No escaping: unicode61 treats `"`, `\` and controls as separators.
         try w.frag.write(w.line.items);
         try w.frag.write("\"}\n");
     }
 
-    /// A caller's `errdefer w.abort()` still runs if the fragment commit fails,
-    /// so `release` must be idempotent or that double-frees `line`.
+    /// `abort` may still run after a failed commit, so `release` is idempotent.
     pub fn commit(w: *TermsWriter) !void {
         w.release();
         try w.frag.commit();
     }
 
-    /// Idempotent, and safe after `commit`.
     pub fn abort(w: *TermsWriter) void {
         w.release();
         w.frag.abort();
@@ -154,9 +127,8 @@ pub const TermsWriter = struct {
     }
 };
 
-/// Writes `text/<md5>.<v>`: a header line, then one line per segment with the
-/// real text and the segment's ADDRESS — the byte range for `.txt`, the page
-/// for `.pdf`/`.note` — which is what a viewer deep-links to (§4.1).
+/// Writes `text/<md5>.<v>`: a header line, then each segment's text and its
+/// address (byte range for `.txt`, page otherwise) for viewer deep links.
 pub const TextWriter = struct {
     frag: derived.Fragment,
 
@@ -171,8 +143,6 @@ pub const TextWriter = struct {
         try writeHeader(&w.frag, md5, n);
     }
 
-    /// `offset`/`len` are the `.txt` raw-blob byte range (`txtFind.ts` is the
-    /// one consumer), null for formats addressed by page alone.
     pub fn page(
         w: *TextWriter,
         ordinal: i64,
@@ -203,17 +173,15 @@ pub const TextWriter = struct {
     }
 };
 
-/// JSON-escape `s` into the fragment through a stack buffer, no allocation:
-/// `std.json`'s encoder wants a `std.Io.Writer` and `Fragment` is not one (it
-/// tees into a hash as well as a compressor).
+/// JSON-escape `s` into the fragment through a stack buffer (`Fragment` is not
+/// a `std.Io.Writer`).
 fn encodeString(f: *derived.Fragment, s: []const u8) !void {
     var buf: [4096]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     var rest = s;
     try f.write("\"");
     while (rest.len > 0) {
-        // Chunk on a codepoint boundary: a split multi-byte sequence encodes as
-        // two invalid strings instead of one valid one.
+        // Chunk on a codepoint boundary, or a split sequence encodes as invalid.
         var take = @min(rest.len, buf.len / 8);
         while (take < rest.len and (rest[take] & 0xC0) == 0x80) take += 1;
         w = .fixed(&buf);
@@ -242,7 +210,6 @@ test "terms: folded, deduplicated, one line per page, empty pages skipped" {
     defer testing.allocator.destroy(w);
     try w.begin(testing.allocator, store, db, md5_x, 4);
     errdefer w.abort();
-    // Diacritics folded, case folded, duplicates collapsed, vocabulary order.
     try w.page(0, "Reunião ORÇAMENTO reunião");
     try w.page(1, "acta");
     try w.page(2, "!!! ??? ---"); // folds to nothing: no row
@@ -295,7 +262,6 @@ test "terms need no escaping, because unicode61 cannot emit a quote" {
     defer testing.allocator.destroy(w);
     try w.begin(testing.allocator, store, db, md5_x, 1);
     errdefer w.abort();
-    // Everything a naive writer would corrupt the line with.
     try w.page(0, "say \"hello\" \\ back\tnow\nplease \x01 {\"json\":true}");
     try w.commit();
 
@@ -304,13 +270,10 @@ test "terms need no escaping, because unicode61 cannot emit a quote" {
     var lines = std.mem.tokenizeScalar(u8, got, '\n');
     _ = lines.next();
     const row = lines.next().?;
-    // The row is still ONE well-formed line: the quotes, backslash, tab and
-    // newline in the input all folded to separators rather than reaching it.
     try testing.expect(std.mem.indexOf(u8, row, "\\") == null);
     try testing.expect(lines.next() == null); // the \n and \t did not split it
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, row, .{});
     defer parsed.deinit();
-    // Vocabulary order, as every terms row is (`fts5vocab` is term-sorted).
     try testing.expectEqualStrings("back hello json now please say true", parsed.value.object.get("t").?.string);
 }
 
@@ -356,8 +319,7 @@ test "text: a segment larger than the escape buffer survives intact" {
     defer tmp.cleanup();
     const store = try derived.DerivedStore.init(io, tmp.dir);
 
-    // Multi-byte characters straddling the chunk boundary are the case the
-    // codepoint-boundary walk in `encodeString` exists for.
+    // Multi-byte characters straddling the chunk boundary.
     var big: std.ArrayList(u8) = .empty;
     defer big.deinit(testing.allocator);
     while (big.items.len < 40_000) try big.appendSlice(testing.allocator, "não \"x\"\n");

@@ -1,9 +1,5 @@
-//! A tiny declarative HTTP router over `std.http.Server`.
-//!
-//! Routes are a flat table of `{ method, path, handler }` (see routes.zig).
-//! Paths support `:name` segment parameters, captured into `Params`. This keeps
-//! the framework surface minimal while giving a clear, table-driven entrypoint —
-//! and leaves transport/TLS to transport.zig.
+//! A declarative HTTP router over `std.http.Server`: a flat route table with
+//! `:name` segment parameters.
 
 const std = @import("std");
 const context = @import("context.zig");
@@ -17,7 +13,6 @@ pub const Scope = context.Scope;
 pub const Caller = context.Caller;
 pub const RateLimit = ratelimit.RateLimit;
 
-/// Captured `:name` path parameters (fixed capacity — routes are short).
 pub const Params = struct {
     entries: [max]Entry = undefined,
     len: usize = 0,
@@ -33,11 +28,8 @@ pub const Params = struct {
     }
 
     fn put(self: *Params, name: []const u8, value: []const u8) void {
-        // Fail loud, not silent: an over-capacity route (more `:name` segments
-        // than `max`) used to have its overflow captures quietly dropped, which
-        // a future handler would experience as a mysteriously-missing param.
-        // A ReleaseSafe/Debug build traps here the moment such a route matches.
-        // (The route table also guards this at compile time; see routes.zig.)
+        // Traps on more `:name` segments than `max` rather than dropping them;
+        // routes.zig also checks at compile time.
         std.debug.assert(self.len < max);
         self.entries[self.len] = .{ .name = name, .value = value };
         self.len += 1;
@@ -49,68 +41,29 @@ pub const Handler = *const fn (ctx: *Context, req: *Request, params: Params) any
 pub const Route = struct {
     method: Method,
     path: []const u8,
-    /// The audiences allowed to call this route. `&.{.public}` = no auth; a set
-    /// like `&.{.controlplane, .pending}` = any listed audience. No default — every route
-    /// must declare it, so the auth boundary can never be forgotten.
+    /// Audiences allowed to call this route; no default, so the auth boundary
+    /// can't be forgotten.
     scopes: []const Scope,
     handler: Handler,
-    /// If set, the caller must also be an administrator (checked after scope).
+    /// Also requires an administrator, checked after scope.
     require_admin: bool = false,
-    /// Optional per-route rate limit (token bucket). Null = unlimited.
     rate_limit: ?RateLimit = null,
-    /// This handler manages its own `ctx.db_lock` windows — dispatch must NOT
-    /// take the automatic whole-handler lock around it. Set only on the streaming
-    /// transfer routes (`/oss/get`, `/oss/put`), whose byte transfer is pure
-    /// filesystem + socket work: holding the one global DB lock across a multi-MB
-    /// transfer would serialize every other request behind it. Such a handler MUST
-    /// wrap each of its DB touches in `ctx.lockDb()`/`ctx.unlockDb()` itself.
-    /// `transport.handle` still holds the lock around `resolveCaller` (a session
-    /// read) before dispatching unlocked. See transport.zig.
+    /// Dispatch takes no whole-handler `db_lock`; the handler brackets each DB
+    /// touch with `lockDb`/`unlockDb` itself. For the streaming `/oss/get` and
+    /// `/oss/put`, so a multi-MB transfer doesn't serialize everything.
     manual_db_lock: bool = false,
-    /// This handler only ever READS the database, so dispatch may run it on a
-    /// pooled `SQLITE_OPEN_READONLY` connection instead of holding `db_lock`
-    /// across it. See `db/reader_pool.zig` and `transport.dispatchLocked`.
-    ///
-    /// **DEFAULTS TO FALSE, and stays false whenever there is any doubt.** A
-    /// route nobody classified is merely slow; a route wrongly classified writes
-    /// through a connection that refuses writes, which is at best a 500 and at
-    /// worst — for the read-modify-write set (`upload/finish`, purge, restore,
-    /// elevate, login) — a half-applied operation. HTTP method is not the signal:
-    /// the device face POSTs pure reads, and `download_v3` looks like a write
-    /// while minting its token in memory.
-    ///
-    /// "Reads" means the DATABASE and the SERVICES both: the pooled request gets
-    /// reader-bound COPIES of `Files` and the auth `Service` (see their
-    /// `readerView`), so a handler that mutates in-memory service state would
-    /// mutate a copy nobody else can see. The two places that could — the login
-    /// challenge table and the thumbnail repair gate — refuse outright on a
-    /// reader view rather than silently succeeding.
-    ///
-    /// Whether a flagged route is really read-only is not left to review: the
-    /// audit in `backend/test/reader_pool.zig` drives every one of them against a
-    /// genuinely read-only connection, so a misclassification is a red test.
-    ///
-    /// Mutually exclusive with BOTH flags above; `readOnlyConflict` explains why
-    /// and `routes.zig` refuses to compile the combination.
+    /// Dispatch may run this on a pooled read-only connection instead of the
+    /// writer. Leave false when in doubt: a wrong flag makes writes fail, at
+    /// worst half-applying a read-modify-write. HTTP method is no guide (device
+    /// reads are POSTs). Services are reader-bound copies, so in-memory mutation
+    /// is invisible too. `backend/test/reader_pool.zig` audits every flagged
+    /// route against a real read-only connection.
     read_only: bool = false,
 };
 
-/// The index of the first route that is `read_only` together with a flag it
-/// cannot be combined with, or null. Comptime-usable, like `manualAdminRoute`.
-///
-/// **`read_only` + `manual_db_lock`** — a manual handler takes `ctx.lockDb()`
-/// around its own DB touches. Under a reader lease those touches would run on
-/// the READER while the lock says "writer", so the handler would be locking one
-/// connection and using another: the lock stops meaning anything, silently. A
-/// streaming route that wants a reader needs the reader threaded through its own
-/// brackets, which is a different change from this flag.
-///
-/// **`read_only` + `require_admin`** — `dispatchLocked` slides the admin
-/// elevation window (`renewElevation`) on the automatic path, and that renewal is
-/// an UPDATE on the session row. On a reader it fails; skipped, admins get a
-/// surprise 428 mid-session. Either way the symptom points nowhere near the flag.
-/// Admin GETs therefore keep the writer, which costs a household nothing: they
-/// are rare and small.
+/// Index of the first route combining `read_only` with `manual_db_lock` (its
+/// `lockDb` would guard the writer while it reads a reader) or with
+/// `require_admin` (elevation renewal is an UPDATE), or null. Comptime-usable.
 pub fn readOnlyConflict(rs: []const Route) ?usize {
     for (rs, 0..) |r, i| {
         if (r.read_only and (r.manual_db_lock or r.require_admin)) return i;
@@ -118,22 +71,9 @@ pub fn readOnlyConflict(rs: []const Route) ?usize {
     return null;
 }
 
-/// The index of the first route that is BOTH `manual_db_lock` and
-/// `require_admin`, or null when there is none. Usable at comptime (the route
-/// table's guard in routes.zig) and at runtime (tests).
-///
-/// **Why the combination is banned rather than supported.** `dispatchLocked`
-/// slides the admin elevation window (`renewElevation`) only on the automatic
-/// locking path; the `manual_db_lock` branch returns before it. Marking an admin
-/// route manual would therefore stop renewing elevation for anyone whose admin
-/// activity happened to be that one route, and the symptom — a surprise 428
-/// mid-session — points nowhere near the flag that caused it.
-///
-/// Renewing in BOTH branches would also fix it, and is the worse fix: it is a
-/// silent behaviour someone has to remember exists, in a second place, under a
-/// different lock discipline (a manual handler holds no lock at dispatch time, so
-/// the renewal would need its own window). This cannot be got wrong — the
-/// combination simply does not compile.
+/// Index of the first route both `manual_db_lock` and `require_admin`, or
+/// null. Banned because the manual branch of `dispatchLocked` skips
+/// `renewElevation`, giving admins a surprise 428.
 pub fn manualAdminRoute(rs: []const Route) ?usize {
     for (rs, 0..) |r, i| {
         if (r.manual_db_lock and r.require_admin) return i;
@@ -143,27 +83,14 @@ pub fn manualAdminRoute(rs: []const Route) ?usize {
 
 pub const Decision = enum { ok, unauthorized, forbidden, needs_elevation };
 
-/// HTTP status for a lapsed/absent admin elevation.
-///
-/// **Deliberately NOT 401, and deliberately not 403 either.** The SPA's failure
-/// sink maps BOTH of those to `UNAUTHORIZED` before it ever looks at the body
-/// (see `webapp/src/api/client.ts`) and routes to the login page — so
-/// reusing either would sign the admin OUT of the whole app instead of showing
-/// the re-authentication gate. That means a distinct `errorCode` alone is not
-/// enough: the STATUS has to be distinguishable too.
-///
-/// 428 says the request is missing a precondition, which is exactly the case: the
-/// session is perfectly valid, it simply has not proved the password recently.
-/// A client wiring this up should route 428 / `ELEVATION_REQUIRED` to the gate and
-/// retry the original request after a successful `POST /api/admin/elevate`.
+/// Status for a lapsed admin elevation. Not 401 or 403: the SPA maps both to
+/// a dead session and signs the admin out instead of showing the re-auth gate.
 pub const elevation_required_status: std.http.Status = .precondition_required; // 428
 pub const elevation_required_code = "ELEVATION_REQUIRED";
 
-/// Decides whether `caller` may reach a route with `scopes`/`require_admin`.
-/// Pure, so it's unit tested directly (device/control-plane separation, pending limits,
-/// admin gating, the elevation gate).
+/// Whether `caller` may reach a route with `scopes`/`require_admin`.
 pub fn authorize(scopes: []const Scope, require_admin: bool, caller: ?Caller) Decision {
-    for (scopes) |s| if (s == .public) return .ok; // a public route needs no caller
+    for (scopes) |s| if (s == .public) return .ok;
     const c = caller orelse return .unauthorized;
     var audience_ok = false;
     for (scopes) |s| if (s == c.audience) {
@@ -172,22 +99,15 @@ pub fn authorize(scopes: []const Scope, require_admin: bool, caller: ?Caller) De
     };
     if (!audience_ok) return .forbidden;
     if (require_admin) {
-        // A non-admin gets the plain 403 an ordinary permission failure gets — it
-        // must not learn that an elevation gate exists behind it, let alone be
-        // invited to try the password.
+        // A non-admin gets a plain 403 and learns nothing of the elevation gate.
         if (!c.is_admin) return .forbidden;
-        // `require_admin` covers EVERY admin route, the read-only listing
-        // included: an idle tablet that still reached `GET /api/admin/users` would
-        // expose every household member's email and quota, which is the same line
-        // the console draws everywhere else.
         if (!c.elevated) return .needs_elevation;
     }
     return .ok;
 }
 
-/// Match `req` against `routes`, apply the route's rate limit, enforce its scope
-/// against `caller`, and invoke the handler. Responds 404 (no match), 429 (rate
-/// limited), 401 (unauthenticated), or 403 (wrong audience / not admin).
+/// Matches, rate-limits, authorizes and runs the handler; falls back to static
+/// files, then 404.
 pub fn dispatch(routes: []const Route, ctx: *Context, req: *Request, caller: ?Caller) !void {
     const path = stripQuery(req.head.target);
     var params: Params = .{};
@@ -206,17 +126,13 @@ pub fn dispatch(routes: []const Route, ctx: *Context, req: *Request, caller: ?Ca
             return r.handler(ctx, req, params);
         }
     }
-    // No API route matched. When a web_dir is configured, fall back to serving
-    // the built SPA's static files (GET only); API routes always take precedence
-    // because this runs only after the loop above found no match.
     if (try static.serve(ctx, req)) return;
     try req.respond("not found\n", .{ .status = .not_found });
 }
 
-/// Returns the retry-after (ms) if the request is over the route's limit, else
-/// null. Keys per route + identity so different routes don't share buckets. The
-/// IP dimension applies pre-auth (protects e.g. login); the user dimension only
-/// once a caller is known. Limiter errors fail open (allow).
+/// Retry-after ms if over the route's limit, else null. Keyed per route and
+/// identity; the IP dimension applies pre-auth, the user one once known.
+/// Limiter errors fail open.
 fn rateLimited(ctx: *Context, route_idx: usize, rl: RateLimit, caller: ?Caller) ?i64 {
     const lim = ctx.limiter orelse return null;
     const now_ms = std.Io.Clock.real.now(ctx.io).toMilliseconds();
@@ -238,11 +154,7 @@ fn rateLimited(ctx: *Context, route_idx: usize, rl: RateLimit, caller: ?Caller) 
     return null;
 }
 
-/// The re-authentication gate's response: the standard failure envelope, so a
-/// client reads `errorCode` exactly as it does everywhere else, under a status
-/// the SPA's session-expired sink does not swallow (see
-/// `elevation_required_status`). Written literally rather than through
-/// `reply.fail` because `reply` imports this module.
+/// The re-auth gate's response. Written literally because `reply` imports this.
 fn elevationRequired(req: *Request) !void {
     try req.respond(
         "{\"success\":false,\"errorCode\":\"" ++ elevation_required_code ++
@@ -256,7 +168,7 @@ fn elevationRequired(req: *Request) !void {
 
 fn tooManyRequests(req: *Request, retry_ms: i64) !void {
     var buf: [16]u8 = undefined;
-    const secs = @divTrunc(retry_ms, 1000) + 1; // round up to whole seconds, min 1
+    const secs = @divTrunc(retry_ms, 1000) + 1;
     const retry_after = std.fmt.bufPrint(&buf, "{d}", .{secs}) catch "1";
     try req.respond("rate limited\n", .{
         .status = .too_many_requests,
@@ -270,30 +182,24 @@ test "authorize: scope sets, device/control-plane boundary, pending limits, admi
     const pend: Caller = .{ .user_id = 1, .audience = .pending };
     const admin: Caller = .{ .user_id = 1, .audience = .controlplane, .is_admin = true, .elevated = true };
 
-    // public: always allowed, even without a caller.
     try std.testing.expectEqual(Decision.ok, authorize(&.{.public}, false, null));
 
-    // protected without a session -> 401.
     try std.testing.expectEqual(Decision.unauthorized, authorize(&.{.controlplane}, false, null));
 
-    // matching audience -> ok; crossing the boundary -> 403.
     try std.testing.expectEqual(Decision.ok, authorize(&.{.device}, false, dev));
     try std.testing.expectEqual(Decision.ok, authorize(&.{.controlplane}, false, cp));
     try std.testing.expectEqual(Decision.forbidden, authorize(&.{.device}, false, cp)); // control plane -> sync API
     try std.testing.expectEqual(Decision.forbidden, authorize(&.{.controlplane}, false, dev)); // device -> page API
 
-    // pending token reaches only routes that list `.pending`.
     try std.testing.expectEqual(Decision.forbidden, authorize(&.{.controlplane}, false, pend));
     try std.testing.expectEqual(Decision.ok, authorize(&.{ .controlplane, .pending }, false, pend)); // change-password
     try std.testing.expectEqual(Decision.ok, authorize(&.{ .controlplane, .pending }, false, cp)); // full control plane too
 
-    // multi-audience route (e.g. logout): any listed audience passes; none -> 401.
     const any = &[_]Scope{ .controlplane, .device, .pending };
     try std.testing.expectEqual(Decision.ok, authorize(any, false, dev));
     try std.testing.expectEqual(Decision.ok, authorize(any, false, pend));
     try std.testing.expectEqual(Decision.unauthorized, authorize(any, false, null));
 
-    // require_admin: only an ELEVATED admin caller of an allowed audience passes.
     try std.testing.expectEqual(Decision.forbidden, authorize(&.{.controlplane}, true, cp));
     try std.testing.expectEqual(Decision.ok, authorize(&.{.controlplane}, true, admin));
 }
@@ -303,42 +209,29 @@ test "authorize: an un-elevated admin is gated, distinguishably from every other
     const stale: Caller = .{ .user_id = 1, .audience = .controlplane, .is_admin = true }; // admin, elevation lapsed
     const fresh: Caller = .{ .user_id = 1, .audience = .controlplane, .is_admin = true, .elevated = true };
 
-    // The gate: an admin whose elevation lapsed gets its OWN decision — not
-    // `unauthorized` (which the SPA reads as a dead session and would sign them
-    // out of the whole app) and not the `forbidden` a non-admin gets.
     try std.testing.expectEqual(Decision.needs_elevation, authorize(&.{.controlplane}, true, stale));
     try std.testing.expect(Decision.needs_elevation != Decision.unauthorized);
     try std.testing.expect(Decision.needs_elevation != Decision.forbidden);
     try std.testing.expect(elevation_required_status != .unauthorized);
     try std.testing.expect(elevation_required_status != .forbidden);
 
-    // A NON-admin is refused as an ordinary permission failure and learns nothing
-    // about a gate behind it.
     try std.testing.expectEqual(Decision.forbidden, authorize(&.{.controlplane}, true, cp));
 
-    // Elevation is only ever consulted on `require_admin` routes: it is not a
-    // second audience, and an ordinary route must not start demanding it.
     try std.testing.expectEqual(Decision.ok, authorize(&.{.controlplane}, false, stale));
     try std.testing.expectEqual(Decision.ok, authorize(&.{.controlplane}, false, cp));
 
-    // And elevation never substitutes for the audience check.
     const elevated_device: Caller = .{ .user_id = 1, .audience = .device, .is_admin = true, .elevated = true };
     try std.testing.expectEqual(Decision.forbidden, authorize(&.{.controlplane}, true, elevated_device));
     try std.testing.expectEqual(Decision.ok, authorize(&.{.controlplane}, true, fresh));
 }
 
-/// The route in the table that matches `req`'s method + path, or null. Lets a
-/// caller read a matched route's declarative fields (e.g. `manual_db_lock`)
-/// *before* dispatching — `dispatch` re-matches, which is cheap on a flat table
-/// of this size and keeps the single matching rule in one place.
+/// The matching route, or null, so a caller can read its flags before dispatch.
 pub fn matched(routes: []const Route, req: *const Request) ?*const Route {
     const i = matchedIndex(routes, req) orelse return null;
     return &routes[i];
 }
 
-/// The INDEX of the matching route, or null. The index is the identity the
-/// per-route lock histogram keys on (see http/lock_stats.zig) — a pointer would
-/// work too, but an index is what a fixed-size table can be sized against.
+/// The matching route's index (the lock histogram's key), or null.
 pub fn matchedIndex(routes: []const Route, req: *const Request) ?usize {
     const path = stripQuery(req.head.target);
     var params: Params = .{};
@@ -348,13 +241,10 @@ pub fn matchedIndex(routes: []const Route, req: *const Request) ?usize {
     return null;
 }
 
-/// True if any route in the table matches `req`'s method + path. Lets the
-/// passthrough capture decide "real handler vs. capture stub" without dispatching.
 pub fn matches(routes: []const Route, req: *const Request) bool {
     return matched(routes, req) != null;
 }
 
-/// True if `path` matches `pattern`, filling `params` with any `:name` captures.
 fn match(pattern: []const u8, path: []const u8, params: *Params) bool {
     params.len = 0;
     var pit = std.mem.splitScalar(u8, std.mem.trim(u8, pattern, "/"), '/');
@@ -379,15 +269,9 @@ pub fn stripQuery(target: []const u8) []const u8 {
     return if (std.mem.indexOfScalar(u8, target, '?')) |i| target[0..i] else target;
 }
 
-/// Copies the request header `name` (matched case-insensitively) into `buf` and
-/// returns the filled prefix; `""` if the header is absent. Truncates to `buf`.
-///
-/// COPYING IS THE POINT, not an implementation detail. `iterateHeaders` yields
-/// slices into the connection's request-head buffer, and `json.readBody`
-/// overwrites that buffer — so a borrowed header value read after the body is a
-/// use-after-free on live memory (which is exactly how a device's echoed
-/// `equipmentNo` once came back as clobbered bytes). Every caller here needs the
-/// value to outlive the body read, so the helper never hands back a borrow.
+/// Copies header `name` into `buf` (truncating); "" if absent. Copies because
+/// `json.readBody` overwrites the head buffer, which once garbled a device's
+/// echoed `equipmentNo`.
 pub fn headerCopy(req: *Request, name: []const u8, buf: []u8) []const u8 {
     var it = req.iterateHeaders();
     while (it.next()) |h| {
@@ -425,18 +309,10 @@ test "match: param segment must be non-empty" {
 }
 
 test "manualAdminRoute finds the flag pair that would silently stop renewing elevation" {
-    // THE PAIR IS THE BUG. `dispatchLocked`'s `manual_db_lock` branch returns
-    // before `if (admin_route) renewElevation(...)`, so a route carrying both
-    // flags stops sliding the admin elevation window — admins get a surprise 428
-    // and nothing in the symptom points at the flag. `routes.zig` turns this
-    // finder into a @compileError over the real table; here it is exercised over
-    // synthetic ones, including the near-misses that must stay legal.
     const h = struct {
         fn f(_: *Context, _: *Request, _: Params) anyerror!void {}
     }.f;
 
-    // Each flag ALONE is legal and must stay legal: `/oss/put` really is manual,
-    // and every admin route really does require admin.
     const legal = [_]Route{
         .{ .method = .GET, .path = "/oss/get/:id", .scopes = &.{.public}, .handler = h, .manual_db_lock = true },
         .{ .method = .GET, .path = "/api/admin/health", .scopes = &.{.controlplane}, .handler = h, .require_admin = true },
@@ -444,8 +320,6 @@ test "manualAdminRoute finds the flag pair that would silently stop renewing ele
     };
     try std.testing.expect(manualAdminRoute(&legal) == null);
 
-    // Both together: refused, and the index names the offender so the compile
-    // error can quote its path.
     const banned = [_]Route{
         .{ .method = .GET, .path = "/api/version", .scopes = &.{.public}, .handler = h },
         .{
@@ -467,8 +341,6 @@ test "readOnlyConflict refuses the two pairings that would make the lock a lie" 
         fn f(_: *Context, _: *Request, _: Params) anyerror!void {}
     }.f;
 
-    // `read_only` alone is the whole point, and each of the other two alone is
-    // already legal — so only the PAIRS may be refused.
     const legal = [_]Route{
         .{ .method = .GET, .path = "/api/controlplane/tree", .scopes = &.{.controlplane}, .handler = h, .read_only = true },
         .{ .method = .GET, .path = "/oss/get/:id", .scopes = &.{.public}, .handler = h, .manual_db_lock = true },
@@ -476,16 +348,12 @@ test "readOnlyConflict refuses the two pairings that would make the lock a lie" 
     };
     try std.testing.expect(readOnlyConflict(&legal) == null);
 
-    // A manual handler brackets its own `ctx.lockDb()` — which would lock the
-    // writer while the handler read the reader it was leased.
     const manual = [_]Route{
         .{ .method = .GET, .path = "/api/version", .scopes = &.{.public}, .handler = h },
         .{ .method = .GET, .path = "/file/:id", .scopes = &.{.controlplane}, .handler = h, .manual_db_lock = true, .read_only = true },
     };
     try std.testing.expectEqual(@as(?usize, 1), readOnlyConflict(&manual));
 
-    // An admin route renews elevation, which is an UPDATE — impossible on a
-    // reader, and skipping it hands admins a surprise 428.
     const admin = [_]Route{
         .{ .method = .GET, .path = "/api/admin/users", .scopes = &.{.controlplane}, .handler = h, .require_admin = true, .read_only = true },
     };

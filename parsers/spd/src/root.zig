@@ -1,20 +1,6 @@
-//! Public entry point for the standalone `.spd` (Supernote Atelier) parser.
-//!
-//! A `.spd` is an SQLite database of a layered drawing. This library opens one
-//! **read-only, in memory** (attacker-supplied — see `spd.zig`), and exposes its
-//! metadata, layer tree, tiles, and thumbnail. It has no consumer wired in yet;
-//! import it as the `spd` module (this file is the module root).
-//!
-//! ```zig
-//! var doc = try spd.open(gpa, bytes);   // bytes may be freed immediately after
-//! defer doc.deinit();
-//! var meta = try doc.metadata(gpa);
-//! defer meta.deinit();
-//! for (meta.layers) |layer| { ... }     // Z-ordered, topmost first
-//! var it = try doc.iterateLayer(meta.layers[0].id);
-//! defer it.deinit();
-//! while (try it.next()) |tile| { ... }   // tile.png borrows until next()
-//! ```
+//! Public entry point for the standalone `.spd` (Supernote Atelier) parser:
+//! opens the SQLite drawing read-only in memory and exposes metadata, layers,
+//! tiles and thumbnail.
 
 const spd = @import("spd.zig");
 
@@ -39,12 +25,10 @@ pub fn open(gpa: @import("std").mem.Allocator, bytes: []const u8) Error!Spd {
     return Spd.open(gpa, bytes);
 }
 
-/// Re-exported so a test or consumer that needs the raw handle shares this
-/// package's single (vendored) SQLite rather than linking a second one.
+/// Re-exported so consumers share this package's single vendored SQLite.
 pub const sqlite = @import("sqlite.zig");
 
 test {
-    // Pull in the unit tests that live next to the code.
     @import("std").testing.refAllDecls(@This());
     _ = @import("protobuf.zig");
     _ = @import("spd.zig");

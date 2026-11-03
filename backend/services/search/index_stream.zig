@@ -1,21 +1,6 @@
-//! The walk behind `/api/controlplane/search-index/stream`: manifest rows plus a
-//! `want=` bitmap in, one stitched gzip out (§3.2, §3.3).
-//! `http/gzip_stitch.zig` owns the container, `store/derived.zig` the stored file
-//! (a 12-byte header with the plaintext CRC32 and length, then a raw-deflate
-//! fragment), `index_export.zig` the row order a bitmap position is read against.
-//!
-//! Must not break:
-//!   * A missing file is SKIPPED, never an error. The manifest and the disk can
-//!     disagree for a tick (a blob GC'd, a derive outstanding — §2.4 makes the
-//!     FILE the fact), and an error here is a status code already on the wire or
-//!     a truncated body: it poisons the stream for every document that was fine.
-//!     A skip costs nothing because the client keys its index on what ARRIVED.
-//!   * The trailer comes from each file's own header: no DB lookup per document,
-//!     so the write lock is nowhere near this path.
-//!   * `buf` is the caller's and nothing here allocates: three concurrent first
-//!     visits of a ~1-2 MB library on a 50 MB budget.
-//!   * The copy is a positional-read loop, not `streamRemaining` — a std bug,
-//!     see the loop. Do not "simplify" it back.
+//! The search-index stream: manifest rows plus a `want=` bitmap in, one
+//! stitched gzip out. A missing or malformed file is skipped, never an error,
+//! because the headers are already on the wire.
 
 const std = @import("std");
 const derived = @import("../../store/derived.zig");
@@ -26,14 +11,11 @@ const want_bitmap = @import("want_bitmap.zig");
 const Io = std.Io;
 const Writer = std.Io.Writer;
 
-/// What the walk did. Deliberately NOT in the response: the client's contract is
-/// "what arrived", and a count beside the bytes could only disagree with it
-/// exactly where a document was skipped.
+/// What the walk did. Not sent: the client's contract is what arrived.
 pub const Stats = struct {
     sent: usize = 0,
-    /// Asked for, file not there — expected, not an error.
     skipped: usize = 0,
-    /// UNCOMPRESSED bytes, i.e. the gzip ISIZE.
+    /// Uncompressed bytes (the gzip ISIZE).
     plain_bytes: u64 = 0,
 };
 
@@ -42,11 +24,8 @@ pub const Error = error{
     StreamTruncated,
 } || Writer.Error;
 
-/// Write the whole body: gzip header, the wanted fragments in MANIFEST ORDER
-/// (which is tier order, which is priority order — §3.3), terminator, trailer.
-///
-/// `rows` must be the exact rows the caller's ETag was computed over; the
-/// route's 412 gate is what guarantees that.
+/// Writes the whole body: header, wanted fragments in manifest (priority)
+/// order, terminator, trailer. `rows` must be the rows the ETag covered.
 pub fn write(
     io: Io,
     terms: derived.DerivedStore,
@@ -63,8 +42,7 @@ pub fn write(
     for (rows, 0..) |row, position| {
         if (!want.isSet(position)) continue;
 
-        // No index row, no file name. The manifest already said so (a null
-        // `index_version` is "do not cache this"); asking anyway is a plain skip.
+        // A null `index_version` was already "do not cache" in the manifest.
         const version = row.index_version orelse {
             stats.skipped += 1;
             continue;
@@ -76,28 +54,15 @@ pub fn write(
         };
         defer file.close(io);
 
-        // Also the format check: a truncated or foreign file is refused while
-        // refusing still costs only a skip.
         const h = derived.readHeader(io, file) catch {
             stats.skipped += 1;
             continue;
         };
 
-        // COMMIT POINT: past the first byte below a partial write cannot be
-        // taken back, so every failure is fatal to the response, not the document.
-        //
-        // Positional reads, NOT `File.Reader.streamRemaining` (the obvious
-        // spelling, and what `http/static.zig` uses): it PANICS against a chunked
-        // response. It lowers to `sendFile`, and `std.http.BodyWriter
-        // .chunkedSendFile` sizes its chunk header from `countSendFileLowerBound`
-        // — a LOWER bound. A transfer shorter than that header promised leaves
-        // `state.chunk_len` mid-chunk, and the next flush trips
-        // `writeSplatHeaderLimit`: `unreachable` in `fixedDrain`, or `end()`'s
-        // "an earlier write call indicated more data would follow". Reproduced
-        // against std alone on Zig 0.16.0. This response is chunked because
-        // `content_length` and the skip rule cannot both hold; every other
-        // streaming route declares a length, whose sendFile path keeps no such
-        // state, which is why this is the first place it bites.
+        // Commit point: past here every failure kills the response.
+        // Positional reads, not `File.Reader.streamRemaining`: on a chunked
+        // response its `sendFile` sizes the chunk from a lower bound and std
+        // panics on the next flush (Zig 0.16.0).
         var off: u64 = derived.header_len;
         while (true) {
             const n = file.readPositionalAll(io, buf, off) catch return error.StreamTruncated;
@@ -112,16 +77,12 @@ pub fn write(
         stats.plain_bytes += h.len;
     }
 
-    // Correct for an EMPTY walk too: crc 0 / len 0 are gzip's values for an
-    // empty payload and `terminator` is a valid final block on its own, so a
-    // client whose every document was skipped gets a well-formed empty gzip.
+    // An empty walk still yields a valid empty gzip (crc 0, len 0).
     try trailer.finish(w);
     return stats;
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+// ---- tests ----
 
 const testing = std.testing;
 
@@ -145,27 +106,13 @@ fn testRow(md5: []const u8, version: ?i64) index_export.Row {
     };
 }
 
-/// Decode a stitched body as ONE gzip member and check its trailer BY HAND.
-///
-/// The hand check is not belt and braces. `std.compress.flate.Decompress` reads
-/// the gzip footer into `container_metadata` and never verifies it
-/// (`gzip_stitch.zig`'s header records the finding), so a Zig-only round trip
-/// passes on a stream `gzip -t` and every browser reject. Comparing against our
-/// own hash of the output is the comparison they make.
+/// Decodes as one gzip member and checks the trailer by hand: std's
+/// `Decompress` never verifies the footer.
 fn inflateChecked(a: std.mem.Allocator, body: []const u8) ![]u8 {
-    // Exactly ONE gzip member, checked on the whole 10-byte header rather than
-    // its 3-byte magic: over a hundred kilobytes of deflate output a 3-byte
-    // needle collides by chance often enough to make this flaky, and 10 bytes
-    // does not. This is the §3.1 assertion in its cheapest form — the broken
-    // implementation is a concatenation of members, and it is indistinguishable
-    // from this one by every "did the request work" check.
+    // One member: match the whole 10-byte header, since a 3-byte magic
+    // collides by chance in deflate output. Zig, like browsers, stops after
+    // the first member, so a concatenation would look like success.
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, gzip_stitch.header));
-
-    // And Zig behaves EXACTLY like the clients that matter here, which is what
-    // makes the check below load-bearing rather than decorative: `Decompress`
-    // goes to `.end` after one member's footer, so a concatenation decodes to
-    // its first document and stops — 37 bytes of 7,980, reported as success.
-    // Node's zlib is the outlier that decodes all of them (§3.1).
 
     var input: std.Io.Reader = .fixed(body);
     var window: [std.compress.flate.max_window_len]u8 = undefined;
@@ -223,8 +170,6 @@ test "the walk stitches the wanted fragments, in manifest order, as one gzip" {
         try testing.expectEqual(@as(usize, 0), stats.skipped);
 
         const plain = try inflateChecked(a, out.written());
-        // ORDER, not merely membership: manifest order is priority order, and a
-        // walk that sorted or reversed would still decode to a valid stream.
         const joined = try std.mem.concat(a, u8, &docs);
         try testing.expectEqualStrings(joined, plain);
         try testing.expectEqual(joined.len, stats.plain_bytes);
@@ -286,9 +231,6 @@ test "a missing, unversioned or malformed file is SKIPPED and the stream stays v
     var buf: [256]u8 = undefined;
     const stats = try write(io, store, &rows, want, &out.writer, &buf);
 
-    // Four skips of four different shapes, one survivor, and a stream a browser
-    // accepts. Every one of these is a real state the manifest can describe and
-    // the disk can disagree with (§2.4).
     try testing.expectEqual(@as(usize, 1), stats.sent);
     try testing.expectEqual(@as(usize, 4), stats.skipped);
     try testing.expectEqualStrings(doc, try inflateChecked(a, out.written()));
@@ -304,9 +246,6 @@ test "many fragments: the trailer comes only from the files' own headers" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    // 200 documents of varying size, which is the shape §3.2 measured: enough
-    // that `crc32Combine` walks several different lengths and that a read buffer
-    // smaller than a document is exercised many times over.
     const n = 200;
     var rows: std.ArrayList(index_export.Row) = .empty;
     var expected: Writer.Allocating = .init(a);
@@ -325,9 +264,7 @@ test "many fragments: the trailer comes only from the files' own headers" {
     var wbuf: [(n + 7) / 8 * 4 + 4]u8 = undefined;
     const want = try wantAll(&wbuf, n);
     var out: Writer.Allocating = .init(a);
-    // 512 bytes for documents up to ~3 KB: the buffer is deliberately smaller
-    // than a document, because "one small buffer" is the claim being tested and
-    // a buffer that happened to fit would test nothing.
+    // Smaller than a document on purpose.
     var buf: [512]u8 = undefined;
     const stats = try write(io, store, rows.items, want, &out.writer, &buf);
     try testing.expectEqual(@as(usize, n), stats.sent);

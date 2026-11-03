@@ -1,12 +1,4 @@
-//! Entry point for Inkhold.
-//!
-//!   zig build serve -- [--config=config.zon]
-//!
-//! Everything past argv lives in `cli.zig`: the grammar is
-//! `inkhold [--config=<config>] [serve]` plus the `users` recovery group.
-//! `inkhold` bare still serves; `inkhold config.zon` no longer parses, because
-//! the config became an option. This file is only the stdio plumbing, the exit
-//! code, and the one decision that needs the real streams — whether to style.
+//! Entry point: stdio plumbing and exit code; the CLI grammar is in `cli.zig`.
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -20,21 +12,15 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    // The one-time temporary password goes to STDOUT (never through `std.log`,
-    // which an operator may well be piping to a file); diagnostics go to stderr.
+    // The temporary password goes to stdout, never `std.log`; diagnostics to stderr.
     var out_buf: [4096]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(io, &out_buf);
     var err_buf: [4096]u8 = undefined;
     var err = std.Io.File.stderr().writerStreaming(io, &err_buf);
 
-    // STYLING IS DECIDED HERE because this is the only place that can see the
-    // real streams. Off when stdout is not a terminal — this output is pasted
-    // into bug reports by people who could not sign in, and escape codes in a
-    // paste are noise exactly when clarity matters most — and off whenever
-    // NO_COLOR is set at all, by presence rather than value.
+    // Styling is off when stdout is not a TTY (output gets pasted into bug reports)
     const tty = std.Io.File.stdout().isTty(io) catch false;
-    // PRESENCE, not value — `NO_COLOR=0` still means no colour, per the informal
-    // standard that tools converged on.
+    // or when NO_COLOR is present, whatever its value.
     const no_color = init.environ_map.get("NO_COLOR") != null;
     const st = cli.Style.choose(tty, no_color);
 
@@ -49,8 +35,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
-    // Aggregate the backend's unit tests (rooted here so http/ can import ../config).
-    // Every file is referenced so its colocated tests run.
+    // Aggregates the backend's colocated unit tests.
     _ = config;
     _ = transport;
     _ = @import("app.zig");

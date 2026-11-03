@@ -1,9 +1,4 @@
-//! Builds synthetic, well-formed `.note` byte buffers in memory.
-//!
-//! This is test infrastructure: it lets tests construct arbitrary containers
-//! (used by the round-trip property test and the tier-laziness proofs) without
-//! needing real device files, and it exercises the exact block/address layout
-//! the parser consumes.
+//! Builds synthetic, well-formed `.note` buffers in memory for tests.
 
 const std = @import("std");
 const note = @import("note");
@@ -21,60 +16,37 @@ pub const LayerSpec = struct {
 };
 
 pub const PageSpec = struct {
-    /// The number written into this page's footer key, 1-based. `null` means
-    /// "position + 1" — a notebook's contiguous `PAGE1`, `PAGE2`, … .
-    ///
-    /// Set it to build a SPARSE footer, which is what a `.mark` has: it stores
-    /// only the annotated pages and names them by the PDF page they belong to
-    /// (`<PAGE2:…><PAGE5:…><PAGE6:…>`, `note-format.md` §13.2).
+    /// The footer key's number; `null` = position + 1. Set it for a sparse
+    /// `.mark`-style footer (`note-format.md` §13.2).
     number: ?u32 = null,
     style: []const u8 = "",
-    /// `PAGESTYLEMD5`: the style asset's content hash (`null` omits the key).
-    /// `"0"` = no custom asset. A custom IMAGE template names its asset here;
-    /// tests set it (plus a non-RLE background bitmap) to exercise the
-    /// image-template classifier.
+    /// `PAGESTYLEMD5` (`null` omits the key; `"0"` = no custom asset).
     style_md5: ?[]const u8 = null,
-    /// `ORIENTATION`: `"1000"` vertical (the device default), `"1090"`
-    /// horizontal. `null` omits the key entirely — for exercising a consumer's
-    /// absent-key default (vertical).
+    /// `ORIENTATION`; `null` omits the key.
     orientation: ?[]const u8 = "1000",
     layers: []const LayerSpec = &.{},
-    /// A raw `LAYERINFO` value emitted VERBATIM (null omits the key). Raw on
-    /// purpose: tests exercise both real encodings (`#`-JSON, base64) and
-    /// hostile garbage through the same field.
+    /// A raw `LAYERINFO` value emitted verbatim (null omits the key).
     layer_info: ?[]const u8 = null,
     /// A raw `LAYERSEQ` value emitted verbatim (null omits the key).
     layer_seq: ?[]const u8 = null,
     /// `RECOGNSTATUS`: 0 none (key omitted), 1 finished, 2 still running.
     recogn_status: u8 = 0,
-    /// Text-element labels. When present, a `RECOGNTEXT` block holding the
-    /// device's shape (base64 of the MyScript-ish elements JSON) is emitted and
-    /// referenced from the page — so a consumer's recognition path can be
-    /// exercised without a real device capture.
-    ///
-    /// Shorthand for `recogn_elements` with no per-word boxes; use that one when
-    /// the test cares where the words are.
+    /// Text-element labels for a `RECOGNTEXT` block; `recogn_elements` without
+    /// word boxes.
     recogn_labels: ?[]const []const u8 = null,
-    /// The full recognition shape: elements, each with positioned words. Takes
-    /// precedence over `recogn_labels` when both are set.
+    /// Elements with positioned words; wins over `recogn_labels`.
     recogn_elements: ?[]const ElementSpec = null,
-    /// The links a PDF template brought with it. When non-empty, an
-    /// `EXTERNALLINKINFO` block in the device's exact encoding is emitted and
-    /// referenced from the page — `null`/empty omits the key entirely, which is
-    /// what every page of an ordinary `.note` looks like.
+    /// An `EXTERNALLINKINFO` block in the device's encoding; empty omits it.
     links: []const LinkSpec = &.{},
 };
 
-/// One `EXTERNALLINKINFO` record (`note-format.md` §14). Defaults describe an
-/// internal page jump; set `uri` and the record becomes a web link, because a
-/// record's kind and its URI are the same fact stated twice on the wire and a
-/// fixture that could state them inconsistently would be a fixture bug waiting
-/// to look like a decoder bug. `source_page` defaults to the page's own number.
+/// One `EXTERNALLINKINFO` record. Setting `uri` makes it a web link, so kind
+/// and URI cannot disagree. `source_page` defaults to the page's number.
 pub const LinkSpec = struct {
     source_page: ?u32 = null,
-    /// Field 2 — the TARGET page's `PAGEID`.
+    /// Field 2, the target page's `PAGEID`.
     target_id: []const u8 = "P00000000000000000000AAAAAAAAAAAA",
-    /// Field 3 — the target page NUMBER, 1-based.
+    /// Field 3, 1-based.
     target_page: u32 = 1,
     /// Fields 4–7, device panel pixels.
     x: i32 = 0,
@@ -85,25 +57,18 @@ pub const LinkSpec = struct {
     uri: ?[]const u8 = null,
 };
 
-/// One recognized word. `box` is in MILLIMETRES (see `recognition.zig`);
-/// null means the device wrote `"bounding-box": null`, which is what it does for
-/// the `"\n"` / `" "` layout separators.
+/// One recognized word; `box` in mm, null for separator words.
 pub const WordSpec = struct {
     label: []const u8,
     box: ?recognition.Box = null,
 };
 
-/// One `Text` element: the joined label plus the words it is made of.
 pub const ElementSpec = struct {
     label: []const u8,
     words: []const WordSpec = &.{},
 };
 
-/// A cover image emitted as a content block and referenced from the footer.
-/// `key` selects the type suffix the device uses: `COVER_3` = user-set on
-/// current firmware (the newest, most-preferred key), `COVER_2` = user-set on
-/// older firmware, `COVER_1` = automatic. Any string works — tests pin the
-/// newest-wins preference by mixing them.
+/// A cover content block under `key` (`COVER_3`, `COVER_2`, `COVER_1`).
 pub const CoverSpec = struct {
     key: []const u8 = "COVER_2",
     bytes: []const u8,
@@ -114,15 +79,11 @@ pub const Spec = struct {
     version: u32 = 20260016,
     header: []const Kv = &.{},
     pages: []const PageSpec,
-    /// Cover image blocks (see `CoverSpec`). Multiple entries let a test build
-    /// the both-keys-present file the preference order is specified against.
     covers: []const CoverSpec = &.{},
-    /// Extra footer entries emitted VERBATIM — e.g. the device's
-    /// `<COVER_0:0>` "no cover set" placeholder.
+    /// Extra footer entries emitted verbatim (e.g. `<COVER_0:0>`).
     footer_extra: []const Kv = &.{},
 };
 
-/// Serializes `spec` into a valid X-series `.note` buffer owned by `gpa`.
 pub fn serialize(gpa: std.mem.Allocator, spec: Spec) ![]u8 {
     var tmp = std.heap.ArenaAllocator.init(gpa);
     defer tmp.deinit();
@@ -131,13 +92,11 @@ pub fn serialize(gpa: std.mem.Allocator, spec: Spec) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(gpa);
 
-    // Leading header: 4-byte file-type marker + signature at offset 4.
     var ft = [_]u8{0} ** 4;
     @memcpy(ft[0..@min(4, spec.filetype.len)], spec.filetype[0..@min(4, spec.filetype.len)]);
     try buf.appendSlice(gpa, &ft);
     try buf.appendSlice(gpa, try std.fmt.allocPrint(t, "SN_FILE_VER_{d:0>8}", .{spec.version}));
 
-    // Pages (and their layer blocks + bitmaps) first, recording addresses.
     const page_addrs = try t.alloc(u32, spec.pages.len);
     for (spec.pages, 0..) |page, pi| {
         var kvs: std.ArrayList(Kv) = .empty;
@@ -150,7 +109,6 @@ pub fn serialize(gpa: std.mem.Allocator, spec: Spec) ![]u8 {
         if (page.recogn_status != 0) {
             try kvs.append(t, .{ .key = "RECOGNSTATUS", .value = try numStr(t, page.recogn_status) });
         }
-        // `recogn_elements` wins; `recogn_labels` is the same thing with no words.
         const elements: ?[]const ElementSpec = page.recogn_elements orelse blk: {
             const labels = page.recogn_labels orelse break :blk null;
             const els = try t.alloc(ElementSpec, labels.len);
@@ -183,17 +141,14 @@ pub fn serialize(gpa: std.mem.Allocator, spec: Spec) ![]u8 {
         page_addrs[pi] = try appendFramed(&buf, gpa, try metaString(t, kvs.items));
     }
 
-    // Header block.
     const header_addr = try appendFramed(&buf, gpa, try metaString(t, spec.header));
 
-    // Cover content blocks, recording each one's footer entry.
     var cover_kvs: std.ArrayList(Kv) = .empty;
     for (spec.covers) |cover| {
         const addr = try appendFramed(&buf, gpa, cover.bytes);
         try cover_kvs.append(t, .{ .key = cover.key, .value = try numStr(t, addr) });
     }
 
-    // Footer block: FILE_FEATURE + one PAGE<n> entry per page (+ covers/extra).
     var footer_kvs: std.ArrayList(Kv) = .empty;
     try footer_kvs.append(t, .{ .key = "FILE_FEATURE", .value = try numStr(t, header_addr) });
     for (page_addrs, 0..) |addr, i| {
@@ -205,7 +160,6 @@ pub fn serialize(gpa: std.mem.Allocator, spec: Spec) ![]u8 {
     try footer_kvs.appendSlice(t, spec.footer_extra);
     const footer_addr = try appendFramed(&buf, gpa, try metaString(t, footer_kvs.items));
 
-    // Trailing 4 bytes: the footer address.
     var tail: [4]u8 = undefined;
     std.mem.writeInt(u32, &tail, footer_addr, .little);
     try buf.appendSlice(gpa, &tail);
@@ -213,7 +167,6 @@ pub fn serialize(gpa: std.mem.Allocator, spec: Spec) ![]u8 {
     return buf.toOwnedSlice(gpa);
 }
 
-/// Appends `[u32 len][payload]` and returns the address (offset of the length).
 fn appendFramed(buf: *std.ArrayList(u8), gpa: std.mem.Allocator, payload: []const u8) !u32 {
     const addr: u32 = @intCast(buf.items.len);
     var lenb: [4]u8 = undefined;
@@ -239,10 +192,7 @@ fn numStr(a: std.mem.Allocator, n: u32) ![]u8 {
     return std.fmt.allocPrint(a, "{d}", .{n});
 }
 
-/// Appends `s` as a JSON string literal, escaped. Not optional politeness: the
-/// separator words this builder exists to reproduce have labels of `"\n"` and
-/// `" "`, and splicing a raw newline into a JSON string produces a document that
-/// will not parse — which then looks exactly like a decoder bug downstream.
+/// Appends `s` as an escaped JSON string; separator labels are `"\n"` and `" "`.
 fn appendJsonString(a: std.mem.Allocator, doc: *std.ArrayList(u8), s: []const u8) !void {
     try doc.append(a, '"');
     for (s) |c| switch (c) {
@@ -256,12 +206,8 @@ fn appendJsonString(a: std.mem.Allocator, doc: *std.ArrayList(u8), s: []const u8
     try doc.append(a, '"');
 }
 
-/// The content of a `RECOGNTEXT` block: base64 of the elements JSON the device
-/// writes (see `recognition.zig`).
-///
-/// A word with a null `box` serializes `"bounding-box": null` — the real device
-/// shape for a layout separator, and the case a consumer must skip rather than
-/// place at the origin.
+/// A `RECOGNTEXT` block's content: base64 of the elements JSON; a null `box`
+/// writes `"bounding-box": null`.
 fn recognText(a: std.mem.Allocator, elements: []const ElementSpec) ![]u8 {
     var doc: std.ArrayList(u8) = .empty;
     try doc.appendSlice(a, "{\"elements\":[");
@@ -294,11 +240,8 @@ fn recognText(a: std.mem.Allocator, elements: []const ElementSpec) ![]u8 {
     return out;
 }
 
-/// The content of an `EXTERNALLINKINFO` block, in the device's exact shape:
-/// nine base64 fields per record with a TRAILING comma, records with a TRAILING
-/// pipe (`note-format.md` §14.1, and `links.zig`'s header on why both trailers
-/// matter). Written as bytes rather than through the decoder's own helpers so a
-/// decoder that changed its mind about the grammar would fail here.
+/// An `EXTERNALLINKINFO` block's content with trailing `,` and `|`, written by
+/// hand rather than through the decoder's helpers.
 fn externalLinkInfo(a: std.mem.Allocator, specs: []const LinkSpec, page_number: u32) ![]u8 {
     const enc = std.base64.standard.Encoder;
     var out: std.ArrayList(u8) = .empty;

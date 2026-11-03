@@ -1,13 +1,6 @@
-//! Content-tier (Tier 3) integration tests against the real fixtures.
-//!
-//! * Decode + composite of `fixtures/sample.note`, asserted byte-for-byte
-//!   (SHA-256) against the output of the reference decoder (supernote-tool).
-//!   These hashes are the exact bytes the validated reference render was
-//!   produced from — the golden contract the RLE quirks must keep satisfying.
-//! * SNPG serialize -> decodeRgba round-trip: the wire format must reproduce
-//!   the native render exactly.
-//! * OCR extraction from `fixtures/sample-2.note`, a real capture with finished
-//!   recognition on page 1 and still-running recognition on page 2.
+//! Content-tier integration tests against real fixtures: decode/composite
+//! hashes from the reference decoder (supernote-tool), SNPG round trips, and
+//! OCR extraction from `sample-2.note`.
 
 const std = @import("std");
 const note = @import("note");
@@ -80,9 +73,7 @@ test "composited page matches reference render byte-for-byte" {
     try expectSha(COMPOSITE_SHA, img.pixels);
 }
 
-// ---------------------------------------------------------------------------
-// SNPG page payload
-// ---------------------------------------------------------------------------
+// ---- SNPG page payload ----
 
 test "serialize -> decodeRgba reproduces renderPageGray on the real Nomad fixture" {
     const gpa = std.testing.allocator;
@@ -90,13 +81,11 @@ test "serialize -> decodeRgba reproduces renderPageGray on the real Nomad fixtur
     var doc = try note.parse(gpa, sample);
     defer doc.deinit();
 
-    // Reference: the byte-validated native grayscale render.
     const gray = try note.renderPageGray(gpa, doc, 0);
     defer gray.deinit(gpa);
     try std.testing.expectEqual(@as(u32, 1404), gray.width);
     try std.testing.expectEqual(@as(u32, 1872), gray.height);
 
-    // Round-trip through the wire format the browser actually consumes.
     const payload = try note.page_payload.serialize(gpa, doc, 0);
     defer gpa.free(payload);
 
@@ -107,7 +96,6 @@ test "serialize -> decodeRgba reproduces renderPageGray on the real Nomad fixtur
     try std.testing.expectEqual(gray.height, rgba.height);
     try std.testing.expectEqual(gray.pixels.len * 4, rgba.pixels.len);
 
-    // Every pixel: RGBA is the grayscale value in RGB, fully opaque.
     for (gray.pixels, 0..) |g, i| {
         try std.testing.expectEqual(g, rgba.pixels[i * 4 + 0]);
         try std.testing.expectEqual(g, rgba.pixels[i * 4 + 1]);
@@ -130,7 +118,6 @@ test "payload is self-describing: header fields match the fixture" {
     try std.testing.expectEqual(@as(u8, 1), payload[5]); // highres Nomad -> X2 variant
     try std.testing.expectEqual(@as(u32, 1404), std.mem.readInt(u32, payload[8..12], .little));
     try std.testing.expectEqual(@as(u32, 1872), std.mem.readInt(u32, payload[12..16], .little));
-    // sample.note page 0 composites MAINLAYER + BGLAYER -> 2 layer records.
     try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, payload[16..20], .little));
 }
 
@@ -138,7 +125,6 @@ test "serialize emits a well-formed header + one record per present layer (synth
     const gpa = std.testing.allocator;
     const pp = note.page_payload;
 
-    // Two present layers (main + background); dims come from the equipment code.
     const main_rle = [_]u8{ 0x61, 0x00 };
     const bg_rle = [_]u8{ 0x62, 0x00 };
     const bytes = try builder.serialize(gpa, .{
@@ -163,8 +149,6 @@ test "serialize emits a well-formed header + one record per present layer (synth
     try std.testing.expectEqual(@as(u32, 1872), std.mem.readInt(u32, payload[12..16], .little));
     try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, payload[16..20], .little));
 
-    // First record is the background (bottom-to-top order), with its 6-byte v2
-    // head: flags, slot, data_len.
     try std.testing.expectEqual(note.types.LayerSlot.background.wireId(), payload[pp.HEADER_SIZE + 1]);
     const rec0_len = std.mem.readInt(u32, payload[pp.HEADER_SIZE + 2 ..][0..4], .little);
     try std.testing.expectEqual(@as(u32, bg_rle.len), rec0_len);
@@ -174,13 +158,10 @@ test "serialize emits a well-formed header + one record per present layer (synth
     );
 }
 
-// ---------------------------------------------------------------------------
-// Orientation: landscape pages are stored natively landscape
-// ---------------------------------------------------------------------------
+// ---- orientation: landscape pages are stored natively landscape ----
 
-/// A full-page RLE stream of exactly `npix` pixels, alternating black and a
-/// literal pass-through gray so the decoded bytes are position-dependent (an
-/// all-one-value page would make the flat-stream assertions below vacuous).
+/// A full-page RLE stream of `npix` pixels alternating black and a literal
+/// gray, so decoded bytes are position-dependent.
 fn fullPageRle(gpa: std.mem.Allocator, npix: usize) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -201,11 +182,8 @@ fn fullPageRle(gpa: std.mem.Allocator, npix: usize) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-// SHA-256 of this codebase's settled landscape renders of
-// `fixtures/horizontal_layers.note` (real Nomad capture, both pages `1090`).
-// Computed here once the output was eyeballed: landscape shape, legible
-// handwriting sitting on horizontal ruled lines, no shear — the row width IS
-// the swapped base width (note-format.md §9.3).
+// Hashes of this codebase's landscape renders of `horizontal_layers.note`,
+// settled after visual inspection (no shear: the row width is swapped).
 const H_PAGE1_SHA = "5733213a3401925e030aab8df038756299e21e773dba4383903d14b27ea3a0a9";
 const H_PAGE2_SHA = "6179883577636a458dc4f0919af28779c78cc154b3717a1b4d652ff86a0031fc";
 
@@ -214,28 +192,20 @@ test "GOLDEN: real landscape capture decodes natively landscape (1872-wide rows)
     var doc = try note.parse(gpa, horizontal);
     defer doc.deinit();
 
-    // Page 2: the ink layers over the landscape template. Its `LAYERSEQ`
-    // (`LAYER3,LAYER1,MAINLAYER,BGLAYER`) omits LAYER2 — HIDDEN on the device
-    // (`LAYERINFO` says isVisible:false, isDeleted:false; the bitmap persists)
-    // — so the composite carries Main/1/3's strokes only: device semantics,
-    // which the hash pins along with the row-width swap. The SNPG v2 payload
-    // ships the hidden stream flagged `hidden`; the decode below proves the
-    // default composite still excludes it.
+    // Page 2's `LAYERSEQ` omits the hidden LAYER2, so the composite has Main/1/3
+    // only; SNPG ships it flagged hidden.
     const img = try note.renderPageGray(gpa, doc, 1);
     defer img.deinit(gpa);
     try std.testing.expectEqual(@as(u32, 1872), img.width);
     try std.testing.expectEqual(@as(u32, 1404), img.height);
     try expectSha(H_PAGE2_SHA, img.pixels);
 
-    // Page 1: the bare template, same landscape shape.
     const img0 = try note.renderPageGray(gpa, doc, 0);
     defer img0.deinit(gpa);
     try std.testing.expectEqual(@as(u32, 1872), img0.width);
     try std.testing.expectEqual(@as(u32, 1404), img0.height);
     try expectSha(H_PAGE1_SHA, img0.pixels);
 
-    // The wire format agrees end to end: the SNPG header advertises the
-    // effective dims and the consumer's decode reproduces the native render.
     const payload = try note.page_payload.serialize(gpa, doc, 1);
     defer gpa.free(payload);
     try std.testing.expectEqual(@as(u32, 1872), std.mem.readInt(u32, payload[8..12], .little));
@@ -251,9 +221,8 @@ test "GOLDEN: real landscape capture decodes natively landscape (1872-wide rows)
 test "a landscape (1090) page renders and serializes at its effective dims" {
     const gpa = std.testing.allocator;
 
-    // The same RLE stream on a portrait and a landscape page: the storage fact
-    // under test is that a 1090 page's raster is the SAME flat byte stream,
-    // reshaped — 1872-wide rows on a Nomad — never rotated or transposed.
+    // The same flat stream on a portrait and a landscape page: reshaped, never
+    // rotated or transposed.
     const base = note.types.Dimensions.default; // N6: 1404×1872
     const npix = @as(usize, base.width) * @as(usize, base.height);
     const rle = try fullPageRle(gpa, npix);
@@ -271,7 +240,6 @@ test "a landscape (1090) page renders and serializes at its effective dims" {
     var doc = try note.parse(gpa, bytes);
     defer doc.deinit();
 
-    // Render: identical pixel bytes, different declared shape.
     const p0 = try note.renderPageGray(gpa, doc, 0);
     defer p0.deinit(gpa);
     const p1 = try note.renderPageGray(gpa, doc, 1);
@@ -282,7 +250,6 @@ test "a landscape (1090) page renders and serializes at its effective dims" {
     try std.testing.expectEqual(@as(u32, 1404), p1.height);
     try std.testing.expectEqualSlices(u8, p0.pixels, p1.pixels);
 
-    // SNPG headers carry the per-page effective dims — the decode geometry.
     const pay0 = try note.page_payload.serialize(gpa, doc, 0);
     defer gpa.free(pay0);
     const pay1 = try note.page_payload.serialize(gpa, doc, 1);
@@ -292,8 +259,6 @@ test "a landscape (1090) page renders and serializes at its effective dims" {
     try std.testing.expectEqual(@as(u32, 1872), std.mem.readInt(u32, pay1[8..12], .little));
     try std.testing.expectEqual(@as(u32, 1404), std.mem.readInt(u32, pay1[12..16], .little));
 
-    // ...and the consumer (the wasm decoder's core) honours them: the round
-    // trip reproduces the native render at the landscape shape.
     const rgba = try note.page_payload.decodeRgba(gpa, pay1);
     defer rgba.deinit(gpa);
     try std.testing.expectEqual(p1.width, rgba.width);
@@ -301,16 +266,10 @@ test "a landscape (1090) page renders and serializes at its effective dims" {
     for (p1.pixels, 0..) |g, i| try std.testing.expectEqual(g, rgba.pixels[i * 4]);
 }
 
-// ---------------------------------------------------------------------------
-// Hidden layers on the wire (layers_edited.note — the mixed-encodings capture
-// with Layer 2 HIDDEN on page 2, bitmap persisting)
-// ---------------------------------------------------------------------------
+// ---- hidden layers on the wire (layers_edited.note) ----
 
-// SHA-256 of this codebase's grayscale renders of `layers_edited.note`. Page 1
-// is the same bare landscape template as `horizontal_layers.note` page 1 (same
-// notebook lineage — the hashes agree, which is its own cross-check); page 2 is
-// the device-authored composite WITHOUT the hidden Layer 2 (`LAYERSEQ` omits
-// it). These pin the default view through the SNPG v2 change.
+// Page 1 matches `horizontal_layers.note` page 1 (same lineage); page 2 is the
+// composite without hidden Layer 2.
 const LE_PAGE1_SHA = "5733213a3401925e030aab8df038756299e21e773dba4383903d14b27ea3a0a9";
 const LE_PAGE2_SHA = "0a6c5cf68211ef561281b879ecff6643fa42bcc3fc89e69c240ba51e50986555";
 
@@ -321,21 +280,16 @@ test "GOLDEN: layers_edited page 2 — the hidden layer rides the wire but stays
     var doc = try note.parse(gpa, layers_edited);
     defer doc.deinit();
 
-    // The reference: the LAYERSEQ-driven device-authored render (no LAYER2).
     const img = try note.renderPageGray(gpa, doc, 1);
     defer img.deinit(gpa);
     try expectSha(LE_PAGE2_SHA, img.pixels);
 
-    // The v2 payload ships FIVE records — LAYERINFO order minus deleted —
-    // where LAYERSEQ draws only four: the hidden LAYER2's stream is on the
-    // wire, slot-identified and flagged hidden, between MAINLAYER and LAYER1.
+    // Five records where LAYERSEQ draws four: LAYER2 ships flagged hidden.
     const payload = try pp.serialize(gpa, doc, 1);
     defer gpa.free(payload);
     try std.testing.expectEqual(pp.VERSION, payload[4]);
     try std.testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, payload[16..20], .little));
 
-    // Walk the record heads: bottom-to-top slots bg, main, layer2, layer1,
-    // layer3, with ONLY layer2 flagged hidden.
     const want = [_]struct { slot: note.types.LayerSlot, hidden: bool }{
         .{ .slot = .background, .hidden = false },
         .{ .slot = .main, .hidden = false },
@@ -354,14 +308,11 @@ test "GOLDEN: layers_edited page 2 — the hidden layer rides the wire but stays
     }
     try std.testing.expectEqual(payload.len, at);
 
-    // The default composite skips the hidden record: byte-identical to the
-    // device-authored render, exactly as if the stream were not there.
     const rgba = try pp.decodeRgba(gpa, payload);
     defer rgba.deinit(gpa);
     for (img.pixels, 0..) |g, i| try std.testing.expectEqual(g, rgba.pixels[i * 4]);
 
-    // The hidden layer itself decodes (record 2) and carries REAL ink — its
-    // bitmap persisted through the hide — with transparent pixels at alpha 0.
+    // The hidden layer decodes with real ink and alpha-0 transparency.
     const l2 = try pp.decodeLayerRgba(gpa, payload, 2);
     defer l2.deinit(gpa);
     try std.testing.expectEqual(@as(u32, 1872), l2.width);
@@ -372,7 +323,6 @@ test "GOLDEN: layers_edited page 2 — the hidden layer rides the wire but stays
     try std.testing.expect(opaque_px > 0); // ink exists
     try std.testing.expect(opaque_px < @as(usize, l2.width) * l2.height); // and transparency exists
 
-    // Page 1 (the untouched template page) stays pinned too.
     const img0 = try note.renderPageGray(gpa, doc, 0);
     defer img0.deinit(gpa);
     try expectSha(LE_PAGE1_SHA, img0.pixels);
@@ -393,8 +343,6 @@ test "decodeLayerRgba on the real fixture agrees with the native single-layer de
     const payload = try pp.serialize(gpa, doc, 1);
     defer gpa.free(payload);
 
-    // Record 2 is the hidden LAYER2 (pinned above). Decode it natively too and
-    // compare pixel for pixel: same stream, same decoder, alpha applied.
     const layer = doc.pages[1].layer(.layer2).?;
     const src = note.Source.fromSlice(layers_edited);
     const r = try src.blockRange(layer.bitmapAddress());
@@ -413,9 +361,7 @@ test "decodeLayerRgba on the real fixture agrees with the native single-layer de
     }
 }
 
-// ---------------------------------------------------------------------------
-// Recognition (real capture)
-// ---------------------------------------------------------------------------
+// ---- recognition (real capture) ----
 
 test "extract recognized text + boxes from a finished page" {
     const gpa = std.testing.allocator;
@@ -424,12 +370,10 @@ test "extract recognized text + boxes from a finished page" {
 
     try std.testing.expectEqual(@as(usize, 2), doc.pageCount());
 
-    // Page 1: recognition done.
     try std.testing.expectEqual(@as(u8, 1), doc.pages[0].recognitionStatus());
     var rec = (try note.recognition.forPage(gpa, doc, 0)) orelse return error.NoRecognition;
     defer rec.deinit();
 
-    // Collect the text-element labels in order.
     var labels: std.ArrayList([]const u8) = .empty;
     defer labels.deinit(gpa);
     for (rec.elements()) |el| {
@@ -440,19 +384,14 @@ test "extract recognized text + boxes from a finished page" {
     try std.testing.expectEqualStrings("Test", labels.items[1]);
     try std.testing.expectEqualStrings("Middle", labels.items[2]);
 
-    // plainText joins them (this is what a full-text index would store).
     const text = try rec.plainText(gpa);
     defer gpa.free(text);
     try std.testing.expectEqualStrings("Test\nMiddle\nTest", text); // v7: device layout honored — regions y-sorted (emitted out of order: Test@y11.8, Test@y136.9, Middle@y72) and newline-joined
 
-    // A word carries a bounding box (millimetres) for searchable-PDF placement.
     const first_word = rec.elements()[0].words.?[0];
     try std.testing.expect(first_word.@"bounding-box".?.width > 0);
 
-    // `placedWords` is the searchable-PDF view: one entry per positioned word,
-    // in reading order, with the device's own MILLIMETRE values untouched. These
-    // numbers are read straight out of the real capture — if the extraction ever
-    // starts scaling, rounding or reordering them, this fails.
+    // The device's mm values, unscaled and in reading order.
     const placed = try rec.placedWords(gpa);
     defer gpa.free(placed);
     try std.testing.expectEqual(@as(usize, 3), placed.len);
@@ -463,9 +402,8 @@ test "extract recognized text + boxes from a finished page" {
     try std.testing.expectApproxEqAbs(@as(f32, 16.534), placed[0].box.height, 1e-3);
     try std.testing.expectEqualStrings("Middle", placed[2].label);
 
-    // The boxes are millimetres, NOT pixels — the whole reason the scale table
-    // exists. At the verified N6 scale every one of them lands inside the page;
-    // read as pixels they would all be in the top-left 112x149 corner of 1404x1872.
+    // Millimetres, not pixels: read as pixels they would hug the top-left
+    // 112x149 corner.
     const scale = note.types.CanvasMm.forEquipment(doc.applyEquipment()).?.pxPerMm(doc.dimensions().width);
     const w: f32 = @floatFromInt(doc.dimensions().width);
     const h: f32 = @floatFromInt(doc.dimensions().height);
@@ -473,8 +411,6 @@ test "extract recognized text + boxes from a finished page" {
         try std.testing.expect((p.box.x + p.box.width) * scale <= w);
         try std.testing.expect((p.box.y + p.box.height) * scale <= h);
     }
-    // ...and they genuinely use the page, rather than hugging the origin the way
-    // a millimetre-as-pixel misread would.
     try std.testing.expect((placed[1].box.y + placed[1].box.height) * scale > h * 0.5);
 }
 

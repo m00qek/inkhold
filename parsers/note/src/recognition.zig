@@ -1,36 +1,15 @@
-//! Tier 3 — handwriting-recognition (OCR) extraction from a page's
-//! `RECOGNTEXT` field.
-//!
-//! When a page's recognition is complete (`RECOGNSTATUS == 1`), its `RECOGNTEXT`
-//! content block is base64-encoded JSON of the form:
-//!   { "elements": [ { "label": "Test", "type": "Text",
-//!                     "words": [ { "label": "Test",
-//!                                  "bounding-box": {x,y,width,height} } ] }, ... ] }
-//! Bounding boxes are in **millimetres**, and a box may be `null` — the device
-//! emits `"\n"` / `" "` layout separators as words with no position at all. The
-//! mm→px scale is NOT `page_px_width/118.64` in general: 118.64 mm is the
-//! verified canvas width of the 1404×1872 class only, so the scale comes from
-//! the allowlist in `types.CanvasMm` and is *unknown* for hardware we have no
-//! sample from. Non-text elements (e.g. "Raw Content") and pages still
-//! recognising (empty `RECOGNTEXT`) yield no text.
-//!
-//! This powers full-text search (index the labels) and searchable-PDF export
-//! (place invisible text at the boxes). The richer `RECOGNFILE` MyScript package
-//! is not parsed here — the simple `RECOGNTEXT` path covers finished pages.
+//! Tier 3: handwriting recognition from a page's `RECOGNTEXT` block (base64
+//! JSON, `note-format.md` §11.1). Boxes are millimetres and may be null; the
+//! mm→px scale comes from `types.CanvasMm` and is unknown for unsampled hardware.
 
 const std = @import("std");
 const note_mod = @import("note.zig");
 const types = @import("types.zig");
 
-/// A `RECOGNTEXT` blob that is not base64-wrapped JSON of the expected shape is
-/// `error.Corrupt` (a content block the file claims is finished recognition but
-/// cannot be read as one). Allocator failure stays its own fact.
+/// A `RECOGNTEXT` blob that is not base64 JSON of the expected shape.
 pub const Error = error{Corrupt} || std.mem.Allocator.Error;
 
-/// A word's bounding box, in **MILLIMETRES** on the page canvas, origin
-/// top-left. Not pixels: converting needs the device's physical page size, which
-/// is `types.CanvasMm.forEquipment` and is deliberately unknown for hardware we
-/// have no sample from.
+/// A word box in millimetres, origin top-left.
 pub const Box = struct {
     x: f32 = 0,
     y: f32 = 0,
@@ -40,16 +19,8 @@ pub const Box = struct {
 
 pub const Word = struct {
     label: []const u8 = "",
-    /// **NULLABLE, and null is common.** The device emits layout separators as
-    /// words — `label` is `"\n"` or `" "` — with `"bounding-box": null`, because
-    /// a line break is not anywhere on the page. Defaulting those to `{0,0,0,0}`
-    /// would pile every separator in the top-left corner; they must be SKIPPED
-    /// (which is what `placedWords` does).
-    ///
-    /// This being optional is also what stops a null from failing the whole
-    /// parse: `std.json` has no way to put `null` into a non-optional struct, so
-    /// before this a single separator cost the page its entire transcript
-    /// (the indexer's `catch` dropped the text and kept only the range).
+    /// Null for the device's `"\n"`/`" "` separator words; must be skipped, not
+    /// defaulted to {0,0,0,0}. Optional so one null cannot fail the whole parse.
     @"bounding-box": ?Box = null,
 };
 
@@ -65,7 +36,6 @@ pub const Element = struct {
 
 const Doc = struct { elements: []const Element = &.{} };
 
-/// Parsed recognition for one page. Owns its allocations via `parsed`.
 pub const Recognition = struct {
     parsed: std.json.Parsed(Doc),
 
@@ -77,25 +47,12 @@ pub const Recognition = struct {
         return self.parsed.value.elements;
     }
 
-    /// The page's recognized text, in reading order, one line per recognized
-    /// region. Caller frees.
-    ///
-    /// The DEVICE does the layout analysis for us and we HONOR it rather than
-    /// reconstruct order from geometry (which supernote-tool does, and which
-    /// would need the mm→px scale this file notes is unknown for some
-    /// hardware): an element's `label` already carries the correct order WITH
-    /// its `"\n"` line breaks, and its `words` list tokens — including the
-    /// `"\n"`/`" "` separators, which are words with a null box — in reading
-    /// order. So per region we take the `label`, or, when it is absent,
-    /// concatenate the words (recovering text a bare `label orelse continue`
-    /// used to DROP entirely). Regions are stable-sorted by their first placed
-    /// word's `y` for the rare out-of-emit-order page, and joined with `"\n"`
-    /// because distinct recognized regions are distinct lines.
+    /// The page text, one line per region; caller frees. Honours the device's
+    /// layout: each region's `label` (or its words concatenated when absent),
+    /// stable-sorted by first placed word's `y`, joined with `"\n"`.
     pub fn plainText(self: Recognition, gpa: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
         const els = self.elements();
 
-        // Indices of the text regions, so the sort moves usize not structs and
-        // the labels stay borrowed from `parsed`.
         var idx: std.ArrayList(usize) = .empty;
         defer idx.deinit(gpa);
         for (els, 0..) |el, i| {
@@ -108,8 +65,7 @@ pub const Recognition = struct {
                 return firstPlacedY(c.els[a]) < firstPlacedY(c.els[b]);
             }
         };
-        // Stable: unplaced regions (`floatMax`) sink to the end keeping emit
-        // order; region counts are tiny, so insertion sort is ideal.
+        // Stable, so unplaced regions (`floatMax`) keep emit order at the end.
         std.sort.insertion(usize, idx.items, Ctx{ .els = els }, Ctx.lt);
 
         var out: std.ArrayList(u8) = .empty;
@@ -121,18 +77,9 @@ pub const Recognition = struct {
         return out.toOwnedSlice(gpa);
     }
 
-    /// Every word that is actually somewhere on the page, in reading order.
-    /// Caller frees the slice; the labels borrow from `parsed` and live as long
-    /// as this `Recognition` does.
-    ///
-    /// Three things are dropped, all of them for the same reason — they have no
-    /// position, so a searchable-PDF text layer has nowhere to put them:
-    ///   - non-`Text` elements (e.g. "Raw Content"), which carry no words;
-    ///   - words with a null `bounding-box` (the `"\n"` / `" "` separators);
-    ///   - words with an empty label, which would place an empty string.
-    ///
-    /// `plainText` is the one to use for reading/indexing — it keeps the
-    /// separators, because there the layout is the point.
+    /// Every word with a position, for a PDF text layer; caller frees, labels
+    /// borrow from `parsed`. Drops non-`Text` elements, null boxes and empty
+    /// labels. Use `plainText` for indexing.
     pub fn placedWords(self: Recognition, gpa: std.mem.Allocator) std.mem.Allocator.Error![]PlacedWord {
         var out: std.ArrayList(PlacedWord) = .empty;
         errdefer out.deinit(gpa);
@@ -148,16 +95,13 @@ pub const Recognition = struct {
     }
 };
 
-/// One recognized word that has a place on the page. `box` is in MILLIMETRES —
-/// see `Box`.
+/// A recognized word with a position; `box` is in millimetres.
 pub const PlacedWord = struct {
     label: []const u8,
     box: Box,
 };
 
-/// True when a region contributes any text — a non-empty `label`, or any word
-/// with a non-empty label. Regions that are empty (no label, only separators or
-/// nothing) are skipped so the `"\n"` join never emits a blank line.
+/// Whether a region has any text, so the join never emits a blank line.
 fn elementHasText(el: Element) bool {
     if (el.label) |l| {
         if (l.len != 0) return true;
@@ -168,9 +112,7 @@ fn elementHasText(el: Element) bool {
     return false;
 }
 
-/// The `y` of a region's first PLACED word (raw millimetres — ordering needs no
-/// scale), or `floatMax` when it has no placed word, so unplaced regions sort to
-/// the end under a stable sort.
+/// A region's first placed word's `y` (mm), or `floatMax` if none.
 fn firstPlacedY(el: Element) f32 {
     if (el.words) |ws| {
         for (ws) |w| {
@@ -180,10 +122,8 @@ fn firstPlacedY(el: Element) f32 {
     return std.math.floatMax(f32);
 }
 
-/// One region's text: the device `label` when present (it already carries the
-/// `"\n"` breaks), else the words concatenated in order — the separator words
-/// carry their own `"\n"`/`" "` label, so concatenation reproduces the device's
-/// breaks and recovers a region a bare label check would have dropped.
+/// A region's `label`, else its words concatenated (separator words carry
+/// their own breaks).
 fn appendElementText(out: *std.ArrayList(u8), gpa: std.mem.Allocator, el: Element) std.mem.Allocator.Error!void {
     if (el.label) |lab| {
         if (lab.len != 0) {
@@ -196,7 +136,6 @@ fn appendElementText(out: *std.ArrayList(u8), gpa: std.mem.Allocator, el: Elemen
     }
 }
 
-/// Parses base64-encoded `RECOGNTEXT` content bytes into a `Recognition`.
 pub fn parse(gpa: std.mem.Allocator, recogntext_content: []const u8) Error!Recognition {
     const dec = std.base64.standard.Decoder;
     const json_len = dec.calcSizeForSlice(recogntext_content) catch return error.Corrupt;
@@ -204,7 +143,7 @@ pub fn parse(gpa: std.mem.Allocator, recogntext_content: []const u8) Error!Recog
     defer gpa.free(json_buf);
     dec.decode(json_buf, recogntext_content) catch return error.Corrupt;
 
-    // alloc_always so all strings are copied into the Parsed arena (json_buf is freed).
+    // alloc_always: strings are copied into the Parsed arena (json_buf is freed).
     const parsed = std.json.parseFromSlice(Doc, gpa, json_buf, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
@@ -215,8 +154,7 @@ pub fn parse(gpa: std.mem.Allocator, recogntext_content: []const u8) Error!Recog
     return .{ .parsed = parsed };
 }
 
-/// Reads and parses page `page_index`'s recognition, or null if the page has no
-/// finished `RECOGNTEXT` (address 0 / still recognising).
+/// Page `page_index`'s recognition, or null if unfinished (address 0).
 pub fn forPage(
     gpa: std.mem.Allocator,
     note: note_mod.Note,
@@ -226,8 +164,7 @@ pub fn forPage(
     return forParsedPage(gpa, note.source, note.pages[page_index]);
 }
 
-/// The bare-page flavour of `forPage`: works off one parsed page and a source
-/// without needing a full `Note`.
+/// `forPage` for one parsed page and a source.
 pub fn forParsedPage(
     gpa: std.mem.Allocator,
     src: note_mod.Source,
@@ -244,7 +181,6 @@ pub fn forParsedPage(
     return try parse(gpa, held.bytes);
 }
 
-/// Base64 of `json`, the way a `RECOGNTEXT` block stores it.
 fn encodeForTest(gpa: std.mem.Allocator, json: []const u8) ![]u8 {
     const enc = std.base64.standard.Encoder;
     const out = try gpa.alloc(u8, enc.calcSize(json.len));
@@ -254,11 +190,8 @@ fn encodeForTest(gpa: std.mem.Allocator, json: []const u8) ![]u8 {
 
 test "plainText honors the device layout: label passthrough, y-sort, word reconstruction" {
     const gpa = std.testing.allocator;
-    // Three regions emitted OUT of y-order; the second carries the device's own
-    // `\n` inside its label (must pass through verbatim); the third has NO
-    // top-level label and must be reconstructed from its words — including the
-    // separator words (`\n`/` `), whose own labels reproduce the breaks — rather
-    // than dropped as a bare `label orelse continue` used to.
+    // Regions out of y-order; one label carries its own `\n`; one has no
+    // label and must be rebuilt from its words.
     const json =
         \\{"elements":[
         \\ {"type":"Text","label":"third","words":[{"label":"third","bounding-box":{"x":0,"y":90,"width":5,"height":5}}]},
@@ -278,16 +211,11 @@ test "plainText honors the device layout: label passthrough, y-sort, word recons
 
     const text = try rec.plainText(gpa);
     defer gpa.free(text);
-    // y-sorted (top@10, mid@40, third@90), regions newline-joined, the label's
-    // own `\n` preserved, the label-less region rebuilt from its words, the
-    // non-Text "Raw Content" ignored.
     try std.testing.expectEqualStrings("top\nrow\nmid line\nthird", text);
 }
 
 test "placedWords skips the null-box layout separators" {
     const gpa = std.testing.allocator;
-    // The device's real shape: "\n" and " " are emitted as words with a NULL
-    // bounding-box, because a line break is not anywhere on the page.
     const json =
         \\{"elements":[{"type":"Text","label":"one two","words":[
         \\  {"label":"one","bounding-box":{"x":1,"y":2,"width":3,"height":4}},
@@ -305,8 +233,7 @@ test "placedWords skips the null-box layout separators" {
     const placed = try rec.placedWords(gpa);
     defer gpa.free(placed);
 
-    // Two, not four — and emphatically not four with two of them at {0,0,0,0},
-    // which is what a non-optional Box with a default would have produced.
+    // Two, not four with two at {0,0,0,0}.
     try std.testing.expectEqual(@as(usize, 2), placed.len);
     try std.testing.expectEqualStrings("one", placed[0].label);
     try std.testing.expectEqualStrings("two", placed[1].label);
@@ -315,9 +242,7 @@ test "placedWords skips the null-box layout separators" {
 
 test "a null bounding-box no longer costs the page its whole transcript" {
     const gpa = std.testing.allocator;
-    // Before `bounding-box` was optional, std.json could not put `null` into a
-    // non-optional struct, so ONE separator failed the parse — and the indexer's
-    // catch dropped the transcript for the entire page.
+    // One null box used to fail the whole page's parse.
     const json =
         \\{"elements":[{"type":"Text","label":"hello","words":[{"label":"\n","bounding-box":null}]}]}
     ;
@@ -357,9 +282,7 @@ test "placedWords ignores non-Text elements and empty labels" {
 
 test "a blob that is not base64-JSON is Corrupt, never a panic or a json error" {
     const gpa = std.testing.allocator;
-    // Not base64 at all.
     try std.testing.expectError(error.Corrupt, parse(gpa, "!!! not base64 !!!"));
-    // Valid base64 of invalid JSON.
     const content = try encodeForTest(gpa, "{ definitely not json");
     defer gpa.free(content);
     try std.testing.expectError(error.Corrupt, parse(gpa, content));

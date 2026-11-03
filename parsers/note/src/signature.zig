@@ -1,26 +1,15 @@
-//! Tier 0 — detection of the `.note` file family and format version.
-//!
-//! Layout of the leading bytes:
-//!   - bytes [0..4)  : file-type marker (e.g. "note")
-//!   - X-series      : signature `SN_FILE_VER_<8 digits>` at offset 4
-//!   - original      : signature `SN_FILE_ASA_<8 digits>` at offset 0
-//!
-//! The trailing 8 digits are a monotonically increasing version key.
-//!
-//! `probe_len` bytes are always enough to answer "is this a `.note` at all, and
-//! which family/version" — the cheapest question the library can be asked.
+//! Tier 0: detection of the `.note` family and version from the leading bytes.
+//! X-series: `SN_FILE_VER_<8 digits>` at offset 4 after a 4-byte type marker;
+//! original A-series: `SN_FILE_ASA_<8 digits>` at offset 0.
 
 const std = @import("std");
 
 pub const Error = error{
-    /// The leading bytes carry neither known signature — this is not a `.note`
-    /// (or is cut so short the signature itself is missing).
+    /// Neither known signature (or too short to hold one).
     NotNote,
 };
 
-/// The most bytes a signature can occupy: 4-byte file-type marker +
-/// `SN_FILE_VER_` + 8 digits. Reading exactly this much is enough to detect
-/// either family without pulling in the file.
+/// Marker + `SN_FILE_VER_` + 8 digits: enough to detect either family.
 pub const probe_len = 24;
 
 pub const Family = enum { x_series, original };
@@ -29,9 +18,9 @@ pub const Signature = struct {
     family: Family,
     /// The 8-digit version key, e.g. 20260016.
     version: u32,
-    /// The 4-byte file-type marker (e.g. "note"). Borrows from input.
+    /// The 4-byte file-type marker (e.g. "note"); borrows from input.
     filetype: []const u8,
-    /// The full signature string. Borrows from input.
+    /// Borrows from input.
     raw: []const u8,
 
     /// High-resolution grayscale is supported from version 20230015 onward.
@@ -45,7 +34,6 @@ const ASA_PREFIX = "SN_FILE_ASA_";
 const DIGITS = 8;
 
 pub fn detect(bytes: []const u8) Error!Signature {
-    // Try X-series first: it is by far the common case.
     if (matchAt(bytes, 4, X_PREFIX)) |raw| {
         return .{
             .family = .x_series,
@@ -65,8 +53,6 @@ pub fn detect(bytes: []const u8) Error!Signature {
     return error.NotNote;
 }
 
-/// If `prefix` followed by `DIGITS` digits sits at `offset`, returns the full
-/// signature slice; otherwise null.
 fn matchAt(bytes: []const u8, offset: usize, prefix: []const u8) ?[]const u8 {
     const total = prefix.len + DIGITS;
     if (offset + total > bytes.len) return null;

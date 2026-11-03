@@ -1,30 +1,6 @@
 //! Public entry point for the standalone `.note` (Supernote notebook) parser.
-//!
-//! Two entry points, cost proportional to what you ask (see `note.zig` for the
-//! parse-order diagram):
-//!
-//! ```zig
-//! // Tier 0 — is this even a .note? (first `signature.probe_len` bytes)
-//! const sig = try note.signature.detect(head);
-//!
-//! // Eager full parse (what an indexer/renderer wants): signature + header +
-//! // footer + every page's metadata, composed over one arena. Peak memory is
-//! // the parsed metadata, never the file size — bitmap bodies are read lazily
-//! // through the retained `Source`.
-//! var doc = try note.parse(gpa, bytes);
-//! defer doc.deinit();
-//! _ = doc.pageCount();
-//! _ = doc.dimensions();
-//! for (doc.pages[0].layers) |l| { _ = l.bitmapAddress(); }
-//!
-//! // Tier 3 — heavy bits, explicit: decode / composite / OCR / flatten.
-//! const img = try note.render.renderPage(gpa, doc.source, doc.rleVariant(), doc.dimensions(), doc.pages[0]);
-//! defer img.deinit(gpa);
-//! ```
-//!
-//! Results own their strings (arena) — input bytes may be freed after parsing —
-//! but content blocks (bitmaps, recognition text) are read lazily through the
-//! retained `Source`, so the underlying file/blob must stay readable to render.
+//! `parse` reads metadata eagerly; bitmaps and recognition text are read
+//! lazily through the retained `Source`, which must stay readable to render.
 
 const note = @import("note.zig");
 
@@ -60,7 +36,6 @@ pub const renderPageGray = render.renderPageGray;
 pub const Image = render.Image;
 
 test {
-    // Pull in every submodule's tests.
     _ = signature;
     _ = source;
     _ = keyblock;

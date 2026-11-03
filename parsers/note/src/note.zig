@@ -1,34 +1,6 @@
 //! Container parser: an eager full parse whose cost is the metadata, never the
-//! file size.
-//!
-//! Parse order mirrors the format; the stages cut it at its natural joints:
-//!
-//!   1. first 24 bytes           -> signature            \  Tier 0: signature.detect
-//!   2. last 4 bytes             -> footer address        \
-//!   3. footer block             -> index of everything    | file-level metadata
-//!   4. footer.FILE_FEATURE      -> header block          /  (`metadataInto`)
-//!   5. footer.PAGE*             -> page blocks           \  per-page metadata
-//!   6. page.{MAINLAYER,...}     -> layer blocks          /  (`parsePageInto`)
-//!   7. layer.LAYERBITMAP etc.   -> content blocks           Tier 3: decoder / render /
-//!                                                            recognition / page_payload
-//!
-//! - **Tier 0** (`signature.detect` over the first `signature.probe_len` bytes)
-//!   answers "is this a `.note`, which family, which version" and nothing else,
-//!   and is the one public stage below `parse`.
-//! - **`parse`/`parseSource`** read the footer address, the footer block, the
-//!   FILE_FEATURE header block, then every page block plus its layer metadata
-//!   blocks — all over ONE arena, via the `metadataInto` + `parsePageInto`
-//!   internals. Bitmap BODIES are never read here: only their addresses are
-//!   captured, so peak memory is the parsed metadata plus the single largest
-//!   metadata block, never the file. Over a `.ranged` source these are small,
-//!   absolutely-addressed reads on demand.
-//! - **Tier 3** is explicit and heavy: `decoder` (RLE), `render` (compositing),
-//!   `recognition` (OCR blob), `page_payload` (SNPG flattening).
-//!
-//! Every step is a small, absolutely-addressed read from a `source.Source`
-//! (a slice the caller holds, or a positional reader over a blob on disk), and
-//! everything a result exposes is **copied into its arena**, so no result ever
-//! borrows from the input.
+//! file size. Footer address (last 4 bytes) -> footer -> header -> page blocks
+//! -> layer blocks, all copied into one arena; bitmap bodies are only addressed.
 
 const std = @import("std");
 const keyblock = @import("keyblock.zig");
@@ -40,46 +12,18 @@ const types = @import("types.zig");
 
 pub const Source = source.Source;
 
-/// Distinct error facts, `.spd`-style. The old implementation's sprawl maps in
-/// as follows (documented so no test-relied-on information is lost):
-///
-///   old fact                          new fact
-///   --------------------------------  -----------------------------------------
-///   signature.BadSignature            NotNote
-///   parser.Truncated (< 4 bytes)      Truncated
-///   source/reader.OutOfBounds         Truncated — an address or length points
-///                                     past EOF; from the parser's seat a
-///                                     cut-short file and a garbage pointer are
-///                                     indistinguishable, and both mean "the
-///                                     source ended before the structure did"
-///   parser.MissingField               Corrupt — footer without FILE_FEATURE, or
-///                                     a PAGE* value that is not an address
-///   recognition base64/json errors    Corrupt (see recognition.zig)
-///   source.ReadFailed                 ReadFailed — backing-store I/O trouble,
-///                                     kept separate because it is not a fact
-///                                     about the file at all
-///   render/page_payload PageOutOfRange PageOutOfRange (caller-level, unchanged)
-///   decoder.SizeMismatch              stays a decoder-level fact (decoder.zig)
-///   page_payload.BadPayload           stays a payload-level fact (page_payload.zig)
+/// Parse errors. Out-of-bounds reads are `Truncated`: a cut file and a garbage
+/// pointer are indistinguishable from here. `ReadFailed` is backing-store I/O,
+/// not a fact about the file.
 pub const Error = error{
-    /// The leading bytes carry no known `.note` signature.
     NotNote,
-    /// The source ends before data the structure references (including a
-    /// too-short file and any block address/length pointing past EOF).
     Truncated,
-    /// The structure is invalid: a footer without FILE_FEATURE, a page address
-    /// that is not a number, an undecodable recognition blob.
     Corrupt,
-    /// The backing store failed to produce bytes for an in-bounds range.
     ReadFailed,
-    /// A page index at or past `pageCount()`.
     PageOutOfRange,
 } || std.mem.Allocator.Error;
 
-/// Lifts a raw source error into the tier taxonomy. See `Error` for why
-/// OutOfBounds reads as Truncated. Public so the Tier-3 modules
-/// (`render`/`recognition`/`page_payload`, which already import this one) share
-/// the one mapping for their `source.Error`-returning block reads.
+/// Maps a `source.Error` into this taxonomy; shared by the Tier-3 modules.
 pub fn lift(e: source.Error) Error {
     return switch (e) {
         error.OutOfBounds => error.Truncated,
@@ -87,12 +31,8 @@ pub fn lift(e: source.Error) Error {
     };
 }
 
-// ---------------------------------------------------------------------------
-// Tier internals — the single implementation the public tiers and the eager
-// parse both compose. Everything allocates into the caller's arena allocator.
-// ---------------------------------------------------------------------------
+// ---- tier internals, allocating into the caller's arena ----
 
-/// The file-level facts `metadataInto` reads, before the per-page loop.
 const RawMetadata = struct {
     signature: signature.Signature,
     header: keyblock.Block,
@@ -100,8 +40,8 @@ const RawMetadata = struct {
     page_entries: []const PageEntry,
 };
 
-/// Tier 1: footer address -> footer block -> header block. Never reads a page
-/// block; the page ADDRESSES come straight out of the footer.
+/// Footer address -> footer block -> header block; page addresses come from
+/// the footer.
 fn metadataInto(a: std.mem.Allocator, src: Source) Error!RawMetadata {
     if (src.size() < 4) return error.Truncated;
 
@@ -121,12 +61,10 @@ fn metadataInto(a: std.mem.Allocator, src: Source) Error!RawMetadata {
     };
 }
 
-/// Tier 2: one page block plus its layer metadata blocks. Captures each layer's
-/// bitmap ADDRESS; never touches bitmap bodies.
+/// One page block plus its layer metadata; captures bitmap addresses only.
 fn parsePageInto(a: std.mem.Allocator, src: Source, entry: PageEntry) Error!types.Page {
     const block = try parseBlockInto(a, src, entry.address);
 
-    // Collect the layers that are actually present (non-zero address).
     var present: usize = 0;
     for (types.LayerSlot.all) |slot| {
         const addr = block.getInt(slot.key()) orelse 0;
@@ -143,17 +81,13 @@ fn parsePageInto(a: std.mem.Allocator, src: Source, entry: PageEntry) Error!type
         i += 1;
     }
 
-    // The layer-panel state, typed. The value lives inside the page block that
-    // is already in hand, so this costs allocation only — no extra reads (the
-    // read-accounting tests pin that). Malformed LAYERINFO is null: a recorded
-    // fact, not an error (see layerinfo.zig).
+    // LAYERINFO is already in the page block: no extra reads. Malformed is null.
     const info = if (block.get("LAYERINFO")) |raw| try layerinfo.parse(a, raw) else null;
 
     return .{ .block = block, .layers = layers, .layer_info = info, .number = entry.number };
 }
 
-/// Reads the leading bytes into `a` and detects the signature over the copy, so
-/// `Signature.raw` / `.filetype` are owned like everything else.
+/// Detects the signature over an arena copy, so its slices are owned.
 fn detectSignatureInto(a: std.mem.Allocator, src: Source) Error!signature.Signature {
     const n: usize = @intCast(@min(src.size(), signature.probe_len));
     const head = try a.alloc(u8, n);
@@ -161,8 +95,6 @@ fn detectSignatureInto(a: std.mem.Allocator, src: Source) Error!signature.Signat
     return signature.detect(head);
 }
 
-/// Reads the metadata block at `address` into `a` and parses it. The payload
-/// copy stays in the arena, which is what the returned entries point into.
 fn parseBlockInto(a: std.mem.Allocator, src: Source, address: u64) Error!keyblock.Block {
     const payload = src.blockAlloc(a, address) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
@@ -172,16 +104,8 @@ fn parseBlockInto(a: std.mem.Allocator, src: Source, address: u64) Error!keybloc
     return keyblock.parse(a, payload);
 }
 
-/// The cover image's content-block address out of a footer, or null when the
-/// note has no cover. The `COVER_n` suffix is a TYPE, not a page number:
-/// `COVER_3` and `COVER_2` are both user-set covers (`COVER_3` is the newer
-/// key a current-firmware "set as cover" writes), `COVER_1` an automatic one.
-/// The preference is newest-wins — `COVER_3`, then `COVER_2`, then `COVER_1`
-/// — which extends the reference implementation's `COVER_2`-over-`COVER_1`
-/// order (supernote-tool `parser.py`) to the key later devices emit. A value
-/// of `0` (the device writes an explicit `<COVER_0:0>` placeholder while no
-/// cover is chosen, and would treat a zeroed `COVER_n` the same way) and an
-/// absent key both mean "no cover". See note-format.md §5.
+/// The cover's content-block address: `COVER_3`, then `COVER_2`, then
+/// `COVER_1`; `0` (incl. `<COVER_0:0>`) or absent is none (`note-format.md` §5).
 fn coverAddressIn(footer: keyblock.Block) ?u64 {
     for ([_][]const u8{ "COVER_3", "COVER_2", "COVER_1" }) |key| {
         const addr = footer.getInt(key) orelse continue;
@@ -190,28 +114,14 @@ fn coverAddressIn(footer: keyblock.Block) ?u64 {
     return null;
 }
 
-/// One footer `PAGE<n>:<address>` entry: which page it is, and where it lives.
 pub const PageEntry = struct {
-    /// The `<n>` in the key, 1-based. See `types.Page.number`.
     number: u32,
-    /// The value: the byte offset of the page block.
     address: u32,
 };
 
-/// Every footer entry whose key starts with "PAGE", preserving footer order.
-///
-/// BOTH HALVES ARE DATA. The value is the page block's address; the KEY carries
-/// the page's own number, and this used to discard it — every caller got a bare
-/// address list and inferred the number from the position. That holds for a
-/// notebook, whose footer runs `PAGE1`, `PAGE2`, … with no gaps, and fails for a
-/// `.mark`, which stores only annotated pages and names them
-/// (`<PAGE2:…><PAGE5:…><PAGE6:…>`) — see `note-format.md` §13.2. Inferring from
-/// position there says a 3-page mark is pages 1-3 rather than 2, 5 and 6.
-///
-/// A PAGE entry whose VALUE is not a number is `Corrupt` — a footer that indexes
-/// a page it cannot point at is not "a file with fewer pages" — and so is one
-/// whose KEY carries no readable number, for the same reason: a page we cannot
-/// place is not a page we can quietly renumber.
+/// Every footer `PAGE<n>` entry in footer order. The key's `<n>` is data: a
+/// `.mark` stores only annotated pages (`note-format.md` §13.2). A non-numeric
+/// key or value is `Corrupt`.
 fn pageEntries(a: std.mem.Allocator, footer: keyblock.Block) Error![]const PageEntry {
     var n: usize = 0;
     for (footer.entries) |e| {
@@ -231,26 +141,13 @@ fn pageEntries(a: std.mem.Allocator, footer: keyblock.Block) Error![]const PageE
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// Eager full parse — the tier internals composed over one arena.
-// ---------------------------------------------------------------------------
+// ---- eager full parse ----
 
-/// A fully parsed `.note` container.
-///
-/// **The Note owns everything it exposes.** Every string it hands out —
-/// signature, header/footer/page/layer metadata — is copied into `arena` at
-/// parse time, so nothing borrows from the input. That is not merely tidier
-/// than a borrow-from-`bytes` contract: a ranged source has no persistent
-/// buffer to borrow from, so owning unconditionally is what makes the two
-/// backings behave identically instead of subtly differently. The cost is
-/// nothing that matters — a Note holds only metadata, never bitmaps.
-///
-/// `source` is retained to read *content* blocks (bitmaps, recognition text) on
-/// demand. For a `.ranged` source the caller must keep the underlying object
-/// (the blob) readable for the Note's lifetime.
+/// A fully parsed `.note`. Everything it exposes is copied into `arena`, so
+/// slice and ranged sources behave identically. `source` is kept for content
+/// blocks; a ranged source's blob must stay readable for the Note's lifetime.
 pub const Note = struct {
     arena: std.heap.ArenaAllocator,
-    /// Where content blocks are read from, by address.
     source: Source,
     signature: signature.Signature,
     header: keyblock.Block,
@@ -267,41 +164,29 @@ pub const Note = struct {
     pub fn fileId(self: Note) ?[]const u8 {
         return self.header.get("FILE_ID");
     }
-    /// The note's BASE (portrait) dims. A page's effective dims are
-    /// `dimensions().oriented(pages[i].orientation())` — see `types.Orientation`.
+    /// Base (portrait) dims; a page's are `.oriented(pages[i].orientation())`.
     pub fn dimensions(self: Note) types.Dimensions {
         return types.Dimensions.forEquipment(self.applyEquipment());
     }
     pub fn pageCount(self: Note) usize {
         return self.pages.len;
     }
-    /// The RLE variant this file's bitmaps use.
     pub fn rleVariant(self: Note) decoder.Variant {
         return decoder.variantForHighres(self.signature.supportsHighresGrayscale());
     }
-    /// The cover image's content-block address (newest-wins: `COVER_3` over
-    /// `COVER_2` over `COVER_1`; `0`/absent — including the device's
-    /// `<COVER_0:0>` "no cover set" placeholder — is null). The footer is part
-    /// of the eager parse, so this costs nothing; the block's LENGTH is equally
-    /// cheap via `source.blockRange(addr).len` (the 4-byte prefix only), and its
-    /// BYTES are one `source.blockAlloc(gpa, addr)` — what a budgeted indexer
-    /// streams. See note-format.md §5 for the `COVER_n` key semantics.
+    /// See `coverAddressIn`. Length is `source.blockRange(addr).len`.
     pub fn coverAddress(self: Note) ?u64 {
         return coverAddressIn(self.footer);
     }
 };
 
-/// Parses `bytes` into a `Note`. Thin wrapper over `parseSource` for callers
-/// that already hold the whole file; the resulting `Note` owns its strings, so
-/// `bytes` need NOT outlive it (though content-block reads via `note.source`
-/// still address into it — keep it alive to render).
+/// Parses a whole-file slice. The Note owns its strings, but content reads
+/// still address into `bytes`; keep it alive to render.
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Note {
     return parseSource(gpa, Source.fromSlice(bytes));
 }
 
-/// Parses whatever `src` addresses into a `Note` — Tier 1 plus a Tier-2 loop
-/// over every page, sharing one arena. Peak memory is the parsed metadata plus
-/// the single largest metadata block — never the file size.
+/// Tier 1 plus every page over one arena.
 pub fn parseSource(gpa: std.mem.Allocator, src: Source) Error!Note {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
@@ -324,21 +209,17 @@ pub fn parseSource(gpa: std.mem.Allocator, src: Source) Error!Note {
     };
 }
 
-// ---------------------------------------------------------------------------
-// Tests (fixture-driven tests live in tests/note_test.zig)
-// ---------------------------------------------------------------------------
+// ---- tests (fixture-driven ones are in tests/note_test.zig) ----
 
 test "parse rejects a too-short buffer" {
     try std.testing.expectError(error.Truncated, parse(std.testing.allocator, "ab"));
 }
 
 test "parse rejects a buffer without a valid signature" {
-    // 8 bytes so the footer-address read itself doesn't fail first.
     try std.testing.expectError(error.NotNote, parse(std.testing.allocator, "xxxxxxxx"));
 }
 
 test "a signature whose footer address points past EOF is Truncated" {
-    // Valid X-series head, then a footer address of 0xFFFFFFFF.
     const bytes = "noteSN_FILE_VER_20260016" ++ "\xFF\xFF\xFF\xFF";
     try std.testing.expectError(error.Truncated, parse(std.testing.allocator, bytes));
 }
