@@ -84,5 +84,16 @@ test {
     _ = @import("handlers/controlplane.zig");
     _ = @import("handlers/admin.zig");
     _ = @import("http/gzip_stitch.zig");
-    _ = @import("test/http_integration.zig");
+    _ = @import("test/http/auth_test.zig");
+    _ = @import("test/http/history_test.zig");
+    _ = @import("test/http/device_read_test.zig");
+    _ = @import("test/http/device_upload_test.zig");
+    _ = @import("test/http/browse_test.zig");
+    _ = @import("test/http/search_test.zig");
+    _ = @import("test/http/cache_test.zig");
+    _ = @import("test/http/bytes_test.zig");
+    _ = @import("test/http/events_test.zig");
+    _ = @import("test/http/bin_test.zig");
+    _ = @import("test/http/upload_test.zig");
+    _ = @import("test/http/pool_test.zig");
 }
