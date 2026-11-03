@@ -17,6 +17,8 @@ import { createFindController, type FindState } from "./findInNote";
 import { createReaderExports } from "./readerExports";
 import { OVAL_VIEWBOX, ovalsFor } from "./findOvals";
 import { createToolbar } from "./toolbar";
+import { createFileStage, type FileStage } from "./fileStage";
+import { createFindBarView, createVersionBanner } from "./readerBars";
 import { svg, VIEWER_IC } from "./viewerIcons";
 import { createPager, createZoomStepper, FIT_PAGE, FIT_WIDTH } from "./viewerControls";
 import { createViewerExportMenu } from "./viewerExportMenu";
@@ -209,11 +211,12 @@ export function createReader(deps: ReaderDeps): Reader {
 
   // --- the non-`.note` stage ------------------------------------------------
   // Shown instead of the canvas stage: an `<img>` or the no-preview block.
-  const fileImg = el("img", { class: "filestage__img", alt: "" }) as HTMLImageElement;
-  // `naturalWidth` is 0 until load, so re-apply the zoom then.
-  fileImg.addEventListener("load", () => sizeImage());
-  const fileBody = el("div", { class: "empty filestage__empty" });
-  const fileStage = el("div", { class: "filestage", hidden: true }, fileImg, fileBody);
+  const files: FileStage = createFileStage({
+    isCurrent: (id) => meta?.id === id,
+    onSized: () => sizeImage(),
+  });
+  const fileImg = files.img;
+  const fileStage = files.el;
 
   const pager = createPager({ readoutClass: "pager__count", onGo: (index) => goToPage(index) });
   // Walks the caller's ladder (note or image) and re-sizes the affected surface.
@@ -294,93 +297,19 @@ export function createReader(deps: ReaderDeps): Reader {
     onHistory: deps.onVersions ? (m, anchor) => deps.onVersions!(m, anchor, undefined) : undefined,
   });
 
-  // --- the "previewing an older version" banner (history mode) --------------
-  // History mode only; Restore is the one mutating action on this surface.
-  const versionBannerText = el("span", { class: "version-banner__text" });
-  const restoreVersionBtn = el("button", {
-    class: "btn version-banner__restore",
-    type: "button",
-    text: "Restore this version",
-  }) as HTMLButtonElement;
-  const versionBanner = el(
-    "div",
-    { class: "version-banner", role: "status", hidden: true },
-    el("span", { class: "version-banner__badge", "aria-hidden": "true", html: svg(VIEWER_IC.restore, 1.6) }),
-    versionBannerText,
-    restoreVersionBtn,
-  );
-
-  // --- the find bar ---------------------------------------------------------
-  const findToggle = el("button", {
-    class: "btn",
-    type: "button",
-    "aria-pressed": "false",
-    "aria-label": "Find in this note",
-    title: "Find in this note (Ctrl+F)",
-    html: svg(VIEWER_IC.find, 1.8),
-  });
-  const findInput = el("input", {
-    type: "text",
-    autocomplete: "off",
-    placeholder: "Find in this note",
-    "aria-label": "Find in this note",
-  }) as HTMLInputElement;
-  const findCount = el("span", { class: "findbar__count", role: "status", "aria-live": "polite" });
-  // Shown when ovals cannot be drawn (unverified or mismatched `pxPerMm`), so a
-  // correct count beside an unmarked page is explained.
-  const findNote = el("span", {
-    class: "findbar__note",
-    hidden: true,
-    text: "Match positions aren't available for this device.",
-  });
-  // Said once beside the counter, never per match.
-  const findFuzzy = el("span", {
-    class: "findbar__fuzzy",
-    role: "status",
-    hidden: true,
-    text: "No exact match — showing close matches.",
-  });
-  // Offered when the exact find is empty but a fuzzy one would match; reveals
-  // the fuzzy result already returned.
-  const findAsk = el("button", {
-    class: "findbar__ask",
-    type: "button",
-    hidden: true,
-    text: "Search similar",
-  }) as HTMLButtonElement;
-  const findPrev = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Previous match",
-    title: "Previous match",
-    html: svg(VIEWER_IC.prev, 1.9),
-  }) as HTMLButtonElement;
-  const findNext = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Next match",
-    title: "Next match",
-    html: svg(VIEWER_IC.next, 1.9),
-  }) as HTMLButtonElement;
-  const findClose = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Close find",
-    title: "Close find",
-    html: svg(VIEWER_IC.close, 1.9),
-  });
-  const findBar = el(
-    "div",
-    { class: "findbar" },
-    el("span", { class: "findbar__field", html: svg(VIEWER_IC.find, 1.8) }, findInput),
-    findCount,
-    findAsk,
-    findFuzzy,
-    findNote,
-    findPrev,
-    findNext,
-    findClose,
-  );
+  const { el: versionBanner, text: versionBannerText, restore: restoreVersionBtn } = createVersionBanner();
+  const {
+    el: findBar,
+    toggle: findToggle,
+    input: findInput,
+    count: findCount,
+    note: findNote,
+    fuzzy: findFuzzy,
+    ask: findAsk,
+    prev: findPrev,
+    next: findNext,
+    close: findClose,
+  } = createFindBarView();
 
   // Hidden in non-note modes. Zoom is not here: images zoom too.
   const noteOnly: HTMLElement[] = [findToggle, ocrToggle, layersToggle, pagesToggle, pager.el, exportMenu.el];
@@ -754,59 +683,14 @@ export function createReader(deps: ReaderDeps): Reader {
     if (url !== null) downloadLink.href = url;
   }
 
-  /** `title`/`body` vary so a failed image load says so. */
   function showNoPreview(m: NoteMeta, title: string, body: string): void {
-    fileImg.hidden = true;
-    fileImg.removeAttribute("src"); // stop a pending load painting over this
-    fileBody.hidden = false;
-    const download = rawFileUrl(m.id, m.fileHash, { download: true, bin: fromBin });
-    fileBody.replaceChildren(
-      el("div", { class: "empty__mark", text: m.fileType.toUpperCase() }),
-      // Device-authored: textContent, like every other name on this surface.
-      el("h3", { text: title }),
-      el("p", { text: body }),
-      ...(download
-        ? [el("a", { class: "btn filestage__download", href: download, download: "", html: svg(VIEWER_IC.down, 1.8) + "Download" })]
-        : []),
-    );
+    files.showNoPreview(m, title, body, rawFileUrl(m.id, m.fileHash, { download: true, bin: fromBin }));
   }
 
-  /** The no-preview layout minus the download, while an image loads. */
-  function showImageLoading(m: NoteMeta): void {
-    fileBody.hidden = false;
-    fileBody.replaceChildren(
-      el("div", { class: "empty__mark", text: m.fileType.toUpperCase() }),
-      el("h3", { text: m.name }),
-      el("p", { text: "Loading this picture…" }),
-    );
-  }
-
-  /**
-   * Image mode. The old `src` is cleared first, or the previous image stays
-   * painted under the new title until the new bytes arrive.
-   */
   function showImage(m: NoteMeta, url: string): void {
-    fileImg.onload = null;
-    fileImg.onerror = null;
-    fileImg.removeAttribute("src");
-    fileImg.hidden = true;
-    showImageLoading(m);
-    // Empty alt: the file name is already the heading.
-    fileImg.alt = "";
-    fileImg.onload = () => {
-      if (meta?.id !== m.id) return; // moved on while loading
-      fileBody.hidden = true;
-      fileBody.replaceChildren();
-      fileImg.hidden = false;
-      // Re-fit now that the image has layout.
-      sizeImage();
-    };
-    // An <img> error carries no status for `dispatchApiFailure`; fall back to no-preview.
-    fileImg.onerror = () => {
-      if (meta?.id !== m.id) return; // moved on while loading
-      showNoPreview(m, m.name, "Couldn't load a preview of this image. You can still download it.");
-    };
-    fileImg.src = url;
+    files.showImage(m, url, () =>
+      showNoPreview(m, m.name, "Couldn't load a preview of this image. You can still download it."),
+    );
   }
 
   /** Enter (or leave) a non-note mode: swap stages and prune the toolbar. */
@@ -1241,10 +1125,7 @@ export function createReader(deps: ReaderDeps): Reader {
     document.removeEventListener("keydown", onKey);
     filmEngine.reset();
     // Also keeps a reopen from flashing the previous image.
-    fileImg.onload = null;
-    fileImg.onerror = null;
-    fileImg.removeAttribute("src");
-    fileBody.replaceChildren();
+    files.clear();
     linkLayer.clear();
     linksByPage.clear();
     meta = null;
