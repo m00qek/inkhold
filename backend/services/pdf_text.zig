@@ -57,7 +57,7 @@ pub fn needsText(db: sqlite.Db, blob_md5: []const u8) !bool {
         &.{ .{ .text = blob_md5 }, .{ .int = noteindex.index_version } },
     )) orelse return false; // no current row: the note half heals first
     defer r.finalize();
-    return r.intOpt(0) == @as(?i64, @intFromEnum(pdfindex.Verdict.ok)) and r.intOpt(1) == null;
+    return r.intOpt(0) == @as(?i64, @backingInt(pdfindex.Verdict.ok)) and r.intOpt(1) == null;
 }
 
 /// Call inside the caller's transaction, last: the memo must not be true before
@@ -66,7 +66,7 @@ pub fn storeVerdict(db: sqlite.Db, blob_md5: []const u8, v: Verdict) !void {
     var s = try db.prepare("UPDATE note_index SET pdf_text = ?2 WHERE blob_md5 = ?1;");
     defer s.finalize();
     s.bindText(1, blob_md5);
-    s.bindInt(2, @intFromEnum(v));
+    s.bindInt(2, @backingInt(v));
     _ = try s.step();
 }
 
@@ -457,7 +457,7 @@ test "a PDF that yields NO TEXT is a verdict, and the walk is what knows it" {
     try testing.expect(!r.any_text);
 
     f.drain();
-    try testing.expectEqual(@as(?i64, @intFromEnum(Verdict.no_text)), try f.verdictOf(&md5));
+    try testing.expectEqual(@as(?i64, @backingInt(Verdict.no_text)), try f.verdictOf(&md5));
     try testing.expect(!try needsText(f.db, &md5)); // never offered again
 }
 
@@ -466,7 +466,7 @@ test "AN INDEXED PDF SETTLES: the tenant runs once, records `ok`, and is never o
     defer f.deinit();
 
     const md5 = try f.put(1, "book.pdf", book_pdf);
-    try testing.expectEqual(@as(?i64, @intFromEnum(Verdict.ok)), try f.verdictOf(&md5));
+    try testing.expectEqual(@as(?i64, @backingInt(Verdict.ok)), try f.verdictOf(&md5));
     try testing.expect(!try needsText(f.db, &md5));
 
     // A PDF contributes no `note_page_index` rows.
@@ -493,7 +493,7 @@ test "TRUNCATION IS RECORDED — a capped document says so, and says how much it
     try finish(f.db, &md5, capped, verdictFor(120, capped, true));
     try f.db.exec("COMMIT;");
 
-    try testing.expectEqual(@as(?i64, @intFromEnum(Verdict.truncated)), try f.verdictOf(&md5));
+    try testing.expectEqual(@as(?i64, @backingInt(Verdict.truncated)), try f.verdictOf(&md5));
     try testing.expect(!try needsText(f.db, &md5)); // recorded, so not retried
 }
 
@@ -504,12 +504,12 @@ test "A NOTE HEAL LEAVES THE PDF TENANT'S MEMO ALONE — a tenant owns its own a
     defer f.deinit();
 
     const md5 = try f.put(1, "book.pdf", book_pdf);
-    try testing.expectEqual(@as(?i64, @intFromEnum(Verdict.ok)), try f.verdictOf(&md5));
+    try testing.expectEqual(@as(?i64, @backingInt(Verdict.ok)), try f.verdictOf(&md5));
 
     try f.db.exec("UPDATE note_index SET index_version = 0;");
     try noteindex.ensureIndexed(testing.allocator, testing.io, f.db, f.files.blobs, &md5, 1);
 
-    try testing.expectEqual(@as(?i64, @intFromEnum(Verdict.ok)), try f.verdictOf(&md5));
+    try testing.expectEqual(@as(?i64, @backingInt(Verdict.ok)), try f.verdictOf(&md5));
     try testing.expect(!try needsText(f.db, &md5)); // not re-extracted for nothing
 }
 
@@ -546,7 +546,7 @@ test "a TERMINAL verdict is not retried by that rule — it never stored a shape
         var s = try f.db.prepare("UPDATE note_index SET pdf_probe = ?2 WHERE blob_md5 = ?1;");
         defer s.finalize();
         s.bindText(1, &md5);
-        s.bindInt(2, @intFromEnum(v));
+        s.bindInt(2, @backingInt(v));
         _ = try s.step();
         try testing.expect(!try pdfindex.needsProbe(f.db, &md5));
     }

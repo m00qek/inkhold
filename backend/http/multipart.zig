@@ -347,7 +347,7 @@ const ChunkedReader = struct {
     fn streamFn(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const self: *ChunkedReader = @fieldParentPtr("iface", r);
         if (self.pos >= self.data.len) return error.EndOfStream;
-        const want = @min(@min(self.chunk, @intFromEnum(limit)), self.data.len - self.pos);
+        const want = @min(@min(self.chunk, @backingInt(limit)), self.data.len - self.pos);
         const n = try w.write(self.data[self.pos..][0..want]);
         self.pos += n;
         return n;

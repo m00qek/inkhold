@@ -79,7 +79,7 @@ pub fn decodeInto(dest: []u8, variant: Variant, data: []const u8, all_blank: boo
                 try emit(dest, &pos, variant, code, len);
                 pushed = true;
             } else {
-        // The held run flushes at its high-part length; the current pair follows.
+                // The held run flushes at its high-part length; the current pair follows.
                 const held_len = ((@as(u32, h.len_byte) & 0x7f) + 1) << 7;
                 try emit(dest, &pos, variant, h.code, held_len);
             }
@@ -276,7 +276,6 @@ fn tailLength(tail: u8, gap: usize) u32 {
 }
 
 // ---- tests ----
-
 
 /// Test helper: `unit` repeated `n` times (Zig 0.17 removed `**`).
 fn repeat(comptime T: type, comptime unit: []const T, comptime n: usize) *const [unit.len * n]T {

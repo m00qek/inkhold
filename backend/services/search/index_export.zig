@@ -198,8 +198,8 @@ pub const Cursor = struct {
             .updated_at = self.stmt.columnInt(col_updated_at),
             .index_version = self.derivedVersion(md5),
             .tier = tier,
-        // Never NULL (an `EXISTS`), but a NULL must not default to `derived`,
-        // which licenses caching an empty set for ever.
+            // Never NULL (an `EXISTS`), but a NULL must not default to `derived`,
+            // which licenses caching an empty set for ever.
             .derivation = if (self.stmt.columnIsNull(col_derivation))
                 .unknown
             else if (self.stmt.columnInt(col_derivation) != 0) .pending else .derived,
@@ -279,7 +279,7 @@ pub fn writeManifest(gpa: std.mem.Allocator, out: *std.ArrayList(u8), m: Manifes
         var raw: [16]u8 = undefined;
         try md5FromHex(r.md5, &raw);
         try out.appendSlice(gpa, &raw);
-        try out.append(gpa, @as(u8, @intFromEnum(r.tier)) | (@as(u8, @intFromEnum(r.derivation)) << 4));
+        try out.append(gpa, @as(u8, @backingInt(r.tier)) | (@as(u8, @backingInt(r.derivation)) << 4));
         try appendVarint(gpa, out, @intCast(r.file_id));
         const at = if (prev_tier != null and prev_tier.? == r.tier)
             prev_at - r.updated_at // the gap, inside a tier
@@ -938,7 +938,7 @@ fn writeJson(gpa: std.mem.Allocator, out: *std.ArrayList(u8), m: Manifest) !void
         try out.print(
             gpa,
             "{{\"id\":{d},\"md5\":\"{s}\",\"tier\":{d},\"updatedAt\":{d},\"derivation\":{d}",
-            .{ r.file_id, r.md5, @intFromEnum(r.tier), r.updated_at, @intFromEnum(r.derivation) },
+            .{ r.file_id, r.md5, @backingInt(r.tier), r.updated_at, @backingInt(r.derivation) },
         );
         if (r.index_version) |v| try out.print(gpa, ",\"indexVersion\":{d}", .{v});
         try out.append(gpa, '}');

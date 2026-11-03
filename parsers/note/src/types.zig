@@ -38,12 +38,12 @@ pub const LayerSlot = enum(u8) {
 
     /// The slot's one-byte SNPG v2 wire id (the enum value; background = 4).
     pub fn wireId(self: LayerSlot) u8 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     pub fn fromWireId(id: u8) ?LayerSlot {
-        if (id > @intFromEnum(LayerSlot.background)) return null;
-        return @enumFromInt(id);
+        if (id > @backingInt(LayerSlot.background)) return null;
+        return @fromBackingInt(@intCast(id));
     }
 
     pub const all = [_]LayerSlot{ .main, .layer1, .layer2, .layer3, .background };

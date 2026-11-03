@@ -1671,8 +1671,8 @@ test "history restore: re-points via supersede, flips what is searchable, and is
 
     const RestoreVO = struct { success: bool, md5: []const u8, size: i64, createdAt: i64, current: bool };
 
-        // Restore goes through the supersede path, not a raw md5 UPDATE: the
-        // search manifest ships live rows by md5.
+    // Restore goes through the supersede path, not a raw md5 UPDATE: the
+    // search manifest ships live rows by md5.
     {
         const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/restore", .{ id, v1md5 });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", path, &web_tok, "{}");

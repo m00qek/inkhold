@@ -58,7 +58,7 @@ pub fn readBody(comptime T: type, gpa: std.mem.Allocator, req: *router.Request) 
     const reader = req.readerExpectContinue(&rbuf) catch return error.BadRequest;
     const body = reader.allocRemaining(gpa, .limited(max_body)) catch return error.BadRequest;
     defer gpa.free(body);
-        // `alloc_always`: the result must not point into `body`, freed here.
+    // `alloc_always`: the result must not point into `body`, freed here.
     return std.json.parseFromSlice(T, gpa, body, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,

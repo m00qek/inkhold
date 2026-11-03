@@ -136,7 +136,7 @@ pub fn serialize(gpa: std.mem.Allocator, note: note_mod.Note, page_index: usize)
 
     try out.appendSlice(gpa, MAGIC);
     try out.append(gpa, VERSION);
-    try out.append(gpa, @intFromEnum(variant));
+    try out.append(gpa, @backingInt(variant));
     try out.appendSlice(gpa, &.{ 0, 0 }); // reserved
     try appendU32(&out, gpa, dims.width);
     try appendU32(&out, gpa, dims.height);

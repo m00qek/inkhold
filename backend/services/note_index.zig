@@ -325,7 +325,7 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
                 .equipment = try dupeOpt(a, note.applyEquipment()),
                 .width = dims.width,
                 .height = dims.height,
-                .rle_variant = @intFromEnum(sn.page_payload.variantOf(note)),
+                .rle_variant = @backingInt(sn.page_payload.variantOf(note)),
                 .recogn_type = try dupeOpt(a, note.header.get("FILE_RECOGN_TYPE")),
                 .recogn_language = try dupeOpt(a, note.header.get("FILE_RECOGN_LANGUAGE")),
                 .recognized_page_count = recognized,

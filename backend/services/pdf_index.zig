@@ -67,7 +67,7 @@ pub fn needsProbe(db: sqlite.Db, blob_md5: []const u8) !bool {
     defer r.finalize();
     const verdict = r.intOpt(0);
     if (verdict == null) return true;
-    return verdict == @as(?i64, @intFromEnum(Verdict.ok)) and r.int(1) == 0;
+    return verdict == @as(?i64, @backingInt(Verdict.ok)) and r.int(1) == 0;
 }
 
 /// Record a successful probe. Call inside the caller's transaction.
@@ -90,7 +90,7 @@ pub fn storeVerdict(db: sqlite.Db, blob_md5: []const u8, v: Verdict) !void {
     var s = try db.prepare("UPDATE note_index SET pdf_probe = ?2 WHERE blob_md5 = ?1;");
     defer s.finalize();
     s.bindText(1, blob_md5);
-    s.bindInt(2, @intFromEnum(v));
+    s.bindInt(2, @backingInt(v));
     _ = try s.step();
 }
 

@@ -1566,7 +1566,7 @@ test "template links: noteMeta carries linksHash, and pageLinks serves the recor
                 .layers = &.{.{ .slot = .main, .bitmap = &bmp }},
                 .links = &.{
                     .{ .target_page = 3, .x = 901, .y = 192, .w = 407, .h = 50 },
-    // A URL carrying a comma and an `=`.
+                    // A URL carrying a comma and an `=`.
                     .{ .uri = "https://onplanners.com/g?a=1,2&b=3", .x = 53, .y = 464, .w = 297, .h = 121 },
                     .{ .uri = "javascript:alert(1)", .x = 10, .y = 10, .w = 50, .h = 50 },
                     .{ .target_page = 99, .x = 20, .y = 20, .w = 50, .h = 50 },

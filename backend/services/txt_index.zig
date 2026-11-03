@@ -276,7 +276,7 @@ pub fn storeVerdict(db: sqlite.Db, blob_md5: []const u8, v: Verdict) !void {
     var s = try db.prepare("UPDATE note_index SET txt_index = ?2 WHERE blob_md5 = ?1;");
     defer s.finalize();
     s.bindText(1, blob_md5);
-    s.bindInt(2, @intFromEnum(v));
+    s.bindInt(2, @backingInt(v));
     _ = try s.step();
 }
 
