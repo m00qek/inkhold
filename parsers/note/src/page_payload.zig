@@ -405,8 +405,11 @@ const Cursor = struct {
     }
 };
 
-// ---- tests (hand-built payloads; the real-fixture cross-check is in
-// tests/content_test.zig) ----
+test {
+    _ = @import("page_payload_test.zig");
+}
+
+// ---- tests of private helpers ----
 
 const testing = std.testing;
 
@@ -601,12 +604,6 @@ test "decodeRgba: hostile dimensions are refused before anything is allocated" {
         try testing.expectError(error.BadPayload, decodeRgba(gpa, out.items));
         try testing.expectError(error.BadPayload, decodeLayerRgba(gpa, out.items, 0));
     }
-}
-
-test "decodeRgba: bad magic / short buffer rejected, never crashes" {
-    const gpa = testing.allocator;
-    try testing.expectError(error.BadPayload, decodeRgba(gpa, "XXXX\x01\x01\x00\x00"));
-    try testing.expectError(error.BadPayload, decodeRgba(gpa, "SN"));
 }
 
 test "backgroundImageHash: a bit2 background record yields its asset hash" {
