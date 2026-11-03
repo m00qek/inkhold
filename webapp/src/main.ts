@@ -1,11 +1,5 @@
-// App bootstrap: hash routing + a light auth guard, and THE one place the whole
-// dependency graph is wired. Login and change-password are always reachable; the
-// library/reader are guarded — we resolve the session profile via `api.me()`
-// (the HttpOnly cookie is invisible to JS) before building the app shell.
-//
-// In dev + e2e the browse/render/live seams are the fakes; P4 swaps `dataApi` for
-// the real HTTP `Api`, P5 swaps `renderer` for the WASM decoder, and P4 also swaps
-// `live` for the SSE `createLiveChannel` — each is a one-line change right here.
+// App bootstrap: routing, the auth guard (`api.me()`, since the HttpOnly
+// cookie is invisible to JS), and the one place the dependency graph is wired.
 
 import { onRoute, go, current, type Route } from "./router";
 import { mount } from "./ui/dom";
@@ -27,26 +21,17 @@ import type { Api } from "./api/types";
 import type { NoteRenderer } from "./render/types";
 import type { LiveChannel } from "./sync/types";
 
-// Re-apply the pinned theme. index.html already did this inline before first
-// paint (that's what avoids the flash); this is the belt-and-braces copy for any
-// host page without that snippet. Idempotent, and it must run before the shell is
-// built so every render is keyed to the right theme from the very first paint —
-// the render cache is keyed by {hash, size, theme}, so a late flip would leave
-// off-theme bitmaps on screen.
+// Re-apply the pinned theme (index.html already did, pre-paint) before the
+// shell exists: render cache keys include the theme.
 applyStoredTheme();
 
 const app = document.getElementById("app");
 if (!app) throw new Error("missing #app mount point");
 const root = app;
 
-// --- the dependency graph — THE one place fakes swap for the real stack ------
-// The shipped app talks to the real control-plane `Api`, the WASM decoder, and the SSE
-// live channel. Dev + e2e default to the fakes so `npm run dev`/`npm test` need
-// no backend or wasm build; `?real` forces the real stack in dev (against a
-// proxied backend), and `?fake` forces the fakes in a production build.
-// The flag is accepted whether it lands before or after the `#` (hash routing
-// otherwise makes `?real` easy to lose), and the choice is remembered in
-// localStorage so it survives reloads/navigation that drop the query string.
+// --- dependency graph: the one place fakes swap for the real stack ---
+// Dev and e2e default to fakes (no backend or wasm needed). `?real`/`?fake`
+// override, before or after the `#`, and stick in localStorage.
 function useFakes(): boolean {
   const search = new URLSearchParams(location.search);
   const hashQuery = new URLSearchParams(location.hash.split("?")[1] ?? "");
@@ -56,40 +41,30 @@ function useFakes(): boolean {
     writeLocal("sn.mode", flag);
     return flag === "fake";
   }
-  // Via readLocal, not localStorage directly: this runs at module scope, and a
-  // raw read throws outright in private mode — which would take boot down here.
+  // readLocal: a raw localStorage read throws in private mode.
   const stored = readLocal("sn.mode");
   if (stored) return stored === "fake";
   return import.meta.env.DEV;
 }
 
 const fakes = useFakes();
-// The fakes are DYNAMICALLY imported, and only in the fakes branch, so Vite
-// splits `./api/fake` + `./render/fake` (~1,700 lines) into their own lazy
-// chunk instead of bundling them into the production entry the real stack ships.
-// Prod never takes this branch, so it never fetches that chunk. The `import()`
-// makes wiring async — hence the top-level `await` here (ES2022 module target),
-// which blocks boot until `dataApi`/`renderer` exist, before `onRoute` registers.
+// Fakes are dynamically imported so Vite keeps them out of the production
+// chunk; hence the top-level await before `onRoute` registers.
 const dataApi: Api = fakes ? (await import("./api/fake")).createFakeApi() : createHttpApi();
 const renderer: NoteRenderer = fakes
   ? (await import("./render/fake")).createFakeRenderer()
   : createWasmRenderer({ getTemplate: createTemplateProvider(dataApi) });
 const live: LiveChannel = fakes ? { subscribe: () => () => {} } : createLiveChannel();
-// ONE persistent thumbnail store (`sn-thumbs`), opened here and SHARED by both the
-// render cache (note-page renders) and the thumbnail facade (`.spd`/`.txt`/cover/
-// image tiles). Opened exactly once — a second `openThumbStore()` would be a
-// second IDB connection to the same database — so every thumbnail lives in one
-// store, under one byte budget, with one lifetime that survives reloads uniformly.
+// One thumbnail store shared by the render cache and the thumbnail facade: a
+// second `openThumbStore()` would open a second IDB connection.
 const thumbStore = openThumbStore();
 const cache = createRenderCache({ persistent: thumbStore });
 
-// --- app shell lifecycle ---------------------------------------------------
+// --- app shell lifecycle ---
 let shell: AppShell | null = null;
 let profile: Me | null = null;
-// A teardown for the current pre-auth page, when it holds resources that must not
-// outlive the screen (the connect step's live-channel subscription). Run on every
-// route change before the next page mounts, so leaving by ANY means — a button, a
-// redirect, the Back button — closes it.
+// Teardown for a pre-auth page holding resources (connect's live
+// subscription); run on every route change.
 let disposePage: (() => void) | null = null;
 
 function onSignOut(): void {
@@ -101,12 +76,8 @@ function onSignOut(): void {
 }
 
 /**
- * The `sn_session` cookie expired while the shell was open — the shell told us so
- * after an API call came back 401/403. Same landing as sign-out (clear the auth
- * hint, route to login), and the same teardown: `go("/login")` fires the login
- * route, whose handler calls `teardownShell()`, so no stale listing/reader state
- * survives into the next sign-in. Unlike sign-out there's no `logout()` call — the
- * session the server would revoke is already gone.
+ * The session cookie expired (an API call came back 401/403). Like sign-out
+ * minus `logout()`; the login route tears down the shell.
  */
 function onSessionExpired(): void {
   session.clear();
@@ -135,8 +106,8 @@ function teardownShell(): void {
   profile = null;
 }
 
-/** Resolve the signed-in profile, redirecting to login/change-password as needed.
- * Returns null when it has already navigated away. */
+/** Resolve the signed-in profile, redirecting to login/change-password as needed;
+ * null when it has navigated away. */
 async function ensureProfile(): Promise<Me | null> {
   if (profile) return profile;
   const me = await authApi.me();
@@ -154,7 +125,6 @@ async function ensureProfile(): Promise<Me | null> {
 }
 
 async function renderRoute(route: Route): Promise<void> {
-  // Close the previous page's resources (see `disposePage`) before anything else.
   disposePage?.();
   disposePage = null;
 
@@ -168,32 +138,21 @@ async function renderRoute(route: Route): Promise<void> {
       mount(root, changePasswordPage());
       return;
     case "connect": {
-      // The connect step is behind the same guard as the app: only a fully
-      // signed-in user (past the mandatory password change) reaches it, and
-      // `ensureProfile` sends everyone else back to login/change-password.
+      // Same guard as the app.
       const me = await ensureProfile();
       if (!me) return;
-      // Like the other pre-auth arms: tear down any shell so it and the connect
-      // screen are never both alive (reachable via Back after "Open the library").
+      // Never keep the shell and connect alive together (reachable via Back).
       teardownShell();
       const page = connectPage({ live });
       disposePage = page.dispose;
       mount(root, page.node);
       return;
     }
-    // EVERY PLACE INSIDE THE APP, and the auth guard is in front of all of them
-    // at once. Routing more places must not open a path around it, so the guard
-    // stays on the shared arm rather than being repeated per destination: a new
-    // `case` added below without a matching `ensureProfile()` would be a signed
-    // -out screen, and there is no `case` to add.
+    // Every in-app place shares one guarded arm, so a new place can't skip it.
     case "library":
     case "folder":
     case "search":
     case "destination":
-    // Your own account. Behind the SAME guard as everything else here and
-    // gated on nothing further: it is reachable only when signed in, and every
-    // signed-in person — admin or not — must be able to open it, which is the
-    // one thing the admin console cannot offer.
     case "account":
     case "note":
     case "note-version":
@@ -202,26 +161,15 @@ async function renderRoute(route: Route): Promise<void> {
       if (!me) return; // redirected to login / change-password
       const shellInstance = ensureShell(me.email ?? "", me.isAdmin);
       mount(root, shellInstance.el);
-      // THE SHELL REACTS; IT DOES NOT DECIDE. Which folder is listed, which
-      // destination is up, what is in the search box and where the reader is
-      // open all come off the route — so a reload, a copied link and a
-      // re-dispatch land on exactly the same screen, and Back means the same
-      // thing wherever you are.
+      // The shell reacts to the route; it does not decide.
       switch (route.name) {
         case "note":
           await shellInstance.openNote(route.id, route.page, route.q);
           return;
         case "note-version":
-          // The version deep link resolves client-side (past → preview, current →
-          // canonicalise to the live note, none → live note + notice). See
-          // `AppShell.openNoteVersion`.
           await shellInstance.openNoteVersion(route.id, route.short, route.page);
           return;
         case "bin-note":
-          // The recycle-bin deep link: ensure the bin listing is loaded, find the
-          // trashed file and open it with a `bin` origin at `route.page`; a file no
-          // longer in the bin falls back to the listing + a notice. See
-          // `AppShell.openBinNote`.
           await shellInstance.openBinNote(route.id, route.page);
           return;
         case "folder":
@@ -245,23 +193,9 @@ async function renderRoute(route: Route): Promise<void> {
 }
 
 /**
- * A ROUTE THAT COULD NOT BE RENDERED SAYS SO.
- *
- * Reached from the `onRoute` seam (see router.ts) for every arm at once, so the
- * boot arm — the one that runs with `#app` still empty and therefore the one
- * whose failure was a blank page — is covered by the same code as the rest.
- *
- * SIGNED OUT IS NOT UNREACHABLE. `dispatchApiFailure` is the client's own
- * taxonomy seam and already owns that rule: a 401/403 is `UNAUTHORIZED` and
- * lands on `onSessionExpired` → `#/login`, exactly as before. (The common
- * spelling of "no session" never gets here at all — `api.me()` answers null for
- * it, and the guard routes to login itself.) Everything left is a server that
- * gave no usable answer, and for that a login form would be a lie.
- *
- * The shell is deliberately NOT torn down. It holds the listing, the reader and
- * their caches; a transient network failure should cost a retry, not a reload
- * of everything. Detached from the DOM it renders nothing, and `ensureShell`
- * hands the same instance back when the retry succeeds.
+ * Render a failed route as such. 401/403 goes through `dispatchApiFailure`
+ * to login; anything else is a server with no usable answer. The shell is
+ * kept so a retry doesn't reload everything.
  */
 function showRouteFailure(error: unknown, route: Route): void {
   if (dispatchApiFailure({ onSessionExpired }, error)) return;
@@ -271,18 +205,9 @@ function showRouteFailure(error: unknown, route: Route): void {
 
 onRoute(renderRoute, showRouteFailure);
 
-// THE BACKSTOP, and only that. Every route arm is handled above; this catches
-// the rejections that belong to nothing on screen — a bare `void promise` in a
-// page, a listener that went async — and it acts ONLY when the app has painted
-// nothing at all, because that is the case indistinguishable from a blank page.
-// With something already mounted, hijacking the whole screen for a stray
-// background failure would destroy more than it explains, so it stays a console
-// error (and the default logging is left intact — no `preventDefault`).
-//
-// It is NOT the fix, and `tests/e2e/boot.spec.ts` is written so that it cannot
-// be mistaken for one: with the seam's catch removed, this backstop still
-// satisfies every cold-boot assertion (measured), so that file carries one case
-// only the seam can answer — a route that fails with a page already on screen.
+// Backstop for stray rejections, acting only when nothing is mounted (the
+// blank-page case). Not the fix: `tests/e2e/boot.spec.ts` has a case only the
+// `onRoute` seam can satisfy.
 window.addEventListener("unhandledrejection", (e) => {
   if (root.childElementCount > 0) return;
   showRouteFailure(e.reason, current());

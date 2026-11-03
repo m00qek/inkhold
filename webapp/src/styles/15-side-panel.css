@@ -1,25 +1,9 @@
-/* ================= SHARED SIDE PANEL ================= */
-/* The reader's docked side-panel CHROME (src/ui/sidePanel.ts) — the ONE card
-   both the "Layers" panel (14-layers-panel.css fills its body with rows) and the
-   "Recognized text" OCR panel (reader.ts fills its body with the transcript)
-   ride. This treatment used to be hand-copied across `.layers-panel` (14) and
-   `.ocr` (07) and kept in sync only by comments — which is exactly how their
-   widths and card radii drifted apart. It lives in ONE place now; the two panels
-   differ only where a token says they should (width) and where the body's own
-   content differs.
+/* ---- shared side panel ----
+   The one card for the Layers and OCR panels (src/ui/sidePanel.ts); they differ
+   only by width token and body content. */
 
-   Appended at the END of the manifest (after 14) per the manifest's own rule;
-   the earlier files now carry only each panel's body-specific look. A format's
-   HOOK classes (`.spd-layers`, `.ocr`, …) sit on these same elements for tests
-   and format-specific rules — they carry no chrome of their own. */
-
-/* The card — docked on the RIGHT of the reader's page (and the `.spd` viewer's
-   stage), opened by a toolbar toggle that wears the open-panel active look off
-   its own `aria-pressed`/`aria-expanded`. A `--sheet` ground, a full `--line`
-   border, the raised-card corner and matching padding. `hidden` drops it from
-   layout so the stage takes the full width when it is shut. The dock MARGIN is
-   context-specific and lives with each context: none here (the reader's
-   `.page-wrap` pays a flex gap), a stage margin in `.spd-body` (12). */
+/* The card, docked right; `hidden` gives the stage full width. Dock margin is
+   per context (none in the reader, a stage margin in `.spd-body`). */
 .side-panel {
   flex: none;
   width: var(--panel-w);
@@ -36,33 +20,19 @@
 .side-panel[hidden] {
   display: none;
 }
-/* The wider track — the layers panel, whose rows carry a name + opacity stepper
-   + eye + a page-sized thumbnail. 320 (up from a plain 268) keeps the name +
-   controls column usable beside a landscape thumbnail that leads ~135px wide. */
+/* Wider for the layers panel's rows beside a landscape thumbnail. */
 .side-panel--wide {
   width: var(--panel-w-wide);
 }
 
-/* The NARROW track — a page index, whose rows are a thumbnail and a number and
-   want far less width than the text/list panels this primitive defaults to.
-   `.pages` is the hook `createPageIndex` stamps on every panel it builds, so
-   both the `.note` reader and the PDF viewer get it by construction.
-
-   IT LIVES HERE, WITH THE OTHER WIDTH VARIANT, and that is load-bearing rather
-   than tidy. It was `#note-pages-panel` in 06-reader.css — the reader's own id,
-   from when the reader was the only thing with a page index — and moving it to
-   the component's class first put it in that same file, where it silently did
-   NOTHING: `.side-panel`'s own `width` above is one class too, and 15 loads
-   after 06, so equal specificity meant source order won. The id had been
-   masking the collision all along. Beside the rule it overrides, it works for
-   the reason it reads like it should. */
+/* Narrow for a page index (`.pages`, stamped by `createPageIndex`). Must live
+   here beside `.side-panel`: at equal specificity in an earlier file, source
+   order made it a no-op. */
 .pages {
   width: var(--panel-w-narrow);
 }
 
-/* `[icon] Label` — the feature's glyph inline before a mono-eyebrow label, in
-   the panel's own `--ink-faint`. The icon is decorative (`aria-hidden`); the
-   card's `aria-label` names the panel. */
+/* `[icon] Label`; the icon is decorative and the card's `aria-label` names it. */
 .side-panel__head {
   display: flex;
   align-items: center;
@@ -87,15 +57,12 @@
   color: var(--ink-faint);
 }
 
-/* The body region the caller fills. Structural only — its content carries its
-   own look (`.layers-panel__list` rows, `.ocr__body` transcript text). */
+/* Structural only; the content carries its own look. */
 .side-panel__body {
   min-width: 0;
 }
 
-/* The shared state line: "still loading" / "nothing here" / "that failed",
-   spoken identically by every panel. Set apart from real body content (a mono
-   eyebrow in `--ink-faint`) so "nothing recognized here" never reads as text. */
+/* The shared loading/empty/error line, styled apart from real content. */
 .side-panel__state {
   margin: 0;
   font-family: var(--font-mono);

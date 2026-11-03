@@ -1,15 +1,6 @@
-// Step 3 of first-run onboarding: connect the Supernote. Reached only after the
-// mandatory password change (see changePassword.ts). Shows the address to point
-// the device at, then waits for real evidence the device arrived — a syncVersion
-// bump on the live channel — before offering to open the freshly-synced library.
-//
-// Two ways forward, both landing in the library: "Open the library" lights up the
-// moment the device syncs; "I'll connect it later" is always there for someone
-// who will pair the device another time.
-//
-// Returns a disposer as well as the node: the page holds a live-channel
-// subscription (an open SSE connection), and main.ts runs the disposer when the
-// route changes so the connection never outlives the screen.
+// Onboarding step 3: shows the address to point the Supernote at and waits for
+// a syncVersion bump on the live channel. Returns a disposer so main.ts can
+// close the SSE subscription on route change.
 
 import { el } from "../ui/dom";
 import { authView, stepDots } from "../ui/chrome";
@@ -22,8 +13,7 @@ export interface ConnectPage {
   dispose: () => void;
 }
 
-/** The address the browser is currently on — the honest fallback when the server
- * can't tell us its own LAN address (or the endpoint isn't there yet). */
+/** Fallback when the server can't report its LAN address. */
 function browserAddress(): string {
   return `${window.location.protocol}//${window.location.host}`;
 }
@@ -38,8 +28,7 @@ export function connectPage(opts: { live: LiveChannel }): ConnectPage {
       try {
         await navigator.clipboard.writeText(addrCode.textContent ?? "");
       } catch {
-        /* clipboard blocked (no permission / insecure context) — the address is
-           on screen to copy by hand; a failed copy is not an error worth raising */
+        /* clipboard blocked; the address is on screen to copy by hand */
       }
       const prev = copy.textContent;
       copy.textContent = "Copied";
@@ -93,14 +82,12 @@ export function connectPage(opts: { live: LiveChannel }): ConnectPage {
   const view = authView(form);
   view.querySelector(".sheet")?.append(stepDots(3));
 
-  // Prefer the server's own LAN address; fall back to wherever the browser is.
   void api.serverInfo().then((info) => {
     if (info?.address) addrCode.textContent = `${window.location.protocol}//${info.address}`;
   });
 
-  // The step resolves on the device's own evidence: the first syncVersion the
-  // channel reports is the baseline (the empty pre-sync state); a later, higher
-  // version means a device just synced onto this account while we watched.
+  // The first syncVersion is the pre-sync baseline; a higher one means the
+  // device just synced.
   let baseline: number | undefined;
   let done = false;
   const markConnected = () => {

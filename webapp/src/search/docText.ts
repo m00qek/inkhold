@@ -1,4 +1,4 @@
-// ONE DOCUMENT'S TEXT — §1.1's other half of the index.
+// One document's text record, for in-document find.
 //
 //     GET /api/controlplane/text/<md5>?v=<index_version>
 //
@@ -6,58 +6,38 @@
 //     {"p":0,"o":0,"l":142,"t":"the real text"}    one line per segment
 //     {"p":1,"t":"the real text"}                  …with no byte range
 //
-// What this must not break:
-//   * `?v=` IS HALF THE CACHE KEY. The response is `immutable` and the path
-//     carries only the md5; an `index_version` bump re-derives the same md5
-//     into a NEW file, so without `?v=` the browser is stranded on an old
-//     parser's text with no symptom (the `PageTextVO.words` regression). The
-//     server ignores it for lookup; it exists to make the URL MOVE. Omitted
-//     when unknown, never guessed.
-//   * Absent `o`/`l` decode as `null`, not 0: a `.txt` paragraph legitimately
-//     starts at byte 0, and a defaulted 0 would map every `.note` page onto
-//     the top of a file that has none.
-//   * `n` is the ADDRESS SPACE, not the row count — an empty segment produces
-//     no line. Read whole (nothing shows before the whole document is indexed);
-//     browser-inflated gzip, no `DecompressionStream`; no cache here — the
-//     HTTP cache is the on-demand story (§4.4).
+// The response is `immutable` and keyed by md5 only, so `?v=` exists to make
+// the URL move when re-derivation changes the text; omitted when unknown.
+// `n` is the address space, not the row count: empty segments have no line.
 
 import { bytesBudget } from "../api/client";
 import { SearchWireError } from "./manifestCodec";
 
 const TEXT_URL = "/api/controlplane/text";
 
-/** One extracted segment: its ordinal, its address where the ordinal is not one,
- *  and its text. */
+/** One extracted segment. */
 export interface TextSegment {
-  /** The ordinal — a `.note` page, a PDF page, a `.txt` paragraph. */
   readonly p: number;
-  /** The `.txt` byte offset into the raw blob. `null` for `.note` and `.pdf`,
-   *  where `p` is already the address. */
+  /** `.txt` byte offset into the raw blob; `null` where `p` is the address. A real 0 is a `.txt` start. */
   readonly o: number | null;
-  /** The `.txt` byte length. `null` wherever {@link o} is. */
   readonly l: number | null;
-  /** The segment's real text, unfolded — FTS5 folds it on insert, which keeps
-   *  the fold single and the byte ranges usable against the raw blob. */
+  /** Unfolded; FTS5 folds on insert, keeping byte ranges valid against the blob. */
   readonly t: string;
 }
 
-/** One document's text record. */
 export interface DocumentText {
-  /** 32 lowercase hex — the blob's content address, and the route's key. */
   readonly md5: string;
-  /** The record's own `v` — what it was DERIVED at. Nothing here compares it. */
+  /** The record's own `v`, what it was derived at. */
   readonly indexVersion: number;
-  /** `n`: the ADDRESS SPACE. Not `segments.length`. */
+  /** `n`, the address space; not `segments.length`. */
   readonly segmentCount: number;
-  /** Only the segments that carried text, in the order the server wrote them. */
   readonly segments: readonly TextSegment[];
 }
 
 /**
- * The route answered 404. DELIBERATELY AMBIGUOUS — unreachable md5 or not yet
- * derived — because distinguishing them would tell an unauthorized caller
- * which md5s exist. NOT an empty result: rendering it as "No matches" would be
- * a confident false statement, so it reaches the viewers as their `error` state.
+ * The route answered 404: unreachable and not-yet-derived are deliberately
+ * indistinguishable, so md5 existence does not leak. Shown as an error, never
+ * as "No matches".
  */
 export class DocumentTextUnavailable extends Error {
   override readonly name = "DocumentTextUnavailable";
@@ -68,10 +48,7 @@ export class DocumentTextUnavailable extends Error {
   }
 }
 
-/**
- * How `docSearch.ts` gets a document's text. Injectable so tests need no
- * network. `indexVersion` null means "not known", never "version 0".
- */
+/** `indexVersion` null means "not known", never version 0. */
 export type TextTransport = (
   md5: string,
   indexVersion: number | null,
@@ -80,12 +57,7 @@ export type TextTransport = (
 
 const MD5_HEX = /^[0-9a-f]{32}$/;
 
-/**
- * Parse a whole text record. Refuses what it cannot read rather than
- * defaulting it: the tempting default `n = segments.length` is wrong by
- * construction, and a defaulted `o` is a byte range pointing at the top of
- * the file.
- */
+/** Refuses what it cannot read rather than defaulting `n` or `o`. */
 export function parseDocumentText(body: string): DocumentText {
   let header: { md5: string; indexVersion: number; segmentCount: number } | null = null;
   const segments: TextSegment[] = [];
@@ -104,8 +76,7 @@ export function parseDocumentText(body: string): DocumentText {
     const record = value as Record<string, unknown>;
 
     if ("md5" in record) {
-      // A second header is a stitched stream reaching a single-record route,
-      // which would index two documents' segments under one ordinal space.
+      // A second header means a stitched stream reached a single-record route.
       if (header !== null) throw new SearchWireError("text record carries a second document header");
       const md5 = record["md5"];
       const v = record["v"];
@@ -129,8 +100,7 @@ export function parseDocumentText(body: string): DocumentText {
     segments.push(parseSegment(record));
   }
 
-  // A header with nothing under it is a complete document whose text
-  // extracted to nothing. No header at all is not.
+  // A header with no segments is a document whose text extracted to nothing.
   if (header === null) throw new SearchWireError("text record carries no document header");
   return { ...header, segments };
 }
@@ -144,8 +114,7 @@ function parseSegment(record: Record<string, unknown>): TextSegment {
   if (typeof t !== "string") {
     throw new SearchWireError("text record carries a segment line with no text");
   }
-  // `o` and `l` travel TOGETHER or not at all: a length with no offset would
-  // silently mark from byte 0.
+  // `o` and `l` travel together; a lone length would mark from byte 0.
   const hasO = "o" in record;
   const hasL = "l" in record;
   if (hasO !== hasL) {
@@ -161,26 +130,20 @@ function parseSegment(record: Record<string, unknown>): TextSegment {
 }
 
 /**
- * The real transport. Cookie-authenticated, and on the BYTES budget rather
- * than a total-duration cap (`indexTransport.ts`): a stall at 5% and a slow
- * success over 3G are indistinguishable to a timer, and the worst document is
- * 3.15 MB.
+ * Cookie-authenticated, on the bytes budget rather than a duration cap: a
+ * stall and a slow 3G success look the same to a timer.
  */
 export function httpTextTransport(): TextTransport {
   return async (md5, indexVersion, signal) => {
     const budget = bytesBudget(signal);
-    // Through `URLSearchParams`: a value that happens to be URL-safe today is a
-    // percent-encoding bug tomorrow.
     const query = indexVersion === null ? "" : `?${new URLSearchParams({ v: String(indexVersion) })}`;
     try {
       const res = await fetch(`${TEXT_URL}/${encodeURIComponent(md5)}${query}`, {
         credentials: "same-origin",
         signal: budget.signal,
       });
-      // BYTE-IDENTICAL FOR EVERY REFUSAL — see `DocumentTextUnavailable`.
       if (res.status === 404) throw new DocumentTextUnavailable(md5);
       if (!res.ok) throw new Error(`text/${md5}: ${res.status}`);
-      // `content-encoding: gzip` is inflated by the browser before this resolves.
       return parseDocumentText(await res.text());
     } finally {
       budget.done();

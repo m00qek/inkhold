@@ -33,9 +33,7 @@ export function field(opts: FieldOpts): Field {
   if (opts.minLength) input.minLength = opts.minLength;
   if (opts.autofocus) {
     input.autofocus = true;
-    // The field is created before it's mounted, and the HTML autofocus attribute
-    // only fires reliably for elements present at parse time — not ones inserted
-    // by script. Focus explicitly once the current task (which mounts us) drains.
+    // `autofocus` only fires for elements present at parse time, not inserted ones.
     queueMicrotask(() => input.focus());
   }
 

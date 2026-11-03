@@ -1,22 +1,13 @@
-/* ================= READER ================= */
-/* One column, three rows: the bar, the find bar, and the content row. The page
-   index is no longer a reader COLUMN — it is a docked side panel inside
-   `.page-wrap` (like Layers and OCR), so the reader grid carries only the header
-   rows over the single content row. */
+/* ---- reader ----
+   One column: the bar, the version banner, the find bar, the content row. */
 .reader {
   position: absolute;
   inset: 0;
   display: none;
-  /* `minmax(0, 1fr)` — NOT bare `1fr`. A `1fr` track floors at the column's
-     min-content, and the reader__bar's toolbar (a non-wrapping flex row of
-     controls) has a min-content wider than a narrow viewport, so `1fr` let the
-     single column — and with it the stage — grow past the viewport and scroll
-     horizontally. `minmax(0, …)` caps the track at the container width; the
-     toolbar and stage manage their own overflow inside it. */
+  /* `minmax(0, 1fr)`, not `1fr`: a `1fr` track floors at the toolbar's
+     min-content, letting the stage grow past a narrow viewport. */
   grid-template-columns: minmax(0, 1fr);
-  /* Four rows now: the bar, the "previewing an older version" banner (0-height
-     when hidden — an empty auto track collapses), the find bar, and the content
-     row. The banner only ever shows in history-preview mode. */
+  /* The version banner's empty auto row collapses when hidden. */
   grid-template-rows: auto auto auto 1fr;
   background: var(--desk);
 }
@@ -36,36 +27,20 @@
   display: grid;
 }
 
-/* Reading is a MODE, not a folder. The library topbar repeated the note's title
-   and its folder, and two of the controls it kept were wrong here: sort and the
-   view toggle describe a listing, and the search box was worse than dead weight
-   — typing in it CLOSED the reader, so it looked like search-within-note and did
-   the opposite. The reader's own bar carries everything reading needs, so the
-   library header leaves rather than sitting above it repeating itself.
-
-   This is why the theme toggle is NOT in here: it is an app-level preference,
-   and hiding this bar took it away exactly while reading. It has since moved on
-   again, to the account page's Appearance section — whose door is the rail
-   footer's nameplate (`.account`), which nothing hides at any width, so it is
-   still reachable from a note. */
+/* Reading is a mode: the library topbar (sort, view, and a search box that
+   would close the reader) leaves. The theme toggle lives on the account page,
+   reachable from the always-visible rail nameplate. */
 .sn-root.is-reading .topbar {
   display: none;
 }
 
-/* The page-index rail — the BODY of the "Pages" side panel now (src/ui/sidePanel.ts
-   frames it: the `--sheet` ground, `--line` border, corner, padding and the
-   scroll all belong to `.side-panel`). So the rail keeps only its own inner
-   layout: a centred column of page thumbnails. */
-
+/* The page-index rail: the body of the "Pages" side panel (frame from `.side-panel`). */
 .filmstrip {
   display: block;
 }
 .filmstrip__page {
-  /* LOAD-BEARING for `.filmstrip__hits`, which is absolutely positioned against
-     it. Without this the badges resolve against a distant positioned ancestor
-     and stack in the window corner — with the right counts in the DOM and
-     nothing visible where they belong. */
-  position: relative; /* Overridden to absolute by VirtualList, but kept for specificity fallback */
+  /* Load-bearing: `.filmstrip__hits` is absolutely positioned against it. */
+  position: relative; /* VirtualList overrides to absolute */
   border: 0;
   background: transparent;
   cursor: pointer;
@@ -73,64 +48,31 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  /* The number is a CAPTION under the page, not a line of it. Sitting flush
-     against the thumbnail's bottom edge it read as part of the sheet — the row
-     is a fixed 124px and the thumbnail 101px, so the slack was all pooling
-     BELOW the number instead of between the two things it had to separate. */
+  /* The number is a caption under the page, not part of it. */
   gap: var(--sp-1);
   height: var(--preview-h-filmstrip);
-  /* THE INK GUTTER, reserved on every row whether or not it draws a stroke, so
-     the thumbnails do not shift sideways as the rail fills in. It belongs to the
-     ROW rather than to `.filmstrip` because `VirtualList` positions each row
-     absolutely (`left: 0; right: 0`) — a gutter on the container would be
-     stepped over by the row's own placement, and the stroke would sit under the
-     thumbnail instead of beside it. It also has to clear the `aria-current`
-     outline, which is 1.5px at `outline-offset: 2px` on the thumb. */
+  /* The ink gutter, reserved on every row so thumbnails don't shift. On the row,
+     because `VirtualList` positions rows absolutely; also clears the
+     `aria-current` outline. */
   padding-left: var(--sp-3);
 }
 
-/* ── The ink edge ──────────────────────────────────────────────────────────
-   One stroke per page that carries ink, in the gutter, and nothing at all on a
-   page that does not.
-
-   IT IS THE THUMBNAIL'S HEIGHT, NOT THE ROW'S — reversed 2026-09-09, on
-   looking at it. The stroke ran the full row on the argument that a filmstrip is
-   a book seen edge-on, so consecutive written pages would meet as one unbroken
-   line and an empty page would be a clean break in it. That argument was made
-   about a diagram and it did not survive the screen: at row height the stroke
-   also spans the page NUMBER and the gap under it, so it reads as a rule running
-   down the panel rather than as a mark on a page, and the thing it is supposedly
-   about — the thumbnail — is the part it lines up with worst.
-
-   The mark belongs to the PAGE, and the thumbnail is the page; the number is a
-   caption. Matching it costs the continuous edge, and that is the right trade:
-   the rail was never going to be read as one line while a 23px gap of caption
-   sat inside it, and a mark that starts and stops with the thing it describes
-   needs no explaining.
-
-   `--paper-ink` is "handwriting rendered onto a note page" — the token that
-   already means the user's own marks, and it inverts for the dark theme for
-   free. `--accent` would have said "search", which is the badge four pixels
-   away at the row's other corner.
-
-   Square ends, no radius: at two pixels a corner is noise, and the app's 2px
-   corner belongs to controls. The mark carries its meaning by POSITION, not by
-   hue, so it survives a colour-blind reader and an e-ink screen. It is
-   decorative here and named in words on the row instead (`pages/pageIndex.ts`). */
+/* ── The ink edge ──
+   One stroke per inked page, the thumbnail's height (not the row's, which
+   would read as a rule running down the panel). `--paper-ink` means the user's
+   own marks and inverts for dark; meaning is carried by position, not hue.
+   Decorative; named in words on the row (`pages/pageIndex.ts`). */
 .filmstrip__page--inked::before {
   content: "";
   position: absolute;
   left: 0;
-  /* Top-aligned with the thumbnail, which sits at the row's top edge (the row is
-     a flex column that packs from the start), so this needs no offset — and it
-     stays right if the caption below ever changes height. */
+  /* The thumbnail sits at the row's top, so no offset. */
   top: 0;
   width: 2px;
   height: var(--preview-h-panel);
   background: var(--paper-ink);
   pointer-events: none;
 }
-/* Match density across the notebook, on UI that already exists. */
 .filmstrip__hits {
   position: absolute;
   right: 4px;
@@ -149,19 +91,11 @@
   pointer-events: none;
 }
 .filmstrip__thumb {
-  /* The PANEL height class (shared with the .spd layers panel). A vertical
-     strip lives on a FIXED item height — it is what keeps the virtual scroll
-     math exact — so the shape a row varies is its WIDTH, never its height. */
+  /* Fixed height (keeps virtual scroll math exact); width varies. */
   height: var(--preview-h-panel);
-  /* The row RESERVES its shape before anything paints — `pages/pageIndex.ts`
-     sets `--thumb-aspect` on the `.filmstrip__page` from whatever the viewer
-     knows about that page (a `.note` page's own dims; a PDF page's measured
-     size), so the strip does not reflow under the pointer as canvases land. The
-     fallback is the portrait page every `.note` is until told otherwise. */
+  /* Reserves the page shape before paint via `--thumb-aspect` (pages/pageIndex.ts). */
   aspect-ratio: var(--thumb-aspect, 3 / 4);
-  /* A LANDSCAPE page (wide aspect) would compute a width past the narrow column
-     and spill out of it. Clamp to the column: the thumb stays its fixed height
-     and only the widest pages give up exact aspect. */
+  /* Clamp landscape pages to the column. */
   max-width: 100%;
   border-radius: 2px;
   overflow: hidden;
@@ -172,24 +106,16 @@
   outline-offset: 2px;
   transition: outline-color 0.12s ease;
   position: relative;
-  /* A BLANK SHEET is the neutral placeholder — a page whose contents are not
-     known yet, which is all any viewer can honestly claim before it renders. */
+  /* A blank sheet is the neutral placeholder. */
   background-color: var(--sheet);
 }
-/* …and the RULED sheet is the `.note` reader's, because a note IS lined
-   stationery with a margin rule. This lived on `.filmstrip__thumb` itself, from
-   when the reader was the only thing with a page index — so once the PDF viewer
-   mounted the same strip, every unpainted PDF row claimed to be lined notebook
-   paper, complete with the red margin, until its thumbnail replaced it with a
-   two-column gazette. On a slow link that is most of the time you spend looking
-   at the strip. */
+/* The ruled sheet is the `.note` reader's only (PDF rows aren't notebook paper). */
 .note-filmstrip .filmstrip__thumb {
   background-image:
     linear-gradient(90deg, transparent 15%, color-mix(in srgb, var(--margin) 30%, transparent) 15%, color-mix(in srgb, var(--margin) 30%, transparent) 17%, transparent 17%),
     repeating-linear-gradient(180deg, transparent, transparent 10%, var(--paper-rule) 10%, var(--paper-rule) calc(10% + 1px));
 }
-/* No "loading" word — the ruled sheet IS the placeholder; the `.is-loading`
-   class stays only as the state hook, without a caption. */
+/* No "loading" word: the ruled sheet is the placeholder. */
 .filmstrip__thumb canvas {
   display: block;
   width: 100%;
@@ -208,45 +134,29 @@
   color: var(--ink);
 }
 
-/* Rows PINNED, for the same reason `.main`'s are: the find bar appears and
-   disappears between the reader bar and the stage, and with auto placement its
-   arrival would push the stage into an implicit `auto` row and collapse the page
-   to nothing. Row 2 costs nothing while the bar is `display: none`. */
+/* Rows pinned, like `.main`'s, so the find bar can't push the stage into a
+   collapsed implicit row. */
 .reader__main {
   display: grid;
   grid-template-rows: 1fr;
   min-height: 0;
   min-width: 0;
 }
-/* The bar and the find bar are placed by `.reader` now (they are its children,
-   not `reader__main`'s). All that is left in here is the stage, which fills the
-   single content row — it carried `grid-row: 3` from the old three-row layout,
-   which on a one-row grid would have created two implicit rows above it. */
 .stage,
 .filestage {
   grid-row: 1;
 }
 
-/* `hidden` must actually hide. The reader switches between its three modes by
-   setting the attribute on components that declare their own `display`
-   (`.stage` is a grid, `.btn` is inline-flex, `.pager` is a flex row), and a
-   class beats the UA sheet's `[hidden] { display: none }` — so without this the
-   stage stayed on screen under the image preview.
-   Deliberately NOT a global `[hidden] { display: none !important }`: that is the
-   shape of reset that recently outranked a component class and made a button
-   unreadable. Scoped to the reader and to the attribute, at (0,2,0), it can only
-   ever win over the element it is actually set on. */
+/* `hidden` must hide components that set their own `display`. Scoped to the
+   reader at (0,2,0), deliberately not a global `!important` reset. */
 .reader [hidden] {
   display: none;
 }
-/* The bar's flex skeleton moved to `10-toolbar.css` (`.toolbar`) for reuse across
-   viewers; `.reader > .reader__bar` above still PLACES it in the reader grid, and
-   the reader adds `reader__bar` alongside the shared `toolbar` class for that. */
 .backbtn {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  /* Compact viewer-toolbar control (see 00-tokens `--control-h-sm`). */
+  /* Compact viewer-toolbar control. */
   height: var(--control-h-sm);
   border: 1px solid var(--line);
   background: transparent;
@@ -268,19 +178,12 @@
   height: 14px;
 }
 
-/* Reader toolbar button (Download, and the mockup's other labelled controls).
-   Shares the .backbtn toolbar treatment —
-   outlined chip, mono label + leading glyph, same geometry — so it sits
-   consistently among the reader controls. The --ink modifier fills it as the
-   primary action (matching the app's primary button), keeping both themes via
-   the same tokens; keyboard focus comes from the global :focus-visible rule. */
+/* Reader toolbar button: the `.backbtn` chip treatment, mono label and glyph. */
 .btn {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  /* The app's shared button — list rows, bin, search, and every viewer toolbar.
-     Compact control height + the system chrome (border --line, --radius, mono
-     label, --accent focus via the global :focus-visible, --hover-fill hover). */
+  /* The app's shared button: compact height and system chrome. */
   height: var(--control-h-sm);
   border: 1px solid var(--line);
   background: transparent;
@@ -305,17 +208,10 @@
   border-color: var(--ink-soft);
   background: var(--hover-fill);
 }
-/* The mockup's filled `btn--ink` variant was dropped: Export now matches the
- * other toolbar controls. The variant is still defined in the mockup if a
- * high-emphasis button is ever wanted again. */
 
-/* --- the Export dropdown, from the mockup ---------------------------------
- *
- * `.menu__item--off` is a first-class state, not an afterthought: two of the
- * four formats cannot be produced faithfully yet, and the menu says so in place
- * rather than hiding them. Dimmed, not-allowed, and carrying their reason as a
- * second line — the row still reads as a real row, which is the point.
- */
+/* --- the Export dropdown ---
+ * `.menu__item--off` rows stay visible, dimmed, with their reason as a second
+ * line, rather than hiding unavailable formats. */
 .menu {
   position: relative;
 }
@@ -337,14 +233,9 @@
 .menu.is-open .menu__pop {
   display: block;
 }
-/* The SHARED overflow menu (ui/menu.ts) FLOATS its popover. On open, JS portals
-   the element to a <body>-level root and positions it with position:fixed from
-   the trigger's viewport rect, so no ancestor's overflow/transform/stacking can
-   clip or mis-anchor it (which is what used to slice a card-edge menu). Because
-   it's portaled OUT of the `.menu` wrapper, the `.menu.is-open .menu__pop` rule
-   above no longer reaches it — visibility is toggled by its own `is-open` here.
-   The reader/spd EXPORT menus keep the plain absolute `.menu__pop` above: they
-   don't portal, so their `right:0; top:100%+6px` anchoring still applies. */
+/* The shared menu's popover is portaled to <body> and fixed-positioned from the
+   trigger rect, so `.menu.is-open .menu__pop` no longer reaches it; it toggles
+   its own `is-open`. Export menus don't portal and keep the absolute pop. */
 .menu__pop--float {
   position: fixed;
   right: auto;
@@ -354,11 +245,7 @@
 .menu__pop--float.is-open {
   display: block;
 }
-/* `.menu__head` is the hand-built export menus' group label; `.menu__section` is
-   the SAME eyebrow rendered by the shared `createMenu()` component (ui/menu.ts),
-   which titles every section it draws (the "always a title" rule). One rule for
-   both so the two menu families read identically — a non-interactive mono eyebrow
-   in `--ink-faint`. */
+/* One eyebrow for the export menus' `.menu__head` and `createMenu()`'s sections. */
 .menu__head,
 .menu__section {
   padding: 8px 10px 4px;
@@ -402,12 +289,8 @@
   cursor: not-allowed;
   color: var(--ink-faint);
 }
-/* Menu rows that LEAD with a glyph — Move to bin, Restore, Delete permanently.
-   The export rows are a label plus a trailing `.pdf` hint, laid out by the
-   item's default space-between; these are an icon + label that must read as one
-   left cluster, so they override to flex-start. The glyph is stroked in
-   currentColor, so the danger variant's mark turns red with its text — no extra
-   rule and no second colour. */
+/* Rows that lead with a glyph (Move to bin, Restore, Delete permanently): one
+   left cluster; the currentColor glyph turns red with a danger row's text. */
 .menu__item--lead {
   justify-content: flex-start;
   align-items: center;
@@ -449,8 +332,6 @@
   font-size: var(--fs-eyebrow);
   color: var(--ink-faint);
 }
-/* `.reader__spacer` became the shared `.toolbar__spacer`; the pager and zoom slot
-   styles moved to `10-toolbar.css` — see there. */
 
 .stage {
   position: relative;
@@ -485,13 +366,10 @@
 .page canvas.is-loading {
   filter: blur(10px);
 }
-/* The focused page's PER-LAYER canvas stack (pages/noteLayers.ts), shown
-   instead of the composite canvas when the page's meta carries layers. The
-   host fills the page box and carries the paper backdrop (set inline per
-   theme — the pixels `decode_page`'s composite base has); each layer canvas
-   is absolutely stacked over it at 100% (they are native-res backing stores,
-   so zoom/resize is a pure CSS scale, exactly the spd-canvas-wrap mechanism).
-   Visibility per layer is `style.display` — the shared panel's eye. */
+/* The focused page's per-layer canvas stack (pages/noteLayers.ts): native-res
+   canvases stacked at 100% over a paper backdrop, so zoom is pure CSS scale;
+   each layer's visibility is its `style.display`. */
+
 .note-stack {
   position: absolute;
   inset: 0;

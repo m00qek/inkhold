@@ -1,68 +1,33 @@
-// The RENAME dialog — a small native-`<dialog>` that
-// renames a file or folder. It mirrors the shared `confirm.ts` scaffold (a native
-// `<dialog>` for the modal focus trap, Escape-to-dismiss and page inertness for
-// free) but does NOT reuse `openDialog`, for two reasons the shape turns on:
-//
-//   * confirm's action is DESTRUCTIVE, so it autofocuses Cancel and makes Enter
-//     activate it. Rename's safe default is "apply what I typed", so it
-//     autofocuses the FIELD (selecting the stem, the way every OS rename does)
-//     and makes Enter → Rename.
-//   * A name clash must keep the dialog OPEN. `openDialog` resolves and removes
-//     the node on any close; rename instead runs the write ITSELF and only
-//     closes on success — a 409 shows the collision line and stays put.
-//
-// The one considered touch is the "label" treatment: the editable STEM on a
-// ruled paper field with the immutable EXTENSION beside it as a Space Mono `<kbd>`
-// chip — the same chip motif the download rows use (cardActions.ts) — so renaming
-// reads as re-labelling a notebook's spine. A folder (no extension) gets the
-// plain field, no chip. The CSS lives in 17-rename.css.
+// The rename dialog. Not built on `openDialog`: it autofocuses the field (stem
+// selected) so Enter applies the rename, and a 409 clash must keep it open.
 
 import { el } from "./dom";
 import { NameTakenError } from "../api/client";
 
-/** Escape a string for literal use inside a `RegExp`. */
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
- * Split a name into the editable STEM and its immutable EXTENSION, by the
- * entry's OWN `fileType` (case-insensitively), the way the `.spd` export peels
- * `.spd` — NOT a naive last-dot split, so `2026.07.20.note` peels to stem
- * `2026.07.20` + ext `.note` rather than losing the date.
- *
- * The returned `ext` is the ACTUAL trailing text of the name (its real casing,
- * e.g. `.NOTE`), so re-assembling `stem + ext` never silently changes the
- * extension's case. A folder, an entry with no `fileType`, or a name that does
- * not end in the expected extension yields the whole name as the stem with an
- * empty `ext` (no chip) — the defensive path the spec calls for.
+ * Split a name into editable stem and immutable extension by the entry's own
+ * `fileType` (so `2026.07.20.note` keeps its date); `ext` keeps its real casing.
+ * No match yields the whole name as stem and an empty `ext`.
  */
 export function peelName(name: string, fileType: string, isFolder: boolean): { stem: string; ext: string } {
   const type = (fileType || "").trim();
   if (isFolder || type === "") return { stem: name, ext: "" };
   const m = name.match(new RegExp("\\." + escapeRegExp(type) + "$", "i"));
   if (!m) return { stem: name, ext: "" };
-  const ext = m[0]; // the real trailing ".note"/".NOTE", casing preserved
+  const ext = m[0]; // casing preserved
   return { stem: name.slice(0, name.length - ext.length), ext };
 }
 
-/** The outcome of validating the stem field, and the inline line to show. */
 export interface RenameValidation {
-  /** Whether Rename may fire — a non-empty, legal, CHANGED stem. */
   ok: boolean;
-  /**
-   * The interface-voice helper/error line, or null when there is nothing to say
-   * (a valid change, or an unchanged stem — disabled but not an error). Exactly
-   * the copy the rename dialog was specified with.
-   */
   message: string | null;
 }
 
-/**
- * Whether a stem carries something a name may not: the path separator, or any
- * control character. Written as a codepoint scan rather than a regex with
- * literal control bytes, so the source stays plain text.
- */
+/** Path separator or any control character. */
 function hasIllegalChar(s: string): boolean {
   if (s.includes("/")) return true;
   for (let i = 0; i < s.length; i++) {
@@ -72,48 +37,33 @@ function hasIllegalChar(s: string): boolean {
   return false;
 }
 
-/**
- * Validate a typed stem against the one it started as. Disables Rename when the
- * stem is empty/whitespace, contains a `/` or a control character, or is
- * unchanged (nothing to do). The messages are the interface's own words.
- */
+/** Validate a typed stem; empty, illegal or unchanged stems disable Rename. */
 export function validateRename(input: string, originalStem: string): RenameValidation {
   const trimmed = input.trim();
   if (trimmed === "") return { ok: false, message: "Enter a name." };
   if (hasIllegalChar(input)) return { ok: false, message: "A name can't contain '/'." };
-  // Unchanged is disabled but SILENT — the field simply holds what it always
-  // held, which is not an error to narrate.
+  // Unchanged is disabled but silent.
   if (trimmed === originalStem.trim()) return { ok: false, message: null };
   return { ok: true, message: null };
 }
 
 export interface RenameEntry {
-  /** The current FULL name, extension included. */
   name: string;
-  /** The entry's verified type (`"note"`, `"pdf"`, …); ignored for a folder. */
   fileType?: string;
   isFolder: boolean;
 }
 
 export interface RenameDialogOptions {
-  /** Where to append the dialog (removed again on close). */
   host: HTMLElement;
   entry: RenameEntry;
   /**
-   * Perform the rename with the assembled full name (`stem.trim() + ext`, or
-   * just `stem.trim()` for a folder). Resolving CLOSES the dialog (a success).
-   * Throwing {@link NameTakenError} keeps it OPEN with the collision line and
-   * re-selects the field. Any other throw closes it — the caller is expected to
-   * have already routed that failure (session expiry, a toast) before it lands
-   * here, so there is nothing left for the dialog to say.
+   * Rename to the assembled full name. Resolving closes the dialog; throwing
+   * {@link NameTakenError} keeps it open with the collision line; any other
+   * throw closes it (the caller has already reported it).
    */
   submit: (fullName: string) => Promise<void>;
 }
 
-/**
- * Open the rename dialog. Resolves `true` when the rename went through, `false`
- * on cancel/Escape (or a non-clash failure the caller already handled).
- */
 export function openRenameDialog(opts: RenameDialogOptions): Promise<boolean> {
   const { stem, ext } = peelName(opts.entry.name, opts.entry.fileType ?? "", opts.entry.isFolder);
 
@@ -128,8 +78,6 @@ export function openRenameDialog(opts: RenameDialogOptions): Promise<boolean> {
     "aria-label": "Name",
     "aria-describedby": helpId,
   }) as HTMLInputElement;
-  // The immutable extension, as the Space Mono chip beside the field — the same
-  // `<kbd>` motif the download rows carry. Folders (no extension) get no chip.
   const chip = ext ? el("kbd", { class: "rename__ext", text: ext }) : null;
   const field = el("div", { class: "rename__row" }, input, chip);
   const help = el("p", { class: "rename__help", id: helpId, "aria-live": "polite" });
@@ -145,9 +93,8 @@ export function openRenameDialog(opts: RenameDialogOptions): Promise<boolean> {
     field,
     help,
   );
-  // `method="dialog"` is kept for the platform close semantics, but every button
-  // is `type="button"` and Enter is intercepted, so a submit never closes the
-  // dialog behind the async write — the write decides.
+  // Every button is `type="button"` and Enter is intercepted, so only the async
+  // write decides when the dialog closes.
   const form = el("form", { method: "dialog" }, body, actions);
   const node = el("dialog", { class: "rename", "aria-labelledby": titleId }, form) as HTMLDialogElement;
 
@@ -157,8 +104,6 @@ export function openRenameDialog(opts: RenameDialogOptions): Promise<boolean> {
   function render(v: RenameValidation): void {
     go.disabled = !v.ok;
     help.textContent = v.message ?? "";
-    // Only a real problem (empty / illegal / clash) colours the line; an
-    // unchanged stem is disabled but says nothing, so it carries no error tint.
     node.classList.toggle("is-error", v.message !== null);
   }
 
@@ -185,17 +130,13 @@ export function openRenameDialog(opts: RenameDialogOptions): Promise<boolean> {
       input.disabled = false;
       cancel.disabled = false;
       if (e instanceof NameTakenError) {
-        // The SERVER is the authority on a clash (the client's listing may be
-        // partial), so this line only appears once the write comes back 409.
+        // The server is the authority on a clash; the listing may be partial.
         help.textContent = "That name's already used here.";
         node.classList.add("is-error");
         input.focus();
         input.select();
-        // Leave Rename enabled so a single edit can re-fire; `input` re-validates.
         go.disabled = false;
       } else {
-        // The caller already handled it (routed a dead session, toasted a
-        // failure); there is nothing to keep the dialog open for.
         node.close();
       }
     }
@@ -204,7 +145,7 @@ export function openRenameDialog(opts: RenameDialogOptions): Promise<boolean> {
   input.addEventListener("input", () => render(validateRename(input.value, stem)));
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
-      e.preventDefault(); // never let a form submit close the dialog itself
+      e.preventDefault();
       void attempt();
     }
   });
@@ -221,11 +162,9 @@ export function openRenameDialog(opts: RenameDialogOptions): Promise<boolean> {
     });
     opts.host.append(node);
     node.showModal();
-    // The safe default is "apply what I typed": land on the field with the stem
-    // selected (type-to-replace, or click to edit — every OS rename).
     input.focus();
     input.select();
-    // Prime the disabled state: an unchanged stem starts with Rename disabled.
+
     render(validateRename(input.value, stem));
   });
 }

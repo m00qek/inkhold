@@ -1,132 +1,63 @@
-// The BLOCK CACHE behind `ink.host_read` —
-//
-// MuPDF reads in small bites: a few hundred bytes of trailer, a couple of
-// kilobytes of xref, an object here and there. Turning each of those into an
-// HTTP request would be SLOWER THAN DOWNLOADING THE WHOLE FILE on a 3G link —
-// ~30 s of almost pure latency against ~7 min of transfer, yes, but also against
-// ~3 s for the same work done in blocks. So the unit of I/O is a block, the
-// block size is a LATENCY decision rather than a memory one, and the small reads
-// inside a block must be hits.
-//
-// No DOM, no wasm, no worker: this is a cache over a range-fetching function,
-// which is why it can be unit-tested against a fake transport.
+// The block cache behind `ink.host_read`. MuPDF reads in small scattered bites;
+// one request each would be slower than a whole download on 3G, so I/O is in
+// blocks sized for latency and the small reads inside a block must be hits.
+// No DOM, wasm or worker; tested against a fake transport.
 
-/** What one range request brought back. */
 export interface RangeResult {
-  /** The requested window, `[start, end]` inclusive — never more. */
+  /** The requested window, `[start, end]` inclusive, never more. */
   bytes: Uint8Array;
   /**
-   * The document's TRUE length, when the response said so: `content-range`
-   * ends in `/N`, and a `200` means the body IS the whole file.
-   *
-   * The length the caller opened with is only a hint — `NoteMeta.size` can be
-   * stale, and a fake or a proxy can be wrong about it outright. Believing a
-   * wrong length is not a small error: MuPDF seeks to the end to find
-   * `startxref`, so a document that claims to be longer than it is has its
-   * trailer looked for in bytes that do not exist.
+   * The true length when the response says so (`content-range: .../N`, or a
+   * `200`). The opening length is only a hint, and a too-long one makes MuPDF
+   * look for `startxref` in bytes that don't exist.
    */
   total: number | null;
-  /** The server ignored `Range` and sent everything. */
   whole: boolean;
 }
 
-/** Fetch `[start, end]` INCLUSIVE, HTTP's own convention for a byte range. */
+/** Fetch `[start, end]` inclusive (HTTP's byte-range convention). */
 export type RangeFetcher = (start: number, end: number) => Promise<RangeResult>;
 
 /**
- * 32 KB, and the size is MEASURED rather than reasoned.
- *
- * The overhead argument for a big block (512 KB is ~2.7 s of 3G transfer against
- * 0.15 s of round trip, ~5%, where 64 KB would be 30%) assumes the bytes in a
- * block get USED. Recording every read MuPDF makes for page 1 of two real
- * documents says they do not: the pattern is ~100 SCATTERED 32 KB object
- * lookups — the page-tree walk alone touches all 77 page objects, spread through
- * 79 MB — with almost no sequential run. So the block size barely moves the
- * request count and moves the byte count enormously:
- *
- * | 79.5 MB, linearized | requests | fetched | 3G, serial |
- * |---|---:|---:|---:|
- * | 512 KB blocks | 47 | 25.5 MB | ~138 s |
- * |  64 KB blocks | 58 |  5.5 MB |  ~37 s |
- * |  32 KB blocks | 65 |  3.8 MB |  ~29 s |
- * |  16 KB blocks | 69 |  3.0 MB |  ~26 s |
- *
- * 16 KB is marginally cheaper still, and 32 KB is chosen over it for a
- * structural reason rather than a modelled second: it is exactly
- * `INK_STREAM_CHUNK` in `pdf_shim.c`, so ONE MuPDF read can never span more than
- * two blocks and the coalescing below always folds it into a single request.
+ * 32 KB, measured: page 1 of a real 79.5 MB document is ~100 scattered object
+ * reads, so bigger blocks barely cut requests but balloon bytes (512 KB: 47 req,
+ * 25.5 MB; 32 KB: 65 req, 3.8 MB). It equals `INK_STREAM_CHUNK` in
+ * `pdf_shim.c`, so one MuPDF read spans at most two blocks (one coalesced request).
  */
 export const BLOCK_SIZE = 32 * 1024;
 
-/**
- * 32 MB of blocks, evicted LRU. A 76 MB document must not become 76 MB of
- * cache; MuPDF re-reading an evicted block is a miss, not an error.
- *
- * Generous now that a block is 32 KB — page 1 of the 79 MB document is under
- * 4 MB resident — but it is a CEILING, and the thing it is a ceiling on (paging
- * through a long book) is what would otherwise accumulate the whole file.
- */
+/** 32 MB of blocks, LRU; an evicted block is a miss, not an error. */
 export const CACHE_CAP_BYTES = 32 * 1024 * 1024;
 
 /**
- * Blocks fetched speculatively past a read that CONTINUES the previous one.
- *
- * The "sequential" qualifier is the whole of it. Read-ahead applied to EVERY
- * read is a pure loss on both real documents: it roughly DOUBLES the request
- * count (69 → 129 at 16 KB) and adds 25-60% to the bytes, because a scattered
- * lookup's next read is nowhere near this one. Restricted to reads that begin
- * exactly where the last one ended, four blocks cost one extra request across
- * both documents and are still there for the case this insures against — a page
- * whose content is one large image stream, read straight through.
+ * Blocks prefetched past a read that continues the previous one. Read-ahead on
+ * every read doubled requests on real documents; sequential-only covers large
+ * image streams.
  */
 export const READ_AHEAD_BLOCKS = 4;
 
 /**
- * The speculative windows fetched at open, in bytes: the FRONT of the file and
- * its TAIL.
- *
- * Measured, not guessed. Opening page 1 of a 79.5 MB document issues 65
- * requests, and **19 of them land in these two windows** — 13 in the first 1 MB
- * and 6 in the last 512 KB, which is where the trailer and the xref live. Two
- * speculative requests cover all 19.
- *
- * Why these ARE worth speculating on when read-ahead generally is not: they are
- * the only two regions every PDF is guaranteed to need, whichever page is
- * wanted. The scattered mid-file object reads making up the other 46 requests
- * are genuinely unpredictable, which is why blind read-ahead lost.
- *
- * The cost is ~0.7 MB fetched and not used, against ~17 saved round trips —
- * 7 seconds on a 400 ms link.
+ * The head and tail windows fetched at open, where the header, trailer and xref
+ * live: 19 of page 1's 65 requests in measurement, covered by two (~0.7 MB
+ * unused against ~17 saved round trips).
  */
 export const PREFETCH_HEAD_BYTES = 1024 * 1024;
 export const PREFETCH_TAIL_BYTES = 512 * 1024;
 
-/**
- * How many `(offset, length)` reads and issued ranges to remember.
- *
- * NOTHING IN THE APP READS THESE — the only consumers are `pdfBlocks.test.ts`,
- * which asserts exact contents on fixtures a few reads long, and the throttled
- * acceptance spec's `report()`, which prints the first 40 and a median. Page 1
- * of the largest document measured is 101 reads, so the whole subject of every
- * measurement fits well inside this, and `stats()` shallow-copies both logs on
- * every call.
- */
+/** Log cap for reads and ranges; only tests and the acceptance report read them. */
 const LOG_LIMIT = 512;
 
 export interface PdfCacheStats {
-  /** HTTP requests issued. THE number: page 1 must cost a handful, not 200. */
+  /** HTTP requests issued: page 1 must cost a handful, not 200. */
   requests: number;
-  /** Bytes the requests brought back, read-ahead included. */
+  /** Bytes fetched, read-ahead included. */
   bytesFetched: number;
-  /** Requests answered `200` — a server with no `Range` support. */
+  /** Requests answered `200` (no `Range` support). */
   wholeResponses: number;
-  /** Calls into `ink.host_read`. */
   reads: number;
-  /** Bytes those calls asked for. */
   bytesRead: number;
-  /** Reads served entirely from resident blocks — no suspension, no request. */
+  /** Reads served entirely from resident blocks. */
   hits: number;
-  /** Reads that had to wait for at least one block. */
   misses: number;
   blockSize: number;
   readAhead: number;
@@ -135,27 +66,17 @@ export interface PdfCacheStats {
   evictions: number;
   /** Every range requested, in order, as `[start, end]`. */
   ranges: ReadonlyArray<readonly [number, number]>;
-  /**
-   * Every read MuPDF asked for, as `[offset, length]` — the answer to
-   * "does MuPDF re-read the same ranges pathologically?".
-   *
-   * Capped at {@link LOG_LIMIT}; see {@link logTruncated} before drawing any
-   * conclusion from its length or from a statistic over it.
-   */
+  /** Every MuPDF read as `[offset, length]`, capped at {@link LOG_LIMIT}. */
   readPattern: ReadonlyArray<readonly [number, number]>;
   /**
-   * Whether either log hit its cap and stopped recording.
-   *
-   * A truncated log must SAY so: `reads` and `requests` keep counting past the
-   * cap, so a median or a count taken over `readPattern` after this goes true is
-   * a statistic about the first {@link LOG_LIMIT} entries wearing the name of
-   * the whole session. Silent truncation reads as complete coverage.
+   * Whether either log hit its cap. Counters keep going past it, so a statistic
+   * over a truncated log covers only the first {@link LOG_LIMIT} entries.
    */
   logTruncated: boolean;
 }
 
 export interface BlockCacheOptions {
-  /** The document's byte length. `NoteMeta.size` already carries it (§2.4). */
+  /** The document's byte length (a hint; the first response corrects it). */
   total: number;
   fetchRange: RangeFetcher;
   blockSize?: number;
@@ -166,13 +87,9 @@ export interface BlockCacheOptions {
 const EMPTY = new Uint8Array(0);
 
 /**
- * A bounded, LRU, read-ahead block cache over a byte-range transport.
- *
- * `read` returns a `Uint8Array` SYNCHRONOUSLY when every block it needs is
- * resident, and a promise otherwise. That union is not a convenience: it is the
- * JSPI contract. A `Suspending` import that returns a plain value does not
- * suspend the wasm stack, so a cache hit costs MuPDF nothing at all, and only a
- * genuine miss pays for moving the stack.
+ * A bounded LRU block cache with sequential read-ahead. `read` returns
+ * synchronously on a hit and a promise only on a miss: that is the JSPI contract
+ * that makes hits free.
  */
 export class BlockCache {
   private total: number;
@@ -180,11 +97,10 @@ export class BlockCache {
   private readonly bs: number;
   private readonly cap: number;
   private readonly ahead: number;
-  /** Insertion-ordered, so the first key is the least recently used. */
+  /** Insertion-ordered, so the first key is least recently used. */
   private readonly blocks = new Map<number, Uint8Array>();
   private readonly inflight = new Map<number, Promise<void>>();
   private resident = 0;
-  /** Where a read would have to start to be a continuation of the last one. */
   private nextExpected = -1;
   private readonly ranges: Array<readonly [number, number]> = [];
   private readonly readPattern: Array<readonly [number, number]> = [];
@@ -198,22 +114,13 @@ export class BlockCache {
     this.ahead = opts.readAhead ?? READ_AHEAD_BLOCKS;
   }
 
-  /**
-   * Read up to `len` bytes at `off`, clamped to the document.
-   *
-   * A short answer is legitimate and means end-of-file; the stream in
-   * `pdf_shim.c` treats zero bytes as EOF, so a read past the end is not an
-   * error to report but a document that ended.
-   */
+  /** Read up to `len` bytes at `off`; a short answer means EOF, as `pdf_shim.c` expects. */
   read(off: number, len: number): Uint8Array | Promise<Uint8Array> {
     const want = Math.max(0, Math.min(len, this.total - off));
     this.counters.reads++;
     this.counters.bytesRead += want;
     if (this.readPattern.length < LOG_LIMIT) this.readPattern.push([off, len]);
-    // Does this read CONTINUE the last one? That single bit is what makes
-    // read-ahead worth having rather than a way to double the traffic — see
-    // `READ_AHEAD_BLOCKS`. Recorded before the early return, so a read past the
-    // end breaks the run rather than pretending to extend it.
+    // Recorded before the early return, so a read past the end breaks the run.
     const sequential = off === this.nextExpected;
     this.nextExpected = off + want;
     if (want === 0 || off < 0) {
@@ -238,27 +145,19 @@ export class BlockCache {
     return this.readSlow(first, last, off, want, sequential);
   }
 
-  /** The document's length: the caller's hint, corrected by the first response. */
+  /** The caller's length hint, corrected by the first response. */
   get length(): number {
     return this.total;
   }
 
   /**
-   * Fetch block 0 and settle the document's length before anything is opened.
-   *
-   * Not a speculation that might be wasted: MuPDF sniffs the file's first bytes
-   * to recognise it, so block 0 is the one block EVERY document needs, and a
-   * linearized file has page 1 in it too (§3). Waiting for it here costs the
-   * round trip that `ink_open_stream`'s first read would have cost anyway, and
-   * buys the true length off `content-range` — see `RangeResult.total`.
+   * Fetch block 0 (MuPDF sniffs it first anyway) and settle the true length,
+   * then the head and tail windows.
    */
   async prime(): Promise<void> {
     if (this.total <= 0) return;
-    // Block 0 first, and AWAITED alone: it carries the true length off
-    // `content-range`, which the tail window's arithmetic depends on. A stale
-    // `NoteMeta.size` would otherwise aim the tail request at the wrong end of
-    // the file — the same class of bug as the short-block one, and it would only
-    // show on a document whose size had changed.
+    // Block 0 alone first: its `content-range` length aims the tail request,
+    // which a stale `NoteMeta.size` would misplace.
     await this.request(0, 0).catch(() => {});
     if (this.total <= 0) return;
 
@@ -266,11 +165,8 @@ export class BlockCache {
     const headEnd = Math.min(last, Math.ceil(PREFETCH_HEAD_BYTES / this.bs) - 1);
     const tailStart = Math.max(0, last - Math.ceil(PREFETCH_TAIL_BYTES / this.bs) + 1);
 
-    // Two windows, and they are allowed to be one: a file smaller than
-    // head+tail collapses to a single span rather than fetching the middle twice.
-    // Both forms START AT 1: block 0 is already resident from the await above,
-    // and re-requesting it would double the cost of a document small enough to
-    // fit in one block — which the committed 688-byte fixture caught.
+    // A file smaller than head+tail collapses to one span. Both start at block
+    // 1, since block 0 is already resident.
     const spans: Array<[number, number]> =
       tailStart <= headEnd + 1 ? [[1, last]] : [[1, headEnd], [tailStart, last]];
 
@@ -295,7 +191,7 @@ export class BlockCache {
     };
   }
 
-  // --- internals ----------------------------------------------------------
+  // ---- internals ----
 
   private async readSlow(
     first: number,
@@ -304,13 +200,11 @@ export class BlockCache {
     want: number,
     sequential: boolean,
   ): Promise<Uint8Array> {
-    // Consecutive MISSING blocks become ONE request, so a read that straddles a
-    // boundary costs one round trip rather than two.
+    // Consecutive missing blocks become one request.
     const waits: Array<Promise<void>> = [];
     let runStart = -1;
     for (let i = first; i <= last + 1; i++) {
-      // `touch`, not `has`: it is also what drops a block left short by a
-      // response taken against a length we have since learned was wrong.
+      // `touch`, not `has`: it also drops a short block from a wrong-length response.
       const missing = i <= last && this.touch(i) === null && !this.inflight.has(i);
       if (missing && runStart < 0) runStart = i;
       if (!missing && runStart >= 0) {
@@ -323,15 +217,13 @@ export class BlockCache {
       }
     }
     await Promise.all(waits);
-    // Read-ahead is issued AFTER the blocking work, and never awaited: waiting
-    // on it would add to the time to first paint to save a later round trip.
+    // Read-ahead is issued after the blocking work and never awaited.
     if (sequential) this.prefetch(last + 1);
 
     const parts: Uint8Array[] = [];
     for (let i = first; i <= last; i++) {
       const b = this.touch(i);
-      // Evicted between the fetch and here. Not reachable with a 32 MB cap and
-      // reads of two blocks, but "not reachable" is not "is checked".
+      // Evicted between fetch and here; not expected with a 32 MB cap, but checked.
       if (!b) return this.read(off, want);
       parts.push(b);
     }
@@ -339,15 +231,10 @@ export class BlockCache {
   }
 
   /**
-   * Queue `[from, to]` as one request, and register every block against it.
-   *
-   * The range asked for is the FULL span of those blocks, NEVER clamped to the
-   * length we think the document has. A server clamps an over-long range itself
-   * and reports the real length in `content-range`, so asking long is how the
-   * length gets corrected for free; and clamping to a length that turns out to
-   * be TOO SMALL stores a SHORT BLOCK, which then answers reads past its end
-   * with EOF. A 76 MB document opened with a stale 400 KB size did exactly that
-   * — MuPDF saw the file end at 400 KB, declared it damaged and went into repair.
+   * Queue `[from, to]` as one request. The range is never clamped to the
+   * believed length: the server clamps and reports the real one, whereas
+   * clamping to a stale short length stores a short block that reports EOF
+   * mid-file (MuPDF then "repairs" a healthy document).
    */
   private request(from: number, to: number): Promise<void> {
     const start = from * this.bs;
@@ -362,8 +249,7 @@ export class BlockCache {
       for (let i = from; i <= to; i++) {
         const at = i * this.bs - start;
         if (at >= bytes.length) break;
-        // `slice`, not `subarray`: a view would pin the whole run's buffer, so
-        // evicting one block of a three-block run would free nothing.
+        // `slice`, not `subarray`, so evicting one block frees its memory.
         this.store(i, bytes.slice(at, Math.min(at + this.bs, bytes.length)));
       }
     })().finally(() => {
@@ -375,18 +261,13 @@ export class BlockCache {
     return run;
   }
 
-  /**
-   * Speculate on `ahead` blocks from `from`, coalesced into as few requests as
-   * their gaps allow — four adjacent blocks are one 128 KB request, not four.
-   * Nothing waits on the result; a read that arrives there finds it in flight.
-   */
+  /** Speculate on `ahead` blocks from `from`, coalesced; nothing waits on it. */
   private prefetch(from: number): void {
     let runStart = -1;
     let runEnd = -1;
     const flush = (): void => {
       if (runStart < 0) return;
-      // Nothing awaits this, so a failed speculation must not become an
-      // unhandled rejection — a later real read will fetch it again and report.
+      // Never an unhandled rejection; a later real read refetches and reports.
       void this.request(runStart, runEnd).catch(() => {});
       runStart = -1;
     };
@@ -422,19 +303,16 @@ export class BlockCache {
     return at === want ? out : out.subarray(0, at);
   }
 
-  /** How long block `i` is in a document of the length we currently believe. */
   private expected(i: number): number {
     return Math.max(0, Math.min(this.bs, this.total - i * this.bs));
   }
 
   /**
-   * Fetch a block and mark it most-recently-used; null when it is not resident.
-   *
-   * A block that is SHORTER than its slot is treated as absent and dropped. It
-   * can only have come from a response taken against a length we have since
-   * learned was wrong, and serving reads out of it would report EOF in the
-   * middle of the document — the one failure a cache must never invent.
+   * A block marked most-recently-used, or null. A block shorter than its slot
+   * (from a since-corrected length) is dropped rather than inventing a
+   * mid-document EOF.
    */
+
   private touch(i: number): Uint8Array | null {
     const b = this.blocks.get(i);
     if (!b) return null;

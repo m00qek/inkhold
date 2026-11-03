@@ -1,12 +1,5 @@
-// A minimal STORE-only zip writer (local headers + CRC32 + central directory +
-// EOCD) — the project forbids runtime deps, so no JSZip. Split out of the `.spd`
-// export (pages/spdExport.ts) into the shared export core so the `.note` layered
-// export can reuse it. It is the part most
-// likely to be subtly wrong, hence the unit tests that unzip its output.
-//
-// STORE-only is deliberate: the payloads are PNGs (already compressed), and the
-// one consumer that CARES about the container — OpenRaster — requires its
-// `mimetype` entry uncompressed anyway.
+// A minimal STORE-only zip writer (no runtime deps). Store suffices: payloads
+// are PNGs, and OpenRaster requires an uncompressed `mimetype` entry anyway.
 
 export interface ZipEntry {
   name: string;
@@ -34,12 +27,7 @@ export function crc32(data: Uint8Array): number {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-/**
- * Serialise `entries` as a ZIP with compression method 0 (store): a local file
- * header + raw data per entry, then a central directory, then the end-of-central-
- * directory record. All fields little-endian; sizes/CRC are the raw data's since
- * nothing is compressed.
- */
+/** Serialise `entries` as a store-only ZIP (little-endian; sizes are raw sizes). */
 export function writeStoredZip(entries: ZipEntry[]): Uint8Array {
   const enc = new TextEncoder();
   const chunks: Uint8Array[] = [];

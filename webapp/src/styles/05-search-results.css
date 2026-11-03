@@ -1,21 +1,9 @@
-/* --- universal search results -----------------------------------------------
-   THE `.hit` COMPONENT IS GONE. A result is not a thing of its own any more: it
-   is the library's own list row, asked a question, plus the one thing the
-   question adds — the pages it matched on. So there are no row, name or page
-   rules here; the row's rules are the card's, which is what keeps a result and a
-   listing aligned to the same grid by construction rather than by two sets of
-   numbers that drift.
+/* --- universal search results ---
+   A result is the library's own list row plus its matched pages, so the row
+   rules are the card's. Every rule is scoped to its component class so nothing
+   here outranks a component elsewhere. */
 
-   THE EXCERPT'S RULES ARE GONE WITH THE EXCERPT (§4.3: they
-   are dropped, not deferred), and so is the "More results" row — a whole local
-   index answers whole, so there is no cursor and no control to style.
-
-   Every rule below is scoped to its own component class — nothing here can
-   outrank a component elsewhere, which is the reset bug (specificity (0,1,1)
-   beating `.btn--ink`) this file is not allowed to repeat. Colour comes only
-   from tokens, so both themes follow automatically. */
-
-/* Said ONCE, above the results — never per row. */
+/* Said once, above the results. */
 .hits__notice {
   grid-column: 1 / -1;
   max-width: 760px;
@@ -28,18 +16,12 @@
   line-height: 1.5;
   color: var(--ink-soft);
 }
-/* The word the typo ladder searched in place of what was typed — §4.3's
-   "matched **reunião**". Set apart INSIDE the notice, not styled as a second
-   component: it is one word in a sentence, and the sentence is already the
-   notice's. Weight and full-strength ink only — no colour of its own, because
-   `.hits__notice` already carries the accent rule and a second accent inside it
-   would read as a control. Scoped under the notice, so its (0,2,0) reach cannot
-   leave this block. */
+/* The word the typo ladder searched instead ("matched reunião"): weight only,
+   no colour of its own inside the accented notice. */
 .hits__notice .hits__matched {
   font-weight: 600;
   color: var(--ink);
 }
-/* "still counting", in the section head beside the totals. */
 .hits__count {
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
@@ -47,29 +29,18 @@
   color: var(--ink-faint);
 }
 
-/* A path answers "not where you are standing". The BIN needs it because the
-   row's home is gone; SEARCH needs it because results span the whole library.
-   Same question, same treatment, one rule — the mockup's `.bin__path,
-   .card__path`, carried over rather than reinvented as a second look. */
+/* A path, shared by bin rows (home is gone) and search (results span the library). */
 .card__path {
   color: var(--ink-soft);
 }
 
-/* How far the query reached into the note, beside the folder and the date. A
-   QUIET line, not a control: it retired a strip of per-page buttons that turned
-   the row into a menu of destinations, and it must not read as one. Same ink as
-   the path it sits next to, tabular figures so a column of results does not
-   jitter as the counts change width. */
+/* How far the query reached into the note: a quiet line, tabular figures. */
 .card__matches {
   color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
 }
 
-/* Mirrors `.ocr__body mark` — the highlight in a title and in the reader's
-   transcript are one idea, so they look the same. Scoped under the component
-   class, so its (0,1,1) reach stops at this block. The title is now the app's
-   ONLY search highlight: the marked excerpt beside it was server-authored HTML,
-   and there is no longer a server interpreting the query. */
+/* Mirrors `.ocr__body mark`: one highlight look in titles and transcripts. */
 .card__title mark {
   background: color-mix(in srgb, var(--accent) 24%, transparent);
   color: var(--ink);
@@ -78,8 +49,7 @@
 }
 
 .empty {
-  /* Full row in both gallery layouts: the icon mode's flex wrap (basis) and the
-     list mode's one-column grid (column span). */
+  /* Full row in both gallery layouts. */
   flex-basis: 100%;
   grid-column: 1 / -1;
   text-align: center;

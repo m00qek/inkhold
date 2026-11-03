@@ -1,21 +1,7 @@
 /**
- * The PDF viewer's download menu — the groups, and what each row does.
- *
- *   THIS PAGE — CURRENT VIEW · THIS PAGE — ORIGINAL VIEW · WHOLE DOCUMENT
- *
- * The same three-group shape as the `.note` reader's (`pages/readerExports.ts`),
- * for the same reason it is three groups there: a per-page export means nothing
- * without saying WHICH VIEW of the page, and the whole file is a different
- * question from the page in front of you.
- *
- * What is PDF about this file is the COMPOSITION below: a `.note` page's layers
- * already share one grid, and a PDF page and the `.mark` written on it do not.
- * The transforms are elsewhere — `export/layered.ts` owns the flatten and the
- * ORA writer, `render/markGeometry.ts` the arithmetic, and the wasm the one
- * export that is not an image at all.
- *
- * State is read through GETTERS rather than held: the focused page and the live
- * layer visibilities change under this on every page turn and eye-toggle.
+ * The PDF viewer's download menu (this page current view, this page original
+ * view, whole document) and the composition of a PDF page with its `.mark` ink,
+ * which unlike a `.note`'s layers do not share one grid.
  */
 
 import { el } from "../ui/dom";
@@ -34,19 +20,15 @@ import { markExportMatrix, type ExportSpace, type Size } from "../render/markGeo
 import type { PdfInkOverlay } from "../render/pdfClient";
 import type { ViewerExportMenu } from "./viewerExportMenu";
 
-// ============================================================================
-// The composition — the one thing the `.note` side never has to do.
-// ============================================================================
+// ---- composition ----
 
-/** One ink layer of a `.mark`, in the DEVICE PANEL's pixels. */
+/** One `.mark` ink layer, in device-panel pixels. */
 export interface MarkInkLayer {
-  /** The layer's display name; it rides into the ORA's `stack.xml`. */
   name: string;
-  /** That layer's own pixels, panel-sized, transparent where nothing was drawn. */
   canvas: HTMLCanvasElement;
-  /** Live panel visibility — the export's `current` state. */
+  /** Live panel visibility (`current`). */
   visible: boolean;
-  /** Device-authored visibility — the export's `original` state. */
+  /** Device-authored visibility (`original`). */
   authoredVisible: boolean;
 }
 
@@ -57,67 +39,34 @@ const domCanvasFactory: CanvasFactory = (w, h) => {
   return c;
 };
 
-/**
- * The page's own layer in a composed model, and the one layer that is NOT ink.
- *
- * A named constant because two things now depend on the number: the ORA writes
- * `data/layer_0.png` for it, and {@link inkAlpha} has to leave it out. "Skip
- * `layers[0]`" would work today and break silently the day a layer is inserted
- * below it.
- */
+/** The page's own layer id; the ORA writes it as `layer_0.png` and {@link inkAlpha} skips it. */
 export const DOCUMENT_LAYER_ID = 0;
 
 /**
- * A PDF page and the ink on it, as ONE {@link LayeredExportModel}.
- *
- * TWO LAYERS in the real case — a `.mark` page carries exactly one ink layer
- * (`MAINLAYER`, with `LAYER1..3` and `BGLAYER` all zero) — but N are handled,
- * because nothing in the format forbids them.
- *
- * THE BACKGROUND SLOT IS NOT A LAYER HERE, and the caller must have dropped it
- * before this is called. On the device that slot holds the paper — ruled
- * stationery, or a raster of the very page being annotated — and over a PDF it is
- * a SECOND OPAQUE SHEET that hides the document completely (the viewer's
- * `suppressBackground` is the on-screen half of the same fact). Carrying it as a
- * hidden layer would be worse than dropping it: an ORA opened in Krita shows a
- * hidden layer in the list, and one click would white out the document.
- *
- * The DOCUMENT layer is ours, not the device's: nothing in the file says the page
- * was ever meant to be invisible, so its `authored` state is visible and only its
- * `current` follows the panel's Document row.
- *
- * `page` may be null (nothing rendered) — the document layer is then a blank
- * sheet rather than a missing one, so the layer indices and the panel's rows
- * still line up.
+ * A PDF page and its ink as one layered model. A `.mark` page has one real ink
+ * layer (`MAINLAYER`; `LAYER1..3` and `BGLAYER` empty) but N are handled. The
+ * caller must already have dropped the background slot: over a PDF it is an
+ * opaque sheet, and even hidden in an ORA one click in Krita would white out the
+ * document. A null `page` gives a blank document layer so ids still line up.
  */
 export function composeMarkExportModel(opts: {
-  /** Where both halves land — {@link markExportSpace}, or the bare page dims. */
   space: Pick<ExportSpace, "width" | "height" | "dx" | "dy">;
-  /** The page, freshly rendered at `space.scale`. Drawn to fill the model. */
   page: CanvasImageSource | null;
-  /** The panel's Document row. */
   pageVisible: boolean;
-  /** The ink, BOTTOM-to-TOP, background slot already removed. */
+  /** Bottom-to-top, background slot removed. */
   ink: readonly MarkInkLayer[];
-  /** Overridable for tests (no GPU, no real canvas). */
   makeCanvas?: CanvasFactory;
 }): LayeredExportModel {
   const make = opts.makeCanvas ?? domCanvasFactory;
   const { width, height, dx, dy } = opts.space;
 
-  // IDS ARE RENUMBERED, bottom-to-top from 0, rather than reused from either
-  // side. An ORA writes one file per layer as `data/layer_<id>.png`, so reusing
-  // the viewer panel's ids (it calls the document `-1`) would put a
-  // `layer_-1.png` in every archive, and reusing the mark's would leave a hole
-  // where the background was.
+  // Ids are renumbered from 0: the ORA names files `layer_<id>.png`, so the
+  // panel's `-1` or the mark's gapped indices would not do.
   const layers: ExportLayer[] = [];
 
   const sheet = make(width, height);
   const sctx = sheet.getContext("2d");
-  // Drawn at the model's EXACT dimensions rather than 1:1. `space.width` is the
-  // rounded fit and a rasteriser may round the other way; a one-pixel rescale of
-  // a vector document is invisible, whereas a one-pixel crop or a transparent
-  // hairline at the edge is not.
+  // Drawn at the model's exact size: a one-pixel rescale is invisible, a crop is not.
   if (sctx && opts.page) sctx.drawImage(opts.page, 0, 0, width, height);
   layers.push({
     id: 0,
@@ -130,17 +79,13 @@ export function composeMarkExportModel(opts: {
   for (const [i, layer] of opts.ink.entries()) {
     const c = make(width, height);
     const ctx = c.getContext("2d");
-    // A PURE TRANSLATION — no scale argument, and `dx`/`dy` are whole pixels
-    // (`markExportSpace`), so every pen stroke keeps the samples the device
-    // wrote. The panel's dead margins fall outside the canvas and are clipped.
+    // Pure whole-pixel translation, so strokes keep the device's samples.
     if (ctx) ctx.drawImage(layer.canvas, dx, dy);
     layers.push({
       id: i + 1,
       name: layer.name,
       canvas: c,
-      // Opacity is 1 in BOTH states: the format has no per-layer opacity at all
-      // (`.note` is device-confirmed, and a `.mark` is a `.note` container), so
-      // the ORA carries `opacity='1.00'` exactly as the reader's does.
+      // The format has no per-layer opacity (a `.mark` is a `.note` container).
       authored: { opacity: 1, visible: layer.authoredVisible },
       current: { opacity: 1, visible: layer.visible },
     });
@@ -150,27 +95,11 @@ export function composeMarkExportModel(opts: {
 }
 
 /**
- * The visible INK of a composed model, as a coverage mask.
- *
- * The alpha channel and nothing else: the decoder stencils this onto the page's
- * own content streams, and colour would be four times the bytes to say the same
- * thing.
- *
- * THE DOCUMENT LAYER IS EXCLUDED, and that is the whole difference from the
- * `.png` row beside it. There the page is a layer and gets flattened with
- * everything else; here the page is already in the file the decoder is grafting,
- * and drawing a raster of it over itself would replace the selectable text this
- * export exists to keep with a picture of it.
- *
- * Which of the remaining layers count is `flattenLayers`', deliberately — the
- * same function, `which`, visibility and opacity the `.png` and `.ora` rows
- * honour. A private loop here is how the three rows would drift into
- * disagreeing about what "current view" means.
- *
- * A MODEL WITH NO VISIBLE INK ANSWERS 1x1, not `width * height` of zeros. The
- * empty case is the common one — most pages of an annotated document were never
- * written on — and a bare A4 page at the N6's resolution is 2.5 MB of zeros to
- * allocate, post across a thread boundary and copy into wasm to draw nothing.
+ * The visible ink as an alpha mask, for the decoder to stencil onto the page's
+ * own content streams. The document layer is excluded (drawing a raster over it
+ * would replace its selectable text), and which layers count is `flattenLayers`'
+ * call so all three rows agree. No visible ink returns 1x1 rather than a page of
+ * zeros, since most pages are unannotated.
  */
 export function inkAlpha(
   model: LayeredExportModel,
@@ -194,114 +123,62 @@ export function inkAlpha(
   const { data } = ctx.getImageData(0, 0, model.width, model.height);
   const alpha = new Uint8Array(model.width * model.height);
   for (let i = 0; i < alpha.length; i++) alpha[i] = data[i * 4 + 3]!;
-  // The flatten's sheet is dead the moment its alpha is out: an A4 page at the
-  // ink's own resolution is ~10 MB of RGBA and the `ImageData` above is another
-  // 10, on a phone as readily as a laptop. ZEROING IT is what drops the backing
-  // store now rather than at the next GC.
+  // Zero the sheet now to free ~10 MB of backing store before GC.
   sheet.width = 0;
   sheet.height = 0;
   return { alpha, width: model.width, height: model.height };
 }
 
-// ============================================================================
-// The menu
-// ============================================================================
+// ---- the menu ----
 
-/** What the menu needs to know about the focused page to decide its rows. */
 export interface PdfExportState {
-  /** This page carries decoded ink. The layered `.ora` has nothing to layer without it. */
+  /** This page carries decoded ink; the `.ora` has nothing to layer without it. */
   hasInk: boolean;
-  /** Some layer is shown or hidden differently from how it was authored. */
   tuned: boolean;
-  /**
-   * The panel's Document row is on.
-   *
-   * Only the PDF row cares. A `.png` or an `.ora` can honour a hidden document
-   * by leaving those pixels transparent; a PDF export cannot, because the page's
-   * own content streams are the thing being grafted.
-   */
+  /** The Document row is on; only the PDF row cares, as it cannot leave the page transparent. */
   pageVisible: boolean;
-  /**
-   * How many pages of the DOCUMENT carry ink — not of the focused page.
-   *
-   * Zero means the whole-document export would be a byte-for-byte copy of the
-   * file the raw row beside it already offers, so that row hides.
-   */
+  /** Inked pages in the whole document; zero hides the annotated export (it would equal the raw file). */
   markedPages: number;
 }
 
 export interface PdfExports {
-  /**
-   * Reconcile the per-page groups with the live state. Cheap and idempotent —
-   * called on every page turn and every layer toggle.
-   */
   refreshGroups(): void;
-  /** Point the raw `.pdf` row at `url`; `null` disables it. Minted per open. */
+  /** Point the raw `.pdf` row at `url`; `null` disables it. */
   setRawHref(url: string | null): void;
 }
 
 export interface PdfExportsDeps {
-  /** The menu shell from `viewerChrome` — this fills its popover. */
   menu: ViewerExportMenu;
   toast(message: string): void;
-  /** The open document's name, or null before one is. */
   docName(): string | null;
-  /** The focused page, 0-based. */
   pageIndex(): number;
   /**
-   * The focused page as a layered model — the document under its ink, composed
-   * into one space. Null when there is nothing to export. The caller MUST call
-   * `release()`: a model is several full-resolution canvases, tens of megabytes
-   * app-wide budget.
-   *
-   * `withPage: false` SKIPS the page raster and leaves the document layer blank
-   * — the PDF row's ask, since it is the only one that does not want a picture
-   * of the page, and rendering one anyway costs a full MuPDF raster (10 MB for
-   * A4 at the ink's resolution) to be discarded. `pagePt` and the model's
-   * dimensions are unaffected, so the two paths are otherwise interchangeable.
+   * The focused page as a layered model, or null. The caller must `release()` it
+   * (several full-resolution canvases). `withPage: false` skips the page raster
+   * for the PDF row, which does not need a picture of the page.
    */
   model(opts?: {
     withPage?: boolean;
   }): Promise<{ model: LayeredExportModel; pagePt: Size; release: () => void } | null>;
-  /**
-   * Burn `ink` onto page `page` of the open document and hand back a PDF's bytes.
-   * Rejects when the decoder refuses — a page it cannot graft, a session that
-   * has gone away.
-   */
+  /** Burn `ink` onto one page into a new one-page PDF. */
   exportPagePdf(page: number, ink: PdfInkOverlay): Promise<Uint8Array>;
   /**
-   * The WHOLE document with its ink burnt in, as one blob — every page, and
-   * every link and highlight the original carried.
-   *
-   * A different mechanism from `exportPagePdf`, not the same one repeated: this
-   * one appends an INCREMENTAL UPDATE to the original file rather than rebuilding
-   * it, which is why the original's own annotations survive here and do not
-   * there. `onProgress(done, total)` counts ANNOTATED pages — the sparse set,
-   * seven of seventy-seven in the real corpus — not pages of the document, and
-   * `pages` is how many actually went in (fewer, when a mark page will not
-   * decode).
+   * The whole document with ink burnt in, as an incremental update appended to
+   * the original, so its own annotations survive. `onProgress` counts annotated
+   * pages; `pages` is how many went in.
    */
   exportDocumentPdf(
     onProgress: (done: number, total: number) => void,
   ): Promise<{ blob: Blob; pages: number }>;
   state(): PdfExportState;
-  /**
-   * Overridable for tests: the ink mask is the one export here that has to READ
-   * pixels back out of a canvas, so a DOM-less environment cannot run this row
-   * without it (the `.png` and `.ora` rows only ever WRITE).
-   */
+  /** Overridable for tests: the ink mask reads pixels back from a canvas. */
   makeCanvas?: CanvasFactory;
 }
 
 export function createPdfExports(deps: PdfExportsDeps): PdfExports {
   const { menu, toast } = deps;
 
-  /**
-   * One page, one view, one format. The page index is read BEFORE the model is
-   * built and the filename comes from that read: building a model awaits a
-   * render, and a page turn during it would otherwise name page N's pixels after
-   * page N+1.
-   */
+  /** The page index is read before the model awaits a render, so a page turn cannot misname it. */
   async function save(which: ExportWhich, ext: "png" | "ora"): Promise<void> {
     const name = deps.docName();
     if (name === null) return;
@@ -313,8 +190,6 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
         ext === "png"
           ? await exportFlatPng(snapshot.model, which)
           : await exportOra(snapshot.model, which);
-      // The reader's own naming helper, not a second scheme, so a `.mark`'s page
-      // and a `.note`'s page land on disk under one convention.
       const filename = noteLayerExportFilename(name, page, which, ext);
       download(filename, blob);
       toast(`Saved ${filename}`);
@@ -324,23 +199,14 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
   }
 
   /**
-   * One page, one view, AS A PDF — the page's own structure with the ink on top.
-   *
-   * Unlike `save("…", "png")`, this never rasterises the page at all: the
-   * decoder grafts the source page — its text, fonts and vectors — into a fresh
-   * one-page document and stencils the ink over it.
-   *
-   * The MODEL IS RELEASED BEFORE the decoder is asked, not after. Nothing past
-   * the alpha needs it, the wasm call is the long one (it can suspend on the
-   * network mid-graft), and holding several full-resolution canvases across it
-   * would put the export's two peaks on top of each other.
+   * One page as a PDF: the decoder grafts the source page (text, fonts, vectors)
+   * into a new document and stencils the ink over it. The model is released before
+   * the long decoder call so the two memory peaks do not stack.
    */
   async function savePdf(which: ExportWhich): Promise<void> {
     const name = deps.docName();
     if (name === null) return;
-    // Read BEFORE the model is built, exactly as `save` does: a page turn during
-    // the await would otherwise name page N's ink after page N+1 — and here it
-    // would also graft the WRONG PAGE, since the index goes to the decoder too.
+    // Read before the await; the index also picks the page to graft.
     const page = deps.pageIndex();
     const snapshot = await deps.model({ withPage: false });
     if (!snapshot) return;
@@ -359,20 +225,14 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
     try {
       bytes = await deps.exportPagePdf(page, ink);
     } catch (err) {
-      // THE DECODER'S SENTENCE GOES TO THE CONSOLE, not to the page — the same
-      // rule `pdfViewer.ts` states for a file MuPDF will not open. The menu's
-      // mechanics toast in the app's voice but cannot say WHICH page failed.
+      // Decoder messages go to the console, not the page.
       console.warn("[pdf] page export failed:", (err as Error).message ?? err);
       throw err;
     }
     const filename = noteLayerExportFilename(name, page, which, "pdf");
     download(filename, new Blob([bytes as BlobPart], { type: "application/pdf" }));
-    // TWO THINGS THE USER MUST NOT DISCOVER BY SURPRISE: that the file is ONE
-    // PAGE (nothing about a `.pdf` on disk says it came out of a longer one),
-    // and that GRAFTING DROPS `/Annots` — links, highlights, comments and form
-    // fields from the source page are not in this one. The page still LOOKS the
-    // same, and a link that has simply stopped working is the kind of loss
-    // nobody attributes to the export that caused it.
+    // The user must be told it is one page and that grafting drops `/Annots`
+    // (links, highlights, form fields).
     toast(
       `Saved ${filename} — this page only, text and vectors intact. ` +
         `Links, highlights and other annotations from the original are not carried over.`,
@@ -380,35 +240,21 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
   }
 
   /**
-   * The whole document, ink and all — and the ONE row in this menu that loses
-   * nothing.
-   *
-   * IT IS NOT THE PER-PAGE ROW AT A LARGER SCALE, and the copy below is written
-   * so the two cannot be read that way: this one APPENDS to the original file
-   * rather than grafting pages into a fresh one, so nothing is re-encoded and
-   * the original's own annotations survive. The bigger export loses less.
-   *
-   * PROGRESS BY PAGE, never a percentage of TIME: the per-page cost varies with
-   * how much was written on it, and the original has to cross the network before
-   * there is a page number to report at all.
+   * The whole document, appended to the original so nothing is lost. Progress is
+   * by page, never a time percentage.
    */
   async function saveDocumentPdf(): Promise<void> {
     const name = deps.docName();
     if (name === null) return;
-    // BEFORE the first await: a menu that closes onto nothing for thirty
-    // seconds reads as a failure.
+    // Before the first await, or a silent closed menu reads as failure.
     toast(`Exporting ${name} — fetching the original…`);
     const { blob, pages } = await deps.exportDocumentPdf((done, total) =>
       toast(`Exporting ${name} — page ${done} of ${total}…`),
     );
-    // The document's own name with a suffix, not the per-page scheme: this IS
-    // the document, so `<stem>_annotated.pdf` says the one thing that changed.
     const stem = name.replace(/\.[^.]*$/, "");
     const filename = `${stem}_annotated.pdf`;
     download(filename, blob);
-    // THE OPPOSITE CLAIM TO THE PER-PAGE ROW'S, and it is deliberate that both
-    // sentences name annotations: a user who has read the warning there needs
-    // telling plainly that this one is different.
+    // The opposite claim to the per-page row's, stated plainly.
     toast(
       `Saved ${filename} — the whole document, with ${pages} annotated ` +
         `${pages === 1 ? "page" : "pages"}. Text, links and the original's own ` +
@@ -416,25 +262,13 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
     );
   }
 
-  // The layered-only ORA rows, held apart from their groups because they — and
-  // they alone — hide on a page with no ink: an ORA of a bare PDF page has
-  // nothing to layer, whereas the Flattened image beside it is still the page.
+  // Only the ORA rows hide on a page with no ink.
   const currentOra = menu.item("Layered image", ".ora", () => save("current", "ora"));
   const originalOra = menu.item("Layered image", ".ora", () => save("original", "ora"));
 
   /**
-   * The per-page PDF rows — `PDF document`, last in each group, which is where
-   * the reader puts its own (`readerExports.ts`) so the two menus read alike.
-   *
-   * THEY DO NOT HIDE ON A PAGE WITH NO INK, unlike the `.ora` beside them: an
-   * ORA of an unannotated page is an archive with one layer in it, whereas a PDF
-   * of one is THE PAGE, lifted out of a 300-page document with its text still
-   * selectable, and nothing else in this menu produces that.
-   *
-   * The CURRENT one does hide when the Document row is off (`refreshGroups`):
-   * that state means "show me the ink alone", which this row cannot answer. The
-   * ORIGINAL row is unaffected, because the document's authored state is always
-   * visible.
+   * The per-page PDF rows do not hide on an unannotated page (it is still the page
+   * with selectable text). The current one hides when the Document row is off.
    */
   const currentPdf = menu.item("PDF document", ".pdf", () => savePdf("current"));
 
@@ -447,10 +281,7 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
     currentPdf,
   );
 
-  // The WHOLE ORIGINAL group hides unless something has been toggled — the
-  // reader's rule (`readerExports.ts:refreshGroups`), for the reader's reason:
-  // until then the two views are the same pixels and a second header over
-  // duplicate rows is noise.
+  // The original group shows only once something has been toggled; until then it duplicates the current one.
   const originalGroup = el(
     "div",
     { hidden: true },
@@ -461,10 +292,7 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
     menu.item("PDF document", ".pdf", () => savePdf("original")),
   );
 
-  // WHOLE DOCUMENT — the RAW file (unchanged bytes) and ANNOTATED, which is the
-  // same file with the handwriting APPENDED to those very bytes: the raw row
-  // plus the ink and nothing subtracted. Annotated hides on a document with no
-  // ink anywhere, where it would duplicate the row above it (`refreshGroups`).
+  // Whole document: the raw file, and the same bytes with the ink appended.
   const annotatedPdf = menu.item("PDF with annotations", ".pdf", saveDocumentPdf);
   const rawItem = menu.rawItem("PDF document", ".pdf");
   const wholeGroup = el(
@@ -483,16 +311,10 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
       const st = deps.state();
       currentOra.hidden = !st.hasInk;
       originalOra.hidden = !st.hasInk;
-      // A PDF of "this page with the page turned off" is not a thing — see
-      // `currentPdf`. Hidden, not disabled: the house rule for a row that cannot
-      // mean anything for the page in front of you (`webapp/ARCHITECTURE.md`).
+      // Hidden, not disabled: the house rule for a row meaningless on this page.
       currentPdf.hidden = !st.pageVisible;
-      // Nothing written on this document ANYWHERE means this row would emit the
-      // raw file under a name promising ink.
       annotatedPdf.hidden = st.markedPages === 0;
-      // `tuned` covers the DOCUMENT row too, not only the ink: the document is a
-      // layer of this model like any other, so hiding it makes "original view" a
-      // real, different export.
+      // `tuned` includes the Document row.
       originalGroup.hidden = !st.tuned;
     },
     setRawHref: (url) => rawItem.setHref(url),

@@ -1,8 +1,5 @@
-// In-memory auth hint for the current page life. The real session lives in the
-// HttpOnly `sn_session` cookie, which JS cannot read — this flag just lets the
-// shell trust a login that happened this session without re-probing the server
-// (which would otherwise bounce right after a successful login). On a fresh page
-// load the flag starts false and the shell verifies with `api.me()`.
+// In-memory auth hint for this page life. The real session is the HttpOnly
+// `sn_session` cookie; this avoids re-probing (and bouncing) right after login.
 
 let authed = false;
 

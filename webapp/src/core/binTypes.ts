@@ -1,75 +1,43 @@
-// The recycle bin's domain vocabulary — the client half of `BinVO`/`RestoredVO`/
+// The recycle bin's domain vocabulary: the client half of `BinVO`/`RestoredVO`/
 // `TrashedVO`/`EmptiedVO` in backend/services/controlplane.zig.
-//
-// A SEPARATE FILE from core/types.ts on purpose: the bin and the admin console
-// are being built in parallel against the same shared modules, so each keeps its
-// own vocabulary in its own file and the two sets of edits stay textually
-// disjoint. Same rule as the `--- BIN WRITES ---` markers on the `Api` seam.
-//
-// Nothing here has behaviour. It is data, exactly like core/types.ts.
 
 import type { Hash, Id, PageRef } from "./types";
 
 /**
- * One trashed row. FLAT — the server deliberately does not group or nest, which
- * is why {@link parentId} and {@link isRoot} are here: the nesting the bin view
- * renders is derived on the client (see `binRows` in pages/bin.ts).
+ * One trashed row. Flat; the nesting the bin view renders is derived on the
+ * client from {@link parentId} and {@link isRoot}.
  */
 export interface BinEntry {
-  /** The same two values `Entry.kind` uses, so the client's kind branch works. */
   kind: "folder" | "note";
   id: Id;
   name: string;
   /**
-   * The path the entry had WHEN IT WAS DELETED, walked through trashed
-   * ancestors. Half of the disambiguation the bin needs — the other half is
-   * {@link deletedAt}, because the same name can be deleted from the same place
-   * twice (delete → the device recreates it → delete).
+   * The path at deletion time, through trashed ancestors. With
+   * {@link deletedAt} it disambiguates the same name deleted twice.
    */
   path: string;
   /** Epoch ms, matching `NoteSummary.updatedAt`. */
   deletedAt: number;
   /**
-   * Bytes this row itself charges against quota, and **0 for a folder**.
-   *
-   * A folder's bytes are its children's, and the children are rows in the same
-   * list — so summing `size` over any set of rows is correct by construction and
-   * can never count a folder together with its contents. That is exactly what
-   * the purge and empty-bin confirmations have to state, and the double-count is
-   * the mistake the field's shape rules out rather than asks callers to avoid.
+   * Bytes this row charges against quota, 0 for a folder, so summing `size`
+   * over any set of rows never double-counts a folder and its contents.
    */
   size: number;
   /** The trashed parent this row came down with, or null when it has none here. */
   parentId: Id | null;
   /** True when this is the top of a trashed subtree — what the user deleted. */
   isRoot: boolean;
-  /**
-   * Server-verified, same vocabulary as `NoteSummary.fileType`. Empty string for
-   * a folder, which has no type of its own.
-   */
+  /** Same vocabulary as `NoteSummary.fileType`; `""` for a folder. */
   fileType: string;
   /** The `?v=` of the bin-scoped raw-bytes URL, or null when there is none. */
   fileHash: Hash | null;
   /**
-   * Page 0, for the row's thumbnail — the same field, the same shape and the
-   * same content hash `NoteSummary.firstPage` carries, so the row paints through
-   * the shared lazy engine and hits the same render cache the library filled.
-   * The bin-scoped fetch is automatic: `createBinScope` routes `getPageBytes`
-   * for a trashed id to the bin's own route.
-   *
-   * NULL when there is nothing to draw — a folder, or a file the indexer could
-   * not parse a page out of. That is not a hole to paper over: the row's honest
-   * fallback is the doc glyph, and a placeholder ref would trade it for an empty
-   * canvas plus a page fetch that can only 404.
+   * Page 0 for the thumbnail, same shape and hash as `NoteSummary.firstPage`,
+   * so it hits the library's render cache. Null when there is nothing to draw
+   * (folder or unparseable file); the row then shows the doc glyph.
    */
   firstPage: PageRef | null;
-  /**
-   * The preview's pixel dimensions, exactly as `NoteSummary.thumbAspect` carries
-   * them (same sources, same absent-means-unknown rule — the index is keyed by
-   * blob md5, so trashing changes nothing about a file's shape). The bin row
-   * pre-sets its lead tile's aspect from this so the row lays out at its final
-   * width before any bytes arrive.
-   */
+  /** As `NoteSummary.thumbAspect`; trashing doesn't change a blob's shape. */
   thumbAspect?: { w: number; h: number };
 }
 
@@ -77,25 +45,14 @@ export interface BinEntry {
 export interface Bin {
   /** Newest deletion first. */
   entries: BinEntry[];
-  /**
-   * What emptying the whole bin would free. The server sums only non-folder
-   * rows, so this is the honest figure rather than one that counts a folder and
-   * its contents both.
-   */
+  /** What emptying the bin would free; folders excluded. */
   totalBytes: number;
-  /**
-   * The retention window, from the server's own `Files.bin_retention_s`, so the
-   * empty state and the per-row countdown quote the real number instead of a
-   * hardcoded copy that can drift from it.
-   */
+  /** From the server's `Files.bin_retention_s`. */
   retentionDays: number;
   syncVersion: number;
 }
 
-/**
- * What a web delete actually did (U5), so the undo toast can state the fanout
- * when the operation exceeds the one row that was clicked.
- */
+/** What a web delete did, so the undo toast can state the fanout. */
 export interface Trashed {
   id: Id;
   name: string;
@@ -105,16 +62,12 @@ export interface Trashed {
 }
 
 /**
- * What `restore` actually did — **not what was asked** (U3).
- *
- * Restore routinely does more than the user selected and the UI cannot tell the
- * truth otherwise: it brings back the trashed ancestor chain (a live row under a
- * trashed parent would be an orphan, in no listing at all), it brings back every
- * trashed descendant of a folder, and it auto-renames when a live entry has
- * taken the name in the meantime. So every field here is load-bearing copy.
+ * What `restore` actually did, not what was asked: it also restores the
+ * trashed ancestor chain (else the row would be orphaned), a folder's trashed
+ * descendants, and auto-renames on a name collision.
  */
 export interface Restored {
-  /** The name it came back under — NOT necessarily the one it had. */
+  /** The name it came back under, not necessarily the one it had. */
   name: string;
   renamed: boolean;
   /** Trashed ancestor folders that had to come back for this to be reachable. */

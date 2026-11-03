@@ -1,14 +1,7 @@
 /**
- * The shell's client-side mirror of the folder tree, and the walk that fills it.
- *
- * The rail's rows and counts, the crumb labels, name-search and the root
- * gallery's flattening are all PURE FUNCTIONS of this cache — none of them
- * fetches. That is what makes the cache worth a module of its own rather than
- * five variables in `library.ts`: everything that reads it reads it the same
- * way, and everything that writes it has to keep two things in step (the
- * listing, and the roots derived from it) in a way that had already been
- * written out twice.
- */
+* The shell's client-side mirror of the folder tree, and the walk that fills
+* it. Rail rows, crumbs, name-search and the root gallery read only this.
+*/
 
 import type { Api } from "../api/types";
 import type { Folder, Id, Listing } from "../core/types";
@@ -17,67 +10,31 @@ import type { FolderTree } from "./rail";
 const key = (id: Id | null) => id ?? "\0root";
 
 export interface FolderCache {
-  /** The cached listing for a folder, or undefined if the walk has not reached it. */
   get(id: Id | null): Listing | undefined;
-  /**
-   * Every listing the walk has reached, in no particular order. For the two
-   * searches that are answered by scanning the whole tree — name-search, and the
-   * reader's "which folder is this note in" — neither of which knows a folder id
-   * to ask about.
-   */
+  /** Every listing reached, unordered, for whole-tree scans. */
   values(): Iterable<Listing>;
-  /**
-   * The rail's read-only view. A live binding, not a snapshot — the rail holds
-   * this object across walks and sees each one's result.
-   */
+  /** A live binding, not a snapshot. */
   tree: FolderTree;
-  /**
-   * Replace one folder's listing, keeping the derived roots in step. The refetch
-   * path's entry point; the walk uses it too, so the pairing has one home.
-   */
+  /** Replace one listing, keeping the derived roots in step. */
   put(id: Id | null, listing: Listing): void;
   /**
-   * List one folder, JOINING a request for the same folder already in flight.
-   *
-   * The walk and the route fire together on every cold boot — `library.ts`
-   * starts `prefetch()` while `main.ts` dispatches the route, and at `#/` the
-   * route's folder IS the walk's first hop, so the root was fetched twice, 1 ms
-   * apart (MEASURED 2026-09-08). Joining is not a cache: the promise is dropped
-   * the moment it settles, so this only ever merges genuinely CONCURRENT asks,
-   * and two asks that overlap by a millisecond cannot want different answers.
-   *
-   * Both callers still do their own thing with the result — the walk `put`s it,
-   * the refetch reconciles it against what it held — and a rejection reaches
-   * both, exactly as two separate failures would have.
-   */
+  * Joins a concurrent request for the same folder (the walk and the route both
+  * ask for the root at boot). Not a cache: the promise is dropped on settle.
+  */
   listFolder(id: Id | null): Promise<Listing>;
   /**
-   * Populate the cache for the whole (small, household-sized) tree. BFS,
-   * sequential; `force` re-lists already-cached folders (used when a sync bump
-   * lands).
-   *
-   * THE SEQUENTIAL BFS STAYS SEQUENTIAL. It is N round-trips before the rail's
-   * resolution, the crumb labels and name-search are correct, and parallelising
-   * it is not a change to make here: the server serialises every connection on
-   * one coarse `db_lock`, so a fan-out would queue on a mutex while spending the
-   * browser's ~6 connections that the gallery's own reads need.
-   */
+  * BFS over the whole (household-sized) tree; `force` re-lists cached folders.
+  * Sequential on purpose: the server serialises on one `db_lock`, so a fan-out
+  * would only spend browser connections the gallery needs.
+  */
   prefetch(force?: boolean): Promise<void>;
 }
 
 export interface FolderCacheDeps {
   api: Pick<Api, "listFolder">;
-  /**
-   * The shell's session-expiry check. True means it has taken over — an expired
-   * session fails every remaining hop identically, so the walk stops rather than
-   * grinding through the tree while the shell re-authenticates.
-   */
+  /** True means the session expired and the shell took over; the walk stops. */
   handled(e: unknown): boolean;
-  /**
-   * A walk finished. `changed` is false when it found a tree identical to the
-   * last one, which is what keeps a walk that found nothing new from costing a
-   * full gallery repaint — see `rail.treeWalked`.
-   */
+  /** `changed` is false for an identical tree, so no gallery repaint is owed. */
   onWalked(changed: boolean): void;
 }
 
@@ -85,69 +42,28 @@ export function createFolderCache({ api, handled, onWalked }: FolderCacheDeps): 
   const listings = new Map<string, Listing>();
   let rootFolders: Folder[] = [];
 
-  /**
-   * The walk currently running, or null. ONE AT A TIME, and that is the whole of
-   * the fix for the stacking: the shell fires a forced walk per sync-version
-   * bump, and a tablet uploading a folder of notes bumps repeatedly, so a full
-   * N-round-trip BFS used to be started on top of each still-running one — every
-   * one of them contending for the browser's ~6 connections with the listing and
-   * the thumbnails the user is actually looking at, and every one of them ending
-   * in a repaint.
-   */
+  /** The running walk. One at a time: sync bumps arrive in bursts. */
   let walk: Promise<void> | null = null;
-  /**
-   * A forced walk was asked for WHILE one was running, so exactly one more runs
-   * when this one finishes. This is the coalescing half: a burst of ten bumps
-   * costs two walks, not ten, and the last one still sees the settled tree —
-   * which is what the bump was asking about. A boolean rather than a counter,
-   * because "walk it again" does not get truer by being asked twice.
-   */
+  /** A forced walk asked for mid-walk: exactly one more runs afterwards. */
   let again = false;
   /**
-   * Bumped per walk. The in-flight guard above is what keeps two walks from
-   * existing, and this is what keeps that from being merely incidental: a walk
-   * that is no longer the current one WRITES NOTHING. Without it, a slower
-   * earlier walk finishing last would overwrite a newer walk's tree entry by
-   * entry — `put` is unconditional — and the tree the rail, the crumbs and
-   * name-search read would be a blend of two.
-   *
-   * NOTHING REACHES IT TODAY, and no test pins it: the follow-up walk is started
-   * from `prefetch`'s own `finally`, so the previous `run` has already returned
-   * by then and two cannot overlap. It is kept because it is the cheap half of
-   * that pair — the day a second door into `run` is added, the invariant holds
-   * rather than needing to be rediscovered.
-   */
+  * Bumped per walk; a stale walk writes nothing, so two can never blend the
+  * tree. Unreachable today (the follow-up starts from `finally`), kept as a guard.
+  */
   let generation = 0;
   /**
-   * A signature of the tree the LAST completed walk left behind, or null before
-   * the first one. What `onWalked(changed)` is answered from — see `signature`.
-   *
-   * Null is deliberately not `""`, and the case is narrower than it looks: an
-   * empty HOUSEHOLD still signs as `"\0root"`, because `signature` pushes each
-   * folder's key before its entries. The signature is empty only when the walk
-   * cached nothing at all — a first walk whose root listing failed non-fatally.
-   * That walk must still repaint, because the rail's loaded flag flips with it,
-   * and that is what turns a category's "Loading…" into "Export is empty".
-   */
+  * Null, not `""`: an empty household still signs as `"\0root"`; empty means
+  * the walk cached nothing, and that first walk must still repaint so the
+  * rail's loaded flag flips.
+  */
   let lastSignature: string | null = null;
 
-  /**
-   * Everything a repaint would be FOR, as one string: which folders exist, where,
-   * what they hold and what they are called. The rail's rows and counts, the root
-   * gallery's flattening, the crumb labels and name-search all read exactly this
-   * and nothing else, so two walks with the same signature owe the gallery
-   * nothing. Cheap because the tree is household-sized by construction — the same
-   * assumption the sequential BFS rests on.
-   *
-   * The same reading `freshness.ts` takes of a single listing, one level up.
-   */
+  /** Everything a repaint depends on, as one string. */
   function signature(): string {
     const parts: string[] = [];
     for (const k of [...listings.keys()].sort()) {
       parts.push(k);
       for (const e of listings.get(k)!.entries) {
-        // `itemCount` for a folder and `updatedAt` for a note are the two things
-        // besides existence and name that anything downstream renders.
         parts.push(`${e.kind}${e.id}${e.name}${e.kind === "folder" ? e.itemCount : e.updatedAt}`);
       }
     }
@@ -156,30 +72,17 @@ export function createFolderCache({ api, handled, onWalked }: FolderCacheDeps): 
 
   function put(id: Id | null, listing: Listing): void {
     listings.set(key(id), listing);
-    // The roots are a projection of one particular listing, so they are re-derived
-    // HERE rather than at each call site: the two used to be assigned separately,
-    // and a writer that updated one without the other left the rail showing roots
-    // the cache disagreed with.
     if (id === null) rootFolders = listing.entries.filter((e): e is Folder => e.kind === "folder");
   }
 
-  /** Folder key -> the request in flight for it. Empty whenever nothing is. */
   const inFlight = new Map<string, Promise<Listing>>();
 
   function listFolder(id: Id | null): Promise<Listing> {
     const k = key(id);
     const running = inFlight.get(k);
     if (running) return running;
-    // CALLERS GET THE API'S OWN PROMISE, and the bookkeeping rides a side
-    // branch. Chaining the cleanup onto what is returned instead (`.finally`,
-    // or a `.then` that forwards) would put an extra microtask between the
-    // response and every awaiting caller — invisible in a browser, and enough
-    // to desynchronise the walk from anything sequencing it a tick at a time.
-    //
-    // Both arms delete: a failed request must not be handed to the next caller,
-    // which would turn one folder's outage into a permanent one. The rejection
-    // is consumed on this branch only, so it does not surface as unhandled
-    // while still reaching everyone who asked.
+    // Callers get the API's own promise; cleanup rides a side branch so no extra
+    // microtask lands before them. Both arms delete, so a failure isn't cached.
     const started = api.listFolder(id);
     inFlight.set(k, started);
     void started.then(
@@ -202,9 +105,6 @@ export function createFolderCache({ api, handled, onWalked }: FolderCacheDeps): 
         try {
           l = await listFolder(id);
         } catch (e) {
-          // An expired session fails every remaining hop identically — stop the
-          // walk and let the shell re-authenticate instead of grinding through
-          // the tree. Any other failure just skips this folder, as before.
           if (handled(e)) return;
           continue;
         }
@@ -222,10 +122,8 @@ export function createFolderCache({ api, handled, onWalked }: FolderCacheDeps): 
 
   function prefetch(force = false): Promise<void> {
     if (walk) {
-      // Join the walk already running rather than starting a second. A FORCED
-      // caller cannot be satisfied by it — the running walk may already have
-      // passed the folder whose change prompted the bump — so it books the one
-      // follow-up `again` allows.
+      // A forced caller can't trust the running walk (it may have passed the changed
+      // folder), so it books the one follow-up.
       if (force) again = true;
       return walk;
     }

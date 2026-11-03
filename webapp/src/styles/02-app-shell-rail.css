@@ -1,10 +1,4 @@
-/* ============================================================
-   App shell — library gallery + .note reader.
-   Ported from the approved visual source of truth.
-   Scoped under .sn-root so it never
-   touches the centered auth sheet above. The chrome stays quiet;
-   the notes (live <canvas> pages) carry the colour.
-   ============================================================ */
+/* ---- app shell: library gallery + reader, scoped under .sn-root ---- */
 
 .sn-root {
   font-family: var(--font-body);
@@ -15,14 +9,9 @@
   overflow: hidden;
 }
 
-/* Form controls inherit the page font/colour instead of the browser's defaults.
- * This is a *reset*, so it must carry no specificity weight of its own: written
- * as `.sn-root button, …` it scores (0,1,1) and silently outranks every single
- * class that styles a control — `.btn`, `.btn--ink`, `.icon-btn`, `.backbtn`.
- * Most visibly it beat `.btn--ink { color: var(--sheet) }`, so the Export button
- * inherited `--ink` for both its label and its `currentColor` icon stroke against
- * an `--ink` background: a solid, unreadable block. `:where()` contributes zero
- * specificity, dropping this to (0,1,0) so the later component classes win. */
+/* Control font reset, wrapped in `:where()` for zero specificity so component
+ * classes (`.btn--ink` etc.) win; at (0,1,1) it made the Export button
+ * ink-on-ink. */
 .sn-root :where(button, input, select) {
   font: inherit;
   color: inherit;
@@ -46,16 +35,9 @@
   position: relative;
   background: var(--sheet);
   display: grid;
-  /* LOAD-BEARING. Without an explicit column this grid gets ONE implicit `auto`
-     track, and an `auto` track floors at the max-content of its widest row — it
-     does not clamp to the 232px `.app` gave the rail. So the widest row silently
-     sets the width for all of them and everything spills to the right, on top of
-     the topbar, still painted and still swallowing clicks: `elementFromPoint` at
-     the topbar's left edge returned `.brand`.
-     It was latent for a long time, sitting at exactly 231px against a 231px box;
-     adding the theme toggle to `.account` pushed it to 240.6 and tipped it over.
-     `minmax(0, 1fr)` makes the track flexible with a zero floor, so rows are
-     capped at the rail's real width and truncate inside it (see `.account`). */
+  /* Load-bearing: an implicit `auto` track floors at its widest row's
+     max-content, so one over-wide row spills every row over the topbar (and
+     eats its clicks). `minmax(0, 1fr)` caps rows at the rail width. */
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto 1fr auto;
   min-height: 0;
@@ -78,27 +60,15 @@
   gap: 8px;
   padding: 22px 20px 18px;
   font-family: var(--font-mono);
-  /* THE WORDMARK LEADS THE RAIL, so it cannot be the smallest thing in it. At
-     `--fs-eyebrow` it tied with the "FOLDERS" section label and sat BELOW the
-     nav items at `--fs-body` — the product name reading as a caption for the
-     list beneath it. `--fs-title` is the first step that puts it on top.
-
-     Tracking comes down as the size goes up: 0.16em is calibrated for 11px mono,
-     and the same ratio at 16px sprawls the word across the rail. */
+  /* The wordmark leads the rail, so it must not be its smallest text; tracking
+     drops as size rises. */
   font-size: var(--fs-heading);
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-/* THE MARK'S WRAPPER MUST NOT BE AN INLINE BOX, and that is the whole fix.
-   As a plain `span` it got a line box of its own — with the same descender space
-   below the baseline that uppercase never uses — and the SVG sat on THAT box's
-   baseline, riding ~2px above where `align-items: center` was aiming it. Making
-   it a block-level box gives it exactly the glyph's height, so the row centres
-   the mark itself rather than a line box wrapped around it.
-
-   No nudge, and deliberately no nudge: a pixel offset here would be a second
-   correction stacked on the first, and it would need re-tuning at every size. */
+/* Must not be an inline box: an inline wrapper's line box puts the SVG on a
+   baseline ~2px above centre. Block-level centres the glyph itself. */
 .brand__mark {
   display: flex;
 }
@@ -123,10 +93,7 @@
   gap: 10px;
   width: 100%;
   padding: 8px 10px;
-  /* Indent one step per nesting level so a subfolder reads as inside its
-     parent; --depth is set per item by the rail builder. 22px a step puts the
-     first level at the mockup's 32px, and keeps going for the deeper levels the
-     mockup never had to draw. */
+  /* One 22px step per nesting level (`--depth`, set by the rail builder). */
   padding-left: calc(10px + var(--depth, 0) * 22px);
   border: 0;
   border-left: 2px solid transparent;
@@ -139,10 +106,7 @@
     background 0.12s ease,
     color 0.12s ease;
 }
-/* A subfolder is one step in, marked by a SHORT ACCENT TICK rather than by
-   indentation alone — at this depth a bare margin reads as misalignment. The
-   mockup's mark, and its token: --accent, never --margin, which is reserved for
-   danger everywhere in this app. */
+/* A subfolder is marked by a short accent tick (never --margin, reserved for danger). */
 .nav__item.is-nested::before {
   content: "";
   position: absolute;
@@ -153,13 +117,10 @@
   background: var(--accent);
   opacity: 0.55;
 }
-/* A nested row is subordinate to its anchor, so its name sits one step back in
-   the ink hierarchy. */
 .nav__item.is-nested .nav__name {
   color: var(--ink-soft);
 }
-/* The glyph is wrapped so a device-authored folder name can be set as text
-   rather than interpolated into markup; the wrapper must not take flex space. */
+/* Wrapped so a device-authored folder name is set as text, not markup. */
 .nav__glyph {
   display: inline-flex;
   flex: none;
@@ -184,15 +145,8 @@
   font-variant-numeric: tabular-nums;
   color: var(--ink-faint);
 }
-/* The OTHER kind of badge: a state glyph where a count would sit (the admin
-   row's padlock). Same slot, same weight in the row — it is answering the same
-   "and what about this one?" question — but it is an icon, so it takes the
-   count's colour rather than its type metrics.
-
-   `--ink-soft`, not `--ink-faint`: this is a 14px non-text indicator carrying
-   meaning, so it owes WCAG's 3.0 rather than the count's decorative dimming, and
-   `--ink-faint` on `--sheet` does not clear it. `flex: none` because `.nav__name`
-   above takes all the free space and an svg here would otherwise be squeezed. */
+/* A state glyph in the count's slot (the admin padlock). `--ink-soft` because a
+   meaningful 14px indicator owes WCAG 3:1, which `--ink-faint` misses. */
 .nav__item .nav__state {
   display: inline-flex;
   flex: none;
@@ -201,9 +155,7 @@
 .nav__item .nav__state svg {
   width: 14px;
   height: 14px;
-  /* The row's own `.nav__item svg` dims every glyph to 0.85 for the category
-     marks, which are decoration beside a word that already says it. This one IS
-     the information, so it is not dimmed. */
+  /* Not dimmed like the category marks: this glyph is the information. */
   opacity: 1;
 }
 .nav__item[aria-current="true"] {
@@ -216,32 +168,9 @@
   opacity: 1;
 }
 
-/* The rail footer is a NAMEPLATE: who you are, and a chevron saying it opens.
-   Nothing else. The theme toggle and sign out both moved onto the account page
-   and this row is the whole reason they had
-   to — it was full, and it is the arithmetic below that says so.
-
-   WHAT THE ROW HAD TO FIT BEFORE, with two 30px buttons in it:
-
-     232 − 24 (padding) − 30 (avatar) − 66 (.account__actions) − 16 (2 × 8 gap)
-       = 96px left for `.account__who`
-
-   which is why the address ellipsised at the default rail width, and why adding
-   a settings glyph (another ~33px) was never an option: the footer had to SHED
-   rather than gain. WHAT IT FITS NOW:
-
-     232 − 24 (padding) − 30 (avatar) − 16 (.account__chevron) − 16 (2 × 8 gap)
-       = 146px left for `.account__who`
-
-   `.account__who` is still the flexible child and the only one — everything else
-   is `flex: none` — and it keeps `min-width: 0`, so a long address still
-   ellipsises inside whatever it has rather than forcing the row wider than the
-   rail. That failure mode is not hypothetical: the rail's grid column floors at
-   max-content (see `grid-template-columns` above), so one over-wide row paints
-   every rail row over the topbar and eats clicks aimed at it.
-
-   A BUTTON, because the whole block is now one target: clicking your own name to
-   manage your account is the convention everywhere, and it costs no glyph. */
+/* The rail footer is a nameplate button (who you are + a chevron). It has no
+   room for more: 232px leaves `.account__who` 146px, and it is the only flex
+   child (`min-width: 0`) so long addresses ellipsise rather than widen the rail. */
 .account {
   display: flex;
   align-items: center;
@@ -264,9 +193,6 @@
 .account:hover .account__chevron {
   color: var(--ink-soft);
 }
-/* The only affordance the row has room for, and it is an EXISTING glyph rather
-   than a new one. Quiet at rest — it marks the row as a door without competing
-   with the name. */
 .account__chevron {
   flex: none;
   display: grid;
@@ -278,13 +204,11 @@
 .account__chevron svg {
   width: 16px;
   height: 16px;
-  /* Pointing the way it opens — the page is to the right of the rail, not below
-     it — so the shared chevron is rotated rather than duplicated as a new path. */
+  /* Points right, toward where the page opens. */
   transform: rotate(-90deg);
 }
 
-/* Storage quota bar, directly under the account footer: used | track | total,
-   the fill in green ink, turning red over quota. Hidden until `usage()` loads. */
+/* Storage quota bar under the footer; red over quota, hidden until `usage()` loads. */
 .quota {
   display: flex;
   align-items: center;
@@ -333,8 +257,7 @@
   font-size: var(--fs-caption);
   font-weight: 600;
 }
-/* `display: block` because these are SPANS now — the nameplate is a <button>,
-   and a <div> inside one is invalid content that browsers reparent. */
+/* Block spans: a <div> inside the <button> nameplate would be reparented. */
 .account__who {
   display: block;
   flex: 1;
@@ -357,11 +280,7 @@
   text-overflow: ellipsis;
   transition: color 0.12s ease;
 }
-/* The square icon control — the find bar's prev/next and the viewer toolbars'
-   zoom/pager steppers. (It used to be the rail footer's too, until the theme
-   toggle and sign out moved onto the account page.) The compact control height,
-   kept square, on the system chrome (--line border, --radius, --hover-fill
-   hover). */
+/* The square compact icon control (find bar prev/next, viewer steppers). */
 .icon-btn {
   display: grid;
   place-items: center;

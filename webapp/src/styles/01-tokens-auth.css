@@ -1,44 +1,10 @@
 /*
- * 01-tokens-auth.css — the self-hosted @font-face declarations and the auth /
- * base element styles. The DESIGN TOKENS moved out to 00-tokens.css (a pure
- * :root layer that loads first); this file resolves every `var(--…)` against
- * them. Kept here because they are element rules, not tokens: the two @font-face
- * blocks, the global box-sizing reset, <body>, and the whole login "sheet".
- *
- * The faces: Space Grotesk (display) and Space Mono (utility mono) — a
- * superfamily, since Grotesk is derived from Mono. Both are SIL OFL, self-hosted
- * under public/fonts/ (Latin subset only); Vite copies them verbatim to dist/,
- * so the built app serves /fonts/*.woff2 from its own origin and nothing is
- * fetched from a CDN — it works offline on the household LAN.
- *
- * Space Grotesk ships two weights: 400 (the admin gate title) and 600 (the
- * heading weight). A 700 request resolves to the 600 face by CSS nearest-match.
- * Metric overrides pin it to the previous system-ui fallback so a heading does
- * not resize or shift on swap: size-adjust 106% lifts the x-height (0.486) to
- * the ~0.516 the fallback rendered; ascent/descent 90%/21% reproduce the
- * fallback line box; line-gap 0%.
- *
- * Space Mono ships the only two weights it HAS: 400 and 700 (there is no 600, so
- * the mono uppercase labels that ask for 600 resolve UP to 700 — the same they
- * already did against the system monospace on Linux, whose bold is 700). Space
- * Mono (upm 1000) has a 612-unit advance, a 700-unit cap height and a small
- * 496-unit x-height.
- *
- * size-adjust: 98%. The utility face is spent almost entirely on UPPERCASE
- * labels (eyebrows, buttons, the topbar), whose apparent size is set by the CAP
- * height, not the x-height — and 98% holds Space Mono's caps (0.686em) within
- * ~2% of the system monospace's ~0.7em, so the labels do not look resized on
- * swap. Width is the one thing that genuinely shifts: MEASURED against the old
- * fallback, "DELETED TODAY" comes out ~5% wider (at 11px the monospace advance
- * quantizes to a whole pixel, so no size-adjust lands exactly on the fallback —
- * the choices are ~7% narrower at <=94% or ~5% wider at >=96%, and the wider one
- * keeps the caps and x-height legible). That ~5% is ABSORBED BY SLACK in every
- * dense-label context: the section eyebrows carry a trailing flex-fill rule, the
- * topbar action buttons grow to fit their `nowrap` label, and the wordmark, rail
- * footer and meta lines have room or ellipsis — so nothing wraps or overflows
- * (confirmed by the e2e suite, incl. the rail-footer-overflow and topbar-action
- * tests). ascent/descent 90%/22% give it a normal line box in place of Space
- * Mono's tall native 112%/36%.
+ * Self-hosted @font-face (public/fonts/, Latin subset, works offline) and the
+ * base/auth element styles. Space Grotesk ships 400/600 and Space Mono 400/700
+ * (a 600 request resolves to 700). Metric overrides keep text from resizing on
+ * swap: Grotesk matches the old system-ui x-height and line box; Mono's 98%
+ * size-adjust matches cap height (its labels are uppercase), leaving them ~5%
+ * wider, which every dense-label context absorbs.
  */
 @font-face {
   font-family: "Space Grotesk";
@@ -107,8 +73,7 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* The library/reader shell is full-bleed, not a centered card — drop the auth
- * layout's centering and padding when it's mounted. */
+/* The app shell is full-bleed: drop the auth centering. */
 body:has(.sn-root) {
   display: block;
   padding: 0;
@@ -122,7 +87,7 @@ body:has(.sn-root) {
   height: 100dvh;
 }
 
-/* --- The sheet: the signature ruled-paper card --- */
+/* --- The sheet --- */
 
 .sheet {
   position: relative;
@@ -139,7 +104,6 @@ body:has(.sn-root) {
   animation: sheet-in 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
 }
 
-/* The red margin rule running the full height of the sheet. */
 .sheet::before {
   content: "";
   position: absolute;
@@ -168,8 +132,6 @@ body:has(.sn-root) {
   gap: 8px;
   margin: 0 0 30px;
   font-family: var(--font-mono);
-  /* In step with the rail's (`02-app-shell-rail.css`): this is the one screen
-     whose whole job is to say which app you are signing in to. */
   font-size: var(--fs-heading);
   font-weight: 600;
   letter-spacing: 0.1em;
@@ -177,9 +139,7 @@ body:has(.sn-root) {
   color: var(--ink);
 }
 
-/* Block-level for the reason the rail's mark is (`02-app-shell-rail.css`): an
-   inline wrapper brings a line box of its own and the glyph rides its baseline
-   instead of being centred on its own height. */
+/* Block-level, so the glyph centres on its own height rather than a baseline. */
 .wordmark__mark {
   display: flex;
 }
@@ -354,21 +314,14 @@ body:has(.sn-root) {
   }
 }
 
-/* ============================================================
-   ONBOARDING — the first-run journey (login -> choose password ->
-   connect device). Built on the same tokens as the rest of this file;
-   nothing here invents a colour or a metric.
-   ============================================================ */
+/* ---- onboarding (login, choose password, connect device) ---- */
 
-/* The pre-auth frame is a layout no-op: `display: contents` lets the sheet stay
- * the centered grid child exactly as before, while the floating theme toggle
- * (position: fixed, out of flow) rides along as a sibling. */
+/* A layout no-op, so the fixed theme toggle rides along as the sheet's sibling. */
 .preauth {
   display: contents;
 }
 
-/* Floating pre-auth theme toggle — chrome for the whole pre-auth window, not any
- * one step. The app shell has its own toggle in the rail, behind the auth wall. */
+/* The floating pre-auth theme toggle. */
 .theme {
   position: fixed;
   top: 18px;
@@ -396,9 +349,8 @@ body:has(.sn-root) {
   height: 16px;
 }
 
-/* First-run guidance, shown AS a terminal — the same ink block the primary button
- * uses, just multi-line and mono. It never carries the password itself (the web
- * client is never sent it); it points at the terminal that printed it. */
+/* First-run guidance styled as a terminal; it points at the printed password,
+ * never shows it. */
 .terminal {
   margin: 0;
   font-family: var(--font-mono);
@@ -414,7 +366,6 @@ body:has(.sn-root) {
   user-select: text;
 }
 
-/* The LAN address, copyable: a line to read plus a quiet copy control. */
 .addr {
   display: flex;
   align-items: center;
@@ -438,7 +389,6 @@ body:has(.sn-root) {
   flex: none;
 }
 
-/* "Use this, not localhost" — the red margin rule as an aside, pulled left. */
 .aside {
   margin: 0;
   font-size: var(--fs-caption);
@@ -452,7 +402,7 @@ body:has(.sn-root) {
   font-weight: 600;
 }
 
-/* The self-resolving sync wait: pulsing until a device syncs, then settled. */
+/* Pulses until a device syncs. */
 .wait {
   display: flex;
   align-items: center;
@@ -486,7 +436,6 @@ body:has(.sn-root) {
   }
 }
 
-/* "I'll connect it later" — a quiet mono link. */
 .skip {
   display: block;
   width: 100%;
@@ -508,7 +457,6 @@ body:has(.sn-root) {
   color: var(--ink-soft);
 }
 
-/* Progress dots — three steps, stated not implied. */
 .dots {
   display: flex;
   gap: 7px;

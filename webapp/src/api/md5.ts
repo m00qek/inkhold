@@ -1,24 +1,10 @@
-// MD5 — compact, dependency-free implementation of the MD5 message digest.
-//
-// Why this exists: the device-compatible login challenge is
-// `sha256_hex(md5_hex(password) + randomCode)` and the stored credential is
-// `md5_hex(password)`. Web Crypto has no MD5 at all, so we bundle this small
-// routine rather than pull in a dependency. (SHA-256 is bundled too — see
-// sha256.ts — because `crypto.subtle` needs a secure context we don't have.)
-// The plaintext password is hashed here in the browser and never leaves it.
-//
-// MD5 is cryptographically broken; it is used only for wire-compatibility with
-// Ratta's protocol, on a trusted LAN. Do not use it for
-// anything security-sensitive.
-//
-// Algorithm: the classic RFC 1321 reference, adapted to operate directly on a
-// byte array (so UTF-8 inputs hash correctly).
+// MD5 (RFC 1321) over UTF-8 bytes. Web Crypto has none; needed only for wire
+// compatibility with Ratta's login protocol — not for anything security-sensitive.
 
 function add32(a: number, b: number): number {
   return (a + b) & 0xffffffff;
 }
 
-// One MD5 operation shared by the four rounds' nonlinear functions.
 function cmn(q: number, a: number, b: number, x: number, s: number, t: number): number {
   a = add32(add32(a, q), add32(x, t));
   return add32((a << s) | (a >>> (32 - s)), b);
@@ -37,7 +23,6 @@ function ii(a: number, b: number, c: number, d: number, x: number, s: number, t:
   return cmn(c ^ (b | ~d), a, b, x, s, t);
 }
 
-// Mixes one 16-word (64-byte) block into the running state.
 function md5cycle(x: number[], k: number[]): void {
   let a = x[0]!, b = x[1]!, c = x[2]!, d = x[3]!;
 
@@ -115,7 +100,6 @@ function md5cycle(x: number[], k: number[]): void {
   x[3] = add32(d, x[3]!);
 }
 
-// Reads 64 bytes at `off` as sixteen little-endian 32-bit words.
 function md5blk(bytes: Uint8Array, off: number): number[] {
   const blk: number[] = new Array(16);
   for (let i = 0; i < 16; i++) {
@@ -132,7 +116,6 @@ function md5(bytes: Uint8Array): number[] {
   let i: number;
   for (i = 64; i <= n; i += 64) md5cycle(state, md5blk(bytes, i - 64));
 
-  // Trailing partial block: copy the remainder, append the 0x80 marker.
   const rem = n & 0x3f;
   const off = n - rem;
   const tail = new Array(16).fill(0) as number[];
@@ -140,8 +123,7 @@ function md5(bytes: Uint8Array): number[] {
   for (; j < rem; j++) tail[j >> 2]! |= bytes[off + j]! << ((j & 3) << 3);
   tail[j >> 2]! |= 0x80 << ((j & 3) << 3);
 
-  // If the marker spilled past word 14 there is no room for the length; flush
-  // this block and append the length in a fresh one.
+  // Marker past word 14 leaves no room for the length: flush, use a fresh block.
   if (j > 55) {
     md5cycle(state, tail);
     for (let z = 0; z < 16; z++) tail[z] = 0;

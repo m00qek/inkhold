@@ -1,42 +1,23 @@
-// The OUTLINE panel — the document's own table of contents, docked beside the
-// page: one row per entry, indented by depth, click to jump, and the entry you
-// are inside marked as you page.
-//
-// A SEPARATE PANEL FROM THE PAGE INDEX, not tabs inside one, because the two
-// want different track widths: a filmstrip is happiest at `--panel-w-narrow`
-// (180px) and a wrapped outline title is unreadable there. They share the DOCK
-// instead and the viewer keeps them mutually exclusive, since two navigation
-// panels open at once would leave the page a sliver.
-//
-// DEPTH IS INDENT PLUS TYPE, NEVER COLOUR. Colour is reserved for STATE here
-// (the current entry, and its accent stroke in the gutter); tint the depths and
-// there is nothing left to say "you are here" with. See `20-pdf-viewer.css`.
+// The PDF outline panel: the document's table of contents, indented by depth,
+// with the entry containing the current page marked. Shares the dock with the
+// page index (mutually exclusive) because the two want different widths.
+// Depth is shown by indent and type only; colour is reserved for the current entry.
 
 import { el } from "../ui/dom";
 import { createSidePanel } from "../ui/sidePanel";
 import { svg, VIEWER_IC } from "./viewerIcons";
 import type { PdfOutlineEntry } from "../render/pdfWire";
 
-/**
- * The deepest level that gets its own indent step and type treatment; anything
- * below it is drawn as this one.
- *
- * At `--sp-3` (12px) a level, the indent runs out of the 268px track at five
- * levels. The clamp is on the INDENT and the TYPE both, so a level-6 entry
- * reads as "deeper than a chapter" rather than as a column of single
- * characters.
- */
+/** Deepest level with its own indent and type step (the 268px track runs out at five). */
 const MAX_DEPTH = 3;
 
 export interface PdfOutlinePanel {
-  /** The panel `<aside>`. Mount it; it is also the list's SCROLL container. */
+  /** The panel `<aside>`, also the scroll container. */
   el: HTMLElement;
-  /** (Re)build the list. The current mark is dropped — set it again after. */
+  /** (Re)build the list; the current mark is dropped. */
   setEntries(entries: readonly PdfOutlineEntry[]): void;
-  /** Move the current mark to the entry that covers this 0-based page. */
   setCurrent(page: number): void;
   setOpen(open: boolean): void;
-  /** Drop every row. The panel stays usable. */
   clear(): void;
 }
 
@@ -52,18 +33,13 @@ export function createPdfOutlinePanel(opts: { onPick(page: number): void }): Pdf
   panel.body.append(list);
 
   let entries: readonly PdfOutlineEntry[] = [];
-  /** One button per entry, index-aligned with `entries`. */
   let rows: HTMLButtonElement[] = [];
-  /** Index into `entries`, or -1 for "no entry covers the current page". */
+  /** Index into `entries`, or -1 when no entry covers the page. */
   let current = -1;
 
   /**
-   * Scroll the marked row into view, if it is out of it.
-   *
-   * Measured rather than `scrollIntoView()`, and against the PANEL's own box:
-   * `scrollIntoView` walks every scrollable ancestor, and the panel is a flex
-   * child of a stage that itself scrolls a zoomed page — so revealing a row 300
-   * entries down would also drag the page sideways under the reader.
+   * Measured against the panel rather than `scrollIntoView()`, which would also
+   * scroll the zoomed page's stage sideways.
    */
   function reveal(): void {
     const row = current >= 0 ? rows[current] : undefined;
@@ -82,9 +58,6 @@ export function createPdfOutlinePanel(opts: { onPick(page: number): void }): Pdf
   }
 
   function buildRow(entry: PdfOutlineEntry, index: number): HTMLButtonElement {
-    // The indent is a custom property because it is arithmetic (`--sp-3` per
-    // step); the TYPE is a class because it is not — it steps down a scale that
-    // already exists and stops.
     const depth = Math.min(entry.depth, MAX_DEPTH);
     const title = el("span", { class: "pdf-outline__t", text: entry.title });
     const row = el(
@@ -94,14 +67,11 @@ export function createPdfOutlinePanel(opts: { onPick(page: number): void }): Pdf
         type: "button",
         "data-entry": String(index),
         "aria-current": "false",
-        // AN ENTRY WITH NO DESTINATION IS INERT, not absent. It is still a line
-        // its author wrote in the table of contents, and a row that silently did
-        // nothing when pressed would be worse than one that says it cannot.
+        // An entry with no destination is shown disabled, not dropped.
         ...(entry.page === null ? { disabled: true } : {}),
       },
       title,
-      // 1-BASED ON SCREEN, 0-based on the wire. `p` is the index `go()` takes;
-      // the number beside a heading is the one printed on the page.
+      // 1-based on screen, 0-based on the wire.
       entry.page === null
         ? null
         : el("span", { class: "pdf-outline__p", text: String(entry.page + 1) }),
@@ -131,15 +101,7 @@ export function createPdfOutlinePanel(opts: { onPick(page: number): void }): Pdf
       list.append(...rows);
     },
 
-    /**
-     * THE ENTRY WITH THE GREATEST `page` AT OR BEFORE `page` — the entry the
-     * reader is INSIDE, which is why this takes a page rather than an index:
-     * the mark tracks paging and arrow keys as faithfully as it tracks a click.
-     *
-     * Ties go to the LAST entry at that page — a Part and its first Chapter
-     * beginning on one page means the Chapter, the more precise answer. An
-     * entry with `page === null` names no place and can never be current.
-     */
+    /** The last entry whose page is at or before `page`; ties go to the later (more specific) entry. */
     setCurrent(page: number): void {
       let best = -1;
       let bestPage = -1;
@@ -156,7 +118,7 @@ export function createPdfOutlinePanel(opts: { onPick(page: number): void }): Pdf
 
     setOpen(open: boolean): void {
       panel.setOpen(open);
-      // A hidden element measures 0×0, so this can only be done on the way IN.
+      // A hidden element measures 0×0, so reveal only on open.
       if (open) reveal();
     },
 

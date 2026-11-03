@@ -1,9 +1,6 @@
-// First-login (mandatory) change-password page — step 2 of first-run onboarding.
-// Reached with a limited "pending" session that can touch nothing else. On
-// success the server revokes all sessions and issues a fresh full session as a
-// new cookie, and we continue to the connect-device step. This is the ONLY way
-// into this page: there is no voluntary "change my password" entry in the app,
-// so every visit is onboarding, and continuing to `/connect` is unambiguous.
+// First-login mandatory password change (onboarding step 2), under a limited
+// "pending" session. Success revokes all sessions and issues a fresh one. There
+// is no voluntary entry, so continuing to `/connect` is always right.
 
 import { el } from "../ui/dom";
 import { authView, stepDots } from "../ui/chrome";
@@ -81,7 +78,6 @@ export function changePasswordPage(): HTMLElement {
         status.error("Choose a password different from your temporary one.");
         next.input.focus();
       } else if (err instanceof ApiError && err.status === 401) {
-        // The pending session expired before the change completed.
         status.error("Your sign-in expired. Sign in again to continue.");
         setTimeout(() => go("/login"), 1500);
       } else if (err instanceof ApiError) {

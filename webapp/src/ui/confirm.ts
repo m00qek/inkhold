@@ -1,66 +1,34 @@
-// A shared modal confirm <dialog>, built per call and removed on close.
-//
-// Both the recycle bin's purge/empty confirm and the admin console's
-// destructive prompts hand-rolled the SAME native-<dialog> scaffold. This is
-// that scaffold, once. The two callers differ only in class names (so their
-// existing CSS and e2e selectors carry over untouched) and in what they build
-// into the body, both passed in.
-//
-// The two rules the shape is built around, and why they are the platform's job:
-//
-//   * A native <dialog> gives the modal focus trap, Escape-to-dismiss, and the
-//     inertness of the page behind it — three things not worth re-implementing.
-//   * `method="dialog"` puts the pressed button's `value` in `returnValue`, and
-//     the FIRST submit button is the one Enter activates. So Cancel comes FIRST
-//     in DOM order and takes `autofocus`: the safe answer is the default one, and
-//     a stray Return never reaches the destructive button. Escape (and the
-//     backdrop) close with an empty `returnValue`, which reads as cancel too.
-//
-// Built per call and removed on close because the per-invocation pieces (a
-// type-to-confirm listener, a disabled state, the focus target) are exactly what
-// leak from one prompt into the next when a single node is reused.
+// A shared native modal confirm <dialog>, built per call and removed on close
+// so per-prompt listeners and state never leak into the next one. Cancel comes
+// first in DOM order with `autofocus`, so Enter takes the safe answer; Escape
+// and the backdrop close with an empty `returnValue`, also read as cancel.
 
 import { el } from "./dom";
 
-/** The class names each caller stamps on the dialog's parts, so its own CSS and
- *  e2e selectors keep matching (`confirm*`/`.btn` for the bin, `admin-dialog*`/
- *  `.admin-btn` for the console). */
+/** Caller class names, so existing CSS and e2e selectors keep matching. */
 export interface DialogClasses {
-  /** The `<dialog>` element itself. */
   dialog: string;
-  /** The body wrapper the `build` callback fills. */
   body: string;
-  /** The trailing button row. */
   actions: string;
-  /** The Cancel button — space-separated classes allowed. */
   cancel: string;
-  /** The confirming ("go") button — space-separated classes allowed. */
   go: string;
 }
 
-/** The two action buttons, handed to `build` so a caller can finish wiring them
- *  (e.g. an `aria-label`, or gating `go` on a type-to-confirm field). */
 export interface DialogButtons {
   cancel: HTMLButtonElement;
   go: HTMLButtonElement;
 }
 
 export interface OpenDialogOptions {
-  /** Where to append the dialog (it is removed again on close). */
   host: HTMLElement;
   classes: DialogClasses;
-  /** The confirming button's label — always says what it does, never "OK". */
   goLabel: string;
-  /** The safe button's label, usually "Cancel". */
   cancelLabel: string;
-  /** Fill the body and, if needed, finish wiring the buttons. */
   build: (body: HTMLElement, buttons: DialogButtons) => void;
-  /** `aria-labelledby` target id, when the body carries a titled heading. */
   labelledBy?: string;
 }
 
-/** Open the dialog. `done` resolves true only when the confirming button was the
- *  one pressed; every other dismissal (Cancel, Escape, the backdrop) is false. */
+/** `done` resolves true only when the confirming button was pressed. */
 export function openDialog(opts: OpenDialogOptions): {
   node: HTMLDialogElement;
   done: Promise<boolean>;
@@ -72,9 +40,8 @@ export function openDialog(opts: OpenDialogOptions): {
     text: opts.cancelLabel,
     autofocus: true,
   });
-  // Cancel must never be blocked by a `required` field it is trying to abandon —
-  // without this an empty required box makes Cancel silently do nothing and the
-  // only way out is Escape. Harmless where the body has no fields.
+  // Cancel must not be blocked by a `required` field it is abandoning.
+
   cancel.formNoValidate = true;
   const go = el("button", {
     class: opts.classes.go,

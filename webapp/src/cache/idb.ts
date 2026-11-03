@@ -1,40 +1,15 @@
-// The persistent tier (L3b) of the render cache: an IndexedDB-backed thumbnail
-// store so the gallery paints instantly on a cold start instead of re-decoding
-// every note. Only "thumb"-size renders are persisted (full reader pages are big
-// and short-lived, so they live only in the memory LRU).
-//
-// Thumbnails are stored as a compressed WebP **Blob**, not raw `ImageData`. Raw
-// RGBA was 20-40x larger on disk (~87 KB for a single 128 px thumb, several MB
-// for a library) and the phone is the device that can least afford it. A Blob
-// structured-clones into IDB the same way ImageData did, the browser decodes it
-// natively on read (`createImageBitmap`), and `blob.size` is the byte weight the
-// LRU budget accounts against.
-//
-// We enforce OUR OWN byte cap with LRU eviction on top of whatever the browser
-// allows, and consult `navigator.storage.estimate()` to shrink that cap so we
-// never crowd the origin's quota (a full quota gets pages evicted unpredictably).
-// The cache is never a source of truth, so if IndexedDB is missing, `estimate()`
-// is unavailable, or any op throws, we degrade to a no-op store — a miss just
-// re-renders.
-//
-// The cap/eviction DECISION is factored into the two pure functions below
-// (`planEviction`, `budgetForQuota`) so it's unit-testable without a real
-// IndexedDB; the class just wires them to storage.
+// The persistent tier of the render cache: thumbnails in IndexedDB as WebP
+// Blobs (raw RGBA was 20-40x larger), under our own LRU byte cap clamped to
+// the origin quota. Never a source of truth: any failure degrades to a no-op.
 
-/** Lightweight per-entry bookkeeping, mirrored in memory to avoid deserializing
- * full ImageData just to make an eviction decision. */
+/** Per-entry bookkeeping, mirrored in memory so eviction never reads records. */
 export interface PersistedMeta {
   key: string;
   size: number;
-  /** Epoch ms of the last get/put — the LRU ordering key. */
   lastAccess: number;
 }
 
-/**
- * Decide which entries to drop so the total fits `budgetBytes`. Pure: takes the
- * current metadata, returns the keys to evict, oldest-access first. Returns `[]`
- * when already within budget.
- */
+/** Pure: keys to evict, oldest access first; `[]` when within budget. */
 export function planEviction(metas: readonly PersistedMeta[], budgetBytes: number): string[] {
   let running = 0;
   for (const m of metas) running += m.size;
@@ -56,10 +31,8 @@ export interface StorageEstimateLike {
 }
 
 /**
- * Shrink our desired byte budget so it stays under the browser's quota. Pure.
- * Leaves headroom (targets 80% of quota) and discounts our own current usage so
- * we don't double-count it. Falls back to the desired budget when no estimate is
- * available (older browsers), trusting the browser's own eviction as a backstop.
+ * Pure. Targets 80% of quota, discounting our own usage; without an estimate,
+ * returns the desired budget.
  */
 export function budgetForQuota(
   estimate: StorageEstimateLike | null | undefined,
@@ -74,20 +47,16 @@ export function budgetForQuota(
   return Math.max(0, Math.min(desiredBytes, Math.floor(headroom)));
 }
 
-/** The persistent thumbnail store the render cache talks to. */
 export interface PersistentThumbStore {
-  /** Whether a real backing store is available (false = silent no-op store). */
+  /** False means the silent no-op store. */
   readonly available: boolean;
-  /** The stored WebP bytes for a key, or undefined on a miss. */
   get(key: string): Promise<Blob | undefined>;
-  /** Persist a freshly encoded WebP thumbnail. */
   put(key: string, image: Blob): Promise<void>;
   clear(): Promise<void>;
 }
 
 export interface ThumbStoreOptions {
   dbName?: string;
-  /** Desired cap before quota clamping. Default ~100 MB. */
   budgetBytes?: number;
 }
 
@@ -96,7 +65,6 @@ const STORE = "thumbs";
 const VERSION = 1;
 const DEFAULT_BUDGET = 100 * 1024 * 1024;
 
-/** A store that does nothing — used when IndexedDB is unavailable. */
 function nullStore(): PersistentThumbStore {
   return {
     available: false,
@@ -126,11 +94,7 @@ interface StoredRecord {
   lastAccess: number;
 }
 
-/**
- * Open the IndexedDB-backed thumbnail store. Never throws: any failure yields a
- * no-op store. The in-memory `metas` mirror keeps eviction cheap; it's seeded on
- * open and kept in sync on every put/evict.
- */
+/** Never throws: any failure yields a no-op store. */
 export function openThumbStore(opts: ThumbStoreOptions = {}): PersistentThumbStore {
   if (!idbAvailable()) return nullStore();
 
@@ -151,11 +115,8 @@ export function openThumbStore(opts: ThumbStoreOptions = {}): PersistentThumbSto
         open.onerror = () => reject(open.error);
       });
 
-      // Seed the meta mirror (cheap: keys only, then per-key size — we store size
-      // alongside so a getAll of records is avoided at scale by reading a cursor).
       await seedMetas(db, metas);
 
-      // Clamp the cap to the browser quota if we can measure it.
       try {
         const nav = typeof navigator !== "undefined" ? navigator : undefined;
         if (nav?.storage?.estimate) {
@@ -209,7 +170,7 @@ export function openThumbStore(opts: ThumbStoreOptions = {}): PersistentThumbSto
     async get(key) {
       const rec = await withStore("readonly", (store) => promisify<StoredRecord | undefined>(store.get(key)));
       if (!rec) return undefined;
-      // Touch lastAccess so the LRU ordering reflects reads (best-effort).
+      // Best-effort LRU touch.
       const meta = metas.get(key);
       if (meta) {
         meta.lastAccess = Date.now();
@@ -225,7 +186,6 @@ export function openThumbStore(opts: ThumbStoreOptions = {}): PersistentThumbSto
       if (ok === undefined) return;
       metas.set(key, { key, size, lastAccess: record.lastAccess });
 
-      // Enforce our own cap.
       const toEvict = planEviction([...metas.values()], budget);
       if (toEvict.length === 0) return;
       await withStore("readwrite", async (store) => {
@@ -243,23 +203,13 @@ export function openThumbStore(opts: ThumbStoreOptions = {}): PersistentThumbSto
   };
 }
 
-// --- the image-dims store ----------------------------------------------------
-//
-// A second, tiny persistent store: `hash → {w, h}` — the TRUE source dimensions
-// of a plain image document, recorded the first time the thumbnail facade
-// decodes it, and read by the masonry layout so an image tile lays out at its
-// real aspect BEFORE any bytes arrive.
-//
-// Its OWN database (`sn-dims`), not a second object store in `sn-thumbs`: adding
-// a store there would need a version bump, and the thumb store's connection
-// opens at the old version — a coordination hazard for zero gain. Records are a
-// few numbers each, so there is no byte budget and no eviction here; like every
-// cache in this app it is advisory, never a source of truth (a missing entry
-// just means one first-view reflow when the image decodes).
+// ---- image dims store ----
+// `hash -> {w, h}`, the true source dimensions of an image document, so
+// masonry lays out at the real aspect before bytes arrive. Its own database
+// (`sn-dims`); no budget, records are tiny.
 
-/** True dims of an image document's bytes, keyed by its content hash (md5). */
+/** Keyed by content hash (md5). */
 export interface DimsStore {
-  /** Whether a real backing store is available (false = silent no-op store). */
   readonly available: boolean;
   get(hash: string): Promise<{ w: number; h: number } | null>;
   put(hash: string, dims: { w: number; h: number }): Promise<void>;
@@ -276,7 +226,6 @@ interface DimsRecord {
   h: number;
 }
 
-/** A dims store that answers "unknown" to everything — no IndexedDB. */
 function nullDimsStore(): DimsStore {
   return {
     available: false,
@@ -288,11 +237,7 @@ function nullDimsStore(): DimsStore {
   };
 }
 
-/**
- * Open the IndexedDB-backed dims store. Never throws: any failure — no
- * IndexedDB, an open error, a per-op error — degrades to null/no-op, exactly
- * like the thumb store, because a miss only costs one first-view reflow.
- */
+/** Never throws; a miss costs one first-view reflow. */
 export function openDimsStore(opts: { dbName?: string } = {}): DimsStore {
   if (!idbAvailable()) return nullDimsStore();
 
@@ -340,14 +285,10 @@ export function openDimsStore(opts: { dbName?: string } = {}): DimsStore {
   };
 }
 
-// ---------------------------------------------------------------------------
-// The no-cover store — the persistence behind cache/coverMemo.ts. Its OWN
-// database (`sn-nocover`) for the same reason `sn-dims` has one: a second
-// object store in an existing DB needs a version bump the other connection
-// does not perform. Records are just the hash — presence IS the fact.
+// ---- no-cover store (behind `coverMemo.ts`) ----
+// Its own database (`sn-nocover`). Presence of the hash is the fact.
 
 export interface NoCoverStore {
-  /** Whether a real backing store is available (false = silent no-op store). */
   readonly available: boolean;
   has(hash: string): Promise<boolean>;
   put(hash: string): Promise<void>;

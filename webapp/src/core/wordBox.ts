@@ -1,20 +1,6 @@
-// The one place millimetres become pixels.
-//
-// `WordBox` carries the DEVICE's own numbers out of the `.note` RECOGNTEXT block
-// — millimetres, origin top-left — and `NoteMeta.pxPerMm` is the only scale that
-// turns them into anything on a page. Two features need that conversion and they
-// must not derive it twice:
-//
-//   - the PDF exporter's invisible text layer (`export/pdf.ts`), which places
-//     words at page-pixel coordinates;
-//   - find-in-note's ovals (`pages/findInNote.ts`), which draws round the same
-//     words at the DISPLAYED page's size.
-//
-// The second is the first with a different scale: a page shown at 480 CSS px
-// wide out of a 1404 px native page is simply `pxPerMm * 480/1404`. Sharing the
-// per-word arithmetic and the bounds rule is what keeps a word circled in the
-// reader and the same word selectable in the export from ever disagreeing about
-// where it is.
+// The one place millimetres become pixels. Shared by the PDF exporter's
+// invisible text layer and find-in-note's ovals so the two never disagree about
+// where a word is.
 
 import type { WordBox } from "./types";
 
@@ -26,10 +12,7 @@ export interface BoxPx {
   h: number;
 }
 
-/**
- * Slack, in pixels, allowed when checking a scaled box against the page.
- * Small on purpose: this is float noise, not a fudge factor for a wrong scale.
- */
+/** Slack for float noise when checking a scaled box against the page. */
 export const BOUNDS_SLACK_PX = 1;
 
 /** A usable scale — a positive, finite number of pixels per millimetre. */
@@ -38,9 +21,8 @@ export function isUsableScale(pxPerMm: number | null): pxPerMm is number {
 }
 
 /**
- * Scale one word's millimetres to pixels, or null when the numbers are not
- * arithmetic (the values are device-authored and reach a PDF content stream and
- * a CSS length, so a `NaN` has to be stopped here rather than propagated).
+ * Scale one word's millimetres to pixels, or null when not finite: the values
+ * are device-authored and reach a PDF content stream and a CSS length.
  */
 export function wordBoxPx(word: WordBox, pxPerMm: number): BoxPx | null {
   const box = {
@@ -53,12 +35,8 @@ export function wordBoxPx(word: WordBox, pxPerMm: number): BoxPx | null {
 }
 
 /**
- * Does a scaled box land on the page?
- *
- * FALSE MEANS THE SCALE IS WRONG, which is why both callers treat it as
- * all-or-nothing rather than dropping the offending word: if the millimetre
- * scale disagrees with this page then every box is wrong, and keeping the ones
- * that happen to still fit leaves a partial answer that looks deliberate.
+ * Does a scaled box land on the page? False means the scale is wrong, so
+ * callers treat it as all-or-nothing rather than dropping the word.
  */
 export function withinPage(box: BoxPx, widthPx: number, heightPx: number): boolean {
   return (

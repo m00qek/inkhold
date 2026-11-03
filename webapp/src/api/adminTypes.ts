@@ -1,60 +1,25 @@
-// The admin console's wire types, in a file of their own for one structural
-// reason: `types.ts` is APPEND-ONLY at a marker that sits INSIDE the `Api`
-// interface, because two features extend that seam in parallel. There is
-// therefore nowhere in that file to declare a top-level type without editing
-// lines the other feature is editing too. The `Api` methods reach these through
-// an inline `import("./adminTypes")` type, which needs no import statement at
-// the top of `types.ts`.
+// The admin console's wire types, kept out of `types.ts` so `Api` can reach
+// them via inline `import("./adminTypes")` types.
 
 /**
- * One household account, as the admin listing sees it.
- *
- * **CAMEL-CASED HERE, SNAKE-CASED ON THE WIRE.** `GET /api/admin/users`
- * serializes the backend's `UserInfo` struct verbatim rather than through a
- * hand-written VO, so it emits `is_admin` / `must_change` / `created_at` — the
- * one endpoint on this surface that does not speak camelCase. `createHttpApi`
- * normalizes at the seam, exactly as it does for the listing's omitted
- * optionals, so nothing above the client has to know which convention the route
- * happened to be written in.
- *
- * **What is deliberately absent:** there is no quota, no device list and no
- * activity timestamp. The first two have no backing route today, and inventing
- * a number for a console whose whole job is to be trusted about what it says
- * would be worse than omitting the section. The third is the line the console
- * does not cross at all — see U7: an admin manages accounts, they do not watch
- * the people using them.
- *
- * `createdAt` survives that rule because it is a fact about the ACCOUNT, not
- * about the person's use of it: it says when you made this login, never when
- * they last picked up their tablet.
- *
- * Quota and devices are NOT folded in here even though the console draws them on
- * the same row: they are separate endpoints per user, they fail separately, and
- * a row whose meter could not be counted must still render the person. See
- * {@link AdminQuota} and {@link AdminDevice}.
+ * One household account. `GET /api/admin/users` serializes `UserInfo`
+ * verbatim in snake_case; `createHttpApi` camel-cases it at the seam. No
+ * activity timestamp, deliberately (U7): admins manage accounts, not watch use.
  */
 export interface AdminUser {
   id: number;
   email: string;
   isAdmin: boolean;
   /**
-   * The account still owes a password change — the state both a create and a
-   * reset leave it in, and what makes a server-generated temporary password
-   * safe to hand over: it unlocks nothing but its own replacement.
+   * The account owes a password change, as after create or reset; this is what
+   * makes handing over a server-generated temporary password safe.
    */
   mustChangePassword: boolean;
   /** Account creation, epoch SECONDS (the server's `created_at`, not ms). */
   createdAt: number;
 }
 
-/**
- * One tablet bound to one household account.
- *
- * `model` and `firmware` are genuinely OPTIONAL, not merely omitted-when-null:
- * the device sends them at pair time and an old binding may carry neither. A
- * row renders what it has rather than printing "undefined" or inventing a dash
- * that looks like a value.
- */
+/** One tablet bound to an account. `model`/`firmware` may be absent on old bindings. */
 export interface AdminDevice {
   /** The device serial. The unlink key, and unique per binding. */
   equipmentNo: string;
@@ -63,10 +28,8 @@ export interface AdminDevice {
   model: string | null;
   firmware: string | null;
   /**
-   * The binding is live. **A REVOKED BINDING IS STILL LISTED** — revocation is a
-   * soft status flip rather than a row delete, and that is precisely what makes
-   * re-pairing possible. So `false` here means "unlinked, and re-pairable with
-   * the device in hand", which the row must SAY rather than hide by filtering.
+   * Revocation is a soft flip, so revoked bindings are still listed;
+   * `false` means unlinked and re-pairable, which the row must say.
    */
   active: boolean;
   /** When the binding was made, epoch SECONDS — the row's "since". */
@@ -74,13 +37,8 @@ export interface AdminDevice {
 }
 
 /**
- * One person's storage accounting, in bytes.
- *
- * **`usedBytes` CAN EXCEED `totalBytes`, and that is not a bug to normalize.**
- * Lowering an allotment below what someone already stores is accepted, stores
- * verbatim, and deletes nothing — it stops their next sync until they free
- * space. Clamping the meter to full would hide the one state the control exists
- * to produce. See the `is-over` branch in the console's meter.
+ * One person's storage, in bytes. `usedBytes` can exceed `totalBytes` after an
+ * allotment is lowered; don't clamp it.
  */
 export interface AdminQuota {
   usedBytes: number;
@@ -95,40 +53,20 @@ export interface AdminRetention {
   minDays: number;
   maxDays: number;
   /**
-   * Epoch SECONDS of the last change, 0 if never — and also the moment the
-   * non-retroactive grace period started. Changing the window never purges
-   * retroactively: an entry's clock runs from the LATER of when it was trashed
-   * and when the window last changed, so shortening 30 days to 7 gives every
-   * entry already in the bin a full 7 more days rather than making a month of
-   * them instantly due. (`settings.sweepCutoff`.)
+   * Epoch seconds of the last change, 0 if never. Not retroactive: an entry's
+   * clock runs from the later of its trashing and this (`settings.sweepCutoff`).
    */
   changedAt: number;
 }
 
-/**
- * Server-wide health. Household totals only — there is deliberately no
- * per-person figure of any kind here, for the same reason the people rows carry
- * no activity.
- */
+/** Server-wide health. Household totals only, no per-person figures. */
 export interface AdminHealth {
   version: string;
-  /**
-   * Resident set size in bytes, or **null where the platform cannot report it**
-   * (only Linux is wired up). It must render as "unknown", never as `0 B`: a
-   * memory panel reading zero looks like a healthy server, which is the exact
-   * opposite of what an unreadable figure means.
-   */
+  /** RSS in bytes, or null where unsupported (Linux only); render "unknown", not 0. */
   memoryBytes: number | null;
-  /** The 50 MB ceiling this project holds itself to. Memory is never shown
-   *  alone — "31.4 MB" means nothing without the budget it is measured against. */
+  /** The 50 MB ceiling memory is shown against. */
   memoryBudgetBytes: number;
-  /**
-   * Bytes held by the content-addressed blob store. DEDUPLICATED disk, not the
-   * sum of everyone's quota usage: a blob two housemates share is one row here
-   * and is charged to both of them in their meters. "How full is this machine"
-   * is the honest question for a server panel; the per-person figure is what the
-   * quota meter is for.
-   */
+  /** Deduplicated blob-store bytes, not the sum of quota usage. */
   blobBytes: number;
   blobCount: number;
 }

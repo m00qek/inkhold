@@ -1,27 +1,11 @@
 /* ---------------- upload: the dropzone + the transfer rows ----------------
-   Two surfaces, one idea: the desk RECEIVING a page.
-
-   The dropzone reuses the app's placeholder motif verbatim — the ruled sheet with
-   its single red margin line, the same gradient pair the gallery's unpainted tile
-   and the reader's canvas placeholder paint (04-library-gallery.css). Dropping a
-   file onto the library should look like laying a page on the desk, and the way
-   to make that read is to draw the page the app already draws.
-
-   The transfer rows are the opposite register: they are DATA — a name, a
-   percentage, a length — so they are Space Mono, the app's utility face, the same
-   one the toast and the extension chips use. Length carries the number (the
-   `--layer-bar-h` fill-bar signature), so the bar is legible without the label.
-
-   Both are theme-aware through the tokens, both respect prefers-reduced-motion,
-   and every control here keeps a visible focus ring. */
+   The dropzone draws the app's own ruled sheet (laying a page on the desk); the
+   transfer rows are data, in Space Mono, with length carrying the number. */
 
 /* --- the dropzone overlay ------------------------------------------------- */
 
-/* Covers the whole SCROLL CONTAINER (`.content`), not just the gallery's own
-   box: a short listing leaves the gallery a few hundred pixels tall, and a target
-   that stops where the tiles do is a target that disagrees with itself.
-   `pointer-events: none` is load-bearing — the overlay must never become the
-   drag's own `dragleave`, which would flicker it off the instant it appeared. */
+/* Covers the whole scroll container, not just the gallery. `pointer-events:
+   none` is load-bearing: the overlay must never trigger the drag's `dragleave`. */
 .dropzone {
   position: absolute;
   inset: 0;
@@ -36,10 +20,7 @@
   display: none;
 }
 
-/* THE SHEET. The ruled paper + red margin of the placeholder tile, at page
-   scale: the same `repeating-linear-gradient` rules and the same margin rule at
-   15–17%, so this is recognisably the app's own paper rather than a second
-   invention of it. */
+/* The placeholder tile's ruled paper and margin rule, at page scale. */
 .dropzone__sheet {
   width: min(420px, 100%);
   padding: var(--sp-8) var(--sp-6);
@@ -96,10 +77,8 @@
 
 /* --- the file picker ------------------------------------------------------ */
 
-/* Off-screen rather than `display: none`: the toolbar's Upload button opens it
-   with `.click()`, and some browsers refuse to open a picker on an input that is
-   not rendered at all. `[hidden]` on the element still hides it from everything
-   that matters; this is the belt for the one behaviour that needs a box. */
+/* Off-screen, not `display: none`: some browsers won't open a picker via
+   `.click()` on an unrendered input. */
 .upload__picker {
   position: absolute;
   width: 1px;
@@ -111,11 +90,7 @@
 
 /* --- the name-conflict prompt --------------------------------------------- */
 
-/* The shell and backdrop of the shared modals (`.rename`, the confirms) — one
-   look for every dialog in the app. What is different is only the shape of the
-   choice: THREE actions rather than two, with the safe one (Keep both) as the
-   default and Replace inked, because Replace is what the person who re-dropped a
-   file to update it came for. */
+/* The shared modal shell, with three actions: Keep both the default, Replace inked. */
 .conflict::backdrop {
   background: color-mix(in srgb, var(--desk) 74%, transparent);
 }
@@ -142,8 +117,7 @@
   font-weight: 600;
   font-size: var(--fs-title);
   line-height: 1.35;
-  /* A filename is data, and it is the subject of the sentence — so it does not
-     ellipsise silently; the dialog is allowed to be two lines tall. */
+  /* The filename is the sentence's subject: wrap, don't ellipsise. */
   overflow-wrap: anywhere;
 }
 .conflict__body {
@@ -192,9 +166,7 @@
 
 /* --- the transfer list ---------------------------------------------------- */
 
-/* Bottom RIGHT, deliberately: the toast is bottom-centre and both can be up at
-   once (a file finishes, its toast appears). A tray that covered the toast would
-   hide the very sentence that names the payoff. */
+/* Bottom right, so it never covers the bottom-centre toast. */
 .transfers {
   position: fixed;
   right: var(--sp-6);
@@ -232,8 +204,7 @@
   justify-content: space-between;
   gap: var(--sp-2);
 }
-/* The NAME is the one thing here that is not data — it is what the person called
-   the file — so it stays in the body face and takes the space. */
+/* The name is the person's, not data: body face. */
 .transfer__name {
   flex: 1 1 auto;
   min-width: 0;
@@ -243,7 +214,7 @@
   font-size: var(--fs-body);
   color: var(--ink);
 }
-/* The state IS data: mono, quiet, and never allowed to wrap under the name. */
+/* The state is data: mono, quiet, never wrapping under the name. */
 .transfer__state {
   flex: 0 0 auto;
   font-family: var(--font-mono);
@@ -258,8 +229,7 @@
   color: var(--accent);
 }
 
-/* LENGTH IS THE NUMBER — the same fill-bar idiom as the layers panel's opacity
-   track, at the same height token, so a percentage is readable without reading. */
+/* Length is the number, the layers-panel fill-bar idiom. */
 .transfer__track {
   margin-top: var(--sp-2);
   height: var(--layer-bar-h);
@@ -278,8 +248,7 @@
     transition: width 0.18s linear;
   }
 }
-/* A refused or cancelled row keeps its bar as a GROUND rather than a claim: no
-   green length, because nothing arrived. */
+/* A refused or cancelled row shows no green length: nothing arrived. */
 .transfer.is-failed .transfer__fill,
 .transfer.is-cancelled .transfer__fill {
   background: var(--ink-faint);

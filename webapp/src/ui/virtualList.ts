@@ -115,15 +115,11 @@ export class VirtualList {
 
 
   /**
-   * Re-measure and re-render UNCONDITIONALLY. `render` short-circuits when the
-   * scroll offset and viewport height look unchanged, which is exactly wrong
-   * after the container is revealed (a hidden element measures 0×0, so the
-   * window was computed from a guess) or resized without a scroll event.
+   * Re-measure and re-render unconditionally, e.g. after the container is
+   * revealed (a hidden element measures 0×0) or resized without a scroll.
    */
   public refresh() {
-    // BOTH guards have to go: `render` short-circuits on the offset AND the
-    // height together, and an offset still at 0 (the common case when a panel is
-    // revealed) is within the 5px slack all by itself.
+    // Both guards must reset: an offset still at 0 is within the 5px slack.
     this.lastScrollTop = -1;
     this.lastClientHeight = -1;
     this.render();
@@ -141,10 +137,7 @@ export class VirtualList {
     const itemTop = index * this.itemHeight;
     const itemBottom = itemTop + this.itemHeight;
     
-    // We need to translate itemTop (which is relative to hostContainer)
-    // to scrollContainer's coordinate system.
-    // scrollTop is effectively (scrollRect.top - hostRect.top).
-    // The current scroll position relative to the host is:
+    // Current scroll position relative to the host container.
     const scrollRect = this.scrollContainer.getBoundingClientRect();
     const hostRect = this.hostContainer.getBoundingClientRect();
     const currentScrollTop = scrollRect.top - hostRect.top;

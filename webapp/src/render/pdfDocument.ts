@@ -1,16 +1,7 @@
-// The PDF DOCUMENT — a typed wrapper over the decoder's C ABI in
-// `webapp/wasm/pdf_decode.zig`. No DOM, no viewer, and no loading: it is handed
-// an instance (see `pdfLoader.ts`) and drives it.
-//
-// MuPDF is a DOCUMENT-oriented engine, unlike the `.note` decoder: a PDF page
-// cannot be decoded from its own bytes because pages share a resource graph
-// (fonts, colour spaces, XObjects) through the xref. So this opens a document
-// once and keeps a handle, where `render/wasm.ts` takes a page's byte range per
-// call. That is also why a PDF renderer does not implement `NoteRenderer`.
-//
-// TWO WAYS TO OPEN: whole-file, or a STREAM pulling blocks over the network as
-// MuPDF walks it. One class covers both, because on the streamed path any call
-// can suspend and on the whole-file path awaiting a plain value costs nothing.
+// A typed wrapper over the PDF decoder's C ABI (`webapp/wasm/pdf_decode.zig`).
+// Document-oriented, unlike the `.note` decoder: pages share a resource graph
+// through the xref, so a document is opened once and held by handle (and is
+// not a `NoteRenderer`).
 
 import { parsePageLinks } from "./pdfWire";
 import type { PdfLink } from "../core/types";
@@ -18,51 +9,27 @@ import { parsePageWords, type PdfWord } from "./pdfWire";
 import { parseOutline, type PdfOutlineEntry } from "./pdfWire";
 import { lastError, type PdfDecoderExports } from "./pdfLoader";
 
-/** A page's size in POINTS (1/72"), the PDF's own unit — not pixels. */
+/** A page's size in points (1/72"), not pixels. */
 export interface PdfPageSize {
   width: number;
   height: number;
 }
 
-/** One rendered page. `rgba` is copied OUT of wasm memory and is ours to keep. */
+/** One rendered page; `rgba` is copied out of wasm memory. */
 export interface PdfBitmap {
   width: number;
   height: number;
-  /**
-   * Straight (non-premultiplied) RGBA, row-major. Every pixel opaque.
-   *
-   * Typed over `ArrayBuffer` rather than `ArrayBufferLike` because it is a COPY
-   * into a fresh buffer (never a view onto wasm memory, which could in principle
-   * be shared) — and `ImageData` will only accept the narrower type.
-   */
+  /** Straight RGBA, row-major, opaque; a fresh `ArrayBuffer` so `ImageData` accepts it. */
   rgba: Uint8ClampedArray<ArrayBuffer>;
 }
 
-// ============================================================================
-// The document wrapper
-// ============================================================================
-
 /**
- * The entry points that can SUSPEND once the document is a stream.
- *
- * On the whole-file path every one of them returns its value outright; on the
- * JSPI path each is a `WebAssembly.promising` wrapper and returns a promise,
- * because anything that walks the xref can re-enter `ink.host_read` and wait on
- * a `fetch`. `AsyncPdfDocument` awaits all of them and so is written ONCE for
- * both — `await 5` is 5.
- *
- * Not every export is here: `ink_alloc`/`ink_free`, the render dimensions, the
- * error accessors and `ink_close` touch no document bytes and stay synchronous.
- * `ink_close` in particular must NOT be promising — a teardown that returns a
- * promise is a teardown that can be interleaved with.
- *
- * THE OPTIONAL MEMBERS BELOW ARE OPTIONAL IN THE TYPE AND MANDATORY ON THE JSPI
- * PATH. Each reads document bytes, so unwrapped on a streamed document it TRAPS
- * the instance the moment it suspends instead of waiting; `AsyncPdfDocument`
- * falls back to the raw export when one is absent, which is right for
- * {@link syncCalls} and wrong for a promising wrapper. They are optional only so
- * a caller building a `PdfCalls` by hand is not forced to name a call it will
- * never make. The note on each says WHY it reads bytes.
+ * The entry points that can suspend on a streamed document: under JSPI each is
+ * a `WebAssembly.promising` wrapper, synchronously each returns its value, and
+ * `AsyncPdfDocument` awaits both alike. `ink_close` must stay synchronous so
+ * teardown can't interleave. The optional members are mandatory on the JSPI
+ * path: unwrapped, a call that reads document bytes traps the instance when it
+ * suspends.
  */
 export interface PdfCalls {
   openWhole(ptr: number, len: number): number | Promise<number>;
@@ -70,17 +37,13 @@ export interface PdfCalls {
   pageCount(handle: number): number | Promise<number>;
   pageSize(handle: number, page: number, wPtr: number, hPtr: number): number | Promise<number>;
   render(handle: number, page: number, scale: number): bigint | Promise<bigint>;
-  /** Listing a page's links LOADS the page, and resolving an internal
-   *  destination walks the xref again. */
+  /** Loads the page; internal destinations walk the xref again. */
   pageLinks?(handle: number, page: number): bigint | Promise<bigint>;
-  /** The most emphatically of any of them: extracting a page's words RUNS the
-   *  page, pulling the fonts, images and every content stream it references. */
+  /** Runs the page, pulling every font, image and content stream it references. */
   pageWords?(handle: number, page: number): bigint | Promise<bigint>;
-  /** Walks the outline tree, then resolves each entry's destination through the
-   *  links layer's own `fz_resolve_link` / `fz_page_number_from_location` pair:
-   *  the xref twice over. */
+  /** Walks the outline and resolves each destination through the xref. */
   loadOutline?(handle: number): bigint | Promise<bigint>;
-  /** Grafting a page walks the SOURCE document's xref. */
+  /** Grafting walks the source document's xref. */
   exportPage?(
     handle: number,
     page: number,
@@ -94,7 +57,7 @@ export interface PdfCalls {
     e: number,
     f: number,
   ): bigint | Promise<bigint>;
-  /** Annotating loads the page, which walks the xref. */
+  /** Annotating loads the page. */
   annotatePage?(
     handle: number,
     page: number,
@@ -108,12 +71,11 @@ export interface PdfCalls {
     e: number,
     f: number,
   ): number | Promise<number>;
-  /** The one call that reads the WHOLE document back — MuPDF's incremental
-   *  write copies the file it appends to, and the module sinks that copy. */
+  /** Reads the whole document back (MuPDF's incremental write copies it). */
   exportIncremental?(handle: number): bigint | Promise<bigint>;
 }
 
-/** `PdfCalls` straight through to the exports — no JSPI, nothing suspends. */
+/** `PdfCalls` straight through to the exports; nothing suspends. */
 export function syncCalls(x: PdfDecoderExports): PdfCalls {
   return {
     openWhole: (ptr, len) => x.ink_open(ptr, len),
@@ -133,19 +95,10 @@ export function syncCalls(x: PdfDecoderExports): PdfCalls {
 }
 
 /**
- * An open document. Holds a wasm-side handle, so it MUST be closed — wasm32
- * linear memory only ever grows, and a leaked document keeps MuPDF's store alive
- * inside it.
- *
- * ASYNC EVEN WHEN NOTHING WAITS, so ONE class covers both transports: the
- * whole-file path is `openWhole` driven by {@link syncCalls}, and `await 5` is
- * 5. A sync twin would be a second copy of the scratch-pointer dance, the
- * packed-return unpacking and the error strings, kept in step by a suite that
- * exercises each separately.
- *
- * EVERY POINTER IS RE-READ after the call that produced it, because an `await`
- * in the middle of a method is a place where wasm memory can have grown and the
- * old `ArrayBuffer` detached.
+ * An open document; must be closed, since wasm32 memory only grows and a leaked
+ * document keeps MuPDF's store alive. Async even when nothing waits, so one
+ * class serves both transports. Every pointer is re-read after an `await`
+ * (memory may have grown and detached the old buffer).
  */
 export class AsyncPdfDocument {
   private handle: number;
@@ -172,7 +125,6 @@ export class AsyncPdfDocument {
     return new AsyncPdfDocument(x, c, handle);
   }
 
-  /** Streamed: MuPDF pulls the bytes it wants through `ink.host_read`. */
   static async openStream(
     x: PdfDecoderExports,
     c: PdfCalls,
@@ -188,7 +140,7 @@ export class AsyncPdfDocument {
     return n < 0 ? 0 : n;
   }
 
-  /** Page size in POINTS. Throws for an out-of-range index. */
+  /** Page size in points. Throws for an out-of-range index. */
   async pageSize(page: number): Promise<PdfPageSize> {
     const x = this.x;
     const scratch = x.ink_alloc(8);
@@ -205,15 +157,8 @@ export class AsyncPdfDocument {
   }
 
   /**
-   * The page's own links, in the page's DISPLAY space (points).
-   *
-   * AN EMPTY LIST IS AN ANSWER, not a failure: most pages have no links, and a
-   * page the decoder refuses answers `[]` too, because the caller's response to
-   * either is the same (draw no link layer) and throwing here would take the
-   * PAGE down with it.
-   *
-   * The bytes are copied out and parsed before the module's buffer is released,
-   * on every path: only one is resident at a time.
+   * The page's own links in display-space points. A refusal answers `[]` rather
+   * than taking the page down.
    */
   async pageLinks(page: number): Promise<PdfLink[]> {
     const x = this.x;
@@ -221,8 +166,7 @@ export class AsyncPdfDocument {
     try {
       const packed = await call(this.alive(), page);
       if (packed < 0n) return [];
-      // `memory.buffer` re-read HERE, not captured: the call allocates, and on
-      // the JSPI path it also suspended.
+      // Re-read `memory.buffer` here: the call allocates and may have suspended.
       const json = new TextDecoder().decode(
         new Uint8Array(x.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
       );
@@ -233,14 +177,8 @@ export class AsyncPdfDocument {
   }
 
   /**
-   * The page's WORDS, in the page's DISPLAY space (points) — find-in-PDF's
-   * locator.
-   *
-   * AN EMPTY LIST IS AN ANSWER, as it is for links, and here it is load-bearing:
-   * a page of scanned images has no words, and a page the server MATCHED can
-   * still yield none the client can name. Either way the page stays a match with
-   * no box drawn, so this must not throw or an unlocatable page would take the
-   * whole find down with it.
+   * The page's words in display-space points. Must answer `[]` rather than
+   * throw: a matched page may have no locatable words.
    */
   async pageWords(page: number): Promise<PdfWord[]> {
     const x = this.x;
@@ -248,8 +186,7 @@ export class AsyncPdfDocument {
     try {
       const packed = await call(this.alive(), page);
       if (packed < 0n) return [];
-      // `memory.buffer` re-read HERE, not captured: the call allocates, and on
-      // the JSPI path it also suspended.
+      // Re-read `memory.buffer` here: the call allocates and may have suspended.
       const json = new TextDecoder().decode(
         new Uint8Array(x.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
       );
@@ -259,26 +196,14 @@ export class AsyncPdfDocument {
     }
   }
 
-  /**
-   * The document's OUTLINE, flattened — its own table of contents.
-   *
-   * PER DOCUMENT, and asked for ONCE: unlike words and links this describes the
-   * whole file and does not change under the reader, so the caller caches it for
-   * the document's life.
-   *
-   * AN EMPTY LIST IS AN ANSWER, and here it is the COMMON one — most documents
-   * have no outline. A document the decoder refuses answers `[]` too, because
-   * the caller's response to either is a dimmed opener, and throwing would take
-   * a perfectly readable document down over its table of contents.
-   */
+  /** The flattened outline, cached per document by the caller; `[]` on refusal. */
   async outline(): Promise<PdfOutlineEntry[]> {
     const x = this.x;
     const call = this.c.loadOutline ?? x.ink_load_outline;
     try {
       const packed = await call(this.alive());
       if (packed < 0n) return [];
-      // `memory.buffer` re-read HERE, not captured: the call allocates, and on
-      // the JSPI path it also suspended.
+      // Re-read `memory.buffer` here: the call allocates and may have suspended.
       const json = new TextDecoder().decode(
         new Uint8Array(x.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
       );
@@ -288,7 +213,7 @@ export class AsyncPdfDocument {
     }
   }
 
-  /** Render one page at `scale`. The pixels are COPIED OUT before returning. */
+  /** Render one page at `scale`; pixels are copied out. */
   async render(page: number, scale: number): Promise<PdfBitmap> {
     const x = this.x;
     const packed = await this.c.render(this.alive(), page, scale);
@@ -303,20 +228,9 @@ export class AsyncPdfDocument {
   }
 
   /**
-   * Export one page as a PDF, with the page's own structure intact.
-   *
-   * THE DIFFERENCE FROM `render`: this GRAFTS the source page into a fresh
-   * one-page document and draws the ink over it, so the text, fonts, vectors and
-   * page size survive. What does NOT survive is the source page's `/Annots` —
-   * `pdf_graft_page` does not copy them; see `webapp/wasm/pdf_shim.c`.
-   *
-   * `alpha` is `width * height` coverage bytes, 255 = full ink. `matrix` maps
-   * that image's OWN PIXEL SPACE onto the page in display space — build it with
-   * `markExportMatrix`, never by hand.
-   *
-   * The bytes are COPIED OUT of wasm memory before returning, and both the
-   * scratch buffer and the module's own copy are released on every path: the
-   * export is page-sized, and one left behind stays resident.
+   * One page as a PDF: grafted into a fresh document with ink drawn over it, so
+   * text and vectors survive but `/Annots` don't (`pdf_graft_page`). `matrix`
+   * comes from `markExportMatrix`. Output is copied out and every buffer freed.
    */
   async exportPage(
     page: number,
@@ -341,18 +255,8 @@ export class AsyncPdfDocument {
   }
 
   /**
-   * Draw the ink onto `page` of THIS document, in place — the first half of the
-   * whole-document export. Call once per annotated page, then
-   * {@link exportIncremental}.
-   *
-   * WHY THIS EXISTS BESIDE `exportPage`: grafting every page into a fresh
-   * document would drop each one's `/Annots`, so a 77-page export would lose
-   * every link and highlight the original had. This route annotates in place and
-   * then writes an INCREMENTAL UPDATE, keeping the original's bytes.
-   *
-   * THE DOCUMENT IS SPENT AFTERWARDS. There is no undo — every later render of
-   * `page` shows the ink burnt in, and annotating the same page twice draws it
-   * twice — so a caller that goes on displaying the document must reopen it.
+   * Draw ink onto `page` in place, once per page before {@link exportIncremental}
+   * (keeps `/Annots`, unlike grafting). No undo; reopen before displaying again.
    */
   async annotatePage(
     page: number,
@@ -372,17 +276,9 @@ export class AsyncPdfDocument {
   }
 
   /**
-   * Write everything {@link annotatePage} changed, and hand back THE DELTA —
-   * the bytes that belong after the original file.
-   *
-   * NOT A PDF ON ITS OWN. `new Blob([originalBlob, delta])` is, and building it
-   * that way is the whole memory argument: blobs are disk-backed, so a 76 MB
-   * document is exported without any of it entering the JS heap.
-   *
-   * The module refuses, with a sentence, for a document it cannot update in
-   * place: one that had to be repaired to open, one with junk before its
-   * `%PDF-` header (every offset in the delta would be misplaced), one with no
-   * backing file, and one where nothing was annotated.
+   * The incremental update's delta; `new Blob([originalBlob, delta])` is the PDF.
+   * The module refuses documents it can't update in place: repaired on open,
+   * junk before `%PDF-`, no backing file, or nothing annotated.
    */
   async exportIncremental(): Promise<Uint8Array> {
     const x = this.x;
@@ -397,11 +293,7 @@ export class AsyncPdfDocument {
     }
   }
 
-  /**
-   * Copy `alpha` into wasm memory, run `use` against the pointer, and free the
-   * scratch on every path. Shared by the two ink routes, which take the same
-   * overlay and refuse the same mismatch.
-   */
+  /** Copy `alpha` into wasm, run `use`, free the scratch on every path. */
   private async withInk<T>(
     alpha: Uint8Array,
     width: number,
@@ -410,8 +302,7 @@ export class AsyncPdfDocument {
   ): Promise<T> {
     const x = this.x;
     if (width <= 0 || height <= 0 || alpha.length !== width * height) {
-      // The module reads `width * height` bytes from a raw pointer, so a short
-      // buffer is an out-of-bounds read inside wasm rather than a bad export.
+      // A short buffer would be an out-of-bounds read inside wasm.
       throw new Error("the ink overlay's size does not match its alpha buffer");
     }
     const ptr = x.ink_alloc(alpha.length);
@@ -424,12 +315,7 @@ export class AsyncPdfDocument {
     }
   }
 
-  /**
-   * The packed `(ptr << 32) | len` an export returns, copied OUT of wasm memory.
-   *
-   * `memory.buffer` re-read HERE, not captured before the call: an export
-   * allocates, so an earlier view's buffer may have been replaced.
-   */
+  /** Copy a packed `(ptr << 32) | len` result out, re-reading `memory.buffer`. */
   private copyExport(packed: bigint): Uint8Array {
     const buf = this.x.memory.buffer;
     return new Uint8Array(
@@ -437,7 +323,8 @@ export class AsyncPdfDocument {
     );
   }
 
-  /** Idempotent. After this every method throws rather than using a stale handle. */
+  /** Idempotent; afterwards every method throws. */
+
   close(): void {
     if (this.handle > 0) this.x.ink_close(this.handle);
     this.handle = 0;

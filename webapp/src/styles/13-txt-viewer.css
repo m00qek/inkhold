@@ -1,24 +1,9 @@
-/* ================= .txt VIEWER ================= */
-/* The reading surface the `.txt` viewer (pages/txtViewer.ts) paints its decoded
-   text into. It builds on the shared viewer FRAME (11-viewer-stub.css) and the
-   shared toolbar (10-toolbar.css) — BOTH view-zone controls reuse `.pager` +
-   `.icon-btn` wholesale: the font-size stepper wears the shared `.zoom` readout,
-   the column-zoom stepper wears its own `.txt-zoom` (a distinct class only so a
-   `.pager .zoom` locator stays unambiguous with two `.pager`s in one bar), and
-   `.txt-zoom` takes its CHROME from the shared readout treatment — grouped as
-   `.zoom, .spd-zoom, .txt-zoom, .pdf-zoom` in 10-toolbar.css, so the Fit control renders
-   pixel-identical to the reader's and the `.spd` viewer's, off the shared rule
-   rather than a divergent restyle here. What THIS file adds is the text column
-   itself, whose WIDTH the zoom control scales via `--txt-zoom`.
+/* ---- .txt viewer ----
+   The text column `pages/txtViewer.ts` paints into, on the shared frame and
+   toolbar; its width scales by `--txt-zoom`. */
 
-   Kept at the END of the manifest (after 11) so the text state can OVERRIDE the
-   frame's centred placeholder layout without reopening it. */
-
-/* When text is on screen the body centres a FIXED portrait page in the stage
-   (rather than a placeholder). `.viewer__main` (11) is `display: grid; place-items:
-   center`; this comes later and wins. The page itself scrolls its own overflow, so
-   the stage does not — a long or large-font file scrolls INSIDE the frame. The
-   loading / error placeholder keeps the frame's centred grid layout. */
+/* With text on screen, a fixed portrait page centres in the stage and scrolls
+   its own overflow. */
 .viewer--txt .viewer__main--text {
   display: flex;
   align-items: center;
@@ -27,21 +12,9 @@
   overflow: hidden;
 }
 
-/* The text page — a leaf of the app's reading surface. A portrait "page" at the
-   Nomad/note page proportions (portrait, aspect 0.75 — the same 3:4 the reader's
-   page and the filmstrip thumbnail use), fitted to the stage HEIGHT: the width
-   follows from the height at that aspect, so it reads as a page dropped into the
-   viewport. Crucially the frame is sized in px/aspect, NOT in `ch`, so changing the
-   font size (set inline by the control, 10–32px) resizes only the TEXT inside — the
-   frame's proportions stay constant. Taller content just scrolls within.
-
-   THE ZOOM CONTROL widens the reading COLUMN by multiplying that aspect by
-   `--txt-zoom` (1 = `Fit ⇕`, the default page): a wider aspect at the same height is a
-   wider measure, so the SAME glyph size reflows across more of the line. It is
-   capped by `max-width: 100%` — once the column fills the stage width the page
-   simply stops widening, and the ladder's TOP rung goes there deliberately (see
-   `.txt__sheet--wide` below). Distinct from font size, which changes the glyphs, not
-   the column. `--txt-zoom` defaults to 1 so an unset page is exactly that fit. */
+/* A 3:4 portrait page fitted to the stage height. Sized by aspect, not `ch`, so
+   font size (10–32px) only reflows text. `--txt-zoom` widens the column by
+   multiplying the aspect, capped at the stage width. */
 .txt__sheet {
   box-sizing: border-box;
   height: 100%;
@@ -58,13 +31,10 @@
   font-family: var(--font-mono);
   line-height: 1.65;
 
-  /* Preserve the file's line breaks and whitespace, but WRAP long lines to the
-     frame rather than forcing a horizontal scroll — a `.txt` is prose or notes,
-     not code that must keep its columns off-screen. */
+  /* Keep line breaks but wrap long lines: prose, not code. */
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  /* Device-authored text may run right-to-left or mix scripts; let the browser
-     resolve direction per paragraph rather than forcing LTR. */
+  /* Device-authored text may be RTL or mixed; resolve per paragraph. */
   unicode-bidi: plaintext;
 
   border: 1px solid var(--paper-rule);
@@ -74,32 +44,19 @@
     0 26px 50px -28px var(--shadow);
 }
 
-/* THE TOP RUNG — `Fit ⇔`, where the column spans the stage rather than a multiple
-   of the page. `max-width: 100%` above already stopped a wide multiplier at the
-   stage edge, so the `200%` rung this replaces already landed here on a common
-   desk (measured: 1211px of a 1218px stage) — but by accident of that desk's
-   proportions, and on a wider one it stopped short with nothing to say so.
-
-   `aspect-ratio` has to go rather than be overridden: it is what the multiplier
-   rungs steer, and with an explicit width AND the inherited `height: 100%` it
-   would be one constraint too many. What is left is a sheet the size of the
-   stage, which is exactly what fitting the width means for a reading column. */
+/* The top rung, `Fit ⇔`: the column spans the stage. `aspect-ratio` must go,
+   since with an explicit width and `height: 100%` it over-constrains. */
 .txt__sheet--wide {
   aspect-ratio: auto;
   width: 100%;
 }
 
-/* ---- find in this file ------------------------------------------------------
-   The `.txt` viewer's find bar. It is styled to MATCH the reader's `.findbar`
-   (07-find-in-note.css) — the field, the counter, the prev/next buttons are one
-   idea across viewers — but carries its OWN class (`.txtbar`), because both
-   viewers are mounted at once and a shared class would put two `.findbar`s in the
-   DOM, where the reader's find tests query `.findbar` globally. Same tokens, same
-   look; a separate name so the two bars never collide. */
+/* ---- find in this file ----
+   Matches the reader's `.findbar` under its own class, so the two bars never
+   collide in tests. */
 .txtbar {
   display: flex;
   align-items: center;
-  /* Match .findbar: anchor field + count + nav to the right edge. */
   justify-content: flex-end;
   gap: 10px;
   padding: 8px 14px;
@@ -142,8 +99,7 @@
   outline: none;
   border-color: var(--accent);
 }
-/* Full `--ink` because it IS the answer being read — the same weighting the
-   reader's counter uses, tabular so the number does not jitter as it changes. */
+/* Full `--ink`, tabular: the count is the answer. */
 .txtbar__count {
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
@@ -151,9 +107,7 @@
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-/* The manual-fuzzy OPT-IN affordance (in-doc-search Phase 3) — the reader's
-   `.findbar__ask` treatment, so "search similar" reads the same in both viewers:
-   a quiet inline action link off --accent beside the "No matches" count. */
+/* The typo-tolerant opt-in, like `.findbar__ask`. */
 .txtbar__ask {
   border: 0;
   background: none;
@@ -170,8 +124,7 @@
   text-decoration: none;
 }
 
-/* The match highlight — the same accent wash as the reader's transcript, the
-   library snippet and the OCR panel, so a highlight is one idea everywhere. */
+/* The match highlight, one accent wash everywhere. */
 .txt__sheet mark {
   background: color-mix(in srgb, var(--accent) 24%, transparent);
   color: var(--paper-ink);
@@ -179,10 +132,8 @@
   padding: 0 1px;
 }
 
-/* The matching PARAGRAPH — the `.txt` analog of the reader's per-page ovals:
-   prev/next steps between these, and the current one is lifted so "where am I in
-   the results" is answerable at a glance. `.txt__match` itself is layout-neutral
-   (an inline wrapper around the paragraph's runs); only the current one paints. */
+/* The current matching paragraph is lifted; `.txt__match` is otherwise layout-neutral. */
+
 .txt__match.is-current {
   border-radius: 3px;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);

@@ -1,32 +1,13 @@
-// The `.txt` viewer's find, factored out of txtViewer.ts the way findInNote.ts is
-// out of reader.ts: the pure text/DOM operations that make find TESTABLE, with
-// the viewer keeping only the wiring (the toolbar toggle, the bar, the fetch).
-//
-// WHY THIS IS DIFFERENT FROM find-in-note, and deliberately so. The reader draws
-// a rectangle per recognised WORD, from the device's own coordinates — find is a
-// geometry problem there. A `.txt` has no geometry: the whole file is loaded in
-// the viewer as text, so a match is a substring and highlighting is a DOM
-// operation. The two share their SHAPE — a note-scoped/blob-scoped query, terms
-// as the one-way authority for what to mark, prev/next stepping, an exact count
-// — and nothing of their mechanism.
-//
-// THE ONE HAZARD THIS FILE EXISTS TO GET RIGHT: the byte range vs the string
-// index. A paragraph is addressed by its BYTE offset in the raw blob — the `o`/`l`
-// fields a `.txt` segment carries in its `text/<md5>` record, and the reason that
-// record has them at all (§1.1: the address is a FIELD, not a
-// branch). The viewer holds the file as a decoded UTF-16 string. `byteToCharMap`
-// is the one conversion between them, so a multi-byte character before a match
-// cannot slide the highlight off the word.
+// Pure text/DOM operations behind the `.txt` viewer's find. A `.txt` has no
+// geometry, so a match is a substring and highlighting is DOM work. The hazard:
+// the index addresses paragraphs by UTF-8 byte offset, the viewer holds a UTF-16
+// string, and `byteToCharMap` is the one conversion between them.
 
 import { el } from "../ui/dom";
-// The one hand-written imitation of `unicode61 remove_diacritics 2`, shared
-// with the other two finds (§8.2). `WORD_RE` below is the
-// same split in the one form this file needs and `words` cannot give it — a
-// global regex whose match INDICES place the `<mark>` in the paragraph.
+// Shared imitation of `unicode61 remove_diacritics 2`; `WORD_RE` below is the
+// same split as a global regex whose match indices place each `<mark>`.
 import { fold } from "../search/fold";
 
-/** UTF-8 byte length of one code point — the inverse of what a `TextEncoder`
- *  would cost per character, computed directly so a big file maps in one pass. */
 function utf8Len(cp: number): number {
   if (cp <= 0x7f) return 1;
   if (cp <= 0x7ff) return 2;
@@ -35,18 +16,9 @@ function utf8Len(cp: number): number {
 }
 
 /**
- * Map each raw-blob BYTE offset to a JS-string (UTF-16 code-unit) index in the
- * decoded text.
- *
- * The backend's paragraph addresses are byte offsets into the UTF-8 blob; the
- * viewer scrolls to and slices a UTF-16 string. One sequential pass over the
- * code points converts every requested offset at once — O(text + offsets),
- * never one scan per offset — so even a multi-MB file is mapped once per query.
- *
- * An offset that lands MID-sequence (a hostile or lossily-decoded file, where
- * the byte count can drift from the decoded string) resolves to the first char
- * at or past it: the highlight is derived from the terms regardless, so at worst
- * the scroll anchor is a character out on input the index already sanitised.
+ * Map raw-blob byte offsets to UTF-16 indices in one pass. An offset landing
+ * mid-sequence (hostile or lossily-decoded input) resolves to the first char at
+ * or past it.
  */
 export function byteToCharMap(text: string, byteOffsets: readonly number[]): Map<number, number> {
   const wanted = [...new Set(byteOffsets)].sort((a, b) => a - b);
@@ -68,44 +40,25 @@ export function byteToCharMap(text: string, byteOffsets: readonly number[]): Map
   return out;
 }
 
-/**
- * One matching paragraph as the index reports it — `docSearch.ts`'s
- * `DocSegmentMatch` narrowed to the `.txt` case, where the byte range is present.
- *
- * Declared structurally rather than imported from the search module so this file
- * stays a pure text/DOM adapter: it is handed ordinals, ranges, terms and counts,
- * and does not know what produced them.
- */
+/** A matching `.txt` paragraph as the index reports it (byte range present). */
 export interface TxtSegmentMatch {
-  /** The paragraph's segment ordinal — the deep link's target. */
   readonly segment: number;
-  /** Its byte offset in the raw blob, and its byte length. */
+  /** Byte offset and byte length in the raw blob. */
   readonly offset: number;
   readonly length: number;
-  /** The index's exact match count for this paragraph. */
   readonly matches: number;
-  /** The folded terms it matched — what a word is marked against. */
   readonly terms: readonly string[];
 }
 
-/** One matching paragraph, resolved into the loaded string's coordinates. */
 export interface FindSegment {
-  /** The paragraph's segment ordinal — the deep link's target, and the URL page. */
   segment: number;
-  /** Half-open char range `[startChar, endChar)` in the decoded text. */
+  /** Half-open char range in the decoded text. */
   startChar: number;
   endChar: number;
-  /** The folded terms this paragraph matched — what a word is marked against. */
   terms: Set<string>;
-  /** The index's exact match count for this paragraph — summed for "N matches". */
   matches: number;
 }
 
-/**
- * Resolve each {@link TxtSegmentMatch}'s byte range to a char range in `text`, in
- * ONE byte→char pass over the whole set of offsets. Input order (ordinal = byte
- * order) is preserved.
- */
 export function resolveFindSegments(text: string, segments: readonly TxtSegmentMatch[]): FindSegment[] {
   const offsets: number[] = [];
   for (const s of segments) offsets.push(s.offset, s.offset + s.length);
@@ -120,26 +73,17 @@ export function resolveFindSegments(text: string, segments: readonly TxtSegmentM
 }
 
 /**
- * Total match instances across the matching paragraphs — the exact "N".
- *
- * Summed from the INDEX's per-paragraph counts, never from the marks the viewer
- * drew: where this side tokenises a word differently from the index the two can
- * disagree, and then the count wins — the same one-way authority find-in-note's
- * counter holds over its ovals.
+ * The exact "N", summed from the index's counts rather than the drawn marks:
+ * where tokenisation disagrees, the index wins.
  */
 export function totalMatches(segments: readonly { matches: number }[]): number {
   return segments.reduce((n, s) => n + s.matches, 0);
 }
 
-/** The counter while the answer is still coming — the first find on a file pays
- *  a `text/<md5>` fetch and an index build, and a number cannot be shown yet. */
+/** Shown while the first find pays the `text/<md5>` fetch and index build. */
 export const TXT_SEARCHING = "Searching…";
 
-/**
- * The counter copy: "N matches in M paragraphs", singular-aware. Exact, because
- * the scope is one document (the in-note counter's rule — unlike library
- * search's "20+" floors, which exist because that query stops counting early).
- */
+/** Exact count, since the scope is one document. */
 export function txtCountText(total: number, paragraphs: number): string {
   if (paragraphs <= 0) return "No matches";
   const m = `${total} ${total === 1 ? "match" : "matches"}`;
@@ -147,20 +91,12 @@ export function txtCountText(total: number, paragraphs: number): string {
   return `${m} in ${p}`;
 }
 
-/** Word runs, as `unicode61` splits them: everything that is not a letter or a
- *  digit is a boundary, so `page-range` is two words and each is marked alone. */
+/** Word runs as `unicode61` splits them: any non-letter/digit is a boundary. */
 const WORD_RE = /[\p{L}\p{N}]+/gu;
 
 /**
- * One matching paragraph's DOM: its own substring, with each word whose folded
- * form is one of `terms` wrapped in `<mark>`. The wrapper is `.txt__match`, the
- * unit prev/next scrolls to and marks current.
- *
- * Marks are DERIVED FROM THE COUNTED TERMS, not re-matched from the query — an
- * equality test on the fold, exactly as find-in-note circles the words the index
- * counted rather than guessing at them. The text is device-authored, so every
- * piece goes in as a text node (`document.createTextNode`) or `mark`'s
- * textContent, never as markup.
+ * Marks words whose fold is in `terms` (the counted terms, not a re-match of the
+ * query). Device-authored text goes in as text nodes, never markup.
  */
 export function markParagraph(para: string, terms: ReadonlySet<string>): HTMLElement {
   const wrap = el("span", { class: "txt__match" });
@@ -182,14 +118,9 @@ export function markParagraph(para: string, terms: ReadonlySet<string>): HTMLEle
 }
 
 /**
- * The `<pre>`'s children for `text` with every matching paragraph wrapped and
- * marked: plain text between the paragraphs, a `.txt__match` span for each.
- * Returns the wrappers in the SAME order as `segments` (ordinal order), so the
- * viewer's prev/next index and the deep link's target ordinal line up with them.
- *
- * Ranges are clamped and never allowed to overlap or go backwards, so a
- * malformed segment set degrades to less marking rather than to a scrambled
- * document.
+ * Wrappers come back in `segments` order to line up with prev/next and deep
+ * links. Ranges are clamped and never overlap, so bad segments mark less rather
+ * than scramble the document.
  */
 export function buildFindContent(
   text: string,

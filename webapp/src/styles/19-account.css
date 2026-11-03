@@ -1,38 +1,11 @@
 /*
- * Your own account (src/pages/account.ts).
- *
- * PREFIXED `acct-`, NOT `account-`, and that is deliberate rather than terse:
- * `.account` is the rail footer's nameplate, two inches to the left of this
- * page, with `.account__name` / `.account__mail` / `.account__chevron` under it.
- * One prefix for two surfaces is how a selector ends up matching both, and how
- * an e2e locator written for one silently resolves to the other.
- *
- * THE SIGNATURE IS THE APP'S OWN MATERIAL, not a new idea: the reserved red
- * margin rule — the `.sheet`'s printed line, the thing the whole app dresses as
- * — runs down this page as its spine, and the section labels sit IN the margin
- * beside it, the way you would write a heading against the rule of a notebook.
- * One column, one readable measure, so it is a page you read rather than a
- * dashboard you scan.
- *
- * TYPE. Space Grotesk (`--font-display`) for the headings; Space Mono
- * (`--font-mono`, via `.acct-data`) for EVERY piece of data — the address, the
- * byte counts, the timestamps, the version count. That is the rule the app
- * already follows everywhere else, and this page is mostly data, so it is where
- * breaking it would show most.
- *
- * COLOUR. Nothing new. Red (`--margin` / `--margin-ink`) is the reserved margin
- * rule and danger, and here it is both — the spine, and the three actions that
- * take something away (sign out everywhere, unlink, and the destructive half of
- * the versions control's consequences). Green (`--accent`) stays brand and
- * state. `--margin-ink` is what any RED WORDS use: `--margin` is tuned as a
- * printed RULE, where the 3.0 non-text threshold applies, and comes to 4.49:1 as
- * text on `--sheet` — under the 4.5 a label owes, and not by enough to argue
- * about. Same aliasing the console does, for the same measured reason.
+ * Your own account (src/pages/account.ts). Prefixed `acct-`, not `account-`,
+ * which is the rail nameplate's. The red margin rule runs down the page as a
+ * spine with section labels in the margin; all data is Space Mono (`.acct-data`);
+ * red words use `--margin-ink` (`--margin` is 4.49:1 as text).
  */
 
-/* An overlay on the shell's content area, exactly as the console and the reader
-   are: the rail and the topbar stay live behind it, which is what makes clicking
-   a folder row the way out. */
+/* An overlay on the content area, like the console and reader. */
 .acct {
   position: absolute;
   inset: 0;
@@ -41,44 +14,26 @@
   background: var(--desk);
 
   --acct-danger: var(--margin-ink);
-  /* The spine's own geometry, in one place so the label column, the rule and the
-     content can never drift apart. Sized so the LONGEST label — "Signing in",
-     set in the eyebrow face at 0.14em tracking, ~92px — sits on one line: a
-     marginal note that wraps stops reading as a marginal note. */
+  /* Spine geometry in one place; wide enough for "Signing in" on one line. */
   --acct-gutter: 138px;
   --acct-label-gap: 14px;
 }
 
 .acct__body {
   position: relative;
-  /* ONE READABLE MEASURE. The gutter is outside it — a margin is not content —
-     so the text column stays the width you would set prose at whatever the
-     window does. */
+  /* One readable measure; the gutter is outside it. */
   max-width: calc(var(--acct-gutter) + 30px + 560px);
   padding: 26px 28px 80px calc(var(--acct-gutter) + 30px);
 }
 
-/* THE SPINE, IN SEGMENTS — one per section, not one line down the whole page.
-   The sheet's red margin rule at the app's own opacity.
-
-   It ran unbroken first, and that made it scenery: a stripe the content happened
-   to sit beside, delimiting nothing. Broken at every section boundary it does
-   the job the margin label only half did — you can see where a section starts
-   and ends without reading a word, and the gaps fall exactly where the eye is
-   already looking for a seam.
-
-   Deliberately NOT beside the identity block at the top: that is who you are,
-   not a section, and it has no margin label. A segment there would promise a
-   label that never comes. So the rule now means one thing exactly — "a labelled
-   section runs alongside this" — and the page starts with a clean edge. */
+/* The spine, one segment per labelled section (not beside the unlabelled
+   identity block), so section boundaries read without words. */
 .acct-sec::before {
   content: "";
   position: absolute;
   top: 0;
   bottom: 0;
-  /* Back out to the gutter from the section's own left edge: `.acct__body` pads
-     by `gutter + 30px`, so the rule sits 30px to the left of the content. One
-     subtraction, so the geometry still comes from `--acct-gutter` alone. */
+  /* 30px left of the content (`.acct__body` pads `gutter + 30px`). */
   left: -30px;
   width: 1.5px;
   background: var(--margin);
@@ -122,9 +77,7 @@
   margin: 0 0 38px;
 }
 
-/* IN THE MARGIN. Pulled out of the content column and right-aligned against the
-   rule, so it reads as a note written beside the text rather than as a heading
-   sitting on top of it. */
+/* In the margin: right-aligned against the rule, a note beside the text. */
 .acct-sec__label {
   position: absolute;
   left: calc(-1 * (var(--acct-gutter) + 30px) + 28px);
@@ -137,7 +90,7 @@
   font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  /* Not --ink-faint: this is a label, and a label owes 4.5:1. */
+  /* A label owes 4.5:1. */
   color: var(--ink-soft);
 }
 
@@ -161,41 +114,24 @@
 .acct-rows > .acct-row:first-child {
   padding-top: 0;
 }
-/* NO RULE AFTER THE LAST ROW OF A SECTION. The rule is a separator BETWEEN rows,
-   and the last one has nothing to be separated from — it was closing a section
-   that the spine segment and the gap already close, so every section ended in a
-   line pointing at empty space.
-
-   `border-bottom-color`, not `border-bottom: 0`: the border stays in the box, so
-   removing it cannot shift the row's height by a pixel. Same technique as
-   `.acct-row.is-expanded`, and the reason is the same. */
+/* No rule after a section's last row. `border-bottom-color`, not `0`, so the
+   height doesn't shift. */
 .acct-rows > .acct-row:last-child {
   border-bottom-color: transparent;
 }
-/* A STANDING HINT BELONGS TO THE ROWS ABOVE IT, and the gap has to be small
-   enough to say so. It measured 27px from the device's name to the hint — the
-   last row's 15px bottom padding plus the hint's 12px margin — against 8px in
-   the Versions section, whose note sits directly under its control. Two
-   explanations of the same kind, at three times the distance.
-
-   The row's bottom padding is what separates it from the NEXT ROW, and when a
-   hint follows there is no next row: the padding is holding a gap for something
-   that is not there. Dropped, so the hint hangs at its own margin alone — the
-   same relationship, and now the same 8px, that Versions has. */
+/* A standing hint belongs to the rows above: drop the last row's bottom
+   padding so the gap matches Versions' 8px. */
 .acct-rows:has(+ .acct-hint) > .acct-row:last-child {
   padding-bottom: 0;
 }
 .acct-rows + .acct-hint {
   margin-top: var(--sp-2);
 }
-/* A row whose disclosure is OPEN gives up its underline: the rule is the row's
-   own bottom boundary, and the panel it opened sits below it, so leaving the
-   line in place drew a border between a row and its own content. */
+/* An open disclosure's row gives up its underline. */
 .acct-row.is-expanded {
   border-bottom-color: transparent;
 }
-/* The rule that row gave up, re-drawn BELOW its open panel — full width, because
-   it separates the two blocks rather than edging the 360px card. */
+/* ...and it is redrawn below the open panel, full width. */
 .acct-pw:not([hidden]) + .acct-row {
   border-top: 1px solid var(--row-rule);
 }
@@ -214,8 +150,7 @@
   color: var(--ink-soft);
 }
 
-/* EVERY PIECE OF DATA IS MONO. Applied as a class rather than per selector so a
-   new row cannot forget it. */
+/* Every piece of data is mono; a class so new rows can't forget. */
 .acct-data {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -230,7 +165,7 @@
 
 /* --- the three prose lines ------------------------------------------------- */
 
-/* LOADING, which is never the same node as a claim about what is there. */
+/* Loading, never the same node as a claim about what is there. */
 .acct-pending {
   margin: 0;
   padding: var(--row-pad-y-tight) 0;
@@ -253,8 +188,7 @@
   color: var(--ink-soft);
 }
 
-/* A standing explanation under a section — what unlinking costs, what "per file"
-   means. Quiet, and full-measure rather than in a value column. */
+/* A standing explanation under a section, full measure. */
 .acct-hint {
   margin: var(--sp-3) 0 0;
   max-width: 52ch;
@@ -293,20 +227,13 @@
   opacity: 0.5;
   cursor: default;
 }
-/* HELD DOWN while the thing it discloses is open — the same treatment the
-   topbar's view toggle gives its active segment (`--hover` fill, full-strength
-   ink), so "this control is currently on" looks the same everywhere in the app.
-   Without it the button is identical open and closed, and pressing it again is
-   how you back out, so there was nothing to tell you which press you were on. */
+/* Held down while its disclosure is open, like the topbar view toggle. */
 .acct-btn.is-open {
   background: var(--hover);
   border-color: var(--ink-soft);
   color: var(--ink);
 }
-/* The disclosure mark. Down = closed, up = open — the same chevron path the rail
-   nameplate rotates, so the motif for "this opens something" is one shape across
-   the app. It carries the state that the fill alone could not: a lone toggle has
-   no unpressed sibling to be read against. */
+/* The disclosure chevron (down closed, up open), the rail's shape. */
 .acct-btn__chevron {
   display: inline-flex;
   margin-left: 6px;
@@ -345,19 +272,8 @@
 
 /* --- change password ------------------------------------------------------- */
 
-/* THE FORM BELONGS TO THE ROW ABOVE IT, and the spacing has to say so. It sat
-   flush against the Password row's bottom rule, so that line read as the CARD's
-   top edge — which put the form on the far side of the boundary and made it look
-   like part of "Other sessions" below. Two changes fix the grouping: the row
-   drops its rule while open (see `.acct-row.is-expanded`), and the gap above is
-   tight so proximity assigns the card to the row it came from.
-
-   Below it, the rule the Password row gave up is handed to the NEXT row instead
-   (`+ .acct-row`), which CLOSES the block: row + form is one tall row now, and
-   every other row on this page ends with a line. Without it the form's card just
-   trailed off into whitespace and "Other sessions" floated, unseparated. The gap
-   is `--row-pad-y` so the closing rule lands in the page's normal row rhythm
-   rather than inventing a second spacing. */
+/* The form belongs to the row above: tight gap above, and the row's rule is
+   handed to the next row so row + form close as one block. */
 .acct-pw {
   display: flex;
   flex-direction: column;
@@ -366,10 +282,7 @@
   margin: var(--sp-3) 0 var(--row-pad-y);
   padding: var(--sp-6) var(--sp-6) var(--sp-4);
   border: 1px solid var(--line);
-  /* The RAISED-CARD corner, which is what this is: a slip laid on the page
-     inside the section. It was a bare `4px` — a third radius the token set does
-     not have (`--radius` 2px, `--radius-card` 8px), so it matched nothing and
-     read as almost-right. */
+  /* The raised-card corner. */
   border-radius: var(--radius-card);
   background: var(--sheet);
 }
@@ -384,9 +297,7 @@
 /* --- devices --------------------------------------------------------------- */
 
 .acct-device__name {
-  /* The name and its sync fact read as ONE line — "Nomad · last synced 20
-     minutes ago" — so this key column is wider than the others and free to grow
-     rather than clipping the timestamp. */
+  /* Name and sync fact read as one line, so this key column grows. */
   flex: 1;
   width: auto;
   min-width: 0;
@@ -416,10 +327,7 @@
   gap: var(--sp-2);
   padding: 0 0 var(--sp-4);
 }
-/* THE TOTAL IS A BYTE COUNT, so it is Space Mono like every other figure on this
-   page — not the display face. It is the page's one big number, so it takes the
-   heading step and the mono 700 the family ships, rather than a display size the
-   mono face would have to be faked at. */
+/* The total is a byte count, so mono 700 at the heading step. */
 .acct-total__v {
   font-family: var(--font-mono);
   font-size: var(--fs-heading);
@@ -446,18 +354,14 @@
   font-size: var(--fs-eyebrow);
   color: var(--ink-faint);
 }
-/* A FIXED, RIGHT-ALIGNED COLUMN so the five figures line up as a column of
-   numbers — which is the only way a reader compares them. Without it the one row
-   that carries an action (the bin) pushes its own figure left, and five numbers
-   with one of them out of line read as a mistake. */
+/* A fixed right-aligned column, so the five figures compare. */
 .acct-kind .acct-row__v {
   flex: none;
   width: 92px;
   text-align: right;
   color: var(--ink);
 }
-/* The same reservation on the action side: only the bin row has a button, and
-   the other four must not close the gap it leaves. */
+/* The same reservation on the action side (only the bin row has a button). */
 .acct-kind .acct-row__acts {
   width: 76px;
   justify-content: flex-end;
@@ -482,10 +386,7 @@
   color: var(--ink);
 }
 
-/* THE STEPPER: [−][ 5 ][+] as ONE control, not three neighbours. The frame is on
-   the wrapper and the parts are separated by hairlines, so it reads as a single
-   object the way the segmented view toggle in the topbar does — same idiom, so a
-   person who has used one knows this one. */
+/* The stepper [−][ 5 ][+] as one framed control. */
 .acct-stepper {
   display: inline-flex;
   align-items: center;
@@ -505,9 +406,7 @@
   font-size: var(--fs-body);
   text-align: center;
 }
-/* The native spinners are unusable at this size and absent on some platforms —
-   the two buttons ARE the affordance, so the browser's version only crowds the
-   digits it sits on. */
+/* Native spinners hidden: the buttons are the affordance. */
 .acct-keep::-webkit-outer-spin-button,
 .acct-keep::-webkit-inner-spin-button {
   appearance: none;
@@ -519,8 +418,7 @@
 .acct-keep:focus-visible {
   outline: none;
 }
-/* Focus lands on the WHOLE control, since the frame is what a person sees as the
-   thing they are operating. */
+/* Focus ring on the whole control. */
 .acct-stepper:focus-within {
   border-color: var(--accent);
 }
@@ -554,16 +452,7 @@
   outline-offset: -2px;
 }
 
-/* `.acct-keep__cost` lived here — the version total, at the end of this line.
-   Removed: it sat exactly where `Save` appears, so beside a pending change it
-   read as what the change would COST rather than what is currently stored. The
-   figure was right and read as a delta, which on the one control that discards
-   data is worse than showing nothing. The total lives on Storage's Versions
-   line, among the other four, where it reads as a total.
-
-   `Save` inherits the `margin-left: auto` that pushed the figure right, so it
-   lands where every other action on this page does — Change, Sign out, Unlink,
-   Open all sit at the right edge of their row. */
+/* `Save` lands at the row's right edge like every action on this page. */
 .acct-keep__save {
   flex: none;
   margin-left: auto;
@@ -572,11 +461,7 @@
   display: none;
 }
 
-/* THE CONSEQUENCE, STATED BEFORE THE CHANGE. Red because it is destructive and
-   red means exactly that here; a live region so it is announced when it appears,
-   which is the accessible equivalent of it being impossible to miss. Empty most
-   of the time, and it collapses when empty rather than reserving a gap that
-   makes the control jump. */
+/* The consequence, stated before the change: red, a live region, collapsing when empty. */
 .acct-keep__note {
   margin: var(--sp-2) 0 0;
   font-family: var(--font-mono);
@@ -589,9 +474,7 @@
 
 /* --- appearance ------------------------------------------------------------ */
 
-/* SIZED TO ITS OWN CONTENT, not to the value column: it sits in the row's value
-   slot, which is the flexible one, and a two-option control stretched to the
-   full measure reads as a bar rather than as a pair of choices. */
+/* Sized to its content, so two options read as a pair, not a bar. */
 .acct-theme {
   display: inline-flex;
   flex: none;
@@ -632,8 +515,7 @@
   background: var(--hover-fill);
   color: var(--ink);
 }
-/* The chosen one, marked by FILL rather than by a tick: it is a two-option
-   control, so which is pressed has to be readable at a glance. */
+/* The chosen option is marked by fill. */
 .acct-theme__opt[aria-pressed="true"] {
   background: var(--ink);
   color: var(--sheet);
@@ -641,9 +523,7 @@
 
 /* --- narrow ---------------------------------------------------------------- */
 
-/* Below this the margin cannot hold a label without stealing the measure, so the
-   spine steps in to the page edge and the labels sit above their sections. The
-   rule stays — it is the page's signature, not its layout. */
+/* Narrow: the spine moves to the page edge and labels sit above their sections. */
 @media (max-width: 860px) {
   .acct {
     --acct-gutter: 16px;
@@ -651,8 +531,7 @@
   .acct__body {
     padding-left: calc(var(--acct-gutter) + 22px);
   }
-  /* Follows the narrower gutter, so the segments stay on the rule rather than
-     drifting into the text. */
+
   .acct-sec::before {
     left: -22px;
   }

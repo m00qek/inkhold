@@ -1,34 +1,17 @@
-// Selecting a passage of a PDF's text: which words a drag covers, and what those
-// words say when you copy them.
-//
-// READING ORDER IS EMISSION ORDER. The shim walks the document's structured text
-// — blocks, then lines, then chars — and emits words in that order, so the
-// selection between two words is simply every word BETWEEN THEM IN THE ARRAY.
-// That order is the DOCUMENT's, not a geometric one: on a two-column page,
-// dragging from the top of the left column to the bottom of the right selects
-// both columns as they are meant to be read, never a horizontal band across
-// both. It comes free from not being clever about coordinates.
-//
-// WORDS ARE THE UNIT, deliberately: splitting a word needs per-glyph geometry
-// the shim does not carry, and a passage is what people select anyway.
+// PDF text selection: which words a drag covers and what they copy as. Reading
+// order is the shim's emission order (blocks, lines, chars), so a range is just
+// the words between two indices and two columns select as they read. Words are
+// the unit; the shim carries no per-glyph geometry.
 
 import type { PdfWord } from "../render/pdfWire";
 
-/** A selection as the two words it was dragged between, in no particular order. */
+/** The two words a selection was dragged between, in either order. */
 export interface WordRange {
-  /** Index into the page's word array where the drag started. */
   anchor: number;
-  /** Index where it currently ends. May be before {@link anchor}. */
   head: number;
 }
 
-/**
- * The words a range covers, in reading order.
- *
- * Order-insensitive about its input and ordered in its output: dragging up the
- * page selects the same passage as dragging down it, and copies it the way it
- * reads rather than the way the pointer moved.
- */
+/** The covered words in reading order, whichever way the drag went. */
 export function wordsInRange(words: readonly PdfWord[], range: WordRange): PdfWord[] {
   const lo = Math.max(0, Math.min(range.anchor, range.head));
   const hi = Math.min(words.length - 1, Math.max(range.anchor, range.head));
@@ -37,17 +20,9 @@ export function wordsInRange(words: readonly PdfWord[], range: WordRange): PdfWo
 }
 
 /**
- * What a selection says: words joined by spaces within a line, lines by
- * newlines.
- *
- * The LINE ID comes from the shim's own stext walk, so "same line" means what
- * the document says it means rather than what the y coordinates look like from
- * here — which matters for text set at an angle, and for two columns whose
- * lines share a baseline without sharing a line.
- *
- * A HYPHENATED WORD STAYS TWO WORDS. Rejoining would mean guessing which
- * hyphens are breaks and which belong to the word, and a wrong guess edits the
- * person's document on the way to their clipboard.
+ * Words joined by spaces within a line, lines by newlines. The line id is the
+ * shim's, so angled text and shared baselines across columns behave. Hyphenated
+ * words are not rejoined; a wrong guess would edit the copied text.
  */
 export function selectionText(words: readonly PdfWord[]): string {
   if (words.length === 0) return "";
@@ -67,15 +42,8 @@ export function selectionText(words: readonly PdfWord[]): string {
 }
 
 /**
- * The word under a point in PAGE coordinates, or `null`.
- *
- * HIT-TESTED IN JS RATHER THAN BY THE DOM: a dense page carries hundreds of
- * words, and giving each a hit rect would put hundreds of elements over every
- * page of a book for a feature most page views never use. The words are already
- * in memory and a linear scan per pointer event is nothing.
- *
- * LAST MATCH WINS — hence no early exit — so overlapping boxes resolve to the
- * later one in reading order, which is the one drawn on top.
+ * The word under a page-space point, or `null`. Hit-tested in JS rather than one
+ * DOM rect per word; last match wins (the later word draws on top).
  */
 export function wordAtPoint(
   words: readonly PdfWord[],
@@ -91,26 +59,13 @@ export function wordAtPoint(
 }
 
 /**
- * The word a drag has reached, for a pointer that has wandered off the text.
- *
- * A DRAG MUST NOT STALL IN A MARGIN. Selecting to the end of a paragraph means
- * pulling past the last word, and a strict hit test answers nothing there — so
- * the selection would stop growing exactly where the user is trying to take it.
- *
- * THE LINE FIRST, THEN THE POSITION IN IT. A plain nearest-box rule measuring
- * straight-line distance is wrong in a way only a real page shows: among SHORT
- * lines, a pointer dragged down and to the right sits closer to the end of an
- * EARLIER long line than to the line it is actually beside, so pulling into the
- * right margin quietly shrinks the selection back up the page. Reading order is
- * vertical first, so the search has to be too.
- *
- * Only for EXTENDING a selection. Starting one uses {@link wordAtPoint}, because
- * a press in a margin is not an attempt to select the nearest paragraph — it is
- * a press in a margin, and it should clear.
+ * The word a drag has reached once the pointer is off the text, so a drag does
+ * not stall in a margin. Picks the nearest line first, then the position in it:
+ * plain nearest-box distance shrinks selections among short lines. Only for
+ * extending; a press in a margin starts nothing.
  */
 export function nearestWord(words: readonly PdfWord[], x: number, y: number): number | null {
   if (words.length === 0) return null;
-  // 1. WHICH LINE: the band the pointer is in, or the nearest band above/below.
   let line: number | null = null;
   let bestDy = Infinity;
   for (const w of words) {
@@ -120,9 +75,7 @@ export function nearestWord(words: readonly PdfWord[], x: number, y: number): nu
       line = w.line;
     }
   }
-  // 2. WHERE IN IT. A pointer past the end of the line must land on its last
-  //    word, or "drag into the margin to take the rest of the line" does not
-  //    work; the `<=` is what does it, by letting a tie fall to the later word.
+  // A pointer past the line's end lands on its last word: `<=` lets ties fall later.
   let best: number | null = null;
   let bestDx = Infinity;
   for (let i = 0; i < words.length; i++) {

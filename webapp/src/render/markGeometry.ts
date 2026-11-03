@@ -1,61 +1,25 @@
-// Where a `.mark`'s ink goes on the PDF page it annotates.
-//
-// A `.mark` is written in DEVICE PANEL PIXELS — 1404x1872 on a Nomad — and its
-// PAGE BLOCKS carry no page geometry: the container records only an equipment
-// code, and the dimensions come from a table keyed on that (`note-format.md`
-// §9.1, §13.3). The PDF page is in points, with its own aspect. So the two do
-// not share a coordinate space and one has to be reconstructed.
-//
-// THE DEVICE FITS THE PAGE TO THE PANEL, PRESERVING ASPECT, CENTRED. Measured
-// against a real capture: an N6 annotating a 77-page A4 document, composited
-// back onto the rendered pages, lands its handwriting in the whitespace it was
-// written in on all three annotated pages.
-//
-// A LATER CAPTURE FOUND THE DEVICE STATES THIS ITSELF, which is worth knowing
-// before anyone re-derives it: a mark's `HIGHLIGHTINFO` block records every PDF
-// text highlight in BOTH spaces — `mupdfRectList` in points and `rnRectList` in
-// panel pixels for the same rectangle. One highlight anywhere on a page yields
-// that page's exact transform with no fitting against ink at all, which is the
-// cheapest calibration available for a device or page size we have never seen.
-// This function agrees with it to 0.67px on A4/N6 (`note-format.md` §13.4).
-//
-// No DOM, no canvas, no wasm — just the arithmetic, so it can be tested at the
-// numbers rather than by looking at a screenshot.
+// Where a `.mark`'s ink (device panel pixels, e.g. 1404x1872) goes on the PDF
+// page (points) it annotates. The device fits the page into the panel
+// aspect-preserving and centred; a mark's `HIGHLIGHTINFO` records each highlight
+// in both spaces, which confirms it (`note-format.md` §13.3, §13.4).
 
-/** A rectangle in some pixel space. */
 export interface Size {
   width: number;
   height: number;
 }
 
-/** Where to draw the WHOLE panel so its page-rect lands on the canvas. */
+/** Where to draw the whole panel so its page-rect lands on the canvas. */
 export interface Placement {
-  /** Size to draw the full panel at, in canvas pixels. */
   width: number;
   height: number;
-  /** Offset of the panel's origin from the canvas's, in canvas pixels. */
   left: number;
   top: number;
 }
 
 /**
- * Where the page sits INSIDE the panel: the aspect-preserving fit, centred.
- *
- * Exported because it is the claim worth stating on its own — everything below
- * is a consequence of it.
- *
- * BOTH HALVES ARE NOW CONFIRMED, and the centring came from an unexpected
- * direction. It was marked `I` at first: no ink in the original corpus went near
- * a side margin, so the captures could not tell centred-letterbox from a plain
- * stretch (for A4 the two differ by at most 3mm, and agree exactly in `y`). The
- * answer turned out to be written in the file — a `.mark`'s `HIGHLIGHTINFO`
- * records each PDF text highlight TWICE, once in PDF points and once in panel
- * pixels, which is the device stating its own mapping. Fitted over 14 paired
- * samples, this function is within 0.67px and a stretch is out by 34.5px
- * (`note-format.md` §13.3, §13.4).
- *
- * The device does NOT clip the pen to the page: ink exists outside this
- * rectangle, on both sides. Whoever composites has to choose whether to keep it.
+ * The page's aspect-preserving, centred fit inside the panel (within 0.67px of
+ * `HIGHLIGHTINFO` pairs; a stretch is 34.5px off). The device does not clip the
+ * pen to this rect.
  */
 export function fitPageInPanel(panel: Size, pagePt: Size): Placement {
   if (pagePt.width <= 0 || pagePt.height <= 0 || panel.width <= 0 || panel.height <= 0) {
@@ -68,23 +32,14 @@ export function fitPageInPanel(panel: Size, pagePt: Size): Placement {
 }
 
 /**
- * Place the mark's panel over a rendered page.
- *
- * The canvas IS the page, and the page is only PART of the panel — so the panel
- * is drawn OVERSIZED and shifted up-left, such that its inner page-rect lands
- * exactly on the canvas. For A4 on a Nomad that is ~6% wider than the canvas and
- * offset left by ~3% of it; the dead margins fall outside and are clipped.
- *
- * Returning the whole panel's placement rather than cropping the ink is what
- * keeps this reversible and cheap: the caller positions ONE element, and nothing
- * has to re-decode or re-raster when the page is zoomed.
+ * Place the mark's whole panel over a rendered page: drawn oversized and shifted
+ * so its page-rect lands on the canvas, the margins clipped. One element, no
+ * re-raster on zoom.
  */
 export function placePanelOverPage(panel: Size, pagePt: Size, canvas: Size): Placement {
   const fit = fitPageInPanel(panel, pagePt);
   if (fit.width <= 0 || canvas.width <= 0) return { width: 0, height: 0, left: 0, top: 0 };
-  // Panel pixels -> canvas pixels. Derived from WIDTH alone: the fit preserves
-  // aspect, so the height ratio is the same number, and taking it from one axis
-  // means a canvas that is a rounded pixel off cannot skew the overlay.
+  // Panel to canvas scale from width alone, so a rounded canvas can't skew it.
   const k = canvas.width / fit.width;
   return {
     width: panel.width * k,
@@ -94,7 +49,7 @@ export function placePanelOverPage(panel: Size, pagePt: Size, canvas: Size): Pla
   };
 }
 
-/** A rectangle in the page's DISPLAY space — top-left origin, y down, POINTS. */
+/** A rect in page display space: top-left origin, y down, points. */
 export interface PageRect {
   x: number;
   y: number;
@@ -103,35 +58,10 @@ export interface PageRect {
 }
 
 /**
- * Where a rect measured in the PAGE's own points lands on the page drawn at
- * `canvas` CSS pixels.
- *
- * THE ONE PAGE→SCREEN MAPPING, and it is here rather than beside either of its
- * callers because there are now two of them. The document's own links
- * (`pdfWire.placeLink`) and find's highlights (`pages/pdfFind.ts`) both start
- * from a rect the decoder already resolved into display space, and both have to
- * land on the same pixels as the `.mark` ink that {@link placePanelOverPage}
- * puts over the same canvas. Two arithmetics for one page is precisely how a
- * highlight and the handwriting it sits under drift apart on a rotated document
- * — so there is one, and everything that draws on a PDF page comes through it.
- *
- * NO LETTERBOX CORRECTION, which is what makes this simpler than the `.mark`
- * overlay rather than a variation on it. A `.mark` is in DEVICE PANEL pixels and
- * the page is only part of that panel, so the panel has to be fitted; a rect that
- * is already in the page's own space needs no fitting, because the canvas IS the
- * page rendered whole. Both facts come from the same place — `fz_bound_page`'s
- * transformed box, which is what `pageSize()` reports — so a `/Rotate`, an
- * off-origin `/MediaBox` and a `/CropBox` are resolved before either of them
- * sees a number.
- *
- * TAKEN FROM WIDTH ALONE, for the reason {@link placePanelOverPage} states about
- * its own `k`: the raster preserves the page's aspect, so the height ratio is
- * the same number, and deriving it from one axis means a canvas whose height
- * MuPDF rounded by a pixel cannot skew every box on the page.
- *
- * A degenerate page or canvas answers with a zero box, which draws nothing — the
- * same posture {@link markExportMatrix} takes, and better than an `Infinity`
- * reaching a style property.
+ * The one page→screen mapping, shared by links, find highlights and (via the
+ * same canvas) `.mark` ink, so they cannot drift apart on a rotated page. The
+ * rect is already in page space (`fz_bound_page`'s transformed box), so no
+ * letterbox fit; scale from width alone. Degenerate input gives a zero box.
  */
 export function placePageRect(rect: PageRect, pagePt: Size, canvas: Size): Placement {
   if (pagePt.width <= 0 || canvas.width <= 0) return { width: 0, height: 0, left: 0, top: 0 };
@@ -139,100 +69,32 @@ export function placePageRect(rect: PageRect, pagePt: Size, canvas: Size): Place
   return { left: rect.x * k, top: rect.y * k, width: rect.w * k, height: rect.h * k };
 }
 
-/** The one coordinate space a page and the ink on it can be exported in. */
 export interface ExportSpace {
-  /** The export image, in whole pixels. */
   width: number;
   height: number;
-  /** Render the PDF page at this scale (PDF points -> export pixels). */
+  /** PDF points to export pixels. */
   scale: number;
-  /** Translate each ink canvas by this when drawing it in. Whole pixels. */
+  /** Ink canvas translation, whole pixels. */
   dx: number;
   dy: number;
 }
 
+// `markExportSpace` (below) composes page and ink in the page's space at the
+// ink's resolution: the ink only translates (never resamples) and the vector PDF
+// absorbs the scale. Offsets round to whole pixels to avoid blur; ink outside
+// the page rect is cropped, as `.pdf-stage` does on screen.
 /**
- * Where to compose a page and its `.mark` into ONE image.
- *
- * The screen gets away with keeping the two apart — {@link placePanelOverPage}
- * puts a whole oversized panel over the canvas and lets `.pdf-stage` clip the
- * dead margins. An export cannot: a PNG or an ORA is one rectangle, so the
- * margins have to go and both halves have to land in the same grid.
- *
- * THE PAGE'S SPACE, AT THE INK'S RESOLUTION. Two spaces were available and only
- * one of them is free:
- *
- *  - the PANEL's (1404x1872), which would ship the device's dead side margins as
- *    part of every export and make an A4 page 6% narrower than it is;
- *  - the PAGE's, sized to the panel's own pixels — `fit.width x fit.height`,
- *    ~1324x1872 for A4 on an N6. The ink then moves by a pure TRANSLATION and is
- *    never resampled, and the PDF (a vector source that re-rasters at any scale
- *    for free) absorbs the whole of the mismatch.
- *
- * So `scale` is the fit's own scale — the number that makes the rendered page
- * exactly as wide as the page-rect inside the panel — and `dx`/`dy` un-shift the
- * ink by the letterbox margin.
- *
- * `dx`/`dy` are ROUNDED TO WHOLE PIXELS on purpose. `drawImage` at a fractional
- * offset resamples, which is precisely what composing in the ink's own
- * resolution was meant to avoid; A4-on-an-N6 asks for 40.19 px, and half a pixel
- * of blur on a 1-px pen stroke is visible where 0.19 px of position is not.
- *
- * `width`/`height` are rounded for the same reason a canvas cannot be 1323.6 px
- * wide. The caller draws the page bitmap at those exact dimensions, so a
- * rasteriser that rounds the other way is a sub-pixel rescale of the DOCUMENT
- * and never a shear.
- *
- * THIS CROPS INK, and that is now a measured fact rather than a theoretical one.
- * The device does not clip the pen to the page: in the third capture
- * (`note-format.md`, "What the corpus is") page 16's ink spans the whole panel,
- * 0..1403.8, with 1,375 contour vertices left of the page rect and 2,557 right
- * of it. Everything outside the rect is dropped here.
- *
- * That is the defensible default — an export of "this page" that included the
- * margins would not be the page — and the viewer agrees with it, since
- * `.pdf-stage` clips the same overhang on screen. But it IS a silent loss of
- * something the user drew, and if it ever needs to change, this is the function
- * that decides it.
- */
-/**
- * A 2x3 affine matrix, in the PDF/PostScript ordering `[a, b, c, d, e, f]`:
- *
- *     x' = a·x + c·y + e
- *     y' = b·x + d·y + f
- *
- * DISPLAY SPACE — top-left origin, y DOWN. That is the space `pageSize()`
- * reports and the space the raster is in, and it is NOT the PDF's own
- * bottom-left user space. Everything the page carries between the two (a
- * `/Rotate`, a `/CropBox` whose origin is not zero) lives inside the decoder's
- * own display transform, so nothing here has to know about it: this maps onto
- * the page AS THE READER SEES IT, which is the only page this app ever measures.
+ * A 2x3 affine `[a, b, c, d, e, f]` (x' = a·x + c·y + e, y' = b·x + d·y + f) in
+ * display space (top-left, y down), not PDF user space; rotation and crop live
+ * inside the decoder's display transform.
  */
 export type DisplayMatrix = readonly [number, number, number, number, number, number];
 
 /**
- * Where an exported INK IMAGE goes on the page it annotates — the inverse of the
- * composition {@link markExportSpace} sets up, expressed as a matrix a renderer
- * can consume.
- *
- * NO TRANSLATION, and that is the claim worth stating: `markExportSpace` has
- * ALREADY un-shifted the ink by the panel's letterbox margin (`dx`/`dy`), so the
- * image's pixel (0,0) IS the page's top-left corner and its extent IS the page
- * rect. A second offset here would correct the same margin twice — which is
- * exactly the bug that reads as "the handwriting is a few millimetres off" and
- * survives every test that only asks whether ink is present.
- *
- * PER-AXIS SCALE, rather than the single `k` that {@link placePanelOverPage} takes
- * from width alone. The reasoning is opposite there and here. On screen the two
- * halves are separate elements and one shared ratio is what stops a rounded
- * canvas from SKEWING the overlay. In an export they are already one rectangle:
- * `markExportSpace` rounds the image to whole pixels and `composeMarkExportModel`
- * draws the page to FILL that rounded box, so inverting it per-axis reproduces
- * the flattened PNG exactly. For A4 on an N6 the two axes differ by 0.02%.
- *
- * Degenerate input answers with the ZERO matrix rather than an `Infinity`: an
- * overlay that collapses to a point draws nothing, and "no ink" is a far better
- * failure than a non-finite number crossing into wasm.
+ * Where an exported ink image goes on its page. No translation: `markExportSpace`
+ * already removed the letterbox margin, and a second offset would double it.
+ * Per-axis scale, inverting the rounded export box exactly. Degenerate input
+ * gives the zero matrix.
  */
 export function markExportMatrix(image: Size, pagePt: Size): DisplayMatrix {
   if (image.width <= 0 || image.height <= 0) return [0, 0, 0, 0, 0, 0];
@@ -245,13 +107,10 @@ export function markExportSpace(panel: Size, pagePt: Size): ExportSpace {
   return {
     width: Math.round(fit.width),
     height: Math.round(fit.height),
-    // From the UNROUNDED fit, and from width alone — the same reasoning as
-    // `placePanelOverPage`'s `k`: one axis cannot skew what the other does.
+    // Unrounded fit, width alone.
     scale: fit.width / pagePt.width,
-    // `0 - x` rather than `-x`: a page that fills its axis has no margin, and
-    // `-Math.round(0)` is NEGATIVE zero — indistinguishable in arithmetic, but
-    // it fails `Object.is` and so leaks into every equality assertion downstream
-    // as a difference that is not one.
+    // `0 - x`, not `-x`: avoids a `-0` that fails `Object.is` in assertions.
+
     dx: 0 - Math.round(fit.left),
     dy: 0 - Math.round(fit.top),
   };

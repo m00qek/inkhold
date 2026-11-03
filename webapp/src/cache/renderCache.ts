@@ -1,24 +1,7 @@
-// The render cache (layer L3) — the concrete `RenderCache` the UI renders
-// through. Two tiers, keyed by (content hash, size, theme) via `keyOf`:
-//
-//   memory  — a byte-budgeted LRU of ImageBitmaps for instant re-blit; evicted
-//             bitmaps are `close()`d, because dropping the reference alone
-//             leaves megabytes to a GC that has no idea what a bitmap weighs.
-//             The BUDGET here is the browser tab's, not the server's — see the
-//             note on `memoryBudgetBytes`.
-//   idb     — thumbnails only, persisted as a compressed WebP Blob for a warm
-//             cold-start (see `idb.ts` for why WebP rather than raw ImageData).
-//
-// The two tiers hold two FORMS on purpose: the browser cannot blit a Blob, and
-// re-encoding a WebP on every re-blit would be waste, so memory keeps the
-// decoded `ImageBitmap` while only the persistent tier pays the encode. The
-// boundary is here: `put` encodes the bitmap to WebP on the way to IDB, `get`
-// decodes it back on the way out.
-//
-// Never a source of truth: a miss re-fetches the immutable page bytes and
-// re-renders, so eviction — ours or the browser's — is always safe. On a
-// theme toggle the page evicts the now-off-theme bitmaps (`evictTheme`) rather
-// than letting them idle in the budget.
+// The concrete `RenderCache`: a byte-budgeted memory LRU of `ImageBitmap`s
+// (closed on eviction, since the GC cannot see a bitmap's weight) over a
+// persistent WebP tier for thumbnails only. Memory keeps decoded bitmaps;
+// only the persistent tier pays the encode.
 
 import type { RenderCache, RenderKey } from "./types";
 import { keyOf } from "./types";
@@ -27,19 +10,9 @@ import type { PersistentThumbStore } from "./idb";
 import { densityBucket } from "../render/types";
 
 /**
- * The cache id for one entry. Thumb-tier keys carry the pristine tier's density
- * bucket — `hash:thumb:theme:b{1..3}` — because a thumb's PIXELS depend on the
- * bucket it was rendered for (target width = TILE_W × bucket × leeway), so two
- * buckets are two distinct rasters, in memory and in IndexedDB alike. The
- * bucket is read PER CALL (`densityBucket()` defaults from the live
- * `devicePixelRatio`), so a monitor hop or zoom change naturally re-keys.
- *
- * Persistent entries written before this key format (`hash:thumb:theme`) are
- * simply MISSES under the new keys — no migration, by design: the render cache
- * is never a source of truth, every entry re-derives from the immutable page
- * bytes, and the old entries age out of the byte-budgeted store via its own
- * LRU. `full`/`native` tiers are unbucketed (they are not the thumb tier's
- * width-normalized rasters) and keep the plain `keyOf` form.
+ * Thumb keys carry the density bucket (`hash:thumb:theme:b{1..3}`): a thumb's
+ * pixels depend on it. Read per call, so a DPR change re-keys. Older unbucketed
+ * persistent entries just miss and age out.
  */
 export function cacheId(key: RenderKey, bucket: number = densityBucket()): string {
   const base = keyOf(key);
@@ -48,35 +21,21 @@ export function cacheId(key: RenderKey, bucket: number = densityBucket()): strin
 
 export interface RenderCacheOptions {
   /**
-   * Memory LRU cap for decoded `ImageBitmap`s. Default 48 MB.
-   *
-   * NOT the project's 50 MB figure, which this used to cite: that is the
-   * SERVER's RSS ceiling on a Pi 1 B+, and nothing here runs on the Pi. The
-   * governing constraint on the client is a modern browser that must stay
-   * responsive on 3G — latency and bandwidth, plus a phone's own tab-memory
-   * pressure, which is hundreds of megabytes rather than fifty.
-   *
-   * So the number is inherited rather than derived, and it is honest to say so:
-   * 48 MB bounds a long scroll from growing without limit and has never been
-   * measured against a real device. If it is ever tuned, tune it as a browser
-   * cache — the persistent WebP tier below is the one with a real quota.
+   * Default 48 MB. An unmeasured bound on a long scroll, sized for a browser
+   * tab, not the server's 50 MB Pi ceiling.
    */
   memoryBudgetBytes?: number;
-  /** Persistent thumbnail tier, or null to run memory-only (tests, no IDB). */
+  /** Null runs memory-only. */
   persistent?: PersistentThumbStore | null;
 }
 
 const DEFAULT_MEMORY_BUDGET = 48 * 1024 * 1024;
 
-/** RGBA byte weight of a decoded bitmap. */
 function bitmapBytes(bm: ImageBitmap): number {
   return bm.width * bm.height * 4;
 }
 
-// WebP quality for the persistent thumbnail. High enough that thin e-ink strokes
-// survive without visible ringing (they are what the gallery pixel-probe reads),
-// still ~20-40x smaller than the raw RGBA this replaced. Lossless-per-source (the
-// doc's codec-per-source refinement) is deliberately left out of the first pass.
+// High enough that thin e-ink strokes survive without ringing.
 const WEBP_QUALITY = 0.9;
 const WEBP_TYPE = "image/webp";
 
@@ -89,13 +48,7 @@ function makeCanvas(w: number, h: number): OffscreenCanvas | HTMLCanvasElement |
   return canvas;
 }
 
-/**
- * Encode a bitmap to a WebP Blob so it can be structured-cloned into IDB. Handles
- * both canvas flavours: `OffscreenCanvas` returns the blob via `convertToBlob`,
- * a DOM `<canvas>` via the callback-style `toBlob`. Returns null when neither the
- * canvas nor the WebP encoder is available (older engines) — the caller then
- * simply skips the persistent tier, exactly as it did on an ImageData failure.
- */
+/** Null when no canvas or WebP encoder exists; the persistent tier is then skipped. */
 async function bitmapToWebp(bm: ImageBitmap): Promise<Blob | null> {
   const canvas = makeCanvas(bm.width, bm.height);
   if (!canvas) return null;
@@ -125,9 +78,7 @@ export function createRenderCache(opts: RenderCacheOptions = {}): RenderCache {
   const lru = new ByteLru<string, ImageBitmap>({
     budgetBytes: opts.memoryBudgetBytes ?? DEFAULT_MEMORY_BUDGET,
     sizeOf: bitmapBytes,
-    // Free GPU/heap memory on eviction. Safe: callers blit synchronously right
-    // after get()/put(), so a returned bitmap is never closed out from under a
-    // pending paint.
+    // Safe: callers blit synchronously after get()/put(), so no pending paint holds it.
     onEvict: (_id, bm) => bm.close(),
   });
 
@@ -140,8 +91,6 @@ export function createRenderCache(opts: RenderCacheOptions = {}): RenderCache {
       if (persistent && key.size === "thumb") {
         const blob = await persistent.get(id);
         if (blob) {
-          // The browser decodes the WebP natively; this is the only place a
-          // persisted thumbnail turns back into a blittable bitmap.
           const bm = await createImageBitmap(blob);
           lru.put(id, bm);
           return bm;
@@ -160,17 +109,13 @@ export function createRenderCache(opts: RenderCacheOptions = {}): RenderCache {
     },
 
     async evictTheme(theme): Promise<void> {
-      // Ids are `hash:size:theme` (full/native) or `hash:size:theme:bN`
-      // (thumb) — the theme segment is either terminal or bucket-suffixed.
-      // Hashes are hex and sizes are fixed words, so neither can contain a
-      // `:${theme}` fragment of its own.
+      // Ids end in `:theme` or contain `:theme:b`; hex hashes and fixed size words cannot collide.
       const terminal = `:${theme}`;
       const bucketed = `:${theme}:b`;
       for (const id of lru.keys()) {
         if (id.endsWith(terminal) || id.includes(bucketed)) lru.delete(id);
       }
-      // Persistent thumbs are left to re-derive on demand; clearing selectively
-      // by theme isn't worth a full scan, and they don't count against RSS.
+      // Persistent thumbs re-derive on demand; a theme scan is not worth it.
     },
   };
 }

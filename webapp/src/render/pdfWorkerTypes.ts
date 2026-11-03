@@ -1,8 +1,5 @@
-// The message protocol between `pdfClient.ts` (main thread) and `pdfWorker.ts`.
-//
-// Its own module so neither side imports the other: the client owns a
-// `new Worker(new URL(...))`, and a worker that imported it would pull that
-// construction into its own bundle. Types only — nothing here survives compile.
+// The message protocol between `pdfClient.ts` and `pdfWorker.ts`, types only,
+// so the worker bundle doesn't pull in the client's `new Worker(...)`.
 
 import type { PdfCacheStats } from "./pdfBlocks";
 import type { DisplayMatrix } from "./markGeometry";
@@ -10,94 +7,50 @@ import type { PdfLink } from "../core/types";
 import type { PdfWord } from "./pdfWire";
 import type { PdfOutlineEntry } from "./pdfWire";
 
-/**
- * How the document was opened.
- *
- * `stream` is the JSPI path: MuPDF pulls blocks through `ink.host_read` as it
- * needs them. `whole` is the fallback for an engine without JSPI — correct
- * everywhere, just not fast.
- */
+/** `stream`: MuPDF pulls blocks via JSPI `ink.host_read`. `whole`: no-JSPI fallback. */
 export type PdfOpenMode = "stream" | "whole";
 
 /**
- * The ink to burn onto one exported page: a COVERAGE MASK and where it goes.
- *
- * A mask rather than colour: a `.mark`'s pen is one colour per stroke and the
- * export draws it as the device drew it, so the only thing the page needs from
- * this side is HOW MUCH ink covers each sample. A full RGBA image would be four
- * times the bytes to say the same thing — an A4 page's ink at the N6's own
- * resolution is 2.5 MB as alpha and 9.9 MB as RGBA.
+ * Ink for one exported page as a coverage mask (pen colour is per stroke), a
+ * quarter the bytes of RGBA.
  */
 export interface PdfInkOverlay {
-  /** `width * height` coverage bytes, row-major. 255 = full ink, 0 = clear. */
+  /** `width * height` coverage bytes, row-major; 255 = full ink. */
   alpha: Uint8Array;
   width: number;
   height: number;
-  /**
-   * Where that image lands on the page, in DISPLAY space (top-left origin) —
-   * see `markExportMatrix`, which is the only thing that builds one.
-   */
+  /** Placement in display space (top-left origin); built by `markExportMatrix`. */
   matrix: DisplayMatrix;
 }
 
 export type PdfRequest =
   | { kind: "open"; id: number; url: string; size: number }
   | { kind: "pageSize"; id: number; page: number }
-  /**
-   * The page's OWN links — the `/Annots` the document was authored with, not
-   * anything the app adds. Cheap next to a render: `fz_load_links` reads the
-   * page object the renderer already fetched, so on a range-served document
-   * this costs no new traffic on a page you are looking at.
-   */
+  /** The page's own authored `/Annots`; cheap, reads the already-fetched page object. */
   | { kind: "pageLinks"; id: number; page: number }
   /**
-   * The page's WORDS and where they sit — find-in-PDF's locator.
-   *
-   * NOT cheap the way `pageLinks` is: this RUNS the page through a
-   * structured-text device, so on a range-served document it can pull bytes a
-   * render of the same page would also have pulled. Hence: asked only when find
-   * is open, only for the page on screen, and cached per page on the main
-   * thread rather than re-requested per keystroke.
+   * Page words for find-in-PDF. Runs a structured-text device and may pull
+   * bytes, so asked only for the visible page and cached on the main thread.
    */
   | { kind: "pageWords"; id: number; page: number }
-  /**
-   * The document's outline, flat and in document order. Per DOCUMENT — one
-   * answer for the whole file, asked once at open and held for its life.
-   */
+  /** The flat outline in document order, asked once per document. */
   | { kind: "outline"; id: number }
   | { kind: "render"; id: number; page: number; scale: number }
   /**
-   * ONE PAGE, AS A PDF — the original page's own content streams grafted into a
-   * fresh document with `ink` drawn over them. Not a raster: the exported page
-   * keeps the text, fonts and vectors the source page had.
-   *
-   * `ink.alpha`'s buffer is TRANSFERRED into the worker (see `pdfClient.ts`).
+   * One page as a PDF: the original content streams grafted into a fresh
+   * document with `ink` over them (not a raster). `ink.alpha` is transferred.
    */
   | { kind: "exportPage"; id: number; page: number; ink: PdfInkOverlay }
   /**
-   * Draw `ink` onto one page of the OPEN document, in place — one of these per
-   * annotated page, then a single `exportDocument`.
-   *
-   * NOT A LOOP OVER `exportPage`, and the difference is the whole feature:
-   * grafting drops `/Annots`, so a page-by-page whole-document export would
-   * lose every link and highlight the original had. `ink.alpha` is TRANSFERRED,
-   * for the same reason it is there.
-   *
-   * THE DOCUMENT IS MUTATED. The worker reopens it after `exportDocument`, so
-   * the session the viewer keeps reading through is clean either way.
+   * Draw `ink` onto a page of the open document in place, before one
+   * `exportDocument`. Not a loop over `exportPage`, since grafting drops
+   * `/Annots`. Mutates the document; the worker reopens it afterwards.
    */
   | { kind: "annotatePage"; id: number; page: number; ink: PdfInkOverlay }
   /**
-   * Write the annotations as an INCREMENTAL UPDATE and answer with the DELTA —
-   * the bytes that belong after the original file, which the caller
-   * concatenates onto it.
-   *
-   * `original` is the caller's own copy of the file, as a Blob, and it is not a
-   * convenience: MuPDF's incremental write begins by reading back the whole
-   * document it appends to, which on the streamed transport would be a second
-   * download of a 76 MB file over the link this app is designed around. A Blob
-   * crosses `postMessage` by REFERENCE and is disk-backed, so lending it costs
-   * nothing and the re-read is local.
+   * Write an incremental update and answer with the delta to append. `original`
+   * is the caller's disk-backed Blob, because MuPDF re-reads the whole document
+   * and on the streamed transport that would be a second download.
    */
   | { kind: "exportDocument"; id: number; original: Blob }
   | { kind: "stats"; id: number }
@@ -108,22 +61,17 @@ export type PdfResponse =
   | { kind: "pageSize"; id: number; width: number; height: number }
   | { kind: "pageLinks"; id: number; links: PdfLink[] }
   | { kind: "pageWords"; id: number; words: PdfWord[] }
-  /**
-   * An EMPTY array is the common answer and a successful one: most documents
-   * carry no outline.
-   */
+  /** Empty is the common, successful answer. */
   | { kind: "outline"; id: number; entries: PdfOutlineEntry[] }
-  /** `bitmap` is TRANSFERRED, so it crosses without copying the pixels. */
+  /** `bitmap` is transferred. */
   | { kind: "rendered"; id: number; bitmap: ImageBitmap; width: number; height: number }
-  /** The produced PDF's bytes. TRANSFERRED, like `rendered`'s bitmap. */
+  /** Transferred. */
   | { kind: "exportedPage"; id: number; bytes: Uint8Array }
   | { kind: "annotatedPage"; id: number }
-  /**
-   * The incremental update's DELTA — tens of kilobytes, not a document.
-   * TRANSFERRED, like the rest.
-   */
+  /** The incremental update's delta (tens of KB). Transferred. */
   | { kind: "exportedDocument"; id: number; delta: Uint8Array }
   | { kind: "stats"; id: number; stats: PdfCacheStats | null; mode: PdfOpenMode | null }
   | { kind: "closed"; id: number }
-  /** `status` is the HTTP status when the failure was a fetch — 401/403 re-auth. */
+  /** `status` is the HTTP status of a failed fetch (401/403 re-auth). */
+
   | { kind: "error"; id: number; message: string; status: number | null };

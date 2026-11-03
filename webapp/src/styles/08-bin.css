@@ -1,27 +1,10 @@
-/* ================= RECYCLE BIN =================
- *
- * A bin is not a folder — it is a countdown. Rows group by deletion date (which
- * reunites a folder-delete batch the device sends as separate per-entity
- * requests, children first) and each carries the signature of the whole design
- * language: a page rule whose remaining length IS the remaining retention,
- * crossing to --margin at the end. No new colour is introduced.
- *
- * THE COLOUR RULE THIS FILE OBEYS. Red (--margin) is DANGER and nothing else;
- * green (--accent) is brand and state. So the countdown rule is neutral until it
- * is nearly out, the aside that explains the device behaviour is green because
- * it is information, and only Delete and the confirm's second button are red.
- *
- * Loaded last, after 07 — see the manifest note in styles.css. Nothing here
- * overrides an earlier file at equal specificity; every selector is new.
- */
+/* ---- recycle bin ----
+ * A bin is a countdown: rows group by deletion date (reuniting a folder-delete
+ * batch the device sends child-first) and each carries a rule whose length is
+ * the remaining retention. Red (--margin) is danger only: the rule turns red
+ * near the end, and only Delete and the confirm's go button are red. */
 
-/* --margin-ink (the AA-legible red for TYPE) now lives in 01-tokens-auth.css:
-   the admin console needs the same colour, and two definitions of one token is
-   how they drift. The uses below are unchanged. */
-
-/* The bin paints INTO the gallery (see bin.ts), so the grid has to stand down:
-   this is a list of rows, not a wall of tiles. Same container geometry as
-   `.gallery`, so the left edge does not shift as you move between them. */
+/* The bin paints into the gallery as rows, with `.gallery`'s geometry. */
 .gallery.is-bin {
   display: block;
   padding: 0;
@@ -31,38 +14,8 @@
   padding: 26px 28px 48px;
 }
 
-/* THE BIN IS A MODE IN THE TOPBAR, exactly as reading is (`.sn-root.is-reading`
-   in 06 takes the whole header away). Two things follow from it:
-
-   - the search box leaves. It searches the LIBRARY, which is not what is on
-     screen, and typing in it navigates off the bin entirely — the same trap the
-     reader's header had, for the same reason;
-   - `Empty bin` arrives, in `.tools` beside sort and the view toggle, because it
-     acts on the whole view rather than on any row. It used to sit in the bin's
-     own header on the argument that a topbar control would need a teardown hook
-     the shell lacks. It does need one, and the shell has had it all along —
-     `renderGallery()` runs on every navigation out of here and is what turns the
-     mode off, precisely as it is already what closes the bin.
-
-   NEITHER RULE IS HERE ANY MORE. Both were written for the bin and both were
-   the admin console's requirement verbatim, so they moved to 03 as
-   `.sn-root.is-destination` and `.topbar__action` — the topbar's own layout,
-   shared by every destination. What stays in this file is what is really about a
-   bin: `.gallery.is-bin` above, and `.btn.is-danger` below, which the console
-   deliberately does NOT take for its Lock button.
-
-   Sort and the view toggle are NOT handled by the mode class either: they use
-   the `hidden` attribute (restated at `.select[hidden]` in 03 — a UA
-   `display:none` at (0,0,1) loses to a component's `display:flex`), which is
-   already how they leave over search results. One rule, one mechanism. */
-
-/* The aside is the whole of this row now: why the bin behaves as it does, at the
-   point where the consequence is visible. */
-/* CENTRED with the rows. The mockup centres `.bin__aside` itself because there
-   the aside IS the 760px block; here it is a `flex: 1` child of `.bin__head`,
-   which is the element that actually carries the measure — so `margin-inline`
-   on the aside would do nothing and the notice would hang to the left of the
-   rows. Same result, one level up. */
+/* The aside explains the device behaviour. `.bin__head` carries the measure, so
+   it is centred there rather than on the flex child. */
 .bin__head {
   display: flex;
   align-items: flex-start;
@@ -91,8 +44,6 @@
   align-items: center;
   gap: 10px;
   max-width: 760px;
-  /* `auto` horizontally, with the rows and the aside — the old 2px was a nudge
-     that only meant anything while the whole bin was left-aligned. */
   margin: 28px auto 6px;
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
@@ -111,8 +62,7 @@
   max-width: 760px;
   margin-inline: auto;
 }
-/* RULED AT REST, like the list row it is the sibling of — the bin had the same
-   problem for the same reason, and takes the same answer. */
+/* Ruled at rest, like the list row. */
 .bin__row {
   position: relative;
   display: flex;
@@ -125,30 +75,13 @@
 .bin__row:last-child {
   border-bottom: none;
 }
-/* (The open-row z-index lift that used to sit here is gone: the shared menu's
-   popover now portals to <body> and paints at `--z-popover`, above every row, so
-   no row needs raising to clear the ones below it — see 06-reader.css.) */
-/* NOT between a trashed folder and its own children. The nesting says these came
-   down together and go back together — one restore, one decision — and a divider
-   through the middle of that would say the opposite. The rule returns after the
-   last child, where the next entry really is a separate thing.
-
-   SPECIFICITY, not order: `:has()` takes the specificity of its most specific
-   argument, so `.bin__row:has(+ .bin__row.is-child)` is (0,3,0) against the
-   (0,1,0) `padding` shorthand above — it cannot be undone by moving these rules,
-   the way an unscoped longhand could (see the `.card .card__menu` note in
-   04-library-gallery.css). `.bin__row.is-child` is (0,2,0) and beats it for the
-   same reason, which is also what has always kept its `padding-left: 34px`. */
+/* No rule between a trashed folder and its children: they restore together.
+   `:has()` takes its argument's specificity, so this is (0,3,0) and order-proof. */
 .bin__row:has(+ .bin__row.is-child) {
   border-bottom: none;
 }
-/* The tight pairing, applied to BOTH sides of every seam inside the subtree —
-   the folder's underside, each child's top, and a child's underside while more
-   children follow. Air and a rule are the same signal, so dropping the rule
-   without dropping the air would leave two 15px paddings meeting as 30px of
-   blank, and a folder's own children would read as FURTHER apart than two
-   unrelated ruled entries. The LAST child keeps the full padding, because it is
-   the end of the group and the next row genuinely is a stranger. */
+/* Tight pairing on every seam inside the subtree (the rule and the air are one
+   signal); the last child keeps full padding. */
 .bin__row:has(+ .bin__row.is-child) {
   padding-bottom: var(--row-pad-y-tight);
 }
@@ -161,19 +94,12 @@
 .bin__row:hover {
   background: var(--hover);
 }
-/* A ROW WITH ITS OWN RESTORE OR PURGE IN FLIGHT (bin.ts's `inFlight`). The row
-   recedes — it is being acted on, not offered — and its ⋯ is already `disabled`
-   in the markup, so this is the visible half of a fact the DOM states twice
-   (`aria-busy` is the other half, for a reader that cannot see the fade).
-   Deliberately NOT a spinner: the whole row is the affordance, and one more
-   spinning mark per row would be noise in a list of them. */
+/* A row with its own restore or purge in flight recedes; its ⋯ is `disabled`
+   and it carries `aria-busy`. No spinner. */
 .bin__row.is-busy {
   opacity: 0.55;
 }
-/* A child sits under the trashed folder it came from. The nesting is not
-   decoration: restoring a child restores its ancestors too, so showing the
-   relationship is what stops that being a surprise. A row whose parent is NOT in
-   the bin stays flush. */
+/* A child is nested under its trashed folder: restoring it restores its ancestors. */
 .bin__row.is-child {
   padding-left: 34px;
 }
@@ -201,18 +127,13 @@
   text-align: left;
   cursor: pointer;
 }
-/* A folder has nothing to open, so its lead is not a control and must not offer
-   itself as one. */
+/* A folder has nothing to open, so its lead is not a control. */
 .bin__open.is-static {
   cursor: default;
 }
 
-/* The bin row's lead tile is LIST-class: same height as the library's list row
-   and a search result, so the three list surfaces share one rhythm. A page/glyph
-   tile keeps the portrait 3:4 width derived from the height (the canvas pipeline
-   carries no per-item aspect); an image tile takes its image's own width — see
-   `.is-image` below. (The old 0.773 tile ratio quietly stretched 0.75 note pages
-   a hair; 3:4 removes even that.) */
+/* The lead tile is list-class (same height as library rows and search results);
+   page and glyph tiles are 3:4, image tiles take their own aspect. */
 .bin__thumb {
   height: var(--preview-h-list);
   width: calc(var(--preview-h-list) * 3 / 4);
@@ -232,65 +153,40 @@
   height: 18px;
   display: block;
 }
-/* A REAL first page, painted by the gallery's own lazy engine. The engine sizes
-   the canvas from its CSS box, so the box has to resolve before the blit — which
-   is why the height and the width live on `.bin__thumb` above and the
-   canvas simply fills it. The ruled stock stays UNDER it: the engine's own
-   placeholder is a ruled sheet too, so the tile looks like paper from the first
-   frame rather than flashing an empty rectangle while the page decodes. */
+/* A real first page from the lazy engine, which sizes the canvas from this box;
+   the ruled stock stays under it. */
 .bin__thumb.is-page canvas {
   width: 100%;
   height: 100%;
   display: block;
 }
-/* An image tile takes the image's own aspect at the class height — nothing
-   cropped (the old `cover` crop went with the fixed-ratio tile), capped at
-   2.5× the height with `contain` letterboxing inside the cap. The 3:4 width
-   above becomes a MINIMUM so the row does not jump while the image loads. */
+/* An image tile: own aspect at the class height, capped at 2.5×, 3:4 minimum. */
 .bin__thumb.is-image {
   width: fit-content;
   min-width: calc(var(--preview-h-list) * 3 / 4);
   max-width: calc(var(--preview-h-list) * 2.5);
   background-image: none;
-  /* The tile is the sizing authority — a fixed-height, centred, CLIPPING box —
-     and the img just fills it (below). Earlier this file put min/max-width on
-     the IMG as well; with `height:100%`+`width:auto` the browser resolved the
-     width against those clamps FIRST and then derived height from the image's
-     own aspect, overriding `height:100%` — so a wide `.txt`/`.spd` or a
-     tall-ratio `.png` rendered a box taller than the 85px row and spilled out
-     (visibly inconsistent tile heights). Making the tile clip and the img
-     fit-contain is immune to that interaction. */
+  /* The tile is the sizing authority (fixed height, clipping); clamps on the img
+     made the browser derive height from a clamped width and spill the row. */
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
 }
 .bin__thumb.is-image img {
-  /* Fill the (correctly-shaped, clipping) tile in BOTH axes; `contain`
-     letterboxes the image's own aspect inside. No px min/max here — the tile
-     owns the clamp — which is what stops height being derived from a clamped
-     width. The tile's min-width floor still holds the row steady before a
-     lazy image arrives (a zero-width `loading="lazy"` image never loads). */
+  /* Fill the tile in both axes and `contain`; the tile owns the clamp. */
   width: 100%;
   height: 100%;
   object-fit: contain;
   display: block;
 }
-/* THE REFLOW RIDER, the bin's copy of the list row's rule
-   in 04: where the row's entry states its shape (`BinEntry.thumbAspect`, or the
-   image dims memo), bin.ts pre-sets an inline `aspect-ratio` — PRE-CLAMPED to
-   min(aspect, 2.5), the class's width cap — and marks the tile `has-aspect`.
-   The lead is then its final (letterboxed) width before any bytes arrive, so
-   the row's text never moves; and a landscape note's canvas gets an honestly
-   wide box instead of being squashed into the fixed 3:4 one. The base rule's
-   explicit width has to stand down for the inline aspect to size the box. */
+/* Where the entry states its shape, bin.ts pre-sets a pre-clamped inline
+   `aspect-ratio` with `has-aspect`, so the lead is final-width before load. */
 .bin__thumb.has-aspect {
   width: auto;
   min-width: calc(var(--preview-h-list) * 3 / 4);
   max-width: calc(var(--preview-h-list) * 2.5);
 }
-/* has-aspect just shapes the tile box; the img rule above (fill + contain)
-   already does the right thing, so no separate img override is needed. */
 .bin__thumb.is-folder {
   background-image: none;
 }
@@ -325,10 +221,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* A path answers "not where you are standing". The bin needs it because the
-   row's home is gone; search needs it because results span the whole library.
-   Same question, same treatment — `.card__path` in 05 is the other half of this
-   one rule. */
+/* A path, since a trashed row's home is gone (`.card__path` in 05 is the twin). */
 .bin__path {
   color: var(--ink-soft);
 }
@@ -341,16 +234,13 @@
   flex: none;
 }
 
-/* The countdown. Neutral until it is nearly out — a rule that is red from the
-   first day says "danger" about a file with four weeks to live. */
+/* The countdown: neutral until nearly out. */
 .life {
   width: 108px;
   flex: none;
 }
 .life__track {
-  /* A BORDERED track so the retention window's TOTAL is legible — without it the
-     fill floated on the paper with nothing to measure against (the old --rule
-     ground was ~invisible). Taller than the old 2px so the fill proportion reads. */
+  /* A bordered track so the window's total is legible. */
   height: 6px;
   box-sizing: border-box;
   background: var(--hover);
@@ -360,8 +250,7 @@
 }
 .life__fill {
   height: 100%;
-  /* --ink-faint, not --line: a clear step darker than the track + its border, so
-     "how much time is left" reads at a glance (red via --margin when is-soon). */
+  /* A clear step darker than the track (red via --margin when is-soon). */
   background: var(--ink-faint);
   border-radius: 1px;
 }
@@ -379,31 +268,9 @@
   color: var(--margin-ink);
 }
 
-/* A RESTING STATE, like the gallery row's own export control and for the same
-   reason — hiding a control on a wide three-line row buys nothing and costs
-   discoverability. Hover and `:focus-within` still bring it to full strength (and
-   `:focus-within` is what keeps it reachable by keyboard), and a coarse pointer
-   has no hover at all, so there it is always fully shown.
-
-   0.65 is the mockup's number and carries the mockup's caveat — see the long
-   note on `.card__actions` in 04-library-gallery.css. In short: it measures
-   5.28:1 there because that `.btn` is a filled `--ink`-on-`--sheet` chip, while
-   this app's `.btn` is a transparent outline in `--ink-soft`/`--margin-ink` on
-   `--desk` with only ~4.5–4.7:1 to begin with, so any fade at all puts it under
-   the floor. Ported for consistency with the list, NOT because it is measured
-   safe here. Do not lower it. */
-  /* FULL OPACITY at rest, and this is forced, not chosen. The approved mockup used
-     0.65 to make a resting control quiet — but its `.btn` is FILLED (`--ink` on
-     `--sheet`, 16.64:1), so it had contrast to spend. This app's `.btn` is an
-     OUTLINE button in `--ink-soft`, which measures 5.47:1 — and every partial
-     opacity fails: 0.85 -> 3.97, 0.75 -> 3.25, 0.65 -> 2.69, all under the 4.5
-     floor. There is no fade that keeps this button legible.
-     
-     Nothing is lost. The fade existed to make the control quiet, and an outline
-     button in the soft ink is ALREADY quiet — the emphasis is in the style, not in
-     the alpha. Hover still marks the active row through the row background.
-     If the button ever becomes filled, a resting fade is back on the table; until
-     then, raising this below 1 reintroduces an accessibility bug. */
+/* Full opacity at rest is forced: the outline `.btn` in `--ink-soft` is
+   5.47:1, and any fade (0.85 → 3.97) falls under 4.5. Don't lower it unless the
+   button becomes filled. */
 .bin__actions {
   display: flex;
   gap: 6px;
@@ -420,12 +287,8 @@
     opacity: 1;
   }
 }
-/* The bin row's "…" is the shared overflow trigger (`.card__more`), which hides
-   itself until hover FOR A GRID CARD — it sits over a page image there. A bin
-   row has no such image and a dedicated actions slot, so the trigger stays
-   visible at rest (the labelled buttons it replaced were), and drops the grid
-   trigger's image-ground fill and blur — but keeps the SAME quiet border at rest
-   as the library trigger, gaining contrast on hover. */
+/* The shared "…" trigger stays visible in the actions slot, without the grid
+   trigger's image-ground fill. */
 .bin__actions .card__more {
   opacity: 1;
   background: transparent;
@@ -437,9 +300,7 @@
   border-color: var(--ink-soft);
 }
 
-/* Destructive AT REST, not just on hover — Delete must not look like Restore
-   until you are already over it. The text uses --margin-ink (AA as small text);
-   the border uses --margin, which only has to clear the 3.0 non-text bar. */
+/* Destructive at rest: text in --margin-ink (AA), border in --margin (3:1 non-text). */
 .btn.is-danger {
   color: var(--margin-ink);
   border-color: color-mix(in srgb, var(--margin) 30%, var(--line));
@@ -453,26 +314,14 @@
   color: var(--margin-ink);
 }
 
-/* Every control in this file clears the 24×24 target minimum. The row's actions
-   are now the shared "…" trigger (`.card__more`, sized off `--control-h-sm`),
-   which already clears it; the confirm dialog's buttons are the ones pinned here. */
+/* The confirm dialog's buttons are pinned to the 24×24 target minimum. */
 .confirm__actions .btn {
   min-height: 26px;
 }
 
 /* ---------------- confirm ----------------
-   A native <dialog>: the modal focus trap, Esc, and the inertness of the page
-   behind it come from the element rather than from us re-implementing three
-   things the platform already gets right. The form is method="dialog", so
-   returnValue carries the choice, and Cancel — FIRST IN DOM ORDER — is the
-   button Enter activates and the one that takes autofocus. The destructive
-   button is never the default action.
-
-   THE SHELL AND BACKDROP ARE SHARED WITH THE ADMIN CONSOLE'S `.admin-dialog`
-   (the other caller of src/ui/confirm.ts). One rule set, one look — the console
-   used to hand-copy these declarations "to the pixel". The BODY layouts stay
-   per-component on purpose: the bin spaces its rows with margins, the console
-   stacks fielded rows with a flex gap — two different models, not drift. */
+   Native <dialog> (src/ui/confirm.ts), shell and backdrop shared with the admin
+   console's `.admin-dialog`; body layouts stay per-component. */
 .confirm::backdrop,
 .admin-dialog::backdrop {
   background: color-mix(in srgb, var(--desk) 74%, transparent);
@@ -504,9 +353,7 @@
   line-height: 1.55;
   color: var(--ink-soft);
 }
-/* The freed size is the one number worth reading twice: trashing keeps charging
-   quota, so this is the moment the bytes actually come back — and it answers
-   "why didn't deleting free space?" exactly where it is being asked. */
+/* The freed size: trashing still charges quota, so this is when bytes come back. */
 .confirm__frees {
   margin-top: 12px;
   font-family: var(--font-mono);
@@ -533,9 +380,8 @@
 }
 
 /* ---------------- the undo toast ----------------
-   The bin's own, not the shell's. Trash is reversible, so it reports and offers
-   the reverse rather than asking first — and that only works if the offer
-   outlasts the glance, which a 2.4s notification does not. */
+   Trash is reversible, so it reports and offers undo instead of asking; the
+   offer must outlast a 2.4s notification. */
 .bin-toast {
   position: fixed;
   left: 50%;
@@ -597,10 +443,9 @@
 }
 
 /* ---------------- the preview overlay ----------------
-   For an IMAGE or a file with no preview; a `.note` goes to the real reader.
-   Deciding whether to restore something deleted a fortnight ago usually means
-   looking at it first, so the two decisions and the deadline sit in the bar
-   beside the evidence. Export is absent: this file is on its way out. */
+   An image or a preview-less file; `.note` goes to the reader. Restore and
+   delete sit beside the evidence; no export. */
+
 .bin-preview {
   position: fixed;
   inset: 0;

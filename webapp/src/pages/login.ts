@@ -1,14 +1,6 @@
-// The login page. Account + password -> challenge -> `login/new` -> session
-// cookie. The plaintext password is hashed in the browser (see api/crypto.ts)
-// and never sent. On success, routes to the first-login change-password page or
-// into the app.
-//
-// The page renders its returning-user form synchronously, then asks the server
-// (`api.serverInfo`) whether this is a brand-new install. On a first-run server
-// it upgrades in place to the onboarding rendering — first-run copy, a terminal
-// banner pointing at the temporary password the server printed, and step dots.
-// The upgrade is progressive: if the probe fails or the endpoint is absent, the
-// plain returning-user form is exactly what stays on screen.
+// The login page. The password is hashed in the browser and never sent. A
+// first-run server (`api.serverInfo`) upgrades the form in place to onboarding;
+// if the probe fails, the plain form stays.
 
 import { el } from "../ui/dom";
 import { authView, stepDots } from "../ui/chrome";
@@ -21,9 +13,7 @@ const RETURNING_SUBTITLE = "Your household's private Supernote cloud.";
 const FIRST_RUN_SUBTITLE =
   "First time here — with no account yet, the server created one for you and printed its temporary password in the terminal you started it from.";
 
-// Honest, secret-free: the web client never receives the temporary password (the
-// server prints it to its own stdout only), so the banner tells you where to
-// find it rather than pretending to show it.
+// The client never receives the temporary password (server stdout only).
 const TERMINAL_GUIDANCE = `== First run ==
 An admin account was created for you.
 Its temporary password was printed in the
@@ -81,8 +71,7 @@ export function loginPage(): HTMLElement {
         const wait = err.retryAfterSeconds ? ` Try again in ${err.retryAfterSeconds}s.` : "";
         status.error(`Too many attempts.${wait}`);
       } else if (err instanceof ApiError) {
-        // Bad account and bad password both surface as INVALID_CREDENTIALS; keep
-        // the message deliberately non-committal so it can't confirm an account.
+        // Bad account and bad password look the same, so it can't confirm an account.
         status.error(
           err.code === "INVALID_CREDENTIALS" || err.code === "NO_CHALLENGE"
             ? "That account and password don't match."
@@ -97,8 +86,6 @@ export function loginPage(): HTMLElement {
 
   const view = authView(form);
 
-  // Progressive first-run upgrade. Never throws (serverInfo swallows failures and
-  // returns null); a non-first-run server leaves the returning form untouched.
   void api.serverInfo().then((info) => {
     if (!info?.firstRun) return;
     subtitle.textContent = FIRST_RUN_SUBTITLE;

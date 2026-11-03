@@ -1,15 +1,6 @@
-/* ================= STUB VIEWERS (.spd / .txt) ================= */
-/* The overlay shell every type-specific viewer paints into (see
-   pages/spdViewer.ts, pages/txtViewer.ts). Today the bodies are placeholders —
-   the real `.spd` compositor and `.txt` layout land at the markers in those
-   modules — but the FRAME is real: a viewer overlays the gallery exactly as the
-   reader does, one visible at a time (the shell's `activate` hides the rest), and
-   hosts the shared toolbar (10-toolbar.css) so Back, Download and Move to bin
-   work before any content renders.
-
-   Kept in its own file at the END of the manifest so the two viewer agents can
-   add their contextual controls' styling without reopening the reader's cascade
-   (06) — the same separation rail/bin/admin already have. */
+/* ---- viewer frame (.spd / .txt) ----
+   The overlay shell type-specific viewers paint into (one visible at a time),
+   hosting the shared toolbar. */
 .viewer {
   position: absolute;
   inset: 0;
@@ -17,23 +8,17 @@
   flex-direction: column;
   background: var(--desk);
 }
-/* Beats the `display: flex` above so a hidden (inactive) viewer truly leaves the
-   layer — the same `[hidden]` discipline the reader relies on for `.filestage`. */
+/* A hidden viewer must leave the layer despite `display: flex` above. */
 .viewer[hidden] {
   display: none;
 }
-/* …and INSIDE a viewer too, exactly as `.reader [hidden]` (06) does: the toolbar
-   swaps its file actions by the attribute (Move to bin ⟷ Restore / Delete
-   permanently, per origin), and `.btn`'s `display: inline-flex` at (0,1,0) beats
-   the UA sheet's `[hidden] { display: none }`. Scoped, never a global reset —
-   the same reasoning as the reader's copy of this rule. */
+/* Inside a viewer too, like `.reader [hidden]`: `.btn`'s inline-flex beats the
+   UA `[hidden]`. Scoped, never a global reset. */
 .viewer [hidden] {
   display: none;
 }
 
-/* The content area under the bar — the real compositor/text layout's slot. It
-   scrolls its own overflow (a tall `.spd` page, a long `.txt`) rather than the
-   page body, and centres the placeholder until there is something to render. */
+/* The content area under the bar; scrolls its own overflow. */
 .viewer__main {
   flex: 1;
   min-height: 0;
@@ -43,16 +28,13 @@
   padding: 24px;
 }
 
-/* Back + title, mirroring the reader's `.backbtn`/`.reader__title` treatment
-   (06-reader.css) but under OWN class names — every viewer is mounted at once, so
-   the stubs cannot share a class a bare `.reader__title`/`.backbtn` test locator
-   selects, or it would resolve to three elements. Same look, separate names. */
+/* The reader's back/title look under own names, since every viewer is mounted
+   and shared names would triple the test locators. */
 .viewer__back {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  /* Compact viewer-toolbar control: the shared chrome (border --line, --radius,
-     mono label) at the compact height. */
+  /* Compact viewer-toolbar control. */
   height: var(--control-h-sm);
   border: 1px solid var(--line);
   background: transparent;
@@ -91,9 +73,7 @@
   color: var(--ink-faint);
 }
 
-/* The placeholder — a centred mark/heading/body, mirroring the shared `.empty`
-   block (05-search-results.css) under own names (same reason as above). `open()`
-   fills it; the real render replaces it. */
+/* The placeholder, mirroring `.empty` under own names. */
 .viewer__placeholder {
   max-width: 420px;
   text-align: center;

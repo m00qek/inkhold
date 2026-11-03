@@ -1,24 +1,7 @@
-// The "history of this file" menu — an ANCHORED FLOATING PANEL launched from a
-// note card's ⋯ item OR the reader's Versions toolbar button (hot-cache
-// versioning, phase 3). It springs from the SAME popover shell the ⋯ overflow menu
-// uses (`ui/popover.ts`: the body-level `.menu-portal`, trigger-anchored fixed
-// positioning, click-away/Escape/scroll dismiss, one-open-at-a-time) — NOT a modal
-// <dialog> — so it reads as the same app the ⋯ menu does.
-//
-// It lists a file's versions newest-first, each as a two-line row (relative time +
-// status on line 1; exact date + a content signal on line 2 — a note's page count
-// with a delta vs the next-older version, or a pageless kind's byte size). Two
-// status CHANNELS: `Current` (an outlined label on the live version) and `Viewing`
-// (a rail + tint + `● Viewing` marker on the version on screen, only when opened
-// mid-preview from the reader). A row CLICK previews that version — there are no
-// per-row buttons; Restore lives solely in the preview banner (`runRestore`).
-//
-// It owns only the LIST + its states; the preview and the restore are handed out
-// through {@link HistoryControllerDeps} so this module never learns how a viewer
-// is activated or how the library refreshes — the same seam discipline the card
-// menu and the bin follow. The restore CORE ({@link runRestore}) is a pure,
-// injected-dependency function so both a card action and the reader preview's
-// banner button drive one machinery, and it is unit-tested directly.
+// The "history of this file" panel: a floating popover (`ui/popover.ts`, not a
+// modal) listing a file's versions newest-first. A row click previews; Restore
+// lives only in the preview banner. Preview and restore come in through
+// `HistoryControllerDeps`; `runRestore` is the shared restore core.
 
 import { el } from "../ui/dom";
 import { openDialog } from "../ui/confirm";
@@ -31,83 +14,45 @@ import type { FileVersion, Id, RestoredVersion } from "../core/types";
 
 export interface HistoryControllerDeps {
   api: Api;
-  /** The app root — kept for the shared confirm host and any fallback anchor. */
   host: HTMLElement;
   toast: (message: string) => void;
-  /** Classify a caught listing error; true when it was actionable (a dead session). */
   handled: (e: unknown) => boolean;
   /**
-   * Open the reader in preview mode for `version` of `noteId`. The shell owns
-   * viewer activation and the history reroute (`historyScope`), so this module
-   * only says WHICH version to preview.
-   *
-   * `annotationsOn` carries {@link HistoryOpenOptions.annotationsOn} straight
-   * back out: when it is set, `noteId` is a `.mark` and the thing to open is the
-   * DOCUMENT it annotates, live, with the ink rerouted to this version. The panel
-   * does not know how that is done — it only refuses to lose the one fact the
-   * caller gave it.
-   */
+  * The shell owns viewer activation and the `historyScope` reroute. When
+  * `annotationsOn` is set, `noteId` is a `.mark` and the document it annotates
+  * is opened live with the ink rerouted to this version.
+  */
   openPreview: (noteId: Id, version: FileVersion, annotationsOn?: Id) => void;
-  /**
-   * Restore `version` as the file's current one — confirm + call + refresh +
-   * toast. Resolves true on success. Provided by the shell so both the panel and
-   * the preview banner run the same path. (No longer called from a row — Restore
-   * is banner-only now — but kept for callers that still route through here.)
-   */
+  /** Confirm, call, refresh and toast; resolves true on success. */
   restore: (noteId: Id, version: FileVersion, noteName: string) => Promise<boolean>;
 }
 
-/** How a caller opens the version menu — WHERE it anchors, and (from the reader
- *  mid-preview) WHICH version is currently on screen so its row is marked Viewing. */
 export interface HistoryOpenOptions {
-  /** The element to anchor the panel to — the card's ⋯ trigger or the reader's
-   *  Versions button. Focus returns here on Escape; a click on it never dismisses. */
+  /** Focus returns here on Escape; a click on it never dismisses. */
   anchor?: HTMLElement;
-  /** The md5 of the version currently being PREVIEWED, so its row shows `Viewing`.
-   *  Absent when opened from a library card (nothing is on screen). */
+  /** The previewed version's md5, so its row shows `Viewing`. */
   viewingMd5?: string;
   /**
-   * THESE VERSIONS ARE A DOCUMENT'S ANNOTATIONS, and this is the id of the
-   * document they are on. Set by the two surfaces that reach a paired `.mark`'s
-   * history — the PDF card's ⋯ menu and the PDF viewer's versions control —
-   * where the file being versioned (the mark) is NOT the file the reader is
-   * looking at (the PDF).
-   *
-   * It changes what the panel SAYS (an "Annotation history" eyebrow plus the
-   * caption that restoring touches only the handwriting) and it is handed back to
-   * {@link HistoryControllerDeps.openPreview} so the shell can open the right
-   * file. Passed IN rather than sniffed off `fileType` inside here: a `.mark`
-   * opened on its own — orphaned into a listing, or from the bin — really is a
-   * file with its own history, and the panel must not start calling that an
-   * annotation history because of its extension.
-   */
+  * Set when these versions are a `.mark` on that document: changes the eyebrow
+  * and caption and is passed back to `openPreview`. Passed in rather than read
+  * off `fileType`, since a standalone `.mark` has a history of its own.
+  */
   annotationsOn?: Id;
 }
 
 export interface HistoryController {
-  /** Open the version menu for one note, anchored per {@link HistoryOpenOptions}.
-   *  `fileType` is the server-verified kind — the content signal reads pages ONLY
-   *  for a `.note` (see {@link contentSignal}). */
+  /** `fileType` is server-verified; only a `.note` shows page counts. */
   open(note: { id: Id; name: string; fileType: string }, opts?: HistoryOpenOptions): void;
 }
 
 /**
- * What line 2 of a row says — the CONTENT SIGNAL. Pure so the page-count/delta
- * arithmetic is unit-tested without a DOM:
- *   - a `.note` (`isNote`) with a resolved count (`pageCount > 0`) → its page count
- *     plus a delta vs the next-OLDER version; the OLDEST (no older row) shows
- *     `created` instead;
- *   - EVERY other kind (`.spd`, `.txt`, image, pdf, …) → the blob's byte size, no
- *     delta. `pageCount` is NOT uniformly pages off the wire (it counts a `.txt`'s
- *     paragraphs, a `.spd`'s index rows), so a "N pages" label is honest only for
- *     a `.note`.
- * `older` is the immediately older version in the newest-first list, or undefined
- * for the last (oldest) row.
- */
+* Line 2 of a row. A `.note` shows pages and a delta vs the next-older version
+* (`created` on the oldest); every other kind shows byte size, since
+* `pageCount` means paragraphs or index rows there.
+*/
 export interface ContentSignal {
   pagesLabel: string | null;
   deltaLabel: string | null;
-  /** The delta is the oldest row's `created` sentinel — rendered faint, not accent. */
   deltaIsFirst: boolean;
   sizeLabel: string | null;
 }
@@ -121,8 +66,6 @@ export function contentSignal(
     const pagesLabel = `${version.pageCount} ${version.pageCount === 1 ? "page" : "pages"}`;
     if (!older) return { pagesLabel, deltaLabel: "created", deltaIsFirst: true, sizeLabel: null };
     const delta = version.pageCount - older.pageCount;
-    // Signed against the older version. A rare non-positive delta (a version that
-    // removed pages, or matched) still reads honestly rather than always "+".
     const deltaLabel = delta === 0 ? "±0" : `${delta > 0 ? "+" : "−"}${Math.abs(delta)}`;
     return { pagesLabel, deltaLabel, deltaIsFirst: false, sizeLabel: null };
   }
@@ -132,31 +75,20 @@ export function contentSignal(
 export function createHistoryController(deps: HistoryControllerDeps): HistoryController {
   function open(note: { id: Id; name: string; fileType: string }, opts: HistoryOpenOptions = {}): void {
     const anchor = opts.anchor ?? deps.host;
-    // Pages are shown ONLY for a `.note`; every other kind reads its byte size.
     const isNote = (note.fileType || "").trim().toLowerCase() === "note";
 
-    // WHOSE history this is. An annotation history lists the versions of the
-    // `.mark` beside a document, under the DOCUMENT's name — so the eyebrow has
-    // to say which of the two is being versioned, or the panel reads as a claim
-    // that the document has past versions (it does not; only the ink does).
+    // The eyebrow must say the ink is versioned, not the document.
     const annotations = opts.annotationsOn != null;
     const heading = annotations ? "Annotation history" : "Version history";
 
     const list = el("ul", { class: "vh__list" });
-    // The section eyebrow, exactly like the ⋯ menu's DOWNLOAD / ACTIONS: a mono,
-    // uppercase, letter-spaced --ink-faint label. No file-name title, no header.
     const pop = el(
       "div",
       { class: "vh menu__pop--float", role: "menu", "aria-label": `${heading} for ${note.name}` },
       el("div", { class: "vh__eyebrow", "aria-hidden": "true", text: heading }),
       list,
     );
-    // AND ONE LINE OF PROSE, only here. Every other history panel is versions of
-    // the thing you were looking at, and needs no explaining. This one is not:
-    // what it lists is handwriting, the rows are dated blobs with nothing on them
-    // to say so, and Restore would otherwise be an unqualified promise about a
-    // document nobody is offering to change. The caption is where that promise
-    // gets its scope.
+    // Scopes Restore to the handwriting, not the document.
     if (annotations) {
       pop.insertBefore(
         el("p", {
@@ -167,8 +99,7 @@ export function createHistoryController(deps: HistoryControllerDeps): HistoryCon
       );
     }
 
-    // This panel's registration in the shared open-popover registry: a click on
-    // its anchor (trigger) OR the portaled pop is "inside" and must not dismiss.
+    // A click on the anchor or the portaled pop counts as inside.
     const self: OpenPopover = {
       trigger: anchor,
       contains: (t) => anchor.contains(t) || pop.contains(t),
@@ -193,20 +124,16 @@ export function createHistoryController(deps: HistoryControllerDeps): HistoryCon
       open_ = false;
     }
 
-    /** The focusable rows in document order — the roving-focus universe. */
     let rowEls: HTMLElement[] = [];
 
-    /** Replace the body with a single state line (loading/empty/error). */
     function state(message: string): void {
       rowEls = [];
       list.replaceChildren(el("li", { class: "vh-state", text: message }));
     }
 
-    /** Paint the rows for a fetched version list. */
     function render(versions: FileVersion[]): void {
       if (versions.length === 0) {
-        // A file always has at least its current version, so an empty list means
-        // the server could not resolve one — say so plainly rather than blank.
+        // A file always has a current version, so empty means the server failed.
         state(
           annotations
             ? "No annotation history for this document yet."
@@ -216,14 +143,12 @@ export function createHistoryController(deps: HistoryControllerDeps): HistoryCon
       }
       rowEls = versions.map((v, i) => row(v, versions[i + 1]));
       list.replaceChildren(...rowEls);
-      // Anchoring is height-sensitive; the list just changed height, so re-place.
+      // Anchoring is height-sensitive.
       if (open_) place();
       rowEls[0]?.focus();
     }
 
     function row(version: FileVersion, older: FileVersion | undefined): HTMLElement {
-      // LINE 1: relative time (left) + status (right). The status cluster can hold
-      // BOTH channels — a row that is current AND being viewed shows both.
       const when = el("span", { class: "vh-when", text: relativeTime(version.createdAt) });
       when.title = absoluteTime(version.createdAt);
       const isViewing = opts.viewingMd5 != null && version.md5 === opts.viewingMd5;
@@ -241,7 +166,6 @@ export function createHistoryController(deps: HistoryControllerDeps): HistoryCon
       if (version.current) status.append(el("span", { class: "tag-current", text: "Current" }));
       const l1 = el("div", { class: "vh-l1" }, when, status);
 
-      // LINE 2: exact date (left) + content signal (right).
       const sig = contentSignal(version, older, isNote);
       let signalEl: HTMLElement;
       if (sig.pagesLabel !== null) {
@@ -265,15 +189,11 @@ export function createHistoryController(deps: HistoryControllerDeps): HistoryCon
         class: cls,
         role: "menuitem",
         tabindex: "-1",
-        // Names the row for a screen reader landing on it — the relative age plus
-        // its status, since the visual status tags are decorative to the SR.
         "aria-label": `${relativeTime(version.createdAt)}${version.current ? ", current version" : ""}${isViewing ? ", now viewing" : ""}`,
       }) as HTMLElement;
       li.append(l1, l2);
 
-      // Row CLICK = preview this version (there is no per-row button). The current
-      // version is already what the note shows, but previewing it is harmless and
-      // keeps the row uniform; the shell no-ops a same-version reopen.
+      // The shell no-ops a same-version reopen.
       li.addEventListener("click", () => {
         close();
         deps.openPreview(note.id, version, opts.annotationsOn);
@@ -283,7 +203,6 @@ export function createHistoryController(deps: HistoryControllerDeps): HistoryCon
       return li;
     }
 
-    // Roving arrow/Home/End over the rows, Enter/Space previews the focused one.
     pop.addEventListener("keydown", (e) => {
       if (rowEls.length === 0) return;
       const at = rowEls.indexOf(document.activeElement as HTMLElement);
@@ -327,38 +246,24 @@ export function createHistoryController(deps: HistoryControllerDeps): HistoryCon
   return { open };
 }
 
-// ============================================================================
-// The restore CORE — pure, injected-dependency, unit-tested directly.
-// ============================================================================
+// ---- restore core ----
 
 export interface RunRestoreOptions {
   api: Pick<Api, "restoreVersion">;
   noteId: Id;
   md5: string;
-  /**
-   * Show the confirm and resolve true only when the user confirmed. Injected so
-   * the flow is testable without a DOM, and so the caller owns the exact copy —
-   * see {@link confirmRestore} for the shared, honest framing.
-   */
+  /** Injected so the caller owns the copy (see `confirmRestore`). */
   confirm: () => Promise<boolean>;
   toast: (message: string) => void;
-  /** Route a dead session to the shell; true = it was handled (don't toast). */
   handled: (e: unknown) => boolean;
-  /** Success sink: the shell refreshes the library/reader off the new current version. */
   onRestored: (restored: RestoredVersion) => void;
 }
 
 /**
- * Confirm, then restore. The ONE restore path behind both the list row and the
- * preview banner (H9): re-point the file at a retained version, which makes it
- * current AND retains the displaced current — so the toast frames it honestly as
- * undoable, not as a destructive overwrite.
- *
- *  - a declined confirm is a no-op (returns false, no call, no toast);
- *  - a dead session routes to the shell (`handled`), not to a "couldn't restore";
- *  - a 507 (over quota) gets its OWN clear message — the restore changed nothing;
- *  - success toasts and hands the new current version to `onRestored`.
- */
+* Restore keeps the displaced current version, so it is framed as undoable. A
+* declined confirm is a no-op, a dead session routes to the shell, and a 507
+* (over quota) gets its own message.
+*/
 export async function runRestore(opts: RunRestoreOptions): Promise<boolean> {
   if (!(await opts.confirm())) return false;
   try {
@@ -377,12 +282,7 @@ export async function runRestore(opts: RunRestoreOptions): Promise<boolean> {
   }
 }
 
-/**
- * The shared restore confirm — a native <dialog> with the HONEST, undoable
- * framing the feature turns on: restoring is safe because the version it replaces
- * is kept. Not the danger variant (no red), because nothing is destroyed.
- * Resolves the promise `runRestore` awaits.
- */
+/** Not the danger variant: nothing is destroyed. */
 export function confirmRestore(host: HTMLElement, version: { createdAt: number }): Promise<boolean> {
   const { done } = openDialog({
     host,

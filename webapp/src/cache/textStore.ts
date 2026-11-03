@@ -1,28 +1,11 @@
-// The BOUNDED half of the in-document text cache — §4.4.
-//
-//     on demand    →  GET text/<md5>?v=…  →  the browser's HTTP cache  (no code)
-//     prefetched   →  GET text/<md5>?v=…  →  HERE                     (this file)
-//
-// What this must not break:
-//   * This exists to be BOUNDED, nothing else. The HTTP cache is already the
-//     on-demand story; what it cannot do is enforce a byte budget, because it
-//     cannot be enumerated. Offline is a side effect, not a promise.
-//   * The key is `(md5, indexVersion)`, spelled `<md5>.<v>` like the server's
-//     filename: a version bump re-derives the SAME md5 into different text, so
-//     a record keyed on md5 alone answers finds from an old parser with no
-//     symptom. A null version cannot be stored (`textPrefetch.ts` refuses it).
-//   * Protected (tier-1) bytes are charged BEFORE the LRU sees the remainder
-//     ({@link planTextEviction}); otherwise casual reading evicts the very
-//     notes the store exists to keep.
-//   * TWO object stores (`meta`, `text`): the worst record is 3.15 MB, and
-//     `termsStore.ts`'s cursor-the-whole-store cold open would deserialize
-//     megabytes to learn three numbers.
-//   * Degrades to a silent no-op store like `idb.ts`; never a source of truth.
+// The bounded store for prefetched document text. On-demand text lives in the
+// HTTP cache; this exists only because that cannot be enumerated or budgeted.
+// Keyed `(md5, indexVersion)` like the server's filename. Degrades to a
+// silent no-op store.
 
 import { budgetForQuota, planEviction, type PersistedMeta } from "./idb";
 import type { DocumentText, TextSegment } from "../search/docText";
 
-/** The identity of one stored record: the two halves of the cache key. */
 export interface TextKey {
   readonly md5: string;
   readonly indexVersion: number;
@@ -30,83 +13,58 @@ export interface TextKey {
 
 /** What the store knows about a held record without reading its text. */
 export interface HeldText extends TextKey {
-  /** See {@link weighText}. */
   readonly size: number;
-  /** Exempt from eviction — tier 1, and nothing else. See {@link planTextEviction}. */
+  /** Tier 1: exempt from eviction. */
   readonly protect: boolean;
-  /** Epoch ms of the last put or find. The LRU ordering key. */
+  /** Epoch ms of the last put or find; the LRU key. */
   readonly lastAccess: number;
 }
 
-/** A stored text record — the wire record plus its bookkeeping. */
 export interface StoredDocumentText extends DocumentText {
   readonly storedAt: number;
   readonly protect: boolean;
 }
 
-/**
- * The prefetched text. It says nothing about WHICH documents belong in it —
- * that is §4.4's tiering, in `search/textPrefetch.ts` where the manifest is.
- * This is storage with a budget attached.
- */
+/** Storage with a budget; which documents belong is `textPrefetch.ts`'s call. */
 export interface TextStore {
-  /** Whether a real backing store is available (false = silent no-op store). */
+  /** False means the silent no-op store. */
   readonly available: boolean;
-  /** One document's text at exactly this version, or null. Touches the LRU. */
+  /** Exactly this version, or null. Touches the LRU. */
   get(md5: string, indexVersion: number): Promise<StoredDocumentText | null>;
-  /** Everything held, cheaply — the payloads are not read. */
+  /** Without reading payloads. */
   keys(): Promise<HeldText[]>;
-  /** Store one record. `protect` exempts it from eviction. */
   put(doc: DocumentText, opts?: { protect?: boolean }): Promise<void>;
-  /**
-   * Re-assert (or release) a held record's exemption. What MIGRATES a store
-   * written by a build that had pins: a record left `protect: true` by a pin
-   * would otherwise be exempt for ever, with nothing left to release it.
-   */
+  /** Re-assert or release a record's exemption (also clears protection left by an older build). */
   setProtection(md5: string, indexVersion: number, protect: boolean): Promise<void>;
   drop(keys: readonly TextKey[]): Promise<void>;
-  /** The byte budget in force — the desired one, clamped to the origin's quota. */
+  /** The desired budget, clamped to the origin's quota. */
   budget(): Promise<number>;
   clear(): Promise<void>;
 }
 
-/** The primary key, spelled as the server spells the filename it names. */
 export function textKeyOf(md5: string, indexVersion: number): string {
   return `${md5}.${indexVersion}`;
 }
 
 /**
- * 2 MB of stored text per user — §4.4's proposal, kept after correcting its
- * units: §4.4's table measures the server's DEFLATED file, and what lands here
- * is the parsed record, ~3.7x larger (tier 1: ~372 KB raw against ~100 KB
- * stored). Re-argued against inflated figures: tier 1 is ~372 KB (18% of the
- * budget, 5x headroom); tier 1 + tier 2 on the dev corpus is ~1.05 MB; the
- * annotated novel is ~5 MB, 2.5x the WHOLE budget and 10x the per-document
- * cap, so the one document the cap exists for is refused more decisively than
- * §4.4 assumed. Clamped further by `budgetForQuota`.
+ * 2 MB of parsed text, ~3.7x the server's deflated size. Fits tier 1 with
+ * headroom and refuses an annotated novel outright. Clamped by `budgetForQuota`.
  */
 export const DEFAULT_TEXT_BUDGET = 2 * 1024 * 1024;
 
 /**
- * No single opportunistically-kept document may exceed a quarter of the
- * budget — a CROWDING rule: at least four documents coexist. 512 KB of raw
- * text is ~2,400 pages at §4.4's 212 B/page of recognition, larger than any
- * note the household writes, so the cap only ever bites an IMPORTED book.
- * Does NOT apply to tier 1, which is bounded by nature.
+ * A non-tier-1 document may take at most a quarter of the budget, so at least
+ * four coexist; in practice only imported books hit it.
  */
 export const PER_DOCUMENT_FRACTION = 0.25;
 
-/** The per-document cap for a budget — see {@link PER_DOCUMENT_FRACTION}. */
 export function perDocumentCap(budgetBytes: number): number {
   return Math.floor(budgetBytes * PER_DOCUMENT_FRACTION);
 }
 
 /**
- * The stored weight of one record: UTF-16 code units of segment text plus a
- * per-segment allowance. An approximation (exact needs the browser's own
- * structured-clone accounting), and deliberately an OVER-count for Latin
- * text, so the budget is spent slightly early — one document fewer kept
- * rather than a quota the browser resolves by evicting something.
+ * UTF-16 units of text plus a per-segment allowance. Deliberately over-counts
+ * so the budget is hit early rather than the browser's quota.
  */
 export function weighText(doc: DocumentText): number {
   let size = doc.md5.length + 32;
@@ -114,21 +72,14 @@ export function weighText(doc: DocumentText): number {
   return size;
 }
 
-/** One record's eviction inputs — {@link planTextEviction}'s row type. */
 export interface ProtectedMeta extends PersistedMeta {
   readonly protect: boolean;
 }
 
 /**
- * Which records to shed so the rest fits the budget: `idb.ts`'s
- * `planEviction`, with the protected set held OUT of the candidates and
- * charged against the budget first. Running tier 1 through a plain LRU would
- * let a burst of tier-2 prefetching evict the records the prefetch exists to
- * make fast — silently, and only on the devices used most.
- *
- * When the protected set alone exceeds the budget the remainder floors at
- * zero and everything else goes; what bounds tier 1 in the end is the origin
- * quota `budgetForQuota` clamps against.
+ * `planEviction` with protected records charged against the budget first and
+ * kept out of the LRU, so tier-2 prefetching cannot evict tier 1. If tier 1
+ * alone exceeds the budget, everything else goes.
  */
 export function planTextEviction(metas: readonly ProtectedMeta[], budgetBytes: number): string[] {
   let protectedBytes = 0;
@@ -142,14 +93,13 @@ export function planTextEviction(metas: readonly ProtectedMeta[], budgetBytes: n
 
 export interface TextStoreOptions {
   dbName?: string;
-  /** Desired cap before quota clamping. See {@link DEFAULT_TEXT_BUDGET}. */
   budgetBytes?: number;
 }
 
 const DB_NAME = "sn-doctext";
 const TEXT = "text";
 const META = "meta";
-/** v2 DROPS the `pins` store; the bump is what removes it from a browser that has one. */
+/** v2 drops v1's `pins` store. */
 const VERSION = 2;
 
 interface TextRecord {
@@ -201,11 +151,9 @@ function promisify<T>(req: IDBRequest<T>): Promise<T> {
 }
 
 /**
- * Open the text store. Never throws: any failure yields the no-op store.
- *
- * Its OWN database (`sn-doctext`), like `sn-terms`, `sn-dims` and `sn-nocover`:
- * adding an object store to an existing database needs a version bump the
- * other module's already-open connection does not perform.
+ * Never throws: any failure yields the no-op store. Its own database, since
+ * adding a store to a shared one needs a version bump other open connections
+ * would block.
  */
 export function openTextStore(opts: TextStoreOptions = {}): TextStore {
   if (!idbAvailable()) return nullStore();
@@ -222,8 +170,7 @@ export function openTextStore(opts: TextStoreOptions = {}): TextStore {
           const d = open.result;
           if (!d.objectStoreNames.contains(TEXT)) d.createObjectStore(TEXT, { keyPath: "key" });
           if (!d.objectStoreNames.contains(META)) d.createObjectStore(META, { keyPath: "key" });
-          // v1's third store. The records it protected are corrected on the
-          // first prefetch pass (`setProtection`), not in an upgrade transaction.
+          // Records it protected are corrected by the next prefetch pass.
           if (d.objectStoreNames.contains("pins")) d.deleteObjectStore("pins");
         };
         open.onsuccess = () => resolve(open.result);
@@ -247,7 +194,7 @@ export function openTextStore(opts: TextStoreOptions = {}): TextStore {
     }
   })();
 
-  /** The whole cold-open cost: one cursor over small records. */
+  /** The whole cold-open cost: one cursor over the small meta records. */
   async function seedMetas(db: IDBDatabase): Promise<void> {
     return new Promise((resolve) => {
       try {
@@ -280,7 +227,6 @@ export function openTextStore(opts: TextStoreOptions = {}): TextStore {
     }
   }
 
-  /** Enforce the cap after anything that could have broken it. */
   async function enforce(): Promise<void> {
     const evict = planTextEviction([...metas.values()].map(toMeta), budget);
     if (evict.length === 0) return;
@@ -310,7 +256,7 @@ export function openTextStore(opts: TextStoreOptions = {}): TextStore {
       if (!rec) return null;
       const meta = metas.get(key);
       if (meta) {
-        // Best-effort touch: a failed one costs at most one wrongly-ordered eviction.
+        // Best effort; a failed touch costs one misordered eviction.
         const touched: MetaRecord = { ...meta, lastAccess: Date.now() };
         metas.set(key, touched);
         void withStores(META, "readwrite", (tx) => promisify(tx.objectStore(META).put(touched)));
@@ -326,7 +272,7 @@ export function openTextStore(opts: TextStoreOptions = {}): TextStore {
     },
 
     async keys() {
-      // The mirror, not the store: asked on every prefetch pass.
+      // From the in-memory mirror; asked on every prefetch pass.
       await dbPromise;
       return [...metas.values()].map((m) => ({
         md5: m.md5,
@@ -373,7 +319,7 @@ export function openTextStore(opts: TextStoreOptions = {}): TextStore {
       const ok = await withStores(META, "readwrite", (tx) => promisify(tx.objectStore(META).put(next)));
       if (ok === undefined) return;
       metas.set(key, next);
-      // A release can put the store over budget for the first time.
+      // A release can push the store over budget.
       if (!protect) await enforce();
     },
 

@@ -1,21 +1,12 @@
-// The MAIN-THREAD half of the search worker — `SearchIndex`'s surface,
-// `Promise`-shaped, answered by `engineWorker.ts` where a `Worker` exists and
-// by an instance in this thread where one does not (§7;
-// `docSearch.ts` says why each consumer gets its own engine and worker).
+// The main-thread half of the search worker: `SearchIndex` behind promises,
+// answered by `engineWorker.ts`, or in-thread where no `Worker` exists or a
+// `CoreLoader` is injected (functions cannot cross `postMessage`). Nothing is
+// constructed until the first `build`/`query`.
 //
-// What this must not break:
-//   * `createSearchEngine` constructs NOTHING — no `Worker`, no fetch, no linear
-//     memory — until the first `build`/`query` (§4.2).
-//   * ABORT LIVES ON THIS SIDE. A running `idx_fuzzy` is a synchronous wasm
-//     call: the worker cannot read a cancel until the scan returns, so a cancel
-//     frame would arrive AFTER the scan it meant to stop. Hence at most one
-//     request is posted at a time, a new query supersedes the one waiting here
-//     (`AbortError`), and a signal on a posted request frees its caller without
-//     clawing back the scan — typing `reunaio` through a corpus without it pays
-//     one 71.3 ms ladder scan in flight, never a stack of them.
-//   * A build is never superseded or aborted: it is the work the next keystroke needs.
-//   * An injected `CoreLoader` forces the in-thread path (a function cannot cross
-//     `postMessage`); a missing or throwing `Worker` constructor lands there too.
+// Abort lives on this side: a running `idx_fuzzy` is synchronous, so the
+// worker cannot see a cancel until it returns. At most one request is posted;
+// a new query supersedes one still queued here, and an abort frees its caller
+// without stopping the scan. Builds are never superseded.
 
 import {
   SearchIndex,
@@ -25,39 +16,26 @@ import {
 } from "./indexEngine";
 import type { EngineRequest, EngineResponse } from "./engineWorker";
 
-/**
- * One index, asynchronously. Narrower than `SearchIndex` on purpose:
- * `serialize`/`deserialize` have no caller in `src/`, and exposing them would
- * put the 10.36 MB image on the wire for nobody.
- */
+/** Narrower than `SearchIndex`: no `serialize`, so no 10 MB image crosses the wire. */
 export interface SearchEngine {
-  /** Replace the contents with `docs`, on the instance already open. */
   build(docs: readonly TermsDocument[]): Promise<void>;
-  /**
-   * Run a query. `text` goes to the wasm RAW (`indexEngine.ts`). Rejects with
-   * `AbortError` when `signal` fires, or when a later query supersedes this one
-   * before it is posted.
-   */
+  /** Rejects with `AbortError` on `signal`, or when superseded before posting. */
   query(text: string, limit: number, fuzzy: boolean, signal?: AbortSignal): Promise<QueryResult>;
-  /** Hand the 16 MB back: terminate the worker, or close the instance (§4.2). */
+  /** Terminate the worker or close the instance, freeing its memory. */
   close(): void;
 }
 
-/** Injectable so a real worker's death path can be staged (the `pdfClient.ts` seam). */
 export type EngineWorkerFactory = () => Worker;
 
 export interface SearchEngineOptions {
-  /** A `CoreLoader` of the caller's own. FORCES the in-thread path — see the header. */
+  /** Forces the in-thread path. */
   load?: CoreLoader;
-  /** Injectable so the client's protocol is testable without a real worker. */
   makeWorker?: EngineWorkerFactory;
 }
 
 /**
- * The default factory, or null where there is no `Worker` (the `node` unit
- * suite). `new URL(..., import.meta.url)` is what makes Vite emit
- * `engineWorker.ts` as its own chunk; it is inside the factory so it is
- * evaluated only when a worker is actually made.
+ * Null where there is no `Worker`. The `new URL(..., import.meta.url)` is what
+ * makes Vite emit the worker chunk; it sits inside so it runs only on demand.
  */
 function defaultWorkerFactory(): EngineWorkerFactory | null {
   if (typeof Worker !== "function") return null;
@@ -83,8 +61,7 @@ export function createSearchEngine(opts: SearchEngineOptions = {}): SearchEngine
         delegate = workerEngine(factory);
         return delegate;
       } catch {
-        // A blocked worker script or an origin that refuses one: fall through
-        // to the in-thread path, which is exactly what shipped before.
+        // A blocked worker script: fall through to the in-thread path.
       }
     }
     delegate = inThreadEngine(opts.load);
@@ -101,12 +78,9 @@ export function createSearchEngine(opts: SearchEngineOptions = {}): SearchEngine
   };
 }
 
-// -----------------------------------------------------------------------------
-
-/** One request waiting its turn on this side, where it can still be discarded. */
 interface Job {
   readonly req: EngineRequest;
-  /** A query, which a later query replaces. Builds are never dropped. */
+  /** Queries are superseded by later queries; builds never are. */
   readonly supersedable: boolean;
   readonly signal?: AbortSignal;
   readonly resolve: (res: EngineResponse) => void;
@@ -115,7 +89,7 @@ interface Job {
 
 function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
   const worker = makeWorker();
-  /** Posted and not yet answered — at most one entry. */
+  /** At most one entry. */
   const pending = new Map<number, { resolve: (r: EngineResponse) => void; reject: (e: unknown) => void }>();
   const queue: Job[] = [];
   let running = false;
@@ -125,7 +99,7 @@ function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
   worker.addEventListener("message", (ev: MessageEvent<EngineResponse>) => {
     const res = ev.data;
     const p = pending.get(res.id);
-    // No entry: the caller aborted and moved on. Dropping the answer is the point.
+    // No entry: the caller aborted; drop the answer.
     if (!p) return;
     pending.delete(res.id);
     if (res.kind === "error") {
@@ -137,11 +111,8 @@ function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
     p.resolve(res);
   });
 
-  // The `error` EVENT is terminal (everything recoverable comes back as an
-  // `error` RESPONSE), so it must fail every waiter AND every later request or
-  // the box sits on "searching…" for ever. Both consumers drop an engine whose
-  // build failed and rebuild on the next search, so this is a failed search,
-  // not a broken session.
+  // The `error` event is terminal (recoverable failures arrive as responses),
+  // so fail every waiter and every later request.
   worker.addEventListener("error", (ev: ErrorEvent) => {
     dead = new Error(ev.message || "the search worker stopped");
     for (const [, p] of pending) p.reject(dead);
@@ -157,8 +128,7 @@ function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
       }
       pending.set(job.req.id, { resolve, reject });
       worker.postMessage(job.req);
-      // Frees the CALLER and lets the next request be posted; the scan itself
-      // cannot be stopped (see the header).
+      // Frees the caller; the scan itself cannot be stopped.
       job.signal?.addEventListener(
         "abort",
         () => {
@@ -206,7 +176,6 @@ function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
     });
   }
 
-  /** The worker answers in kind; a mismatch is a protocol bug, not a state. */
   function expect<K extends EngineResponse["kind"]>(
     res: EngineResponse,
     kind: K,
@@ -229,18 +198,13 @@ function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
       for (const [, p] of pending) p.reject(dead);
       pending.clear();
       for (const job of queue.splice(0)) job.reject(dead);
-      // Terminating is what hands the 16.13 MB back: wasm linear memory never
-      // shrinks, and the instance goes when its realm does (§4.2).
+      // Terminating the realm is the only way to free wasm linear memory.
       worker.terminate();
     },
   };
 }
 
-/**
- * The fallback, and the path the unit suite drives: `SearchIndex` in this
- * thread behind the async surface. Same ordering and abort semantics; it just
- * cannot leave the UI thread alone.
- */
+/** In-thread fallback, also what unit tests drive. Same ordering and abort semantics. */
 function inThreadEngine(load?: CoreLoader): SearchEngine {
   let index: SearchIndex | null = null;
   return {

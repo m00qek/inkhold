@@ -1,37 +1,16 @@
 /*
- * 00-tokens.css — THE PURE TOKEN LAYER. This file contains ONLY `:root`
- * custom-property declarations: the font stacks, the coherence system (type
- * scale, spacing ramp, control heights, radius, hover fills), the shared row /
- * preview rhythm, and the full light+dark palette. No element selectors, no
- * @font-face — those live in 01-tokens-auth.css, which loads AFTER this and
- * resolves every `var(--…)` against the values below.
- *
- * It loads FIRST (see styles.css) so every later file sees the tokens. It is
- * also the ONE source of truth the living design guide imports
- * (the guide `@import`s this file), so the specimen and
- * the app can never disagree on a colour or a size.
- *
- * HOW TO ADD A SIZE: you don't add a raw px anywhere else — you add (or reuse) a
- * step here. Every `font-size` in the app is `var(--fs-<step>)`; every control
- * height is `var(--control-h)` or `var(--control-h-sm)`. The lint gate
- * (scripts/lint-styles.mjs) fails the build if a raw `font-size:<px>` or a raw
- * control `height:<px>` reappears outside this file.
+ * The pure token layer: only `:root` custom properties (fonts, type scale,
+ * spacing, control heights, palette). Also imported by the design guide. Raw
+ * font sizes and control heights belong only here (scripts/lint-styles.mjs).
  */
 :root {
-  /* — Font stacks — the display face (Space Grotesk) and the utility mono
-     (Space Mono) are both self-hosted; @font-face lives in 01-tokens-auth.css.
-     Space Grotesk is derived from Space Mono, so the two now complete the
-     superfamily; the system stacks stay as the offline-safe fallback. */
+  /* Font stacks; both faces self-hosted (@font-face in 01-tokens-auth.css). */
   --font-display: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-mono: "Space Mono", ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
   color-scheme: light dark;
 
-  /* — THE COHERENCE SYSTEM (derived from the app's own clusters). — */
-
-  /* One type scale, six steps. Every font-size in the app snaps to one of
-     these. Roles disambiguate near a boundary: a mono uppercase label is an
-     eyebrow even at 12px. */
+  /* One type scale, six steps; a mono uppercase label is an eyebrow even at 12px. */
   --fs-eyebrow: 11px; /* mono uppercase labels, eyebrows */
   --fs-caption: 12px; /* meta, timestamps, hints */
   --fs-body: 13.5px; /* reading default */
@@ -39,8 +18,7 @@
   --fs-heading: 22px; /* section heads */
   --fs-display: 30px; /* the rare big moment */
 
-  /* One spacing ramp. Row padding, panel padding and control gaps pull from
-     these steps rather than ad-hoc px. */
+  /* One spacing ramp. */
   --sp-1: 4px;
   --sp-2: 8px;
   --sp-3: 12px;
@@ -48,79 +26,43 @@
   --sp-6: 24px;
   --sp-8: 32px;
 
-  /* Two control heights, and only two. Default/topbar controls are 34px;
-     compact viewer toolbars are 28px. `box-sizing: border-box` (set globally in
-     01-tokens-auth.css) folds each control's border+padding inside these, so
-     the number is the VISUAL height. `--topbar-control-h` is an alias kept for
-     any lingering reference — it is the same 34px. */
+  /* Two control heights: 34px default/topbar, 28px compact viewer toolbars.
+     Border-box, so this is the visual height. `--topbar-control-h` is an alias. */
   --control-h: 34px;
   --control-h-sm: 28px;
   --topbar-control-h: var(--control-h);
 
-  /* The layers panel's opacity FILL BAR track (14-layers-panel.css): a slim
-     ground whose fill LENGTH carries the value — the app's "length is the
-     number" signature. Only its one drawn dimension lives here so the track
-     can't drift; the fill width is data (the opacity %). */
+  /* The layers panel's opacity fill-bar track height. */
   --layer-bar-h: 6px;
 
-  /* Stacking: the ONE z above all app chrome (the app's current max is 60), for
-     the shared overflow menu's popover (ui/menu.ts), which is portaled to <body>
-     and must clear everything it floats over. */
+  /* Above all app chrome (max 60), for the portaled popover menus. */
   --z-popover: 100;
 
   --radius: 2px; /* the app's corner, everywhere */
-  --radius-card: 8px; /* the raised-card / overlay corner: docked side panels,
-                         the export dropdown, the toast — softer than a control */
+  --radius-card: 8px; /* raised cards and overlays: side panels, dropdowns, toast */
 
-  /* The reader's docked side panels (src/ui/sidePanel.ts). THREE widths,
-     one intent each, so the difference is decided rather than drifted:
-     - panel-w:        the OCR "Recognized text" default (right dock).
-     - panel-w-wide:   the layers panel, which carries a name + opacity stepper +
-                       eye + a page-sized thumbnail per row and needs the room.
-     - panel-w-narrow: the LEFT page-index "Pages" rail — a column of page
-                       thumbnails, so it wants far less width than a text/list
-                       panel (the pre-panel filmstrip lived in a 128px column).
-     panel-gap is the flex gap the page pays to whichever panel is open — the
-     reader's relayout math reads all four straight off these tokens
-     (getComputedStyle) so the JS can never fall out of sync with the layout. */
+  /* Docked side panel widths: OCR (default), layers (wide), page index (narrow,
+     left). JS reads these via getComputedStyle for relayout. */
   --panel-w: 268px;
   --panel-w-wide: 320px;
   --panel-w-narrow: 180px;
   --panel-gap: 22px;
 
-  /* Row rhythm, shared by the list view and the bin so the two cannot drift.
-     Theme-independent, so they live here rather than in either palette. */
+  /* Row rhythm shared by the list view and the bin. */
   --row-pad-y: 15px;
   --row-pad-y-tight: 7px;
 
-  /* Preview size classes. Every small preview in the app is exactly ONE of
-     three classes, and EACH CLASS FIXES THE AXIS ITS LAYOUT HOLDS CONSTANT:
-     rows fix HEIGHT, the gallery's masonry columns fix WIDTH. The other axis is
-     the item's own aspect ratio and is never set in px on a surface.
-     - icon: the masonry column width (184px = the old grid minimum tile).
-     - list: the list/search/bin row lead (85px = 64px lead at 3:4).
-     - panel: the reader filmstrip / .spd layers panel (101px = 76px at 3:4). */
+  /* Preview size classes; each fixes the axis its layout holds constant (rows
+     fix height, masonry columns fix width). `--tile-w-icon` must equal
+     `TILE_W` in render/types.ts. */
   --tile-w-icon: 184px;
   --preview-h-list: 85px;
   --preview-h-panel: 101px;
   --preview-h-filmstrip: 124px;
 
-  /* THE "TRANSPARENT" CHECKER — the app's one way of saying "nothing here, and
-     that is the point". It was `.spd`'s private detail, described in its own
-     comment as "the universal transparent backdrop" while only one viewer used
-     it; the PDF viewer's hidden Document layer is the second, so it moves here
-     rather than being pasted into a second file.
-
-     Both viewers get it the same way: the checker is on the box UNDER the
-     content, and the content's own opaque canvas covers it until it is hidden.
-     Nothing toggles the checker itself.
-
-     THEME-INDEPENDENT, AND THAT IS A DECISION rather than an oversight inherited
-     from where it came from. It sits under authored content that never inverts —
-     a PDF page is the author's, and `.spd`'s reference layer is white — so a
-     checker that went dark would read as the page having changed colour instead
-     of as the page being absent. It stays light-neutral in both themes, which is
-     also why it is here and not in either palette below. */
+  /* The "transparent" checker under content that can be hidden (`.spd`
+     reference layer, PDF document layer). Theme-independent on purpose: it sits
+     under authored content that never inverts. */
   --checker-base: #f4f4f4;
   --checker-square: #d8d8d8;
   --checker-cell: 22px;
@@ -140,16 +82,11 @@
   --ink-faint: #97927f;
   --line: #cbc6b6; /* the underline affordance under fields, hairline borders */
   --rule: rgba(28, 27, 23, 0.05); /* the sheet's faint horizontal rules */
-  /* The LIST SEPARATOR, and deliberately not `--rule`. `--rule` is the paper
-     ruling — tuned to sit under ink without competing, which is exactly why it
-     cannot also divide rows. Calibrated between `--rule` (1.10:1) and `--line`
-     (1.65:1): 0.14 measures 1.33:1. If it reads faint on a given screen, move
-     toward 0.18 (1.45:1) rather than reaching for `--line`. */
+  /* The list separator, between `--rule` (1.10:1) and `--line` (1.65:1) at 1.33:1. */
   --row-rule: rgba(28, 27, 23, 0.14);
-  /* Red is reserved: the sheet's printed margin line, and things gone wrong.
-     Brand and state use --accent, so red keeps meaning one thing. */
+  /* Red is reserved for the margin line and errors; brand/state use --accent. */
   --margin: #bf5248;
-  /* --margin darkened for TEXT so words on the sheet clear 4.5:1. */
+  /* --margin darkened for text (4.5:1). */
   --margin-ink: #ab4239;
   --accent: #3f6b4a; /* green ink — brand, selection, focus, search highlight */
   --shadow: rgba(36, 32, 22, 0.18);
@@ -157,15 +94,13 @@
   --paper-ink: #33302a; /* handwriting rendered onto a note page */
   --paper-rule: rgba(28, 27, 23, 0.11);
 
-  /* Opaque hover fills, composited once from the palette so a control never
-     shows the desk through a translucent tint. --hover-fill is the quiet
-     surface hover; --hover-fill-ink is the inked (primary) button hover. */
+  /* Opaque hover fills, so a control never shows the desk through a tint. */
   --hover-fill: color-mix(in srgb, var(--sheet), var(--ink) 7%);
   --hover-fill-ink: color-mix(in srgb, var(--ink) 90%, var(--accent));
 }
 
-/* Dark: the device's inverted e-ink mode. Applies with the media query unless a
- * light override is pinned, and again when `data-theme="dark"` is forced. */
+/* Dark: inverted e-ink. The media query applies unless light is pinned; again
+ * when `data-theme="dark"` is forced. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --desk: #0c0c0e;
@@ -188,8 +123,8 @@
   }
 }
 
-/* A pinned choice also narrows `color-scheme` so native UI matches the pinned
- * theme instead of the OS one. */
+/* A pinned choice also narrows `color-scheme` so native UI matches. */
+
 :root[data-theme="light"] {
   color-scheme: light;
 }

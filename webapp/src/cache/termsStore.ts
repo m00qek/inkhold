@@ -1,68 +1,42 @@
 // Where the terms stream lands: one IndexedDB record per document, keyed by
-// `(md5, index_version)` — §4.2.
-//
-// What this must not break:
-//   * No wasm on this path. Sync writes rows and nothing else; the FTS index
-//     is built on first search (39 ms at tier 1). Instantiating the engine at
-//     sync time would bill every member who only browses 17.4 MB of linear
-//     memory, so this module imports nothing that can reach `sqlite-core.wasm`.
-//   * The md5 alone is HALF a key: a blob with a stale index row reports
-//     `derived` while genuinely underived (`manifestCodec.ts`), and only a
-//     client keyed on both halves refetches. The key is taken from the
-//     RECORD's own `v` (§3.3: key what ARRIVED), never the manifest's.
-//   * Never a source of truth: no IndexedDB, an open failure or a throwing
-//     transaction degrade to a silent no-op store, and a partial loss is
-//     self-healing because the diff asks for whatever is not held.
+// the record's own `(md5, index_version)`. No wasm on this path; the index is
+// built on first search. Degrades to a no-op store; a partial loss self-heals
+// because the next diff asks for whatever is missing.
 
 import { budgetForQuota, planEviction, type PersistedMeta } from "./idb";
 import type { TermsDocument, TermsPage } from "../search/termsStream";
 
-/** The identity of one stored record: the two halves of the cache key. */
 export interface TermsKey {
   readonly md5: string;
   readonly indexVersion: number;
 }
 
-/** A stored terms record — the wire record plus when it landed. */
 export interface StoredTermsDocument extends TermsDocument {
-  /** Epoch ms. The eviction ordering key, and nothing else reads it. */
+  /** Epoch ms; the eviction key. */
   readonly storedAt: number;
 }
 
-/**
- * The per-document term rows — the seam the engine consumes. It says nothing
- * about where the rows came from: the engine never sees a manifest, a bitmap
- * or a stream.
- */
+/** Per-document term rows; the engine never sees a manifest, bitmap or stream. */
 export interface TermsStore {
-  /** Whether a real backing store is available (false = silent no-op store). */
+  /** False means the silent no-op store. */
   readonly available: boolean;
-  /** Every `(md5, indexVersion)` held. This is the left-hand side of the diff. */
+  /** The left-hand side of the diff. */
   keys(): Promise<TermsKey[]>;
-  /** One document's rows, or null. */
   get(md5: string, indexVersion: number): Promise<StoredTermsDocument | null>;
-  /** Every document held, for the index build. */
   all(): Promise<StoredTermsDocument[]>;
   put(doc: TermsDocument): Promise<void>;
   drop(keys: readonly TermsKey[]): Promise<void>;
   clear(): Promise<void>;
 }
 
-/** The primary key — `<md5>.<index_version>`, the server's own filename for
- *  the same fact (`data/terms/<md5>.<index_version>`). */
+/** `<md5>.<index_version>`, the server's filename for the same fact. */
 export function termsKeyOf(md5: string, indexVersion: number): string {
   return `${md5}.${indexVersion}`;
 }
 
 /**
- * One record per md5, keeping the highest `indexVersion`.
- *
- * The store is keyed `(md5, indexVersion)`, so TWO GENERATIONS OF ONE DOCUMENT
- * CAN COEXIST — dropping the older is clean-up nobody waits for. Fine for
- * storage, fatal for the build: the engine refuses a repeated md5 (it would
- * double the match counts results are ranked by), so a drop that has not run
- * yet would turn an extractor-version bump into a search that throws. The
- * manifest never names two versions, so the newest is always the right one.
+ * One record per md5, highest `indexVersion`. Two generations can coexist
+ * until clean-up runs, and the engine throws on a repeated md5.
  */
 export function newestPerDocument(docs: readonly StoredTermsDocument[]): StoredTermsDocument[] {
   const best = new Map<string, StoredTermsDocument>();
@@ -75,7 +49,6 @@ export function newestPerDocument(docs: readonly StoredTermsDocument[]): StoredT
 
 export interface TermsStoreOptions {
   dbName?: string;
-  /** Desired cap before quota clamping. See {@link DEFAULT_BUDGET}. */
   budgetBytes?: number;
 }
 
@@ -84,11 +57,8 @@ const STORE = "terms";
 const VERSION = 1;
 
 /**
- * 16 MB, a BACKSTOP rather than a budget to manage. The real tier-1 payload
- * decodes to 341,466 bytes for 186 documents and the whole dev corpus is
- * 1-2 MB (§3.2, §4.4). Eviction here is not free: the diff asks for whatever
- * is not held, so a cap the library genuinely exceeds means re-fetching the
- * same documents on every sync for ever.
+ * A backstop, an order of magnitude above a real library. Eviction is not
+ * free: the diff refetches whatever is missing, every sync.
  */
 const DEFAULT_BUDGET = 16 * 1024 * 1024;
 
@@ -131,9 +101,7 @@ function promisify<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
-/** The stored weight of one record, as UTF-16 code units of term text. An
- *  approximation on purpose: it is only ever compared against a cap an order
- *  of magnitude above the corpus. */
+/** Approximate weight in UTF-16 units; only compared against a generous cap. */
 function weigh(doc: TermsDocument): number {
   let size = doc.md5.length + 24;
   for (const page of doc.pages) size += page.t.length + 8;
@@ -162,13 +130,7 @@ function stored(rec: StoredRecord): StoredTermsDocument {
   };
 }
 
-/**
- * Open the terms store. Never throws: any failure yields the no-op store.
- *
- * Its OWN database (`sn-terms`), like `sn-dims` and `sn-nocover`: a second
- * object store inside `sn-thumbs` needs a version bump the thumbnail store's
- * already-open connection does not perform.
- */
+/** Never throws: any failure yields the no-op store. */
 export function openTermsStore(opts: TermsStoreOptions = {}): TermsStore {
   if (!idbAvailable()) return nullStore();
 
@@ -214,8 +176,7 @@ export function openTermsStore(opts: TermsStoreOptions = {}): TermsStore {
           const cursor = cursorReq.result;
           if (!cursor) return resolve();
           const rec = cursor.value as StoredRecord;
-          // `storedAt` IS the LRU key: a terms record has no meaningful
-          // "access" — the build reads all of them at once.
+          // `storedAt` is the LRU key: the build reads every record at once.
           metas.set(rec.key, { key: rec.key, size: rec.size, lastAccess: rec.storedAt });
           cursor.continue();
         };
@@ -244,7 +205,7 @@ export function openTermsStore(opts: TermsStoreOptions = {}): TermsStore {
     available: true,
 
     async keys() {
-      // The META MIRROR, not a read of the store: the diff runs on every sync.
+      // From the meta mirror: the diff runs on every sync.
       await dbPromise;
       const out: TermsKey[] = [];
       for (const key of metas.keys()) {

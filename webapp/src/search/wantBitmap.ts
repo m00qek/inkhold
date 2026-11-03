@@ -1,15 +1,9 @@
-// The ENCODER for the `want=` parameter of the search-index stream — "these
-// are the manifest positions I am missing" (§3.3). The
-// decoder is `backend/services/search/want_bitmap.zig`; the two are pinned by
-// ONE checked-in artifact, `testdata/want_golden.txt`, whose meaning is
-// written out by hand on both sides.
+// Encoder for the stream's `want=` parameter: the manifest positions the
+// client is missing. Decoder: `backend/services/search/want_bitmap.zig`,
+// pinned by `testdata/want_golden.txt`. Positions are meaningful only against
+// the exact manifest named by `m=`; a mismatch is a 412.
 //
-// Positions, not md5s: 200 md5s is a 6.6 KB URL, 1,222 positions are 204
-// base64url characters. A position means nothing except against the exact row
-// order the server emitted, which is what the ETag beside it (`m=`) and the
-// 412 on a mismatch make structural.
-//
-// Layout (mirrors `want_bitmap.zig`; change both or neither):
+// Layout (change both sides or neither):
 //
 //     bit `n & 7` of byte `n >> 3`    manifest position n — LSB-FIRST, so
 //                                     position 0 is the LOW bit of byte 0
@@ -18,20 +12,12 @@
 
 import { SearchWireError } from "./manifestCodec";
 
-/** base64url. The two characters at the end are the whole difference from base64. */
 const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /**
- * Spell a set of manifest positions as the `want=` parameter.
- *
- * `manifestLength` bounds the bitmap; the server refuses anything longer with
- * a 412. Trailing zero bytes are dropped: tier order puts the newest notes
- * FIRST, so a client missing two of them sends a couple of characters instead
- * of 204, and the server reads any position past the end as unset.
- *
- * @throws SearchWireError if a position is not an integer in `[0,
- * manifestLength)` — a caller bug, but the SAME bug the 412 catches on the
- * wire, so it wears the one error class the callers already handle.
+ * Trailing zero bytes are dropped (newest notes come first, so the usual URL
+ * is short); the server reads positions past the end as unset.
+ * @throws SearchWireError for a position outside `[0, manifestLength)`.
  */
 export function encodeWant(positions: Iterable<number>, manifestLength: number): string {
   if (!Number.isInteger(manifestLength) || manifestLength < 0) {
@@ -44,8 +30,7 @@ export function encodeWant(positions: Iterable<number>, manifestLength: number):
         `want bitmap position ${position} is outside a manifest of ${manifestLength} documents`,
       );
     }
-    // LSB-first. Reversing this produces a perfectly valid bitmap naming the
-    // wrong documents, and nothing downstream would report an error.
+    // LSB-first; reversed bits would name the wrong documents without error.
     bytes[position >> 3]! |= 1 << (position & 7);
   }
 
@@ -54,12 +39,7 @@ export function encodeWant(positions: Iterable<number>, manifestLength: number):
   return base64url(bytes.subarray(0, end));
 }
 
-/**
- * base64url, unpadded, written out rather than reached for: `btoa` wants a
- * binary string, then a `replace` for `+/` and a strip for `=` — three
- * conversions, with `+` or `/` surviving a slip and decoding on the server as
- * a document set nobody chose.
- */
+/** Hand-written: `btoa` plus replaces risks a stray `+` or `/` naming the wrong set. */
 function base64url(bytes: Uint8Array): string {
   let out = "";
   let i = 0;
@@ -67,8 +47,7 @@ function base64url(bytes: Uint8Array): string {
     const n = (bytes[i]! << 16) | (bytes[i + 1]! << 8) | bytes[i + 2]!;
     out += ALPHABET[n >> 18]! + ALPHABET[(n >> 12) & 63]! + ALPHABET[(n >> 6) & 63]! + ALPHABET[n & 63]!;
   }
-  // The leftover low bits of the final character are ZERO, not arbitrary
-  // padding: the server refuses a non-canonical group.
+  // Leftover low bits must be zero; the server refuses non-canonical groups.
   const left = bytes.length - i;
   if (left === 1) {
     const n = bytes[i]!;

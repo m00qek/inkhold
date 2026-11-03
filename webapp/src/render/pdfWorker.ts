@@ -1,15 +1,7 @@
-// The PDF WORKER — MuPDF, the block cache and every `ink_*` call, off the main
-// thread.
-//
-// NOT FOR JSPI, which works on either thread. Rastering a 77-page A4 document on
-// the main thread janks the UI for as long as it takes, and `createImageBitmap`
-// here transfers to the main thread's canvas with no pixel copy, where an
-// `ImageData` would have to be structured-cloned.
-//
-// It owns exactly one document at a time. Requests are SERIALISED (see `queue`)
-// because the module has one handle table, one last-render buffer and, on the
-// JSPI path, one suspendable stack: two overlapping renders would interleave
-// inside wasm and hand back each other's pixels.
+// The PDF worker: MuPDF, the block cache and every `ink_*` call off the main
+// thread (rastering janks the UI; `createImageBitmap` here transfers without a
+// pixel copy). One document at a time, requests serialised: the module has one
+// handle table, one render buffer and one suspendable stack.
 
 import {
   DEFAULT_WASM_URL,
@@ -22,14 +14,7 @@ import { BlockCache, type PdfCacheStats } from "./pdfBlocks";
 import { HttpError, fetchWhole, rangeFetcher } from "./pdfTransport";
 import type { PdfInkOverlay, PdfOpenMode, PdfRequest, PdfResponse } from "./pdfWorkerTypes";
 
-/**
- * The worker's global, typed by hand.
- *
- * `tsconfig.json` gives this app the `DOM` lib, under which `self` is a
- * `Window`. Adding `WebWorker` would make the two libs collide across every
- * file in `src/`, and this is the only module that is not a document. One
- * interface is cheaper than a second tsconfig.
- */
+/** The worker global, typed by hand: the app's `DOM` lib types `self` as `Window`. */
 interface WorkerScope {
   postMessage(message: PdfResponse, transfer?: Transferable[]): void;
   addEventListener(type: "message", cb: (ev: MessageEvent<PdfRequest>) => void): void;
@@ -37,13 +22,8 @@ interface WorkerScope {
 const ctx = globalThis as unknown as WorkerScope;
 
 /**
- * Is JSPI here? Measured present in Chromium 149 in a NON-SECURE, non-isolated
- * context, which is what a household box on `http://<lan-ip>` has to work in.
- *
- * Feature-detected, never version-sniffed, and the answer picks a whole
- * transport: without it MuPDF cannot suspend on a `fetch`, so the document is
- * downloaded whole and opened from a buffer. Both paths are exercised — the
- * fallback is what Firefox and Safari may still be on.
+ * Is JSPI here? Works in a non-secure LAN context. Without it MuPDF can't
+ * suspend on a `fetch`, so the document is downloaded whole.
  */
 function hasJspi(): boolean {
   return (
@@ -53,31 +33,21 @@ function hasJspi(): boolean {
 
 const jspi = hasJspi();
 
-/** The live document's cache. `host_read` closes over this box, not the cache. */
 let cache: BlockCache | null = null;
 let doc: AsyncPdfDocument | null = null;
 let mode: PdfOpenMode | null = null;
 let lastStats: PdfCacheStats | null = null;
-/** What `open` was told, so the document can be reopened after an export. */
 let source: { url: string; size: number } | null = null;
 /**
- * A LOCAL copy of the file that `host_read` prefers while it is set.
- *
- * Installed only for the duration of the whole-document export, whose first act
- * inside MuPDF is to read the entire original back (see `exportDocument`). Over
- * the network that would be a second download of the whole file; reading it out
- * of the Blob the main thread already holds is local and disk-backed.
+ * A local copy of the file that `host_read` prefers while set: installed only
+ * during the whole-document export, whose incremental write reads the whole
+ * original back.
  */
 let localCopy: ((off: number, len: number) => Promise<Uint8Array>) | null = null;
 
 /**
- * Read `blob` through ONE sliding window rather than through the block cache.
- *
- * 4 MB, and not `BLOCK_SIZE`. The block cache's 32 KB blocks are sized for a
- * SCATTERED access pattern over a network — the measurement that chose them is
- * about round trips. This read is the opposite: one strictly sequential pass
- * over the whole file with no latency to amortise, where 32 KB blocks would mean
- * 2,400 `slice().arrayBuffer()` round trips for a 76 MB document instead of 19.
+ * Read `blob` through one 4 MB sliding window: a sequential local pass, where
+ * the cache's 32 KB network blocks would mean thousands of slice round trips.
  */
 function blobReader(blob: Blob): (off: number, len: number) => Promise<Uint8Array> {
   const WINDOW = 4 * 1024 * 1024;
@@ -94,26 +64,18 @@ function blobReader(blob: Blob): (off: number, len: number) => Promise<Uint8Arra
 }
 
 /**
- * `ink.host_read`, the one import the module declares.
- *
- * Returns a NUMBER when the block cache already holds the bytes, and only then a
- * promise. That distinction is the whole performance story: a `Suspending`
- * import that returns a plain value does not move the wasm stack, so the
- * thousands of small reads inside one 512 KB block cost nothing beyond a memcpy.
+ * `ink.host_read`. Returns a number on a cache hit and a promise only on a miss:
+ * a `Suspending` import that returns a value doesn't move the wasm stack.
  */
 function makeHostRead(getMemory: () => WebAssembly.Memory): HostRead {
   const copy = (bytes: Uint8Array, dst: number): number => {
-    // `memory.buffer` is re-read HERE and not captured: a suspension is exactly
-    // the window in which the heap can have grown and the old buffer detached.
+    // Re-read `memory.buffer`: a suspension may have grown and detached it.
     new Uint8Array(getMemory().buffer, dst, bytes.length).set(bytes);
     return bytes.length;
   };
   return (off, dst, len) => {
     const at = Number(off);
-    // The local copy WINS while it is installed: same bytes, no network. It is
-    // only ever the file this document was opened from — `exportDocument`
-    // checks the length before installing it — so preferring it cannot change
-    // what MuPDF reads, only where it comes from.
+    // The local copy wins while installed (same file, length-checked).
     if (localCopy) return localCopy(at, len).then((bytes) => copy(bytes, dst), () => -1);
     const c = cache;
     if (!c) return -1;
@@ -121,66 +83,43 @@ function makeHostRead(getMemory: () => WebAssembly.Memory): HostRead {
     if (got instanceof Uint8Array) return copy(got, dst);
     return got.then(
       (bytes) => copy(bytes, dst),
-      // A failed range read becomes MuPDF's own "cannot read N bytes at M",
-      // raised inside `fz_try` — not a trap and not a wedged instance.
+      // Becomes MuPDF's "cannot read" inside `fz_try`, not a trap.
       () => -1,
     );
   };
 }
 
 const loadDecoder = browserLoader(DEFAULT_WASM_URL, (getMemory) => {
-  // Without JSPI nothing can suspend, so the import is the honest -1 stub and
-  // `ink_open_stream` is never called. The module still DECLARES the import, so
-  // something must be supplied.
+  // Without JSPI nothing can suspend; the import still must be supplied.
   if (!jspi) return () => -1;
   return new WebAssembly.Suspending(makeHostRead(getMemory));
 });
 
 /**
- * The exports, wrapped so that anything which can reach `ink.host_read` returns
- * a promise. EVERY ENTRY BELOW SUSPENDS — each one reads bytes on a document
- * that is still mostly unfetched, for the reason noted beside it — and an
- * UNWRAPPED one TRAPS the instance on its first suspension rather than waiting.
- *
- * EXPORTED, AND `useJspi` IS A PARAMETER, PURELY SO THIS CAN BE TESTED. The
- * branch is otherwise unreachable from a test — `jspi` is decided once at module
- * load from the real engine's capabilities — and the failure it guards is
- * invisible to every other kind of check: forget one wrapper and the suite stays
- * green, the whole-file path stays correct, and only a RANGE-SERVED document in
- * a real browser breaks. That is a production-only bug behind a green board, so
- * the table gets an assertion of its own (`pdfWorker.test.ts`).
+ * The exports wrapped so anything that can reach `ink.host_read` returns a
+ * promise; an unwrapped one traps the instance on its first suspension. `useJspi`
+ * is a parameter so `pdfWorker.test.ts` can assert the table, since a missing
+ * wrapper only breaks range-served documents in a real browser.
  */
 export function callsFor(x: PdfDecoderExports, useJspi: boolean = jspi): PdfCalls {
   if (!useJspi) return syncCalls(x);
   return {
     openWhole: (ptr, len) => x.ink_open(ptr, len),
     openStream: WebAssembly.promising(x.ink_open_stream),
-    // Walks the page tree.
     pageCount: WebAssembly.promising(x.ink_page_count),
-    // Loads a page.
     pageSize: WebAssembly.promising(x.ink_page_size),
-    // Loads the page, then walks the xref again to resolve internal targets.
     pageLinks: WebAssembly.promising(x.ink_page_links),
-    // RUNS the page — every font, image and content stream it references.
     pageWords: WebAssembly.promising(x.ink_page_words),
-    // Walks the outline tree, then resolves every entry's destination through
-    // `fz_resolve_link` / `fz_page_number_from_location`: the xref twice over.
     loadOutline: WebAssembly.promising(x.ink_load_outline),
     render: WebAssembly.promising(x.ink_render),
-    // Grafting walks the source document's xref. NOT OPTIONAL here whatever
-    // `PdfCalls` says: `AsyncPdfDocument.exportPage` falls back to the raw
-    // export when this is absent, which is right only for `syncCalls`.
+    // Not optional here: `AsyncPdfDocument` falls back to the raw export when absent.
     exportPage: WebAssembly.promising(x.ink_export_page),
-    // Annotating loads a page; the incremental write reads the ENTIRE original
-    // back through `ink.host_read`.
     annotatePage: WebAssembly.promising(x.ink_annotate_page),
     exportIncremental: WebAssembly.promising(x.ink_export_incremental),
   };
 }
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
+// ---- handlers ----
 
 let inflight: AbortController | null = null;
 
@@ -208,9 +147,8 @@ async function open(url: string, size: number): Promise<{ pageCount: number; mod
   if (jspi && size > 0) {
     const c = new BlockCache({ total: size, fetchRange: rangeFetcher(url, signal) });
     cache = c;
-    // Block 0 BEFORE the open, not during it: MuPDF's first act is to sniff the
-    // file's opening bytes, so this is the round trip it would have paid anyway
-    // — and the response settles the true length, which `size` only guesses at.
+    // Prime block 0 before the open: MuPDF sniffs it first, and the response
+    // settles the true length.
     await c.prime();
     doc = await AsyncPdfDocument.openStream(x, calls, c.length);
     mode = "stream";
@@ -225,9 +163,7 @@ async function open(url: string, size: number): Promise<{ pageCount: number; mod
 async function render(page: number, scale: number): Promise<PdfResponse & { kind: "rendered" }> {
   if (!doc) throw new Error("no document is open");
   const bmp = await doc.render(page, scale);
-  // `createImageBitmap` here rather than `putImageData` on the main thread: the
-  // result TRANSFERS, so the pixels cross the thread boundary once, by handoff,
-  // instead of being cloned into the message and copied again into the canvas.
+  // `createImageBitmap` here so the result transfers instead of being cloned.
   const bitmap = await createImageBitmap(new ImageData(bmp.rgba, bmp.width, bmp.height), {
     premultiplyAlpha: "none",
     colorSpaceConversion: "none",
@@ -235,59 +171,31 @@ async function render(page: number, scale: number): Promise<PdfResponse & { kind
   return { kind: "rendered", id: 0, bitmap, width: bmp.width, height: bmp.height };
 }
 
-/**
- * ONE PAGE, AS A PDF — the original page's structure with the ink over it.
- *
- * NOT A RASTER, which is the entire reason this row exists: the module GRAFTS
- * the source page — its own content streams and the resources they reference —
- * into a fresh one-page document, then draws the ink over it as an image mask.
- *
- * The refusals are the module's to make and surface as a thrown error, which
- * `handle` turns into an `{ kind: "error" }` response.
- */
+/** One page as a PDF: the source page grafted, ink drawn as an image mask. */
 async function exportPage(page: number, ink: PdfInkOverlay): Promise<Uint8Array> {
   if (!doc) throw new Error("no document is open");
-  // NO SIZE CHECK HERE, and two on either side of it. `pdfClient.ts` refuses a
-  // mismatched mask before the buffer is even handed over, and
-  // `AsyncPdfDocument.exportPage` refuses it again immediately before the
-  // pointer reaches wasm. A third copy in the middle would be the one no test
-  // reaches and the one that drifts.
+  // Mask size is checked in `pdfClient.ts` and `AsyncPdfDocument.exportPage`.
   return doc.exportPage(page, ink.alpha, ink.width, ink.height, ink.matrix);
 }
 
 /**
- * Has any page been drawn on since the document was opened?
- *
- * `ink_annotate_page` MUTATES the open document and there is no undo, so a
- * document that has been annotated is spent: rendering it again would show the
- * ink burnt into the page AND the `.mark` overlay on top of it, drawn twice.
- * This is what says the document has to be reopened before the viewer uses it
- * again — including when the export FAILED, which is the path that would
- * otherwise leave a half-annotated document behind.
+ * Annotation mutates the open document with no undo, so it must be reopened
+ * before the viewer uses it again, including after a failed export.
  */
 let annotated = false;
 
-/**
- * ONE PAGE OF THE WHOLE-DOCUMENT EXPORT: draw the ink into the open document.
- * Sparse by nature — the real corpus is 7 annotated pages out of 77.
- */
+/** Draw ink into the open document for one page of the whole-document export. */
 async function annotatePage(page: number, ink: PdfInkOverlay): Promise<void> {
   if (!doc) throw new Error("no document is open");
   await doc.annotatePage(page, ink.alpha, ink.width, ink.height, ink.matrix);
-  // Set AFTER the call, not before: a refusal (a repaired file, junk before the
-  // header) is made by the module before it touches anything, so a document
-  // that refused its first page is still clean and needs no reopen.
+  // Set after the call: a refusal happens before the module touches anything.
   annotated = true;
 }
 
 /**
- * The whole document, as the delta of an incremental update.
- *
- * `original` is lent by the main thread — see `exportDocument` in
- * `pdfWorkerTypes.ts` for why it is not a convenience. It is checked against
- * the length the document was opened with, because pointing MuPDF's reads at a
- * DIFFERENT file mid-write would produce a delta that is wrong in a way nothing
- * downstream could detect.
+ * The whole document as an incremental-update delta. `original` is checked
+ * against the opened length: reading a different file mid-write would produce
+ * an undetectably wrong delta.
  */
 async function exportDocument(original: Blob): Promise<Uint8Array> {
   if (!doc) throw new Error("no document is open");
@@ -300,14 +208,11 @@ async function exportDocument(original: Blob): Promise<Uint8Array> {
     return await doc.exportIncremental();
   } finally {
     localCopy = null;
-    // ALWAYS, and on the failure path especially: the pages were mutated before
-    // the write was attempted, so leaving this document open would show the ink
-    // twice on every page the user turns back to.
+    // Always reopen, especially on failure: the pages were already mutated.
     await reopen();
   }
 }
 
-/** Replace the spent document with a clean one, keeping everything else. */
 async function reopen(): Promise<void> {
   if (!annotated || !source) return;
   annotated = false;
@@ -315,10 +220,8 @@ async function reopen(): Promise<void> {
   const calls = callsFor(x);
   doc?.close();
   doc = null;
-  // The block cache SURVIVES on the streamed path — it holds the original's
-  // bytes, which have not changed, and re-priming it would cost a round trip
-  // for nothing. The whole-file path has no cache to keep and re-fetches; that
-  // is the non-JSPI fallback, where the file is in the HTTP cache anyway.
+  // The block cache survives on the streamed path (the original's bytes are
+  // unchanged); the whole-file path re-fetches from the HTTP cache.
   if (mode === "stream" && cache) {
     doc = await AsyncPdfDocument.openStream(x, calls, cache.length);
   } else {
@@ -328,12 +231,8 @@ async function reopen(): Promise<void> {
 }
 
 /**
- * Requests run ONE AT A TIME, in arrival order.
- *
- * The alternative is a race with teeth: `ink_render` reuses a single pixmap and
- * `ink_close` frees the handle table entry, so a `close` overtaking a suspended
- * render would drop the document out from under wasm that is about to resume
- * into it.
+ * Requests run one at a time: a `close` overtaking a suspended render would
+ * free the document under wasm about to resume into it.
  */
 let queue: Promise<unknown> = Promise.resolve();
 
@@ -373,8 +272,7 @@ function handle(req: PdfRequest): Promise<void> {
       }
       case "exportPage": {
         const bytes = await exportPage(req.page, req.ink);
-        // TRANSFERRED, like the rendered bitmap: a grafted page carries the
-        // source page's fonts and images, so this is not a small message.
+        // Transferred: a grafted page carries fonts and images.
         ctx.postMessage({ kind: "exportedPage", id: req.id, bytes }, [
           bytes.buffer as ArrayBuffer,
         ]);
@@ -387,8 +285,7 @@ function handle(req: PdfRequest): Promise<void> {
       }
       case "exportDocument": {
         const delta = await exportDocument(req.original);
-        // TRANSFERRED like the rest, though this one is tens of kilobytes where
-        // the document it belongs to is tens of megabytes.
+
         ctx.postMessage({ kind: "exportedDocument", id: req.id, delta }, [
           delta.buffer as ArrayBuffer,
         ]);

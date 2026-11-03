@@ -1,36 +1,18 @@
-// The browse/read surface of the server API, as an interface so the UI can run
-// against a fake (dev + tests) and the real HTTP client interchangeably. Auth
-// lives in client.ts (login/me/logout/changePassword) and is intentionally NOT
-// here — this is only the file-browser + reader data path.
+// The browse/read/write surface of the server API, as an interface so the UI
+// runs against a fake (dev + tests) or the real HTTP client. Auth lives in
+// client.ts. No search lives here: the browser fetches `text/<md5>` indexes
+// and answers every query itself (`src/search/`).
 //
-// Backing endpoints (control-plane, `.controlplane` scope — to be built in P4):
-//   listFolder   → GET  /api/controlplane/tree?parent={id}
-//   getNoteMeta  → GET  /api/controlplane/file/metadata/{id}  (generic per-item meta)
-//   getPageBytes → GET  /note/{id}/page/{n}?v={hash}        (immutable, HTTP-cached)
-//   getPageText  → GET  /note/{id}/page/{n}/text?v={textHash} (immutable, HTTP-cached)
-//   getPageLinks → GET  /note/{id}/page/{n}/links?v={linksHash}
-//
-// NO SEARCH OF ANY KIND LIVES HERE ANY MORE (§6 steps 6-7).
-// The browser holds every index and answers every query itself — library-wide
-// and in-document alike; `src/search/` fetches `text/<md5>` and nothing on this
-// seam is asked to interpret a query.
+//   listFolder   → GET /api/controlplane/tree?parent={id}
+//   getNoteMeta  → GET /api/controlplane/file/metadata/{id}
+//   getPageBytes → GET /note/{id}/page/{n}?v={hash}           (immutable)
+//   getPageText  → GET /note/{id}/page/{n}/text?v={textHash}  (immutable)
+//   getPageLinks → GET /note/{id}/page/{n}/links?v={linksHash}
 
 import type { PdfLink } from "../core/types";
 import type { Hash, Id, Listing, NoteMeta, PageRef, PageText } from "../core/types";
 
-/**
- * One page's links, as {@link Api.getPageLinks} answers.
- *
- * An OBJECT around the array rather than the bare array, mirroring the wire: a
- * top-level JSON array is a shape that can never gain a field, and this one may
- * yet want to say what panel it was authored against.
- *
- * `PdfLink` is the record `render/pdfWire.ts` already defines and
- * `pages/linkLayer.ts` already renders — deliberately the same type for a
- * `.note`'s links and a `.pdf`'s, so the layer, the allowlist and the exporter
- * are written once. See {@link Api.getPageLinks} for the one thing that differs
- * between them (the unit the rect is in).
- */
+/** One page's links. An object, not a bare array, so the wire can gain fields. */
 export interface PageLinks {
   links: readonly PdfLink[];
 }
@@ -43,123 +25,51 @@ export interface Api {
   getNoteMeta(id: Id): Promise<NoteMeta>;
 
   /**
-   * The raw `.note` byte-range for a single page — the input the renderer
-   * decodes. The versioned URL (`?v={page.hash}`) makes the response immutable,
-   * so the browser HTTP cache is layer L2 and this call is free on a repeat
-   * view. Returns bytes, never pixels: rasterization is the renderer's job.
+   * The raw `.note` byte-range for one page, for the renderer to decode.
+   * `?v={page.hash}` makes it immutable, so the HTTP cache serves repeats.
    */
   getPageBytes(id: Id, page: PageRef): Promise<ArrayBuffer>;
 
   /**
-   * A page's custom IMAGE template (`GET /note/{id}/template/{hash}`) as a Blob
-   * for `createImageBitmap`. `hash` is the asset hash the SNPG payload carries
-   * on a `raster image` background record; the URL is content-addressed so the
-   * response is `immutable` (HTTP cache is the byte layer, and the reader
-   * memoizes the DECODED bitmap once per hash — see render/template.ts). Only
-   * pages with a custom image background reference this; a built-in RATTA_RLE
-   * template never does.
+   * A page's custom image template (`GET /note/{id}/template/{hash}`),
+   * content-addressed and immutable. Built-in RATTA_RLE templates never use it.
    */
   getTemplate(id: Id, hash: Hash): Promise<Blob>;
 
   /**
-   * The handwriting-recognition for a single page: the flat transcript the OCR
-   * panel shows, plus the same words POSITIONED (`words`, in millimetres) for the
-   * searchable-PDF export.
-   *
-   * LAZY BY CONTRACT: call this only when the "Recognized text" panel is actually
-   * showing the page. It is deliberately NOT bundled into {@link getNoteMeta} —
-   * that would make every note-open pay for text almost nobody reads, on top of a
-   * backend whose `readBlob` already re-parses whole notes per listing.
-   *
-   * ONE CALL, NOT TWO: text and boxes come out of the same RECOGNTEXT block and
-   * are versioned by the same hash, so the server carries them on one endpoint
-   * and this seam mirrors that. Splitting them here would mean two round-trips
-   * and two chances for a panel and an export to disagree about a page.
-   *
-   * Keyed by page index + `page.textHash` (NOT `page.hash`): the versioned URL
-   * must change exactly when the recognition changes, so it can be served
-   * `immutable` without a stale empty transcript outliving the recognition run
-   * that replaced it. Returns an empty result — without any request — when
-   * `page.textHash` is null, so a caller that checks the hash first simply never
-   * round-trips.
+   * A page's recognition: transcript plus positioned words (mm). Lazy: call
+   * only when the text panel shows the page. Keyed by `page.textHash`, not
+   * `page.hash`; resolves empty without a request when `textHash` is null.
    */
   getPageText(id: Id, page: PageRef): Promise<PageText>;
 
   /**
-   * The links a PDF used as this page's template brought with it — the
-   * rectangles the device kept when it rasterised the imported document into
-   * the page's background (`parsers/note/note-format.md` §14).
-   *
-   * ONE SHAPE FOR BOTH KINDS OF DOCUMENT. The records come back as
-   * {@link PdfLink}, the very record a PDF's own links arrive as from the wasm
-   * decoder, so the reader's link layer and the PDF exporter each consume one
-   * shape rather than one per container. The server does the conversion (§14
-   * stores a 1-based page number and the literal `none`; `PdfLink` means a
-   * 0-based target and `-1` for external), so exactly one place knows both
-   * spellings.
-   *
-   * **`x`/`y`/`w`/`h` are DEVICE PANEL PIXELS here**, where a PDF's are points.
-   * That is not an inconsistency to paper over — it is the page's own space in
-   * both cases, and it is why the geometry is SIMPLER for a `.note`: the page IS
-   * the panel, so there is no page-rect mapping and no letterbox, just the
-   * canvas-to-panel scale the reader already computes for the ink.
-   *
-   * LAZY BY CONTRACT, and keyed by `page.linksHash` rather than `page.hash` —
-   * the same discipline as {@link getPageText}, for the same reasons. Returns an
-   * empty result WITHOUT a request when `linksHash` is null, which is every page
-   * of every note not built on a PDF template. Per page and never per document:
-   * the capture behind §14 carries 51,256 records over 1702 pages.
+   * The links a PDF template brought to this page (`note-format.md` §14), as
+   * {@link PdfLink}; the server converts §14's 1-based page and `none` to
+   * 0-based and -1. Rects are in device panel pixels (a PDF's are points).
+   * Lazy and keyed by `page.linksHash`; empty without a request when null.
    */
   getPageLinks(id: Id, page: PageRef): Promise<PageLinks>;
 
   // ---------------------------------------------------------------------------
-  // WRITES. Everything above this line is a read; the control-plane face was
-  // GET-only until the bin and the admin console arrived.
-  //
-  // APPEND-ONLY, at your own marker. Two features extend this seam in parallel,
-  // so add methods under the marker that names yours and touch nothing else in
-  // this file — no reordering, no refactoring the reads. That keeps the two sets
-  // of edits textually disjoint and mergeable without conflict.
-  //
-  // A write may fail with `ELEVATION_REQUIRED` (HTTP 428): the session is valid
-  // but not freshly elevated. Route it through `dispatchApiFailure` to the
-  // gate — never treat it as a dead session.
+  // Writes. Each feature appends under its own marker so parallel edits stay
+  // disjoint; vocabularies come in via inline `import(...)` types for the same
+  // reason. Any write may fail with `ELEVATION_REQUIRED` (428): route it through
+  // `dispatchApiFailure` to the gate, never treat it as a dead session.
   //
   // --- BIN WRITES ---
-  //
-  // The recycle bin. Two of these are READS despite living under this banner —
-  // the bin-scoped preview path — and they are here rather than above it because
-  // they belong to the bin, not because they mutate.
-  //
-  // The vocabulary is `core/binTypes.ts`, referenced through inline `import(…)`
-  // types rather than a top-of-file `import type` line: this seam is extended by
-  // two features in parallel at their own markers, and an import statement is
-  // the one thing that cannot live at a marker. See that file's header.
+  // (Two bin-scoped reads live here too.)
 
   /**
    * Every trashed entry, newest deletion first, plus the retention window and
-   * the byte total the empty-bin confirmation quotes.
-   *
-   * FLAT and ungrouped by contract. The grouping and nesting the bin renders are
-   * derived on the client from `parentId`/`isRoot`, so the server never has to
-   * guess which of several presentations a client wants.
+   * byte total. Flat by contract; nesting is derived client-side.
    */
   listBin(): Promise<import("../core/binTypes").Bin>;
 
   /**
-   * {@link getNoteMeta} for a TRASHED note.
-   *
-   * A separate method because it is a separate ROUTE, and that split is a
-   * security boundary rather than a convenience: the server's `Files.get`
-   * hardcodes `deleted = 0` and is the shared ownership check behind every live
-   * read, so it is not relaxed to see the bin. These read through `getTrashed`,
-   * which sees trashed rows and nothing else — a live id 404s here exactly as a
-   * trashed one 404s from {@link getNoteMeta}.
-   *
-   * Deciding whether to restore something deleted a fortnight ago means looking
-   * at it first (U2b), which is the whole reason this exists. It works at all
-   * only because trashing now HOLDS the blob reference; under the old behaviour
-   * the bytes were gone before anyone could look.
+   * {@link getNoteMeta} for a trashed note. A separate route because the live
+   * `Files.get` hardcodes `deleted = 0` as the shared ownership check; this one
+   * sees trashed rows only.
    */
   getBinNoteMeta(id: Id): Promise<NoteMeta>;
 
@@ -167,22 +77,17 @@ export interface Api {
   getBinPageBytes(id: Id, page: PageRef): Promise<ArrayBuffer>;
 
   /**
-   * Move a LIVE entry to the bin (U5) — the browser's only delete, and the entry
-   * point that makes the bin reachable from it at all.
-   *
-   * A folder takes its whole subtree, so the response states the fanout: the
-   * user clicked one row and the operation may have moved three. Reversible, so
-   * nothing here expects a confirmation — the caller offers an undo instead.
+   * Move a live entry to the bin; a folder takes its subtree, so the response
+   * states the fanout. Reversible: offer undo, not a confirm.
    */
   trashEntry(id: Id): Promise<import("../core/binTypes").Trashed>;
 
-  /** Bring a trashed entry back. The result reports what it ACTUALLY did (U3). */
+  /** Bring a trashed entry back; the result reports what it actually did. */
   restoreEntry(id: Id): Promise<import("../core/binTypes").Restored>;
 
   /**
-   * Destroy one trashed entry and its subtree, permanently. The only call on
-   * this seam that is not reversible by another call on it — hence the confirm.
-   * A LIVE id is a 404, not a hard delete.
+   * Permanently destroy one trashed entry and its subtree. A live id is a 404,
+   * not a hard delete.
    */
   purgeEntry(id: Id): Promise<void>;
 
@@ -190,312 +95,153 @@ export interface Api {
   emptyBin(): Promise<number>;
 
   // --- ADMIN WRITES ---
-  //
-  // The admin console (U1–U8). Every method below
-  // is `require_admin` on the server — `is_admin` AND a live elevation — except
-  // the two that manage the elevation itself, so any of them may answer 428
-  // ELEVATION_REQUIRED at any moment. `pages/admin.ts` is what turns that into
-  // the gate and retries the call that hit it; nothing here knows about the gate.
-  //
-  // The row type comes from `./adminTypes` through an inline `import(...)` type
-  // rather than a top-level import, for the reason that file's header gives.
+  // All `require_admin` (is_admin and a live elevation) except elevate/lock, so
+  // any may answer 428; `pages/admin.ts` handles the gate and retry.
 
-  /**
-   * Every household account. Admin-only INCLUDING this read: an unattended
-   * tablet must not be able to list every housemate's address.
-   */
+  /** Every household account. Admin-only even as a read. */
   adminListUsers(): Promise<import("./adminTypes").AdminUser[]>;
 
   /**
-   * Create an account, and return the temporary password **the server
-   * generated**.
-   *
-   * There is deliberately no password parameter. The client must never invent a
-   * credential a housemate will keep using, and the plaintext exists only in
-   * this one response — the server stores a hash and genuinely cannot produce it
-   * again. A caller that drops this string has created an account nobody can
-   * sign in to, so hand-over is part of the flow, not a nicety.
+   * Create an account and return the server-generated temporary password. It
+   * exists only in this response (the server stores a hash), so hand-over is
+   * part of the flow.
    */
   adminCreateUser(email: string, isAdmin: boolean): Promise<string>;
 
-  /**
-   * Permanently delete an account and everything in it. Refused for the last
-   * remaining admin (`LAST_ADMIN`), which would otherwise lock administration
-   * out of the server for good.
-   */
+  /** Permanently delete an account. Refused for the last admin (`LAST_ADMIN`). */
   adminDeleteUser(id: number): Promise<void>;
 
   /**
-   * Reset an account to a fresh server-generated temporary password, returned
-   * once — same inversion, same reason, as {@link Api.adminCreateUser}. Signs
+   * Reset to a fresh server-generated temporary password, returned once. Signs
    * the target out everywhere.
    */
   adminResetPassword(id: number): Promise<string>;
 
   /**
-   * Re-enter the password to elevate THIS session.
-   *
-   * Runs the same challenge flow login does (`sha256(md5(pw) + randomCode)`) —
-   * a plain password POST would be a real regression on a deployment that is
-   * plaintext HTTP across a LAN. Takes the account because the challenge is
-   * issued per account; the server still reads WHO from the session, so this
-   * can never re-authenticate as somebody else.
-   *
-   * Rate-limited 5 per 300s **by account, not by IP**: a household shares one
-   * address, and IP-keying would let one person's fumbling lock out everyone.
+   * Re-enter the password to elevate this session, via the login challenge
+   * (`sha256(md5(pw) + randomCode)`) since deployments may be plaintext HTTP on
+   * a LAN. The server takes who from the session. Rate-limited 5/300s per
+   * account, not per IP (a household shares one address).
    */
   adminElevate(account: string, plaintext: string): Promise<void>;
 
-  /** Drop this session's elevation ("Lock console"). Idempotent, and always
-   *  allowed — an already-lapsed caller gets a 200, never the gate. */
+  /** Drop this session's elevation. Idempotent; never answers with the gate. */
   adminLock(): Promise<void>;
 
-  /**
-   * Every tablet bound to one account, revoked bindings INCLUDED — see
-   * {@link AdminDevice.active}. 404 `USER_NOT_FOUND` for an unknown id.
-   */
+  /** One account's tablets, revoked included. 404 `USER_NOT_FOUND`. */
   adminListDevices(userId: number): Promise<import("./adminTypes").AdminDevice[]>;
 
   /**
-   * Cut one tablet off from syncing. A soft status flip, not a row delete, so
-   * re-pairing stays possible — with the device in hand.
-   *
-   * 404 `DEVICE_NOT_FOUND` covers both "no such serial" and "that serial belongs
-   * to a different housemate", deliberately indistinguishable: a distinct status
-   * would leak exactly the fact the shared error is hiding.
+   * Soft-revoke one tablet (re-pairable). 404 `DEVICE_NOT_FOUND` also covers a
+   * serial owned by someone else, deliberately indistinguishable.
    */
   adminUnlinkDevice(userId: number, equipmentNo: string): Promise<void>;
 
-  /** One person's used/allotted bytes — the two numbers the meter is drawn from. */
+  /** One person's used/allotted bytes. */
   adminGetQuota(userId: number): Promise<import("./adminTypes").AdminQuota>;
 
   /**
-   * Set one person's allotment, in bytes, and get the accounting back.
-   *
-   * **Below current usage is legal and destroys nothing.** The response then
-   * reports `usedBytes` above `totalBytes`, which the meter must be able to draw
-   * — see {@link AdminQuota}. Only a negative value is refused (400
-   * `INVALID_QUOTA`).
+   * Set one person's allotment in bytes. Below current usage is legal and
+   * deletes nothing; only negative is refused (400 `INVALID_QUOTA`).
    */
   adminSetQuota(userId: number, totalBytes: number): Promise<import("./adminTypes").AdminQuota>;
 
-  /** The recycle bin's retention window, with the bounds a field can validate
-   *  against before it ever posts. */
+  /** The bin retention window, with bounds for client-side validation. */
   adminGetRetention(): Promise<import("./adminTypes").AdminRetention>;
 
   /**
-   * Change the retention window. **Never purges retroactively** — the new
-   * window's clock starts at this write, so nothing already in the bin becomes
-   * due because the number went down. 400 `INVALID_RETENTION` outside the
-   * bounds the read returns.
+   * Change the retention window; never purges retroactively. 400
+   * `INVALID_RETENTION` outside the bounds.
    */
   adminSetRetention(days: number): Promise<import("./adminTypes").AdminRetention>;
 
-  /** Server-wide health: version, memory against its budget, blob store size. */
+  /** Server-wide health. */
   adminHealth(): Promise<import("./adminTypes").AdminHealth>;
 
-  // --- HISTORY (hot-cache versioning — "history of this file") ---
-  //
-  // The read + restore face of the version history. All note-scoped by `:id`
-  // (the same ownership gate
-  // the sibling `/note/:id` routes use); the per-version routes are gated on
-  // `:md5` being a RETAINED version of THAT file, so a stranger's md5 — or one not
-  // in this file's history — is one indistinguishable 404.
-  //
-  // The vocabulary (`FileHistory`, `RestoredVersion`) lives in `core/types.ts`,
-  // referenced inline like the bin/admin markers so this seam stays extensible at
-  // its own marker.
+  // --- HISTORY ---
+  // Note-scoped by `:id` (the `/note/:id` ownership gate); per-version routes
+  // require `:md5` to be a retained version of that file, else one
+  // indistinguishable 404. Per-version URLs are content-addressed: no `?v=`.
 
   /**
-   * A file's versions, newest-first (`GET /api/controlplane/note/:id/history`):
-   * the current blob (flagged {@link import("../core/types").FileVersion.current})
-   * then every retained one. `createdAt` is normalized to epoch ms at the seam.
+   * A file's versions, newest-first: the current blob then every retained one.
+   * `createdAt` is normalized to epoch ms.
    */
   noteHistory(id: Id): Promise<import("../core/types").FileHistory>;
 
   /**
-   * A retained version's OWN page list + geometry
-   * (`GET /api/controlplane/note/:id/history/:md5/meta`) — the same
-   * {@link NoteMeta} shape as {@link getNoteMeta}, read from the version's retained
-   * `note_index` (H7). This is what lets a preview render the version's REAL page
-   * count and dims: a version whose page count differs from the current note (the
-   * "I added pages since" case) previews with its own geometry, not the live
-   * note's slots. `fileHash` is the version md5; `id`/`name` are the file's. An md5
-   * not in this file's history — like the other per-version routes — is a 404.
+   * A retained version's own page list and geometry (from its retained
+   * `note_index`), so a preview uses the version's page count, not the live
+   * note's. `fileHash` is the version md5; `id`/`name` are the file's.
    */
   historyMeta(id: Id, md5: Hash): Promise<NoteMeta>;
 
-  /**
-   * Page `n`'s SNPG bytes of a RETAINED version
-   * (`GET /api/controlplane/note/:id/history/:md5/page/:n`) — the same wire shape
-   * as {@link getPageBytes}, decoded by the same renderer. NO `?v=`: the `:md5`
-   * already pins the immutable blob, so the URL is content-addressed on its own.
-   * This is what parameterizes the reader's page source for a preview.
-   */
+  /** Page `n`'s SNPG bytes of a retained version; same wire shape as {@link getPageBytes}. */
   historyPageBytes(id: Id, md5: Hash, index: number): Promise<ArrayBuffer>;
 
-  /**
-   * Page `n`'s recognized TEXT of a RETAINED version
-   * (`GET /api/controlplane/note/:id/history/:md5/page/:n/text`) — the same
-   * {@link PageText} shape as {@link getPageText}: the flat transcript plus the
-   * positioned `words` (millimetres). This is what lets a preview draw the
-   * version's on-page recognized-text ovals, mark find-in-preview's word
-   * rectangles, and carry an invisible text layer into a version's PDF export —
-   * all three read `getPageText`, which the history scope reroutes here. NO `?v=`:
-   * the `:md5` already pins the immutable version, so the transcript is
-   * content-addressed with it. An md5 not in this file's history — like every
-   * per-version route — is a 404.
-   */
+  /** Page `n`'s recognized text of a retained version; same shape as {@link getPageText}. */
   historyPageText(id: Id, md5: Hash, index: number): Promise<PageText>;
 
   /**
-   * Restore a retained version (`POST …/history/:md5/restore`): re-point the file
-   * at that blob through the normal supersede path, which re-derives it as the new
-   * current version AND retains the displaced current as a new history row — so
-   * restore is inherently UNDOABLE (undo == restore the displaced version). May
-   * fail with `QUOTA_EXCEEDED` (HTTP 507), which changes nothing.
+   * Restore a retained version through the normal supersede path, which also
+   * retains the displaced current, so restore is undoable. May fail with
+   * `QUOTA_EXCEEDED` (507), changing nothing.
    */
   restoreVersion(id: Id, md5: Hash): Promise<import("../core/types").RestoredVersion>;
 
   /**
-   * A retained version's RAW blob bytes
-   * (`GET /api/controlplane/note/:id/history/:md5/raw`) — the version-scoped twin
-   * of the live `/file/:id?v=` raw route (and of the bin's
-   * `/api/controlplane/bin/file/:id`). This is what unlocks history preview for
-   * the CLIENT-SIDE-rendered kinds: `.spd` (`spd_decode`), `.txt` (`.text()`) and
-   * images each decode a version from these bytes, exactly as they decode the live
-   * file from `/file/:id?v=`.
-   *
-   * `/file/:id?v={hash}` is the ONE universal raw-bytes primitive: it returns the
-   * exact stored bytes of ANY file, `.note` included (it is the `.note` download
-   * path — `rawFileUrl(..., {download:true})`). The per-page SNPG route
-   * (`getPageBytes`, `/note/:id/page/:n`) is a `.note` RENDER convenience layered
-   * on top, NEVER the way to fetch a `.note`'s bytes. NO `?v=`: the `:md5` already
-   * pins the immutable
-   * version. An md5 not in this file's history is a 404, like every per-version
-   * route. The viewers fetch by URL (`historyFileUrl`) for their `<img>`/`fetch`
-   * paths; this seam method is the same bytes for any caller that wants them
-   * through the `Api`.
+   * A retained version's raw blob bytes, for the client-rendered kinds (`.spd`,
+   * `.txt`, images). `/file/:id?v=` is the universal raw-bytes route, `.note`
+   * included; the per-page SNPG route is only a render convenience.
    */
   historyRaw(id: Id, md5: Hash): Promise<ArrayBuffer>;
 
-  // --- BIN-SCOPED READS (recycle-bin viewer parity) ---
-  //
-  // The `/bin/…` twins of the current-version and version-history reads above,
-  // for a file that is IN the recycle bin. A trashed file's data is fully
-  // retained — its blob, its md5-keyed `note_index` transcript, and its
-  // `file_history` — so the bin viewer can offer the SAME recognized-text ovals
-  // and view-only version history the live viewer does. (Find is not among them
-  // any more: the in-document index is keyed by blob md5, and a trashed file's
-  // md5 addresses the same `text/<md5>` every other one does.) Each is a
-  // separate ROUTE (and so a separate seam method) for the same reason
-  // {@link getBinNoteMeta} is: the live routes hardcode `deleted = 0` as the
-  // shared ownership boundary and are deliberately not relaxed to see the bin.
-  // {@link createBinScope} (pages/bin.ts) is what reroutes a trashed id's reads
-  // onto these, once, at the seam — the reader never learns a bin exists.
+  // --- BIN-SCOPED READS ---
+  // `/bin/…` twins of the reads above, for a trashed file (its blob, transcript
+  // and history are retained). Separate routes because the live ones hardcode
+  // `deleted = 0`. `createBinScope` (pages/bin.ts) reroutes a trashed id's reads
+  // onto these, so the reader never learns a bin exists.
 
-  /**
-   * {@link getPageText} for a TRASHED note
-   * (`GET /api/controlplane/bin/note/:id/page/:n/text`) — the same
-   * {@link PageText} shape, resolved from the trashed file's retained md5-keyed
-   * transcript. This is what draws a trashed-note preview's on-page recognized-
-   * text ovals and marks find-in-a-trashed-note's word rectangles.
-   */
+  /** {@link getPageText} for a trashed note. */
   binPageText(id: Id, page: PageRef): Promise<PageText>;
 
   /**
-   * {@link noteHistory} for a TRASHED file
-   * (`GET /api/controlplane/bin/note/:id/history`) — its retained `file_history`,
-   * which follows the file into the bin (purged only when the bin purges). Same
-   * {@link import("../core/types").FileHistory} shape. View-only: the bin history
-   * offers preview but no per-version restore (restore the FILE first).
+   * {@link noteHistory} for a trashed file; history follows the file into the
+   * bin. View-only: restore the file first.
    */
   binNoteHistory(id: Id): Promise<import("../core/types").FileHistory>;
 
-  /** {@link historyPageBytes} for a retained version of a TRASHED file
-   *  (`GET /api/controlplane/bin/note/:id/history/:md5/page/:n`). */
+  /** {@link historyPageBytes} for a trashed file. */
   binHistoryPageBytes(id: Id, md5: Hash, index: number): Promise<ArrayBuffer>;
 
-  /** {@link historyPageText} for a retained version of a TRASHED file
-   *  (`GET /api/controlplane/bin/note/:id/history/:md5/page/:n/text`) — ovals +
-   *  find rectangles on a previewed past version, from the bin. */
+  /** {@link historyPageText} for a trashed file. */
   binHistoryPageText(id: Id, md5: Hash, index: number): Promise<PageText>;
 
-  /** {@link historyRaw} for a retained version of a TRASHED file
-   *  (`GET /api/controlplane/bin/note/:id/history/:md5/raw`) — the raw-based
-   *  viewers (`.spd`/`.txt`/image) decode a trashed file's past version from
-   *  these bytes, via `historyFileUrl(id, md5, { bin: true })`. */
+  /** {@link historyRaw} for a trashed file. */
   binHistoryRaw(id: Id, md5: Hash): Promise<ArrayBuffer>;
 
-  // --- RENAME (control-plane) ---
-  //
-  // Rename a LIVE file or folder in place. A rename is a
-  // `move` whose destination is the entry's current parent, so the server reuses
-  // the device-sync path's name / collision / sync-version logic; this seam only
-  // carries the new full name (extension included) and hands the updated entry
-  // back for the caller to reconcile.
-  //
-  // The vocabulary (`Entry`) is referenced through an inline `import(...)` type
-  // rather than a top-of-file `import` line, exactly like the bin/admin/history
-  // markers above, so this seam stays extensible at its own marker.
+  // --- RENAME ---
+  // A rename is a server-side `move` to the current parent, reusing the sync
+  // path's name, collision and sync-version logic.
 
   /**
-   * Rename entry `id` to `name` — the new FULL name, extension INCLUDED. Returns
-   * the updated {@link import("../core/types").Entry} so the caller can reconcile
-   * the visible listing.
-   *
-   * Rejects with a `NameTaken` error (HTTP 409 → `NameTakenError`, see
-   * `client.ts`) when a sibling in the SAME parent already holds that exact name:
-   * the rename dialog catches it and stays open with the collision message rather
-   * than silently autorenaming — a person who just typed a name wants to know it
-   * clashed, unlike the unattended device sync, which suffixes " (2)". The server
-   * also refuses to rename a fixed category-root folder; the UI hides the action
-   * there, so that refusal is a backstop rather than a path the UI reaches.
+   * Rename to `name`, the full name with extension. Returns the updated entry.
+   * A sibling with that exact name rejects with `NameTakenError` (409) rather
+   * than auto-suffixing as device sync does, so the dialog can say it clashed.
    */
   rename(id: Id, name: string): Promise<import("../core/types").Entry>;
 
-  // --- UPLOAD (control-plane) ---
-  //
-  // Put a file INTO the library from the browser, which
-  // closes the one arrow the app was missing: web → cloud → device. The device
-  // half is CONFIRMED — a file placed straight into the tree is pulled down by
-  // the Nomad on its next sync — so this seam's job is only to leave the tree in
-  // the state a sync reads.
-  //
-  // The vocabulary (`Entry`) is referenced through an inline `import(...)` type,
-  // exactly like the markers above, so this seam stays extensible at its own
-  // marker.
+  // --- UPLOAD ---
+  // web → cloud → device: a file placed in the tree is pulled by the device on
+  // its next sync.
 
   /**
-   * Upload ONE file into folder `folderId` (`null` = the library root), as
-   * `multipart/form-data` with a single file part. Returns the created entry in
-   * the SAME listing shape `rename` returns, so the caller reconciles the new row
-   * without a refetch.
-   *
-   * `onProgress` receives the fraction of BYTES SENT, 0..1, and is what the
-   * queue's progress bar is drawn from. It is the reason this is the one call on
-   * this seam implemented with `XMLHttpRequest` rather than `fetch`: only
-   * `xhr.upload.onprogress` reports bytes sent portably — a `fetch` request body
-   * cannot be observed. Download progress is the
-   * opposite direction and a different transport; the two share the progress UI
-   * and nothing else.
-   *
-   * `signal` ABORTS THE TRANSFER, not just its paint — that is the whole of
-   * "Cancel" on a queued row, and on a multi-megabyte PDF over wifi it is the
-   * difference between stopping and merely looking away.
-   *
-   * Refusals arrive as `UploadRefusedError` (see `client.ts`), which names WHICH
-   * of the three the server gave: quota (413), an extension outside the accept
-   * list (415), or an unusable filename (400). The UI phrases each; a missing,
-   * foreign or trashed destination is one indistinguishable 404, as everywhere
-   * else on this seam.
-   *
-   * `onConflict` decides what happens when the folder already holds a file of
-   * this name, and it defaults to the safe answer. A CALLER MUST NOT SEND
-   * `replace` UNLESS THE USER CHOSE IT: the interface detects the clash against
-   * the listing it already has and asks BEFORE transferring, so a re-dropped
-   * file is never uploaded twice to discover what to do with it. See
-   * `UploadConflictMode` for why both answers are non-destructive.
+   * Upload one file into `folderId` (`null` = root) as multipart; returns the
+   * entry in the same shape as `rename`. The one XHR call on this seam: only
+   * `xhr.upload.onprogress` reports bytes sent. `signal` aborts the transfer
+   * itself. Refusals are `UploadRefusedError` (413 quota, 415 type, 400 name);
+   * a bad destination is a 404. Never send `replace` unless the user chose it:
+   * the UI detects clashes from the listing before transferring.
    */
   upload(
     folderId: Id | null,
@@ -506,155 +252,60 @@ export interface Api {
   ): Promise<import("../core/types").Entry>;
 
   // --- ACCOUNT (self-service) ---
-  //
-  // The surface a person has over their OWN account.
-  // Everything else account-shaped in this
-  // app is an ADMIN verb aimed at somebody else — reset THEIR password, unlink
-  // THEIR device, set THEIR quota — and a person who needed one of these for
-  // themselves has, until now, had to point one of those at their own row. That
-  // is the whole reason this marker exists; §2 is the argument.
-  //
-  // ==========================================================================
-  // WHAT IS BACKED, AND WHAT IS NOT.
-  // ==========================================================================
-  // Four control-plane routes landed for this surface, and the shape of them is
-  // the point: NOT ONE TAKES A TARGET. The session is who this is about, which
-  // is what stops a person wanting to change their own settings from reaching
-  // for a tool built to change somebody else's (§1–§2).
+  // None of these take a target: the session is who this is about.
   //
   //   GET  /api/controlplane/account                 identity, sign-in, devices
   //   GET  /api/controlplane/account/storage         the meter and its five lines
-  //   POST /api/controlplane/account/devices/unlink  one of YOUR bindings
+  //   POST /api/controlplane/account/devices/unlink  one of your bindings
   //   POST /api/controlplane/account/sign-out-others every session but this one
-  //
   //   PUT  /api/controlplane/account/versions        how many versions to keep
   //   PUT  /api/user/password                        your own password
-  //
-  // NOTHING UNDER THIS MARKER IS UNBACKED ANY MORE. The last gap to close was
-  // verification of the CURRENT password on `PUT /api/user/password` (§4): the
-  // handler now requires the field of a control-plane caller and the service
-  // verifies it before it writes or revokes anything. `fake.ts` remains the
-  // reference implementation of the intended behaviour, and it and the server
-  // now agree — a refusal seen in dev is a refusal the server would give.
-  //
-  // The vocabulary is `./accountTypes`, referenced through inline `import(...)`
-  // types exactly like the bin/admin/history/rename/upload markers above, so
-  // this seam stays extensible at its own marker.
 
   /**
-   * The tablets bound to the CALLER'S OWN account, ACTIVE bindings only.
-   *
-   * `GET /api/controlplane/account`, which is the admin console's own
-   * `listUserDevices` with the target fixed to the caller rather than a
-   * self-scoped second copy — one widened ownership gate, not two queries to
-   * keep in step. Before it landed a non-admin could not see their own bindings
-   * at all, which is the gap §5 names first.
-   *
-   * The route returns revoked bindings too (an admin auditing an account needs
-   * them); the seam filters them out, because a person looking at their own
-   * account wants the list of tablets that sync.
+   * The caller's own tablets. The route also returns revoked bindings; the
+   * seam keeps only active ones.
    */
   myDevices(): Promise<import("./accountTypes").MyDevice[]>;
 
   /**
-   * Cut one of YOUR OWN tablets off from syncing, by serial.
-   *
-   * `POST /api/controlplane/account/devices/unlink`. A soft status flip, so
-   * re-pairing stays possible with the device in hand, and it removes nothing
-   * already synced.
-   *
-   * A serial that is not one of the caller's own is a 404, indistinguishable
-   * from a serial that does not exist — the same conflation the admin route
-   * makes, for the same reason: a distinct status would leak exactly the fact
-   * the shared error hides.
+   * Soft-revoke one of your own tablets. A serial not yours is a 404, same as
+   * one that doesn't exist.
    */
   unlinkMyDevice(equipmentNo: string): Promise<void>;
 
   /**
-   * End every OTHER session, keeping this one. Returns how many were ended, so
-   * the interface can confirm what happened rather than say "done".
-   *
-   * `POST /api/controlplane/account/sign-out-others`. THIS BROWSER STAYS SIGNED
-   * IN on purpose: the confirmation of "sign out everywhere else" must not be a
-   * login screen.
+   * End every other session, keeping this one; returns how many ended.
    */
   signOutEverywhere(): Promise<number>;
 
   /**
-   * The caller's own storage, split by KIND — what the Storage section draws.
-   *
-   * `GET /api/controlplane/account/storage`. The five figures are a PARTITION of
-   * `usedBytes` — the backend's partition audit asserts they sum to it after
-   * every mutation — so nothing above this seam re-derives or reconciles them.
-   * {@link import("./accountTypes").StorageBreakdown.byKind} is still nullable,
-   * for a server too old to answer the split: null is "not known", never "zero
-   * of everything".
+   * Your storage split by kind. The five figures partition `usedBytes`
+   * (asserted by the backend's partition audit); `byKind` null means unknown.
    */
   storageBreakdown(): Promise<import("./accountTypes").StorageBreakdown>;
 
   /**
-   * How many versions of each file are kept, its ceiling, and what the retained
-   * copies cost.
-   *
-   * **PARTIALLY BACKED, AND DELIBERATELY REFUSED UNTIL IT IS WHOLE.**
-   * `GET /api/controlplane/account` already carries `versions: {keep, maxKeep}`
-   * (schema v3's per-user `history_keep`, clamped to the admin's configured
-   * ceiling). What it does not carry is {@link
-   * import("./accountTypes").VersionPolicy.retainedPerFile} — and without that
-   * the control cannot say what lowering the number would discard, which is the
-   * condition §7 puts on offering it at all. So the real client throws rather
-   * than showing a dial that can destroy history silently.
-   *
-   * §6 is what makes handing this over safe in the first place: once retained
-   * versions count against quota, a person raising it is spending their own
-   * allotment, so the setting is self-limiting.
+   * Versions kept per file, the admin ceiling, and per-file retained counts
+   * (needed to state what lowering would discard).
    */
   versionPolicy(): Promise<import("./accountTypes").VersionPolicy>;
 
   /**
-   * Set how many versions of each file to keep, and report what that discarded.
-   *
-   * **NO ENDPOINT EXISTS** — the account routes that landed are read-only, plus
-   * the two unlink/sign-out writes (see {@link Api.versionPolicy}). Lowering `keep`
-   * evicts immediately and irreversibly — the recycle bin does not hold
-   * versions — so the interface states the count BEFORE calling this, and the
-   * response is the confirmation rather than the news.
-   *
-   * `keep` is clamped to `[0, maxKeep]` by the SERVER; 0 is a legal value that
-   * turns versioning off, not a refusal.
+   * Set versions kept per file, reporting what was discarded. Eviction is
+   * immediate and skips the bin, so the UI states the count first. The server
+   * clamps to `[0, maxKeep]`; 0 turns versioning off.
    */
   setVersionPolicy(keep: number): Promise<import("./accountTypes").VersionPolicyChange>;
 
-  /** When the password last changed, how many other sessions are live, and when
-   *  THIS browser signed in — what the "Signing in" section states. From
-   *  `GET /api/controlplane/account`, the same request {@link Api.myDevices}
-   *  reads; the client shares one round trip between them. */
+  /** Password age, other live sessions, and this browser's sign-in time; shares a request with {@link Api.myDevices}. */
   accountSecurity(): Promise<import("./accountTypes").AccountSecurity>;
 
   /**
-   * Change your own password from a live session: the traditional path, with
-   * the CURRENT password required.
-   *
-   * `PUT /api/user/password` was built for the forced first-login flow, where a
-   * `pending` token proves identity and there is nothing to check a current
-   * password against but the temporary one just used. That is right for THAT
-   * caller and wrong for this one: a session is a longer-lived thing than a
-   * password prompt — a borrowed laptop, an unlocked screen — so without the
-   * check anyone who reaches a signed-in window can lock the owner out of their
-   * own household cloud (§4).
-   *
-   * The endpoint now distinguishes the two callers, in two halves: the HANDLER
-   * requires `currentPassword` of a `controlplane` caller and not of a `pending`
-   * one (the policy), and the SERVICE verifies it whenever it is supplied,
-   * whatever the caller (the mechanism) — so the check cannot be dodged by
-   * picking an audience. Verification runs before the write and before any
-   * session is revoked, so a typo costs a typo and not a lockout.
-   *
-   * Rejects with an `ApiError` coded `INVALID_CREDENTIALS` when the current
-   * password is wrong or missing, and `SAME_PASSWORD` when the new one is not
-   * new; the route is rate-limited per account, so it can also throw
-   * `RateLimitError`. Succeeds by revoking every OTHER session and minting a
-   * fresh one for this browser, which the screen has to say plainly.
+   * Change your own password, current password required. The handler requires
+   * it of `controlplane` callers (not the forced first-login `pending` flow);
+   * the service verifies it before writing or revoking anything. Rejects with
+   * `INVALID_CREDENTIALS`, `SAME_PASSWORD` or `RateLimitError`. Revokes every
+   * other session and mints a fresh one for this browser.
    */
   changePassword(currentPlaintext: string, newPlaintext: string): Promise<void>;
   // ---------------------------------------------------------------------------

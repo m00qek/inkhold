@@ -1,52 +1,34 @@
-// The READER for the stitched terms stream — §2.2's JSONL
-// records, parsed as they land. The writer is `derive_search.zig`'s
-// `writeHeader` plus its per-page line, stitched into one gzip member by
-// `search/index_stream.zig`. Pure: no wasm, no IndexedDB, no `fetch`.
+// Streaming reader for the stitched terms JSONL. Writer:
+// `derive_search.zig` `writeHeader` plus per-page lines, stitched into one
+// gzip member by `search/index_stream.zig`.
 //
 //     {"md5":"…","v":7,"n":14055}          the header line
 //     {"p":0,"t":"reuniao orcamento"}      one line per page WITH TEXT
 //
-// What this must not break:
-//   * A generator, not `await response.text()`: on the real tier-1 payload the
-//     first document is usable at 8 ms of a 193 ms stream (§3.2), and manifest
-//     order is priority order. The parser holds one document plus one partial line.
-//   * A record has NO TERMINATOR — the server accumulates nothing — so a
-//     document cannot be released until the NEXT header line arrives, or the
-//     stream ends.
-//   * `v` is the record's OWN version, and half the cache key (§3.3: key what
-//     ARRIVED). `n` is the ADDRESS SPACE, not the row count: a page with no
-//     text produces no line, and a header with nothing under it is complete.
-//   * The body is one native-gzip stream; no `DecompressionStream`.
+// Records have no terminator, so a document is released only when the next
+// header arrives or the stream ends. `n` is the address space, not the row count.
 
 import { SearchWireError } from "./manifestCodec";
 
-/** One page's folded terms — the FTS5 row §4.1 inserts verbatim. */
 export interface TermsPage {
-  /** The page/paragraph ordinal, which is every viewer's existing deep-link address. */
+  /** The page/paragraph ordinal, every viewer's deep-link address. */
   readonly p: number;
-  /** Space-separated terms, already folded by the server's own tokenizer. */
+  /** Space-separated terms, already folded by the server's tokenizer. */
   readonly t: string;
 }
 
-/** One document's terms record: the header line plus every page line under it. */
 export interface TermsDocument {
-  /** 32 lowercase hex. Half the cache key. */
   readonly md5: string;
-  /** The record's own `v` — the other half of the cache key. */
+  /** The record's own `v`, the other half of the cache key. */
   readonly indexVersion: number;
-  /** `n`: the document's ADDRESS SPACE. NOT `pages.length`. */
+  /** `n`, the address space; not `pages.length`. */
   readonly pageCount: number;
-  /** Only the pages that carried text, in the order the server wrote them. */
   readonly pages: readonly TermsPage[];
 }
 
 const MD5_HEX = /^[0-9a-f]{32}$/;
 
-/**
- * Decode a response body to text progressively. `fatal: true`: the terms are
- * valid UTF-8 by construction, and an index quietly full of U+FFFD matches
- * nothing a user can type and reports no error.
- */
+/** `fatal`: terms are valid UTF-8 by construction, and U+FFFD would match nothing silently. */
 export async function* textChunks(body: ReadableStream<BufferSource>): AsyncGenerator<string> {
   const reader = body.pipeThrough(new TextDecoderStream("utf-8", { fatal: true })).getReader();
   try {
@@ -56,21 +38,15 @@ export async function* textChunks(body: ReadableStream<BufferSource>): AsyncGene
       if (value) yield value;
     }
   } finally {
-    // A consumer that stops early must not leave the body locked and the
-    // connection held open.
+    // Unlock so an early-stopping consumer does not hold the connection.
     reader.releaseLock();
   }
 }
 
 /**
- * Parse the JSONL into documents, yielding each the moment its last line is
- * in hand — which is the next header, or the end of the stream.
- *
- * @throws SearchWireError on a line this build cannot read, a page line with
- * no header before it, or a body that ends mid-line. The last is truncation,
- * and it matters for `manifestCodec.ts`'s reason: a stream that merely ran
- * out is otherwise a shorter, well-formed answer. Documents already yielded
- * stay yielded; the rest are simply still missing at the next manifest.
+ * Yields each document once its next header or the stream end arrives.
+ * @throws SearchWireError on an unreadable line, a page before any header, or
+ * a body ending mid-line (truncation). Documents already yielded stay yielded.
  */
 export async function* parseTermsJsonl(chunks: AsyncIterable<string>): AsyncGenerator<TermsDocument> {
   let buffer = "";
@@ -98,9 +74,7 @@ export async function* parseTermsJsonl(chunks: AsyncIterable<string>): AsyncGene
     }
   }
 
-  // Every record ends in a newline, so anything left is half a line. The
-  // gzip trailer would also have failed, but a client that only checked for a
-  // resolved `fetch` is exactly §3.1's victim.
+  // Leftover text is half a line: truncation, even if `fetch` resolved.
   if (buffer.trim().length > 0) {
     throw new SearchWireError("terms stream ends mid-line");
   }
@@ -116,12 +90,7 @@ function freeze(doc: {
   return { md5: doc.md5, indexVersion: doc.indexVersion, pageCount: doc.pageCount, pages: doc.pages };
 }
 
-/**
- * One line: a header, a page, or nothing (a blank line between fragments).
- * MISSING FIELDS ARE REFUSED, NOT DEFAULTED: the tempting `n = pages.length`
- * would turn a format change into a client that silently believes every
- * document is shorter than it is.
- */
+/** A header, a page, or null for a blank line. Missing fields are refused, never defaulted. */
 function parseLine(line: string): { md5: string; indexVersion: number; pageCount: number } | TermsPage | null {
   if (line.trim().length === 0) return null;
 

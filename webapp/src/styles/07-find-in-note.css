@@ -1,15 +1,9 @@
-/* ================= FIND IN NOTE =================
-   Universal search answers "which note"; find answers "where on this page". It
-   can, because the device's recognition carries a rectangle per word (WordBox,
-   in millimetres) — the same data the PDF exporter already places its invisible
-   text layer from. So a match is drawn ON the ink rather than described beside
-   it. */
+/* ---- find in note ----
+   Matches are drawn on the ink, from the device's per-word WordBox rects (mm). */
 .findbar {
   display: none;
   align-items: center;
-  /* Anchor the field + count + nav to the right edge of the bar. The field caps
-     at 340px, so on a wide reader the leftover space falls to the left and the
-     whole cluster sits right; on a narrow bar it just fills, unchanged. */
+  /* The field caps at 340px, so on a wide bar the cluster sits right. */
   justify-content: flex-end;
   gap: 10px;
   padding: 8px 14px;
@@ -19,9 +13,7 @@
 .reader.is-finding .findbar {
   display: flex;
 }
-/* BUILT LIKE THE LIBRARY'S SEARCH FIELD, not as a bare text node. As one it had
-   no border, no ground and no focus ring, so the only thing saying "type here"
-   was the placeholder — and once you typed, nothing at all. */
+/* Built like the library search field: border, ground and focus ring. */
 .findbar__field {
   position: relative;
   flex: 1;
@@ -55,14 +47,8 @@
   outline: none;
   border-color: var(--accent);
 }
-/* WEIGHTED THE OTHER WAY ROUND FROM THE MOCKUP, deliberately. There it was
-   `--ink-faint` for the live count and `--ink-soft` for everything else, but
-   `--ink-faint` measures 2.5:1 in light mode and 3.9:1 in dark — under AA for
-   text this size, and this is the string carrying the answer. So a real count
-   gets full `--ink` (it IS the answer) and the non-count states — "searching…",
-   "No matches", "Not recognised on the device" — stay quieter at `--ink-soft`,
-   which is what the pager count beside it already uses. The distinction the
-   mockup drew survives; the illegible end of it does not. */
+/* A real count gets full `--ink` (`--ink-faint` is 2.5:1, under AA); the
+   non-count states stay at `--ink-soft`. */
 .findbar__count {
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
@@ -73,15 +59,12 @@
 .findbar__count.is-none {
   color: var(--ink-soft);
 }
-/* Said in the bar, not as an empty result: a note with no recognition cannot be
-   searched at all, which is a different fact from "no matches here". */
+/* A note with no recognition can't be searched, a different fact from "no matches". */
 .findbar__note {
   font-size: var(--fs-caption);
   color: var(--ink-soft);
 }
-/* "These are close matches" — said once, beside the counter, never per match.
-   Same soft treatment as the aside above, because it qualifies the count rather
-   than competing with it; the count is still the thing being read. */
+/* "These are close matches", said once beside the counter. */
 .findbar__fuzzy {
   font-size: var(--fs-caption);
   color: var(--ink-soft);
@@ -89,10 +72,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* The manual-fuzzy OPT-IN affordance (in-doc-search Phase 3): shown beside the
-   "No matches" count when a typo-tolerant search WOULD find something. A quiet
-   inline action, link-styled off --accent so it reads as "do this" without
-   competing with the counter — never a heavy button for a suggestion. */
+/* The typo-tolerant search opt-in beside "No matches": a quiet accent link. */
 .findbar__ask {
   border: 0;
   background: none;
@@ -113,20 +93,14 @@
   cursor: default;
 }
 
-/* An OVAL, not a rectangle. The rectangles come from the device's own
-   recognition and can sit slightly off the ink, so a hard box asserts a
-   precision the data does not have — an oval reads as "circled", which is
-   inherently approximate, and matches a pen going round a word in a notebook.
-   Outline rather than fill throughout: a wash would obscure the very ink it is
-   pointing at. */
+/* An oval outline, not a box: device rects sit slightly off the ink, and a fill
+   would hide the ink it points at. */
 .findbox {
   position: absolute;
   pointer-events: none;
 }
-/* `preserveAspectRatio="none"` stretches one drawn loop to any word's
-   proportions; `non-scaling-stroke` then keeps the line an even weight instead
-   of smearing with it — without it a long word gets a fat horizontal stroke and
-   a thin vertical one. `overflow: visible` lets the overshoot leave the box. */
+/* `preserveAspectRatio="none"` stretches one loop to any word; `non-scaling-stroke`
+   keeps the line even; `overflow: visible` lets the overshoot out. */
 .findbox svg {
   display: block;
   width: 100%;
@@ -142,30 +116,19 @@
   stroke-width: 1.4;
   opacity: 0.55;
 }
-/* Nothing but the stroke separates the current match, since the background is
-   transparent by design — a fill would sit on top of the ink it circles. */
 .findbox.is-current path {
   stroke-width: 2.2;
   opacity: 1;
 }
 
-/* ================= NON-.note STAGE =================
-   The reader's other two outcomes, in the slot `.stage` occupies (exactly one of
-   the two is ever in the grid; the other is `hidden`). An image is shown as
-   itself; anything else falls back to the shared `.empty` block, so the "no
-   preview" state inherits the library's existing empty-state typography rather
-   than introducing a second voice for the same idea. */
+/* ---- non-.note stage ----
+   An image shown as itself, else the shared `.empty` block. */
 .filestage {
   position: relative;
   overflow: auto;
   display: grid;
-  /* A DEFINITE ROW, so the image's `max-height: 100%` has something to resolve
-     against. Implicit rows are content-sized, which makes that percentage
-     indefinite — so it silently did nothing and `Fit` fitted the WIDTH only,
-     making it identical to `Fit ↔` and the second step pointless. `minmax(0, 1fr)`
-     rather than `1fr` because a bare `1fr` floors at min-content, which a tall
-     image would push past. A second child (the unpreviewable-file message) still
-     gets an implicit auto row beneath. */
+  /* A definite row so the image's `max-height: 100%` resolves (else `Fit` only
+     fits width); `minmax(0, 1fr)` because `1fr` floors at min-content. */
   grid-template-rows: minmax(0, 1fr);
   place-items: center;
   padding: 28px;
@@ -189,13 +152,8 @@
   text-decoration: none;
 }
 
-/* The page and the recognized-text aside are SIBLINGS in a row: opening the
-   panel narrows the page rather than covering it, which is why the reader
-   re-runs showPage on every toggle. The gap is `--panel-gap`; the panel widths
-   are `--panel-w` / `--panel-w-wide` — the canvas is sized in JS against the
-   stage, and the reader's relayout reads all three straight off those tokens
-   (getComputedStyle), so the JS subtracts exactly what this layout takes away
-   with nothing hand-synced. */
+/* Page and side panels are siblings: opening a panel narrows the page. JS sizes
+   the canvas reading `--panel-gap`/`--panel-w*` via getComputedStyle. */
 .page-wrap {
   position: relative;
   display: flex;
@@ -203,31 +161,23 @@
   align-items: flex-start;
 }
 
-/* ================= RECOGNIZED TEXT =================
-   The card, head and state treatment are the SHARED side panel now
-   (src/ui/sidePanel.ts, 15-side-panel.css); the OCR panel rides `.side-panel`
-   with the `.ocr` hook namespace. All that stays here is the body's own text
-   look — the transcript, which is unlike the layers panel's row list. */
+/* ---- recognized text ----
+   The card is the shared side panel (`.ocr` hooks); only the transcript look lives here. */
 .ocr__body {
   font-size: var(--fs-body);
   line-height: 1.62;
   color: var(--ink-soft);
-  /* The transcript carries the device's own line breaks — preserve them. */
+  /* The transcript carries the device's own line breaks. */
   white-space: pre-wrap;
 }
-/* Reserved for the search-highlight pass: the panel already renders <mark>. */
 .ocr__body mark {
   background: color-mix(in srgb, var(--accent) 24%, transparent);
   color: var(--ink);
   border-radius: 2px;
   padding: 0 1px;
 }
-/* The loading / failed / genuinely-empty states are the SHARED
-   `.side-panel__state` now (15-side-panel.css) — promoted from here so every
-   docked panel says "still loading / nothing here / that failed" identically. */
 
-/* A page with no recognized text still shows the control — dimmed, so the
-   feature stays discoverable instead of vanishing between pages. */
+/* Dimmed rather than hidden on a page without recognized text, so it stays discoverable. */
 .btn:disabled {
   opacity: 0.42;
   cursor: default;
@@ -238,7 +188,8 @@
   background: transparent;
 }
 
-/* ================= TOAST ================= */
+/* ---- toast ---- */
+
 .toast {
   position: fixed;
   left: 50%;

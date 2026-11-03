@@ -1,11 +1,6 @@
-// localStorage that cannot break boot.
-//
-// `localStorage` can *throw on access*, not merely return null: Safari's private
-// mode and Chrome's "block all cookies" both raise a SecurityError when the
-// property is read, and a write can raise QuotaExceededError. An unguarded read
-// at module scope therefore takes the whole app down before it paints. Every
-// preference we keep (`sn.mode`, `sn.theme`) goes through here, and a failure
-// degrades to "no stored preference" rather than an exception.
+// localStorage that cannot break boot: access can throw (Safari private mode,
+// blocked cookies raise SecurityError; writes can raise QuotaExceededError), so
+// a failure degrades to "no stored preference".
 
 function backing(): Storage | null {
   try {
@@ -29,9 +24,8 @@ export function writeLocal(key: string, value: string): void {
   try {
     backing()?.setItem(key, value);
   } catch {
-    /* private mode, disabled storage, or over quota — nothing we can do or should say */
+    /* private mode, disabled storage, or over quota */
   }
 }
 
-/** The pinned gallery sort order. Read by `library.ts` at construction. */
 export const SORT_KEY = "sn.sort";

@@ -1,142 +1,60 @@
-// The PAGE INDEX — the filmstrip a viewer docks beside its page: one thumbnail
-// per page, click to jump, the current page marked, and (where a viewer has
-// something to say about it) a per-page badge.
-//
-// ONE COMPONENT, TWO VIEWERS. The `.note` reader and the PDF viewer had a strip
-// each: the same markup, the same `.filmstrip*` classes, the same highlight and
-// the same click-to-jump, written twice. They differ in exactly ONE thing — the
-// PAINT. A `.note` page goes through `NoteRenderer`/`LazyEngine`; a PDF page comes
-// from the worker's `PdfSession`. So the paint is the parameter and everything
-// else lives here.
-//
-// WHY THIS IS VIRTUALISED, AND WHY THAT IS THE POINT. A strip is a row per page,
-// and a page is a canvas. Build them all up front and a 1,700-page document holds
-// 1,700 canvases: at a ~120px thumbnail that is tens of megabytes of backing
-// store that nothing ever releases, in a tab a phone may kill for it. So the rows
-// are a `VirtualList` window (`src/ui/virtualList.ts`) — the DOM cost is a
-// viewport, not a document — and a row that leaves the window is UNMOUNTED: its
-// paint is cancelled by the caller's `unmount` and its canvas is resized to 0×0,
-// which is the one call that actually frees a canvas's pixels.
-//
-// HOOK CLASSES. The `.filmstrip*` classes carry the LOOK and are deliberately
-// shared, which means a bare `.filmstrip` selector matches every viewer that
-// mounts one at once. A caller that needs to select its own strip passes
-// `stripHook` for an additional namespace class (`pdf-filmstrip`) — the same
-// shared-appearance / feature-hook split `createSidePanel`'s `hookPrefix` makes.
+// The page index: a virtualised thumbnail filmstrip shared by the reader and the
+// PDF viewer, with the paint as a parameter. Rows leaving the window are unmounted
+// and their canvas zeroed, so a 1,700-page document never holds 1,700 canvases.
 
 import { el } from "../ui/dom";
 import { createSidePanel } from "../ui/sidePanel";
 import { VirtualList } from "../ui/virtualList";
 import { svg, VIEWER_IC } from "./viewerIcons";
 
-/**
- * The fixed row height, in px — `--preview-h-filmstrip` (the thumbnail's
- * `--preview-h-panel` plus its number and gap). A vertical strip lives on a
- * FIXED item height: it is what keeps the virtual scroll math exact, and it is
- * why a row reserves its shape through `--thumb-aspect` (a WIDTH) rather than by
- * growing.
- */
+/** Fixed row height, px (`--preview-h-filmstrip`); the virtual scroll math depends on it. */
 const ROW_H = 124;
 
-/** One row of the strip, as the paint sees it. */
 export interface PageIndexRow {
-  /** 0-based page index. */
   readonly index: number;
-  /** The `.filmstrip__page` button. */
   readonly el: HTMLElement;
-  /** The thumbnail canvas — where the paint goes. */
   readonly canvas: HTMLCanvasElement;
-  /** Toggle the row's loading treatment (`.is-loading` on the thumb). */
   setLoading(on: boolean): void;
-  /** Reserve or correct the row's shape (width ÷ height). */
   setAspect(aspect: number): void;
 }
 
 export interface PageIndexOptions {
-  /** `id` for the panel `<aside>` — an opener's `aria-controls` target. */
   id: string;
-  /**
-   * An extra hook class on the `.filmstrip` rail (e.g. `"pdf-filmstrip"`), so a
-   * caller can select ITS strip while the look stays on the shared classes.
-   */
+  /** Extra hook class, since the shared `.filmstrip` classes match every mounted viewer. */
   stripHook?: string;
-  /** The user picked a page. */
   onPick(index: number): void;
   /**
-   * A row entered the window: START ITS PAINT. Free to be async — nothing here
-   * awaits it — but it MUST tolerate being superseded: the row may be unmounted
-   * (see {@link unmount}) or the whole strip rebuilt before the pixels land, and
-   * a paint that finishes late must drop them rather than draw into a canvas
-   * that now stands for another page.
+   * Start the row's paint. Must tolerate being superseded: a late paint drops its
+   * pixels rather than draw into a canvas now standing for another page.
    */
   mount(row: PageIndexRow): void;
-  /**
-   * The row left the window, or the strip was cleared. Cancel or forget the
-   * paint. The canvas is zeroed by the strip immediately afterwards, so this
-   * only has to release whatever the CALLER holds (an engine slot, a queue
-   * entry, a decoded bitmap).
-   */
+  /** Release whatever the caller holds; the strip zeroes the canvas afterwards. */
   unmount(row: PageIndexRow): void;
-  /**
-   * The row's reserved shape (width ÷ height), or `null` to leave the
-   * stylesheet's own default. Reserved BEFORE anything paints, so the strip does
-   * not reflow under the pointer as thumbnails land; a viewer that only learns a
-   * page's real size when its thumbnail resolves corrects it with
-   * {@link PageIndexRow.setAspect} and answers the corrected value here after
-   * (rows are rebuilt as they scroll back in).
-   */
+  /** Reserved shape (width ÷ height) before painting, so the strip does not reflow; `null` for the CSS default. */
   aspect?(index: number): number | null;
-  /** The row starts in the loading treatment. */
   loading?(index: number): boolean;
-  /**
-   * The word the row's accessible name uses for a page that carries ink —
-   * "written" for a notebook, "annotated" for a PDF's mark. Same fact, and the
-   * two viewers genuinely mean different things by it: a `.note` page was
-   * WRITTEN, a PDF page someone drew on was ANNOTATED. The stroke itself is one
-   * device for both (it is the same fact); only the word forks.
-   */
+  /** Accessible-name word for an inked page: "written" (note) or "annotated" (PDF). */
   inkWord?: string;
 }
 
 export interface PageIndex {
-  /** The panel `<aside>`. Mount it; it is also the strip's SCROLL container. */
+  /** The panel `<aside>`, also the scroll container. */
   readonly el: HTMLElement;
-  /** (Re)build the strip for a document of `count` pages, all unpainted. */
   setPages(count: number): void;
-  /** Move the `aria-current` mark and scroll that row into view. */
   setCurrent(index: number): void;
-  /**
-   * Per-page counts to badge (`.filmstrip__hits`). Held, not just applied: rows
-   * built later — by a scroll, or by a rebuild — carry the badge they are due.
-   */
+  /** Held, so rows built later carry their badge. */
   setBadges(counts: ReadonlyMap<number, number>): void;
   /**
-   * Which pages carry ink, by page index: `true` draws the stroke, `false`
-   * draws nothing — and a MISSING entry is the third state, "the server has not
-   * looked at this page yet". Held like {@link setBadges}, so rows the virtual
-   * window builds later wear the mark they are due.
-   *
-   * ALL-OR-NOTHING, and the component enforces it rather than trusting the
-   * caller: if the map does not cover every page, NO row draws a stroke. A rail
-   * that is half filled in reads as "those other pages are empty" about pages
-   * nobody has looked at — the exact misreading the missing-entry state exists
-   * to prevent, arriving through the eye instead of through the API. This is
-   * why the argument is a map and not the set of inked pages: a set cannot tell
-   * "empty" from "not yet looked", so it could not make this check.
+   * A missing entry means "not looked at yet". All-or-nothing: unless the map
+   * covers every page, no row draws a stroke, so a half-filled rail cannot imply
+   * unexamined pages are empty.
    */
   setInk(ink: ReadonlyMap<number, boolean>): void;
-  /**
-   * The row's thumbnail canvas IF that row is inside the rendered window — the
-   * reader's blur-up source. `null` for a page whose row does not currently
-   * exist, which is the normal case for a jump across a long document.
-   */
+  /** The row's canvas if it is in the rendered window (the reader's blur-up source). */
   thumbCanvas(index: number): HTMLCanvasElement | null;
-  /** Re-measure the window (after a resize, or after the panel is revealed). */
   refresh(): void;
   setOpen(open: boolean): void;
-  /** Drop every row (each is unmounted). The strip stays usable. */
   clear(): void;
-  /** Tear down for good. */
   destroy(): void;
 }
 
@@ -157,14 +75,8 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
   let badges: ReadonlyMap<number, number> = new Map();
   let ink: ReadonlyMap<number, boolean> = new Map();
   const inkWord = opts.inkWord ?? "written";
-  /** The rows inside the virtual window, by index. Mirrors the list's own set. */
   const rows = new Map<number, PageIndexRow>();
 
-  /**
-   * The badge, rewritten from scratch. Removing first is what makes this safe to
-   * call on a row that already carries one — a count that dropped to zero has to
-   * take the badge away, not leave a stale number sitting on the page.
-   */
   function applyBadge(row: PageIndexRow): void {
     row.el.querySelector(".filmstrip__hits")?.remove();
     const n = badges.get(row.index);
@@ -174,20 +86,10 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
   }
 
   /**
-   * The ink stroke, and the row's accessible name along with it.
-   *
-   * THE CLAIM IS ONLY EVER POSITIVE. `true` marks the row; `false` and "not yet
-   * looked" are both drawn — and both NAMED — identically, as an unmarked row.
-   * So the absence of a stroke never asserts that a page is empty, which is the
-   * safe direction for a fact the server is still filling in behind the reader.
-   *
-   * The stroke is a `::before` and stays out of the accessibility tree; the fact
-   * reaches a screen reader as a WORD on the row's own name instead, because a
-   * decorative rule that is announced would say "image" on every written page.
+   * Only ever a positive claim: `false` and unknown look and are named alike. The
+   * stroke is a `::before`, so the fact reaches screen readers as a word in the name.
    */
   function applyInk(row: PageIndexRow): void {
-    // A map that does not cover the document is not partial information here —
-    // it is no information (see `setInk`).
     const known = total > 0 && ink.size >= total;
     const inked = known && ink.get(row.index) === true;
     row.el.classList.toggle("filmstrip__page--inked", inked);
@@ -196,12 +98,7 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
 
   function buildRow(index: number): HTMLElement {
     const canvas = el("canvas");
-    // EMPTY MEANS 0×0. A fresh canvas is 300×150 with nothing drawn on it, which
-    // reads to every "has this row been painted?" test in the app as a real
-    // bitmap — and the reader's blur-up believed it, blitting a transparent
-    // rectangle over the page instead of falling back to the ruled sheet. A
-    // recycled row is zeroed for the same reason (see `dropRow`); a new one
-    // starts there.
+    // Empty means 0×0: a fresh 300×150 canvas reads as painted to every check.
     canvas.width = 0;
     canvas.height = 0;
     const thumb = el("div", { class: "filmstrip__thumb" }, canvas);
@@ -237,12 +134,7 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
     return btn;
   }
 
-  /**
-   * A row leaving the window. `unmount` first (the caller may still want to read
-   * the canvas), THEN zero the canvas: setting `width`/`height` to 0 is what
-   * actually frees a canvas's backing store. Dropping the element alone leaves
-   * the pixels to a garbage collector that has no idea they are megabytes.
-   */
+  /** `unmount` first, then zero the canvas, which is what frees its backing store. */
   function dropRow(index: number): void {
     const row = rows.get(index);
     if (!row) return;
@@ -260,8 +152,7 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
     for (const index of [...rows.keys()]) dropRow(index);
     total = 0;
     strip.replaceChildren();
-    // `VirtualList.destroy` empties its host, and the host is the panel body —
-    // so the rail itself has to go back in for the next `setPages`.
+    // `VirtualList.destroy` empties its host (the panel body), so re-insert the rail.
     panel.body.replaceChildren(strip);
   }
 
@@ -288,9 +179,7 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
     setCurrent(index: number): void {
       current = index;
       for (const [i, row] of rows) row.el.setAttribute("aria-current", String(i === index));
-      // The LIST scrolls, not the element: the target row may not exist yet (a
-      // deep link or a find step lands well outside the window), and only the
-      // list knows where a row that has not been built would be.
+      // The list scrolls, since the target row may not be built yet.
       list?.scrollIntoView(index);
     },
 
@@ -314,8 +203,7 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
 
     setOpen(open: boolean): void {
       panel.setOpen(open);
-      // A hidden panel measures 0×0, so the window it computed while shut is a
-      // guess. Re-measure on the way in — nothing else fires a scroll event.
+      // A hidden panel measured 0×0; re-measure on reveal.
       if (open) list?.refresh();
     },
 

@@ -1,29 +1,8 @@
-// THE UPLOAD ZONE — the drag/drop target over a
-// surface, the queue behind it, and the progress rows it draws.
-//
-// THREE PIECES, SEPARATED ON PURPOSE, because only one of them is about uploads:
-//
-//   1. `preflightUpload` — the pure gate. Would this file be refused, and in
-//      whose words? Shared by the drop path, the picker path and (by reason) the
-//      server's own refusal, so a file rejected here and one rejected by the
-//      server are described identically.
-//   2. `createTransferList` — the progress ROWS: a name, a bar, a state, a
-//      Cancel. It knows nothing about uploading. `.spd`/`.txt` DOWNLOAD progress
-//      is bytes RECEIVED through a completely
-//      different transport, but it is the same component on screen — so it is a
-//      seam that takes rows and hands back clicks, and that is all.
-//   3. `createUploadZone` — the drag target + the queue model that feeds (2).
-//
-// IT IS INDEPENDENT OF THE GALLERY. Everything it needs about where it is —
-// which folder a drop lands in, whether that folder is the device's TEMPLATE
-// folder, how much room the account has left — arrives through `UploadZoneDeps`
-// as functions, so a second surface (the reader, a folder picker) can mount one
-// without library.ts being involved.
-//
-// ONE AT A TIME. The queue sends files sequentially rather than in parallel: a
-// browser allows about six connections per origin and the server serialises on
-// one coarse lock, so a fan-out of eight PDFs would compete with the gallery's
-// own reads for no gain in total time.
+// The upload zone: a pure pre-flight gate (`preflightUpload`), a progress-row
+// component that knows nothing about uploads (`createTransferList`), and the
+// drag target + queue (`createUploadZone`). Location facts arrive through deps,
+// so it is independent of the gallery. Files go one at a time: the server
+// serialises on one lock and parallel sends would starve the gallery's reads.
 
 import { el } from "./dom";
 import { formatBytes, isAcceptedUpload, nextAvailableName, uploadExtension } from "../core/fileKind";
@@ -33,27 +12,17 @@ import type { Entry, Id } from "../core/types";
 
 // --- the pure gate -----------------------------------------------------------
 
-/** A file the interface will not send, and the line that says why. */
 export interface UploadRefusedResult {
   ok: false;
   reason: UploadRefusal;
-  /** The interface-voice line, naming this file's problem specifically. */
   message: string;
 }
 
 export type PreflightResult = { ok: true } | UploadRefusedResult;
 
 /**
- * What to SAY about a refusal, in the interface's own voice.
- *
- * ONE VOCABULARY FOR BOTH SIDES. A file the browser refuses before sending and a
- * file the server refuses after receiving it are the same event to the person who
- * dropped it, so the words come from here in both cases — the pre-flight below
- * calls this, and so does the queue when it catches an {@link UploadRefusedError}.
- *
- * The type line NAMES THE EXTENSION rather than listing what is allowed: "The
- * Nomad can't open .xyz" says the one thing that is true about the file in hand,
- * where a wall of accepted extensions would make the reader do the comparison.
+ * Refusal copy, shared by the pre-flight and a server-side
+ * {@link UploadRefusedError} so both read identically. Names the extension.
  */
 export function uploadRefusalMessage(reason: UploadRefusal, file: { name: string; size: number }): string {
   if (reason === "type") {
@@ -65,17 +34,9 @@ export function uploadRefusalMessage(reason: UploadRefusal, file: { name: string
 }
 
 /**
- * Should this file be sent at all?
- *
- * REFUSED BEFORE THE TRANSFER, which is the whole point: a 200 MB PDF that the
- * account has no room for must fail in the instant it is dropped, not after four
- * minutes of upload. Both checks are facts the browser already holds — the name
- * and the size — so neither costs a round trip.
- *
- * `remaining` is bytes of quota left, or **null when it is not known** (the usage
- * endpoint has not answered, or the account has no quota). Unknown NEVER blocks:
- * refusing on a number we do not have would turn a missing meter into a broken
- * feature, and the server's 413 is the authority regardless.
+ * Should this file be sent at all? Refused before the transfer, from name and
+ * size. `remaining` null (unknown quota) never blocks; the server's 413 is the
+ * authority.
  */
 export function preflightUpload(file: { name: string; size: number }, remaining: number | null): PreflightResult {
   if (!isAcceptedUpload(file.name)) {
@@ -92,54 +53,33 @@ export function preflightUpload(file: { name: string; size: number }, remaining:
 
 // --- the queue model ---------------------------------------------------------
 
-/**
- * Where one file is in its life.
- *
- * `failed` and `cancelled` are DIFFERENT states, not one "didn't finish": a
- * cancelled row is something the user did and needs no explanation, while a
- * failed one owes them a reason. Collapsing them would make the interface
- * apologise for obeying.
- */
+/** `cancelled` (user's choice) and `failed` (owes a reason) stay distinct. */
 export type TransferState = "queued" | "sending" | "done" | "failed" | "cancelled";
 
-/** One row of the transfer list — the whole of what {@link createTransferList} draws. */
 export interface TransferRow {
   readonly id: string;
   readonly name: string;
   readonly size: number;
   state: TransferState;
-  /** 0..1. Meaningful while `sending`; 1 once `done`. */
+  /** 0..1, meaningful while `sending`. */
   progress: number;
-  /** Why it failed, in the interface's voice — null unless `state === "failed"`. */
   message: string | null;
 }
 
 export interface TransferListDeps {
-  /** Where the list mounts. Created empty and hidden; it never appends anything
-   *  while there is nothing to show. */
   host: HTMLElement;
-  /** A row's Cancel was pressed. Only shown for `queued`/`sending` rows. */
   onCancel: (id: string) => void;
-  /** Dismiss the whole finished list ("Done"). */
   onDismiss: () => void;
 }
 
 export interface TransferList {
-  /** Repaint from the current rows. Cheap and idempotent — call it per change. */
   render(rows: readonly TransferRow[]): void;
   destroy(): void;
 }
 
 /**
- * The progress ROWS, as a component that knows nothing about what is being
- * transferred (see this file's header — `.spd`/`.txt` download progress is meant
- * to reuse exactly this).
- *
- * Rows are rebuilt per render rather than diffed: the list is at most a handful
- * of items and lives for seconds. The one thing that is NOT rebuilt is the bar's
- * width, which is written as a style on the existing node when only the fraction
- * moved — a `replaceChildren` on every progress event would restart the CSS
- * transition sixty times a second and make the bar stutter instead of glide.
+ * The progress rows. Rebuilt per render except the bar width, which is written
+ * in place when only the fraction moved so the CSS transition doesn't restart.
  */
 export function createTransferList(deps: TransferListDeps): TransferList {
   const list = el("ol", { class: "transfers__list" });
@@ -148,19 +88,14 @@ export function createTransferList(deps: TransferListDeps): TransferList {
     {
       class: "transfers",
       hidden: true,
-      // POLITE, not assertive: a progress bar that interrupts whatever a screen
-      // reader is saying every time a percentage moves is unusable. The per-row
-      // text carries the state; the bar itself is `aria-hidden` decoration.
+      // Polite: the per-row text carries the state; the bar is `aria-hidden`.
       "aria-label": "Uploads",
     },
     list,
   );
   deps.host.append(panel);
 
-  /** The bar + state-line nodes per row id, so a fraction change can be written
-   *  in place. Held as a map rather than re-queried by selector: row ids are ours,
-   *  but a `querySelector` over an attribute value is one escaping rule away from
-   *  a bug and needs `CSS.escape`, which not every test DOM implements. */
+  /** Bar and label nodes per row id, held in a map to avoid `CSS.escape` selectors. */
   const bars = new Map<string, { fill: HTMLElement; label: HTMLElement }>();
   let painted = "";
 
@@ -193,16 +128,12 @@ export function createTransferList(deps: TransferListDeps): TransferList {
         el("span", { class: "transfer__name", text: row.name, title: row.name }),
         label,
       ),
-      // The bar is the SAME fact as the state line beside it, so it is hidden
-      // from assistive tech rather than announced twice.
       el("div", { class: "transfer__track", "aria-hidden": "true" }, bar),
     );
     if (row.state === "queued" || row.state === "sending") {
       const cancel = el("button", {
         class: "transfer__cancel",
         type: "button",
-        // Named per row: a list of identical "Cancel" buttons tells a screen
-        // reader nothing about which transfer it is on.
         "aria-label": `Cancel upload of ${row.name}`,
         text: "Cancel",
       });
@@ -222,16 +153,13 @@ export function createTransferList(deps: TransferListDeps): TransferList {
         return;
       }
       panel.hidden = false;
-      // The SHAPE of the list — which rows, in which state — as one string. When
-      // only a fraction moved the shape is unchanged, and the bars are nudged in
-      // place instead of the DOM being rebuilt under a running transition.
+      // The list's shape; unchanged means only fractions moved.
       const shape = rows.map((r) => `${r.id}:${r.state}:${r.message ?? ""}`).join("|");
       if (shape === painted) {
         for (const row of rows) {
           const nodes = bars.get(row.id);
           if (!nodes) continue;
           nodes.fill.style.width = `${Math.round(row.progress * 100)}%`;
-          // The percentage in the state line is text, so it moves with the bar.
           nodes.label.textContent = stateLabel(row);
         }
         return;
@@ -239,8 +167,7 @@ export function createTransferList(deps: TransferListDeps): TransferList {
       bars.clear();
       list.replaceChildren(...rows.map((row) => rowNode(row)));
       painted = shape;
-      // Only once nothing is in flight: a Dismiss control beside a running
-      // transfer invites the reading that it would stop it.
+      // Dismiss only once nothing is in flight, so it can't read as "stop".
       if (rows.every((r) => r.state !== "queued" && r.state !== "sending")) {
         const done = el("button", { class: "transfers__dismiss", type: "button", text: "Dismiss" });
         done.addEventListener("click", () => deps.onDismiss());
@@ -257,57 +184,26 @@ export function createTransferList(deps: TransferListDeps): TransferList {
 
 // --- the zone ----------------------------------------------------------------
 
-/** Where a drop would land, and what that place MEANS. */
 export interface UploadDestination {
-  /** The folder id, or null for the library root. */
   id: Id | null;
-  /**
-   * This folder is the device's TEMPLATE folder (`NOTE/MyStyle`) — resolved by
-   * the rail's category identity, never by name. It changes only what the
-   * interface SAYS: the dropzone offers a template, the toast names one. Nothing
-   * is filtered or routed differently, so a `.txt` dropped here still uploads
-   * normally with the generic copy.
-   */
+  /** The device's template folder (`NOTE/MyStyle`); changes only the copy. */
   templates: boolean;
 }
 
 export interface UploadZoneDeps {
-  /**
-   * The element a drop is accepted over — the gallery. Listeners are attached
-   * here, and the overlay is drawn into {@link UploadZoneDeps.overlayHost}.
-   */
   target: HTMLElement;
-  /** Where the drag overlay mounts (a positioned ancestor of `target`). */
   overlayHost: HTMLElement;
-  /** Where the progress rows mount. */
   listHost: HTMLElement;
-  /**
-   * Where a drop would land RIGHT NOW, or null when this surface cannot take one
-   * (a search, a destination, a category with no folder yet). Read per event, so
-   * navigating mid-drag can never upload into the folder you left.
-   */
+  /** Where a drop lands now, or null; read per event so mid-drag navigation is safe. */
   destination: () => UploadDestination | null;
-  /** Bytes of quota left, or null when unknown — see {@link preflightUpload}. */
   remainingBytes: () => number | null;
   /**
-   * The names already in a destination folder, or null when the caller does not
-   * know them (that folder has never been listed).
-   *
-   * This is what makes the conflict prompt cost NOTHING: the clash is found
-   * against a listing the app already holds, so the alternative — send the file,
-   * take a 409, send it again — is never paid for. Null means "cannot tell", and
-   * the zone then simply does not ask: the server's default (`rename`) is the
-   * safe answer, and inventing a prompt from an unknown is worse than not asking.
+   * Names already in a folder, or null if unknown (then the zone doesn't ask and
+   * the server's default `rename` applies).
    */
   existingNames: (folderId: Id | null) => readonly string[] | null;
-  /**
-   * Ask what to do about one name that is already taken. Injected rather than
-   * imported so the queue's branching is testable without a real `<dialog>` —
-   * `ui/uploadConflict.ts` is what library.ts passes.
-   */
+  /** Injected so the queue's branching is testable without a real `<dialog>`. */
   confirmConflict: (req: { name: string; taken: readonly string[]; remaining: number }) => Promise<ConflictAnswer>;
-  /** The seam call. Separate from `Api` so the zone can be tested (and reused)
-   *  without one. */
   upload: (
     folderId: Id | null,
     file: File,
@@ -315,7 +211,6 @@ export interface UploadZoneDeps {
     signal: AbortSignal,
     onConflict: UploadConflictMode,
   ) => Promise<Entry>;
-  /** A file landed. The caller splices the row into its listing and repaints. */
   onUploaded: (entry: Entry, destination: UploadDestination) => void;
   toast: (message: string) => void;
   /** Route a failure the shell owns (a dead session). True = already handled. */
@@ -323,22 +218,14 @@ export interface UploadZoneDeps {
 }
 
 export interface UploadZone {
-  /**
-   * Queue files for upload — the picker path and the drop path both land here,
-   * so pre-flight, refusal copy and the queue are shared by construction rather
-   * than duplicated per entry point.
-   */
+  /** Queue files; the picker and drop paths both land here. */
   add(files: readonly File[]): void;
-  /** The queue, for tests and for anything that wants to render it elsewhere. */
   rows(): readonly TransferRow[];
-  /** Stop a queued or in-flight transfer. */
   cancel(id: string): void;
-  /** Whether the dropzone overlay is currently up (drag in progress). */
   isDragging(): boolean;
   destroy(): void;
 }
 
-/** Does this drag carry FILES (rather than a text selection or a card)? */
 function carriesFiles(e: DragEvent): boolean {
   const types = e.dataTransfer?.types;
   if (!types) return false;
@@ -351,9 +238,8 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
   const zoneHint = el("p", { class: "dropzone__hint" });
   const overlay = el(
     "div",
-    // `aria-hidden`: the overlay is pure feedback for a pointer gesture already
-    // in progress. The KEYBOARD path to the same capability is the toolbar's
-    // Upload button, which is a real focusable control.
+    // `aria-hidden`: pointer feedback only; the toolbar Upload button is the
+    // keyboard path.
     { class: "dropzone", hidden: true, "aria-hidden": "true" },
     el("div", { class: "dropzone__sheet" }, zoneTitle, zoneHint),
   );
@@ -361,31 +247,20 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
 
   // --- the queue ---
   const queue: TransferRow[] = [];
-  /** The `File` per row — kept OUT of {@link TransferRow} so the row type stays a
-   *  pure view model the download half can produce too. */
+  /** The `File` per row, kept out of {@link TransferRow} so rows stay a pure view model. */
   const files = new Map<string, File>();
-  /** Where each row is going, captured when it was queued — so a queue that
-   *  outlives a navigation still uploads into the folder it was dropped on. */
+  /** Captured at queue time, so a queue outliving a navigation keeps its folder. */
   const destinations = new Map<string, UploadDestination>();
-  /** What was ANSWERED about this row's name clash, if there was one. Never
-   *  `replace` unless the person said so. */
+  /** The answered clash mode; never `replace` unless the person chose it. */
   const modes = new Map<string, UploadConflictMode>();
-  /** Rows that replaced an existing file, so the toast can name the version
-   *  rather than claim something new arrived. */
   const replaced = new Set<string>();
   const controllers = new Map<string, AbortController>();
-  /** Rows the user cancelled, so the abort's rejection is read as a choice
-   *  rather than as a failure to explain. */
+  /** User-cancelled rows, so the abort's rejection isn't reported as a failure. */
   const cancelled = new Set<string>();
   /**
-   * Rows that are queued but must NOT be sent yet: their name clashes and the
-   * question has not been answered.
-   *
-   * They are real rows from the moment of the drop (the list has to show the
-   * batch in the order it arrived), so "queued" alone cannot mean "ready to
-   * send" any more — anything that nudges the pump, including cancelling a
-   * different row, would otherwise start a transfer whose conflict mode has not
-   * been decided, which is precisely the `replace`-without-being-asked hazard.
+   * Queued rows whose name clash is not answered yet. Anything that nudges the
+   * pump must skip them, or they'd send with an undecided (possibly `replace`)
+   * mode.
    */
   const holding = new Set<string>();
   let seq = 0;
@@ -396,8 +271,7 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
     host: deps.listHost,
     onCancel: (id) => cancel(id),
     onDismiss: () => {
-      // Only what is finished: a dismiss during a later upload must not drop the
-      // row that is still running.
+      // Only finished rows; a running one must survive a dismiss.
       for (let i = queue.length - 1; i >= 0; i--) {
         const row = queue[i]!;
         if (row.state !== "queued" && row.state !== "sending") queue.splice(i, 1);
@@ -419,12 +293,11 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
     controllers.get(id)?.abort();
     controllers.delete(id);
     repaint();
-    // A row cancelled while merely QUEUED never enters `send`, so the pump has to
-    // be nudged or the queue would stall behind a row nobody is sending.
+    // A row cancelled while queued never enters `send`; nudge the pump.
     void pump();
   }
 
-  /** The next transfer, one at a time. Re-entrant-safe via `running`. */
+  /** The next transfer, one at a time; re-entrant-safe via `running`. */
   async function pump(): Promise<void> {
     if (running || destroyed) return;
     running = true;
@@ -465,8 +338,7 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
         dest.id,
         file,
         (fraction) => {
-          // A superseded/cancelled row must not be re-painted as sending by a
-          // progress event that was already in flight when it was aborted.
+          // Ignore a progress event that was in flight when the row was aborted.
           if (row.state !== "sending") return;
           row.progress = fraction;
           repaint();
@@ -479,9 +351,7 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
       row.progress = 1;
       repaint();
       deps.onUploaded(entry, dest);
-      // A REPLACE IS A DIFFERENT EVENT, so it gets its own sentence — and the
-      // sentence names the version, because "Replaced 'X'" on its own reads as a
-      // loss to anyone who has not been told otherwise.
+      // A replace names the version, so it doesn't read as a loss.
       deps.toast(
         replaced.has(row.id)
           ? `Replaced '${entry.name}'. The previous file is in its version history.`
@@ -496,8 +366,6 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
         return;
       }
       if (deps.handled?.(e)) {
-        // The shell has taken it (a dead session): the row stops, and there is
-        // nothing left for this list to explain.
         row.state = "failed";
         row.message = null;
         repaint();
@@ -523,23 +391,15 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
       deps.toast("There's nowhere to put a file here.");
       return;
     }
-    // Charged against the SAME headroom as the files ahead of it in this batch:
-    // three 4 MB files into 5 MB of space is two refusals, not three successes
-    // and a server error.
+    // Charged against the same headroom as earlier files in the batch.
     let budget = deps.remainingBytes();
     const planned: { id: string; file: File }[] = [];
-    // EVERY FILE GETS ITS ROW HERE, IN DROP ORDER, refused ones included. The
-    // conflict prompt below is async, so building the rows as its answers arrive
-    // would list a batch in the order it was ANSWERED — the second file above the
-    // first because the first was the one that had to be asked about.
+    // Every file gets its row here in drop order, before the async prompts.
     for (const file of incoming) {
       const id = `u${++seq}`;
       const check = preflightUpload(file, budget);
       if (!check.ok) {
-        // A refusal is still a ROW. It could have been only a toast, but then a
-        // batch of eight where two are refused would report the refusals one at a
-        // time in a control that disappears — and the person would have to
-        // remember which two. The row stays until dismissed.
+        // A refusal stays as a row until dismissed, so a batch's refusals stay visible.
         queue.push({ id, name: file.name, size: file.size, state: "failed", progress: 0, message: check.message });
         deps.toast(check.message);
         continue;
@@ -547,7 +407,6 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
       if (budget !== null) budget -= file.size;
       files.set(id, file);
       destinations.set(id, dest);
-      // HELD until its name question is settled — see `holding`.
       holding.add(id);
       queue.push({ id, name: file.name, size: file.size, state: "queued", progress: 0, message: null });
       planned.push({ id, file });
@@ -557,23 +416,13 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
   }
 
   /**
-   * Settle what happens to each queued file whose name is already taken, then
-   * release the batch to the pump (see `ui/uploadConflict.ts` for why it asks at
-   * all rather than letting the server auto-rename).
-   *
-   * ALL OF THIS HAPPENS BEFORE A SINGLE BYTE MOVES: the clash is found in the
-   * listing the app already holds, so a re-dropped file is never uploaded once to
-   * discover what to do with it and then uploaded again — which on a slow link is
-   * the difference between one transfer and two.
-   *
-   * ONE ANSWER CAN COVER THE REST. A drop of ten files where six clash must not
-   * be ten dialogs, so the prompt offers "do the same for the other N" and
-   * `sticky` carries that answer through the remainder — cancel included, which
-   * is what someone who dropped the wrong folder wants.
+   * Settle each clashing name before any byte moves, then release the batch to
+   * the pump. "Do the same for the rest" carries one answer (cancel included)
+   * through the remainder via `sticky`.
    */
   async function resolveConflicts(planned: readonly { id: string; file: File }[], dest: UploadDestination): Promise<void> {
-    // Read ONCE for the batch and updated locally as names are claimed, so two
-    // files called `notes.pdf` in one drop do not both preview as `notes (2).pdf`.
+    // Read once per batch and updated as names are claimed, so two `notes.pdf`
+    // in one drop don't both preview as `notes (2).pdf`.
     const known = deps.existingNames(dest.id);
     const taken = known === null ? null : [...known];
     const clashing = (name: string): boolean =>
@@ -583,7 +432,6 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
     for (let i = 0; i < planned.length; i++) {
       const { id, file } = planned[i]!;
       const row = queue.find((r) => r.id === id);
-      // Cancelled from the list while the dialog was up, or the shell went away.
       if (destroyed) return;
       if (!row || row.state !== "queued") {
         holding.delete(id);
@@ -602,8 +450,7 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
           answer = given.choice;
         }
         if (answer === "cancel") {
-          // NOTHING IS SENT. The row records that, so a batch does not silently
-          // shrink between what was dropped and what is in flight.
+          // The row records that nothing was sent.
           row.state = "cancelled";
           holding.delete(id);
           files.delete(id);
@@ -615,8 +462,6 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
 
       modes.set(id, mode);
       if (mode === "replace") replaced.add(id);
-      // A kept-both file claims its new name for the rest of the batch; a replace
-      // claims nothing, because the name was already there.
       if (taken !== null && mode === "rename") taken.push(nextAvailableName(file.name, taken));
       holding.delete(id);
       void pump();
@@ -624,20 +469,13 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
   }
 
   // --- drag handling ---
-  //
-  // COUNTED, not toggled. `dragleave` fires every time the pointer crosses into a
-  // CHILD of the target — every card, every caption — so a boolean would make the
-  // overlay flicker off and on across a gallery of forty tiles. The depth counter
-  // is the standard fix: enter increments, leave decrements, zero means gone.
+  // Counted, not toggled: `dragleave` fires on every child crossed.
   let depth = 0;
 
   function showOverlay(): void {
     const dest = deps.destination();
     if (!dest) return;
-    // THE MYSTYLE MOMENT. Dropping an image or PDF into MyStyle is
-    // not a generic upload — it is adding a template you can then write on, a
-    // capability that otherwise needs a cable. The interface knows where it is,
-    // so it says so. Confirmed real: a template placed here does reach the device.
+    // In MyStyle a dropped image or PDF becomes a device template, so say so.
     zoneTitle.textContent = dest.templates
       ? "Drop an image or PDF to add a template"
       : "Drop files to add them here";
@@ -660,9 +498,8 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
   };
   const onDragOver = (e: DragEvent): void => {
     if (!carriesFiles(e)) return;
-    // WITHOUT THIS THERE IS NO DROP. The default action of `dragover` is to
-    // refuse the drag, so a target that does not preventDefault every one of them
-    // never receives a `drop` at all — and the browser navigates to the file.
+    // Without preventDefault on every `dragover` there is no `drop`; the browser
+    // navigates to the file instead.
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
     if (overlay.hidden) showOverlay();
@@ -685,9 +522,8 @@ export function createUploadZone(deps: UploadZoneDeps): UploadZone {
   deps.target.addEventListener("dragleave", onDragLeave);
   deps.target.addEventListener("drop", onDrop);
 
-  // A file dropped OUTSIDE the target would otherwise navigate the whole tab to
-  // it, throwing the app away mid-session. Swallowed at the document, which is
-  // the only place that catches "somewhere else".
+  // A file dropped outside the target would navigate the tab away; swallow it.
+
   const swallow = (e: DragEvent): void => {
     if (!carriesFiles(e)) return;
     if (deps.target.contains(e.target as Node)) return;

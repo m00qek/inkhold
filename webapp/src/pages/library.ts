@@ -1,22 +1,8 @@
-// The library shell (P3) — the signed-in app: a left rail of folders, a topbar
-// (breadcrumbs, search, sort, view toggle, theme toggle), and a gallery grid of
-// lazily-thumbnailed notes, with the reader overlaying it. Ported from the
-// approved mockup; the chrome stays quiet and the note canvases carry the colour.
-//
-// This is a *controller* (created once in main.ts, kept alive across route
-// changes) rather than a per-render page, so the gallery's lazy state and the
-// reader survive navigating in and out of a note — matching the mockup, where the
-// gallery lives on behind the reader.
-//
-// THE ROUTE IS THE SOURCE OF TRUTH, AND THIS SHELL REACTS TO IT. It used to own
-// `folderId` as internal state and the rail called `navigate()` directly, which
-// meant opening a subfolder and reloading put you back at the root, the recycle
-// bin and the admin console had no address at all, and Back's meaning depended on
-// which of two navigation systems you had last used. Now every entry point — a
-// rail row, a gallery folder card, the breadcrumb, the search box, the bin — does
-// nothing but `go()` a URL, and the four `show*` methods below are the ONLY
-// writers of the state that URL describes. See `router.ts` for the rule and
-//  for why addressability and history are separate.
+// The library shell: rail, topbar and lazily-thumbnailed gallery, with the
+// reader overlaying it. A long-lived controller (created once in main.ts) so
+// gallery state survives opening a note. The route is the source of truth:
+// every entry point only `go()`s a URL, and the `show*` handlers are the only
+// writers of the state that URL describes (see `router.ts`).
 
 import { el } from "../ui/dom";
 import { ICONS, svg, type IconName } from "../ui/icons";
@@ -67,9 +53,7 @@ import {
 import { createPdfThumbs, type PdfThumbs } from "../render/pdfThumb";
 import { classify, reconcile } from "../sync/freshness";
 import { createReader, type Reader, type ReaderOrigin } from "./reader";
-// The multi-viewer seam: a file's type picks a viewer, all conforming to the one
-// `Viewer` shape (see `pages/viewer.ts`). The reader is the default; the `.spd`
-// and `.txt` stubs are wired in at `viewerFor` below.
+// A file's type picks a `Viewer` (`pages/viewer.ts`) in `viewerFor`.
 import { createSpdViewer } from "./spdViewer";
 import { createTxtViewer } from "./txtViewer";
 import { createPdfViewer } from "./pdfViewer";
@@ -77,186 +61,83 @@ import type { Viewer, ViewerDeps } from "./viewer";
 import { createNoteSearch, MIN_GLOBAL_QUERY_LEN, type SearchState } from "./noteSearch";
 import { createSearchService } from "../search/searchService";
 import { createDocSearch } from "../search/docSearch";
-// The three features pulled out of this god-file (Review-2 Pass-2 #3), each fed
-// an explicit context the controller builds — no hidden coupling back in.
 import { createGalleryCards, type GalleryCards } from "./galleryCards";
 import { createCardActions } from "./cardActions";
 import { createHistoryScope, versionMeta, rawVersionMeta } from "./historyScope";
 import { createHistoryController, runRestore, confirmRestore } from "./historyPanel";
 import type { FileVersion } from "../core/types";
 import { createGallerySearch, type GallerySearch } from "./gallerySearch";
-// The rail and the tree/category resolution it rests on. `crumbPath` comes from
-// there too: the breadcrumb is painted here, where its other inputs (the search
-// query, the pending category) live, but the container-flattening rule it
-// applies is the RAIL'S rule and there is exactly one copy of it.
+// The breadcrumb is painted here, but its flattening rule is the rail's.
 import { createRail, createRailView, crumbPath, type RailController } from "./rail";
-// The recycle bin. It paints into `gallery` and is closed by `renderGallery()`
-// overwriting it, so there is no teardown hook here — see bin.ts's header.
+// Paints into `gallery`; `renderGallery()` closes it, so no teardown hook.
 import { BIN_KEY, createBin, createBinScope, createBinView, type BinController } from "./bin";
-// TYPE ONLY, so the console still code-splits: `import type` is erased, and the
-// one runtime `import("./admin")` below is what pulls the chunk. Most households
-// have a single admin, so the console's code and CSS should not ride along in
-// every reader's first paint.
+// Type only, so the console stays a separate chunk loaded by `import("./admin")`.
 import type { AdminPanel } from "./admin";
-// YOUR OWN ACCOUNT. Statically imported, unlike the console: it is a fraction of
-// the console's size, everybody has one (a non-admin has no other surface at
-// all), and a chunk boundary here would buy a round trip and the loading
-// stand-in that goes with it for no useful saving.
+// Static, unlike the console: small, and every user has one.
 import { createAccountPage, type AccountHost, type AccountPage } from "./account";
 
-/** The admin console's {@link Destination} key. Matches `DESTINATIONS` in rail.ts. */
 const ADMIN_KEY = "admin";
 /**
- * The account page's place key.
- *
- * NOT a {@link Destination} — it has no rail row, and `DESTINATIONS` does not
- * contain it. It is written into `destination` all the same, because every guard
- * in this file asks that variable ONE question — "is a folder listing what is on
- * screen?" — and for the account page the answer is no, exactly as it is for the
- * bin and the console. So it inherits `renderGallery`'s refusal to paint over an
- * open place, the upload button's refusal to offer a destination, and the rail's
- * "no folder is current" reading, all without a second flag that could disagree
- * with the first. The rail simply matches no row and highlights nothing, which
- * is right: the door to this page is the nameplate below the rail, not a row in
- * it.
- */
+* Not a `Destination` (no rail row), but written into `destination` so every
+* "is a folder listing on screen?" guard treats it like the bin and console.
+*/
 const ACCOUNT_KEY = "account";
 
 export interface AppDeps {
   api: Api;
   renderer: NoteRenderer;
   cache: RenderCache;
-  /**
-   * The persistent thumbnail store (`sn-thumbs`), the SAME instance the render
-   * cache uses (main.ts opens it once and passes it to both). Shared so the
-   * facade's `.spd`/`.txt`/cover/image thumbnails persist across reloads in the
-   * one store, under the one byte budget — the render path already did. Optional/
-   * null in tests and any host that runs memory-only.
-   */
+  /** The same `sn-thumbs` instance as the render cache: one store, one budget. */
   persistentThumbs?: PersistentThumbStore | null;
   live: LiveChannel;
-  /**
-   * Who is signed in. `isAdmin` reaches the rail so admin-only destinations can
-   * be hidden — a rail row is NOT the access check (the server gates every admin
-   * route), it just avoids showing a door that always refuses.
-   */
+  /** `isAdmin` hides admin-only rail rows; the server is the access check. */
   identity: { email: string; isAdmin: boolean };
   onSignOut: () => void;
-  /**
-   * The `sn_session` cookie went invalid while the shell was open — every
-   * subsequent call would fail the same way. Like {@link onSignOut} this is a
-   * callback rather than a router import: the shell never navigates the app
-   * itself, main.ts owns that (it is the composition root). Fired at most once
-   * per shell.
-   */
+  /** Fired at most once per shell; main.ts owns navigation. */
   onSessionExpired: () => void;
 }
 
 /**
- * THE ROUTE HANDLERS, and the only writers of "where the shell is".
- *
- * One per kind of place, called by main.ts and by nothing else. Each is
- * IDEMPOTENT — a route can be dispatched twice (see `onRoute` in router.ts) and
- * `go()` re-fires deliberately when the target is already current — and each
- * performs the SAME shell-level reset, because every one of them means "you are
- * somewhere else now": the reader closes, the console closes, the pending
- * category clears.
- */
+* The route handlers, called only by main.ts. Each is idempotent (a route can
+* dispatch twice) and closes the reader, console and pending category.
+*/
 export interface AppShell {
   el: HTMLElement;
-  /**
-   * List a folder — `#/folder/:id`, or the library root (`#/`) for `null`.
-   *
-   * The id is the device's, and it is stable by design: the device assigns it
-   * and nothing ever relocates a row, which is what makes a folder link outlive
-   * a sync.
-   */
+  /** The device's folder ids are stable, so a folder link outlives a sync. */
   showFolder(id: Id | null): void;
-  /**
-   * Show library-wide results for `q` — `#/search?q=`. A blank query is not a
-   * place; it redirects back to the folder the shell is standing in.
-   */
+  /** A blank query redirects to the current folder. */
   showSearch(q: string): void;
-  /**
-   * Show a {@link Destination} — `#/bin`, `#/admin`. The key is the rail's own,
-   * so there is nothing here that can drift from `DESTINATIONS`.
-   *
-   * `#/admin` LANDS ON THE ELEVATION GATE, never on the console. Addressable is
-   * not accessible: the server gates every admin route on `require_admin` plus a
-   * live elevation, and a bookmark must not imply otherwise.
-   */
+  /** `#/admin` always lands on the elevation gate: addressable is not accessible. */
   showDestination(key: string): void;
-  /**
-   * Show YOUR OWN ACCOUNT — `#/account`, opened by the rail footer's nameplate.
-   *
-   * A method of its own rather than a `showDestination` arm because it is not a
-   * {@link Destination}: it has no rail row and no key in `DESTINATIONS`. It is
-   * gated on nothing beyond being signed in — a household member who is not an
-   * admin must be able to open it, which is precisely what the admin console
-   * cannot offer.
-   */
+  /** Not a `Destination`; open to any signed-in user. */
   showAccount(): void;
   /**
-   * Open a note in the reader at `page` — the INTERNAL 0-based index. The route
-   * it came off counts from one (`#/note/:id` and `#/note/:id/page/1` are both
-   * the first page, `/page/5` is the fifth); the conversion happens in the
-   * router and nowhere else. `q` primes find-in-note (`?q=term`).
-   *
-   * All three come from the ROUTE rather than being held here, so a reload or a
-   * shared link lands on exactly the document, the page and the search the URL
-   * describes.
-   */
+  * `page` is 0-based; the router converts from the URL's 1-based pages. `q`
+  * primes find-in-note. All from the route, so reloads and links land exactly.
+  */
   openNote(id: Id, page?: number, q?: string): Promise<void>;
   /**
-   * Resolve a `#/note/:id/version/:short` deep link (hot-cache versioning) and
-   * open what it names, at `page` (the INTERNAL 0-based index). `short` is a
-   * 7-hex-char md5 prefix; resolution is client-side against `noteHistory` (the
-   * list the panel already fetches), LIVE-FIRST:
-   *
-   *  - a PAST version → the read-only preview in the reused reader;
-   *  - the CURRENT md5 → the LIVE note, with the URL canonicalised to the bare
-   *    `#/note/:id/page/:n` (a restore can make a past version's md5 the live one,
-   *    so this branch must win and never 404);
-   *  - no match (aged out of the hot cache / bad prefix) → the live note + a
-   *    "no longer available" notice, never a blank or hard error.
-   */
+  * `short` is a 7-hex md5 prefix resolved against `noteHistory`: a past version
+  * opens the preview, the current md5 opens the live note with a canonical URL
+  * (a restore makes this case common), and no match opens the live note with a
+  * notice.
+  */
   openNoteVersion(id: Id, short: string, page?: number): Promise<void>;
   /**
-   * Open a `#/bin/note/:id/page/:n` deep link — a TRASHED file in its viewer, at
-   * `page` (the INTERNAL 0-based index). The recycle-bin twin of {@link openNote}:
-   * it ensures the bin listing is loaded (a cold load races the boot-time fetch),
-   * then finds the trashed entry and opens it with a `"bin"` origin — the SAME
-   * path a bin-row click takes (`readerReturn` → bin origin, `viewerFor` → the
-   * right viewer), so Back says "Recycle bin", the file's actions are Restore /
-   * Delete permanently, and its bytes come off the bin-scoped routes.
-   *
-   * GRACEFUL FALLBACK: a file no longer in the bin (purged or restored since the
-   * link was made) falls back to the bin LISTING (`#/bin`) with a notice — the
-   * analog of the version-preview age-out — never a blank or a hard 404.
-   */
+  * A trashed file in its viewer via the same path as a bin-row click (waiting
+  * for the bin listing on a cold load). A file no longer in the bin falls back
+  * to `#/bin` with a notice.
+  */
   openBinNote(id: Id, page?: number): Promise<void>;
   destroy(): void;
 
-  // --- DESTINATION VIEWS (append-only, at your own marker) ---
-  // A `Destination` (see `rail.ts`) is a full-content view that is not a folder.
-  // Each one is now a line in `DESTINATIONS`, an arm in `showDestination` below,
-  // and nothing else — no method of its own. The rail routes (`go(#/key)`), the
-  // router recognises the key because it reads the same list, and the shell
-  // reacts. Two features can still do this in parallel; the marked arms are
-  // where the edits go.
+  // ---- destination views ----
+  // A destination is a line in `DESTINATIONS` plus an arm in `showDestination`.
 }
 
 type SortKey = "recent" | "title" | "pages";
 
-/**
- * The pinned sort order, or "recent" when nothing valid is stored.
- *
- * VALIDATED rather than cast: the value is user-writable (it is localStorage) and
- * a stale key from an older build — or a hand-edited one — would otherwise reach
- * the comparator as a `SortKey` it does not handle, silently leaving the gallery
- * in whatever order the listing happened to arrive in. An unrecognised value is
- * not an error worth surfacing; it just means "never chose".
- */
+/** Validated, not cast: localStorage may hold a stale or hand-edited key. */
 function readStoredSort(): SortKey {
   const raw = readLocal(SORT_KEY);
   return raw === "title" || raw === "pages" || raw === "recent" ? raw : "recent";
@@ -275,68 +156,29 @@ export function createAppShell(deps: AppDeps): AppShell {
   const { renderer, cache, live, identity } = deps;
 
   /**
-   * Routes reads for a TRASHED id through the bin's own endpoints (U2b).
-   *
-   * WRAPPED ONCE, HERE, so that `api` means the same thing everywhere below it.
-   * The reader, the lazy render engine, the exporter and `openNote` all pull
-   * note metadata or page bytes through this seam, and none of them should have
-   * to know that a bin exists. The server keeps the two scopes on separate
-   * routes deliberately — `Files.get` hardcodes `deleted = 0` and is the shared
-   * ownership boundary behind every live read — so the split has to be honoured
-   * somewhere, and this is the one place that costs nothing downstream.
-   *
-   * `attach` supplies the predicate further down, because the bin controller is
-   * built after most of the things that read through this wrapper. Until then
-   * nothing is trashed, which is the reading that changes no behaviour.
-   */
+  * Wrapped once here so the reader, lazy engine, exporter and `openNote` never
+  * learn the bin exists. `attach` comes later; until then nothing is trashed.
+  */
   const binScope = createBinScope();
 
-  /**
-   * The admin console, created on FIRST ENTRY and kept for the life of the
-   * shell. Null until then — the module is dynamically imported, so there is
-   * nothing to hold before somebody has asked for it.
-   */
+  /** Created on first entry (dynamic import) and kept for the shell's life. */
   let admin: AdminPanel | null = null;
 
   /**
-   * The user is going somewhere that is not a destination — a folder, a
-   * category, a search. Called from the three places that are genuinely user-
-   * driven navigation.
-   *
-   * NOT from `renderGallery`, which is how the bin closes: that also fires on a
-   * live sync bump, and ejecting an admin from a half-typed delete confirmation
-   * because a housemate's tablet finished uploading is not something the shell
-   * should do. The bin can afford it (it is a listing); the console cannot.
-   */
+  * Called on user-driven navigation only, not from `renderGallery`, which also
+  * runs on a live sync bump and must not eject an admin mid-confirmation.
+  */
   function leaveAdmin(): void {
-    // The stand-in below is the console for as long as its chunk is on the wire,
-    // so leaving has to take that down too — otherwise a rail click during the
-    // import leaves an "Opening the admin console" overlay sitting on top of the
-    // folder the user asked for, with no console ever arriving to replace it.
+    // Also drop the import stand-in, or it would sit over the requested folder.
     hideAdminBooting(false);
     admin?.close();
   }
 
   /**
-   * THE CHUNK-IMPORT WINDOW, painted.
-   *
-   * `import("./admin")` is a round trip of its own — a separate module request,
-   * on the same throttled link as everything else — and nothing used to be
-   * painted before or during it. So the previous folder's gallery stayed on
-   * screen, under a rail highlight that had already moved to Admin, for the whole
-   * of it; and from the BIN it was worse, because the console's route closes the
-   * bin by repainting the gallery over it, so the sequence was bin → a folder
-   * listing nobody asked for → a long gap → the console.
-   *
-   * This is a STAND-IN, not the console: it takes the same surface the panel will
-   * take (the content overlay, the topbar, the crumb) and says the one true thing
-   * there is to say. The panel replaces it wholesale when the chunk lands, and it
-   * deliberately reuses `.admin-notice` so the swap is a change of words rather
-   * than a change of layout.
-   *
-   * Built lazily and kept: a session that never opens the console never creates
-   * it, and one that does creates it once.
-   */
+  * Stand-in painted over the `import("./admin")` round trip, so the old gallery
+  * doesn't linger under the Admin highlight. Reuses `.admin-notice` so the swap
+  * is a change of words. Built lazily, once.
+  */
   let adminBooting: HTMLElement | null = null;
 
   function adminNotice(title: string, text: string): HTMLElement {
@@ -355,18 +197,11 @@ export function createAppShell(deps: AppDeps): AppShell {
     }
     adminBooting.replaceChildren(adminNotice("Loading…", "Opening the admin console."));
     adminBooting.hidden = false;
-    // Exactly what `AdminPanel.chrome(true)` does, and for the same reasons: the
-    // gallery is HIDDEN rather than emptied (so leaving the console lands back on
-    // the folder without a refetch), sort and the view toggle describe a listing
-    // this is not, and the crumb has to agree with the rail highlight. `lockBtn`
-    // stays hidden — there is nothing to lock yet.
+    // Same as `AdminPanel.chrome(true)`; `lockBtn` stays hidden.
     gallery.hidden = true;
     sortWrap.hidden = true;
     segmented.hidden = true;
     setDestinationMode("admin", true);
-    // "Library / Admin" — same way out as the bin and the account page. The
-    // console had the identical dead-end header, and it is the destination you
-    // are MOST likely to want to leave without picking a rail row first.
     {
       const home = el("button", { type: "button", text: "Library" });
       home.addEventListener("click", () => go(folderHref(null)));
@@ -379,12 +214,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     rail.build(); // the highlight reads `destination`, already ADMIN_KEY
   }
 
-  /**
-   * Take the stand-in down. `handOver` is true when the real console is taking
-   * this surface over — the chrome it just set is the chrome the panel wants, so
-   * touching it would flash the gallery back — and false when the route has left,
-   * in which case everything the stand-in claimed has to be given back.
-   */
+  /** `handOver`: the real console takes this chrome as is, so don't flash the gallery. */
   function hideAdminBooting(handOver: boolean): void {
     if (!adminBooting || adminBooting.hidden) return;
     adminBooting.hidden = true;
@@ -396,28 +226,17 @@ export function createAppShell(deps: AppDeps): AppShell {
   }
 
   /**
-   * Put the console up, importing it on first entry.
-   *
-   * IT ALWAYS LANDS ON THE ELEVATION GATE from a cold start, and that is the
-   * client half of "addressable is not accessible": a bookmarked `#/admin`
-   * reaches this on a fresh document where `admin` is null, so the panel is
-   * built from scratch and `console_.open()` paints the gate. Re-entry inside
-   * one session deliberately does not rebuild — the elevation is a fact about
-   * the session and the server is its authority — but there is no reload, no
-   * bookmark and no typed URL that can skip the gate, because none of them can
-   * arrive with an `admin` that already exists.
-   */
+  * A cold start always builds a fresh panel and shows the gate; re-entry in one
+  * session reuses it, since elevation is the server's fact.
+  */
   function openAdmin(): void {
     if (admin) {
       admin.open();
       rail.build();
       return;
     }
-    // Painted BEFORE the import is issued, so there is no frame in which the
-    // surface still belongs to whatever was here before — see `showAdminBooting`.
+    // Painted before the import is issued.
     showAdminBooting();
-    // The one runtime import. Everything it is handed is something this shell
-    // already owns — the panel creates nothing here but its own <section>.
     void import("./admin")
       .then((m) => {
         admin = m.createAdminPanel({
@@ -430,73 +249,48 @@ export function createAppShell(deps: AppDeps): AppShell {
           segmented,
           lockBtn: lockAdminBtn,
           setMode: (open) => setDestinationMode("admin", open),
-          // THE PADLOCK MUST NOT LIE. Elevation changes in three places — an
-          // unlock, a lock, and a 428 that parks the console back on the gate —
-          // and only the panel sees any of them. Every one of them comes through
-          // here, and the rail is a pure function of what it is asked, so a
-          // rebuild is the whole of the update.
+          // Elevation changes only inside the panel (unlock, lock, 428); rebuild the
+          // rail so the padlock never lies.
           onElevationChanged: () => rail.build(),
           toast,
           onSessionExpired: sessionDidExpire,
         });
-        // The import is a round trip, and a route change can land inside it: a
-        // rail click while the chunk is loading would otherwise open the console
-        // over the folder the user has just asked for. `destination` is the
-        // route's answer, so checking it here is checking whether the console is
-        // still where the URL says we are.
+        // A route change can land during the import.
         if (destination !== ADMIN_KEY) {
           hideAdminBooting(false);
           return;
         }
-        // HAND OVER, don't tear down: `admin.open()` sets exactly the chrome the
-        // stand-in is already holding, so giving it back first would flash the
-        // gallery between the two.
+        // Hand over rather than tear down, to avoid flashing the gallery.
         hideAdminBooting(true);
         admin.open();
         rail.build(); // the console is open now; repaint the highlight
       })
       .catch(() => {
-        // The chunk itself failed to load — a dropped link mid-import, or a stale
-        // tab asking a redeployed server for a hash that no longer exists. Left
-        // alone this sat on "Loading…" for the rest of the session, which is the
-        // one thing a loading state must never do: outlive the thing it describes.
+        // The chunk failed (dropped link, or a stale tab after a redeploy); a loading
+        // state must not outlive what it describes.
         if (destination !== ADMIN_KEY || !adminBooting) return;
         adminBooting.replaceChildren(
           adminNotice("The console could not be loaded", "Check your connection and try again."),
         );
       });
   }
-  // Two seam wrappers, composed: `historyScope` reroutes page bytes + in-note
-  // search onto a retained VERSION while a preview is up (H7/H8), `binScope`
-  // reroutes them onto the bin for a trashed note. They never both fire (a preview
-  // is only ever of a LIVE note), and each is a pure passthrough when inactive, so
-  // the order is immaterial; the reader reads through the composed result unchanged.
+  // Two composed `Api` wrappers: version preview and bin. They never both fire
+  // (previews are of live notes) and pass through when inactive.
   const historyScope = createHistoryScope();
   const api = historyScope.wrap(binScope.wrap(deps.api));
 
-  // --- state ---------------------------------------------------------------
-  //
-  // `folderId`, `destination` and `query` are not this shell's decisions any
-  // more: each is written ONLY by the `show*` route handler that owns it, so all
-  // three are a cache of what the address bar says rather than a second opinion
-  // about it. That is the whole of the inversion — everything else here already
-  // read them.
+  // ---- state ----
+  // `folderId`, `destination` and `query` are written only by their `show*`
+  // handlers: a cache of the address bar.
   /**
-   * The folder the gallery is listing (`null` = root), from the folder route.
-   *
-   * SURVIVES A NOTE OR A DESTINATION, deliberately: the reader is an overlay and
-   * the bin paints over the gallery, so neither moves you out of the folder you
-   * were in — which is what lets Back out of a note, or a rail click out of the
-   * bin, land in that folder's cached listing rather than at the root.
-   */
+  * `null` = root. Survives a note or destination, so Back or a rail click
+  * lands in this folder's cached listing.
+  */
   let folderId: Id | null = null;
   /**
-   * The {@link Destination} key currently open, from the destination route, or
-   * null. THE RAIL'S HIGHLIGHT READS THIS, not `bin.isOpen()`/`admin.isOpen()`,
-   * so it cannot disagree with the address bar: the two panels' own open flags
-   * follow their DOM, and DOM can be repainted by a live sync bump that no route
-   * change accompanied.
-   */
+  * The rail highlight reads this, not the panels' DOM-derived `isOpen()`, which
+  * a sync-bump repaint can change without a route change.
+  */
   let destination: string | null = null;
   let listing: Listing | undefined;
   let query = "";
@@ -505,14 +299,11 @@ export function createAppShell(deps: AppDeps): AppShell {
   let knownSyncVersion = 0;
   const key = (id: Id | null) => id ?? "\0root";
 
-  // --- failure routing -----------------------------------------------------
+  // ---- failure routing ----
   /**
-   * An expired session is terminal for this shell, and it arrives in a *burst*:
-   * a gallery of thumbnails plus the tree prefetch all 401 at once. The latch
-   * makes that one hand-off to main.ts, and — since the flag also short-circuits
-   * every later handler — an UNAUTHORIZED raised *during* the expiry handling
-   * itself can't re-trigger it.
-   */
+  * Expiry arrives in a burst (thumbnails plus the walk); the latch makes one
+  * hand-off and blocks re-entry during handling.
+  */
   let sessionExpired = false;
   function sessionDidExpire(): void {
     if (sessionExpired) return;
@@ -521,11 +312,9 @@ export function createAppShell(deps: AppDeps): AppShell {
   }
 
   /**
-   * A thumbnail's `?v=` hash 404'd. That hash came from this folder's listing
-   * (`NoteSummary.firstPage`), so the listing is the metadata to refetch to honour
-   * the STALE_PAGE contract. One refetch per stale hash — a refetch yields new
-   * hashes, and if those 404 too we must not spin.
-   */
+  * A thumbnail's `?v=` 404'd: refetch the listing (STALE_PAGE). Once per hash,
+  * so new hashes that also 404 can't spin.
+  */
   const staleHandled = new Set<Hash>();
   function onStaleThumbnail(hash: Hash): void {
     if (sessionExpired || staleHandled.has(hash)) return;
@@ -538,67 +327,28 @@ export function createAppShell(deps: AppDeps): AppShell {
     onStalePage: (_noteId, page) => onStaleThumbnail(page.hash),
   };
 
-  /**
-   * Classify a caught error from a *listing/metadata* call (no page involved).
-   * Returns true when it was actionable and the caller should skip its own
-   * fallback; anything else stays non-fatal, exactly as before.
-   */
+  /** For listing/metadata errors; true means handled, skip the fallback. */
   function handled(e: unknown): boolean {
     return dispatchApiFailure(failures, e);
   }
 
-  // --- DOM: rail -----------------------------------------------------------
-  // `aria-busy` until the tree walk lands: the rail pins all six categories from
-  // the first paint, so until then its counts and its resolved/absent split are
-  // provisional. It is a real a11y signal, not a test hook — a screen reader
-  // should not announce "Export, 0" as settled while it is still being counted.
+  // ---- DOM: rail ----
+  // `aria-busy` until the walk lands: counts are provisional.
   const nav = el("nav", { class: "nav", "aria-label": "Folders", "aria-busy": "true" });
 
-  /**
-   * The listing cache and the walk that fills it — see `folderCache.ts`. It is
-   * what the rail's entries, the crumb labels and name-search are all functions
-   * of, and this shell keeps only what it cannot know: where the user currently
-   * is, and what selecting a row means for the reader, the search box and the
-   * gallery.
-   *
-   * The rail is a PURE FUNCTION of `folderCache.tree` plus `place()`: it never
-   * fetches, so `folderCache.prefetch` stays the only thing that asks the server
-   * about folders.
-   */
+  /** The shell keeps only where the user is; the tree lives in `folderCache.ts`. */
   const folderCache = createFolderCache({
     api,
     handled,
-    // The rail owns what a completed walk MEANS — dropping `aria-busy`, settling
-    // a category selected while still unresolved. The cache owns only whether
-    // anything changed.
     onWalked: (changed) => rail.treeWalked(changed),
   });
 
   const rail: RailController = createRail({
     view: createRailView(nav),
     tree: folderCache.tree,
-    // `listing` being undefined is not the same as an empty path: with no
-    // listing nothing is expanded, not even the current folder.
-    //
-    // A DESTINATION IS MUTUALLY EXCLUSIVE WITH A FOLDER (see `RailPlace`), so
-    // while the bin is open this reports no folder at all rather than the one
-    // the user happened to be standing in — otherwise two rows would be
-    // `aria-current` at once. The shell's own `folderId`/`listing` are left
-    // untouched, which is what lets a rail click out of the bin land back in
-    // that folder's cached listing.
-    // BOTH HALVES COME OFF THE ROUTE, via the two variables only the `show*`
-    // handlers write. It used to ask `admin?.isOpen()`/`bin.isOpen()`, which is
-    // a question about DOM: the bin unmounts whenever the gallery repaints, and
-    // the gallery repaints on a live sync bump nobody navigated for, so the
-    // highlight could drift from the address bar with no route change in
-    // between. Now it cannot — the rail says what the URL says.
-    //
-    // A DESTINATION IS MUTUALLY EXCLUSIVE WITH A FOLDER (see `RailPlace`), so
-    // while one is open this reports no folder at all rather than the one the
-    // user happened to be standing in — otherwise two rows would be
-    // `aria-current` at once. The shell's own `folderId`/`listing` are left
-    // untouched, which is what lets a rail click out of the bin land back in
-    // that folder's cached listing.
+    // From the route via `folderId`/`destination`, not panel DOM. A destination
+    // reports no folder (one `aria-current` only); the shell's own `folderId` is
+    // kept so leaving the bin lands back in that folder.
     place: () =>
       destination !== null
         ? { folderId: null, destination, openPath: null }
@@ -606,96 +356,51 @@ export function createAppShell(deps: AppDeps): AppShell {
             folderId,
             destination: null,
             openPath: listing ? listing.path : null,
-            // Not a highlight — see `RailPlace.searching`. It is what tells the
-            // walk that the gallery currently on screen (a results list, whose
-            // name half reads the cached tree) depends on it finishing.
+            // See `RailPlace.searching`.
             searching: query.trim() !== "",
           },
-    // EVERY ENTRY POINT IS NOW A URL. The rail does not navigate; it says where
-    // it wants to be and the route handler takes it there. That is what makes
-    // "open a subfolder, reload, and you are still in it" true without the rail
-    // knowing anything about reloads.
+    // The rail never navigates; it names a URL.
     onOpenFolder: (id) => go(folderHref(id)),
     onSelectCategory: () => enterPendingCategory(),
     onOpenDestination: (key) => go(destinationHref(key)),
-    // Append your arm at your marker; a destination with nothing to count
-    // returns 0 and renders no badge.
     destinationCount: (key) => {
       switch (key) {
         // --- BIN COUNT ---
         case BIN_KEY:
           return bin.count();
         // --- ADMIN COUNT ---
-        // No arm for "admin", deliberately: the console has nothing whose
-        // number belongs on a rail badge. The only count it could carry is how
-        // many people are in the household, and a standing figure about
-        // housemates on the navigation is the kind of ambient stat this console
-        // was designed not to keep. `default` returns 0, which renders none.
+        // None: a household headcount is an ambient stat about housemates.
         default:
           return 0;
       }
     },
-    // Append your arm at your marker; a destination with no state to show
-    // returns null and renders no glyph.
     destinationState: (key) => {
       switch (key) {
         // --- ADMIN STATE ---
-        // THE PADLOCK. It says whether the console is elevated right now, so
-        // that "am I still in?" is answerable from the navigation instead of
-        // by opening the console and finding out. It is a fact the panel owns
-        // (the server is the authority and the panel is what talks to it), so
-        // this reads through `isElevated()` rather than keeping a second copy
-        // the shell would have to remember to update.
-        //
-        // NULL BEFORE THE FIRST ENTRY, when `admin` has not been imported yet:
-        // the shell has never asked the server anything, so "locked" is the
-        // truthful reading — and it is also the state the gate will put up.
-        //
-        // The accessible name changes WITH the glyph, not just the shape:
-        // WCAG's non-text rules are not satisfied by a swap a screen reader
-        // cannot hear.
+        // Read through `isElevated()`, the panel's fact. Locked before the console was
+        // ever imported, which is also what the gate will show.
         case ADMIN_KEY:
           return admin?.isElevated()
             ? { icon: "unlock", label: "Admin console unlocked" }
             : { icon: "lock", label: "Admin console locked" };
-        // Nothing else has a state. The BIN deliberately does not: it has a
-        // count, and a row has room for one badge.
+        // The bin has a count, and a row has room for one badge.
         default:
           return null;
       }
     },
     isAdmin: () => identity.isAdmin,
-    // The rail has just rebuilt itself; only the gallery is left to repaint.
     onSettled: () => renderGallery({ rail: false }),
     onLabelsSettled: () => relabelFolders(),
   });
 
-  // THE FOOTER IS A NAMEPLATE NOW, and both of the buttons that used to sit
-  // beside it have moved onto the account page (
-  // §7). Neither was deleted — sign out is the last row of "Signing in", and the
-  // theme toggle is Appearance.
-  //
-  // THE ROW HAD TO SHED RATHER THAN GAIN, and its own CSS does the arithmetic
-  // (see `.account` in 02): with two 30px buttons in it there were 96px left for
-  // a name and an address, which is why the address ellipsised. A settings glyph
-  // would have taken another ~33px. So the identity block becomes ONE button
-  // that opens the page — clicking your own name to manage your account is the
-  // convention everywhere — with a chevron as the only affordance, and the name
-  // column grows to ~146px, which fixes a legibility problem that predated the
-  // question.
-  //
-  // The theme toggle in particular does not need to be one click away: the app
-  // already follows `prefers-color-scheme`, so the control is a set-once
-  // override, and it was ALREADY listed under Appearance — keeping it here was
-  // one control in two places.
+  // The footer is one nameplate button opening the account page; sign out and
+  // the theme toggle live there now, which gives the name column room.
   const nameplate = el(
     "button",
     {
       class: "account",
       type: "button",
-      // The address is inside the button, but an accessible name assembled from
-      // three stacked lines reads as a sentence nobody wrote. This says what
-      // pressing it does, and who it is about.
+      // Says what pressing does and who it's about.
       "aria-label": `Your account: ${identity.email || "signed in"}`,
       title: "Your account",
     },
@@ -710,9 +415,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   );
   nameplate.addEventListener("click", () => go(accountHref()));
 
-  // Storage quota bar, under the account footer. Progressive + optional: hidden
-  // until `usage()` resolves; a failed/absent fetch, or a user with no quota,
-  // just leaves it hidden — the rail works without it. Turns red over quota.
+  // Hidden until `usage()` resolves; red over quota.
   const quotaUsed = el("span", { class: "quota__used" });
   const quotaTotal = el("span", { class: "quota__total" });
   const quotaFill = el("div", { class: "quota__fill" });
@@ -724,13 +427,9 @@ export function createAppShell(deps: AppDeps): AppShell {
     quotaTotal,
   );
   /**
-   * The last usage figures the server gave, or null before the first answer (or
-   * after a failure). THE SAME NUMBER TWICE: it draws the bar above, and it is
-   * what the upload pre-flight charges a file against so a doomed 200 MB transfer
-   * is refused in the instant it is dropped rather than four minutes later.
-   *
-   * Null is "not known", never "no room" — see `preflightUpload`.
-   */
+  * Draws the bar and feeds the upload pre-flight, so a doomed transfer is
+  * refused on drop. Null means unknown, never "no room".
+  */
   let usage: { used: number; total: number } | null = null;
 
   function refreshUsage(): void {
@@ -751,12 +450,8 @@ export function createAppShell(deps: AppDeps): AppShell {
   }
   refreshUsage();
 
-  // The `<aside>` itself, not the entries: the brand block and the account
-  // nameplate are shell concerns, so the shell builds them. `rail` above owns
-  // everything inside `nav`. The storage meter STAYS here, directly beneath the
-  // nameplate — it is the one thing in this corner that answers a question at a
-  // glance, and moving it onto the page would mean opening a page to learn
-  // whether there is room for the file you are about to drop.
+  // The storage meter stays under the nameplate: room for the file you're about
+  // to drop should be visible at a glance.
   const sidebar = el(
     "aside",
     { class: "rail" },
@@ -771,43 +466,21 @@ export function createAppShell(deps: AppDeps): AppShell {
     quota,
   );
 
-  // --- DOM: topbar ---------------------------------------------------------
+  // ---- DOM: topbar ----
   const crumbs = el("div", { class: "crumbs", id: "crumbs" });
   const searchInput = el("input", {
     class: "search__input",
     id: "search",
     type: "search",
     autocomplete: "off",
-    // The mockup's promise, now that the second half of it is real.
     placeholder: "Search across every note — typed and handwritten",
     "aria-label": "Search notes",
   });
-  // THE ONE PLACE WHERE PUSH AND REPLACE MEET IN THE SAME HANDLER, and the
-  // clearest illustration of the rule.
-  //
-  // Typing the FIRST letter is a NAVIGATION: you were in a folder and you are
-  // now looking at library-wide results, which is a different place. It pushes,
-  // so Back leaves the search and returns to the folder.
-  //
-  // Every letter AFTER that is an ADJUSTMENT of a search you are already looking
-  // at, so it replaces. Without that, `w`, `wi`, `wit`, `witc` would each be a
-  // rung on the history ladder and Back would spell the query backwards one
-  // character at a time — the exact failure `replaceNotePosition` exists to
-  // avoid for page turns.
-  //
-  // CLEARING THE BOX REPLACES TOO, even though it does leave the search. One
-  // search episode is one history entry either way; making the exit a push
-  // instead would mean type-then-clear left two entries behind, both of which
-  // Back has to step through to reach the folder you never actually left.
-  // ENTERING the search route is a hash navigation (`go` sets `location.hash`),
-  // and a fragment that matches no element makes the browser RESET DOCUMENT FOCUS
-  // to `<body>` — which drops the caret out of the box on the very FIRST
-  // keystroke, so the letters after it land nowhere (or, once focus is regained,
-  // at the wrong caret). Every letter after the first replaces in place and never
-  // navigates, so only the arriving keystroke is affected. The caret is captured
-  // here, before the navigation, and re-asserted by `showSearch` — the handler
-  // the navigation dispatches, which runs AFTER the browser's focus reset. Null
-  // except across that one navigation; a folder navigation never arms it.
+  // The first letter pushes (folder to results is a navigation); later letters
+  // and clearing replace, so one search episode is one history entry.
+  // Entering via a hash navigation resets focus to `<body>`, losing the caret on
+  // the first keystroke; it's captured here and restored by `showSearch`, which
+  // runs after the reset.
   let pendingSearchCaret: number | null = null;
   function restoreSearchFocus(): void {
     if (pendingSearchCaret === null) return;
@@ -815,58 +488,36 @@ export function createAppShell(deps: AppDeps): AppShell {
     pendingSearchCaret = null;
     searchInput.focus();
     const input = searchInput as HTMLInputElement;
-    // A `<input type="search">` supports selection range everywhere we ship; the
-    // guard is only for a DOM that does not implement it (a headless test host).
+    // Guard only for DOMs without selection ranges (headless tests).
     try {
       input.setSelectionRange(caret, caret);
     } catch {
-      /* selection unsupported — focus alone already keeps typing in the box */
     }
   }
 
   searchInput.addEventListener("input", () => {
     const next = searchInput.value;
-    // A blank query is not a place — it is the folder you were standing in all
-    // along, which `folderId` still holds precisely because search never moved
-    // it. See `folderHref`/`searchHref`.
+    // A blank query is the folder `folderId` still holds.
     const target = next.trim() === "" ? folderHref(folderId) : searchHref(next);
     if (current().name !== "search") {
-      // Arriving. The route handler does the painting — but arm the focus restore
-      // first (only when this is genuinely entering search, not blanking back to
-      // a folder), because the hash navigation is about to blur the box.
+      // Arm the caret restore only when entering search.
       if (next.trim() !== "") pendingSearchCaret = (searchInput as HTMLInputElement).selectionStart ?? next.length;
       go(target);
       return;
     }
     replaceRoute(target);
-    // Painted from here rather than by a re-dispatch: `replaceRoute` deliberately
-    // does not fire the route, so the address bar and the gallery move together
-    // without the same list being built twice per keystroke.
+    // `replaceRoute` doesn't fire the route, so paint here.
     applyQuery(next);
   });
 
-  /**
-   * Show `q`'s results (or, for a blank `q`, the folder behind them) WITHOUT
-   * touching the URL — the caller has already put the address bar where it
-   * belongs.
-   *
-   * Shared by the keystroke path above and the `#/search?q=` route handler, so a
-   * typed query and a shared link reach the same screen through the same code.
-   */
+  /** Shared by keystrokes and the `#/search?q=` route; doesn't touch the URL. */
   function applyQuery(next: string): void {
-    // Searching is navigation: the results belong in the gallery, which the
-    // console (or the account page) is currently covering.
+    // The results belong in the gallery, which the console or account page covers.
     leaveAdmin();
     leaveAccount();
     query = next;
-    // Two halves of ONE question, and they resolve at different speeds: names
-    // are matched against the cached tree on the keystroke, transcripts are a
-    // debounced round-trip. Both are library-wide, so the list can be painted
-    // from the name half immediately and grown when the response lands, rather
-    // than answering one query at two different scopes.
-    //
-    // `rail: false` is the point about not compounding the known per-keystroke
-    // rebuild — the folder tree cannot change because someone typed.
+    // Names paint on the keystroke from the cached tree; transcripts arrive after
+    // the debounce. `rail: false`: typing can't change the tree.
     search.setQuery(query);
     renderGallery({ rail: false });
   }
@@ -878,9 +529,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     el("option", { value: "title", text: "Title" }),
     el("option", { value: "pages", text: "Pages" }),
   ) as HTMLSelectElement;
-  // The CONTROL has to agree with the state it was restored from. Without this the
-  // options paint in declaration order, so the box reads "Recent" while the gallery
-  // is sorted by title — the control lying about the order it is showing.
+  // Otherwise the select shows its first option while sorted by another.
   sortSelect.value = sort;
   sortSelect.addEventListener("change", () => {
     sort = sortSelect.value as SortKey;
@@ -894,39 +543,17 @@ export function createAppShell(deps: AppDeps): AppShell {
   gridBtn.addEventListener("click", () => setView("grid"));
   listBtn.addEventListener("click", () => setView("list"));
 
-  // Held as variables because both are HIDDEN OVER RESULTS: sort orders a folder
-  // listing and the toggle picks how to lay one out, and a query has left the
-  // folder behind entirely. Leaving them on screen would offer two controls that
-  // describe something the user is no longer looking at.
+  // Both are hidden over results: they describe a folder listing.
   const sortWrap = el("span", { class: "select" }, sortSelect, el("span", { html: svg(ICONS.chevron, 1.8) }));
   const segmented = el("div", { class: "segmented", role: "group", "aria-label": "View" }, gridBtn, listBtn);
 
-  // --- DESTINATION MODE ---
-  //
-  // A destination (the bin, the admin console) is a MODE in the topbar, the same
-  // way reading is: `is-reading` hides the whole library header, and
-  // `is-destination` hides only the search box — which would otherwise search a
-  // library the user is not looking at, and typing in it navigates away, so
-  // leaving it there is the same trap the reader's header was. See 03's
-  // `.sn-root.is-destination`.
-  //
-  // ONE CLASS FOR BOTH, not `is-bin` plus `is-admin`: the rule is not "the bin is
-  // open", it is "what is on screen is not a folder listing".
-  //
-  // TRACKED PER DESTINATION rather than as a single boolean, because the two
-  // switch it independently and their calls interleave. `renderGallery()` runs
-  // on a live sync bump and calls `setBinMode(false, …)`; a single flag would let
-  // a housemate's tablet finishing an upload strip the mode off the console
-  // somebody is standing in, putting the search box back over it.
+  // ---- destination mode ----
+  // `is-destination` hides the search box (it would search a library not on
+  // screen and navigate away). Tracked per destination: `renderGallery()` runs on
+  // sync bumps and must not strip another destination's mode.
   const destinationsOpen = { bin: false, admin: false, account: false };
   function setDestinationMode(which: "bin" | "admin" | "account", open: boolean): void {
-    // DESTINATIONS ARE MUTUALLY EXCLUSIVE — exactly one surface is on screen, so
-    // opening one closes the rest. Without this the flags could BOTH be true:
-    // the bin's was only ever cleared by `renderGallery`, which returns early
-    // while a destination is open, so going bin -> account left the bin still
-    // marked open and its `Empty bin` still on the toolbar, over a page with no
-    // bin on it. The flags are what every question below is asked of, so they
-    // have to describe one screen rather than a history of them.
+    // Mutually exclusive: opening one closes the rest, so flags describe one screen.
     if (open) {
       for (const other of ["bin", "admin", "account"] as const) {
         if (other !== which) destinationsOpen[other] = false;
@@ -936,24 +563,9 @@ export function createAppShell(deps: AppDeps): AppShell {
     const anyOpen = destinationsOpen.bin || destinationsOpen.admin || destinationsOpen.account;
     root.classList.toggle("is-destination", anyOpen);
 
-    // ---- THE TOOLBAR BELONGS TO WHAT IS ON SCREEN --------------------------
-    //
-    // `renderGallery` used to be the only thing that cleared these, and it
-    // returns early while a destination is open — so entering one from a place
-    // that had them left them stranded over a page they say nothing about:
-    // `Upload` over your account settings, `Empty bin` still there after going
-    // from the bin to the account page. It read as intermittent because it
-    // depended entirely on where you came from; a folder that takes no uploads
-    // showed no bug at all.
-    //
-    // This function already knows which destinations are open, so it is the one
-    // place that can answer "does this control still mean anything". It only
-    // ever TAKES AWAY, never restores: each destination stays the authority on
-    // showing its own action (the console keeps `Lock` hidden until there is a
-    // session to lock), and `renderGallery` brings `Upload` back when a folder
-    // listing is the view again.
+    // Only takes controls away; each destination shows its own action and
+    // `renderGallery` brings Upload back.
     if (anyOpen) {
-      // Upload targets a FOLDER, and a destination is not one.
       uploadBtn.hidden = true;
       toolsSep.hidden = true; // never a hairline with nothing after it
     }
@@ -961,53 +573,34 @@ export function createAppShell(deps: AppDeps): AppShell {
     if (!destinationsOpen.admin) lockAdminBtn.hidden = true;
   }
 
-  /**
-   * A labelled topbar action belonging to one destination — `Empty bin`,
-   * `Lock console`. Glyph then words, never icon-only: a lone mark in a toolbar
-   * is a guess, and neither of these is something to guess at.
-   *
-   * Hidden by the `hidden` attribute (see `.topbar__action[hidden]` in 03, which
-   * has to restate it) so it exists only where it means something.
-   */
+  /** Glyph then words, never icon-only; `hidden` per `.topbar__action[hidden]`. */
   function topbarAction(opts: {
     id: string;
     label: string;
     icon: IconName;
     ariaLabel?: string;
     danger?: boolean;
-    /** Render the glyph alone. Only for an action whose icon is unambiguous —
-     *  the labelled destination actions beside it deliberately are not. */
+    /** Only for an unambiguous icon. */
     iconOnly?: boolean;
   }): HTMLButtonElement {
     const b = el("button", {
       class: `btn topbar__action${opts.iconOnly ? " topbar__action--icon" : ""}${opts.danger ? " is-danger" : ""}`,
-      // An id, as `#crumbs`, `#search`, `#sort` and `#gallery` already have:
-      // there are two of these in `.tools` now and they are otherwise
-      // distinguishable only by their label, which is the thing under test.
+      // Two of these share `.tools`; the id tells them apart in tests.
       id: opts.id,
       type: "button",
       hidden: true,
-      // Only where the words on the button are not the whole story. When it is
-      // omitted the visible label IS the accessible name, which is what WCAG's
-      // Label in Name asks for — an `aria-label` that does not contain the
-      // visible text makes the control unspeakable by anyone reading it aloud.
+      // Only when the label isn't the whole story; an `aria-label` that omits the
+      // visible text breaks WCAG Label in Name.
       ...(opts.ariaLabel ? { "aria-label": opts.ariaLabel } : {}),
     });
     b.append(el("span", { class: "topbar__action-mark", html: svg(ICONS[opts.icon], 1.7) }));
-    // The label is HIDDEN, not absent: `aria-label` above names it for a screen
-    // reader and `title` for a pointer, so nothing loses the word but the pixels.
     if (opts.iconOnly) b.title = opts.ariaLabel ?? opts.label;
     else b.append(el("span", { text: opts.label }));
     return b;
   }
 
-  // `Empty bin` is a VIEW-LEVEL control — it acts on the whole bin rather than on
-  // any row — so it sits with sort and the view toggle rather than inside the
-  // content. Red at rest because it is destructive (red is danger and nothing
-  // else here; green is brand and state), and DISABLED rather than removed over
-  // an empty bin: the control is where the user will look for it next time, and a
-  // button that vanishes teaches nothing about why. The confirm rides on
-  // `bin.empty()`, which is the only way in.
+  // View-level, so beside sort and view. Red (destructive); disabled, not
+  // removed, over an empty bin. The confirm rides on `bin.empty()`.
   const emptyBinBtn = topbarAction({
     id: "empty-bin",
     label: "Empty bin",
@@ -1017,49 +610,30 @@ export function createAppShell(deps: AppDeps): AppShell {
   });
   emptyBinBtn.addEventListener("click", () => bin.empty());
 
-  // `Lock console` is the console's equivalent, and deliberately NOT `danger`:
-  // locking destroys nothing — it is the safe direction, and it is the same act
-  // as the gate the admin has already passed. Red here would spend the one
-  // colour this app reserves for "this destroys something" on the button that
-  // undoes the risk rather than the one that takes it.
+  // Not `danger`: locking destroys nothing.
   const lockAdminBtn = topbarAction({
     id: "lock-console",
     label: "Lock console",
     icon: "lock",
-    // No `aria-label`: "Lock console" already says exactly what it does, and any
-    // longer name would no longer contain the words on the button.
   });
   lockAdminBtn.addEventListener("click", () => void admin?.lock());
 
-  // UPLOAD — the discoverable half of the drop target (
-  // §7). Dragging a file onto the gallery is the hero interaction, but a gesture
-  // nobody is told about is not a feature, and it is unavailable by touch and by
-  // keyboard; so the same capability sits in the toolbar as a labelled control.
-  // Both entry points hand their files to the SAME `uploadZone.add`, so the
-  // pre-flight, the refusal copy and the queue cannot drift between them.
-  //
-  // It is a `topbarAction` like Empty bin and Lock console, and shown/hidden by
-  // the same rule as sort and the view toggle: it describes a FOLDER, and a
-  // search result list or a destination is not one.
+  // The discoverable, keyboard- and touch-reachable twin of drag and drop; both
+  // hand files to the same `uploadZone.add`. Shown only over a folder listing.
   const uploadBtn = topbarAction({
     id: "upload",
     label: "Upload",
     icon: "export",
     ariaLabel: "Upload a file to this folder",
-    // Icon-only, unlike `Empty bin` and `Lock console`: the arrow-out-of-tray is
-    // the same mark every other application uses for this, the action is
-    // non-destructive, and dropping a file on the gallery is the primary
-    // affordance anyway — this is the discoverable second route to it.
+    // Icon-only: a universal mark for a non-destructive secondary route.
     iconOnly: true,
   });
-  /** The hairline between the VIEW controls and the ACTIONS (see `.tools__sep`). */
   const toolsSep = el("span", { class: "tools__sep", hidden: true, "aria-hidden": "true" });
   const filePicker = el("input", {
     class: "upload__picker",
     type: "file",
     multiple: true,
-    // A HINT the OS dialog filters with, never the check — drag and drop bypasses
-    // it entirely, so the pre-flight runs on every file regardless.
+    // A hint for the OS dialog only; drag and drop bypasses it, so pre-flight always runs.
     accept: UPLOAD_ACCEPT_ATTR,
     hidden: true,
     "aria-hidden": "true",
@@ -1067,23 +641,17 @@ export function createAppShell(deps: AppDeps): AppShell {
   }) as HTMLInputElement;
   filePicker.addEventListener("change", () => {
     const picked = Array.from(filePicker.files ?? []);
-    // RESET FIRST. An `<input type=file>` fires no `change` when the same file is
-    // picked twice in a row, so a failed upload could not be retried from the
-    // picker without this.
+    // Reset first: picking the same file twice fires no `change`.
     filePicker.value = "";
     if (picked.length > 0) uploadZone.add(picked);
   });
   uploadBtn.addEventListener("click", () => filePicker.click());
 
-  /** The bin's half of the mode, plus its own topbar action's state. */
   function setBinMode(open: boolean, count: number, busy = false): void {
     setDestinationMode("bin", open);
     emptyBinBtn.hidden = !open;
-    // TWO REASONS FOR ONE APPEARANCE, and both are "there is nothing this click
-    // can usefully do": an empty bin, and this button's own call still in
-    // flight. Without the second, a slow link let `Empty bin` be pressed twice —
-    // and the second call, arriving at a bin the first had already emptied,
-    // reported a failure for an operation that had succeeded.
+    // Also disabled while its own call is in flight, or a slow-link second press
+    // reports failure for a success.
     emptyBinBtn.disabled = count === 0 || busy;
   }
 
@@ -1096,31 +664,21 @@ export function createAppShell(deps: AppDeps): AppShell {
       { class: "search" },
       el("span", { class: "search__glyph-wrap", html: `<svg class="search__glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">${ICONS.search}</svg>` }),
       searchInput,
-      // The mockup's chip, restored now that it is honest: this box really does
-      // read the recognised ink. `aria-hidden` because the placeholder already
-      // says so in words — a screen-reader user should not also hear a stray "OCR".
+      // `aria-hidden`: the placeholder already says it.
       el("span", { class: "search__ocr", "aria-hidden": "true", text: "OCR" }),
     ),
     el("div", { class: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, lockAdminBtn),
     filePicker,
   );
 
-  // --- DOM: content (gallery + reader) -------------------------------------
+  // ---- DOM: content (gallery + reader) ----
   const gallery = el("section", { class: "gallery", id: "gallery", "aria-label": "Notes" });
   const content = el("div", { class: "content" }, gallery);
   const toastEl = el("div", { class: "toast", role: "status", "aria-live": "polite" });
 
-  // The thumbnail facade the gallery paints through: it answers WHAT image a tile
-  // shows (always a WebP blob — a note page, an extracted `.spd`, an image, a
-  // `.txt` snippet, or a glyph), hiding cache/HTTP/render behind one call. The
-  // note-page strategy reuses the exact `renderPage` pipeline the engine used to
-  // inline, at the "thumb" tier.
-  // Page 0 of a `.pdf`, through the SAME MuPDF wasm the viewer uses — one
-  // document at a time, closed between files, and the worker released once the
-  // queue has been idle (see render/pdfThumb.ts). Built eagerly but INERT: no
-  // worker exists and no module is fetched until a PDF tile is both visible and
-  // uncached, because a persistent `sn-thumbs` hit answers inside the facade
-  // before this seam is ever called.
+  // The thumbnail facade: every tile is a WebP blob from one call. PDF page 0
+  // uses the viewer's MuPDF wasm, inert until a visible, uncached PDF tile needs
+  // it (a persistent `sn-thumbs` hit answers first).
   const pdfThumbs: PdfThumbs = createPdfThumbs();
   const thumbnails: Thumbnails = createThumbnails({
     getTheme: currentTheme,
@@ -1136,23 +694,15 @@ export function createAppShell(deps: AppDeps): AppShell {
     cache,
     getTheme: currentTheme,
     getThumbnail: thumbnails.getThumbnail,
-    // The interim floor for a tile whose produce is slow — a `.pdf` fetching and
-    // compiling MuPDF before it has a pixel. See `PLACEHOLDER_AFTER_MS`.
+    // Interim floor for a slow produce; see `PLACEHOLDER_AFTER_MS`.
     getGlyph: thumbnails.getGlyph,
     root: content,
     failures,
   });
 
-  // Native image tiles (a raw PNG/JPG shown as its own `<img>`, not through the
-  // engine) are lazy-loaded by US, not by the browser's `loading="lazy"`.
-  // Chromium never loads a lazy `<img>` inserted ALREADY inside the viewport
-  // during an SPA re-render — no scroll follows to trip its intersection check,
-  // so the tile sticks on the 3:4 fallback forever, blank. It looked
-  // intermittent because the first FULL page load does trip the check; only
-  // in-place hash navigations back into a folder hit it. So we ship the tile
-  // with `data-src` and promote it to a real `src` the moment it nears the
-  // viewport, which is reliable both in-view and on-scroll. Same `root` as the
-  // engine; disconnected per repaint beside `galleryEngine.reset()`.
+  // Native image tiles are lazy-loaded by us: Chromium never loads a
+  // `loading="lazy"` `<img>` inserted already in the viewport during an SPA
+  // re-render. `data-src` is promoted on approach.
   const imgLazy: IntersectionObserver | null =
     typeof IntersectionObserver !== "undefined"
       ? new IntersectionObserver(
@@ -1169,36 +719,18 @@ export function createAppShell(deps: AppDeps): AppShell {
         )
       : null;
 
-  // --- transcript search ----------------------------------------------------
-  // The debounce/staleness/failure logic lives in the controller (noteSearch.ts);
-  // this shell is only the DOM half of it. The same `failures` sink the gallery
-  // and the reader use, so an expired session mid-search reaches the composition
-  // root instead of quietly rendering as "no matches".
-  //
-  // THE ENGINE IS THE SEAM §6 LANDS ON, and step 6 left ONE
-  // producer behind it: `src/search/searchService.ts` is the browser's own
-  // index and nothing else. NO `api` IS PASSED and that absence is the boundary
-  // — there is no library-wide search route left to call, so a query the index
-  // cannot answer fails here rather than quietly reaching the network.
+  // ---- transcript search ----
+  // Logic lives in noteSearch.ts. The engine is the browser's own index; no `api`
+  // is passed, since there is no library-wide search route.
   let searchState: SearchState = { kind: "idle" };
   const searchService = createSearchService({
-    // THE OFFLINE STAND-IN FOR THE MANIFEST (`indexSearch.ts`'s header). A
-    // session that has never managed a sync has no manifest, which without this
-    // would leave a full local store unsearchable — the one case §4.4's "global
-    // search is fully offline" is actually about. The tree cache already names
-    // every note in the library, and `fileHash` is the same blob md5 the derived
-    // files are keyed by, so it can stand in wholesale.
-    //
-    // Read fresh on every call rather than captured: the cache fills during a
-    // background tree walk, so a snapshot taken here would be whatever was known
-    // at construction.
+    // Stands in for the manifest when this session never synced, so a full local
+    // store stays searchable offline. Read fresh: the walk fills it later.
     listing: () =>
       [...folderCache.values()].flatMap((cached) =>
         cached.entries.flatMap((e) =>
           e.kind === "note" && e.fileHash
-            // `Id` is a string here and the manifest's `fileId` is a varint, so
-            // the numeric side is canonical and `gallerySearch` converts back
-            // with `String(doc.fileId)`. Converting here keeps one direction.
+            // The numeric `fileId` is canonical; `gallerySearch` converts back.
             ? [{ md5: e.fileHash, fileId: Number(e.id), updatedAt: e.updatedAt }]
             : [],
         ),
@@ -1210,21 +742,10 @@ export function createAppShell(deps: AppDeps): AppShell {
     view: {
       setState(next) {
         searchState = next;
-        // ONLY the states that arrive from the ENGINE repaint from here.
-        // `idle` and `searching` are set synchronously inside `setQuery`/`reset`,
-        // whose callers already render — repainting here too would paint the
-        // same list twice on every keystroke.
+        // Only engine-arrived states repaint here; `idle`/`searching` callers already render.
         if (next.kind !== "results" && next.kind !== "error") return;
-        // The results ARE the gallery now, so an arriving answer repaints it
-        // rather than a box beneath it. ONE PAINT PER ANSWER, because an answer
-        // is whole: the cursor's "More results" needed an append path so that
-        // growing the list did not replay every row's entrance animation, reset
-        // the lazy engine's observations and risk the scroll position — and
-        // there is no second page to append any more. The repaint does reset the
-        // lazy engine, but the list it is repainting is precisely what changed,
-        // and every bitmap already drawn is still in the render cache, so the
-        // name matches that were on screen a moment ago come back off the cache,
-        // not off the wire.
+        // One paint per answer: answers are whole. Drawn bitmaps come back off the
+        // render cache.
         renderGallery({ rail: false });
       },
     },
@@ -1238,67 +759,33 @@ export function createAppShell(deps: AppDeps): AppShell {
     toastTimer = setTimeout(() => toastEl.classList.remove("is-shown"), 2400);
   }
 
-  // The same browser-side exporter the reader uses; the library only ever asks
-  // it for `documentPdf` (see `exportDocument`).
   const exporter: Exporter = createExporter({ api, renderer });
 
-  // ONE deps object for EVERY viewer (see `pages/viewer.ts`). The reader is no
-  // longer the only thing an open file can be, so its callbacks — Back, the one
-  // `bin.trash` path behind Move to bin, position reporting — are shared with the
-  // `.spd`/`.txt` viewers by construction. That is what stops the universal
-  // actions drifting apart between viewers: they are literally the same closures.
+  // One deps object for every viewer, so Back, Move to bin and position
+  // reporting are literally the same closures.
   const viewerDeps: ViewerDeps = {
     api,
-    // IN-DOCUMENT SEARCH, and it is §1.1's whole point: the
-    // same wasm FTS5 engine the library search runs on, pointed at ONE document's
-    // `text/<md5>` instead of the terms index. Built HERE, once, and handed to
-    // every viewer — the reader, the `.txt` viewer and the PDF viewer all search
-    // through this one object, so a session holds one instance and one built
-    // index rather than three (§8.1: documents through a reused instance converge
-    // on the cost of the single worst one).
-    //
-    // NO `api` GOES INTO IT, exactly as none goes into `searchService` above, and
-    // for the same reason: there is no in-document search route left to call.
-    //
-    // The one thing it does need from the library side is the `index_version` the
-    // manifest already carries — `text/<md5>` is served under a long-lived
-    // `immutable` and its path names only the md5, so the version has to ride the
-    // query string or a re-derivation would be invisible to the browser's cache
-    // (`docText.ts`'s header). Read fresh per call, because the manifest arrives
-    // on a background sync and a value captured here would be whatever was known
-    // at construction.
+    // In-document search: the same wasm FTS5 engine on one document's
+    // `text/<md5>`, built once and shared by every viewer. `text/<md5>` is
+    // `immutable`, so `index_version` from the manifest rides the query string to
+    // bust the cache on re-derivation; read fresh per call.
     docSearch: createDocSearch({ indexVersion: (md5) => searchService.indexVersion(md5) }),
     renderer,
     cache,
     getTheme: currentTheme,
-    // Back to WHERE THE NOTE WAS OPENED FROM — the bin, a search, or the folder
-    // — rather than always to the root. See `readerBack` below for why this is a
-    // push to a known URL and not `history.back()`.
+    // Back to where the note was opened from; see `readerBack`.
     onBack: () => go(readerBack),
     toast,
     onSessionExpired: sessionDidExpire,
-    // "Move to bin" from inside a viewer routes through the SAME `bin.trash` the
-    // library card's delete uses — one trash path, so the undo toast, the U6
-    // device line (`DEVICE_LINE`) and the control-plane call are shared by
-    // construction rather than reinvented. Then leave the viewer exactly the way
-    // Back does: the note now lives in the bin, so `readerBack` (the folder or
-    // search it was opened from) is where to land, and that route's handler
-    // (`enterPlace`) hides whichever viewer was up. A file is a `NoteSummary`
-    // whatever its type, so `kind: "note"` is right for an image, PDF or `.spd`.
+    // The same `bin.trash` as the card menu (toast, device line), then leave like
+    // Back. `kind: "note"` is right for any file type.
     onMoveToBin: (meta) => {
       void bin.trash({ id: meta.id, name: meta.name, kind: "note" });
       go(readerBack);
     },
-    // The BIN-ORIGIN pair (Restore / Delete permanently, shown by every viewer
-    // when the file was opened FROM the bin). Both route through the bin
-    // controller's own by-id methods, so the toast, the purge's confirm dialog —
-    // the bin's rule: no caller reaches the destructive half without it — and
-    // the badge/gallery refresh (`onChanged`) are the ONE machinery the bin's
-    // row actions use. Navigation waits for the outcome, unlike `onMoveToBin`'s
-    // fire-and-forget: a cancelled confirm or a failed call leaves the file in
-    // the bin and the viewer honestly open on it, while a success means the file
-    // no longer exists in the bin context, so the viewer closes back to the bin
-    // page (`readerBack` is `#/bin` for a bin origin).
+    // Bin-origin Restore / Delete through the bin controller's by-id methods (the
+    // purge confirm included). Navigation waits for the outcome: a cancel or
+    // failure leaves the viewer open; success returns to `#/bin`.
     onRestore: (meta) => {
       void bin.restore(meta.id).then((done) => {
         if (done) go(readerBack);
@@ -1309,39 +796,18 @@ export function createAppShell(deps: AppDeps): AppShell {
         if (done) go(readerBack);
       });
     },
-    // Restore the version being PREVIEWED (the history banner's action). Routes
-    // through the SAME `restoreVersion` the list row uses — one confirm, one
-    // quota-error path, one refresh — so the two entry points cannot drift.
-    //
-    // `subject.id` is what gets re-pointed and `annotationsOn` is where we land
-    // afterwards, and for a PDF's annotations those are two different files: the
-    // `.mark` is restored, the DOCUMENT is what reopens. Routing to the mark
-    // instead would take the reader to `foo.pdf.mark` in the note reader — a file
-    // they never asked for, showing the thing they just restored out of context.
+    // The same `restoreVersion` as the panel. For a PDF's annotations the `.mark`
+    // is restored but the document is what reopens.
     onRestoreVersion: (subject, version) =>
       void restoreVersion(subject.id, version, subject.name, subject.annotationsOn ?? subject.id),
-    // The viewer's versions control — the SAME history panel the card ⋯ menu
-    // opens (`historyController.open`), never a second one. A forward reference to
-    // the controller built below; only ever called on a click, long after.
-    //
-    // The PDF viewer hands over the paired `.mark` as the subject plus the
-    // document as `annotationsOn`, so the panel heads itself "Annotation history"
-    // and previews over the live document; every other viewer hands over its own
-    // meta and nothing here can tell the difference.
+    // The same history panel as the card menu; a forward reference, only called on click.
     onVersions: (subject, anchor, viewingMd5) =>
       historyController.open(
         { id: subject.id, name: subject.name, fileType: subject.fileType },
         { anchor, viewingMd5, annotationsOn: subject.annotationsOn },
       ),
-    // The viewer moved, or its find query changed. Each rewrites the hash WITHOUT
-    // a history entry (see `router.ts`), so the URL keeps describing what is on
-    // screen while Back stays one step out of the note. WHICH form depends on the
-    // origin: a file opened FROM THE BIN gets the deep `#/bin/note/:id/page/:n`
-    // (`replaceBinNotePosition`) — its blob is not at the live route; a version
-    // PREVIEW gets `#/note/:id/version/:short` (`replaceNoteVersionPosition`); a
-    // plain LIVE open gets the bare note URL (`replaceNotePosition`). The flags are
-    // mutually exclusive — bin wins first because a trashed version preview is
-    // still reached through the bin.
+    // Rewrites the hash without a history entry. Bin wins first (a trashed version
+    // preview is still reached through the bin), then version preview, then live.
     onPosition: (noteId, page, q, versionMd5, bin) =>
       bin
         ? replaceBinNotePosition(noteId, page)
@@ -1352,10 +818,7 @@ export function createAppShell(deps: AppDeps): AppShell {
 
   const reader: Reader = createReader(viewerDeps);
   content.append(reader.el);
-  // The type-specific viewers, mounted ONCE beside the reader — same overlay slot,
-  // all hidden until `activate` shows one. Their bodies are stubs today (a
-  // placeholder + the shared toolbar); the `.spd`/`.txt` viewer agents fill the
-  // render at the markers inside each module.
+  // Mounted once beside the reader, hidden until `activate` shows one.
   const spdViewer: Viewer = createSpdViewer(viewerDeps);
   content.append(spdViewer.el);
   const txtViewer: Viewer = createTxtViewer(viewerDeps);
@@ -1363,37 +826,22 @@ export function createAppShell(deps: AppDeps): AppShell {
   const pdfViewer: Viewer = createPdfViewer(viewerDeps);
   content.append(pdfViewer.el);
 
-  /**
-   * The viewer on screen, or null. Exactly one paints at a time — {@link activate}
-   * hides whichever was active before the next opens, so note → `.spd` → note
-   * never stacks two overlays. Tracked here because the reader is no longer the
-   * only viewer, and the old route-away `reader.close()` only knew how to hide it.
-   */
+  /** Exactly one viewer paints at a time. */
   let activeViewer: Viewer | null = null;
 
   /**
-   * Which viewer opens a file, by its server-verified `fileType`. The DEFAULT is
-   * the reader — `.note`, images and every unrecognised kind still go there,
-   * exactly as before; only the types with a dedicated module branch off. A new
-   * viewer adds a `case` at its marker and is mounted beside the reader above.
-   */
-  /**
-   * The type → viewer map. Its MEMBERSHIP is `hasDedicatedViewer`
-   * (core/fileKind.ts) — the recycle bin asks that same question to decide
-   * whether a row opens a real viewer, and the two drifted once already. Add a
-   * case here and add the type there in the same commit.
-   */
+  * By server-verified `fileType`; the reader is the default. Membership must
+  * match `hasDedicatedViewer` (core/fileKind.ts), which the bin uses.
+  */
   function viewerFor(fileType: string): Viewer {
     switch ((fileType || "").toLowerCase()) {
-      // --- SPD VIEWER: the .spd viewer agent fills spdViewer.ts; this seam is live ---
+      // --- SPD VIEWER ---
       case "spd":
         return spdViewer;
-      // --- TXT VIEWER: the .txt viewer agent fills txtViewer.ts; this seam is live ---
+      // --- TXT VIEWER ---
       case "txt":
         return txtViewer;
-      // MuPDF, rastered in the browser (`render/pdfDecode.ts`). A `.mark` does
-      // NOT come here — it parses as a note and the reader paints it; pairing
-      // the two is still ahead.
+      // A `.mark` doesn't come here: it parses as a note and the reader paints it.
       case "pdf":
         return pdfViewer;
       default:
@@ -1401,43 +849,22 @@ export function createAppShell(deps: AppDeps): AppShell {
     }
   }
 
-  /** Make `v` the visible viewer, hiding the one it replaces. `v.open()` shows
-   *  `v.el` itself; this only guarantees the PRIOR viewer has left the layer. */
+  /** `v.open()` shows `v.el`; this only hides the prior viewer. */
   function activate(v: Viewer): void {
     if (activeViewer && activeViewer !== v) activeViewer.hide();
     activeViewer = v;
-    // AND TAKE THE GALLERY OUT OF THE LAYER, which is not cosmetic — it is what
-    // STOPS THE LAZY PAINTING BEHIND IT.
-    //
-    // `.viewer` is `position: absolute; inset: 0` over an opaque `--desk`, so
-    // the gallery is covered but still laid out. IntersectionObserver does no
-    // occlusion testing: a card under an opaque overlay is still intersecting,
-    // so every observer kept firing and the gallery went on producing
-    // thumbnails nobody could see for as long as a file was open.
-    //
-    // That was always true and never mattered, because a `.note`/`.spd`/`.txt`
-    // tile is cheap. A `.pdf` tile is a MuPDF open plus a page render, so the
-    // waste became visible the moment PDFs got real tiles — a folder of them
-    // kept decoding behind whichever one you had opened. `hidden` makes the
-    // cards `display: none`, the observers report nothing, and every type stops.
+    // Hide the gallery, not just cover it: IntersectionObserver ignores occlusion,
+    // so tiles (expensive for PDFs) kept rendering behind the viewer.
     gallery.hidden = true;
   }
 
-  /** Route away from every viewer: hide whatever is active. Replaces the old
-   *  `reader.close()`, which could only hide the reader — a `.spd`/`.txt` viewer
-   *  left up would otherwise paint under the folder gallery. */
   function hideActiveViewer(): void {
-    // Leaving a viewer also leaves any version-preview reroute — the next live
-    // read must not be pinned to a retained version. Harmless when no preview is
-    // active (the scope is already quiet).
+    // The next live read must not stay pinned to a retained version.
     historyScope.clear();
     if (activeViewer) {
       activeViewer.hide();
       activeViewer = null;
     }
-    // The gallery comes back with the layer it was hidden from (see `activate`).
-    // Unconditional: this also runs when no viewer was active, and a listing
-    // that is already visible does not mind being told so.
     gallery.hidden = false;
   }
 
@@ -1450,9 +877,7 @@ export function createAppShell(deps: AppDeps): AppShell {
 
   const bin: BinController = createBin({
     api,
-    // The gallery's OWN engine, not a second one: the bin paints into the
-    // gallery, so the scroll root is already right and `renderGallery`'s
-    // `reset()` is already the teardown its canvases need.
+    // The gallery's own engine; its `reset()` is the bin's teardown.
     view: createBinView({
       gallery,
       crumbs,
@@ -1463,56 +888,28 @@ export function createAppShell(deps: AppDeps): AppShell {
       setMode: setBinMode,
       onLeave: () => go(folderHref(null)),
     }),
-    // A trashed file with a real viewer (`.note`, `.spd`, `.txt` — the bin's
-    // `actions.open` mirrors `viewerFor`) is ROUTED, not opened directly, so
-    // Back, a reload and the browser's own history all behave. It routes to the
-    // deep `#/bin/note/:id` URL (NOT the live `#/note/:id`, whose blob 404s for a
-    // trashed file), dispatched through `openBinNote` — which builds the `"bin"`
-    // origin (`readerReturn`) that makes the viewer's Back say "Recycle bin" and
-    // swaps its file actions to Restore / Delete permanently. That URL then tracks
-    // the page, so a reload / copy-link reopens the SAME trashed file at the same
-    // place instead of falling back to the library.
+    // Routed to `#/bin/note/:id` (the live route 404s for trashed files) so Back,
+    // reload and copy-link reopen the same trashed file with a `"bin"` origin.
     onOpen: (entry) => go(binNotePageHref(entry.id)),
     onChanged: (mutated) => {
-      // The badge is a function of the bin listing, so it moves on every
-      // refresh; the FOLDER behind the bin only changes when something was
-      // actually trashed or restored, and refetching it on the boot-time
-      // listing would duplicate the request the first route dispatch has just
-      // made.
+      // The badge moves every refresh; the folder only refetches on a real mutation.
       rail.build();
       if (mutated) void refetch(folderId, folderCache.get(folderId));
     },
     handled,
   });
-  // The reader can only ask for bin-scoped bytes once there is a bin to ask.
   binScope.attach((id) => bin.isTrashed(id));
 
-  // --- the three extracted features (Review-2 Pass-2 #3) -------------------
-  //
-  // The controller keeps owning lifecycle and state; these own rendering/logic.
-  // Each is handed an explicit context — everything it touches arrives as an
-  // argument (or an imported pure helper), so there is no hidden coupling back
-  // into this closure. Built HERE, once every dependency exists (the bin, the
-  // exporter, the search controller); the functions they return are only ever
-  // CALLED at runtime (a route dispatch, a search response), long after this.
-  //
-  // Order matters: the card factory's overflow menu comes from `cardActions`,
-  // and the search renderer's rows come from the card factory.
-  // The "history of this file" list, launched from a note card's ⋯ menu. Built
-  // before `cardActions` (whose menu triggers it) and handed the two things it
-  // does not own: how to PREVIEW a version (the shell activates the reader with
-  // the history reroute armed) and how to RESTORE one (the shared confirm+refresh
-  // path). Both are hoisted function declarations below.
+  // ---- the extracted features ----
+  // Each gets an explicit context; built once every dependency exists. Order
+  // matters: cards use `cardActions`' menu, search rows use the card factory.
   const historyController = createHistoryController({
     api,
     host: root,
     toast,
     handled,
-    // TWO PREVIEWS, ONE PANEL. `annotationsOn` is the whole difference: with it,
-    // `noteId` is a `.mark` and what opens is the DOCUMENT it annotates, live,
-    // with the ink rerouted to this version; without it, `noteId` is the file and
-    // what opens is that file's past version. The panel does not know either
-    // story — it hands back the fact it was given.
+    // With `annotationsOn`, `noteId` is a `.mark` and the live document opens
+    // with the ink rerouted; without it, the file's past version opens.
     openPreview: (noteId, version, annotationsOn) =>
       void (annotationsOn != null
         ? openAnnotationsPreview(annotationsOn, noteId, version)
@@ -1520,17 +917,10 @@ export function createAppShell(deps: AppDeps): AppShell {
     restore: (noteId, version, noteName) => restoreVersion(noteId, version, noteName),
   });
   /**
-   * Rename a live file or folder. Opens the dialog
-   * prefilled from the entry's name + type; the dialog owns the field, the
-   * keyboard flow and the collision loop, and calls back here to do the write.
-   *
-   * On success the visible listing is updated OPTIMISTICALLY — `entry` is the same
-   * object the card was built from and the same one the cached listing holds, so
-   * one field write plus a repaint is the whole update; the SSE `syncVersion` bump
-   * reconciles the rest. A clash (409 → `NameTakenError`) is rethrown so the dialog
-   * stays open with the collision line; every other failure routes through the
-   * shell's failure sink exactly as the other card actions do.
-   */
+  * `entry` is the object the cached listing holds, so one field write plus a
+  * repaint updates it; the SSE bump reconciles. `NameTakenError` is rethrown to
+  * keep the dialog open.
+  */
   async function onRename(entry: Entry): Promise<void> {
     await openRenameDialog({
       host: root,
@@ -1564,19 +954,12 @@ export function createAppShell(deps: AppDeps): AppShell {
     sessionDidExpire,
     onTrash: (entry) => void bin.trash(entry),
     onRename: (entry) => void onRename(entry),
-    // The rail is the ONE owner of "which folder IS a category" (resolved by
-    // identity, so a user's own folder merely named `Note` is not caught). A note
-    // is never a category root; only the six pinned category anchors are.
     isCategoryRoot: (entry) => entry.kind === "folder" && rail.categoryIconFor(entry) !== null,
     onHistory: (noteSummary, anchor) =>
       historyController.open(
         { id: noteSummary.id, name: noteSummary.name, fileType: noteSummary.fileType },
         { anchor },
       ),
-    // THE MARK'S history, under the DOCUMENT's name. The same panel and the same
-    // preview/restore machinery as above — only the subject and the wording move,
-    // because what is versioned here is the handwriting and the document on
-    // screen is always the live one.
     onAnnotationHistory: (doc, annotationsId, anchor) =>
       historyController.open(
         { id: annotationsId, name: doc.name, fileType: "mark" },
@@ -1590,10 +973,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     labelFor: (folder) => rail.labelFor(folder),
     categoryIconFor: (folder) => rail.categoryIconFor(folder),
     pendingCategoryOf: (folder) => rail.pendingCategoryOf(folder),
-    // The SAME path the rail's unresolved row takes, so a category with no folder
-    // yet lands in one state whichever surface selected it. `selectCategory` also
-    // fires the rail's own `onSelectCategory` (→ `enterPendingCategory`), so this
-    // must not call that as well.
+    // `selectCategory` already fires `onSelectCategory`; don't call it again.
     onSelectCategory: (cat) => rail.selectCategory(cat),
     scheduleSpan,
     cardMenu: cardActions.cardMenu,
@@ -1602,10 +982,6 @@ export function createAppShell(deps: AppDeps): AppShell {
     gallery,
     getSearchState: () => searchState,
     folders: folderCache,
-    // The rail owns "has the tree walk landed" (`treeWalked`), and the name half
-    // of a query is a function of exactly that walk — so the search renderer
-    // asks the same authority the gallery's pending-category branch does rather
-    // than keeping a second copy of the flag.
     treeLoaded: () => rail.loaded(),
     labelFor: (folder) => rail.labelFor(folder),
     resultCard: galleryCards.resultCard,
@@ -1614,22 +990,11 @@ export function createAppShell(deps: AppDeps): AppShell {
   });
 
   /**
-   * WHERE A DROP WOULD LAND right now, or null when this surface cannot take one.
-   *
-   * Read PER EVENT rather than captured, so a drag that starts in one folder and
-   * finishes after a navigation cannot upload into the folder the user left.
-   *
-   * The four refusals are all "what is on screen is not a folder listing": a
-   * destination (the bin, the console), search results, a category the device has
-   * not created yet (there is no id to upload into — the rail's `pending` state),
-   * and an open viewer. Each of them is also a surface where the toolbar's Upload
-   * button is hidden, so the two entry points agree by construction.
-   *
-   * `templates` comes from the RAIL, which is the one owner of "which folder IS a
-   * category" — resolved by identity against the walked tree, so a user's own
-   * folder named `MyStyle` is not the device's template folder and does not get
-   * the template copy. See `Category.templates`.
-   */
+  * Read per event, so a drag that ends after a navigation can't upload into
+  * the folder left. Null over a destination, results, a pending category or an
+  * open viewer: the same places Upload is hidden. `templates` comes from the
+  * rail's identity resolution.
+  */
   function uploadDestination(): UploadDestination | null {
     if (destination !== null || activeViewer !== null) return null;
     if (query.trim() !== "" || rail.pending() !== null) return null;
@@ -1639,31 +1004,18 @@ export function createAppShell(deps: AppDeps): AppShell {
     };
   }
 
-  /**
-   * THE DROP TARGET over the gallery, plus the queue behind it
-   * The zone owns the drag feedback, the pre-flight,
-   * the per-file progress rows and the toasts; this shell owns only what the zone
-   * cannot know — where a drop lands, how much room is left, and what to do with
-   * a file once it exists.
-   */
+  /** The zone owns feedback, pre-flight, progress and toasts; the shell owns the rest. */
   const uploadZone: UploadZone = createUploadZone({
     target: gallery,
-    // The overlay is absolutely positioned over the SCROLL CONTAINER, not the
-    // gallery: a short listing leaves the gallery only a few hundred pixels tall,
-    // and a dropzone that covers the tiles but not the empty space beneath them
-    // is a target that visibly disagrees with itself.
+    // Over the scroll container, not the gallery, so a short listing's empty space
+    // is still a target.
     overlayHost: content,
     listHost: root,
     destination: uploadDestination,
-    // Null (usage unknown) never blocks — see `preflightUpload`. The server's 413
-    // is the authority; this only saves a transfer that could not have succeeded.
+    // Unknown never blocks; the server's 413 is the authority.
     remainingBytes: () => (usage === null ? null : Math.max(0, usage.total - usage.used)),
-    // The FILE names in that folder, from the listing already in hand — which is
-    // what lets a clash be found and asked about before any bytes move. Folders
-    // are left out deliberately: an upload can never replace one, so a name
-    // shared with a subfolder is the server's ordinary auto-rename, not a
-    // question worth putting to the user. Null (never listed) means "cannot
-    // tell", and the zone then does not ask.
+    // File names only: an upload never replaces a folder. Null means unknown, so
+    // the zone doesn't ask.
     existingNames: (id) => {
       const cached = folderCache.get(id);
       return cached ? cached.entries.filter((e) => e.kind === "note").map((e) => e.name) : null;
@@ -1672,17 +1024,10 @@ export function createAppShell(deps: AppDeps): AppShell {
     upload: (folderIdArg, file, onProgress, signal, onConflict) =>
       api.upload(folderIdArg, file, onProgress, signal, onConflict),
     onUploaded: (entry, dest) => {
-      // OPTIMISTIC, then reconciled. The row is spliced into the cached listing
-      // straight away so the file appears the instant it lands — and `refetch`
-      // behind it replaces the whole listing with the server's, which is what
-      // corrects an auto-renamed collision ("notes (2).pdf") and fills in
-      // anything the upload response did not carry.
+      // Optimistic splice, then `refetch` corrects auto-renames.
       const cached = folderCache.get(dest.id);
       if (cached) {
-        // A REPLACE COMES BACK WITH THE SAME ID it went in with — that is what
-        // "supersede" means — so the row is swapped in place rather than added.
-        // Anything else is a new row. Getting this wrong would show one file
-        // twice for as long as it took the refetch to land.
+        // A replace keeps its id, so it swaps in place.
         const at = cached.entries.findIndex((e) => e.id === entry.id);
         cached.entries =
           at >= 0 ? cached.entries.map((e, i) => (i === at ? entry : e)) : [...cached.entries, entry];
@@ -1691,25 +1036,15 @@ export function createAppShell(deps: AppDeps): AppShell {
           renderGallery();
         }
       }
-      // The upload just charged the account, so the bar beside it is now wrong.
       refreshUsage();
       void refetch(folderId, folderCache.get(folderId));
-      // The rail's counts are a function of the tree, and the tree just grew.
       void folderCache.prefetch(true);
     },
     toast,
     handled,
   });
 
-  /**
-   * What YOUR OWN ACCOUNT is handed — all of it something this shell already
-   * owns, so the page creates nothing but its own `<section>`.
-   *
-   * Two of the callbacks out (`onSignOut`, `onSetTheme`) are exactly the two
-   * controls that LEFT the rail footer, which is the shape of that move: the
-   * shell still owns what signing out and repainting for a theme MEAN; the page
-   * owns only where the buttons are and what they say.
-   */
+  /** Everything is the shell's; the page owns only where buttons sit. */
   const ACCOUNT_HOST: AccountHost = {
     api,
     account: identity.email,
@@ -1728,55 +1063,32 @@ root,
     onSetTheme: (next) => setThemeTo(next),
   };
   /**
-   * The account page, BUILT ON FIRST ENTRY and kept for the life of the shell —
-   * the same lifetime the admin console has, and for a measured reason rather
-   * than symmetry.
-   *
-   * It used to be constructed with the shell, and that put its whole DOM — four
-   * sections, five storage rows, a three-field password form — on the BOOT PATH,
-   * between the shell existing and the first listing painting. The gallery's
-   * loading state has a 150 ms grace (`LOADING_PAINT_DELAY_MS`) that a fast
-   * listing is meant to win outright, and the extra work was enough to lose that
-   * race on a loaded machine: `slowLink`'s "a fast listing paints no loading
-   * state at all" and `find`'s stroke probe both went red, on a clean checkout's
-   * green suite. Nothing on the boot path may cost what only a visitor to one
-   * page needs.
-   *
-   * The MODULE is still statically imported, deliberately: it is a fraction of
-   * the console's size, and a chunk boundary here would buy a round trip and the
-   * loading stand-in that goes with it (see `showAdminBooting`) for no useful
-   * saving. What was expensive was the DOM, not the code.
-   */
+  * Built on first entry, not with the shell: its DOM on the boot path lost the
+  * 150 ms `LOADING_PAINT_DELAY_MS` race and broke `slowLink`/`find` e2e tests.
+  */
   let accountPage: AccountPage | null = null;
   function account(): AccountPage {
     accountPage ??= createAccountPage(ACCOUNT_HOST);
     return accountPage;
   }
 
-  /** Leave the account page. The twin of `leaveAdmin`, and called from the same
-   *  places: a route handler that means "you are somewhere else now". */
   function leaveAccount(): void {
     accountPage?.close();
   }
 
-  // --- rendering -----------------------------------------------------------
+  // ---- rendering ----
   function buildCrumbs(): void {
     const parts: (Node | string)[] = [];
     const home = el("button", { type: "button", text: "Library" });
     home.addEventListener("click", () => go(folderHref(null)));
     if (query.trim()) {
-      // JUST "Search", with no folder ahead of it. `Note / Search` would claim a
-      // scope the search does not have: results span the whole library, so
-      // naming the folder you happened to be standing in when you typed is a lie
-      // about what is on screen. Nothing is stranded by dropping the path — every
-      // rail click clears the query and puts the folder crumb straight back.
+      // Just "Search": results span the library, so a folder crumb would lie.
       crumbs.replaceChildren(el("span", { class: "crumbs__here", text: "Search" }));
       return;
     }
     const pending = rail.pending();
     if (pending) {
-      // The category has no folder, but it IS where the user is. Saying
-      // "Library" here would contradict the highlighted rail row.
+      // "Library" would contradict the highlighted rail row.
       parts.push(home, el("span", { class: "crumbs__sep", text: "/" }), el("span", { class: "crumbs__here", text: pending.label }));
       crumbs.replaceChildren(...parts);
       return;
@@ -1788,16 +1100,11 @@ root,
       const trail = crumbPath(listing.path);
       trail.forEach((folder, i) => {
         parts.push(el("span", { class: "crumbs__sep", text: "/" }));
-        // `rail.labelFor`, not `folder.name`: a category anchor is called by its
-        // category label everywhere, so the crumb cannot read `EXPORT` while the
-        // rail two inches away reads `Export`.
+        // The rail's label, so the crumb can't read `EXPORT` beside `Export`.
         const label = rail.labelFor(folder);
         if (i === trail.length - 1) {
-          // The LAST crumb is where you already are — plain text, not a link.
           parts.push(el("span", { class: "crumbs__here", text: label }));
         } else {
-          // Every ANCESTOR in between is clickable now — jump straight to it, the
-          // same as "Library" (the root ancestor) already does.
           const crumb = el("button", { type: "button", text: label });
           crumb.addEventListener("click", () => go(folderHref(folder.id)));
           parts.push(crumb);
@@ -1808,28 +1115,12 @@ root,
   }
 
   /**
-   * The NARROW repaint the tree walk owes a folder listing — see
-   * `RailDeps.onLabelsSettled`.
-   *
-   * The crumb trail and the folder cards are the only two things in a folder
-   * gallery whose text is a function of the walk (`rail.labelFor`,
-   * `rail.categoryIconFor`), and they are rebuilt HERE rather than by calling
-   * `renderGallery`, deliberately: the full repaint drops every note card,
-   * resets the shared render engine and re-observes every lazy image, throwing
-   * away work that has nothing to do with what changed. It is the same churn
-   * `settle`'s `changed` gate is there to stop; adding a second source of it to
-   * fix a label would be a poor trade.
-   *
-   * Folder cards precede note cards in the gallery (see `renderGallery`), so the
-   * two lists line up positionally; a length mismatch means the DOM is not this
-   * listing's and nothing is touched.
-   */
+  * The narrow repaint the walk owes a folder listing: crumbs and folder cards
+  * only, without resetting the render engine. Folder cards precede note cards,
+  * so they line up by position; a length mismatch touches nothing.
+  */
   function relabelFolders(): void {
-    // The same one question the folder fetch's own late answers ask — the crumb
-    // and the cards belong to the bin or the console while either is up.
     if (!galleryIsOnScreen()) return;
-    // The crumb is the visible half on a deep link — "Library / EXPORT" until the
-    // walk resolves the anchor. It is cheap and unconditional.
     buildCrumbs();
     if (query.trim() !== "" || !listing) return;
     const folders = visibleEntries().filter((e): e is Folder => e.kind === "folder");
@@ -1837,13 +1128,8 @@ root,
     const cards = gallery.querySelectorAll<HTMLElement>(".card--folder");
     if (cards.length !== folders.length) return;
 
-    // ONLY THE CARDS WHOSE RENDERING ACTUALLY MOVED. Replacing all of them
-    // unconditionally is not merely wasteful: a replaced node is DETACHED, so a
-    // card the user is hovering, has tabbed to, or is in the middle of clicking
-    // is pulled out from under them — and `settle()` runs on every completed
-    // walk, i.e. on every sync bump from the device, not just the first. The two
-    // things this pass can change are the label (`EXPORT` → `Export`) and whether
-    // the card is a category, so comparing those two is the whole test.
+    // Only cards whose label or category status moved: a replaced node is
+    // detached from under the user's hover or focus, and this runs on every sync.
     const stale = folders.filter((folder, i) => {
       const card = cards[i]!;
       const labelMoved = card.querySelector(".card__title")?.textContent !== rail.labelFor(folder);
@@ -1857,19 +1143,13 @@ root,
       if (!stale.includes(folder)) return;
       cards[i]!.replaceWith(galleryCards.folderCard(folder));
     });
-    // A category card is a different height from a plain folder chip.
     scheduleSpan();
   }
 
   function visibleEntries(): Entry[] {
     if (!listing) return [];
-    // The root is the one listing this app rewrites: containers out, their
-    // meaningful children in. Everywhere else shows exactly what the server said.
-    // NO QUERY FILTER HERE ANY MORE. A query does not narrow the folder you are
-    // standing in — it replaces the gallery with library-wide results (see
-    // `renderSearch`), because filtering names to this folder while transcripts
-    // searched everything answered one question at two scopes, with nothing on
-    // screen to say which.
+    // Only the root is rewritten (containers out). No query filter: a query
+    // replaces the gallery with library-wide results.
     const entries = folderId === null ? rail.rootEntries(listing.entries) : listing.entries;
     const folders = entries.filter((e): e is Folder => e.kind === "folder");
     const notes = entries.filter((e): e is NoteSummary => e.kind === "note");
@@ -1882,27 +1162,14 @@ root,
   }
 
   interface RenderOpts {
-    /**
-     * Rebuild the folder rail too. Default true. Set false on the search-typing
-     * path: the rail is a pure function of the cached tree, which cannot change
-     * because someone typed a letter, and rebuilding it per keystroke is the
-     * known inefficiency this change was told not to compound.
-     */
+    /** False on the typing path: typing can't change the tree. */
     rail?: boolean;
   }
 
-  // --- masonry spans + tile aspect ----------------------------------------
-  //
-  // The icon gallery is CSS-grid row-span masonry (04-library-gallery.css has
-  // the geometry): uniform `--tile-w-icon` columns over a small fixed row unit,
-  // each card spanning the rows its own height needs. The HEIGHT is decided by
-  // CSS alone — the tile's pre-set `aspect-ratio` at the fixed column width,
-  // plus the caption — so the span pass below only ever MEASURES and never
-  // sizes; it is what folds the cards up under each other, and it re-runs only
-  // when a height can genuinely change (a repaint, or an image's one allowed
-  // aspect correction).
+  // ---- masonry spans + tile aspect ----
+  // CSS-grid row-span masonry (04-library-gallery.css). CSS decides heights; the
+  // span pass only measures, and reruns only when a height can change.
 
-  /** One scheduled pass per frame, however many corrections ask for it. */
   let spanScheduled = false;
   function scheduleSpan(): void {
     if (spanScheduled) return;
@@ -1913,32 +1180,16 @@ root,
     });
   }
 
-  // A LATE WEBFONT SWAP IS A HEIGHT CHANGE, and this masonry measures heights.
-  // The captions are set in the app's own faces; until those load the browser
-  // paints the fallback, and the swap re-flows every caption — so a first paint
-  // that landed before the fonts did leaves every card spanning the wrong number
-  // of rows, with the gaps that implies, until something else repaints. `size-
-  // adjust` on the @font-face keeps the error small, which is exactly why it went
-  // unnoticed rather than why it is not there. One extra pass, once per document.
-  //
-  // Guarded: `document.fonts` is absent in the non-browser environments the unit
-  // tests construct these modules in (the same guard `thumbnails.ts` uses).
+  // A late webfont swap reflows captions, so span once more when fonts load.
+  // `document.fonts` is absent in unit tests.
   if (typeof document !== "undefined" && document.fonts) {
     void document.fonts.ready.then(() => scheduleSpan());
   }
 
   /**
-   * Span every gallery child over the masonry's row unit: rows needed =
-   * ⌈(outer height + vertical gap) / row unit⌉, with the gap folded into the
-   * span (row-gap is 0) so cards start mid-track instead of on shared lines.
-   * Margins count — the section head owns real ones — and the unit/gap are read
-   * off the live grid, so the CSS constants have exactly one home.
-   *
-   * ONLY the icon masonry spans. The list, search results and the bin are row
-   * layouts; the guards mirror `renderGallery`'s own mode decision, and the
-   * `grid-auto-rows` parse turns non-finite the moment `.is-bin`'s block layout
-   * is standing in front of the grid anyway.
-   */
+  * Rows = ⌈(outer height + gap) / row unit⌉, with unit and gap read off the
+  * live grid. Only the icon masonry spans.
+  */
   function spanTiles(): void {
     if (view !== "grid" || query.trim() !== "") return;
     const grid = getComputedStyle(gallery);
@@ -1956,54 +1207,32 @@ root,
   }
 
   function renderGallery(opts: RenderOpts = {}): void {
-    // A DESTINATION OWNS THE SURFACE. While the route says the bin or the
-    // console is what is on screen, an AMBIENT repaint — the boot-time tree
-    // walk settling (`rail.onSettled`), a live sync bump, a late search
-    // response — must not paint the folder gallery over it: that repaint is
-    // the bin's documented close mechanism, and on a hard reload of `#/bin`
-    // the tree prefetch used to land AFTER the bin opened and blank it (the
-    // console lost its topbar the same way). Route-driven exits never trip
-    // this guard, because every `show*` handler reassigns `destination`
-    // BEFORE it repaints — the guard only ever reads "the address bar still
-    // says a destination", which is exactly when the gallery is not the view.
+    // A destination owns the surface: ambient repaints (walk settling, sync bumps,
+    // late search answers) must not paint over it. Route exits reassign
+    // `destination` before repainting, so they pass.
     if (destination !== null) return;
     if (opts.rail !== false) rail.build();
     buildCrumbs();
     const searching = query.trim() !== "";
-    // Sort and the view toggle describe a folder listing; results are not one.
     sortWrap.hidden = searching;
     segmented.hidden = searching;
-    // Upload obeys the SAME rule, plus one more: a category the device has not
-    // created yet has no id to upload into. `uploadDestination()` is the single
-    // authority on that, so the button and the drop target can never disagree
-    // about whether this place accepts a file.
+    // `uploadDestination()` decides, so the button and drop target agree.
     uploadBtn.hidden = uploadDestination() === null;
-    // Never a hairline with nothing after it.
     toolsSep.hidden = uploadBtn.hidden;
-    // Leaving the bin is this repaint, and nothing else — the same overwrite
-    // that closes it turns its mode off. That is the teardown hook bin.ts is
-    // built around; it just has to be one line, here, rather than nowhere.
+    // This repaint is how the bin closes, so it also ends bin mode.
     setBinMode(false, 0);
-    // Results are always a list: a row is what has room for a path, a date and
-    // the count of pages the query reached, and a grid of covers has room for
-    // none of them.
+    // Results are always a list: only a row has room for path, date and page count.
     gallery.className = `gallery${searching || view === "list" ? " is-list" : ""}`;
     galleryEngine.reset();
     imgLazy?.disconnect(); // drop the previous repaint's native-image observations
     closeOpenMenu(); // a card/row menu's DOM is about to be replaced
     gallery.replaceChildren();
-    // The masonry span pass, scheduled BEFORE the children are appended below:
-    // the rAF fires after this whole repaint, whatever branch it takes, and
-    // `spanTiles` itself knows which layouts span (only the icon masonry).
+    // Scheduled before appending; `spanTiles` knows which layouts span.
     scheduleSpan();
 
     if (searching) {
       const q = query.trim();
-      // BELOW THE GLOBAL FLOOR: a 1–2 char library-wide query does not search —
-      // it is broad-term cost and noise (`MIN_GLOBAL_QUERY_LEN`, and the backend
-      // gate behind it). The results area idles with a quiet hint rather than
-      // firing search-as-you-type or painting name matches for a single letter.
-      // (In-doc find, inside a viewer, is unaffected — it searches at any length.)
+      // Below the floor: a quiet hint, no search. In-doc find is unaffected.
       if (q.length < MIN_GLOBAL_QUERY_LEN) {
         gallery.append(
           emptyState("Keep typing", `Type at least ${MIN_GLOBAL_QUERY_LEN} characters to search your library.`),
@@ -2014,9 +1243,6 @@ root,
       return;
     }
 
-    // A category with no folder behind it. Which of the two things that means
-    // depends entirely on whether the tree walk has finished — see
-    // `RailController.loaded`.
     const pending = rail.pending();
     if (pending) {
       gallery.append(
@@ -2035,10 +1261,8 @@ root,
     }
     const entries = visibleEntries();
     if (entries.length === 0) {
-      // EMPTINESS AS DIRECTION, not mood: now that a file can be put here from
-      // the browser, the empty state names the thing to do rather than only the
-      // thing that has not happened. The device promise is a fact — a file placed
-      // in the cloud is pulled down on the next sync.
+      // The empty state names the thing to do; a cloud file reaches the device on
+      // the next sync.
       gallery.append(
         emptyState(
           "This folder is empty",
@@ -2055,33 +1279,14 @@ root,
     }
   }
 
-  /** `n thing` / `n things`, with the plural only where it belongs. */
   function plural(n: number, one: string): string {
     return `${n} ${n === 1 ? one : `${one}s`}`;
   }
 
   /**
-   * What the gallery's section head says about the listing under it.
-   *
-   * TWO HALVES, COUNTED SEPARATELY — "8 docs" over a folder holding a subfolder
-   * and eight files is not what is on screen; a folder is not one of the docs.
-   * The folder half is OMITTED when there are none, rather than reading
-   * "0 folders · 8 docs", and so is the doc half (a folder of nothing but
-   * subfolders says "6 folders", not "6 folders · 0 docs").
-   *
-   * THE VOCABULARY IS FIXED, and it dovetails with the folder rows and the rail:
-   *
-   *   - "items" = folders AND docs together, the total. That is what a folder row
-   *     and a rail count say about what is inside a folder ("8 items").
-   *   - "docs"  = any file, whatever its type — note, image, PDF, `.spd`.
-   *
-   * So `8 items` on a row and `1 folder · 7 docs` in the head of the folder it
-   * opens are the same eight things, described at two levels.
-   *
-   * "docs" is TYPE-NEUTRAL ON PURPOSE: nothing here branches on `fileType`, so
-   * nothing here can call a screenshot a note — the defect the old blanket
-   * "notes" count had, and the one `itemCount` was fixed for.
-   */
+  * Folders and docs counted separately, each half omitted at zero. "Items" is
+  * the total (matching folder rows and the rail); "docs" is any file, type-neutral.
+  */
   function listingSummary(entries: Entry[]): string {
     const folders = entries.filter((e) => e.kind === "folder").length;
     const docs = entries.length - folders;
@@ -2101,41 +1306,22 @@ root,
     );
   }
 
-  // --- where the reader was opened from ------------------------------------
+  // ---- where the reader was opened from ----
   /**
-   * The human path of the folder a note lives in — `Note / Projects` — or null
-   * when this shell cannot say.
-   *
-   * Answered from `folderCache`, which its walk fills for the WHOLE
-   * (household-sized) tree, because the question is asked from a search result
-   * and a search result carries no folder — the index names documents by id and
-   * nothing else: results are library-wide, so the note is very often somewhere
-   * the user has never navigated. The same container
-   * flattening the breadcrumb uses (`crumbPath`) is applied here, so the reader
-   * says `Note` where the server said `NOTE / Note`.
-   *
-   * Null when the walk has not reached the folder yet (or the note is not in the
-   * cache at all). The reader renders that as ABSENT rather than guessing — a
-   * subtitle that invents a folder is worse than one that omits it.
-   */
+  * The note's folder path from the whole-tree cache (search results carry no
+  * folder), flattened like the breadcrumb. Null when unknown; the reader then
+  * omits it rather than guessing.
+  */
   function folderPathOf(noteId: Id): string | null {
     for (const cached of folderCache.values()) {
       if (!cached.entries.some((e) => e.kind === "note" && e.id === noteId)) continue;
-      // The listing's own `path` is root → here, which is the note's folder.
       const names = crumbPath(cached.path).map((f) => rail.labelFor(f));
       return names.length === 0 ? null : names.join(" / ");
     }
     return null;
   }
 
-  /** The folder the user is STANDING IN, as a path — null at the library root. */
-  /**
-   * NAMES COME FROM `rail.labelFor`, never from `folder.name`. A category anchor
-   * is called by its category label everywhere it appears — the rail, the
-   * breadcrumb, the reader's Back button, a search result's path — because the
-   * device calls it `EXPORT` and the app calls it `Export`, and the same folder
-   * reading as two different places is the bug this fixes.
-   */
+  /** Null at the root. Names via `rail.labelFor`, never `folder.name`. */
   function currentFolderPath(): string | null {
     const pending = rail.pending();
     if (pending) return pending.label;
@@ -2145,103 +1331,52 @@ root,
   }
 
   /**
-   * What Back should say for the note about to open. The query being non-empty
-   * is what makes it a search arrival — the same test the mockup uses, and the
-   * one that stays true because every navigation clears the box.
-   *
-   * NOTE WHICH FOLDER EACH KIND CARRIES, because they are not the same folder:
-   *
-   *  - `folder` — Back returns to the LISTING BEHIND the reader, so the label has
-   *    to name where the user is standing, not where the note lives. For a note
-   *    opened from the folder it is in these coincide; for one opened by URL from
-   *    the root they do not, and "Library" is the honest destination.
-   *  - `search` — the subtitle wants the NOTE'S OWN folder, which is the whole
-   *    point: results are library-wide, so that folder is information the user
-   *    does not already have.
-   */
+  * A non-empty shell query makes it a search arrival. `folder` names where the
+  * user stands (Back returns to that listing); `search` names the note's own
+  * folder, which the user doesn't know yet.
+  */
   function readerReturn(noteId: Id): { origin: ReaderOrigin; href: string } {
-    // The BIN comes first, and it is the one origin that is not about where the
-    // user was standing but about what the file IS: a trashed file exists in no
-    // folder and in no search, so returning to either would drop the user
-    // somewhere the thing they were just looking at does not appear. The path is
-    // the one it had WHEN IT WAS DELETED — the only folder it can honestly name.
+    // Bin first: a trashed file is in no folder or search; its path is the one it
+    // had when deleted.
     if (bin.isTrashed(noteId)) {
-      // The countdown rides along so the viewer's toolbar paints the SAME
-      // retention rule the bin row does — the fourth surface of the one control
-      // vocabulary (see `createBinViewerActions`).
+      // So the viewer paints the same countdown as the bin row.
       return {
         origin: { kind: "bin", folderPath: bin.pathOf(noteId), retention: bin.retentionOf(noteId) },
         href: destinationHref(BIN_KEY),
       };
     }
-    // THE SHELL'S `query`, NEVER THE ROUTE'S `?q=`. They look alike and mean
-    // opposite things: the route's `q` is the FIND running inside the note (see
-    // `replaceNotePosition`), which the reader itself writes there as you type.
-    // Deciding the origin from it would send Back to a library-wide search for a
-    // term the user only ever looked for within one notebook.
+    // The shell's `query`, never the route's `?q=`, which is in-note find.
     const q = query.trim();
     if (q) return { origin: { kind: "search", folderPath: folderPathOf(noteId) }, href: searchHref(q) };
     return { origin: { kind: "folder", folderPath: currentFolderPath() }, href: folderHref(folderId) };
   }
 
   /**
-   * Where the reader's own Back button goes — the URL of the place the note was
-   * opened FROM, captured when it opened.
-   *
-   * IT PUSHES, and it is not `history.back()`, which is the tempting
-   * simplification now that every origin has an address. Two things stop it
-   * being equivalent. A note reached by a shared link or a bookmark has no app
-   * entry beneath it at all, so `history.back()` would walk the user out of the
-   * app entirely — the one case a reader's Back button must never do. And the
-   * origin is still needed whatever Back does: it is what the button is CALLED
-   * ("Recycle bin", "Projects") and what the reader's subtitle prints, and
-   * history can say where you came from but not what to name it. So the origin
-   * stays, and routing buys it the thing it was missing — a Back out of a note
-   * opened from the bin now lands in the BIN rather than at `#/`.
-   */
+  * Back pushes this URL rather than `history.back()`: a note opened from a
+  * shared link has no app entry beneath it, and the origin is still needed to
+  * name the button.
+  */
   let readerBack = folderHref(null);
 
-  /**
-   * Reading is a MODE: the library's topbar leaves while it is on. Toggled here
-   * rather than inside the reader because the class belongs to the shell whose
-   * header it hides, and both transitions already funnel through exactly two
-   * places (`openNote`, and `enterPlace` for every route out of a note).
-   */
+  /** Reading hides the topbar; toggled only in `openNote` and `enterPlace`. */
   function setReading(reading: boolean): void {
     root.classList.toggle("is-reading", reading);
   }
 
   /**
-   * Open a retained VERSION in the reused viewer, read-only preview (phase 4/5).
-   *
-   * ADDRESSABLE for EVERY previewable kind: the URL is canonicalised to
-   * `#/note/:id/version/:short` (a REPLACE, not a push — opening a preview is
-   * reading, so Back still leaves for the folder via `readerBack`), so a reload /
-   * copy-link reproduces this version. The `.note` reader and the raw
-   * `.spd`/`.txt`/image viewers alike get this — the raw branch below seeds the
-   * SAME URL the `.note` branch does, then each viewer's own `onPosition` sync
-   * refines a route that is already this one.
-   *
-   * For `.note`, the page-structure template is the VERSION's OWN meta
-   * (`historyMeta`, H7): its real page count + dims, so a version that added/removed
-   * pages previews with its own geometry rather than the live note's slots. On a
-   * `historyMeta` failure we fall back to the LIVE meta as the template
-   * (`versionMeta(base, md5)`) — a degraded preview beats no preview. Either way the
-   * history reroute is armed on `historyScope` just before the reader's first paint
-   * pulls page bytes through the wrapped api.
-   */
+  * A retained version in the reused viewer, read-only. The URL is replaced
+  * (not pushed) with `#/note/:id/version/:short` so reload and copy-link
+  * reproduce it. `.note` uses the version's own meta (`historyMeta`), falling
+  * back to live geometry; the reroute is armed before the first paint.
+  */
   async function openHistoryPreview(noteId: Id, version: FileVersion, startPage = 0): Promise<void> {
     const mine = ++routeToken;
     try {
-      // The live meta gives the file's id/name/type — the fallback template for a
-      // `.note`, and everything the raw kinds need.
       const base = await api.getNoteMeta(noteId);
       if (mine !== routeToken) return; // navigated away while fetching
       const type = base.fileType.trim().toLowerCase();
-      // A version preview of a TRASHED file is VIEW-ONLY: the banner's Restore is
-      // suppressed (restore the FILE first, then a version) and the
-      // raw-based viewers fetch the version's bytes off the bin-scoped history
-      // route. The version LIST, Viewing/Current and click-to-preview all stay.
+      // A trashed file's version preview is view-only (restore the file first);
+      // raw viewers read the bin-scoped history route.
       const viewOnly = bin.isTrashed(noteId);
       const origin: ReaderOrigin = {
         kind: "history",
@@ -2250,16 +1385,8 @@ root,
         viewOnly,
       };
 
-      // DISPATCH BY KIND. `.spd`/`.txt`/image render CLIENT-SIDE from the version's
-      // RAW bytes (`historyFileUrl`), so they skip most of the `.note` machinery: no
-      // `historyScope` reroute (that reroutes per-PAGE SNPG bytes) and no
-      // `historyMeta` (a `.note`-only render index). A minimal meta carrying the
-      // version md5 is all the viewer needs; it fetches the bytes itself. But the
-      // preview IS addressable, exactly as `.note`: seed the canonical
-      // `#/note/:id/version/:short` URL BEFORE the viewer opens (a REPLACE — Back
-      // still leaves for the folder via `readerBack`) so a reload / copy-link
-      // reproduces this version, and so the viewer's own `onPosition` sync (which
-      // writes the `/version/:short` form) refines a route that is already this one.
+      // Raw kinds decode the version blob (`historyFileUrl`): no reroute, no
+      // `historyMeta`. Seed the canonical URL before opening.
       if (type === "spd" || type === "txt" || fileKind(type) === "image") {
         readerBack = folderHref(folderId);
         const viewer = viewerFor(base.fileType);
@@ -2271,29 +1398,18 @@ root,
         return;
       }
 
-      // `.note`: the SNPG reroute path. Prefer the version's OWN meta (its real page
-      // count + dims, H7); a `historyMeta` failure falls back to the live geometry.
       let template = base;
       try {
         const vmeta = await api.historyMeta(noteId, version.md5);
         if (mine !== routeToken) return;
         template = vmeta;
       } catch {
-        // A degraded preview (live geometry) beats no preview — keep `base`.
+        // Degraded preview (live geometry) beats none.
       }
       readerBack = folderHref(folderId); // Back leaves the preview for the folder
       activate(reader);
-      // AFTER activate (which may hide a prior viewer), BEFORE open (whose first
-      // paint reads through the wrapped api).
+      // After activate (may hide a prior viewer), before open (first paint reads through it).
       historyScope.setActive(noteId, version.md5);
-      // Make the preview ADDRESSABLE before the reader's own sync fires: replace
-      // (not push) the current URL with the `#/note/:id/version/:short` form, so a
-      // reload / copy-link reproduces this version. Opening a preview is reading,
-      // not navigating — Back returns to the folder via `readerBack` — so it is a
-      // replace, matching the reader's URL discipline. On a deep-link this is a
-      // no-op or a canonicalisation of the prefix to its 7-char form; from the
-      // panel it turns the folder URL into the version URL. It also seeds the route
-      // the reader's per-page `replaceNoteVersionPosition` then refines.
       replaceRoute(noteVersionHref(noteId, shortMd5(version.md5), startPage));
       const meta = versionMeta(template, version.md5);
       reader.open(synthesizeSummary(meta), Promise.resolve(meta), startPage, origin, "");
@@ -2306,34 +1422,11 @@ root,
   }
 
   /**
-   * Preview a past version of a document's ANNOTATIONS — the `.mark` beside a
-   * `.pdf` (§7).
-   *
-   * IT OPENS THE LIVE DOCUMENT. There is no past version of the PDF here and this
-   * deliberately does not invent one: a `.pdf` was not authored on the device, the
-   * document is always the current one, and what has a history is the ink over it.
-   * So the document opens exactly as it always does — same viewer, same
-   * range-served bytes, same raster — and the ONLY thing rerouted is the mark's
-   * page bytes, by arming the generic history scope with the MARK's id.
-   *
-   * That is the whole preview mechanism, and it is the mechanism that already
-   * existed: `historyScope` wraps the shell's `Api` once and every viewer reads
-   * through it, so `deps.api.getPageBytes(markId, ref)` — the line the PDF viewer
-   * already had for its overlay — answers with the retained version's bytes and
-   * nothing else in the rendering path changes. No second document handle, no
-   * second reroute, no new viewer.
-   *
-   * NOT ADDRESSABLE, unlike every other version preview, and that is a fact about
-   * the route rather than an omission: `#/note/:id/version/:short` resolves the
-   * short against THAT file's history, and this version is not in the document's
-   * history — it is in the mark's. Minting one would produce a link that can only
-   * answer "that version is no longer available". So no URL is seeded here: the
-   * viewer's own `onPosition` publishes the document's plain `#/note/:id/page/:n`
-   * when it is already on a note route and leaves the folder URL alone when the
-   * preview came from a card, and a reload of either lands on the live document.
-   * That is the honest answer — the document IS what those addresses name, and
-   * only the ink was ever a preview.
-   */
+  * A past version of a PDF's `.mark`: the live document opens unchanged and
+  * only the mark's page bytes are rerouted through `historyScope`. Not
+  * addressable: the version belongs to the mark's history, so a document
+  * version URL could only answer "no longer available".
+  */
   async function openAnnotationsPreview(
     documentId: Id,
     markId: Id,
@@ -2347,18 +1440,13 @@ root,
         kind: "history",
         folderPath: currentFolderPath(),
         version: { md5: version.md5, createdAt: version.createdAt },
-        // A trashed document's annotations are browsable but not restorable —
-        // restore the FILE first. (In practice the bin nulls `annotationsId`, so
-        // this arm is defence rather than a reachable state.)
+        // Defensive: the bin nulls `annotationsId` in practice.
         viewOnly: bin.isTrashed(documentId),
       };
       readerBack = folderHref(folderId); // Back leaves the preview for the folder
       const viewer = viewerFor(base.fileType);
       activate(viewer);
-      // AFTER activate (which may hide a prior viewer), BEFORE open (whose first
-      // ink read goes through the wrapped api). Armed on the MARK — arming it on
-      // the document would reroute page reads the document does not make and
-      // leave the ink live, which is the reroute exactly backwards.
+      // Armed on the mark, not the document; after activate, before open.
       historyScope.setActive(markId, version.md5);
       viewer.open(synthesizeSummary(base), Promise.resolve(base), 0, origin, "");
       setReading(true);
@@ -2370,18 +1458,10 @@ root,
   }
 
   /**
-   * Restore a version as the file's current one (phase 6) — the ONE path behind
-   * both the list row's Restore and the preview banner's. Confirms with honest
-   * undoable framing, then on success drops the preview reroute, refreshes the
-   * folder listing + rail badges, and routes to `returnTo` so it reopens as its
-   * new current version. `runRestore` owns the toast and the 507 (over-quota)
-   * message.
-   *
-   * `returnTo` defaults to `noteId` and differs in exactly one case: restoring a
-   * PDF's ANNOTATIONS re-points the `.mark` but returns to the DOCUMENT, because
-   * the document is what the reader was looking at and the mark is a file they
-   * have never seen the name of.
-   */
+  * The one restore path behind the panel and the banner; `runRestore` owns the
+  * toast and 507 message. `returnTo` differs only for PDF annotations: the
+  * `.mark` is restored, the document reopens.
+  */
   function restoreVersion(
     noteId: Id,
     version: { md5: string; createdAt: number },
@@ -2405,43 +1485,17 @@ root,
   }
 
   /**
-   * Bumped by every route transition between the library and a note.
-   *
-   * `openNote` awaits `getNoteMeta`, so a route change (a Back, a rail click)
-   * can land `enterPlace` in the middle of it. Without this the late response
-   * would re-open the reader over a folder route AND hide the topbar — leaving a
-   * shell with no header at all, which is the new and worse half of a hazard the
-   * unguarded `reader.open` already had.
-   */
+  * Bumped per library/note transition, so a late `getNoteMeta` can't reopen the
+  * reader (and hide the topbar) over a folder route.
+  */
   let routeToken = 0;
 
-  // --- data / freshness ----------------------------------------------------
+  // ---- data / freshness ----
   /**
-   * The rail selected a category whose folder does not exist on the device yet.
-   *
-   * The rail already holds WHICH category (`rail.pending()`) — there is no id to
-   * list, so that flag is the whole of that state. This is the SHELL's half:
-   * deliberately NOT a `navigate(null)`, because root is a real listing and would
-   * show the whole library under a rail row that says "Export". No request is
-   * made — there is no id to make one with, and inventing one would 404. Shares
-   * `navigate`'s reader rule and query reset so the two entry points cannot
-   * diverge.
-   */
-  /**
-   * THE ONE PLACE THAT IS NOT ADDRESSABLE, and it is not addressable because it
-   * has no identity to address: the category's folder does not exist on the
-   * device yet, so there is no id, and any URL invented for it would name a
-   * folder the server would 404. It is transient by construction — the moment
-   * the device creates the folder, `settle()` turns it into an ordinary
-   * `#/folder/:id` navigation.
-   *
-   * What it must NOT do is leave the address bar lying. The shell is standing at
-   * the root here (no folder, no listing), so the URL is REPLACED with the root:
-   * no history entry, because selecting an empty category is not somewhere you
-   * went, and a reload lands on the library instead of on the folder you were in
-   * three clicks ago. `replaceRoute` rather than `redirect` precisely so the
-   * pending state survives — a re-dispatch would clear it.
-   */
+  * A category with no device folder yet: not a root navigation, no request.
+  * The one unaddressable place (no id); the URL is replaced with the root so it
+  * doesn't lie, via `replaceRoute` so the pending state survives.
+  */
   function enterPendingCategory(): void {
     hideActiveViewer();
     setReading(false);
@@ -2457,35 +1511,15 @@ root,
     renderGallery();
   }
 
-  // --- the delayed loading paint -------------------------------------------
-  //
-  // LOADING AND KNOWN-EMPTY ARE DIFFERENT STATES, and so are LOADING and
-  // "still showing the last folder". A cache miss used to paint nothing at all:
-  // on a cold boot the shell mounted with an empty gallery for a whole round
-  // trip, and on a folder-to-folder move the previous folder stayed fully on
-  // screen under the new chrome. `renderGallery()` already knows what to say
-  // (`!listing` → "Loading…"); it was simply never called.
-  //
-  // But a loading state that paints INSTANTLY is its own defect: on a warm link
-  // every navigation would flash "Loading…" for 40 ms between two good paints,
-  // which reads as a flicker rather than as progress. So the paint is DELAYED —
-  // a fast response wins the race and the user sees no loading state at all, a
-  // slow one is admitted well before the request completes.
+  // ---- the delayed loading paint ----
+  // Loading, known-empty and "still the last folder" are different states. The
+  // "Loading…" paint is delayed so a fast response shows none at all.
 
-  /**
-   * How long a folder listing may be outstanding before the gallery says so.
-   *
-   * Chosen as the usual "this is no longer instantaneous" threshold: below it a
-   * response feels like a direct result of the click and any interstitial reads
-   * as a flash; above it a blank region is indistinguishable from a freeze.
-   */
+  /** The usual "no longer instantaneous" threshold. */
   const LOADING_PAINT_DELAY_MS = 150;
 
-  /** The armed delayed paint, or undefined. At most one — a navigation cancels
-   *  the previous one before arming its own. */
   let loadingPaintTimer: ReturnType<typeof setTimeout> | undefined;
 
-  /** Disarm the delayed paint: the listing landed, or we left before it could. */
   function cancelLoadingPaint(): void {
     if (loadingPaintTimer === undefined) return;
     clearTimeout(loadingPaintTimer);
@@ -2493,25 +1527,16 @@ root,
   }
 
   /**
-   * Arm the "Loading…" paint for the folder `id`, {@link LOADING_PAINT_DELAY_MS}
-   * from now.
-   *
-   * IT CAN ONLY EVER PAINT THE PLACE IT WAS ARMED FOR. The user can navigate,
-   * search or open the bin inside the delay, and every one of those makes this
-   * paint wrong — so the timer re-reads the same route state `renderGallery`
-   * itself reads (`folderId`, `query`, `destination`) and drops itself if any of
-   * them has moved. `destroy()` clears it too, so a torn-down shell leaves
-   * nothing scheduled to paint into DOM on its way out.
-   */
+  * Paints only the place it was armed for: re-reads `folderId`, `query` and
+  * `destination` and drops itself if any moved.
+  */
   function scheduleLoadingPaint(id: Id | null): void {
     cancelLoadingPaint();
     loadingPaintTimer = setTimeout(() => {
       loadingPaintTimer = undefined;
       if (folderId !== id || destination !== null || query.trim() !== "") return;
       if (listing !== undefined) return; // a listing arrived by another path
-      // The tree walk may have reached this folder while we waited — its listing
-      // is the same listing, so paint it rather than a loading state we no
-      // longer need.
+      // The walk may have cached it meanwhile.
       const cached = folderCache.get(id);
       if (cached) listing = cached;
       renderGallery();
@@ -2519,52 +1544,28 @@ root,
   }
 
   /**
-   * The `#/folder/:id` route's body (and `#/`'s, with `null`).
-   *
-   * LANDING ON A CONTAINER is now genuinely reachable from a URL — `#/folder/
-   * dir-note` is a link somebody can bookmark — where it used to be only the
-   * transient container card the root renders before the tree walk has reached
-   * it. It is still RENDERED NORMALLY rather than redirected: `NOTE` really does
-   * hold `Note` and `MyStyle`, so listing them is a truthful, reachable view, and
-   * `crumbPath` keeps the container's name in the breadcrumb while you are
-   * standing in it.
-   *
-   * A DEEP LINK CAN ARRIVE BEFORE THE TREE WALK, and nothing here waits for it:
-   * the listing is one request that does not depend on the walk, so the gallery
-   * and the breadcrumb are right immediately. What is provisional is the RAIL —
-   * which category a folder belongs under is `resolveCategory`'s answer, and
-   * that needs the walk — so until it lands the rail simply highlights nothing.
-   * `rail.treeWalked()` rebuilds it when it does. That is the same waiting
-   * mechanism `pendingCategory` uses and deliberately not a second one.
-   */
+  * The `#/folder/:id` route body. A container is rendered normally (it really
+  * holds those folders). A deep link doesn't wait for the walk; only the rail
+  * highlight is provisional until `rail.treeWalked()`.
+  */
   async function navigate(id: Id | null): Promise<void> {
-    // `navigate` is fire-and-forget (`void navigate(id)`), so two can overlap: a
-    // slow folder still awaiting its listing when the user clicks another. The
-    // route token is what makes the TRAILING cancel below belong to this call
-    // only — without it, the slow one resolving last would disarm the newer
-    // navigation's loading paint and restore the blank window it exists to fill.
+    // Overlapping navigations: the token keeps a slow one from cancelling the
+    // newer one's loading paint.
     const mine = routeToken;
     cancelLoadingPaint();
     rail.clearPending();
     folderId = id;
     query = "";
     searchInput.value = "";
-    // Clearing the box has to clear BOTH halves of the query. Without this the
-    // previous folder's transcript hits would sit under the new folder's
-    // gallery, still linking somewhere else entirely.
+    // Clears transcript hits too.
     search.reset();
     const cached = folderCache.get(id);
     if (cached) {
       listing = cached;
       renderGallery(); // stale-while-revalidate: paint immediately
     } else {
-      // CACHE MISS — nothing truthful to paint yet. `listing` is dropped
-      // IMMEDIATELY (not after the delay) because it now describes a folder we
-      // are no longer in: any repaint triggered meanwhile — the sort select, the
-      // view toggle, `rail.onSettled` — would otherwise run `visibleEntries()`
-      // with `folderId` = B and `listing` = A, and at the root would apply the
-      // root flattening to a non-root listing. The PAINT is what waits; see
-      // `scheduleLoadingPaint`.
+      // Cache miss: drop `listing` now (it describes the old folder, and any repaint
+      // meanwhile would mix the two); only the paint waits.
       listing = undefined;
       scheduleLoadingPaint(id);
     }
@@ -2573,37 +1574,18 @@ root,
   }
 
   /**
-   * A folder route named a folder that is not there — deleted from the device,
-   * trashed, or a link that has outlived its subtree.
-   *
-   * TWO SIGNALS, because the two backends answer differently and both readings
-   * are honest: the real control plane 404s, and a listing that comes back with
-   * an EMPTY `path` for a non-null id is a server saying "these are the ancestors
-   * of nothing". Either way this is a `redirect`, not a `go`: the missing folder
-   * was never a place, so it must not become a history entry that Back can climb
-   * onto and be bounced off again. The toast is what keeps it from being a
-   * silent teleport to the root.
-   */
+  * A 404, or an empty `path` for a non-null id, both mean the folder is gone.
+  * `redirect`, not `go`, so Back can't climb onto it; the toast explains.
+  */
   function missingFolder(): void {
     toast("That folder isn't there any more.");
     redirect(folderHref(null));
   }
 
   /**
-   * Is the folder gallery still the surface on screen?
-   *
-   * ONE QUESTION, ONE PLACE. `renderGallery` refuses to paint while the route
-   * says a destination is open, and `refetch`'s success path additionally
-   * refuses while the bin's node is mounted — but the FAILURE path used to
-   * `replaceChildren` the gallery element directly, around both, and the
-   * missing-folder redirect fired regardless. So a folder you gave up on could
-   * land its failure minutes later and replace an open recycle bin with
-   * "Couldn't load", or bounce you out of it to the root, while the URL, the
-   * rail highlight and the `Empty bin` button all still said Recycle bin.
-   *
-   * A late answer about a place the user has left is DROPPED, not painted: they
-   * have moved on, and there is nothing here they asked to be told.
-   */
+  * Late answers about a place the user has left are dropped, so a stale folder
+  * failure can't replace an open bin or redirect out of it.
+  */
   function galleryIsOnScreen(): boolean {
     return destination === null && !bin.isOpen();
   }
@@ -2611,19 +1593,14 @@ root,
   async function refetch(id: Id | null, prev: Listing | undefined): Promise<void> {
     let fresh: Listing;
     try {
-      // Through the cache, so a boot that lists the root here and walks it in
-      // `prefetch` at the same instant sends one request (`FolderCache.listFolder`).
+      // Through the cache, so boot's root listing and walk share one request.
       fresh = await folderCache.listFolder(id);
     } catch (e) {
-      // A dead session isn't a "couldn't load this folder" — don't paint the
-      // retry empty-state over a shell that's about to be torn down.
+      // A dead session isn't "couldn't load".
       if (handled(e)) return;
       if (id !== folderId) return; // navigated away while failing
-      // …nor over a destination the user opened while this was in flight.
       if (!galleryIsOnScreen()) return;
-      // GONE is not UNREACHABLE. A 404 is the server answering, so retrying will
-      // never help and "check your connection" would be a lie; anything else
-      // (a network drop, a 500) keeps the retry state it always had.
+      // A 404 won't improve on retry; other failures keep the retry state.
       if (id !== null && e instanceof ApiError && e.status === 404) {
         missingFolder();
         return;
@@ -2635,89 +1612,52 @@ root,
       return;
     }
     if (id !== folderId) return; // navigated away while fetching
-    // The other half of the missing-folder signal — see `missingFolder`. The
-    // root legitimately has an empty path, so this asks only about a real id.
+    // The root legitimately has an empty path.
     if (id !== null && fresh.path.length === 0) {
-      // The same guard as the failure path: a redirect is a navigation, and
-      // yanking someone out of the bin they are standing in is worse than
-      // leaving a folder id nobody is looking at uncorrected.
       if (galleryIsOnScreen()) missingFolder();
       return;
     }
     knownSyncVersion = Math.max(knownSyncVersion, fresh.syncVersion);
 
     const result = reconcile(prev, fresh);
-    // `result.listing`, not `fresh`: same data either way — `reconcile` only
-    // reuses unchanged entry OBJECTS — but the roots the rail reads are then the
-    // very objects the cache holds, so identity-keyed work downstream stays put.
+    // `result.listing` keeps unchanged entry objects, so identity-keyed work stays put.
     folderCache.put(id, result.listing);
     if (result.changed || listing !== result.listing) {
       listing = result.listing;
-      // NOT while the bin is on screen. A restore mutates the folder BEHIND the
-      // bin and asks for exactly this refetch, so repainting here would overwrite
-      // the bin — with its own action's result — and drop it back to a folder the
-      // user never navigated to. `listing` is updated either way, so the folder is
-      // correct the moment the bin is closed by something that meant to close it.
+      // Not while the bin is open: a restore triggers this refetch and repainting
+      // would close the bin.
       if (!bin.isOpen()) renderGallery();
     }
   }
 
   /**
-   * How many of this user's documents the server last said were still being
-   * derived, or `null` while it has not said at all.
-   *
-   * NULL IS NOT ZERO. An old server, or a client that fell back to polling,
-   * never sends the frame — and "the server did not say" must not be painted as
-   * "nothing is outstanding", because that is the reading that quietly drops the
-   * caveat off a search that needed it. The renderer treats null as "say
-   * nothing", which is the same screen as zero and a different claim.
-   */
+  * Documents still being derived, or `null` if the server never said (old
+  * server, polling fallback). Null means "say nothing", not zero.
+  */
   let indexPending: number | null = null;
 
-  /** A live sync-version bump: revalidate the folder we're looking at if stale. */
   function onBump(version: number): void {
     knownSyncVersion = Math.max(knownSyncVersion, version);
     if (classify(folderCache.get(folderId), knownSyncVersion) === "stale") {
       void refetch(folderId, folderCache.get(folderId));
-      // Refresh the rail's category counts/subfolders across the whole tree.
       void folderCache.prefetch(true);
     }
   }
-  /**
-   * A live `event: index` frame: how much is still being derived.
-   *
-   * REPAINTS ONLY THE SEARCH, and only when the number really moved. The frame
-   * arrives at the poll interval whenever a derive lands, and the search list is
-   * the one surface making a completeness claim the count can falsify — the
-   * gallery claims nothing, so it has nothing to correct (§6).
-   */
+  /** Repaints only the search, and only when the number moved. */
   function onIndex(status: IndexStatus): void {
     if (status.pending === indexPending) return;
     indexPending = status.pending;
-    // Only where a query is on screen: `renderGallery` refuses to paint over an
-    // open viewer or destination anyway, and repainting a folder listing for a
-    // number it never shows would be work with no pixel behind it.
     if (query.trim() !== "" && destination === null && activeViewer === null) renderGallery();
   }
   const unsubscribe = live.subscribe(onBump, onIndex);
 
-  // THE INDEX'S OWN LIFECYCLE, on the same socket the gallery already listens to.
-  // §3.3 names two triggers — a derive completing (`event: index`) and the
-  // listing changing (`event: sync`) — and requires them COALESCED, because a
-  // device syncing a hundred notes must become a handful of conditional manifest
-  // requests rather than a hundred × ~127 ms on the Pi. `attachLive` owns that
-  // window; both frames already arrive here, so this is one subscription and no
-  // cross-component coordination.
-  //
-  // `syncNow` is fire-and-forget on purpose: it never rejects, a failure is for
-  // the next trigger to retry, and the search box keeps working from the server
-  // fallback meanwhile. Nothing here instantiates the engine — §4.2's promise is
-  // that a person who never searches never pays for it, and only `search()` can
-  // break that.
+  // The index's lifecycle on the same socket: derive-complete and sync frames
+  // coalesce in `attachLive`, so a big sync is a few manifest requests. Nothing
+  // here instantiates the engine; only `search()` does.
   const detachSearchLive = searchService.attachLive(live);
   void searchService.syncNow();
 
-  // --- view / theme --------------------------------------------------------
+  // ---- view / theme ----
   function setView(next: View): void {
     view = next;
     gridBtn.setAttribute("aria-pressed", String(next === "grid"));
@@ -2725,35 +1665,22 @@ root,
     renderGallery();
   }
 
-  /** Repaint for a theme change: drop the now-off-theme bitmaps, then repaint only
-   * what's on screen; the rest re-lazy on next scroll (keyed by theme, so nothing
-   * is lost). */
+  /** Drop off-theme bitmaps and repaint what's on screen; the rest re-lazy. */
   function repaintForTheme(previous: Theme): void {
     void cache.evictTheme?.(previous);
-    // The facade caches WebP blobs per theme too; drop the off-theme ones so a
-    // toggle does not leave both worlds resident.
     thumbnails.evictTheme(previous);
-    // The Appearance control is the only thing on screen that CLAIMS a theme, so
-    // it is what has to stop claiming the old one — including on the OS-flip
-    // path below, which nobody clicked.
+    // The Appearance control claims a theme, including on the OS-flip path.
     accountPage?.themeChanged();
     galleryEngine.bumpTheme();
     reader.bumpTheme();
   }
 
   /**
-   * Pin a theme, from the account page's two-option control.
-   *
-   * A no-op when it is already in force, which is what makes the control safe to
-   * press twice: re-pinning would evict every off-theme bitmap and repaint the
-   * gallery for no change at all. (The FIRST press of the theme you are already
-   * following does still pin it — `currentTheme()` reads the OS when nothing is
-   * stored — so choosing "Light" while the OS is light stops following the OS,
-   * which is exactly what pressing it means.)
-   */
+  * A no-op if already in force. The first press of the followed theme still
+  * pins it, which stops following the OS.
+  */
   function setThemeTo(next: Theme): void {
     const previous = currentTheme();
-    // Pins the attribute AND persists it, so the choice survives a reload.
     setTheme(next);
     if (previous === next) {
       accountPage?.themeChanged();
@@ -2762,19 +1689,16 @@ root,
     repaintForTheme(previous);
   }
 
-  // Follow the OS theme, live, while the user hasn't pinned one. A pinned choice
-  // sets `data-theme`, which both wins in CSS and short-circuits this.
-  // Handlers are hoisted to named consts (and the MediaQueryList kept) so
-  // `destroy()` can remove them — otherwise they leak across sign-out/in.
+  // Follow the OS theme until one is pinned (`data-theme` wins). Handlers are
+  // named so `destroy()` can remove them.
   const osThemeQuery = window.matchMedia?.("(prefers-color-scheme: dark)");
   const onOsThemeChange = (e: MediaQueryListEvent): void => {
     if (document.documentElement.getAttribute("data-theme")) return;
-    // We are moving *to* the OS's new theme, so the theme being left is its inverse.
+    // The theme being left is the inverse of the new one.
     repaintForTheme(e.matches ? "light" : "dark");
   };
   osThemeQuery?.addEventListener("change", onOsThemeChange);
 
-  // Repaint on-screen tiles after a resize (debounced).
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   const onWindowResize = (): void => {
     if (resizeTimer !== undefined) clearTimeout(resizeTimer);
@@ -2785,16 +1709,7 @@ root,
   };
   window.addEventListener("resize", onWindowResize);
 
-  /**
-   * The shell-level reset EVERY route into a place performs, before that place's
-   * own work.
-   *
-   * One function rather than four copies because the copies drifted: the bin's
-   * arm and the console's arm each had their own transcription of it, and a
-   * destination added in a hurry would have got a third. The reader is closed
-   * DIRECTLY here — not by routing away, which is what the old `navigate` had to
-   * do — because we are already inside the route handler that replaced it.
-   */
+  /** The shell-level reset every route into a place performs. */
   function enterPlace(): void {
     routeToken++;
     hideActiveViewer();
@@ -2802,11 +1717,7 @@ root,
     rail.clearPending();
   }
 
-  // Fill the tree so the category rail resolves. THE FIRST LISTING IS NOT KICKED
-  // OFF HERE any more: main.ts dispatches the route immediately after building
-  // this shell, and that dispatch is what lists a folder. A `navigate(null)` here
-  // would race it — booting on `#/folder/projects` would fetch the root, throw
-  // the answer away, and fetch again.
+  // The first listing comes from main.ts's route dispatch; listing here would race it.
   void folderCache.prefetch();
 
   return {
@@ -2818,45 +1729,32 @@ root,
       leaveAccount();
       destination = null;
       void navigate(id);
-      // Ensure on-screen thumbnails are painted for the current theme.
       requestAnimationFrame(() => galleryEngine.repaintVisible());
     },
 
     showSearch(q: string): void {
-      // `#/search` with nothing in it is not a place — see `searchHref`. A
-      // hand-typed or truncated one is CORRECTED rather than rendered, so the
-      // address bar never describes a screen the app does not have.
+      // An empty `#/search` is corrected, not rendered.
       if (q.trim() === "") {
         redirect(folderHref(folderId));
         return;
       }
       enterPlace();
       destination = null;
-      // The box has to agree with the URL: on a reload or a shared link nobody
-      // typed this, and a results list above an empty search field is the
-      // control lying about what produced it.
+      // The box agrees with the URL on reload or shared link.
       if (searchInput.value !== q) searchInput.value = q;
       applyQuery(q);
-      // Re-assert focus + caret after the arriving-keystroke navigation (which
-      // the browser blurred). A no-op on a reload / shared link, where nothing
-      // armed it — those must not steal focus from wherever the user is.
+      // After the arriving-keystroke navigation's blur; a no-op otherwise.
       restoreSearchFocus();
     },
 
     showDestination(key: string): void {
       enterPlace();
-      // One place at a time, and the account page is one — whichever arm runs
-      // below, arriving at a destination IS the navigation away from it.
       leaveAccount();
       query = "";
       searchInput.value = "";
       search.reset();
-      // Assigned PER ARM below rather than up front: the admin arm has to close
-      // a still-mounted bin by repainting the gallery over it, and
-      // `renderGallery` refuses to paint over whatever destination this
-      // variable names — so it must not name one until the old surface is gone.
-      // Cleared first because arriving here IS the navigation away from
-      // whichever destination was open.
+      // Assigned per arm: the admin arm must first repaint over a mounted bin, which
+      // `renderGallery` refuses while `destination` names one.
       destination = null;
       switch (key) {
         // --- BIN ROUTE ---
@@ -2868,20 +1766,14 @@ root,
           return;
         // --- ADMIN ROUTE ---
         case ADMIN_KEY:
-          // The bin has no `close()` — it closes by the gallery being repainted
-          // over it (see bin.ts). Merely hiding the gallery would leave it
-          // MOUNTED, so the console would be sitting on top of it. Repainting
-          // first both unmounts it and restores the folder the admin will land
-          // back on — and it runs while `destination` is still null, which is
-          // what lets it through the guard at the top of `renderGallery`.
+          // The bin closes by being repainted over; do it while `destination` is null so
+          // the guard lets it through.
           if (bin.isOpen()) renderGallery({ rail: false });
           destination = key;
           openAdmin();
           return;
         default:
-          // Unreachable through the router, which only mints a key it read out
-          // of `DESTINATIONS`. Kept honest anyway: a destination removed from
-          // that list while a tab still holds its URL must land somewhere real.
+          // Unreachable via the router; a removed destination's URL still lands somewhere.
           redirect(folderHref(folderId));
           return;
       }
@@ -2889,11 +1781,7 @@ root,
 
     showAccount(): void {
       enterPlace();
-      // The bin has no `close()` — it closes by the gallery being repainted over
-      // it — and the console does, so both are dealt with the same way the admin
-      // arm above deals with them, and for the same reasons. The repaint runs
-      // while `destination` is still null, which is what lets it through the
-      // guard at the top of `renderGallery`.
+      // Same as the admin arm.
       if (bin.isOpen()) renderGallery({ rail: false });
       leaveAdmin();
       query = "";
@@ -2901,8 +1789,7 @@ root,
       search.reset();
       destination = ACCOUNT_KEY;
       account().open();
-      // No rail row matches this key, so this repaints the highlight OFF —
-      // which is right: you are not in a folder, the bin or the console.
+      // No rail row matches, so the highlight goes off.
       rail.build();
     },
 
@@ -2933,23 +1820,16 @@ root,
         v.open(summary, metaPromise, page, origin, q);
         setReading(true);
       } catch (e) {
-        // "That note couldn't be opened" would be a lie for a dead session, and
-        // bouncing to the library would just freeze there instead.
         if (handled(e)) return;
         toast("That note couldn't be opened.");
-        // A `redirect`, not a `go`: a link to a note that is gone (or to a
-        // trashed one this session has not listed the bin for) never named a
-        // place, so it must not leave a rung Back can climb onto and be bounced
-        // off again. Same reasoning as `missingFolder`.
+        // `redirect`, not `go`: a gone note never named a place.
         redirect(folderHref(folderId));
       }
     },
 
     async openNoteVersion(id: Id, short: string, page = 0): Promise<void> {
       const mine = ++routeToken;
-      // Client-side resolution against the SAME list the panel fetches — no
-      // backend prefix-match route. On a fetch failure that is not a dead session,
-      // degrade to the live note (its own open handles a missing note honestly).
+      // Resolved against the panel's list; a non-session failure degrades to the live note.
       let history: Awaited<ReturnType<typeof api.noteHistory>>;
       try {
         history = await api.noteHistory(id);
@@ -2962,62 +1842,42 @@ root,
       if (mine !== routeToken) return; // routed away while fetching
       const match = resolveVersionShort(history.versions, short);
       if (match.kind === "past") {
-        // A retained version → the read-only preview, at the requested page.
-        // `openHistoryPreview` canonicalises the URL to the 7-char `:short` form.
         await openHistoryPreview(id, match.version, page);
         return;
       }
-      // CURRENT or NONE both land on the live note with the URL canonicalised to
-      // the bare `#/note/:id/page/:n` — `redirect` REPLACES (no history rung) and
-      // re-dispatches through the router's `note` arm, so `openNote` opens it and
-      // there is one canonical address. The current branch must NOT 404 (a restore
-      // can make a past version's md5 the live one); the none branch is the
-      // hot-cache age-out, softened by a notice rather than a hard error.
+      // Current or none: the live note at its canonical URL (`redirect` replaces).
+      // Current must not 404 after a restore; none gets a notice.
       if (match.kind === "none") toast("That version is no longer available.");
       redirect(notePageHref(id, page));
     },
 
     async openBinNote(id: Id, page = 0): Promise<void> {
       const mine = ++routeToken;
-      // A bin open is never a version preview: drop any lingering history reroute
-      // so the trashed file reads its own (current) blob, not one left armed.
+      // A bin open is never a version preview.
       historyScope.clear();
-      // The listing has to be in hand before we can find the entry or build its
-      // origin — on a COLD `#/bin/note/:id` load this awaits the boot-time fetch
-      // (or one retry), the friction the recycle-bin deep link uniquely carries.
+      // On a cold `#/bin/note/:id` this awaits the boot listing.
       try {
         await bin.ensureLoaded();
       } catch (e) {
         if (mine !== routeToken) return;
         if (handled(e)) return;
-        // The listing itself could not be fetched — send them to the bin, which
-        // will surface its own load error rather than a dead viewer.
+        // The bin will show its own load error.
         redirect(destinationHref(BIN_KEY));
         return;
       }
       if (mine !== routeToken) return; // routed away while the listing loaded
-      // NOT (or no longer) in the bin: purged / restored since the link was made,
-      // or simply never trashed. Fall back to the LISTING plus a notice — the
-      // recycle-bin analog of the version-preview age-out. `redirect` REPLACES (no
-      // history rung) and re-dispatches through the `destination` arm, which paints
-      // the bin.
+      // Not in the bin (purged, restored, never trashed): the listing plus a notice.
       if (!bin.isTrashed(id)) {
         toast("That file is no longer in the recycle bin.");
         redirect(destinationHref(BIN_KEY));
         return;
       }
       try {
-        // `readerReturn` reads the bin origin (path + retention countdown) and the
-        // `#/bin` Back href off the now-loaded listing — the SAME origin a row
-        // click produces. `getNoteMeta` reroutes to the bin-scoped meta route
-        // (`binScope`, keyed on `isTrashed`), so a trashed file's meta resolves.
+        // The same origin a row click produces; meta comes via `binScope`.
         const { origin, href } = readerReturn(id);
         const meta = await api.getNoteMeta(id);
         if (mine !== routeToken) return; // routed away while fetching
         readerBack = href;
-        // DISPATCH by kind exactly as a live open does — `.spd`/`.txt` to their own
-        // viewers, every other kind (`.note`, images) to the reader — each opened
-        // with the `bin` origin, whose per-position sync writes the bin URL.
         const v = viewerFor(meta.fileType);
         activate(v);
         v.open(synthesizeSummary(meta), Promise.resolve(meta), page, origin, "");
@@ -3031,26 +1891,15 @@ root,
 
     destroy(): void {
       unsubscribe();
-      // The service holds a coalescing window and, once anybody has searched,
-      // the engine's linear memory. A shell torn down on sign-out that left
-      // either behind would accumulate one per sign-in cycle.
+      // Otherwise one coalescing window and engine memory leak per sign-in cycle.
       detachSearchLive();
       searchService.dispose();
-      // Shell-level window listeners registered at build time. Without these
-      // removals they accumulate one set per sign-out/in cycle, each holding
-      // the whole torn-down shell alive.
+      // Otherwise these accumulate per sign-in cycle, each holding the shell alive.
       osThemeQuery?.removeEventListener("change", onOsThemeChange);
       window.removeEventListener("resize", onWindowResize);
       if (resizeTimer !== undefined) clearTimeout(resizeTimer);
-      // Nothing scheduled to paint into a shell on its way out — see
-      // `scheduleLoadingPaint`.
       cancelLoadingPaint();
-      // The card/row overflow menus install their own document listeners once,
-      // inside `ui/menu.ts`, and are keyed on which menu is open — there is
-      // nothing per-shell to tear down here any more.
-      // Kills the debounce timer and orphans any in-flight query, so a shell
-      // torn down mid-search (a sign-out, an expired session) leaves nothing
-      // scheduled to paint into DOM that is on its way out.
+      // Kills the debounce timer and orphans in-flight queries.
       search.reset();
       bin.destroy();
       reader.destroy();
@@ -3058,14 +1907,10 @@ root,
       txtViewer.destroy();
       admin?.destroy();
       accountPage?.destroy();
-      // Aborts anything still uploading and drops the document-level drag
-      // swallowers — otherwise a torn-down shell would go on eating drops for the
-      // rest of the page's life.
+      // Aborts uploads and drops the document-level drag swallowers.
       uploadZone.destroy();
       galleryEngine.destroy();
-      // The tile decoder's worker, without waiting out its idle window: a
-      // sign-out must not leave 5 MB of compiled MuPDF alive behind a shell that
-      // is gone.
+      // Release the ~5 MB MuPDF worker now, not after its idle window.
       pdfThumbs.destroy();
     },
   };
@@ -3083,9 +1928,7 @@ export function synthesizeSummary(meta: NoteMeta): NoteSummary {
     fileHash: meta.fileHash,
     hasRecognizedText: meta.pages.some((p) => p.textHash !== null),
     thumbAspect: undefined,
-    // Carried straight through: the meta is the authority on the pairing (it is
-    // the field the listing's own copy mirrors), and a summary synthesized for a
-    // viewer must not tell the viewer a paired mark went away.
+    // The meta is the authority on the mark pairing.
     annotationsId: meta.annotationsId,
   };
 }

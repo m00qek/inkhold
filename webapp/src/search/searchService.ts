@@ -1,23 +1,7 @@
-// What the search box calls — §6's whole surface: the local
-// index, and the sync lifecycle that gets it into a state where it can answer.
-//
-//     event: index ─┐
-//                   ├─▶ refresh() ─(one window)─▶ sync ─▶ rows in IndexedDB
-//     event: sync ──┘
-//
-// What this must not break:
-//   * ONE producer. A search the local index cannot answer FAILS; nothing
-//     reaches the network (§6 step 6).
-//   * A WINDOW FROM THE FIRST TRIGGER, NOT A TRAILING DEBOUNCE. A device
-//     pushing 100 notes emits frames for as long as it takes; a debounce that
-//     re-arms on every frame would defer the sync until the burst ENDED —
-//     minutes during which nothing new is searchable.
-//   * A trigger during a running sync gets ONE queued re-run, not a join: the
-//     request in flight fetched its manifest before the new document existed.
-//   * Failed syncs are silent: the next trigger (a device upload, a derive
-//     completing) retries, and the last good answer is still on screen.
-//   * The text prefetch is started from the sync's completion and NOT awaited
-//     (§4.4): opportunistic, never a gate on search being usable.
+// What the search box calls: the local index plus the sync lifecycle. Sync
+// triggers coalesce into one window armed by the first trigger (a trailing
+// debounce would starve during a long device burst); a trigger during a sync
+// queues one re-run. Failed syncs are silent and the next trigger retries.
 
 import type { LiveChannel } from "../sync/types";
 import type { CoreLoader } from "./indexEngine";
@@ -26,40 +10,29 @@ import { createIndexSearch, type LiveDocument } from "./indexSearch";
 import { createTextPrefetch, type TextPrefetch } from "./textPrefetch";
 import type { LocalSearch } from "./localSearch";
 
-/** How long the first trigger waits for its neighbours. The manifest costs
- *  ~127-177 ms on the Pi and a device sync bursts, so shorter buys nothing;
- *  much longer is visible as "my note is not findable yet". */
+/** The manifest costs ~150 ms on a Pi and device syncs burst; much longer feels like "not findable yet". */
 const COALESCE_MS = 1500;
 
 export interface SearchServiceOptions {
-  /** The sync driving the index. Defaults to a real one over HTTP. */
   sync?: IndexSync;
-  /** How an engine instance is obtained. Injectable so tests need no wasm. */
   load?: CoreLoader;
-  /** See {@link COALESCE_MS}. */
   coalesceMs?: number;
-  /** The app's cached file listing, the OFFLINE stand-in for the manifest
-   *  (`indexSearch.ts`). */
+  /** The cached file listing, the offline stand-in for the manifest. */
   listing?: () => readonly LiveDocument[];
-  /** §4.4's text prefetch. Defaults to the real one; a no-op without IndexedDB. */
   textPrefetch?: TextPrefetch;
 }
 
 export interface SearchService extends LocalSearch {
-  /** A trigger fired. Coalesced — call it from anywhere that learns the
-   *  library moved; an extra call costs nothing. */
+  /** A trigger fired. Coalesced; extra calls are free. */
   refresh(): void;
-  /** Sync now and await it. For boot, and for tests. Never rejects. */
+  /** Never rejects. */
   syncNow(): Promise<void>;
-  /** One document's `index_version` from the last manifest — forwarded because
-   *  in-document search needs it for `text/<md5>`'s `?v=`. */
+  /** Forwarded for in-document search's `text/<md5>?v=`. */
   indexVersion(md5: string): number | null;
-  /** §4.4's text prefetch, driven from here off each sync's manifest. Exposed
-   *  for `available`; nothing sets policy through it. */
+  /** Exposed for `available` only. */
   readonly textPrefetch: TextPrefetch;
-  /** Subscribe both triggers to the live channel. Returns the unsubscribe. */
   attachLive(live: LiveChannel): () => void;
-  /** Cancel the pending window and hand back the engine's 16 MB (§4.2). */
+  /** Cancel the pending window and free the engine. */
   dispose(): void;
 }
 
@@ -80,9 +53,9 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
     const p = local
       .sync()
       .then((outcome) => {
-        // Started, not awaited, and as silent as a failed sync (see the header).
+        // Prefetch is opportunistic: not awaited, failures ignored.
         void textPrefetch.prefetch(outcome.manifest.rows).catch(() => undefined);
-      }, () => undefined) // silent by design — see the header.
+      }, () => undefined)
       .finally(() => {
         running = null;
         if (!queued) return;
@@ -93,7 +66,7 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
     return p;
   }
 
-  // Armed by the FIRST trigger and not re-armed by the rest.
+  // Armed by the first trigger, not re-armed by the rest.
   function refresh(): void {
     if (timer !== null) return;
     timer = setTimeout(() => {
@@ -117,8 +90,7 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
     textPrefetch,
 
     attachLive(live) {
-      // One socket carries both frames (`sync/live.ts`). Neither payload is
-      // read: a trigger says "ask the manifest", whatever it says.
+      // Both frames just mean "ask the manifest"; payloads are not read.
       return live.subscribe(
         () => refresh(),
         () => refresh(),

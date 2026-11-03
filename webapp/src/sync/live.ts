@@ -1,50 +1,15 @@
-// The live-freshness channel (layer L1) over Server-Sent Events. Wraps
-// `EventSource` on GET /api/controlplane/events and implements `LiveChannel`: each event
-// carries the user's current `syncVersion`, which the library/reader use to
-// revalidate listings the instant a note syncs from the device.
+// `LiveChannel` over SSE on GET /api/controlplane/events. The server holds the
+// stream open (with `: ping` every ~15 s), or under its stream cap sends one
+// frame and closes; `EventSource` honours `retry:` either way. A clean close
+// is terminal for `EventSource`, so we reopen with capped backoff, and after
+// repeated failures to open we fall back to polling.
 //
-// The server HOLDS this connection open and pushes a frame when the version
-// changes, plus a `: ping` comment frame every ~15s so a dead link surfaces
-// instead of parking silently. It may also answer with a single frame and close
-// (its degraded shape, when the per-user/global stream cap is reached) — the
-// client cannot tell, and does not need to: `EventSource` honours the `retry:`
-// the server sends and reopens, which turns the degraded shape into a poll all
-// by itself.
-//
-// SSE reconnects on its own for transient drops, but a *clean* server close
-// (readyState → CLOSED) is terminal — so we add a capped-backoff reopen for that
-// case, and after `fallbackAfterFailures` consecutive failures to open we stop
-// trusting SSE at all and fall back to plain polling (see `startPolling`). This
-// deployment is plaintext HTTP on a LAN, where `EventSource` works fine — but a
-// reverse proxy that buffers, or a browser without `EventSource`, would
-// otherwise leave the app with no freshness signal at all.
-//
-// `subscribe` returns an unsubscribe that closes the socket, cancels any pending
-// reconnect AND any pending poll, leaving nothing running. The `EventSource`
-// constructor and the poll fetch are injectable so tests can drive both without
-// a network.
-//
-// TWO NAMED FRAMES now ride this one connection: `event: sync` (the version) and
-// `event: index` (how much of the library is still being derived). One socket,
-// because a held stream costs one of four per-user slots on the server and a
-// second subscription would halve how many tabs can stay live.
-//
-// KNOWN LIMIT OF THE POLLING FALLBACK: it reads only the FIRST frame of the
-// response, which is the sync one, so a client that has fallen back to polling
-// stops hearing about indexing — and this channel is now the ONLY source for
-// that count, since a query is answered locally and no response comes back with
-// one attached. Both the empty state's "still being indexed" and the "results
-// may grow" line therefore go quiet there. Fixing it means teaching
-// `fetchVersionOnce` to drain the whole one-shot body, and nobody has needed it:
-// the fallback is for a browser with no `EventSource` at all.
+// Known limit: the polling fallback reads only the first (sync) frame, so a
+// polling client stops hearing `event: index`.
 
 import type { IndexStatus, LiveChannel } from "./types";
 
-/** The subset of `EventSource` we depend on — lets tests supply a fake. The
- * server emits a **named** `event: sync` frame (see handlers/controlplane.zig
- * `controlplaneEvents`), so we subscribe via `addEventListener` for both the named
- * `sync` event and the default unnamed `message` (defensive, in case the frame's
- * `event:` line is dropped). */
+/** The subset of `EventSource` we use. */
 export interface EventSourceLike {
   addEventListener(type: string, listener: (ev: MessageEvent) => void): void;
   onopen: ((this: unknown, ev: Event) => unknown) | null;
@@ -57,42 +22,24 @@ export type EventSourceFactory = (url: string) => EventSourceLike;
 
 export interface LiveChannelOptions {
   url?: string;
-  /** Defaults to the global `EventSource` with `withCredentials` (cookie auth).
-   * `null` means "there is no EventSource here" — go straight to polling. */
+  /** Default: global `EventSource` with credentials. `null`: go straight to polling. */
   create?: EventSourceFactory | null;
-  /** Base reconnect delay in ms (grows to `maxBackoffMs`). Default 1000. */
+  /** Base reconnect delay in ms, doubling to `maxBackoffMs`. */
   backoffMs?: number;
   maxBackoffMs?: number;
-  /**
-   * Consecutive terminal failures to open the stream before abandoning SSE for
-   * the polling fallback. A successful open resets the count, so a flaky link
-   * keeps using SSE; only a channel that never works at all is written off.
-   */
+  /** Consecutive terminal open failures before polling; a successful open resets it. */
   fallbackAfterFailures?: number;
-  /** Poll interval in ms once in fallback mode. Default 15000. */
   pollMs?: number;
-  /**
-   * Fetches the current `syncVersion` for the polling fallback. Defaults to a
-   * plain GET of the same events URL, reading just the first frame — the server
-   * always leads with one carrying the current version, on both the held and the
-   * degraded shape, so no second endpoint is needed.
-   */
+  /** Polling fallback; defaults to the first frame of a GET on the events URL. */
   fetchVersion?: () => Promise<number | undefined>;
 }
 
 const DEFAULT_URL = "/api/controlplane/events";
-const CLOSED = 2; // EventSource.CLOSED
+const CLOSED = 2;
 
 /**
- * Parse an `event: index` payload — `{"pending":3,"version":41}`.
- *
- * TOLERANT ONLY WHERE ABSENCE IS NOT A CLAIM. A frame that does not parse, or
- * whose `pending` is not a finite number, yields `undefined` and the UI keeps
- * whatever it last knew: an unreadable frame must never be turned into
- * "nothing is pending", which is the reading that would silently drop the
- * "still indexing" line off a search that needs it. `version` is allowed to be
- * missing (0) — nothing in this app reads it yet, and it is not a claim about
- * completeness the way `pending` is.
+ * Parses `{"pending":3,"version":41}`. An unreadable frame yields `undefined`
+ * (keep what you knew), never "nothing pending". A missing `version` is 0.
  */
 export function parseIndexStatus(data: string): IndexStatus | undefined {
   let parsed: unknown;
@@ -110,7 +57,7 @@ export function parseIndexStatus(data: string): IndexStatus | undefined {
   };
 }
 
-/** Parse a sync-version out of an SSE payload: a bare number or `{syncVersion}`. */
+/** A bare number or `{syncVersion}`. */
 export function parseBump(data: string): number | undefined {
   const raw = data.trim();
   if (raw === "") return undefined;
@@ -125,12 +72,7 @@ export function parseBump(data: string): number | undefined {
   }
 }
 
-/**
- * The version carried by the last `data:` line in a raw `text/event-stream`
- * chunk — how the polling fallback reads a response it fetched as plain text
- * rather than through `EventSource`. Comment frames (`: ping`) and the `retry:`
- * line are ignored, being neither.
- */
+/** The last `data:` version in a raw event-stream chunk, for the polling fallback. */
 export function parseVersionFromStream(text: string): number | undefined {
   let found: number | undefined;
   for (const line of text.split("\n")) {
@@ -145,20 +87,14 @@ function defaultFactory(url: string): EventSourceLike {
   return new EventSource(url, { withCredentials: true }) as unknown as EventSourceLike;
 }
 
-/** The global `EventSource`, or null where the runtime has none (an old browser,
- * a non-DOM test environment) — in which case we never even try to open one. */
+/** Null where the runtime has no `EventSource`. */
 function globalEventSourceFactory(): EventSourceFactory | null {
   return typeof EventSource === "undefined" ? null : defaultFactory;
 }
 
 /**
- * Poll the events endpoint once and return the version in its first frame.
- *
- * Reads INCREMENTALLY and stops as soon as a version is in hand, because the
- * endpoint may be either shape: a degraded one-shot response ends by itself, but
- * a held stream never does, and `res.text()` on one of those would hang for the
- * connection's whole lifetime. The `AbortSignal` also lets an unsubscribe cut a
- * poll short instead of leaving a request running behind a closed page.
+ * Reads incrementally and stops at the first version: a held stream never
+ * ends, so `res.text()` would hang.
  */
 async function fetchVersionOnce(url: string, signal: AbortSignal): Promise<number | undefined> {
   const res = await fetch(url, {
@@ -170,7 +106,7 @@ async function fetchVersionOnce(url: string, signal: AbortSignal): Promise<numbe
   if (!res.ok) return undefined;
 
   const body = res.body;
-  if (!body) return parseVersionFromStream(await res.text()); // no streams in this runtime
+  if (!body) return parseVersionFromStream(await res.text());
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffered = "";
@@ -183,7 +119,6 @@ async function fetchVersionOnce(url: string, signal: AbortSignal): Promise<numbe
       if (done) return undefined;
     }
   } finally {
-    // Held stream or not, we are done with it — never leave one draining.
     void reader.cancel().catch(() => {});
   }
 }
@@ -213,10 +148,8 @@ export function createLiveChannel(opts: LiveChannelOptions = {}): LiveChannel {
           return fetchVersionOnce(url, aborter.signal);
         });
 
-      // The fallback. Once here we stay here for the life of the subscription: an
-      // SSE channel that failed to open `fallbackAfter` times running is not going
-      // to start working, and flapping between the two would pile failed
-      // connections on top of a poll that already works.
+      // Once polling, stay polling for this subscription; flapping would pile
+      // failed connections onto a working poll.
       const startPolling = (): void => {
         const tick = (): void => {
           if (stopped) return;
@@ -225,7 +158,7 @@ export function createLiveChannel(opts: LiveChannelOptions = {}): LiveChannel {
               if (!stopped && version !== undefined) onBump(version);
             })
             .catch(() => {
-              /* a failed poll is a skipped poll; the next tick retries */
+              /* the next tick retries */
             })
             .finally(() => {
               if (!stopped) pollTimer = setTimeout(tick, pollMs);
@@ -236,23 +169,21 @@ export function createLiveChannel(opts: LiveChannelOptions = {}): LiveChannel {
 
       const open = (): void => {
         if (stopped) return;
-        if (!create) return startPolling(); // no EventSource in this runtime
+        if (!create) return startPolling();
         const es = create(url);
         source = es;
 
         es.onopen = () => {
-          attempt = 0; // healthy connection — reset backoff
-          failures = 0; // ...and the fallback countdown
+          attempt = 0;
+          failures = 0;
         };
         const onData = (ev: MessageEvent) => {
           const version = parseBump(String(ev.data ?? ""));
           if (version !== undefined) onBump(version);
         };
-        es.addEventListener("sync", onData); // the server's named frame
+        es.addEventListener("sync", onData);
         es.addEventListener("message", onData); // defensive: unnamed frames
-        // The index frame. NOT on "message" as well: its payload is JSON and the
-        // unnamed handler above would read it as a sync-version, so a shared
-        // listener would let one frame answer two questions.
+        // Not on "message": its JSON payload would be misread as a sync version.
         if (onIndex) {
           es.addEventListener("index", (ev: MessageEvent) => {
             const status = parseIndexStatus(String(ev.data ?? ""));
@@ -260,10 +191,7 @@ export function createLiveChannel(opts: LiveChannelOptions = {}): LiveChannel {
           });
         }
         es.onerror = () => {
-          // Transient errors: EventSource retries itself while readyState stays
-          // CONNECTING (that is also how the server's degraded one-shot shape
-          // turns into a poll, via the `retry:` it sends). Only a terminal
-          // CLOSED needs our own handling.
+          // EventSource retries transient errors itself; only CLOSED is ours.
           if (stopped) return;
           if (es.readyState !== CLOSED) return;
           failures++;

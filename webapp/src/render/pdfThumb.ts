@@ -1,36 +1,9 @@
-// PAGE 0 OF A PDF, AS A LIBRARY TILE — the `renderPdfPage` seam behind the
-// thumbnail facade's `pdf-page` strategy.
-//
-// It is the PDF twin of the `renderNote` seam wired in `pages/library.ts`: the
-// facade asks for a bitmap of page 0 at the tier target and encodes it to WebP;
-// everything about MuPDF, workers and byte ranges stops here.
-//
-// A MODULE AND NOT A FUNCTION AT THE BOTTOM OF `thumbnails.ts` (where the other,
-// smaller seams live) because the facade's orchestration is deliberately
-// Node-testable with `net`, `painter` and the render seams faked: importing
-// `pdfClient` from there would drag the worker/wasm module graph into that
-// import for the sake of one function.
-//
-// THREE THINGS IT OWNS, AND ONLY THESE THREE:
-//
-//  1. STRICTLY ONE DOCUMENT AT A TIME. `PdfSession` is one worker holding one
-//     open document, and its `BlockCache` (32 MB) belongs to that document — so
-//     N tiles in flight would be N documents' blocks resident, and their range
-//     fetches would interleave. The queue below serialises open → size → render
-//     → CLOSE, and the close is what bounds peak memory to one document.
-//  2. A WARM SESSION, RELEASED WHEN IDLE. Compiling MuPDF is ~5.3 MB of wasm, so
-//     the session survives between jobs. But a library tile is produced ONCE PER
-//     DOCUMENT EVER (a persistent `sn-thumbs` hit returns the stored WebP before
-//     `produce` runs, so this seam is not called at all on a revisit), and a
-//     worker kept alive for a path that will never be entered again is pure
-//     cost. So it is torn down once the queue has been drained for
-//     {@link IDLE_RELEASE_MS}.
-//  3. THE TIER TARGET. Page 0 is rendered at the same density-bucketed width
-//     every other thumbnail producer uses (`thumbTargetWidth`), so the tile is
-//     crisp at the caller's DPR and never larger than it can be shown.
-//
-// The ~1.5 MB head+tail window every document open pays (`BlockCache.prime`) is
-// NOT this module's to avoid: it is a one-time toll per document per device.
+// Page 0 of a PDF as a library tile: the `renderPdfPage` seam behind the
+// thumbnail facade's `pdf-page` strategy, its own module so `thumbnails.ts`
+// stays Node-testable without the worker/wasm graph. One document at a time
+// (each session's 32 MB block cache belongs to one document); a warm session
+// released after an idle window, since each document's tile is produced once
+// ever and then served from `sn-thumbs`.
 
 import { ASPECT_CAP } from "../ui/tileAspect";
 import { rawFileUrl } from "../core/fileKind";
@@ -41,41 +14,24 @@ import type { Hash, Id } from "../core/types";
 import type { PdfPageThumb } from "./thumbnails";
 
 /**
- * The byte length handed to `PdfSession.open`.
- *
- * A gallery listing entry carries NO size: only `NoteMeta` does, and that is a
- * per-file round trip a tile has no business making. The hint's only job is to
- * choose the RANGE-SERVED path over the whole-file one (`pdfWorker.open` reads
- * `size > 0` as "this can be streamed"); the real length is settled a moment
- * later by the first response's `content-range`, because `BlockCache.request`
- * deliberately never clamps its range to the length it currently believes. So
- * one byte is enough, and nothing downstream reads this number again.
+ * The size hint for `PdfSession.open`. Listings carry no size; any `size > 0`
+ * selects the range-served path, and the real length comes from the first
+ * `content-range`.
  */
 const SIZE_UNKNOWN = 1;
 
 /**
- * How long a drained tile session stays warm before its worker is destroyed.
- *
- * Long enough to cover a whole folder: the lazy engine reveals tiles in bursts
- * as the IntersectionObserver fires, with a 150 ms settle and a scroll's worth
- * of gap between them, and recompiling 5.3 MB of MuPDF inside one of those gaps
- * would dwarf the render. Short enough that browsing away from a folder of PDFs
- * does not leave a second wasm instance resident for the session.
- *
- * It is also the RECOVERY for a worker that died (an engine OOM on a very large
- * page): a dead `PdfSession` rejects every later request and nothing here
- * inspects the failure to tell that apart from a corrupt PDF — but a dead
- * session drains the queue immediately, so the release fires and the next tile
- * gets a fresh worker.
+ * How long a drained session stays warm: long enough to bridge the lazy
+ * engine's bursts (recompiling 5.3 MB of MuPDF would dwarf a render), short
+ * enough not to keep a second wasm instance around. Also recovers from a dead
+ * worker, since a dead session drains the queue at once.
  */
 export const IDLE_RELEASE_MS = 15_000;
 
-/** The browser seams, injectable so the queue is testable without a worker —
- *  the same shape `pages/pdfViewer.ts` takes (`PdfSeam`). */
+/** The browser seams, injectable so the queue is testable without a worker. */
 export interface PdfThumbSeam {
-  /** A fresh decoder session. One worker, one document at a time. */
   createSession(): PdfSession;
-  /** False → no session is ever created and every tile falls to its glyph. */
+  /** False: no session is created and every tile falls back to its glyph. */
   supported(): boolean;
 }
 
@@ -83,7 +39,6 @@ export function defaultPdfThumbSeam(): PdfThumbSeam {
   return { createSession: createPdfSession, supported: supportsWasmExceptions };
 }
 
-/** The seam the facade injects as `ThumbnailsDeps.renderPdfPage`. */
 export type RenderPdfPage = (
   fileId: Id,
   hash: Hash,
@@ -91,32 +46,21 @@ export type RenderPdfPage = (
 ) => Promise<PdfPageThumb>;
 
 export interface PdfThumbsOptions {
-  /** Override the idle release window. `0` releases the moment the queue
-   *  drains — what a unit test wants, so no timer outlives the test. */
+  /** Override the idle window; `0` releases on drain (tests). */
   idleMs?: number;
-  /** The tier target width in PHYSICAL px. Defaults to the live density
-   *  bucket's, read per render call exactly as every other producer reads it. */
+  /** Tier target width in physical px; defaults to the live density bucket's. */
   targetWidth?: () => number;
 }
 
-/** A handle over the seam, so a caller that owns the app's lifetime can drop the
- *  worker on teardown rather than waiting out the idle window. */
 export interface PdfThumbs {
   renderPdfPage: RenderPdfPage;
-  /** Tear the session down now (app teardown). Safe to call at any time. */
   destroy(): void;
 }
 
 /**
- * The scale that puts page 0 at the tier target.
- *
- * WIDTH-LED, because a masonry tile is width-constrained. But the HEIGHT is
- * capped at {@link ASPECT_CAP} times that width, because the layout letterboxes
- * anything taller than 2.5:1 — so a receipt-shaped page would otherwise
- * rasterise thousands of rows nothing can show.
- *
- * Returns 0 for a page with no measurable box, which the caller treats as "this
- * page cannot be drawn" rather than rendering at a nonsense scale.
+ * Scale for page 0 at the tier target: width-led, with height capped at
+ * {@link ASPECT_CAP} × width (the layout letterboxes beyond). 0 when the page
+ * has no measurable box.
  */
 export function tileScale(pageW: number, pageH: number, targetW: number): number {
   if (!(pageW > 0) || !(pageH > 0) || !(targetW > 0)) return 0;
@@ -132,19 +76,11 @@ export function createPdfThumbs(
   const targetWidth = opts.targetWidth ?? (() => thumbTargetWidth());
 
   let session: PdfSession | null = null;
-  /**
-   * The serial chain. Every job is appended to it, so exactly one document is
-   * ever open — see the header. It is kept NON-REJECTING (`.catch`) because a
-   * chain that rejects poisons every job appended after it: one corrupt PDF
-   * would take the whole folder's tiles down with it.
-   */
+  /** The serial chain, kept non-rejecting so one corrupt PDF can't poison the rest. */
   let chain: Promise<unknown> = Promise.resolve();
   /**
-   * Jobs appended to the chain and not yet finished — the queue is DRAINED at
-   * 0, which is the only moment the session is worth releasing. Decremented
-   * inside the job (before the release is scheduled) rather than by the awaiting
-   * caller: a caller's `finally` runs a microtask LATER, so the last job would
-   * always see its own count and never schedule anything.
+   * Unfinished jobs; drained at 0. Decremented inside the job, since a caller's
+   * `finally` runs a microtask too late for the last job to schedule a release.
    */
   let queued = 0;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -164,15 +100,14 @@ export function createPdfThumbs(
   }
 
   function scheduleRelease(): void {
-    if (queued > 0) return; // more tiles behind this one; stay warm
+    if (queued > 0) return;
     cancelRelease();
     if (idleMs <= 0) {
       release();
       return;
     }
     idleTimer = setTimeout(release, idleMs);
-    // Node's timer would otherwise hold a test process open past the assertion;
-    // the browser's is a plain number and has no `unref`.
+    // `unref` so Node's timer doesn't hold a test process open.
     (idleTimer as unknown as { unref?: () => void }).unref?.();
   }
 
@@ -187,14 +122,10 @@ export function createPdfThumbs(
       const scale = tileScale(size.width, size.height, targetWidth());
       if (scale === 0) throw new Error("page 0 has no measurable box");
       const frame = await s.render(0, scale);
-      // The page's OWN box, not the raster's: it is the cropped, rotated one
-      // (`fz_bound_page` — a `/Rotate 90` page reports its visual, swapped
-      // dimensions), which is what the masonry memo wants as the tile's aspect.
+      // The page's own box (rotation applied), which the masonry memo wants.
       return { bitmap: frame.bitmap, pageW: size.width, pageH: size.height };
     } finally {
-      // CLOSE BETWEEN FILES, on every path. This is what keeps peak memory at
-      // one document's blocks rather than the folder's — the whole reason the
-      // queue is serial. The worker (and its compiled module) stays warm.
+      // Close between files on every path: peak memory is one document's blocks.
       if (s) await s.close().catch(() => {});
       queued--;
       scheduleRelease();
@@ -202,15 +133,13 @@ export function createPdfThumbs(
   }
 
   const renderPdfPage: RenderPdfPage = async (fileId, hash, o = {}) => {
-    // No session, no worker, no 5.3 MB module on a browser that cannot run it;
-    // the facade turns this rejection into the glyph.
     if (!seam.supported()) throw new Error("this browser cannot run the PDF decoder");
     const url = rawFileUrl(fileId, hash, { bin: o.bin });
     if (!url) throw new Error("this file has no readable address");
     queued++;
     const run = chain.then(() => job(url));
-    // The chain waits on the SETTLED job, so the next open never overlaps this
-    // close.
+    // Chain on the settled job so the next open never overlaps this close.
+
     chain = run.then(
       () => {},
       () => {},

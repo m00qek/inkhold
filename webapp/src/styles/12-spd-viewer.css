@@ -1,20 +1,9 @@
-/* ================= .spd (Atelier) VIEWER ================= */
-/* The compositor's surface: a layers panel beside a scrollable canvas stage,
-   under the shared toolbar (10-toolbar.css). The loading / error / empty states
-   reuse the stub's centred `.viewer__placeholder` (11-viewer-stub.css) — this
-   file only adds the RENDERED body (`.spd-body`), which lives beside `.viewer__main`
-   and is shown once the tiles have composited.
+/* ---- .spd (Atelier) viewer ----
+   A layers panel beside a scrollable canvas stage; states reuse the stub's
+   `.viewer__placeholder`. */
 
-   Appended at the END of the manifest (after 11) so it can override the stub's
-   `.viewer__main` treatment for `.spd` without reopening earlier files. */
-
-/* The rendered body fills the viewer below the bar, laid out as [stage | panel] —
-   the layers panel docks on the RIGHT, a card beside the canvas, exactly as the
-   reader's "Recognized text" aside sits right of the page (`.ocr`, 07-find-in-note).
-   Shown only once the canvas has content; until then `.viewer__main` (the
-   placeholder) is what paints. Both carry an explicit `[hidden]` rule because
-   their `display` is set at class specificity, which would otherwise beat the
-   UA `[hidden]` — the same discipline `.viewer[hidden]` needs in 11. */
+/* The rendered body, [stage | panel], shown once tiles composite. Explicit
+   `[hidden]` rules because class-level `display` beats the UA one. */
 .spd-body {
   flex: 1;
   min-height: 0;
@@ -28,31 +17,19 @@
   display: none;
 }
 
-/* The layers panel itself is the SHARED side panel now — its card, head and
-   open/hide are the primitive (`.side-panel`, 15-side-panel.css); its rows,
-   eyes, steppers and thumb sizing are the layers body (`.layers-panel*`,
-   14-layers-panel.css). The `spd-layers`/`spd-layer__…` classes on the same
-   elements are the `.spd` HOOK namespace — test selectors and the home of the
-   one `.spd`-specific thumb rule below; they carry no other look.
-
-   The DOCK MARGIN is this context's, not the primitive's: the `.spd-body` lays
-   the panel out beside the stage and floats it off the edges by --sp-6 (24px),
-   mirroring the stage's own padding. The reader's `.page-wrap` pays a flex gap
-   instead and so leaves the primitive's zero margin alone. */
+/* The layers panel is the shared side panel; `spd-layers`/`spd-layer__…` are
+   hook classes only. The 24px dock margin is this context's. */
 .spd-body .side-panel {
   margin: var(--sp-6) var(--sp-6) var(--sp-6) 0;
 }
 
-/* The blank Reference Layer's empty frame: no canvas to derive a width from, so
-   buildThumb (spdViewer.ts) sets the drawing's real aspect inline, and this
-   portrait 3:4 stands in if it cannot. `.spd`-specific because the reserved
-   blank Reference Layer (id 9999) is `.spd` knowledge. */
+/* The blank Reference Layer (id 9999) has no canvas: buildThumb sets the real
+   aspect inline, 3:4 otherwise. */
 .spd-layer__thumb--blank {
   aspect-ratio: 3 / 4;
 }
 
-/* The stage scrolls its own overflow (a drawing larger than the viewport at
-   100%/150%) and centres the canvas while it fits. */
+/* Scrolls overflow; centres the canvas while it fits. */
 .spd-stage {
   flex: 1;
   min-width: 0;
@@ -62,26 +39,20 @@
   place-items: center;
   padding: 24px;
 }
-/* The zoom surface AND the transparency backdrop. It holds one absolutely-
-   positioned canvas per layer; its own size (set in px by the viewer) is the only
-   thing zoom changes, and the browser scales the whole stack. Its CHECKERBOARD
-   shows through wherever a layer is hidden or transparent — the white base is the
-   Reference Layer's OWN canvas, not a fill here, so hiding it goes see-through. */
+/* The zoom surface: one absolute canvas per layer; zoom only resizes this box.
+   The checkerboard shows through hidden or transparent layers (the white base is
+   the Reference Layer's own canvas). */
 .spd-canvas-wrap {
   position: relative;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 6px 20px rgba(0, 0, 0, 0.08);
   line-height: 0;
-  /* The universal "transparent" backdrop, now shared with the PDF viewer's
-     hidden Document layer — the values live in 00-tokens.css (`--checker-*`).
-     Sits under every layer canvas; the white base is the Reference Layer's OWN
-     canvas, so hiding that layer goes see-through onto this. */
+  /* The shared "transparent" checker (00-tokens.css). */
   background-color: var(--checker-base);
   background-image: var(--checker-image);
   background-size: var(--checker-cell) var(--checker-cell);
   background-position: 0 0, var(--checker-offset) var(--checker-offset);
 }
-/* Each layer's own canvas: base-res backing, stretched to the wrap so zoom is a
-   single CSS resize with no re-raster. Stacked in DOM order (topmost last). */
+/* Base-res canvases stretched to the wrap: zoom is a CSS resize, no re-raster. */
 .spd-layer-canvas {
   position: absolute;
   inset: 0;
@@ -89,9 +60,3 @@
   height: 100%;
   display: block;
 }
-
-/* The zoom readout wears its OWN class (`.spd-zoom`) — every viewer is mounted at
-   once, so a shared `.zoom` locator would resolve to more than one element — but
-   its CHROME is the shared `.zoom` treatment, grouped with `.spd-zoom`/`.txt-zoom`/
-   `.pdf-zoom` in 10-toolbar.css so there is one source of truth rather than a
-   per-viewer copy. */

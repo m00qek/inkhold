@@ -1,86 +1,29 @@
-/* ================= PDF VIEWER ================= */
-/* One page at a time, rastered by MuPDF in the browser (`pages/pdfViewer.ts`).
-   The loading / error / too-large / unsupported-browser states all reuse the
-   stub's centred `.viewer__placeholder` (11-viewer-stub.css); this file adds only
-   the page stage.
+/* ---- PDF viewer ----
+   One page at a time, rastered by MuPDF in the browser (`pages/pdfViewer.ts`);
+   states reuse the stub's `.viewer__placeholder`. */
 
-   Appended after 11 so it can override the stub's `.viewer__main` for `.pdf`
-   without reopening an earlier file — the same move 12 and 13 make. */
-
-/* The stage scrolls, because a page at 200% is bigger than the viewport by
-   design. `place-items` centres a page that is SMALLER than the stage, which is
-   the common case at Fit. */
-/* THE SAME STAGE THE READER HAS. `.stage` (06-reader) is `overflow:auto` +
-   `place-items:center` + 28px of padding, and the reader's page index sits INSIDE
-   it, so the panel and the page float together as one centred group with air on
-   every side. The PDF viewer had the panel outside a full-bleed content area, so
-   it sat flush against the rail and the page ran to the top edge — the same
-   controls, a different language. This makes the wrap the stage. */
+/* The reader's stage: the page index sits inside it, so panel and page float
+   together as one centred group. */
 .viewer--pdf .viewer__main {
   min-width: 0;
   min-height: 0;
   display: grid;
-  /* `safe`, and the reason is scrolling. THIS is where a zoomed page overflows —
-     the wrap's flex row never does, because this box shrinks (`min-width: 0`)
-     instead of growing with the stage inside it.
-
-     Plain `center` on a box whose content is BIGGER than it splits the overflow
-     evenly, and half of it lands off the LEADING edge where no scrollbar can
-     reach: scrollable overflow only extends end-ward. Measured with plain
-     `center` at 150%, scrolled fully left, the page's left edge sat 220px
-     outside the container — on screen, and unreachable. `safe` centres while the
-     page fits, which is the Fit case and the common one, and falls back to start
-     the moment it does not. */
+  /* `safe`: plain `center` splits a zoomed page's overflow, and the half past
+     the leading edge can't be scrolled to. `safe` centres while it fits. */
   place-items: safe center;
-  /* The wrap is now the stage, so it owns BOTH of these and the stub's defaults
-     have to go, or they fight it:
-
-     - `padding: 24px` stacked on the wrap's 28, pushing the page 24px below the
-       panel beside it — two cards that should share a top edge, visibly not.
-     - `overflow: auto` made this a SECOND scroller nested inside the wrap's.
-       A page taller than the available box scrolled here instead of in the
-       stage, so it ran off the bottom past the wrap's padding and the outer
-       scrollbar never appeared to say so. */
+  /* The wrap is the stage, so the stub's padding (misaligns the page with the
+     panel) and overflow (a nested second scroller) must go. */
   padding: 0;
   overflow: visible;
-  /* FILL THE STAGE, so `place-items: center` has a stage to centre in. The wrap
-     is `align-items: flex-start` (the panel is a card, not a full-height rail),
-     which left this box sized by its own content — and every placeholder the
-     viewer owns is a child of it. So "Opening this PDF…", the corrupt-file
-     message and the unsupported-browser message all centred inside a box
-     collapsed against the top, and read as stranded at the top of an empty desk
-     instead of centred on it. Stretching costs the page nothing: at Fit it
-     already fills the height, so centred and top-aligned are the same place. */
+  /* Fill the stage so placeholders centre on the desk, not at its top. */
   align-self: stretch;
 }
 
-/* THE STAGE IS THE SHEET now, because something is layered on it. The `.mark`
-   overlay is absolutely positioned against this box, and it is deliberately
-   WIDER than the page: the ink is in device-panel pixels and the page occupies
-   only a letterboxed sub-rect of that panel, so the host hangs over both edges
-   by the dead margin (~3% each side for A4 on a Nomad). `overflow: hidden`
-   clips it back to the page — anything the device drew outside the document is
-   not part of the document.
-
-   The card treatment moved here from `.pdf-page` with it: clipping on the
-   canvas's own box would have cut its shadow off. */
-/* AND IT CARRIES THE CHECKER, which is what "Document off" looks like. Turning
-   that row off in the Annotations panel sets the canvas's `visibility: hidden`,
-   which keeps its box — so the stage still has the page's exact rectangle and
-   whatever is painted here shows through it. Without this the desk showed
-   through instead and the ink floated on it, as though the page had been
-   removed rather than hidden.
-
-   The checker is UNCONDITIONAL: nothing toggles it, because `.pdf-page` is an
-   opaque canvas over the top (its own `--sheet` fill plus the raster) and hides
-   it completely whenever the page is visible. That is exactly how the `.spd`
-   viewer works, where the white base is the Reference Layer's own canvas rather
-   than a fill on the wrap — the same mechanism, now the same tokens
-   (`--checker-*`, 00-tokens.css).
-
-   It goes on THIS box and not on `.pdf-page` so the card treatment above still
-   clips and shadows one sheet: a checker on the canvas would be the page rather
-   than what is behind it, and would square off the rounded corners. */
+/* The stage is the sheet. The `.mark` overlay is wider than the page (ink is in
+   panel pixels, the page a letterboxed sub-rect) and `overflow: hidden` clips
+   it to the page. It also carries the checker that "Document off" shows
+   through (the canvas keeps its box under `visibility: hidden`); the opaque
+   page covers it otherwise. */
 .pdf-stage {
   position: relative;
   display: grid;
@@ -98,15 +41,10 @@
   background-position: 0 0, var(--checker-offset) var(--checker-offset);
 }
 
-/* THE FIND BAR. The reader's bar and the `.txt` viewer's, a third time, and it
-   carries its OWN class for exactly the reason `.txtbar` does: all four viewers
-   are mounted at once, so a shared class would put several `.findbar`s in the
-   DOM and the reader's find tests — which query `.findbar` globally — would see
-   them. Same tokens, same look, a separate name so the bars never collide. */
+/* The find bar, under its own class like `.txtbar` so test locators don't collide. */
 .pdfbar {
   display: flex;
   align-items: center;
-  /* Match .findbar: anchor field + count + nav to the right edge. */
   justify-content: flex-end;
   gap: 10px;
   padding: 8px 14px;
@@ -149,8 +87,7 @@
   outline: none;
   border-color: var(--accent);
 }
-/* Full `--ink` because it IS the answer being read — tabular so the number does
-   not jitter as the stream's floor climbs to the exact count. */
+/* Full `--ink`, tabular, as the streamed floor climbs to the exact count. */
 .pdfbar__count {
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
@@ -158,14 +95,11 @@
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-/* Everything that is NOT a live count of matches reads dimmer — "Searching…",
-   "No matches", the error. A streaming floor is a live count and stays full
-   weight, exactly as the reader's counter does. */
+/* Non-count states read dimmer; a streaming floor is a count. */
 .pdfbar__count.is-none {
   color: var(--ink-faint);
 }
-/* The manual-fuzzy OPT-IN affordance — the reader's `.findbar__ask` treatment,
-   so "search similar" reads the same in every viewer that offers it. */
+/* The typo-tolerant opt-in, like `.findbar__ask`. */
 .pdfbar__ask {
   border: 0;
   background: none;
@@ -186,15 +120,8 @@
   cursor: default;
 }
 
-/* Find's marks, UNDER the ink — see `pages/pdfHighlightLayer.ts` for why the
-   PDF gets a precise highlight where the reader's `.note` find gets an oval, and
-   why this sits below the handwriting rather than over it.
-
-   The wash is the `.txt` viewer's `<mark>`, at the same two weights: this app
-   already has one vocabulary for "the query is here", and a third would only
-   make the two viewers look like different products. Current is heavier rather
-   than a different hue — the same distinction the ovals draw with stroke weight
-   (07-find-in-note.css). */
+/* Find marks, under the ink (`pages/pdfHighlightLayer.ts`): the `.txt` viewer's
+   wash at the same two weights. */
 .pdf-find-marks {
   position: absolute;
   pointer-events: none;
@@ -203,10 +130,7 @@
   position: absolute;
   background: color-mix(in srgb, var(--accent) 24%, transparent);
   border-radius: 2px;
-  /* A hair of bleed on each side. A glyph's box hugs its outline, so an exact
-     rect reads as a stripe that starts fractionally inside the first letter;
-     this is the printed equivalent of `findOvals`'s GROW, and it is small
-     because — unlike a recogniser's rectangle — this box is not a guess. */
+  /* A hair of bleed, since a glyph box hugs its outline. */
   outline: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
 }
 .pdf-find-mark.is-current {
@@ -214,58 +138,26 @@
   outline-color: color-mix(in srgb, var(--accent) 42%, transparent);
 }
 
-/* The selection layer — the one layer over the page that DOES take the pointer,
-   because dragging across it is the whole feature. It sits under the links
-   (which are real anchors and win the press) and under the ink, and the ink is
-   `pointer-events: none`, so the stacking answers "was that a link or a
-   selection?" without a line of code asking.
-
-   The host has no fill: it is a hit area, and an empty page must look exactly
-   like a page. The cursor is the only standing hint that a raster page has text
-   in it at all, and it appears only once the words have arrived — offering a
-   text cursor over a page whose words are still loading would promise something
-   a press could not yet deliver. */
+/* The selection layer: under the links and the (pointer-transparent) ink, so
+   stacking decides link vs selection. No fill; the text cursor appears only
+   once the words have arrived. */
 .pdf-select {
   position: absolute;
-  /* TRANSPARENT UNTIL IT HAS SOMETHING TO OFFER. A page of scanned images has no
-     words, and a page whose words are still being built does not have them YET —
-     in both states this layer can do nothing with a press, so it must not take
-     one. Claiming the pointer regardless would put an invisible sheet over every
-     PDF in the app and quietly swallow clicks meant for the page beneath, which
-     is exactly what it did: it intercepted the click that focuses the canvas.
-
-     It is also what lets the words be fetched at all. With `none` here the
-     pointer reaches the page and the event bubbles to `.pdf-stage`, which is
-     where the viewer listens for the intent to select — the layer cannot listen
-     for the thing that would switch it on. */
+  /* Transparent to the pointer until it has words, so it never swallows clicks
+     meant for the page, and so the press that requests words reaches `.pdf-stage`. */
   pointer-events: none;
 }
 .pdf-select.is-selectable {
   pointer-events: auto;
   cursor: text;
 }
-/* THE SELECTION IS NOT THE FIND MARK, and the colour is what says so. Find uses
-   `--accent`, the app's green ink, everywhere it points at a hit; a selection
-   that borrowed it would read as "these words matched your search" over words
-   the reader picked by hand — and the two can be on screen at once, which is
-   precisely when the confusion would cost something. `--paper-ink` is the wrong
-   answer too: it means the user's own handwriting (the page index's rail uses
-   it for exactly that). So this takes `--ink`, the UI's own text colour, at a
-   wash: a neutral, unmistakably-not-green band that reads as "chosen" rather
-   than "found", and inverts with the theme for free.
-
-   No radius and no bleed, unlike the find mark. Adjacent words in a selected
-   line must meet as one continuous band — that is what makes a passage look
-   selected rather than word-by-word highlighted — and a rounded, outlined box
-   would put a seam between every pair of words. */
+/* Selection is `--ink` at a wash, not find's `--accent` or the handwriting's
+   `--paper-ink`. No radius or bleed, so a selected line reads as one band. */
 .pdf-select__box {
   position: absolute;
   background: color-mix(in srgb, var(--ink) 22%, transparent);
 }
-/* The copy outcome, for a screen reader only — the same visually-hidden shape
-   the pager's live region uses. A glyph cannot say "that did not work", and on
-   the plain-HTTP address this app is usually served over, "that did not work"
-   is a real outcome rather than a theoretical one. */
+/* The copy outcome for screen readers (copy can genuinely fail over plain HTTP). */
 .pdf-copy__live {
   position: absolute;
   width: 1px;
@@ -274,22 +166,15 @@
   clip-path: inset(50%);
   white-space: nowrap;
 }
-/* …and its sighted half. A failed copy has to be visible on the control that
-   was pressed, because the text it failed to copy is painted on a canvas and
-   cannot be selected by hand as a fallback. */
+/* ...and on the button, since canvas text can't be selected by hand instead. */
 .btn.is-failed {
-  /* `--margin-ink`, the token the palette reserves for "things gone wrong" (it
-     is `--margin` darkened so words clear 4.5:1, and this is a glyph on a
-     button). Red keeps meaning one thing here, which is why it is not the
-     accent. */
+  /* `--margin-ink`: things gone wrong. */
   color: var(--margin-ink);
   outline: 1px solid currentColor;
 }
 
-/* The ink layer. `pointer-events: none` so it never eats a click meant for the
-   page, and no background of its own — `decode_layer` returns alpha 0 wherever
-   the device wrote nothing, which is what makes this an overlay rather than a
-   second sheet. */
+/* The ink layer: no pointer events, no background (`decode_layer` is alpha 0
+   where nothing was written). */
 .pdf-mark {
   position: absolute;
   pointer-events: none;
@@ -299,52 +184,21 @@
   height: 100%;
 }
 
-/* The link layer that used to live here is now `21-link-layer.css`: the
-   component (`pages/linkLayer.ts`) is shared with the `.note` reader, so its
-   styling is not the PDF viewer's to own. */
-
-/* The page itself. A PDF page is paper: it gets the sheet colour and a soft
-   edge, exactly as the reader's `.page` does, so a document reads as a document
-   and not as a bitmap floating on the desk.
-
-   `height: auto` with an explicit CSS width (set from JS) is what keeps the
-   raster DPR-sharp: the canvas BUFFER is device pixels, the CSS box is layout
-   pixels, and the ratio between them is the device pixel ratio. Without it a
-   HiDPI screen would upscale a 1x raster and the type would go soft. */
-/* The page is PAPER, and it is the reader's paper: the same 3px radius and the
-   same two-layer shadow (`.page`, 06-reader) — a tight contact shadow plus a
-   wide soft one, which is what makes a sheet look like it is lying on the desk
-   rather than pasted onto it. A single flat shadow read as a different material. */
-/* NO `max-width` HERE, deliberately, and it is what makes zoom mean anything.
-   `max-width: 100%` looks like ordinary defensive CSS and reads as harmless,
-   but the canvas's CSS width is the RENDER SIZE — `paint` sets it from the
-   raster it just asked MuPDF for — so clamping it does not scale the page down,
-   it throws the zoom away. Measured before this came out: at 300% the buffer
-   was 2976px wide, the box was 992, and `scrollWidth` never exceeded
-   `clientWidth`, so there was not even anything to scroll to. The app rastered
-   nine times the pixels and showed the same picture.
-
-   It also took the ink with it. The `.mark` overlay is placed against the
-   raster's intended size (`markGeometry`), so a clamped page put the ink at
-   1.5x, 2x, 3x the page it annotates — exactly the zoom factor. */
+/* The page is the reader's paper (3px radius, two-layer shadow). JS sets the CSS
+   width and `height: auto` keeps the raster DPR-sharp. No `max-width`: the CSS
+   width is the render size, so clamping it throws the zoom away and misplaces
+   the `.mark` ink by the zoom factor. */
 .pdf-page {
   display: block;
   height: auto;
   background: var(--sheet);
 }
 
-/* DARK MODE LEAVES THE PAGE ALONE — deliberately, and unlike the `.note`
-   reader, which inverts e-ink because a note is INK ON NOTHING and the paper is
-   ours to choose. A PDF's page is authored: its background, its images and its
-   type were chosen by whoever made it, and inverting them would misrepresent the
-   document (a photograph would come back as a negative). The chrome around it
-   goes dark; the sheet stays the sheet. */
+/* Dark mode leaves an authored PDF page alone (inverting would turn a photo into
+   a negative); only the chrome goes dark. */
 
-/* ================= the page index ================= */
-/* Docked LEFT beside the page, exactly as the reader's is — the same flex row,
-   the same `--panel-gap`, so the two viewers put "Pages" in the same place. The
-   panel NARROWS the page rather than covering it, which is why the stage is a
-   flex child with `min-width: 0` and the canvas is sized against it. */
+/* ---- page index ----
+   Docked left like the reader's; it narrows the page rather than covering it. */
 .pdf-wrap {
   flex: 1;
   min-height: 0;
@@ -352,16 +206,9 @@
   overflow: auto;
   display: flex;
   gap: var(--panel-gap);
-  /* `flex-start`, not `stretch`: the panel is a CARD that sizes to the page
-     beside it, exactly as the reader's does. Stretched, it ran the full height of
-     the viewport and stopped reading as a card at all. */
+  /* `flex-start`, so the panel stays a card sized by the page. */
   align-items: flex-start;
-  /* Plain `center`, and it stays plain: this row's items never overflow it. The
-     page grows inside `.viewer__main`, which is `min-width: 0` and shrinks
-     rather than widening the row, so the overflow lands one level down — which
-     is where the `safe` keyword is needed and where it is. Tried `safe` here
-     too; with it reverted every zoom assertion still passes, so it was doing
-     nothing but suggesting this row was the one that overflowed. */
+  /* Plain `center`: this row never overflows (`.viewer__main` shrinks instead). */
   justify-content: center;
   padding: 28px;
 }
@@ -369,41 +216,23 @@
   min-width: 0;
 }
 
-/* The rows reserve their shape BEFORE any thumbnail paints, from page 0's
-   aspect (set as `--thumb-aspect` in JS, then corrected per row when that page's
-   own thumbnail resolves — see `pages/pageIndex.ts`, which applies the property
-   and `06-reader.css`, which consumes it). Without it the strip would reflow
-   under the pointer as each canvas landed — the same reason the gallery reserves
-   tile aspect. This is only the FLOOR: a PDF's pages are not the reader's
-   portrait `.note` panel, so the shared default would be the wrong guess. */
+/* Rows reserve their shape from `--thumb-aspect` (pages/pageIndex.ts) before
+   any thumbnail paints; this is the PDF floor. */
 .viewer--pdf .filmstrip__page {
   --thumb-aspect: 0.7071; /* A4 portrait, the fallback when page 0 will not measure */
 }
 
-/* ================= the outline ================= */
-/* The document's OWN table of contents (`pages/pdfOutlinePanel.ts`), docked in
-   the same left slot as the page index and mutually exclusive with it — two
-   navigation panels open at once would leave the page a sliver. It takes the
-   DEFAULT `--panel-w` track (268px): a filmstrip is happiest at the narrow 180
-   and a wrapped chapter title is unreadable there, which is why these are two
-   panels and not two tabs in one.
-
-   DEPTH IS INDENT PLUS TYPE, NEVER COLOUR. Colour in this panel means STATE —
-   the current entry, and nothing else. Tint the levels and there is nothing left
-   to say "you are here" with, on a panel whose whole job is to say it. */
+/* ---- outline ----
+   The document's table of contents (`pages/pdfOutlinePanel.ts`), in the page
+   index's slot and exclusive with it, at the default `--panel-w`. Depth is
+   indent plus type, never colour: colour means current. */
 .pdf-outline {
   display: flex;
   flex-direction: column;
 }
 
-/* The row. A grid of `1fr auto` — the title takes what it needs and the page
-   number sits in a column of its own, so the numbers line up down the panel
-   however deeply their titles are indented.
-
-   The indent is arithmetic: one `--sp-3` step per level, from a `--depth` the
-   component sets per row and CLAMPS at 3 (see `MAX_DEPTH` — 12px a level runs
-   out of a 268px track at five, and an outline indented into a 40px column is
-   unreadable before it is deep). */
+/* A `1fr auto` grid so page numbers align; one `--sp-3` indent per `--depth`,
+   clamped at 3. */
 .pdf-outline__row {
   position: relative;
   display: grid;
@@ -423,19 +252,12 @@
   line-height: 1.45;
   color: var(--ink-soft);
 }
-/* TITLES WRAP, THEY NEVER TRUNCATE. The title is the entire content of the row
-   and an ellipsis in a table of contents hides the one thing it is for — and a
-   long chapter title is exactly the entry a reader is hunting for. `break-word`
-   rather than `anywhere` so an ordinary long title breaks between words and only
-   an unbreakable run is cut. */
+/* Titles wrap, never truncate. */
 .pdf-outline__t {
   min-width: 0;
   overflow-wrap: break-word;
 }
-/* The page number: mono, tabular, quiet — a coordinate, not part of the title.
-   ALIGNED TO THE TITLE'S FIRST LINE (`align-self: start`), so a title that wraps
-   to three lines does not drag its number down and knock the column out of true.
-   It is drawn 1-based; the wire is 0-based, and the component converts. */
+/* The page number: mono, tabular, aligned to the title's first line; 1-based. */
 .pdf-outline__p {
   align-self: start;
   font-family: var(--font-mono);
@@ -444,14 +266,8 @@
   color: var(--ink-faint);
 }
 
-/* The type scale, one step per level and then it stops — the same clamp the
-   indent takes, so a level-6 entry reads as "deeper than a chapter" instead of
-   as a column of single characters.
-
-   Depth 0 is a PART: the display face, a heavier weight, full `--ink`, and air
-   above it, so the top level reads as structure rather than as the first row of
-   a list. It is the only rule here that adds space; the levels under it are
-   already separated by their indent. */
+/* One type step per level, clamped like the indent. Depth 0 is a part: display
+   face, heavier, with air above. */
 .pdf-outline__row--d0 {
   margin-top: var(--sp-2);
   font-family: var(--font-display);
@@ -479,10 +295,7 @@
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
-/* AN ENTRY WHOSE DESTINATION WILL NOT RESOLVE is drawn and inert, not dropped:
-   it is still a line its author wrote, and a hole in a table of contents reads
-   as "there is no Chapter Four" about a chapter that is right there. It shows no
-   number, because there is none to show. */
+/* An unresolvable destination: drawn, inert, no number. */
 .pdf-outline__row:disabled {
   cursor: default;
   color: var(--ink-faint);
@@ -491,13 +304,8 @@
   background: none;
 }
 
-/* THE CURRENT ENTRY — the one the reader is inside, which moves as they page and
-   not only as they click. The mark is the page index's own device (a 2px accent
-   stroke in the gutter, `::before`) in the colour this app already means
-   "current" by, and it costs no horizontal space — which matters when four
-   levels of indent are already spending it. The title comes up to full `--ink`
-   and the number to `--accent` with it, so the row reads as current at a glance
-   and at the number both. */
+/* The current entry (moves as you page): the page index's 2px accent stroke,
+   full `--ink` title, `--accent` number. */
 .pdf-outline__row[aria-current="true"] {
   color: var(--ink);
   font-weight: 600;

@@ -1,60 +1,29 @@
-// THE NAME-CONFLICT PROMPT — what the interface asks
-// when a dropped file is already in the folder.
-//
-// WHY IT ASKS AT ALL, since the server can silently auto-rename: the main use of
-// web upload is to UPDATE a file — you edit a PDF on your laptop and drop it back
-// — and a silent `notes (2).pdf` gets that exactly wrong, twice over. You end up
-// with two files, and both of them sync to a device where clutter is expensive.
-//
-// WHY THE CHOICE IS SAFE TO OFFER, which is the fact the copy has to carry:
-// replacing supersedes the occupant through the same path a device re-uploading
-// an edited note takes, so the displaced file is kept as a VERSION and can be
-// restored from the version history the app already ships. Neither answer
-// destroys anything — and a user who does not know that will always pick "Keep
-// both", so the dialog says it in the body rather than leaving it to be inferred.
-//
-// IT ASKS BEFORE ANY BYTES MOVE. The clash is detected against the listing the
-// app already holds, so the alternative — upload, take a 409, upload again — is
-// never paid for. On a slow link that is the difference between one transfer and
-// two.
-//
-// The scaffold mirrors `renameDialog.ts` (a native `<dialog>` for the modal focus
-// trap, Escape-to-dismiss and page inertness for free); the CSS lives in
-// 18-upload.css.
+// The name-conflict prompt for a dropped file whose name is already taken.
+// Asked before any bytes move, because web upload is mostly for updating a file
+// and a silent auto-rename gets that wrong. Replace keeps the displaced file as
+// a version, so the body says neither answer destroys anything.
 
 import { el } from "./dom";
 import { nextAvailableName } from "../core/fileKind";
 import type { UploadConflictMode } from "../api/client";
 
-/** What the person chose. `cancel` is Escape and the Cancel button alike. */
 export type ConflictChoice = UploadConflictMode | "cancel";
 
 export interface ConflictAnswer {
   choice: ConflictChoice;
-  /**
-   * Apply this same answer to every remaining conflict in this batch, instead of
-   * asking again. False when the box was not offered (a single conflict).
-   */
+  /** Apply this answer to the rest of the batch; false when not offered. */
   applyToRest: boolean;
 }
 
 export interface ConflictRequest {
-  /** Where the dialog mounts (removed again on close). */
   host: HTMLElement;
-  /** The dropped file's name — the one that clashes. */
   name: string;
-  /** Every name already in the destination, so the "Keep both" preview is real. */
   taken: readonly string[];
-  /** How many OTHER conflicts are still waiting in this batch. `> 0` offers the
-   *  "do the same for the rest" box — a drop of ten files must not become ten
-   *  dialogs. */
+  /** Other conflicts still waiting; `> 0` offers "do the same for the rest". */
   remaining: number;
 }
 
-/**
- * Ask what to do about one clashing name. Resolves with the choice; `cancel`
- * means nothing at all is sent for that file.
- */
+/** Ask about one clashing name; `cancel` means nothing is sent for that file. */
 export function openConflictDialog(req: ConflictRequest): Promise<ConflictAnswer> {
   const keptName = nextAvailableName(req.name, req.taken);
 
@@ -64,9 +33,6 @@ export function openConflictDialog(req: ConflictRequest): Promise<ConflictAnswer
     class: "conflict__title",
     text: `'${req.name}' is already here`,
   });
-  // The two facts that make the choice easy, in the order they are needed: what
-  // "Keep both" would produce (so the outcome is not a surprise), and that
-  // "Replace" is reversible (so it is not scary).
   const body = el("p", {
     class: "conflict__body",
     text: `Keep both saves it as '${keptName}'. Replace makes the file that's there now a version you can restore.`,
@@ -104,9 +70,7 @@ export function openConflictDialog(req: ConflictRequest): Promise<ConflictAnswer
     ),
   ) as HTMLDialogElement;
 
-  // KEEP BOTH IS THE DEFAULT, and deliberately not Replace. Both are safe, but
-  // only one of them leaves the file that is already there exactly as it was, so
-  // it is the answer an accidental Enter should give.
+  // Keep both is the default: it is the answer an accidental Enter should give.
   let choice: ConflictChoice = "cancel";
 
   return new Promise<ConflictAnswer>((resolve) => {
@@ -119,9 +83,7 @@ export function openConflictDialog(req: ConflictRequest): Promise<ConflictAnswer
     replace.addEventListener("click", () => close("replace"));
     node.addEventListener("close", () => {
       node.remove();
-      // The box applies to CANCEL too — "do the same for the other files" reads
-      // as "stop asking", and someone who dropped the wrong folder wants one
-      // click, not eight.
+      // The box applies to Cancel too ("stop asking").
       resolve({ choice, applyToRest: restBox.checked });
     });
     req.host.append(node);

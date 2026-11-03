@@ -1,18 +1,9 @@
-// An in-memory Api implementation over a small fixture tree. This is what the UI
-// runs against in `dev` and in Playwright e2e until the real control-plane endpoints
-// (P4) exist, and it's the reference for what those endpoints must return. It is
-// deliberately synchronous data behind async signatures + a tiny latency, so
-// loading states and lazy behaviour are exercised realistically.
+// In-memory `Api` over a small fixture tree, for `dev` and Playwright e2e.
+// Synchronous data behind async signatures plus a small latency.
 
 import type { Api, PageLinks } from "./types";
 import type { PdfLink } from "../core/types";
-// The bin half of this fake, in its own module — see the `--- BIN WRITES ---`
-// marker below and `binFake.ts`'s header for why it is not inline.
 import { createBinFake, BIN_SEED_NOTES } from "./binFake";
-// The layered `.note` fixture: real SNPG v2 payloads + `layers` page refs for
-// ONE note, so the reader's layers panel runs against the real wasm decoder in
-// dev and e2e. Shared with binFake (a trashed note keeps its layers, as the
-// real blob-keyed index does) — see that module's header.
 import {
   LAYERED_NOTE_ID,
   layeredPageLayers,
@@ -21,17 +12,9 @@ import {
 } from "./layeredFixture";
 
 /**
- * The `.mark` that annotates `178` ("Appliance manual"), and the PDF it belongs to.
- *
- * It reuses the layered fixture's payload, which is already a real SNPG v2 body
- * at 1404x1872 — the device PANEL size, which is exactly what a mark is written
- * in. So the overlay path runs the real wasm decoder over real layer records
- * rather than a stand-in.
- *
- * SPARSE, like the real thing: one page, annotating PDF page 2 (`sourcePage: 2`,
- * 1-based). That the mark's only page is NOT the PDF's first is the point — a
- * viewer that ignored `sourcePage` would paint this ink on page 1 and look
- * perfectly plausible doing it.
+ * The `.mark` annotating PDF `178`, reusing the layered fixture's real SNPG v2
+ * payload. Sparse like a real mark: its one page annotates PDF page 2, so a
+ * viewer that ignored `sourcePage` would visibly paint on the wrong page.
  */
 export const MARKED_PDF_ID = "178";
 export const PDF_MARK_ID = "179";
@@ -62,63 +45,18 @@ function fakeHash(seed: string): string {
   return (h >>> 0).toString(16).padStart(8, "0").repeat(4); // 32 hex chars, md5-shaped
 }
 
-/**
- * The whole-file content hash a fixture entry advertises as its `fileHash` —
- * the value the thumbnail facade puts in `/thumbnail/{hash}` for `.spd` and
- * `.note` tiles. Exported so the e2e thumbnail mock can address a SPECIFIC
- * fixture file's URL (serve this note's cover, withhold that one's) instead of
- * blanket-answering every hash the same way.
- */
+/** The fixture's whole-file `fileHash`, exported so e2e can mock one file's `/thumbnail/{hash}`. */
 export function fakeFileHash(id: Id): string {
   return fakeHash(`${id}:file`);
 }
 
-/**
- * The recognition hash for a fixture page, or null where the device never ran
- * recognition. A note the user never recognized has NO recognized page at all;
- * within one that they did, every third page (index 2, 5, 8…) is deliberately
- * left WITHOUT any — that's what keeps the reader's disabled toggle and empty
- * state honestly exercised in dev and in e2e, instead of a happy path where
- * everything happens to have text.
- *
- * Keeping the per-page nulls derived from the note's `hasRecognizedText` is what
- * makes the fixture self-consistent: the gallery's OCR marker means exactly
- * "some page here has a transcript", and in the fake it provably does.
- *
- * Note it is seeded independently of the page content hash, mirroring the real
- * thing: RECOGNTEXT is not a layer, so its hash moves independently of strokes.
- */
-/**
- * Notes whose recognition does not start at page 1, by id (see
- * `NoteOpts.recognizedFrom`). A side table because `NoteSummary` has no field
- * for it — the server never sends one, since the listing only carries the
- * whole-note `hasRecognizedText` — and `getNoteMeta` still has to rebuild the
- * SAME per-page pattern the summary was derived from.
- */
+/** Notes whose recognition starts after page 1; `getNoteMeta` must rebuild the summary's per-page pattern. */
 const RECOGNIZED_FROM: Record<string, number> = {};
 
-/**
- * The PDF-TEMPLATE fixture: the one note whose pages were rasterised from an
- * imported PDF and kept that document's own links (`note-format.md` §14).
- *
- * Chosen rather than invented, for the reason the late-recognition note (`181`) states in reverse:
- * every listing count and section head in the e2e suite is asserted literally,
- * so a NEW note in a real folder rewrites unrelated expectations. This one is
- * seven pages long, which is what an internal page jump needs to be worth
- * looking at.
- */
+/** The PDF-template note: its pages keep the imported PDF's links. Seven pages, so an internal jump is meaningful. */
 const LINKED_NOTE_ID: Id = "122";
 
-/**
- * A page with NOTHING WRITTEN ON IT, in the reader's own fixture note (`141`).
- *
- * The ink rail's whole job is to make an unwritten page visible in a run of
- * written ones (§2.5), so a corpus where every page carries ink
- * cannot fail the way a real notebook does. This is the gap the strip has to
- * draw — a break in an otherwise continuous edge — and it sits in the MIDDLE
- * rather than at either end, because an edge is only unbroken on both sides of
- * a page that has neighbours.
- */
+/** A page with no ink, mid-note, so the ink rail has a gap to draw. */
 const BLANK_PAGE_NOTE_ID: Id = "141";
 const BLANK_PAGE_INDEX = 4;
 
@@ -137,26 +75,13 @@ function pages(
   return Array.from({ length: count }, (_, index) => ({
     index,
     hash: fakeHash(`${noteId}:${index}`),
-    // Supernote A5X native page size — EFFECTIVE dims, so a landscape fixture
-    // passes 1872×1404 and its refs read honestly wide, as the real index does.
+    // Effective dims: a landscape fixture passes 1872×1404.
     width: dims?.w ?? 1404,
     height: dims?.h ?? 1872,
     textHash: fakeTextHash(noteId, index, recognized, recognizedFrom),
-    // Non-null ONLY for the PDF-template fixture, exactly as the real page list
-    // has it: a note on a built-in style has no links to preserve, so the field
-    // is null for every page of every other note and the reader never asks.
     linksHash: noteId === LINKED_NOTE_ID ? fakeHash(`${noteId}:${index}:links`) : null,
-    // A `.note` page: its number is always `index + 1`, so there is nothing
-    // to carry (see `PageRef.sourcePage`).
     sourcePage: null,
-    // WRITTEN ON, except for the one deliberate gap. The real server answers
-    // this per page from a scan at ingest; a fixture note is handwriting all the
-    // way through, which is exactly the notebook case the rail is designed for —
-    // a solid edge, and one page you can find by the break in it.
-    //
-    // Note this is `false`, not absent: a fixture that omitted the field would
-    // put every strip in the "nobody has looked yet" state and quietly assert
-    // nothing at all, since the rail refuses to draw on an incomplete map.
+    // `false`, not absent: the rail refuses to draw on an incomplete map.
     hasInk: !(noteId === BLANK_PAGE_NOTE_ID && index === BLANK_PAGE_INDEX),
   }));
 }
@@ -172,42 +97,23 @@ function fakeText(name: string, index: number): string {
     "  · confirm the page-range serving budget",
     "  · md5-keyed cache stays immutable across edits",
     "  · ask about the vector question in the container",
-    // Deliberately full of characters that are HTML syntax. The transcript is
-    // DEVICE-AUTHORED text — whatever the handwriting recogniser produced — and
-    // it is rendered through `textContent` everywhere, now that the excerpt that
-    // used to reach `innerHTML` is gone (§6 step 6). Keeping angle brackets and
-    // an ampersand in the fixture is what would catch that regressing, against a
-    // corpus that would otherwise happen to be alphanumeric.
+    // HTML-syntax characters: device-authored text must stay `textContent`-rendered.
     "  · <draft> R&D budget — flag \"open\" items & re-check",
     "",
     "Follow-up: re-read the sync notes before Thursday,",
     "then fold the answers back into the design doc.",
-    // ONE LINE THAT IS NOT ON EVERY PAGE, and the only one. Every other line of
-    // this transcript is identical across pages, so any query either matched
-    // everywhere at once or nowhere — and find's navigation had nothing to be
-    // wrong about. A word that lives on some pages and not others is what makes
-    // "the match is not on the page in front of you" a state the fixture can
-    // reach at all; it is the shape the real bug was reported in.
+    // The only line not on every page, so find can have matches off the current page.
     ...(index % 2 === 1 ? ["Marginalia: the witches of Endor, again."] : []),
   ];
   return lines.join("\n");
 }
 
 /**
- * A page's links, in the shape the real endpoint serves: **device panel pixels**
- * (the `.note` page IS the panel), a 0-based target for an internal jump and
- * `-1` with a real URL for an external one.
- *
- * Two per page, placed where a digital planner puts them — a header tab and a
- * footer nav — and NOT vertically centred, so a placement that lost the y
- * offset would be visible rather than symmetric enough to pass.
- *
- * The refused schemes are absent on purpose: the SERVER applies the allowlist,
- * so a `javascript:` record never reaches a client, and a fake that emitted one
- * would be testing the browser's last-ditch gate instead of the seam.
+ * Links as the real endpoint serves them: device panel pixels, 0-based target
+ * for an internal jump, `-1` plus a URL for an external one. No refused schemes:
+ * the server applies the allowlist.
  */
 function fakePageLinks(page: PageRef, pageCount: number): PdfLink[] {
-  // Wrap, so the last page still links somewhere real — and never to itself.
   const target = (page.index + 1) % pageCount;
   return [
     { x: 980, y: 96, w: 340, h: 64, page: -1, uri: "https://example.com/planner?utm=fixture&a=1,2" },
@@ -216,57 +122,20 @@ function fakePageLinks(page: PageRef, pageCount: number): PdfLink[] {
 }
 
 /**
- * A fixture note. `fileType` and `hasRecognizedText` are explicit per note so the
- * fixture carries a REALISTIC spread rather than a uniform "everything is a
- * recognized .note" — the tree genuinely holds PDFs and screenshots, and most
- * notes were never run through on-device recognition.
- *
- * ## THE IDS ARE DECIMAL, AND THAT IS A CORRECTNESS PROPERTY
- *
- * They used to be readable strings (`n-doc-attn`, `n-files-readme`). A real
- * `files.id` is an INTEGER — it travels in the search manifest as a varint
- * (`manifestCodec.ts`'s `ManifestRow.fileId`) and reaches the app through the
- * seam as its decimal string, and the two are joined by number:
- * `library.ts` feeds the index `Number(e.id)` and `gallerySearch.ts` matches a
- * hit back to a card with `String(doc.fileId)`.
- *
- * Against an opaque id that join is `Number("n-doc-attn") === NaN` on one side
- * and `"NaN"` on the other, so NO transcript hit can ever match a card — which
- * made the whole transcript half of library search unexercisable in dev and in
- * e2e, silently and with no failure to look at. Decimal ids are what the real
- * server hands out; a fixture that could not express one hid a bug class rather
- * than a spelling.
- *
- * Folder ids stay words (`dir-note`, `projects`): nothing joins a folder by
- * number, and the rail's routes read better for it.
+ * Ids are decimal because a real `files.id` is an integer: search joins hits
+ * to cards by `Number(e.id)` / `String(doc.fileId)`, which a word id breaks.
+ * Folder ids stay words; nothing joins them by number.
  */
 interface NoteOpts {
-  /** Default "note". Non-"note" fixtures exercise the badge's other values. */
   fileType?: string;
-  /** Default false — recognition is opt-in ON the device, so it is the minority. */
   hasRecognizedText?: boolean;
-  /**
-   * First page index carrying recognition, when it does NOT start at page 1.
-   *
-   * The default pattern always gives page 0 a transcript, which made a whole
-   * class of bug unrepresentable: the reader derives "can this note be searched"
-   * from the page list, and while it is showing the SKELETON only page 0 is real.
-   * A note recognised from page 2 onward is exactly the case that used to leave
-   * Find disabled forever, so the fixture has to be able to express it.
-   */
+  /** First recognized page index, when not 0 (the case that once left Find disabled from the skeleton). */
   recognizedFrom?: number;
-  /** Default 1 MB-ish, derived from the id. Only the "no preview" state shows it. */
   size?: number;
-  /** Effective page dims. Default portrait 1404×1872; a landscape fixture passes
-   *  1872×1404 so both its page refs AND its derived `thumbAspect` read wide. */
+  /** Effective page dims; a landscape fixture passes 1872×1404. */
   pageDims?: { w: number; h: number };
-  /**
-   * Explicit preview dims, overriding the derivation below — the COVER case for
-   * a `.note` (cover dims win over page 1's) and the only source for a `.spd`
-   * (its embedded thumbnail's dims, which the listing cannot derive from pages).
-   */
+  /** Explicit preview dims: a `.note`'s cover, or a `.spd`'s embedded thumbnail. */
   thumbAspect?: { w: number; h: number };
-  /** The paired live `.mark`'s id. Default null — only an annotated `.pdf` has one. */
   annotationsId?: Id;
 }
 function note(id: Id, name: string, pageCount: number, updatedAt: number, opts: NoteOpts = {}): NoteSummary {
@@ -279,49 +148,25 @@ function note(id: Id, name: string, pageCount: number, updatedAt: number, opts: 
     id,
     name,
     pageCount,
-    // A LISTING ENTRY'S FIRST PAGE CARRIES ITS LAYERS, exactly as the meta's
-    // page 0 does — the server builds both from the same index, and the reader
-    // opens from this summary. Without it the layered fixture painted the
-    // composite, disabled Layers, then re-fetched the same page bytes and swapped
-    // the stack in when the meta landed; with it the stack is the FIRST paint and
-    // the toggle is right immediately. Omitted (not null) where there are none.
+    // Layers on the listing's first page too, so a layered note's first paint is its stack.
     firstPage: id === LAYERED_NOTE_ID ? withLayeredPageLayers(first!) : first!,
     updatedAt,
     fileType,
-    // Seeded independently of the page hashes, exactly like the real thing: this
-    // is the WHOLE-FILE md5, not a per-page content hash.
+    // Whole-file md5, seeded apart from the page hashes.
     fileHash: fakeHash(`${id}:file`),
     hasRecognizedText,
-    // The serving rule the real listing applies:
-    //  - `.note` → cover dims when a cover exists (`opts.thumbAspect`), else
-    //    page 1's EFFECTIVE dims — so a landscape note serves an honest 1872×1404;
-    //  - `.spd` → its thumb dims, which only `opts.thumbAspect` can supply;
-    //  - images/`.txt`/everything else → ABSENT, exactly like the server.
+    // As the server: `.note` → cover dims or page 1's; `.spd` → thumb dims; others absent.
     thumbAspect:
       opts.thumbAspect ?? (fileType === "note" && first ? { w: first.width, h: first.height } : undefined),
-    // The listing half of the pairing the meta already states. The server folds
-    // the mark itself out of the listing, so this field is the ONLY thing on a
-    // row that says the document has handwriting beside it — and the only thing
-    // the card's "Annotation history" can key off without fetching a meta per
-    // entry. Omitted (→ null) everywhere but the one paired fixture.
+    // The server folds the mark out of the listing; this is the row's only pairing signal.
     annotationsId: opts.annotationsId ?? null,
   };
 }
 
-/**
- * A note whose recognition is real but whose hardware the scale table has never
- * measured — `getNoteMeta` returns `pxPerMm: null` for it. It exists so the
- * raster-only export path is a fixture the UI is built against, not a branch
- * that is only ever reached by a device nobody in the household owns.
- */
+/** Recognized, but on hardware the scale table never measured: `pxPerMm: null`. */
 const UNSCALED_NOTE_ID = "144";
 
-/**
- * Word boxes for a fake transcript, in MILLIMETRES on the 118.64 x 158.19 mm
- * canvas. Laid out as real lines of writing: they stay inside the page, so the
- * exporter's bounds guard passes, and they are spread over it rather than piled
- * at the origin — which is what a millimetre-as-pixel misread would look like.
- */
+/** Word boxes in millimetres on the 118.64 x 158.19 mm canvas, kept inside the page. */
 function fakeWords(text: string): WordBox[] {
   const out: WordBox[] = [];
   const lines = text.split("\n");
@@ -339,74 +184,35 @@ function fakeWords(text: string): WordBox[] {
   return out;
 }
 
-/** Deterministic stand-in for the stored file size, in bytes. */
 function fakeSize(id: Id, pageCount: number): number {
   return 40_000 + pageCount * 90_000 + (id.length % 7) * 1_337;
 }
 
 // --- the upload fixture ------------------------------
 
-/**
- * How much room the fixture account has left. A file bigger than this is refused
- * with the real 413 (`UploadRefusedError("quota")`).
- *
- * EXPORTED, because it is a test input rather than a decoration: the over-quota
- * path is one the interface has to phrase, and a test that wants it should not
- * have to guess a magic size. 8 MB is comfortably above every plausible fixture
- * upload and comfortably below a "large PDF", so both sides of the line are easy
- * to land on deliberately.
- *
- * The CLIENT-side pre-flight normally refuses an over-quota file before any of
- * this runs (it reads the account's real usage); this is the server's own
- * backstop, which exists because the browser's copy of "space left" is always a
- * little stale.
- */
+/** Fixture account's free space; a bigger file gets the real 413. Exported as a test input. */
 export const FAKE_UPLOAD_HEADROOM = 8 * 1024 * 1024;
 
-/**
- * How many progress steps a file of `size` bytes is sent in — 4 for anything
- * small, up to 24 for a few megabytes.
- *
- * SCALED BY SIZE ON PURPOSE. A fake that reported one instant 100% would make the
- * progress bar and Cancel unobservable in dev and untestable in e2e, which are
- * exactly the two things this feature's UI is made of. Each step costs one
- * `latency` tick, so a big file takes proportionally longer to send — the same
- * relationship the real transfer has.
- */
+/** Progress steps scale with size so the progress bar and Cancel are observable. */
 function uploadSteps(size: number): number {
   return Math.max(4, Math.min(24, Math.ceil(size / 65_536)));
 }
 
-/**
- * Ids for uploaded files: `901`, `902`, … — decimal like every other file id
- * (see `note`), and numbered well clear of the fixture tree so an upload is
- * never mistaken for a seeded note.
- */
+/** Upload ids `901`, `902`, … — decimal, clear of the fixture tree. */
 let uploadSeq = 0;
 const UPLOAD_ID_BASE = 900;
 
 const DAY = 86_400_000;
 const NOW = 1_752_800_000_000; // fixed epoch ms — no Date.now(), keeps fixtures deterministic
 
-// --- the version-history fixture (hot-cache versioning, phases 3-6) ----------
-//
-// Stands in for `ControlPlaneService.history`. A `.note` accrues versions when
-// it is re-synced; the fixture gives every `.note` its current blob plus two
-// retained versions (a small K, as the real hot cache keeps), newest-first, so
-// the list/preview/restore UI has real history to render in dev and e2e. A
-// non-note kind (a one-shot PDF/image) carries only its current version — the
-// self-limiting property H6 names.
+// --- the version-history fixture ---------------------------------------------
+// Every `.note` gets its current blob plus two retained versions, newest-first;
+// other kinds carry only their current version.
 
 /** The retained versions a `.note` accrues, by seed suffix — see `baseVersions`. */
 const RETAINED_VERSION_KS = [1, 2] as const;
 
-/**
- * A version's OWN page count in the fake. Older retained versions have FEWER pages
- * than the current note (`current - k`), so previewing one exercises the
- * differing-page-count path H7 is about — the reader must render the version's
- * geometry, not the live note's slot count. The current blob (and a displaced-
- * current row after a restore) falls through to the live count.
- */
+/** Older retained versions have fewer pages (`current - k`), so a preview must use the version's own geometry. */
 function versionPageCount(summary: NoteSummary, md5: string): number {
   for (const k of RETAINED_VERSION_KS) {
     if (fakeHash(`${summary.id}:v${k}`) === md5) return Math.max(1, summary.pageCount - k);
@@ -414,25 +220,13 @@ function versionPageCount(summary: NoteSummary, md5: string): number {
   return summary.pageCount;
 }
 
-/**
- * A file's versions, newest-first: the current blob (flagged) + retained. Every
- * previewable kind ({@link canPreviewHistory}) gets the retained pair, so the list
- * has a past version to open for each; a non-previewable one-shot (a `.pdf`)
- * carries only its current version — the self-limiting property H6 names, and it
- * keeps the fake in step with what the UI can actually preview. (The real retain
- * path has no extension filter; the fixture just does not bother where no viewer
- * would ever open the result.)
- */
+/** Current blob plus the retained pair for every previewable kind; others carry only the current one. */
 function baseVersions(id: Id): FileVersion[] {
-  // `noteSummary`, not `ALL_NOTES`: a TRASHED file's `file_history` follows it into
-  // the bin (H10), so the bin's `noteHistory` reroute resolves its versions here.
+  // Through `noteSummary`: a trashed file's history follows it into the bin.
   const summary = noteSummary(id);
   if (!summary) return [];
   const size = fakeSize(id, summary.pageCount);
-  // Only a `.note` is paginated: its versions carry a real, DIFFERING page count
-  // (older versions have fewer pages — see `versionPageCount`), so the menu's
-  // content signal reads "17 pages +2". Every other kind carries 0 → the signal
-  // falls back to the byte size, no delta.
+  // Only a `.note` carries a page count; other kinds carry 0 and the UI falls back to size.
   const isNote = summary.fileType === "note";
   const current: FileVersion = {
     md5: fakeFileHash(id),
@@ -443,8 +237,6 @@ function baseVersions(id: Id): FileVersion[] {
   };
   if (!canPreviewHistory(summary.fileType)) return [current];
   const retained: FileVersion[] = [1, 2].map((k) => ({
-    // A retained version's md5 is its own content address — distinct from the
-    // current blob's, which is what the preview reroutes page bytes by.
     md5: fakeHash(`${id}:v${k}`),
     size: Math.max(1, size - k * 6_000),
     createdAt: summary.updatedAt - k * 2 * DAY,
@@ -454,13 +246,8 @@ function baseVersions(id: Id): FileVersion[] {
   return [current, ...retained];
 }
 
-// The Supernote's real default tree. The device ships fixed *container* folders
-// (NOTE, DOCUMENT) plus flat category folders (EXPORT, SCREENSHOT, INBOX); the
-// meaningful categories live one level down (Note, MyStyle, Document). The web
-// rail is anchored in those categories, so the fixture mirrors the device layout
-// exactly — plus a user-created subfolder under Note (Projects) and a custom
-// top-level folder (Archive) so the rail's nesting and its "Other" group both
-// have something real to render.
+// The Supernote's real default tree: containers (NOTE, DOCUMENT), flat categories
+// (EXPORT, SCREENSHOT, INBOX), categories one level down, plus user folders.
 const FOLDERS: Record<string, Folder> = {
   "dir-note": { kind: "folder", id: "dir-note", name: "NOTE" },
   "dir-document": { kind: "folder", id: "dir-document", name: "DOCUMENT" },
@@ -473,27 +260,19 @@ const FOLDERS: Record<string, Folder> = {
   projects: { kind: "folder", id: "projects", name: "Projects" },
   scratch: { kind: "folder", id: "scratch", name: "Scratch" },
   archive: { kind: "folder", id: "archive", name: "Archive" },
-  // A custom top-level folder holding one of EVERY previewable kind, so the
-  // thumbnail facade's four strategies (note render, image, `.spd` embedded
-  // extract, `.txt` snippet) all have a fixture to paint in dev and e2e — plus a
-  // `.pdf`, which keeps the honest no-preview glyph.
+  // One of every previewable kind, plus a `.pdf` with no preview.
   files: { kind: "folder", id: "files", name: "Files" },
 };
 
-// A deep folder of many notes, so the gallery actually scrolls — this is what
-// makes the lazy behaviour (off-screen thumbnails staying blank until scrolled
-// in) observable in dev and pixel-probeable in e2e. It lives in the custom
-// top-level "Archive" folder (the rail's "Other" group).
+// Enough notes that the gallery scrolls and lazy thumbnails are observable.
 const ARCHIVE_NOTES: NoteSummary[] = Array.from({ length: 30 }, (_, i) =>
   note(String(200 + i), `Archive note ${String(i + 1).padStart(2, "0")}`, 1 + (i % 6), NOW - (i + 4) * DAY, {
-    // Alternating, so a single scrolled gallery shows both marker states side by side.
     hasRecognizedText: i % 2 === 0,
   }),
 );
 
 const CHILDREN: Record<string, Entry[]> = {
-  // Root mirrors the device: the two containers, the three flat categories, and
-  // one custom user folder. No loose notes at root (the device never puts any).
+  // No loose notes at root; the device never puts any.
   root: [
     FOLDERS["dir-note"]!,
     FOLDERS["dir-document"]!,
@@ -503,96 +282,57 @@ const CHILDREN: Record<string, Entry[]> = {
     FOLDERS.archive!,
     FOLDERS.files!,
   ],
-  // Containers hold their category subfolders (flattened away by the rail and
-  // the root gallery) — PLUS, here, a folder the user made on the device inside
-  // one. `Scratch` is not a category, so flattening `NOTE` has to PROMOTE it to
-  // the root rather than drop it; without a fixture case, the code path that
-  // loses a user's folder is one nobody ever exercises.
+  // `Scratch` is a user folder inside a container, so flattening `NOTE` must promote it, not drop it.
   "dir-note": [FOLDERS.note!, FOLDERS.mystyle!, FOLDERS.scratch!],
   "dir-document": [FOLDERS.document!],
-  // Note: a user subfolder + a few notes (recursive count = 5).
   note: [
     FOLDERS.projects!,
     note("101", "Weekly review", 3, NOW - DAY, { hasRecognizedText: true }),
     note("102", "Ideas & scratch", 1, NOW),
     note("103", "Sketch — kitchen layout", 1, NOW - 3 * DAY),
-    // The layered fixture (see layeredFixture.ts): page 1 carries `layers` in
-    // its meta ref and a real SNPG v2 payload — a device-hidden Layer 2, a
-    // renamed current layer — page 2 carries none, so the reader's panel both
-    // appears and disappears within one note.
     note(LAYERED_NOTE_ID, "Layered field sketch", 2, NOW - 2 * DAY),
   ],
-  // A user folder living INSIDE the NOTE container — see "dir-note" above.
   scratch: [note("111", "Scratch — todo", 1, NOW - 2 * DAY)],
   projects: [
     note("121", "Project Aurora — kickoff", 6, NOW - 6 * DAY, { hasRecognizedText: true }),
     note("122", "Project Beta", 7, NOW - 8 * DAY),
   ],
-  // MyStyle: templates (count = 3). Blank templates: nothing to recognize.
+  // Blank templates: nothing to recognize.
   mystyle: [
     note("131", "Cornell notes", 1, NOW - 60 * DAY),
     note("132", "Weekly planner", 1, NOW - 60 * DAY),
     note("133", "Dot grid", 1, NOW - 60 * DAY),
   ],
-  // Document: an annotated paper (a real .note) next to a plain PDF that was
-  // never a note at all — the "another file type living in the tree" case the
-  // hardcoded "note" badge used to misreport.
   document: [
     note("141", "Attention Is All You Need", 20, NOW - 9 * DAY, { hasRecognizedText: true }),
     note("142", "Apartment lease — signed", 6, NOW - 26 * DAY, { fileType: "pdf" }),
-    // An `.epub`: uploadable (`UPLOAD_ACCEPT`) and readable ON THE DEVICE, but
-    // with no viewer here — so it is the reader's "no preview, here is a
-    // download" state. That state used to be exercised by the PDF above; PDFs
-    // now open in their own viewer, and this keeps the reader's own fallback
-    // under test rather than letting it go dark.
+    // Uploadable, but no viewer here: the reader's "no preview, download" state.
     note("143", "Sourdough — a field guide", 1, NOW - 27 * DAY, { fileType: "epub" }),
-    // Recognized, but written on hardware whose millimetre scale has never been
-    // measured — `getNoteMeta` answers `pxPerMm: null` for it. This is the
-    // raster-only export case, kept in the fixture so it is a state the UI is
-    // built and tested against rather than a branch nobody ever sees.
     note(UNSCALED_NOTE_ID, "Field notes — unknown device", 3, NOW - 4 * DAY, {
       hasRecognizedText: true,
     }),
   ],
-  // Export: empty (nothing exported yet — count 0, exercises the empty state).
   export: [],
-  // SCREENSHOT holds PNGs, not notes — and a screenshot is never recognized.
   screenshot: [
     note("151", "Screenshot — pricing page", 1, NOW - 2 * DAY, { fileType: "png" }),
     note("152", "Screenshot — trailhead map", 1, NOW - 5 * DAY, { fileType: "png" }),
   ],
   inbox: [note("161", "Unsorted — meeting doodles", 2, NOW - DAY, { hasRecognizedText: true })],
   archive: ARCHIVE_NOTES,
-  // One of every previewable kind, for the thumbnail facade. The `.note` renders
-  // its page, the png is a native <img>, the `.spd` shows its extracted embedded
-  // thumbnail, the `.txt` a rasterised snippet; the `.pdf` keeps the glyph.
-  //
-  // The folder is ALSO the masonry fixture: every `thumbAspect`
-  // source and both clamp extremes are on one screen, so the aspect-truth,
-  // order-pin, reflow and clamp e2e all read from here.
+  // One of every previewable kind; also the masonry fixture (every `thumbAspect` source, both clamp extremes).
   files: [
-    // The COVER note: its aspect is the cover's dims (the e2e cover mock serves
-    // a 120×160 PNG), which win over page 1's — same 3:4 here, deliberately, so
-    // the cover-vs-coverless e2e stay shape-agnostic.
+    // Cover dims win over page 1's; the same 3:4 so cover e2e stay shape-agnostic.
     note("171", "Meeting notes — Q3", 2, NOW - DAY, { hasRecognizedText: true, thumbAspect: { w: 120, h: 160 } }),
-    // A LANDSCAPE note: page 1's effective dims are wide, so its derived aspect
-    // is the honest 1872×1404 — the §D case the masonry layout exists for.
     note("172", "Whiteboard — sprint plan", 1, NOW - 2 * DAY, { pageDims: { w: 1872, h: 1404 } }),
-    // An image carries NO thumbAspect (decision 5: local dims memo only).
+    // Images carry no thumbAspect (local dims memo only).
     note("173", "Screenshot — dashboard", 1, NOW - 3 * DAY, { fileType: "png" }),
-    // A `.spd` serves its embedded thumbnail's dims.
     note("174", "Kitchen sketch", 1, NOW - 4 * DAY, { fileType: "spd", thumbAspect: { w: 600, h: 800 } }),
-    // The two clamp extremes, both `.spd` (the one type whose thumb can be any
-    // shape): a panorama that must reserve its LETTERBOXED width in rows and hit
-    // the wide floor in the grid, and a scroll that must hit the 2.5× tall cap.
+    // Clamp extremes: a panorama hitting the wide floor, a scroll hitting the 2.5× tall cap.
     note("175", "Panorama — coastline", 1, NOW - 5 * DAY, { fileType: "spd", thumbAspect: { w: 3000, h: 400 } }),
     note("176", "Receipt — long scroll", 1, NOW - 6 * DAY, { fileType: "spd", thumbAspect: { w: 240, h: 1800 } }),
-    // A `.txt` carries NO thumbAspect either — its snippet's shape is the
-    // client-side constant (we rasterise it, we fix it).
+    // A `.txt` carries no thumbAspect: the snippet shape is a client constant.
     note("177", "readme", 1, NOW - 7 * DAY, { fileType: "txt" }),
-    // THE ANNOTATED PDF — the one fixture with a `.mark` beside it. The mark has
-    // no row of its own (the server folds a paired mark out of every listing),
-    // so this field is what makes its version history reachable at all.
+    // The paired mark has no listing row, so this field is how its history is reached.
     note("178", "Appliance manual", 4, NOW - 8 * DAY, {
       fileType: "pdf",
       annotationsId: PDF_MARK_ID,
@@ -606,30 +346,16 @@ for (const entries of Object.values(CHILDREN)) {
 }
 
 /**
- * RECOGNISED LATE: nothing on page 1, a transcript from page 2 on — the shape
- * that used to leave Find disabled for a whole session, because the reader
- * derives "can this be searched" from a SKELETON page list whose pages all read
- * `textHash: null`. The default fixture pattern always recognises page 1, which
- * is exactly why the bug was unrepresentable and shipped.
- *
- * Registered BY ID ONLY, deliberately outside `CHILDREN`: every listing count
- * and section head in the e2e suite is asserted literally, so a note added to a
- * real folder would rewrite half a dozen unrelated expectations for a fixture
- * that exists to be opened by route.
+ * Recognised from page 2 only — the case that once left Find disabled from the
+ * skeleton. Kept out of `CHILDREN` because e2e asserts listing counts literally.
  */
 ALL_NOTES["181"] = note("181", "Recognised from page two", 4, NOW - 2 * DAY, {
   hasRecognizedText: true,
   recognizedFrom: 1,
 });
 
-// The recycle-bin fixture's own notes, kept in a SEPARATE map from the live
-// library. Keyed the same way, so every PER-ID transcript / version-history
-// generator answers for a TRASHED id exactly as for a live one — the fake mirror
-// of "a trashed file's md5-keyed data is fully retained".
-// Deliberately NOT in `ALL_NOTES`: the library-wide enumerations walk
-// `ALL_NOTES`, and a trashed note must not surface in a live-wide listing (the
-// real server excludes `deleted = 1`). `noteSummary(id)` unions the two for the
-// per-id lookups that DO need the trashed rows.
+// Bin fixture notes: per-id generators answer for them via `noteSummary`, but
+// they stay out of `ALL_NOTES` so live-wide walks never surface a trashed note.
 const BIN_NOTES: Record<string, NoteSummary> = {};
 for (const s of BIN_SEED_NOTES) {
   BIN_NOTES[s.id] = note(s.id, s.name, s.pageCount, NOW, {
@@ -639,40 +365,19 @@ for (const s of BIN_SEED_NOTES) {
 }
 
 /**
- * The paired `.mark`'s own summary — registered by id ONLY, deliberately outside
- * BOTH `CHILDREN` and `ALL_NOTES`.
- *
- * That is not a shortcut, it is the fixture mirroring the defect this feature
- * exists for: the real server's `hide_paired_mark` folds a live mark out of every
- * listing, so it has no row, no card and no ⋯ menu — and a mark that DID appear in
- * `ALL_NOTES` would show up in the library-wide walks (search, quota) that no real
- * listing would ever put it in.
- *
- * It exists so the per-id generators can answer for the mark: `baseVersions`
- * resolves through {@link noteSummary}, and `canPreviewHistory("mark")` is true,
- * so the mark accrues the same current-plus-two-retained history every other
- * previewable kind has. Without this the mark's history was an empty list — which
- * is exactly what the household saw.
+ * The paired `.mark`, outside `CHILDREN` and `ALL_NOTES` because the server
+ * folds a live mark out of every listing; registered so its history resolves.
  */
 const PDF_MARK_SUMMARY: NoteSummary = note(PDF_MARK_ID, "Appliance manual.pdf.mark", 1, NOW - 8 * DAY, {
   fileType: "mark",
 });
 
-/**
- * A note summary by id — the live library first, then the recycle-bin fixture,
- * then the paired mark. The per-id generators (transcript, version history)
- * resolve through this so they answer for a TRASHED id (and for a mark that has
- * no listing row), while the library-wide walks stay on `ALL_NOTES` alone (a
- * trashed note is unfindable in a live-wide listing, and neither is a paired
- * mark).
- */
+/** Live library, then bin, then the paired mark. Library-wide walks use `ALL_NOTES` only. */
 function noteSummary(id: Id): NoteSummary | undefined {
   return ALL_NOTES[id] ?? BIN_NOTES[id] ?? (id === PDF_MARK_ID ? PDF_MARK_SUMMARY : undefined);
 }
 
-// Parent of each folder (null = root), derived from CHILDREN. Lets listFolder
-// return the full ancestor path (root → here) the way the real control-plane
-// does — the breadcrumbs and the rail's folder tree both rely on it.
+// Parent of each folder (null = root), so listFolder can return the ancestor path.
 const PARENT: Record<string, string | null> = {};
 for (const [parent, entries] of Object.entries(CHILDREN)) {
   for (const e of entries) if (e.kind === "folder") PARENT[e.id] = parent === "root" ? null : parent;
@@ -689,16 +394,7 @@ function pathTo(id: Id | null): Folder[] {
   return out;
 }
 
-/**
- * Attach a folder's direct-child count, the way `ControlPlaneService.listing`
- * does: DIRECT children only, of every kind (subfolders included), and only on
- * LISTING rows — never on a breadcrumb.
- *
- * Derived from `CHILDREN` rather than written down per folder, so the fixture
- * cannot drift into claiming a count its own tree contradicts. The fake has no
- * bin, so there is nothing trashed to exclude here; the exclusion rule is proved
- * against the real query in `files.zig`.
- */
+/** Direct-child count, every kind, on listing rows only (never a breadcrumb), derived from `CHILDREN`. */
 function withItemCount(e: Entry): Entry {
   return e.kind === "folder" ? { ...e, itemCount: (CHILDREN[e.id] ?? []).length } : e;
 }
@@ -712,14 +408,7 @@ export interface FakeApiOptions {
   syncVersion?: number;
 }
 
-/** Construct a fresh fixture-backed Api. State is per-instance (test isolation). */
-/**
- * The paired `.mark`'s metadata: ONE page, and it is the PDF's page 2.
- *
- * `width`/`height` are the device panel, not the PDF page — that mismatch is the
- * whole reason `markGeometry` exists, and a fixture that quietly matched the
- * page would test nothing.
- */
+/** The paired `.mark`'s one page is PDF page 2; its dims are the device panel, not the PDF page. */
 function markMeta(): NoteMeta {
   const layers = layeredPageLayers(0);
   return {
@@ -737,14 +426,9 @@ function markMeta(): NoteMeta {
         width: 1404,
         height: 1872,
         textHash: null,
-        // A `.mark` annotates a PDF and imports no template of its own, so it
-        // carries no `EXTERNALLINKINFO` — the PDF's links come from the PDF.
+        // A `.mark` imports no template, so no links of its own.
         linksHash: null,
         sourcePage: PDF_MARK_SOURCE_PAGE,
-        // The mark's one page is the one somebody drew on — so the PDF's strip
-        // marks exactly the row `sourcePage` names and no other. A mark page
-        // erased back to nothing would carry `false` here and light nothing,
-        // which is the distinction the flag exists to make.
         hasInk: true,
         layers,
       },
@@ -756,9 +440,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
   const latency = opts.latencyMs ?? 120;
   const syncVersion = opts.syncVersion ?? 1;
 
-  // Per-instance version history, so a restore in one test cannot leak into the
-  // next (test isolation, like the admin/bin state). Seeded lazily from the
-  // fixture; a restore rewrites the entry the way the real supersede path does.
+  // Per-instance, seeded lazily; a restore rewrites the entry as the real supersede path does.
   const historyState = new Map<Id, FileVersion[]>();
   const historyFor = (id: Id): FileVersion[] => {
     let v = historyState.get(id);
@@ -776,8 +458,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       const entries = (CHILDREN[key] ?? []).map(withItemCount);
       return {
         folderId: parentId,
-        // NO counts on the breadcrumb — `pathTo` hands back the bare fixture
-        // folders, exactly as the real control plane omits `itemCount` there.
+        // No counts on the breadcrumb, as the real control plane.
         path: pathTo(parentId),
         entries,
         syncVersion,
@@ -790,18 +471,10 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       const summary = ALL_NOTES[id];
       if (!summary) throw new Error(`no such note: ${id}`);
       return {
-        // The one paired fixture: this PDF has a `.mark` beside it. The real
-        // server resolves the pairing by name (`NoteMetaVO.annotationsId`).
         annotationsId: id === MARKED_PDF_ID ? PDF_MARK_ID : null,
         id,
         name: summary.name,
-        // Layers are attached here rather than inside `pages()` because they are
-        // a per-note fixture fact, not a page-shape one — and the listing's
-        // `firstPage` gets the SAME treatment through the same helper (see
-        // `note()`), which is what the reader's instant layered first paint
-        // depends on. Dims come off the summary's own first page, so a landscape
-        // fixture's meta agrees with its listing instead of quietly reverting to
-        // portrait.
+        // Layers per note (same helper as the listing's `firstPage`); dims from the summary so a landscape meta agrees.
         pages: pages(
           id,
           summary.pageCount,
@@ -809,37 +482,26 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
           { w: summary.firstPage.width, h: summary.firstPage.height },
           RECOGNIZED_FROM[String(id)],
         ).map((p) => (id === LAYERED_NOTE_ID ? withLayeredPageLayers(p) : p)),
-        // The reader branches on these, so the fake has to carry them: a route
-        // reload lands here with nothing but the id.
+        // A route reload lands here with only the id, and the reader branches on these.
         fileType: summary.fileType,
         fileHash: summary.fileHash,
         size: fakeSize(id, summary.pageCount),
-        // The fixture is an N6-class device (1404 px over a 118.64 mm canvas),
-        // which is exactly the hardware the real scale table has verified. The
-        // "unknown hardware" case is exercised by `144` ("Field notes — unknown
-        // device") below, which
-        // has recognition but NO scale — the raster-only PDF path.
+        // N6-class (1404 px over 118.64 mm); `144` has recognition but no scale.
         pxPerMm: summary.id === UNSCALED_NOTE_ID ? null : 1404 / 118.64,
       };
     },
 
     async getPageBytes(_id: Id, page: PageRef): Promise<ArrayBuffer> {
       await delay(latency);
-      // The mark's ink: a real SNPG v2 payload, so the overlay decodes for real.
       if (_id === PDF_MARK_ID) {
         const payload = layeredPagePayload(0);
         if (payload) return payload.slice().buffer as ArrayBuffer;
       }
-      // The layered fixture answers with a REAL SNPG v2 payload — the reader's
-      // per-layer path drives the actual wasm decoder over it, fake data plane
-      // or not. Every other page keeps the junk bytes below.
       if (_id === LAYERED_NOTE_ID) {
         const payload = layeredPagePayload(page.index);
         if (payload) return payload.slice().buffer as ArrayBuffer;
       }
-      // The fake renderer ignores these bytes (it paints from page.hash), but we
-      // return a stable, page-shaped buffer so callers can treat the contract as
-      // real — a few bytes seeded by the page hash.
+      // The fake renderer paints from page.hash; these bytes are only stable and page-shaped.
       const seed = page.hash;
       const buf = new Uint8Array(16);
       for (let i = 0; i < buf.length; i++) buf[i] = seed.charCodeAt(i) & 0xff;
@@ -847,9 +509,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
     },
 
     async getTemplate(_id: Id, _hash: string): Promise<Blob> {
-      // The fake data plane has no custom image templates: the fake renderer
-      // paints from `page.hash` and never reads a raster-image background. This
-      // exists only to satisfy the Api shape; a call would be a fixture bug.
+      // No custom image templates in the fake; a call would be a fixture bug.
       await delay(latency);
       throw new Error("fake api has no custom image templates");
     },
@@ -858,8 +518,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       await delay(latency);
       const summary = ALL_NOTES[id];
       if (!summary) throw new Error(`no such note: ${id}`);
-      // Mirrors the real endpoint: a page the device never recognized has no
-      // transcript, and says so with an empty result rather than an error.
+      // Unrecognized page: empty result, not an error, as the real endpoint.
       if (page.textHash === null) return { text: "", words: [] };
       const text = fakeText(summary.name, page.index);
       return { text, words: fakeWords(text) };
@@ -869,18 +528,13 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       await delay(latency);
       const summary = noteSummary(id);
       if (!summary) throw new Error(`no such note: ${id}`);
-      // Mirrors the real endpoint's short-circuit: a page with no link block has
-      // no version to ask for, and the answer is empty rather than an error.
+      // No link block: empty, not an error, as the real endpoint.
       if (page.linksHash === null) return { links: [] };
       return { links: fakePageLinks(page, summary.pageCount) };
     },
 
-    // --- HISTORY (hot-cache versioning) ---
-    //
-    // The read + restore face over the per-instance `historyState`. Mirrors the
-    // real client at the seam: `noteHistory` newest-first, and `restoreVersion`
-    // re-points AND retains the displaced current, so the result is undoable by
-    // construction.
+    // --- history ---
+    // `restoreVersion` re-points and retains the displaced current, so it is undoable.
 
     async noteHistory(id: Id): Promise<FileHistory> {
       await delay(latency);
@@ -891,22 +545,14 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       await delay(latency);
       const summary = ALL_NOTES[id];
       if (!summary) throw new Error(`no such note: ${id}`);
-      // The version's OWN geometry: a retained version has FEWER pages than the
-      // current note (see `versionPageCount`), so the preview renders a DIFFERENT
-      // count than the live meta — the whole point of H7. `fileHash` is the version
-      // md5; everything else mirrors `getNoteMeta`. Layers are omitted (a preview
-      // nulls them anyway), so this never needs the layered fixture.
+      // The version's own geometry (fewer pages); `fileHash` is the version md5; layers omitted.
       const count = versionPageCount(summary, md5);
       return {
-        // A version PREVIEW shows the bytes of a past blob; the mark beside
-        // the file today annotates the CURRENT one, so it is not this one's.
+        // Today's mark annotates the current blob, not this past one.
         annotationsId: null,
         id,
         name: summary.name,
-        // A version preview carries NO links: there is no per-version links
-        // route (unlike the transcript, which has one), so claiming a hash here
-        // would send the reader to an address that cannot answer. The real
-        // client's `historyScope` nulls it for the same reason.
+        // No per-version links route, so no links in a preview.
         pages: pages(
           id,
           count,
@@ -923,20 +569,11 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     async historyPageBytes(_id: Id, md5: string, index: number): Promise<ArrayBuffer> {
       await delay(latency);
-      // A PAST VERSION OF THE INK IS STILL INK. The PDF viewer's annotation
-      // preview reroutes `getPageBytes(markId, ref)` through here, and the
-      // overlay is decoded for real — so shape-only junk would paint nothing and
-      // a preview that showed no handwriting at all would look like success.
-      // Same payload the live route serves, which is the honest limit of what a
-      // fixture can say here: it makes the preview path renderable end to end,
-      // and deliberately does not pretend to be a second set of handwriting.
+      // The PDF annotation preview decodes this for real, so serve the live mark payload rather than junk.
       if (_id === PDF_MARK_ID) {
         const payload = layeredPagePayload(0);
         if (payload) return payload.slice().buffer as ArrayBuffer;
       }
-      // The fake renderer paints from the preview meta's page.hash (which the
-      // reader keys per-version), so these bytes are shape-only — a stable buffer
-      // seeded by the version + page, mirroring `getPageBytes`.
       const seed = `${md5}:${index}`;
       const buf = new Uint8Array(16);
       for (let i = 0; i < buf.length; i++) buf[i] = seed.charCodeAt(i % seed.length) & 0xff;
@@ -947,12 +584,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       await delay(latency);
       const summary = ALL_NOTES[id];
       if (!summary) throw new Error(`no such note: ${id}`);
-      // A retained version carries its OWN transcript, with the SAME recognition
-      // spread as the live note (an un-recognized note — and every third page of
-      // a recognized one — has none, exactly as `getPageText` reads it). The
-      // recognized pages get a version-FLAVOURED transcript so a preview's ovals,
-      // find-in-preview boxes and PDF text layer are visibly the version's, not the
-      // current blob's — which is what lets a test tell the two apart.
+      // Same recognition spread as live, version-flavoured text so tests can tell the two apart.
       if (!summary.hasRecognizedText || fakeTextHash(id, index, true) === null) {
         return { text: "", words: [] };
       }
@@ -964,12 +596,8 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       await delay(latency);
       const versions = historyFor(id);
       const target = versions.find((v) => v.md5 === md5);
-      // The real route 404s an md5 not in this file's history; the fake throws so
-      // the same "no such version" path is reachable.
       if (!target) throw new Error(`no such version: ${md5}`);
-      // Re-point: the target becomes current at `now`; the displaced current is
-      // retained as a new history row (undoable — H9). Newest-first: restored,
-      // then the just-displaced current, then the remaining retained rows.
+      // The displaced current is retained (undoable). Newest-first: restored, displaced, rest.
       const now = NOW;
       const restored: FileVersion = { md5, size: target.size, createdAt: now, current: true, pageCount: target.pageCount };
       const displaced = versions.filter((v) => v.current).map((v) => ({ ...v, current: false }));
@@ -980,34 +608,20 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     async historyRaw(id: Id, md5: string): Promise<ArrayBuffer> {
       await delay(latency);
-      // The version's whole raw blob. Shape-only in the fake — the client-side
-      // viewers (`.spd`/`.txt`/image) decode their own dims from these bytes, and
-      // e2e serves REAL image/text bytes off the mocked route — so this is a
-      // stable buffer seeded by the version md5, distinct per version, mirroring
-      // `historyPageBytes`.
+      // Shape-only; e2e serves real bytes off the mocked route.
       const seed = `${id}:${md5}:raw`;
       const buf = new Uint8Array(16);
       for (let i = 0; i < buf.length; i++) buf[i] = seed.charCodeAt(i % seed.length) & 0xff;
       return buf.buffer;
     },
 
-    // --- BIN-SCOPED READS (recycle-bin viewer parity) ---
-    //
-    // The `/bin/…` twins delegate to the SAME generators as their live cousins,
-    // keyed on the trashed id (which is registered in `ALL_NOTES` above) — the
-    // fake's expression of "a trashed file's transcript, matches and history are
-    // fully retained, md5-keyed". So a trashed note's bin preview draws the same
-    // ovals, finds the same matches and browses the same version list a live one
-    // does; only the ROUTE differs, which is the real client's concern, not the
-    // fixture's.
+    // --- bin-scoped reads ---
+    // The same generators as the live routes, keyed on the trashed id.
 
     async binPageText(id: Id, page: PageRef): Promise<PageText> {
       await delay(latency);
       const summary = noteSummary(id);
       if (!summary) throw new Error(`no such trashed note: ${id}`);
-      // The trashed file's retained transcript — same shape/content as the live
-      // route, so a page the device never recognized (a null `textHash` on the
-      // bin meta) reads empty, exactly as `getPageText` does.
       if (page.textHash === null) return { text: "", words: [] };
       const text = fakeText(summary.name, page.index);
       return { text, words: fakeWords(text) };
@@ -1015,8 +629,6 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     async binNoteHistory(id: Id): Promise<FileHistory> {
       await delay(latency);
-      // The trashed file's retained `file_history` — the same list a live note
-      // has, since history follows the file into the bin (H10).
       return { id, versions: historyFor(id).map((v) => ({ ...v })) };
     },
 
@@ -1032,9 +644,6 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       await delay(latency);
       const summary = noteSummary(id);
       if (!summary) throw new Error(`no such trashed note: ${id}`);
-      // The retained version's own transcript, version-flavoured exactly as the
-      // live `historyPageText` is — so a trashed note's version preview draws the
-      // version's ovals, not the current blob's.
       if (!summary.hasRecognizedText || fakeTextHash(id, index, true) === null) {
         return { text: "", words: [] };
       }
@@ -1050,17 +659,10 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       return buf.buffer;
     },
 
-    // --- RENAME (control-plane) ---
-    //
-    // Mutates the fixture entry IN PLACE — a rename is a metadata change, and the
-    // fixture's entries are the same objects `listFolder` hands out and (for a
-    // note) the same object `ALL_NOTES` holds, so one field write is seen
-    // everywhere the entry appears. The collision rule is the real server's, on
-    // the data the client cannot re-derive: a sibling in the SAME parent already
-    // carrying that exact name is a `NameTaken` (the real 409), which the dialog
-    // catches and stays open on. `NameTakenError` is imported dynamically for the
-    // same reason the admin fake imports `ApiError` that way — this file has no
-    // top-level import of `client.ts` and cannot grow one at a marker.
+    // --- rename ---
+    // In place: the entry objects are shared with `listFolder` and `ALL_NOTES`. A
+    // same-name sibling is the real 409. Imported dynamically: no top-level
+    // import of `client.ts` here.
     async rename(id: Id, name: string): Promise<Entry> {
       await delay(latency);
       for (const entries of Object.values(CHILDREN)) {
@@ -1076,22 +678,9 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       throw new Error(`no such entry: ${id}`);
     },
 
-    // --- UPLOAD (control-plane) ---
-    //
-    // The web → cloud half of, fixture-side. It MUTATES
-    // the fixture tree — the uploaded file appears in `CHILDREN[dest]` and in
-    // `ALL_NOTES` — so the row the gallery reconciles is the row a later
-    // `listFolder` returns, exactly as the real endpoint behaves.
-    //
-    // IT ENFORCES THE REFUSALS, and that is the point of it rather than an
-    // afterthought: the accept list (415) and a quota ceiling (413) are the two
-    // paths the UI has to phrase, and without them here they would be unreachable
-    // until the server existed. `UploadRefusedError` is imported dynamically for
-    // the same reason the admin fake imports `ApiError` that way.
-    //
-    // PROGRESS IS REPORTED IN STEPS, scaled by size (see `uploadSteps`), so a
-    // big file genuinely takes longer than a small one — which is what makes the
-    // progress bar, and Cancel, observable in dev and deterministic in e2e.
+    // --- upload ---
+    // Mutates the fixture tree and enforces the real refusals (415 type, 413
+    // quota). Progress comes in size-scaled steps so Cancel is observable.
     async upload(
       folderId: Id | null,
       file: File,
@@ -1102,8 +691,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       const { UploadRefusedError, ApiError } = await import("./client");
       const destKey = folderId === null ? "root" : String(folderId);
       const siblings = CHILDREN[destKey];
-      // Missing, foreign and trashed are one indistinguishable answer, here as
-      // on the real route.
+      // Missing, foreign and trashed are one answer, as on the real route.
       if (!siblings) throw new ApiError("NOT_FOUND", "That folder isn't there any more.", 404);
 
       const name = file.name.trim();
@@ -1116,18 +704,12 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       const steps = uploadSteps(file.size);
       for (let i = 1; i <= steps; i++) {
         await delay(latency);
-        // Checked BETWEEN steps, so a cancel lands mid-transfer the way an
-        // `xhr.abort()` does rather than after the whole thing completed.
+        // Checked between steps, so a cancel lands mid-transfer like `xhr.abort()`.
         if (signal?.aborted) throw new ApiError("CANCELLED", "Upload cancelled.", 0);
         onProgress?.(i / steps);
       }
 
-      // REPLACE SUPERSEDES IN PLACE, and the id is the whole point: the file
-      // keeps its identity, so every link to it still resolves and the displaced
-      // blob becomes a retained VERSION of it — the same path the device takes
-      // when it re-uploads a note it has edited. The fixture cannot really keep
-      // a blob, so it models the part the UI can see: one row, same id, new
-      // timestamp. Nothing is added, and nothing is lost.
+      // Replace supersedes in place: same id, new timestamp (the displaced blob becomes a version).
       const occupant =
         onConflict === "replace"
           ? siblings.find((e): e is NoteSummary => e.kind === "note" && e.name === name)
@@ -1136,9 +718,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
         occupant.updatedAt = Date.now();
         return { ...occupant };
       }
-      // Otherwise the default: invent a free name and leave the occupant alone.
-      // Through the SAME helper the conflict prompt previews the name with, so
-      // what the dialog promised is what the tree gets.
+      // Otherwise a free name, from the same helper the conflict prompt previews with.
       const final = nextAvailableName(
         name,
         siblings.map((e) => e.name),
@@ -1152,12 +732,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     // --- WRITES (append-only, at your own marker — see `types.ts`) ---
     // --- BIN WRITES ---
-    // The whole bin, from `./binFake`. It is a separate module because a fixture
-    // cannot be declared inside this object literal, and one spread is the
-    // smallest edit this marker can carry — see that file's header, including
-    // the one behaviour it deliberately cannot fake. The lookup is how a trashed
-    // fixture entry keeps its real name/type/size — a `.spd` trashed from the
-    // library must still be a `.spd` when the bin opens it into its viewer.
+    // Separate module: a fixture cannot be declared inside this object literal.
     ...createBinFake(
       delay,
       latency,
@@ -1169,29 +744,20 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
               fileType: n.fileType,
               size: fakeSize(id, n.pageCount),
               pageCount: n.pageCount,
-              // Recognition survives trashing (md5-keyed index), so a note trashed
-              // from the library keeps its transcript, ovals and find in the bin.
+              // Recognition and shape survive trashing (blob-keyed index).
               recognized: n.hasRecognizedText,
-              // The shape survives trashing (blob-keyed index), so a trashed row
-              // keeps reserving its final tile width exactly like a live one.
               thumbAspect: n.thumbAspect,
             }
           : null;
       },
-      // The blob md5 a trashed row advertises — the SAME one the live listing
-      // gave, because trashing does not rewrite a blob. See `BlobHash`.
+      // Trashing does not rewrite a blob, so the same md5 as the live listing.
       fakeFileHash,
     ),
     // --- ADMIN WRITES ---
     //
-    // A SPREAD OF AN IIFE, deliberately. These five methods need a fixture they
-    // all mutate (people are added and deleted, an elevation goes stale), and
-    // this marker is INSIDE the returned object literal — there is nowhere above
-    // it to declare a `const` that is not a line a parallel feature is also
-    // editing. The IIFE gives them one shared closure without touching a single
-    // line outside the marker, and it is the whole of the admin fake.
+    // A spread IIFE gives these methods a shared mutable fixture without
+    // declaring anything outside this marker.
     ...(() => {
-      /** The household, mirroring the approved mockup's cast. */
       const people = [
         { id: 1, email: "ana@household.lan", isAdmin: true, mustChangePassword: false, createdAt: 1_751_500_000 },
         { id: 2, email: "rui@household.lan", isAdmin: false, mustChangePassword: false, createdAt: 1_747_500_000 },
@@ -1199,29 +765,15 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       ];
       let nextId = 4;
 
-      /**
-       * Whether this "session" is elevated. Starts FALSE so dev and e2e both
-       * land on the gate — which is the console's first screen in the real thing
-       * too, and the one state a fake that started unlocked would never show.
-       */
+      /** Starts locked, so dev and e2e land on the gate first, as the real console does. */
       let elevated = false;
 
-      /**
-       * The fixture password, and the only one the fake accepts. A published
-       * constant rather than "anything non-empty", so the wrong-password branch
-       * is reachable in a test without the fake having to invent a rule.
-       */
+      /** The only password the fake accepts, so the wrong-password branch is reachable. */
       const PASSWORD = "inkhold";
 
       /**
-       * The 428 the real server answers with, as the REAL error class.
-       *
-       * `dispatchApiFailure` routes on `instanceof ApiError`, so a fake throwing
-       * a plain `Error` here would exercise a code path the shipped app never
-       * takes — the console would fall through to its generic failure state and
-       * the gate would never open. Imported dynamically because this file has no
-       * top-level import of client.ts and cannot grow one at this marker; the
-       * module is already in the graph, so it resolves off the module cache.
+       * The real `ApiError`, because `dispatchApiFailure` routes on `instanceof`.
+       * Imported dynamically: no top-level import of client.ts here.
        */
       const httpError = async (code: string, message: string, status: number): Promise<Error> => {
         const { ApiError } = await import("./client");
@@ -1232,26 +784,18 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
       const GB = 1024 * 1024 * 1024;
 
-      /**
-       * Devices per user id. Rui carries two — one of them REVOKED, so the
-       * console's "unlinked but re-pairable" row is on screen in dev and in e2e
-       * rather than reachable only by clicking Unlink first.
-       */
+      /** Rui has a revoked device, so the re-pairable row is on screen. */
       const devices: Record<number, { equipmentNo: string; name: string; model: string | null; firmware: string | null; active: boolean; createdAt: number }[]> = {
         1: [{ equipmentNo: "SN1000A2X", name: "Nomad", model: "A5X2", firmware: "3.20.29", active: true, createdAt: 1_751_500_000 }],
         2: [
           { equipmentNo: "SN1000B7K", name: "Manta", model: "A6X2", firmware: "3.21.02", active: true, createdAt: 1_747_600_000 },
           { equipmentNo: "SN1000C1M", name: "Nomad", model: "A5X2", firmware: "3.19.11", active: false, createdAt: 1_735_700_000 },
         ],
-        // Guest has none: the "no device linked yet" state is a real one, and a
-        // fixture where everybody has a tablet would never show it.
+        // Guest has none: the "no device linked yet" state.
         3: [],
       };
 
-      /**
-       * Quota per user id. Rui is deliberately OVER his allotment — the state a
-       * lowered quota produces, which the meter has to draw rather than clamp.
-       */
+      /** Rui is over his allotment, which the meter must draw rather than clamp. */
       const quotas: Record<number, { usedBytes: number; totalBytes: number }> = {
         1: { usedBytes: 5.4 * GB, totalBytes: 10 * GB },
         2: { usedBytes: 11.2 * GB, totalBytes: 10 * GB },
@@ -1284,13 +828,10 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
           if (people.some((p) => p.email.toLowerCase() === address)) {
             throw await httpError("EMAIL_EXISTS", "an account with that email already exists", 200);
           }
-          // Must-change from birth, like the real one: the temporary password
-          // unlocks nothing but its own replacement.
+          // Must-change from birth, as on the real server.
           const id = nextId++;
           people.push({ id, email: address, isAdmin, mustChangePassword: true, createdAt: Date.now() / 1000 });
-          // A new account gets its accounting rows the same moment the server's
-          // `insertUser` calls `ensureCapacity`. Without them the console's
-          // per-person detail fetch would 404 on somebody it had just created.
+          // Accounting rows at creation, like the server's `ensureCapacity`.
           quotas[id] = { usedBytes: 0, totalBytes: 2 * GB };
           devices[id] = [];
           return tempPassword();
@@ -1301,16 +842,12 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
           if (!elevated) throw await needsElevation();
           const at = people.findIndex((p) => p.id === id);
           if (at < 0) return;
-          // The same refusal the server makes, and it has to be here or the
-          // console's LAST_ADMIN branch is unreachable in dev: deleting the only
-          // administrator would lock administration out of the server for good.
+          // The server refuses deleting the last administrator.
           if (people[at]!.isAdmin && people.filter((p) => p.isAdmin).length <= 1) {
             throw await httpError("LAST_ADMIN", "cannot remove the last administrator", 200);
           }
           const [gone] = people.splice(at, 1);
-          // The server's FK cascade takes capacity and device bindings with the
-          // account; the fake has to do it by hand or a recycled id would
-          // inherit a stranger's meter.
+          // By hand what the server's FK cascade does, so a recycled id has a clean meter.
           if (gone) {
             delete quotas[gone.id];
             delete devices[gone.id];
@@ -1343,9 +880,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
           if (!elevated) throw await needsElevation();
           const list = devices[userId];
           if (!list) throw await notFound();
-          // Revoked bindings included — filtering them here would make the
-          // console's revoked row unreachable and quietly teach the fake a rule
-          // the server does not have.
+          // Revoked bindings included, as the server does.
           return list.map((d) => ({ ...d }));
         },
 
@@ -1353,9 +888,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
           await delay(latency);
           if (!elevated) throw await needsElevation();
           const device = devices[userId]?.find((d) => d.equipmentNo === equipmentNo && d.active);
-          // Same conflation the server makes: an unknown serial and someone
-          // else's serial are one error, so this cannot be used to discover
-          // which housemate holds a given tablet.
+          // Unknown and someone else's serial are one error, so serials can't be probed.
           if (!device) throw await httpError("DEVICE_NOT_FOUND", "that user has no such device", 404);
           device.active = false; // a soft flip, exactly as the server does it
         },
@@ -1374,9 +907,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
           const q = quotas[userId];
           if (!q) throw await notFound();
           if (totalBytes < 0) throw await httpError("INVALID_QUOTA", "an allotment cannot be negative", 400);
-          // Stored VERBATIM, even below current usage, and `usedBytes` is left
-          // alone. That is the whole behaviour under test: nothing is deleted,
-          // and the meter is handed a genuine over-quota pair.
+          // Stored verbatim, even below usage: nothing is deleted.
           q.totalBytes = totalBytes;
           return { ...q };
         },
@@ -1394,9 +925,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
             throw await httpError("INVALID_RETENTION", "retention must be between 1 and 365 days", 400);
           }
           retentionDays = days;
-          // Nothing already in the bin is purged. `changedAt` moving is exactly
-          // what gives every existing entry a full new window — the fake records
-          // it so the UI's non-retroactive sentence describes real behaviour.
+          // Not retroactive: nothing is purged; `changedAt` gives existing entries a new window.
           retentionChangedAt = Math.floor(Date.now() / 1000);
           return { retentionDays, defaultDays: 30, minDays: 1, maxDays: 365, changedAt: retentionChangedAt };
         },
@@ -1415,36 +944,13 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
       };
     })(),
 
-    // --- ACCOUNT (self-service) ---
-    //
-    // THE REFERENCE IMPLEMENTATION of this surface (
-    // §5–§7): where the intended behaviour is written down, and what the
-    // endpoints are built to match. `changePassword` mirrors the real route,
-    // which now REQUIRES and VERIFIES the current password of a control-plane
-    // caller (§4) — so the refusal below is a rehearsal of a real server answer,
-    // not a fiction the server would wave through.
-    //
-    // A SPREAD OF AN IIFE, for the same reason the admin block above is one:
-    // these methods share mutable fixture state (a device is unlinked, `keep`
-    // goes down and takes versions with it), and this marker is INSIDE the
-    // returned object literal, so there is nowhere above it to declare a `const`
-    // that is not a line another feature is also editing.
-    //
-    // The fixture is ONE HOUSEHOLD MEMBER'S account, deliberately small: a
-    // single "Nomad" (the only device this app supports — the mobile app is out
-    // of scope), and a few hundred megabytes across the four kinds.
+    // --- account (self-service) ---
+    // A spread IIFE like the admin block. `changePassword` verifies the current
+    // password, as the real route does. One member's account, one Nomad.
     ...(() => {
       const MB = 1024 * 1024;
 
-      /**
-       * The bound tablets. ONE, named as an object rather than as a serial —
-       * that naming is the point of the section (§7), and a fixture with three
-       * anonymous devices would never show it.
-       *
-       * `lastSeenAt` is 20 minutes ago, RELATIVE to when the fake is built, so
-       * the row reads "last seen 20 minutes ago" in dev and in e2e instead of
-       * drifting into "8 months ago" as the fixture ages.
-       */
+      /** One named tablet; `lastSeenAt` relative to build time so the row never ages. */
       const now = () => Math.floor(Date.now() / 1000);
       let devices = [
         {
@@ -1457,65 +963,29 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
         },
       ];
 
-      /**
-       * The FIVE kinds, as a PARTITION: their sum IS `usedBytes`, which is the
-       * property that makes the panel worth believing (§8). Two halves of that:
-       *
-       *  - the RECYCLE BIN line, which the numbers found — three live kinds that
-       *    came up 597,016 bytes short of a real `used_bytes`, being two trashed
-       *    files still charging;
-       *  - VERSIONS, charged at all only after §6. A fixture whose total excluded
-       *    them would model the bug rather than the fix, and the sum would not be
-       *    a partition.
-       *
-       * 214 + 46 + 178 + 12 + 13 = 463 MB, which is deliberately the figure the
-       * design doc quotes when it argues that "463 MB" alone answers nothing.
-       */
+      /** A partition: the kinds plus bin plus versions sum to `usedBytes` (214+46+178+12+13 = 463 MB). */
       const kinds = { notebookBytes: 214 * MB, sketchBytes: 46 * MB, documentBytes: 178 * MB, binBytes: 12 * MB };
       const totalBytes = 10 * 1024 * MB;
 
-      /**
-       * Retained versions per file. Chosen so the design's own example is the
-       * one the fake produces: at `keep = 3` this discards
-       * `Σ max(0, c − 3)` = 2+2+2+2+0+0 = **8** versions — "Keeping 3 will remove
-       * 8 versions now" (§7).
-       */
+      /** Retained versions per file; `keep = 3` removes 8, the design's own example. */
       let retainedPerFile: number[] = [5, 5, 5, 5, 3, 2];
       let keep = 5;
-      /** The admin's ceiling. One person must not set the household's disk
-       *  policy, so the control is bounded by config it cannot see. */
+      /** The admin's ceiling on `keep`. */
       const maxKeep = 20;
-      /** What the retained copies cost. Held per version so an eviction can
-       *  report the bytes it actually freed rather than a guess. */
       const bytesPerVersion = (13 * MB) / 25; // the 25 retained versions above ≈ 13 MB
       const versionBytes = () => Math.round(retainedPerFile.reduce((a, b) => a + b, 0) * bytesPerVersion);
 
-      /**
-       * The fixture password — the same string the admin gate accepts, and
-       * published for the same reason: the WRONG-password branch has to be
-       * reachable in a test without the fake inventing a rule about what counts
-       * as right. Restated rather than shared because both live inside marker
-       * IIFEs that cannot see each other. MUTABLE, so a successful change makes
-       * the NEW password the one the next change has to prove — a fake where the
-       * old password kept working would model nothing.
-       */
+      /** Same as the admin gate's; mutable so the new password is the one the next change must prove. */
       let password = "inkhold";
 
-      /** The real error class, imported dynamically for the reason the admin
-       *  block's `httpError` gives (no top-level import is reachable here). */
+      /** The real error class, imported dynamically like the admin block's. */
       const httpError = async (code: string, message: string, status: number): Promise<Error> => {
         const { ApiError } = await import("./client");
         return new ApiError(code, message, status);
       };
 
       let otherSessions = 2;
-      /**
-       * NULL WOULD ALSO BE A REALISTIC FIXTURE — `users.password_changed_at`
-       * does not exist yet, so every real account reads unrecorded until the
-       * column lands and its owner changes one. A date is used here so the
-       * common, informative rendering is the one dev and e2e exercise; the null
-       * branch is covered in the unit tests instead.
-       */
+      /** A date rather than null so dev and e2e exercise the common rendering. */
       let passwordChangedAt: number | null = now() - 97 * 86_400;
       const thisSessionSince = now() - 3 * 86_400;
 
@@ -1530,12 +1000,9 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
         async unlinkMyDevice(equipmentNo: string): Promise<void> {
           await delay(latency);
           const found = devices.some((d) => d.equipmentNo === equipmentNo);
-          // The same conflation the admin route makes: an unknown serial and
-          // somebody else's serial are one indistinguishable error.
+          // Unknown and someone else's serial are one error.
           if (!found) throw await httpError("DEVICE_NOT_FOUND", "no such device on this account", 404);
-          // The ROW GOES. Unlike the admin listing — which keeps a revoked
-          // binding so an admin can see it — your own list is the list of
-          // tablets that sync, and an unlinked one does not.
+          // Removed, unlike the admin listing: your list is the tablets that sync.
           devices = devices.filter((d) => d.equipmentNo !== equipmentNo);
         },
 
@@ -1549,9 +1016,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
         async storageBreakdown() {
           await delay(latency);
           const byKind = { ...kinds, versionBytes: versionBytes() };
-          // SUMMED, never stated separately: the whole invariant is that the
-          // lines add up to the meter, and a fixture that wrote the total down
-          // by hand could drift from its own parts.
+          // Summed, so the lines always add up to the meter.
           const usedBytes =
             byKind.notebookBytes +
             byKind.sketchBytes +
@@ -1568,8 +1033,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
         async setVersionPolicy(next: number) {
           await delay(latency);
-          // Clamped by the SERVER, not by the control: a hand-crafted request
-          // must not be able to set the household's disk policy either.
+          // Clamped by the server, not just the control.
           const target = Math.max(0, Math.min(maxKeep, Math.floor(next)));
           const before = retainedPerFile.reduce((a, b) => a + b, 0);
           retainedPerFile = retainedPerFile.map((c) => Math.min(c, target));
@@ -1589,10 +1053,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
         async changePassword(currentPlaintext: string, newPlaintext: string): Promise<void> {
           await delay(latency);
-          // The same refusal the server gives (§4): `INVALID_CREDENTIALS` at
-          // status 200, before anything is changed and before any session is
-          // revoked. Modelled here so the path is exercised in dev and in e2e
-          // without standing a backend up.
+          // `INVALID_CREDENTIALS` at status 200, before anything changes, as the server.
           if (currentPlaintext !== password) {
             throw await httpError("INVALID_CREDENTIALS", "current password incorrect", 200);
           }
@@ -1600,8 +1061,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
             throw await httpError("SAME_PASSWORD", "that is already your password", 200);
           }
           password = newPlaintext;
-          // Every OTHER session goes — the real `changePassword` mints a new
-          // session and revokes the rest — which is why the screen says so.
+          // The real route revokes every other session.
           otherSessions = 0;
           passwordChangedAt = now();
         },

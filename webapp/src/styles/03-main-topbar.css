@@ -1,4 +1,4 @@
-/* ================= MAIN ================= */
+/* ---- main ---- */
 .main {
   display: grid;
   grid-template-rows: auto 1fr;
@@ -60,18 +60,14 @@
 }
 .search input {
   width: 100%;
-  /* One shared height with the sort/view controls (see `--topbar-control-h`);
-     border-box folds the padding + border inside it, so the visual box matches. */
   height: var(--control-h);
-  /* Right padding clears the OCR chip, so a long query scrolls under the glyph
-     rather than behind the chip. */
+  /* Right padding clears the OCR chip. */
   padding: 9px 52px 9px 36px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--sheet);
   font-size: var(--fs-body);
 }
-/* The mockup's chip: this box reads the recognised ink, not just the names. */
 .search__ocr {
   position: absolute;
   right: 8px;
@@ -101,74 +97,36 @@
   gap: var(--sp-2);
 }
 
-/* ---- A DESTINATION IS A MODE IN THE TOPBAR ---------------------------------
- *
- * `.sn-root.is-destination` is set while any full-content view that is NOT a
- * folder listing is up — the recycle bin, the admin console (see
- * `setDestinationMode` in library.ts). It began as `.sn-root.is-bin`, for the
- * bin alone, and generalised the moment the console needed the identical
- * treatment: the reason is not "this is the bin", it is "what is on screen is
- * not the library", which is equally true of both. Two classes doing one thing
- * is how they drift apart.
- *
- * The rules live HERE, with `.search` and `.tools`, rather than in either
- * destination's stylesheet: they are facts about the topbar's own layout, and a
- * third destination should not have to find them inside the bin's file.
- *
- * The search box leaves because it searches the LIBRARY, which is not what is on
- * screen — and typing in it navigates off the destination entirely, which is the
- * trap rather than the box.
- */
+/* ---- destinations ----
+ * `.sn-root.is-destination` is set for full-content views that aren't a folder
+ * listing (bin, admin console). The search box leaves: it searches the library,
+ * and typing in it would navigate away. */
 .sn-root.is-destination .search {
   display: none;
 }
-/* The search box is what normally pushes `.tools` to the far edge (`flex: 1`),
-   so removing it collapses the toolbar against the breadcrumb and a topbar
-   action lands mid-header, reading as part of the crumb rather than as a
-   control. The margin restores the position the box was holding, so nothing in
-   the topbar moves as you enter and leave a destination. */
+/* Restores the position the search box held, so the topbar doesn't shift. */
 .sn-root.is-destination .tools {
   margin-left: auto;
 }
 
-/* A LABELLED topbar action belonging to whichever destination is open — `Empty
-   bin`, `Lock console`. Labelled and not icon-only on purpose: a lone glyph in a
-   toolbar is a guess, and both of these do something a guess should not reach.
-   The glyph is decoration on a control that already says what it does, so it
-   sits INSIDE the button and takes the label's colour; nothing here says
-   anything about tone. `is-danger` (08) carries the bin's red, and the console's
-   Lock deliberately does not take it — red is danger and nothing else here, and
-   locking destroys nothing. */
-/* `.btn.topbar__action`, NOT `.topbar__action` — a specificity fix, not a style.
-   `.btn` (06-reader.css) sets the COMPACT `--control-h-sm`, and at equal
-   specificity the later stylesheet wins, so every topbar action rendered 28px
-   against 34px neighbours: a toolbar of controls that almost line up. Matching
-   `.btn`'s specificity and beating it on order is the whole of the fix. */
+/* A labelled destination action (Empty bin, Lock console). `.btn.topbar__action`
+   to match `.btn`'s specificity and win on order, else it gets the compact
+   28px height. Red only via `is-danger`; locking destroys nothing. */
 .btn.topbar__action {
   display: inline-flex;
   align-items: center;
   gap: 7px;
   flex: none;
-  /* Aligns with the search box and the sort/view controls — one topbar height
-     (see `--topbar-control-h`), border-box so the `.btn` padding sits inside it. */
   height: var(--control-h);
 }
-/* ICON-ONLY, for an action whose glyph is unambiguous and which is reached far
-   more often than the labelled destination actions beside it. Square rather than
-   pill so it reads as a control rather than a truncated button, and the padding
-   goes to the glyph since there is no text to sit beside. It keeps its
-   `aria-label` and a `title`, so the name is available to a screen reader and to
-   a hover — the label is hidden, not absent. */
+/* Icon-only for a frequent, unambiguous action; keeps `aria-label` and `title`. */
 .btn.topbar__action--icon {
   gap: 0;
   width: var(--control-h);
   padding: 0;
   justify-content: center;
 }
-/* The seam between LOOKING and DOING: sort and the view toggle change how the
-   folder is shown, upload changes what is in it. A hairline says so without a
-   word. It travels with the upload control (hidden together), so it can never be
-   left dangling at the end of a toolbar with nothing after it. */
+/* A hairline between view controls and upload, hidden together with upload. */
 .tools__sep {
   flex: none;
   width: 1px;
@@ -179,10 +137,7 @@
 .tools__sep[hidden] {
   display: none;
 }
-/* Same specificity trap as `.select[hidden]` above, and the reason this rule
-   exists at all: `display: inline-flex` at (0,1,0) beats the UA's `[hidden] {
-   display: none }` at (0,0,1), so without this the button would stay on screen
-   over every folder with only the accessibility tree agreeing it was gone. */
+/* `display: inline-flex` (0,1,0) beats the UA `[hidden]` (0,0,1); restate it. */
 .topbar__action[hidden] {
   display: none;
 }
@@ -191,9 +146,7 @@
   height: 15px;
   display: block;
 }
-/* Disabled rather than removed over an empty bin — the control stays where it
-   will be looked for. Not dimmed past legibility: it still has to read as the
-   thing that will be available once there is something to empty. */
+/* Disabled, not removed, over an empty bin. */
 .topbar__action:disabled {
   opacity: 0.45;
   cursor: default;
@@ -203,20 +156,14 @@
   display: inline-flex;
   align-items: center;
 }
-/* Both of these are HIDDEN OVER SEARCH RESULTS — they describe a folder listing,
-   and a query has left the folder behind. `[hidden]`'s `display: none` is a UA
-   rule at specificity (0,0,1), so the `display: inline-flex` above silently beat
-   it and the attribute did nothing visible: the controls stayed on screen with
-   only the accessibility tree agreeing they were gone. Restated here at (0,1,1)
-   so the attribute means what it says. */
+/* Hidden over search results. Restated at (0,1,1): `display: inline-flex` beat
+   the UA `[hidden]` rule. */
 .select[hidden],
 .segmented[hidden] {
   display: none;
 }
 .select select {
   appearance: none;
-  /* The topbar's shared control height (see `--topbar-control-h`) — this was the
-     control that read a touch SHORTER than the view toggle in the mockup. */
   height: var(--control-h);
   padding: 7px 26px 7px 10px;
   border: 1px solid var(--line);
@@ -231,11 +178,7 @@
 .select svg {
   position: absolute;
   right: 8px;
-  /* BOTH axes, because `position: absolute` only escapes flow on the axes it is
-     given one. With `right` alone the chevron kept its STATIC vertical position —
-     the flex line's start rather than its centre — so it sat low against a label
-     the flex container had already centred. The offset is small enough to read as
-     sloppy rendering rather than a missing rule, which is why it survived. */
+  /* Both axes: with `right` alone the chevron kept its static vertical position. */
   top: 50%;
   transform: translateY(-50%);
   width: 12px;
@@ -245,8 +188,6 @@
 }
 .segmented {
   display: inline-flex;
-  /* One topbar height (see `--topbar-control-h`); border-box keeps the 1px frame
-     inside it so the toggle matches the sort select and the search box exactly. */
   height: var(--control-h);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -256,8 +197,7 @@
   display: grid;
   place-items: center;
   width: 32px;
-  /* Fill the frame's inner height rather than pinning 32px, so the segment's
-     height follows `--topbar-control-h` from the one place it is set. */
+  /* Fill the frame's inner height so it follows `--control-h`. */
   height: 100%;
   border: 0;
   background: transparent;
@@ -274,14 +214,10 @@
 }
 
 /* ---- content scroll area ---- */
-/* Rows are PINNED rather than auto-placed. `.reader` is `position: absolute;
-   inset: 0`, so its height comes entirely from `.content`. With auto placement,
-   hiding the topbar (see `.sn-root.is-reading` below) promotes `.content` into
-   the collapsed `auto` row — the gallery being `display: none` leaves nothing to
-   give it height, so the reader resolves to `Wx0` and the whole panel renders
-   BLANK while every class and computed style still reads correctly (`is-open`
-   true, `display: grid`, `visibility: visible`). Pinning the rows means hiding a
-   header can never reflow what sits under it. */
+/* Rows are pinned, not auto-placed: hiding the topbar would otherwise move
+   `.content` into the collapsed `auto` row and the absolute `.reader` would
+   resolve to zero height (blank, with every style still "correct"). */
+
 .topbar {
   grid-row: 1;
 }

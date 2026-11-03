@@ -1,32 +1,7 @@
-// The `.note` reader's LAYER glue — everything between the wire (a page's
-// `PageLayer[]` off `NoteMetaVO` + the SNPG v2 payload) and the two shared
-// components the `.spd` viewer already feeds: the layers panel
-// (pages/layersPanel.ts) and the layered-export core (export/layered.ts). The
-// decision is: per-layer decode with
-// stacked canvases (the `.spd` mechanism), identity by SLOT, view-only tuning.
-//
-// THE RENDER MODEL. The focused page becomes a stack of per-layer canvases,
-// one per SNPG record in wire order (bottom-to-top; DOM order does the
-// stacking), each decoded by the wasm's `decode_layer` — transparent (0xff)
-// pixels arrive with alpha 0, so the browser compositor blends the stack
-// exactly as `decode_page` composites internally. Visibility is
-// `style.display`, mirroring spdViewer; a toggle costs no decode. The canvases
-// are BASE resolution (the payload's own dims, ~10.5 MB RGBA each), which is
-// affordable for THE focused page only — filmstrip/thumbnails/neighbours stay
-// on the composite path, by scope pin. The ONE exception is `inkRaster`, which a
-// filmstrip does drive per page: it decodes a layer, reduces it and drops it
-// before asking for the next, so it never holds a stack and never touches the
-// one `present` has mounted. See its own note for why the two cannot share.
-//
-// DEGRADE, NEVER BREAK. Every checkpoint that can fail — a v1/hostile payload,
-// a slot mismatch between records and the VO list, a missing `decode_layer`
-// export, a decode error — returns null and the reader falls back to today's
-// single-composite paint. A wrong panel is worse than no panel.
-//
-// THEME. On-screen canvases match the composite: notes always paint in the LIGHT
-// world (dark ink on white paper), the app theme never inverts them, and the
-// stack backdrop is white. EXPORTS are likewise the authored light pixels —
-// `exportModel()` re-decodes from the presented payload — matching `exporter.ts`.
+// The `.note` reader's layer glue: SNPG v2 payload + `PageLayer[]` to the shared
+// layers panel and layered export. The focused page becomes a stack of
+// per-layer canvases decoded by `decode_layer`; any failure returns null and the
+// reader falls back to the single composite.
 
 import { LAYER_SLOTS, type Id, type LayerSlot, type PageLayer, type Theme } from "../core/types";
 import type { PanelLayer } from "./layersPanel";
@@ -41,27 +16,20 @@ import {
   type RawDecoded,
 } from "../render/wasm";
 
-// ============================================================================
-// The pure core — no DOM, no wasm. Unit-tested (tests/unit/noteLayers.test.ts).
-// ============================================================================
+// ---- pure core (no DOM, no wasm) ----
 
-/** One SNPG v2 record's identity, as the wasm `snpg_enumerate` hands it back. */
 export interface SnpgRecord {
   slot: LayerSlot;
-  /** bit1 of the record flags: excluded from the default composite. */
+  /** Flag bit1: excluded from the default composite. */
   hidden: boolean;
   /**
-   * bit2 of the record flags: a browser-native IMAGE background. `data` is then
-   * the asset HASH (not RLE), and this layer is drawn with `createImageBitmap`
-   * from `GET /note/{id}/template/{hash}`, never `decode_layer`.
+   * Flag bit2: an image background. `data` is then the template asset hash (not
+   * RLE), drawn via `GET /note/{id}/template/{hash}`, never `decode_layer`.
    */
   rasterImage: boolean;
-  /** The asset hash for a `rasterImage` background; empty otherwise (an ordinary
-   *  layer's pixels ride `decode_layer`, indexed by wire position — never here). */
   data: Uint8Array;
 }
 
-/** The enumerated records plus the page's effective dims. */
 export interface SnpgEnumeration {
   records: SnpgRecord[];
   width: number;
@@ -72,13 +40,8 @@ const FLAG_HIDDEN = 0b10; // bit1
 const FLAG_RASTER_IMAGE = 0b100; // bit2
 
 /**
- * Enumerate an SNPG v2 payload's records via the wasm decoder — the ONE parser
- * of the wire format now lives in Zig (`page_payload.enumerateRecords`), so this
- * only marshals structured output: dims + each record's slot, flag bits and (for
- * an image background) its asset hash. `null` for anything the stacked panel
- * cannot present — a v1/foreign/truncated/over-claiming payload, an unknown slot,
- * a bad record count, trailing junk — or a wasm module too old to expose the
- * enumerator (feature-detected). No RLE is touched; pixels stay in `decode_layer`.
+ * Enumerate a payload's records via the wasm (the one SNPG parser lives in Zig).
+ * Null for anything the stack cannot present, or a module without the enumerator.
  */
 export function enumerateSnpg(wasm: DecoderExports, bytes: Uint8Array): SnpgEnumeration | null {
   const {
@@ -115,8 +78,7 @@ export function enumerateSnpg(wasm: DecoderExports, bytes: Uint8Array): SnpgEnum
     if (slot === undefined) return null; // guarded, though Zig already rejected it
     const flags = flagsOf.call(wasm, i);
     const hashLen = hashLenOf.call(wasm, i);
-    // Copy the hash OUT of wasm memory now — the static buffer is reused by the
-    // next enumerate, and this record is kept for `exportModel`.
+    // Copy out now: the wasm's static buffer is reused by the next enumerate.
     const data =
       hashLen > 0
         ? new Uint8Array(wasm.memory.buffer, hashPtrOf.call(wasm, i), hashLen).slice()
@@ -131,9 +93,7 @@ export function enumerateSnpg(wasm: DecoderExports, bytes: Uint8Array): SnpgEnum
   return { records, width: widthOf.call(wasm), height: heightOf.call(wasm) };
 }
 
-/** One wire record married to its `LayerVO` — the unit everything downstream
- *  (panel row, canvas, export layer) is built from. `index` is the record's
- *  position in wire order (bottom-to-top), which is the stable per-page id. */
+/** A wire record paired with its `LayerVO`; `index` (wire order, bottom-to-top) is the per-page id. */
 export interface PairedLayer {
   index: number;
   record: SnpgRecord;
@@ -141,13 +101,8 @@ export interface PairedLayer {
 }
 
 /**
- * Pair the payload's records with the noteMeta `layers` BY SLOT — the contract
- * both docs state outright ("pair by slot, not by position"). The two lists
- * come from the same index and agree in practice; pairing by slot is what
- * turns a server-side ordering bug into a visible degrade (null → composite)
- * instead of a silently mislabelled panel. `null` on any mismatch: different
- * lengths, a slot on one side only, or (already impossible past the seam's
- * validation) a duplicate.
+ * Pair records with `layers` by slot, not position, so a server ordering bug
+ * degrades visibly (null) instead of mislabelling the panel.
  */
 export function pairLayers(records: readonly SnpgRecord[], vos: readonly PageLayer[]): PairedLayer[] | null {
   if (records.length !== vos.length || records.length === 0) return null;
@@ -166,26 +121,9 @@ export function pairLayers(records: readonly SnpgRecord[], vos: readonly PageLay
 }
 
 /**
- * The wire positions of the records that carry INK a reader would see — the
- * input to any flattening of a page that is an OVERLAY on something else (a
- * `.mark` over the PDF it annotates), rather than a page in its own right.
- *
- * Three kinds of record are dropped, and each for a reason the screen already
- * states somewhere:
- *
- *  - the BACKGROUND slot, because over a PDF that layer is the device's paper
- *    and the document IS the paper. Compositing it is a second opaque sheet
- *    (`pdfViewer.ts`'s `suppressBackground` hides the same record on screen).
- *  - a RASTER-IMAGE background, which is a background by another route: its
- *    `data` is a template asset hash, not pixels, and it would need a fetch of
- *    its own to draw something that must not be drawn.
- *  - a DEVICE-HIDDEN record (wire flag bit1). `present` seeds each layer's
- *    visibility from the authored flag, so a hidden layer is not on the page —
- *    and a thumbnail that showed it would put strokes in the filmstrip that are
- *    nowhere in the document beside it.
- *
- * Pure, and separate from the decode, so "which layers is a mark's ink?" can be
- * asserted against a real payload without a canvas.
+ * Wire positions of the records carrying visible ink, for flattening an overlay
+ * (a `.mark` over a PDF). Drops the background slot (the document is the paper),
+ * raster-image backgrounds and device-hidden records.
  */
 export function inkRecordIndices(records: readonly SnpgRecord[]): number[] {
   return records.flatMap((r, i) =>
@@ -193,11 +131,7 @@ export function inkRecordIndices(records: readonly SnpgRecord[]): number[] {
   );
 }
 
-/**
- * What a slot is called when the device wrote no display name (`LAYERINFO`
- * absent or nameless). These match the device's own defaults — "Layer 3", the
- * background as "Background Layer" — so the panel never shows an internal id.
- */
+/** Fallback names matching the device's own defaults. */
 export const SLOT_NAMES: Record<LayerSlot, string> = {
   main: "Main Layer",
   layer1: "Layer 1",
@@ -206,37 +140,24 @@ export const SLOT_NAMES: Record<LayerSlot, string> = {
   background: "Background Layer",
 };
 
-/** A layer's display name: the device's own (`LAYERINFO`), else the slot default. */
 export function layerDisplayName(vo: PageLayer): string {
   return vo.name || SLOT_NAMES[vo.slot];
 }
 
-/**
- * One layer of the live stack: the paired identity, that layer's own decoded
- * canvas, and the view-only `visible` the panel tunes (seeded from the
- * device-authored `vo.visible`; never persisted). The shape the panel feeder
- * and the export mapping both read.
- */
+/** One live layer; `visible` is view-only, seeded from the device's `vo.visible`. */
 export interface NoteLayerView {
   index: number;
   slot: LayerSlot;
-  /** Resolved display name (device name or slot default). */
   name: string;
-  /** Device-authored visibility — the export's `original` state. */
+  /** Device-authored visibility: the export's `original` state. */
   authoredVisible: boolean;
   isCurrent: boolean;
-  /** Live panel state — the export's `current` state. Starts authored. */
+  /** Live panel state: the export's `current` state. */
   visible: boolean;
   canvas: HTMLCanvasElement;
 }
 
-/**
- * Feed the shared panel: TOP-first (reverse of wire order — the panel's
- * Z-order contract), id = wire record index, and deliberately NO `opacity`
- * field — that absence is what keeps the stepper off every row (`.note` has no
- * per-layer opacity; device-confirmed). Names are pre-resolved so the panel's
- * own `Layer <id>` fallback (an `.spd`-shaped default) never shows.
- */
+/** Top-first for the panel, with no `opacity` because `.note` layers have none. */
 export function toPanelLayers(views: readonly NoteLayerView[]): PanelLayer[] {
   return [...views]
     .reverse()
@@ -244,16 +165,9 @@ export function toPanelLayers(views: readonly NoteLayerView[]): PanelLayer[] {
 }
 
 /**
- * The export snapshot for the shared layered core: one `ExportLayer` per wire
- * record, BOTTOM-to-TOP (= `views` order), opacity 1 in BOTH states (`.note`
- * has none), `authored.visible` the device's state and `current.visible` the
- * panel's live state. A device-hidden layer is therefore PRESENT in an
- * "original" ORA with its full pixels, marked invisible — the file's own
- * semantics. `width`/`height` are the PAYLOAD's effective dims, so a landscape
- * page exports 1872×1404 with no special case.
- *
- * `canvases` lets the caller substitute freshly decoded (light-theme) canvases
- * for the on-screen (possibly dark-inverted) ones — keyed by position.
+ * One `ExportLayer` per record, bottom-to-top, opacity 1 in both states. A
+ * device-hidden layer is present but invisible in an "original" ORA. `canvases`
+ * substitutes freshly decoded light-theme canvases by position.
  */
 export function buildNoteExportModel(
   width: number,
@@ -274,13 +188,7 @@ export function buildNoteExportModel(
   };
 }
 
-/**
- * The layered exports' filename — spdExport's convention
- * (`<base>_<which>.<ext>`) with the 1-based page slotted in, since a `.note`
- * export is of ONE page: `Weekly review_p3_current.ora`. The stem is the
- * exporter's own sanitiser, so the two export families never disagree about
- * what a note is called on disk.
- */
+/** `<stem>_p<page>_<which>.<ext>`, using the exporter's sanitiser. */
 export function noteLayerExportFilename(
   noteName: string,
   pageIndex: number,
@@ -290,24 +198,13 @@ export function noteLayerExportFilename(
   return `${filenameStem(noteName)}_p${pageIndex + 1}_${which}.${ext}`;
 }
 
-// ============================================================================
-// The panel thumbnail — the one thing only the `.note` side knows about its
-// layers' pixels, mirroring spdViewer's `buildThumb` (the shared panel sizes
-// whatever comes back via `layers-panel__thumb`).
-// ============================================================================
+// ---- panel thumbnail ----
 
-/** Backing height in device px — ~2× the CSS box (`--preview-h-panel`) for
- *  retina crispness; width follows the page's aspect, capped like the class. */
+/** Backing height, ~2× the CSS box for retina. */
 const THUMB_H = 202;
 const THUMB_MAX_ASPECT = 2.5;
 
-/**
- * A per-layer thumbnail: that layer's own decoded canvas scaled onto a page-
- * coloured sheet. The sheet follows the THEME because the layer pixels do — a
- * dark-inverted layer on a white sheet would be the one place the panel
- * disagreed with the page beside it. Drawn once per panel rebuild from pixels
- * already in hand; never re-decoded.
- */
+/** A layer's own canvas scaled onto a sheet; drawn from pixels in hand, never re-decoded. */
 export function buildNoteLayerThumb(view: NoteLayerView): HTMLElement {
   const cw = view.canvas.width;
   const ch = view.canvas.height;
@@ -317,14 +214,11 @@ export function buildNoteLayerThumb(view: NoteLayerView): HTMLElement {
   const thumbW = Math.max(1, Math.round(THUMB_H * aspect));
   thumb.width = thumbW;
   thumb.height = THUMB_H;
-  const ctx = thumb.getContext("2d"); // null in happy-dom — the canvas still exists.
+  const ctx = thumb.getContext("2d"); // null in happy-dom
   if (ctx && cw > 0 && ch > 0) {
     ctx.fillStyle = "#ffffff"; // notes always paint on white paper (see wasm.ts)
     ctx.fillRect(0, 0, thumbW, THUMB_H);
-    // The ~9× reduction from a full-res (~1872-wide) layer canvas goes through
-    // the SHARED quality downscale, not a single bilinear `drawImage` step that
-    // skips source rows and drops/moirés a ruled template's thin lines. The
-    // sheet fill above keeps the box stable until the async draw lands.
+    // Shared quality downscale: a single bilinear step at ~9× drops thin template lines.
     const scale = Math.min(thumbW / cw, THUMB_H / ch);
     const dw = Math.max(1, Math.round(cw * scale));
     const dh = Math.max(1, Math.round(ch * scale));
@@ -335,12 +229,8 @@ export function buildNoteLayerThumb(view: NoteLayerView): HTMLElement {
   return thumb;
 }
 
-// ============================================================================
-// The stack controller — the DOM/wasm half. Injectable loader; the reader
-// falls back to the composite whenever `present` answers null.
-// ============================================================================
+// ---- stack controller (DOM + wasm) ----
 
-/** A presented stack: the payload's effective dims + the live layer views. */
 export interface NoteLayerStack {
   width: number;
   height: number;
@@ -348,40 +238,22 @@ export interface NoteLayerStack {
 }
 
 export interface NoteLayersControllerOptions {
-  /** URL of the decoder wasm. Default `/note-decode.wasm` (the renderer's). */
   wasmUrl?: string;
-  /** Override module loading (tests). Default fetches + instantiates `wasmUrl`. */
   loader?: () => Promise<DecoderExports>;
-  /**
-   * Fetch + decode a page's custom IMAGE template (memoized per hash). The
-   * background layer of an image-template page is drawn from this rather than
-   * `decode_layer`. Absent → an image background renders blank (the ink layers
-   * still stack); wired from the Api by the reader.
-   */
+  /** Image-template fetch (memoized per hash); absent, an image background is blank. */
   getTemplate?: TemplateProvider;
   /**
-   * What the stack sits ON. Default `"#fff"` — the reader's case, where the
-   * stack REPLACES the page render and therefore has to supply the paper that
-   * `decode_page`'s composite base would have.
-   *
-   * Pass `null` when the stack is an OVERLAY on something else, as the PDF
-   * viewer's `.mark` layer is: there the page underneath is the document, and a
-   * white backdrop hides it completely. That failure is invisible in the reader
-   * — white paper over white paper — so it is worth naming rather than leaving
-   * to a caller to override after every `present`.
+   * What the stack sits on. Default white, since in the reader the stack replaces
+   * the composite's paper; pass `null` for an overlay (the PDF `.mark`), where
+   * white would hide the document.
    */
   backdrop?: string | null;
 }
 
 export interface NoteLayersController {
-  /** The stack host — mounted once inside the reader's `.page`, above the
-   *  composite canvas. Hidden while no stack is presented. */
+  /** Mounted once inside the reader's `.page`, above the composite canvas. */
   el: HTMLElement;
-  /**
-   * Decode + mount the stack for the focused page. Returns the stack, or null
-   * on ANY failure/mismatch — the caller then paints the composite. A repeat
-   * call for the same `(key, theme)` is free (the stack is already up).
-   */
+  /** Null on any failure, so the caller paints the composite. Repeat `(key, theme)` is free. */
   present(
     noteId: Id,
     key: string,
@@ -389,62 +261,32 @@ export interface NoteLayersController {
     vos: PageLayer[],
     theme: Theme,
   ): Promise<NoteLayerStack | null>;
-  /** Whether `(key, theme)` is exactly what is on screen — skip the refetch. */
   isPresented(key: string, theme: Theme): boolean;
-  /** The live stack, or null. */
   stack(): NoteLayerStack | null;
-  /** The panel's eye toggle: flip one layer's canvas. View-only, instant. */
   setVisible(index: number, visible: boolean): void;
-  /**
-   * A fresh LIGHT-theme export model decoded from the presented payload (the
-   * on-screen canvases may be dark-inverted). Call `release()` when the export
-   * has consumed the canvases. Null when no stack is up.
-   */
+  /** A fresh light-theme export model; call `release()` once the export is done. */
   exportModel(): Promise<{ model: LayeredExportModel; release: () => void } | null>;
   /**
-   * ONE page's ink, small — the whole authored stack minus its paper, flattened
-   * into a `dst`-sized canvas. For a THUMBNAIL, where the page it annotates is
-   * 120px and a stack of full-resolution canvases is not on offer.
-   *
-   * DELIBERATELY OUTSIDE `present`. That call mounts the stack, holds ONE page
-   * at a time and is what the screen is looking at; driving it per thumbnail
-   * would evict the page the reader is on and re-decode it on the way back. This
-   * decodes, downscales and throws the big pixels away — it touches no state the
-   * screen owns, so a filmstrip and an open page can want different pages of the
-   * same mark at once. It shares the decoder INSTANCE, which is the point: one
-   * wasm module and one linear memory for the viewer, not two.
-   *
-   * WHAT IS DROPPED, and why it matches the page beside it: the BACKGROUND slot
-   * (over a PDF that layer is the device's paper, and the document is the paper —
-   * `pdfViewer.ts`'s `suppressBackground` says the same on screen) and any
-   * DEVICE-HIDDEN record (`present` seeds visibility from the authored flag, so
-   * showing one here would put ink in the strip that is not on the page).
-   *
-   * Null when there is nothing to draw: an unpresentable payload, a module too
-   * old for `decode_layer`, no ink records, or no 2D context. The caller shows
-   * the bare page — a missing overlay is not a broken thumbnail.
-   *
-   * The canvas is the CALLER'S to free (`width = 0`), like every other canvas
-   * this module hands out.
+   * One page's ink, flattened into a `dst`-sized canvas for a thumbnail. Outside
+   * `present` so a filmstrip never evicts the mounted page; shares the decoder
+   * instance. Drops the same records as `inkRecordIndices`. The canvas is the
+   * caller's to free.
    */
   inkRaster(bytes: ArrayBuffer, dst: { width: number; height: number }): Promise<HTMLCanvasElement | null>;
-  /** Drop the stack and its canvases (page change, mode change, teardown). */
   release(): void;
 }
 
-/** Zero a canvas's backing store — frees ~10 MB eagerly rather than at GC. */
+/** Zero a canvas's backing store, freeing ~10 MB eagerly rather than at GC. */
 function zeroCanvas(canvas: HTMLCanvasElement): void {
   canvas.width = 0;
   canvas.height = 0;
 }
 
-/** Paint one decoded layer onto its own canvas (native payload resolution). */
 function layerCanvas(raw: RawDecoded): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
   canvas.width = raw.width;
   canvas.height = raw.height;
   const ctx = canvas.getContext("2d");
-  // happy-dom/jsdom have no 2d context; the canvas still exists and sizes.
   if (ctx) ctx.putImageData(new ImageData(raw.rgba, raw.width, raw.height), 0, 0);
   return canvas;
 }
@@ -463,15 +305,11 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
   let current: NoteLayerStack | null = null;
   let currentKey: string | null = null;
   let currentTheme: Theme | null = null;
-  /** The presented payload, kept for `exportModel`'s fresh light decode — a
-   *  few hundred KB against the stack's tens of MB of RGBA. */
+  /** Kept for `exportModel`'s fresh light decode (small next to the stack's RGBA). */
   let currentBytes: Uint8Array | null = null;
-  /** The presented note id + paired records + page dims — kept so `exportModel`
-   *  can redraw an image background from its template. */
   let currentNoteId: Id | null = null;
   let currentPaired: PairedLayer[] | null = null;
   let currentDims: { width: number; height: number } | null = null;
-  /** Bumps on every present/release; a superseded present discards itself. */
   let gen = 0;
 
   function release(): void {
@@ -488,9 +326,7 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
     currentDims = null;
   }
 
-  /** An image-background layer's canvas: the template, contain-placed on the
-   *  page rectangle (margins transparent — the host paints the paper). Blank
-   *  when the template can't be fetched, so the ink layers still stack. */
+  /** The template contain-placed on the page; blank if unfetchable. */
   async function templateLayerCanvas(
     noteId: Id,
     hash: string,
@@ -508,9 +344,7 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
     return canvas;
   }
 
-  /** One canvas per paired record, in wire order: an image background from its
-   *  template, every other layer from `decode_layer`. Layers paint in the LIGHT
-   *  world (see the composite renderer) — the app theme never inverts them. */
+  /** One canvas per record, in wire order, always in the light world. */
   async function buildCanvases(
     wasm: DecoderExports,
     u8: Uint8Array,
@@ -557,9 +391,6 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
         if (my !== gen) return null; // superseded while the wasm loaded
         if (typeof wasm.decode_layer !== "function") return null; // stale module
 
-        // Enumeration now lives in the wasm decoder (the one SNPG parser); a
-        // module too old to expose it, or a payload the panel can't present,
-        // degrades to the composite.
         const enumerated = enumerateSnpg(wasm, u8);
         if (!enumerated) return null;
         const { records } = enumerated;
@@ -581,7 +412,7 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
           }),
         );
 
-        // Commit: replace whatever was up. `release` bumps `gen`, so re-own it.
+        // `release` bumps `gen`, so re-own it.
         release();
         gen = my;
         current = { width: dims.width, height: dims.height, views };
@@ -591,10 +422,6 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
         currentNoteId = noteId;
         currentPaired = paired;
         currentDims = dims;
-        // The backdrop the CALLER asked for: white paper for a stack that IS
-        // the page (the reader — matching the composite base `decode_page`
-        // emits; notes never invert for dark, see wasm.ts), and none for a stack
-        // laid OVER something, where paper would hide what it is annotating.
         host.style.background = backdrop ?? "";
         for (const v of views) {
           v.canvas.style.display = v.visible ? "" : "none";
@@ -603,9 +430,6 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
         host.hidden = false;
         return current;
       } catch {
-        // Any failure — decode error, OOM, hostile payload — degrades to the
-        // composite. The reader repaints that path; nothing here to unwind
-        // beyond making sure a half-built stack is not left mounted.
         if (my === gen) release();
         return null;
       }
@@ -648,7 +472,7 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
         out = document.createElement("canvas");
         out.width = w;
         out.height = h;
-        const ctx = out.getContext("2d"); // null in happy-dom — degrade, don't throw
+        const ctx = out.getContext("2d"); // null in happy-dom
         if (!ctx) {
           zeroCanvas(out);
           return null;
@@ -659,25 +483,15 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
           return null;
         }
         for (const index of ink) {
-          // ONE LAYER RESIDENT AT A TIME. A payload's layer is the panel's own
-          // ~1404x1872 (10.5 MB of RGBA, and `layerCanvas` holds a second copy
-          // while it blits), so the loop that `present` runs — decode them all,
-          // then stack — is 40 MB of live canvas for a picture that
-          // ends up 120 px wide. Each is reduced and released before the next is
-          // asked for, which puts the peak at one layer whatever the page holds.
+          // One layer resident at a time: decoding them all first would be
+          // ~40 MB of canvas for a 120 px picture.
           const full = layerCanvas(decodeLayerWithExports(wasm, u8, index));
-          // The SHARED quality downscale, for the reason it exists: this is a
-          // ~15x reduction, and one bilinear `drawImage` step at that ratio skips
-          // most source rows — it would drop the thinnest strokes outright and
-          // moire the rest. `buildNoteLayerThumb` reduces the same pixels the
-          // same way for the panel's own previews.
+          // Shared quality downscale; a ~15× bilinear step would drop thin strokes.
           await drawDownscaledInto(ctx, full, w, h, 0, 0);
           zeroCanvas(full);
         }
         return out;
       } catch {
-        // A decode error, a hostile payload, an OOM: the page still stands on its
-        // own, exactly as it does when `present` answers null.
         if (out) zeroCanvas(out);
         return null;
       }
