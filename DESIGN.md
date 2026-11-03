@@ -1,0 +1,470 @@
+# Inkhold design
+
+What the code cannot say for itself: the invariants, the device's behaviour we
+reverse-engineered, and why the system is shaped the way it is. Comments in the
+code stay short and point here (`DESIGN.md §n`) when a rule spans files.
+
+File formats have their own specs: [`parsers/note/note-format.md`](parsers/note/note-format.md)
+and [`parsers/spd/spd-format.md`](parsers/spd/spd-format.md).
+
+## 1. Shape
+
+- **One binary, one port, three faces.** Device sync API, browser control-plane
+  API and the static web app, kept apart by caller scope (`.device`,
+  `.controlplane`, `.pending`, `.public`); crossing a scope is a 403.
+- **The server moves bytes; the browser does the work.** Page rendering, PDF
+  rendering, search indexing and querying, and export all run in the browser
+  (WASM decoders). The server never rasterises.
+- **The budget is a Raspberry Pi 1 B+:** one ARMv6 core, ~50 MB RSS (measured as
+  `RssAnon`; `VmRSS` also counts the mmapped DB and binary). Every design choice
+  below that looks unusual is usually this budget. No 64-bit atomics on ARMv6:
+  counters are `u32`/`usize`.
+- **A household, not a tenant fleet:** a handful of devices and browsers.
+  Single SQLite file, single writer.
+
+## 2. Storage
+
+### 2.1 Invariants
+
+- Every file operation is scoped by `user_id`. This is the core security
+  guarantee; `Files.get` is the ownership boundary for every live read and is
+  never relaxed. Narrow separate reads exist for the bin (`getTrashed`) and for
+  device retries (`getAnyState`).
+- Blobs are content-addressed by md5. Write order: stream to a temp file while
+  hashing → fsync → verify the expected md5 → atomic rename to `<ab>/<md5>`. A
+  name is its hash, so an existing blob is known-good and never overwritten.
+- **Blob before commit, GC after commit.** Multi-table mutations run in one
+  transaction; the blob (and any derived file) is on disk before the commit that
+  references it and is removed only after the commit that drops the last
+  reference. A crash can orphan a blob (harmless, swept), never leave a row
+  pointing at missing bytes.
+- `reapIfUnreferenced` is the single GC gate: `blobs.refcount = 0` (live
+  `files` rows) and no `file_history` row.
+- `parent_id` cascades, but cascades cannot decrement refcounts: anything a
+  delete reaches must be in the decref set first (`releaseIds`, `purgeUser`).
+- md5 lengths are checked where a key becomes a path (`finalRel`); offsets read
+  from device-written metadata are hostile (`readRange` bounds every read).
+- The server never holds a whole file: `blobstore.chunk_len` (64 KB) windows,
+  compile-time because buffers live on the 1 MiB connection stacks (§3.1).
+
+### 2.2 Recycle bin
+
+- Two stages. `trash` sets `deleted = 1` and **holds every blob reference** —
+  nothing is released or refunded. `purge`/`emptyBin`/`sweepBin` hard-delete and
+  are the only decref callers besides account deletion.
+- So `restore` is a flag flip, not a re-index. Restore also revives the trashed
+  ancestor chain and a folder's trashed descendants, and auto-renames on
+  collision (`freeName`: lowest free ` (n)`, deterministic so replays converge).
+- `trash` is idempotent: the device deletes one entity per request, children
+  first, with retries. A retry keeps the first `deleted_at` and does not bump the
+  sync version.
+- `deleted_path` freezes the path at trash time, so the bin listing survives
+  later ancestor renames.
+- Retention is not retroactive: an entry expires at
+  `max(trashed_at, window_changed_at) + window`, so shortening the window never
+  purges a month of notes at once.
+
+### 2.3 Quota
+
+- `used_bytes` sums the **distinct blobs** a user's rows keep alive, not file
+  sizes: two identical files are one blob. Charge on a user's first reference,
+  refund on their last. Dedup across users is not a discount.
+- A reference is anything keeping bytes on disk: `files` rows, live or trashed,
+  and `file_history` rows. Trashed files keep charging (refunding at trash time
+  would let cycling the bin exceed real usage).
+- Under quota pressure an edit evicts the user's oldest history-only versions
+  rather than being refused; refusal mid-sync is worse than losing history.
+- Refunds are computed from the rows after all writes (`settleRefund`), never
+  predicted.
+
+### 2.4 Version history
+
+- On supersede, the `file_history` row is written before the decref, in the
+  same transaction, so the GC gate keeps the old blob.
+- Bounds: per-file `keep` (the owner's policy, ceiling `@max(keep, max_keep)`),
+  then install-wide `max_bytes`, enforced by evicting **the writing user's**
+  oldest versions only. `keep = 0` disables versioning.
+- Restoring a version goes through the upload supersede path, so the displaced
+  current is retained: restore is undoable.
+
+### 2.5 `.mark` pairs
+
+- The device writes a document's annotations to `<document full name>.mark`
+  (extension appended). A pair lists as one row, the document's, which carries
+  `annotationsId`.
+- The rule is relational, not an extension list: same folder, exact stem, no
+  chains (`a.mark.mark`), neither half a folder, same `deleted` state. One SQL
+  rule (`mark_pairing.zig`) is shared by every listing; `pairOf` is the one
+  entry point for mutations, so what a listing folds is exactly what a
+  trash/restore/move/purge carries.
+- A pair moves and renames as one. Ink is never composited onto a trashed
+  document (trashed reads select `NULL` for the mark).
+
+## 3. Concurrency
+
+### 3.1 Threads and locks
+
+- One detached thread per connection (keep-alive, SSE, the device's Socket.IO),
+  capped by `max_connections` (96). Stacks are 1 MiB, bisected empirically
+  against a live 32 MB upload; re-bisect if the upload path's frames change.
+- One shared SQLite writer connection, serialised by `db_lock` around the whole
+  handler. `std.Io.Mutex` is not reentrant: anything that takes `db_lock`
+  itself (`indexSnapshot`, `pending.Pulse`) must not be called inside a
+  `lockDb` bracket.
+- **Lock order:** `Files.thumb_repair` first, `db_lock` second. `Pulse.mutex`
+  is held across its recount including `db_lock`; nothing takes them reversed.
+- Once a response head is sent, a failure returns without `body.end()` (it
+  asserts the full `Content-Length` and panics in safe builds); the closed
+  connection is the truncation signal.
+
+### 3.2 Route flags
+
+- `manual_db_lock`: streaming routes (`/oss/get`, `/oss/put`, page bytes, raw
+  file, thumbnails, uploads, SSE) lock only around their own DB touches so a
+  multi-MB transfer never holds the global lock. Their plans own inline copies
+  so nothing borrows SQLite statement memory past the unlock.
+- `read_only`: runs on a pooled `SQLITE_OPEN_READONLY` connection without
+  `db_lock`. The flag is a claim about the whole call path, not the HTTP method
+  (device POSTs pure reads; self-healing listings write, so they stay on the
+  writer). Defaults to false. An integration audit probes every flagged route on
+  a real reader and on the writer with an update hook armed.
+- Banned pairs, asserted at comptime: `read_only` + `manual_db_lock`, and
+  either one + `require_admin` (elevation renewal is an UPDATE on the automatic
+  path).
+
+### 3.3 Reader pool
+
+- WAL allows many readers and one writer; one shared connection threw that away
+  (a 3.4 s search on the Pi blocked everything). Readers win even on one core,
+  through preemption.
+- Borrow per operation, never per request: SSE streams live for minutes.
+  Exhaustion returns null and the caller falls back to the writer under
+  `db_lock` — the pool is an optimisation, its size (3) is tuning.
+- Readers open after the writer has created and migrated the DB. The
+  per-connection `temp` schema stays writable on a reader (used for the term
+  fold scratch).
+
+### 3.4 Deferred work
+
+- Indexing on the upload path held the connection for the whole derive (48–60 s
+  for a 16 MB `.txt` on the Pi), so post-upload work runs on one background
+  worker at nice 19.
+- **The job store is a query, not a queue.** Each tenant is a FROM/WHERE naming
+  blobs that still owe work. That buys restart safety, idempotence (all writes
+  are upserts) and live priority, with no claims or status column.
+- Tenant shape: re-check under the lock → derive off the lock → verdict under
+  the lock. **The derived file is the fact**: files are written before the
+  verdict, never the reverse, or a crash marks an underived blob done for ever.
+- A tenant that can never succeed records a verdict (over-cap, broken PDF, no
+  text), or it is retried for ever. Each blob is offered at most once per
+  drain; a 30 s idle tick paces retries.
+- The tenant FROM/WHERE fragments are shared by the worker and the "indexing
+  pending" count (`pending.zig`), which may only add bounds, so the two cannot
+  disagree. Signal the worker after COMMIT, never inside the transaction.
+
+## 4. Device protocol
+
+Reverse-engineered against a Supernote Nomad; facts here were observed on
+hardware unless marked otherwise.
+
+- **Failures are HTTP 200 with a coded envelope** (`QUOTA_EXCEEDED`, …). A
+  4xx/5xx reads to the tablet as a network failure mid-sync.
+- **Never 401 on byte endpoints**: a 401 logs the device out. A bad download
+  capability is 403.
+- **Never 404 from delete/move/copy/create**: a 404 aborts the sync (or makes it
+  re-download deleted notes). Unknown, foreign, already-trashed ids answer
+  success with the payload omitted — which also hides other users' id spaces.
+- `delete_folder_v3` is the only delete, for files too, one entity per request,
+  children first, with retries. `move_v3`/`copy_v3` carry a full destination
+  path including the filename; copy is used for conflict resolution
+  (`…_CONFLICT_<ts>.note`). Without `create_folder_v2` empty folders never sync.
+- Sync is hash-based and stateless: the device pulls `query/summary/hash`,
+  diffs md5s, then fetches details. Paths are computed in SQL from a folder-only
+  recursive CTE; whole-library materialisation was a 3–5× regression.
+- **Login:** `password = sha256_hex(md5_hex(pw) + randomCode)`. The kind of
+  client comes from `equipment` (1 web, 2 app, 3 terminal), not `equipmentNo`:
+  the Android app logs in with no serial. Device logins get the token in the
+  body.
+- **`bindEquipment` arrives without a token**: the Nomad sends it a few ms after
+  login, before it has stored the token. It is accepted only when a live device
+  session for that serial belongs to the named account. File calls usually
+  arrive first and auto-bind the serial with a placeholder name; bind replaces
+  the placeholder. Its `totalCapacity` is the device's own storage (KB) and is
+  ignored — a device cannot raise its own quota.
+- Pre-login `equipment/unlink` with no caller is a no-op success: a real unbind
+  would let any LAN client log out a device by its printed serial.
+- **Downloads:** `download_v3` mints a `?t=` token (128-bit, ~5 min,
+  multi-use for retries and Range) because the GET carries no access token.
+  `/oss/get` is raw bytes with a `Content-Disposition` filename — without it the
+  device cannot materialise the note.
+- **Uploads:** `upload/apply` binds path and name (authoritative) → `/oss/put`
+  (multipart, optionally chunked; the device uploads parts sequentially) →
+  `upload/finish` (md5 must equal `content_hash`; the on-disk size is charged,
+  not the declared one). The cap is per session, not per part, and retried parts
+  are credited back.
+- `get_space_usage` is bytes (confirmed on screen); `user/query.totalCapacity`
+  is bytes by assumption.
+- The device's To-Do/Digest data uses a separate protocol, not implemented.
+
+## 5. Auth and credentials
+
+- The protocol needs `md5(pw)` recoverable, so no bcrypt/argon2: `md5(pw)` is
+  stored encrypted (XChaCha20-Poly1305, per-row nonce) under `cred.key`, a
+  32-byte 0600 file outside the DB. A stolen backup yields nothing; losing the
+  key forces every password reset. Only `serve` may create the key.
+- The browser bundles MD5/SHA-256: `crypto.subtle` exists only in secure
+  contexts and the LAN deployment is plain HTTP. Plaintext never leaves the
+  browser.
+- Session tokens are stored as SHA-256 only. Lifetimes: device ~2 years, no
+  idle (revoked by unlink); control plane 14 days idle / 90 absolute; pending
+  (forced first-login change) 15 minutes.
+- Control-plane cookie is `HttpOnly; SameSite=Strict` (`Secure` under TLS);
+  that is the CSRF defence, deliberately the only one.
+- Admin elevation re-runs the login challenge (nothing replayable over HTTP).
+  15 min sliding, 60 min ceiling, stored on the session row. A lapse is 428
+  `ELEVATION_REQUIRED`, not 401/403, which the SPA reads as a dead session.
+  Every refusal is `INVALID_CREDENTIALS` so admins cannot be enumerated.
+- Password-oracle rate limits are keyed by account, not IP: a household shares
+  one address.
+- Temporary passwords: one generator (4 diceware words), server-chosen so no
+  admin knows a housemate's password, shown once, always must-change.
+- Account routes take no target id (the session is the subject); admin routes
+  always name `:id`. Both faces call the same service functions with
+  `actor`/`target`, so one ownership decision covers both.
+
+## 6. Security rules for untrusted content
+
+- **No existence oracles.** Blobs are deduplicated across the household, so
+  only a `files` row says whose bytes are whose. Foreign ids and md5s answer
+  exactly like missing ones (404, byte-identical body).
+- `/file/{id}` serves inline only an allowlist (png, jpg, webp, gif, pdf), with
+  `nosniff`; everything else is an attachment. SVG/HTML from a device would be
+  stored XSS.
+- Link schemes are allowlisted (http, https, mailto) in the server, the PDF
+  shim and the browser, because the exporter reads the same endpoints.
+- `Content-Disposition` names are device-authored: allowlisted quoted form plus
+  RFC 5987 `filename*`.
+- A `.spd` is an attacker-supplied SQLite database: it is copied and
+  deserialised read-only into `:memory:`, never opened as a file.
+- Decoders bound every size with checked arithmetic (wasm32 `usize` is 32-bit
+  and `ReleaseSmall` has no overflow traps).
+
+## 7. Schema and migrations
+
+- v1 is the verbatim schema of a long-way-migrated install, so fresh and
+  migrated databases are byte-identical (a test compares `sqlite_master`).
+  Never edit `ddl_v1`; additive changes live in their own step.
+- A data step that changes a shipped version's outcome gets a new version — a
+  step folded into an applied version never runs. `steps.len == version` is
+  checked at comptime.
+- Each step and its `user_version` stamp is one `BEGIN IMMEDIATE` transaction;
+  a partial step once bricked boot.
+- Verdict columns (`pdf_probe`, `pdf_text`, `txt_index`, `has_ink`) are
+  nullable, NULL meaning "not looked at yet" — exactly what the worker's tenants
+  select (§3.4).
+- Some indexes are load-bearing by plan (`files_live_name` is named in an
+  `INDEXED BY`; others are pinned by VM-step tests).
+
+## 8. Indexing and derived data
+
+### 8.1 `.note` index
+
+- Parse unlocked, write locked: parsing is pure CPU over addressed ranges
+  (kilobytes allocated for a 40 MB note); rows are written in the caller's
+  transaction.
+- Rows are keyed by blob md5, so they are never stale and are shared by every
+  deduped file; any read joins through `files` for ownership.
+- Self-healing, no backfill migrations: a missing row or one at an old
+  `index_version` is re-parsed on read. Concurrent heals are harmless (upserts).
+- Landscape pages (`ORIENTATION = 1090`) store their raster natively landscape;
+  effective dimensions are stored per page. Wrong width shears silently.
+
+### 8.2 `index_version`
+
+The browser caches derived text under `(md5, index_version)`. Bump it **only**
+when what that key names changes (the derived `terms/` and `text/` files). A
+bump re-derives every document. A new column with unchanged derived bytes does
+not bump (it heals through a tenant instead).
+
+### 8.3 Derived stores
+
+- `terms/` and `text/` files carry `index_version` in their name; a DB column
+  may cache existence but is never the authority. A crash between writing the
+  new version and retiring the old leaves both, which is safe.
+- Stored as raw-deflate fragments with CRC and length up front, `flush()`ed
+  (no BFINAL) so they concatenate (§10).
+- Thumbnails are not blobs: keyed by source md5 so they die with it. fsync
+  before rename even for a cache (ext4 can persist a zero-length file).
+- The server only serves images files already carry (`.spd` thumbnail, a
+  `.note` user cover); covers are located at index time and streamed, never
+  buffered.
+
+### 8.4 Per format
+
+- **`.note`:** text comes from the device's own recognition (`RECOGNTEXT`, no
+  OCR), derived at upload. `has_ink` is tri-state (NULL = unread layer); the
+  background never counts, a hidden layer does.
+- **PDF:** all MuPDF calls are in C (`fz_try` is setjmp/longjmp; a Zig frame in
+  between is UB). One tenant does probe then text, because each blob is offered
+  once per drain. The text pass caps MuPDF's store at 4 MB and reopens every 32
+  pages — what makes the 50 MB budget close. Page shape is `fz_bound_page`,
+  never raw `/MediaBox`. Private Use Area glyphs become spaces (the tokenizer
+  treats them as word characters). Capped at 5,000 pages, recorded as truncated.
+- **`.txt`:** paragraph segments (blank-line split, ~8 KB cap), addressed by
+  byte range into the raw blob; search AND-semantics are per paragraph.
+- **`.spd`:** parsed once per blob; a parse failure is a memoised
+  `indexable = 0`.
+
+## 9. Serving and caching
+
+### 9.1 Pages
+
+- A page response is planned from the index alone (`pagePlan`: exact
+  `Content-Length`, ETag = stored content hash) and then streamed from the blob
+  with the lock released. Peak heap stays under one chunk.
+- The page `?v=` hash covers layer bitmaps only; recognition text and template
+  links have their own hashes because they change without the strokes changing.
+- SNPG (our page envelope) is versioned in band; bumping it must also move the
+  `?v=` domain.
+
+### 9.2 Cache rule
+
+`immutable` only when the cache key covers everything that can change. A
+content hash covers opaque bytes; it never covers a JSON struct serialised
+around them (page text was once immutable and pinned responses without `words`
+for a year). Struct-serialised bodies are `no-cache`. `index.html` is
+`no-cache`; `/assets/*` is immutable.
+
+### 9.3 Live channel
+
+SSE on `/api/controlplane/events` carries `event: sync` (the per-user sync
+version, polled server-side every 500 ms) and `event: index` (pending count).
+Held streams are admission-controlled (16 total, 4 per user) and degrade to a
+one-shot frame plus `retry:`, never a 503.
+
+## 10. Search
+
+- **There is no server search.** The browser downloads per-document derived
+  text and answers every query from a local FTS5 index in `sqlite-core.wasm`.
+  The server-side FTS index was removed: it held `db_lock` for 98 s per
+  whole-library ingest on the Pi.
+- **One tokenizer.** Server and browser share `schema.fts_tokenizer`
+  (`unicode61 remove_diacritics 2`); query text goes to the wasm raw. Any
+  folding or escaping in JS would be a second tokenizer.
+- **The manifest has no tombstones.** It is the caller's complete live document
+  set (binary `SMAN`: md5, tier, derivation state, id, time, version) and
+  replaces the client's set wholesale; absence is the only deletion. So any
+  LIMIT or extra filter is a correctness bug, and truncation is detectable
+  (fixed-width row count up front). ETag is the body's md5.
+- **Derivation state** separates "derived and empty" from "not derived yet";
+  caching the latter's emptiness would make a document unsearchable for ever.
+- **Fetch:** the client sends a `want=` bitmap over manifest positions (LSB
+  first, canonical base64url) and receives one stitched gzip stream. It must be
+  one gzip member: Chromium and curl decode only the first member of a
+  concatenated stream and report success (Node decodes all, so Node tests lie).
+  Missing fragments are skipped, so the stream is chunked and `no-store`.
+- Golden vectors (`manifest_golden.bin`, `want_golden.txt`) are checked by both
+  the Zig encoder and the TS decoder; never regenerate one to make a side pass.
+- **Typo ladder** (in-wasm, Damerau-Levenshtein): only when the exact query has
+  zero hits — the corpus is misspelt handwriting recognition. English-oriented
+  stemmers/spellfix were rejected (the corpus is Portuguese).
+
+## 11. Browser app
+
+### 11.1 Seams
+
+`main.ts` wires four seams; each has a real and a fake implementation (dev and
+e2e run on the fakes, `?real`/`?fake` override):
+
+| Seam | Real | What it owns |
+|---|---|---|
+| `Api` (`api/types.ts`) | `createHttpApi()` | the wire contract; `api/fake.ts` is the reference behaviour |
+| `NoteRenderer` (`render/types.ts`) | `createWasmRenderer()` | SNPG → RGBA in `note-decode.wasm` |
+| `RenderCache` (`cache/types.ts`) | `renderCache.ts` | rendered pixels (§11.4) |
+| `LiveChannel` (`sync/types.ts`) | `live.ts` (SSE) | freshness (§9.3) |
+
+Golden wire fixtures in `webapp/tests/fixtures/wire/` pin the server's JSON
+through the client normalisers (`INK_UPDATE_WIRE_FIXTURES=1 zig build test`
+regenerates them).
+
+### 11.2 Routing
+
+Hash routing (the server has no SPA fallback). Every place has a URL;
+navigation pushes, adjustments (page turns, find queries) replace, so Back
+leaves a note in one step. URL pages are one-based. Trashed files live under
+`#/bin/note/:id` because live routes 404 them; past versions are addressed by an
+md5 prefix.
+
+### 11.3 Viewers
+
+Four viewers share one four-method `Viewer` interface (`el`/`open`/`hide`/
+`destroy`) and compose shared services (viewer chrome, toolbar, side panel,
+page index, layers panel, thumbnails, virtual list) instead of inheriting.
+Reach for those before writing a private copy.
+
+A PDF is its own viewer: its pages share resources through the xref, so the
+document is opened once in a worker (MuPDF, ~5 MB of wasm, one session for the
+viewer's life), streamed by Range requests through a 32 KB block cache. A PDF
+has no version history of its own; its `.mark` does.
+
+### 11.4 Caches
+
+- L0 app shell: fingerprinted, immutable. L1 listing/metadata: the only layer
+  that revalidates, stale-while-revalidate gated on the sync version. L2 page
+  bytes: immutable under `?v=`, browser HTTP cache. L3 rendered pixels:
+  `RenderCache`, keyed by (content hash, size tier, theme), never a source of
+  truth.
+- **One persistent pixel store**, `sn-thumbs`, shared by the render cache and
+  thumbnails under one byte budget. Thumbnails persist as WebP (raw RGBA was
+  20–40× larger); reader pages stay in memory.
+- Other IndexedDB caches each have their own database, so adding a store never
+  needs a version bump another module's open connection would block. All
+  degrade to no-ops when storage is unavailable.
+- Never paint an off-screen page: every canvas renders lazily through
+  `IntersectionObserver`; a theme toggle repaints only what is visible.
+
+### 11.5 Adding a file type
+
+A file type is a row in nine decisions. Miss one and the feature degrades
+silently.
+
+| # | Where | Decides |
+|---|---|---|
+| 1 | `core/fileKind.ts` — `fileKind()` | which stage renders it |
+| 2 | `core/fileKind.ts` — `canPreviewHistory()` | whether version preview is offered |
+| 3 | `core/fileKind.ts` — `UPLOAD_ACCEPT` | whether the web may upload it |
+| 4 | `render/thumbnails.ts` — `strategyFor()` | which thumbnail strategy draws its tile |
+| 5 | `pages/galleryCards.ts` — `FACADE_THUMB_TYPES` | whether the card asks for a tile at all |
+| 6 | `pages/library.ts` — `viewerFor()` | which viewer opens it |
+| 7 | `api/fake.ts` | a fixture, or no e2e can reach it |
+| 8 | `backend/services/controlplane.zig` — `fileTypeFor()` | the type the server reports (parser-verified, not the extension) |
+| 9 | `backend/handlers/controlplane.zig` — `inline_types` | inline or attachment |
+
+4 and 5 must agree; `thumbnails.test.ts` asserts it for every type. 8 is why a
+`.mark` (a thin `.note`) reports as `"note"`.
+
+### 11.6 Export
+
+- Client-side, always: native resolution, light theme, bypassing the render
+  cache. Download-only — exports never enter the device's `EXPORT/` folder.
+- The PDF writer is dependency-free and streaming: it pulls one page at a time
+  and returns a Blob of chunks, so a whole notebook peaks at about one page.
+- An invisible text layer only at a **verified** mm scale (`pxPerMm`, an
+  allowlist of measured hardware; only `N6`, the Nomad, today). A missing text layer is
+  obvious; a mis-scaled one is silently wrong.
+- Annotated PDFs export as an incremental update over the original bytes
+  (keeping forms, bookmarks, annotations); ink is drawn into page content, not
+  as an annotation.
+
+### 11.7 WASM rules
+
+- Any call can grow linear memory and detach `memory.buffer`: create views after
+  the producing call, never keep them, copy out before the next call.
+- `sqlite-core.wasm` serves both the `.spd` viewer and the search index (SQLite
+  is most of its size). It runs on a null VFS, so `SQLITE_TEMP_STORE=3` is
+  mandatory and checked at open.
+- MuPDF needs the wasm exception-handling proposal: the browser floor is about
+  Chrome 95 / Firefox 131 / Safari 18.4. Every export that can suspend on
+  `ink.host_read` must be wrapped for JSPI.
+- MuPDF is a pinned, unpatched dependency; upstream bugs are worked around by
+  excluding sources and supplying stubs (`load-jpx.c`), not by patching.

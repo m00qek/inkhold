@@ -248,10 +248,10 @@ certificate to get started.
 
 ## For developers
 
-The internals — how the single binary serves three faces on one port, the
-content-addressed blob store, the client-side WASM rendering pipeline, and the
-`.note`/`.spd` parsers — are documented in comments beside the code they explain.
-The layout:
+[`DESIGN.md`](DESIGN.md) holds the invariants, the reverse-engineered device
+protocol and the reasoning behind the architecture; the file formats are
+specified in `parsers/note/note-format.md` and `parsers/spd/spd-format.md`. The
+layout:
 
 ```
 backend/    the Zig server — one binary, device sync + browser API + static host
