@@ -7,6 +7,24 @@ import { challengeHash, md5Hex } from "./crypto";
 import { historyFileUrl } from "../core/fileKind";
 import { parsePageLinks } from "../render/pdfWire";
 import type { Api, PageLinks } from "./types";
+import { ApiError, NameTakenError, UploadRefusedError, type UploadConflictMode } from "./errors";
+import {
+  type Envelope,
+  rawFetch,
+  request,
+  statusError,
+  TIMEOUT_AMBIGUOUS,
+  UPLOAD_RESPONSE_MS,
+  UPLOAD_STALL_MS,
+} from "./request";
+import {
+  fileTypeFromName,
+  normalizeAspect,
+  normalizeEntry,
+  normalizePage,
+  normalizeVersion,
+  normalizeWords,
+} from "./normalize";
 import type {
   Entry,
   FileHistory,
@@ -14,210 +32,25 @@ import type {
   Hash,
   Id,
   Listing,
-  LayerSlot,
   NoteMeta,
-  PageLayer,
   PageRef,
   PageText,
   RestoredVersion,
   WordBox,
 } from "../core/types";
 
-interface Envelope {
-  success: boolean;
-  errorCode?: string;
-  errorMsg?: string;
-}
-
-/** A failed API call. `code` is the server's `errorCode` (or a synthetic one). */
-export class ApiError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-    this.name = "ApiError";
-  }
-}
-
-/** A rename clash (409), a subclass so the rename dialog can catch it by type. */
-export class NameTakenError extends ApiError {
-  constructor() {
-    super("NAME_TAKEN", "That name's already used here.", 409);
-    this.name = "NameTakenError";
-  }
-}
-
-/** Why an upload was refused. The client pre-flight produces the same reasons, so both read alike. */
-export type UploadRefusal =
-  /** 413 — the file would take the account over its quota. */
-  | "quota"
-  /** 415 — the extension is outside the accept list; the device could not open it. */
-  | "type"
-  /** 400 — an empty or unusable filename. */
-  | "name";
-
-/**
- * `rename` (the default) picks a free name; `replace` supersedes the occupant,
- * whose blob stays restorable in `file_history`. Send `replace` only when the
- * user chose it.
- */
-export type UploadConflictMode = "rename" | "replace";
-
-/** A refused upload, caught by type in the queue. A fact about the file, so never retried. */
-export class UploadRefusedError extends ApiError {
-  constructor(
-    readonly reason: UploadRefusal,
-    status: number,
-  ) {
-    super(
-      reason === "quota" ? "QUOTA_EXCEEDED" : reason === "type" ? "UNSUPPORTED_TYPE" : "INVALID_NAME",
-      "That file wasn't accepted.",
-      status,
-    );
-    this.name = "UploadRefusedError";
-  }
-}
-
-/** Raised on HTTP 429. `retryAfterSeconds` comes from the `Retry-After` header. */
-export class RateLimitError extends ApiError {
-  constructor(readonly retryAfterSeconds: number | null) {
-    super("RATE_LIMITED", "Too many attempts. Wait a moment and try again.", 429);
-    this.name = "RateLimitError";
-  }
-}
-
-// --- request budgets ---------------------------------------------------------
-// These guard against a stall, not slowness: a stalled connection never rejects,
-// but a 200 MB PDF to a Pi may take minutes. Hence tiers. The SSE stream is
-// exempt; it has its own heartbeats.
-
-/** A control-plane GET: small responses. Past this, it is not coming. */
-const CONTROL_TIMEOUT_MS = 15_000;
-
-/** A mutation may have applied before its answer was lost: never auto-retry, never claim it failed. */
-const MUTATION_TIMEOUT_MS = 30_000;
-
-/**
- * Bytes: payloads, raw files, thumbnails. Only a backstop against the infinite
- * case; a total cap cannot tell a stall from a slow success.
- */
-const BYTES_TIMEOUT_MS = 300_000;
-
-/** An upload is bounded by silence (no `upload.onprogress` bytes), never by total time. */
-const UPLOAD_STALL_MS = 30_000;
-
-/** After the last byte, progress stops while the server hashes, so switch to a cap on the answer. */
-const UPLOAD_RESPONSE_MS = 60_000;
-
-const TIMEOUT_MESSAGE = "The server is taking too long to answer. Check your connection and try again.";
-/** A mutation that timed out MAY HAVE APPLIED. Never say it failed. */
-const TIMEOUT_AMBIGUOUS =
-  "The server didn't answer in time, so we don't know whether that finished. Reload to see where things stand.";
-
-/**
- * Aborts when `caller` does or `ms` elapses; run `done()` in a `finally`. Not
- * `AbortSignal.timeout`: the timer must be clearable (hundreds of thumbnail
- * fetches), and `timedOut` must be readable since `fetch` rejects identically.
- */
-function withTimeout(caller: AbortSignal | undefined, ms: number) {
-  const ctl = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    ctl.abort();
-  }, ms);
-  const onCallerAbort = (): void => ctl.abort();
-  caller?.addEventListener("abort", onCallerAbort);
-  if (caller?.aborted) ctl.abort();
-  return {
-    signal: ctl.signal,
-    /** True only when WE aborted it, so a caller's own cancel is not a timeout. */
-    timedOut: () => timedOut,
-    done: () => {
-      clearTimeout(timer);
-      caller?.removeEventListener("abort", onCallerAbort);
-    },
-  };
-}
-
-/** The bytes budget for whole-blob readers that own their `fetch`. Run `done()` in a `finally`. */
-export function bytesBudget(caller?: AbortSignal): { signal: AbortSignal; done: () => void } {
-  const b = withTimeout(caller, BYTES_TIMEOUT_MS);
-  return { signal: b.signal, done: b.done };
-}
-
-type Method = "GET" | "POST" | "PUT" | "DELETE";
-
-/**
- * `signal` goes straight to `fetch`, the only way a superseded request frees
- * one of the browser's ~6 connections per origin. An abort lands as `NETWORK`,
- * which the aborting caller never sees.
- */
-async function request<T = unknown>(
-  method: Method,
-  path: string,
-  body?: unknown,
-  signal?: AbortSignal,
-): Promise<T & Envelope> {
-  // A GET is cheap to lose and safe to repeat; a mutation gets room and an honest message.
-  const mutating = method !== "GET";
-  const budget = withTimeout(signal, mutating ? MUTATION_TIMEOUT_MS : CONTROL_TIMEOUT_MS);
-  // `done()` on every path: an armed timer per request leaks on busy surfaces.
-  try {
-    let res: Response;
-    try {
-      res = await fetch(path, {
-        method,
-        credentials: "same-origin",
-        headers: body === undefined ? undefined : { "content-type": "application/json" },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: budget.signal,
-      });
-    } catch {
-      if (budget.timedOut()) {
-        throw new ApiError("TIMEOUT", mutating ? TIMEOUT_AMBIGUOUS : TIMEOUT_MESSAGE, 0);
-      }
-      throw new ApiError("NETWORK", "Can't reach the server. Check your connection and try again.", 0);
-    }
-
-    if (res.status === 429) {
-      const header = res.headers.get("Retry-After");
-      const secs = header ? Number.parseInt(header, 10) : NaN;
-      throw new RateLimitError(Number.isFinite(secs) ? secs : null);
-    }
-
-    // Before 401/403: the session is valid, just not recently elevated. Treated as
-    // UNAUTHORIZED it would sign the user out instead of showing the gate.
-    if (res.status === 428) {
-      throw new ApiError("ELEVATION_REQUIRED", "Confirm your password to continue.", 428);
-    }
-
-    if (res.status === 401 || res.status === 403) {
-      throw new ApiError("UNAUTHORIZED", "Your session has ended. Sign in again.", res.status);
-    }
-
-    let data: (T & Envelope) | null = null;
-    try {
-      data = (await res.json()) as T & Envelope;
-    } catch {
-      // Some endpoints (/api/version) return non-JSON.
-      if (!res.ok) throw new ApiError("SERVER", "The server returned an unexpected response.", res.status);
-      return {} as T & Envelope;
-    }
-
-    if (data && data.success === false) {
-      throw new ApiError(data.errorCode ?? "ERROR", data.errorMsg ?? "Something went wrong.", res.status);
-    }
-    if (!res.ok) {
-      throw new ApiError("SERVER", "The server returned an unexpected response.", res.status);
-    }
-    return data;
-  } finally {
-    budget.done();
-  }
-}
+export {
+  ApiError,
+  NameTakenError,
+  RateLimitError,
+  UploadRefusedError,
+  dispatchApiFailure,
+  type ApiFailureSink,
+  type UploadConflictMode,
+  type UploadRefusal,
+} from "./errors";
+export { bytesBudget, rawFetch } from "./request";
+export { fileTypeFromName, normalizeEntry, normalizeLayers, normalizePage } from "./normalize";
 
 export interface LoginResult {
   /** A first-login "pending" session that can only reach change-password. */
@@ -302,197 +135,6 @@ export const api = {
 // JSON here is raw VOs, no `{success}` envelope, so `request()` passes it through.
 // Page bytes are binary and bypass `request()`; the immutable `?v={hash}` URL
 // makes them browser-HTTP-cached.
-
-function statusError(status: number): ApiError | null {
-  if (status === 428) {
-    return new ApiError("ELEVATION_REQUIRED", "Confirm your password to continue.", 428);
-  }
-  if (status === 401 || status === 403) {
-    return new ApiError("UNAUTHORIZED", "Your session has ended. Sign in again.", status);
-  }
-  if (status === 429) return new RateLimitError(null);
-  if (status === 404) {
-    // A stale `?v=`: the caller should refetch the note metadata for new page hashes.
-    return new ApiError("STALE_PAGE", "This page is out of date. Reopening…", 404);
-  }
-  if (status >= 400) return new ApiError("SERVER", "The server returned an unexpected response.", status);
-  return null;
-}
-
-/** Fetch for non-JSON bodies with `request()`'s error taxonomy; returns an `ok` Response. */
-export async function rawFetch(url: string, signal?: AbortSignal): Promise<Response> {
-  // The bytes budget: large payloads must not die for being large.
-  const budget = withTimeout(signal, BYTES_TIMEOUT_MS);
-  let res: Response;
-  try {
-    res = await fetch(url, { credentials: "same-origin", signal: budget.signal });
-  } catch {
-    if (budget.timedOut()) throw new ApiError("TIMEOUT", TIMEOUT_MESSAGE, 0);
-    throw new ApiError("NETWORK", "Can't reach the server. Check your connection and try again.", 0);
-  } finally {
-    // Cleared once the response lands; the caller reads the body itself.
-    budget.done();
-  }
-  const err = statusError(res.status);
-  if (err) throw err;
-  if (!res.ok) throw new ApiError("SERVER", "The server returned an unexpected response.", res.status);
-  return res;
-}
-
-/**
- * The failures a view must act on rather than swallow; everything else stays
- * non-fatal and the view keeps its last good paint.
- */
-export interface ApiFailureSink {
-  /** Session gone (401/403): re-authenticate. */
-  onSessionExpired(): void;
-  /** A `?v=` 404'd: refetch whatever owns that hash (meta or listing). */
-  onStalePage?(noteId: Id, page: PageRef): void;
-  /** 428: the session is fine; open the re-confirm gate and retry on success. */
-  onElevationRequired?(): void;
-}
-
-/** Route a caught error to `sink`; true when actionable. Non-`ApiError` throws never are. */
-export function dispatchApiFailure(sink: ApiFailureSink, e: unknown, noteId?: Id, page?: PageRef): boolean {
-  if (!(e instanceof ApiError)) return false;
-  if (e.code === "UNAUTHORIZED") {
-    sink.onSessionExpired();
-    return true;
-  }
-  if (e.code === "ELEVATION_REQUIRED" && sink.onElevationRequired) {
-    sink.onElevationRequired();
-    return true;
-  }
-  if (e.code === "STALE_PAGE" && sink.onStalePage && noteId !== undefined && page !== undefined) {
-    sink.onStalePage(noteId, page);
-    return true;
-  }
-  return false;
-}
-
-/**
- * Fill in the optionals the server omits (`emit_null_optional_fields = false`).
- * `textHash` is absent on pages without recognized text.
- */
-export function normalizePage(p: PageRef): PageRef {
-  return {
-    index: p.index,
-    hash: p.hash,
-    width: p.width,
-    height: p.height,
-    textHash: p.textHash ?? null,
-    linksHash: p.linksHash ?? null,
-    // Omitted wherever it would be `index + 1`; 0 or below is not a page.
-    sourcePage: typeof p.sourcePage === "number" && p.sourcePage > 0 ? p.sourcePage : null,
-    // Three-state, so `undefined`, not `null`: true, false, or "not scanned yet"
-    // (key omitted). A mark is drawn only on a positive.
-    hasInk: typeof p.hasInk === "boolean" ? p.hasInk : undefined,
-    layers: normalizeLayers(p.layers),
-  };
-}
-
-const LAYER_SLOTS: ReadonlySet<string> = new Set(["main", "layer1", "layer2", "layer3", "background"]);
-
-/**
- * Validate `layers` or degrade to `null` (no panel). All-or-nothing: entries
- * pair with the payload's SNPG records by slot, and a row on the wrong pixels is
- * worse than the composite. Exported for tests.
- */
-export function normalizeLayers(layers: PageLayer[] | null | undefined): PageLayer[] | null {
-  if (!Array.isArray(layers) || layers.length === 0) return null;
-  const seen = new Set<string>();
-  const out: PageLayer[] = [];
-  for (const l of layers) {
-    if (typeof l?.slot !== "string" || !LAYER_SLOTS.has(l.slot)) return null;
-    if (seen.has(l.slot)) return null;
-    seen.add(l.slot);
-    out.push({
-      slot: l.slot as LayerSlot,
-      // Device-authored; `""` means no display name.
-      name: typeof l.name === "string" ? l.name : "",
-      // A missing flag reads as visible-and-not-current, claiming nothing extra.
-      visible: typeof l.visible === "boolean" ? l.visible : true,
-      isCurrent: l.isCurrent === true,
-    });
-  }
-  return out;
-}
-
-/** Drop malformed device-authored word boxes before they reach the PDF generator as `NaN`. */
-function normalizeWords(words: WordBox[] | undefined): WordBox[] {
-  if (!Array.isArray(words)) return [];
-  return words
-    .filter(
-      (w): w is WordBox =>
-        typeof w?.text === "string" &&
-        [w.xMm, w.yMm, w.wMm, w.hMm].every((v) => typeof v === "number" && Number.isFinite(v)),
-    )
-    .map((w) => ({ text: w.text, xMm: w.xMm, yMm: w.yMm, wMm: w.wMm, hMm: w.hMm }));
-}
-
-export function fileTypeFromName(name: string): string {
-  const dot = name.lastIndexOf(".");
-  if (dot <= 0 || dot === name.length - 1) return "file";
-  return name.slice(dot + 1).toLowerCase();
-}
-
-/**
- * A safe preview-shape pair, or `undefined` (layout falls back to 3:4). A bad
- * pair would reach CSS as `aspect-ratio: NaN` and silently disable the property.
- */
-function normalizeAspect(a: { w?: number; h?: number } | undefined | null): { w: number; h: number } | undefined {
-  if (!a || typeof a.w !== "number" || typeof a.h !== "number") return undefined;
-  if (!Number.isFinite(a.w) || !Number.isFinite(a.h) || a.w <= 0 || a.h <= 0) return undefined;
-  return { w: a.w, h: a.h };
-}
-
-/** Fill in the optionals the server omits on a listing entry. */
-export function normalizeEntry(e: Entry): Entry {
-  return e.kind === "note"
-    ? {
-        ...e,
-        firstPage: normalizePage(e.firstPage),
-        fileType: e.fileType ?? fileTypeFromName(e.name),
-        // No hash → no raw-bytes URL (the route requires `?v=`).
-        fileHash: e.fileHash ?? null,
-        hasRecognizedText: e.hasRecognizedText ?? false,
-        // Absent for most entries; only `.note`/`.spd` state a shape.
-        thumbAspect: normalizeAspect(e.thumbAspect),
-        // Absent or unusable reads as `null`.
-        annotationsId:
-          typeof e.annotationsId === "string" && e.annotationsId !== "" ? e.annotationsId : null,
-      }
-    : {
-        ...e,
-        // `undefined`, not `0`: absent is "not counted", `0` is "counted, empty".
-        itemCount: typeof e.itemCount === "number" && e.itemCount >= 0 ? e.itemCount : undefined,
-      };
-}
-
-/**
- * `current` is emitted only on the live version. A malformed `createdAt`
- * becomes 0; a row with no md5 is dropped by the caller.
- */
-function normalizeVersion(v: {
-  md5?: unknown;
-  size?: unknown;
-  createdAt?: unknown;
-  current?: unknown;
-  pageCount?: unknown;
-}): FileVersion | null {
-  if (typeof v?.md5 !== "string" || v.md5 === "") return null;
-  return {
-    md5: v.md5,
-    size: typeof v.size === "number" && Number.isFinite(v.size) && v.size > 0 ? Math.floor(v.size) : 0,
-    createdAt: typeof v.createdAt === "number" && Number.isFinite(v.createdAt) && v.createdAt > 0 ? v.createdAt : 0,
-    current: v.current === true,
-    // Sent only for a `.note`; otherwise 0, and the UI falls back to byte size.
-    pageCount:
-      typeof v.pageCount === "number" && Number.isFinite(v.pageCount) && v.pageCount > 0
-        ? Math.floor(v.pageCount)
-        : 0,
-  };
-}
 
 export function createHttpApi(): Api {
   return {
