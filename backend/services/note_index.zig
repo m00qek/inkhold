@@ -917,6 +917,7 @@ pub fn serializeFromIndex(
 
 test {
     _ = @import("note_index/index_test.zig");
+    _ = @import("note_index/index_cover_test.zig");
     _ = @import("note_index/template_test.zig");
 }
 

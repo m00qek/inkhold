@@ -956,6 +956,7 @@ pub const Service = struct {
 
 test {
     _ = @import("service/session_test.zig");
+    _ = @import("service/challenge_test.zig");
     _ = @import("service/admin_test.zig");
 }
 

@@ -1089,7 +1089,10 @@ test {
     _ = @import("files/quota_test.zig");
     _ = @import("files/uploads_test.zig");
     _ = @import("files/bin_test.zig");
+    _ = @import("files/bin_list_test.zig");
     _ = @import("files/derive_test.zig");
     _ = @import("files/move_test.zig");
     _ = @import("files/marks_test.zig");
+    _ = @import("files/marks_move_test.zig");
+    _ = @import("files/marks_rule_test.zig");
 }

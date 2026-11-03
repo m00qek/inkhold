@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = unit_mod })).step);
 
-    for ([_][]const u8{ "tests/note_test.zig", "tests/content_test.zig" }) |path| {
+    for ([_][]const u8{ "tests/note_test.zig", "tests/note_container_test.zig", "tests/content_test.zig" }) |path| {
         const it_mod = b.createModule(.{
             .root_source_file = b.path(path),
             .target = target,
