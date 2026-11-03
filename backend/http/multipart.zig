@@ -4,6 +4,7 @@
 //! still caught.
 
 const std = @import("std");
+const repeat = @import("../repeat.zig").repeat;
 
 /// Longest boundary accepted including `\r\n--` (RFC 2046 caps it at 70).
 pub const max_term = 128;
@@ -23,7 +24,7 @@ pub const Error = error{
 /// body, which invalidates header strings.
 pub fn boundaryFromContentType(content_type: []const u8, buf: []u8) ?[]const u8 {
     const marker = "boundary=";
-    const at = std.ascii.indexOfIgnoreCase(content_type, marker) orelse return null;
+    const at = std.ascii.findIgnoreCase(content_type, marker) orelse return null;
     var rest = content_type[at + marker.len ..];
     if (rest.len > 0 and rest[0] == '"') {
         rest = rest[1..];
@@ -89,7 +90,7 @@ pub fn readPrologue(reader: *std.Io.Reader, out: *Prologue) !void {
 /// can't survive as a traversal. RFC 5987 `filename*=` is not read.
 fn parseFilename(headers: []const u8) []const u8 {
     const marker = "filename=";
-    const at = std.ascii.indexOfIgnoreCase(headers, marker) orelse return "";
+    const at = std.ascii.findIgnoreCase(headers, marker) orelse return "";
     var rest = headers[at + marker.len ..];
     if (rest.len > 0 and rest[0] == '"') {
         rest = rest[1..];
@@ -318,7 +319,7 @@ test "part filenames: quoted, unquoted, path-stripped, absent, over-long" {
         try testing.expectEqualStrings(c.want, pro.filename());
     }
 
-    const long = "x" ** (max_filename + 1);
+    const long = repeat(u8, "x", max_filename + 1);
     const body = try std.fmt.allocPrint(testing.allocator, "--b\r\nContent-Disposition: form-data; filename=\"{s}\"\r\n\r\n\r\n--b--\r\n", .{long});
     defer testing.allocator.free(body);
     var base = std.Io.Reader.fixed(body);

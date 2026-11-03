@@ -237,7 +237,7 @@ pub const Spd = struct {
     /// is built from an integer, so there is no injection surface.
     pub fn iterateLayer(self: *Spd, layer_id: i32) Error!TileIterator {
         var buf: [64]u8 = undefined;
-        const sql = std.fmt.bufPrintZ(&buf, "SELECT tid, tile FROM surface_{d} ORDER BY tid", .{layer_id}) catch unreachable;
+        const sql = std.fmt.bufPrintSentinel(&buf, "SELECT tid, tile FROM surface_{d} ORDER BY tid", .{layer_id}, 0) catch unreachable;
         var stmt: ?*c.sqlite3_stmt = null;
         if (c.sqlite3_prepare_v2(self.db, sql.ptr, -1, &stmt, null) != c.SQLITE_OK) {
             return .{ .stmt = null }; // table absent → empty iterator

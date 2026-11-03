@@ -1,6 +1,7 @@
 //! Shared reply and request-parsing helpers for the handlers.
 
 const std = @import("std");
+const repeat = @import("../repeat.zig").repeat;
 const json = @import("json.zig");
 const context = @import("context.zig");
 const router = @import("router.zig");
@@ -167,7 +168,7 @@ test "contentDisposition neutralizes quotes, newlines and separators" {
 
 test "contentDisposition truncates long names on a UTF-8 boundary" {
     var buf: [1024]u8 = undefined;
-    const long = "é" ** 200; // 400 bytes, every one of them multi-byte
+    const long = repeat(u8, "é", 200); // 400 bytes, every one of them multi-byte
     const out = try contentDisposition(&buf, "inline", long);
     try std.testing.expect(!std.mem.endsWith(u8, out, "%C3"));
     try std.testing.expect(std.mem.indexOf(u8, out, "filename*=UTF-8''") != null);

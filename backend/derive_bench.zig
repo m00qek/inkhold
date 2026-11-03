@@ -98,7 +98,7 @@ pub fn main(init: std.process.Init) !void {
     const want_derive = std.mem.eql(u8, mode, "derive") or std.mem.eql(u8, mode, "all");
     const want_split = std.mem.eql(u8, mode, "split");
 
-    const path_z = try arena.dupeZ(u8, db_path);
+    const path_z = try arena.dupeSentinel(u8, db_path, 0);
     const corpus = try sqlite.Db.openReadOnly(path_z);
     defer corpus.close();
 

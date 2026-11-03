@@ -2,9 +2,7 @@
 //! there is one SQLite in the build and `SQLITE_DESERIALIZE_READONLY` comes
 //! from the real header rather than a hand-copied constant.
 
-pub const c = @cImport({
-    @cInclude("sqlite3.h");
-});
+pub const c = @import("c");
 
 // `SQLITE_TRANSIENT = (void*)-1`, which `@cImport` cannot translate. The
 // address is unaligned, so a comptime `@ptrFromInt` to a function pointer fails

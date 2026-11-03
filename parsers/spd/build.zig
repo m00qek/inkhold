@@ -13,14 +13,21 @@ const sqlite_flags = [_][]const u8{
 
 const vendor_sqlite = "../../vendor/sqlite";
 
-fn addSqliteHeaders(b: *std.Build, mod: *std.Build.Module) void {
+/// `sqlite3.h` for `target`, imported as `c` by `src/sqlite.zig`.
+fn addSqliteHeaders(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     mod.link_libc = true;
     mod.addIncludePath(b.path(vendor_sqlite ++ "/sqlite3.h").dirname());
+    const tc = b.addTranslateC(.{
+        .root_source_file = b.path(vendor_sqlite ++ "/sqlite3.h"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    mod.addImport("c", tc.createModule());
 }
 
 /// Compiles the vendored amalgamation into `mod`; once per test root.
-fn linkSqlite(b: *std.Build, mod: *std.Build.Module) void {
-    addSqliteHeaders(b, mod);
+fn linkSqlite(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    addSqliteHeaders(b, mod, target);
     mod.addCSourceFile(.{
         .file = b.path(vendor_sqlite ++ "/sqlite3.c"),
         .flags = &sqlite_flags,
@@ -33,7 +40,7 @@ pub fn build(b: *std.Build) void {
 
     // Consumers link SQLite themselves; this only carries the header include.
     const spd = b.addModule("spd", .{ .root_source_file = b.path("src/root.zig") });
-    addSqliteHeaders(b, spd);
+    addSqliteHeaders(b, spd, target);
 
     const test_step = b.step("test", "Run the .spd parser tests");
 
@@ -42,7 +49,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    linkSqlite(b, unit_mod);
+    linkSqlite(b, unit_mod, target);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = unit_mod })).step);
 
     const it_mod = b.createModule(.{
@@ -51,6 +58,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     it_mod.addImport("spd", spd);
-    linkSqlite(b, it_mod); // the single copy of the C for this artifact
+    linkSqlite(b, it_mod, target); // the single copy of the C for this artifact
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = it_mod })).step);
 }

@@ -503,7 +503,7 @@ fn allTermsIn(text: []const u8, q: []const u8) bool {
     var any = false;
     while (it.next()) |t| {
         any = true;
-        if (std.ascii.indexOfIgnoreCase(text, t) == null) return false;
+        if (std.ascii.findIgnoreCase(text, t) == null) return false;
     }
     return any;
 }

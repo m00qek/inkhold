@@ -277,6 +277,17 @@ fn tailLength(tail: u8, gap: usize) u32 {
 
 // ---- tests ----
 
+
+/// Test helper: `unit` repeated `n` times (Zig 0.17 removed `**`).
+fn repeat(comptime T: type, comptime unit: []const T, comptime n: usize) *const [unit.len * n]T {
+    const out = comptime blk: {
+        @setEvalBranchQuota(10 * unit.len * n + 1000);
+        var a: [unit.len * n]T = undefined;
+        for (0..n) |k| @memcpy(a[k * unit.len ..][0..unit.len], unit);
+        break :blk a;
+    };
+    return &out;
+}
 test "single short run" {
     const gpa = std.testing.allocator;
     const out = try decode(gpa, .ratta_rle_x2, &.{ 0x61, 0x00 }, 1, 1, false);
@@ -288,7 +299,7 @@ test "background code maps to transparent" {
     const gpa = std.testing.allocator;
     const out = try decode(gpa, .ratta_rle_x2, &.{ 0x62, 0x04 }, 5, 1, false); // len 4+1
     defer gpa.free(out);
-    try std.testing.expectEqualSlices(u8, &(.{TRANSPARENT} ** 5), out);
+    try std.testing.expectEqualSlices(u8, &(@as([5]u8, @splat(TRANSPARENT))), out);
 }
 
 test "two-byte length, matching color, combines" {
@@ -323,7 +334,7 @@ test "size mismatch is reported" {
 test "decodeInto fills a caller-provided buffer exactly" {
     var buf: [5]u8 = undefined;
     try decodeInto(&buf, .ratta_rle_x2, &.{ 0x62, 0x04 }, false);
-    try std.testing.expectEqualSlices(u8, &(.{TRANSPARENT} ** 5), &buf);
+    try std.testing.expectEqualSlices(u8, &(@as([5]u8, @splat(TRANSPARENT))), &buf);
 }
 
 test "decodeInto: a too-small destination fails on the overflowing run" {
@@ -347,7 +358,7 @@ test "hostile stream fails on its first oversized run — no ballooning" {
     // one allocation, so SizeMismatch proves nothing grew.
     const gpa = std.testing.allocator;
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 1 });
-    const data = [_]u8{ 0x61, 0xFF } ** 64;
+    const data = repeat(u8, &.{ 0x61, 0xFF }, 64).*;
     try std.testing.expectError(
         error.SizeMismatch,
         decode(failing.allocator(), .ratta_rle_x2, &data, 2, 2, false),
@@ -481,11 +492,11 @@ test "InkFinder: it stops at the first stroke — the rest of the layer is never
     try std.testing.expect(f.pending == null); // it did not walk on to carry a byte
 
     var g = InkFinder.init();
-    g.feed(&([_]u8{ 0x62, 0xFF } ** 2048));
+    g.feed(&(repeat(u8, &.{ 0x62, 0xFF }, 2048).*));
     try std.testing.expect(!g.found);
     g.feed(&.{ 0x61, 0x00 });
     try std.testing.expect(g.found);
-    g.feed(&([_]u8{ 0x62, 0xFF } ** 2048));
+    g.feed(&(repeat(u8, &.{ 0x62, 0xFF }, 2048).*));
     try std.testing.expect(g.done());
 }
 

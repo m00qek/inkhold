@@ -324,7 +324,7 @@ fn openExisting(
         return error.NoDatabase;
     }
 
-    const db_path = try gpa.dupeZ(u8, cfg.db_path);
+    const db_path = try gpa.dupeSentinel(u8, cfg.db_path, 0);
     defer gpa.free(db_path);
     var db = sqlite.Db.open(db_path) catch |e| {
         try err.print("Could not open the database at {s}: {t}\n", .{ cfg.db_path, e });
@@ -620,7 +620,7 @@ const Fixture = struct {
 
     /// Creates and migrates the database; the caller closes both.
     fn openDb(self: Fixture, gpa: std.mem.Allocator) !struct { sqlite.Db, authsvc.Service } {
-        const z = try gpa.dupeZ(u8, self.db_path);
+        const z = try gpa.dupeSentinel(u8, self.db_path, 0);
         defer gpa.free(z);
         const db = try sqlite.Db.open(z);
         try schema.migrate(db);

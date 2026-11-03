@@ -2,11 +2,11 @@
     .name = .inkhold,
     .version = "0.0.0",
     .fingerprint = 0x61d02c25fdacbf98,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .tls = .{
-            .url = "git+https://github.com/ianic/tls.zig?ref=zig-0.16.x#a6e2a71f1d4df1e1ceea65c678ed554d07702968",
-            .hash = "tls-0.1.0-ER2e0hDCBQCziSZqqCqdcny8BNejzidas95SgU_9wPeh",
+            .url = "git+https://github.com/ianic/tls.zig#bd22bcb73f423389441a1de80bf031ef1b623cce",
+            .hash = "tls-0.1.0-ER2e0l6qBgDEYo6RBkVZw5UrxOqtI6-OqLwyFJvEr3RK",
         },
         .mupdf = .{
             .url = "https://mupdf.com/downloads/archive/mupdf-1.28.1-source.tar.gz",

@@ -4,6 +4,7 @@
 //! backfilled on the spot.
 
 const std = @import("std");
+const repeat = @import("../repeat.zig").repeat;
 const Files = @import("files.zig").Files;
 const Entry = @import("files.zig").Entry;
 const sn = @import("supernote");
@@ -2163,7 +2164,7 @@ test "bin: a trashed note carries its real first page; a folder and an unparseab
 const mini_png = "\x89PNG\r\n\x1a\n" ++
     "\x00\x00\x00\x0d" ++ "IHDR" ++
     "\x00\x00\x01\x40" ++ "\x00\x00\x00\xf0" ++ // 320 × 240
-    "\x08\x02\x00\x00\x00" ++ ("p" ** 16);
+    "\x08\x02\x00\x00\x00" ++ (repeat(u8, "p", 16));
 
 /// A minimal `.spd` (SQLite with a `config` thumbnail), caller-owned bytes.
 fn buildSpdBytes(thumb: []const u8) ![]u8 {

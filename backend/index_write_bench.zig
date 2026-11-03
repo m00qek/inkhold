@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
     try copyDb(io, db_path, scratch_path);
     defer if (!keep) removeDb(io, scratch_path);
 
-    const scratch_z = try arena.dupeZ(u8, scratch_path);
+    const scratch_z = try arena.dupeSentinel(u8, scratch_path, 0);
     const db = try sqlite.Db.open(scratch_z);
     defer db.close();
 

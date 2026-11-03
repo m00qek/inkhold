@@ -19,7 +19,7 @@ const alphabet = std.base64.url_safe_alphabet_chars;
 /// `std.base64`'s equivalent sentinel is private.
 const invalid: u8 = 0xff;
 const char_to_sextet: [256]u8 = blk: {
-    var table = [_]u8{invalid} ** 256;
+    var table = @as([256]u8, @splat(invalid));
     for (alphabet, 0..) |c, i| table[c] = @intCast(i);
     break :blk table;
 };
@@ -118,7 +118,7 @@ const golden_manifest_len = 34;
 test "the golden want bitmap decodes to the positions written out beside it" {
     const map = try parse(want_golden, golden_manifest_len);
 
-    var expected = [_]bool{false} ** golden_manifest_len;
+    var expected = @as([golden_manifest_len]bool, @splat(false));
     for (golden_positions) |p| expected[p] = true;
 
     for (0..golden_manifest_len) |position| {
@@ -145,7 +145,7 @@ test "an empty want is an empty set, not a refusal" {
 test "a single bit, at each end of a byte" {
     var buf: [8]u8 = undefined;
     for ([_]usize{ 0, 1, 7, 8, 33 }) |position| {
-        var bytes = [_]u8{0} ** 5;
+        var bytes = @as([5]u8, @splat(0));
         bytes[position >> 3] |= @as(u8, 1) << @intCast(position & 7);
         const map = try parse(encodeForTest(&buf, &bytes), 40);
         try testing.expectEqual(@as(usize, 1), map.countSet());
@@ -157,7 +157,7 @@ test "a single bit, at each end of a byte" {
 
 test "a sparse set, spread across groups so every byteAt branch runs" {
     const positions = [_]usize{ 2, 25, 40, 41, 79 };
-    var bytes = [_]u8{0} ** 10;
+    var bytes = @as([10]u8, @splat(0));
     for (positions) |p| bytes[p >> 3] |= @as(u8, 1) << @intCast(p & 7);
 
     var buf: [16]u8 = undefined;
@@ -170,7 +170,7 @@ test "a sparse set, spread across groups so every byteAt branch runs" {
 }
 
 test "every bit set, and the last byte's overhang stays legal" {
-    var bytes = [_]u8{0xff} ** 5;
+    var bytes = @as([5]u8, @splat(0xff));
     bytes[4] = 0x03;
     var buf: [8]u8 = undefined;
     const map = try parse(encodeForTest(&buf, &bytes), 34);
@@ -183,7 +183,7 @@ test "1,222 documents is 153 bytes and 204 characters, which is §3.3's whole cl
     const byte_len = (documents + 7) / 8;
     try testing.expectEqual(@as(usize, 153), byte_len);
 
-    var bytes = [_]u8{0xff} ** 153;
+    var bytes = @as([153]u8, @splat(0xff));
     bytes[152] = 0x3f; // positions 1216..1221; bits 6 and 7 are past the manifest
     var buf: [256]u8 = undefined;
     const encoded = encodeForTest(&buf, &bytes);
@@ -218,10 +218,10 @@ test "non-canonical leftover bits are refused rather than discarded" {
 
 test "a bitmap longer than the manifest is refused, and cheaply" {
     var buf: [16]u8 = undefined;
-    const six = encodeForTest(&buf, &[_]u8{0} ** 6);
+    const six = encodeForTest(&buf, &@as([6]u8, @splat(0)));
     try testing.expectError(error.WantLongerThanManifest, parse(six, 34));
 
-    const junk = [_]u8{'!'} ** 4_096;
+    const junk = @as([4_096]u8, @splat('!'));
     try testing.expectError(error.WantLongerThanManifest, parse(&junk, 34));
 
     try testing.expectEqual(@as(usize, 0), (try parse("", 0)).countSet());
@@ -231,20 +231,20 @@ test "a bitmap longer than the manifest is refused, and cheaply" {
 test "a bit set past the manifest's last position is a 412, not a no-op" {
     var buf: [16]u8 = undefined;
 
-    var one_past = [_]u8{0} ** 5;
+    var one_past = @as([5]u8, @splat(0));
     one_past[4] = 0x04;
     try testing.expectError(error.WantBitPastManifest, parse(encodeForTest(&buf, &one_past), 34));
 
-    var top = [_]u8{0} ** 5;
+    var top = @as([5]u8, @splat(0));
     top[4] = 0x80;
     try testing.expectError(error.WantBitPastManifest, parse(encodeForTest(&buf, &top), 34));
 
     // The bit just below the overhang is the last document: the off-by-one.
-    var last = [_]u8{0} ** 5;
+    var last = @as([5]u8, @splat(0));
     last[4] = 0x02;
     try testing.expectEqual(@as(usize, 1), (try parse(encodeForTest(&buf, &last), 34)).countSet());
 
-    var full = [_]u8{0} ** 4;
+    var full = @as([4]u8, @splat(0));
     full[3] = 0xff;
     try testing.expectEqual(@as(usize, 8), (try parse(encodeForTest(&buf, &full), 32)).countSet());
 }

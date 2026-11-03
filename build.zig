@@ -79,14 +79,33 @@ const sqlite_core_wasm_flags = [_][]const u8{
 
 /// Compiles the vendored SQLite amalgamation into `mod`, so the binary is
 /// self-contained and FTS5 is guaranteed.
-fn linkSqlite(b: *std.Build, mod: *std.Build.Module) void {
+fn linkSqlite(b: *std.Build, mod: *std.Build.Module, headers: *std.Build.Module) void {
     mod.link_libc = true;
-    // `@cImport({ @cInclude("sqlite3.h") })` in db/sqlite.zig resolves here.
+    mod.addImport("c", headers); // `@import("c")` in db/sqlite.zig
     mod.addIncludePath(b.path("vendor/sqlite"));
     mod.addCSourceFile(.{
         .file = b.path("vendor/sqlite/sqlite3.c"),
         .flags = &sqlite_flags,
     });
+}
+
+/// `sqlite3.h` translated for `target`, imported as `c` by the SQLite wrappers.
+fn sqliteHeaders(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    const tc = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/sqlite/sqlite3.h"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    return tc.createModule();
+}
+
+/// The `.spd` parser for one target. Headers only: `linkSqlite` in the
+/// importing artifact supplies the symbols, so there is one SQLite compile.
+fn spdModule(b: *std.Build, headers: *std.Build.Module) *std.Build.Module {
+    const mod = b.createModule(.{ .root_source_file = b.path("parsers/spd/src/root.zig") });
+    mod.link_libc = true;
+    mod.addImport("c", headers);
+    return mod;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +226,10 @@ fn mupdfListedSources(
     dep: *std.Build.Dependency,
     groups: []const []const u8,
 ) []const []const u8 {
-    const text = dep.builder.build_root.handle.readFileAlloc(
+    var root_dir = dep.builder.root.openDir(b.graph.io, ".", .{}) catch
+        @panic("mupdf: cannot open the pinned dependency");
+    defer root_dir.close(b.graph.io);
+    const text = root_dir.readFileAlloc(
         b.graph.io,
         "Makelists",
         b.allocator,
@@ -239,7 +261,7 @@ fn mupdfDirSources(
     sub_path: []const u8,
     extension: []const u8,
 ) []const []const u8 {
-    var dir = dep.builder.build_root.handle.openDir(b.graph.io, sub_path, .{ .iterate = true }) catch
+    var dir = dep.builder.root.openDir(b.graph.io, sub_path, .{ .iterate = true }) catch
         @panic(b.fmt("mupdf: cannot open {s} in the pinned dependency", .{sub_path}));
     defer dir.close(b.graph.io);
 
@@ -392,12 +414,8 @@ fn buildMupdfWasm(b: *std.Build, dep: *std.Build.Dependency) *std.Build.Step.Com
     });
 
     // Zig's vendored setjmp runtime, located via the lib dir so any toolchain works.
-    const zig_lib = b.graph.zig_lib_directory.path orelse
-        @panic("mupdf: no Zig lib directory — cannot find the wasm setjmp runtime");
     mod.addCSourceFile(.{
-        .file = .{ .cwd_relative = b.pathJoin(&.{
-            zig_lib, "libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c",
-        }) },
+        .file = std.Build.LazyPath.zig_lib.path(b, "libc/wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c"),
         .flags = &.{"-fwasm-exceptions"}, // NB: no `-wasm-enable-sjlj` here
     });
 
@@ -448,14 +466,10 @@ pub fn build(b: *std.Build) void {
     const tls_dep = b.dependency("tls", .{ .target = target, .optimize = optimize });
     const tls_mod = tls_dep.module("tls");
 
-    // The `.spd` parser, sharing the backend's single SQLite compile: only the
-    // headers go here, and `linkSqlite` in the importing artifact supplies the
-    // symbols.
-    const spd_mod = b.createModule(.{
-        .root_source_file = b.path("parsers/spd/src/root.zig"),
-    });
-    spd_mod.link_libc = true;
-    spd_mod.addIncludePath(b.path("vendor/sqlite"));
+    const wasi_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+    const sqlite_c = sqliteHeaders(b, target);
+    const sqlite_c_wasi = sqliteHeaders(b, wasi_target);
+    const spd_mod = spdModule(b, sqlite_c);
 
     // The schema as a header-only module, so the wasm search index imports
     // `fts_tokenizer` from the same declaration as the server.
@@ -463,19 +477,18 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("backend/db/schema.zig"),
     });
     schema_mod.link_libc = true;
-    schema_mod.addIncludePath(b.path("vendor/sqlite"));
+    schema_mod.addImport("c", sqlite_c_wasi);
 
     // ---- WebAssembly SQLite core: the `.spd` decoder and the search index ----
     // One artifact, two ABIs: SQLite is ~290 KB gzip of 362 KB, so two modules
     // would ship it twice. Targets WASI only for libc headers; the null VFS makes
     // no syscalls, which the ABI test checks under a real WASI.
-    const wasi_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
     const sqlite_core_mod = b.createModule(.{
         .root_source_file = b.path("webapp/wasm/sqlite_core.zig"),
         .target = wasi_target,
         .optimize = .ReleaseSmall,
     });
-    sqlite_core_mod.addImport("spd", spd_mod);
+    sqlite_core_mod.addImport("spd", spdModule(b, sqlite_c_wasi));
     sqlite_core_mod.addImport("schema", schema_mod);
     sqlite_core_mod.link_libc = true;
     sqlite_core_mod.addIncludePath(b.path("vendor/sqlite"));
@@ -547,13 +560,13 @@ pub fn build(b: *std.Build) void {
     serve_mod.addImport("supernote", supernote); // backend can use the .note library
     serve_mod.addImport("spd", spd_mod); // native .spd parser for thumbnail extraction
     serve_mod.addOptions("build_options", build_options); // `--version`
-    linkSqlite(b, serve_mod);
+    linkSqlite(b, serve_mod, sqlite_c);
     // MuPDF for the PDF probe and text pass (~6.7 MB of binary).
     serve_mod.linkLibrary(buildMupdfNative(b, mupdf_dep, target, optimize));
     const serve_exe = b.addExecutable(.{ .name = "inkhold", .root_module = serve_mod });
     b.installArtifact(serve_exe);
     const run_serve = b.addRunArtifact(serve_exe);
-    if (b.args) |args| run_serve.addArgs(args);
+    run_serve.addPassthruArgs();
     const serve_step = b.step("serve", "Run the Inkhold server");
     serve_step.dependOn(&run_serve.step);
 
@@ -566,7 +579,7 @@ pub fn build(b: *std.Build) void {
     });
     derive_mod.addImport("supernote", supernote);
     derive_mod.addImport("spd", spd_mod);
-    linkSqlite(b, derive_mod);
+    linkSqlite(b, derive_mod, sqlite_c);
     const derive_exe = b.addExecutable(.{ .name = "derive-bench", .root_module = derive_mod });
     const derive_step = b.step("derive-bench", "Build the derive-path bench (measurement only)");
     derive_step.dependOn(&b.addInstallArtifact(derive_exe, .{}).step);
@@ -579,7 +592,7 @@ pub fn build(b: *std.Build) void {
     });
     idxwrite_mod.addImport("supernote", supernote);
     idxwrite_mod.addImport("spd", spd_mod);
-    linkSqlite(b, idxwrite_mod);
+    linkSqlite(b, idxwrite_mod, sqlite_c);
     const idxwrite_exe = b.addExecutable(.{ .name = "index-write-bench", .root_module = idxwrite_mod });
     const idxwrite_step = b.step("index-write-bench", "Build the write-side search bench (measurement only)");
     idxwrite_step.dependOn(&b.addInstallArtifact(idxwrite_exe, .{}).step);
@@ -603,7 +616,7 @@ pub fn build(b: *std.Build) void {
     note_builder_mod.addImport("note", supernote);
     backend_test_mod.addImport("note_builder", note_builder_mod);
     backend_test_mod.addOptions("build_options", build_options); // cli.zig's `--version`
-    linkSqlite(b, backend_test_mod);
+    linkSqlite(b, backend_test_mod, sqlite_c);
     backend_test_mod.linkLibrary(buildMupdfNative(b, mupdf_dep, target, optimize));
     // Device captures for the golden test; @embedFile cannot leave its module dir.
     for ([_][]const u8{ "sample.note", "sample-2.note", "layers_edited.note" }) |fixture| {

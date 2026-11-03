@@ -2,6 +2,7 @@
 //! the hot read paths need in `note_index` + `note_page_index`.
 
 const std = @import("std");
+const repeat = @import("../repeat.zig").repeat;
 const sqlite = @import("../db/sqlite.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
@@ -1714,7 +1715,7 @@ test "packed layer records round-trip (slot, hidden, current, name), and a malfo
     bad_slot[9] = 0xEE;
     try testing.expectError(error.BadLayerBlob, unpackLayerRecords(&bad_slot, &out));
 
-    const long_name = "n" ** 300;
+    const long_name = repeat(u8, "n", 300);
     const long = [_]IndexedLayer{.{ .ref = .{ .offset = 1, .len = 2, .slot = .main, .all_blank = false, .hidden = false }, .name = long_name }};
     const packed_long = packLayers(&buf, &long);
     const got_long = try unpackLayerRecords(packed_long, &out);
@@ -1724,7 +1725,7 @@ test "packed layer records round-trip (slot, hidden, current, name), and a malfo
 const mini_png = "\x89PNG\r\n\x1a\n" ++
     "\x00\x00\x00\x0d" ++ "IHDR" ++
     "\x00\x00\x01\x40" ++ "\x00\x00\x00\xf0" ++ // 320 × 240
-    "\x08\x02\x00\x00\x00" ++ ("p" ** 16);
+    "\x08\x02\x00\x00\x00" ++ (repeat(u8, "p", 16));
 
 /// A `.mark`: a `.note` with a different 4-byte marker.
 fn markFile(a: Allocator) ![]u8 {
@@ -1843,7 +1844,7 @@ test "the cover is LOCATED not extracted: offset/length/mime + dims recorded; co
 
     // PNG magic, corrupt IHDR: still served, dims record 0.
     {
-        const corrupt_png = "\x89PNG\r\n\x1a\n" ++ "\x00\x00\x00\x0d" ++ "NOPE" ++ ("z" ** 16);
+        const corrupt_png = "\x89PNG\r\n\x1a\n" ++ "\x00\x00\x00\x0d" ++ "NOPE" ++ (repeat(u8, "z", 16));
         const bytes = try coveredNote(gpa, corrupt_png);
         defer gpa.free(bytes);
         var p = try parseBlob(gpa, bytes);
@@ -1955,7 +1956,7 @@ test "needsRepair: missing or stale row only — no derived file exists for a .n
     try testing.expect(try needsRepair(f.db, f.files.thumbs, &md5));
     {
         var buf: [64]u8 = undefined;
-        const sql = try std.fmt.bufPrintZ(&buf, "UPDATE note_index SET index_version = {d};", .{index_version});
+        const sql = try std.fmt.bufPrintSentinel(&buf, "UPDATE note_index SET index_version = {d};", .{index_version}, 0);
         try f.db.exec(sql);
     }
     try testing.expect(!try needsRepair(f.db, f.files.thumbs, &md5));

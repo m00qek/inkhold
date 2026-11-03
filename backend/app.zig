@@ -41,7 +41,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     }
     defer if (cfg.tls.enabled and cfg.tls.cipher_suites.len > 0) gpa.free(ciphers);
 
-    const db_path = try gpa.dupeZ(u8, cfg.db_path); // sqlite wants a null-terminated path
+    const db_path = try gpa.dupeSentinel(u8, cfg.db_path, 0); // sqlite wants a null-terminated path
     defer gpa.free(db_path);
     var db = try sqlite.Db.open(db_path);
     defer db.close();
@@ -215,7 +215,7 @@ test "startupSweeps runs EVERY sweep, including the one that was never wired" {
             "VALUES('deadbeef', 1, 'controlplane', 0, 1);",
     );
 
-    var svc = authsvc.Service.init(testing.allocator, testing.io, db, [_]u8{0} ** passwordmod.cred_key_len);
+    var svc = authsvc.Service.init(testing.allocator, testing.io, db, @as([passwordmod.cred_key_len]u8, @splat(0)));
     defer svc.deinit();
     startupSweeps(testing.io, db, &svc, files_svc);
 
@@ -257,7 +257,7 @@ test "a failed session sweep warns and lets the boot continue, sweeps after it i
     const thumbs = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
     const files_svc = filesmod.Files.init(testing.allocator, testing.io, db, store, thumbs);
 
-    var svc = authsvc.Service.init(testing.allocator, testing.io, db, [_]u8{0} ** passwordmod.cred_key_len);
+    var svc = authsvc.Service.init(testing.allocator, testing.io, db, @as([passwordmod.cred_key_len]u8, @splat(0)));
     defer svc.deinit();
 
     startupSweeps(testing.io, db, &svc, files_svc);

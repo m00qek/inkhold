@@ -3,6 +3,7 @@
 //! refcounts, per-user quota, two-stage delete via the recycle bin.
 
 const std = @import("std");
+const repeat = @import("../repeat.zig").repeat;
 const config = @import("../config.zig");
 const sqlite = @import("../db/sqlite.zig");
 const blobstore = @import("../store/blobs.zig");
@@ -2811,7 +2812,7 @@ test "§6: a user AT their allotment can still EDIT — history gives way, the e
     try testing.expectEqual(@as(i64, 1), try historyRows(&f, &blobstore.md5HexOf("cccccccccc")));
 
     {
-        var r = std.Io.Reader.fixed("x" ** 40);
+        var r = std.Io.Reader.fixed(repeat(u8, "x", 40));
         try testing.expectError(error.QuotaExceeded, f.files.putFile(1, null, "big.note", &r, null));
     }
     try f.expectQuotaBalanced(1);
@@ -4364,7 +4365,7 @@ test "getTrashed sees the bin and ONLY the bin; get still sees only live rows" {
 // ---- embedded-thumbnail ingest derivation + on-demand repair ----
 
 /// JPEG magic plus filler, so derivation runs without a committed binary.
-const spd_fake_jpeg = "\xff\xd8\xff\xe0" ++ ("thumbnail-pixels" ** 4);
+const spd_fake_jpeg = "\xff\xd8\xff\xe0" ++ (repeat(u8, "thumbnail-pixels", 4));
 
 /// A minimal in-memory `.spd` with an optional `config.thumbnail` row.
 fn buildSpd(gpa: std.mem.Allocator, thumb: ?[]const u8) ![]u8 {
@@ -4414,7 +4415,7 @@ test "linking a .spd derives the spd_index row + thumbs file; dedup re-link does
     defer freeEntry(e2);
     try testing.expectEqual(@as(?i64, 999), try spdIndexedAt(&f, md5));
 
-    const disguised = try buildSpd(testing.allocator, "\x89PNG\r\n\x1a\n" ++ ("z" ** 40));
+    const disguised = try buildSpd(testing.allocator, "\x89PNG\r\n\x1a\n" ++ (repeat(u8, "z", 40)));
     defer testing.allocator.free(disguised);
     const n = try putBytes(&f, 1, null, "secret.note", disguised);
     defer freeEntry(n);
@@ -4454,7 +4455,7 @@ test "replacing a .spd GCs the OLD blob's thumbs file along with the blob" {
 
     const v1 = try buildSpd(testing.allocator, spd_fake_jpeg);
     defer testing.allocator.free(v1);
-    const v2 = try buildSpd(testing.allocator, "\x89PNG\r\n\x1a\n" ++ ("q" ** 40));
+    const v2 = try buildSpd(testing.allocator, "\x89PNG\r\n\x1a\n" ++ (repeat(u8, "q", 40)));
     defer testing.allocator.free(v2);
 
     const e1 = try putBytes(&f, 1, null, "drawing.spd", v1);
@@ -4522,7 +4523,7 @@ const nb = @import("note_builder");
 const cover_png = "\x89PNG\r\n\x1a\n" ++
     "\x00\x00\x00\x0d" ++ "IHDR" ++
     "\x00\x00\x01\x40" ++ "\x00\x00\x00\xf0" ++
-    "\x08\x02\x00\x00\x00" ++ ("p" ** 16);
+    "\x08\x02\x00\x00\x00" ++ (repeat(u8, "p", 16));
 
 /// A one-page `.note` with `cover` as its `COVER_2` block (null = coverless).
 fn buildNote(gpa: std.mem.Allocator, cover: ?[]const u8) ![]u8 {

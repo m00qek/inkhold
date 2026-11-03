@@ -144,7 +144,7 @@ test "BENCH note: a page fold on a connection that has folded a whole document, 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [128]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}/bench.db", .{tmp.sub_path});
+    const path = try std.fmt.bufPrintSentinel(&path_buf, ".zig-cache/tmp/{s}/bench.db", .{tmp.sub_path}, 0);
     var db = try sqlite.Db.open(path);
     defer db.close();
     try schema.migrate(db);

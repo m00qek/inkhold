@@ -2,9 +2,7 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("sqlite3.h");
-});
+const c = @import("c");
 
 // SQLITE_TRANSIENT, (void*)-1: SQLite copies bound text/blobs. @cImport can't
 // translate the macro, and a comptime `@ptrFromInt` of this unaligned address

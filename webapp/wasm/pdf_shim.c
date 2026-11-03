@@ -1315,6 +1315,13 @@ void ink_shim_drop_buffer(fz_buffer *buf)
 		fz_drop_buffer(g_ctx, buf);
 }
 
+/* --- setjmp tag ---
+ * Zig 0.17's wasi-libc setjmp runtime (`rt.c`) throws the C_LONGJMP tag but no
+ * longer defines it, so `fz_try`/`fz_throw` link against an undefined
+ * `__c_longjmp`. Its payload is the jmp_buf argument pointer (i32 on wasm32).
+ */
+__asm__(".globl __c_longjmp\n.tagtype __c_longjmp i32\n__c_longjmp:\n");
+
 /* --- JPX stubs ---
  * MuPDF 1.28.1's disabled-JPX stub of `fz_load_jpx_info` lacks the trailing
  * `defcs` parameter; wasm-ld turns the mismatch into a trapping stub. So

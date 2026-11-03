@@ -1468,11 +1468,11 @@ test "an account longer than any real email is refused, so the entry cap bounds 
     var svc = try testService(db);
     defer svc.deinit();
 
-    const long = [_]u8{'a'} ** (max_account_len + 1);
+    const long = @as([max_account_len + 1]u8, @splat('a'));
     try std.testing.expectError(error.OutOfMemory, svc.getRandomCode(&long));
     try std.testing.expectEqual(@as(u32, 0), svc.challenges.count());
 
-    const at = [_]u8{'a'} ** max_account_len;
+    const at = @as([max_account_len]u8, @splat('a'));
     _ = try svc.getRandomCode(&at);
     try std.testing.expectEqual(@as(u32, 1), svc.challenges.count());
 }

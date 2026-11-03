@@ -92,7 +92,7 @@ pub fn serialize(gpa: std.mem.Allocator, spec: Spec) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(gpa);
 
-    var ft = [_]u8{0} ** 4;
+    var ft = @as([4]u8, @splat(0));
     @memcpy(ft[0..@min(4, spec.filetype.len)], spec.filetype[0..@min(4, spec.filetype.len)]);
     try buf.appendSlice(gpa, &ft);
     try buf.appendSlice(gpa, try std.fmt.allocPrint(t, "SN_FILE_VER_{d:0>8}", .{spec.version}));

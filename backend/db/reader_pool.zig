@@ -90,7 +90,7 @@ const Fixture = struct {
         const f = try testing.allocator.create(Fixture);
         errdefer testing.allocator.destroy(f);
         f.tmp = testing.tmpDir(.{});
-        f.path = try std.fmt.bufPrintZ(&f.path_buf, ".zig-cache/tmp/{s}/reader.db", .{f.tmp.sub_path});
+        f.path = try std.fmt.bufPrintSentinel(&f.path_buf, ".zig-cache/tmp/{s}/reader.db", .{f.tmp.sub_path}, 0);
         f.writer = try sqlite.Db.open(f.path);
         try schema.migrate(f.writer);
         return f;

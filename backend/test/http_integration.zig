@@ -3,6 +3,7 @@
 //! an in-memory reader/writer pair (no sockets, no threads).
 
 const std = @import("std");
+const repeat = @import("../repeat.zig").repeat;
 const app = @import("../routes.zig");
 const transport = @import("../http/transport.zig");
 const context = @import("../http/context.zig");
@@ -207,7 +208,7 @@ const Fixture = struct {
         f.stats = .{};
         f.tmp = std.testing.tmpDir(.{});
         if (on_disk) {
-            const path = try std.fmt.bufPrintZ(&f.path_buf, ".zig-cache/tmp/{s}/inkhold.db", .{f.tmp.sub_path});
+            const path = try std.fmt.bufPrintSentinel(&f.path_buf, ".zig-cache/tmp/{s}/inkhold.db", .{f.tmp.sub_path}, 0);
             f.db = try sqlite.Db.open(path);
             try schema.migrate(f.db);
             f.pool = try readerpool.Pool.open(gpa, path, readers);
@@ -696,7 +697,7 @@ test "login rejects a missing challenge and a wrong password" {
     var reqbuf: [1024]u8 = undefined;
 
     {
-        const body = "{\"account\":\"admin\",\"password\":\"" ++ ("0" ** 64) ++ "\"}";
+        const body = "{\"account\":\"admin\",\"password\":\"" ++ (repeat(u8, "0", 64)) ++ "\"}";
         const req = try buildRequest(&reqbuf, "POST", "/api/official/user/account/login/new", &.{
             .{ .name = "content-type", .value = "application/json" },
         }, body);
@@ -1448,7 +1449,7 @@ test "history page text: 404 (indistinguishable) for a non-history md5, a bogus 
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "")).status);
     }
     {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/page/0/text", .{ id, "f" ** 32 });
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/page/0/text", .{ id, repeat(u8, "f", 32) });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "")).status);
     }
     // Another user's real retained md5: the `user_id` scope 404s it.
@@ -1560,7 +1561,7 @@ test "history raw: 404 (indistinguishable) for a non-history md5, a bogus md5, a
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "")).status);
     }
     {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/raw", .{ id, "f" ** 32 });
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/note/{d}/history/{s}/raw", .{ id, repeat(u8, "f", 32) });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "")).status);
     }
     // Another user's real retained md5 404s: no cross-account existence oracle.
@@ -2141,8 +2142,8 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", oss_path, &.{}, ""), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try std.testing.expectEqualStrings(blob_bytes, resp.body); // exact bytes, raw
-        try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "application/octet-stream") != null);
-        try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "content-disposition:") != null);
+        try std.testing.expect(std.ascii.findIgnoreCase(resp.head, "application/octet-stream") != null);
+        try std.testing.expect(std.ascii.findIgnoreCase(resp.head, "content-disposition:") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "a.note") != null);
     }
 
@@ -3853,12 +3854,12 @@ test "control-plane browse/read: tree, note meta, page bytes (immutable), and SS
         try std.testing.expect(resp.body.len >= 4);
         try std.testing.expectEqualStrings("SNPG", resp.body[0..4]);
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "immutable") != null);
-        try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "etag:") != null);
+        try std.testing.expect(std.ascii.findIgnoreCase(resp.head, "etag:") != null);
     }
 
     {
         var pbuf: [96]u8 = undefined;
-        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0?v={s}", .{ top_id, "0" ** 32 });
+        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0?v={s}", .{ top_id, repeat(u8, "0", 32) });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
@@ -4005,7 +4006,7 @@ test "control-plane page links: raw VO, versioned by linksHash, revalidated, 404
         try std.testing.expectEqualStrings("https://onplanners.com/g?a=1,2", p.value.links[1].uri);
     }
 
-    const stale = "0" ** 32;
+    const stale = repeat(u8, "0", 32);
     const cases = [_]struct { id: u64, page: []const u8, v: []const u8 }{
         .{ .id = id, .page = "0", .v = stale },
         .{ .id = id, .page = "1", .v = &links_hash }, // the ordinary page
@@ -4102,7 +4103,7 @@ test "control-plane page text: raw VO, versioned by textHash, revalidated, 404 o
         try std.testing.expectEqualStrings("Test\nMiddle", p.value.text.?); // v7: regions newline-joined
     }
 
-    const stale = "0" ** 32;
+    const stale = repeat(u8, "0", 32);
     const cases = [_]struct { id: u64, page: []const u8, v: []const u8 }{
         .{ .id = rec_id, .page = "0", .v = stale }, // stale `?v=`
         .{ .id = plain_id, .page = "0", .v = &text_hash }, // never recognized
@@ -4603,7 +4604,7 @@ test "the search-index stream is ONE gzip member carrying every document, not a 
         var skipped: usize = 0;
         var pos: u32 = 0;
         while (pos < rows) : (pos += 1) {
-            var bits = [_]u8{0} ** 8;
+            var bits = @as([8]u8, @splat(0));
             bits[pos >> 3] = @as(u8, 1) << @intCast(pos & 7);
             var b64: [16]u8 = undefined;
             const enc = std.base64.url_safe_no_pad.Encoder;
@@ -4683,7 +4684,7 @@ test "the search-index stream refuses a bitmap it cannot trust: 412 on the manif
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/stream?want=AQ", &web_tok, "", 400);
 
     // A wrong `m=` is 412 before the bitmap is parsed (this `want` would be a 400).
-    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/stream?m=" ++ "0" ** 32 ++ "&want=+A", &web_tok, "", 412);
+    try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/search-index/stream?m=" ++ repeat(u8, "0", 32) ++ "&want=+A", &web_tok, "", 412);
 
     // Trashing a document moves the manifest, so the old ETag stops answering.
     {
@@ -4898,12 +4899,12 @@ test "the per-document text route: unreachable and underived are ONE 404, byte f
     const mine_md5 = try fileMd5(f, mine);
 
     {
-        const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/text/" ++ "a" ** 32, &.{}, "");
+        const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/text/" ++ repeat(u8, "a", 32), &.{}, "");
         try std.testing.expectEqual(@as(u16, 401), (try roundtrip(ctx, req, &obuf)).status);
     }
     {
         const dev_tok = try deviceLogin(ctx, &obuf, &reqbuf, "bob", "bpass111", "SN9");
-        const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/text/" ++ "a" ** 32, &.{
+        const req = try buildRequest(&reqbuf, "GET", "/api/controlplane/text/" ++ repeat(u8, "a", 32), &.{
             .{ .name = "x-access-token", .value = &dev_tok },
         }, "");
         try std.testing.expectEqual(@as(u16, 403), (try roundtrip(ctx, req, &obuf)).status);
@@ -4921,7 +4922,7 @@ test "the per-document text route: unreachable and underived are ONE 404, byte f
         &mine_md5, // reachable, NOT derived
         &theirs_md5, // derived, NOT reachable — a housemate's live document
         &theirs_old_md5, // derived, NOT reachable — a housemate's retained version
-        "f" ** 32, // names no blob at all
+        repeat(u8, "f", 32), // names no blob at all
         "nao-e-um-md5", // not even the right shape: still 404, never a 400
     };
     var first: []const u8 = "";
@@ -5420,8 +5421,8 @@ test "cache policy: the served responses match the classification, route by rout
     // Not on the 404 path: that would cache the miss.
     {
         const stale = [_][]const u8{
-            try std.fmt.bufPrint(pbuf[0..96], "/note/{d}/page/0?v={s}", .{ note_id, "0" ** 32 }),
-            try std.fmt.bufPrint(pbuf[96..], "/file/{d}?v={s}", .{ pic.id, "0" ** 32 }),
+            try std.fmt.bufPrint(pbuf[0..96], "/note/{d}/page/0?v={s}", .{ note_id, repeat(u8, "0", 32) }),
+            try std.fmt.bufPrint(pbuf[96..], "/file/{d}?v={s}", .{ pic.id, repeat(u8, "0", 32) }),
         };
         for (stale) |path| {
             const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
@@ -5442,7 +5443,7 @@ test "cache policy: the served responses match the classification, route by rout
         "/api/admin/users",
         "/oss/get/1?t=deadbeefdeadbeefdeadbeefdeadbeef",
         // The text route's miss path (no derived stores here).
-        "/api/controlplane/text/" ++ "f" ** 32,
+        "/api/controlplane/text/" ++ repeat(u8, "f", 32),
         try std.fmt.bufPrint(pbuf[0..96], "/api/controlplane/file/metadata/{d}", .{note_id}),
         try std.fmt.bufPrint(pbuf[96..], "/note/{d}/page/0/text?v={s}", .{ note_id, text_hash[0..] }),
     };
@@ -5543,7 +5544,7 @@ test "db_lock is released after handle() for both a normal and a manual_db_lock 
     try expectUnlocked(&lock);
 
     {
-        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0?v={s}", .{ note_id, "0" ** 32 });
+        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0?v={s}", .{ note_id, repeat(u8, "0", 32) });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
@@ -5559,7 +5560,7 @@ test "db_lock is released after handle() for both a normal and a manual_db_lock 
     }
     try expectUnlocked(&lock);
     {
-        const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ pic.id, "0" ** 32 });
+        const path = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ pic.id, repeat(u8, "0", 32) });
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web_tok, "");
         try std.testing.expectEqual(@as(u16, 404), resp.status);
     }
@@ -5755,7 +5756,7 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
     {
         const bare = try std.fmt.bufPrint(&pbuf, "/file/{d}", .{png.id});
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", bare, &web_tok, "", 404);
-        const stale = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ png.id, "0" ** 32 });
+        const stale = try std.fmt.bufPrint(&pbuf, "/file/{d}?v={s}", .{ png.id, repeat(u8, "0", 32) });
         try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", stale, &web_tok, "", 404);
     }
 
@@ -5905,7 +5906,7 @@ test "GET /thumbnail/{hash}: extracted .spd preview served immutable; 404 for no
     var reqbuf: [1024]u8 = undefined;
     var pbuf: [128]u8 = undefined;
 
-    const jpeg = "\xff\xd8\xff\xe0" ++ ("supernote-thumbnail-pixels" ** 8);
+    const jpeg = "\xff\xd8\xff\xe0" ++ (repeat(u8, "supernote-thumbnail-pixels", 8));
 
     const spd = try buildSpdFixture(jpeg);
     defer gpa.free(spd);
@@ -5949,7 +5950,7 @@ test "GET /thumbnail/{hash}: extracted .spd preview served immutable; 404 for no
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", "/thumbnail/ffffffffffffffffffffffffffffffff", &admin_tok, "", 404);
 
     // Bob's thumbnail row exists, but admin does not hold that blob: 404.
-    const bob_spd = try buildSpdFixture("\x89PNG\r\n\x1a\n" ++ ("bobs-private-drawing" ** 4));
+    const bob_spd = try buildSpdFixture("\x89PNG\r\n\x1a\n" ++ (repeat(u8, "bobs-private-drawing", 4)));
     defer gpa.free(bob_spd);
     const bob_drawing = try putSeedHashed(f, bob, null, "secret.spd", bob_spd);
     {
@@ -5979,7 +5980,7 @@ test "GET /thumbnail/{hash}: a lost thumbs/ file heals on demand — the next GE
     var reqbuf: [1024]u8 = undefined;
     var pbuf: [128]u8 = undefined;
 
-    const jpeg = "\xff\xd8\xff\xe0" ++ ("regenerate-me" ** 8);
+    const jpeg = "\xff\xd8\xff\xe0" ++ (repeat(u8, "regenerate-me", 8));
     const spd = try buildSpdFixture(jpeg);
     defer gpa.free(spd);
     const drawing = try putSeedHashed(f, admin, null, "drawing.spd", spd);
@@ -6046,7 +6047,7 @@ test "GET /thumbnail/{hash}: a corrupt .spd is derived ONCE — two GETs, two 40
 const cover_png = "\x89PNG\r\n\x1a\n" ++
     "\x00\x00\x00\x0d" ++ "IHDR" ++
     "\x00\x00\x01\x40" ++ "\x00\x00\x00\xf0" ++
-    "\x08\x02\x00\x00\x00" ++ ("p" ** 16);
+    "\x08\x02\x00\x00\x00" ++ (repeat(u8, "p", 16));
 
 /// A one-page `.note`, optionally with `cover` as its `COVER_2` block.
 fn buildNoteFixture(cover: ?[]const u8) ![]u8 {
@@ -6146,7 +6147,7 @@ test "GET /thumbnail/{hash}: a wiped .note cover row heals on demand — the rep
     }
     {
         var sqlbuf: [160]u8 = undefined;
-        const sql = try std.fmt.bufPrintZ(&sqlbuf, "SELECT cover_offset IS NOT NULL FROM note_index WHERE blob_md5 = ?1 AND index_version = {d};", .{noteindex.index_version});
+        const sql = try std.fmt.bufPrintSentinel(&sqlbuf, "SELECT cover_offset IS NOT NULL FROM note_index WHERE blob_md5 = ?1 AND index_version = {d};", .{noteindex.index_version}, 0);
         var s = try f.db.prepare(sql);
         defer s.finalize();
         s.bindText(1, &note.md5);
@@ -6314,7 +6315,7 @@ test "a held stream pushes a NEW syncVersion when the tree changes, then release
     try std.testing.expectEqual(@as(u16, 200), runner.status);
 
     const out = runner.output();
-    try std.testing.expect(std.ascii.indexOfIgnoreCase(out, "transfer-encoding: chunked") != null);
+    try std.testing.expect(std.ascii.findIgnoreCase(out, "transfer-encoding: chunked") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "text/event-stream") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "retry: ") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "data: 0") != null);
@@ -6443,7 +6444,7 @@ test "the DEGRADED one-shot shape carries the index frame too — it is the clie
     var reqbuf: [1024]u8 = undefined;
     const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/events", &who.token, "");
     try std.testing.expectEqual(@as(u16, 200), resp.status);
-    try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "chunked") == null); // really one-shot
+    try std.testing.expect(std.ascii.findIgnoreCase(resp.head, "chunked") == null); // really one-shot
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "event: index\ndata: {\"pending\":1,") != null);
 }
 
@@ -6498,8 +6499,8 @@ test "at the per-user cap the events endpoint DEGRADES to one-shot rather than r
     try std.testing.expect(std.mem.indexOf(u8, resp.head, "text/event-stream") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "event: sync") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "retry: ") != null);
-    try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "content-length:") != null);
-    try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "chunked") == null);
+    try std.testing.expect(std.ascii.findIgnoreCase(resp.head, "content-length:") != null);
+    try std.testing.expect(std.ascii.findIgnoreCase(resp.head, "chunked") == null);
     try std.testing.expectEqual(@as(u32, 1), streams.count(std.testing.io));
 }
 
@@ -6516,7 +6517,7 @@ test "with no stream registry (the single-threaded harness) the endpoint is one-
     const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "GET", "/api/controlplane/events", &who.token, "");
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "event: sync") != null);
-    try std.testing.expect(std.ascii.indexOfIgnoreCase(resp.head, "chunked") == null);
+    try std.testing.expect(std.ascii.findIgnoreCase(resp.head, "chunked") == null);
 }
 
 test "a dead client tears the stream down and returns its slot, long before the lifetime cap" {
@@ -7274,7 +7275,7 @@ test "web upload: requires a control-plane session" {
     var obuf: [16384]u8 = undefined;
     var reqbuf: [8192]u8 = undefined;
 
-    const resp = try uploadFile(ctx, &obuf, &reqbuf, "0" ** 32, "root", "sneaky.pdf", "bytes");
+    const resp = try uploadFile(ctx, &obuf, &reqbuf, repeat(u8, "0", 32), "root", "sneaky.pdf", "bytes");
     try std.testing.expectEqual(@as(u16, 401), resp.status);
 }
 
@@ -7725,7 +7726,7 @@ test "web upload onConflict=replace: re-uploading identical bytes is a no-op, no
 const aspect_png = "\x89PNG\r\n\x1a\n" ++
     "\x00\x00\x00\x0d" ++ "IHDR" ++
     "\x00\x00\x01\x40" ++ "\x00\x00\x00\xf0" ++ // 320 × 240
-    "\x08\x02\x00\x00\x00" ++ ("p" ** 16);
+    "\x08\x02\x00\x00\x00" ++ (repeat(u8, "p", 16));
 
 test "a PDF's tree entry carries its REAL page count and shape, not the 1-page fallback" {
     // A `.pdf` card must report its `page_count`, not the fallback's 1. Three
@@ -8093,7 +8094,7 @@ test "bin parity phase 1: page-text ovals serve a TRASHED note's current version
     }
 
     {
-        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/text?v={s}", .{ id, "f" ** 32 });
+        const path = try std.fmt.bufPrint(&pbuf, "/note/{d}/page/0/text?v={s}", .{ id, repeat(u8, "f", 32) });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "")).status);
     }
 
@@ -8185,7 +8186,7 @@ test "bin parity phase 2: view-only version history for a TRASHED note serves ea
 
     // An md5 not in this file's history is a 404 (`historyVersionIn(.trashed)`).
     {
-        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/history/{s}/page/0/text", .{ id, "f" ** 32 });
+        const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/bin/note/{d}/history/{s}/page/0/text", .{ id, repeat(u8, "f", 32) });
         try std.testing.expectEqual(@as(u16, 404), (try requestWithCookie(ctx, &obuf, &reqbuf, "GET", path, &web, "")).status);
     }
 

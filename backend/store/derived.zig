@@ -451,7 +451,7 @@ pub fn beginFragment(store: DerivedStore, f: *Fragment, md5: []const u8, version
     errdefer f.staged.abort();
     f.crc = .init();
     f.len = 0;
-    try f.staged.interface.writeAll(&[_]u8{0} ** header_len);
+    try f.staged.interface.writeAll(&@as([header_len]u8, @splat(0)));
     f.compress = try std.compress.flate.Compress.init(
         f.staged.interface,
         &f.window,

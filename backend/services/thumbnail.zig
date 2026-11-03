@@ -3,6 +3,7 @@
 //! All input is attacker-supplied: bounds-checked, no allocation, null on junk.
 
 const std = @import("std");
+const repeat = @import("../repeat.zig").repeat;
 const sn = @import("supernote");
 
 /// Largest source we buffer whole to extract from (SQLite `deserialize` needs
@@ -209,8 +210,8 @@ test "imageDims reads JPEG SOF0/SOF2 and PNG IHDR dimensions" {
 }
 
 test "imageDims returns null for webp/gif and undecodable formats" {
-    try testing.expect(imageDims("RIFF\x00\x00\x00\x00WEBP" ++ ("w" ** 20)) == null);
-    try testing.expect(imageDims("GIF89a" ++ ("g" ** 20)) == null);
+    try testing.expect(imageDims("RIFF\x00\x00\x00\x00WEBP" ++ (repeat(u8, "w", 20))) == null);
+    try testing.expect(imageDims("GIF89a" ++ (repeat(u8, "g", 20))) == null);
     try testing.expect(imageDims("not an image at all") == null);
     try testing.expect(imageDims("") == null);
 }

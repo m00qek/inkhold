@@ -76,7 +76,13 @@ pub const ParseError = error{ OutOfMemory, ParseZon };
 pub fn parse(gpa: std.mem.Allocator, source: [:0]const u8) ParseError!Loaded {
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();
-    const cfg = try std.zon.parse.fromSliceAlloc(Config, arena.allocator(), source, null, .{});
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    const cfg = try std.zon.parse.fromSlice(Config, .{
+        .gpa = gpa,
+        .arena = arena.allocator(),
+        .source = source,
+        .diagnostics = &diagnostics,
+    });
     return .{ .config = cfg, .arena = arena };
 }
 

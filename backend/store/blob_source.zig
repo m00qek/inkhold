@@ -2,6 +2,7 @@
 //! which bounds-checks untrusted offsets, so parse memory is independent of size.
 
 const std = @import("std");
+const repeat = @import("../repeat.zig").repeat;
 const sn = @import("supernote");
 const blobstore = @import("blobs.zig");
 
@@ -61,6 +62,6 @@ test "BlobSource reads ranges out of a stored blob and refuses bad ones" {
     try testing.expectError(error.OutOfBounds, src.read(12, &buf));
     try testing.expectError(error.OutOfBounds, src.u32le(std.math.maxInt(u64)));
 
-    try testing.expectError(error.FileNotFound, BlobSource.init(store, "f" ** 32));
+    try testing.expectError(error.FileNotFound, BlobSource.init(store, repeat(u8, "f", 32)));
     try testing.expectError(error.InvalidMd5, BlobSource.init(store, "abc"));
 }

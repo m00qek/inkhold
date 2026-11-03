@@ -2,6 +2,7 @@
 //! facts (`spd_index`) and the embedded thumbnail (`thumbs/`).
 
 const std = @import("std");
+const repeat = @import("../repeat.zig").repeat;
 const sqlite = @import("../db/sqlite.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
@@ -226,11 +227,11 @@ const schema = @import("../db/schema.zig");
 
 /// A JPEG-magic stand-in with undecodable dims (`thumb_w = 0`), and a minimal
 /// PNG whose IHDR carries 320x240.
-const fake_jpeg = "\xff\xd8\xff\xe0" ++ ("thumbnail-pixels" ** 4);
+const fake_jpeg = "\xff\xd8\xff\xe0" ++ (repeat(u8, "thumbnail-pixels", 4));
 const mini_png = "\x89PNG\r\n\x1a\n" ++
     "\x00\x00\x00\x0d" ++ "IHDR" ++
     "\x00\x00\x01\x40" ++ "\x00\x00\x00\xf0" ++ // 320 × 240
-    "\x08\x02\x00\x00\x00" ++ ("p" ** 16);
+    "\x08\x02\x00\x00\x00" ++ (repeat(u8, "p", 16));
 
 /// `ls` is a raw protobuf blob (null = omit).
 const SpdSpec = struct {
@@ -417,7 +418,7 @@ test "non-SQLite / corrupt / empty bytes derive as indexable = 0, never an error
         "this is definitely not sqlite",
         "",
         "SQLite format 3", // 15 bytes: magic truncated
-        thumbnail.sqlite_magic ++ ("\x00" ** 64), // header-valid, body garbage
+        thumbnail.sqlite_magic ++ (repeat(u8, "\x00", 64)), // header-valid, body garbage
     }) |bytes| {
         var d = try derive(gpa, bytes);
         defer d.deinit();
