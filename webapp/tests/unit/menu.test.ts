@@ -1,13 +1,5 @@
 // @vitest-environment happy-dom
-//
-// The shared overflow menu (src/ui/menu.ts) as a DOM unit — the behaviour the
-// gallery/bin/toolbar e2e cannot cheaply assert about the COMPONENT in isolation.
-// The load-bearing new behaviour is the VIEWPORT-POSITIONED popover: on open the
-// pop is portaled to a <body> root and placed with position:fixed from the
-// trigger's rect, so no ancestor's overflow can clip it (the card-edge bug). We
-// assert the portal seam, the placement/flip maths, and that every prior contract
-// (Escape returns focus, outside-click/scroll close, roving, the is-open state)
-// still holds once the pop lives outside the wrapper.
+// The open pop is portaled to <body> with position:fixed so no ancestor clips it.
 
 import { describe, it, expect, afterEach } from "vitest";
 import { createMenu, closeOpenMenu } from "../../src/ui/menu";
@@ -22,11 +14,7 @@ function rect(left: number, top: number, w = 28, h = 28) {
 const POP_W = 244;
 const POP_H = 120;
 
-/**
- * Build a two-item menu, mount its trigger inside a body-level scroll container,
- * and give the trigger a fixed rect plus the pop a fixed measured box (happy-dom
- * has no layout, so placePop's offsetWidth/Height reads need mocking).
- */
+/** A two-item menu in a scroll container; layout reads are mocked (happy-dom has none). */
 function makeMenu(triggerRect: DOMRect, onSelect: () => void = () => {}) {
   const scroller = document.createElement("div");
   document.body.appendChild(scroller);
@@ -58,9 +46,8 @@ afterEach(() => {
 describe("shared overflow menu — viewport-positioned popover", () => {
   it("portals the open pop out of the wrapper to a body-level root", () => {
     const { menu, trigger, pop } = makeMenu(rect(900, 12));
-    expect(pop.parentElement).toBe(menu); // closed: nested in the wrapper
+    expect(pop.parentElement).toBe(menu);
     trigger.click();
-    // Open: lifted to the portal root under <body>, NOT inside the (clippable) menu.
     expect(portalRoot()).not.toBeNull();
     expect(pop.parentElement).toBe(portalRoot());
     expect(menu.contains(pop)).toBe(false);
@@ -68,8 +55,7 @@ describe("shared overflow menu — viewport-positioned popover", () => {
   });
 
   it("is not clipped near a scroll-container edge — stays within the viewport", () => {
-    // Trigger hard against the right edge, where a right-anchored pop used to
-    // overflow and get sliced by the scroller.
+    // Regression: a right-anchored pop at the right edge was clipped by the scroller.
     const { trigger, pop } = makeMenu(rect(window.innerWidth - 30, 20));
     trigger.click();
     const left = parseFloat(pop.style.left);
@@ -81,7 +67,6 @@ describe("shared overflow menu — viewport-positioned popover", () => {
   });
 
   it("default placement: dropped below, right edge aligned to the trigger", () => {
-    // Roomy spot: no flip/clamp, so the raw right-align + drop maths show through.
     const r = rect(400, 100);
     const { trigger, pop } = makeMenu(r);
     trigger.click();
@@ -90,17 +75,16 @@ describe("shared overflow menu — viewport-positioned popover", () => {
   });
 
   it("flips to left-align when a right-align would run off the left edge", () => {
-    const r = rect(20, 100); // right-align → 20+28-244 = -196, off-screen left
+    const r = rect(20, 100);  // right-align → 20+28-244 = -196, off-screen left
     const { trigger, pop } = makeMenu(r);
     trigger.click();
-    expect(parseFloat(pop.style.left)).toBe(r.left); // left-aligned to the trigger
+    expect(parseFloat(pop.style.left)).toBe(r.left);
   });
 
   it("opens upward when a downward drop would run off the bottom", () => {
-    const r = rect(400, window.innerHeight - 40); // little room below
+    const r = rect(400, window.innerHeight - 40);
     const { trigger, pop } = makeMenu(r);
     trigger.click();
-    // Above: trigger top − gap − pop height.
     expect(parseFloat(pop.style.top)).toBe(Math.round(r.top - 6 - POP_H));
   });
 });
@@ -129,12 +113,9 @@ describe("shared overflow menu — preserved behaviour", () => {
     const { menu, pop } = makeMenu(rect(400, 100));
     const trigger = menu.querySelector(".card__more") as HTMLButtonElement;
     trigger.click();
-    // A click landing inside the pop keeps it open, even though the pop is no
-    // longer a descendant of the wrapper.
     const header = pop.querySelector(".menu__section") as HTMLElement;
     header.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(menu.classList.contains("is-open")).toBe(true);
-    // A click anywhere outside closes it.
     document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(menu.classList.contains("is-open")).toBe(false);
   });
@@ -151,7 +132,7 @@ describe("shared overflow menu — preserved behaviour", () => {
     const { pop } = makeMenu(rect(400, 100));
     const trigger = document.querySelector(".card__more") as HTMLButtonElement;
     const items = pop.querySelectorAll<HTMLButtonElement>(".menu__item");
-    trigger.click(); // programmatic click reports detail 0 → focuses first item
+    trigger.click();
     expect(document.activeElement).toBe(items[0]);
     pop.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     expect(document.activeElement).toBe(items[1]);
@@ -167,6 +148,6 @@ describe("shared overflow menu — preserved behaviour", () => {
     (pop.querySelector(".menu__item") as HTMLButtonElement).click();
     expect(ran).toBe(true);
     expect(menu.classList.contains("is-open")).toBe(false);
-    expect(pop.parentElement).toBe(menu); // returned to the wrapper on close
+    expect(pop.parentElement).toBe(menu);
   });
 });

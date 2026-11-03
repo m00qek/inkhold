@@ -11,10 +11,7 @@ import type { NoteRenderer } from "../../src/render/types";
 import type { RenderCache } from "../../src/cache/types";
 import type { PageRef } from "../../src/core/types";
 
-// The scheduler is exercised without any DOM: canvases are opaque identity
-// objects, and the observer, blit, and placeholder are all injected. This lets us
-// assert the load-bearing invariant — off-screen slots never reach the renderer —
-// on plain Node.
+// No DOM: canvases are identity objects; observer, blit and placeholder are injected.
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -66,7 +63,7 @@ function build(observer = fakeObserver(), failures?: ApiFailureSink) {
     observerFactory: observer.factory,
     blit,
     placeholder,
-    schedule: (fn) => fn(), // run placeholder+observe synchronously
+    schedule: (fn) => fn(),
     failures,
     debounceMs: 0,
   });
@@ -79,7 +76,6 @@ const canvas = () => ({}) as unknown as HTMLCanvasElement;
 const imgEl = () => ({ tagName: "IMG", src: "", alt: "" }) as unknown as HTMLImageElement;
 
 describe("a tile whose produce is slow shows the glyph meanwhile", () => {
-  /** An engine wired for the `<img>` facade path, with both seams faked. */
   function imgBuild(getThumbnail: () => Promise<Blob>, getGlyph: () => Promise<Blob>) {
     const s = stubs();
     const observer = fakeObserver();
@@ -95,7 +91,6 @@ describe("a tile whose produce is slow shows the glyph meanwhile", () => {
       debounceMs: 0,
       getThumbnail,
       getGlyph,
-      // The blob IS its own identity here, so `src` says which one was painted.
       createObjectUrl: (b) => `url:${String(b)}`,
       revokeObjectUrl: () => {},
     });
@@ -111,10 +106,7 @@ describe("a tile whose produce is slow shows the glyph meanwhile", () => {
   });
 
   it("paints the glyph while the render is outstanding, then upgrades in place", async () => {
-    // A `.pdf` tile fetches 1.5 MB of MuPDF, compiles it, opens the document and
-    // renders page 0 before it has one pixel — measured at 8.5s on 3G, 30.8s on
-    // slow 3G. It used to stay BLANK for all of it, which is what made a
-    // thumbnail the Largest Contentful Paint element at 10.5s.
+    // A `.pdf` tile takes seconds (MuPDF fetch + render), so it gets a placeholder.
     let land: (b: Blob) => void = () => {};
     const real = new Promise<Blob>((r) => (land = r));
     const getGlyph = vi.fn(async () => "GLYPH" as unknown as Blob);
@@ -124,19 +116,17 @@ describe("a tile whose produce is slow shows the glyph meanwhile", () => {
     engine.add(slot(el));
     observer.intersect(el, true);
 
-    // Before the placeholder window elapses the tile is untouched: a produce that
-    // answers quickly must never flash a glyph on its way to the real pixels.
     await flush();
     expect(el.src).toBe("");
     expect(getGlyph).not.toHaveBeenCalled();
 
     await new Promise((r) => setTimeout(r, PLACEHOLDER_AFTER_MS + 80));
     expect(getGlyph).toHaveBeenCalledWith("pdf");
-    expect(el.src).toBe("url:GLYPH"); // the floor is up, and the render is still owed
+    expect(el.src).toBe("url:GLYPH");
 
     land("REAL" as unknown as Blob);
     await flush();
-    expect(el.src).toBe("url:REAL"); // replaced in place when the pixels arrive
+    expect(el.src).toBe("url:REAL");
   });
 
   it("never draws the glyph when the produce beats the window", async () => {
@@ -148,10 +138,6 @@ describe("a tile whose produce is slow shows the glyph meanwhile", () => {
     await flush();
 
     expect(el.src).toBe("url:REAL");
-    // The whole point of racing rather than always painting the floor: every
-    // strategy but `pdf-page` answers from a cache or a small fetch, and a flash
-    // of glyph on a tile that was about to paint properly is a worse artefact
-    // than the blank it replaces.
     await new Promise((r) => setTimeout(r, PLACEHOLDER_AFTER_MS + 80));
     expect(getGlyph).not.toHaveBeenCalled();
     expect(el.src).toBe("url:REAL");
@@ -166,18 +152,15 @@ describe("lazy engine scheduler", () => {
     t.engine.add({ target: onScreen, noteId: "n1", page: page("h1"), size: "thumb" });
     t.engine.add({ target: offScreen, noteId: "n2", page: page("h2"), size: "thumb" });
 
-    // Placeholders drawn for both; nothing rendered yet.
     expect(t.placeholder).toHaveBeenCalledTimes(2);
     expect(t.render).not.toHaveBeenCalled();
 
-    // Only the first scrolls into view.
     t.observer.intersect(onScreen, true);
     await flush();
 
     expect(t.getPageBytes).toHaveBeenCalledTimes(1);
     expect(t.render).toHaveBeenCalledTimes(1);
     expect(t.blit).toHaveBeenCalledTimes(1);
-    // The off-screen slot was never fetched or rendered.
     expect(t.render.mock.calls.every(([req]) => (req as { page: PageRef }).page.hash === "h1")).toBe(true);
   });
 
@@ -190,7 +173,6 @@ describe("lazy engine scheduler", () => {
     await flush();
     expect(t.render).toHaveBeenCalledTimes(1);
 
-    // Scroll out and back in: the cached paint stands, no second render.
     t.observer.intersect(c, false);
     t.observer.intersect(c, true);
     await flush();
@@ -227,7 +209,6 @@ describe("lazy engine scheduler", () => {
     t.engine.bumpTheme();
     await flush();
 
-    // Visible slot re-rendered for the new theme; hidden slot only re-placeheld.
     expect(t.render).toHaveBeenCalledTimes(2);
     expect(t.render.mock.calls.at(-1)?.[0]).toMatchObject({ page: { hash: "h1" } });
     expect(t.placeholder).toHaveBeenCalledWith(hidden, expect.anything());
@@ -238,7 +219,7 @@ describe("lazy engine scheduler", () => {
     try {
       const t = build();
       t.engine.prefetch("n1", page("h9"), "full");
-      await vi.advanceTimersByTimeAsync(200); // idle fallback = setTimeout(180)
+      await vi.advanceTimersByTimeAsync(200);
       expect(t.getPageBytes).toHaveBeenCalledTimes(1);
       expect(t.render).toHaveBeenCalledTimes(1);
       expect(t.blit).not.toHaveBeenCalled();
@@ -248,8 +229,7 @@ describe("lazy engine scheduler", () => {
   });
 });
 
-// Regression: these failures used to hit a bare `catch {}`, so an expired cookie
-// left a gallery of blank thumbnails and no route to login.
+// Regression: these failures hit a bare `catch {}`, so an expired cookie never reached login.
 describe("lazy engine failure reporting", () => {
   function sink(): ApiFailureSink & { onSessionExpired: ReturnType<typeof vi.fn>; onStalePage: ReturnType<typeof vi.fn> } {
     return { onSessionExpired: vi.fn(), onStalePage: vi.fn() };
@@ -266,7 +246,7 @@ describe("lazy engine failure reporting", () => {
     await flush();
 
     expect(s.onSessionExpired).toHaveBeenCalledTimes(1);
-    expect(t.blit).not.toHaveBeenCalled(); // still non-fatal: placeholder stands
+    expect(t.blit).not.toHaveBeenCalled();
   });
 
   it("reports a STALE_PAGE with the note + page whose ?v= went stale", async () => {
@@ -312,11 +292,7 @@ describe("lazy engine failure reporting", () => {
   });
 });
 
-// The facade + a CANVAS target (the recycle bin): the engine asks the facade
-// WHAT image a slot shows (a WebP blob), decodes it and blits it, instead of
-// inlining the note-page pipeline. This is the boundary: the engine keeps owning
-// WHEN to paint. The gallery's <img> path (below) shares the facade but skips the
-// decode/blit entirely.
+// The facade + a canvas target (the recycle bin): decode and blit the facade's blob.
 describe("lazy engine thumbnail-facade path (canvas target)", () => {
   const fakeBitmap = () => ({ width: 240, height: 320, close: vi.fn() }) as unknown as ImageBitmap;
 
@@ -358,7 +334,6 @@ describe("lazy engine thumbnail-facade path (canvas target)", () => {
     t.observer.intersect(c, true);
     await flush();
 
-    // Dispatch source carries the note id, page and the tile's own hash/type.
     expect(t.getThumbnail).toHaveBeenCalledTimes(1);
     const [source, fileType] = t.getThumbnail.mock.calls[0]!;
     expect(fileType).toBe("spd");
@@ -366,7 +341,6 @@ describe("lazy engine thumbnail-facade path (canvas target)", () => {
 
     expect(t.decode).toHaveBeenCalledTimes(1);
     expect(t.blit).toHaveBeenCalledTimes(1);
-    // The note-page pipeline was NOT used — this tile is not a note.
     expect(t.getPageBytes).not.toHaveBeenCalled();
     expect(t.render).not.toHaveBeenCalled();
   });
@@ -391,7 +365,6 @@ describe("lazy engine thumbnail-facade path (canvas target)", () => {
     await flush();
 
     expect(t.blit).toHaveBeenCalledTimes(1);
-    // The engine owns a facade-decoded bitmap and frees it once drawImage copied it.
     expect((t.bitmap.close as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
   });
 
@@ -426,16 +399,9 @@ describe("lazy engine thumbnail-facade path (canvas target)", () => {
   });
 });
 
-// The gallery's <img> path: the engine points an <img> at an object URL over the
-// facade's WebP blob and lets the BROWSER own decode/eviction. No ImageBitmap is
-// decoded or held, and the new lifetime concern — object-URL revocation, which
-// replaces the old bitmap `.close()` — is asserted here: every mint is revoked, on
-// replacement (a theme bump) and on teardown (reset/remove), never leaked. The DOM
-// is faked: a `{ tagName: "IMG" }` routes to the <img> branch, and object-URL
-// create/revoke are injected so a leak is a missed `revokeObjectUrl` call.
+// The gallery's <img> path: object URLs over the facade's blob; every mint is revoked.
 describe("lazy engine <img> gallery path", () => {
-  /** A fake <img>: settable `src`/`alt`, and `tagName: "IMG"` so the engine's
-   *  target-kind check routes it to the object-URL path with no real DOM. */
+  /** A fake <img>; `tagName: "IMG"` routes the engine to the object-URL path. */
   const imgTarget = () => ({ tagName: "IMG", src: "", alt: "" }) as unknown as HTMLImageElement;
 
   function buildImg() {
@@ -484,12 +450,9 @@ describe("lazy engine <img> gallery path", () => {
     expect(t.getThumbnail).toHaveBeenCalledTimes(1);
     expect(t.createObjectUrl).toHaveBeenCalledTimes(1);
     expect(img.src).toBe("blob:mock/0");
-    // Accessibility: the tile is named, not left as an anonymous image.
     expect(img.alt).toBe("Meeting notes");
-    // The browser owns decode: no ImageBitmap tier for a gallery tile.
     expect(t.decode).not.toHaveBeenCalled();
     expect(t.blit).not.toHaveBeenCalled();
-    // Nothing revoked yet — the live URL is what the <img> is displaying.
     expect(t.revokeObjectUrl).not.toHaveBeenCalled();
   });
 
@@ -517,7 +480,7 @@ describe("lazy engine <img> gallery path", () => {
 
     t.engine.remove(a);
     expect(t.revokeObjectUrl).toHaveBeenCalledTimes(1);
-    expect(t.revokeObjectUrl).toHaveBeenCalledWith("blob:mock/0"); // a's URL only
+    expect(t.revokeObjectUrl).toHaveBeenCalledWith("blob:mock/0");
   });
 
   it("revokes the old URL when a theme bump repaints a visible tile — no leak on replacement", async () => {
@@ -531,7 +494,6 @@ describe("lazy engine <img> gallery path", () => {
     t.engine.bumpTheme();
     await flush();
 
-    // A fresh blob for the new theme, a fresh URL, and the old one revoked.
     expect(t.getThumbnail).toHaveBeenCalledTimes(2);
     expect(t.createObjectUrl).toHaveBeenCalledTimes(2);
     expect(img.src).toBe("blob:mock/1");
@@ -547,15 +509,13 @@ describe("lazy engine <img> gallery path", () => {
     );
     t.engine.add({ target: img, noteId: "n1", page: page("h1"), size: "thumb", thumb: { fileType: "note", fileHash: "fh" } });
     t.observer.intersect(img, true);
-    await flush(); // paint is now awaiting the blob
+    await flush();
 
-    // A gallery repaint (folder change / live bump) tears the slot down first.
     t.engine.reset();
     resolveBlob(new Blob(["late"], { type: "image/webp" }));
     await flush();
 
-    // The late blob is dropped: nothing is minted for a torn-down slot, so there
-    // is no dangling object URL that reset never had a chance to revoke.
+    // A late blob for a torn-down slot mints nothing, so no URL escapes revocation.
     expect(t.createObjectUrl).not.toHaveBeenCalled();
     expect(img.src).toBe("");
   });
@@ -566,25 +526,19 @@ describe("lazy engine <img> gallery path", () => {
     t.engine.add({ target: img, noteId: "n1", page: page("h1"), size: "thumb", thumb: { fileType: "note", fileHash: "fh" } });
     t.observer.intersect(img, true);
     await flush();
-    t.observer.intersect(img, false); // scrolled off-screen
+    t.observer.intersect(img, false);
 
     t.engine.bumpTheme();
     await flush();
 
-    // Not repainted while off-screen: the old-theme image stays (nobody sees it),
-    // no new URL is minted and the current one is NOT revoked (that would blank it
-    // to a broken image). The correct theme paints — and revokes this URL — when
-    // the tile is next scrolled in.
+    // Off-screen: no repaint and no revoke (that would blank it) until scrolled in.
     expect(img.src).toBe("blob:mock/0");
     expect(t.createObjectUrl).toHaveBeenCalledTimes(1);
     expect(t.revokeObjectUrl).not.toHaveBeenCalled();
   });
 
   it("paints a PAGELESS facade slot — the bin's .spd/.txt/image rows have no page ref", async () => {
-    // A trashed `.spd`/`.txt`/image row registers with the facade but carries
-    // no `page` (its strategy fetches by hash, never renders a page). The
-    // engine must paint it from the facade blob all the same, and pass the
-    // slot's `bin` flag through to the facade's source.
+    // A trashed `.spd`/`.txt`/image row has no `page`; the `bin` flag passes through.
     const t = buildImg();
     const img = imgTarget();
     t.engine.add({

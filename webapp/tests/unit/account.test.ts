@@ -14,21 +14,9 @@ import {
 import { ApiError, RateLimitError } from "../../src/api/client";
 import type { MyDevice } from "../../src/api/accountTypes";
 
-// The account page's decisions, with no DOM — the same split `admin.ts` and
-// `rail.ts` use. Two of these are load-bearing enough to be worth pinning on
-// their own:
-//
-//   * THE DISCARD COUNT. It is stated BEFORE the change, and discarded versions
-//     are gone — the recycle bin does not hold them. So a number that is wrong
-//     by one is a promise the interface breaks irreversibly.
-//   * PER FILE, NOT A POOL. `Σ max(0, count − keep)` and `max(0, Σcount − keep)`
-//     agree on a one-file fixture and disagree on every real one, so the fixture
-//     below has several files on purpose.
-
 describe("versionsToDiscard", () => {
   it("counts per FILE, not against a shared pool", () => {
-    // Six files, 25 retained versions between them. A pool reading would say
-    // "25 − 3 = 22"; the per-file reading is 2+2+2+2+0+0.
+    // A pooled reading would say 25 − 3 = 22; per file it is 2+2+2+2+0+0.
     expect(versionsToDiscard([5, 5, 5, 5, 3, 2], 3)).toBe(8);
   });
 
@@ -69,8 +57,6 @@ describe("discardNotice", () => {
 
   it("treats zero as a real setting and says what it means going forward", () => {
     expect(discardNotice([5, 5], 0)).toBe("Keeping 0 will remove 10 versions now. No new versions will be kept.");
-    // Zero with nothing retained is still a statement, not silence: choosing it
-    // is a decision about the future, not only about what is on disk now.
     expect(discardNotice([], 0)).toBe("Nothing to discard, and no new versions will be kept.");
   });
 });
@@ -79,9 +65,7 @@ describe("storageRows", () => {
   const byKind = { notebookBytes: 5, sketchBytes: 4, documentBytes: 3, binBytes: 2, versionBytes: 1 };
 
   it("splits into FIVE kinds, in the order the design sets out", () => {
-    // Five, not four. The bin line was missing from the first draft and the live
-    // database found it: three live kinds that summed short of `used_bytes` by
-    // exactly two trashed files, leaving hundreds of MB unexplained on screen.
+    // Regression: without the bin line, the live kinds summed short of `used_bytes`.
     expect(storageRows(byKind).map((r) => r.label)).toEqual([
       "Notebooks",
       "Sketches",
@@ -92,8 +76,6 @@ describe("storageRows", () => {
   });
 
   it("keeps each figure with its own kind, and invents no totals of its own", () => {
-    // The five are a PARTITION the SERVER computes; a client that re-derived or
-    // reconciled one of them would be a second opinion about the meter.
     expect(storageRows(byKind).map((r) => r.bytes)).toEqual([5, 4, 3, 2, 1]);
   });
 
@@ -101,16 +83,10 @@ describe("storageRows", () => {
     const rows = storageRows(byKind);
     expect(rows[0]!.hint).toBe(".note");
     expect(rows[1]!.hint).toBe(".spd");
-    // Images fold into Documents for now (§7's open question), and the hint has
-    // to say so or the line reads as "text files only".
     expect(rows[2]!.hint).toContain("images");
   });
 
   it("says what the bin figure MEANS — what emptying it returns", () => {
-    // The line counts the versions of trashed files too, because history is
-    // purged with the file. A line promising 600 KB that frees 900 KB would be
-    // wrong in the user's favour, which is still wrong — so the hint names the
-    // remedy rather than describing the contents.
     const bin = storageRows(byKind).find((r) => r.key === "bin")!;
     expect(bin.hint).toContain("emptying");
   });
@@ -124,10 +100,6 @@ describe("the Signing in copy", () => {
   });
 
   it("blames the RECORD, not the person, when there is no date", () => {
-    // `users.password_changed_at` does not exist yet and only becomes true from
-    // the day it lands, so every existing account is unrecorded until its owner
-    // next changes one. "Never changed" would be a claim about their habits made
-    // from a column that was not there.
     expect(passwordAgeLabel(null, now)).toBe("No change recorded yet");
     expect(passwordAgeLabel(0, now)).toBe("No change recorded yet");
   });
@@ -143,10 +115,6 @@ describe("the Signing in copy", () => {
     });
 
     it("NAMES the device, because that is the object you have to go and find", () => {
-      // The tablet is the part that matters and the line used to omit it: its
-      // session dies with the browsers', but unlike a browser it cannot sign
-      // itself back in — it authenticates with the password it has stored. So
-      // sync stops until somebody walks over to it.
       const text = passwordChangeConsequence([dev("Supernote Nomad")]);
       expect(text).toContain("Supernote Nomad will stop syncing");
       expect(text).toContain("enter the new password on the device");
@@ -160,8 +128,6 @@ describe("the Signing in copy", () => {
     });
 
     it("says nothing about devices when none are bound", () => {
-      // A standing warning about hardware you do not own is noise, and noise is
-      // what teaches people to skip the line that matters.
       const text = passwordChangeConsequence([]);
       expect(text).toBe("Your other browsers will be signed out. This one stays signed in.");
       expect(text).not.toContain("sync");
@@ -198,8 +164,6 @@ describe("deviceSeenLabel", () => {
   };
 
   it("says SEEN, not SYNCED — the server records the last request, not the last sync", () => {
-    // Decided against the data rather than the wish: the wider word would be
-    // right almost always and wrong occasionally.
     expect(deviceSeenLabel(nomad, now)).toBe("last seen 20 minutes ago");
     expect(deviceSeenLabel(nomad, now)).not.toContain("sync");
   });
@@ -224,9 +188,6 @@ describe("failure copy", () => {
   });
 
   it("names the WRONG CURRENT PASSWORD as exactly that", () => {
-    // The one refusal this form exists to be able to show. A generic "something
-    // went wrong" here would leave a person re-typing a new password that was
-    // never the problem.
     const wrong = new ApiError("INVALID_CREDENTIALS", "current password incorrect", 200);
     expect(passwordFailureMessage(wrong)).toBe("That isn't your current password.");
   });

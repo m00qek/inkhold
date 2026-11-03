@@ -1,18 +1,8 @@
 import { test, expect } from "@playwright/test";
 import { signedIn, freezeMotion } from "./helpers/app";
 
-// The MULTI-VIEWER seam. A file's type decides which viewer opens it: `.note`,
-// images and every unrecognised kind stay in the reader (files.spec.ts owns those
-// outcomes); a `.spd` and a `.txt` route to their own viewer modules. Those
-// modules are STUBS today — a placeholder plus the shared toolbar — so what is
-// proved here is the SEAM, not the render: the dispatch reaches the right module,
-// only one viewer is ever visible, the topbar hides, and the universal toolbar
-// actions (Back, Move to bin) work in a non-reader viewer before any tiles land.
-//
-// The `Files` fixture folder carries one of each: `174` is a `.spd`,
-// `177` a `.txt`. Only the `.spd` STUB is exercised here now — the
-// `.txt` viewer is REAL (it fetches and lays out text), so its render, font-size
-// control and universal actions live in `txtViewer.spec.ts`.
+// Proves the type-to-viewer dispatch seam using the `.spd` stub (`174`); the `.txt`
+// viewer has its own spec.
 
 const CASES = [
   { kind: ".spd", id: "174", region: "Sketch viewer", cls: ".viewer--spd", mark: "SPD", name: "Kitchen sketch" },
@@ -27,15 +17,11 @@ for (const c of CASES) {
 
       const region = page.getByRole("region", { name: c.region });
       await expect(region).toBeVisible();
-      // The placeholder — where the real render lands — names the file and the type.
       const placeholder = region.locator(".viewer__placeholder");
       await expect(placeholder).toContainText(c.name);
       await expect(placeholder.locator(".viewer__mark")).toHaveText(c.mark);
 
-      // Reading is a mode: the library topbar (its search box) leaves, exactly as
-      // for the reader.
       await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeHidden();
-      // …and the reader is NOT the thing on screen.
       await expect(page.locator(".reader.is-open")).toBeHidden();
     });
 
@@ -58,19 +44,15 @@ for (const c of CASES) {
 
       const moveBin = page.locator(c.cls).getByRole("button", { name: "Move to bin" });
       await expect(moveBin).toBeVisible();
-      // QUIET, NEVER RED — trashing is recoverable.
       await expect(moveBin).not.toHaveClass(/is-danger/);
 
       await moveBin.click();
 
-      // The SAME undo toast the reader and the library card raise — one trash path,
-      // not a second: "Moved …", the U6 device line, and an Undo control.
       const toast = page.locator(".bin-toast");
       await expect(toast).toContainText("Moved");
       await expect(toast).toContainText("Also comes off your Supernote at the next sync.");
       await expect(toast.locator(".bin-toast__action")).toHaveText("Undo");
 
-      // The file now lives in the bin, so the viewer leaves and the library is back.
       await expect(page.getByRole("region", { name: c.region })).toBeHidden();
       await expect(page.locator(".gallery")).toBeVisible();
     });
@@ -80,19 +62,16 @@ for (const c of CASES) {
 test("switching viewers (note → .spd → note) hides the prior each time", async ({ page }) => {
   await signedIn(page);
 
-  // A real .note: the reader.
   await page.goto("/#/note/141");
   await expect(page.locator(".reader.is-open")).toBeVisible();
 
-  // In-app hash change (no reload), so this exercises the shell's `activate` — not
-  // a fresh boot. The .spd viewer comes up and the reader is gone: not two overlays.
+  // In-app hash change (no reload), so this exercises the shell's `activate`.
   await page.evaluate(() => {
     window.location.hash = "#/note/174";
   });
   await expect(page.locator(".viewer--spd")).toBeVisible();
   await expect(page.locator(".reader.is-open")).toBeHidden();
 
-  // Back to a note: the reader returns and the .spd viewer is hidden again.
   await page.evaluate(() => {
     window.location.hash = "#/note/141";
   });

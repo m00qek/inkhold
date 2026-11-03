@@ -2,8 +2,6 @@ import { test, expect } from "@playwright/test";
 import { mockApi, okRandomCode } from "./helpers/mockApi";
 import { signedIn } from "./helpers/app";
 
-// Light accessibility assertions with plain locators (no axe). Covers focus
-// management and that the status region is a live region screen readers announce.
 test.describe("accessibility", () => {
   test("focus lands on the account field on load", async ({ page }) => {
     await mockApi(page, { "query/random/code": okRandomCode });
@@ -32,7 +30,6 @@ test.describe("accessibility", () => {
     await password.fill("wrong-password");
     await page.getByRole("button", { name: "Sign in" }).click();
 
-    // The live region carries the error, and focus moves to the field to fix.
     await expect(page.getByRole("status")).toHaveText(/don't match/);
     await expect(password).toBeFocused();
   });
@@ -54,9 +51,6 @@ test.describe("accessibility — library & reader", () => {
 
     await expect(page.getByRole("navigation", { name: "Folders" })).toBeVisible();
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
-    // The rail footer is a nameplate: ONE button, whose accessible name says
-    // what pressing it does and whose account it is about. The three stacked
-    // lines inside it would otherwise be read out as a sentence nobody wrote.
     await expect(page.getByRole("button", { name: "Your account: ana@household.lan" })).toBeVisible();
   });
 
@@ -65,11 +59,7 @@ test.describe("accessibility — library & reader", () => {
     await page.goto("/#/account");
 
     await expect(page.getByRole("region", { name: "Your account" })).toBeVisible();
-    // A two-option control needs to be a GROUP with a name, or the two buttons
-    // are just two buttons that happen to sit together.
     await expect(page.getByRole("group", { name: "Theme" })).toBeVisible();
-    // Per-device actions name their device: a column of identical "Unlink"
-    // buttons tells a screen reader nothing about which one it is on.
     await expect(page.getByRole("button", { name: "Unlink Nomad" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Change your password" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
@@ -88,7 +78,6 @@ test.describe("accessibility — library & reader", () => {
     await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Previous page" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Next page" })).toBeVisible();
-    // The Back control returns focus into the app on open (keyboard entry point).
     await expect(page.getByRole("button", { name: "Library" })).toBeFocused();
   });
 });

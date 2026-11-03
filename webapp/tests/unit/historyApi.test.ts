@@ -1,10 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createHttpApi, ApiError } from "../../src/api/client";
 
-// The history read + restore endpoints over the real control-plane, with a
-// stubbed `fetch`. Same discipline as httpApi.test.ts: raw VOs (no `{success}`
-// envelope), binary page bytes, errors round-trip as `ApiError`, and the seam
-// normalizes the `emit_null_optional_fields = false` omissions.
+// History endpoints with a stubbed `fetch`: raw VOs, binary pages, `ApiError`.
 
 function jsonResponse(body: unknown, init: { status?: number } = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -32,8 +29,8 @@ describe("noteHistory", () => {
         id: "n1",
         versions: [
           { md5: "aaa", size: 900, createdAt: 1_752_800_000_000, current: true, pageCount: 17 },
-          { md5: "bbb", size: 800, createdAt: 1_752_600_000_000 }, // current + pageCount omitted → retained, 0
-          { size: 700, createdAt: 1 }, // no md5 → dropped (addresses nothing)
+          { md5: "bbb", size: 800, createdAt: 1_752_600_000_000 },
+          { size: 700, createdAt: 1 },
         ],
       }),
     );
@@ -42,8 +39,6 @@ describe("noteHistory", () => {
     const h = await api.noteHistory("n1");
     expect(calls[0]).toContain("/api/controlplane/note/n1/history");
     expect(h.id).toBe("n1");
-    // An omitted `pageCount` normalizes to 0 (the "no pages to count" reading the
-    // content signal falls back to byte size for).
     expect(h.versions).toEqual([
       { md5: "aaa", size: 900, createdAt: 1_752_800_000_000, current: true, pageCount: 17 },
       { md5: "bbb", size: 800, createdAt: 1_752_600_000_000, current: false, pageCount: 0 },
@@ -54,8 +49,7 @@ describe("noteHistory", () => {
     const { fn } = recordingFetch(() =>
       jsonResponse({
         id: "n1",
-        // A restored version can tie the displaced one on createdAt; re-sorting
-        // would reorder them and lie about which is live.
+        // A restored version can tie the displaced one on createdAt; don't re-sort.
         versions: [
           { md5: "restored", size: 1, createdAt: 100, current: true },
           { md5: "displaced", size: 1, createdAt: 100 },
@@ -70,9 +64,6 @@ describe("noteHistory", () => {
 
 describe("historyMeta", () => {
   it("hits the per-version meta route and returns the VERSION's own page list", async () => {
-    // The version has THREE pages — a DIFFERENT count than a current note might
-    // have — proving the seam carries the version's real geometry, not the live
-    // note's. `fileHash` is the version md5.
     const { fn, calls } = recordingFetch(() =>
       jsonResponse({
         id: "n1",
@@ -93,7 +84,6 @@ describe("historyMeta", () => {
     expect(meta.fileHash).toBe("ver-md5");
     expect(meta.pages).toHaveLength(3);
     expect(meta.pages.map((p) => p.index)).toEqual([0, 1, 2]);
-    // Normalized like `getNoteMeta`: an omitted `textHash` becomes null.
     expect(meta.pages[0]!.textHash).toBe("t0");
     expect(meta.pages[1]!.textHash).toBeNull();
   });
@@ -126,8 +116,7 @@ describe("historyPageText", () => {
     const { fn, calls } = recordingFetch(() => jsonResponse({ text: "alpha beta", words }));
     vi.stubGlobal("fetch", fn);
     const got = await createHttpApi().historyPageText("n1", "abc123", 4);
-    // The `:md5` pins the immutable version, so — unlike the live text route — the
-    // URL carries no `?v={textHash}`.
+    // The `:md5` pins the version, so no `?v={textHash}`.
     expect(calls[0]).toBe("/api/controlplane/note/n1/history/abc123/page/4/text");
     expect(calls[0]).not.toContain("?v=");
     expect(got).toEqual({ text: "alpha beta", words });
@@ -138,7 +127,7 @@ describe("historyPageText", () => {
       jsonResponse({
         words: [
           { text: "good", xMm: 1, yMm: 2, wMm: 3, hMm: 4 },
-          { text: "bad", xMm: Number.NaN, yMm: 2, wMm: 3, hMm: 4 }, // NaN coord → dropped
+          { text: "bad", xMm: Number.NaN, yMm: 2, wMm: 3, hMm: 4 },
         ],
       }),
     );
@@ -196,7 +185,6 @@ describe("restoreVersion", () => {
     vi.stubGlobal("fetch", fn);
     const r = await createHttpApi().restoreVersion("n1", "req-md5");
     expect(r.md5).toBe("req-md5");
-    // Belt-and-braces: the error class is importable for callers that switch on it.
     expect(ApiError).toBeTypeOf("function");
   });
 });

@@ -1,12 +1,4 @@
 // @vitest-environment happy-dom
-//
-// The `.txt` viewer's RENDER + FONT-SIZE logic (src/pages/txtViewer.ts), driven
-// through its injected {@link TxtSeam} so no browser network or storage is
-// needed. The shared stub contract (Viewer shape, the universal toolbar zone) is
-// proved in `viewerStubs.test.ts`; what is proved HERE is the real behaviour the
-// stub deferred: fetch → decode → lay out text, the font-size stepper and its
-// persistence, the honest error state, session-expiry routing, and — the shell
-// reuses ONE instance — that a hidden or superseded load never paints stale text.
 
 import { describe, it, expect, vi } from "vitest";
 import { FIT_PAGE, FIT_WIDTH } from "../../src/pages/viewerControls";
@@ -73,8 +65,7 @@ function deferred<T>(): Deferred<T> {
 /** Flush microtasks + a macrotask, so the viewer's `.then`/`.catch` has run. */
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-/** A seam whose every `fetchText` is a controllable deferred, with in-memory
- *  font-size AND zoom stores — the things the real seam needs a browser for. */
+/** A seam whose `fetchText` is a controllable deferred, with in-memory size and zoom stores. */
 function fakeSeam(initialFont: number | null = null, initialZoom: number | null = null) {
   const calls: { url: string; signal: AbortSignal; d: Deferred<string> }[] = [];
   let store = initialFont;
@@ -113,10 +104,8 @@ describe("txt viewer — render", () => {
     const v = mount(createTxtViewer(deps(), f.seam));
     await v.open(synthesizeSummary(meta({ id: "n-1", fileHash: "b".repeat(32) })), Promise.resolve(meta({ id: "n-1", fileHash: "b".repeat(32) })), 0, FOLDER, "");
 
-    // The fetch target is the versioned raw url WITHOUT `download=1`.
     expect(f.calls).toHaveLength(1);
     expect(f.calls[0]!.url).toBe(`/file/n-1?v=${"b".repeat(32)}`);
-    // Loading state until the bytes land.
     expect(q(v, ".viewer__placeholder")).not.toBeNull();
     expect(q(v, ".txt__sheet")).toBeNull();
 
@@ -125,7 +114,6 @@ describe("txt viewer — render", () => {
 
     const pre = q(v, ".txt__sheet")!;
     expect(pre).not.toBeNull();
-    // Line breaks + whitespace preserved verbatim; textContent, never innerHTML.
     expect(pre.textContent).toBe("Line one\n  indented\nLine three");
     expect(q(v, ".viewer__placeholder")).toBeNull();
     v.destroy();
@@ -138,12 +126,9 @@ describe("txt viewer — render", () => {
     const v = mount(createTxtViewer(deps({ onVersions, onRestoreVersion }), f.seam));
     await v.open(synthesizeSummary(meta({ id: "n-1", fileHash: "b".repeat(32) })), Promise.resolve(meta({ id: "n-1", fileHash: "b".repeat(32) })), 0, HISTORY, "");
 
-    // NOT the live `/file/:id?v=` (which serves the current blob) — the
-    // version-scoped history raw route, keyed by the version's md5.
+    // The version-scoped history raw route, not the live `/file/:id?v=`.
     expect(f.calls[0]!.url).toBe(`/api/controlplane/note/n-1/history/${"e".repeat(32)}/raw`);
 
-    // The read-only version chrome: the banner is up, Move to bin is gone, and the
-    // Versions control (to reopen the list) is shown.
     const banner = q(v, ".version-banner") as HTMLElement;
     expect(banner.hidden).toBe(false);
     expect(banner.textContent).toContain("not the current note");
@@ -151,8 +136,6 @@ describe("txt viewer — render", () => {
     const versions = v.el.querySelector('button[aria-label="Version history"]') as HTMLElement;
     expect(versions.hidden).toBe(false);
 
-    // Versions reopens the shared list; the banner's Restore routes to the shared
-    // restore path via `onRestoreVersion`.
     versions.click();
     expect(onVersions).toHaveBeenCalledOnce();
     (banner.querySelector(".version-banner__restore") as HTMLElement).click();
@@ -183,7 +166,6 @@ describe("txt viewer — render", () => {
     expect(q(v, ".txt__sheet")).toBeNull();
     const ph = q(v, ".viewer__placeholder")!;
     expect(ph.textContent).toContain("read this file");
-    // Download stays offered — the original is still there to save.
     expect((q(v, '[aria-label="Download"]') as HTMLAnchorElement).hidden).toBe(false);
     v.destroy();
   });
@@ -226,7 +208,6 @@ describe("txt viewer — font size", () => {
     smaller(v).click();
     smaller(v).click();
     expect(label(v).textContent).toBe("14px");
-    // Every change is persisted through the seam.
     expect(f.saves).toEqual([18, 16, 14]);
     v.destroy();
   });
@@ -251,7 +232,7 @@ describe("txt viewer — font size", () => {
     for (let i = 0; i < 20; i++) larger(v).click();
     expect(label(v).textContent).toBe("32px");
     const savesAtMax = f.saves.length;
-    larger(v).click(); // already at the ceiling — a no-op, not another save
+    larger(v).click();
     expect(f.saves.length).toBe(savesAtMax);
 
     for (let i = 0; i < 40; i++) smaller(v).click();
@@ -260,7 +241,7 @@ describe("txt viewer — font size", () => {
   });
 
   it("restores the persisted size on construction (survives a reload)", async () => {
-    const f = fakeSeam(24); // as if a prior session had stored 24px
+    const f = fakeSeam(24);
     const v = mount(createTxtViewer(deps(), f.seam));
     expect(label(v).textContent).toBe("24px");
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
@@ -280,8 +261,7 @@ describe("txt viewer — font size", () => {
 describe("txt viewer — zoom (reading column, distinct from font size)", () => {
   const zoomOut = (v: ReturnType<typeof createTxtViewer>) => q(v, '[aria-label="Zoom out"]') as HTMLButtonElement;
   const zoomIn = (v: ReturnType<typeof createTxtViewer>) => q(v, '[aria-label="Zoom in"]') as HTMLButtonElement;
-  // The zoom readout wears `.txt-zoom` (NOT the font stepper's `.zoom`), so the
-  // two `.pager`s in the one toolbar stay individually addressable.
+  // `.txt-zoom`, not `.zoom`, so the two `.pager`s stay addressable.
   const zoomLabel = (v: ReturnType<typeof createTxtViewer>) => q(v, ".pager .txt-zoom")!;
 
   it("renders as a `−` [Fit] `+` control in the view zone, defaulting to Fit", async () => {
@@ -305,10 +285,9 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
     expect(zoomLabel(v).textContent).toBe("125%");
     expect(f.zoomSaves).toEqual([1, 2, 1]);
 
-    // Fit is the floor: stepping out from it is a no-op, not another save.
-    zoomOut(v).click(); // → Fit
+    zoomOut(v).click();
     const at = f.zoomSaves.length;
-    zoomOut(v).click(); // already Fit
+    zoomOut(v).click();
     expect(zoomLabel(v).textContent).toBe(FIT_PAGE);
     expect(f.zoomSaves.length).toBe(at);
     v.destroy();
@@ -322,7 +301,6 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
     await flush();
 
     const pre = q(v, ".txt__sheet") as HTMLPreElement;
-    // Fit is factor 1; a step widens the column to 1.25×.
     expect(pre.style.getPropertyValue("--txt-zoom")).toBe("1");
     zoomIn(v).click();
     expect(pre.style.getPropertyValue("--txt-zoom")).toBe("1.25");
@@ -337,28 +315,23 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
     await flush();
     const pre = q(v, ".txt__sheet") as HTMLPreElement;
 
-    // Three multiplier rungs, each still steering `--txt-zoom`…
     for (const factor of ["1.25", "1.5", "1.75"]) {
       zoomIn(v).click();
       expect(pre.style.getPropertyValue("--txt-zoom")).toBe(factor);
       expect(pre.classList.contains("txt__sheet--wide")).toBe(false);
     }
 
-    // …then the top rung, which drops the factor entirely. Leaving a stale
-    // `--txt-zoom` behind would be invisible here but would decide the sheet's
-    // aspect the moment the class came off again.
+    // The top rung drops `--txt-zoom`; a stale one would decide the aspect later.
     zoomIn(v).click();
     expect(zoomLabel(v).textContent).toBe(FIT_WIDTH);
     expect(pre.classList.contains("txt__sheet--wide")).toBe(true);
     expect(pre.style.getPropertyValue("--txt-zoom")).toBe("");
 
-    // It is the ceiling: another step in is a no-op, not a sixth rung.
     const at = f.zoomSaves.length;
     zoomIn(v).click();
     expect(zoomLabel(v).textContent).toBe(FIT_WIDTH);
     expect(f.zoomSaves.length).toBe(at);
 
-    // And stepping back restores the factor the class had displaced.
     zoomOut(v).click();
     expect(zoomLabel(v).textContent).toBe("175%");
     expect(pre.classList.contains("txt__sheet--wide")).toBe(false);
@@ -367,10 +340,8 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
   });
 
   it("text arriving LATER opens at the fit-width rung, not at a bare factor", async () => {
-    // The rung is applied in two places — a step, and text landing afterwards.
-    // The second used to write `--txt-zoom` directly, so a file opened while
-    // fit-width was the current rung would have come back at a multiplier.
-    const f = fakeSeam(null, 4); // a prior session left the top rung stored
+    // Regression: text landing afterwards wrote `--txt-zoom` directly, ignoring fit-width.
+    const f = fakeSeam(null, 4);
     const v = mount(createTxtViewer(deps(), f.seam));
     expect(zoomLabel(v).textContent).toBe(FIT_WIDTH);
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
@@ -383,7 +354,7 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
   });
 
   it("restores the persisted zoom on construction (survives a reload)", async () => {
-    const f = fakeSeam(null, 2); // as if a prior session had stored step 2 (150%)
+    const f = fakeSeam(null, 2);
     const v = mount(createTxtViewer(deps(), f.seam));
     expect(zoomLabel(v).textContent).toBe("150%");
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
@@ -401,17 +372,15 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
     await flush();
     const pre = q(v, ".txt__sheet") as HTMLPreElement;
 
-    // Zooming leaves the font size alone (glyphs unchanged, column wider).
     (q(v, '[aria-label="Zoom in"]') as HTMLButtonElement).click();
     expect(pre.style.getPropertyValue("--txt-zoom")).toBe("1.25");
     expect(pre.style.fontSize).toBe("16px");
-    expect(q(v, ".pager .zoom")!.textContent).toBe("16px"); // font readout untouched
+    expect(q(v, ".pager .zoom")!.textContent).toBe("16px");
 
-    // Resizing the font leaves the zoom alone (glyphs bigger, column unchanged).
     (q(v, '[aria-label="Larger text"]') as HTMLButtonElement).click();
     expect(pre.style.fontSize).toBe("18px");
     expect(pre.style.getPropertyValue("--txt-zoom")).toBe("1.25");
-    expect(zoomLabel(v).textContent).toBe("125%"); // zoom readout untouched
+    expect(zoomLabel(v).textContent).toBe("125%");
     v.destroy();
   });
 });
@@ -419,22 +388,13 @@ describe("txt viewer — zoom (reading column, distinct from font size)", () => 
 describe("txt viewer — find", () => {
   // Alpha in para 0; "zephyrine" in paragraphs 1 and 2 (byte = char, all ASCII).
   const BODY = "Alpha here.\n\nThe zephyrine tea.\n\nMore zephyrine, brighter.";
-  // The `.txt` case is the ONE where the ordinal is not the address: `o`/`l` are
-  // the paragraph's byte range in the raw blob, and `byteToCharMap` is what turns
-  // them into the UTF-16 indices the viewer holds. Byte = char here (all ASCII),
-  // which is exactly why `byteToCharMap`'s own multi-byte behaviour is pinned in
-  // `txtFind.test.ts` rather than smuggled in here.
   const ZEPH: DocSegmentMatch[] = [
     { segment: 1, offset: 13, length: 18, matches: 1, terms: ["zephyrine"] },
     { segment: 2, offset: 33, length: 25, matches: 1, terms: ["zephyrine"] },
   ];
 
-  /**
-   * A viewer whose in-document engine answers `segments` for any query.
-   * `opts.usedFuzzy` marks the answer a typo-tolerant fallback, which is the
-   * opt-in gate; `opts.hold` leaves the query unresolved so a test can read the
-   * counter while the text is still being fetched and indexed.
-   */
+  /** A viewer whose engine answers `segments`; `usedFuzzy` marks a held fallback,
+   *  `hold` leaves the query unresolved. */
   function findViewer(
     segments: DocSegmentMatch[] = ZEPH,
     over: Partial<ViewerDeps> = {},
@@ -473,28 +433,22 @@ describe("txt viewer — find", () => {
 
   it("a ?q= deep link opens find, marks matches, and lands on the target paragraph", async () => {
     const { v, f, search } = findViewer();
-    // page = 1 → the paragraph ordinal the library hit routed with.
     await v.open(synthesizeSummary(meta({ id: "n-r" })), Promise.resolve(meta({ id: "n-r" })), 1, FOLDER, "zephyrine");
     f.calls[0]!.d.resolve(BODY);
     await flush();
     await flush();
 
-    // The bar is open and pre-filled, and the query went to the BLOB — `fileHash`,
-    // not the file id. That is the whole of §1.1's collapse:
-    // one md5-keyed route, so history and the bin reach it with no reroute.
+    // The query goes to the blob (`fileHash`), not the file id.
     expect((q(v, ".txtbar") as HTMLElement).hidden).toBe(false);
     expect((q(v, ".txtbar input") as HTMLInputElement).value).toBe("zephyrine");
     expect(search).toHaveBeenCalledWith("a".repeat(32), "zephyrine", expect.any(AbortSignal));
 
-    // Both paragraphs are wrapped and their word marked.
     const paras = v.el.querySelectorAll(".txt__match");
     expect(paras).toHaveLength(2);
     expect(v.el.querySelectorAll(".txt__sheet mark")).toHaveLength(2);
 
-    // EXACT count, in-document scope.
     expect(q(v, ".txtbar__count")!.textContent).toBe("2 matches in 2 paragraphs");
 
-    // Landed on the TARGET (ordinal 1 → the first matching paragraph).
     expect(paras[0]!.classList.contains("is-current")).toBe(true);
     expect(paras[1]!.classList.contains("is-current")).toBe(false);
     v.destroy();
@@ -513,9 +467,9 @@ describe("txt viewer — find", () => {
 
     btn(v, "Next match").click();
     expect(current()).toBe(1);
-    btn(v, "Next match").click(); // wraps
+    btn(v, "Next match").click();
     expect(current()).toBe(0);
-    btn(v, "Previous match").click(); // wraps back
+    btn(v, "Previous match").click();
     expect(current()).toBe(1);
     v.destroy();
   });
@@ -528,7 +482,6 @@ describe("txt viewer — find", () => {
     await flush();
     expect(q(v, ".txtbar__count")!.textContent).toBe("No matches");
     expect(v.el.querySelectorAll(".txt__sheet mark")).toHaveLength(0);
-    // The whole text is still there, just unmarked.
     expect(q(v, ".txt__sheet")!.textContent).toBe(BODY);
     v.destroy();
   });
@@ -539,9 +492,6 @@ describe("txt viewer — find", () => {
     f.calls[0]!.d.resolve(BODY);
     await flush();
     expect((q(v, ".txtbar") as HTMLElement).hidden).toBe(true);
-    // §4.1: OPENING A FILE TO READ IT FETCHES NO TEXT INDEX. The `.txt` blob is
-    // already on screen; the search record is a separate, larger fetch that only
-    // a find pays for.
     expect(search).not.toHaveBeenCalled();
     v.destroy();
   });
@@ -553,37 +503,24 @@ describe("txt viewer — find", () => {
     f.calls[0]!.d.resolve(BODY);
     await flush();
     await flush();
-    // Landed on ordinal 2 (the target), with the query — what a reload restores.
-    // The 4th arg is the version md5, undefined on a live (non-preview) open.
+    // The 4th arg is the version md5, undefined on a live open.
     expect(onPosition).toHaveBeenLastCalledWith("n-p", 2, "zephyrine", undefined);
     v.destroy();
   });
 
   it("in a HISTORY preview: the URL sync rides the version md5 (addressable version)", async () => {
-    // Opening a `.txt` version preview must publish the `#/note/:id/version/:short`
-    // form, not the bare note URL — the shell's `onPosition` keys off the version
-    // md5 (its 4th arg) to write the version address. A plain preview (no `?q=`)
-    // publishes it from the open-end sync; here we also drive find to show the
-    // landed paragraph keeps riding the same version md5.
     const onPosition = vi.fn();
     const version = { md5: "e".repeat(32), createdAt: 1_752_000_000_000 };
     const { v, f } = findViewer(ZEPH, { onPosition });
     await v.open(synthesizeSummary(meta({ id: "n-p" })), Promise.resolve(meta({ id: "n-p" })), 0, { kind: "history", folderPath: "Note / Files", version }, "zephyrine");
-    // The open-end sync already carried the version md5 (before any text arrived).
     expect(onPosition).toHaveBeenLastCalledWith("n-p", 0, "zephyrine", version.md5);
     f.calls[0]!.d.resolve(BODY);
     await flush();
     await flush();
-    // Once find lands (on the first match, ordinal 1, since the panel opened at the
-    // start), the position still rides the version md5 — the address stays pinned.
     expect(onPosition).toHaveBeenLastCalledWith("n-p", 1, "zephyrine", version.md5);
     v.destroy();
   });
 
-  // THERE IS NO FLOOR ANY MORE. The old counter drained a server keyset and read
-  // "1+ match in 1+ paragraph" until the last batch; a local index answers in one
-  // call, so the counter has exactly two things to say — "Searching…" while the
-  // text is being fetched and indexed, and then the exact "N in M".
   it("says 'Searching…' with NO number until the answer lands, then the exact count", async () => {
     const { v, f, land } = findViewer(ZEPH, {}, { hold: true });
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 1, FOLDER, "zephyrine");
@@ -600,9 +537,7 @@ describe("txt viewer — find", () => {
     v.destroy();
   });
 
-  // A `.note` or `.pdf` segment has no byte range because its ordinal IS the
-  // address. If one ever reached the `.txt` path it could not be placed in the
-  // string, and marking it from byte 0 would highlight the top of the file.
+  // A segment without a byte range cannot be placed; marking from byte 0 would be wrong.
   it("drops a segment that carries no byte range rather than marking from byte 0", async () => {
     const mixed: DocSegmentMatch[] = [
       { segment: 0, offset: null, length: null, matches: 9, terms: ["zephyrine"] },
@@ -620,20 +555,16 @@ describe("txt viewer — find", () => {
 
   it("manual fuzzy is OPT-IN: offers 'Search similar', reveals the held result on click", async () => {
     const { v, f, search } = findViewer(ZEPH, {}, { usedFuzzy: true });
-    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "zephyryne"); // a typo absent from the file
+    await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "zephyryne");
     f.calls[0]!.d.resolve(BODY);
     await flush();
     await flush();
 
-    // The exact search is empty and the fuzzy result is HELD, not shown: no marks,
-    // "No matches", and the affordance offering to search similar.
     expect(q(v, ".txtbar__count")!.textContent).toBe("No matches");
     expect(v.el.querySelectorAll(".txt__sheet mark")).toHaveLength(0);
     const ask = q(v, ".txtbar__ask") as HTMLButtonElement;
     expect(ask.hidden).toBe(false);
 
-    // Opt in → the held fuzzy result is revealed, with nothing asked again: the
-    // ladder ran inside the one query and its answer was merely held.
     const calls = search.mock.calls.length;
     ask.click();
     await flush();
@@ -667,11 +598,11 @@ describe("txt viewer — lifecycle / abort hazard (one reused instance)", () => 
     expect(f.calls).toHaveLength(2);
     expect(f.calls[0]!.signal.aborted).toBe(true);
 
-    f.calls[0]!.d.resolve("A text"); // the stale one lands first…
+    f.calls[0]!.d.resolve("A text");
     await flush();
     expect(q(v, ".txt__sheet")).toBeNull();
 
-    f.calls[1]!.d.resolve("B text"); // …the current one wins
+    f.calls[1]!.d.resolve("B text");
     await flush();
     expect(q(v, ".txt__sheet")!.textContent).toBe("B text");
     v.destroy();

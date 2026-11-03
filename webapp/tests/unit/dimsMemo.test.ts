@@ -1,12 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { createDimsMemo, getDims, setDims, type DimsBackend, type ImageDims } from "../../src/cache/dimsMemo";
 
-// The image-dims memo: session Map read-through over an injectable persistent
-// backend (production: the `sn-dims` IndexedDB store — cache/idb.ts). The
-// factory is what these exercise, with the backend faked, so the persistence
-// CONTRACT (round-trip, read-through, failure tolerance) runs on plain Node —
-// the same inject-the-seam pattern the rest of the suite uses for IDB.
-
 function fakeBackend(seed: Record<string, ImageDims> = {}) {
   const map = new Map(Object.entries(seed));
   return {
@@ -39,14 +33,14 @@ describe("createDimsMemo", () => {
     await memo.getDims("known");
     await memo.getDims("unknown");
     await memo.getDims("unknown");
-    expect(backend.get).toHaveBeenCalledTimes(2); // once per distinct hash
+    expect(backend.get).toHaveBeenCalledTimes(2);
   });
 
   it("null means 'unknown yet', and a later set overrides a remembered miss", async () => {
     const backend = fakeBackend();
     const memo = createDimsMemo(backend);
     await expect(memo.getDims("h1")).resolves.toBeNull();
-    await memo.setDims("h1", { w: 1, h: 2 }); // first decode arrives
+    await memo.setDims("h1", { w: 1, h: 2 });
     await expect(memo.getDims("h1")).resolves.toEqual({ w: 1, h: 2 });
   });
 
@@ -61,15 +55,13 @@ describe("createDimsMemo", () => {
     };
     const memo = createDimsMemo(backend);
     await expect(memo.setDims("h1", { w: 5, h: 6 })).resolves.toBeUndefined();
-    await expect(memo.getDims("h1")).resolves.toEqual({ w: 5, h: 6 }); // session layer
+    await expect(memo.getDims("h1")).resolves.toEqual({ w: 5, h: 6 });
     await expect(memo.getDims("other")).resolves.toBeNull();
   });
 });
 
 describe("module-level surface (the layout/facade contract)", () => {
   it("getDims/setDims work in Node, where IndexedDB is absent (session-only)", async () => {
-    // The exported surface the gallery layout and the facade import: unchanged
-    // signatures, and the persistence layer degrades to a no-op store here.
     await setDims("mod-hash", { w: 123, h: 456 });
     await expect(getDims("mod-hash")).resolves.toEqual({ w: 123, h: 456 });
     await expect(getDims("never-seen")).resolves.toBeNull();

@@ -4,16 +4,8 @@ import { fileURLToPath } from "node:url";
 import { encodeWant } from "../../src/search/wantBitmap";
 import { SearchWireError } from "../../src/search/manifestCodec";
 
-// THE golden vector — one artifact, two implementations, exactly as
-// `manifestCodec.test.ts` and `manifest_golden.bin` do it, with the directions
-// swapped: this side ENCODES and asserts the characters, and
-// `backend/services/search/want_bitmap.zig` decodes them and asserts the
-// positions, from a list written out by hand there. Neither test can be made to
-// pass by editing the other's code.
-//
-// Reaching across into `backend/` is deliberate. A copy under `webapp/` would be
-// a second artifact, and two copies of a golden vector is how a format drifts on
-// one side without anything noticing.
+// The golden vector, read from `backend/` on purpose: this side encodes,
+// `want_bitmap.zig` decodes. Neither test can pass by editing the other.
 const GOLDEN = readFileSync(
   fileURLToPath(
     new URL("../../../backend/services/search/testdata/want_golden.txt", import.meta.url),
@@ -21,12 +13,8 @@ const GOLDEN = readFileSync(
   "utf8",
 );
 
-// The golden's positions, written out by hand HERE. Between them they cover: a
-// full first byte (so bits 7 and 8 straddle a byte boundary), a gap at position
-// 8 that an MSB-first encoder would fill instead, an INTERIOR zero byte at byte
-// 3 which must not be mistaken for a trimmable trailing one, and the manifest's
-// very last position at 33 — six bits below the end of its byte, so the server's
-// "no bits past the manifest" check has something to look at.
+// Positions cover a byte boundary, an MSB-trap gap at 8, an interior zero byte and
+// the manifest's last position at 33.
 const GOLDEN_POSITIONS = [0, 1, 2, 3, 4, 5, 6, 7, 13, 14, 15, 16, 17, 33];
 const GOLDEN_MANIFEST_LENGTH = 34;
 
@@ -36,18 +24,13 @@ describe("the want bitmap encoder, against the checked-in golden vector", () => 
   });
 
   it("is base64URL and not base64", () => {
-    // `_-` are sextets 63 and 62 — the two characters the two alphabets spell
-    // differently. An encoder built on `btoa` without the `replace` pass writes
-    // `/+ADAAI` here, which is valid base64, decodes to different bytes on the
-    // server, and names a different set of documents with no error anywhere.
+    // `_-` are sextets 63 and 62; plain `btoa` would write valid but wrong `/+`.
     expect(GOLDEN).toBe("_-ADAAI");
     expect(GOLDEN).not.toMatch(/[+/=]/);
   });
 
   it("orders bits LSB-first, which position 8 is here to prove", () => {
-    // Byte 1 of the golden is 0xe0 — positions 13, 14, 15. Read MSB-first the
-    // same byte is positions 8, 9, 10, so the deliberate hole at 8 is what makes
-    // the two orderings produce different strings.
+    // Byte 1 is 0xe0 = positions 13, 14, 15; MSB-first would read 8, 9, 10.
     expect(GOLDEN_POSITIONS).not.toContain(8);
     expect(encodeWant([...GOLDEN_POSITIONS, 8], GOLDEN_MANIFEST_LENGTH)).not.toBe(GOLDEN);
   });
@@ -55,8 +38,6 @@ describe("the want bitmap encoder, against the checked-in golden vector", () => 
 
 describe("the sets a client actually sends", () => {
   it("encodes the empty set as the empty string", () => {
-    // A client that already holds everything. The server reads it as an empty
-    // set rather than a refusal, so this needs no special case at either end.
     expect(encodeWant([], 1222)).toBe("");
     expect(encodeWant([], 0)).toBe("");
   });
@@ -68,12 +49,8 @@ describe("the sets a client actually sends", () => {
   });
 
   it("drops trailing zero bytes, which is what keeps the usual request small", () => {
-    // The common case after a coalesced refetch: tier order puts the newest
-    // notes first, so "the two I am missing" is two characters against a library
-    // of 1,222 — not the 204 a full-width bitmap would cost.
     expect(encodeWant([0, 2], 1222)).toBe("BQ"); // 0x05, and nothing after it
     expect(encodeWant([0, 2], 1222).length).toBe(2);
-    // Interior zeros survive; only the tail is trimmed.
     expect(encodeWant([0, 20], 64)).toBe("AQAQ"); // 0x01 0x00 0x10
   });
 
@@ -83,15 +60,12 @@ describe("the sets a client actually sends", () => {
   });
 
   it("encodes every bit set without spilling past the manifest's last position", () => {
-    // 34 documents end two bits into byte 4, so a full set's last byte is 0x03
-    // and not 0xff. Setting the other six would be a 412 on the server.
+    // 34 documents end two bits into byte 4; setting the other six is a server 412.
     expect(encodeWant(range(34), 34)).toBe("_____wM");
   });
 
   it("is 153 bytes and 204 characters at 1,222 documents, which is §3.3's whole claim", () => {
-    // The measurement the design rests on. 200 md5s in a URL is 6.6 KB; the same
-    // question as a bitmap is 204 characters — and 153 divides by 3, so it needs
-    // no padding either and there is nothing to strip.
+    // 200 md5s in a URL is 6.6 KB; as a bitmap, 204 characters.
     const want = encodeWant(range(1222), 1222);
     expect(want.length).toBe(204);
     expect(Math.ceil(1222 / 8)).toBe(153);
@@ -103,10 +77,7 @@ describe("the sets a client actually sends", () => {
 });
 
 describe("what the encoder refuses", () => {
-  // These are caller bugs rather than corrupt payloads, but they are the SAME
-  // disagreement the server answers with a 412 — positions that do not belong to
-  // the manifest being addressed — so they are caught here, before a request
-  // goes out that cannot be served.
+  // Caller bugs, but the same disagreement the server 412s, so caught here.
   it("refuses a position past the manifest's last document", () => {
     expect(() => encodeWant([34], 34)).toThrow(SearchWireError);
     expect(() => encodeWant([0, 1, 1222], 1222)).toThrow(SearchWireError);
@@ -125,7 +96,6 @@ describe("what the encoder refuses", () => {
   });
 
   it("tolerates a repeated position, because a set is a set", () => {
-    // `|=` is idempotent, and a caller deduplicating first would be ceremony.
     expect(encodeWant([0, 0, 2, 2], 64)).toBe("BQ");
   });
 });

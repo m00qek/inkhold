@@ -2,9 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { createHttpApi, ApiError, dispatchApiFailure } from "../../src/api/client";
 import type { Listing, NoteMeta, PageRef } from "../../src/core/types";
 
-// The browse `Api` over the real control-plane endpoints, with a stubbed `fetch`.
-// Mirrors client.test.ts: the web JSON is RAW (no `{success}` envelope), page
-// bytes are BINARY, and errors round-trip as `ApiError`.
+// The browse `Api` with a stubbed `fetch`: raw JSON, binary pages, `ApiError`.
 
 function jsonResponse(body: unknown, init: { status?: number } = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -54,7 +52,6 @@ const LISTING: Listing = {
 type NoteEntry = Extract<(typeof LISTING.entries)[number], { kind: "note" }>;
 const NOTE_ENTRY = LISTING.entries[1] as NoteEntry;
 
-/** The one note from a listing response, for the assertions below. */
 function firstNote(listing: Listing): NoteEntry {
   const entry = listing.entries.find((e) => e.kind === "note");
   if (!entry || entry.kind !== "note") throw new Error("no note entry in listing");
@@ -65,7 +62,7 @@ function firstNote(listing: Listing): NoteEntry {
 function listingWithout(...keys: (keyof NoteEntry)[]): unknown {
   const wireNote: Record<string, unknown> = { ...NOTE_ENTRY };
   for (const k of keys) delete wireNote[k as string];
-  for (const k of keys) expect(k in wireNote).toBe(false); // the wire shape
+  for (const k of keys) expect(k in wireNote).toBe(false);
   return { ...LISTING, entries: [LISTING.entries[0], wireNote] };
 }
 
@@ -105,17 +102,15 @@ describe("createHttpApi", () => {
       expect(listing.entries[1]).toMatchObject({ kind: "note", id: "7" });
     });
 
-    // The server serializes with `emit_null_optional_fields = false`, so a null
-    // optional field is OMITTED from the JSON rather than sent as `null`. These
-    // must run against the REAL client: the fake `Api` returns a well-formed
-    // `null`, which is exactly why this divergence survived unnoticed.
+    // The server omits null optionals (`emit_null_optional_fields = false`); the fake
+    // `Api` returns `null`, so these must run against the real client.
     it("normalizes an OMITTED folderId to null for the root listing", async () => {
       const { folderId: _omitted, ...rootWithoutFolderId } = LISTING;
-      expect("folderId" in rootWithoutFolderId).toBe(false); // the wire shape
+      expect("folderId" in rootWithoutFolderId).toBe(false);
       vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(rootWithoutFolderId)).fn);
 
       const listing = await createHttpApi().listFolder(null);
-      // Not just falsy — `library.ts` tests the root with `=== null`.
+      // Not just falsy: `library.ts` tests the root with `=== null`.
       expect(listing.folderId).toBeNull();
     });
 
@@ -132,20 +127,13 @@ describe("createHttpApi", () => {
       expect(calls[0]).toContain("/api/controlplane/tree?parent=9");
     });
 
-    // The gallery badge is `fileType` and the OCR marker is `hasRecognizedText`.
-    // NEITHER field exists on the backend yet, so today every note arrives
-    // without them — and an absent optional is `undefined`, not a default. Left
-    // un-normalized the badge renders the literal "undefined" and the marker is
-    // shown on every card. Like the folderId/textHash cases above these MUST run
-    // against the REAL client: the fake returns both fields well-formed, which is
-    // exactly why this class of divergence survives unnoticed.
+    // Absent optionals arrive `undefined`; un-normalized, the badge prints "undefined".
     describe("fileType / hasRecognizedText (absent on today's backend)", () => {
       it("derives an OMITTED fileType from the note's filename extension", async () => {
         const wire = listingWithout("fileType");
         (wire as { entries: { name: string }[] }).entries[1]!.name = "Apartment lease.PDF";
         vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(wire)).fn);
 
-        // Lowercased, dot stripped — never the literal "undefined", never "note".
         expect(firstNote(await createHttpApi().listFolder(null)).fileType).toBe("pdf");
       });
 
@@ -168,7 +156,6 @@ describe("createHttpApi", () => {
       it("normalizes an OMITTED hasRecognizedText to false, so no marker rather than a wrong one", async () => {
         vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(listingWithout("hasRecognizedText"))).fn);
 
-        // Not merely falsy — library.ts renders the marker on the raw value.
         expect(firstNote(await createHttpApi().listFolder(null)).hasRecognizedText).toBe(false);
       });
 
@@ -178,8 +165,7 @@ describe("createHttpApi", () => {
           recordingFetch(() =>
             jsonResponse({
               ...LISTING,
-              // The server VERIFIES the blob, so a name that lies loses to the
-              // sniffed type — the client must not re-derive over the top of it.
+              // The server verifies the blob, so the sniffed type beats the name.
               entries: [LISTING.entries[0], { ...NOTE_ENTRY, name: "Ideas.pdf", fileType: "note", hasRecognizedText: true }],
             }),
           ).fn,
@@ -190,9 +176,7 @@ describe("createHttpApi", () => {
         expect(note.hasRecognizedText).toBe(true);
       });
 
-      // `fileHash` is what makes `/file/{id}?v=…` addressable at all. The route
-      // REQUIRES the version, so an entry without a hash must yield no URL —
-      // `undefined` here would build `?v=undefined` and 404 every preview.
+      // The route requires `?v=`; `undefined` would build `?v=undefined` and 404.
       it("normalizes an OMITTED fileHash to null", async () => {
         vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(listingWithout("fileHash"))).fn);
         expect(firstNote(await createHttpApi().listFolder(null)).fileHash).toBeNull();
@@ -212,11 +196,7 @@ describe("createHttpApi", () => {
       });
     });
 
-    // The tile-shape fact the masonry lays out from.
-    // ABSENT for most entries by design (only `.note`/`.spd` state a shape), and
-    // the layout consumes it as a RATIO — so anything that cannot be a shape
-    // must normalize to `undefined` (the CSS fallback), never reach
-    // `aspect-ratio` as NaN/0, which silently disables the property.
+    // Consumed as a CSS `aspect-ratio`, where NaN/0 silently disables the property.
     describe("thumbAspect (absent on most entries)", () => {
       const withAspect = (thumbAspect: unknown): unknown => ({
         ...LISTING,
@@ -267,18 +247,13 @@ describe("createHttpApi", () => {
       expect(meta.pages[1]?.hash).toBe("b".repeat(32));
     });
 
-    // `textHash` does not exist on the backend yet, so EVERY page arrives without
-    // it today. This is the test the fake cannot substitute for: the fake returns
-    // a well-formed `null`, while the wire omits the field entirely. If this
-    // normalization regresses, real mode hands the reader `undefined` — truthy
-    // enough to enable the toggle and fetch a transcript that isn't there.
+    // The wire omits `textHash`; `undefined` would enable the toggle and fetch nothing.
     it("normalizes an OMITTED per-page textHash to null (real mode against today's backend)", async () => {
       const wirePages = NOTE_META.pages.map(({ textHash: _omitted, ...rest }) => rest);
-      expect(wirePages.every((p) => !("textHash" in p))).toBe(true); // the wire shape
+      expect(wirePages.every((p) => !("textHash" in p))).toBe(true);
       vi.stubGlobal("fetch", recordingFetch(() => jsonResponse({ ...NOTE_META, pages: wirePages })).fn);
 
       const meta = await createHttpApi().getNoteMeta("7");
-      // Not merely falsy — the reader tests recognition with `textHash === null`.
       expect(meta.pages.map((p) => p.textHash)).toEqual([null, null]);
     });
 
@@ -301,8 +276,6 @@ describe("createHttpApi", () => {
       if (entry?.kind === "note") expect(entry.firstPage.textHash).toBeNull();
     });
 
-    // The reader branches on these three, and it is reached by ROUTE — a reload
-    // of `#/note/:id` has nothing but the id, so they have to survive this call.
     describe("fileType / fileHash / size", () => {
       it("passes the server's verified values through", async () => {
         vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(NOTE_META)).fn);
@@ -312,8 +285,6 @@ describe("createHttpApi", () => {
         expect(meta.size).toBe(240_000);
       });
 
-      // The dangerous default. An omitted `fileType` must NOT read as "note":
-      // that is precisely what opens a PNG into a blank canvas.
       it("derives an omitted fileType from the name instead of assuming 'note'", async () => {
         const wire = noteMetaWithout("fileType") as { name: string };
         wire.name = "20260719_165902_Page_1.PNG";
@@ -347,7 +318,7 @@ describe("createHttpApi", () => {
     const page: PageRef = { index: 3, hash: "c".repeat(32), width: 1404, height: 1872, textHash: null };
 
     it("GETs the versioned /note/{id}/page/{index}?v={hash} URL and returns bytes", async () => {
-      const payload = new Uint8Array([0x53, 0x4e, 0x50, 0x47, 1, 1, 2, 3]); // "SNPG"…
+      const payload = new Uint8Array([0x53, 0x4e, 0x50, 0x47, 1, 1, 2, 3]);
       const { fn, calls } = recordingFetch(() => binaryResponse(payload));
       vi.stubGlobal("fetch", fn);
 
@@ -380,7 +351,7 @@ describe("createHttpApi", () => {
   describe("getPageText", () => {
     const recognized = (textHash: string | null): PageRef => ({
       index: 3,
-      hash: "c".repeat(32), // the STROKE hash — deliberately constant below
+      hash: "c".repeat(32),
       width: 1404,
       height: 1872,
       textHash,
@@ -395,19 +366,15 @@ describe("createHttpApi", () => {
       expect(got.text).toBe("first line\nsecond line");
     });
 
-    // The cache-poisoning regression guard. The transcript URL is served
-    // `immutable`, so it MUST be versioned by the recognition hash and not the
-    // page content hash: running recognition on the device adds RECOGNTEXT while
-    // leaving the strokes — and therefore `hash` — identical. If the key ever
-    // reverts to `page.hash`, both requests below collapse onto one URL and the
-    // year-cached pre-recognition empty body wins forever.
+    // Regression guard: the transcript URL is immutable, so it must key on the
+    // recognition hash; recognition adds RECOGNTEXT without changing the stroke `hash`.
     it("changes the fetch URL when textHash changes, even though the page hash does not", async () => {
       const { fn, calls } = recordingFetch(() => jsonResponse({ text: "hi" }));
       vi.stubGlobal("fetch", fn);
 
       const before = recognized("1".repeat(32));
       const after = recognized("2".repeat(32));
-      expect(before.hash).toBe(after.hash); // strokes unchanged
+      expect(before.hash).toBe(after.hash);
 
       const client = createHttpApi();
       await client.getPageText("7", before);
@@ -418,8 +385,6 @@ describe("createHttpApi", () => {
       expect(calls[1]).toContain("v=" + "2".repeat(32));
     });
 
-    // Real mode against TODAY's backend: no `textHash` on the wire → null → the
-    // panel must resolve to "no recognized text" without ever hitting the network.
     it("returns '' WITHOUT a request when the page has no recognition", async () => {
       const { fn, calls } = recordingFetch(() => jsonResponse({ text: "should never be read" }));
       vi.stubGlobal("fetch", fn);
@@ -436,9 +401,7 @@ describe("createHttpApi", () => {
       });
     });
 
-    // The word boxes ride on this same response. They are MILLIMETRES and are
-    // passed through untouched — the client must not scale them, because the
-    // scale is hardware-dependent and arrives separately on the note metadata.
+    // Word boxes are millimetres, passed through unscaled (the scale is per device).
     it("carries word boxes through verbatim, in millimetres", async () => {
       const words = [
         { text: "alpha", xMm: 10.5, yMm: 20.25, wMm: 30.5, hMm: 8.125 },
@@ -450,8 +413,7 @@ describe("createHttpApi", () => {
       expect(got.words).toEqual(words);
     });
 
-    // Device-authored values reaching a PDF generator: a malformed box has to be
-    // dropped here rather than become a NaN coordinate in the content stream.
+    // Device-authored: a malformed box is dropped rather than become a NaN in a PDF.
     it("drops malformed word boxes instead of emitting NaN coordinates", async () => {
       vi.stubGlobal(
         "fetch",
@@ -499,14 +461,10 @@ describe("createHttpApi", () => {
     });
   });
 
-  // A `.note`'s OWN links — the rectangles a PDF used as a page's template
-  // brought with it (`note-format.md` §14). The seam matters more than usual
-  // here because two consumers read it: the reader's link layer and the PDF
-  // exporter, both through this one call and one record shape.
   describe("getPageLinks", () => {
     const linked = (linksHash: string | null): PageRef => ({
       index: 3,
-      hash: "c".repeat(32), // the STROKE hash — deliberately constant below
+      hash: "c".repeat(32),
       width: 1404,
       height: 1872,
       textHash: null,
@@ -526,10 +484,7 @@ describe("createHttpApi", () => {
       expect(got.links).toEqual(links);
     });
 
-    // The same cache-key guard the transcript has, for the same reason: a
-    // re-imported template can change a page's links while leaving every stroke —
-    // and therefore `hash` — identical. Keyed by `hash`, both requests would
-    // collapse onto one URL.
+    // Same cache-key guard: a re-imported template can change links but not `hash`.
     it("changes the fetch URL when linksHash changes, even though the page hash does not", async () => {
       const { fn, calls } = recordingFetch(() => jsonResponse({ links: [] }));
       vi.stubGlobal("fetch", fn);
@@ -547,9 +502,6 @@ describe("createHttpApi", () => {
       expect(calls[1]).toContain("v=" + "2".repeat(32));
     });
 
-    // THE COMMON CASE BY A WIDE MARGIN, and the whole reason the hash rides on
-    // the page list: a note that was not built on a PDF template has no page
-    // with links, and the reader must not ask about a single one of them.
     it("returns no links WITHOUT a request when the page has no link block", async () => {
       const { fn, calls } = recordingFetch(() => jsonResponse({ links: [{ x: 1, y: 1, w: 1, h: 1, page: 0, uri: "none" }] }));
       vi.stubGlobal("fetch", fn);
@@ -563,25 +515,17 @@ describe("createHttpApi", () => {
       expect(await createHttpApi().getPageLinks("7", linked("l".repeat(32)))).toEqual({ links: [] });
     });
 
-    // Device-authored values reaching the DOM as `href`s and a PDF as
-    // annotations: a record that is not a record is dropped at the seam, by the
-    // same validator the wasm decoder's payload goes through.
     it("drops a record with nothing to draw or nowhere to go", async () => {
-      // The two refusals `pdfWire.ts` still makes about a link, and both are
-      // about CONTENT out of the document: a uri that names nowhere, and a rect
-      // with no area. The shape of the record is our own shim's (§2.7) and is
-      // no longer re-checked here — `{ page: 1.5 }` would need the shim to be
-      // broken, which the ABI test catches first.
       vi.stubGlobal(
         "fetch",
         recordingFetch(() =>
           jsonResponse({
             links: [
               { x: 1, y: 2, w: 3, h: 4, page: -1, uri: "https://ok.example/" },
-              { x: 1, y: 2, w: 3, h: 4, page: -1 }, // no uri
-              { x: 1, y: 2, w: 3, h: 4, page: -1, uri: "" }, // nowhere to go
-              { x: 1, y: 2, w: 0, h: 4, page: -1, uri: "https://ok.example/" }, // empty rect
-              { x: 1, y: 2, w: 3, h: -4, page: -1, uri: "https://ok.example/" }, // negative
+              { x: 1, y: 2, w: 3, h: 4, page: -1 },
+              { x: 1, y: 2, w: 3, h: 4, page: -1, uri: "" },
+              { x: 1, y: 2, w: 0, h: 4, page: -1, uri: "https://ok.example/" },
+              { x: 1, y: 2, w: 3, h: -4, page: -1, uri: "https://ok.example/" },
             ],
           }),
         ).fn,
@@ -608,9 +552,6 @@ describe("createHttpApi", () => {
 
 });
 
-// The client's error taxonomy used to have no consumers — every view caught with
-// a bare `catch {}`. This is the seam that gives UNAUTHORIZED/STALE_PAGE somewhere
-// to go, so it's the thing to pin.
 describe("dispatchApiFailure", () => {
   const page: PageRef = { index: 0, hash: "d".repeat(32), width: 1404, height: 1872, textHash: null };
   const sink = () => ({ onSessionExpired: vi.fn(), onStalePage: vi.fn() });
@@ -639,19 +580,12 @@ describe("dispatchApiFailure", () => {
 
   it("does not fire onStalePage without a page to blame", () => {
     const s = sink();
-    // A listing/metadata call has no `?v=` hash — there's nothing to refetch on
-    // its behalf, so this stays the caller's non-fatal problem.
     expect(dispatchApiFailure(s, new ApiError("STALE_PAGE", "stale", 404))).toBe(false);
     expect(s.onStalePage).not.toHaveBeenCalled();
   });
 });
 
-// --- the account face ---
-//
-// Four routes, and the thing they have in common is what is being pinned here
-// as much as the mapping: NOT ONE OF THEM TAKES A TARGET. Every verb under
-// `/api/admin` names another account with an `:id`; the session is the target
-// here, which is the whole difference between the two faces.
+// --- the account face: no route takes a target `:id` ---
 describe("createHttpApi — the account face", () => {
   const ACCOUNT = {
     email: "ana@household.lan",
@@ -682,14 +616,12 @@ describe("createHttpApi — the account face", () => {
     const s = await createHttpApi().accountSecurity();
 
     expect(calls[0]).toContain("/api/controlplane/account");
-    expect(calls[0]).not.toMatch(/\/\d+/); // no `:id` — the session is the target
+    expect(calls[0]).not.toMatch(/\/\d+/);
     expect(s).toEqual({ passwordChangedAt: 1_750_000_000, otherSessions: 2, thisSessionSince: 1_760_000_000 });
   });
 
   it("reads an ABSENT optional as 'the fact does not exist', never as 0", async () => {
-    // `respond` omits null optionals, so a password that has never been
-    // changed arrives as a missing key. Reading it as 0 would date the change
-    // to 1970 and the screen would say "last changed 56 years ago".
+    // An omitted `passwordChangedAt` must not read as 0 (1970).
     const { passwordChangedAt, thisSessionSince, ...bare } = ACCOUNT;
     void passwordChangedAt;
     void thisSessionSince;
@@ -701,9 +633,7 @@ describe("createHttpApi — the account face", () => {
   });
 
   it("maps a device row and drops REVOKED bindings", async () => {
-    // The route is the admin console's own listing, which keeps revoked
-    // bindings so an admin can audit them. On your own account they would read
-    // as a tablet still attached, so the seam filters them out here.
+    // The admin listing keeps revoked bindings; on your own account they are filtered.
     const withRevoked = {
       ...ACCOUNT,
       devices: [
@@ -733,9 +663,6 @@ describe("createHttpApi — the account face", () => {
   });
 
   it("shares ONE /account round trip between the two methods that read it", async () => {
-    // The server answers identity, sign-in and devices in one response; the
-    // seam keeps them separate so the page can fail each section on its own.
-    // Both are right, and the join belongs in the client.
     const { fn, calls } = recordingFetch(() => jsonResponse(ACCOUNT));
     vi.stubGlobal("fetch", fn);
 
@@ -743,8 +670,6 @@ describe("createHttpApi — the account face", () => {
     await Promise.all([api.accountSecurity(), api.myDevices()]);
     expect(calls).toHaveLength(1);
 
-    // …and it is NOT a cache: a later read re-asks, or re-entering the page
-    // would silently show what was true when it was first opened.
     await api.myDevices();
     expect(calls).toHaveLength(2);
   });
@@ -777,8 +702,7 @@ describe("createHttpApi — the account face", () => {
   });
 
   it("reports byKind as NOT KNOWN when the split is absent, rather than as zeros", async () => {
-    // A server too old to answer the split can still answer the total. Five
-    // zeroes beside a full meter is the confident lie; null is the truth.
+    // An old server can answer the total but not the split: null, not five zeroes.
     vi.stubGlobal("fetch", recordingFetch(() => jsonResponse({ used_bytes: 15, total_bytes: 100 })).fn);
     const s = await createHttpApi().storageBreakdown();
     expect(s.usedBytes).toBe(15);
@@ -805,27 +729,16 @@ describe("createHttpApi — the account face", () => {
   });
 
   it("reads the per-file retained counts, which are what let the dial state its cost", async () => {
-    // §7 makes stating the cost the CONDITION on offering the control at all:
-    // discarded versions are gone, the recycle bin does not hold them. So the
-    // counts are not decoration on this response, they are the reason the
-    // section can render — "keeping 3 will remove 8 versions now" is
-    // `Σ max(0, count − 3)` over exactly this array.
     vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(ACCOUNT)).fn);
 
     const p = await createHttpApi().versionPolicy();
 
-    // NOTE the fixture still SENDS `bytes` and the result does not carry it: the
-    // field was dropped when the figure left the control, and reading a payload
-    // that still has it must not resurrect it. `toEqual` is exact, so this fails
-    // if the mapper starts passing unknown fields through.
+    // The fixture still sends `bytes`; `toEqual` fails if unknown fields pass through.
     expect(p).toEqual({ keep: 5, maxKeep: 20, retainedPerFile: [7, 2, 1] });
   });
 
   it("drops a non-numeric retained count instead of letting the notice read NaN", async () => {
-    // This array drives a control that DESTROYS data. One null in it makes the
-    // sum `NaN`, and "Keeping 3 will remove NaN versions now" is worse than no
-    // notice at all: it is the notice, broken, in front of someone whose next
-    // click discards history that the bin will not hold.
+    // One null would make the discard count `NaN` on a destructive control.
     const bad = { ...ACCOUNT, versions: { keep: 1, maxKeep: 9, retainedPerFile: [3, null, -1, 4], bytes: 5 } };
     vi.stubGlobal("fetch", recordingFetch(() => jsonResponse(bad)).fn);
 
@@ -835,10 +748,6 @@ describe("createHttpApi — the account face", () => {
   });
 
   it("PUTs the dial and reports what the change ACTUALLY discarded", async () => {
-    // The page predicted a number from `retainedPerFile` before the click; the
-    // server answers with what it really removed. Both exist on purpose — if
-    // they ever disagree, the interface promised something it did not deliver
-    // and should be able to notice rather than repeat its own arithmetic back.
     const { fn, calls } = recordingFetch(() =>
       jsonResponse({
         policy: { keep: 3, maxKeep: 20, retainedPerFile: [3, 2, 1], bytes: 9_000_000 },
@@ -857,11 +766,7 @@ describe("createHttpApi — the account face", () => {
   });
 
   it("sends the CURRENT password as well as the new one", async () => {
-    // The server REQUIRES and VERIFIES it (§4): a control-plane caller that omits
-    // the field is refused `INVALID_CREDENTIALS` outright, so a client that stops
-    // sending it stops working entirely. This pins the CLIENT half of that
-    // contract — if it ever goes red, the current-password field on the form has
-    // become theatre and the endpoint will say so.
+    // The server requires and verifies the current password; this pins the client half.
     const bodies: Record<string, unknown>[] = [];
     const fn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -871,8 +776,7 @@ describe("createHttpApi — the account face", () => {
 
     await createHttpApi().changePassword("old-one", "new-one");
     expect(Object.keys(bodies[0]!).sort()).toEqual(["currentPassword", "newPassword"]);
-    // BOTH hashed at the seam, so an existing password is no more exposed on
-    // the wire than a new one.
+    // Both hashed at the seam.
     expect(bodies[0]!["currentPassword"]).toMatch(/^[0-9a-f]{32}$/);
     expect(bodies[0]!["newPassword"]).toMatch(/^[0-9a-f]{32}$/);
     expect(bodies[0]!["currentPassword"]).not.toBe(bodies[0]!["newPassword"]);

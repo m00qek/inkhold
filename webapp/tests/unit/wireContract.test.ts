@@ -13,54 +13,18 @@ import type {
   PageText,
 } from "../../src/core/types";
 
-// THE OTHER HALF OF §8.4's WIRE CONTRACT.
-//
-// `backend/services/controlplane.zig` writes `tests/fixtures/wire/*.json` from
-// the real VOs through the real serializer, with the handlers' own options
-// (`emit_null_optional_fields = false`, so an absent optional is an ABSENT KEY
-// and not a null). This file reads those same bytes back through the real
-// client normalizers and asks two questions of every one of them:
-//
-//   1. did the client DECIDE about every key the server sent? and
-//   2. did every key it decided to keep actually survive the rebuild?
-//
-// Question 2 is the one that was missing. `normalizePage` rebuilds a `PageRef`
-// field by field rather than spreading it, so a field the server added and the
-// rebuild never listed vanished at the seam with both suites green — which is
-// precisely how `hasInk` was lost. The tables below are the contract: a wire key
-// with no entry fails (1), and an entry whose property comes back `undefined`
-// fails (2).
-//
-// Question 3 rides along: for a fixture that OMITS an optional, the normalized
-// property must be the absent form the type documents — and `null` and
-// `undefined` are different answers here. `sourcePage`/`textHash` collapse onto
-// `null` because they are two-state (a value, or nothing). `hasInk` collapses
-// onto `undefined` because it is THREE-state, and folding "the server has not
-// looked yet" onto `false` would tell someone their notebook is blank while the
-// back-fill is still running. See the doc comments on `PageRef` in
-// `core/types.ts`; this asserts what they claim.
-//
-// When a fixture changes, regenerate it with
-// `INK_UPDATE_WIRE_FIXTURES=1 zig build test` from the repo root and read the
-// `git diff` as a description of what changed on the wire.
+// The server writes `tests/fixtures/wire/*.json` through its real serializer (absent
+// optional = absent key). Every wire key must be decided by the client, survive the
+// rebuild (that is how `hasInk` was lost), and normalize to its documented absence.
+// Regenerate with `INK_UPDATE_WIRE_FIXTURES=1 zig build test` from the repo root.
 
 const wire = (name: string): Record<string, unknown> =>
   JSON.parse(readFileSync(new URL(`../fixtures/wire/${name}`, import.meta.url), "utf8")) as Record<string, unknown>;
 
-/**
- * A wire shape's key table: every key the server may send, mapped to the domain
- * property that carries it — or to `null` where the client DELIBERATELY drops
- * it, with the reason on the line. There is no third option, which is the point:
- * a new server field has to be given one of the two answers here before this
- * suite goes green again.
- */
+/** Every key the server may send, mapped to its domain property or `null` if dropped. */
 type KeyTable<T> = Record<string, keyof T | null>;
 
-/**
- * What the normalized record must show for a key the server OMITTED. Only keys
- * whose absence has a documented form appear; a key the client answers by
- * DERIVING a value (`fileType` from the name) is not an absence and is left out.
- */
+/** The normalized form of an omitted key, for keys whose absence has a documented form. */
 type AbsentTable<T> = Partial<Record<keyof T, unknown>>;
 
 const PAGE_REF_KEYS: KeyTable<PageRef> = {
@@ -79,10 +43,8 @@ const PAGE_REF_ABSENT: AbsentTable<PageRef> = {
   textHash: null,
   linksHash: null,
   sourcePage: null,
-  // Absent means NONE, not unknown — the server omits the key exactly when the
-  // page has no layer records, so `null` is the reader's "no panel" state.
   layers: null,
-  // The one that is `undefined` rather than `null`. See the header.
+  // The one that is `undefined` rather than `null`: three-state.
   hasInk: undefined,
 };
 
@@ -101,8 +63,6 @@ const FOLDER_KEYS: KeyTable<Folder> = {
 };
 
 const FOLDER_ABSENT: AbsentTable<Folder> = {
-  // Absent = "not counted here" (the breadcrumb never counts), which the row
-  // renders as no meta at all. `0` would be a claim that the folder is empty.
   itemCount: undefined,
 };
 
@@ -123,12 +83,10 @@ const NOTE_ENTRY_KEYS: KeyTable<NoteSummary> = {
 const NOTE_ENTRY_ABSENT: AbsentTable<NoteSummary> = {
   fileHash: null,
   hasRecognizedText: false,
-  // Absent = "unknown shape", which the masonry answers with its 3:4 fallback.
-  // Never `{w:0,h:0}`, which would reach CSS as an invalid `aspect-ratio`.
+  // Never `{w:0,h:0}`, an invalid `aspect-ratio`.
   thumbAspect: undefined,
   annotationsId: null,
-  // `fileType` is deliberately NOT here: the client derives it from the name
-  // (`fileTypeFromName`), so its absence produces a value rather than a hole.
+  // `fileType` is derived from the name, so absence is not a hole.
 };
 
 const NOTE_META_KEYS: KeyTable<NoteMeta> = {
@@ -145,8 +103,7 @@ const NOTE_META_KEYS: KeyTable<NoteMeta> = {
 const NOTE_META_ABSENT: AbsentTable<NoteMeta> = {
   fileHash: null,
   annotationsId: null,
-  // `null` IS the answer, and the exporter must honour it: unknown hardware
-  // means "do not place invisible text", not "guess a scale".
+  // Unknown hardware: do not place invisible text.
   pxPerMm: null,
   size: 0,
 };
@@ -159,8 +116,7 @@ const LISTING_KEYS: KeyTable<Listing> = {
 };
 
 const LISTING_ABSENT: AbsentTable<Listing> = {
-  // Omitted for the ROOT listing, and `listing.folderId === null` is the test
-  // that drives the breadcrumb — `undefined` there would break it silently.
+  // Omitted for the root listing; `folderId === null` drives the breadcrumb.
   folderId: null,
 };
 
@@ -221,18 +177,16 @@ function checkShape<T>(
   }
 
   for (const [key, prop] of Object.entries(table) as [string, (keyof T) | null][]) {
-    if (prop === null) continue; // deliberately dropped; the table line says why
+    if (prop === null) continue;
     if (has(sent, key)) {
-      // 2. A key that carried a value survived the client's rebuild. THIS is the
-      //    assertion that would have caught `hasInk`.
+      // 2. A key that carried a value survived the rebuild (would have caught `hasInk`).
       expect(
         got[prop as string],
         `${where}: the server sent "${key}" and the client dropped it — ` +
           `normalized "${String(prop)}" is undefined. If the field is genuinely not wanted, map it to null in the table.`,
       ).not.toBeUndefined();
     } else if (has(absent as Record<string, unknown>, prop as string)) {
-      // 3. An omitted key reads as the documented ABSENT form — and null,
-      //    undefined and a default are three different answers.
+      // 3. An omitted key reads as its documented absent form.
       expect(
         got[prop as string],
         `${where}: the server OMITTED "${key}"; the client must read that as the documented absent form.`,
@@ -285,24 +239,17 @@ function serve(body: unknown): void {
 }
 
 describe("wire contract: PageRefVO", () => {
-  // The three cases the fixtures deliberately cover: both optionals omitted,
-  // both present with ink, and both present WITHOUT ink (an erased mark page —
-  // `false` is a fact and travels; only the unknown is omitted).
+  // Both optionals omitted, both with ink, both without (an erased mark page).
   it.each(["page-ref.json", "page-ref-inked.json", "page-ref-sparse-mark.json"])("%s", (name) => {
     const sent = wire(name);
     checkPageRef(name, sent, normalizePage(sent as unknown as PageRef));
   });
 
   it("reads an omitted hasInk as undefined and an omitted sourcePage as null — not as each other", () => {
-    // The two absences are spelled differently ON PURPOSE, and this is the pair
-    // that says so. Stated separately from the table walk because it is the
-    // distinction the whole three-state design rests on.
     const bare = normalizePage(wire("page-ref.json") as unknown as PageRef);
     expect(bare.hasInk).toBeUndefined();
     expect(bare.sourcePage).toBeNull();
 
-    // …and where the server DID look, `false` survives as `false` rather than
-    // collapsing into the same silence.
     const erased = normalizePage(wire("page-ref-sparse-mark.json") as unknown as PageRef);
     expect(erased.hasInk).toBe(false);
     expect(erased.sourcePage).toBe(5);
@@ -316,8 +263,7 @@ describe("wire contract: EntryVO", () => {
   });
 
   it("carries the paired .mark's id off the document's row", () => {
-    // The listing is the ONLY place this can come from — the mark is folded out
-    // of every folder view, so it has no row of its own.
+    // The mark is folded out of every folder view; the listing is the only source.
     const doc = normalizeEntry(wire("entry-annotated-pdf.json") as unknown as Entry) as NoteSummary;
     expect(doc.annotationsId).toBe("3");
     const plain = normalizeEntry(wire("entry.json") as unknown as Entry) as NoteSummary;
@@ -333,8 +279,6 @@ describe("wire contract: ListingVO", () => {
 
     checkShape("listing.json", LISTING_KEYS, LISTING_ABSENT, sent, got as unknown as Record<string, unknown>);
 
-    // The breadcrumb is `FolderVO` too, and its crumbs carry no count — the
-    // absent-itemCount half of the folder contract lives here.
     const path = sent.path as Record<string, unknown>[];
     expect(got.path).toHaveLength(path.length);
     path.forEach((crumb, i) => {
@@ -351,15 +295,13 @@ describe("wire contract: ListingVO", () => {
     expect(got.entries).toHaveLength(entries.length);
     entries.forEach((e, i) => checkEntry(`listing.json.entries[${i}]`, e, got.entries[i]));
 
-    // Both folder spellings really are in this fixture, so the walk above is
-    // not vacuously passing over one shape.
     expect(got.entries.some((e) => e.kind === "folder")).toBe(true);
     expect(got.entries.some((e) => e.kind === "note")).toBe(true);
   });
 
   it("reads an omitted folderId as null, because the root listing omits it", async () => {
     const { folderId, ...root } = wire("listing.json");
-    expect(folderId).toBeDefined(); // the fixture is a SUBfolder listing; drop the key to make it the root's
+    expect(folderId).toBeDefined();
     serve(root);
     expect((await createHttpApi().listFolder(null)).folderId).toBeNull();
   });
@@ -381,8 +323,6 @@ describe("wire contract: NoteMetaVO", () => {
   it("keeps pxPerMm where the server measured the hardware, and null where it did not", async () => {
     serve(wire("note-meta.json"));
     expect(await createHttpApi().getNoteMeta("1").then((m) => m.pxPerMm)).toBeCloseTo(11.834, 3);
-    // The PDF has no equipment to measure, so the key is absent — and absent is
-    // a real answer ("raster-only export"), not a number to guess at.
     serve(wire("note-meta-pdf-with-mark.json"));
     expect(await createHttpApi().getNoteMeta("2").then((m) => m.pxPerMm)).toBeNull();
   });
@@ -394,8 +334,6 @@ describe("wire contract: HistoryVO", () => {
     serve(sent);
     const got = await createHttpApi().noteHistory("1");
 
-    // `HistoryVO` itself is two keys, so it gets its table inline rather than a
-    // named one nothing else would reuse.
     checkShape("history.json", { id: "id", versions: "versions" }, {}, sent, got as unknown as Record<string, unknown>);
 
     const versions = sent.versions as Record<string, unknown>[];
@@ -410,8 +348,6 @@ describe("wire contract: HistoryVO", () => {
       );
     });
 
-    // Newest first, exactly one live row. The order is the server's and the
-    // client never re-sorts it.
     expect(got.versions.map((v: FileVersion) => v.current)).toEqual([true, false]);
   });
 });
@@ -420,8 +356,6 @@ describe("wire contract: PageTextVO", () => {
   it("page-text.json, walked to its word boxes", async () => {
     const sent = wire("page-text.json");
     serve(sent);
-    // `textHash` non-null is what makes the client actually ask — a null one
-    // short-circuits to the empty transcript without a request.
     const page = { index: 0, textHash: "deadbeef" } as unknown as PageRef;
     const got: PageText = await createHttpApi().getPageText("1", page);
 
@@ -439,14 +373,12 @@ describe("wire contract: PageTextVO", () => {
       );
     });
 
-    // The units are the device's own millimetres, carried through unconverted —
-    // the field names are the contract and there is no scale in this object.
+    // Device millimetres, unconverted.
     expect(got.words[0]).toEqual({ text: "hello", xMm: 10.5, yMm: 20.25, wMm: 15, hMm: 6.5 });
   });
 
   it("reads an empty body as the empty transcript, not as an error", async () => {
-    // `{}` is what a page with a stored-but-undecodable RECOGNTEXT serializes
-    // to; the panel renders its honest "no recognized text" state.
+    // `{}` is a page with stored-but-undecodable RECOGNTEXT.
     serve({});
     const page = { index: 0, textHash: "deadbeef" } as unknown as PageRef;
     expect(await createHttpApi().getPageText("1", page)).toEqual({ text: "", words: [] });

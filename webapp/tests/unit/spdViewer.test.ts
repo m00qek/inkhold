@@ -1,14 +1,5 @@
 // @vitest-environment happy-dom
-//
-// The `.spd` viewer's PURE CORE, and its DOM seam. The parse (bytes → layer tree +
-// tiles), the tile bounding box and the base canvas dims are pure — tested here
-// against a FAKE decoder that speaks the real `spd_*` C-ABI (`webapp/wasm/spd_decode.zig`),
-// backed by a real `WebAssembly.Memory` so the pointer-and-copy discipline `parseSpd`
-// relies on is genuinely exercised. The viewer itself is then driven with an
-// injected decoder + tile decoder — no GPU, no network — to prove the STACKED
-// PER-LAYER CANVAS model: one canvas per layer at base res, the eye toggles and the
-// live seam (`setLayerVisible`/`setLayerOpacity`/`exportModel`), and the bitmap
-// release (each tile is drawn once then closed).
+// The fake decoder speaks the real `spd_*` C-ABI over a real `WebAssembly.Memory`.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
@@ -37,10 +28,10 @@ interface FakeCalls {
 }
 
 function makeFakeDecoder(spec: FakeSpec): { exports: SpdDecoderExports; calls: FakeCalls } {
-  const memory = new WebAssembly.Memory({ initial: 4 }); // 256 KiB
+  const memory = new WebAssembly.Memory({ initial: 4 });
   const u8 = () => new Uint8Array(memory.buffer);
   const enc = new TextEncoder();
-  let bump = 2048; // leave the low region for `spd_alloc` returns
+  let bump = 2048;
 
   const nameRefs = spec.layers.map((l) => {
     const b = enc.encode(l.name);
@@ -116,8 +107,7 @@ function makeFakeDecoder(spec: FakeSpec): { exports: SpdDecoderExports; calls: F
   return { exports, calls };
 }
 
-// The corpus shape the real fixture has: layers 4/3/2 shown, 1 hidden @76/255,
-// 9999 the empty Reference Layer — Z-order top-first.
+// The real fixture's shape: layers 4/3/2 shown, 1 hidden @76/255, 9999 empty; top-first.
 const SAMPLE: FakeSpec = {
   width: 1404,
   height: 1872,
@@ -129,7 +119,7 @@ const SAMPLE: FakeSpec = {
   ],
 };
 
-// The SAMPLE bbox is x∈[5,12] y∈[5,25] → 8×21 tiles → base 1024×2688 px.
+// The sample bbox is x∈[5,12] y∈[5,25] → 8×21 tiles → base 1024×2688 px.
 const BASE = { w: 8 * 128, h: 21 * 128 };
 
 describe("parseSpd", () => {
@@ -144,16 +134,13 @@ describe("parseSpd", () => {
     expect(doc.layers.map((l) => l.visible)).toEqual([true, true, false, true]);
     expect(doc.layers[2]!.opacity).toBe(76);
 
-    // Tiles copied out with their grid coords and exact PNG bytes.
     expect(doc.layers[0]!.tiles).toEqual([
       { tx: 10, ty: 20, png: new Uint8Array([1, 2, 3]) },
       { tx: 12, ty: 22, png: new Uint8Array([4, 5]) },
     ]);
-    // The empty Reference Layer yields zero tiles, not an error.
     expect(doc.layers[3]!.tiles).toEqual([]);
 
-    // The one hazard: the input is freed right after open, and the document is
-    // closed once — the decoder holds nothing after parseSpd returns.
+    // The input is freed right after open and the document closed once.
     expect(calls.open).toBe(1);
     expect(calls.close).toBe(1);
     expect(calls.free.length).toBe(1);
@@ -163,7 +150,6 @@ describe("parseSpd", () => {
   it("throws with the mapped message on a decoder error, and still closes on read failure", async () => {
     const bad = makeFakeDecoder({ ...SAMPLE, openRc: -2 });
     expect(() => parseSpd(bad.exports, new Uint8Array([0]))).toThrow(/not an \.spd file/);
-    // open failed → the input was still freed, and close was NOT called (nothing open).
     expect(bad.calls.free.length).toBe(1);
     expect(bad.calls.close).toBe(0);
   });
@@ -172,7 +158,6 @@ describe("parseSpd", () => {
     const { exports } = makeFakeDecoder(SAMPLE);
     const doc = parseSpd(exports, new Uint8Array([0]));
     const png = doc.layers[0]!.tiles[0]!.png;
-    // Mutating wasm memory now must not change what we copied out.
     new Uint8Array(exports.memory.buffer).fill(0xff, 2048, 4096);
     expect(Array.from(png)).toEqual([1, 2, 3]);
   });
@@ -182,16 +167,13 @@ describe("spdBbox", () => {
   it("is the min/max tile box across every layer", async () => {
     const { exports } = makeFakeDecoder(SAMPLE);
     const doc = parseSpd(exports, new Uint8Array([0]));
-    // Across layers 4 (10,20)/(12,22), 3 (11,25), 1 (5,5): x∈[5,12] y∈[5,25].
     expect(spdBbox(doc)).toEqual({ minTx: 5, minTy: 5, cols: 8, rows: 21 });
-    // Base canvas dims = the bbox in px.
     expect(spdBaseDims(doc, spdBbox(doc))).toEqual(BASE);
   });
 
   it("is null when nothing is drawn", async () => {
     const doc: SpdDoc = { width: 100, height: 200, layers: [{ id: 9999, name: "Reference Layer", visible: true, opacity: 255, tiles: [] }] };
     expect(spdBbox(doc)).toBeNull();
-    // …and the base dims fall back to the surface size.
     expect(spdBaseDims(doc, null)).toEqual({ w: 100, h: 200 });
   });
 });
@@ -272,24 +254,22 @@ describe("createSpdViewer (DOM seam)", () => {
   }
 
   it("stacks one base-res canvas per layer, topmost last in the DOM", async () => {
-    // A DPR > 1 must NOT enlarge the backing store — memory is bounded by base res.
+    // A DPR > 1 must not enlarge the backing store: memory is bounded by base res.
     vi.stubGlobal("devicePixelRatio", 2);
     const { v } = mount();
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => stackCanvases(v).length > 0);
 
     const canvases = stackCanvases(v);
-    expect(canvases.length).toBe(4); // one per layer
-    // Backing store is the bbox in px — NOT × devicePixelRatio.
+    expect(canvases.length).toBe(4);
     expect([canvases[0]!.width, canvases[0]!.height]).toEqual([BASE.w, BASE.h]);
 
-    // layerViews is Z-order (index 0 = topmost); the DOM is reversed so the
-    // topmost paints on top (last child).
+    // layerViews is top-first; the DOM is reversed so the topmost paints last.
     const views = seamOf(v).layerViews();
     expect(views.map((lv) => lv.layer.id)).toEqual([4, 3, 1, 9999]);
     const wrap = v.el.querySelector(".spd-canvas-wrap")!;
-    expect(wrap.lastElementChild).toBe(views[0]!.canvas); // topmost (Layer 4) on top
-    expect(wrap.firstElementChild).toBe(views[3]!.canvas); // Reference Layer at the bottom
+    expect(wrap.lastElementChild).toBe(views[0]!.canvas);
+    expect(wrap.firstElementChild).toBe(views[3]!.canvas);
     v.destroy();
   });
 
@@ -312,11 +292,9 @@ describe("createSpdViewer (DOM seam)", () => {
     await v.open(synthesizeSummary(meta({ id: "174", fileHash: "a".repeat(32) })), Promise.resolve(meta({ id: "174", fileHash: "a".repeat(32) })), 0, { kind: "history", folderPath: "Note / Files", version }, "");
     await until(() => calls.length > 0);
 
-    // NOT the live `/file/:id?v=` (the current blob) — the version-scoped history
-    // raw route, keyed by the version's md5.
+    // The version-scoped history raw route, not the live `/file/:id?v=`.
     expect(calls[0]).toBe(`/api/controlplane/note/174/history/${"e".repeat(32)}/raw`);
 
-    // The read-only version chrome: banner up, Move to bin gone, Versions shown.
     const banner = v.el.querySelector(".version-banner") as HTMLElement;
     expect(banner.hidden).toBe(false);
     expect(banner.textContent).toContain("not the current note");
@@ -324,7 +302,6 @@ describe("createSpdViewer (DOM seam)", () => {
     const versions = v.el.querySelector('button[aria-label="Version history"]') as HTMLElement;
     expect(versions.hidden).toBe(false);
 
-    // Versions reopens the shared list; Restore routes to the shared restore path.
     versions.click();
     expect(onVersions).toHaveBeenCalledOnce();
     (banner.querySelector(".version-banner__restore") as HTMLElement).click();
@@ -333,10 +310,7 @@ describe("createSpdViewer (DOM seam)", () => {
   });
 
   it("in a HISTORY preview: the URL sync rides the version md5 (addressable version)", async () => {
-    // A `.spd` has no page/query to refine, so its whole URL sync is asserting the
-    // version's address once on open — the shell's `onPosition` keys off the version
-    // md5 (its 4th arg) to write the `#/note/:id/version/:short` form, so a reload /
-    // copy-link reproduces the previewed sketch. Synchronous (no render needed).
+    // `onPosition` keys off the version md5 (4th arg) to write `#/note/:id/version/:short`.
     const onPosition = vi.fn();
     const { exports } = makeFakeDecoder(SAMPLE);
     const version = { md5: "e".repeat(32), createdAt: 1_752_000_000_000 };
@@ -348,8 +322,6 @@ describe("createSpdViewer (DOM seam)", () => {
   });
 
   it("a LIVE .spd open publishes no version md5 (bare note URL)", async () => {
-    // The negative: a non-preview open must NOT emit a version address — a `.spd`
-    // has nothing to sync, so `onPosition` is untouched and the bare note URL stands.
     const onPosition = vi.fn();
     const { exports } = makeFakeDecoder(SAMPLE);
     const v = createSpdViewer(deps({ onPosition }), { loader: async () => exports, decodeTile: vi.fn() });
@@ -364,11 +336,9 @@ describe("createSpdViewer (DOM seam)", () => {
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
-    // The rendered body is up; the placeholder is gone.
     expect((v.el.querySelector(".viewer__main") as HTMLElement).hidden).toBe(true);
     expect((v.el.querySelector(".spd-body") as HTMLElement).hidden).toBe(false);
 
-    // One row per layer, Z-order top-first, with the device-authored names.
     const rows = Array.from(v.el.querySelectorAll(".spd-layer"));
     expect(rows.map((r) => r.querySelector(".spd-layer__name")!.textContent)).toEqual([
       "Layer 4",
@@ -376,13 +346,11 @@ describe("createSpdViewer (DOM seam)", () => {
       "Layer 1",
       "Reference Layer",
     ]);
-    // The authored-hidden layer starts toggled off; the rest on.
     const pressed = rows.map((r) => r.querySelector(".spd-layer__eye")!.getAttribute("aria-pressed"));
     expect(pressed).toEqual(["true", "true", "false", "true"]);
-    // …and each canvas's initial style mirrors the authored state.
     const views = seamOf(v).layerViews();
     expect(views.map((lv) => lv.canvas.style.display)).toEqual(["", "", "none", ""]);
-    expect(views[2]!.canvas.style.opacity).toBe(String(76 / 255)); // hidden layer 1 @76
+    expect(views[2]!.canvas.style.opacity).toBe(String(76 / 255));
     v.destroy();
   });
 
@@ -390,10 +358,7 @@ describe("createSpdViewer (DOM seam)", () => {
     const { v, decodeTile, bitmaps } = mount();
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => stackCanvases(v).length > 0);
-    // Layer 4 has 2 tiles, layer 3 one, layer 1 one, 9999 none → 4 decodes.
     expect(decodeTile).toHaveBeenCalledTimes(4);
-    // Each tile is drawn once onto its layer canvas, then released — no bitmap is
-    // kept alive past the draw (the pixels live on the canvas).
     expect(bitmaps.length).toBe(4);
     for (const b of bitmaps) expect(b.close).toHaveBeenCalledTimes(1);
     v.destroy();
@@ -422,8 +387,6 @@ describe("createSpdViewer (DOM seam)", () => {
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
     const head = v.el.querySelector(".spd-layers__head")!;
-    // A decorative icon (aria-hidden) THEN the label, kept in its own <span> so the
-    // title text stays a clean text node.
     const icon = head.querySelector(".spd-layers__head-ic")!;
     expect(icon.getAttribute("aria-hidden")).toBe("true");
     expect(icon.querySelector("svg")).not.toBeNull();
@@ -438,14 +401,13 @@ describe("createSpdViewer (DOM seam)", () => {
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
     const firstEye = v.el.querySelector(".spd-layer__eye") as HTMLButtonElement;
-    const topCanvas = seamOf(v).layerViews()[0]!.canvas; // Layer 4
+    const topCanvas = seamOf(v).layerViews()[0]!.canvas;
     expect(firstEye.getAttribute("aria-pressed")).toBe("true");
     expect(topCanvas.style.display).toBe("");
 
     firstEye.click();
     expect(firstEye.getAttribute("aria-pressed")).toBe("false");
     expect(firstEye.closest(".spd-layer")!.classList.contains("is-hidden")).toBe(true);
-    // The seam actually toggled the canvas + the current state.
     expect(topCanvas.style.display).toBe("none");
     expect(seamOf(v).layerViews()[0]!.current.visible).toBe(false);
     v.destroy();
@@ -477,21 +439,18 @@ describe("createSpdViewer (DOM seam)", () => {
     expect(b3.bar.getAttribute("aria-valuenow")).toBe("50");
     expect(b3.fill.style.width).toBe("50%");
 
-    // ArrowRight nudges up 1% — the fill WIDTH, the readout, the ARIA value and
-    // the live canvas all move together.
     b3.bar.dispatchEvent(key("ArrowRight"));
     expect(b3.pct.textContent).toBe("51%");
     expect(b3.fill.style.width).toBe("51%");
     expect(b3.bar.getAttribute("aria-valuenow")).toBe("51");
     expect(view3.current.opacity).toBeCloseTo(0.51, 6);
-    expect(view3.canvas.style.opacity).toBe("0.51"); // pushed live through the seam.
+    expect(view3.canvas.style.opacity).toBe("0.51");
 
     b3.bar.dispatchEvent(key("ArrowLeft"));
     b3.bar.dispatchEvent(key("ArrowLeft"));
     expect(b3.pct.textContent).toBe("49%");
     expect(view3.current.opacity).toBeCloseTo(0.49, 6);
 
-    // Home/End jump straight to the bounds.
     b3.bar.dispatchEvent(key("Home"));
     expect(b3.pct.textContent).toBe("0%");
     expect(b3.fill.style.width).toBe("0%");
@@ -500,7 +459,6 @@ describe("createSpdViewer (DOM seam)", () => {
     expect(b3.pct.textContent).toBe("100%");
     expect(view3.current.opacity).toBe(1);
 
-    // Clamp at the top: Layer 4 starts at 100%, so ArrowRight is a silent no-op.
     const b4 = barOf(v, 0);
     const view4 = seamOf(v).layerViews()[0]!;
     expect(b4.pct.textContent).toBe("100%");
@@ -515,24 +473,21 @@ describe("createSpdViewer (DOM seam)", () => {
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
-    const b3 = barOf(v, 1); // Layer 3 @ 50%
+    const b3 = barOf(v, 1);
     const view3 = seamOf(v).layerViews().find((lv) => lv.layer.id === 3)!;
     // happy-dom has no layout, so give the track a real box: left 100, width 200.
     b3.bar.getBoundingClientRect = () =>
       ({ left: 100, width: 200, top: 0, right: 300, bottom: 6, height: 6, x: 100, y: 0, toJSON: () => ({}) }) as DOMRect;
 
-    // Press 75% across the track → 75%.
     b3.bar.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 100 + 0.75 * 200, bubbles: true }));
     expect(b3.pct.textContent).toBe("75%");
     expect(b3.fill.style.width).toBe("75%");
     expect(view3.current.opacity).toBeCloseTo(0.75, 6);
 
-    // A move while held keeps steering (down to 25%), even off the thin bar.
     window.dispatchEvent(new MouseEvent("mousemove", { clientX: 100 + 0.25 * 200 }));
     expect(b3.pct.textContent).toBe("25%");
     expect(view3.current.opacity).toBeCloseTo(0.25, 6);
 
-    // Release ends the drag: a later move no longer steers.
     window.dispatchEvent(new MouseEvent("mouseup", {}));
     window.dispatchEvent(new MouseEvent("mousemove", { clientX: 100 + 0.9 * 200 }));
     expect(b3.pct.textContent).toBe("25%");
@@ -544,30 +499,25 @@ describe("createSpdViewer (DOM seam)", () => {
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
-    // Layer 1 is authored-hidden → its bar starts dimmed, aria-disabled, untabbable.
     const b1 = barOf(v, 2);
     expect(b1.barwrap.classList.contains("is-disabled")).toBe(true);
     expect(b1.bar.getAttribute("aria-disabled")).toBe("true");
     expect(b1.bar.hasAttribute("tabindex")).toBe(false);
-    // Keyboard is inert while hidden (opacity is meaningless on an invisible layer).
     const view1 = seamOf(v).layerViews().find((lv) => lv.layer.id === 1)!;
     const before = view1.current.opacity;
     b1.bar.dispatchEvent(key("ArrowRight"));
     expect(view1.current.opacity).toBe(before);
 
-    // A shown layer starts enabled + tabbable; toggling its eye off disables the bar…
     const b4 = barOf(v, 0);
     expect(b4.barwrap.classList.contains("is-disabled")).toBe(false);
     expect(b4.bar.getAttribute("tabindex")).toBe("0");
     b4.eye.click();
     expect(b4.barwrap.classList.contains("is-disabled")).toBe(true);
     expect(b4.bar.hasAttribute("tabindex")).toBe(false);
-    // …and toggling it back on re-enables it.
     b4.eye.click();
     expect(b4.barwrap.classList.contains("is-disabled")).toBe(false);
     expect(b4.bar.getAttribute("tabindex")).toBe("0");
 
-    // Revealing the authored-hidden layer likewise re-enables its bar.
     b1.eye.click();
     expect(b1.barwrap.classList.contains("is-disabled")).toBe(false);
     expect(b1.bar.getAttribute("tabindex")).toBe("0");
@@ -579,12 +529,10 @@ describe("createSpdViewer (DOM seam)", () => {
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
-    // Layers 4/3/1 have tiles → a <canvas> thumb each; the empty 9999 gets a blank box.
     expect(v.el.querySelectorAll("canvas.spd-layer__thumb").length).toBe(3);
     const blank = Array.from(v.el.querySelectorAll(".spd-layer__thumb--blank"));
     expect(blank.length).toBe(1);
     expect(blank[0]!.tagName).not.toBe("CANVAS");
-    // Every row carries exactly one thumbnail slot (canvas or blank box).
     for (const row of Array.from(v.el.querySelectorAll(".spd-layer"))) {
       expect(row.querySelectorAll(".spd-layer__thumb").length).toBe(1);
     }
@@ -596,9 +544,7 @@ describe("createSpdViewer (DOM seam)", () => {
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => v.el.querySelectorAll(".spd-layer").length > 0);
 
-    // Height is design (one shared backing height per panel); aspect is data —
-    // the backing width follows the drawing's shape, clamped at 2.5× the height
-    // so a pathological aspect letterboxes instead of wrecking the row.
+    // Backing height is fixed per panel; width follows the aspect, clamped at 2.5×.
     const base = seamOf(v).layerViews()[0]!.canvas;
     const expected = Math.min(base.width / base.height, 2.5);
     const thumbs = Array.from(v.el.querySelectorAll("canvas.spd-layer__thumb")) as HTMLCanvasElement[];
@@ -609,9 +555,7 @@ describe("createSpdViewer (DOM seam)", () => {
       expect(t.width / t.height).toBeCloseTo(expected, 2);
       expect(t.width / t.height).toBeLessThanOrEqual(2.5 + 1e-6);
     }
-    // The blank Reference Layer has no canvas; its empty frame carries the same
-    // aspect inline so the box matches its siblings' shape. Serializations
-    // differ ("0.38" vs "0.38 / 1"), so evaluate the ratio rather than the text.
+    // Serializations differ ("0.38" vs "0.38 / 1"), so compare the ratio.
     const blank = v.el.querySelector(".spd-layer__thumb--blank") as HTMLElement;
     const parts = blank.style.aspectRatio.split("/").map((s) => Number(s.trim()));
     const ratio = parts.length === 2 ? parts[0]! / parts[1]! : parts[0]!;
@@ -634,41 +578,33 @@ describe("createSpdViewer (DOM seam)", () => {
     expect(view3.canvas.style.opacity).toBe("0.5");
     expect(view3.current.opacity).toBe(0.5);
 
-    // Opacity is clamped to 0..1.
     seam.setLayerOpacity(3, 2);
     expect(view3.current.opacity).toBe(1);
     seam.setLayerOpacity(3, -1);
     expect(view3.current.opacity).toBe(0);
 
-    // An unknown id is a no-op (does not throw).
     expect(() => seam.setLayerVisible(424242, false)).not.toThrow();
     v.destroy();
   });
 
   it("exportModel snapshots bottom-to-top with authored vs current and base dims", async () => {
     const { v } = mount();
-    // Nothing loaded yet → null.
     expect(seamOf(v).exportModel()).toBeNull();
 
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => stackCanvases(v).length > 0);
     const seam = seamOf(v);
 
-    // Tune before exporting: dim the top layer, reveal the hidden one.
     seam.setLayerOpacity(4, 0.5);
     seam.setLayerVisible(1, true);
 
     const model = seam.exportModel()!;
     expect({ width: model.width, height: model.height }).toEqual({ width: BASE.w, height: BASE.h });
-    // BOTTOM-to-TOP: the reverse of layerViews (4,3,1,9999).
     expect(model.layers.map((l) => l.id)).toEqual([9999, 1, 3, 4]);
-    // Each carries its own layer canvas (the thumbnail/flatten source).
     for (const l of model.layers) expect(l.canvas).toBeInstanceOf(HTMLCanvasElement);
 
     const top = model.layers.find((l) => l.id === 4)!;
-    // authored is the source `.spd` state (opacity 255 → 1, visible), untouched by tuning.
     expect(top.authored).toEqual({ opacity: 1, visible: true });
-    // current reflects the live tuning.
     expect(top.current).toEqual({ opacity: 0.5, visible: true });
 
     const hidden = model.layers.find((l) => l.id === 1)!;
@@ -685,7 +621,6 @@ describe("createSpdViewer (DOM seam)", () => {
     seamOf(v).setLayerVisible(4, false);
     expect(seamOf(v).layerViews()[0]!.current).toEqual({ opacity: 0.25, visible: false });
 
-    // Re-open the same file: current is rebuilt from authored, tuning is dropped.
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "");
     await until(() => stackCanvases(v).length > 0);
     expect(seamOf(v).layerViews()[0]!.current).toEqual({ opacity: 1, visible: true });

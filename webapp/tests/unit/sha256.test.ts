@@ -2,10 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
 import { sha256Hex } from "../../src/api/sha256";
 
-// SHA-256 is the outer half of the login challenge
-// (`sha256_hex(md5_hex(pw) + randomCode)`). A wrong digest breaks login for
-// every device with no obvious symptom, so it is pinned against the published
-// FIPS 180-2 / NIST vectors as well as against Node's crypto.
+// The outer half of the login challenge, against FIPS 180-2 vectors and Node.
 const NIST: Record<string, string> = {
   "": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   abc: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
@@ -36,10 +33,7 @@ describe("sha256Hex", () => {
     expect(sha256Hex("supernote")).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  // The padding boundary is the single most common place a hand-written SHA-256
-  // is wrong: at 56 bytes the 0x80 marker plus the 8-byte length no longer fit
-  // in the block, so an extra block must be emitted. 55 is the last length that
-  // fits; 64 is an exact block; 65 starts a fresh one.
+  // At 56 bytes the 0x80 marker and length no longer fit, forcing an extra block.
   describe("padding boundaries", () => {
     for (const len of [0, 1, 54, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128, 129, 1000]) {
       it(`is correct for a ${len}-byte message`, () => {
@@ -49,15 +43,12 @@ describe("sha256Hex", () => {
     }
   });
 
-  // The password may contain any Unicode; we must hash its UTF-8 bytes.
   it("hashes UTF-8 (multi-byte) input like Node's crypto", () => {
     for (const s of ["café", "λ-notebook", "日本語のパスワード", "🔑🔒", "ünïcode-λ".repeat(37)]) {
       expect(sha256Hex(s)).toBe(createHash("sha256").update(s, "utf8").digest("hex"));
     }
   });
 
-  // Every byte-length from 0 to 200 against Node, so no offset in the block
-  // loop or the padding arithmetic can hide.
   it("agrees with Node's crypto for every length from 0 to 200", () => {
     let s = "";
     for (let i = 0; i <= 200; i++) {

@@ -2,12 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { createFolderCache, type FolderCacheDeps } from "../../src/pages/folderCache";
 import type { Entry, Folder, Id, Listing } from "../../src/core/types";
 
-// These are the tests the extraction was FOR. The guards below — one walk at a
-// time, coalesced, generation-checked — are race guards, and while they lived in
-// `library.ts` the only way to reach them was through the shell, where a real
-// race is not something a test can stage. Here `listFolder` is a promise the test
-// holds the resolver for, so "a slower earlier walk finishes last" is three lines
-// rather than a timing hope.
+// `listFolder` resolves only when the test says so, so races are staged, not timed.
 
 const folder = (id: string, name: string, itemCount = 0): Folder => ({
   kind: "folder",
@@ -24,10 +19,7 @@ const listing = (folderId: string | null, entries: Entry[] = []): Listing => ({
   syncVersion: 1,
 });
 
-/**
- * A tree served folder-by-folder, with every response deferred until the test
- * releases it. `release(id)` answers exactly one pending call.
- */
+/** A tree served folder by folder; `release(id)` answers one pending call. */
 function server(tree: Record<string, Entry[]>) {
   const pending = new Map<string, () => void>();
   const calls: (Id | null)[] = [];
@@ -42,7 +34,6 @@ function server(tree: Record<string, Entry[]>) {
   return {
     listFolder,
     calls,
-    /** Answer one outstanding request. Awaits a microtask so the walk advances. */
     async release(id: string): Promise<void> {
       pending.get(id)?.();
       pending.delete(id);
@@ -99,7 +90,6 @@ describe("folder cache: the walk", () => {
     for (const k of ["root", "a", "a1"]) await api.release(k);
     await done;
 
-    // Folders only, and the SUBfolder does not leak into the roots.
     expect(cache.tree.roots().map((f) => f.id)).toEqual(["a"]);
     expect(cache.tree.children("a" as Id).map((f) => f.id)).toEqual(["a1"]);
   });
@@ -109,19 +99,16 @@ describe("folder cache: the walk", () => {
 
     const first = cache.prefetch();
     const second = cache.prefetch();
-    expect(second).toBe(first); // the same promise, not a second walk
+    expect(second).toBe(first);
 
     for (const k of ["root", "a"]) await api.release(k);
     await first;
 
-    expect(api.calls).toEqual([null, "a"]); // each folder asked about ONCE
+    expect(api.calls).toEqual([null, "a"]);
   });
 
   it("joins a concurrent listing of the same folder into ONE request", async () => {
-    // THE COLD-BOOT RACE, staged. `library.ts` starts the walk while `main.ts`
-    // dispatches the route, and at `#/` the route's folder is the walk's first
-    // hop — so the root was listed twice, 1 ms apart, on every boot (MEASURED
-    // 2026-09-08). Both callers still get the answer; only the request merges.
+    // Regression: on cold boot at `#/` the walk and the route listed the root twice.
     const { cache, api } = make({ root: [folder("a", "A")], a: [] });
 
     const walk = cache.prefetch();
@@ -134,12 +121,11 @@ describe("folder cache: the walk", () => {
     for (const k of ["a"]) await api.release(k);
     await walk;
 
-    expect(api.calls).toEqual([null, "a"]); // the root asked about ONCE
+    expect(api.calls).toEqual([null, "a"]);
   });
 
   it("does not hand a FAILED listing to the next caller", async () => {
-    // The join lives only as long as the request. A folder that failed must be
-    // askable again immediately, or one outage becomes a permanent one.
+    // A failed request must not stay joined, or one outage becomes permanent.
     const { cache, api } = make({ root: [] });
 
     const first = cache.listFolder(null);
@@ -147,7 +133,7 @@ describe("folder cache: the walk", () => {
     await expect(first).rejects.toThrow("boom root");
 
     const second = cache.listFolder(null);
-    expect(api.calls).toEqual([null, null]); // a real second request
+    expect(api.calls).toEqual([null, null]);
     await api.release("root");
     expect((await second).folderId).toBe(null);
   });
@@ -156,26 +142,19 @@ describe("folder cache: the walk", () => {
     const { cache, api } = make({ root: [], a: [] });
 
     const first = cache.prefetch();
-    // Ten bumps land while the first walk is in flight.
     for (let i = 0; i < 10; i++) void cache.prefetch(true);
     await api.release("root");
     await first;
     await Promise.resolve();
 
-    // One follow-up, not ten: the root is asked about twice in total.
     await api.release("root");
     expect(api.calls.filter((id) => id === null)).toHaveLength(2);
   });
 
-  // No test for the generation guard: it is unreachable while `prefetch` is the
-  // only door into the walk — see the comment on `generation`. A test staged
-  // against it passes with the guard deleted, which is worse than no test.
+  // No generation-guard test: it is unreachable while `prefetch` is the only entry.
 
   it("reports changed on the first walk that reached NOTHING", async () => {
-    // The narrow case the null-vs-"" start guards, and the only one: an empty
-    // household still signs as "\0root", so a signature is empty only when the
-    // walk cached nothing — here, a root listing that failed non-fatally. It must
-    // still repaint, because the rail's loaded flag flips with it.
+    // An empty household still signs as "\0root", so an empty signature means nothing cached.
     const { cache, api, walked } = make({});
     const done = cache.prefetch();
     await api.fail("root");
@@ -206,7 +185,7 @@ describe("folder cache: the walk", () => {
       handled: () => false,
       onWalked: (c) => walked.push(c),
     });
-    void api; // the deferred server is not needed here
+    void api;
 
     await cache.prefetch();
     entries = [folder("a", "A renamed", 1)];
@@ -222,14 +201,13 @@ describe("folder cache: the walk", () => {
     const done = expired.cache.prefetch();
     await expired.api.fail("root");
     await done;
-    // It did not go on to ask about `a`, and told nobody the walk landed.
     expect(expired.api.calls).toEqual([null]);
     expect(expired.walked).toEqual([]);
 
     const other = make({ root: [folder("a", "A"), folder("b", "B")], a: [], b: [] });
     const run = other.cache.prefetch();
     await other.api.release("root");
-    await other.api.fail("a"); // one bad folder is skipped, not fatal
+    await other.api.fail("a");
     await other.api.release("b");
     await run;
     expect(other.cache.tree.walked("b" as Id)).toBe(true);
@@ -239,8 +217,6 @@ describe("folder cache: the walk", () => {
 
 describe("folder cache: put", () => {
   it("keeps the roots in step with the listing it stores", async () => {
-    // The pairing that used to be written out at two call sites, one of which
-    // could be updated without the other.
     const { cache } = make({});
     cache.put(null, listing(null, [folder("a", "A")]));
     expect(cache.tree.roots().map((f) => f.id)).toEqual(["a"]);

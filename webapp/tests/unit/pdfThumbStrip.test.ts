@@ -2,10 +2,7 @@ import { describe, it, expect } from "vitest";
 import { pdfPageThumbKey, pdfThumbKey } from "../../src/pages/pdfThumbStrip";
 import type { Hash, PageRef } from "../../src/core/types";
 
-// The strip's CACHE KEY, which is the one pure thing in the paint queue and the
-// one thing a wrong answer is invisible in: a key that collides serves the wrong
-// picture out of IndexedDB for the life of the store, and every test that only
-// looks at what is on screen passes anyway.
+// A colliding key would serve the wrong picture from IndexedDB indefinitely.
 
 function ref(over: Partial<PageRef> = {}): PageRef {
   return {
@@ -67,9 +64,7 @@ describe("the composite key", () => {
   });
 
   it("is SALTED by the previewed version, so a preview cannot be served live ink", () => {
-    // `ref` is the LIVE mark page's either way — the page list always comes from
-    // the live mark, because that is what maps mark pages onto PDF pages. Under
-    // a preview the version's md5 is what actually names the bytes on screen.
+    // `ref` is always the live mark page; under a preview the version md5 names the bytes.
     const live = pdfThumbKey("docmd5", 7, "light", ref(), null);
     const preview = pdfThumbKey("docmd5", 7, "light", ref(), "versionmd5");
     expect(live.hash).toBe("docmd5:p7+inkhash");

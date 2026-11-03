@@ -1,11 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { templatePlacement, createTemplateProvider } from "../../src/render/template";
 
-// The image-template hash is now extracted Zig-side (page_payload.zig's
-// `backgroundImageHash`, exercised by its own unit tests) and read out of wasm
-// via `note_decode.zig`'s `template_hash_*` exports — the browser no longer
-// parses the page payload, so there is nothing to unit-test here for that.
-
 describe("templatePlacement (Ratta's four size cases: contain, never upscale, centered)", () => {
   const pageW = 1404;
   const pageH = 1872;
@@ -19,35 +14,34 @@ describe("templatePlacement (Ratta's four size cases: contain, never upscale, ce
   });
 
   it("narrow + tall: height fills the page, blank left/right", () => {
-    const p = templatePlacement(pageW, pageH, 500, 3744); // 2x page height
+    const p = templatePlacement(pageW, pageH, 500, 3744);
     expect(p.h).toBeCloseTo(pageH);
-    expect(p.w).toBeCloseTo(250); // 500 * (1872/3744)
+    expect(p.w).toBeCloseTo(250);
     expect(p.y).toBeCloseTo(0);
     expect(p.x).toBeCloseTo((1404 - 250) / 2);
   });
 
   it("wide + short: width fills the page, blank top/bottom", () => {
-    const p = templatePlacement(pageW, pageH, 2808, 500); // 2x page width
+    const p = templatePlacement(pageW, pageH, 2808, 500);
     expect(p.w).toBeCloseTo(pageW);
-    expect(p.h).toBeCloseTo(250); // 500 * (1404/2808)
+    expect(p.h).toBeCloseTo(250);
     expect(p.x).toBeCloseTo(0);
     expect(p.y).toBeCloseTo((1872 - 250) / 2);
   });
 
   it("oversized non-3:4: contained (letterboxed), never upscaled past a dim", () => {
-    const p = templatePlacement(pageW, pageH, 2000, 2000); // square, bigger than page
+    const p = templatePlacement(pageW, pageH, 2000, 2000);
     // scale = min(1, 1404/2000, 1872/2000) = 0.702 -> both dims 1404
     expect(p.w).toBeCloseTo(1404);
     expect(p.h).toBeCloseTo(1404);
-    expect(p.x).toBeCloseTo(0); // width fills
+    expect(p.x).toBeCloseTo(0);
     expect(p.y).toBeCloseTo((1872 - 1404) / 2);
-    // and never exceeds either page dim
     expect(p.w).toBeLessThanOrEqual(pageW);
     expect(p.h).toBeLessThanOrEqual(pageH);
   });
 
   it("an exact 3:4 oversize covers the page perfectly (no letterbox)", () => {
-    const p = templatePlacement(pageW, pageH, 2808, 3744); // exactly 2x the page
+    const p = templatePlacement(pageW, pageH, 2808, 3744);
     expect(p.w).toBeCloseTo(pageW);
     expect(p.h).toBeCloseTo(pageH);
     expect(p.x).toBeCloseTo(0);
@@ -67,14 +61,14 @@ describe("createTemplateProvider (fetch + decode once per hash)", () => {
     const provider = createTemplateProvider({ getTemplate }, decode);
 
     const a1 = await provider("note1", "A");
-    const a2 = await provider("note1", "A"); // hit
-    const a3 = await provider("note2", "A"); // hit — content-addressed, note-independent
-    const b1 = await provider("note1", "B"); // miss
+    const a2 = await provider("note1", "A");
+    const a3 = await provider("note2", "A");
+    const b1 = await provider("note1", "B");
 
     expect(a1).toBe(a2);
     expect(a1).toBe(a3);
     expect(a1).not.toBe(b1);
-    expect(getTemplate).toHaveBeenCalledTimes(2); // A once, B once
+    expect(getTemplate).toHaveBeenCalledTimes(2);
     expect(decode).toHaveBeenCalledTimes(2);
   });
 
@@ -88,11 +82,8 @@ describe("createTemplateProvider (fetch + decode once per hash)", () => {
     expect(getTemplate).toHaveBeenCalledTimes(1);
   });
 
-  // A NOTE BUILT ON A PDF gives nearly every page its own template — the file
-  // that found this has 1698 distinct templates over 1703 pages. An `ImageBitmap`
-  // is a native allocation the collector cannot reclaim, so an unbounded memo
-  // asked the browser for ~17.8 GB of them and the whole-document export died on
-  // `createImageBitmap: The ImageBitmap could not be allocated`.
+  // Regression: a PDF-based note has a template per page (1698 over 1703); an unbounded
+  // `ImageBitmap` memo asked for ~17.8 GB and the export died.
   it("CLOSES what it evicts, so a template per page cannot exhaust the browser", async () => {
     const closed: number[] = [];
     const bitmapClosing = (id: number): ImageBitmap =>
@@ -107,7 +98,6 @@ describe("createTemplateProvider (fetch + decode once per hash)", () => {
     // Let the eviction's `.then(close)` settle.
     await new Promise((r) => setTimeout(r, 0));
 
-    // Cap 3, five distinct templates: the two oldest are gone AND released.
     expect(closed).toEqual([1, 2]);
   });
 
@@ -121,17 +111,16 @@ describe("createTemplateProvider (fetch + decode once per hash)", () => {
     const decode = vi.fn(async (_b: Blob) => bitmapClosing(++n));
     const provider = createTemplateProvider({ getTemplate }, decode, 3);
 
-    const shared = await provider("n", "SHARED"); // id 1
+    const shared = await provider("n", "SHARED");
     await provider("n", "B");
     await provider("n", "C");
-    await provider("n", "SHARED"); // a hit — freshens it
-    await provider("n", "D"); // evicts B (id 2), NOT the shared one
+    await provider("n", "SHARED");
+    await provider("n", "D");  // evicts B (id 2), not the shared one
     await new Promise((r) => setTimeout(r, 0));
 
     expect(closed).toEqual([2]);
-    // And it is still the same live bitmap, not re-fetched.
     expect(await provider("n", "SHARED")).toBe(shared);
-    expect(getTemplate).toHaveBeenCalledTimes(4); // SHARED, B, C, D
+    expect(getTemplate).toHaveBeenCalledTimes(4);
   });
 
   it("caches a failed fetch as null (no repeated round-trips)", async () => {

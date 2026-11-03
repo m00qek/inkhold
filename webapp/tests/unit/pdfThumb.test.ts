@@ -3,11 +3,7 @@ import { createPdfThumbs, tileScale, type PdfThumbSeam } from "../../src/render/
 import { ASPECT_CAP } from "../../src/ui/tileAspect";
 import type { PdfSession } from "../../src/render/pdfClient";
 
-// The `renderPdfPage` seam's ORCHESTRATION — the serial queue, the close, the
-// session lifetime, the tier scale — with the decoder faked, so it runs on plain
-// Node with no worker and no wasm. The decoder itself is proved by
-// `pdfDecode.test.ts` against the real module; what is proved here is that this
-// module drives it one document at a time and always lets go.
+// Orchestration with the decoder faked; the decoder itself is `pdfDecode.test.ts`'s.
 
 /** A stand-in for the transferred `ImageBitmap`, with a spy on the close. */
 function fakeBitmap(w: number, h: number): ImageBitmap & { closed: boolean } {
@@ -36,9 +32,7 @@ function fakeSession(
   let open = false;
   const session: PdfSession = {
     async open(url, size) {
-      // The serial claim, enforced from inside: a second open while one document
-      // is still open is exactly the overlap the queue exists to prevent, and a
-      // real session would answer it by dropping the first document silently.
+      // Throws on an overlapping open: a real session would silently drop the first document.
       if (open) throw new Error("OVERLAP: a second document was opened before the first closed");
       log.push(`open ${url} size=${size}`);
       if (over.failOn === "open") throw new Error("cannot open");
@@ -102,8 +96,7 @@ describe("tileScale — the tier target, width-led with the layout's cap", () =>
   });
 
   it("an extreme scroll is capped by the layout's own 2.5x letterbox", () => {
-    // 100x2000 would rasterise 230 x 4600 = a million rows nothing can show; the
-    // masonry clamps the free axis at ASPECT_CAP, so the raster does too.
+    // The masonry clamps the free axis at ASPECT_CAP, so the raster does too.
     const scale = tileScale(100, 2000, 230);
     expect(scale).toBeCloseTo((230 * ASPECT_CAP) / 2000, 6);
     expect(2000 * scale).toBeCloseTo(230 * ASPECT_CAP, 3);
@@ -129,7 +122,6 @@ describe("renderPdfPage — one document at a time", () => {
       `render 0 @${(TARGET / 400).toFixed(4)}`,
       "close",
     ]);
-    // The PAGE's points, not the raster's pixels — this is the masonry aspect.
     expect(out.pageW).toBe(400);
     expect(out.pageH).toBe(600);
     expect(out.bitmap.width).toBe(TARGET);
@@ -146,14 +138,11 @@ describe("renderPdfPage — one document at a time", () => {
   it("SERIALISES: concurrent tiles never overlap, and each closes before the next opens", async () => {
     const fake = fakeSession();
     const thumbs = createPdfThumbs(seamOver([fake]), { idleMs: 100, targetWidth: target });
-    // Three tiles revealed at once, the way an IntersectionObserver reveals them.
     await Promise.all([
       thumbs.renderPdfPage("a", "h1"),
       thumbs.renderPdfPage("b", "h2"),
       thumbs.renderPdfPage("c", "h3"),
     ]);
-    // The fake THROWS on an overlapping open, so reaching here is already the
-    // claim; the log states it positively, and in arrival order.
     expect(fake.log).toEqual([
       "open /file/a?v=h1 size=1",
       "pageSize 0",
@@ -172,9 +161,7 @@ describe("renderPdfPage — one document at a time", () => {
   });
 
   it("a document that will not open still CLOSES, and does not poison the queue", async () => {
-    // One corrupt PDF in a folder must cost exactly one glyph, not the folder:
-    // a chain that inherited the rejection would fail every tile queued behind
-    // it. The bad document is opened FIRST, on the same warm session.
+    // One corrupt PDF must cost one glyph, not every tile queued behind it.
     const fake = fakeSession();
     let corrupt = true;
     const openOk = fake.session.open.bind(fake.session);
@@ -190,7 +177,6 @@ describe("renderPdfPage — one document at a time", () => {
     await expect(thumbs.renderPdfPage("bad", "h")).rejects.toThrow(/cannot open/);
     const ok = await thumbs.renderPdfPage("good", "h2");
     expect(ok.bitmap.width).toBe(TARGET);
-    // Closed after BOTH, the failed one included.
     expect(fake.log.filter((l) => l === "close")).toHaveLength(2);
     thumbs.destroy();
   });
@@ -225,8 +211,6 @@ describe("renderPdfPage — one document at a time", () => {
       { idleMs: 0, targetWidth: target },
     );
     await expect(thumbs.renderPdfPage("f", "h")).rejects.toThrow(/cannot run the PDF decoder/);
-    // No worker, and therefore no 5.3 MB module fetch, on a browser that would
-    // only fail later. The facade turns this into the glyph.
     expect(create).not.toHaveBeenCalled();
   });
 });
@@ -249,11 +233,9 @@ describe("the session's lifetime", () => {
     const first = fakeSession();
     const second = fakeSession();
     const seam = seamOver([first, second]);
-    // `idleMs: 0` is the release-on-drain end of the same policy.
     const thumbs = createPdfThumbs(seam, { idleMs: 0, targetWidth: target });
     await thumbs.renderPdfPage("a", "h1");
     expect(first.log.at(-1)).toBe("destroy");
-    // …and the next tile gets a fresh one rather than a dead handle.
     await thumbs.renderPdfPage("b", "h2");
     expect(seam.created()).toBe(2);
     expect(second.log[0]).toBe("open /file/b?v=h2 size=1");
@@ -264,7 +246,6 @@ describe("the session's lifetime", () => {
     const seam = seamOver([fake, fakeSession()]);
     const thumbs = createPdfThumbs(seam, { idleMs: 0, targetWidth: target });
     await Promise.all([thumbs.renderPdfPage("a", "h1"), thumbs.renderPdfPage("b", "h2")]);
-    // Two documents, ONE session, destroyed exactly once — at the end.
     expect(seam.created()).toBe(1);
     expect(fake.log.filter((l) => l === "destroy")).toHaveLength(1);
     expect(fake.log.at(-1)).toBe("destroy");
@@ -277,6 +258,6 @@ describe("the session's lifetime", () => {
     expect(fake.log).not.toContain("destroy");
     thumbs.destroy();
     expect(fake.log.at(-1)).toBe("destroy");
-    thumbs.destroy(); // idempotent — a second teardown must not throw
+    thumbs.destroy();
   });
 });

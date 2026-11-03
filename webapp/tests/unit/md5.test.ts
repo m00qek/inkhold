@@ -2,9 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
 import { md5Hex } from "../../src/api/md5";
 
-// MD5 is the load-bearing half of the stored credential (`md5_hex(password)`)
-// and the login challenge, so it is pinned exactly. These are the RFC 1321
-// reference test suite vectors.
+// RFC 1321 reference vectors; MD5 is half of the stored credential and login challenge.
 const RFC1321: Record<string, string> = {
   "": "d41d8cd98f00b204e9800998ecf8427e",
   a: "0cc175b9c0f1b6a831c399e269772661",

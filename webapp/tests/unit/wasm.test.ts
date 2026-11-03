@@ -3,14 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { decodeWithExports, invertRgb, type DecoderExports } from "../../src/render/wasm";
 
-// Cross-language integration: load the REAL freestanding decoder that the Zig
-// track builds (`public/note-decode.wasm`, from webapp/wasm/note_decode.zig) into
-// Node's WebAssembly runtime and feed it SNPG payloads in the exact wire format
-// the server's `page_payload.serialize` emits (see parsers/note/src/page_payload.zig). This
-// exercises the whole client→wasm path — alloc, copy-in, decode_page, result
-// read-out — against the actual compiled artifact, not a stub. The real-capture
-// (sample.note) round-trip is validated on the Zig side in tests/page_payload_test.zig;
-// here we assert the ABI + our RGBA/inversion glue with hand-built, valid payloads.
+// The real `public/note-decode.wasm`, fed hand-built SNPG payloads in the server's
+// `page_payload.serialize` wire format.
 
 const wasmPath = fileURLToPath(new URL("../../public/note-decode.wasm", import.meta.url));
 const hasWasm = existsSync(wasmPath);
@@ -20,10 +14,8 @@ function u32(v: number): number[] {
   return [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
 }
 
-/** Build a valid SNPG v1 payload: header + one record per layer (bottom-to-top).
- * `variant` 1 = RATTA_RLE X2 (highres/Nomad). RLE bytes use the same codes the
- * Zig decode tests use: 0x61 = black, 0x62 = transparent; the following byte is a
- * run length where `n` < 0x80 means a run of `n+1`. */
+/** A valid SNPG v1 payload, one record per layer (bottom-to-top). `variant` 1 =
+ *  RATTA_RLE X2; 0x61 = black, 0x62 = transparent, next byte `n` < 0x80 = run of n+1. */
 function snpg(width: number, height: number, layers: Array<{ allBlank?: boolean; rle: number[] }>): Uint8Array {
   const bytes: number[] = [];
   bytes.push(0x53, 0x4e, 0x50, 0x47); // "SNPG"
@@ -73,8 +65,7 @@ suite("note-decode.wasm (real module, cross-language)", () => {
 
     const ink = (i: number) => rgba[i * 4] === 0 && rgba[i * 4 + 1] === 0 && rgba[i * 4 + 2] === 0;
     const inkCount = Array.from({ length: 8 }, (_, i) => (ink(i) ? 1 : 0)).reduce((a, b) => a + b, 0);
-    expect(inkCount).toBe(4); // first four black, rest white — a real pixel probe
-    // Alpha is always opaque.
+    expect(inkCount).toBe(4);
     for (let i = 3; i < rgba.length; i += 4) expect(rgba[i]).toBe(255);
   });
 
@@ -82,12 +73,12 @@ suite("note-decode.wasm (real module, cross-language)", () => {
     const wasm = loadDecoder();
     // bottom: black across 2 px; top: transparent then black → px0 black, px1 black.
     const payload = snpg(2, 1, [
-      { rle: [0x61, 0x01] }, // bottom: 2 black
-      { rle: [0x62, 0x00, 0x61, 0x00] }, // top: 1 transparent, 1 black
+      { rle: [0x61, 0x01] },
+      { rle: [0x62, 0x00, 0x61, 0x00] },
     ]);
     const { rgba } = decodeWithExports(wasm, payload);
-    expect(rgba[0]).toBe(0); // px0: bottom black shows (top transparent)
-    expect(rgba[4]).toBe(0); // px1: top black
+    expect(rgba[0]).toBe(0);
+    expect(rgba[4]).toBe(0);
   });
 
   it("surfaces a decode error for a truncated payload", () => {
@@ -106,7 +97,7 @@ describe("invertRgb (dark-theme inversion, pure)", () => {
   it("black ink on white paper becomes white ink on black paper", () => {
     const rgba = new Uint8ClampedArray([0, 0, 0, 255, 255, 255, 255, 255]);
     invertRgb(rgba);
-    expect(Array.from(rgba.slice(0, 4))).toEqual([255, 255, 255, 255]); // ink → light
-    expect(Array.from(rgba.slice(4, 8))).toEqual([0, 0, 0, 255]); // paper → dark
+    expect(Array.from(rgba.slice(0, 4))).toEqual([255, 255, 255, 255]);
+    expect(Array.from(rgba.slice(4, 8))).toEqual([0, 0, 0, 255]);
   });
 });

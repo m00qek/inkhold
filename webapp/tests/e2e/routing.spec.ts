@@ -5,27 +5,9 @@ import { mockDocText, noteTextRecord } from "./helpers/docText";
 import { mockSearchIndex, noteTermsDocument } from "./helpers/searchIndex";
 import { fakeFileHash } from "../../src/api/fake";
 
-// THE RULE, END TO END: every place has a URL; every navigation pushes and every
-// adjustment replaces.
-//
-// These tests are deliberately about the RULE rather than about the route table.
-// A spec that only checked `#/folder/:id` appears in the address bar would pass
-// on a build where the URL is written but never read, which is exactly the half-
-// fix this work replaced — folder navigation was internal state with a routed
-// reader beside it, so reloading inside a subfolder put you back at the root and
-// Back's meaning depended on which of the two systems you had last used.
-//
-// So each place is proved the same three ways, because those are the three
-// things a URL is FOR:
-//
-//   - RELOAD lands on the same place (it is written and it is read);
-//   - BACK and FORWARD step through places, not through knob turns;
-//   - a link that has gone stale degrades to somewhere real, with something
-//     honest on screen.
-//
-// The push/replace half is asserted as an ABSENCE (`history.length` did not
-// grow), because a build that pushed where it should replace passes every
-// visible assertion here.
+// Each place is proved three ways: reload lands there, Back/Forward step through
+// places, and a stale link degrades honestly. Navigations push and adjustments
+// replace, asserted as `history.length` not growing.
 
 /** A rail anchor/subfolder/destination located by its exact visible name. */
 function navItem(page: Page, name: string): Locator {
@@ -45,10 +27,7 @@ function currentNavItem(page: Page): Locator {
 
 const searchBox = (page: Page) => page.getByRole("searchbox", { name: "Search notes" });
 
-// --- 1. WHICH FOLDER YOU ARE IN ---------------------------------------------
-//
-// The biggest gap and the most common action: open a subfolder, reload, and you
-// used to be back at the root.
+// --- 1. which folder you are in ---
 
 test.describe("a folder is a place", () => {
   test("opening one from the rail puts it in the URL, and a reload lands back in it", async ({ page }) => {
@@ -62,8 +41,6 @@ test.describe("a folder is a place", () => {
 
     await page.reload();
 
-    // THE ASSERTION THE WHOLE REFACTOR IS FOR. On the old build this landed on
-    // the library root and showed the six category cards instead.
     await expect(page).toHaveURL(/#\/folder\/note$/);
     await expect(cardButton(page, /Weekly review/)).toBeVisible();
     await railSettled(page);
@@ -72,16 +49,11 @@ test.describe("a folder is a place", () => {
 
   test("a subfolder is reachable by link alone, with the breadcrumb it would have had", async ({ page }) => {
     await signedIn(page);
-    // Straight in, having never visited the parent — a shared link, a bookmark.
     await page.goto("/#/folder/projects");
 
     await expect(cardButton(page, /Project Aurora — kickoff/)).toBeVisible();
-    // The breadcrumb comes off the server's own `listing.path`, so it is right
-    // immediately — it does not wait for the tree walk the RAIL needs.
     await expect(page.locator(".crumbs")).toContainText("Projects");
-    // The rail's highlight IS provisional until the walk lands: which category a
-    // folder sits under is `resolveCategory`'s answer. It arrives, rather than
-    // being waited on by a second mechanism.
+    // The rail highlight is provisional until the tree walk lands.
     await railSettled(page);
     await expect(currentNavItem(page)).toHaveText(/^Projects/);
   });
@@ -93,9 +65,7 @@ test.describe("a folder is a place", () => {
 
     await navItem(page, "Note").click();
     await expect(cardButton(page, /Weekly review/)).toBeVisible();
-    // Down one more, this time through a gallery card rather than the rail: both
-    // entry points are the same `go()`, and a test that only used the rail would
-    // not notice one of them going back to calling `navigate()` directly.
+    // Through a gallery card, since rail and card must share the same `go()`.
     await cardButton(page, /^Projects/).click();
     await expect(page).toHaveURL(/#\/folder\/projects$/);
     await expect(cardButton(page, /Project Aurora — kickoff/)).toBeVisible();
@@ -105,8 +75,7 @@ test.describe("a folder is a place", () => {
     await expect(cardButton(page, /Weekly review/)).toBeVisible();
 
     await page.goBack();
-    // `page.goto("/")` left no hash at all, so the root is spelled bare here —
-    // one place, two spellings the browser gave us, both meaning the library.
+    // `page.goto("/")` left no hash, so the root may be spelled bare.
     await expect(page).toHaveURL(/\/(#\/)?$/);
     await expect(page.locator(".card--folder").first()).toBeVisible();
 
@@ -119,22 +88,18 @@ test.describe("a folder is a place", () => {
     await signedIn(page);
     await page.goto("/#/folder/deleted-last-tuesday");
 
-    // Something HONEST on screen — not a blank shell, and not an empty folder,
-    // which would be a confident lie about a folder that does not exist.
     await expect(page.locator(".toast")).toContainText("isn't there any more");
-    // …and somewhere real to be.
     await expect(page).toHaveURL(/#\/$/);
     await railSettled(page);
     await expect(page.locator(".card--folder").first()).toBeVisible();
 
-    // A REDIRECT, NOT A NAVIGATION. The missing folder was never a place, so it
-    // must not be a rung Back can climb onto only to be bounced off it again.
+    // A redirect: the missing folder must not become a history entry.
     await page.goBack();
     await expect(page).not.toHaveURL(/deleted-last-tuesday/);
   });
 });
 
-// --- 2 & 3. THE DESTINATIONS -------------------------------------------------
+// --- 2 & 3. destinations ---
 
 test.describe("a destination is a place", () => {
   test("the recycle bin has a URL, survives a reload, and keeps the rail honest", async ({ page }) => {
@@ -143,19 +108,14 @@ test.describe("a destination is a place", () => {
     await railSettled(page);
 
     await navItem(page, "Recycle bin").click();
-    // Spelled by the rail's own `DESTINATIONS` key — the router reads that list
-    // rather than restating the name.
     await expect(page).toHaveURL(/#\/bin$/);
     await expect(page.locator(".bin")).toBeVisible();
 
     await page.reload();
     await expect(page.locator(".bin")).toBeVisible();
     await railSettled(page);
-    // The rail highlight derives from the ROUTE now, so it cannot disagree with
-    // the address bar even though the bin's own DOM is what `bin.isOpen()` reads.
     await expect(currentNavItem(page)).toHaveText(/^Recycle bin/);
 
-    // Back leaves the bin for wherever you were.
     await page.goBack();
     await expect(page).toHaveURL(/\/(#\/)?$/);
     await expect(page.locator(".bin")).toHaveCount(0);
@@ -168,8 +128,6 @@ test.describe("a destination is a place", () => {
 
     await page.getByRole("button", { name: /20260720_152956/ }).first().click();
     await expect(reader(page)).toBeVisible();
-    // The reader NAMES where it will go — history could return you there but it
-    // could never tell you what to call it, which is why the origin survives.
     await expect(page.locator(".backbtn__label")).toHaveText("Recycle bin");
 
     await page.locator(".backbtn").click();
@@ -190,11 +148,7 @@ test.describe("a destination is a place", () => {
     await page.getByRole("button", { name: "Unlock console" }).click();
     await expect(page.getByRole("heading", { name: "People" })).toBeVisible();
 
-    // ADDRESSABLE IS NOT ACCESSIBLE. The URL survives the reload; the elevation
-    // does not, because the server is its authority and this document has not
-    // asked it anything yet. A bookmark that reopened the console would be a way
-    // around `require_admin`, which is enforced server-side — and the client must
-    // not imply otherwise.
+    // The elevation does not survive a reload; `require_admin` is enforced server-side.
     await page.reload();
     await expect(page).toHaveURL(/#\/admin$/);
     await expect(page.getByRole("button", { name: "Unlock console" })).toBeVisible();
@@ -205,16 +159,13 @@ test.describe("a destination is a place", () => {
     await mockApi(page, {
       "user/me": { json: { success: true, email: "rui@household.lan", isAdmin: false, mustChangePassword: false } },
     });
-    // The rail hides the row from them (a door that always refuses is worse than
-    // no door), but a URL can still be typed. What it reaches is the gate, and
-    // the gate is what the server enforces.
     await page.goto("/#/admin");
     await expect(page.getByRole("button", { name: "Unlock console" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "People" })).toHaveCount(0);
   });
 });
 
-// --- 4. LIBRARY-WIDE SEARCH --------------------------------------------------
+// --- 4. library-wide search ---
 
 test.describe("a library-wide search is a place", () => {
   test("typing pushes ONCE, refining replaces, and the URL is shareable", async ({ page }) => {
@@ -223,26 +174,19 @@ test.describe("a library-wide search is a place", () => {
     await railSettled(page);
     await navItem(page, "Note").click();
     await expect(page).toHaveURL(/#\/folder\/note$/);
-    // Waited for on purpose: the click only sets the hash, and the route handler
-    // that lands the listing — and CLEARS the search box — runs a task later.
-    // Typing into the box before it has run gets the box wiped underneath you.
+    // The route handler clears the search box a task after the click; wait for it first.
     await expect(cardButton(page, /Weekly review/)).toBeVisible();
 
     await searchBox(page).fill("a");
     await expect(page).toHaveURL(/#\/search\?q=a$/);
-    // The depth after ARRIVING. Everything that follows is a knob turn.
     const depth = await page.evaluate(() => history.length);
 
     await searchBox(page).fill("au");
     await searchBox(page).fill("aur");
     await searchBox(page).fill("aurora");
     await expect(page).toHaveURL(/#\/search\?q=aurora$/);
-    // Four more keystrokes, no more history. A build that pushed per keystroke
-    // makes Back spell the query backwards one letter at a time.
     expect(await page.evaluate(() => history.length)).toBe(depth);
 
-    // ONE Back leaves the whole search episode and returns to the folder — which
-    // search never moved you out of.
     await page.goBack();
     await expect(page).toHaveURL(/#\/folder\/note$/);
     await expect(cardButton(page, /Weekly review/)).toBeVisible();
@@ -252,13 +196,9 @@ test.describe("a library-wide search is a place", () => {
     await signedIn(page);
     await page.goto("/#/search?q=aurora");
 
-    // The box has to agree with the URL: results above an empty search field are
-    // the control lying about what produced them.
     await expect(searchBox(page)).toHaveValue("aurora");
     await expect(cardButton(page, /Project Aurora — kickoff/)).toBeVisible();
-    // Results span the library, so the crumb says just "Search" — naming the
-    // folder would claim a scope the search does not have, which is also why the
-    // route is `#/search` and not `#/folder/:id?q=`.
+    // Results span the library, hence `#/search` rather than `#/folder/:id?q=`.
     await expect(page.locator(".crumbs")).toHaveText("Search");
   });
 
@@ -274,15 +214,13 @@ test.describe("a library-wide search is a place", () => {
     await expect(page).toHaveURL(/#\/search\?q=aurora$/);
     await searchBox(page).fill("");
 
-    // Back where it started, and one search episode cost exactly one entry —
-    // the one Back now steps off.
     await expect(page).toHaveURL(/#\/folder\/note$/);
     await expect(cardButton(page, /Weekly review/)).toBeVisible();
     expect(await page.evaluate(() => history.length)).toBe(depth + 1);
   });
 });
 
-// --- THE TWO EXCEPTIONS ------------------------------------------------------
+// --- what is deliberately not in the URL ---
 
 test.describe("what is deliberately NOT in the URL", () => {
   test("sort and view mode are preferences, not places", async ({ page }) => {
@@ -296,33 +234,24 @@ test.describe("what is deliberately NOT in the URL", () => {
     await page.getByRole("combobox", { name: "Sort notes" }).selectOption("title");
     await page.getByRole("button", { name: "List view" }).click();
 
-    // A URL carrying them means sharing a link imposes your view on whoever
-    // opens it. Sort is pinned in localStorage precisely so it follows the
-    // PERSON rather than the link.
+    // Sort lives in localStorage so it follows the person, not the link.
     await expect(page).toHaveURL(/#\/folder\/note$/);
     expect(await page.evaluate(() => history.length)).toBe(depth);
   });
 });
 
-// --- THE PAGE NUMBER IN THE URL IS THE ONE ON SCREEN -------------------------
-//
-// A URL is user-facing text and humans number pages from one, so `/page/5` is the
-// fifth page — while the reader, the filmstrip and the lazy engine all index from
-// zero and stay that way. Asserted from OUTSIDE the router on both sides (a
-// literal URL against a rendered pager) because a test that round-tripped through
-// the app's own helpers would pass whether or not the offset was ever applied.
+// --- page numbers in the URL count from one ---
+// Asserted from outside the router, so a round-trip through app helpers cannot hide the offset.
 
 test.describe("page numbers in the URL count from one", () => {
   test("the address bar agrees with the pager, in both directions", async ({ page }) => {
     await signedIn(page);
     await page.goto("/#/note/141");
 
-    // Internal index 4 → `/page/5`, and the pager independently says "5 / 20".
     await page.getByRole("button", { name: "Page 5" }).click();
     await expect(page.locator(".pager__count")).toHaveValue("5 / 20");
     await expect(page).toHaveURL(/#\/note\/141\/page\/5$/);
 
-    // And back the other way, on a cold load.
     await page.goto("/#/note/141/page/5");
     await expect(page.locator(".pager__count")).toHaveValue("5 / 20");
   });
@@ -332,53 +261,28 @@ test.describe("page numbers in the URL count from one", () => {
     await page.goto("/#/note/141/page/5");
     await expect(page.locator(".pager__count")).toHaveValue("5 / 20");
 
-    // Returning to the start collapses to the bare path rather than emitting a
-    // second spelling of it.
-    // By name PREFIX: an inked row's accessible name carries the fact
-    // ("Page 1, written" — §2.5), so an exact match is a locator
-    // that works only until the ink rail has an answer for that page.
+    // By name prefix: an inked row is named "Page 1, written".
     await page.getByRole("button", { name: /^Page 1\b/ }).click();
     await expect(page).toHaveURL(/#\/note\/141$/);
 
-    // …but a hand-typed or shared `page/1` still lands there.
     await page.goto("/#/note/141/page/1");
     await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
   });
 
   test("a hand-edited page number lands somewhere sensible instead of erroring", async ({ page }) => {
     await signedIn(page);
-    // `page/0` means nothing once the URL counts from one. It is clamped to the
-    // start of THIS note — not 404'd, and not bounced to the library, which
-    // would make a mistyped page number look like a broken link.
+    // `page/0` clamps to the start of this note rather than 404ing.
     await page.goto("/#/note/141/page/0");
     await expect(reader(page)).toBeVisible();
     await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
 
-    // Past the end is clamped by the READER, which is the only thing that knows
-    // how long the note is.
+    // Past the end is clamped by the reader, the only thing that knows the length.
     await page.goto("/#/note/141/page/900");
     await expect(page.locator(".pager__count")).toHaveValue("20 / 20");
   });
 
-  // BROKEN SINCE §6 STEP 6, DECLARED RATHER THAN LEFT RED —
-  // AND NOW RUNNING, because the fixture it was waiting for exists
-  // (`helpers/searchIndex.ts`).
-  //
-  // "Endor" exists only in a TRANSCRIPT (`noteTranscript` in helpers/docText.ts
-  // writes it on odd pages), so this row can only come from the transcript half
-  // of a query — which step 6 moved onto the browser's own index. Until the
-  // manifest and the stream had honest bytes here, nothing filled the store, no
-  // hit was produced, and the click below had no row to click.
-  //
-  // WHAT IT ASSERTS is not what its old title said, because there are no
-  // excerpts (§4.3): a result row is a DOCUMENT carrying a match count
-  // (`.card__matches`), and its one link opens the FIRST matching page with the
-  // query attached. Six pages; indices 2 and 5 carry no recognition
-  // (`recognisedPages`), and "Endor" is on the ODD ones — so pages 1 and 3
-  // zero-based, and the first is index 1 → `/page/2?q=Endor`, which is the
-  // one-based conversion this describe block exists to pin. (The `fixme`'s own
-  // note said three pages and page 5; page 5 is the third page with no
-  // transcript at all, which is exactly the sort of thing an unrun test says.)
+  // "Endor" exists only in transcripts, on odd pages; recognised indices skip 2 and 5,
+  // so the first hit is index 1, i.e. `/page/2?q=Endor`.
   test("a search hit deep-links to the first page it matched, numbered the same way", async ({ page }) => {
     await signedIn(page);
     await mockSearchIndex(page, {
@@ -396,29 +300,23 @@ test.describe("page numbers in the URL count from one", () => {
         [fakeFileHash("121")]: noteTermsDocument(fakeFileHash("121"), "Project Aurora — kickoff", 6),
       },
     });
-    // The find bar the deep link primes fetches this — and so does the §4.4
-    // prefetch a tier-1 row earns. Without it the reader would open onto a red
-    // find bar, which would not fail the assertions below and would be a lie in
-    // the middle of a passing test.
+    // Without it the reader would open onto a red find bar without failing anything.
     await mockDocText(page, { [fakeFileHash("121")]: noteTextRecord("Project Aurora — kickoff", 6) });
     await page.goto("/");
-    // "Endor" is on the ODD pages only, so the best-ranked page is not the first
-    // — "the link carries a page" is a real claim here.
+    // "Endor" is on odd pages only, so the link really carries a page.
     await railSettled(page); // the name half of a search reads the cached tree
     await searchBox(page).fill("Endor");
     const row = page.locator(".card--result").filter({ hasText: "Project Aurora — kickoff" });
-    // A DOCUMENT with a match count, not an excerpt — the row's whole answer.
     await expect(row.locator(".card__matches")).toHaveText("Matches on 2 pages", { timeout: 20_000 });
     await row.locator(".card__open").click();
 
     await expect(page.locator(".pager__count")).toHaveValue("2 / 6");
-    // The href builder the result rows use is the SAME one the reader writes
-    // with, so the conversion cannot be applied in one and missed in the other.
+    // Result rows and the reader share one href builder.
     await expect(page).toHaveURL(/#\/note\/121\/page\/2\?q=Endor$/);
   });
 });
 
-// --- PAGING IS AN ADJUSTMENT, NOT A PLACE ------------------------------------
+// --- paging is an adjustment, not a place ---
 
 test.describe("Back out of a note goes where you came from", () => {
   test("however far you paged, and to the folder you entered from", async ({ page }) => {
@@ -435,8 +333,6 @@ test.describe("Back out of a note goes where you came from", () => {
     await expect(page.locator(".pager__count")).toHaveValue("9 / 20");
     await expect(page).toHaveURL(/#\/note\/141\/page\/9$/);
 
-    // ONE Back, and it lands in the FOLDER — not on page 8, and not at the
-    // library root the reader used to be sent to unconditionally.
     await page.goBack();
     await expect(reader(page)).toBeHidden();
     await expect(page).toHaveURL(/#\/folder\/document$/);

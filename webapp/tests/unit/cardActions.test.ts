@@ -1,14 +1,5 @@
 // @vitest-environment happy-dom
-//
-// `pages/cardActions.ts` — the whole-document PDF export, launched from a card's
-// overflow menu.
-//
-// WHAT THIS IS HERE FOR: a document export is a JOB, not a click. The menu item
-// that starts one closes the instant it is chosen, which was taken to mean there
-// was no control left to guard — but nothing then stops a second choice from
-// starting a SECOND full export beside the first. On a 1703-page notebook that
-// is ~243 MB of PDF built twice at once, held as heap chunks until the Blob
-// exists, and it is the natural thing to click when nothing has downloaded yet.
+// A second click must not start a second full-document export beside the first.
 
 import { describe, it, expect, vi } from "vitest";
 import { createCardActions, type CardActionsCtx } from "../../src/pages/cardActions";
@@ -33,7 +24,6 @@ interface Harness {
   menu: HTMLElement;
   toast: ReturnType<typeof vi.fn>;
   documentPdf: ReturnType<typeof vi.fn>;
-  /** Let the in-flight export finish. */
   finish: () => void;
 }
 
@@ -70,7 +60,6 @@ function harness(): Harness {
   return { menu, toast, documentPdf, finish: release };
 }
 
-/** The "PDF document" row in the DOWNLOAD section. */
 function pdfItem(menu: HTMLElement): HTMLButtonElement {
   const btn = Array.from(menu.querySelectorAll("button")).find((b) =>
     b.textContent?.includes("PDF document"),
@@ -89,7 +78,6 @@ describe("the whole-document PDF export, from a card", () => {
     item.click();
     await Promise.resolve();
 
-    // The second click must not have launched a second export beside the first.
     expect(h.documentPdf).toHaveBeenCalledTimes(1);
 
     h.finish();
@@ -113,15 +101,12 @@ describe("the whole-document PDF export, from a card", () => {
   });
 
   it("lets a LATER export run once the first has finished", async () => {
-    // The guard is not a one-shot latch: it has to clear, or the first export of
-    // a session would be the only one the page ever allows.
     const h = harness();
     const item = pdfItem(h.menu);
 
     item.click();
     await Promise.resolve();
     h.finish();
-    // Let the export's `finally` run.
     await new Promise((r) => setTimeout(r, 0));
 
     item.click();
@@ -130,23 +115,9 @@ describe("the whole-document PDF export, from a card", () => {
   });
 });
 
-// ============================================================================
-// The two history rows — and the fact that they are two.
-// ============================================================================
-//
-// A `.pdf` has no version history the app can paint, so `canPreviewHistory`
-// excludes it and must go on excluding it: offering "Version history" on a PDF
-// would promise a past document, and there is none. What a PDF can have is a
-// paired `.mark`, whose every superseded version is retained AND charged to the
-// user's quota — and which has no card of its own, because the server folds a
-// paired mark out of every listing. Before this row the only way to reach any of
-// it was to trash the PDF, which unpairs the mark and lets it list.
-//
-// So the row exists, and its LABEL is the point: what is versioned here is the
-// handwriting, not the file on screen, and the menu is the first place that can
-// say so.
+// --- the two history rows -----------------------------------------------------
+// A PDF has no history of its own; its paired `.mark` row is labelled as the handwriting.
 
-/** The labels of every row in a card's ⋯ menu, in document order. */
 function rowLabels(entry: Entry, over: Partial<CardActionsCtx> = {}): string[] {
   const ctx = {
     api: {},
@@ -185,7 +156,6 @@ function pdfEntry(annotationsId: string | null): Entry {
 describe("the card's history rows", () => {
   it("offers ANNOTATION history on a PDF that has a paired mark", () => {
     expect(rowLabels(pdfEntry("179"))).toContain("Annotation history");
-    // And never the note wording, which would claim the document has versions.
     expect(rowLabels(pdfEntry("179"))).not.toContain("Version history");
   });
 
@@ -193,14 +163,10 @@ describe("the card's history rows", () => {
     const labels = rowLabels(pdfEntry(null));
     expect(labels).not.toContain("Annotation history");
     expect(labels).not.toContain("Version history");
-    // The rest of the menu is untouched: a plain PDF still trashes and renames.
     expect(labels).toEqual(expect.arrayContaining(["Rename", "Move to bin"]));
   });
 
   it("hands the panel the MARK's id under the DOCUMENT's name", () => {
-    // `foo.pdf.mark` is a filename the device invented; the heading has to be the
-    // one the reader recognises, so the id and the name come from different files
-    // — which is exactly why this is a separate seam from `onHistory`.
     const onAnnotationHistory = vi.fn();
     const entry = pdfEntry("179");
     const ctx = {

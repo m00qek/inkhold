@@ -4,8 +4,7 @@ import { fileURLToPath } from "node:url";
 import { newestPerDocument, type StoredTermsDocument } from "../../src/cache/termsStore";
 import { SearchIndex, type CoreLoader, type SearchCoreExports } from "../../src/search/indexEngine";
 
-// The real module, loaded the way `indexEngine.test.ts` loads it — the third
-// test below is only worth anything against an engine that really refuses.
+// The real module: the third test needs an engine that really refuses.
 let bytes: Uint8Array;
 const loadCore: CoreLoader = async () => {
   const { instance } = await WebAssembly.instantiate(bytes, {});
@@ -17,12 +16,8 @@ beforeAll(() => {
   bytes = readFileSync(fileURLToPath(new URL("../../public/sqlite-core.wasm", import.meta.url)));
 });
 
-/**
- * The seam between the two halves of step 3, which were built independently and
- * so had nobody testing the join. The store is keyed `(md5, indexVersion)`; the
- * index build refuses a repeated md5. Those two facts are individually right and
- * collide the moment an extractor-version bump lands before its clean-up does.
- */
+/** The store keys `(md5, indexVersion)` but the build refuses a repeated md5; they
+ *  collide when an extractor-version bump lands before its clean-up. */
 const doc = (md5: string, indexVersion: number, terms: string): StoredTermsDocument => ({
   md5,
   indexVersion,

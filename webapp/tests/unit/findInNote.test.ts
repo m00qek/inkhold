@@ -5,25 +5,7 @@ import type { Api } from "../../src/api/types";
 import type { PageRef, WordBox } from "../../src/core/types";
 import type { DocSearch, DocSearchResult, DocSegmentMatch } from "../../src/search/docSearch";
 
-// Find-in-note's logic with the DOM injected, the same way the OCR panel and the
-// library search are tested. Five things are load-bearing here and none of them
-// are visible to a "does the control exist" check:
-//
-//   1. TWO PHASES. The current page's ovals are drawn from `getPageText`; the
-//      note-wide counts come from ONE in-document query over `text/<md5>`, never
-//      one per page.
-//   2. THE TEXT IS FETCHED ON THE FIRST FIND, NOT ON OPEN (§4.1) — opening a
-//      note to read it needs the renderer, not a text index.
-//   3. THE INTERMEDIATE STATE SHOWS NO TOTAL. `1 of 12` is a claim about the
-//      whole note, and a total that revises itself is how a search loses trust.
-//   4. SETTLING KEEPS THE MATCH ALREADY HIGHLIGHTED rather than jumping the page
-//      out from under someone reading it.
-//   5. "Not recognised on the device" is NOT "No matches" — the second asserts
-//      that a search happened.
-//
-// The ENGINE is faked here. That it really answers — the ordinals, the byte
-// ranges, the typo ladder — is `docSearch.test.ts`'s job, against the shipped
-// wasm; this file is about what the controller does with an answer.
+// The engine is faked; `docSearch.test.ts` covers it against the real wasm.
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -39,12 +21,7 @@ function word(text: string, i: number): WordBox {
 
 const RECOGNISED = [page(0, "a".repeat(32)), page(1, "b".repeat(32)), page(2, null)];
 
-/**
- * A matching segment naming the fixture's own words — i.e. WHAT THE INDEX
- * COUNTED. The ovals are derived from these rather than re-derived from the
- * query, so a fixture row that named nothing would be a page with a count and no
- * marks. `offset`/`length` are null because a `.note` ordinal IS the address.
- */
+/** A matching segment naming the words the index counted; `.note` has no offsets. */
 function match(segment: number, matches: number, terms = ["attention", "attentive"]): DocSegmentMatch {
   return { segment, offset: null, length: null, matches, terms };
 }
@@ -72,9 +49,6 @@ function build(opts: { pages?: DocSegmentMatch[]; words?: WordBox[]; usedFuzzy?:
       md5,
       segments: opts.pages ?? [],
       usedFuzzy,
-      // The ladder reports what it substituted, and `usedFuzzy` is exactly
-      // "expansions is non-empty" in the real module — kept consistent here so a
-      // fixture cannot describe a state the engine cannot produce.
       expansions: usedFuzzy ? [{ typed: query, matched: "attention" }] : [],
     }),
   );
@@ -100,49 +74,33 @@ function build(opts: { pages?: DocSegmentMatch[]; words?: WordBox[]; usedFuzzy?:
 const last = <T>(xs: T[]): T | undefined => xs[xs.length - 1];
 
 describe("matchWords", () => {
-  // THE PROPERTY THIS WHOLE CHANGE EXISTS FOR: the ovals are the words the index
-  // COUNTED, not a second opinion about the query. This side cannot reproduce the
-  // prefix expansion, the tokenizer's fold, or which near-miss a typo expanded
-  // into — so it does not try.
+  // The ovals are the words the index counted, not a re-derivation from the query.
   it("circles exactly the terms the count says it counted", () => {
     const words = [word("Avaliação", 0), word("attention", 1), word("budget", 2)];
 
-    // Folded, accent-stripped terms — the form the index holds them in — match
-    // the accented word on the page.
     expect(matchWords(words, "irrelevant", ["avaliacao"]).map((w) => w.text)).toEqual(["Avaliação"]);
-    // Several terms circle several words, however the query was spelled.
     expect(matchWords(words, "", ["attention", "budget"]).map((w) => w.text)).toEqual([
       "attention",
       "budget",
     ]);
-    // A TYPO'D QUERY still circles the word that was counted, because the term
-    // is the corpus's spelling and not the user's.
     expect(matchWords(words, "budgte", ["budget"]).map((w) => w.text)).toEqual(["budget"]);
-    // And a term is a WHOLE term, not a substring: `atten` counted nothing, so
-    // nothing is circled. The old substring rule circled "attention" here, which
-    // is precisely the disagreement with the count this replaces.
+    // Whole terms, not substrings: `atten` counted nothing, so nothing is circled.
     expect(matchWords(words, "atten", ["atten"])).toEqual([]);
-    // No terms means nothing to circle, whatever the query says.
     expect(matchWords(words, "attention", [])).toEqual([]);
   });
 
   it("splits a word label the way the index's tokenizer does", () => {
-    // `unicode61` breaks on everything that is not a letter or a digit, so a
-    // hyphenated label carries two terms and a trailing comma is not part of one.
+    // `unicode61` breaks on every non-letter, non-digit.
     const words = [word("page-range", 0), word("Endor,", 1)];
     expect(matchWords(words, "", ["range"]).map((w) => w.text)).toEqual(["page-range"]);
     expect(matchWords(words, "", ["endor"]).map((w) => w.text)).toEqual(["Endor,"]);
   });
 
-  // `terms === null` is PHASE 1 only: no answer exists yet — the first find is
-  // waiting on `text/<md5>` and an index build — and drawing nothing would cost
-  // find the immediacy that is its whole feel. The counter beside it claims
-  // nothing beyond this page.
+  // `terms === null` is phase 1 only: no answer yet, so draw from this page.
   it("falls back to a provisional substring guess only before the counts land", () => {
     const words = [word("Avaliação", 0), word("attention", 1), word("budget", 2)];
     expect(matchWords(words, "avaliacao", null).map((w) => w.text)).toEqual(["Avaliação"]);
     expect(matchWords(words, "ATTEN", null).map((w) => w.text)).toEqual(["attention"]);
-    // Multi-token: each word the query names, not a demand that they be adjacent.
     expect(matchWords(words, "atten budget", null).map((w) => w.text)).toEqual(["attention", "budget"]);
   });
 
@@ -153,9 +111,7 @@ describe("matchWords", () => {
 });
 
 describe("find in note", () => {
-  // §4.1, and the reason the fetch is here rather than in `reader.open`: reading
-  // a note needs the renderer, not a text index, and a 3.15 MB text record is not
-  // something a household member who never searches should pay for.
+  // The text record is fetched on first find, not on open.
   it("fetches NOTHING when the bar is merely opened — peeking is free", async () => {
     const t = build();
     t.find.setNote("n1", MD5, RECOGNISED);
@@ -168,7 +124,6 @@ describe("find in note", () => {
 
   it("costs ONE document-scoped query for the whole notebook, not one per page", async () => {
     const t = build({ pages: [match(0, 2), match(1, 3)] });
-    // 40 pages: the shape where a per-page fetch would be catastrophic.
     const many = Array.from({ length: 40 }, (_, i) => page(i, "c".repeat(32)));
     t.find.setNote("n1", MD5, many);
     t.find.open();
@@ -178,12 +133,9 @@ describe("find in note", () => {
 
     expect(t.search).toHaveBeenCalledTimes(1);
     expect(t.search).toHaveBeenCalledWith(MD5, "attention", expect.anything());
-    // …plus exactly one page-text fetch: the page actually on screen.
     expect(t.getPageText).toHaveBeenCalledTimes(1);
   });
 
-  // A note with no content address cannot be searched — the route is keyed by
-  // md5 — and inventing one would search somebody else's blob.
   it("asks nothing at all for a note with no content address", async () => {
     const t = build({ pages: [match(0, 1)] });
     t.find.setNote("n1", null, RECOGNISED);
@@ -198,8 +150,7 @@ describe("find in note", () => {
   it("shows NO TOTAL while the answer is outstanding", async () => {
     let land!: (r: DocSearchResult) => void;
     const t = build();
-    // Hold the query open — the "still counting" window while the text is being
-    // fetched and indexed.
+    // Hold the query open: the window while the text is fetched and indexed.
     t.search.mockImplementation(
       (md5: string, query: string) =>
         new Promise<DocSearchResult>((resolve) => {
@@ -214,10 +165,7 @@ describe("find in note", () => {
 
     const mid = last(t.states)!;
     expect(mid.kind).toBe("counting");
-    // The page in front of you is answered immediately — two of the three
-    // fixture words contain "attent".
     expect(mid).toMatchObject({ kind: "counting", onThisPage: 2, recognisedPages: 2 });
-    // And nothing before the answer lands claims a note-wide total.
     expect(t.states.some((s) => s.kind === "settled")).toBe(false);
 
     land({ query: "attent", md5: MD5, segments: [match(0, 2), match(1, 3)], usedFuzzy: false, expansions: [] });
@@ -230,7 +178,6 @@ describe("find in note", () => {
     t.find.setNote("n1", MD5, RECOGNISED);
     t.find.open();
     t.find.setQuery("attent");
-    // Phase 1 has run, phase 2 has not.
     expect(t.view.setStepEnabled).toHaveBeenLastCalledWith(false);
 
     await flush();
@@ -241,26 +188,20 @@ describe("find in note", () => {
   it("keeps the match already highlighted when the counts settle", async () => {
     const t = build({ pages: [match(0, 2), match(1, 3)] });
     t.find.setNote("n1", MD5, RECOGNISED);
-    t.find.setPage(1); // the user is reading page 2
+    t.find.setPage(1);
     t.find.open();
     t.find.setQuery("attent");
     await flush();
     await flush();
 
-    // Page 1 holds global matches 2,3,4 — settling lands on the first of THOSE,
-    // not on match 1, and it does not navigate.
     expect(last(t.states)).toEqual({ kind: "settled", at: 2, total: 5, fuzzy: false });
     expect(t.view.showPage).not.toHaveBeenCalled();
   });
 
-  // THE OTHER HALF OF THAT RULE, and the bug it was missing. When the page in
-  // front of you holds NO match there is nothing to be taken away from you, and
-  // staying put is what made find look broken on real data: the counter read
-  // `1 of 1`, the filmstrip badged a page you were not on, and nothing was
-  // circled, because the one match was somewhere else entirely.
+  // Regression: with no match on the current page, settling stayed put and circled nothing.
   it("GOES TO the first match when the page in front of you holds none", async () => {
     const t = build({ pages: [match(1, 2)] });
-    t.find.setNote("n1", MD5, RECOGNISED); // reading page 0, which has no match
+    t.find.setNote("n1", MD5, RECOGNISED);
     t.find.open();
     t.find.setQuery("attent");
     await flush();
@@ -280,24 +221,19 @@ describe("find in note", () => {
     await flush();
 
     expect(t.view.showPage).toHaveBeenLastCalledWith(1);
-    t.find.setPage(1); // the reader answers showPage by moving, as it really does
+    t.find.setPage(1);
 
     t.find.step(1);
     expect(last(t.states)).toEqual({ kind: "settled", at: 1, total: 2, fuzzy: false });
     expect(t.view.showPage).toHaveBeenLastCalledWith(3);
     t.find.setPage(3);
 
-    // …and forward from the last wraps back to the first, turning the page again.
     t.find.step(1);
     expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 2, fuzzy: false });
     expect(t.view.showPage).toHaveBeenLastCalledWith(1);
   });
 
-  // THE AGREEMENT PROPERTY. The query is misspelt, so nothing about it would
-  // find these words — the ovals are drawn from the terms the INDEX counted, and
-  // the count and the marks therefore describe the same two words. Manual fuzzy
-  // is OPT-IN: the exact search is empty, the bar offers "search similar", and
-  // opting in reveals the counted matches.
+  // Misspelt query: the ovals come from the terms the index counted, after opt-in.
   it("circles what the count counted, even when the query spells it wrong — after opting in", async () => {
     const t = build({
       pages: [{ segment: 0, offset: null, length: null, matches: 2, terms: ["attention", "attentive"] }],
@@ -309,17 +245,13 @@ describe("find in note", () => {
     await flush();
     await flush();
 
-    // Not shown automatically — the affordance is offered instead.
     expect(last(t.states)).toEqual({ kind: "fuzzyPrompt" });
 
     t.find.searchSimilar();
     await flush();
     expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 2, fuzzy: true });
     expect(last(t.ovals)!.words.map((w) => w.text)).toEqual(["attention", "attentive"]);
-    // The number and the marks agree — which is the whole reason the fallback
-    // can be switched on for this route at all.
     expect(last(t.ovals)!.words).toHaveLength(2);
-    // AND NOTHING WAS ASKED AGAIN: the ladder ran inside the one query.
     expect(t.search).toHaveBeenCalledTimes(1);
   });
 
@@ -334,8 +266,6 @@ describe("find in note", () => {
     await flush();
 
     t.find.step(1);
-    // Said once above the results, not per match — but it does not stop being
-    // true because you moved to the next one.
     expect(last(t.states)).toEqual({ kind: "settled", at: 1, total: 2, fuzzy: true });
   });
 
@@ -347,15 +277,14 @@ describe("find in note", () => {
     await flush();
     await flush();
 
-    t.find.step(1); // 0 → 1, still page 0
+    t.find.step(1);
     expect(last(t.states)).toEqual({ kind: "settled", at: 1, total: 5, fuzzy: false });
     expect(t.view.showPage).not.toHaveBeenCalled();
 
-    t.find.step(1); // 1 → 2, which is page 1
+    t.find.step(1);
     expect(last(t.states)).toEqual({ kind: "settled", at: 2, total: 5, fuzzy: false });
     expect(t.view.showPage).toHaveBeenCalledWith(1);
 
-    // Previous from the first match wraps to the last, on the last matching page.
     t.find.step(-1);
     t.find.step(-1);
     t.find.step(-1);
@@ -371,9 +300,7 @@ describe("find in note", () => {
     await flush();
 
     expect(last(t.states)).toEqual({ kind: "unrecognised" });
-    // The distinction is the point: nothing was searched, so nothing is claimed.
     expect(t.states.some((s) => s.kind === "empty")).toBe(false);
-    // And it costs no request at all — `textHash` already said so.
     expect(t.search).not.toHaveBeenCalled();
     expect(t.getPageText).not.toHaveBeenCalled();
   });
@@ -393,7 +320,7 @@ describe("find in note", () => {
   it("never asks for the text of a page the device did not recognise", async () => {
     const t = build({ pages: [match(0, 1)] });
     t.find.setNote("n1", MD5, RECOGNISED);
-    t.find.setPage(2); // textHash === null
+    t.find.setPage(2);
     t.find.open();
     t.find.setQuery("attent");
     await flush();
@@ -420,9 +347,7 @@ describe("find in note", () => {
     t.find.setQuery("attention");
     await flush();
 
-    // The SLOW, OLDER query's answer lands last. Painting it would leave the
-    // wrong count on screen with nothing later coming to correct it — the token
-    // guard drops it.
+    // The slower, older query lands last and must be dropped.
     answers[1]!({ query: "", md5: MD5, segments: [match(0, 1)], usedFuzzy: false, expansions: [] });
     await flush();
     answers[0]!({ query: "", md5: MD5, segments: [match(1, 99)], usedFuzzy: false, expansions: [] });
@@ -444,9 +369,7 @@ describe("find in note", () => {
     expect(t.states.some((s) => s.kind === "error")).toBe(false);
   });
 
-  // A 404 from `text/<md5>` means "not derived, or not reachable" and the route
-  // deliberately cannot say which. Rendering it as "No matches" would be a
-  // confident false statement about a document that may well contain the word.
+  // A 404 from `text/<md5>` cannot say why, so it is never "No matches".
   it("surfaces an ordinary failure as an error, distinct from an empty result", async () => {
     const t = build();
     t.search.mockRejectedValue(new ApiError("SERVER", "boom", 500));
@@ -492,10 +415,6 @@ describe("find in note", () => {
     expect(t.search).toHaveBeenCalledTimes(1);
   });
 
-  // §1.1: "history and bin are not special: they are other md5s". A version
-  // preview reaches this controller through `versionMeta`, which has already
-  // rewritten `fileHash` — so the SAME code path searches the retained blob, with
-  // no reroute in `historyScope` or `binScope` and no second response shape.
   it("searches a version preview's own blob through the same path, on its md5", async () => {
     const version = "9".repeat(32);
     const t = build({ pages: [match(1, 4)] });
@@ -526,7 +445,6 @@ describe("find in note", () => {
   });
 
   it("gates manual fuzzy WITH hits behind opt-in; a fuzzy MISS is a plain 'No matches'", async () => {
-    // Close matches found → HELD, offered, nothing circled until opt-in.
     const hit = build({ pages: [match(0, 1)], usedFuzzy: true });
     hit.find.setNote("n1", MD5, RECOGNISED);
     hit.find.open();
@@ -536,7 +454,6 @@ describe("find in note", () => {
     expect(last(hit.states)).toEqual({ kind: "fuzzyPrompt" });
     expect(last(hit.ovals)).toEqual({ words: [], current: -1 });
 
-    // Even the typo-tolerant search found nothing → a real absence, no affordance.
     const miss = build({ pages: [], usedFuzzy: true });
     miss.find.setNote("n1", MD5, RECOGNISED);
     miss.find.open();

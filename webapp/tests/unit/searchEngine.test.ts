@@ -3,19 +3,8 @@ import { createSearchEngine } from "../../src/search/searchEngine";
 import type { EngineRequest, EngineResponse } from "../../src/search/engineWorker";
 import type { CoreLoader, TermsDocument } from "../../src/search/indexEngine";
 
-// The MAIN-THREAD half of the search worker, driven by a FAKE worker.
-//
-// What is being pinned is the thing the wasm cannot do for itself: a running
-// `idx_fuzzy` is a synchronous call, so nothing can interrupt one and a "cancel"
-// frame would arrive after the scan it was meant to cancel. The whole of abort
-// therefore lives on THIS side — one request posted at a time, and the query
-// waiting behind it replaced rather than queued — and none of it is reachable
-// from a real worker, whose 71.3 ms no-match scan (§8.6) is exactly what a test
-// cannot stage.
-//
-// The death path is the same argument `pdfClient.test.ts` makes: a real worker
-// fires `error` only for a module that will not compile or an instance the engine
-// killed, and neither can be produced on demand.
+// Driven by a fake worker: `idx_fuzzy` is synchronous and uninterruptible, so abort
+// lives here (one request in flight, the waiting query replaced, not queued).
 
 class FakeWorker extends EventTarget {
   readonly sent: EngineRequest[] = [];
@@ -52,9 +41,7 @@ const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 describe("a search engine over a worker", () => {
   it("constructs nothing until the first request — §4.2", async () => {
-    // The promise this move could have broken in a new way: a worker spawned at
-    // boot would instantiate the 16.13 MB engine at boot, for somebody who may
-    // never type in the box.
+    // The 16.13 MB engine must not be instantiated at boot.
     let made = 0;
     const e = createSearchEngine({
       makeWorker: () => {
@@ -74,8 +61,6 @@ describe("a search engine over a worker", () => {
     await settle();
     void e.query("reuniao", 10, true);
     await settle();
-    // The query is waiting HERE, where it can still be discarded — not in the
-    // worker's message queue, where it could not.
     expect(worker.sent.map((m) => m.kind)).toEqual(["build"]);
     worker.answer();
     await settle();
@@ -83,17 +68,12 @@ describe("a search engine over a worker", () => {
   });
 
   it("supersedes a query still waiting, so a burst of keystrokes is one scan", async () => {
-    // THE POINT OF THE WHOLE ARRANGEMENT. A query that matches nothing costs
-    // 71.3 ms (§8.6) because the ladder walks the whole vocabulary, and somebody
-    // typing a word the corpus does not contain fires one per keystroke. The
-    // queue must not grow past a single pending query however fast they type.
+    // A no-match query costs 71.3 ms; the queue must never grow past one pending query.
     const { worker, e } = engine();
     const build = e.build([DOC]);
     await settle();
 
-    // The handlers are attached AS each promise is made, because superseding is
-    // synchronous — the next `query` call rejects the last one before this
-    // statement finishes.
+    // Handlers attach as each promise is made: superseding rejects synchronously.
     const named = (p: Promise<unknown>): Promise<string> =>
       p.then(() => "resolved", (err: Error) => err.name);
     const first = named(e.query("re", 10, true));
@@ -103,10 +83,9 @@ describe("a search engine over a worker", () => {
     expect(await first).toBe("AbortError");
     expect(await second).toBe("AbortError");
 
-    worker.answer(); // the build
+    worker.answer();
     await build;
     await settle();
-    // Only the newest was ever posted.
     expect(worker.sent.filter((m) => m.kind === "query")).toHaveLength(1);
     expect(worker.sent[1]).toMatchObject({ kind: "query", text: "reun" });
     worker.answer();
@@ -114,9 +93,7 @@ describe("a search engine over a worker", () => {
   });
 
   it("frees a caller whose signal fires on a query already posted", async () => {
-    // It cannot claw the scan back — nothing can. What it prevents is a
-    // superseded answer reaching a view that has moved on, and it lets the next
-    // request be posted rather than waiting the scan out first.
+    // The scan cannot be clawed back; the stale answer just never reaches the view.
     const { worker, e } = engine();
     void e.build([DOC]);
     await settle();
@@ -129,7 +106,6 @@ describe("a search engine over a worker", () => {
     expect(worker.sent).toHaveLength(2);
     ac.abort();
     await expect(p).rejects.toMatchObject({ name: "AbortError" });
-    // The late answer is dropped rather than resolving anybody.
     worker.answer();
     await settle();
   });
@@ -147,8 +123,6 @@ describe("a search engine over a worker", () => {
   });
 
   it("never supersedes a build", async () => {
-    // A build is not abortable and should not be: it is the same work the next
-    // keystroke needs, and both consumers say so already.
     const { worker, e } = engine();
     const one = e.build([DOC]);
     const two = e.build([DOC]);
@@ -180,8 +154,7 @@ describe("a search engine over a worker", () => {
     await settle();
     worker.die("the module would not compile");
     await expect(inFlight).rejects.toThrow(/would not compile/);
-    // The regression `pdfClient.test.ts` names: a later request posted to a
-    // corpse has nobody left to reject it, and the box sits on "searching…".
+    // Regression: a request posted to a dead worker was never rejected.
     await expect(e.query("reuniao", 10, true)).rejects.toThrow(/would not compile/);
   });
 
@@ -197,10 +170,7 @@ describe("a search engine over a worker", () => {
 
 describe("a search engine with no worker to be had", () => {
   it("falls back to this thread when the constructor throws", async () => {
-    // `cache/idb.ts`'s posture: this app runs on a plain-HTTP LAN origin where
-    // several APIs are simply absent, and a missing engine must degrade rather
-    // than break search. It reaches the injected core, which is what proves the
-    // in-thread path took over.
+    // The plain-HTTP LAN origin lacks some APIs; a missing worker falls back in-thread.
     let loaded = 0;
     const load: CoreLoader = () => {
       loaded += 1;
@@ -217,9 +187,7 @@ describe("a search engine with no worker to be had", () => {
   });
 
   it("takes the in-thread path whenever a loader is injected", async () => {
-    // A function cannot be structured-cloned into a worker, so supplying one is
-    // itself the choice — which is what keeps every unit test that injects a fake
-    // core driving exactly the code it was written against.
+    // A function cannot be cloned into a worker, so injecting a core forces in-thread.
     const worker = new FakeWorker();
     const e = createSearchEngine({
       load: () => Promise.reject(new Error("mine")),

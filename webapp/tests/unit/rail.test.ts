@@ -15,29 +15,10 @@ import {
 import type { IconName } from "../../src/ui/icons";
 import type { Entry, Folder, Id } from "../../src/core/types";
 
-// `DESTINATIONS` is a SHIPPED list now (the recycle bin registers a line in it),
-// but every test below is about the producer rather than about which entries
-// happen to exist — so each one starts from an empty list and installs exactly
-// the destinations it is making a claim about. The shipped set is put back
-// afterwards so nothing leaks out of this file. That the bin is really
-// registered is `bin.test.ts`'s claim, where it belongs.
+// `DESTINATIONS` ships entries; each test starts empty and the shipped set is restored.
 const SHIPPED: Destination[] = [...DESTINATIONS];
 beforeEach(() => void DESTINATIONS.splice(0, DESTINATIONS.length));
 afterAll(() => void DESTINATIONS.splice(0, DESTINATIONS.length, ...SHIPPED));
-
-// The rail's logic with the DOM injected, the same way the recognized-text panel
-// is tested. The load-bearing invariants here are the ones a silent regression
-// would cost a user something real:
-//
-//   - ALL SIX categories render whether or not the device has created their
-//     folders, because it creates them lazily;
-//   - selecting one the device has NOT created issues no request and is not an
-//     error — and, before the tree walk lands, is not yet even known to be
-//     absent (the `pendingCategory` / `treeLoaded` machine);
-//   - the device's container folders are flattened away in the rail, the
-//     breadcrumb and the root listing ALIKE, without ever losing a folder the
-//     user made inside one;
-//   - one counting path, and `undefined` is not `0`.
 
 // --- fixtures ----------------------------------------------------------------
 
@@ -51,13 +32,7 @@ interface Spec {
 
 const folder = (s: Spec): Folder => ({ kind: "folder", id: s.id, name: s.name, ...(s.count === undefined ? {} : { itemCount: s.count }) });
 
-/**
- * A {@link FolderTree} over a literal spec, plus the one thing the shell's real
- * cache knows and a plain tree does not: which folders have been LISTED.
- * `unwalked` marks folders whose listing has not arrived — they report no
- * children AND report themselves as unwalked, which is the distinction
- * `rootEntries` turns on.
- */
+/** A tree over a literal spec; `unwalked` folders report no children and say so. */
 function treeOf(roots: Spec[], unwalked: Id[] = []): FolderTree {
   const byId = new Map<Id, Spec>();
   const index = (s: Spec): void => {
@@ -130,12 +105,7 @@ function build(
 /** Every item row's visible name, in paint order. Labels excluded. */
 const names = (rows: RailRow[]): string[] => rows.filter((r) => r.kind === "item").map((r) => (r.kind === "item" ? r.name : ""));
 const item = (rows: RailRow[], name: string) => rows.find((r): r is Extract<RailRow, { kind: "item" }> => r.kind === "item" && r.name === name);
-/**
- * A row's COUNT, or undefined where it carries no count — either no badge at all
- * or a state glyph instead. The badge is a discriminated union now (see
- * {@link RailBadge}), because the admin row shows a padlock rather than a number
- * and a padlock is not a count of anything.
- */
+/** A row's count, or undefined for no badge or a state glyph. */
 const countOf = (rows: RailRow[], name: string): number | undefined => {
   const badge = item(rows, name)?.badge;
   return badge?.kind === "count" ? badge.value : undefined;
@@ -148,8 +118,6 @@ describe("the rail's category anchors", () => {
     const t = build(SPARSE);
     t.rail.build();
 
-    // The rail's shape is the SAME every session — it does not grow a row each
-    // time the device happens to write a folder.
     expect(names(t.last()).slice(0, 6)).toEqual(["Note", "Document", "MyStyle", "Export", "Screenshot", "Inbox"]);
     expect(names(t.last()).slice(0, 6)).toEqual(CATEGORIES.map((c) => c.label));
   });
@@ -159,8 +127,7 @@ describe("the rail's category anchors", () => {
     t.rail.build();
     const rows = t.last();
 
-    // DIRECT counts: Note holds Projects + 3 loose notes = 4. Projects' own 2
-    // belong to its own row, a level down.
+    // Direct counts: Note holds Projects + 3 loose notes = 4.
     expect(countOf(rows, "Note")).toBe(4);
     expect(countOf(rows, "MyStyle")).toBe(3);
     expect(countOf(rows, "Document")).toBe(3);
@@ -168,21 +135,16 @@ describe("the rail's category anchors", () => {
     expect(countOf(rows, "Screenshot")).toBe(2);
     expect(countOf(rows, "Inbox")).toBe(1);
 
-    // An anchor with no folder behind it still shows a number.
     const sparse = build(SPARSE);
     sparse.rail.build();
     expect(countOf(sparse.last(), "Export")).toBe(0);
   });
 
   it("shows a rail row's count as 0 when the server did not count the folder", () => {
-    // A rail row must show a number, so `undefined` reads as 0 HERE. This is the
-    // one place that conversion is allowed — the gallery's folder rows take the
-    // opposite decision and render no meta line at all, so an uncounted folder
-    // never *claims* to be empty where there is room to say nothing.
+    // The one place `undefined` reads as 0; gallery folder rows show nothing instead.
     const t = build([{ id: "dir-note", name: "NOTE", children: [{ id: "note", name: "Note" }] }]);
     t.rail.build();
     expect(countOf(t.last(), "Note")).toBe(0);
-    // …and the underlying field really is absent, not 0.
     expect(t.tree.children("dir-note")[0]!.itemCount).toBeUndefined();
   });
 
@@ -195,20 +157,13 @@ describe("the rail's category anchors", () => {
   });
 });
 
-// --- categoryIconFor ---------------------------------------------------------
-//
-// The glyph that scopes the gallery's folder-silhouette treatment to the six
-// pinned categories. Resolved by IDENTITY, exactly like `labelFor`: only the
-// folder a category path resolves to is the category, so a user's own folder
-// that merely happens to be named like one gets nothing.
+// --- categoryIconFor: by identity, like `labelFor` ---------------------------
 
 describe("categoryIconFor", () => {
   it("returns each pinned category's own glyph, by identity", () => {
     const t = build(FULL);
-    // Note carries its OWN notebook glyph now, not the generic `folder`.
     expect(t.rail.categoryIconFor({ id: "note" })).toBe("note");
     expect(CATEGORIES.find((c) => c.label === "Note")!.icon).toBe("note");
-    // The other five keep their existing glyphs.
     expect(t.rail.categoryIconFor({ id: "doc" })).toBe("doc");
     expect(t.rail.categoryIconFor({ id: "mystyle" })).toBe("layers");
     expect(t.rail.categoryIconFor({ id: "export" })).toBe("export");
@@ -218,19 +173,13 @@ describe("categoryIconFor", () => {
 
   it("returns null for a user folder, even the device CONTAINER it flattens away", () => {
     const t = build(FULL);
-    // A folder the user made at the root is not a category.
     expect(t.rail.categoryIconFor({ id: "archive" })).toBeNull();
-    // A user folder INSIDE a container (`NOTE/Scratch`) is not a category.
     expect(t.rail.categoryIconFor({ id: "scratch" })).toBeNull();
-    // The raw container `NOTE` itself is noise the rail flattens — not an anchor.
     expect(t.rail.categoryIconFor({ id: "dir-note" })).toBeNull();
-    // A nested category CHILD (`Note/Projects`) is a plain folder, not an anchor.
     expect(t.rail.categoryIconFor({ id: "projects" })).toBeNull();
   });
 
   it("returns null for every category before the tree resolves them", () => {
-    // SPARSE has only NOTE/Note; the other five resolve to nothing, so they are
-    // not anchors yet and get no glyph — the same absence `labelFor` reports.
     const t = build(SPARSE);
     expect(t.rail.categoryIconFor({ id: "note" })).toBe("note");
     expect(t.rail.categoryIconFor({ id: "export" })).toBeNull();
@@ -247,10 +196,9 @@ describe("selecting a category the device has not created yet", () => {
 
     item(t.last(), "Export")!.select();
 
-    // THE POINT: there is no id, so nothing is asked for. Inventing one would 404.
+    // No id, so nothing is asked for; inventing one would 404.
     expect(t.onOpenFolder).not.toHaveBeenCalled();
     expect(t.rail.pending()?.label).toBe("Export");
-    // The shell still gets told, so it can close the reader and clear the query.
     expect(t.onSelectCategory).toHaveBeenCalledTimes(1);
   });
 
@@ -259,8 +207,6 @@ describe("selecting a category the device has not created yet", () => {
     t.rail.build();
     const absent = item(t.last(), "Export")!;
     const present = item(t.last(), "Note")!;
-    // Same shape: no disabled flag, no dimming, no "not available" — from the
-    // user's side nothing is wrong, the category is simply empty.
     expect(Object.keys(absent).sort()).toEqual(Object.keys(present).sort());
     expect(absent.depth).toBe(present.depth);
   });
@@ -278,10 +224,7 @@ describe("selecting a category the device has not created yet", () => {
     expect(t.rail.pending()).toBeNull();
   });
 
-  // The bug this machine exists for: before the walk lands, an unresolved
-  // category is indistinguishable from an absent one, and clicking Export during
-  // load once claimed "nothing has been exported" about a folder that was merely
-  // still loading — a confident lie.
+  // Regression: clicking Export during load claimed it was empty.
   it("is not yet KNOWN to be absent until the tree walk lands", () => {
     const t = build(SPARSE);
     t.rail.build();
@@ -289,8 +232,6 @@ describe("selecting a category the device has not created yet", () => {
 
     item(t.last(), "Export")!.select();
 
-    // The shell reads `loaded()` to choose "Loading…" over the empty state, so
-    // it cannot yet say "Export is empty" about a folder that may still arrive.
     expect(t.rail.loaded()).toBe(false);
     expect(t.rail.pending()?.label).toBe("Export");
   });
@@ -304,16 +245,13 @@ describe("selecting a category the device has not created yet", () => {
 
     expect(t.rail.loaded()).toBe(true);
     expect(t.view.setBusy).toHaveBeenLastCalledWith(false);
-    // Still pending, still no request — but now the shell can say so honestly.
     expect(t.rail.pending()?.label).toBe("Export");
     expect(t.onOpenFolder).not.toHaveBeenCalled();
     expect(t.onSettled).toHaveBeenCalledTimes(1);
   });
 
   it("goes to the folder when the walk resolves the category after all", () => {
-    // Export is selected while the walk has only reached the root, and `EXPORT`
-    // turns up later in the same walk. This is the race the flag exists for, so
-    // the tree has to GROW under one rail rather than be swapped for another.
+    // Export is selected while the walk is at the root and `EXPORT` turns up later.
     let spec: Spec[] = [...SPARSE];
     const growing: FolderTree = {
       roots: () => treeOf(spec).roots(),
@@ -344,24 +282,16 @@ describe("selecting a category the device has not created yet", () => {
     spec = [...SPARSE, { id: "export", name: "EXPORT", count: 0 }];
     rail.treeWalked();
 
-    // Where the user asked to be, so that is where they go.
     expect(onOpenFolder).toHaveBeenCalledWith("export");
-    // …and NOT also a bare repaint, which would paint the empty state over it.
     expect(onSettled).not.toHaveBeenCalled();
   });
 
   it("repaints the root when the walk lands with nothing pending", () => {
-    // The root gallery is a function of the tree too (it flattens the containers
-    // away), so the first paint's raw NOTE/DOCUMENT rows must be replaced.
     const t = build(FULL, { folderId: null, openPath: null });
     t.rail.treeWalked();
     expect(t.onSettled).toHaveBeenCalledTimes(1);
 
-    // Standing in a real folder, the ROWS are not provisional — they came from
-    // one listing that never depended on the walk — so the full repaint stays
-    // off. What IS provisional is what they are CALLED, and that gets the narrow
-    // callback instead of nothing at all (2.3: a deep link to `#/folder/<export>`
-    // used to read "Library / EXPORT" for good).
+    // In a real folder only the names are provisional, so only the narrow callback fires.
     const inside = build(FULL, { folderId: "note", openPath: [] });
     inside.rail.treeWalked();
     expect(inside.onSettled).not.toHaveBeenCalled();
@@ -369,10 +299,7 @@ describe("selecting a category the device has not created yet", () => {
   });
 
   it("owes the gallery nothing when the walk found the tree unchanged", () => {
-    // A syncing tablet bumps the sync version per file, and every bump used to
-    // end in a full `replaceChildren` + `galleryEngine.reset()` of a gallery that
-    // was already correct. `changed` is the shell's answer to "did anything the
-    // rail, the crumbs or name-search reads actually move".
+    // A syncing tablet bumps per file; `changed` gates the full repaint.
     const root = build(FULL, { folderId: null, openPath: null });
     root.rail.treeWalked(false);
     expect(root.onSettled).not.toHaveBeenCalled();
@@ -381,8 +308,7 @@ describe("selecting a category the device has not created yet", () => {
     inside.rail.treeWalked(false);
     expect(inside.onLabelsSettled).not.toHaveBeenCalled();
 
-    // A PENDING CATEGORY is exempt: the walk having FINISHED is the transition,
-    // whatever it found, and it is what turns "Loading…" into "Export is empty".
+    // A pending category repaints when the walk finishes, whatever it found.
     const pending = build(SPARSE);
     pending.rail.build();
     item(pending.last(), "Export")!.select();
@@ -396,9 +322,7 @@ describe("selecting a category the device has not created yet", () => {
 describe("container folders", () => {
   it("derives the container set from the multi-segment category paths only", () => {
     expect([...CONTAINER_NAMES].sort()).toEqual(["DOCUMENT", "NOTE"]);
-    // Single-segment categories ARE the category, not a wrapper around one —
-    // flattening them would promote their notes to the root and delete the
-    // folders from the UI.
+    // Single-segment categories are the category; flattening would hide their folders.
     for (const name of ["EXPORT", "SCREENSHOT", "INBOX"]) expect(CONTAINER_NAMES.has(name)).toBe(false);
   });
 
@@ -409,8 +333,6 @@ describe("container folders", () => {
 
     expect(shown).not.toContain("NOTE");
     expect(shown).not.toContain("DOCUMENT");
-    // A single-segment category appears exactly once — as its anchor, never also
-    // under "Other". That is what KNOWN_ROOT_NAMES is for.
     for (const name of shown) expect(shown.filter((n) => n === name)).toHaveLength(1);
   });
 
@@ -419,16 +341,13 @@ describe("container folders", () => {
     t.rail.build();
     const rows = t.last();
 
-    // `NOTE/Scratch` is not a category. Flattening NOTE without promoting it
-    // would make it unreachable from anywhere in the UI.
+    // `NOTE/Scratch` is not a category; flattening NOTE must still promote it.
     expect(names(rows)).toContain("Scratch");
     expect(names(rows)).toContain("Archive");
-    // Both live under the "Other" heading, after the six anchors.
     const other = rows.findIndex((r) => r.kind === "label" && r.text === "Other");
     expect(other).toBeGreaterThan(0);
     expect(names(rows.slice(other))).toEqual(["Scratch", "Archive"]);
 
-    // And it is a working destination, not just a row.
     item(rows, "Scratch")!.select();
     expect(t.onOpenFolder).toHaveBeenCalledWith("scratch");
   });
@@ -436,8 +355,6 @@ describe("container folders", () => {
   it("contributes nothing from a container it has not walked yet", () => {
     const t = build(FULL, { folderId: null, openPath: null }, ["dir-note"]);
     t.rail.build();
-    // Scratch is inside the unwalked NOTE, so it cannot be promoted yet — but
-    // the rail must not invent it, and Archive is still there.
     expect(names(t.last())).not.toContain("Scratch");
     expect(names(t.last())).toContain("Archive");
   });
@@ -455,14 +372,11 @@ describe("nested rows", () => {
     open.rail.build();
     const projects = item(open.last(), "Projects")!;
     expect(projects).toBeDefined();
-    // Indented one step under its anchor, and counted from the same field.
     expect(projects.depth).toBe(1);
     expect(projects.badge).toEqual({ kind: "count", value: 2 });
   });
 
   it("expands nothing at all when there is no listing yet", () => {
-    // `openPath: null` is not the same as an empty path: with no listing nothing
-    // is expanded, not even the folder we believe we are in.
     const t = build(FULL, { folderId: "note", openPath: null });
     t.rail.build();
     expect(names(t.last())).not.toContain("Projects");
@@ -485,22 +399,12 @@ describe("rootEntries", () => {
     expect(out.slice(0, 6)).toEqual(["Note", "Document", "MyStyle", "EXPORT", "SCREENSHOT", "INBOX"]);
     expect(out).not.toContain("NOTE");
     expect(out).not.toContain("DOCUMENT");
-    // The promoted and the custom folder, both reachable.
     expect(out).toContain("Scratch");
     expect(out).toContain("Archive");
   });
 
   it("drops the containers even before the walk, and still shows ALL SIX anchors", () => {
-    // THE SHAPE IS SETTLED AT FIRST PAINT. This used to emit a not-yet-walked
-    // container as itself so nothing was unreachable, and push only the anchors
-    // that already resolved — so the root painted 3 tiles + `NOTE`/`DOCUMENT`,
-    // then re-laid-out to 6 when the walk landed (plainly visible on a slow link).
-    //
-    // Reachability is preserved WITHOUT the containers: the anchors are all
-    // present from the start, and selecting an unresolved one shows "Loading…"
-    // until the walk settles it onto the real folder (see the `loaded()` gate in
-    // library.ts and `settle()` here). `CONTAINER_NAMES` is static data derived
-    // from `CATEGORIES`, so nothing has to be fetched to know these are noise.
+    // The six anchors are present from first paint; unresolved ones show "Loading…".
     const t = build(FULL, { folderId: null, openPath: null }, ["dir-note"]);
     const out = t.rail.rootEntries(raw).map((e) => e.name);
     expect(out).not.toContain("NOTE");
@@ -509,10 +413,8 @@ describe("rootEntries", () => {
   });
 
   it("stands in for an anchor the device has no folder for, and never as a real folder", () => {
-    // An unresolved anchor is a card, not a gap — but it has no folder behind it,
-    // so every consumer that would navigate to its id or offer folder actions has
-    // to be able to tell (galleryCards asks exactly this).
-    const t = build([]); // a device that has synced nothing: no anchor resolves
+    // An unresolved anchor is a card with no folder behind it.
+    const t = build([]);
     const out = t.rail.rootEntries([]);
     expect(out.map((e) => e.name).slice(0, 6)).toEqual([
       "Note",
@@ -525,7 +427,6 @@ describe("rootEntries", () => {
     for (const e of out) {
       const cat = t.rail.pendingCategoryOf(e as Folder);
       expect(cat).not.toBeNull();
-      // It still paints as its category, so resolving it never restyles the card.
       expect(t.rail.categoryIconFor(e as Folder)).toBe(cat!.icon);
     }
   });
@@ -548,13 +449,11 @@ describe("crumbPath", () => {
   });
 
   it("keeps a container that is where you are STANDING", () => {
-    // Dropping the last segment would leave the breadcrumb saying "Library"
-    // while the gallery showed the container's contents.
     expect(crumbPath(p("NOTE")).map((f) => f.name)).toEqual(["NOTE"]);
   });
 
   it("keeps a deeply-nested folder that merely happens to be called NOTE", () => {
-    // A container name is a ROOT-folder fact; a user's own folder is not noise.
+    // A container name is a root-folder fact only.
     expect(crumbPath(p("Archive", "NOTE", "x")).map((f) => f.name)).toEqual(["Archive", "NOTE", "x"]);
   });
 
@@ -563,13 +462,7 @@ describe("crumbPath", () => {
   });
 });
 
-// --- labelPathSegments -------------------------------------------------------
-//
-// `crumbPath`'s twin, for a path that arrives as PLAIN SEGMENTS rather than as
-// resolved folders — which is the shape the recycle bin gets, because a trashed
-// entry's path is reconstructed on the server from a tree that no longer has
-// live `Folder` objects to run `labelFor` against. The two must agree: a path
-// that reads `Note` in the breadcrumb cannot read `NOTE / Note` in the bin.
+// --- labelPathSegments: `crumbPath` for plain segments (the bin) -------------
 
 describe("labelPathSegments", () => {
   it("labels a category and flattens the container it sits in", () => {
@@ -577,8 +470,7 @@ describe("labelPathSegments", () => {
   });
 
   it("picks the LONGEST matching category, not the first", () => {
-    // The load-bearing case: `NOTE/Note` and `NOTE/MyStyle` share a first
-    // segment, so a shortest-prefix match would label every one of them "Note".
+    // `NOTE/Note` and `NOTE/MyStyle` share a first segment.
     expect(labelPathSegments(["NOTE", "MyStyle"])).toEqual(["MyStyle"]);
   });
 
@@ -588,17 +480,14 @@ describe("labelPathSegments", () => {
   });
 
   it("never flattens a single-segment category — it IS the category", () => {
-    // `EXPORT`, `SCREENSHOT` and `INBOX` are not wrappers around anything.
-    // Flattening one would promote its notes to the root and delete the folder
-    // from the UI entirely.
+    // `EXPORT`, `SCREENSHOT` and `INBOX` are not wrappers.
     expect(labelPathSegments(["EXPORT"])).toEqual(["Export"]);
     expect(labelPathSegments(["SCREENSHOT", "2024"])).toEqual(["Screenshot", "2024"]);
   });
 
   it("passes a folder the user made themselves through untouched", () => {
     expect(labelPathSegments(["Archive", "2024"])).toEqual(["Archive", "2024"]);
-    // A container name is a ROOT-folder fact; the same word deeper down is a
-    // folder somebody meant.
+    // A container name is a root-folder fact only.
     expect(labelPathSegments(["Archive", "NOTE", "x"])).toEqual(["Archive", "NOTE", "x"]);
   });
 
@@ -617,12 +506,6 @@ describe("labelPathSegments", () => {
 });
 
 // --- destinations ------------------------------------------------------------
-//
-// A rail entry with no folder behind it. `DESTINATIONS` ships EMPTY — the bin and
-// the admin console each add their line when they land — so these tests install
-// their own and remove them again. That is deliberate: the producer is the shared
-// foundation two features build on in parallel, and it must be known-good before
-// either depends on it, rather than discovered broken twice.
 
 describe("rail destinations", () => {
   const BIN: Destination = { key: "bin", label: "Recycle bin", icon: "trash" };
@@ -647,9 +530,6 @@ describe("rail destinations", () => {
   });
 
   it("emits the Other heading for a destination even with no custom root folders", () => {
-    // SPARSE holds only NOTE/Note — a known category — so `otherRootFolders()` is
-    // empty. Before destinations there was no "Other" heading in this case at
-    // all, and a destination rendering under no heading is what this pins.
     install(BIN);
     const t = build(SPARSE);
     t.rail.build();
@@ -677,11 +557,7 @@ describe("rail destinations", () => {
     });
     t.rail.build();
     expect(item(t.last(), "Recycle bin")?.badge).toEqual({ kind: "count", value: 3 });
-    // A DESTINATION'S 0 IS NO BADGE AT ALL — the regression this pins. The
-    // painter used to render the count unconditionally, so the console (which
-    // has nothing countable, by design) carried a permanent `0` beside its name
-    // and read as an empty inbox. A folder's 0 is a different claim and keeps
-    // its badge; see the category tests above.
+    // Regression: a destination's 0 rendered as a badge, so the console read as an empty inbox.
     expect(item(t.last(), "Admin")?.badge).toBeNull();
   });
 
@@ -697,7 +573,6 @@ describe("rail destinations", () => {
       icon: "lock",
       label: "Admin console locked",
     });
-    // The bin is untouched by the new channel.
     expect(item(t.last(), "Recycle bin")?.badge).toBeNull();
   });
 
@@ -717,11 +592,7 @@ describe("rail destinations", () => {
   });
 
   it("never asks about a destination it is not painting — elevation cannot leak", () => {
-    // `adminOnly` filters the row out BEFORE the badge is produced, so a
-    // household member's rail never even puts the question. That is what keeps
-    // "hidden from non-admins" true of the state as well as of the row: a
-    // padlock is a fact about the admin's session, and this is the only place
-    // the shell could have leaked it.
+    // `adminOnly` filters the row before its badge is produced.
     install(BIN, ADMIN);
     const t = build(SPARSE, { folderId: null, openPath: null }, [], { isAdmin: () => false });
     t.rail.build();
@@ -734,7 +605,6 @@ describe("rail destinations", () => {
     const t = build(SPARSE, { folderId: null, openPath: null, destination: "bin" });
     t.rail.build();
     expect(item(t.last(), "Recycle bin")?.current).toBe(true);
-    // A destination is not a folder: no folder row is current at the same time.
     expect(t.last().filter((r) => r.kind === "item" && r.current)).toHaveLength(1);
   });
 

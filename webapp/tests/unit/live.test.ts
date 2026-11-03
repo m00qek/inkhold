@@ -31,28 +31,23 @@ describe("parseIndexStatus", () => {
     expect(parseIndexStatus('  {"pending":0,"version":0}  ')).toEqual({ pending: 0, version: 0 });
   });
 
-  // UNDEFINED, never `{pending: 0}`. A frame that does not parse must leave the
-  // UI saying what it last knew: turning it into "nothing is pending" would
-  // silently drop the "still indexing" caveat off a search that needed it.
+  // An unparseable frame is `undefined`, never `{pending: 0}`.
   it("returns undefined rather than zero for anything it cannot read", () => {
     expect(parseIndexStatus("")).toBeUndefined();
-    expect(parseIndexStatus("3")).toBeUndefined(); // a sync frame, not an index one
+    expect(parseIndexStatus("3")).toBeUndefined();
     expect(parseIndexStatus("{oops")).toBeUndefined();
     expect(parseIndexStatus('{"version":41}')).toBeUndefined();
     expect(parseIndexStatus('{"pending":"3"}')).toBeUndefined();
     expect(parseIndexStatus("null")).toBeUndefined();
   });
 
-  // `version` is not a completeness claim and nothing reads it yet, so a frame
-  // missing it is still usable. `pending` is, so it is not.
   it("tolerates a missing version but never a missing pending", () => {
     expect(parseIndexStatus('{"pending":2}')).toEqual({ pending: 2, version: 0 });
     expect(parseIndexStatus('{"pending":-4,"version":1}')).toEqual({ pending: 0, version: 1 });
   });
 });
 
-// A controllable fake EventSource: the test drives open/message/error and reads
-// how many were created, so reconnect behaviour is deterministic without a net.
+// A controllable fake EventSource, so reconnect behaviour is deterministic.
 class FakeEventSource implements EventSourceLike {
   static instances: FakeEventSource[] = [];
   onopen: ((this: unknown, ev: Event) => unknown) | null = null;
@@ -72,7 +67,6 @@ class FakeEventSource implements EventSourceLike {
     this.closed = true;
     this.readyState = 2;
   }
-  /** Emit a frame on a channel (default the server's named `sync`). */
   emitMessage(data: string, type = "sync"): void {
     for (const l of this.listeners.get(type) ?? []) l({ data } as MessageEvent);
   }
@@ -97,7 +91,7 @@ describe("createLiveChannel", () => {
     channel.subscribe((v) => bumps.push(v));
 
     const es = FakeEventSource.instances[0]!;
-    es.emitMessage("3"); // event: sync, data: 3  (the real server frame)
+    es.emitMessage("3");  // the real server frame
     es.emitMessage('{"syncVersion": 4}');
     es.emitMessage("garbage");
     expect(bumps).toEqual([3, 4]);
@@ -113,8 +107,7 @@ describe("createLiveChannel", () => {
   });
 
   it("delivers index frames on the SAME connection as the sync ones", () => {
-    // One socket, two named frames. A second `subscribe` would be a second held
-    // stream, and the server allows a user only four across every tab.
+    // One socket, two named frames: the server allows a user four streams across tabs.
     const bumps: number[] = [];
     const seen: Array<{ pending: number; version: number }> = [];
     const channel = createLiveChannel({ create: (url) => new FakeEventSource(url) });
@@ -126,9 +119,9 @@ describe("createLiveChannel", () => {
 
     const es = FakeEventSource.instances[0]!;
     es.emitMessage('{"pending":3,"version":41}', "index");
-    es.emitMessage("9"); // still the sync channel
+    es.emitMessage("9");
     es.emitMessage('{"pending":0,"version":42}', "index");
-    es.emitMessage("{not json}", "index"); // dropped, not delivered as zero
+    es.emitMessage("{not json}", "index");
 
     expect(seen).toEqual([
       { pending: 3, version: 41 },
@@ -137,8 +130,7 @@ describe("createLiveChannel", () => {
     expect(bumps).toEqual([9]);
   });
 
-  // The two frames must not be read by one listener: an index payload is JSON
-  // and the defensive unnamed handler would try to read a version out of it.
+  // An index payload is JSON; the unnamed handler must not read a version from it.
   it("never lets an index frame arrive as a sync bump", () => {
     const bumps: number[] = [];
     const channel = createLiveChannel({ create: (url) => new FakeEventSource(url) });
@@ -150,8 +142,6 @@ describe("createLiveChannel", () => {
     expect(bumps).toEqual([]);
   });
 
-  // A caller that does not ask for index frames must not break, and must not be
-  // handed them by some other route.
   it("is optional — a subscriber that wants only freshness still works", () => {
     const bumps: number[] = [];
     const channel = createLiveChannel({ create: (url) => new FakeEventSource(url) });
@@ -167,12 +157,10 @@ describe("createLiveChannel", () => {
     channel.subscribe(() => {});
 
     const first = FakeEventSource.instances[0]!;
-    // Transient error (still CONNECTING): no manual reopen.
     first.emitError(0);
     vi.advanceTimersByTime(5000);
     expect(FakeEventSource.instances).toHaveLength(1);
 
-    // Terminal close: reopens after the backoff delay.
     first.emitError(2);
     vi.advanceTimersByTime(1000);
     expect(FakeEventSource.instances).toHaveLength(2);
@@ -186,7 +174,6 @@ describe("createLiveChannel", () => {
     unsubscribe();
     expect(es.closed).toBe(true);
 
-    // A pending reconnect after unsubscribe must not spawn a new source.
     es.emitError(2);
     vi.advanceTimersByTime(10000);
     expect(FakeEventSource.instances).toHaveLength(1);
@@ -220,8 +207,6 @@ describe("createLiveChannel polling fallback", () => {
   });
 
   it("polls instead of opening a stream when the runtime has no EventSource", async () => {
-    // An old browser, or anything that strips SSE. Without the fallback the app
-    // would simply never learn about a new note.
     const bumps: number[] = [];
     let version = 5;
     const channel = createLiveChannel({
@@ -232,8 +217,8 @@ describe("createLiveChannel polling fallback", () => {
     const unsubscribe = channel.subscribe((v) => bumps.push(v));
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(bumps).toEqual([5]); // polled immediately, not after the first interval
-    expect(FakeEventSource.instances).toHaveLength(0); // never tried to open one
+    expect(bumps).toEqual([5]);
+    expect(FakeEventSource.instances).toHaveLength(0);
 
     version = 6;
     await vi.advanceTimersByTimeAsync(1000);
@@ -252,7 +237,6 @@ describe("createLiveChannel polling fallback", () => {
     });
     const unsubscribe = channel.subscribe((v) => bumps.push(v));
 
-    // Two terminal failures still reopen the stream (a flaky link keeps SSE).
     FakeEventSource.instances[0]!.emitError(2);
     await vi.advanceTimersByTimeAsync(1000);
     expect(FakeEventSource.instances).toHaveLength(2);
@@ -261,7 +245,6 @@ describe("createLiveChannel polling fallback", () => {
     expect(FakeEventSource.instances).toHaveLength(3);
     expect(bumps).toEqual([]);
 
-    // The third gives up on SSE: no fourth source, and the poll takes over.
     FakeEventSource.instances[2]!.emitError(2);
     await vi.advanceTimersByTimeAsync(0);
     expect(FakeEventSource.instances).toHaveLength(3);
@@ -274,8 +257,7 @@ describe("createLiveChannel polling fallback", () => {
   });
 
   it("a successful open resets the fallback countdown", async () => {
-    // Otherwise a long-lived connection that drops once a week would eventually
-    // accumulate enough failures to abandon SSE forever.
+    // A good open resets the count, or weekly drops would abandon SSE forever.
     const channel = createLiveChannel({
       create: (url) => new FakeEventSource(url),
       backoffMs: 1000,
@@ -286,11 +268,10 @@ describe("createLiveChannel polling fallback", () => {
 
     for (let i = 0; i < 5; i++) {
       const es = FakeEventSource.instances[i]!;
-      es.onopen?.call(es, new Event("open")); // healthy connection
-      es.emitError(2); // ...then a terminal drop
+      es.onopen?.call(es, new Event("open"));
+      es.emitError(2);
       await vi.advanceTimersByTimeAsync(1000);
     }
-    // Still on SSE after five drops, because each one followed a good open.
     expect(FakeEventSource.instances).toHaveLength(6);
     unsubscribe();
   });
@@ -311,6 +292,6 @@ describe("createLiveChannel polling fallback", () => {
     expect(polls).toBe(1);
     unsubscribe();
     await vi.advanceTimersByTimeAsync(60000);
-    expect(polls).toBe(1); // nothing left running
+    expect(polls).toBe(1);
   });
 });

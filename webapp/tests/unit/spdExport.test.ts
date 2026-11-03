@@ -1,16 +1,4 @@
 // @vitest-environment happy-dom
-//
-// The `.spd` EXPORT core (`spdExport.ts`) — PURE given a model, so tested with
-// FAKE canvases: no GPU, no real raster. Two things are proved:
-//   1. the FLAT PNG flatten reads the RIGHT state — a layer hidden in `current`
-//      but visible in `authored` is skipped for "current" and drawn for
-//      "original" (and vice-versa) — asserted via a recording 2d context that
-//      logs every `drawImage` and the `globalAlpha` in force at the time; and
-//   2. the LAYERED ORA is a real, byte-correct STORED zip — `PK\x03\x04`, an
-//      uncompressed `mimetype` = `image/openraster` FIRST, and a `stack.xml`
-//      carrying the chosen state's opacity/visibility and a default name for
-//      the empty layer — validated by unzipping it here (a hand-rolled reader
-//      that walks the local file headers), which is the real ORA-opens check.
 
 import { describe, it, expect } from "vitest";
 import { exportSpdPng, exportSpdOra, buildStackXml, crc32 } from "../../src/pages/spdExport";
@@ -23,7 +11,6 @@ function layerCanvas(id: number): HTMLCanvasElement {
   return {
     __id: id,
     toBlob(cb: (b: Blob | null) => void, _type?: string): void {
-      // A distinct payload per layer so the ORA `data/layer_<id>.png` bytes are checkable.
       cb(new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47, id])], { type: "image/png" }));
     },
   } as unknown as HTMLCanvasElement;
@@ -56,12 +43,11 @@ function layer(
   return { id, name, canvas: layerCanvas(id), authored, current };
 }
 
-// Layers BOTTOM-to-TOP (as `exportModel()` hands them over):
-//   9 base   — visible in both
-//   2 Ink    — visible in both; dimmed to 0.5 in current only
-//   5 hidden — visible authored, HIDDEN current  → skipped for current, drawn for original
-//   7 shown  — HIDDEN authored, visible current  → drawn for current, skipped for original
-// Layer 9 has an EMPTY name → ORA must default it to "Layer 9".
+// Layers bottom to top:
+//   9 base   — visible in both, empty name → "Layer 9"
+//   2 Ink    — visible in both; 0.5 in current only
+//   5 hidden — visible authored, hidden current
+//   7 shown  — hidden authored, visible current
 function model(): SpdExportModel {
   return {
     width: 8,
@@ -113,7 +99,6 @@ describe("exportSpdPng", () => {
     const rec = recordingCanvas();
     const blob = await exportSpdPng(model(), "current", () => rec.canvas);
     expect(blob).toBeInstanceOf(Blob);
-    // Bottom-to-top; layer 5 hidden in current is skipped, 7 (current-visible) drawn.
     expect(rec.draws).toEqual([
       { id: 9, alpha: 1 },
       { id: 2, alpha: 0.5 },
@@ -124,7 +109,6 @@ describe("exportSpdPng", () => {
   it("flattens the ORIGINAL state: skips the authored-hidden layer, uses authored opacity", async () => {
     const rec = recordingCanvas();
     await exportSpdPng(model(), "original", () => rec.canvas);
-    // Authored: 7 is hidden (skipped); 5 is visible (drawn); 2 at authored opacity 1.
     expect(rec.draws).toEqual([
       { id: 9, alpha: 1 },
       { id: 2, alpha: 1 },
@@ -147,14 +131,12 @@ describe("exportSpdPng", () => {
 describe("buildStackXml", () => {
   it("lists layers TOP-to-BOTTOM with the chosen state, escaping and defaulting names", () => {
     const m = model();
-    m.layers[1]!.name = "A & B <x>"; // exercise escaping on the Ink layer
+    m.layers[1]!.name = "A & B <x>";
     const xml = buildStackXml(m, "current");
 
-    // TOP-first: 7, 5, 2, 9 — the reverse of the bottom-to-top model.
     const order = [...xml.matchAll(/src='data\/layer_(\d+)\.png'/g)].map((mm) => Number(mm[1]));
     expect(order).toEqual([7, 5, 2, 9]);
 
-    // Current state: layer 5 hidden, layer 2 at 0.50; empty-named base defaults to "Layer 9".
     expect(xml).toContain("<image w='8' h='4'>");
     expect(xml).toContain("src='data/layer_5.png' opacity='1.00' visibility='hidden'");
     expect(xml).toContain("src='data/layer_2.png' opacity='0.50' visibility='visible'");
@@ -165,7 +147,6 @@ describe("buildStackXml", () => {
 
   it("reads the AUTHORED state when asked for original", () => {
     const xml = buildStackXml(model(), "original");
-    // Authored: layer 7 hidden @0.30, layer 5 visible.
     expect(xml).toContain("src='data/layer_7.png' opacity='0.30' visibility='hidden'");
     expect(xml).toContain("src='data/layer_5.png' opacity='1.00' visibility='visible'");
   });
@@ -177,18 +158,15 @@ describe("exportSpdOra", () => {
     expect(blob.type).toBe("image/openraster");
     const bytes = await zipBytes(blob);
 
-    // Local file header magic.
     expect(Array.from(bytes.subarray(0, 4))).toEqual([0x50, 0x4b, 0x03, 0x04]);
 
     const entries = readStoredZip(bytes);
-    // Every entry is STORE (method 0).
     for (const e of entries) expect(e.method).toBe(0);
 
-    // The mimetype is FIRST and is exactly the OpenRaster magic, uncompressed.
+    // The mimetype entry is first, uncompressed, exactly the OpenRaster magic.
     expect(entries[0]!.name).toBe("mimetype");
     expect(new TextDecoder().decode(entries[0]!.data)).toBe("image/openraster");
 
-    // stack.xml then one PNG per layer (bottom-to-top model order: 9,2,5,7).
     expect(entries.map((e) => e.name)).toEqual([
       "mimetype",
       "stack.xml",
@@ -208,22 +186,19 @@ describe("exportSpdOra", () => {
     expect(xml).toContain("src='data/layer_5.png' opacity='1.00' visibility='hidden'");
     expect(xml).toContain("name='Layer 9'");
 
-    // The layer PNG is the layer canvas's own bytes (identity byte = the id), NOT flattened.
     expect(Array.from(byName.get("data/layer_5.png")!.data)).toEqual([0x89, 0x50, 0x4e, 0x47, 5]);
 
-    // The stored size/CRC in the header match the data (a real reader would accept it).
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     expect(dv.getUint32(0, true)).toBe(0x04034b50);
   });
 
   it("the end-of-central-directory records the right entry count and closes the archive", async () => {
     const bytes = await zipBytes(await exportSpdOra(model(), "original"));
-    // EOCD is the last 22 bytes (no comment).
     const eocd = bytes.length - 22;
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     expect(dv.getUint32(eocd, true)).toBe(0x06054b50);
-    expect(dv.getUint16(eocd + 8, true)).toBe(6); // entries on this disk
-    expect(dv.getUint16(eocd + 10, true)).toBe(6); // total entries
+    expect(dv.getUint16(eocd + 8, true)).toBe(6);
+    expect(dv.getUint16(eocd + 10, true)).toBe(6);
   });
 });
 

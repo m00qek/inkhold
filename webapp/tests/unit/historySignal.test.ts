@@ -3,10 +3,6 @@ import { contentSignal } from "../../src/pages/historyPanel";
 import { formatBytes } from "../../src/core/fileKind";
 import type { FileVersion } from "../../src/core/types";
 
-// The pure CONTENT SIGNAL that line 2 of a version row renders (the version menu's
-// "17 pages +2" / byte-size logic). No DOM — just the page-count/delta arithmetic
-// and the kind gate: pages only for a `.note`, byte size for everything else.
-
 function v(pageCount: number, size = 100_000): FileVersion {
   return { md5: `m${pageCount}-${size}`, size, createdAt: 0, current: false, pageCount };
 }
@@ -37,8 +33,7 @@ describe("contentSignal", () => {
   });
 
   it("a NON-note kind (isNote false) shows the byte size, never pages, even with a pageCount", () => {
-    // The wire `pageCount` counts a .txt's paragraphs / a .spd's index rows — not
-    // pages — so a non-note is gated to its byte size regardless of the number.
+    // `pageCount` counts a .txt's paragraphs / a .spd's index rows, so non-notes show bytes.
     const sig = contentSignal(v(42, 2048), v(40, 1024), false);
     expect(sig.pagesLabel).toBeNull();
     expect(sig.deltaLabel).toBeNull();

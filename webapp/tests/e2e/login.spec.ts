@@ -38,9 +38,7 @@ test.describe("login", () => {
     await page.getByLabel("Confirm password").fill("a-brand-new-password");
     await page.getByRole("button", { name: "Save and continue" }).click();
 
-    // Step 3 — connect the device. The sync-wait never resolves under the fake
-    // live channel, so "Open the library" stays disabled and the way on is the
-    // always-available skip.
+    // The sync-wait never resolves under the fake live channel, so the way on is skip.
     await expect(page.getByRole("heading", { name: "Connect your Supernote" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Open the library" })).toBeDisabled();
     await page.getByRole("button", { name: "I'll connect it later" }).click();
@@ -62,7 +60,6 @@ test.describe("login", () => {
 
     await expect(page.getByRole("status")).toContainText("account and password don't match");
     await expect(password).toHaveValue("");
-    // Still on the login page (no navigation happened).
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
   });
 
@@ -90,19 +87,12 @@ test.describe("login", () => {
     await page.getByRole("button", { name: "Sign in" }).click();
 
     await expect(page.getByRole("status")).toContainText("Can't reach the server");
-    // The button re-enables so the user can retry.
     await expect(page.getByRole("button", { name: "Sign in" })).toBeEnabled();
   });
 
-  // The phone's situation. Playwright drives Chromium on localhost, which *is* a
-  // secure context, so an ordinary login here can never reproduce the bug — we
-  // have to take `crypto.subtle` away to emulate `http://<lan-ip>:8090`.
-  //
-  // Asserting only "login succeeds" would be too weak: the mock accepts any
-  // body. So we also pin the challenge the client puts on the wire against an
-  // independently computed `sha256_hex(md5_hex(pw) + randomCode)`.
+  // Localhost is a secure context, so `crypto.subtle` is removed to emulate a LAN
+  // http origin; the challenge is pinned because the mock accepts any body.
   test("logs in over an insecure context, with crypto.subtle unavailable", async ({ page }) => {
-    // Emulate an insecure context: `crypto` exists, but `subtle` does not.
     await page.addInitScript(() => {
       const insecure = Object.create(Object.getPrototypeOf(window.crypto) as object) as Crypto;
       Object.defineProperty(insecure, "subtle", { value: undefined, configurable: true });

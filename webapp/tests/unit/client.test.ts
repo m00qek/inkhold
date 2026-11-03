@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { api, ApiError, RateLimitError, createHttpApi } from "../../src/api/client";
 
-// Build a JSON Response the way the Zig server does (envelope + optional status
-// and headers). Node provides `Response` globally.
+// A JSON Response shaped like the Zig server's envelope.
 function jsonResponse(body: unknown, init: { status?: number; headers?: Record<string, string> } = {}): Response {
   return new Response(JSON.stringify(body), {
     status: init.status ?? 200,
@@ -10,8 +9,7 @@ function jsonResponse(body: unknown, init: { status?: number; headers?: Record<s
   });
 }
 
-// A `fetch` stub that dispatches by URL substring, so a single stub can answer
-// the multi-request flows (e.g. login = random/code then login/new).
+// A `fetch` stub that dispatches by URL substring, for multi-request flows.
 function routedFetch(map: Record<string, () => Response>): typeof fetch {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -105,13 +103,7 @@ describe("api client", () => {
 });
 
 // --- request budgets ---------------------------------------------------------
-//
-// A STALLED connection — one that neither delivers nor errors — used to leave
-// every surface in its loading state forever, because `NETWORK` only fires on an
-// actual rejection. These pin the two halves of the policy that matter: that a
-// stall ends, and that a MUTATION's ending never claims to know what happened.
 describe("request budgets", () => {
-  /** A fetch that never answers, and rejects the way a real one does on abort. */
   function stallingFetch(): typeof fetch {
     return vi.fn(
       (_input: RequestInfo | URL, init?: RequestInit) =>
@@ -145,7 +137,6 @@ describe("request budgets", () => {
     void createHttpApi()
       .listFolder(null)
       .catch(() => void (settled = true));
-    // Well past a naive "a second or two" cap, nowhere near the real budget.
     await vi.advanceTimersByTimeAsync(5_000);
 
     expect(settled).toBe(false);
@@ -155,9 +146,7 @@ describe("request budgets", () => {
     vi.useFakeTimers();
     vi.stubGlobal("fetch", stallingFetch());
 
-    // A rename is the sharp case: the server may have renamed the file before
-    // the answer was lost, so "couldn't rename" would be a lie — and a caller
-    // that believed it might retry a purge into deleting twice.
+    // The server may have renamed before the answer was lost, so no "couldn't rename".
     const pending = createHttpApi()
       .rename("f1", "new name.note")
       .catch((e: unknown) => e);
@@ -177,23 +166,14 @@ describe("request budgets", () => {
     void createHttpApi()
       .rename("f1", "new name.note")
       .catch(() => void (settled = true));
-    // The GET budget has been spent; a mutation's has not.
     await vi.advanceTimersByTimeAsync(15_001);
 
     expect(settled).toBe(false);
   });
 });
 
-// --- upload: bounded by SILENCE, not by total time -------------------------
-//
-// An upload is the one request where a total cap is actively wrong: a large PDF
-// over household wifi to a Pi can legitimately outlast any cap worth setting,
-// and aborting it there punishes it for succeeding slowly. So the budget is a
-// STALL — bytes must keep moving, however slowly — and these pin both halves of
-// that, because a stall timeout that also kills healthy slow uploads is no
-// better than the total cap it replaced.
+// --- upload: bounded by stall, not by total time -----------------------------
 describe("upload budget", () => {
-  /** The parts of XMLHttpRequest the client touches, driven by hand. */
   class FakeXhr {
     static last: FakeXhr | null = null;
     upload: { onprogress?: (e: ProgressEvent) => void; onload?: () => void } = {};
@@ -216,11 +196,9 @@ describe("upload budget", () => {
       this.aborted = true;
       this.onabort?.();
     }
-    /** Simulate bytes leaving the machine. */
     progress(loaded: number, total: number): void {
       this.upload.onprogress?.({ lengthComputable: true, loaded, total } as ProgressEvent);
     }
-    /** Simulate the last byte having gone; the server is now working. */
     bodySent(): void {
       this.upload.onload?.();
     }
@@ -253,8 +231,6 @@ describe("upload budget", () => {
       .upload("f1", bigFile())
       .catch(() => void (settled = true));
 
-    // Ten minutes of genuine progress, each report arriving just inside the
-    // window. A total cap would have killed this long ago; a stall must not.
     for (let i = 1; i <= 24; i++) {
       await vi.advanceTimersByTimeAsync(25_000);
       FakeXhr.last!.progress(i * 100, 4096);
@@ -274,12 +250,10 @@ describe("upload budget", () => {
     FakeXhr.last!.progress(4096, 4096);
     FakeXhr.last!.bodySent();
 
-    // Past the STALL window: the server is hashing and linking, and no further
-    // progress event can arrive — aborting here would kill a healthy commit.
+    // Past the stall window: the server is committing and sends no more progress.
     await vi.advanceTimersByTimeAsync(45_000);
     expect(settled).toBe(false);
 
-    // But the answer is not unbounded either.
     await vi.advanceTimersByTimeAsync(20_000);
     expect((await pending as ApiError).code).toBe("TIMEOUT");
   });
@@ -292,17 +266,13 @@ describe("upload budget", () => {
     FakeXhr.last!.progress(100, 4096);
     ctl.abort();
 
-    // Same abort path as a stall, so the reason has to be carried out of band —
-    // otherwise a dead link would tell the user they cancelled.
+    // Same abort path as a stall, so the reason is carried out of band.
     expect((await pending as ApiError).code).toBe("CANCELLED");
   });
 });
 
 describe("PageRef.sourcePage off the wire", () => {
-  // A `.mark` names its pages by the PDF page they annotate, and the server
-  // omits the field wherever it would be `index + 1`. The normalizer has to
-  // turn absence into `null` — not `undefined`, which would read as "not known
-  // yet" — and must refuse a value that cannot be a page.
+  // The server omits `sourcePage` where it would be `index + 1`; absence is `null`.
   const page = (over: Record<string, unknown>) => ({
     index: 0,
     hash: "a".repeat(32),
@@ -311,7 +281,6 @@ describe("PageRef.sourcePage off the wire", () => {
     ...over,
   });
 
-  /** `getNoteMeta` over a stubbed transport serving exactly `pages`. */
   async function metaWith(pages: unknown[]) {
     vi.stubGlobal(
       "fetch",
@@ -334,9 +303,7 @@ describe("PageRef.sourcePage off the wire", () => {
   });
 
   it("refuses a value that is not a page number", async () => {
-    // 0 is what a pre-v7 row reads back as and what every `.txt` row carries;
-    // there is no page 0, and a client that trusted one would place annotations
-    // against a page that cannot exist. Negative and non-numeric likewise.
+    // Pre-v7 rows and `.txt` rows carry 0; there is no page 0.
     const api = await metaWith([
       page({ sourcePage: 0 }),
       page({ index: 1, sourcePage: -3 }),
@@ -347,11 +314,7 @@ describe("PageRef.sourcePage off the wire", () => {
 });
 
 describe("PageRef.hasInk off the wire", () => {
-  // The page index's ink rail, and the one optional on a page ref that must
-  // survive normalization as `undefined` rather than `null`. `sourcePage` above
-  // is two-state, so absence collapses onto `null` safely; this one is three-
-  // state, and the third state is what stops the rail claiming a notebook is
-  // blank while the server's back-fill is still working through it.
+  // Three-state: `undefined` means the server's back-fill has not reached it yet.
   const page = (over: Record<string, unknown>) => ({
     index: 0,
     hash: "b".repeat(32),
@@ -372,10 +335,7 @@ describe("PageRef.hasInk off the wire", () => {
   }
 
   it("carries both answers through", async () => {
-    // The regression this exists for: `normalizePage` rebuilds a page ref field
-    // by field, so a field nobody adds here is silently dropped between the
-    // server and the strip — the rail would have stayed blank on a document the
-    // server had fully scanned, with the right values sitting in the response.
+    // Regression: `normalizePage` rebuilds field by field and silently dropped this one.
     const api = await metaWith([page({ hasInk: true }), page({ index: 1, hasInk: false })]);
     expect(api.pages.map((p) => p.hasInk)).toEqual([true, false]);
   });
@@ -383,8 +343,6 @@ describe("PageRef.hasInk off the wire", () => {
   it("keeps an omitted field UNDEFINED, not null and not false", async () => {
     const api = await metaWith([page({}), page({ index: 1 })]);
     expect(api.pages.map((p) => p.hasInk)).toEqual([undefined, undefined]);
-    // Explicitly not the falsy neighbours: either one would read downstream as
-    // "this page is empty", which is the claim the omission exists to withhold.
     expect(api.pages[0]?.hasInk).not.toBeNull();
   });
 
@@ -399,15 +357,7 @@ describe("PageRef.hasInk off the wire", () => {
 });
 
 describe("Entry.annotationsId off the wire", () => {
-  // The listing half of the pairing. It exists because a paired `.mark` has NO
-  // listing row of its own — the server folds it out — so the document's row is
-  // the only place its retained versions can be reached from, and this field is
-  // the only thing on that row which says there are any.
-  //
-  // Same `emit_null_optional_fields = false` shape as `fileHash`: absent is the
-  // common case (almost nothing has a mark), and absent must read as `null`, not
-  // `undefined` — the card tests `!== null`, and an unusable value must not
-  // become a menu row that opens the history of nothing.
+  // A paired `.mark` has no listing row, so this field is the only way to its versions.
   const entry = (over: Record<string, unknown>) => ({
     kind: "note",
     id: "e-1",
@@ -420,7 +370,6 @@ describe("Entry.annotationsId off the wire", () => {
     ...over,
   });
 
-  /** `listFolder` over a stubbed transport serving exactly `entries`. */
   async function listWith(entries: unknown[]) {
     vi.stubGlobal(
       "fetch",
@@ -433,10 +382,7 @@ describe("Entry.annotationsId off the wire", () => {
   }
 
   it("carries the paired mark's id through", async () => {
-    // The regression this exists for: `normalizeEntry` rebuilds a note entry
-    // field by field, so a field nobody adds here is dropped between the server
-    // and the card — the ⋯ menu would offer nothing on a document the server had
-    // correctly paired, with the right id sitting in the response.
+    // Regression: `normalizeEntry` rebuilds field by field and silently dropped this one.
     const listing = await listWith([entry({ annotationsId: "179" })]);
     expect(listing.entries.map((e) => (e.kind === "note" ? e.annotationsId : "folder"))).toEqual(["179"]);
   });
@@ -450,9 +396,6 @@ describe("Entry.annotationsId off the wire", () => {
   });
 
   it("refuses a value that cannot address a file", async () => {
-    // A non-string (or an empty one) is unusable as an id, and the conservative
-    // direction is the one `sourcePage` takes: `null`, so the row is simply not
-    // offered — rather than a menu item that opens a panel for nothing.
     const listing = await listWith([
       entry({ annotationsId: 179 }),
       entry({ id: "e-2", annotationsId: "" }),
@@ -466,9 +409,6 @@ describe("Entry.annotationsId off the wire", () => {
   });
 
   it("says nothing about a folder row", async () => {
-    // `Entry` is a union and the field lives on the note arm alone: a folder has
-    // no bytes, no versions and no annotations, and must not grow the field just
-    // because it shares a listing with things that do.
     const listing = await listWith([{ kind: "folder", id: "sub", name: "Manuals", updatedAt: 0 }]);
     expect(listing.entries[0]?.kind).toBe("folder");
     expect(listing.entries[0]).not.toHaveProperty("annotationsId");

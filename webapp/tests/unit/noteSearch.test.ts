@@ -16,24 +16,14 @@ import {
 import { rankDocuments, type Expansion, type LocalHit, type LocalResults, type LocalSearch } from "../../src/search/localSearch";
 import { ApiError } from "../../src/api/client";
 
-// The search controller with the DOM and the ENGINE both replaced — the same
-// shape as ocrPanel.test.ts. The invariants worth a test are the two that cost
-// real money if they regress: one run per PAUSE rather than per keystroke (which
-// used to be a request and is now a frame — §4.6), and an
-// answer that lost the race never painting over a newer one.
-//
-// The engine is a `LocalSearch` and nothing here knows or asks which real one it
-// stands for. That is the point of the interface, and a test that faked "the
-// local one" would be asserting a distinction the view is not allowed to make.
+// The search controller with the DOM and the engine replaced.
 
 const DEBOUNCE = DEFAULT_DEBOUNCE_MS;
 
-/** One matching DOCUMENT — the only kind of result there is now. */
 function doc(fileId: number, pages: number[], updatedAt = 0): LocalHit {
   return { md5: `md5-${fileId}`, fileId, pages, updatedAt };
 }
 
-/** What a `results` state looks like once documents land. */
 function painted(query: string, documents: LocalHit[], expansions: Expansion[] = []): SearchState {
   return { kind: "results", query, documents, expansions };
 }
@@ -97,10 +87,7 @@ afterEach(() => vi.useRealTimers());
 
 describe("createNoteSearch", () => {
   describe("debounce", () => {
-    // THE NUMBER MOVED, AND IT WAS NOT INHERITED. 220 ms bought one backend FTS
-    // query per pause; there is no backend query left to buy (§4.6). What the
-    // pause buys now is frames — the worst short prefix is 37.9 ms of main
-    // thread — so it is smaller, and it is emphatically not zero.
+    // The debounce buys main-thread frames now (worst short prefix 37.9 ms): smaller, not zero.
     it("defaults to a debounce well under the 220 ms a round trip once bought", () => {
       expect(DEFAULT_DEBOUNCE_MS).toBeGreaterThan(0);
       expect(DEFAULT_DEBOUNCE_MS).toBeLessThan(220);
@@ -125,7 +112,6 @@ describe("createNoteSearch", () => {
       const h = harness();
 
       for (const q of ["r", "ro", "roa", "road", "roadm", "roadma", "roadmap"]) h.controller.setQuery(q);
-      // Nothing has run yet — the whole point.
       expect(h.calls).toEqual([]);
 
       await vi.advanceTimersByTimeAsync(DEBOUNCE);
@@ -163,8 +149,7 @@ describe("createNoteSearch", () => {
       await vi.advanceTimersByTimeAsync(DEBOUNCE);
       expect(h.calls).toEqual(["roadmap"]);
 
-      // Trailing whitespace is not a new question; re-issuing here would cancel
-      // the run already on its way to answering exactly this one.
+      // Trailing whitespace is not a new question; re-issuing would cancel the run.
       h.controller.setQuery("roadmap ");
       h.controller.setQuery("  roadmap");
       await vi.advanceTimersByTimeAsync(DEBOUNCE);
@@ -185,7 +170,7 @@ describe("createNoteSearch", () => {
     it("clearing the box cancels a debounced run that had not started yet", async () => {
       const h = harness();
       h.controller.setQuery("roadmap");
-      await vi.advanceTimersByTimeAsync(DEBOUNCE - 10); // still in the quiet period
+      await vi.advanceTimersByTimeAsync(DEBOUNCE - 10);
       h.controller.setQuery("");
 
       await vi.advanceTimersByTimeAsync(DEBOUNCE * 4);
@@ -202,17 +187,11 @@ describe("createNoteSearch", () => {
       h.controller.setQuery("");
       await h.settle(0, [doc(7, [4])]);
 
-      // The late answer to a question no longer being asked must not repopulate
-      // the results under a box the user emptied.
       expect(h.last()).toEqual({ kind: "idle" });
     });
   });
 
-  // THE GLOBAL FLOOR. A library-wide query below `MIN_GLOBAL_QUERY_LEN` matches
-  // very nearly the whole index — noise on screen, and the costliest thing the
-  // engine does — so the box never fires it; it idles exactly as an empty box
-  // does. (In-doc find lives in the viewers, not this controller, and is not
-  // gated — see txtViewer/findInNote.)
+  // Below `MIN_GLOBAL_QUERY_LEN` a global query matches nearly everything; never run it.
   describe("below the global floor", () => {
     it("runs NOTHING for a 1- or 2-char query, and idles", async () => {
       expect(MIN_GLOBAL_QUERY_LEN).toBe(3);
@@ -223,7 +202,6 @@ describe("createNoteSearch", () => {
       h.controller.setQuery("ro");
       expect(h.last()).toEqual({ kind: "idle" });
 
-      // Even after the debounce window, nothing ran.
       await vi.advanceTimersByTimeAsync(DEBOUNCE * 4);
       expect(h.calls).toEqual([]);
     });
@@ -231,26 +209,21 @@ describe("createNoteSearch", () => {
     it("fires the moment the query reaches the floor, and idles again if it drops back", async () => {
       const h = harness();
 
-      h.controller.setQuery("ro"); // below — no run, no searching state
+      h.controller.setQuery("ro");
       await vi.advanceTimersByTimeAsync(DEBOUNCE);
       expect(h.calls).toEqual([]);
 
-      h.controller.setQuery("roa"); // at the floor — search-as-you-type resumes
+      h.controller.setQuery("roa");
       expect(h.last()).toEqual({ kind: "searching", query: "roa" });
       await vi.advanceTimersByTimeAsync(DEBOUNCE);
       expect(h.calls).toEqual(["roa"]);
 
-      // Deleting back below the floor abandons the results and idles — no stale
-      // rows left standing under a query too short to have earned them.
       h.controller.setQuery("ro");
       expect(h.last()).toEqual({ kind: "idle" });
     });
   });
 
-  // THE race. Two runs are outstanding and they come back in the WRONG order:
-  // without the token guard the older, slower one lands last and wins, leaving
-  // the user staring at results for a query they have moved past — permanently,
-  // because nothing later is coming to correct it.
+  // Out-of-order answers: the older, slower one must not win.
   describe("staleness", () => {
     it("an earlier SLOW answer does not overwrite a later FAST one", async () => {
       const h = harness();
@@ -261,14 +234,11 @@ describe("createNoteSearch", () => {
       await vi.advanceTimersByTimeAsync(DEBOUNCE);
       expect(h.calls).toEqual(["road", "roadmap"]);
 
-      // The LATER query answers first…
       await h.settle(1, [doc(2, [2])]);
       expect(h.last()).toEqual(painted("roadmap", [doc(2, [2])]));
 
-      // …and then the earlier, slower one finally arrives. It must be dropped.
       await h.settle(0, [doc(9, [9])]);
       expect(h.last()).toEqual(painted("roadmap", [doc(2, [2])]));
-      // And it must not have painted at all, not even transiently.
       expect(h.states.filter((s) => s.kind === "results" && s.query === "road")).toEqual([]);
     });
 
@@ -278,9 +248,7 @@ describe("createNoteSearch", () => {
       await vi.advanceTimersByTimeAsync(DEBOUNCE);
       expect(h.signals[0]?.aborted).toBe(false);
 
-      // The token alone would leave the abandoned query running — and locally
-      // that is main thread, not a socket: §4.6's worst prefix is 37.9 ms an
-      // engine that honours the signal can hand back.
+      // The token alone would leave the abandoned query burning main thread.
       h.controller.setQuery("roadmap");
       expect(h.signals[0]?.aborted).toBe(true);
     });
@@ -300,10 +268,6 @@ describe("createNoteSearch", () => {
   });
 
   describe("failures", () => {
-    // A dead session showing as "no matches" is exactly the bug class the
-    // ApiFailureSink was introduced to remove. Still live with a local index:
-    // the fallback engine behind the same interface is the one that can still
-    // meet an expired cookie.
     it("routes UNAUTHORIZED to onSessionExpired instead of rendering an empty result", async () => {
       const h = harness();
       h.controller.setQuery("roadmap");
@@ -312,7 +276,6 @@ describe("createNoteSearch", () => {
       await h.fail(0, new ApiError("UNAUTHORIZED", "gone", 401));
 
       expect(h.failures.onSessionExpired).toHaveBeenCalledTimes(1);
-      // Not an error message and emphatically not an empty result set.
       expect(h.last()).toEqual({ kind: "searching", query: "roadmap" });
       expect(h.states.some((s) => s.kind === "results")).toBe(false);
     });
@@ -340,10 +303,6 @@ describe("createNoteSearch", () => {
     });
   });
 
-  // THE ANSWER IS WHOLE. There is no cursor, no "More results" and no floor: a
-  // client holding the index has already paid for every match, so a painted
-  // `results` state is everything the query found and the controller has no
-  // second arm to spend.
   describe("one answer, no continuation", () => {
     it("has no loadMore to call", () => {
       const h = harness();
@@ -358,16 +317,9 @@ describe("createNoteSearch", () => {
 
       const state = h.last();
       expect(state?.kind).toBe("results");
-      // No `cursor` and no `coverage` — each retired with the server that was
-      // the only thing able to say it. `expansions` is emphatically NOT the
-      // `usedFuzzy` that retired with them: a boolean was all the server could
-      // offer, because the corrected word lived only inside the marked excerpt
-      // §4.3 deletes. The client ran the ladder, so it carries the WORDS.
       expect(Object.keys(state ?? {}).sort()).toEqual(["documents", "expansions", "kind", "query"]);
     });
 
-    // …and it is a fallback, so it is empty on every query that answered as
-    // typed, which is nearly all of them.
     it("substitutes nothing when the query as typed answered", async () => {
       const h = harness();
       h.controller.setQuery("roadmap");
@@ -387,8 +339,7 @@ describe("createNoteSearch", () => {
     });
   });
 
-  // The default engine. It exists so the controller has no "nobody handed me
-  // one" branch — not as a fallback, which is why it is never `ready`.
+  // The default engine, so the controller has no "no engine" branch; never `ready`.
   describe("noLocalSearch", () => {
     it("is never ready and answers every query with nothing", async () => {
       expect(noLocalSearch.ready).toBe(false);
@@ -413,7 +364,6 @@ describe("createNoteSearch", () => {
       await h.settle(0, [doc(7, [4])]);
       expect(h.last()).toEqual({ kind: "idle" });
 
-      // And it genuinely reset: the same query is a new question afterwards.
       h.controller.setQuery("roadmap");
       await vi.advanceTimersByTimeAsync(DEBOUNCE);
       expect(h.calls).toEqual(["roadmap", "roadmap"]);
@@ -421,10 +371,7 @@ describe("createNoteSearch", () => {
   });
 });
 
-// THE ONE ORDERING. Pinned here, in the consumer's own suite, because every
-// renderer downstream refuses to re-sort and that refusal is only correct if
-// this holds: §4.1 folds ranking and the match count into the same number, so
-// there is nothing to reflow into when anything else loads.
+// Renderers downstream never re-sort, which is only correct if this holds.
 describe("rankDocuments, as the view relies on it", () => {
   it("ranks by matching pages, then by recency", () => {
     const few = doc(1, [0], 900);
@@ -435,19 +382,11 @@ describe("rankDocuments, as the view relies on it", () => {
   });
 });
 
-// What the deep link carries, now that nothing marks anything.
-// §4.3's "matched **reunião**", as the sentence the results say once above the
-// list. The renderer's own choices — where the line goes, and when it is
-// suppressed — are `gallerySearch.test.ts`'s; this pins the WORDING.
 describe("expansionNotice", () => {
-  /** The sentence as one string, so a test reads like what lands on screen. */
   const say = (parts: ExpansionPart[] | null): string | null => (parts ? parts.map((p) => p.text).join("") : null);
-  /** Just the words set apart — the half §4.3 asks to be emphasised. */
   const words = (parts: ExpansionPart[] | null): string[] =>
     (parts ?? []).filter((p) => p.matched).map((p) => p.text);
 
-  // THE FALLBACK IS THE ORDINARY SILENCE. Expansion never widens a query that
-  // answered, so the line appears exactly when there is something to explain.
   it("says nothing when the query as typed is what answered", () => {
     expect(expansionNotice([])).toBeNull();
   });
@@ -455,13 +394,10 @@ describe("expansionNotice", () => {
   it("names the word searched and the word typed", () => {
     const parts = expansionNotice([{ typed: "valjaen", matched: "valjean" }]);
     expect(say(parts)).toBe("Matched valjean instead of “valjaen”.");
-    // The substituted word is the emphasised half — a word, never a snippet.
     expect(words(parts)).toEqual(["valjean"]);
   });
 
-  // THE TIE IS REAL: `valjen` reaches `valen` and `valjean`, one edit and one
-  // character away each, and the index searched them as ALTERNATIVES. So the
-  // connective inside a group is "or".
+  // `valjen` reaches `valen` and `valjean` as alternatives, so "or" within a group.
   it("offers both readings of a genuine distance tie, as alternatives", () => {
     const parts = expansionNotice([
       { typed: "valjen", matched: "valen" },
@@ -471,9 +407,6 @@ describe("expansionNotice", () => {
     expect(words(parts)).toEqual(["valen", "valjean"]);
   });
 
-  // ACROSS tokens the relationship is the opposite one — both had to appear —
-  // so the groups are listed rather than alternated, and each keeps its own
-  // "instead of" so the reader can tell which word stood in for which.
   it("keeps the pairing when more than one token was corrected", () => {
     expect(
       say(
@@ -486,8 +419,6 @@ describe("expansionNotice", () => {
     ).toBe("Matched valen or valjean instead of “valjen”, and reunião instead of “reuniao”.");
   });
 
-  // Only the tokens that FAILED are in the array at all, so a query where one
-  // word was exact reports the other alone — which is the honest sentence.
   it("reports only the token that was substituted, not the whole query", () => {
     expect(say(expansionNotice([{ typed: "cosete", matched: "cosette" }]))).toBe(
       "Matched cosette instead of “cosete”.",
@@ -505,10 +436,7 @@ describe("expansionNotice", () => {
     ).toBe("Matched valjean instead of “valjaen”.");
   });
 
-  // NOT A STRING, and the reason is the escaping as much as the emphasis. Both
-  // halves are device-authored (an index term, a token out of the search box),
-  // and the renderer turns parts into text nodes — so nothing here can become
-  // the `innerHTML` of unescaped text that step 6 deleted.
+  // Parts, not a string: both halves are device-authored and become text nodes.
   it("keeps the word as a part rather than as markup", () => {
     const parts = expansionNotice([{ typed: "<b>x</b>", matched: "<i>y</i>" }]) ?? [];
     expect(parts.some((p) => p.matched && p.text === "<i>y</i>")).toBe(true);
@@ -517,12 +445,7 @@ describe("expansionNotice", () => {
 });
 
 describe("deepLinkQuery", () => {
-  // THE DECISION, REVERSED. It used to carry the typo, because the row could not
-  // know the correction once §4.3 deleted the marked excerpt it was read out of.
-  // The CLIENT runs the ladder now, so the term arrives as data — and carrying
-  // the typo was not merely a missed nicety: the three viewers gate a fuzzy
-  // answer behind an opt-in, so a row that had just said "matches on 887 pages"
-  // opened a find reading "No matches" over a "search similar" prompt.
+  // The row carries the corrected term: viewers gate fuzzy answers behind an opt-in.
   it("carries the word that was searched, not the one that was typed", () => {
     expect(deepLinkQuery("valjaen", [{ typed: "valjaen", matched: "valjean" }])).toBe("valjean");
   });
@@ -533,16 +456,11 @@ describe("deepLinkQuery", () => {
     expect(deepLinkQuery("")).toBe("");
   });
 
-  // Per TOKEN, like the ladder: a query where one word was exact keeps it.
   it("substitutes only the tokens the ladder corrected, in place", () => {
     expect(deepLinkQuery("jean valjaen", [{ typed: "valjaen", matched: "valjean" }])).toBe("jean valjean");
   });
 
-  // A TIE IS NOT RESOLVED HERE. `valjen` reached two words and the row does not
-  // say which one this document holds; picking one would invent a fact, and for
-  // the rows holding the other word it would be worse than the typo — the
-  // viewer's own ladder recovers from a typo and has no reason to expand one
-  // real word into a different real one.
+  // A tie is not resolved here; picking one would invent a fact.
   it("leaves an ambiguous token alone rather than guessing between two readings", () => {
     expect(
       deepLinkQuery("valjen", [
@@ -559,36 +477,23 @@ describe("deepLinkQuery", () => {
   });
 });
 
-// The result row's quiet metadata — what replaced first the strip of page chips
-// and then the excerpt.
 describe("pageSummary", () => {
   it("gets its plural right", () => {
     expect(pageSummary(2)).toBe("Matches on 2 pages");
     expect(pageSummary(20)).toBe("Matches on 20 pages");
   });
 
-  // A name-only match. "Matches on 0 pages" would make the reader parse a
-  // number to learn that the marked title above was the whole answer.
   it("says nothing when no page matched", () => {
     expect(pageSummary(0)).toBeNull();
     expect(pageSummary(-1)).toBeNull();
   });
 
-  // IT SPEAKS FOR ONE PAGE NOW, and the change is the point of the rework. The
-  // old silence-below-two existed because the server returned one hit per
-  // document and counted only what was inside the fetched window, so "1" was
-  // both the ordinary case and a claim the row could not stand behind. A
-  // document's `pages` is every page that matched, so one is a fact.
   it("says so for a single page, because it is now true", () => {
     expect(pageSummary(1)).toBe("Matches on 1 page");
     expect(pageSummary(1, 1)).toBe("Matches in 1 paragraph");
   });
 
-  // IT COUNTS PAGES, NOT MATCHES, and that is the load-bearing part. A page
-  // either matched or did not; there is no per-page tally to build a match count
-  // from. A row claiming "3 matches" beside a find counter reading "1 of 9" for
-  // the same query would be a second source of truth for one number — so the row
-  // says what it knows and leaves the tally to the one place that has it.
+  // Pages, not matches: there is no per-page tally to count from.
   it("never claims a match count it was not given", () => {
     for (const n of [1, 3, 12]) expect(pageSummary(n)).not.toMatch(/match(es)? /);
   });
@@ -599,41 +504,25 @@ describe("pageSummary", () => {
   });
 });
 
-// The empty state's second sentence.
 describe("coverageLine", () => {
-  // IT STOPPED BEING ABLE TO COUNT. `12 of your 40 notes have no recognised
-  // text` rode a zero-hit server response, and §4.3 leaves no server
-  // interpreting a query — so there is no response for it to ride. Degrading to
-  // the unquantified sentence is the same call the old `null` branch made: say
-  // less rather than assert "0 of your 0 notes" about a library nobody counted.
   it("says the one thing it can still stand behind", () => {
     expect(coverageLine()).toBe("Only notes recognised on the device are searchable.");
   });
 });
 
-// The two sentences pending-ness adds, and the one property that matters most
-// about them: they are a DIFFERENT claim from the coverage sentence above.
-// `unsearchable` is permanent and `pending` resolves itself, so a UI that merged
-// them would tell somebody their half-minute-old upload is permanently
-// unsearchable — and, worse, tell them to stop waiting for the text that is
-// about to arrive.
+// `unsearchable` is permanent and `pending` transient; they must never merge.
 describe("pendingLine and resultsMayGrowLine", () => {
   it("says how much is still coming, over an empty result", () => {
     expect(pendingLine(3)).toBe("3 documents are still being indexed — matches in them will appear on their own.");
     expect(pendingLine(1)).toBe("1 document is still being indexed — matches in them will appear on their own.");
   });
 
-  // THIS DID NOT RETIRE WITH THE CURSOR. "More results" said the ANSWER was cut
-  // short; this says the CORPUS is not finished. A document still being derived
-  // is not in the manifest, so it is not in the index, so it cannot match — and
-  // no amount of holding the whole index repairs that.
+  // A document still deriving is not in the manifest, so it cannot match yet.
   it("qualifies a NON-EMPTY page more quietly, because completeness is the only claim to repair", () => {
     expect(resultsMayGrowLine(2)).toBe("More may appear — 2 documents are still being indexed.");
     expect(resultsMayGrowLine(1)).toBe("More may appear — 1 document is still being indexed.");
   });
 
-  // Silence is the ordinary case. A line that appeared over a fully indexed
-  // library would be permanent furniture saying nothing.
   it("says nothing at all when nothing is outstanding", () => {
     expect(pendingLine(0)).toBeNull();
     expect(resultsMayGrowLine(0)).toBeNull();
@@ -641,14 +530,10 @@ describe("pendingLine and resultsMayGrowLine", () => {
     expect(resultsMayGrowLine(-1)).toBeNull();
   });
 
-  // The two sentences must not be able to collapse into each other: the empty
-  // state explains an absence, the results line qualifies a presence.
   it("does not say the same thing twice", () => {
     expect(pendingLine(3)).not.toBe(resultsMayGrowLine(3));
   });
 
-  // …and neither of them is the coverage sentence, which is about text that
-  // will never exist.
   it("is a different sentence from the unsearchable one", () => {
     expect(coverageLine()).not.toContain("still being indexed");
     expect(pendingLine(3)).not.toContain("recognised");

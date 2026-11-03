@@ -56,14 +56,12 @@ describe("budgetForQuota", () => {
 
 describe("openDimsStore", () => {
   it("degrades to a null store where IndexedDB is missing — never throws", async () => {
-    // Node has no indexedDB: the dims store must answer "unknown" and accept
-    // writes silently, exactly like the thumb store's no-op fallback — a miss
-    // only costs one first-view reflow.
+    // Node has no indexedDB: the dims store must no-op like the thumb store.
     const store = openDimsStore();
     expect(store.available).toBe(false);
     await expect(store.get("h1")).resolves.toBeNull();
     await expect(store.put("h1", { w: 1, h: 2 })).resolves.toBeUndefined();
     await expect(store.clear()).resolves.toBeUndefined();
-    await expect(store.get("h1")).resolves.toBeNull(); // still a no-op, not a Map
+    await expect(store.get("h1")).resolves.toBeNull();
   });
 });

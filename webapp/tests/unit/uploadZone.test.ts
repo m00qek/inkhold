@@ -1,19 +1,4 @@
 // @vitest-environment happy-dom
-//
-// The upload feature's pure logic and its queue, as
-// units:
-//   - the ACCEPT LIST and the extension reading behind it (`core/fileKind`);
-//   - the PRE-FLIGHT — the gate that refuses a file BEFORE any bytes move, and
-//     the interface-voice line each refusal carries;
-//   - the QUEUE's state machine: queued → sending(%) → done / failed / cancelled,
-//     including that a cancel really aborts the transfer rather than only
-//     relabelling the row;
-//   - the FAKE `Api`'s upload, which is where the 415/413 refusal paths are
-//     exercisable with no server — the reference for what the real endpoint must
-//     do.
-//
-// It needs a document (the zone draws its rows), so it opts this one file into
-// happy-dom the way `toolbar.test.ts` does.
 
 import { describe, it, expect, afterEach } from "vitest";
 import {
@@ -46,8 +31,7 @@ describe("the accept list", () => {
   });
 
   it("has no extension for a bare name or a dotfile", () => {
-    // A leading-dot name is not a file OF that type — `.gitignore` is its whole
-    // name — so the honest answer is "none", which the accept list then refuses.
+    // `.gitignore` is a whole name, not a file of type `gitignore`.
     expect(uploadExtension("README")).toBe("");
     expect(uploadExtension(".gitignore")).toBe("");
     expect(uploadExtension("trailing.")).toBe("");
@@ -63,8 +47,7 @@ describe("the accept list", () => {
     for (const name of ["a.xyz", "a.exe", "a.svg", "a.zip", "README"]) {
       expect(isAcceptedUpload(name)).toBe(false);
     }
-    // `.svg` stays out on purpose — the server refuses to serve it inline, and it
-    // is an XML document that can carry script.
+    // `.svg` stays out: it is an XML document that can carry script.
     expect(UPLOAD_ACCEPT).not.toContain("svg");
   });
 });
@@ -108,8 +91,7 @@ describe("preflightUpload — refused before anything is sent", () => {
   });
 
   it("NEVER blocks when the quota is unknown", () => {
-    // Null is "we have not been told", not "no room" — a missing usage endpoint
-    // must not turn into a broken feature. The server's 413 is the authority.
+    // Null means not told, not no room; the server's 413 is the authority.
     expect(preflightUpload({ name: "huge.pdf", size: 9e12 }, null)).toEqual({ ok: true });
   });
 
@@ -123,8 +105,6 @@ describe("preflightUpload — refused before anything is sent", () => {
   });
 
   it("speaks the same words for a SERVER refusal as for its own", () => {
-    // The point of the shared vocabulary: a file refused after transfer must not
-    // be explained differently from one refused before it.
     const file = { name: "recording.xyz", size: 10 };
     expect(uploadRefusalMessage("type", file)).toBe("The Nomad can't open .xyz");
   });
@@ -211,17 +191,14 @@ function harness(opts: HarnessOpts = {}): Harness {
 /** Let the queue's microtasks run. */
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
-// Each harness mounts its own host; without this every later DOM assertion would
-// be counting the rows of every earlier test as well.
+// Each harness mounts its own host; clean up so row counts don't accumulate.
 afterEach(() => document.body.replaceChildren());
 
 describe("the upload queue", () => {
   it("walks queued → sending(%) → done, and names the payoff", async () => {
     const h = harness();
     h.zone.add([fileOf("lease.pdf")]);
-    // The FIRST file starts sending in the same turn it was queued — the pump
-    // runs synchronously up to the seam call — so `queued` is observable on the
-    // ones behind it (see "sends ONE AT A TIME"), not on this one.
+    // The first file starts sending in the same turn it was queued.
     await settle();
     expect(h.rows()[0]!.state).toBe("sending");
 
@@ -245,7 +222,6 @@ describe("the upload queue", () => {
   });
 
   it("a NON-template type dropped in the template folder still uploads, with generic copy", async () => {
-    // The interface never blocks — it only names the likely intent.
     const h = harness({ dest: { id: "mystyle", templates: true } });
     h.zone.add([fileOf("notes.txt")]);
     await settle();
@@ -256,7 +232,6 @@ describe("the upload queue", () => {
     const h = harness();
     h.zone.add([fileOf("clip.xyz")]);
     await settle();
-    // Never sent: no transfer was ever started for it.
     expect(h.pending()).toBeNull();
     expect(h.rows()[0]!.state).toBe("failed");
     expect(h.rows()[0]!.message).toBe("The Nomad can't open .xyz");
@@ -280,12 +255,10 @@ describe("the upload queue", () => {
     expect(flight.signal.aborted).toBe(false);
 
     h.zone.cancel(h.rows()[0]!.id);
-    // The seam was really told to stop — a row relabelled while the bytes kept
-    // going would still have created the file.
+    // The seam was really told to stop, not just the row relabelled.
     expect(flight.signal.aborted).toBe(true);
     expect(h.rows()[0]!.state).toBe("cancelled");
 
-    // The rejection the abort produces must not re-read as a failure.
     flight.reject(new Error("aborted"));
     await settle();
     expect(h.rows()[0]!.state).toBe("cancelled");
@@ -337,17 +310,11 @@ describe("the upload queue", () => {
     expect(document.querySelector(".transfer__cancel")).not.toBeNull();
     h.pending()!.resolve(entry("a.pdf"));
     await settle();
-    // Finished: there is nothing left to cancel, so the control goes.
     expect(document.querySelector(".transfer__cancel")).toBeNull();
   });
 });
 
-// --- the name conflict -------------------------------------------------------
-//
-// The behaviour CHANGE: a clash is a question, not a silent " (2)". The main use
-// of web upload is to update a file you edited on your laptop, and quietly
-// keeping both gets that exactly wrong — twice, since both copies then sync to
-// the device.
+// --- the name conflict: a question, not a silent " (2)" ------------------------
 
 describe("a name that is already taken", () => {
   it("ASKS rather than silently renaming", async () => {
@@ -366,8 +333,7 @@ describe("a name that is already taken", () => {
   });
 
   it("never asks — and never replaces — when the folder's contents are unknown", async () => {
-    // Null is "we have never listed that folder". Inventing a prompt from an
-    // unknown would be worse than not asking, and the server's default is safe.
+    // Null means never listed; the server's default is safe.
     const h = harness({ existing: null });
     h.zone.add([fileOf("notes.pdf")]);
     await settle();
@@ -396,7 +362,6 @@ describe("a name that is already taken", () => {
     const h = harness({ existing: ["notes.pdf"], answer: { choice: "cancel", applyToRest: false } });
     h.zone.add([fileOf("notes.pdf")]);
     await settle();
-    // Not "it failed" — the seam was never called.
     expect(h.modes).toEqual([]);
     expect(h.pending()).toBeNull();
     expect(h.rows()[0]!.state).toBe("cancelled");
@@ -409,9 +374,8 @@ describe("a name that is already taken", () => {
     });
     h.zone.add([fileOf("a.pdf"), fileOf("b.pdf"), fileOf("c.pdf")]);
     await settle();
-    // One dialog, not three — and it said how many others it would cover.
     expect(h.asked).toEqual([{ name: "a.pdf", remaining: 2 }]);
-    expect(h.modes).toEqual(["replace"]); // one in flight; the rest are queued behind it
+    expect(h.modes).toEqual(["replace"]);
     expect(h.rows().map((r) => r.name)).toEqual(["a.pdf", "b.pdf", "c.pdf"]);
   });
 
@@ -423,9 +387,7 @@ describe("a name that is already taken", () => {
   });
 
   it("holds a clashing file OUT of the pump until it has been answered", async () => {
-    // The hazard this guards: a row is queued from the instant of the drop (so
-    // the list reads in order), and anything that nudges the pump meanwhile —
-    // cancelling a different row — must not send a file whose mode is undecided.
+    // A row queued during the dialog must not be sent before its mode is decided.
     let answer: ((a: ConflictAnswer) => void) | null = null;
     const host = document.createElement("div");
     document.body.append(host);
@@ -447,9 +409,8 @@ describe("a name that is already taken", () => {
     });
     zone.add([fileOf("clash.pdf")]);
     await settle();
-    // The dialog is still open: nothing has been sent.
     expect(modes).toEqual([]);
-    zone.cancel("nope"); // a stray pump nudge must not release it
+    zone.cancel("nope");
     await settle();
     expect(modes).toEqual([]);
     answer!({ choice: "replace", applyToRest: false });
@@ -475,7 +436,6 @@ describe("the fake Api's upload", () => {
     await api.upload("projects", fileOf("a.pdf", 400_000), (f) => seen.push(f));
     expect(seen.length).toBeGreaterThan(1);
     expect(seen[seen.length - 1]).toBe(1);
-    // Monotonic — a bar that goes backwards is worse than no bar.
     expect([...seen].sort((a, b) => a - b)).toEqual(seen);
   });
 
@@ -506,7 +466,6 @@ describe("the fake Api's upload", () => {
     const second = await api.upload("projects", fileOf("dup.pdf"));
     expect(first.name).toBe("dup.pdf");
     expect(second.name).toBe("dup (2).pdf");
-    // Two files, both still there.
     const listing = await api.listFolder("projects");
     expect(listing.entries.filter((e) => e.name.startsWith("dup"))).toHaveLength(2);
   });
@@ -517,8 +476,7 @@ describe("the fake Api's upload", () => {
     const before = (await api.listFolder("projects")).entries.length;
 
     const second = await api.upload("projects", fileOf("paper.pdf"), undefined, undefined, "replace");
-    // SAME ID is the whole meaning of supersede: the file kept its identity and
-    // gained a version, so every link to it still resolves.
+    // Same id: the file keeps its identity and gains a version.
     expect(second.id).toBe(first.id);
     const after = await api.listFolder("projects");
     expect(after.entries.length).toBe(before);
@@ -555,8 +513,6 @@ describe("the drag target", () => {
       Object.defineProperty(e, "dataTransfer", { value: { types } });
       target.dispatchEvent(e);
     };
-    // A text selection or a dragged card is not an upload, and must not put a
-    // "drop files here" sheet over the gallery.
     drag([]);
     expect(h.zone.isDragging()).toBe(false);
     drag(["Files"]);

@@ -18,8 +18,8 @@ describe("ByteLru", () => {
     const lru = new ByteLru<string, { n: number }>({ budgetBytes: 30, sizeOf });
     lru.put("a", bytes(10));
     lru.put("b", bytes(10));
-    lru.put("c", bytes(10)); // full
-    lru.put("d", bytes(10)); // over → evict oldest "a"
+    lru.put("c", bytes(10));
+    lru.put("d", bytes(10));
     expect(lru.has("a")).toBe(false);
     expect(lru.has("d")).toBe(true);
     expect(lru.byteSize).toBe(30);
@@ -30,8 +30,8 @@ describe("ByteLru", () => {
     lru.put("a", bytes(10));
     lru.put("b", bytes(10));
     lru.put("c", bytes(10));
-    lru.get("a"); // a becomes newest
-    lru.put("d", bytes(10)); // evict oldest, now "b"
+    lru.get("a");
+    lru.put("d", bytes(10));
     expect(lru.has("a")).toBe(true);
     expect(lru.has("b")).toBe(false);
   });
@@ -40,8 +40,8 @@ describe("ByteLru", () => {
     const lru = new ByteLru<string, { n: number }>({ budgetBytes: 100, sizeOf });
     lru.put("a", bytes(20));
     lru.put("b", bytes(20));
-    lru.put("c", bytes(20)); // 60
-    lru.put("big", bytes(70)); // 130 → evict a (110), b (90) then stop
+    lru.put("c", bytes(20));
+    lru.put("big", bytes(70));  // 130 → evict a (110), b (90) then stop
     expect(lru.has("a")).toBe(false);
     expect(lru.has("b")).toBe(false);
     expect(lru.has("c")).toBe(true);
@@ -54,12 +54,12 @@ describe("ByteLru", () => {
     const lru = new ByteLru<string, { n: number }>({ budgetBytes: 20, sizeOf, onEvict });
     const a = bytes(10);
     lru.put("a", a);
-    lru.put("a", bytes(10)); // replace → frees old a
+    lru.put("a", bytes(10));
     expect(onEvict).toHaveBeenCalledWith("a", a);
 
     onEvict.mockClear();
     lru.put("b", bytes(10));
-    lru.put("c", bytes(10)); // over budget → evict oldest
+    lru.put("c", bytes(10));
     expect(onEvict).toHaveBeenCalledTimes(1);
 
     onEvict.mockClear();
@@ -68,7 +68,7 @@ describe("ByteLru", () => {
 
     onEvict.mockClear();
     lru.clear();
-    expect(onEvict).toHaveBeenCalledTimes(1); // only "c" remained
+    expect(onEvict).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the just-added entry even when it alone exceeds the budget", () => {
@@ -85,7 +85,7 @@ describe("ByteLru", () => {
     lru.put("c", bytes(1));
     const keys = lru.keys();
     expect(keys).toEqual(["a", "b", "c"]);
-    for (const k of keys) lru.delete(k); // mutating while iterating the snapshot
+    for (const k of keys) lru.delete(k);
     expect(lru.size).toBe(0);
   });
 });

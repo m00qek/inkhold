@@ -1,11 +1,4 @@
-// The `.note` layers glue's PURE CORE (src/pages/noteLayers.ts): the SNPG v2
-// record walk, the slot pairing that marries wire records to `LayerVO`s, the
-// panel-model mapping (top-first, NO opacity), the export-model mapping (both
-// states, opacity 1, hidden-in-original present), and the filename rule —
-// plus the client seam's `normalizeLayers` validation. The DOM/wasm half (the
-// stacked canvases, the real decoder) is exercised end-to-end in
-// tests/e2e/noteLayers.spec.ts against the real fixture payload; nothing here
-// needs a browser.
+// The `.note` layers glue's pure core; the DOM/wasm half is in e2e/noteLayers.spec.ts.
 
 import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
@@ -40,7 +33,7 @@ function payload(
   const out: number[] = [
     ...(opts.magic ?? [0x53, 0x4e, 0x50, 0x47]),
     opts.version ?? 2,
-    1, // variant
+    1,
     0,
     0,
     ...u32(opts.w ?? 4),
@@ -51,14 +44,12 @@ function payload(
   return Uint8Array.from(out);
 }
 
-// A tiny 2-record body: background (wire 4) + main (wire 0), main hidden.
 const TWO_RECORDS = [
   { flags: 0, slot: 4, data: [0x65, 0x03] },
   { flags: 0b10, slot: 0, data: [0x61, 0x03] },
 ];
 
-// The real compiled decoder — `enumerateSnpg` and `decode_layer` both drive it
-// (the SNPG parse now lives in the wasm; nothing walks the bytes in TS).
+// The real compiled decoder; the SNPG parse lives in wasm.
 const wasmPath = fileURLToPath(new URL("../../public/note-decode.wasm", import.meta.url));
 const wasmSuite = existsSync(wasmPath) ? describe : describe.skip;
 
@@ -68,11 +59,6 @@ function loadDecoder(): DecoderExports {
 }
 
 // --- enumerateSnpg (wasm-backed record enumeration) --------------------------
-//
-// The SNPG v2 record walk moved into Zig (`page_payload.enumerateRecords`, with
-// its own reject-case unit test); here we prove the wasm ABI + TS marshalling
-// against the real compiled module — the same cross-language pattern as
-// wasm.test.ts. The reject cases mirror what the old TS `parseSnpgRecords` pinned.
 
 wasmSuite("enumerateSnpg (real module)", () => {
   it("walks a v2 payload into slot + hidden + dims, wire order", () => {
@@ -81,7 +67,7 @@ wasmSuite("enumerateSnpg (real module)", () => {
       { slot: "background", hidden: false, rasterImage: false },
       { slot: "main", hidden: true, rasterImage: false },
     ]);
-    expect([en?.width, en?.height]).toEqual([4, 1]); // header dims (builder default)
+    expect([en?.width, en?.height]).toEqual([4, 1]);
   });
 
   it("accepts the shipped layered fixture payload (4 records, layer2 hidden)", () => {
@@ -108,7 +94,7 @@ wasmSuite("enumerateSnpg (real module)", () => {
   it("rejects a record claiming bytes the payload lacks, and trailing junk", () => {
     const wasm = loadDecoder();
     const overclaim = payload([{ flags: 0, slot: 0, data: [] }]);
-    overclaim.set(u32(999), 22); // data_len of the sole record
+    overclaim.set(u32(999), 22);
     expect(enumerateSnpg(wasm, overclaim)).toBeNull();
 
     const junk = Uint8Array.from([...payload(TWO_RECORDS), 0xde, 0xad]);
@@ -123,11 +109,7 @@ wasmSuite("enumerateSnpg (real module)", () => {
 });
 
 // --- inkRecordIndices --------------------------------------------------------
-//
-// Which records of a page are INK, as opposed to the paper under it. It is the
-// question a `.mark` asks that a `.note` never has to: a mark is an OVERLAY, so
-// the layers it does NOT contribute matter as much as the ones it does — the
-// document underneath is the paper, and drawing the device's own would hide it.
+// A `.mark` is an overlay: the device's paper layers must not hide the document.
 
 describe("inkRecordIndices", () => {
   const rec = (over: Partial<SnpgRecord> = {}): SnpgRecord => ({
@@ -165,10 +147,7 @@ describe("inkRecordIndices", () => {
 
 wasmSuite("inkRecordIndices (the shipped mark payload)", () => {
   it("picks Main and Layer Renamed out of the fixture — not the sheet, not the hidden one", () => {
-    // The fixture IS the `.mark` the PDF viewer composites (`fake.ts`'s
-    // `getPageBytes` hands this payload back for the `.mark` `179`), so
-    // this is the real answer for the real file: records 1 and 3. Record 0 is the
-    // white sheet the PDF replaces and record 2 is device-hidden.
+    // The `.mark` fixture: ink is records 1 and 3; 0 is the white sheet, 2 device-hidden.
     const records = enumerateSnpg(loadDecoder(), layeredPagePayload(0)!)!.records;
     expect(inkRecordIndices(records)).toEqual([1, 3]);
   });
@@ -191,8 +170,7 @@ describe("pairLayers", () => {
   ];
 
   it("pairs BY SLOT, not by array position", () => {
-    // The VO list arrives reversed relative to the records — pairing must
-    // still marry background↔background, main↔main.
+    // The VO list arrives reversed relative to the records.
     const paired = pairLayers(records, [vo("main", { name: "Ink" }), vo("background")]);
     expect(paired?.map((p) => [p.index, p.record.slot, p.vo.slot])).toEqual([
       [0, "background", "background"],
@@ -246,16 +224,13 @@ describe("toPanelLayers", () => {
       [1, "Layer Renamed", false],
       [0, "Background Layer", true],
     ]);
-    // The ABSENCE of the field is the contract: it is what keeps the shared
-    // panel's opacity stepper off every `.note` row.
+    // The absent field keeps the opacity stepper off `.note` rows.
     for (const r of rows) expect("opacity" in r).toBe(false);
   });
 });
 
 describe("buildNoteExportModel", () => {
   it("maps VO + live panel state into both export states, opacity 1 everywhere", () => {
-    // The capture's shape: a device-hidden layer the panel toggled ON, and a
-    // visible layer the panel toggled OFF.
     const views = [
       view(0, { name: "Main Layer" }),
       view(1, { name: "Layer 2", authoredVisible: false, visible: true }),
@@ -264,11 +239,10 @@ describe("buildNoteExportModel", () => {
     const model = buildNoteExportModel(1404, 1872, views);
     expect(model.width).toBe(1404);
     expect(model.height).toBe(1872);
-    // Bottom-to-top, ids = wire record indices — the shared core's contract.
     expect(model.layers.map((l) => l.id)).toEqual([0, 1, 2]);
     expect(model.layers.map((l) => l.authored)).toEqual([
       { opacity: 1, visible: true },
-      { opacity: 1, visible: false }, // hidden-in-original: PRESENT, invisible
+      { opacity: 1, visible: false },
       { opacity: 1, visible: true },
     ]);
     expect(model.layers.map((l) => l.current)).toEqual([
@@ -353,9 +327,7 @@ wasmSuite("layeredFixture (VO/payload pairing, via the real decoder)", () => {
     const vos = layeredPageLayers(0)!;
     const paired = pairLayers(records, vos);
     expect(paired).not.toBeNull();
-    // The wire hidden flag mirrors the VO's device-authored visibility.
     for (const p of paired!) expect(p.record.hidden).toBe(!p.vo.visible);
-    // The renamed current layer sits on top.
     expect(paired!.at(-1)!.vo).toMatchObject({ name: "Layer Renamed", isCurrent: true });
   });
 });
@@ -378,23 +350,19 @@ wasmSuite("decode_layer (real module, fixture payload)", () => {
     const wasm = loadDecoder();
     const bytes = layeredPagePayload(0)!;
 
-    // Record 0, background: opaque near-white everywhere.
     const bg = decodeLayerWithExports(wasm, bytes, 0);
     expect([bg.width, bg.height]).toEqual([1404, 1872]);
     expect(at(bg.rgba, 0)[3]).toBe(0xff);
 
-    // Record 1, main: black band rows 200–400, alpha 0 outside it.
     const main = decodeLayerWithExports(wasm, bytes, 1);
     expect(at(main.rgba, 300)).toEqual([0, 0, 0, 0xff]);
     expect(at(main.rgba, 100)[3]).toBe(0);
 
-    // Record 2, the DEVICE-HIDDEN Layer 2: its pixels are on the wire and
-    // decode like any other — the whole reason SNPG v2 ships hidden records.
+    // The device-hidden layer's pixels are on the wire; SNPG v2 ships hidden records.
     const hidden = decodeLayerWithExports(wasm, bytes, 2);
     expect(at(hidden.rgba, 900)).toEqual([0, 0, 0, 0xff]);
     expect(at(hidden.rgba, 300)[3]).toBe(0);
 
-    // Out of range answers -4, surfaced as a throw.
     expect(() => decodeLayerWithExports(wasm, bytes, 4)).toThrow(/out of range/);
   });
 
@@ -402,9 +370,7 @@ wasmSuite("decode_layer (real module, fixture payload)", () => {
     const wasm = loadDecoder();
     const bytes = layeredPagePayload(0)!;
     const page = decodeWithExports(wasm, bytes);
-    // The hidden layer's band shows the white base, not its black ink…
     expect(at(page.rgba, 900)[0]).toBeGreaterThan(0xf0);
-    // …while the visible main layer's band is black.
     expect(at(page.rgba, 300)[0]).toBe(0);
   });
 });

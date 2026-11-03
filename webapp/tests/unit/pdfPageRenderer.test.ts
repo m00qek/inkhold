@@ -1,18 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { clampRasterScale, fitScaleIn, MAX_RASTER_PIXELS } from "../../src/pages/pdfPageRenderer";
 
-// The raster path's ARITHMETIC — the fit and the area ceiling. Both are pure,
-// both are what decides how many pixels the wasm heap is asked for, and both are
-// invisible on screen when they are slightly wrong: a page fitted to a box 320px
-// wider than it has does not overflow, it just runs under the panel.
-
 describe("the fit", () => {
   const box = { w: 800, h: 600 };
 
   it("takes the BINDING term — the page has to fit both ways", () => {
-    // Portrait A4-ish: height binds.
     expect(fitScaleIn(595, 842, box, false)).toBeCloseTo(600 / 842, 12);
-    // Landscape: width binds.
     expect(fitScaleIn(842, 595, box, false)).toBeCloseTo(800 / 842, 12);
   });
 
@@ -22,7 +15,7 @@ describe("the fit", () => {
   });
 
   it("is ASCENDING on a portrait page, which is what the stepper's arrows promise", () => {
-    // `Fit ⇕` -> `Fit ⇔` must be a step UP or the ladder lies about direction.
+    // `Fit ⇕` -> `Fit ⇔` must be a step up.
     expect(fitScaleIn(595, 842, box, true)).toBeGreaterThanOrEqual(
       fitScaleIn(595, 842, box, false),
     );
@@ -58,8 +51,7 @@ describe("the area clamp", () => {
   });
 
   it("clamps by AREA, so a small page at the same zoom is NOT cut", () => {
-    // The whole reason it is not a scale ceiling: 200pt fixtures and 1404pt
-    // panel exports are a 7x spread and the pixel count is what costs memory.
+    // A pixel ceiling, not a scale one: page sizes span 7x.
     expect(clampRasterScale(200, 200, 6)).toBe(6);
     expect(clampRasterScale(1404, 1872, 6)).toBeLessThan(6);
   });

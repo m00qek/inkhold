@@ -21,18 +21,16 @@ describe("sha256Hex", () => {
   });
 });
 
-// The security-critical path: `sha256_hex(md5_hex(pw) + randomCode)`. Pinned by
-// computing the same thing independently with Node's crypto.
+// `sha256_hex(md5_hex(pw) + randomCode)`, checked against Node's crypto.
 describe("challengeHash", () => {
   it("equals sha256_hex(md5_hex(pw) + randomCode)", async () => {
     const pw = "hunter2";
     const rc = "0011aabb";
 
-    // Independent reference, using only Node primitives.
     const md5Node = createHash("md5").update(pw, "utf8").digest("hex");
     const expected = createHash("sha256").update(md5Node + rc, "utf8").digest("hex");
 
-    expect(md5Hex(pw)).toBe(md5Node); // our MD5 agrees with Node's
+    expect(md5Hex(pw)).toBe(md5Node);
     expect(await challengeHash(pw, rc)).toBe(expected);
   });
 
@@ -49,11 +47,8 @@ describe("challengeHash", () => {
   });
 });
 
-// The actual regression guard for "web login is impossible from any device
-// except the server host": `crypto.subtle` exists only in a secure context, and
-// the phone loads the app over plain HTTP from a LAN IP, so on that device the
-// whole `crypto` global may be missing. Nothing on the credential path may
-// depend on it.
+// Regression: the phone loads over plain HTTP, where `crypto.subtle` (or `crypto`)
+// is missing, so nothing on the credential path may depend on it.
 describe("challengeHash without Web Crypto (insecure context, e.g. a phone on http://<lan-ip>)", () => {
   const realCrypto = globalThis.crypto;
   afterEach(() => {
@@ -80,7 +75,7 @@ describe("challengeHash without Web Crypto (insecure context, e.g. a phone on ht
       .digest("hex");
 
     removeWebCrypto();
-    expect(globalThis.crypto).toBeUndefined(); // the stub really took effect
+    expect(globalThis.crypto).toBeUndefined();
     expect(await challengeHash(pw, rc)).toBe(expected);
   });
 

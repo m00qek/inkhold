@@ -1,9 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createCoverMemo, type NoCoverBackend } from "../../src/cache/coverMemo";
 
-// The persistent negative-thumbnail memo: definitive 404s survive sessions
-// (content-addressed — a new cover means a new hash, so a recorded miss can
-// never go stale); transient failures never touch the backend.
+// Definitive 404s persist (content-addressed, never stale); transient failures don't.
 
 function memBackend(): NoCoverBackend & { store: Set<string> } {
   const store = new Set<string>();
@@ -41,19 +39,19 @@ describe("createCoverMemo", () => {
     await m.hasNoCover("cc");
     await m.hasNoCover("cc");
     await m.hasNoCover("cc");
-    expect(spy).toHaveBeenCalledTimes(1); // negative memoised in `unknown`
+    expect(spy).toHaveBeenCalledTimes(1);
     await m.setNoCover("dd");
     await m.hasNoCover("dd");
-    expect(spy).toHaveBeenCalledTimes(1); // session Set answered, no backend read
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
   it("transient misses suppress for the session but never persist", async () => {
     const b = memBackend();
     const m = createCoverMemo(b);
     m.noteTransientMiss("ee");
-    expect(await m.hasNoCover("ee")).toBe(true); // suppressed now
-    expect(b.store.has("ee")).toBe(false); // nothing durable
-    expect(await createCoverMemo(b).hasNoCover("ee")).toBe(false); // next session probes
+    expect(await m.hasNoCover("ee")).toBe(true);
+    expect(b.store.has("ee")).toBe(false);
+    expect(await createCoverMemo(b).hasNoCover("ee")).toBe(false);
   });
 
   it("degrades to session-only on backend failure, silently", async () => {
@@ -66,8 +64,8 @@ describe("createCoverMemo", () => {
       },
     };
     const m = createCoverMemo(failing);
-    expect(await m.hasNoCover("ff")).toBe(false); // read failure = unknown
-    await expect(m.setNoCover("ff")).resolves.toBeUndefined(); // no throw
-    expect(await m.hasNoCover("ff")).toBe(true); // session layer still works
+    expect(await m.hasNoCover("ff")).toBe(false);
+    await expect(m.setNoCover("ff")).resolves.toBeUndefined();
+    expect(await m.hasNoCover("ff")).toBe(true);
   });
 });

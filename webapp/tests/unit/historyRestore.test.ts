@@ -3,11 +3,6 @@ import { runRestore } from "../../src/pages/historyPanel";
 import { ApiError } from "../../src/api/client";
 import type { RestoredVersion } from "../../src/core/types";
 
-// The restore CORE (H9): confirm → re-point → refresh. The ONE path behind both
-// the list row's Restore and the preview banner's, so its branches — declined,
-// success, over-quota, dead-session — are pinned here where they are cheap to
-// assert, DOM-free.
-
 const RESTORED: RestoredVersion = { md5: "abc", size: 100, createdAt: 5, current: true };
 
 function opts(over: Partial<Parameters<typeof runRestore>[0]> = {}) {
@@ -40,7 +35,6 @@ describe("runRestore", () => {
     expect(o.api.restoreVersion).toHaveBeenCalledWith("n1", "abc");
     expect(o.onRestored).toHaveBeenCalledWith(RESTORED);
     expect(o.toast).toHaveBeenCalledTimes(1);
-    // The toast must say the replaced version is kept — that is the whole promise.
     expect(String(o.toast.mock.calls[0]![0])).toMatch(/history/i);
   });
 

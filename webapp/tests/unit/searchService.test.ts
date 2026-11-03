@@ -7,17 +7,8 @@ import type { DocumentManifest, ManifestRow } from "../../src/search/manifestCod
 import type { StoredTermsDocument, TermsStore } from "../../src/cache/termsStore";
 import type { LiveChannel } from "../../src/sync/types";
 
-// A FAKE core, not `sqlite-core.wasm`, and the distinction is the point of the
-// layer under test: `indexEngine.test.ts` already pins FTS5's tokenizer against
-// the real artifact, because folding parity is what putting SQLite in the
-// browser is FOR. Nothing here is about matching — it is about which documents
-// survive the manifest join, how pages group, what order rows come out in, and
-// whether the engine was woken up at all. A fake makes the last of those
-// observable (`loads`) and the rest deterministic.
-//
-// It matches the way `idx_query` really behaves in the two ways that matter: the
-// return is the TOTAL and independent of `limit`, and `limit` caps only the
-// retained rowids.
+// A fake core (the tokenizer is `indexEngine.test.ts`'s). Like `idx_query`, it returns
+// the total regardless of `limit`, which caps only the retained rowids.
 function fakeCore(): SearchCoreExports {
   const memory = new WebAssembly.Memory({ initial: 2 });
   const decoder = new TextDecoder();
@@ -65,11 +56,6 @@ function fakeCore(): SearchCoreExports {
       return 0;
     },
     idx_query: run,
-    // The ladder is a MATCHING question, so it is deliberately absent here — the
-    // real one is asserted against the real artifact in `sqlite_core_abi.mjs`
-    // and `indexFuzzy.test.ts`. What this has to reproduce is the ABI: a fuzzy
-    // call answers a matching query exactly as `idx_query` does, and substitutes
-    // nothing, which is the only behaviour the join and grouping below can see.
     idx_fuzzy: run,
     idx_expansion_ptr: () => 0,
     idx_expansion_len: () => 0,
@@ -94,8 +80,6 @@ function spyLoader(): { load: CoreLoader; loads: () => number } {
   };
 }
 
-// Three documents. `alfa` matches on three pages, `bravo` on one, `charlie` on
-// two — and `charlie` is the one the manifest will stop naming.
 const ALFA = "a".repeat(32);
 const BRAVO = "b".repeat(32);
 const CHARLIE = "c".repeat(32);
@@ -105,8 +89,6 @@ const DOCS: StoredTermsDocument[] = [
     md5: ALFA,
     indexVersion: 3,
     pageCount: 12,
-    // Sparse and out of order, as a real record is: only pages with text get a
-    // row, and the row that matches first in rank order is page 11.
     pages: [
       { p: 11, t: "reuniao projeto" },
       { p: 0, t: "reuniao orcamento" },
@@ -138,8 +120,7 @@ function manifest(rows: readonly ManifestRow[]): DocumentManifest {
   return { coverage: { notes: rows.length, unsearchable: 0 }, rows };
 }
 
-/** An `IndexSync` with no transport behind it: the rows are already stored, and
- *  each `sync()` hands back whichever manifest the test set. */
+/** An `IndexSync` with stored rows; each `sync()` returns the manifest the test set. */
 interface FakeSyncOptions {
   docs?: StoredTermsDocument[];
   rows?: readonly ManifestRow[];
@@ -188,8 +169,7 @@ describe("createIndexSearch", () => {
     const { sync } = fakeSync();
     const local = createIndexSearch({ sync, load });
 
-    // Construction, sync, and the readiness the UI polls: all of it must stay on
-    // the side of §4.2 where the 16.13 MB has not been allocated.
+    // Nothing here may allocate the 16.13 MB engine.
     expect(loads()).toBe(0);
     await local.sync();
     expect(local.ready).toBe(true);
@@ -218,18 +198,15 @@ describe("createIndexSearch", () => {
 
     const results = await local.search("reuniao");
     expect(results.query).toBe("reuniao");
-    // 3 + 2 + 1 pages, all of them counted, none of them capped.
     expect(results.totalPages).toBe(6);
     expect(results.documents.map((d) => d.md5)).toEqual([ALFA, CHARLIE, BRAVO]);
-    // Ascending, because the row deep-links to the FIRST matching page — first
-    // in the document, not first in the ranking.
+    // Ascending: the row deep-links to the first matching page in the document.
     expect(results.documents[0]).toEqual({ md5: ALFA, fileId: 10, pages: [0, 4, 11], updatedAt: 1000 });
     expect(results.documents[2]).toEqual({ md5: BRAVO, fileId: 20, pages: [1], updatedAt: 5000 });
   });
 
   it("breaks a tie on match count by recency", async () => {
     const { load } = spyLoader();
-    // BRAVO and CHARLIE both match `acta` on exactly one page; CHARLIE is newer.
     const docs: StoredTermsDocument[] = [
       { md5: BRAVO, indexVersion: 3, pageCount: 1, pages: [{ p: 0, t: "acta" }], storedAt: 1 },
       { md5: CHARLIE, indexVersion: 3, pageCount: 1, pages: [{ p: 0, t: "acta" }], storedAt: 1 },
@@ -249,16 +226,13 @@ describe("createIndexSearch", () => {
     await local.sync();
     expect((await local.search("reuniao")).documents.map((d) => d.md5)).toContain(CHARLIE);
 
-    // CHARLIE is trashed. Nothing dropped its rows — §2.7 says clean-up rides
-    // the blob GC and is not a protocol step — so it is still in the built index
-    // and must still not come back.
+    // Trashed: its rows stay in the index (clean-up rides blob GC), but must not return.
     state.rows = LIVE.filter((r) => r.md5 !== CHARLIE);
     state.received = 0;
     await local.sync();
 
     const results = await local.search("reuniao");
     expect(results.documents.map((d) => d.md5)).toEqual([ALFA, BRAVO]);
-    // And the count follows the rows: CHARLIE's two pages are in neither.
     expect(results.totalPages).toBe(4);
   });
 
@@ -269,14 +243,11 @@ describe("createIndexSearch", () => {
     await local.sync();
     expect((await local.search("reuniao")).documents).toHaveLength(3);
 
-    // A sync that received nothing: the built index is still right, and a 703 ms
-    // rebuild would buy nothing.
     state.received = 0;
     await local.sync();
     await local.search("reuniao");
 
-    // A sync that received something: the new document has to appear, and on the
-    // SAME instance (§4.1's `reset`), so the loader is still called once.
+    // On the same instance (`reset`), so the loader is still called once.
     const delta = "d".repeat(32);
     state.docs = [
       ...DOCS,
@@ -297,15 +268,9 @@ describe("createIndexSearch", () => {
 
     const degraded = createIndexSearch({ sync: fakeSync({ available: false }).sync, load });
     await degraded.sync();
-    // The manifest arrived; the store is a no-op, so every build is empty and a
-    // confident "no results" would be a lie.
     expect(degraded.ready).toBe(false);
   });
 
-  // §4.4's "global search is fully offline", and step 6 is what made it
-  // load-bearing: the fallback used to answer whenever this path raised, so a
-  // guard that was stricter than `ready` cost a round trip instead of a screen.
-  // There is nothing behind it now, so the two have to agree.
   it("answers a session that never synced, from the cached listing alone", async () => {
     const { load } = spyLoader();
     const { sync } = fakeSync();
@@ -317,8 +282,6 @@ describe("createIndexSearch", () => {
 
     expect(local.ready).toBe(true);
     const results = await local.search("reuniao");
-    // CHARLIE is in the store but not in the listing, so it is not in the
-    // answer: the listing is the intersection, exactly as the manifest is.
     expect(results.documents.map((d) => d.md5)).toEqual([ALFA, BRAVO]);
     expect(results.totalPages).toBe(4);
   });
@@ -327,8 +290,6 @@ describe("createIndexSearch", () => {
     const { load } = spyLoader();
     const local = createIndexSearch({ sync: fakeSync().sync, load });
     expect(local.ready).toBe(false);
-    // NOT an empty answer: nothing is behind this to try, so a confident "no
-    // matches" would be the lie the error state exists to avoid.
     await expect(local.search("reuniao")).rejects.toThrow();
   });
 
@@ -355,14 +316,11 @@ describe("createSearchService", () => {
       const { load } = spyLoader();
       const service = createSearchService({ sync, load });
 
-      // A device pushing 100 notes: `event: sync` and `event: index` frames, one
-      // after another, all inside the window.
       for (let i = 0; i < 100; i += 1) service.refresh();
       expect(state.syncs).toBe(0);
       await vi.advanceTimersByTimeAsync(2000);
       expect(state.syncs).toBe(1);
 
-      // The window is over, so the next burst gets its own.
       service.refresh();
       await vi.advanceTimersByTimeAsync(2000);
       expect(state.syncs).toBe(2);
@@ -377,16 +335,13 @@ describe("createSearchService", () => {
     const { load } = spyLoader();
     const service = createSearchService({ sync, load, coalesceMs: 0 });
 
-    // Hold the first sync open. The frames arriving now describe documents the
-    // manifest it already fetched cannot contain, so joining it would answer
-    // with a result that provably misses them.
+    // Hold the first sync open; frames now describe documents its manifest lacks.
     state.hold = true;
     const first = service.syncNow();
     await Promise.resolve();
     for (let i = 0; i < 10; i += 1) service.refresh();
     state.gate?.();
     await first;
-    // Let the queued re-run start and finish.
     await new Promise((r) => setTimeout(r, 0));
     expect(state.syncs).toBe(2);
     service.dispose();
@@ -405,13 +360,9 @@ describe("createSearchService", () => {
     };
     const service = createSearchService({ sync: failing, load, coalesceMs: 0 });
 
-    // Never rejects: a background sync failure belongs to the next trigger, not
-    // to whoever happens to be typing.
     await expect(service.syncNow()).resolves.toBeUndefined();
     expect(service.ready).toBe(false);
-    // THE USER-VISIBLE BOUNDARY §6 step 6 draws. There is no `searchText` left
-    // to reach for, so the query RAISES and the box paints "couldn't search" —
-    // never a quiet round trip, and never a confident "no matches".
+    // No server fallback: the query raises, never a quiet "no matches".
     await expect(service.search("reuniao")).rejects.toThrow();
     service.dispose();
   });
@@ -451,8 +402,7 @@ describe("createSearchService", () => {
       };
 
       const off = service.attachLive(live);
-      // ONE subscription: a held stream costs one of four per-user slots on the
-      // server, so the second trigger may not open a second socket.
+      // One subscription: the server allows four held streams per user.
       expect(subscriptions).toBe(1);
 
       onBump?.(7);

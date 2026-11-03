@@ -10,40 +10,20 @@ import {
 } from "../../src/render/pdfLoader";
 import { AsyncPdfDocument, syncCalls } from "../../src/render/pdfDocument";
 
-// THE REAL MODULE, NOT A FAKE. The viewer tests use a fake speaking the ABI (as
-// `.spd`'s do), but this file exists to prove one specific thing a fake cannot:
-// that `wasiShim` is a sufficient replacement for a real WASI implementation.
-//
-// The Zig-side ABI test (`webapp/wasm/tests/pdf_decode_abi.mjs`) runs the module
-// under Node's genuine WASI. If MuPDF ever needs a syscall the browser cannot
-// provide, that test keeps passing and only this one fails — which is exactly
-// the split we want, because the browser is where it would actually break.
+// The real module: proves `wasiShim` suffices in place of WASI, which Node's ABI
+// test (`pdf_decode_abi.mjs`) cannot.
 
 const here = dirname(fileURLToPath(import.meta.url));
-// `public/`, not `zig-out/`: this is the artifact the app actually serves, and
-// `npm run build:wasm` (a `pretest` hook) is what puts it there.
+// `public/`, not `zig-out/`: the served artifact, built by the `pretest` hook.
 const wasmPath = join(here, "../../public/pdf-decode.wasm");
 const pdfPath = join(here, "../../wasm/tests/fixtures/two-page.pdf");
 
-/**
- * The WHOLE-FILE path, which is what the worker runs on any browser without
- * JSPI (`pdfWorker.ts`: `if (!jspi) return syncCalls(x)`).
- *
- * There used to be a separate sync `PdfDocument` class for this, and these tests
- * were its only callers — so they proved page sizing, scaling, the pixel copy
- * and the closed-handle guard about code that shipped to nobody. Through
- * `openWhole` they prove the same things about the code that does ship.
- */
+/** The whole-file path, which the worker runs on any browser without JSPI. */
 const openWhole = (): Promise<AsyncPdfDocument> =>
   AsyncPdfDocument.openWhole(exports, syncCalls(exports), pdf);
 
-/**
- * A one-page PDF with a stated `/MediaBox` and `/Rotate`, built here rather than
- * committed: the committed fixtures are upright, and what has to be provable is
- * that a page's ORIENTATION reaches the client — the fact a library tile's aspect
- * rests on. Every byte is ASCII, so a string offset IS a byte offset and the
- * xref table can be computed as the objects are written.
- */
+/** A one-page PDF with a given `/MediaBox` and `/Rotate`; all ASCII, so string
+ *  offsets are byte offsets for the xref. */
 function minimalPdf(w: number, h: number, rotate: number): Uint8Array {
   const content = "0 0 0 RG 4 w 20 20 m 120 120 l S\n";
   const objs = [
@@ -75,11 +55,7 @@ let hostFails = false;
 
 beforeAll(async () => {
   let x: PdfDecoderExports | null = null;
-  // `decoderImports`, not `wasiShim` alone: the module now DECLARES an
-  // `ink.host_read` import, and an import the embedder omits is a link error.
-  // Here it is a real reader over the fixture's bytes — synchronous, because
-  // Node can answer from memory and nothing needs JSPI to do that. That is what
-  // makes the stream path testable without a browser at all.
+  // The module imports `ink.host_read`; omitting it is a link error. Synchronous here.
   const { instance } = await WebAssembly.instantiate(
     readFileSync(wasmPath),
     decoderImports(
@@ -114,8 +90,7 @@ describe("the WASI shim", () => {
   });
 
   it("reports MuPDF's warnings rather than swallowing them", () => {
-    // `fd_write` is the one stub with real work to do: the byte count must be
-    // written back or libc treats the write as short and loops.
+    // `fd_write` must write the byte count back, or libc loops on a short write.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const mem = new WebAssembly.Memory({ initial: 1 });
@@ -124,10 +99,10 @@ describe("the WASI shim", () => {
       const d = new DataView(mem.buffer);
       const msg = new TextEncoder().encode("cannot find font\n");
       new Uint8Array(mem.buffer).set(msg, 100);
-      d.setUint32(0, 100, true); // iov[0].base
-      d.setUint32(4, msg.length, true); // iov[0].len
+      d.setUint32(0, 100, true);
+      d.setUint32(4, msg.length, true);
       expect(w(2, 0, 1, 200)).toBe(0);
-      expect(d.getUint32(200, true)).toBe(msg.length); // bytes written, or libc spins
+      expect(d.getUint32(200, true)).toBe(msg.length);  // bytes written, or libc spins
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("cannot find font"));
     } finally {
       warn.mockRestore();
@@ -142,12 +117,7 @@ describe("AsyncPdfDocument, whole-file", () => {
       const a = await doc.pageSize(0);
       expect(a.width).toBeGreaterThan(0);
       expect(a.height).toBeGreaterThan(0);
-      // THE TWO OUT-PARAMS ARE IN ORDER. `ink_page_size` writes width then
-      // height into one scratch block, and reading them back swapped passed
-      // every assertion above — the fixture is landscape, so its own shape is
-      // what tells them apart. Cross-checked against the RENDER's dimensions,
-      // which come from a different export (`ink_render_width/height`) and so
-      // cannot agree by sharing the same mistake.
+      // Width then height; checked against the render's dims, a different export.
       const bmp = await doc.render(0, 1);
       expect(bmp.width).toBe(Math.round(a.width));
       expect(bmp.height).toBe(Math.round(a.height));
@@ -157,25 +127,17 @@ describe("AsyncPdfDocument, whole-file", () => {
     }
   });
 
-  // THE CLAIM THE LIBRARY TILE RESTS ON. A `.pdf`'s gallery thumbnail has no
-  // server-stated shape (nothing indexes a `/MediaBox`), so the tile learns its
-  // aspect from `pageSize` alone — and it is only honest if that reports the
-  // page as it will be SEEN, not as its `/MediaBox` was written. `/Rotate 90`
-  // is where those differ: MuPDF's `fz_bound_page` returns the cropped box with
-  // the rotation applied, so a portrait MediaBox marked `/Rotate 90` measures
-  // landscape, and the RENDER agrees because it derives its pixmap from the same
-  // box. Asserted rather than assumed, against the real module.
+  // A `.pdf` tile's aspect comes from `pageSize` alone, so it must report the page as
+  // seen: `fz_bound_page` applies `/Rotate`.
   it("a /Rotate 90 page measures ROTATED — pageSize and render agree", async () => {
     const upright = await AsyncPdfDocument.openWhole(exports, syncCalls(exports), minimalPdf(400, 600, 0));
     const turned = await AsyncPdfDocument.openWhole(exports, syncCalls(exports), minimalPdf(400, 600, 90));
     try {
       const a = await upright.pageSize(0);
-      expect([a.width, a.height]).toEqual([400, 600]); // the MediaBox verbatim
+      expect([a.width, a.height]).toEqual([400, 600]);
 
       const b = await turned.pageSize(0);
-      expect([b.width, b.height]).toEqual([600, 400]); // …swapped by /Rotate
-      // Not just the measurement: the pixels come out landscape too, off a
-      // different export, so the two cannot agree by sharing one mistake.
+      expect([b.width, b.height]).toEqual([600, 400]);
       const bmp = await turned.render(0, 1);
       expect(bmp.width).toBe(600);
       expect(bmp.height).toBe(400);
@@ -198,8 +160,7 @@ describe("AsyncPdfDocument, whole-file", () => {
   });
 
   it("returns pixels that OUTLIVE the next render", async () => {
-    // The whole reason `render` copies. A view into wasm memory would be
-    // overwritten by the next page and detached by `memory.grow`.
+    // A view into wasm memory would be overwritten by the next page or detached by growth.
     const doc = await openWhole();
     try {
       const first = await doc.render(0, 1);
@@ -232,7 +193,7 @@ describe("AsyncPdfDocument, whole-file", () => {
   it("a closed document throws instead of using a stale handle", async () => {
     const doc = await openWhole();
     doc.close();
-    doc.close(); // idempotent
+    doc.close();
     await expect(doc.pageCount()).rejects.toThrow(/closed/);
     await expect(doc.render(0, 1)).rejects.toThrow(/closed/);
   });
@@ -248,13 +209,8 @@ describe("AsyncPdfDocument, whole-file", () => {
 });
 
 describe("AsyncPdfDocument.exportPage — one page, structure intact", () => {
-  // The PDF-level behaviour (the graft, the placement matrix, the ink's
-  // encoding) is proved in `webapp/wasm/tests/pdf_decode_abi.mjs`, which can
-  // diff rendered pixels against the source page. What is proved HERE is the
-  // wrapper: the alpha reaches wasm through a pointer that survives a heap
-  // growth, the produced bytes are copied out rather than aliased, and both the
-  // scratch buffer and the module's own copy are released whichever way the call
-  // ends. Those are the things a leak or a detached-ArrayBuffer bug lives in.
+  // PDF-level behaviour is in `pdf_decode_abi.mjs`; here, the wrapper's pointers,
+  // copies and releases.
 
   /** Full-page coverage: every byte inked, so "did it draw" needs no geometry. */
   const solid = (w: number, h: number): Uint8Array => new Uint8Array(w * h).fill(255);
@@ -276,8 +232,6 @@ describe("AsyncPdfDocument.exportPage — one page, structure intact", () => {
       ]);
       expect(new TextDecoder().decode(bytes.subarray(0, 5))).toBe("%PDF-");
 
-      // Back through the same module. One page, same point size — and darker
-      // than the source everywhere, because the coverage was solid.
       const out = await AsyncPdfDocument.openWhole(exports, syncCalls(exports), bytes);
       try {
         expect(await out.pageCount()).toBe(1);
@@ -290,8 +244,6 @@ describe("AsyncPdfDocument.exportPage — one page, structure intact", () => {
           if (after.rgba[i] > before.rgba[i]) lighter += 1;
         }
         expect(lighter).toBe(0);
-        // ...and it is INK, not a black page: solid coverage over a white page
-        // has to come out black rather than merely different.
         let dark = 0;
         for (let i = 0; i < after.rgba.length; i += 4) if (after.rgba[i] < 64) dark += 1;
         expect(dark).toBe(after.width * after.height);
@@ -306,8 +258,7 @@ describe("AsyncPdfDocument.exportPage — one page, structure intact", () => {
   it("rejects an alpha buffer that does not match its own dimensions", async () => {
     const doc = await openWhole();
     try {
-      // The module reads `w * h` bytes from a raw pointer, so a short buffer is
-      // an out-of-bounds read inside wasm — caught here, before the call.
+      // The module reads `w * h` bytes from a raw pointer, so a short buffer is caught first.
       await expect(doc.exportPage(0, solid(10, 10), 20, 20, [1, 0, 0, 1, 0, 0])).rejects.toThrow(
         /alpha/,
       );
@@ -320,12 +271,7 @@ describe("AsyncPdfDocument.exportPage — one page, structure intact", () => {
   it("surfaces MuPDF's own refusal, and frees the scratch either way", async () => {
     const doc = await openWhole();
     try {
-      // A page that does not exist. The message has to come back out — the
-      // caller's fallback is the rasterising exporter, and "it failed" is not a
-      // reason to show anyone.
       await expect(doc.exportPage(99, solid(4, 4), 4, 4, [1, 0, 0, 1, 0, 0])).rejects.toThrow();
-      // The failed call must not have wedged anything or leaked the scratch: a
-      // good export straight afterwards is the check that proves both.
       const bytes = await doc.exportPage(0, solid(4, 4), 4, 4, [50, 0, 0, 25, 0, 0]);
       expect(bytes.length).toBeGreaterThan(0);
     } finally {
@@ -336,8 +282,6 @@ describe("AsyncPdfDocument.exportPage — one page, structure intact", () => {
   it("returns bytes we own — a later export cannot change them", async () => {
     const doc = await openWhole();
     try {
-      // The module's buffer is reused, so a view onto wasm memory would mutate
-      // under the caller. This is the assertion that the copy is real.
       const first = await doc.exportPage(0, solid(4, 4), 4, 4, [50, 0, 0, 25, 0, 0]);
       const snapshot = new Uint8Array(first);
       await doc.exportPage(1, solid(8, 8), 8, 8, [37, 0, 0, 18, 0, 0]);
@@ -355,18 +299,9 @@ describe("AsyncPdfDocument.exportPage — one page, structure intact", () => {
 });
 
 describe("ink_open_stream — the same document, pulled through `ink.host_read`", () => {
-  // The C stream in `pdf_shim.c` is the part of the range design that cannot be
-  // tested from JS alone: its `next`/`seek` callbacks have to keep `stm->pos`,
-  // the window and `fz_tell` consistent, and getting that wrong offsets every
-  // object in the file. JSPI is NOT needed to prove it — the host reader above
-  // answers synchronously, which is precisely what a cache HIT does in the
-  // browser too.
+  // The `pdf_shim.c` stream must keep `stm->pos`, its window and `fz_tell` consistent.
 
   it("opens, counts, sizes and renders identically to the whole-file path", async () => {
-    // ONE CLASS, TWO TRANSPORTS — which is what this test was always about. It
-    // used to compare `openStream` against the separate sync class, varying the
-    // transport AND the wrapper at once; now the wrapper is held fixed and the
-    // transport is the only difference, which is the thing being asserted.
     const streamed = await AsyncPdfDocument.openStream(exports, syncCalls(exports), pdf.length);
     const whole = await openWhole();
     try {
@@ -376,8 +311,7 @@ describe("ink_open_stream — the same document, pulled through `ink.host_read`"
       const b = await whole.render(0, 2);
       expect(a.width).toBe(b.width);
       expect(a.height).toBe(b.height);
-      // Byte-for-byte: a stream that reads from the wrong offsets can still
-      // produce a plausibly-sized page of the wrong content.
+      // Byte for byte: wrong offsets can still produce a plausible page.
       expect(Array.from(a.rgba)).toEqual(Array.from(b.rgba));
     } finally {
       streamed.close();
@@ -386,10 +320,8 @@ describe("ink_open_stream — the same document, pulled through `ink.host_read`"
   });
 
   it("does not re-read what it is already holding", async () => {
-    // The whole point of the window in `ink_stream_seek`. Without it this
-    // 688-byte fixture cost SEVEN host reads of the same 688 bytes, because
-    // `fz_seek` has no in-buffer fast path of its own and drops the window on
-    // every backwards seek. Each was a cache hit, and each was pointless.
+    // Without the window in `ink_stream_seek`, this 688-byte file cost seven host reads:
+    // `fz_seek` drops the window on every backwards seek.
     hostReads = [];
     const doc = await AsyncPdfDocument.openStream(exports, syncCalls(exports), pdf.length);
     try {
@@ -402,10 +334,7 @@ describe("ink_open_stream — the same document, pulled through `ink.host_read`"
   });
 
   it("a host that cannot read fails as a MuPDF error, not a trap", async () => {
-    // `ink_host_read` returning <0 is `fz_throw` from inside the stream's
-    // `next`, raised through a `fz_try` the shim owns. The instance must SURVIVE
-    // it — a wedged module would take every later document with it, and on the
-    // real path this is just an aborted range fetch.
+    // A host read < 0 is `fz_throw` inside the stream's `next`; the instance must survive.
     hostFails = true;
     try {
       await expect(
@@ -434,14 +363,6 @@ describe("supportsWasmExceptions", () => {
 });
 
 describe("annotatePage + exportIncremental — the whole document, appended to", () => {
-  // The PDF-level claim that matters most — that the ORIGINAL's own `/Annots`
-  // survive, where the grafting export loses them — is proved in
-  // `webapp/wasm/tests/pdf_decode_abi.mjs`, which can build a fixture carrying
-  // links and diff the bytes. What is proved HERE is the same split as
-  // `exportPage`'s: that the WRAPPER marshals correctly, that what comes back is
-  // a delta rather than a document, and that the concatenation is a PDF this
-  // very module will open.
-
   const solid = (w: number, h: number): Uint8Array => new Uint8Array(w * h).fill(255);
 
   /** `original || delta`, which is the only thing the delta is valid as. */
@@ -462,20 +383,15 @@ describe("annotatePage + exportIncremental — the whole document, appended to",
     } finally {
       doc.close();
     }
-    // NOT A DOCUMENT. If this began with a header the module would be handing
-    // back a rewritten file, and the browser's `new Blob([original, delta])`
-    // would produce nonsense — while still looking like a successful export.
+    // Not a document: a header here would make `new Blob([original, delta])` nonsense.
     expect(new TextDecoder().decode(delta.subarray(0, 5))).not.toBe("%PDF-");
     expect(delta.length).toBeGreaterThan(0);
 
     const whole = join(pdf, delta);
-    // The incremental promise itself: nothing of the original is re-encoded.
     expect(Array.from(whole.subarray(0, pdf.length))).toEqual(Array.from(pdf));
 
     const out = await AsyncPdfDocument.openWhole(exports, syncCalls(exports), whole);
     try {
-      // BOTH pages, not one — the difference from `exportPage`, which lifts a
-      // page out of the document and leaves the rest behind.
       expect(await out.pageCount()).toBe(2);
       expect(await out.pageSize(1)).toEqual({ width: 300, height: 150 });
     } finally {
@@ -484,8 +400,6 @@ describe("annotatePage + exportIncremental — the whole document, appended to",
   });
 
   it("inks the pages it was given and leaves the others exactly as they were", async () => {
-    // SPARSE IS THE REAL CASE — seven pages of seventy-seven — so a route that
-    // quietly touched every page would be a different and much worse feature.
     const before = await openWhole();
     let untouched: Uint8Array;
     let inkedBefore: number;
@@ -509,14 +423,10 @@ describe("annotatePage + exportIncremental — the whole document, appended to",
 
     const out = await AsyncPdfDocument.openWhole(exports, syncCalls(exports), join(pdf, delta));
     try {
-      // Page 0 is solidly inked — every sample black, since the coverage was
-      // full and the matrix covers the page.
       const inked = await out.render(0, 1);
       let dark = 0;
       for (let i = 0; i < inked.rgba.length; i += 4) if (inked.rgba[i] < 64) dark += 1;
       expect(dark).toBe(inked.width * inked.height);
-      // Page 1 is byte-for-byte what it was. Not "looks similar": a placement
-      // bug that put the ink on the wrong page passes every count-based check.
       const other = await out.render(1, 1);
       expect(Array.from(other.rgba)).toEqual(Array.from(untouched));
     } finally {
@@ -525,9 +435,7 @@ describe("annotatePage + exportIncremental — the whole document, appended to",
   });
 
   it("refuses a document nothing was written on", async () => {
-    // An empty delta concatenates to a byte-identical copy of the original,
-    // which the raw-download row already offers. Producing it under a name that
-    // promises ink would be a lie the user cannot see.
+    // An empty delta would just be the original under a name that promises ink.
     const doc = await openWhole();
     try {
       await expect(doc.exportIncremental()).rejects.toThrow(/no ink/i);
@@ -537,8 +445,6 @@ describe("annotatePage + exportIncremental — the whole document, appended to",
   });
 
   it("rejects an alpha buffer that does not match its dimensions, before the call", async () => {
-    // The same guard `exportPage` gets, and it has to be on both doors: the
-    // module reads `w * h` bytes from a raw pointer either way.
     const doc = await openWhole();
     try {
       await expect(doc.annotatePage(0, solid(10, 10), 20, 20, [1, 0, 0, 1, 0, 0])).rejects.toThrow(
@@ -566,10 +472,7 @@ describe("annotatePage + exportIncremental — the whole document, appended to",
   });
 
   it("hands back bytes we own — a later export cannot change them", async () => {
-    // The module reuses one export buffer, so a view onto wasm memory would
-    // mutate under the caller. The delta is the one payload that is concatenated
-    // with a Blob LATER, so an aliased view here would be read after the module
-    // had already reused it.
+    // The delta is concatenated later, so an aliased view would be read after reuse.
     const doc = await openWhole();
     try {
       const size = await doc.pageSize(0);
@@ -585,13 +488,6 @@ describe("annotatePage + exportIncremental — the whole document, appended to",
 });
 
 describe("pageLinks — the document's own links, as far as the client", () => {
-  // The COORDINATE claims and the shim's own refusals are asserted in
-  // `webapp/wasm/tests/pdf_decode_abi.mjs`, against fixtures with an off-origin
-  // box and a `/Rotate 90`. What is asserted here is the rest of the chain:
-  // that the JSON the module writes survives the ABI boundary as typed records,
-  // in the same units `pageSize` reports, with the module's buffer released on
-  // every path.
-
   /** A two-page PDF whose page 0 carries `annots`. Two, so a target resolves. */
   function linkedPdf(annots: string[]): Uint8Array {
     const refs = annots.map((_, i) => `${6 + i} 0 R`).join(" ");
@@ -635,8 +531,7 @@ describe("pageLinks — the document's own links, as far as the client", () => {
       expect(await doc.pageSize(0)).toEqual({ width: 200, height: 100 });
       const links = await doc.pageLinks(0);
       expect(links).toHaveLength(2);
-      // Top-left origin, y down, POINTS — the annot at PDF y 20..60 on a 100pt
-      // page displays at y 40..80.
+      // Top-left origin, y down, points: PDF y 20..60 on a 100pt page displays at 40..80.
       expect(links[0]).toEqual({
         x: 20,
         y: 40,
@@ -645,7 +540,7 @@ describe("pageLinks — the document's own links, as far as the client", () => {
         page: -1,
         uri: "https://example.invalid/a",
       });
-      // RESOLVED IN THE MODULE. The client never sees `5 0 R`.
+      // Resolved in the module; the client never sees `5 0 R`.
       expect(links[1]!.page).toBe(1);
       expect(links[1]!.x).toBe(100);
     } finally {
@@ -654,8 +549,6 @@ describe("pageLinks — the document's own links, as far as the client", () => {
   });
 
   it("never lets a `javascript:` uri reach the client at all", async () => {
-    // The shim drops it, so the payload does not carry it; `linkTarget` refuses
-    // it a second time before it could become an href. This is the first gate.
     const doc = await open(
       linkedPdf([
         annot([20, 20, 80, 60], "/S /URI /URI (javascript:alert\\(1\\))"),
@@ -672,8 +565,6 @@ describe("pageLinks — the document's own links, as far as the client", () => {
   });
 
   it("answers [] for a page with no links — that is not a failure", async () => {
-    // Most pages have none, and a viewer that threw here would take the PAGE
-    // down with it.
     const doc = await open(linkedPdf([annot([20, 20, 80, 60], "/S /URI /URI (https://a.invalid/)")]));
     try {
       expect(await doc.pageLinks(1)).toEqual([]);
@@ -692,8 +583,6 @@ describe("pageLinks — the document's own links, as far as the client", () => {
   });
 
   it("releases the module's buffer, so the same page answers the same twice", async () => {
-    // One buffer at a time, replaced by the next call: a second read of the
-    // same page must not see a stale pointer or an accumulated payload.
     const doc = await open(linkedPdf([annot([20, 20, 80, 60], "/S /URI /URI (https://a.invalid/)")]));
     try {
       const first = await doc.pageLinks(0);
@@ -706,9 +595,7 @@ describe("pageLinks — the document's own links, as far as the client", () => {
   });
 
   it("falls back to the raw export when PdfCalls does not name pageLinks", async () => {
-    // `PdfCalls.pageLinks` is OPTIONAL, for a caller building the table by hand
-    // — which is right on the non-JSPI path, where nothing suspends, and wrong
-    // on the JSPI one (`pdfWorker.test.ts` asserts the wrapper is there).
+    // `PdfCalls.pageLinks` is optional (fine without JSPI; `pdfWorker.test.ts` covers JSPI).
     const bare = { ...syncCalls(exports), pageLinks: undefined };
     const doc = await AsyncPdfDocument.openWhole(
       exports,

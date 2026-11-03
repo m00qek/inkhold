@@ -22,23 +22,9 @@ import { DESTINATIONS } from "../../src/pages/rail";
 import type { Api } from "../../src/api/types";
 import type { Bin, BinEntry } from "../../src/core/binTypes";
 
-// The bin with the DOM injected, the same way rail.ts and noteSearch.ts are
-// tested. What is worth pinning here is not the markup — it is the two things a
-// silent regression would cost a user something real:
-//
-//   - the ARITHMETIC behind every destructive sentence: the fanout a purge
-//     declares, and the bytes it promises back. A folder's bytes are its
-//     children's and the children are rows in the same list, so a total that
-//     sums folders too is silently double the truth, in the one dialog whose
-//     whole job is to be believed;
-//   - WHICH OPERATIONS ASK. Trash must never open a dialog and purge must never
-//     skip one — that asymmetry is the entire protection model, and it is
-//     invisible from the markup.
-
 // --- fixtures ----------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
-/** A fixed "now" so the countdown and the date headings are deterministic. */
 const NOW = new Date("2026-07-20T14:00:00Z").getTime();
 
 function entry(over: Partial<BinEntry> & Pick<BinEntry, "id" | "name">): BinEntry {
@@ -51,9 +37,6 @@ function entry(over: Partial<BinEntry> & Pick<BinEntry, "id" | "name">): BinEntr
     isRoot: true,
     fileType: "note",
     fileHash: `${over.id}-md5`,
-    // Nothing renderable by default. The row's thumbnail is a DOM concern and
-    // these are the data tests; the "real ink, not the placeholder glyph" claim
-    // is the e2e suite's, where there is a renderer to make it with.
     firstPage: null,
     ...over,
   };
@@ -62,8 +45,7 @@ function entry(over: Partial<BinEntry> & Pick<BinEntry, "id" | "name">): BinEntr
 function bin(entries: BinEntry[], over: Partial<Bin> = {}): Bin {
   return {
     entries,
-    // The SERVER's figure, which sums files only — the client never re-derives
-    // it, and these tests assert on what the server said.
+    // The server's figure, which sums files only.
     totalBytes: entries.reduce((n, e) => n + e.size, 0),
     retentionDays: 30,
     syncVersion: 1,
@@ -71,14 +53,13 @@ function bin(entries: BinEntry[], over: Partial<Bin> = {}): Bin {
   };
 }
 
-/** A folder deleted with the two notes inside it — the mockup's own fixture. */
 const FOLDER_DELETE = bin([
   entry({ id: "f", name: "nested_to_remove", kind: "folder", fileType: "", fileHash: null, size: 0 }),
   entry({ id: "a", name: "one.note", parentId: "f", isRoot: false, size: 1000, path: "Note / nested_to_remove" }),
   entry({ id: "b", name: "two.note", parentId: "f", isRoot: false, size: 2000, path: "Note / nested_to_remove" }),
 ]);
 
-// --- ordering and nesting (U2) ------------------------------------------------
+// --- ordering and nesting ----------------------------------------------------
 
 describe("bin rows", () => {
   it("keeps a trashed subtree together, children nested under their parent", () => {
@@ -88,8 +69,6 @@ describe("bin rows", () => {
   });
 
   it("gives a whole subtree its ROOT's date heading, never one per child", () => {
-    // A child tombstoned a second past midnight would otherwise split the group
-    // its parent is in — for one user action, sent as three requests.
     const split = bin([
       entry({ id: "f", name: "folder", kind: "folder", fileType: "", fileHash: null, deletedAt: NOW }),
       entry({ id: "a", name: "one.note", parentId: "f", isRoot: false, deletedAt: NOW - 2 * DAY }),
@@ -99,8 +78,6 @@ describe("bin rows", () => {
   });
 
   it("promotes an orphan rather than dropping it", () => {
-    // The parent was purged (or restored) while this listing was in flight. A
-    // lost row is far worse than a flush one.
     const orphan = bin([entry({ id: "a", name: "one.note", parentId: "gone", isRoot: false })]);
     const rows = binRows(orphan, NOW);
     expect(rows.map((r) => r.entry.id)).toEqual(["a"]);
@@ -108,8 +85,6 @@ describe("bin rows", () => {
   });
 
   it("makes a folder unopenable and a file openable", () => {
-    // A folder has nothing to open — its contents are already listed beneath it
-    // — so it must not be rendered as a control that promises a view.
     const rows = binRows(FOLDER_DELETE, NOW);
     expect(rows.map((r) => r.openable)).toEqual([false, true, true]);
   });
@@ -117,7 +92,6 @@ describe("bin rows", () => {
   it("counts the fanout and the bytes over the SUBTREE, not the row", () => {
     const [folder, a] = binRows(FOLDER_DELETE, NOW);
     expect(folder!.fanout).toBe(3);
-    // The folder itself weighs 0; its bytes are its children's, counted once.
     expect(folder!.bytes).toBe(3000);
     expect(a!.fanout).toBe(1);
     expect(a!.bytes).toBe(1000);
@@ -160,7 +134,7 @@ describe("group headings", () => {
   });
 });
 
-// --- the sentences (U3, U4, U6, U7) -------------------------------------------
+// --- the sentences ------------------------------------------------------------
 
 describe("confirmation copy", () => {
   it("names the object and the act, and the button repeats it", () => {
@@ -168,14 +142,12 @@ describe("confirmation copy", () => {
     const spec = purgeConfirm(row);
     expect(spec.title).toBe("Delete download_test.note permanently?");
     expect(spec.action).toBe("Delete permanently");
-    // Never "Are you sure?" — the sentence read is the sentence performed.
     expect(spec.body).not.toMatch(/sure/i);
   });
 
   it("declares the fanout only when the operation exceeds the selection", () => {
     const [folder, child] = binRows(FOLDER_DELETE, NOW);
     expect(purgeConfirm(folder!).body).toContain("Deletes the folder and the 2 items inside it");
-    // One row destroys one row: a sentence explaining that would be noise.
     expect(purgeConfirm(child!).body).toBe("This can’t be undone.");
   });
 
@@ -185,8 +157,7 @@ describe("confirmation copy", () => {
   });
 
   it("never double-counts a folder with its contents in the empty-bin total", () => {
-    // THE bug this shape rules out: the folder row weighs 0, so summing every
-    // row is the same number as summing the files.
+    // Folder rows weigh 0, so summing every row equals summing the files.
     const spec = emptyConfirm(FOLDER_DELETE);
     expect(spec.frees).toBe("2.9 KB");
     expect(spec.title).toBe("Delete all 3 items permanently?");
@@ -217,12 +188,6 @@ describe("result copy", () => {
 });
 
 // --- where the row says the entry used to live --------------------------------
-//
-// The server's `path` is the full path INCLUDING the entry's own name, so the
-// row used to repeat the name printed directly above it AND name `NOTE`, a
-// container every other surface in the app flattens away. The flattening half is
-// the rail's (`labelPathSegments`, tested in rail.test.ts); what is tested here
-// is the strip, and the one case where stripping is wrong.
 
 describe("the folder a trashed entry came from", () => {
   it("strips the entry's own name and names the folder the way the rail does", () => {
@@ -231,28 +196,22 @@ describe("the folder a trashed entry came from", () => {
   });
 
   it("keeps a parent that happens to share the entry's name", () => {
-    // Only the TRAILING segment is the entry's own. A folder deleted from inside
-    // a same-named parent must not lose the parent as well — one `pop`, never a
-    // filter over every segment.
+    // Strip only the trailing segment: a same-named parent must survive.
     expect(folderLabel("/NOTE/Note/Work/Work", "Work")).toBe("Note / Work");
   });
 
   it("says Library rather than nothing when the entry sat at the root", () => {
     expect(folderLabel("/loose.note", "loose.note")).toBe("Library");
-    // A root-level CONTAINER strips to the root too, because that is exactly
-    // where the rail puts its contents.
     expect(folderLabel("/NOTE", "NOTE")).toBe("Library");
   });
 
   it("survives a path the strip does not apply to", () => {
-    // Defensive rather than expected: if the server ever stopped appending the
-    // name, the line degrades to naming one folder too many — not to a crash.
     expect(folderLabel("/NOTE/Note", "deep.note")).toBe("Note");
     expect(folderLabel("", "deep.note")).toBe("Library");
   });
 });
 
-// --- what asks and what does not (U4) -----------------------------------------
+// --- what asks and what does not --------------------------------------------
 
 function stubView(over: Partial<BinView> = {}): BinView & { rendered: BinModel[]; toasts: { msg: string; sub?: string; undo?: () => void }[]; confirms: ConfirmSpec[] } {
   const rendered: BinModel[] = [];
@@ -286,7 +245,6 @@ function stubApi(over: Partial<Api> = {}): Api {
   } as unknown as Api;
 }
 
-/** Let the controller's construction-time listing settle. */
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 describe("what asks, and what does not", () => {
@@ -297,8 +255,6 @@ describe("what asks, and what does not", () => {
 
     await controller.trash({ id: "n1", name: "a.note", kind: "note" });
 
-    // The whole protection model: a confirm spent on the frequent, safe action
-    // is what trains people to dismiss the rare, final one.
     expect(view.confirms).toHaveLength(0);
     const last = view.toasts.at(-1)!;
     expect(last.msg).toBe("Moved a.note to Recycle bin");
@@ -325,9 +281,6 @@ describe("what asks, and what does not", () => {
     const controller = createBin({ api: stubApi({ emptyBin }), view, onOpen: vi.fn(), onChanged: vi.fn(), handled: () => false });
     await settle();
 
-    // Through the CONTROLLER, because that is where the control now calls from:
-    // `Empty bin` moved to the topbar, which the bin's painter does not own. The
-    // confirm travelling with it is the whole point of the method.
     controller.empty();
     await settle();
 
@@ -343,11 +296,10 @@ describe("what asks, and what does not", () => {
       view,
       onOpen: vi.fn(),
       onChanged: vi.fn(),
-      handled: () => true, // the shell owns it
+      handled: () => true,
     });
     await settle();
 
-    // `error` would put "Couldn't load the bin" over a shell on its way out.
     expect(view.rendered.every((m) => m.state !== "error")).toBe(true);
   });
 
@@ -364,8 +316,6 @@ describe("what asks, and what does not", () => {
     controller.open();
     await settle();
 
-    // "Nothing deleted" over a failed listing is indistinguishable from a bin
-    // that really is empty — to somebody deciding whether their file still exists.
     expect(view.rendered.at(-1)!.state).toBe("error");
   });
 });
@@ -373,7 +323,6 @@ describe("what asks, and what does not", () => {
 // --- what opens where ---------------------------------------------------------
 
 describe("what opens where", () => {
-  /** One of every openable kind: four with a real viewer, one without. */
   const MIXED = bin([
     entry({ id: "n", name: "a.note" }),
     entry({ id: "s", name: "sketch.spd", fileType: "spd" }),
@@ -396,25 +345,11 @@ describe("what opens where", () => {
     const actions = captureActions(controller, view);
     const of = (id: string) => MIXED.entries.find((e) => e.id === id)!;
 
-    // Every kind with a viewer of its own — `hasDedicatedViewer`, the set
-    // `library.viewerFor` dispatches on — is routed by the SHELL: Back, a reload
-    // and history behave, and the viewer gets the `"bin"` origin.
-    //
-    // `.pdf` IS ONE OF THEM, and this test used to say otherwise. It listed the
-    // pdf beside the png as a kind "with no real viewer", which was true when it
-    // was written and stopped being true the day the PDF viewer shipped — so the
-    // test went on asserting that a trashed PDF falls into the preview panel,
-    // where it could be neither restored nor deleted. The bin's own membership
-    // check had drifted from `viewerFor` in exactly the same way; both now ask
-    // `hasDedicatedViewer`.
+    // Routed by the shell for every kind in `hasDedicatedViewer`, `.pdf` included.
     for (const id of ["n", "s", "t", "p"]) actions.open(of(id));
     expect(onOpen).toHaveBeenCalledTimes(4);
     expect(view.preview).not.toHaveBeenCalled();
 
-    // An image still has none. Not an oversight: a trashed image is the "is this
-    // the screenshot I meant?" question, which the bin's own preview panel — with
-    // the decision controls and the deadline right there — answers better than a
-    // full viewer would.
     actions.open(of("i"));
     expect(view.preview).toHaveBeenCalledTimes(1);
     expect(onOpen).toHaveBeenCalledTimes(4);
@@ -434,8 +369,6 @@ describe("the viewers' by-id restore and purge", () => {
     await expect(controller.restore("a")).resolves.toBe(true);
     expect(restoreEntry).toHaveBeenCalledWith("a");
     expect(view.toasts.at(-1)!.msg).toContain("Restored");
-    // The viewer's caller relies on the same `onChanged` the row action fires —
-    // the rail badge and the folder behind the bin refresh either way.
     expect(onChanged).toHaveBeenCalledWith(true);
   });
 
@@ -470,7 +403,6 @@ describe("the viewers' by-id restore and purge", () => {
     await settle();
 
     await expect(controller.purge("a")).resolves.toBe(true);
-    // The SAME `ConfirmSpec` a row click builds — the dialog names the object.
     expect(view.confirms.at(-1)!.title).toBe("Delete one.note permanently?");
     expect(purgeEntry).toHaveBeenCalledWith("a");
   });
@@ -490,7 +422,6 @@ describe("the viewers' by-id restore and purge", () => {
   });
 });
 
-/** The actions object the controller hands the view on every render. */
 function captureActions(controller: ReturnType<typeof createBin>, view: ReturnType<typeof stubView>): BinActions {
   let captured: BinActions | null = null;
   const render = view.render.bind(view);
@@ -510,7 +441,6 @@ describe("shell seams", () => {
     const rows = DESTINATIONS.filter((d) => d.key === BIN_KEY);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.label).toBe("Recycle bin");
-    // Not admin-gated: a household member's own bin is their own data.
     expect(rows[0]!.adminOnly).toBeUndefined();
   });
 
@@ -545,8 +475,6 @@ describe("shell seams", () => {
 
     const scope = createBinScope();
     const wrapped = scope.wrap(api);
-    // Before `attach`, nothing is trashed — a wrapper that guessed would send
-    // every live read to a route that answers 404 for all of them.
     await wrapped.getNoteMeta("a");
     expect(live.meta).toHaveBeenCalledTimes(1);
 
@@ -560,10 +488,7 @@ describe("shell seams", () => {
     await wrapped.getPageBytes("a", page);
     expect(trashed.bytes).toHaveBeenCalled();
 
-    // A trashed file's transcript IS retained (md5-keyed index, `deleted = 1`),
-    // so page-text reroutes to the bin's own route rather than degrading to
-    // empty — that is what draws a trashed-note preview's ovals. A LIVE id still
-    // goes to the live route untouched.
+    // Trashed transcripts are retained, so page-text reroutes to the bin route.
     expect(await wrapped.getPageText("a", page)).toEqual({
       text: "trashed",
       words: [{ text: "t", xMm: 0, yMm: 0, wMm: 1, hMm: 1 }],
@@ -600,7 +525,6 @@ describe("shell seams", () => {
     const wrapped = scope.wrap(api);
     scope.attach((id) => id === "a");
 
-    // Every call reroutes to its bin twin for a trashed id.
     await wrapped.noteHistory("a");
     expect(trashed.binNoteHistory).toHaveBeenCalledWith("a");
     await wrapped.historyPageBytes("a", "v1", 0);
@@ -609,27 +533,14 @@ describe("shell seams", () => {
     await wrapped.historyRaw("a", "v1");
     expect(trashed.binHistoryRaw).toHaveBeenCalledWith("a", "v1");
 
-    // …and a LIVE id passes straight through to the live history routes.
     await wrapped.noteHistory("b");
     expect(live.noteHistory).toHaveBeenCalledWith("b");
     await wrapped.historyPageText("b", "v1", 0);
     expect(live.historyPageText).toHaveBeenCalled();
   });
 
-  // THE SCOPE HAS NO SEARCH IN IT ANY MORE, and that absence is the assertion.
-  //
-  // §1.1 collapsed the five in-document search routes to one
-  // keyed by BLOB MD5 — "history and bin are not special: they are other md5s".
-  // A trashed file's blob keeps the md5 it had before it was trashed, and
-  // `getBinNoteMeta` (rerouted above) already hands the viewer that `fileHash`,
-  // so find-in-a-trashed-note needs no reroute at all: the same controller, the
-  // same engine, a different md5.
-  //
-  // Written as a property of the WRAPPER rather than of one method name — the
-  // seam carries no search method to name any more, so the guard is stated
-  // against a HYPOTHETICAL one: hand the wrapper a search-named member and it
-  // must come back the same function object, and the wrapper must not grow one
-  // of its own. A reroute reintroduced under any spelling fails here.
+  // Search is keyed by blob md5, which a trashed file keeps, so the wrapper must
+  // not reroute or add any search-named member.
   it("wraps NOTHING whose name is about searching — §1.1's collapse", () => {
     const api = {
       searchAnything: vi.fn(),
@@ -646,12 +557,8 @@ describe("shell seams", () => {
     const seen = wrapped as unknown as Record<string, unknown>;
     for (const name of new Set([...Object.keys(source), ...Object.keys(seen)])) {
       if (!/search/i.test(name)) continue;
-      // Passed through by the spread, i.e. the SAME function object — the
-      // wrapper does not intercept it, and invents nothing under that name.
       expect(seen[name]).toBe(source[name]);
     }
-    // And the one that carries the md5 IS still rerouted, because that is what
-    // makes the no-search-reroute rule work.
     expect(wrapped.getNoteMeta).not.toBe(api.getNoteMeta);
   });
 
@@ -659,9 +566,7 @@ describe("shell seams", () => {
     const e = entry({ id: "7", name: "shot.png", fileType: "png", fileHash: "abc" });
     expect(binFileUrl(e)).toBe("/api/controlplane/bin/file/7?v=abc");
     expect(binFileUrl(e, { download: true })).toBe("/api/controlplane/bin/file/7?v=abc&download=1");
-    // The route REQUIRES `?v=` — that is what makes its immutable response
-    // honest — so a hashless entry has no addressable URL rather than a
-    // guaranteed 404.
+    // The route requires `?v=`, so a hashless entry has no URL.
     expect(binFileUrl({ ...e, fileHash: null })).toBeNull();
   });
 });

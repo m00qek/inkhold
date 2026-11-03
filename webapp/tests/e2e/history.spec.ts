@@ -5,42 +5,22 @@ import { signedIn, freezeMotion, railSettled } from "./helpers/app";
 import { mockDocText, noteTextRecord } from "./helpers/docText";
 import { fakeFileHash } from "../../src/api/fake";
 
-// The "history of this file" UI (hot-cache versioning, phases 3-6): the version
-// MENU from a card's ⋯ item (an anchored floating panel, NOT a modal), a read-only
-// PREVIEW of a past version in the reused reader (banner + find-in-preview), and
-// RESTORE (confirm + toast + refresh).
-//
-// FIXTURE FACTS. "Attention Is All You Need" (`141`) is a 20-page `.note`
-// with recognition on every page except index 2, 5, 8… The fake gives every
-// `.note` THREE versions — the current blob plus two retained — newest-first. Its
-// transcript carries "budget" on every recognised page, so a find-in-preview for
-// it lands real counts.
+// Fixture: `141` is a 20-page note recognised except at indices 2, 5, 8…; the fake
+// gives every `.note` three versions, newest-first.
 
-// The version menu is a popover (`.vh`) portaled into the shared `.menu-portal`,
-// not a `<dialog>`. Rows are `.vh-row`; a row CLICK previews (no per-row buttons).
+// A popover portaled into `.menu-portal`, not a `<dialog>`; a row click previews.
 const menu = (page: Page): Locator => page.locator(".vh");
 const rows = (page: Page): Locator => page.locator(".vh-row");
 
 /**
- * The version preview's find, served (§1.1, §6 step 7).
- *
- * `/note/:id/history/:md5/search` is gone. A preview searches the RETAINED
- * blob's own `text/<md5>` and nothing reroutes anywhere — which is §1.1's
- * "history and bin are not special: they are other md5s" as a fact rather than a
- * claim, because `historyScope.ts` has already rewritten `NoteMeta.fileHash` to
- * the version's address before find sees it.
- *
- * Served through `fallback` rather than by md5, and that is forced: the fake
- * mints a retained version's address from a hash it does not export, so a test
- * cannot name it. What the test CAN name — and asserts below — is the md5 that
- * must NOT be asked for, which is the live note's.
+ * A preview searches the retained blob's own `text/<md5>`. Served via `fallback`
+ * because the fake does not export retained md5s; the test asserts the live md5 is not asked for.
  */
 async function mockPreviewText(page: Page): Promise<{ count(md5?: string): number }> {
   return mockDocText(
     page,
     {},
-    // The version has 19 pages to the live note's 20, and the same recognition
-    // spread — the fake's `versionPageCount`, mirrored.
+    // The fake's `versionPageCount`: 19 pages to the live note's 20.
     { fallback: noteTextRecord("Attention Is All You Need", 19) },
   );
 }
@@ -60,23 +40,15 @@ test.describe("version history", () => {
   test("the ⋯ menu opens the floating panel: versions newest-first, the live one labelled Current", async ({ page }) => {
     await openHistory(page);
 
-    // A section eyebrow (like the ⋯ menu's DOWNLOAD / ACTIONS), no file-name title.
     await expect(menu(page).locator(".vh__eyebrow")).toHaveText("Version history");
 
-    // Three versions (current + two retained), and ONLY the first carries the
-    // Current label — the newest-first, one-live invariant the VO promises.
     await expect(rows(page)).toHaveCount(3);
     await expect(rows(page).nth(0)).toHaveClass(/is-current/);
     await expect(rows(page).nth(0).locator(".tag-current")).toHaveText("Current");
     await expect(page.locator(".tag-current")).toHaveCount(1);
 
-    // No Viewing marker when opened from a card (nothing is on screen).
     await expect(page.locator(".mark-viewing")).toHaveCount(0);
 
-    // Two-line rows: a relative time on line 1 (absolute in its title on hover), and
-    // a content signal on line 2 — the `.note` shows its page count plus a delta.
-    // There are NO per-row Preview/Restore buttons any more; the row itself is the
-    // control (a `menuitem`).
     await expect(rows(page).nth(0).locator("button")).toHaveCount(0);
     await expect(rows(page).nth(0).locator(".vh-pages")).toContainText("pages");
     await expect(rows(page).nth(1).locator(".vh-delta")).toBeVisible();
@@ -89,26 +61,18 @@ test.describe("version history", () => {
     await openHistory(page);
 
     await rows(page).nth(1).click();
-    // The panel gives way to the reader.
     await expect(menu(page)).toBeHidden();
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await freezeMotion(page);
 
-    // The "you're viewing a past version" banner is the clear affordance that
-    // this is NOT the live note, and it carries the one action that is safe here.
     const banner = page.locator(".reader .version-banner");
     await expect(banner).toBeVisible();
     await expect(banner).toContainText("not the current note");
     await expect(banner.getByRole("button", { name: "Restore this version" })).toBeVisible();
 
-    // Read-only: the live note's Move to bin is not offered on a version preview.
     await expect(page.locator(".reader__bar").getByRole("button", { name: "Move to bin" })).toBeHidden();
 
-    // It really is the reused reader — the page actually paints — AND it paints
-    // the VERSION's OWN geometry (H7), not the live note's. The live note is 20
-    // pages; this retained version has 19, sourced from `historyMeta`, so the
-    // pager reads "1 / 19". Previously the preview rendered the live note's 20
-    // slots (the surplus one a blank 404), which this pins against.
+    // Regression: the preview rendered the live note's 20 slots instead of the version's 19.
     await expect(page.locator(".pager__count")).toHaveValue("1 / 19");
   });
 
@@ -119,27 +83,18 @@ test.describe("version history", () => {
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await freezeMotion(page);
 
-    // The reused find bar, running over the retained blob's own text.
     await page.getByRole("button", { name: "Find in this note" }).click();
     const field = page.getByRole("textbox", { name: "Find in this note" });
     await expect(field).toBeFocused();
     await field.fill("budget");
 
-    // The counter settles to a real "N of M" and the filmstrip badges the
-    // matching pages. Generous, because this is the session's first find: it pays
-    // the wasm instantiate and the index build.
+    // Generous: the session's first find pays wasm instantiation and the index build.
     await expect(page.locator(".findbar__count")).toContainText("of", { timeout: 20_000 });
     await expect(page.locator(".filmstrip__hits").first()).toBeVisible();
-    // One-document find over a corpus that contains the word exactly: nothing
-    // approximate is claimed, and the opt-in affordance never appears.
     await expect(page.locator(".findbar__fuzzy")).toBeHidden();
     await expect(page.locator(".findbar__ask")).toBeHidden();
 
-    // THE REROUTE, AS AN OBSERVATION. One document's text was fetched, and it was
-    // not the live note's — `historyScope.ts` rewrote `fileHash` to the version's
-    // address before find ever saw it, which is the whole of what "history is not
-    // special" means (§1.1). Under the old reroute this was a different ROUTE;
-    // now it is the same route with a different key, and the key is checkable.
+    // `historyScope.ts` rewrote `fileHash` to the version's address before find saw it.
     expect(text.count()).toBe(1);
     expect(text.count(fakeFileHash("141"))).toBe(0);
   });
@@ -151,20 +106,12 @@ test.describe("version history", () => {
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await freezeMotion(page);
 
-    // The ink marks — the ovals looped round the matched words on the page — are
-    // the half of find that needs `getPageText`. Previously the preview zeroed
-    // that out (empty transcript), so a version preview counted matches but drew
-    // NO ovals. Now the reroute reads the version's real transcript
-    // (`historyPageText`), so the marks paint. `141`'s scale is verified
-    // (`pxPerMm` non-null), so the ovals CAN be placed — this pins that they are.
+    // Regression: the preview counted matches but drew no ovals (empty transcript).
     await page.getByRole("button", { name: "Find in this note" }).click();
     await page.getByRole("textbox", { name: "Find in this note" }).fill("budget");
 
-    // The counter settles first (the index over `text/<md5>`), then the current
-    // page's ovals paint from the per-version transcript's word boxes.
     await expect(page.locator(".findbar__count")).toContainText("of", { timeout: 20_000 });
     await expect(page.locator(".reader .findbox").first()).toBeVisible();
-    // The "scale unverified, no marks" note stays hidden — the ovals really drew.
     await expect(page.locator(".findbar__note")).toBeHidden();
   });
 
@@ -174,10 +121,7 @@ test.describe("version history", () => {
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await freezeMotion(page);
 
-    // Intercept the version-scoped raw route so the ".note" download becomes a
-    // captured download rather than a live navigation. Registered AFTER `signedIn`
-    // (via openHistory) so it wins Playwright's newest-first route match over the
-    // `/api/` catch-all.
+    // Registered after `signedIn` so it wins newest-first matching over the catch-all.
     await page.route(
       (url) => /\/api\/controlplane\/note\/[^/]+\/history\/[^/]+\/raw$/.test(url.pathname),
       (route) =>
@@ -189,10 +133,6 @@ test.describe("version history", () => {
         }),
     );
 
-    // Open the reader's Download menu and take the one non-transformed row — the
-    // whole-notebook raw ".note". In a preview it used to be DISABLED (the live
-    // raw route hands back the current blob); now it points at the version's own
-    // bytes through `historyFileUrl`, the same route the raw viewers use.
     await page.locator(".reader__bar").getByRole("button", { name: "Download" }).click();
     const rawItem = page.locator(".reader__bar").getByRole("menuitem", { name: "Supernote" });
     await expect(rawItem).toBeEnabled();
@@ -212,21 +152,15 @@ test.describe("version history", () => {
 
     await page.locator(".reader .version-banner").getByRole("button", { name: "Restore this version" }).click();
 
-    // The confirm is HONEST about being safe/undoable — the replaced version is
-    // kept — not a destructive-overwrite warning.
     const confirm = page.locator("dialog.confirm");
     await expect(confirm).toBeVisible();
     await expect(confirm).toContainText(/kept in this file's history/i);
     await confirm.getByRole("button", { name: "Restore this version" }).click();
 
-    // The toast says the previous version is retained, and the note reopens as its
-    // now-current version (the preview banner is gone).
     await expect(page.locator(".toast")).toContainText(/history/i);
     await expect(page.locator(".reader .version-banner")).toBeHidden();
 
-    // Back to the folder, then reopen the history: the restored version is now
-    // Current at the top, and a version was retained (the displaced current), so
-    // the list still holds three — restore is undoable by construction.
+    // The displaced current is retained, so the list still holds three.
     await page.goto("/#/folder/document");
     await railSettled(page);
     const card = page.locator(".card", { hasText: "Attention Is All You Need" });
@@ -239,13 +173,9 @@ test.describe("version history", () => {
   });
 });
 
-// TO-DOs A + B: the reader toolbar's "Versions" control (discoverability) and
-// URL-ADDRESSABLE version previews — a preview is now a place with a URL
-// (`#/note/:id/version/:short`, a 7-hex-char md5 prefix), so reload / copy-link /
-// deep-link reproduce the previewed version, while the CURRENT version keeps the
-// bare note URL.
+// Previews are addressable as `#/note/:id/version/:short` (7-hex md5 prefix); the
+// current version keeps the bare note URL.
 test.describe("versions in the reader: toolbar control + addressable previews", () => {
-  // The 7-char md5 prefix the panel's Preview writes into the address bar.
   const versionUrlRe = /#\/note\/141\/version\/[0-9a-f]{7}$/;
   const bareNoteRe = /#\/note\/141$/;
 
@@ -254,12 +184,10 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
     await page.goto("/#/note/141");
     await expect(page.locator(".reader.is-open")).toBeVisible();
 
-    // Gated to a live `.note` (like the card ⋯ menu), in the reader's toolbar.
     const versions = page.locator(".reader__bar").getByRole("button", { name: "Version history" });
     await expect(versions).toBeVisible();
     await versions.click();
 
-    // It routes through the same controller — the same panel, not a second one.
     await expect(menu(page)).toBeVisible();
     await expect(menu(page).locator(".vh__eyebrow")).toHaveText("Version history");
     await expect(rows(page)).toHaveCount(3);
@@ -272,12 +200,9 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
     await expect(page.locator(".reader .version-banner")).toBeVisible();
     await freezeMotion(page);
 
-    // The address bar now PINS this version rather than describing the live note.
     await expect(page).toHaveURL(versionUrlRe);
     const versionUrl = page.url();
 
-    // A reload reproduces exactly the previewed version: the banner, and the
-    // version's OWN 19-page geometry (not the live note's 20).
     await page.reload();
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await expect(page.locator(".reader .version-banner")).toContainText("not the current note");
@@ -286,7 +211,6 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
   });
 
   test("a version deep link opened cold resolves to the past preview", async ({ page }) => {
-    // Derive a real 7-char short from the panel, then hit the URL with no panel.
     await openHistory(page);
     await rows(page).nth(1).click();
     await expect(page).toHaveURL(versionUrlRe);
@@ -306,8 +230,7 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
     await expect(page).toHaveURL(versionUrlRe);
     const short = page.url().split("/version/")[1]!;
 
-    // Restore it: that md5 is now the LIVE version, so its `:short` must resolve
-    // as "current" and open the live note, never 404.
+    // That md5 is now live, so its `:short` must resolve as current, never 404.
     await page.locator(".reader .version-banner").getByRole("button", { name: "Restore this version" }).click();
     const confirm = page.locator("dialog.confirm");
     await confirm.getByRole("button", { name: "Restore this version" }).click();
@@ -315,7 +238,6 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
 
     await page.goto(`/#/note/141/version/${short}`);
     await expect(page.locator(".reader.is-open")).toBeVisible();
-    // The live note, no preview banner, and the URL rewritten to the bare form.
     await expect(page.locator(".reader .version-banner")).toBeHidden();
     await expect(page).toHaveURL(bareNoteRe);
   });
@@ -335,18 +257,12 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await expect(page.locator(".reader .version-banner")).toBeVisible();
 
-    // Previously hidden in preview mode; now shown so you can pick another version
-    // without leaving. It routes through the SAME controller — the same panel.
     const versions = page.locator(".reader__bar").getByRole("button", { name: "Version history" });
     await expect(versions).toBeVisible();
     await versions.click();
     await expect(menu(page)).toBeVisible();
     await expect(rows(page)).toHaveCount(3);
 
-    // Opened MID-PREVIEW: the version on screen (the retained one previewed above,
-    // row 1) is marked `Viewing` — the selection channel — with its accent rail +
-    // tint, distinct from the `Current` label on the live version (row 0). Exactly
-    // one of each, and the newest version is not the one being viewed.
     await expect(page.locator(".mark-viewing")).toHaveCount(1);
     await expect(rows(page).nth(1)).toHaveClass(/is-viewing/);
     await expect(rows(page).nth(1).locator(".mark-viewing")).toContainText("Viewing");
@@ -355,11 +271,7 @@ test.describe("versions in the reader: toolbar control + addressable previews", 
   });
 });
 
-// TASK 2: history browsing for the CLIENT-SIDE-rendered kinds — `.spd` (spdViewer +
-// spd_decode), `.txt` (txtViewer), and images (reader image mode). Each opens the
-// SAME version list from the card ⋯ menu, previews a past version rendered from the
-// version's RAW bytes (`…/history/:md5/raw`), and gets the read-only version chrome:
-// the banner, Restore, and a Versions control to reopen the list.
+// `.spd`, `.txt` and images preview a version from its raw bytes (`…/history/:md5/raw`).
 
 const SPD_BYTES = readFileSync(
   fileURLToPath(new URL("../../../parsers/spd/tests/fixtures/layers_hidden.spd", import.meta.url)),
@@ -371,16 +283,7 @@ const TINY_PNG = Buffer.from(
   "base64",
 );
 
-/**
- * Serve the version-scoped raw route (`…/history/:md5/raw`) for the Files
- * fixtures, by file id — the REAL browser fetch the raw viewers make (the library
- * itself runs against the fake `Api`). Returns the hit log so a test can assert the
- * version's bytes came off the HISTORY route, not the live `/file/:id`.
- *
- * MUST be registered AFTER `signedIn` (whose `mockApi` installs a `/api/`
- * catch-all): Playwright matches routes newest-first, so this more-specific route
- * has to win over that catch-all.
- */
+/** Serve `…/history/:md5/raw` by file id and log hits. Register after `signedIn`. */
 async function serveHistoryRaw(page: Page): Promise<{ hits: () => string[] }> {
   const hits: string[] = [];
   await page.route(
@@ -402,9 +305,7 @@ async function serveHistoryRaw(page: Page): Promise<{ hits: () => string[] }> {
   return { hits: () => hits };
 }
 
-/** Open the version history for a named card in the Files folder (one of every
- *  previewable kind lives there). Assumes `signedIn` + `serveHistoryRaw` already
- *  ran; mirrors `openHistory` for the DOCUMENT folder otherwise. */
+/** Assumes `signedIn` and `serveHistoryRaw` already ran. */
 async function openFilesHistory(page: Page, name: string): Promise<void> {
   await page.goto("/#/folder/files");
   await railSettled(page);
@@ -420,7 +321,6 @@ test.describe("version history — raw-based kinds (.spd / .txt / image)", () =>
     await signedIn(page);
     const raw = await serveHistoryRaw(page);
     await openFilesHistory(page, "Kitchen sketch");
-    // The kind now accrues history (current + two retained), like a `.note`.
     await expect(rows(page)).toHaveCount(3);
 
     await rows(page).nth(1).click();
@@ -430,12 +330,9 @@ test.describe("version history — raw-based kinds (.spd / .txt / image)", () =>
     await expect(region).toBeVisible();
     await freezeMotion(page);
 
-    // The real decoder rendered the VERSION — a per-layer canvas stack — and its
-    // bytes came off the version-scoped history route (not the live `/file/`).
     await expect(region.locator(".spd-canvas-wrap .spd-layer-canvas").first()).toBeVisible();
     expect(raw.hits().some((p) => p.startsWith("/api/controlplane/note/174/history/"))).toBe(true);
 
-    // The read-only version chrome: banner + Restore + Versions; no Move to bin.
     const banner = region.locator(".version-banner");
     await expect(banner).toBeVisible();
     await expect(banner).toContainText("not the current note");
@@ -443,7 +340,6 @@ test.describe("version history — raw-based kinds (.spd / .txt / image)", () =>
     await expect(region.getByRole("button", { name: "Version history" })).toBeVisible();
     await expect(region.getByRole("button", { name: "Move to bin" })).toBeHidden();
 
-    // The Versions control reopens the SAME list.
     await region.getByRole("button", { name: "Version history" }).click();
     await expect(menu(page)).toBeVisible();
     await expect(rows(page)).toHaveCount(3);
@@ -461,7 +357,6 @@ test.describe("version history — raw-based kinds (.spd / .txt / image)", () =>
     const region = page.getByRole("region", { name: "Text viewer" });
     await expect(region).toBeVisible();
 
-    // The version's text is laid out (fetched off the history raw route).
     await expect(region.locator(".txt__sheet")).toContainText("Shopping list");
     expect(raw.hits().some((p) => p.startsWith("/api/controlplane/note/177/history/"))).toBe(true);
 
@@ -483,13 +378,10 @@ test.describe("version history — raw-based kinds (.spd / .txt / image)", () =>
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await freezeMotion(page);
 
-    // The image's bytes came off the version-scoped history route.
     await expect
       .poll(() => raw.hits().some((p) => p.startsWith("/api/controlplane/note/173/history/")))
       .toBe(true);
 
-    // The read-only version chrome in the reader: banner + Restore + the toolbar
-    // Versions control (now shown for an image preview too); no Move to bin.
     const banner = page.locator(".reader .version-banner");
     await expect(banner).toBeVisible();
     await expect(banner.getByRole("button", { name: "Restore this version" })).toBeVisible();
@@ -498,12 +390,7 @@ test.describe("version history — raw-based kinds (.spd / .txt / image)", () =>
   });
 });
 
-// The raw kinds are now URL-ADDRESSABLE like `.note`: opening a `.spd`/`.txt`/image
-// version writes the `#/note/:id/version/:short` form (a 7-hex prefix), so reload /
-// copy-link / cold deep-link reproduce the previewed version, while the CURRENT
-// version keeps the bare `#/note/:id`. The resolve order (live-first) and the
-// current-canonicalise / age-out fallbacks are the SHARED `openNoteVersion` path,
-// already proved for `.note` above; these cover the raw viewers' open paths.
+// Resolve order and fallbacks are the shared `openNoteVersion`, proved for `.note` above.
 test.describe("addressable version previews — raw-based kinds (.spd / .txt / image)", () => {
   const spdVersionRe = /#\/note\/174\/version\/[0-9a-f]{7}$/;
   const bareSpdRe = /#\/note\/174$/;
@@ -519,12 +406,9 @@ test.describe("addressable version previews — raw-based kinds (.spd / .txt / i
     await expect(region.locator(".version-banner")).toBeVisible();
     await freezeMotion(page);
 
-    // The address bar now PINS this version rather than describing the live file.
     await expect(page).toHaveURL(spdVersionRe);
     const versionUrl = page.url();
 
-    // A reload reproduces exactly the previewed version — the sketch viewer with
-    // its read-only banner, at the same address.
     await page.reload();
     await expect(page.getByRole("region", { name: "Sketch viewer" })).toBeVisible();
     await expect(page.locator(".viewer--spd .version-banner")).toContainText("not the current note");
@@ -534,7 +418,6 @@ test.describe("addressable version previews — raw-based kinds (.spd / .txt / i
   test("a .txt version deep link opened cold resolves to the past preview", async ({ page }) => {
     await signedIn(page);
     await serveHistoryRaw(page);
-    // Derive a real 7-char short from the panel, then hit the URL with no panel up.
     await openFilesHistory(page, "readme");
     await rows(page).nth(1).click();
     await expect(page).toHaveURL(/#\/note\/177\/version\/[0-9a-f]{7}$/);
@@ -569,15 +452,12 @@ test.describe("addressable version previews — raw-based kinds (.spd / .txt / i
   test("an unknown short for a .spd falls back to the LIVE sketch + a notice (bare URL)", async ({ page }) => {
     await signedIn(page);
     await serveHistoryRaw(page);
-    // The fallback opens the LIVE sketch, which fetches the current blob off
-    // `/file/:id` — serve the fixture there so the live render is real, not a 404.
+    // The fallback opens the live file off `/file/:id`, so serve it there.
     await page.route(
       (url) => url.pathname.startsWith("/file/"),
       (route) => route.fulfill({ status: 200, contentType: "application/octet-stream", headers: { "x-content-type-options": "nosniff" }, body: SPD_BYTES }),
     );
-    // Cold-load a `:short` that names no retained version (aged out / bad prefix):
-    // the shared resolve degrades to the live file in its own viewer + a notice,
-    // never a hard error, and the address is canonicalised to the bare note URL.
+    // An unknown `:short` degrades to the live file with a notice and a canonical URL.
     await page.goto("/#/note/174/version/0000000");
     await expect(page.getByRole("region", { name: "Sketch viewer" })).toBeVisible();
     await expect(page.locator(".viewer--spd .version-banner")).toBeHidden();
@@ -586,27 +466,14 @@ test.describe("addressable version previews — raw-based kinds (.spd / .txt / i
   });
 });
 
-// ============================================================================
-// TASK 3: an ANNOTATED PDF's history — the INK's, from the DOCUMENT's card.
-// ============================================================================
-//
-// §7. A `.mark` is folded out of every
-// listing, so it has no card; a `.pdf` is excluded from `canPreviewHistory`, so
-// its card offered no history row. Meanwhile retention keeps — and quota charges
-// for — every superseded `.mark`. The data existed, cost the household storage,
-// and the only way to reach it was to trash the PDF, which unpairs the mark and
-// lets it list: the ink's history became visible exactly when the document it
-// annotates was gone.
-//
-// The row that fixes it says ANNOTATION history, and the difference from the
-// note wording is the point — a PDF has no past version here, only past
-// handwriting, and everything below asserts that the app never claims otherwise.
+// ---- annotated PDF history ----
+// A `.mark` has no card and a `.pdf` has no versions, so the PDF's card offers the
+// mark's "Annotation history"; nothing may claim a past version of the document.
 
 const PDF_BYTES = readFileSync(
   fileURLToPath(new URL("../../wasm/tests/fixtures/two-page.pdf", import.meta.url)),
 );
 
-/** Serve the raw-file route with a real PDF, so the viewer has something to open. */
 async function servePdfBytes(page: Page): Promise<void> {
   await page.route(
     (url) => url.pathname.startsWith("/file/"),
@@ -621,7 +488,6 @@ async function servePdfBytes(page: Page): Promise<void> {
   );
 }
 
-/** Open the ⋯ menu on a named card in the Files folder, without choosing a row. */
 async function cardMenuFor(page: Page, name: string): Promise<Locator> {
   await page.goto("/#/folder/files");
   await railSettled(page);
@@ -638,14 +504,12 @@ test.describe("annotation history, from the PDF's card", () => {
     await signedIn(page);
     const portal = await cardMenuFor(page, "Appliance manual");
     await expect(portal.getByRole("menuitem", { name: "Annotation history" })).toBeVisible();
-    // NOT "Version history": that would promise a past version of the document,
-    // and there is none — `canPreviewHistory("pdf")` stays false on purpose.
+    // `canPreviewHistory("pdf")` stays false on purpose.
     await expect(portal.getByRole("menuitem", { name: "Version history" })).toHaveCount(0);
   });
 
   test("a PDF with no annotations offers neither row", async ({ page }) => {
-    // 142 ("Apartment lease — signed") is the plain PDF: no `.mark`, so there is
-    // no ink history to reach and nothing to offer.
+    // 142 has no `.mark`, so there is nothing to offer.
     await signedIn(page);
     await page.goto("/#/folder/document");
     await railSettled(page);
@@ -666,19 +530,12 @@ test.describe("annotation history, from the PDF's card", () => {
     await portal.getByRole("menuitem", { name: "Annotation history" }).click();
     await expect(menu(page)).toBeVisible();
 
-    // THE EYEBROW. "Version history" here would be a claim about the PDF.
     await expect(menu(page).locator(".vh__eyebrow")).toHaveText("Annotation history");
-    // AND THE CAPTION, which is the only place the promise gets its scope: the
-    // rows are dated blobs with nothing on them to say they are handwriting, and
-    // Restore would otherwise be an unqualified offer about the document.
     const caption = menu(page).locator(".vh__caption");
     await expect(caption).toContainText("The handwriting on this document");
     await expect(caption).toContainText("only the annotations");
     await expect(caption).toContainText("the document itself is untouched");
 
-    // The mark's own history: current + two retained, exactly like every other
-    // previewable kind. `foo.pdf.mark` never appears — the panel is headed by the
-    // name the reader recognises.
     await expect(rows(page)).toHaveCount(3, { timeout: 20_000 });
     await expect(menu(page)).toHaveAttribute("aria-label", "Annotation history for Appliance manual");
   });
@@ -692,21 +549,17 @@ test.describe("annotation history, from the PDF's card", () => {
     await rows(page).nth(1).click();
     await expect(menu(page)).toBeHidden();
 
-    // THE PDF VIEWER, on the live document — no second handle, no new viewer.
     const region = page.getByRole("region", { name: "PDF viewer" });
     await expect(region).toBeVisible();
     await freezeMotion(page);
 
     const banner = region.locator(".version-banner");
     await expect(banner).toBeVisible();
-    // The `annotations` voice. The shared banner's default ends "this is not the
-    // current note", which here would be a straight lie about the document.
+    // The default banner ends "this is not the current note", false for the document.
     await expect(banner).toContainText("the annotations from");
     await expect(banner).toContainText("the document itself is current");
     await expect(banner).not.toContainText("not the current note");
 
-    // The mark is SPARSE and names PDF page 2, so the ink is there and nowhere
-    // else — a preview does not move the handwriting.
     await expect(region.locator(".pdf-mark")).toBeHidden();
     await region.getByRole("button", { name: "Next page" }).click();
     await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
@@ -731,8 +584,6 @@ test.describe("annotation history, from the PDF's card", () => {
     await confirm.getByRole("button", { name: "Restore this version" }).click();
 
     await expect(page.locator(".toast")).toContainText("kept in this file's history");
-    // ON THE DOCUMENT, not on `Appliance manual.pdf.mark`: the mark is what got
-    // re-pointed, the document is what the reader was looking at.
     await expect(page).toHaveURL(/#\/note\/178/);
     await expect(banner).toBeHidden();
   });

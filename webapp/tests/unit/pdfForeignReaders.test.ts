@@ -6,27 +6,9 @@ import { join } from "node:path";
 import { buildPdf, type PdfPage } from "../../src/export/pdf";
 import type { PdfLink } from "../../src/render/pdfWire";
 
-// THE ONLY ASSERTION THAT SETTLES THE QUESTION. Everywhere else in this suite
-// the writer is checked against our own reading of the bytes, which proves the
-// writer agrees with itself and nothing about the file someone else opens — and
-// the file someone else opens is the entire point of an export.
-//
-// It matters most for the LINKS, because they are written as DIRECT dictionaries
-// in the page object rather than as annotation objects. The spec permits that;
-// convention is indirect, and conventions are what implementations actually
-// test. So two independent readers are asked, and between them they cover both
-// kinds of link:
-//
-//   * POPPLER (`pdfinfo`, `pdftohtml`) — the engine behind most Linux viewers.
-//     Its XML output names the resolved TARGET PAGE of an internal link, which
-//     is the forward reference proved from outside.
-//   * GHOSTSCRIPT — reads the document and writes a new one, so an annotation it
-//     did not parse simply does not appear in its output. It is the only tool
-//     here that reports EXTERNAL URIs.
-//
-// SKIPPED, not failed, where the binaries are absent: a developer without
-// poppler installed still gets the rest of the suite, and the machine that has
-// them runs this on every change.
+// Real readers check the file: links are direct dictionaries in the page object,
+// which the spec permits but convention doesn't. Poppler resolves internal targets;
+// Ghostscript reports external URIs. Skipped where the binaries are absent.
 
 function has(bin: string): boolean {
   try {
@@ -47,10 +29,7 @@ function page(links: PdfLink[]): PdfPage {
   return { width: W, height: H, gray: new Uint8Array(W * H).fill(0xff), links };
 }
 
-// An UNBALANCED bracket, deliberately. A PDF literal string may contain BALANCED
-// parentheses unescaped, so `a(b)` proves nothing about escaping — a reader
-// parses it either way. A lone `)` is the one that ends the string early and
-// leaves the rest of the URI as stray tokens inside the page dictionary.
+// An unbalanced `)`: balanced parentheses are legal unescaped and prove nothing.
 const EXTERNAL = "https://example.com/a)b?q=1";
 const UNICODE = "https://exámple.com/ç";
 
@@ -92,27 +71,21 @@ describe.skipIf(!READERS)("the exported file, read by somebody else's reader", (
     const info = execFileSync("pdfinfo", [file], { encoding: "utf8" });
     expect(info).toMatch(/^Pages:\s+3$/m);
     expect(info).toMatch(/^Page size:\s+595\.28 x 793\.71 pts$/m);
-    // pdfinfo exits non-zero on a file it had to repair, so getting here at all
-    // is half the assertion.
+    // pdfinfo exits non-zero on a file it had to repair.
   });
 
-  // THE FORWARD REFERENCE, PROVED FROM OUTSIDE. Poppler resolved `10 0 R` — an
-  // object our writer named before it had written it — to the third page.
   it("has poppler resolve the internal link to the page it points at", () => {
     const xml = execFileSync("pdftohtml", ["-xml", "-stdout", "-i", file], { encoding: "utf8" });
     expect(xml).toContain("link to page 3");
   });
 
   it("has Ghostscript re-emit the external links it read out of the page dictionary", () => {
-    // Ghostscript writes its own file from what it parsed, so an inline
-    // annotation it ignored would be absent here. The bracket survived escaping.
     expect(gs).toContain("/URI(https://example.com/a\\)b?q=1)");
     expect(gs).toContain("/URI(mailto:a@b.c)");
   });
 
   it("has Ghostscript decode the UTF-16BE URI rather than mangling its bytes", () => {
-    // `\376\377` is the BOM, and each character follows as two bytes — i.e. gs
-    // recognised the hex string as text and not as a Latin-1 literal.
+    // `\376\377` is the BOM: gs read the hex string as text, not Latin-1.
     expect(gs).toContain("\\376\\377");
     expect(gs).toContain("\\000e\\000x\\000\\341\\000m\\000p\\000l\\000e");
   });
@@ -120,8 +93,7 @@ describe.skipIf(!READERS)("the exported file, read by somebody else's reader", (
   it("has Ghostscript resolve the destination to a page of its own document", () => {
     const dest = /\/Dest \[(\d+) 0 R/.exec(gs);
     expect(dest).not.toBeNull();
-    // Renumbered by gs, which is exactly what proves it followed the reference
-    // rather than copying our bytes through.
+    // Renumbered by gs, so it followed the reference rather than copying bytes.
     expect(gs).toMatch(new RegExp(`${dest![1]} 0 obj\\s*<</Type\\s*/Page`));
   });
 

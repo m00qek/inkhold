@@ -1,15 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { signedIn, freezeMotion } from "./helpers/app";
 
-// The REAL `.txt` viewer (src/pages/txtViewer.ts). Where `viewers.spec.ts` proves
-// the multi-viewer SEAM against the `.spd` stub, this proves the `.txt` viewer's
-// actual behaviour: it fetches the raw file, decodes and lays the text out, and
-// its font-size control steps the text and PERSISTS across a reload.
-//
-// The library runs against the in-memory fake `Api`, but the raw file is a REAL
-// URL the viewer fetches itself (not an `Api` call), so it needs a real response.
-// `177` is the `.txt` fixture (see `api/fake.ts`).
-
 const README = "177";
 const BODY = "Shopping list\n\n- oat milk\n- lentils\n- a new nib for the Supernote\n\nSee you Sunday.";
 
@@ -46,13 +37,11 @@ test.describe(".txt viewer", () => {
     const region = page.getByRole("region", { name: "Text viewer" });
     await expect(region).toBeVisible();
 
-    // The decoded text, in a readable column — line breaks preserved.
     const sheet = region.locator(".txt__sheet");
     await expect(sheet).toBeVisible();
     await expect(sheet).toContainText("Shopping list");
     await expect(sheet).toContainText("a new nib for the Supernote");
 
-    // Reading is a mode: the library topbar leaves and the reader is not on screen.
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeHidden();
     await expect(page.locator(".reader.is-open")).toBeHidden();
   });
@@ -68,21 +57,17 @@ test.describe(".txt viewer", () => {
     const label = region.locator(".pager .zoom");
     await expect(sheet).toBeVisible();
 
-    // Default 16px.
     await expect(label).toHaveText("16px");
     const px = () => sheet.evaluate((el) => getComputedStyle(el).fontSize);
     expect(await px()).toBe("16px");
 
-    // Larger steps up in px and actually resizes the text.
     await region.getByRole("button", { name: "Larger text" }).click();
     await expect(label).toHaveText("18px");
     expect(await px()).toBe("18px");
 
-    // Smaller steps back down.
     await region.getByRole("button", { name: "Smaller text" }).click();
     await expect(label).toHaveText("16px");
 
-    // Now push to 22 and prove it SURVIVES A RELOAD (localStorage).
     await region.getByRole("button", { name: "Larger text" }).click();
     await region.getByRole("button", { name: "Larger text" }).click();
     await region.getByRole("button", { name: "Larger text" }).click();
@@ -109,24 +94,20 @@ test.describe(".txt viewer", () => {
     const sheet = region.locator(".txt__sheet");
     await expect(sheet).toBeVisible();
 
-    // The frame is a fixed portrait page (aspect 0.75), sized from the viewport —
-    // not from `ch`, so the font size must not move its width.
+    // The frame is sized from the viewport, not `ch`, so font size must not move its width.
     const width = () => sheet.evaluate((el) => Math.round(el.getBoundingClientRect().width));
     const fontPx = () => sheet.evaluate((el) => getComputedStyle(el).fontSize);
 
     const widthAt16 = await width();
     expect(await fontPx()).toBe("16px");
-    // A portrait page: taller than it is wide.
     const height16 = await sheet.evaluate((el) => Math.round(el.getBoundingClientRect().height));
     expect(height16).toBeGreaterThan(widthAt16);
 
-    // Grow the text three steps (16 → 22): the text scales, the frame width does NOT.
     for (let i = 0; i < 3; i++) await region.getByRole("button", { name: "Larger text" }).click();
     await expect(region.locator(".pager .zoom")).toHaveText("22px");
     expect(await fontPx()).toBe("22px");
     expect(await width()).toBe(widthAt16);
 
-    // And shrinking it back leaves the frame width where it was, too.
     for (let i = 0; i < 6; i++) await region.getByRole("button", { name: "Smaller text" }).click();
     await expect(region.locator(".pager .zoom")).toHaveText("10px");
     expect(await width()).toBe(widthAt16);
@@ -140,8 +121,7 @@ test.describe(".txt viewer", () => {
 
     const region = page.getByRole("region", { name: "Text viewer" });
     const sheet = region.locator(".txt__sheet");
-    // The zoom readout is `.txt-zoom` — its own class, kept apart from the font
-    // stepper's `.zoom` so the two `.pager`s in this bar stay addressable.
+    // `.txt-zoom`, not `.zoom`, so the two `.pager`s in this bar stay addressable.
     const zoomLabel = region.locator(".pager .txt-zoom");
     await expect(sheet).toBeVisible();
     await expect(zoomLabel).toHaveText("Fit ⇕");
@@ -152,15 +132,12 @@ test.describe(".txt viewer", () => {
     const fitWidth = await width();
     expect(await fontPx()).toBe("16px");
 
-    // Zooming in WIDENS the frame while the glyph size is untouched — the two are
-    // different knobs (font size reflows the column; zoom changes how wide it is).
     await region.getByRole("button", { name: "Zoom in" }).click();
     await expect(zoomLabel).toHaveText("125%");
     expect(await width()).toBeGreaterThan(fitWidth);
     expect(await fontPx()).toBe("16px"); // glyphs unchanged
     await expect(region.locator(".pager .zoom")).toHaveText("16px"); // font readout unmoved
 
-    // Push to 150% and prove it SURVIVES A RELOAD (its own localStorage key).
     await region.getByRole("button", { name: "Zoom in" }).click();
     await expect(zoomLabel).toHaveText("150%");
     const wide = await width();
@@ -175,7 +152,6 @@ test.describe(".txt viewer", () => {
     await expect(region2.locator(".pager .txt-zoom")).toHaveText("150%");
     expect(await region2.locator(".txt__sheet").evaluate((el) => Math.round(el.getBoundingClientRect().width))).toBe(wide);
 
-    // Fit restores the default column.
     await region2.getByRole("button", { name: "Zoom out" }).click();
     await region2.getByRole("button", { name: "Zoom out" }).click();
     await expect(region2.locator(".pager .txt-zoom")).toHaveText("Fit ⇕");
@@ -183,10 +159,7 @@ test.describe(".txt viewer", () => {
   });
 
   test("`Fit ⇔` at the top of the ladder spans the stage, which no multiplier promises", async ({ page }) => {
-    // The rung this replaced was `200%`, and `max-width: 100%` meant it landed on
-    // the stage edge at a common desk size — by accident of that desk. The point
-    // of naming the rung is that it is EXACT: whatever the stage, the column is
-    // the stage. So this measures against the stage rather than against a number.
+    // The top rung must equal the stage's content width exactly, whatever the stage.
     await signedIn(page);
     await mockTextFile(page);
     await page.goto(`/#/note/${README}`);
@@ -197,8 +170,6 @@ test.describe(".txt viewer", () => {
     const zoomLabel = region.locator(".pager .txt-zoom");
     await expect(sheet).toBeVisible();
 
-    // The stage's CONTENT box — the sheet's containing block, padding removed, so
-    // this is the width the column could possibly reach.
     const availWidth = await sheet.evaluate((el) => {
       const stage = el.parentElement!;
       const cs = getComputedStyle(stage);
@@ -206,8 +177,6 @@ test.describe(".txt viewer", () => {
     });
 
     const fit = await sheet.evaluate((el) => el.getBoundingClientRect().width);
-    // The default page is a 3:4 column — comfortably short of the stage, or the
-    // rest of this test would prove nothing.
     expect(fit).toBeLessThan(availWidth - 40);
 
     for (const step of ["125%", "150%", "175%", "Fit ⇔"]) {
@@ -217,12 +186,9 @@ test.describe(".txt viewer", () => {
 
     const spanned = await sheet.evaluate((el) => el.getBoundingClientRect().width);
     expect(Math.abs(spanned - availWidth)).toBeLessThan(1);
-    // The aspect is what the multiplier rungs steer, so the top rung has to be
-    // free of it — left in place it would fight the explicit width.
+    // The aspect is what the multiplier rungs steer; left on, it would fight the explicit width.
     expect(await sheet.evaluate((el) => getComputedStyle(el).aspectRatio)).toBe("auto");
 
-    // Still fits the stage VERTICALLY, as every rung does: height is what the
-    // sheet is sized from, and the top rung only changes the measure.
     const fitsHeight = await sheet.evaluate((el) => {
       const stage = el.parentElement!;
       const cs = getComputedStyle(stage);
@@ -232,15 +198,7 @@ test.describe(".txt viewer", () => {
     expect(fitsHeight).toBe(true);
   });
 
-  // The `−` [Fit] `+` control must render PIXEL-IDENTICAL to the reader's / the
-  // `.spd` viewer's zoom control. Its readout carries its own `.txt-zoom` class
-  // (so a `.zoom` locator stays unambiguous with two `.pager`s in the bar), but
-  // its CHROME must come from the shared toolbar rule, not a divergent restyle.
-  // The regression this guards: `.txt-zoom` had NO rule at all, so the readout
-  // rendered unstyled — wrong font, no min-width, no centring — shifting the whole
-  // control. The two readouts in this one bar (the font stepper's `.zoom` and the
-  // column-zoom's `.txt-zoom`) share the treatment, so their computed chrome is
-  // the same down to the pixel.
+  // Regression: `.txt-zoom` had no rule, so the readout rendered unstyled and shifted the control.
   test("the Fit control's chrome matches the shared zoom readout, not a divergent restyle", async ({ page }) => {
     await signedIn(page);
     await mockTextFile(page);
@@ -253,10 +211,6 @@ test.describe(".txt viewer", () => {
     await expect(fontReadout).toBeVisible();
     await expect(zoomReadout).toBeVisible();
 
-    // The chrome the shared `.zoom, .spd-zoom, .txt-zoom` rule sets: the pill's
-    // font, size, colour, min-width and centring. Read the SAME properties off
-    // both readouts and require them identical — the txt readout inherits the
-    // shared treatment rather than defaulting to unstyled inline text.
     const chrome = (loc: typeof fontReadout) =>
       loc.evaluate((el) => {
         const s = getComputedStyle(el);
@@ -271,17 +225,10 @@ test.describe(".txt viewer", () => {
     const font = await chrome(fontReadout);
     const zoom = await chrome(zoomReadout);
     expect(zoom).toEqual(font);
-    // And it is the real treatment, not two coincidentally-unstyled pills: the
-    // shared rule pins one min-width for every viewer's readout and centres the
-    // label. 62px holds the widest label any of them shows — `400%` and `Fit ⇔`
-    // in the reader's image mode and the PDF viewer — and the others carry
-    // the slack, because the readout sits between two buttons and a label that
-    // outgrows its box would move them.
+    // 62px holds the widest readout label (`400%`, `Fit ⇔`) in any viewer.
     expect(zoom.minWidth).toBe("62px");
     expect(zoom.textAlign).toBe("center");
 
-    // The font-size stepper beside it is unaffected — still its own `.zoom`
-    // readout, still stepping the glyph size independently of the column zoom.
     await expect(fontReadout).toHaveText("16px");
     await region.getByRole("button", { name: "Larger text" }).click();
     await expect(fontReadout).toHaveText("18px");

@@ -2,20 +2,9 @@ import { test, expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { FIXTURE, openPageOne } from "./helpers/pdfRange";
 
-// The FALLBACK, exercised rather than assumed.
-//
-//  Safari's JSPI status
-// open, so "download the whole file and open it from a buffer" is not a legacy
-// branch kept for politeness — it is what some real browser is on today, and a
-// path that is never run is a path that is broken.
-//
-// HOW JSPI IS TAKEN AWAY, and why it is done like this. Chromium 149 ships JSPI
-// as a stable feature: `--js-flags=--no-wasm-jspi`, `--no-experimental-wasm-jspi`
-// and `--disable-features=WebAssemblyJSPI` were all tried and all left
-// `WebAssembly.Suspending` present. `addInitScript` is no use either, because the
-// decision is made inside the WORKER, which has a global scope of its own. So the
-// worker's own module is intercepted on its way to the browser and a line is put
-// in front of it. That is the real detection running against a real absence.
+// Exercises the whole-file fallback for browsers without JSPI. Chromium's flags
+// cannot disable JSPI and detection runs in the worker, so the worker module is
+// intercepted and patched on its way to the browser.
 test.beforeEach(async ({ page }) => {
   await page.route(
     (url) => url.pathname.includes("pdfWorker"),
@@ -33,9 +22,6 @@ test.beforeEach(async ({ page }) => {
 test("without JSPI the viewer falls back to the whole file, and still paints", async ({ page }) => {
   const { served, stats } = await openPageOne(page, readFileSync(FIXTURE));
   expect(stats.mode).toBe("whole");
-  // No block cache at all on this path — there is nothing to cache blocks for.
   expect(stats.cache).toBeNull();
-  // One plain GET, and no `Range` on it. That the page is PAINTED at the end of
-  // it is already asserted inside `openPageOne`.
   expect(served.count()).toBe(1);
 });

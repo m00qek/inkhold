@@ -1,15 +1,6 @@
 // @vitest-environment happy-dom
-//
-// The `.txt` viewer's find CORE (src/pages/txtFind.ts): the byte→char mapping
-// that is the one hazard of searching a UTF-8 blob through a UTF-16 string, the
-// term-based paragraph marking, the exact count, and the DOM build. Pure and DOM
-// helpers, exercised directly; the viewer's wiring is proved in txtViewer.test.ts.
 
 import { describe, it, expect } from "vitest";
-// `fold` is no longer this file's: §8.2's merge left one copy, in `search/fold`,
-// which `txtFind.ts` now imports. The spot-check below stays pointed at the
-// shared module — the `.txt` side's dependence on the exact folding is pinned
-// where it belongs, through `markParagraph`, further down.
 import { fold } from "../../src/search/fold";
 import {
   byteToCharMap,
@@ -38,9 +29,8 @@ describe("byteToCharMap", () => {
   });
 
   it("accounts for multi-byte characters BEFORE the offset (the whole hazard)", () => {
-    // "é" is 2 UTF-8 bytes but 1 UTF-16 unit: the word after it starts at byte 3
-    // but char 2. A naive byte===char map would slide the highlight one over.
-    const text = "café latte"; // c a f é(2B) space l...
+    // "é" is 2 UTF-8 bytes but 1 UTF-16 unit, so offsets diverge after it.
+    const text = "café latte";
     // byte offset of "latte": c(1)a(1)f(1)é(2)space(1) = 6 bytes; char index 5.
     const m = byteToCharMap(text, [6]);
     expect(m.get(6)).toBe(5);
@@ -60,7 +50,7 @@ describe("resolveFindSegments", () => {
     const segs: TxtSegmentMatch[] = [{ segment: 1, offset: 13, length: 11, matches: 1, terms: ["Plain"] }];
     const [r] = resolveFindSegments(text, segs);
     expect(text.slice(r!.startChar, r!.endChar)).toBe("plain tail.");
-    expect(r!.terms.has("plain")).toBe(true); // folded
+    expect(r!.terms.has("plain")).toBe(true);
   });
 });
 
@@ -82,13 +72,12 @@ describe("markParagraph", () => {
     const marks = wrap.querySelectorAll("mark");
     expect(marks).toHaveLength(2);
     expect([...marks].map((m) => m.textContent)).toEqual(["zephyrine", "zephyrine"]);
-    // The rest of the paragraph survives verbatim as text.
     expect(wrap.textContent).toBe("The zephyrine and the zephyrine tea.");
   });
 
   it("marks by the FOLDED term, so an accented word matches an unaccented term", () => {
     const wrap = markParagraph("uma linha sobre café aqui", new Set(["cafe"]));
-    expect(wrap.querySelector("mark")!.textContent).toBe("café"); // shown as written
+    expect(wrap.querySelector("mark")!.textContent).toBe("café");
   });
 
   it("marks nothing when the terms are empty (a match it cannot point at)", () => {
@@ -101,17 +90,14 @@ describe("markParagraph", () => {
 describe("buildFindContent", () => {
   it("wraps each matching paragraph in a .txt__match, leaving the gaps plain", () => {
     const text = "one alpha.\n\ntwo beta.\n\nthree alpha.";
-    // alpha is in paragraphs 0 and 2.
     const segs = [
       { segment: 0, startChar: 0, endChar: 10, terms: new Set(["alpha"]), matches: 1 },
       { segment: 2, startChar: 23, endChar: 35, terms: new Set(["alpha"]), matches: 1 },
     ];
     const { nodes, paras } = buildFindContent(text, segs);
-    // Two wrappers, in ordinal order.
     expect(paras).toHaveLength(2);
     expect(paras[0]!.querySelector("mark")!.textContent).toBe("alpha");
     expect(paras[1]!.querySelector("mark")!.textContent).toBe("alpha");
-    // The whole document is reconstructed byte-for-byte across text + wrappers.
     const rebuilt = nodes.map((n) => n.textContent).join("");
     expect(rebuilt).toBe(text);
   });

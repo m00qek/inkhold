@@ -59,10 +59,7 @@ describe("reconcile", () => {
     expect(r.listing).toBe(next);
   });
 
-  // The listing WRAPPER's identity is load-bearing, not just its entries': the
-  // library repaints when `listing !== result.listing`, so a fresh wrapper on
-  // every revalidation repainted the gallery even when `changed` was false —
-  // dropping keyboard focus and detaching cards mid-interaction.
+  // Regression: a fresh wrapper per revalidation repainted the gallery and dropped focus.
   it("returns the SAME listing object when nothing changed, so callers can skip the repaint", () => {
     const prev = listing([note("a", 10), note("b", 20)], 1);
     const next = listing([note("a", 10), note("b", 20)], 1);
@@ -84,7 +81,6 @@ describe("reconcile", () => {
     const next = listing([note("a", 1, "h"), note("b", 2, "g")], 4);
     const r = reconcile(prev, next);
     expect(r.changed).toBe(false);
-    // Unchanged rows keep the previous object reference (stable identity).
     expect(r.listing.entries[0]).toBe(prev.entries[0]);
     expect(r.listing.entries[1]).toBe(prev.entries[1]);
   });
@@ -100,8 +96,8 @@ describe("reconcile", () => {
     const next = listing([note("a", 1, "h"), note("b", 9, "g2")], 5);
     const r = reconcile(prev, next);
     expect(r.changed).toBe(true);
-    expect(r.listing.entries[0]).toBe(prev.entries[0]); // untouched
-    expect(r.listing.entries[1]).toBe(next.entries[1]); // fresh copy
+    expect(r.listing.entries[0]).toBe(prev.entries[0]);
+    expect(r.listing.entries[1]).toBe(next.entries[1]);
   });
 
   it("reports changed when entries are added or removed", () => {

@@ -3,13 +3,8 @@ import http from "node:http";
 import { AddressInfo } from "node:net";
 import { HttpError, rangeFetcher, fetchWhole, totalFromContentRange } from "../../src/render/pdfTransport";
 
-// The transport, against a REAL server over a REAL `fetch`.
-//
-// A mocked `fetch` cannot test the thing that was broken here. The bug was that
-// `fetch` resolves on HEADERS while the body is still streaming, so a budget
-// released in a `finally` around the fetch alone left the body read unguarded —
-// and a mock that resolves with a fully-formed `Response` has no such gap to
-// expose. Only a server that answers and then STOPS reproduces it.
+// A real server: `fetch` resolves on headers, and only a server that then stalls
+// exposes an unguarded body read.
 
 const servers: http.Server[] = [];
 
@@ -36,17 +31,11 @@ const stallMidBody: http.RequestListener = (_req, res) => {
 };
 
 describe("the transfer budget", () => {
-  // THE REGRESSION, and why it is tested through ABORT rather than through the
-  // timer. `budget` funnels the deadline and the caller's signal into ONE
-  // `AbortController`, so "does the caller's abort still reach the body?" and
-  // "does the deadline still reach the body?" are the same question about the
-  // same `b.signal` — and the real deadline is 120 s, which no test should wait
-  // for. Releasing the budget after the headers broke both at once: it cleared
-  // the timer AND dropped the caller's abort listener.
+  // Regression: releasing the budget after the headers dropped both the deadline and
+  // the caller's abort. Tested through abort; the real deadline is 120 s.
 
   it("turns a cancelled transfer into an HttpError, not a raw AbortError", async () => {
-    // The viewer prints `PdfLoadError` as "Couldn't load this PDF"; a bare
-    // AbortError would surface DOMException text to the user instead.
+    // A bare AbortError would surface DOMException text to the user.
     const url = await serve(stallMidBody);
     const ac = new AbortController();
     setTimeout(() => ac.abort(), 200);
@@ -54,9 +43,6 @@ describe("the transfer budget", () => {
   });
 
   it("cancels an in-flight BODY when the caller aborts, so close() is not a lie", async () => {
-    // `release()` aborts `inflight` to stop a transfer the user walked away
-    // from. Releasing the budget after the headers dropped the caller's abort
-    // listener too, so the download carried on to completion in the background.
     const url = await serve(stallMidBody);
     const ac = new AbortController();
     const pending = rangeFetcher(url, ac.signal)(0, 999);

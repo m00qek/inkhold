@@ -2,11 +2,8 @@ import { describe, it, expect } from "vitest";
 import { SHORT_LEN, shortMd5, resolveVersionShort } from "../../src/pages/versionShort";
 import type { FileVersion } from "../../src/core/types";
 
-// The client-side half of `#/note/:id/version/:short`: a 7-hex-char md5 PREFIX
-// resolved against the version list the history panel already fetches
-// (`Api.noteHistory`, newest-first, the current blob flagged). Live-first, so a
-// restore that made a past version's md5 the live one resolves as "current"
-// rather than 404ing.
+// A 7-hex md5 prefix resolved against the newest-first version list; live first, so a
+// restored past md5 resolves as current.
 
 const v = (md5: string, current = false): FileVersion => ({
   md5,
@@ -15,7 +12,6 @@ const v = (md5: string, current = false): FileVersion => ({
   current,
 });
 
-// A file's list: current blob + two retained, newest-first, distinct 7-prefixes.
 const CURRENT = "aaaaaaa0000000000000000000000000";
 const PAST_1 = "bbbbbbb1111111111111111111111111";
 const PAST_2 = "ccccccc2222222222222222222222222";
@@ -50,8 +46,6 @@ describe("resolveVersionShort", () => {
   });
 
   it("resolves an ambiguous prefix to the NEWEST match (list is newest-first)", () => {
-    // Two versions sharing a prefix: the first (newer) wins. This is also why a
-    // restored past version — now prepended as current — resolves to current.
     const shared = [v("deadbee_newer".padEnd(32, "0"), true), v("deadbee_older".padEnd(32, "0"))];
     expect(resolveVersionShort(shared, "deadbee")).toEqual({ kind: "current", version: shared[0] });
   });

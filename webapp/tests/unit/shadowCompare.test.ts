@@ -12,37 +12,15 @@ import {
   type TermsDocument,
 } from "../../src/search/indexEngine";
 
-// ---------------------------------------------------------------------------
-// THE SHADOW, run against a FROZEN capture of the server's answers.
-//
-// §6 step 4 puts both engines behind the real search box and
-// counts disagreements on queries a person types. This replaces that, and the
-// reason is not impatience: step 6 DELETES the server implementation, so the
-// window in which the two can be compared at all is finite, and a control that
-// depends on somebody noticing a counter during it is not a control.
-//
-// So the server's answers are captured now, exhaustively, by
-// `tools/shadow-capture.py` — thousands of queries GENERATED FROM THE CORPUS
-// rather than imagined by an author — and this checks the browser against them
-// forever, including long after there is no server left to ask.
-//
+// The browser engine against a frozen capture of the server's answers:
 //   sqlite3 server/8089/minicloud.db ".backup /tmp/shadow.db"
 //   python3 tools/shadow-capture.py /tmp/shadow.db /tmp/golden.json 4000
 //   cd webapp && SHADOW_TERMS=../server/8089/data/terms SHADOW_SERVER=/tmp/golden.json \
 //     npx vitest run tests/unit/shadowCompare.test.ts
-//
-// Skipped unless pointed at real data, so the normal suite pays nothing.
-//
-// The capture reads `segment_fts` — the index the shipped path really uses, not
-// a reimplementation. This half reads the derived files off disk and builds
-// through the REAL engine, rowid mapping included, because that mapping is
-// exactly where an addressing bug would hide.
-// ---------------------------------------------------------------------------
+// Skipped unless pointed at real data.
 
 const termsDir = process.env.SHADOW_TERMS;
-// The capture is COMMITTED, and that is the point of it: step 6 deletes the
-// server, and after that this file is the only record of what it answered. It
-// is 1.8 MB of JSON, 0.2 MB gzipped, so it is stored compressed.
+// Committed (gzipped): the only record of what the server answered.
 const defaultGolden = fileURLToPath(new URL("../../../tools/testdata/shadow-golden.json.gz", import.meta.url));
 const goldenPath = process.env.SHADOW_SERVER ?? defaultGolden;
 const enabled = Boolean(termsDir && goldenPath && existsSync(termsDir) && existsSync(goldenPath));
@@ -52,19 +30,15 @@ const enabled = Boolean(termsDir && goldenPath && existsSync(termsDir) && exists
 type ModeAnswer = { n?: number; digest?: string; pages?: [string, number][]; error?: string };
 type Golden = { seed: number; queries: Record<string, { exact: ModeAnswer; prefix: ModeAnswer }> };
 
-/** Must stay identical to `shadow-capture.py`'s `digest()`: sha256 over
- * `md5#page\n` lines in sorted order, truncated to 32 hex characters.
- * Synchronous on purpose — this runs once per query over thousands of them, and
- * `crypto.subtle` made the comparison an async bottleneck that timed out. */
+/** Must match `shadow-capture.py`'s `digest()`: sha256 over sorted `md5#page\n`
+ *  lines, 32 hex chars. Synchronous: `crypto.subtle` was too slow here. */
 function digestOf(keys: readonly string[]): string {
   const h = createHash("sha256");
   for (const k of keys) h.update(`${k}\n`);
   return h.digest("hex").slice(0, 32);
 }
 
-/** `[12-byte header][raw deflate fragment]`. The fragment carries no final block
- * — every one is written with flush() so they concatenate — so reading one back
- * means appending what the serve path appends after the last. */
+/** `[12-byte header][raw deflate fragment]`; each fragment lacks a final block. */
 function readStored(path: string): string {
   const raw = readFileSync(path);
   if (raw.subarray(0, 4).toString("latin1") !== "IDF1") throw new Error(`not a fragment: ${path}`);
@@ -108,10 +82,7 @@ describe.skipIf(!enabled)("the browser answers what the server answered", () => 
     console.log(`  corpus ${docs.length} documents / ${index.pageCount} pages, golden ${Object.keys(golden.queries).length} queries`);
   }, 120_000);
 
-  // TWO MODES, because the client asks two questions: `buildMatch` appends `*`
-  // to the LAST term unless the query ends in whitespace. Asking only one is how
-  // the first version of this harness produced nine disagreements of its own
-  // making, the largest 3,549 pages.
+  // Two modes: `buildMatch` appends `*` unless the query ends in whitespace.
   for (const mode of ["exact", "prefix"] as const) {
     it(`matches the frozen server answers in ${mode} mode`, () => {
       const disagreements: string[] = [];
@@ -119,22 +90,15 @@ describe.skipIf(!enabled)("the browser answers what the server answered", () => 
 
       for (const [query, answer] of Object.entries(golden.queries)) {
         const want = answer[mode];
-        // A trailing space suppresses the prefix star; its absence requests one.
         const asked = mode === "exact" ? `${query} ` : query;
 
         if (want.error !== undefined) {
-          // The server could not parse it. Ours must ANSWER rather than throw —
-          // §2.2: a token folding to no terms is not an error.
+          // Unparseable on the server; ours must answer rather than throw.
           expect(() => index.query(asked, 1), `${JSON.stringify(query)} threw`).not.toThrow();
           continue;
         }
         checked += 1;
-        // ONE canonical order on both sides, and it is not the obvious one.
-        // `shadow-capture.py` sorts `[md5, page]` pairs, so pages compare as
-        // NUMBERS; sorting the composed `md5#page` strings instead puts page 10
-        // before page 9 and the digests disagree on ordering alone. That looked
-        // exactly like a real defect — same count, different set — on every
-        // query too big to keep full pages for.
+        // Pages sort as numbers, as `shadow-capture.py` does, not as `md5#page` strings.
         const hits = index
           .query(asked, 1_000_000)
           .hits.slice()
@@ -145,9 +109,6 @@ describe.skipIf(!enabled)("the browser answers what the server answered", () => 
           disagreements.push(`${JSON.stringify(query)}: server ${want.n} pages, client ${hits.length}`);
           continue;
         }
-        // Full pages where the capture kept them, digest otherwise. The digest is
-        // what catches a set of the right SIZE but the wrong CONTENT — which is
-        // precisely what a rowid mapped to the wrong page looks like.
         if (want.pages) {
           const have = new Set(hits);
           const missing = want.pages.map(([m, p]) => `${m}#${p}`).filter((k) => !have.has(k));

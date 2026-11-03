@@ -32,7 +32,7 @@ describe("parseTermsJsonl", () => {
       {
         md5: A,
         indexVersion: 7,
-        // `n` is the ADDRESS SPACE, not the row count. Two rows, 14,055 pages.
+        // `n` is the address space, not the row count.
         pageCount: 14055,
         pages: [
           { p: 0, t: "reuniao orcamento projeto" },
@@ -50,21 +50,13 @@ describe("parseTermsJsonl", () => {
   });
 
   it("accepts a header with NO page lines — a fully derived, wholly textless document", async () => {
-    // An unrecognised `.note` or an image-only PDF folds to nothing. The record
-    // ARRIVED, so it is derived, and `manifestCodec.ts`'s rule — cache an empty
-    // set under `derived` and never under `pending` — is satisfied by arrival
-    // itself. Refusing this would make such a document ask for ever.
+    // A document that folds to nothing still arrived, so it is derived.
     const docs = await collect(chunked(doc(A, 7, 12, [])));
     expect(docs).toEqual([{ md5: A, indexVersion: 7, pageCount: 12, pages: [] }]);
   });
 
   it("yields a document BEFORE the rest of the stream has arrived", async () => {
-    // The measured property this whole format exists for: first document usable
-    // at 8 ms of a 193 ms stream (§3.2). The parser releases a document on the
-    // NEXT header — there is nothing else that could say a document has ended —
-    // so the exact claim is that pulling document one reads two chunks and stops,
-    // with the rest of the library still on the wire. A parser that buffered the
-    // body would read all three.
+    // Released on the next header: pulling document one reads two chunks and stops.
     let pulled = 0;
     async function* slow(): AsyncGenerator<string> {
       for (const chunk of [
@@ -90,8 +82,7 @@ describe("parseTermsJsonl", () => {
       [0, "alpha beta"],
       [1, "gamma"],
     ]);
-    // Every possible split point, one at a time: a TCP segment lands wherever it
-    // lands and none of these may change the answer.
+    // Every possible split point: a TCP segment lands anywhere.
     for (let cut = 1; cut < body.length; cut += 1) {
       const docs = await collect(chunked(body.slice(0, cut), body.slice(cut)));
       expect(docs).toHaveLength(1);
@@ -103,8 +94,7 @@ describe("parseTermsJsonl", () => {
   });
 
   it("refuses a body that ends mid-line — truncation is the silent corruption", async () => {
-    // §3.1's failure mode in miniature: a stream that merely ran out decodes as
-    // a shorter, perfectly plausible answer.
+    // A stream that merely ran out would decode as a shorter, plausible answer.
     const body = doc(A, 7, 1, [[0, "alpha"]]) + '{"md5":"fedcba98765432';
     await expect(collect(chunked(body))).rejects.toThrow(SearchWireError);
   });
@@ -117,8 +107,6 @@ describe("parseTermsJsonl", () => {
         for await (const d of parseTermsJsonl(chunked(body))) got.push(d);
       })(),
     ).rejects.toThrow(SearchWireError);
-    // A caller that stored as it went keeps A. The rest is simply still missing
-    // at the next manifest and is asked for again.
     expect(got.map((d) => d.md5)).toEqual([A]);
   });
 
@@ -127,9 +115,7 @@ describe("parseTermsJsonl", () => {
   });
 
   it("refuses a header missing any of md5, v or n rather than defaulting one", async () => {
-    // REFUSED, NOT COERCED — the same call `manifestCodec.ts` makes about an
-    // unknown tier. The tempting default for `n` is the row count, which is
-    // wrong by construction.
+    // Refused, not coerced: defaulting `n` to the row count is wrong by construction.
     await expect(collect(chunked(`{"md5":"${A}","v":7}\n`))).rejects.toThrow(SearchWireError);
     await expect(collect(chunked(`{"md5":"${A}","n":3}\n`))).rejects.toThrow(SearchWireError);
     await expect(collect(chunked('{"md5":"not-hex","v":7,"n":3}\n'))).rejects.toThrow(SearchWireError);
@@ -161,11 +147,8 @@ describe("textChunks", () => {
   });
 
   it("splits multi-byte UTF-8 across chunks without a replacement character", async () => {
-    // Terms arrive folded by `unicode61 remove_diacritics 2`, so an accented
-    // character in the corpus is unusual — but the decoder must be streaming
-    // regardless, because a chunk boundary lands where the network puts it.
     const bytes = new TextEncoder().encode(doc(A, 7, 1, [[0, "reuniaoão"]]));
-    // Straight through the middle of the two-byte "ã", four characters from the end.
+    // Straight through the middle of the two-byte "ã".
     const cut = bytes.length - 5;
     const body = new ReadableStream<Uint8Array>({
       start(controller) {

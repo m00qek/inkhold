@@ -2,24 +2,13 @@ import { expect, type Page } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 import { signedIn, freezeMotion } from "./app";
 
-// Shared machinery for the range-served PDF specs: a Range-honouring route,
-// the ink probe, and the diagnostic the worker publishes.
-//
-// The acceptance is not "it renders", which `pdfViewer.spec.ts` already proves.
-// It is an ARITHMETIC claim: page 1 of a 76 MB document must cost a handful of
-// requests and a few megabytes, because on a 3G link the alternative to that is
-// seven minutes. So this file counts requests and bytes, and asserts about them.
-//
-// The two real documents are a deliberately CONTRASTING PAIR and they are not in
-// the repo — 76 MB in git would be worse than the test is worth. They are read
-// from an absolute path and the test skips itself when they are absent, so a
-// clean checkout still runs the suite green; the committed 688-byte fixture
-// covers what always has to work.
+// Range-honouring route, ink probe and worker diagnostics for the range-served PDF
+// specs. The `REAL` documents are local-only; specs skip when they are absent.
 
 export const REAL = {
-  /** 76 MB, 77 pages, A4, LINEARIZED — page 1 sits at the front. */
+  /** 76 MB, 77 pages, linearized (page 1 at the front). */
   linearized: "/home/rock-cavy/Downloads/2022-03 Plano diretor de Natal.pdf",
-  /** 26 MB, the same document, NOT linearized — the opposite access pattern. */
+  /** 26 MB, the same document, not linearized. */
   compressed: "/home/rock-cavy/Downloads/2022-03 Plano diretor de Natal_compressed.pdf",
 };
 
@@ -48,13 +37,8 @@ export interface SessionStats {
 }
 
 /**
- * Serve `body` the way the Zig raw route does since `d464895`: `206` with a
- * `content-range` for a satisfiable range, `416` when it is not, and
- * `accept-ranges` on everything.
- *
- * Playwright's `page.route` DOES intercept a dedicated worker's `fetch`,
- * `Range` header and all — checked before this design was committed to, because
- * the whole point is that the requests come from the worker and not the page.
+ * Link shaping for `serveRanges`, which answers like the Zig raw route (206 with
+ * `content-range`, 416 when unsatisfiable). `page.route` does see a worker's fetches.
  */
 export interface LinkShape {
   /** Round trip, in ms, charged once per request. */
@@ -70,28 +54,12 @@ export async function serveRanges(
   page: Page,
   body: Buffer,
   shape?: LinkShape,
-  /**
-   * Which raw-file requests this serves. Defaults to EVERY `/file/…`, which is
-   * what a viewer spec wants (one document on screen, nothing else asking for
-   * bytes). A GALLERY spec needs the narrow form: the folder around the PDF is
-   * full of images and `.txt` files whose tiles fetch the same route, and
-   * handing them PDF bytes would break every other tile in the grid.
-   */
+  /** Narrow it in gallery specs, or the neighbouring image and .txt tiles get PDF bytes. */
   match: (url: URL) => boolean = (url) => url.pathname.startsWith("/file/"),
 ): Promise<{ count: () => number; bytes: () => number }> {
   let count = 0;
   let bytes = 0;
-  /**
-   * Charge the response what the link would charge it.
-   *
-   * NOT what CDP's `Network.emulateNetworkConditions` does, because it does not
-   * reach here: a route fulfilled by Playwright never touches the browser's
-   * network stack, so the emulation applies to nothing. MEASURED — with Fast 3G
-   * conditions set, a fulfilled 5 MB body arrived in 233 ms and a 1-byte one in
-   * 6 ms, where the profile says ~25 s and ~400 ms. A "throttled" number taken
-   * that way is a CPU number wearing a network label. So the shaping is done
-   * here, where the bytes actually are.
-   */
+  /** Shaped here because CDP network emulation does not apply to fulfilled routes. */
   const charge = async (n: number): Promise<void> => {
     if (!shape) return;
     const ms = shape.latencyMs + (n / shape.bytesPerSecond) * 1000;
@@ -212,4 +180,3 @@ export function report(label: string, fileBytes: number, served: { count: () => 
     ].join("\n"),
   );
 }
-

@@ -16,25 +16,9 @@ import { serveRanges } from "./helpers/pdfRange";
 import { mockDocText, noteTextRecord } from "./helpers/docText";
 import { fakeFileHash } from "../../src/api/fake";
 
-// The recycle bin, end to end against the fake `Api`'s bin fixture (see
-// `src/api/binFake.ts`): a folder deleted with the two notes inside it, plus an
-// older note four days from the end of its retention window.
-//
-// What these tests are for is the behaviour that is invisible from the markup
-// and expensive to get wrong:
-//
-//   - trash NEVER opens a dialog and purge ALWAYS does. That asymmetry is the
-//     whole protection model — a confirm spent on the frequent, safe action is
-//     what trains people to dismiss the rare, final one;
-//   - the confirm's Cancel is FIRST, is what Enter activates, and holds focus,
-//     so the destructive button is never the default;
-//   - leaving the bin needs no teardown: `renderGallery()` overwriting the
-//     gallery is what closes it, and the rail highlight is derived from that.
-//     That same repaint is now what leaves BIN MODE, so the topbar's search box
-//     and its `Empty bin` are proved to come and go with it here;
-//   - a row shows the note's real first page. Nothing in the markup distinguishes
-//     a canvas painted with handwriting from one that never got any, so that
-//     claim is made with a pixel probe (`inkFraction`) rather than a selector.
+// Fixture `src/api/binFake.ts`: a folder trashed with two notes, plus an older note four
+// days from expiry. Trash never confirms and purge always does; `renderGallery()`
+// overwriting the gallery is what closes the bin and leaves bin mode.
 
 /** The bin's rail row, by its exact name (ignoring the count badge). */
 function binRow(page: Page) {
@@ -52,27 +36,16 @@ async function openBin(page: Page): Promise<void> {
 /** `download_test.note` — the older trashed seed, by id (`src/api/binFake.ts`). */
 const BIN_OLD_NOTE_ID = "304";
 
-/**
- * A bin row's two decisions now live behind the shared "…" overflow menu (the
- * same one the library grid/list rows use), so a row action is: open the row's
- * "…", then choose the item. The trigger names the row; the items are the plain
- * "Restore" / "Delete permanently".
- */
+/** Row actions live behind the shared "…" menu; the trigger names the row. */
 function binRowOf(page: Page, rowText: string) {
   return page.locator(".bin__row", { hasText: rowText }).first();
 }
-/**
- * Open a bin row's "…" menu and leave it open. RETRIED as a unit, for the same
- * reason the group-padding read is (see the `readGroup` retry below): the bin
- * repaints shortly after it opens (its own refresh lands), which can detach a
- * just-opened menu. `toPass` re-opens on a fresh row until the popover sticks.
- */
+/** Retried as a unit: the bin repaints after its own refresh, detaching a fresh menu. */
 async function openRowMenu(page: Page, rowText: string, name: string) {
   const row = binRowOf(page, rowText);
   await expect(async () => {
     await row.getByRole("button", { name: `Actions for ${name}` }).click();
-    // The open popover is PORTALED to `.menu-portal` at the body root (ui/menu.ts),
-    // not left under the row — so it is located at page scope, not `row.locator`.
+    // Portaled to `.menu-portal`, so located at page scope.
     await expect(page.locator(".menu-portal .menu__pop")).toBeVisible({ timeout: 1000 });
   }).toPass({ timeout: 15000 });
   return row;
@@ -87,11 +60,7 @@ async function rowMenuItem(
   await page.locator(".menu-portal").getByRole("menuitem", { name: item }).click();
 }
 
-/**
- * Open a viewer's bin-actions "…" (File actions) menu, RETRIED — a viewer can
- * repaint just after it mounts and detach a freshly-opened menu (the same hazard
- * `openRowMenu` guards against). Leaves the portaled popover showing.
- */
+/** Retried: a viewer can repaint just after mounting and detach the menu. */
 async function openFileActions(page: Page, cluster: Locator): Promise<void> {
   await expect(async () => {
     await cluster.getByRole("button", { name: "File actions" }).click();
@@ -99,12 +68,7 @@ async function openFileActions(page: Page, cluster: Locator): Promise<void> {
   }).toPass({ timeout: 15000 });
 }
 
-/**
- * Open a "…" / File-actions `trigger` and CLICK a portaled `item`, retried as ONE
- * unit — a viewer/list repaint can detach the just-opened menu between the open
- * and the click. Safe against double-firing: once the item click lands the block
- * resolves and `toPass` stops, so the action runs exactly once.
- */
+/** Open and click retried as one unit; `toPass` stops once the click lands, so it runs once. */
 async function chooseMenuItem(page: Page, trigger: Locator, item: string): Promise<void> {
   await expect(async () => {
     await trigger.click();
@@ -114,14 +78,8 @@ async function chooseMenuItem(page: Page, trigger: Locator, item: string): Promi
   }).toPass({ timeout: 15000 });
 }
 
-// --- serving raw bytes for the non-note viewers -------------------------------
-//
-// The library runs against the in-memory fake `Api`, but the `.spd`/`.txt`
-// viewers fetch their raw bytes as REAL browser requests. Two routes exist —
-// `/file/:id` for a live file and `/api/controlplane/bin/file/:id` for a trashed
-// one — and which of them the viewer mints is precisely the behaviour under
-// test, so each is served separately and the bin route COUNTS its hits.
-// (Registered after `signedIn`, so the bin route wins over its `/api/` catch-all.)
+// --- raw bytes for the non-note viewers ---
+// Live and bin raw routes are served separately; which one a viewer mints is under test.
 
 const SPD_PATH = fileURLToPath(new URL("../../../parsers/spd/tests/fixtures/layers_hidden.spd", import.meta.url));
 const SPD_BYTES = readFileSync(SPD_PATH);
@@ -147,15 +105,13 @@ async function serveRawBytes(page: Page, contentType: string, body: Buffer | str
   return { binHits: () => hits };
 }
 
-/** Trash the open file from its viewer, then walk to the bin and open its row. */
 async function trashAndReopenFromBin(page: Page, viewerRegion: string, rowName: string): Promise<void> {
   const region = page.getByRole("region", { name: viewerRegion });
   await expect(region).toBeVisible();
   await region.getByRole("button", { name: "Move to bin" }).click();
   await expect(page.locator(".bin-toast")).toContainText("Moved");
 
-  // IN-APP navigation, not a goto: a reload would rebuild the fake Api and lose
-  // the trash. This is also exactly the path a user walks.
+  // In-app navigation: a reload would rebuild the fake Api and lose the trash.
   await openBin(page);
   await page.locator(".bin__row", { hasText: rowName }).locator("button.bin__open").click();
   await expect(region).toBeVisible();
@@ -163,25 +119,18 @@ async function trashAndReopenFromBin(page: Page, viewerRegion: string, rowName: 
 }
 
 test.describe("recycle bin", () => {
-  // --- the boot race -----------------------------------------------------------
+  // --- the boot race ---
 
   test("a hard reload straight onto #/bin shows the trashed rows — and keeps them when the tree lands", async ({
     page,
   }) => {
     await signedIn(page);
-    // THE REAL BOOT PATH, deliberately: a fresh goto with NO prior navigation,
-    // so the shell's folder-tree prefetch is still in flight when the bin route
-    // dispatches. Its late response used to repaint the folder gallery over the
-    // just-opened bin — the bin's own close mechanism, fired by nobody — and the
-    // bin's subsequent paints were then guarded off as unmounted, leaving a
-    // blank screen. Navigating away and back never showed it, because the tree
-    // is cached by then; only a cold `#/bin` boot walks this code.
+    // Regression: on a cold `#/bin` boot the late folder-tree response repainted the gallery
+    // over the bin, closing it and leaving a blank screen.
     await page.goto("/#/bin");
     await expect(page.locator(".bin")).toBeVisible();
     await expect(page.locator(".bin__row")).toHaveCount(4);
 
-    // The regression window is the tree walk SETTLING — after it, the bin must
-    // still be the surface the route says it is, mode and all.
     await railSettled(page);
     await expect(page.locator(".bin")).toBeVisible();
     await expect(page.locator(".bin__row")).toHaveCount(4);
@@ -197,12 +146,9 @@ test.describe("recycle bin", () => {
 
     const row = binRow(page);
     await expect(row).toHaveCount(1);
-    // Not among the folders: nothing can be moved into it and it does not sync.
     await expect(row.locator(".nav__count")).toHaveText("4");
 
     await row.click();
-    // The breadcrumb names where you are, and sort/view describe a folder
-    // listing the bin is not.
     await expect(page.locator(".crumbs__here")).toHaveText("Recycle bin");
     await expect(page.locator(".segmented")).toBeHidden();
     await expect(page.locator(".select")).toBeHidden();
@@ -210,11 +156,7 @@ test.describe("recycle bin", () => {
   });
 
   test("the crumb is a way OUT, not just a label", async ({ page }) => {
-    // The bin is a destination, not a folder, so nothing else in the topbar
-    // leads back to the library. That was survivable while the only way in was
-    // the rail row you could click again — and stopped being survivable when
-    // the account page grew a Storage line that sends you here from somewhere
-    // else entirely, leaving the header a dead end.
+    // Regression: with the bin reachable from the account page, the header was a dead end.
     await signedIn(page);
     await page.goto("/");
     await railSettled(page);
@@ -226,29 +168,25 @@ test.describe("recycle bin", () => {
 
     await home.click();
 
-    // Back in a folder listing: the bin is gone and the controls it hid return.
     await expect(page.locator(".bin")).toHaveCount(0);
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
   });
 
-  // --- the bin is a MODE in the topbar (`.sn-root.is-destination`) ------------
+  // --- bin mode (`.sn-root.is-destination`) ---
 
   test("takes the search box away, because it searches a library you are not looking at", async ({ page }) => {
     await signedIn(page);
     await page.goto("/");
     await railSettled(page);
 
-    // Present over a folder — this is not a box that never existed.
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
 
     await binRow(page).click();
     await expect(page.locator(".bin")).toBeVisible();
-    // Gone from the accessibility tree too, not merely invisible: typing in it
-    // would leave the bin entirely, which is the trap, not the box.
+    // Out of the accessibility tree too: typing in it would leave the bin.
     await expect(page.locator(".sn-root")).toHaveClass(/is-destination/);
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeHidden();
 
-    // And it comes back on the way out, by the same repaint that closes the bin.
     await page
       .getByRole("navigation", { name: "Folders" })
       .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Note$/ }) })
@@ -263,17 +201,13 @@ test.describe("recycle bin", () => {
     await railSettled(page);
 
     const empty = page.locator("#empty-bin");
-    // A view-level control on a view you are not on.
     await expect(empty).toBeHidden();
 
     await binRow(page).click();
     await expect(empty).toBeVisible();
-    // The words the user asked for, beside the trash glyph — a red icon-only
-    // button in a toolbar is a guess, not a label.
     await expect(empty).toHaveText("Empty bin");
     await expect(empty.locator("svg")).toHaveCount(1);
     await expect(empty).toBeEnabled();
-    // Destructive at rest, and legible there: red is danger and nothing else.
     const { color, background } = await paintedColours(empty);
     expect(contrastRatio(color, background)).toBeGreaterThanOrEqual(4.5);
     const box = await empty.boundingBox();
@@ -287,16 +221,13 @@ test.describe("recycle bin", () => {
     await openBin(page);
 
     const empty = page.locator("#empty-bin");
-    // THE CONFIRM TRAVELLED WITH THE BUTTON. Empty-bin is irreversible and bulk,
-    // so the dialog is half of what the control is — moving it to the topbar
-    // must not have left the dialog behind in the view it came from.
+    // The confirm must have moved to the topbar with the button.
     await empty.click();
     const dialog = page.locator("dialog.confirm");
     await expect(dialog.locator("h2")).toHaveText("Delete all 4 items permanently?");
     await dialog.locator(".is-danger").click();
 
     await expect(page.locator(".bin .empty h3")).toHaveText("Nothing deleted");
-    // Still where it will be looked for, and unable to do anything.
     await expect(empty).toBeVisible();
     await expect(empty).toBeDisabled();
   });
@@ -306,14 +237,10 @@ test.describe("recycle bin", () => {
     await page.goto("/");
     await openBin(page);
 
-    // Both facts, because there are two distinct collisions: same name in
-    // different places (the path), and same name in the same place deleted twice
-    // (the time).
+    // Two collisions: same name in different places (path), same place twice (time).
     const old = page.locator(".bin__row", { hasText: "download_test.note" });
     await expect(old.locator(".bin__path")).toHaveText("Note");
     await expect(old.locator(".life__label")).toHaveText("4 days left");
-    // Four days out, so the rule crosses to the danger colour — the one place
-    // red appears without a destructive control under it.
     await expect(old.locator(".life")).toHaveClass(/is-soon/);
 
     const fresh = page.locator(".bin__row", { hasText: "nested_to_remove" });
@@ -325,17 +252,12 @@ test.describe("recycle bin", () => {
     await page.goto("/");
     await openBin(page);
 
-    // Deciding whether to restore something deleted a fortnight ago starts with
-    // recognising it, and a column of identical glyphs answers nothing a column
-    // of names has not already answered. This is the pixel probe that the row is
-    // showing ink rather than the placeholder it used to be stuck on.
+    // Pixel probe: markup cannot tell a painted row from a placeholder.
     const row = page.locator(".bin__row", { hasText: "download_test.note" });
     const canvas = row.locator(".bin__thumb.is-page canvas");
     await expect(canvas).toHaveCount(1);
     await expect.poll(async () => inkFraction(canvas), { timeout: 5000 }).toBeGreaterThan(0.002);
 
-    // The honest fallbacks are still honest: a folder is a container, and gets
-    // the folder glyph rather than a page it does not have.
     const folder = page.locator(".bin__row", { hasText: "nested_to_remove" }).first();
     await expect(folder.locator(".bin__thumb.is-folder")).toHaveCount(1);
     await expect(folder.locator("canvas")).toHaveCount(0);
@@ -347,14 +269,12 @@ test.describe("recycle bin", () => {
     await openBin(page);
 
     const rows = page.locator(".bin__row");
-    // The device sends a folder delete as separate per-entity requests, children
-    // first. The nesting is what reunites them into the one action they were.
+    // The device deletes a folder as per-entity requests, children first; nesting reunites them.
     await expect(rows.nth(0)).toContainText("nested_to_remove");
     await expect(rows.nth(1)).toHaveClass(/is-child/);
     await expect(rows.nth(2)).toHaveClass(/is-child/);
     await expect(rows.nth(0).locator(".bin__open.is-static")).toHaveCount(1);
     await expect(rows.nth(1).locator("button.bin__open")).toHaveCount(1);
-    // A child's path would just repeat the folder named directly above it.
     await expect(rows.nth(1).locator(".bin__path")).toHaveCount(0);
   });
 
@@ -378,11 +298,9 @@ test.describe("recycle bin", () => {
     const dialog = page.locator("dialog.confirm");
     await expect(dialog).toBeVisible();
     await expect(dialog.locator("h2")).toHaveText("Delete nested_to_remove permanently?");
-    // The user clicked one row; the operation destroys three.
     await expect(dialog.locator("p")).toContainText("Deletes the folder and the 2 items inside it");
-    // Trash keeps charging quota, so purge is the only moment the bytes return.
+    // Trash keeps charging quota, so purge is when the bytes return.
     await expect(dialog.locator(".confirm__frees")).toContainText("2.0 MB");
-    // The button repeats the title, so the sentence read is the sentence performed.
     await expect(dialog.locator(".is-danger")).toHaveText("Delete permanently");
   });
 
@@ -400,7 +318,6 @@ test.describe("recycle bin", () => {
     await expect(buttons.nth(1)).toHaveText("Delete permanently");
     await expect(buttons.nth(0)).toBeFocused();
 
-    // The destructive button is never the default action.
     await page.keyboard.press("Enter");
     await expect(dialog).toBeHidden();
     await expect(row).toBeVisible();
@@ -439,7 +356,6 @@ test.describe("recycle bin", () => {
 
     await rowMenuItem(page, "nested_to_remove", "nested_to_remove", "Restore");
 
-    // Restore routinely does more than the user selected, so it says so.
     await expect(page.locator(".bin-toast")).toContainText("with the 2 items inside it");
     await expect(page.locator(".bin__row")).toHaveCount(1);
   });
@@ -452,12 +368,11 @@ test.describe("recycle bin", () => {
     await page.getByRole("button", { name: "Delete everything in the recycle bin permanently" }).click();
     const dialog = page.locator("dialog.confirm");
     await expect(dialog.locator("h2")).toHaveText("Delete all 4 items permanently?");
-    // A folder's bytes are its children's; the total must not count them twice.
+    // A folder's bytes are its children's; do not count them twice.
     await expect(dialog.locator(".confirm__frees")).toContainText("4.1 MB");
 
     await dialog.locator(".is-danger").click();
     await expect(page.locator(".bin__row")).toHaveCount(0);
-    // U7: the absence is informative rather than blank.
     await expect(page.locator(".bin .empty h3")).toHaveText("Nothing deleted");
     await expect(page.locator(".bin .empty p")).toContainText("30 days");
   });
@@ -474,11 +389,9 @@ test.describe("recycle bin", () => {
 
     const card = page.locator(".card").filter({ has: page.locator(".card__title") }).first();
     const name = (await card.locator(".card__title").textContent())?.trim() ?? "";
-    // The row's delete is now the "…" menu's Move to bin item.
     await card.getByRole("button", { name: `Actions for ${name}` }).click();
     await page.locator(".menu-portal").getByRole("menuitem", { name: "Move to bin" }).click();
 
-    // Reversible, so no dialog — it acts and offers the reverse.
     await expect(page.locator("dialog.confirm")).toBeHidden();
     const toast = page.locator(".bin-toast");
     await expect(toast).toContainText("Moved");
@@ -496,19 +409,13 @@ test.describe("recycle bin", () => {
 
     await page.locator(".bin__row", { hasText: "download_test.note" }).locator("button.bin__open").click();
 
-    // Returning to the library would drop the user somewhere the file they were
-    // just looking at does not exist.
     await expect(page.locator("#back-label, .backbtn")).toContainText("Recycle bin");
 
-    // THE CONTEXT SWAP: the note is already trashed, so Move to bin leaves and the
-    // toolbar shows the SAME `|— retention —| ⋯` a bin ROW does — the countdown
-    // then the "…" menu whose two decisions are Restore (neutral) and Delete
-    // permanently (the one red item).
+    // The note is already trashed, so the toolbar swaps Move to bin for the bin row's cluster.
     const reader = page.locator(".reader");
     await expect(reader.getByRole("button", { name: "Move to bin" })).toBeHidden();
     const cluster = reader.locator(".viewer__bin-actions");
     await expect(cluster).toBeVisible();
-    // The retention countdown, carried from the bin row: 4 days left, "soon".
     await expect(cluster.locator(".life__label")).toHaveText("4 days left");
     await expect(cluster.locator(".life")).toHaveClass(/is-soon/);
 
@@ -522,7 +429,6 @@ test.describe("recycle bin", () => {
     await page.keyboard.press("Escape");
 
     await page.locator(".backbtn").first().click();
-    // And the bin is still what is behind the reader — nothing had to restore it.
     await expect(page.locator(".bin__row").first()).toBeVisible();
   });
 
@@ -534,9 +440,6 @@ test.describe("recycle bin", () => {
     await page.locator(".bin__row", { hasText: "download_test.note" }).locator("button.bin__open").click();
     await expect(page.locator("#back-label, .backbtn")).toContainText("Recycle bin");
 
-    // Restore is the SAFE direction: no dialog, it acts — and the file no longer
-    // exists in the bin context, so the viewer leaves for the bin page. It lives
-    // in the toolbar's "…" menu now.
     const cluster = page.locator(".reader").locator(".viewer__bin-actions");
     await chooseMenuItem(page, cluster.getByRole("button", { name: "File actions" }), "Restore");
     await expect(page.locator("dialog.confirm")).toBeHidden();
@@ -552,24 +455,18 @@ test.describe("recycle bin", () => {
     await openBin(page);
 
     await page.locator(".bin__row", { hasText: "download_test.note" }).locator("button.bin__open").click();
-    // Delete permanently is the toolbar "…" menu's red item. A helper, because it
-    // is invoked twice here (a cancel, then a confirm).
     const cluster = page.locator(".reader").locator(".viewer__bin-actions");
     const openPurge = async (): Promise<void> => {
       await chooseMenuItem(page, cluster.getByRole("button", { name: "File actions" }), "Delete permanently");
     };
     await openPurge();
 
-    // The SAME dialog a bin row raises — no caller reaches the destructive half
-    // without it — and a cancel leaves the reader open on the still-trashed note.
     const dialog = page.locator("dialog.confirm");
     await expect(dialog.locator("h2")).toHaveText("Delete download_test.note permanently?");
     await dialog.locator("button", { hasText: "Cancel" }).click();
     await expect(dialog).toBeHidden();
     await expect(page.locator("#back-label, .backbtn")).toContainText("Recycle bin");
 
-    // Confirmed, the note is gone for good: back to the bin, one row and one
-    // badge count lighter, with the bytes stated.
     await openPurge();
     await dialog.locator(".is-danger").click();
     await expect(page.locator(".bin-toast")).toContainText("2.1 MB freed");
@@ -578,30 +475,13 @@ test.describe("recycle bin", () => {
     await expect(binRow(page).locator(".nav__count")).toHaveText("3");
   });
 
-  // --- viewer parity: a trashed note reads like a live one ------
-  //
-  // A trashed file's transcript + history are RETAINED (md5-keyed, `deleted = 1`),
-  // so the bin viewer draws the same recognized-text ovals, finds in-note, and
-  // browses version history the live viewer does — all through `createBinScope`'s
-  // reroutes onto the `/bin/…` twins. `download_test.note` (the fixture's older
-  // trashed note) is recognized, so it is the one that exercises all of it.
+  // --- viewer parity ---
+  // Transcripts and history are retained for trashed files, via `createBinScope`'s reroutes.
 
   test("a trashed .note preview draws recognized-text ovals and find-in-note works", async ({ page }) => {
     await signedIn(page);
-    // THE BIN IS NOT A SCOPE ANY MORE (§1.1, §6 step 7).
-    // `/bin/note/:id/search` is gone; a trashed file's find fetches
-    // `text/<md5>` under the RETAINED blob's own address, exactly as a live
-    // file's does, and `createBinScope` reroutes nothing for it — there is
-    // nothing left to reroute. That is the collapse §1.1 promised: "history and
-    // bin are not special, they are other md5s".
-    //
-    // Served under the trashed blob's OWN address, which is the whole claim: a
-    // trashed file's md5 is the md5 it always had (`binFake.ts`'s `BlobHash`),
-    // so the record is registered by name here rather than through a `fallback`
-    // that answers whatever is asked. This spec used to need that workaround
-    // because the fixture minted `"<id>-md5"`, a hash the real route's path
-    // could not carry. `download_test.note` is 2 pages, both recognised,
-    // "budget" twice on each.
+    // Served under the trashed blob's own md5 (`binFake.ts`'s `BlobHash`), not via `fallback`.
+    // `download_test.note`: 2 pages, "budget" twice on each.
     await mockDocText(page, {
       [fakeFileHash(BIN_OLD_NOTE_ID)]: noteTextRecord("download_test.note", 2),
     });
@@ -612,24 +492,16 @@ test.describe("recycle bin", () => {
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await freezeMotion(page);
 
-    // Find is ENABLED — the trashed note is searchable because its transcript
-    // survived the delete (it used to degrade to an empty stub, disabling this).
     const findBtn = page.getByRole("button", { name: "Find in this note" });
     await expect(findBtn).toBeEnabled();
     await findBtn.click();
     await page.getByRole("textbox", { name: "Find in this note" }).fill("budget");
 
-    // The counter settles to a real "N of M" off the retained blob's own text.
-    // Generous, because this is the session's first find: it pays the wasm
-    // instantiate (16.13 MB) and the index build before it can say a number.
+    // Generous: the session's first find pays wasm instantiation and the index build.
     await expect(page.locator(".findbar__count")).toContainText("of", { timeout: 20_000 });
-    // …and the on-page ovals paint from the bin page-text route's word boxes —
-    // the half of find that needs `getPageText`, which the bin reroute DOES still
-    // serve. Only the search half stopped being a scope.
+    // Ovals come from the bin page-text route; only search stopped being bin-scoped.
     await expect(page.locator(".reader .findbox").first()).toBeVisible();
     await expect(page.locator(".findbar__note")).toBeHidden();
-    // The word is in the text exactly as typed, so the ladder never fires and no
-    // fuzzy affordance appears.
     await expect(page.locator(".findbar__fuzzy")).toBeHidden();
   });
 
@@ -642,16 +514,12 @@ test.describe("recycle bin", () => {
     await expect(page.locator(".reader.is-open")).toBeVisible();
     await freezeMotion(page);
 
-    // CARD PARITY: the bin viewer's "…" menu carries a "Version history" row next
-    // to Restore / Delete permanently — the same entry the library card ⋯ offers.
     const cluster = page.locator(".reader").locator(".viewer__bin-actions");
     await openFileActions(page, cluster);
     await expect(page.locator(".menu-portal").getByRole("menuitem", { name: "Version history" })).toBeVisible();
     await expect(page.locator(".menu-portal").getByRole("menuitem", { name: "Restore" })).toBeVisible();
     await page.keyboard.press("Escape");
 
-    // The reader's Versions toolbar button — un-gated for a trashed real note —
-    // opens the SAME floating panel; it lists versions with no per-row buttons.
     await page.locator(".reader__bar").getByRole("button", { name: "Version history" }).click();
     const panel = page.locator(".vh");
     await expect(panel).toBeVisible();
@@ -660,14 +528,12 @@ test.describe("recycle bin", () => {
     await expect(versionRows).toHaveCount(3);
     await expect(versionRows.nth(0).locator("button")).toHaveCount(0);
 
-    // Preview a PAST version — the row click opens the reused reader read-only.
     await versionRows.nth(1).click();
     await expect(panel).toBeHidden();
     const banner = page.locator(".reader .version-banner");
     await expect(banner).toBeVisible();
     await expect(banner).toContainText("not the current note");
-    // THE VIEW-ONLY DECISION: no per-version Restore in the bin. Restore the FILE
-    // first (still offered by the bin cluster), then a version — the live flow.
+    // View-only: restore the file first, then a version.
     await expect(banner.getByRole("button", { name: "Restore this version" })).toBeHidden();
   });
 
@@ -679,8 +545,6 @@ test.describe("recycle bin", () => {
     await page.locator(".bin__row", { hasText: "download_test.note" }).locator("button.bin__open").click();
     await expect(page.locator(".reader.is-open")).toBeVisible();
 
-    // Un-touched by the view-only history decision: the bin viewer's own Restore
-    // (restore the FILE) acts, toasts, and closes back onto the bin minus the row.
     const cluster = page.locator(".reader").locator(".viewer__bin-actions");
     await chooseMenuItem(page, cluster.getByRole("button", { name: "File actions" }), "Restore");
     await expect(page.locator(".bin-toast")).toContainText("Restored download_test.note");
@@ -700,8 +564,6 @@ test.describe("recycle bin", () => {
     await expect(page.locator(".bin")).toHaveCount(0);
     await expect(page.locator(".segmented")).toBeVisible();
     await expect(page.locator(".select")).toBeVisible();
-    // The mode's own control leaves with the mode; `renderGallery()` is the
-    // whole of the teardown, exactly as it is for the bin's markup.
     await expect(page.locator("#empty-bin")).toBeHidden();
     await expect(binRow(page)).toHaveAttribute("aria-current", "false");
   });
@@ -711,12 +573,9 @@ test.describe("recycle bin", () => {
     await page.goto("/");
     await openBin(page);
 
-    // The destructive decision is a menu item now. Open the row's "…", then
-    // measure the item where it is read — inside the popover.
     const row = await openRowMenu(page, "download_test.note", "download_test.note");
     const del = page.locator(".menu-portal").getByRole("menuitem", { name: "Delete permanently" });
     await expect(del).toBeVisible();
-    // It IS the danger variant (the one red item), and legible on the popover.
     await expect(del).toHaveClass(/menu__item--danger/);
     const { color, background } = await paintedColours(del);
     expect(contrastRatio(color, background)).toBeGreaterThanOrEqual(4.5);
@@ -726,27 +585,18 @@ test.describe("recycle bin", () => {
     expect(box!.width).toBeGreaterThanOrEqual(24);
   });
 
-  // A TRASHED SUBTREE IS ONE UNIT, and it takes TWO things to say so — dropping
-  // the rule between a folder and its children, and tightening the padding on
-  // both sides of every seam inside the group. They are one decision: air and a
-  // rule are the same signal, so a group that drops the rule while keeping the
-  // full 15px would put 30px of blank between a folder and its own children and
-  // make them read as FURTHER apart than two unrelated ruled rows. Asserted
-  // together, because reverting either half alone is the failure mode and either
-  // half alone still looks deliberate in a screenshot.
+  // Dropping the rule and tightening padding are one decision; either alone leaves the
+  // group reading further apart than unrelated rows.
   test("a trashed folder clusters with its children, and the group ends where the next entry begins", async ({
     page,
   }) => {
     await signedIn(page);
     await page.goto("/");
     await openBin(page);
-    // Nothing below is read before motion stops: a frozen transition hands back
-    // an intermediate padding as readily as an intermediate opacity.
+    // Freeze first: a running transition reports intermediate padding.
     await freezeMotion(page);
 
     const rows = page.locator(".bin__row");
-    // The fixture: `nested_to_remove` with its two notes, children first from the
-    // device, reunited into folder-then-children by the nesting.
     await expect(rows.nth(0)).toContainText("nested_to_remove");
     await expect(rows.nth(1)).toHaveClass(/is-child/);
     await expect(rows.nth(2)).toHaveClass(/is-child/);
@@ -760,17 +610,7 @@ test.describe("recycle bin", () => {
     });
     expect(tokens.tight).toBeLessThan(tokens.full);
 
-    // Read as ONE snapshot of the whole group, so the two halves of the pairing
-    // are compared against each other rather than asserted a row at a time.
-    //
-    // RETRIED, for the same reason `paintedColours` and `inkFraction` are (see
-    // helpers/app.ts): the bin repaints under this read. `open()` paints what is
-    // already in hand and then re-renders when its own refresh lands, and a node
-    // detached between resolving the locator and reading it reports EMPTY
-    // computed styles — `getComputedStyle` on an orphan returns "" for every
-    // property — which arrives here as `NaN` and fails the test for a reason
-    // that has nothing to do with padding. `null` is "unreadable, try again";
-    // the values themselves are stable once the DOM is.
+    // Retried: the bin re-renders when its refresh lands, and orphans report "" styles.
     const readGroup = () =>
       page.locator(".bin__rows").first().evaluate((g) => {
         const out = [];
@@ -783,9 +623,7 @@ test.describe("recycle bin", () => {
             bottom: parseFloat(cs.paddingBottom),
           });
         }
-        // The fixture group is a folder plus its two children, so fewer than
-        // three rows is a half-rendered list rather than an answer. (It can be
-        // MORE: the second read below appends a stranger row on purpose.)
+        // Fewer than three rows is a half-rendered list.
         return out.length >= 3 ? out : null;
       });
 
@@ -799,31 +637,14 @@ test.describe("recycle bin", () => {
     };
 
     const [folder, middle, last] = await group();
-    // The folder: no divider through the middle of the group it owns, and the
-    // tight underside that keeps its children close to it.
     expect(folder).toEqual({ rule: 0, top: tokens.full, bottom: tokens.tight });
-    // A middle child is tight on BOTH sides, and still undivided.
     expect(middle).toEqual({ rule: 0, top: tokens.tight, bottom: tokens.tight });
-    // The last child ENDS the group: the full padding comes back. This is the
-    // half that is easiest to revert on its own, and doing so would put 30px of
-    // blank inside the group while leaving 15px at its edge — the nesting saying
-    // the opposite of what it means.
     expect(last!.top).toBe(tokens.tight);
     expect(last!.bottom).toBe(tokens.full);
 
-    // …and so does the rule. It cannot be read straight off this fixture, because
-    // the last child is also the last row of its date group and `:last-child`
-    // suppresses the border there for a different reason — a true reading and a
-    // false one that agree. So a sibling is appended to make the group genuinely
-    // continue, which is exactly the case `:has(+ .bin__row.is-child)` exists to
-    // distinguish: the rule must return for a row that is NOT followed by a child.
-    //
-    // APPENDED AND READ IN ONE evaluate, and retried as a pair. The bin
-    // re-renders when its own refresh lands, which throws the appended row away
-    // — and a read that then found the true last child would measure the
-    // `:last-child` suppression and report exactly the failure this assertion is
-    // looking for. Doing both inside one turn means either both survive or
-    // neither does, and the retry above handles "neither".
+    // The last child is also last in its date group, where `:last-child` hides the border
+    // anyway, so a stranger row is appended. Appended and read in one evaluate, since a
+    // re-render discards it.
     const groupWithStranger = async () => {
       for (let attempt = 0; ; attempt++) {
         const read = await page
@@ -855,12 +676,8 @@ test.describe("recycle bin", () => {
     };
 
     const [folderAfter, middleAfter, lastAfter] = await groupWithStranger();
-    // The subtree is unchanged — the suppression is scoped to "followed by a
-    // child", not to "anywhere above the end of the list".
     expect(folderAfter).toEqual(folder);
     expect(middleAfter).toEqual(middle);
-    // The last child now divides, because what follows it really is a separate
-    // thing. Padding stays full: the group ended here either way.
     expect(lastAfter!.rule).toBeGreaterThan(0);
     expect(lastAfter!.bottom).toBe(tokens.full);
     const colour = await page
@@ -871,13 +688,7 @@ test.describe("recycle bin", () => {
     expect(colour).not.toMatch(/,\s*0\s*\)$/);
   });
 
-  // --- the non-note viewers, from the bin -------------------------------------
-  //
-  // A trashed `.spd`/`.txt` used to fall into the small in-bin preview panel,
-  // because their viewers minted the LIVE raw-bytes URL and a trashed file 404s
-  // from it. Now they open their REAL viewers, fetching off the bin-scoped route,
-  // with the bin-origin toolbar (the retention countdown + the "…" menu's Restore
-  // / Delete permanently) and the "Recycle bin" Back control the reader had.
+  // --- non-note viewers from the bin ---
 
   test("a trashed .spd opens its real viewer off the bin route, and Restore returns it", async ({ page }) => {
     await signedIn(page);
@@ -887,14 +698,11 @@ test.describe("recycle bin", () => {
 
     await trashAndReopenFromBin(page, "Sketch viewer", "Kitchen sketch");
 
-    // The REAL render, through the real decoder — one canvas per layer — and the
-    // bytes came off the BIN route, because the live one 404s for trashed files.
+    // The live route 404s for trashed files.
     const region = page.getByRole("region", { name: "Sketch viewer" });
     await expect(region.locator(".spd-canvas-wrap .spd-layer-canvas")).toHaveCount(4);
     expect(raw.binHits()).toBeGreaterThan(0);
 
-    // The context swap, exactly as the reader wears it: the retention countdown +
-    // the "…" menu (Restore neutral, Delete permanently the red item).
     await expect(region.getByRole("button", { name: "Move to bin" })).toBeHidden();
     const cluster = region.locator(".viewer__bin-actions");
     await expect(cluster.locator(".life__label")).toContainText("days left");
@@ -905,8 +713,6 @@ test.describe("recycle bin", () => {
     await expect(purge).toBeVisible();
     await expect(purge).toHaveClass(/menu__item--danger/);
 
-    // Restore acts without a dialog, and the sketch no longer exists in the bin
-    // context — so the viewer closes back onto the bin, minus the row.
     await restore.click();
     await expect(page.locator("dialog.confirm")).toBeHidden();
     await expect(page.locator(".bin-toast")).toContainText("Restored Kitchen sketch");
@@ -923,19 +729,14 @@ test.describe("recycle bin", () => {
 
     await trashAndReopenFromBin(page, "Text viewer", "readme");
 
-    // The decoded text itself, laid out by the real viewer — off the bin route.
     const region = page.getByRole("region", { name: "Text viewer" });
     await expect(region.locator(".txt__sheet")).toContainText("Return the library books on Friday.");
     expect(raw.binHits()).toBeGreaterThan(0);
-    // …and Download still offered, pointed at the bin-scoped URL (the reader's
-    // precedent: the original is still there to save until the purge).
     await expect(region.locator('[aria-label="Download"]')).toHaveAttribute(
       "href",
       /^\/api\/controlplane\/bin\/file\/177\?/,
     );
 
-    // Purge NEVER skips the dialog; a cancel leaves the viewer open on the file.
-    // It is the toolbar "…" menu's red item now.
     const cluster = region.locator(".viewer__bin-actions");
     const openPurge = async (): Promise<void> => {
       await chooseMenuItem(page, cluster.getByRole("button", { name: "File actions" }), "Delete permanently");
@@ -947,7 +748,6 @@ test.describe("recycle bin", () => {
     await expect(dialog).toBeHidden();
     await expect(region).toBeVisible();
 
-    // Confirmed, it is gone for good: back onto the bin, one row lighter.
     await openPurge();
     await dialog.locator(".is-danger").click();
     await expect(page.locator(".bin-toast")).toContainText("Deleted readme");
@@ -959,12 +759,7 @@ test.describe("recycle bin", () => {
   test("a trashed .pdf offers Restore and Delete permanently, like every other viewer", async ({
     page,
   }) => {
-    // The PDF viewer was the ONLY one of four with no bin controls at all. It
-    // knew it had been opened from the bin — it used `fromBin` to pick the
-    // bin-scoped download route — and still offered Download as the only action,
-    // so a trashed PDF could be neither restored nor deleted from the place you
-    // were looking at it. Both halves are new here: `trashAndReopenFromBin`
-    // clicks a "Move to bin" that did not exist either.
+    // Regression: the PDF viewer offered no bin controls for a trashed PDF.
     await signedIn(page);
     const raw = await serveRawBytes(page, "application/pdf", PDF_BYTES);
     await page.goto("/#/note/178");
@@ -973,8 +768,7 @@ test.describe("recycle bin", () => {
     await trashAndReopenFromBin(page, "PDF viewer", "Appliance manual");
 
     const region = page.getByRole("region", { name: "PDF viewer" });
-    // It really RENDERS from the bin route — the live one 404s for a trashed
-    // file, so a viewer that minted the wrong URL would sit on its placeholder.
+    // A viewer minting the live URL would sit on its placeholder.
     await expect.poll(
       () =>
         page.evaluate(() => {
@@ -985,7 +779,6 @@ test.describe("recycle bin", () => {
     ).toBeGreaterThan(0);
     expect(raw.binHits()).toBeGreaterThan(0);
 
-    // The context swap the reader and the `.spd`/`.txt` viewers already wore.
     await expect(region.getByRole("button", { name: "Move to bin" })).toBeHidden();
     const cluster = region.locator(".viewer__bin-actions");
     await expect(cluster.locator(".life__label")).toContainText("days left");
@@ -1001,14 +794,8 @@ test.describe("recycle bin", () => {
     await expect(page.locator(".bin__row", { hasText: "Appliance manual" })).toHaveCount(0);
   });
 
-  // --- the tiles come off the library's own thumbnail facade -------------------
-  //
-  // A trashed `.spd`/`.txt`/image used to fall to the generic doc glyph (or, for
-  // an image, a raw full-size fetch per row): the bin's painter never learned
-  // the facade the library galleries paint through. Now every tile with a real
-  // preview asks the SAME facade — same strategies, same tier cache, same dims
-  // memo — with the one bin-specific fact (`bin: true`) routing raw-file
-  // fetches to the bin-scoped endpoint the trashed blob still answers from.
+  // --- bin tiles use the library's thumbnail facade ---
+  // `bin: true` routes raw fetches to the bin endpoint.
 
   /** Trash one of the Files-folder fixtures from its list row — no viewer. The
    *  row's delete is the "…" menu's Move to bin item. */
@@ -1033,53 +820,25 @@ test.describe("recycle bin", () => {
     await trashFromFiles(page, "readme");
     await openBin(page);
 
-    // The `.spd`: its extracted embedded thumbnail, off `/thumbnail/{hash}` —
-    // the same strategy, cache and (content-addressed, so trashed-blob-serving)
-    // endpoint the library tile uses. Real pixels, probed as pixels.
     const spdRow = page.locator(".bin__row", { hasText: "Kitchen sketch" });
     const spd = spdRow.locator(".bin__thumb img");
     await expect(spd).toHaveCount(1);
     await expect.poll(() => imgInkFraction(spd), { timeout: 6000 }).toBeGreaterThan(0.02);
-    // Addressed by the blob's REAL md5 — the same one the live listing gave it,
-    // because trashing does not rewrite a blob (`binFake.ts`'s `BlobHash`).
+    // Trashing does not rewrite a blob, so the md5 is the live one.
     expect(hits.thumbnailHits(fakeFileHash("174"))).toBeGreaterThan(0);
-    // …and the row pre-clamped its lead from the `.spd`'s stated thumb dims, so
-    // the tile reserved its final width before any bytes arrived.
     await expect(spdRow.locator(".bin__thumb")).toHaveClass(/has-aspect/);
 
-    // The `.txt`: a rasterised snippet of its ACTUAL head, not the doc glyph —
-    // ink the mark could not produce.
     const txt = page.locator(".bin__row", { hasText: "readme" }).locator(".bin__thumb img");
     await expect(txt).toHaveCount(1);
     await expect.poll(() => imgInkFraction(txt), { timeout: 6000 }).toBeGreaterThan(0.004);
 
-    // AND IT COST NOTHING. This walk saw `readme` twice — once as a live list
-    // row, once as a trashed one — and the raw blob was read exactly ONCE across
-    // BOTH scopes. That is the facade's own claim, stated in `ThumbSource.bin`:
-    // "cache entries stay keyed by hash alone, because the bytes are the same
-    // bytes whichever route carried them". It only became assertable when the
-    // bin's `fileHash` stopped being `<id>-md5` and became the live blob's own
-    // address (`binFake.ts`'s `BlobHash`) — before that the two tiles keyed
-    // differently and the second one paid for the first's bytes again.
-    //
-    // Which route the bin tile mints when the cache is genuinely COLD is the
-    // next test; it cannot be asked here, because arriving via the Files listing
-    // is what warms it.
+    // The facade keys by hash alone, so the raw blob is read once across both scopes.
     expect(hits.fileHits("177") + hits.binFileHits("177")).toBe(1);
   });
 
   test("a trashed .txt tile reads its bytes off the BIN route when the cache is cold", async ({ page }) => {
-    // The other half of the test above, and it needs the bin to be the FIRST
-    // place the facade meets this blob: the live `/file/{id}` goes through
-    // `Files.get`, which hardcodes `deleted = 0`, so a tile that minted it would
-    // 404 its way to a glyph — but a tile that never fetches at all cannot show
-    // you which URL it would have used.
-    //
-    // So the file is trashed from its VIEWER, deep-linked. `readme` lives in the
-    // Files folder and the route lands on the ROOT gallery, which does not list
-    // it, so no facade tile for `177` is ever painted while it is live. The
-    // viewer's own raw fetch does not warm the facade — different cache — which
-    // is exactly the split this exercises.
+    // The bin must be the first place the facade meets this blob: live `/file/{id}` uses
+    // `deleted = 0`. Trashed from a deep-linked viewer, whose fetch does not warm the facade.
     await signedIn(page);
     const hits = await mockThumbnailBackend(page, { textIds: ["177"] });
     await page.goto("/#/note/177");
@@ -1090,9 +849,6 @@ test.describe("recycle bin", () => {
     await region.getByRole("button", { name: "Move to bin" }).click();
     await expect(page.locator(".bin-toast")).toContainText("Moved");
 
-    // Everything the LIVE viewer read, before the bin paints anything. The
-    // viewer mints `/file/177` for its own bytes; what must not grow past this
-    // is the count AFTER the file is trashed.
     const liveBefore = hits.fileHits("177");
 
     // In-app, never a goto: a reload rebuilds the fake `Api` and loses the trash.
@@ -1101,19 +857,12 @@ test.describe("recycle bin", () => {
     const txt = page.locator(".bin__row", { hasText: "readme" }).locator(".bin__thumb img");
     await expect(txt).toHaveCount(1);
     await expect.poll(() => imgInkFraction(txt), { timeout: 6000 }).toBeGreaterThan(0.004);
-    // The fetch the doc glyph never made, on the scope a trashed blob answers.
     expect(hits.binFileHits("177")).toBeGreaterThan(0);
-    // …and NOT on the live one, which `Files.get`'s `deleted = 0` would have
-    // 404'd on the real server.
     expect(hits.fileHits("177")).toBe(liveBefore);
   });
 
   test("a trashed .pdf renders its page 0 off the BIN route, and learns the page's shape", async ({ page }) => {
-    // The same question the `.txt` above asks, for the type whose bytes come in
-    // RANGES: the live `/file/{id}` hardcodes `deleted = 0`, so a tile that
-    // minted it would 404 its way to a glyph. `two-page.pdf`'s page 0 is
-    // 200x100 — landscape, nothing like the A4 portrait the row reserves — so
-    // the lead's final shape is proof the page itself was read.
+    // `two-page.pdf`'s page 0 is landscape, so the final lead shape proves the page was read.
     await signedIn(page);
     await mockThumbnailBackend(page, { textIds: ["177"] });
     const served = await serveRanges(page, PDF_BYTES, undefined, (url) =>
@@ -1131,9 +880,6 @@ test.describe("recycle bin", () => {
     await expect.poll(() => imgInkFraction(img), { timeout: 20_000 }).toBeGreaterThan(0.02);
     expect(served.count()).toBeGreaterThan(0);
 
-    // …and the lead ends up landscape, corrected from the A4 portrait it
-    // reserved — the row's one allowed reflow, and the only place page 0's own
-    // box could have come from.
     await expect(row.locator(".bin__thumb")).toHaveClass(/has-aspect/);
     await expect
       .poll(
@@ -1146,12 +892,7 @@ test.describe("recycle bin", () => {
       .toBeCloseTo(2, 1);
   });
 
-  // A 120×160 grayscale PNG (the same decodable raster the thumbnail helper uses
-  // for extracted thumbnails). REAL bytes `createImageBitmap` can decode are
-  // load-bearing here: the image-doc strategy fetches the raw file and decodes
-  // it through `createImageBitmap` — unlike the LIBRARY, whose image tiles are
-  // native `<img>`s and never touch it — so a placeholder too small to decode
-  // would silently exercise the glyph fallback instead of the tier path.
+  // 120×160 PNG: the image-doc strategy decodes via `createImageBitmap`, so it must be real.
   const IMG_PNG_BASE64 =
     "iVBORw0KGgoAAAANSUhEUgAAAHgAAACgCAAAAADiYvdMAAAAZElEQVR42u3aAQ0AMAgEsfdvmqkAktEzUAOXWipgMBgMBoPBR+E0" +
     "BwaDwWAwGAwGg8FgMBgMBoPBYDAYDAaDwWAwGAyegS03YDAYDAaDwWAwGAwGg8FgMBgMBoPBYDAYDAZ/Cz+nJdLCphXs6QAAAABJ" +
@@ -1159,10 +900,7 @@ test.describe("recycle bin", () => {
 
   test("a trashed image is tier-served off the bin route, aspect-corrected, and memoised", async ({ page }) => {
     await signedIn(page);
-    // The screenshot's raw bytes on BOTH scopes — the live route (the library's
-    // native tile fetches it) and the bin twin (the facade's image-doc fetches
-    // it once the file is trashed). Only the bin route is tallied, because
-    // routing the raw fetch there for a trashed file is the behaviour under test.
+    // Both scopes are served; only the bin route is tallied.
     const png = Buffer.from(IMG_PNG_BASE64, "base64");
     const raw = await serveRawBytes(page, "image/png", png);
     await page.goto("/");
@@ -1173,20 +911,12 @@ test.describe("recycle bin", () => {
 
     const row = page.locator(".bin__row", { hasText: "Screenshot — dashboard" });
     const img = row.locator(".bin__thumb img");
-    // TIER-SERVED: the <img> shows the facade's downscaled WebP over a blob:
-    // URL — the tile never points at the raw file, so a multi-MB photo costs
-    // one fetch and one decode per hash, not one raw decode per paint.
+    // The tile shows the facade's downscaled WebP, never the raw file.
     await expect.poll(() => imgPainted(img), { timeout: 6000 }).toBe(true);
     await expect.poll(() => imgInkFraction(img), { timeout: 6000 }).toBeGreaterThan(0.02);
-    // And that raw fetch went to the BIN route the trashed blob answers on — the
-    // live `/file/{id}` 404s for anything trashed.
     expect(raw.binHits()).toBeGreaterThan(0);
 
-    // The corrected aspect: an image states no `thumbAspect`, so the DECODED
-    // source is the truth (120×160 → 0.75) — the row's single allowed reflow,
-    // after which the shape is pinned inline. This is the natural-size
-    // correction the bin used to be missing (it letterboxed in the 3:4 floor
-    // forever).
+    // Images state no `thumbAspect`, so the decoded 120×160 is the truth.
     await expect(row.locator(".bin__thumb")).toHaveClass(/has-aspect/);
     await expect
       .poll(() =>
@@ -1197,8 +927,7 @@ test.describe("recycle bin", () => {
       )
       .toBe(0.75);
 
-    // …and the memo WRITE landed: the facade recorded the SOURCE's true dims
-    // under the content hash, which is what pre-clamps every later session.
+    // The facade memoised the source dims under the content hash.
     await expect
       .poll(
         () =>
@@ -1226,16 +955,13 @@ test.describe("recycle bin", () => {
                   }
                 };
               }),
-            // The blob's REAL md5, which is what a trashed row advertises now
-            // (`binFake.ts`'s `BlobHash`) and what the memo is therefore keyed by.
             fakeFileHash("173"),
           ),
         { timeout: 6000 },
       )
       .toEqual({ w: 120, h: 160 });
 
-    // A repaint serves the cached tier tile: leave the bin and come back, and
-    // the row paints again WITHOUT a second raw fetch off the bin route.
+    // A repaint is served from the tier cache, with no second raw fetch.
     const before = raw.binHits();
     await page
       .getByRole("navigation", { name: "Folders" })
@@ -1248,16 +974,9 @@ test.describe("recycle bin", () => {
   });
 });
 
-// --- the recycle-bin viewer's URL --------------------------------------------
-//
-// A trashed file open in a viewer is URL-ADDRESSABLE, exactly as a live note and
-// a retained version are, via its own deep path under the bin listing:
-// `#/bin/note/:id/page/:n`. The live `#/note/:id` route can't stand in for it —
-// a trashed file's blob is not served there, so a reload of that address 404s and
-// falls back to the library, dropping the user somewhere the file does not exist.
-// So the address tracks the open trashed file (and its page), reload / copy-link
-// reopen it, and a file no longer in the bin ages out to the listing with a
-// notice — the recycle-bin twin of the version-preview age-out.
+// --- recycle-bin viewer URL ---
+// `#/bin/note/:id/page/:n`: the live route would 404 a trashed blob. Gone files age out
+// to the listing with a notice.
 test.describe("recycle-bin viewer URL", () => {
   test("addresses the open trashed file under #/bin, tracks the page, and a reload reopens it there", async ({
     page,
@@ -1270,16 +989,13 @@ test.describe("recycle-bin viewer URL", () => {
     const reader = page.locator(".reader");
     await expect(reader).toBeVisible();
     await expect(page.locator("#back-label, .backbtn")).toContainText("Recycle bin");
-    // The deep bin path, NOT the live `#/note/:id` (whose blob 404s for a trashed
-    // file). The first page collapses to the bare form.
+    // The first page collapses to the bare form.
     await expect(page).toHaveURL(/#\/bin\/note\/304$/);
 
-    // The page rides the URL — `download_test.note` has two pages.
     await reader.getByRole("button", { name: "Next page" }).click();
     await expect(page).toHaveURL(/#\/bin\/note\/304\/page\/2$/);
     const at = page.url();
 
-    // A RELOAD reopens the SAME trashed file at the SAME page, not the library.
     await page.reload();
     await expect(page.locator(".reader")).toBeVisible();
     await expect(page.locator("#back-label, .backbtn")).toContainText("Recycle bin");
@@ -1288,20 +1004,14 @@ test.describe("recycle-bin viewer URL", () => {
 
   test("a bin deep link opened COLD reopens the trashed file, and Back leaves for the listing", async ({ page }) => {
     await signedIn(page);
-    // No prior in-app navigation: the shell boots straight onto the bin-note URL,
-    // so `openBinNote` must load the bin listing before it can find the entry and
-    // build its origin. The static bin fixture survives a cold boot.
+    // Cold boot: `openBinNote` must load the bin listing before it can find the entry.
     await page.goto("/#/bin/note/304");
     await expect(page.locator(".reader")).toBeVisible();
     await expect(page.locator("#back-label, .backbtn")).toContainText("Recycle bin");
     await expect(page).toHaveURL(/#\/bin\/note\/304$/);
 
-    // The view-only history control is present on a trashed `.note` (bin-parity),
-    // and Move to bin is not — the bin context swap survived the cold open.
     await expect(reader(page).getByRole("button", { name: "Move to bin" })).toBeHidden();
 
-    // Back leaves for the bin LISTING — nothing had to pre-paint it behind the
-    // reader; the Back href routes to `#/bin`, which paints it.
     await page.locator(".backbtn").first().click();
     await expect(page).toHaveURL(/#\/bin$/);
     await expect(page.locator(".bin__row").first()).toBeVisible();
@@ -1309,8 +1019,6 @@ test.describe("recycle-bin viewer URL", () => {
 
   test("a bin deep link to a file no longer in the bin falls back to the listing with a notice", async ({ page }) => {
     await signedIn(page);
-    // Purged / restored since the link was made, or never trashed: no dead viewer
-    // and no library — the bin listing, plus a notice.
     await page.goto("/#/bin/note/t-does-not-exist");
     await expect(page.locator(".bin")).toBeVisible();
     await expect(page).toHaveURL(/#\/bin$/);

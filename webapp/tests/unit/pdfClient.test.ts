@@ -2,11 +2,8 @@ import { describe, it, expect } from "vitest";
 import { createPdfSession, PdfLoadError } from "../../src/render/pdfClient";
 import type { PdfResponse } from "../../src/render/pdfWorkerTypes";
 
-// The main-thread half of the worker protocol, driven by a FAKE worker.
-//
-// A real one only fires `error` for a module that will not compile or an
-// instance the engine killed — neither of which a test can stage, and both of
-// which are exactly what this has to survive.
+// Driven by a fake worker: real `error` events (compile failure, killed instance)
+// cannot be staged.
 
 class FakeWorker extends EventTarget {
   readonly sent: unknown[] = [];
@@ -52,11 +49,7 @@ describe("a PDF session whose worker dies", () => {
   });
 
   it("fails EVERY LATER request too, rather than hanging on one that cannot be answered", async () => {
-    // THE REGRESSION. The death handler rejected the in-flight requests and
-    // stopped there, so the NEXT `send` posted to a worker that would never
-    // answer and had no one left to reject it. The viewer sat on "Opening this
-    // PDF…" forever — the exact state the handler exists to prevent, for every
-    // request after the first.
+    // Regression: after a worker death the next `send` hung forever.
     const { worker, s } = session();
     const first = s.open("/file/x", 100);
     worker.die();
@@ -97,8 +90,6 @@ describe("a healthy PDF session", () => {
   });
 
   it("asks for a page's links and hands the records straight back", async () => {
-    // Plain data, no transfer list: a page's links are a handful of records,
-    // where the ink mask beside them is megabytes.
     const { worker, s } = session();
     const asking = s.pageLinks(4);
     const req = worker.sent[0] as { id: number; kind: string; page: number };
@@ -111,7 +102,6 @@ describe("a healthy PDF session", () => {
   });
 
   it("refuses a wrong-kind reply to a links request rather than reading `undefined`", async () => {
-    // Without the guard this resolves to `undefined` and the layer iterates it.
     const { worker, s } = session();
     const asking = s.pageLinks(0);
     const { id } = worker.sent[0] as { id: number };
@@ -128,9 +118,7 @@ describe("a healthy PDF session", () => {
   });
 
   it("refuses a wrong-kind reply to an EXPORT too, rather than downloading undefined", async () => {
-    // The same guard, on the one call whose payload leaves the app as a FILE: a
-    // reply of another shape has no `bytes`, and reading through it would save an
-    // empty `.pdf` that looks exactly like a successful export until it is opened.
+    // A reply without `bytes` would save an empty `.pdf` that looks like success.
     const { worker, s } = session();
     const exporting = s.exportPage(0, {
       alpha: new Uint8Array(1),
@@ -144,11 +132,7 @@ describe("a healthy PDF session", () => {
   });
 
   it("HANDS OVER the ink mask rather than copying it, and answers with the PDF's bytes", async () => {
-    // The mask is `width * height` bytes — 2.5 MB for an A4 page at the ink's own
-    // resolution, against a 50 MB app-wide budget — so it crosses the thread
-    // boundary by transfer, exactly as a rendered bitmap crosses back. Without
-    // the transfer list it is structured-CLONED, which costs the same megabytes
-    // twice and leaves a detached-looking buffer nobody freed.
+    // The mask is megabytes, so it is transferred, not structured-cloned.
     const { worker, s } = session();
     const alpha = new Uint8Array(12);
     const exporting = s.exportPage(3, { alpha, width: 4, height: 3, matrix: [2, 0, 0, 2, 0, 0] });
@@ -162,9 +146,7 @@ describe("a healthy PDF session", () => {
   });
 
   it("refuses a mask whose buffer disagrees with its own dimensions", async () => {
-    // The module reads `width * height` bytes from the pointer it is given, so a
-    // short buffer is an out-of-bounds read inside wasm — a torn-down instance,
-    // not a failed export. Nothing is posted at all.
+    // The module reads `width * height` bytes from a raw pointer; a short buffer is an OOB read.
     const { worker, s } = session();
     const bad = { alpha: new Uint8Array(5), width: 4, height: 3, matrix: [1, 0, 0, 1, 0, 0] as const };
     await expect(s.exportPage(0, bad)).rejects.toThrow(/does not match/);
@@ -175,9 +157,6 @@ describe("a healthy PDF session", () => {
   });
 
   it("surfaces a decoder that refuses the export, rather than resolving with nothing", async () => {
-    // The wasm can refuse — a source that is not a PDF, a page it cannot graft.
-    // The menu turns a rejection into a toast; a quiet resolve would download an
-    // empty file called `<page>.pdf`.
     const { worker, s } = session();
     const exporting = s.exportPage(0, {
       alpha: new Uint8Array(1),
@@ -202,10 +181,6 @@ describe("a healthy PDF session", () => {
 
 describe("the whole-document export, across the worker boundary", () => {
   it("HANDS OVER each page's mask, one `annotatePage` at a time", async () => {
-    // Sparse by nature — seven of seventy-seven pages in the real corpus — so
-    // this is a handful of messages even for a long document, and each carries
-    // the same megabyte-scale mask the per-page export does. Transferred for the
-    // same reason.
     const { worker, s } = session();
     const alpha = new Uint8Array(12);
     const annotating = s.annotatePage(5, { alpha, width: 4, height: 3, matrix: [2, 0, 0, 2, 0, 0] });
@@ -218,9 +193,7 @@ describe("the whole-document export, across the worker boundary", () => {
   });
 
   it("refuses a mask whose buffer disagrees with its dimensions, before posting", async () => {
-    // The same guard the per-page export gets, and it has to be on BOTH doors:
-    // `annotatePage` hands the module a raw pointer exactly as `exportPage`
-    // does, so a short buffer here is an out-of-bounds read inside wasm.
+    // Same guard on both doors: `annotatePage` also passes a raw pointer.
     const { worker, s } = session();
     await expect(
       s.annotatePage(0, { alpha: new Uint8Array(5), width: 4, height: 3, matrix: [1, 0, 0, 1, 0, 0] }),
@@ -229,12 +202,8 @@ describe("the whole-document export, across the worker boundary", () => {
   });
 
   it("LENDS the original as a Blob — not transferred, not read", async () => {
-    // THE MEMORY ARGUMENT, at the one boundary where it could be undone. A Blob
-    // crosses `postMessage` by REFERENCE, so a 76 MB document costs a handle;
-    // reading it into an ArrayBuffer to send would cost 76 MB in each thread.
-    //
-    // And it is NOT in the transfer list: transferring detaches it on this side,
-    // and this side is the one that concatenates it with the delta afterwards.
+    // A Blob crosses `postMessage` by reference; not transferred, since this side
+    // concatenates it with the delta afterwards.
     const { worker, s } = session();
     const original = new Blob([new Uint8Array([0x25, 0x50, 0x44, 0x46])]);
     const exporting = s.exportDocument(original);
@@ -249,10 +218,7 @@ describe("the whole-document export, across the worker boundary", () => {
   });
 
   it("refuses a wrong-kind reply to the document export", async () => {
-    // The same guard as the per-page export's, and the same consequence: a reply
-    // of another shape has no `delta`, and concatenating `undefined` onto the
-    // original would save a file that opens as the ORIGINAL — no ink, no error,
-    // and nothing to notice until someone looks for their handwriting.
+    // A reply without `delta` would save a file that opens as the original, ink lost.
     const { worker, s } = session();
     const exporting = s.exportDocument(new Blob([new Uint8Array([1])]));
     const { id } = worker.sent[0] as { id: number };
@@ -261,10 +227,6 @@ describe("the whole-document export, across the worker boundary", () => {
   });
 
   it("surfaces a decoder that REFUSES the document, rather than resolving with nothing", async () => {
-    // The refusals are specific and unfixable: a PDF that had to be repaired to
-    // open, or one with junk before its `%PDF-` header. Falling back to grafting
-    // every page is not offered — that is the fidelity loss this route exists to
-    // avoid — so the message has to reach the menu.
     const { worker, s } = session();
     const exporting = s.exportDocument(new Blob([new Uint8Array([1])]));
     const { id } = worker.sent[0] as { id: number };

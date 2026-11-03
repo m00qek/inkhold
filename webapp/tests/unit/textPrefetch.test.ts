@@ -16,21 +16,8 @@ import { createTextPrefetch, orderCandidates } from "../../src/search/textPrefet
 import type { DocumentText, TextTransport } from "../../src/search/docText";
 import type { ManifestRow, Tier } from "../../src/search/manifestCodec";
 
-// WHAT THE BROWSER CACHES OF A DOCUMENT'S TEXT — §4.4.
-//
-// The two halves are tested at different levels on purpose. The BUDGET decision
-// is pure (`planTextEviction`) and asserted directly, because the real store
-// needs an IndexedDB node does not have; the POLICY — which documents are worth
-// fetching before anybody asks, and which are left to the HTTP cache — runs
-// against an in-memory `TextStore` that mirrors the real one's put/evict
-// structure, so the eviction under test is the same shared function the
-// IndexedDB store calls.
-//
-// **There is no "keep this offline" here any more, and there is no pin.** §4.4
-// was corrected: offline is a side effect of running the work in the browser,
-// not a goal, and a control whose only power was to override eviction was
-// promising an availability this project does not offer. What survives is the
-// budget, the per-document cap, and tier 1 as the one protected class.
+// The budget decision (`planTextEviction`) is tested pure; the policy runs against an
+// in-memory `TextStore` that calls the same eviction. Tier 1 is the only protected class.
 
 const md5 = (n: string): string => n.repeat(32).slice(0, 32);
 const NOTE = md5("a");
@@ -59,11 +46,7 @@ function text(hash: string, indexVersion: number, bytes: number, word = "reuniao
   };
 }
 
-/**
- * An in-memory `TextStore`. It enforces the cap through the SAME
- * `planTextEviction` the IndexedDB store calls, so an assertion here is about
- * the shared decision and not about a test double's own opinion.
- */
+/** An in-memory `TextStore` enforcing the cap through the same `planTextEviction`. */
 function memoryStore(available = true, budgetBytes = DEFAULT_TEXT_BUDGET): TextStore & {
   records: Map<string, StoredDocumentText>;
   metas: Map<string, ProtectedMeta & { md5: string; indexVersion: number }>;
@@ -153,12 +136,7 @@ function transportOf(bodies: Record<string, DocumentText>): {
   return { transport, calls };
 }
 
-/**
- * "Is this document's text held at this version?" — asked of the STORE, because
- * the prefetch no longer answers it. It was a public method only so a
- * per-document control could paint a checked state, and there is no such control
- * any more; the store's own `keys()` is the fact itself.
- */
+/** Whether a document's text is held at this version, asked of the store. */
 async function isHeld(store: TextStore, hash: string, indexVersion: number): Promise<boolean> {
   const held = await store.keys();
   return held.some((h) => h.md5 === hash && h.indexVersion === indexVersion);
@@ -173,10 +151,6 @@ const meta = (key: string, size: number, lastAccess: number, protect = false): P
 
 describe("the budget", () => {
   it("is 2 MB with a 512 KB per-document cap", () => {
-    // §4.4 proposes both; `textStore.ts` argues them against INFLATED figures,
-    // since the section's table is the server's deflated file and what lands in
-    // IndexedDB is the parsed record. The projected household tier 1 (~372 KB
-    // raw) is still under a fifth of it.
     expect(DEFAULT_TEXT_BUDGET).toBe(2 * 1024 * 1024);
     expect(perDocumentCap(DEFAULT_TEXT_BUDGET)).toBe(512 * 1024);
     expect(perDocumentCap(DEFAULT_TEXT_BUDGET)).toBeGreaterThan(372 * 1024 * 0.25);
@@ -188,17 +162,12 @@ describe("the budget", () => {
   });
 
   it("never evicts a protected record, and charges it against the budget first", () => {
-    // The promise §4.4 makes about tier 1 is exactly this: a burst of on-demand
-    // documents must not be able to shed the notes, however long ago they were
-    // read. 60 of the 100 are spoken for, so the LRU runs against 40.
+    // Tier 1 is never shed for on-demand documents; 60 of 100 are spoken for.
     const metas = [meta("note", 60, 1, true), meta("a", 30, 2), meta("b", 30, 3)];
     expect(planTextEviction(metas, 100)).toEqual(["a"]);
   });
 
   it("sheds everything evictable when the protected set alone exceeds the budget", () => {
-    // A note library larger than the whole allowance. Tier 1 is bounded by the
-    // household's own page count, and what bounds it in the end is the origin
-    // quota rather than this number.
     const metas = [meta("notes", 500, 1, true), meta("a", 30, 2)];
     expect(planTextEviction(metas, 100)).toEqual(["a"]);
   });
@@ -218,11 +187,8 @@ describe("orderCandidates", () => {
   ];
 
   it("keeps tier 1 and tier 2, and never tier 3 at all", () => {
-    // Tier 3 used to be reachable through a pin. With the pin gone it is the
-    // on-demand half without exception, and the HTTP cache is its whole story.
     const ordered = orderCandidates(rows);
     expect(ordered.map((c) => c.md5)).toEqual([NOTE, MARKED]);
-    // Tier 1 is protected — kept with no budget check; tier 2 is not.
     expect(ordered.map((c) => c.protect)).toEqual([true, false]);
   });
 
@@ -260,16 +226,11 @@ describe("the prefetch", () => {
     const prefetch = createTextPrefetch({ store, transport });
     await prefetch.prefetch([row(OTHER, "other", 3, 300)]);
     expect(await isHeld(store, OTHER, 15)).toBe(false);
-    // Not fetched-and-refused: never asked for. A tier-3 find pays one fetch and
-    // the immutable HTTP cache answers every later one.
     expect(calls).toEqual([]);
   });
 
   it("releases a record a previous build had pinned, and lets it be evicted", async () => {
-    // THE MIGRATION, and the only reason `setProtection` outlived the pin. A
-    // store written by the build that had one holds `protect: true` on a tier-2
-    // record; nothing else walks both the manifest and the held set, so if this
-    // pass did not correct it the record would be exempt from eviction for ever.
+    // Migration: old stores hold `protect: true` on tier-2 records; this pass clears it.
     const store = memoryStore(true, 1_000);
     const { transport } = transportOf({ [MARKED]: text(MARKED, 15, 600) });
     await store.put(text(MARKED, 15, 600), { protect: true });
@@ -281,10 +242,7 @@ describe("the prefetch", () => {
   });
 
   it("spends the budget on tier 2 newest-first and stops", async () => {
-    // Five annotated documents of 250 B against a 1,000 B budget. Four fit; the
-    // OLDEST is the one that does not, which is the failure §4.4 asks for in as
-    // many words — "the two oldest annotated books cost a fetch on their first
-    // find" rather than "the household silently synced 40 MB".
+    // Four of five fit; the oldest is the one that pays a fetch on first find.
     const hashes = [md5("1"), md5("2"), md5("3"), md5("4"), md5("5")];
     const store = memoryStore(true, 1_000);
     const bodies: Record<string, DocumentText> = {};
@@ -292,16 +250,13 @@ describe("the prefetch", () => {
     const { transport, calls } = transportOf(bodies);
     const prefetch = createTextPrefetch({ store, transport });
 
-    // Handed to the pass OLDEST first, so the ordering under test is the
-    // policy's and not the manifest's.
     const outcome = await prefetch.prefetch(
       hashes.map((h, i) => row(h, "marked", i + 10, (i + 1) * 100)),
     );
     expect(outcome.kept).toBe(4);
     expect(await isHeld(store, hashes[4]!, 15)).toBe(true);
     expect(await isHeld(store, hashes[0]!, 15)).toBe(false);
-    // The four newest were asked for, newest first, and once the allowance was
-    // gone the walk stopped ASKING — the oldest was never fetched.
+    // Once the allowance is gone the walk stops asking: the oldest is never fetched.
     expect(calls).toEqual([...hashes].reverse().slice(0, 4).map((h) => `${h}.15`));
   });
 
@@ -314,20 +269,14 @@ describe("the prefetch", () => {
     const prefetch = createTextPrefetch({ store, transport });
 
     await prefetch.prefetch([row(NOTE, "note", 1, 100), row(MARKED, "marked", 2, 200)]);
-    // §4.4: tier 1 is kept with NO budget check — and having spent the budget, it
-    // is what stops tier 2 rather than being shed for it. Once the allowance is
-    // gone the walk stops ASKING, so nothing is fetched to be thrown away.
     expect(await isHeld(store, NOTE, 15)).toBe(true);
     expect(await isHeld(store, MARKED, 15)).toBe(false);
     expect(calls).toEqual([`${NOTE}.15`]);
   });
 
   it("refuses a tier-2 document over the per-document cap, and does not re-fetch it", async () => {
-    // MEASURED, §4.4: one `.mark` on a novel moves 1.35 MB of stored text into
-    // the cache from a single gesture. The cap is what stops one annotated novel
-    // crowding out everything else; the document itself is still findable, it
-    // just pays a fetch on its first find like any tier-3 one.
-    const store = memoryStore(true, 4_000); // cap = 1,000
+    // One `.mark` on a novel moves 1.35 MB of text; the per-document cap stops it.
+    const store = memoryStore(true, 4_000);
     const { transport, calls } = transportOf({ [MARKED]: text(MARKED, 15, 3_000) });
     const prefetch = createTextPrefetch({ store, transport });
     const rows = [row(MARKED, "marked", 2, 200)];
@@ -337,7 +286,7 @@ describe("the prefetch", () => {
     expect(await isHeld(store, MARKED, 15)).toBe(false);
 
     await prefetch.prefetch(rows);
-    expect(calls).toEqual([`${MARKED}.15`]); // fetched once, refused, remembered.
+    expect(calls).toEqual([`${MARKED}.15`]);
   });
 
   it("drops a generation the manifest moved past", async () => {
@@ -353,9 +302,7 @@ describe("the prefetch", () => {
   });
 
   it("does nothing at all without a manifest", async () => {
-    // An empty manifest is not evidence of deletion — §2.7's removal mechanism is
-    // a COMPLETE manifest that omits a document, and a session that never synced
-    // has no opinion to act on.
+    // An empty manifest is not evidence of deletion; only a complete one that omits is.
     const store = memoryStore();
     await store.put(text(NOTE, 15, 300), { protect: true });
     const { transport, calls } = transportOf({});
@@ -372,7 +319,7 @@ describe("the prefetch", () => {
     const prefetch = createTextPrefetch({ store, transport });
 
     const outcome = await prefetch.prefetch([
-      row(NOTE, "note", 1, 900), // no body: the transport throws
+      row(NOTE, "note", 1, 900),
       row(MARKED, "marked", 2, 200),
     ]);
     expect(outcome.kept).toBe(1);
@@ -386,17 +333,13 @@ describe("the prefetch", () => {
 
     expect(prefetch.available).toBe(false);
     expect(await prefetch.prefetch([row(NOTE, "note", 1, 100)])).toMatchObject({ kept: 0 });
-    // Nothing was fetched to be thrown away: an unavailable store is a no-op, and
-    // in-document search then fetches on demand exactly as it does today.
     expect(calls).toEqual([]);
   });
 });
 
 describe("openTextStore", () => {
   it("degrades to a no-op store where IndexedDB is missing — never throws", async () => {
-    // Node has no indexedDB, so this is the REAL store degrading. Every call
-    // answers "nothing held", which is what makes the fetch path below the
-    // ordinary one rather than a recovery.
+    // Node has no indexedDB, so this is the real store degrading.
     const store = openTextStore();
     expect(store.available).toBe(false);
     expect(await store.get(NOTE, 15)).toBeNull();

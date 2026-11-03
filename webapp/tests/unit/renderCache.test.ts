@@ -3,10 +3,8 @@ import { cacheId, createRenderCache } from "../../src/cache/renderCache";
 import type { PersistentThumbStore } from "../../src/cache/idb";
 import type { RenderKey } from "../../src/cache/types";
 
-// The render cache's pristine-tier keying: thumb entries carry the density
-// bucket — `hash:thumb:theme:bN` — in memory and in the persistent store alike,
-// the bucket read from the LIVE devicePixelRatio per call. Old-format
-// persistent entries (`hash:thumb:theme`) are tolerated as plain misses.
+// Thumb keys carry the live density bucket (`hash:thumb:theme:bN`); old unbucketed
+// persistent keys are plain misses.
 
 const bmp = (w = 8, h = 8): ImageBitmap => ({ width: w, height: h, close: vi.fn() }) as unknown as ImageBitmap;
 
@@ -34,7 +32,6 @@ describe("cacheId", () => {
   it("appends the density bucket to thumb keys only", () => {
     expect(cacheId(key(), 2)).toBe("h1:thumb:light:b2");
     expect(cacheId(key({ theme: "dark" }), 1)).toBe("h1:thumb:dark:b1");
-    // full/native are not the tier's width-normalized rasters — unbucketed.
     expect(cacheId(key({ size: "full" }), 2)).toBe("h1:full:light");
     expect(cacheId(key({ size: "native" }), 3)).toBe("h1:native:light");
   });
@@ -42,9 +39,9 @@ describe("cacheId", () => {
   it("defaults the bucket from the live devicePixelRatio, per call", () => {
     setDpr(1);
     expect(cacheId(key())).toBe("h1:thumb:light:b1");
-    setDpr(1.5); // fractional → bucket 2
+    setDpr(1.5);
     expect(cacheId(key())).toBe("h1:thumb:light:b2");
-    setDpr(undefined); // Node / no DPR → bucket 1
+    setDpr(undefined);
     expect(cacheId(key())).toBe("h1:thumb:light:b1");
   });
 });
@@ -59,9 +56,6 @@ describe("render cache bucket keying", () => {
   });
 
   it("treats OLD-FORMAT persistent entries as plain misses — no migration", async () => {
-    // A store written before the bucketed key format. The cache is regenerable
-    // (every entry re-derives from immutable page bytes), so the old entry is
-    // simply never found under the new key and ages out via the store's LRU.
     setDpr(1);
     const store = fakeStore({ "h1:thumb:light": new Blob(["old"]) });
     const cache = createRenderCache({ persistent: store });
@@ -74,11 +68,11 @@ describe("render cache bucket keying", () => {
     const store = fakeStore();
     const cache = createRenderCache({ persistent: store });
     const bitmap = bmp();
-    await cache.put(key(), bitmap); // memory id …:b1
-    await expect(cache.get(key())).resolves.toBe(bitmap); // same bucket → memory hit
+    await cache.put(key(), bitmap);
+    await expect(cache.get(key())).resolves.toBe(bitmap);
     expect(store.get).not.toHaveBeenCalled();
 
-    setDpr(2); // monitor hop → bucket 2: the b1 entry must not answer
+    setDpr(2);  // monitor hop → bucket 2: the b1 entry must not answer
     await expect(cache.get(key())).resolves.toBeUndefined();
     expect(store.get).toHaveBeenCalledWith("h1:thumb:light:b2");
   });
@@ -89,9 +83,9 @@ describe("render cache bucket keying", () => {
     const lightThumb = bmp();
     const darkThumb = bmp();
     const lightFull = bmp();
-    await cache.put(key(), lightThumb); // h1:thumb:light:b1
-    await cache.put(key({ hash: "h2", theme: "dark" }), darkThumb); // h2:thumb:dark:b1
-    await cache.put(key({ hash: "h3", size: "full" }), lightFull); // h3:full:light
+    await cache.put(key(), lightThumb);
+    await cache.put(key({ hash: "h2", theme: "dark" }), darkThumb);
+    await cache.put(key({ hash: "h3", size: "full" }), lightFull);
 
     await cache.evictTheme?.("light");
     await expect(cache.get(key())).resolves.toBeUndefined();

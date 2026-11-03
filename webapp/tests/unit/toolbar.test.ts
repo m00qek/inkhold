@@ -1,13 +1,4 @@
 // @vitest-environment happy-dom
-//
-// The shared viewer toolbar (src/pages/toolbar.ts) as a DOM unit — the one unit
-// test that needs a document, so it opts a single file into happy-dom rather than
-// giving the whole node-only layer a DOM (see vitest.config.ts). What is asserted
-// here is exactly what the reader e2e cannot cheaply assert about the COMPONENT in
-// isolation: that the data spec produces the two zones in order, that the right
-// zone is fixed, that a contextual control absent from the spec does not render,
-// and that the a11y contract (role="toolbar", the two role="group"s, a decorative
-// divider, and the roving tabindex) holds independent of any one consumer.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { createToolbar, type ToolbarButton, type ToolbarControl } from "../../src/pages/toolbar";
@@ -78,14 +69,10 @@ describe("createToolbar", () => {
     );
     const [, file] = groups(bar);
     const labels = [...file!.querySelectorAll("button")].map((b) => b.getAttribute("aria-label"));
-    // The order is the spec's order — this is the invariant a future viewer relies
-    // on so "how I download" lands in the same place everywhere.
     expect(labels).toEqual(["Download", "Move to bin"]);
   });
 
   it("does not render a contextual control that is absent from the spec", () => {
-    // The reader drops the recognised-text toggle from a viewer that has no OCR by
-    // simply not listing it — not by rendering it disabled.
     const bar = mount(basicSpec({ view: [btn("a", "A")] as ToolbarControl[] }));
     expect(bar.control("b")).toBeUndefined();
     expect(bar.el.querySelector('[aria-label="B"]')).toBeNull();
@@ -96,10 +83,9 @@ describe("createToolbar", () => {
     const sep = bar.el.querySelector(".toolbar__sep")!;
     expect(sep).not.toBeNull();
     expect(sep.getAttribute("aria-hidden")).toBe("true");
-    // No text at all: a `|` would be read aloud and would drift with the font.
+    // No text: a `|` would be read aloud.
     expect(sep.textContent).toBe("");
     expect(bar.el.textContent).not.toContain("|");
-    // It sits between the two zones in document order.
     const [view, file] = groups(bar);
     const order = [...bar.el.children];
     expect(order.indexOf(view!)).toBeLessThan(order.indexOf(sep));
@@ -120,8 +106,8 @@ describe("createToolbar", () => {
       basicSpec({ view: [btn("z", "Zoom in", { icon: "<svg></svg>", iconOnly: true })] as ToolbarControl[] }),
     );
     const b = bar.control("z")!;
-    expect(b.textContent).toBe(""); // the words are gone…
-    expect(b.getAttribute("aria-label")).toBe("Zoom in"); // …the name is not
+    expect(b.textContent).toBe("");
+    expect(b.getAttribute("aria-label")).toBe("Zoom in");
     expect(b.querySelector("svg")).not.toBeNull();
   });
 
@@ -133,7 +119,6 @@ describe("createToolbar", () => {
     );
     expect(bar.control("f")!.getAttribute("aria-pressed")).toBe("false");
     expect(bar.control("o")!.getAttribute("aria-pressed")).toBe("true");
-    // A plain button carries no aria-pressed at all — it is not a toggle.
     expect(bar.control("a")).toBeUndefined();
   });
 
@@ -167,7 +152,7 @@ describe("createToolbar", () => {
 
   it("renders leading elements outside both zones, ahead of the spacer", () => {
     const bar = mount(basicSpec());
-    const back = bar.el.querySelector("button")!; // the leading Back, first child
+    const back = bar.el.querySelector("button")!;
     const spacer = bar.el.querySelector(".toolbar__spacer")!;
     for (const g of groups(bar)) expect(g.contains(back)).toBe(false);
     const order = [...bar.el.children];
@@ -179,9 +164,8 @@ describe("createToolbar", () => {
     const zeros = [...bar.el.querySelectorAll('[tabindex="0"]')];
     const minus = [...bar.el.querySelectorAll('[tabindex="-1"]')];
     expect(zeros).toHaveLength(1);
-    // The leading control leads the roving order, so it is the initial stop.
     expect((zeros[0] as HTMLElement).textContent).toBe("Back");
-    expect(minus).toHaveLength(3); // A, B, Download
+    expect(minus).toHaveLength(3);
   });
 
   it("moves the tab stop to the next control on ArrowRight, and focuses it", () => {
@@ -200,7 +184,6 @@ describe("createToolbar", () => {
     const back = bar.el.querySelector("button")!;
     back.focus();
     key(back, "ArrowLeft");
-    // Order is [Back, A, B, Download]; wrapping left from Back lands on Download.
     expect(document.activeElement).toBe(bar.control("d"));
   });
 
@@ -215,20 +198,18 @@ describe("createToolbar", () => {
   });
 
   it("skips hidden controls while roving, and ignores keys from unregistered descendants", () => {
-    // A custom control whose inner button is NOT declared focusable — a menu item,
-    // say — must not be swept into the roving set: arrows from it are left alone.
+    // A custom control's inner button not declared focusable stays out of the roving set.
     const stray = el("button", { text: "menu item" });
     const bar = mount(
       basicSpec({ file: [btn("d", "Download"), { kind: "custom", key: "menu", el: stray }] as ToolbarControl[] }),
     );
     const back = bar.el.querySelector("button")!;
     back.focus();
-    key(back, "ArrowRight"); // → A
-    (bar.control("b") as HTMLButtonElement).hidden = true; // hide the next stop
-    key(bar.control("a")!, "ArrowRight"); // A → (skip B) → Download
+    key(back, "ArrowRight");
+    (bar.control("b") as HTMLButtonElement).hidden = true;
+    key(bar.control("a")!, "ArrowRight");
     expect(document.activeElement).toBe(bar.control("d"));
 
-    // A keystroke from the unregistered inner button changes nothing.
     const before = bar.control("d")!.getAttribute("tabindex");
     key(stray, "ArrowLeft");
     expect(bar.control("d")!.getAttribute("tabindex")).toBe(before);
