@@ -235,3 +235,27 @@ pub fn userChargedRefs(self: Files, user_id: u64, md5: []const u8) !u64 {
     defer r.finalize();
     return @intCast(r.int(0));
 }
+
+/// `parent_id` is null (root) or a live folder owned by the user.
+pub fn assertFolder(self: Files, user_id: u64, parent_id: ?u64) !void {
+    const pid = parent_id orelse return;
+    var r = (try self.db.row("SELECT is_folder FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 0;", &.{ .{ .int = @intCast(pid) }, .{ .int = @intCast(user_id) } })) orelse return error.NotFound;
+    defer r.finalize();
+    if (r.int(0) == 0) return error.NotAFolder;
+}
+
+pub fn ensureBlobRow(self: Files, md5: []const u8, size: u64) !void {
+    var s = try self.db.prepare("INSERT INTO blobs(md5, size, refcount, created_at) VALUES(?1,?2,0,?3) ON CONFLICT(md5) DO NOTHING;");
+    defer s.finalize();
+    s.bindText(1, md5);
+    s.bindInt(2, @intCast(size));
+    s.bindInt(3, now(self));
+    _ = try s.step();
+}
+
+pub fn incref(self: Files, md5: []const u8) !void {
+    var s = try self.db.prepare("UPDATE blobs SET refcount = refcount + 1 WHERE md5 = ?1;");
+    defer s.finalize();
+    s.bindText(1, md5);
+    _ = try s.step();
+}
