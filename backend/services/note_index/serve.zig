@@ -24,6 +24,7 @@ const Allocator = std.mem.Allocator;
 pub const SliceSource = struct {
     bytes: []const u8,
 
+    /// `len` bytes at `offset`, or `BadRange` past the slice.
     pub fn read(self: SliceSource, offset: u32, len: u32) Error![]const u8 {
         if (@as(u64, offset) + len > self.bytes.len) return error.BadRange;
         return self.bytes[offset..][0..len];
@@ -38,6 +39,7 @@ pub const SliceSource = struct {
 /// silently.
 pub const NoteHeader = struct { width: u32, height: u32, rle_variant: u8, page_count: u32 };
 
+/// The header facts for `blob_md5`, or null without a current indexable row.
 pub fn noteHeader(db: sqlite.Db, blob_md5: []const u8) !?NoteHeader {
     var r = (try db.row(
         "SELECT width, height, rle_variant, page_count FROM note_index " ++
@@ -71,14 +73,18 @@ pub const PagePlan = struct {
     bg_hash_buf: [max_bg_hash]u8 = undefined,
     bg_hash_len: u8 = 0,
 
+    /// The layers in wire order.
     pub fn layers(self: *const PagePlan) []const LayerRef {
         return self.layer_buf[0..self.layer_count];
     }
 
+    /// The raster background's asset hash; empty when the page has none.
     pub fn bgHash(self: *const PagePlan) []const u8 {
         return self.bg_hash_buf[0..self.bg_hash_len];
     }
 
+    /// Bytes the layer takes on the wire: a raster background sends its hash,
+    /// every other layer its bytes.
     pub fn wireLen(self: *const PagePlan, r: LayerRef) u64 {
         return if (r.raster_image) self.bg_hash_len else r.len;
     }
@@ -133,6 +139,7 @@ pub fn pagePlan(db: sqlite.Db, blob_md5: []const u8, page_index: u64) !?PagePlan
 /// same block, so `LIMIT 1` is exact. Null for an unknown hash.
 pub const TemplateLocation = struct { offset: u64, length: u64 };
 
+/// The template block for `hash` in `blob_md5`, or null.
 pub fn templateLocation(db: sqlite.Db, blob_md5: []const u8, hash: []const u8) !?TemplateLocation {
     var row = (try db.row(
         "SELECT layers FROM note_page_index WHERE blob_md5 = ?1 AND bg_hash = ?2 LIMIT 1;",

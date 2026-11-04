@@ -19,6 +19,7 @@ const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
 
 const Io = std.Io;
+const log = std.log.scoped(.http);
 
 // Socket-side buffers must hold whole TLS ciphertext records.
 const sock_read_len = tls.input_buffer_len;
@@ -135,7 +136,7 @@ pub fn listenAndServe(
     var listener = try address.listen(io, .{ .mode = .stream, .reuse_address = true });
     defer listener.close(io);
 
-    std.debug.print("Inkhold listening on {s}://{s}:{d}\n", .{
+    log.info("listening on {s}://{s}:{d}", .{
         if (cfg.tls.enabled) "https" else "http", cfg.host, cfg.port,
     });
 
@@ -144,7 +145,7 @@ pub fn listenAndServe(
 
     while (true) {
         const stream = listener.accept(io) catch |err| {
-            std.debug.print("accept failed: {}\n", .{err});
+            log.warn("accept failed: {t}", .{err});
             continue;
         };
         // Over the cap, close immediately and keep accepting.
@@ -152,10 +153,7 @@ pub fn listenAndServe(
             stream.close(io);
             if (!refusing) {
                 refusing = true;
-                std.debug.print(
-                    "at max_connections ({d}); refusing new connections until one closes\n",
-                    .{cfg.max_connections},
-                );
+                log.warn("at max_connections ({d}); refusing new connections until one closes", .{cfg.max_connections});
             }
             continue;
         }
@@ -167,9 +165,9 @@ pub fn listenAndServe(
         const t = std.Thread.spawn(.{ .stack_size = conn_stack_size }, connThread, .{ ctx.*, routes, stream, auth_ptr, ciphers, rng, &conns }) catch |err| {
             // Inline fallback: release the slot reserved above.
             defer conns.release();
-            std.debug.print("thread spawn failed ({}); handling inline\n", .{err});
+            log.warn("thread spawn failed ({t}); handling inline", .{err});
             handleConn(ctx, routes, stream, auth_ptr, ciphers, rng) catch |e| {
-                std.debug.print("connection error: {}\n", .{e});
+                log.warn("connection error: {t}", .{e});
             };
             stream.close(io);
             continue;
@@ -191,7 +189,7 @@ fn connThread(
     defer conns.release();
     var local = ctx;
     handleConn(&local, routes, stream, auth, ciphers, rng) catch |err| {
-        std.debug.print("connection error: {}\n", .{err});
+        log.warn("connection error: {t}", .{err});
     };
     stream.close(local.io);
 }
@@ -359,7 +357,7 @@ pub fn presentedToken(req: *router.Request) ?[]const u8 {
 fn resolveCaller(svc: *authsvc.Service, req: *router.Request) ?router.Caller {
     const t = presentedToken(req) orelse return null;
     var who = (svc.caller(t) catch |err| {
-        std.debug.print("resolveCaller: session lookup failed: {}\n", .{err});
+        log.warn("resolveCaller: session lookup failed: {t}", .{err});
         return null;
     }) orelse return null;
     if (who.audience == .device) {

@@ -144,7 +144,8 @@ pub fn changePassword(ctx: *Context, req: *Request, params: Params) anyerror!voi
 pub fn logout(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
-    if (transport.presentedToken(req)) |tok| svc.logout(tok) catch {};
+    // The cookie is cleared regardless; a row that outlives it expires on its own.
+    if (transport.presentedToken(req)) |tok| svc.logout(tok) catch |e| std.log.warn("logout: session not revoked: {t}", .{e});
     var cbuf: [128]u8 = undefined;
     const cleared = try sessionCookie(&cbuf, "", ctx.config.tls.enabled, 0); // Max-Age=0 expires it
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, cleared);

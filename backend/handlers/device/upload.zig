@@ -127,7 +127,8 @@ fn refuseOversize(ctx: *Context, req: *Request, files: *filesmod.Files, inner: [
     {
         ctx.lockDb();
         defer ctx.unlockDb();
-        files.deleteUploadSession(inner) catch {};
+        // The daily sweep reclaims a session this fails to drop.
+        files.deleteUploadSession(inner) catch |e| std.log.warn("upload {s}: session not dropped: {t}", .{ inner, e });
     }
     return fail(ctx, req, .ok, "QUOTA_EXCEEDED", "not enough space");
 }
@@ -339,7 +340,8 @@ pub fn uploadFinish(ctx: *Context, req: *Request, params: Params) anyerror!void 
     ctx.gpa.free(entry.name);
     if (entry.md5) |m| ctx.gpa.free(m);
 
-    files.deleteUploadSession(in.innerName) catch {};
+    // The blob is linked; a session this fails to drop is reclaimed by the daily sweep.
+    files.deleteUploadSession(in.innerName) catch |e| std.log.warn("upload {s}: session not dropped: {t}", .{ in.innerName, e });
 
     const id_str = try std.fmt.allocPrint(a, "{d}", .{entry.id});
     try json.respond(ctx.gpa, req, .ok, UploadFinishVO{

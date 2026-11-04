@@ -30,6 +30,7 @@ pub const DerivedStore = struct {
     /// Owned by the caller; must share a filesystem with its `tmp/` for the rename.
     root: Dir,
 
+    /// Opens the store at `root`, creating its `tmp/` staging directory.
     pub fn init(io: Io, root: Dir) !DerivedStore {
         try ensureDir(io, root, "tmp");
         return .{ .io = io, .root = root };
@@ -76,6 +77,8 @@ pub const DerivedStore = struct {
         }
     };
 
+    /// Starts staging `<md5>.<version>` in `s`: write through `s.interface`, then
+    /// `commit` or `abort`. `s` must not move afterwards.
     pub fn begin(self: DerivedStore, s: *Staged, md5: []const u8, version: i64) !void {
         if (md5.len != md5_hex_len) return error.InvalidMd5;
         s.store = self;
@@ -93,6 +96,7 @@ pub const DerivedStore = struct {
         s.interface = &s.fw.interface;
     }
 
+    /// Stages, writes and commits `bytes` in one step.
     pub fn put(self: DerivedStore, md5: []const u8, version: i64, bytes: []const u8) !void {
         var s: Staged = undefined;
         try self.begin(&s, md5, version);
@@ -108,6 +112,7 @@ pub const DerivedStore = struct {
         return self.root.openFile(self.io, rel, .{});
     }
 
+    /// Whether `<md5>.<version>` is published.
     pub fn has(self: DerivedStore, md5: []const u8, version: i64) bool {
         var buf: [max_name_len]u8 = undefined;
         const rel = finalRel(&buf, md5, version) orelse return false;
@@ -115,6 +120,7 @@ pub const DerivedStore = struct {
         return true;
     }
 
+    /// Deletes one published version; a missing file or malformed key is a no-op.
     pub fn remove(self: DerivedStore, md5: []const u8, version: i64) void {
         var buf: [max_name_len]u8 = undefined;
         const rel = finalRel(&buf, md5, version) orelse return;

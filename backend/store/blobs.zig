@@ -36,6 +36,7 @@ pub const BlobStore = struct {
     /// Owned by the caller; must share a filesystem with its `tmp/` for the rename.
     root: Dir,
 
+    /// Opens the store at `root`, creating its `tmp/` staging directory.
     pub fn init(io: Io, root: Dir) !BlobStore {
         try ensureDir(io, root, "tmp");
         return .{ .io = io, .root = root };
@@ -224,6 +225,7 @@ pub const Ingest = struct {
     size: u64,
     tmp_name: [20]u8, // "tmp/" + 16 hex
 
+    /// Appends to the temp file and the running md5.
     pub fn write(self: *Ingest, bytes: []const u8) !void {
         self.hasher.update(bytes);
         try self.fw.interface.writeAll(bytes);
@@ -257,6 +259,7 @@ pub const Ingest = struct {
         return .{ .md5 = md5, .size = self.size, .deduped = false };
     }
 
+    /// Closes the fd after `finish`; the published blob stays.
     pub fn deinit(self: *Ingest) void {
         self.file.close(self.store.io);
     }
@@ -268,6 +271,9 @@ pub const Ingest = struct {
     }
 };
 
+/// One part of a multipart device upload, staged under `tmp/` by upload id and
+/// part number until `mergeChunks` hashes them into a blob. `write`*, `finish`,
+/// `deinit`; or `abort`.
 pub const ChunkIngest = struct {
     store: BlobStore,
     file: File,
@@ -275,15 +281,18 @@ pub const ChunkIngest = struct {
     tmp_name: [chunk_name_max]u8,
     tmp_len: usize,
 
+    /// Appends to the part.
     pub fn write(self: *ChunkIngest, bytes: []const u8) !void {
         try self.fw.interface.writeAll(bytes);
     }
 
+    /// Flushes and fsyncs the part; `deinit` still closes it.
     pub fn finish(self: *ChunkIngest) !void {
         try self.fw.interface.flush(); // userspace buffer -> fd
         try self.file.sync(self.store.io); // fd -> disk
     }
 
+    /// Closes the fd; the part stays on disk for the merge.
     pub fn deinit(self: *ChunkIngest) void {
         self.file.close(self.store.io);
     }
@@ -358,6 +367,7 @@ fn finalRel(buf: *[35]u8, md5: []const u8) ?[]const u8 {
     return buf[0..35];
 }
 
+/// The blob key of `data`: its md5 as lowercase hex.
 pub fn md5HexOf(data: []const u8) [md5_hex_len]u8 {
     var digest: [Md5.digest_length]u8 = undefined;
     Md5.hash(data, &digest, .{});

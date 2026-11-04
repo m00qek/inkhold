@@ -85,7 +85,8 @@ pub fn resolveEquipment(ctx: *Context, body_eno: ?[]const u8, caller: *const con
         const svc = ctx.service.?;
         if (!(svc.isDeviceBound(caller.user_id, eno) catch true)) {
             // A placeholder until `bindEquipment` reports the real name.
-            svc.bindDevice(caller.user_id, eno, "Supernote") catch {};
+            svc.bindDevice(caller.user_id, eno, "Supernote") catch |e|
+                std.log.warn("device {s}: auto-bind failed: {t}", .{ eno, e });
             std.log.info("device {s} auto-bound from a file call; no name reported yet", .{eno});
         }
     }
@@ -103,7 +104,8 @@ pub fn unlinkEquipmentLenient(ctx: *Context, req: *Request, params: Params) anye
     defer parsed.deinit();
     const eno = parsed.value.equipmentNo;
     if (ctx.caller) |c| {
-        svc.unlinkDevice(c.user_id, eno) catch {};
+        // Still "success": the following `bindEquipment` re-binds anyway.
+        svc.unlinkDevice(c.user_id, eno) catch |e| std.log.warn("device {s}: pre-login unlink failed: {t}", .{ eno, e });
     }
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
 }
@@ -152,7 +154,8 @@ pub fn bindEquipment(ctx: *Context, req: *Request, params: Params) anyerror!void
     // The device's reported name overwrites the placeholder `resolveEquipment`
     // may have stamped (`bindDevice` never overwrites). Uses `in.name`, so the
     // fallback never clobbers a real label.
-    if (in.name) |reported| svc.nameDevice(user_id, in.equipmentNo, reported) catch {};
+    if (in.name) |reported| svc.nameDevice(user_id, in.equipmentNo, reported) catch |e|
+        std.log.warn("device {s}: name not stored: {t}", .{ in.equipmentNo, e });
     // Sent only when the account is added, so a stale name usually means it never arrived.
     if (in.name) |reported| {
         std.log.info("device {s} bound via bindEquipment, reported name \"{s}\"", .{ in.equipmentNo, reported });
@@ -163,9 +166,11 @@ pub fn bindEquipment(ctx: *Context, req: *Request, params: Params) anyerror!void
     if (ctx.files) |files| {
         // Creates the capacity row if missing but never lets the device set it:
         // `totalCapacity` is ignored so a device token cannot raise its own quota.
-        files.ensureCapacity(user_id) catch {};
+        files.ensureCapacity(user_id) catch |e| std.log.warn("user {d}: capacity row not created: {t}", .{ user_id, e });
         if (in.label) |labels| {
-            for (labels) |path| _ = files.ensureFolderPath(user_id, path) catch {};
+            // The device creates the folder itself on its first sync, so this is a convenience.
+            for (labels) |path| _ = files.ensureFolderPath(user_id, path) catch |e|
+                std.log.warn("user {d}: sync folder {s} not created: {t}", .{ user_id, path, e });
         }
     }
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);

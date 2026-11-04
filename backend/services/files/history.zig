@@ -1,6 +1,7 @@
 //! Version history: retention, eviction, reads and restore.
 
 const std = @import("std");
+const log = std.log.scoped(.files);
 const filesmod = @import("../files.zig");
 const Files = filesmod.Files;
 const internal = @import("internal.zig");
@@ -299,8 +300,9 @@ pub fn restoreVersion(self: Files, user_id: u64, file_id: u64, md5: []const u8) 
     // Same name and parent supersedes this very row; `file_id` is unchanged.
     const linked = try self.linkBlobIndexed(user_id, entry.parent_id, entry.name, &v.md5, v.size, null);
 
-    // The restored version is current now; drop its history row for this file.
-    dropFileHistoryVersion(self, file_id, &v.md5) catch {};
+    // The restored version is current now; drop its history row for this file. A
+    // row left behind only costs a duplicate line in the history listing.
+    dropFileHistoryVersion(self, file_id, &v.md5) catch |e| log.warn("file {d}: restored version's history row kept: {t}", .{ file_id, e });
     return linked;
 }
 

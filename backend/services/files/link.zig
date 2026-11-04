@@ -103,7 +103,7 @@ pub fn linkBlobIndexed(
     if (parsed) |p| try noteindex.store(self.db, md5, p.*, ts);
 
     // Best-effort: a missing row is re-derived on demand.
-    if (spd_derived) |d| spdindex.store(self.db, md5, d, ts) catch {};
+    if (spd_derived) |d| spdindex.store(self.db, md5, d, ts) catch |e| log.warn("blob {s}: spd index not stored, will re-derive: {t}", .{ md5, e });
 
     if (existing) |e| {
         file_id = e.id;

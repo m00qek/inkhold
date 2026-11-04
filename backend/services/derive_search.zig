@@ -71,6 +71,8 @@ pub const TermsWriter = struct {
     line: std.ArrayList(u8),
     gpa: std.mem.Allocator,
 
+    /// Opens the fragment and writes the header for `n` pages; `commit` or
+    /// `abort` must follow.
     pub fn begin(
         w: *TermsWriter,
         gpa: std.mem.Allocator,
@@ -116,6 +118,7 @@ pub const TermsWriter = struct {
         try w.frag.commit();
     }
 
+    /// Drops the staged fragment; safe after a failed `commit`.
     pub fn abort(w: *TermsWriter) void {
         w.release();
         w.frag.abort();
@@ -132,6 +135,8 @@ pub const TermsWriter = struct {
 pub const TextWriter = struct {
     frag: derived.Fragment,
 
+    /// Opens the fragment and writes the header for `n` pages; `commit` or
+    /// `abort` must follow.
     pub fn begin(
         w: *TextWriter,
         store: derived.DerivedStore,
@@ -143,6 +148,8 @@ pub const TextWriter = struct {
         try writeHeader(&w.frag, md5, n);
     }
 
+    /// One segment: page `ordinal`, its byte range when the format has one
+    /// (`.txt`), and its text. Empty text writes nothing.
     pub fn page(
         w: *TextWriter,
         ordinal: i64,
@@ -164,10 +171,12 @@ pub const TextWriter = struct {
         try w.frag.write("}\n");
     }
 
+    /// Publishes the fragment.
     pub fn commit(w: *TextWriter) !void {
         try w.frag.commit();
     }
 
+    /// Drops the staged fragment.
     pub fn abort(w: *TextWriter) void {
         w.frag.abort();
     }
