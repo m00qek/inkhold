@@ -268,6 +268,14 @@ pub fn documentText(ctx: *Context, req: *Request, params: Params) anyerror!void 
     body.end() catch {};
 }
 
+/// Sends what the frame writer buffered: the body writer's own buffer into
+/// the chunked stream, then the stream to the socket. `BodyWriter.flush` alone
+/// flushes only the latter, which left every frame waiting for 256 bytes.
+fn pushFrames(body: *std.http.BodyWriter) !void {
+    try body.writer.flush();
+    try body.flush();
+}
+
 /// GET /api/controlplane/events -> the live-freshness SSE channel: `syncVersion`
 /// pushed on change over a held connection. Without `ctx.event_streams` (the test
 /// harness) it answers one-shot. `manual_db_lock` is mandatory: the default lock
@@ -303,7 +311,7 @@ pub fn events(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
     body.writer.print("retry: {d}\nevent: sync\ndata: {d}\n\n", .{ eventstreams.retry_ms, initial }) catch return;
     if (initial_index) |snap| writeIndexFrame(&body.writer, snap) catch return;
-    body.flush() catch return;
+    pushFrames(&body) catch return;
 
     var last = initial;
     var last_index = initial_index;
@@ -345,12 +353,12 @@ pub fn events(ctx: *Context, req: *Request, params: Params) anyerror!void {
         }
         if (wrote) {
             since_write_ms = 0;
-            body.flush() catch break;
+            pushFrames(&body) catch break;
         } else if (since_write_ms >= streams.heartbeat_ms) {
             since_write_ms = 0;
             // `EventSource` ignores comments; the bytes surface a dead peer.
             body.writer.writeAll(": ping\n\n") catch break;
-            body.flush() catch break;
+            pushFrames(&body) catch break;
         }
     }
 

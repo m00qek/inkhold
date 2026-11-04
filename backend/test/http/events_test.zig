@@ -11,9 +11,11 @@ const harness = @import("harness.zig");
 const onboardWeb = harness.onboardWeb;
 const Fixture = harness.Fixture;
 const requestWithCookie = harness.requestWithCookie;
+const transport = @import("../../http/transport.zig");
+const app = @import("../../routes.zig");
 
 /// Runs one events request on its own thread with its own `Context` copy, as
-/// `connThread` does, keeping the raw response.
+/// a held-stream thread does, keeping the raw response.
 const StreamRunner = struct {
     ctx: *Context,
     token: [32]u8,
@@ -353,4 +355,92 @@ test "a dead client tears the stream down and returns its slot, long before the 
     try std.testing.expect(elapsed_ms < 10_000);
     try std.testing.expectEqual(@as(u32, 0), streams.count(std.testing.io));
     try std.testing.expectEqual(@as(u32, 0), streams.countFor(std.testing.io, who.id));
+}
+
+/// The socket's side of a stream: a small buffered writer whose drains are the
+/// moments bytes would hit the wire; it notes the first `event: sync` to arrive.
+const FrameClock = struct {
+    writer: std.Io.Writer,
+    buf: [1024]u8 = undefined,
+    store: [8192]u8 = undefined,
+    len: usize = 0,
+    first_frame_ms: std.atomic.Value(i64) = .init(0),
+
+    /// `self.buf` is the writer's buffer, so the clock must not move afterwards.
+    fn arm(self: *FrameClock) void {
+        self.writer = .{
+            .vtable = &.{ .drain = drain, .flush = std.Io.Writer.defaultFlush, .rebase = std.Io.Writer.failingRebase },
+            .buffer = &self.buf,
+        };
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *FrameClock = @fieldParentPtr("writer", w);
+        self.append(w.buffered());
+        w.end = 0;
+        var n: usize = 0;
+        for (data, 0..) |d, i| {
+            const times: usize = if (i == data.len - 1) splat else 1;
+            for (0..times) |_| {
+                self.append(d);
+                n += d.len;
+            }
+        }
+        if (self.first_frame_ms.load(.monotonic) == 0 and std.mem.indexOf(u8, self.store[0..self.len], "event: sync") != null) {
+            self.first_frame_ms.store(nowMs(), .release);
+        }
+        return n;
+    }
+
+    fn append(self: *FrameClock, bytes: []const u8) void {
+        const take = @min(self.store.len - self.len, bytes.len);
+        @memcpy(self.store[self.len..][0..take], bytes[0..take]);
+        self.len += take;
+    }
+
+    fn nowMs() i64 {
+        return std.Io.Clock.awake.now(std.testing.io).toMilliseconds();
+    }
+
+    /// Drives the handler against this writer, as a held-stream thread would.
+    fn run(self: *FrameClock, ctx: *Context, token: *const [32]u8) void {
+        var local = ctx.*;
+        var cbuf: [64]u8 = undefined;
+        const cookie = std.fmt.bufPrint(&cbuf, "sn_session={s}", .{token}) catch return;
+        var reqbuf: [1024]u8 = undefined;
+        const req_bytes = harness.buildRequest(&reqbuf, "GET", "/api/controlplane/events", &.{.{ .name = "cookie", .value = cookie }}, "") catch return;
+        var in = std.Io.Reader.fixed(req_bytes);
+        var server = std.http.Server.init(&in, &self.writer);
+        var req = server.receiveHead() catch return;
+        transport.handle(&local, &app.routes, &req) catch {};
+    }
+};
+
+test "a frame leaves for the socket when it is written, not once 256 bytes have gathered" {
+    // `BodyWriter.flush` flushes the socket writer but not the body writer's own
+    // buffer; every frame once waited there until `end()`, so a live stream
+    // delivered nothing for its whole lifetime.
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    var streams: eventstreams.EventStreams = .{
+        .poll_interval_ms = 5,
+        .heartbeat_ms = 100_000, // no ping: only the frames written at open count
+        .max_lifetime_ms = 600,
+    };
+    ctx.event_streams = &streams;
+    const who = try onboardedAdmin(f);
+
+    var clock: FrameClock = .{ .writer = undefined };
+    clock.arm();
+    const started = FrameClock.nowMs();
+    const t = try std.Thread.spawn(.{}, FrameClock.run, .{ &clock, ctx, &who.token });
+    t.join();
+    const ended = FrameClock.nowMs();
+
+    const first = clock.first_frame_ms.load(.acquire);
+    try std.testing.expect(first != 0);
+    // The first frame is written at open; it must not wait for the stream's end.
+    try std.testing.expect(first - started < @divTrunc(ended - started, 2));
+    try std.testing.expect(std.mem.indexOf(u8, clock.store[0..clock.len], "retry: ") != null);
 }
