@@ -41,12 +41,21 @@ pub const Config = struct {
     /// The first-run admin's login. Must be an email: the sign-in field is
     /// `type="email"`, so a non-email default could never sign in.
     admin_email: []const u8 = "admin@home.lan",
-    /// Concurrent connection cap; serve runs a thread per connection, so this
-    /// bounds reserved stack at `max_connections * conn_stack_size`. Over the cap,
-    /// new connections are closed. Slots last a connection's lifetime (browsers
-    /// park ~6 keep-alives per tab). Stacks are address space, not RSS (~68 KiB
-    /// resident idle); 96 idle connections cost ~6.4 MB of the ~50 MB budget.
-    max_connections: u16 = 96,
+    /// Open sockets at once: parked keep-alives, requests in flight and held
+    /// streams. Over the cap, new connections are closed. A parked plaintext
+    /// socket costs ~34 KB and no thread (a browser parks ~6 per tab), so this
+    /// is a file-descriptor budget more than a memory one.
+    max_connections: u16 = 192,
+    /// Threads serving requests. Concurrency past `db_lock` is tiny, so a few
+    /// suffice; each reserves `conn_stack_size`. Memory follows this, not the
+    /// socket count.
+    workers: u8 = 4,
+    /// Threads for held streams (SSE), beyond the workers. Over the cap a new
+    /// stream is dropped and its `EventSource` retries.
+    max_held: u16 = 24,
+    /// A keep-alive socket idle this long is closed; the browser reopens one
+    /// on the next click. Generous, since under TLS a reopen is a handshake.
+    idle_timeout_s: u32 = 300,
     tls: Tls = .{},
     history: History = .{},
 };

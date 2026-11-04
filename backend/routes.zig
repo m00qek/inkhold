@@ -140,7 +140,7 @@ pub const routes = [_]router.Route{
     // SSE: a held connection. Without `manual_db_lock` it would hold the global DB
     // lock for the connection's lifetime and stall device sync. Over the stream cap
     // it degrades to a one-shot frame instead of refusing.
-    .{ .method = .GET, .path = "/api/controlplane/events", .scopes = &.{.controlplane}, .handler = controlplane.events, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/api/controlplane/events", .scopes = &.{.controlplane}, .handler = controlplane.events, .manual_db_lock = true, .held = true },
 
     // --- Recycle bin ---
     // No CSRF token: the session cookie is `HttpOnly; SameSite=Strict`.

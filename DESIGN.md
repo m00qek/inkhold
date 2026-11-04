@@ -104,9 +104,15 @@ and [`parsers/spd/spd-format.md`](parsers/spd/spd-format.md).
 
 ### 3.1 Threads and locks
 
-- One detached thread per connection (keep-alive, SSE, the device's Socket.IO),
-  capped by `max_connections` (96). Stacks are 1 MiB, bisected empirically
-  against a live 32 MB upload; re-bisect if the upload path's frames change.
+- **Threads follow requests, not sockets.** The acceptor parks every socket
+  with the poller (`http/poller.zig`, one `poll` thread); a readable one goes
+  to a worker from a fixed pool (`workers`, 4) which serves it and parks it
+  again. A parked plaintext socket is one `Conn` (`http/conn.zig`, ~34 KB) and
+  no thread; `max_connections` (192) is therefore an fd budget. Only a `held`
+  route (the SSE channel) gets a thread of its own, capped by `max_held`;
+  sockets idle past `idle_timeout_s` are closed. Worker and held-stream stacks
+  are 1 MiB, bisected empirically against a live 32 MB upload; re-bisect if
+  the upload path's frames change.
 - One shared SQLite writer connection, serialised by `db_lock` around the whole
   handler. `std.Io.Mutex` is not reentrant: anything that takes `db_lock`
   itself (`indexSnapshot`, `pending.Pulse`) must not be called inside a

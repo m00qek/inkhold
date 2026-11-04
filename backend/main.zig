@@ -51,6 +51,9 @@ test {
     _ = @import("http/download_tokens.zig");
     _ = @import("http/event_streams.zig");
     _ = @import("http/context.zig");
+    _ = @import("http/conn.zig");
+    _ = @import("http/poller.zig");
+    _ = @import("http/pool.zig");
     _ = @import("http/reply.zig");
     _ = @import("http/multipart.zig");
     _ = @import("http/byte_range.zig");

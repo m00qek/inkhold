@@ -59,7 +59,17 @@ pub const Route = struct {
     /// is invisible too. `test/http/read_only_audit_test.zig` audits every flagged
     /// route against a real read-only connection.
     read_only: bool = false,
+    /// The handler holds the connection for minutes (SSE). It gets a thread of
+    /// its own instead of a pool worker, as every connection once did.
+    held: bool = false,
 };
+
+/// Whether `req` lands on a `held` route; decided before dispatch, since a
+/// worker must not be the thread that serves one.
+pub fn isHeld(routes: []const Route, req: *const Request) bool {
+    const i = matchedIndex(routes, req) orelse return false;
+    return routes[i].held;
+}
 
 /// Index of the first route combining `read_only` with `manual_db_lock` (its
 /// `lockDb` would guard the writer while it reads a reader) or with

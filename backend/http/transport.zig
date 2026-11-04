@@ -1,5 +1,6 @@
-//! HTTP(S) transport: the accept loop, optional in-process TLS (ianic/tls.zig),
-//! caller resolution, and dispatch under the route table's `db_lock` policy.
+//! HTTP(S) transport: the accept loop, the poller/worker machinery around a
+//! connection (`conn.zig`, `poller.zig`, `pool.zig`), caller resolution, and
+//! dispatch under the route table's `db_lock` policy.
 const std = @import("std");
 const tls = @import("tls");
 const config = @import("../config.zig");
@@ -20,23 +21,22 @@ const thumbstore = @import("../store/thumbs.zig");
 
 const Io = std.Io;
 const log = std.log.scoped(.http);
-
-// Socket-side buffers must hold whole TLS ciphertext records.
-const sock_read_len = tls.input_buffer_len;
-const sock_write_len = tls.output_buffer_len;
-const plain_len = 16 * 1024;
+const conn_mod = @import("conn.zig");
+const Conn = conn_mod.Conn;
+const Poller = @import("poller.zig").Poller;
+const Pool = @import("pool.zig").Pool;
 
 pub const Error = error{UnknownCipherSuite} || std.mem.Allocator.Error;
 
-/// Stack per connection thread, set empirically: static frame sums (~281 KB,
-/// mostly `ossPut` and `multipart.extract` buffers) badly under-predict, and a
-/// live 32 MB upload put the real floor between 512 KiB (SIGSEGV) and
-/// 576 KiB. Re-bisect against a real transfer if those frames change.
+/// Stack per worker and per held-stream thread, set empirically: static frame
+/// sums (~281 KB, mostly `ossPut` and `multipart.extract` buffers) badly
+/// under-predict, and a live 32 MB upload put the real floor between 512 KiB
+/// (SIGSEGV) and 576 KiB. Re-bisect against a real transfer if those frames
+/// change. Only `workers + max_held` threads reserve it.
 pub const conn_stack_size = 1024 * 1024;
 
-/// Bounds in-flight connections: each is a detached thread with
-/// `conn_stack_size` of stack, so an uncapped flood blows the ~50 MB RSS
-/// target. One missed `release` drifts the count until everything is refused.
+/// A counted cap: open sockets, or held-stream threads. One missed `release`
+/// drifts the count until everything is refused.
 pub const ConnLimiter = struct {
     active: std.atomic.Value(u32) = .init(0),
     max: u32,
@@ -121,8 +121,72 @@ test "ConnLimiter: a zero cap refuses everything without underflowing" {
     try std.testing.expectEqual(@as(u32, 0), l.count());
 }
 
-/// The accept loop: one detached thread per connection, dispatching `routes`
-/// with `ctx`. Never returns on success.
+/// The serving machinery, alive for the process: the acceptor (this thread)
+/// hands sockets to the poller, the poller hands readable ones to the pool, a
+/// worker serves and hands the socket back or closes it. A request on a
+/// `held` route gets a thread of its own, as every connection once did.
+/// Memory therefore follows requests in flight, not open sockets.
+pub const Serve = struct {
+    gpa: std.mem.Allocator,
+    io: Io,
+    /// The template every worker copies per request: `client_ip`, `caller` and
+    /// the lock bookkeeping are per request.
+    ctx: *Context,
+    routes: []const router.Route,
+    tls_opts: conn_mod.TlsOptions,
+    /// Open sockets: parked, in a worker, or held.
+    sockets: ConnLimiter,
+    /// Threads given to held streams, beyond the workers.
+    held: ConnLimiter,
+    poller: Poller,
+    pool: Pool,
+
+    /// A worker's turn with `conn`.
+    pub fn work(self: *Serve, conn: *Conn) void {
+        var local = self.ctx.*;
+        switch (conn.serve(&local, self.routes, self.tls_opts)) {
+            .park => self.poller.park(conn),
+            .close => self.finish(conn),
+            .held => |req| self.hold(conn, req),
+        }
+    }
+
+    /// Closes and frees `conn` and returns its socket slot.
+    pub fn finish(self: *Serve, conn: *Conn) void {
+        conn.destroy(self.gpa);
+        self.sockets.release();
+    }
+
+    /// Gives a held stream its own thread. Over the cap, or with no thread to
+    /// be had, the connection is dropped rather than parked on a worker for
+    /// minutes; an `EventSource` reconnects after `retry:`.
+    fn hold(self: *Serve, conn: *Conn, req: router.Request) void {
+        if (!self.held.tryAcquire()) {
+            log.warn("at max_held ({d}); dropping a stream", .{self.held.max});
+            self.finish(conn);
+            return;
+        }
+        const t = std.Thread.spawn(.{ .stack_size = conn_stack_size }, heldThread, .{ self, conn, req }) catch |err| {
+            self.held.release();
+            log.warn("thread spawn failed ({t}); dropping a stream", .{err});
+            self.finish(conn);
+            return;
+        };
+        t.detach();
+    }
+
+    /// Runs the held request to its end, then closes: a stream never keeps alive.
+    fn heldThread(self: *Serve, conn: *Conn, req_in: router.Request) void {
+        defer self.held.release();
+        var req = req_in;
+        var local = self.ctx.*;
+        local.client_ip = conn.ip();
+        handle(&local, self.routes, &req) catch |err| log.warn("connection error: {t}", .{err});
+        self.finish(conn);
+    }
+};
+
+/// The accept loop. Never returns on success.
 pub fn listenAndServe(
     io: Io,
     cfg: config.Config,
@@ -134,22 +198,38 @@ pub fn listenAndServe(
 ) !void {
     const address = try Io.net.IpAddress.parse(cfg.host, cfg.port);
     var listener = try address.listen(io, .{ .mode = .stream, .reuse_address = true });
-    defer listener.close(io);
+    defer listener.deinit(io);
 
-    log.info("listening on {s}://{s}:{d}", .{
-        if (cfg.tls.enabled) "https" else "http", cfg.host, cfg.port,
+    // Self-referential through the poller and the pool, so it never moves:
+    // this frame lives as long as the process.
+    var serve: Serve = .{
+        .gpa = ctx.gpa,
+        .io = io,
+        .ctx = ctx,
+        .routes = routes,
+        .tls_opts = .{ .auth = auth_ptr, .ciphers = ciphers, .rng = rng },
+        .sockets = .init(cfg.max_connections),
+        .held = .init(cfg.max_held),
+        .poller = undefined,
+        .pool = undefined,
+    };
+    serve.poller = try Poller.init(io, ctx.gpa, &serve, cfg.idle_timeout_s);
+    serve.pool = .{ .io = io, .gpa = ctx.gpa, .serve = &serve };
+    try serve.pool.start(cfg.workers);
+    try serve.poller.start();
+
+    log.info("listening on {s}://{s}:{d} ({d} workers)", .{
+        if (cfg.tls.enabled) "https" else "http", cfg.host, cfg.port, cfg.workers,
     });
 
-    var conns: ConnLimiter = .init(cfg.max_connections);
     var refusing = false; // log once per over-capacity episode
-
     while (true) {
         const stream = listener.accept(io) catch |err| {
             log.warn("accept failed: {t}", .{err});
             continue;
         };
         // Over the cap, close immediately and keep accepting.
-        if (!conns.tryAcquire()) {
+        if (!serve.sockets.tryAcquire()) {
             stream.close(io);
             if (!refusing) {
                 refusing = true;
@@ -158,82 +238,15 @@ pub fn listenAndServe(
             continue;
         }
         refusing = false;
-        // A thread per connection, since keep-alive, the device's Socket.IO
-        // WebSocket and SSE streams park connections for a long time. `ctx` is
-        // copied so `client_ip`/`caller` stay thread-local. On spawn failure,
-        // serve inline.
-        const t = std.Thread.spawn(.{ .stack_size = conn_stack_size }, connThread, .{ ctx.*, routes, stream, auth_ptr, ciphers, rng, &conns }) catch |err| {
-            // Inline fallback: release the slot reserved above.
-            defer conns.release();
-            log.warn("thread spawn failed ({t}); handling inline", .{err});
-            handleConn(ctx, routes, stream, auth_ptr, ciphers, rng) catch |e| {
-                log.warn("connection error: {t}", .{e});
-            };
+        const conn = Conn.create(ctx.gpa, io, stream, cfg.tls.enabled) catch |err| {
+            serve.sockets.release();
             stream.close(io);
+            log.warn("connection refused ({t})", .{err});
             continue;
         };
-        t.detach();
-    }
-}
-
-/// One connection on its own thread, with a by-value `ctx`.
-fn connThread(
-    ctx: Context,
-    routes: []const router.Route,
-    stream: Io.net.Stream,
-    auth: ?*tls.config.CertKeyPair,
-    ciphers: []const tls.config.CipherSuite,
-    rng: std.Random,
-    conns: *ConnLimiter,
-) void {
-    defer conns.release();
-    var local = ctx;
-    handleConn(&local, routes, stream, auth, ciphers, rng) catch |err| {
-        log.warn("connection error: {t}", .{err});
-    };
-    stream.close(local.io);
-}
-
-fn handleConn(
-    ctx: *Context,
-    routes: []const router.Route,
-    stream: Io.net.Stream,
-    auth: ?*tls.config.CertKeyPair,
-    ciphers: []const tls.config.CipherSuite,
-    rng: std.Random,
-) !void {
-    const io = ctx.io;
-    var ip_buf: [46]u8 = undefined; // max textual IPv6
-    ctx.client_ip = peerIp(stream, &ip_buf);
-
-    var sock_rbuf: [sock_read_len]u8 = undefined;
-    var sock_wbuf: [sock_write_len]u8 = undefined;
-    var sr = stream.reader(io, &sock_rbuf);
-    var sw = stream.writer(io, &sock_wbuf);
-
-    if (ctx.config.tls.enabled) {
-        var conn = try tls.server(&sr.interface, &sw.interface, .{
-            .auth = auth,
-            .rng = rng,
-            .now = Io.Clock.real.now(io),
-            .cipher_suites = ciphers,
-        });
-        var plain_rbuf: [plain_len]u8 = undefined;
-        var plain_wbuf: [plain_len]u8 = undefined;
-        var cr = conn.reader(&plain_rbuf);
-        var cw = conn.writer(&plain_wbuf);
-        try serve(ctx, routes, &cr.interface, &cw.interface);
-        conn.close() catch {};
-    } else {
-        try serve(ctx, routes, &sr.interface, &sw.interface);
-    }
-}
-
-fn serve(ctx: *Context, routes: []const router.Route, in: *Io.Reader, out: *Io.Writer) !void {
-    var http = std.http.Server.init(in, out);
-    while (true) {
-        var req = http.receiveHead() catch return;
-        try handle(ctx, routes, &req);
+        // Straight to the poller: the first request is read once bytes arrive,
+        // so a silent connect holds no worker.
+        serve.poller.park(conn);
     }
 }
 
@@ -359,44 +372,6 @@ fn resolveCaller(svc: *authsvc.Service, req: *router.Request) ?router.Caller {
         who.equipment_len = router.headerCopy(req, "equipmentno", &who.equipment_buf).len;
     }
     return who;
-}
-
-/// The peer IP for rate-limit keying (no proxy: TLS terminates here).
-fn peerIp(stream: Io.net.Stream, buf: []u8) ?[]const u8 {
-    var storage: std.posix.sockaddr.storage = undefined;
-    var len: std.posix.socklen_t = @sizeOf(@TypeOf(storage));
-    std.posix.getpeername(stream.socket.handle, @ptrCast(&storage), &len) catch return null;
-    return formatPeerIp(&storage, buf);
-}
-
-fn formatPeerIp(storage: *const std.posix.sockaddr.storage, buf: []u8) ?[]const u8 {
-    const sa: *const std.posix.sockaddr = @ptrCast(storage);
-    switch (sa.family) {
-        std.posix.AF.INET => {
-            const in: *const std.posix.sockaddr.in = @ptrCast(@alignCast(storage));
-            const b = std.mem.asBytes(&in.addr); // network order = dotted order
-            return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }) catch null;
-        },
-        std.posix.AF.INET6 => {
-            const in6: *const std.posix.sockaddr.in6 = @ptrCast(@alignCast(storage));
-            var w = std.Io.Writer.fixed(buf);
-            for (in6.addr, 0..) |octet, i| {
-                if (i != 0 and i % 2 == 0) w.writeByte(':') catch return null;
-                w.print("{x:0>2}", .{octet}) catch return null;
-            }
-            return buf[0..w.end];
-        },
-        else => return null,
-    }
-}
-
-test "formatPeerIp renders an IPv4 dotted quad" {
-    var storage: std.posix.sockaddr.storage = std.mem.zeroes(std.posix.sockaddr.storage);
-    const in: *std.posix.sockaddr.in = @ptrCast(@alignCast(&storage));
-    in.family = std.posix.AF.INET;
-    in.addr = std.mem.bytesToValue(u32, &[4]u8{ 192, 168, 1, 42 });
-    var buf: [46]u8 = undefined;
-    try std.testing.expectEqualStrings("192.168.1.42", formatPeerIp(&storage, &buf).?);
 }
 
 /// Cookie `name` from a `Cookie` header value, or null.

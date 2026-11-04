@@ -24,12 +24,21 @@
     // Email/login of the auto-created first-run administrator.
     .admin_email = "admin@home.lan",
 
-    // Max connections in flight at once (a thread per connection in serve mode, so
-    // this bounds memory: max_connections * ~1 MiB reserved stack). Slots are held
-    // for a connection's whole lifetime — keep-alive parks ~6 per browser tab and
-    // the device holds a persistent WebSocket. 96 covers a household inside the
-    // ~50 MB RSS budget. Raise only together with the budget.
-    .max_connections = 96,
+    // Open sockets at once: parked keep-alives, requests in flight and held
+    // streams. A parked socket costs ~34 KB and no thread (a browser parks ~6
+    // per tab), so this is a file-descriptor budget more than a memory one.
+    .max_connections = 192,
+
+    // Threads serving requests. Everything past `db_lock` is serialised anyway,
+    // so a few are plenty; memory follows this number, not the socket count.
+    .workers = 4,
+
+    // Threads for held streams (the live-update channel), beyond the workers.
+    .max_held = 24,
+
+    // A keep-alive socket idle this long is closed; the browser reopens one on
+    // the next click. Generous, because under TLS a reopen is a handshake.
+    .idle_timeout_s = 300,
 
     .tls = .{
         // Terminate TLS in-process. When false, plaintext HTTP is served.
