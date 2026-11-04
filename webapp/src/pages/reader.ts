@@ -43,6 +43,7 @@ import {
   toPanelLayers,
 } from "./noteLayers";
 import type { PageLayer } from "../core/types";
+import type { ReaderState } from "./readerState";
 
 export interface ReaderDeps {
   api: Api;
@@ -121,7 +122,7 @@ const ZOOMS = [FIT_PAGE, "100%", "150%"] as const;
  * below it are needed, and reading a screenshot needs more than 150%.
  */
 const IMAGE_ZOOMS = ["25%", "50%", FIT_PAGE, FIT_WIDTH, "100%", "200%", "400%"] as const;
-type Zoom = (typeof ZOOMS)[number] | (typeof IMAGE_ZOOMS)[number];
+export type Zoom = (typeof ZOOMS)[number] | (typeof IMAGE_ZOOMS)[number];
 /**
  * Note-page factors, tuned to the 640px height heuristic in `showPage`; images
  * treat the label as a real percentage and must not use them.
@@ -184,18 +185,18 @@ export function createReader(deps: ReaderDeps): Reader {
     stripHook: "note-filmstrip",
     onPick: (index) => goToPage(index),
     // Skeleton pages (empty hash) have nothing to render yet.
-    loading: (index) => meta?.pages[index]?.hash === "",
+    loading: (index) => st.meta?.pages[index]?.hash === "",
     aspect: (index) => {
-      const page = meta?.pages[index];
+      const page = st.meta?.pages[index];
       if (!page?.width || !page.height) return null;
       // Clamped so a wide page cannot exceed the fixed-height row's column.
       return Math.min(page.width / page.height, 2.5);
     },
     // The lazy engine decides when to paint within the strip's window.
     mount: (row) => {
-      const page = meta?.pages[row.index];
-      if (meta && page && page.hash !== "") {
-        filmEngine.add({ target: row.canvas, noteId: meta.id, page, size: "thumb" });
+      const page = st.meta?.pages[row.index];
+      if (st.meta && page && page.hash !== "") {
+        filmEngine.add({ target: row.canvas, noteId: st.meta.id, page, size: "thumb" });
       }
     },
     unmount: (row) => filmEngine.remove(row.canvas),
@@ -212,7 +213,7 @@ export function createReader(deps: ReaderDeps): Reader {
   // --- the non-`.note` stage ------------------------------------------------
   // Shown instead of the canvas stage: an `<img>` or the no-preview block.
   const files: FileStage = createFileStage({
-    isCurrent: (id) => meta?.id === id,
+    isCurrent: (id) => st.meta?.id === id,
     onSized: () => sizeImage(),
   });
   const fileImg = files.img;
@@ -226,14 +227,14 @@ export function createReader(deps: ReaderDeps): Reader {
     format: (z: Zoom) => z,
     onStep: (dir) => {
       // Unknown values fall back to `Fit ⇕`, a rung both ladders carry.
-      const ladder: readonly Zoom[] = mode === "image" ? IMAGE_ZOOMS : ZOOMS;
-      const at = ladder.indexOf(zoom);
+      const ladder: readonly Zoom[] = st.mode === "image" ? IMAGE_ZOOMS : ZOOMS;
+      const at = ladder.indexOf(st.zoom);
       const from = at < 0 ? Math.max(0, ladder.indexOf(FIT_PAGE)) : at;
       const i = Math.max(0, Math.min(ladder.length - 1, from + dir));
-      zoom = ladder[i]!;
-      if (mode === "image") sizeImage();
-      else void showPage(pageIndex);
-      return zoom;
+      st.zoom = ladder[i]!;
+      if (st.mode === "image") sizeImage();
+      else void showPage(st.pageIndex);
+      return st.zoom;
     },
   });
   const zoomEl = zoomStepper.el;
@@ -290,7 +291,7 @@ export function createReader(deps: ReaderDeps): Reader {
   });
   // Bin-origin cluster (retention countdown + menu), swapped in for Move to bin.
   const binActions = createBinViewerActions({
-    getMeta: () => meta,
+    getMeta: () => st.meta,
     onRestore: deps.onRestore,
     onPurge: deps.onPurge,
     // Only wired when the shell can open history, so there is no dead row.
@@ -363,43 +364,28 @@ export function createReader(deps: ReaderDeps): Reader {
     el("div", { class: "reader__main" }, stage, fileStage),
   );
 
-  // --- state ---------------------------------------------------------------
-  let meta: NoteMeta | null = null;
-  /** Which outcome is on screen; every note-only path is gated on it. */
-  let mode: FileKind = "note";
-  /** False while `meta` is the skeleton, whose invented pages say `textHash: null`. */
-  let metaResolved = false;
-  /** The listing's whole-note recognised-text flag, used until `metaResolved`. */
-  let summaryRecognized = false;
-  let pageIndex = 0;
-  let zoom: Zoom = FIT_PAGE;
-  let open = false;
-  let paintToken = 0;
-  /** Opened from the bin: raw URLs need the bin-scoped route (the live one 404s). */
-  let fromBin = false;
-  /** The previewed retained version (history mode), or null. */
-  let previewVersion: { md5: string; createdAt: number } | null = null;
-  /** History preview of a trashed file: no Restore, bin-scoped history route. */
-  let previewViewOnly = false;
-  /** The user's intent; the panel shows only while the page has layers. */
-  let layersPanelOpen = false;
-  /**
-   * What the layers toggle may claim, decided from metadata rather than the
-   * decode (which lags a page turn). "unknown" while `meta` is the skeleton.
-   */
-  let layersAvail: "unknown" | "none" | "some" = "unknown";
-  /** The user's intent; defaults open, forced shut by {@link relieveDoubleSqueeze}. */
-  let pageIndexOpen = true;
+  const st: ReaderState = {
+    meta: null,
+    mode: "note",
+    metaResolved: false,
+    summaryRecognized: false,
+    pageIndex: 0,
+    zoom: FIT_PAGE,
+    open: false,
+    paintToken: 0,
+    fromBin: false,
+    previewVersion: null,
+    previewViewOnly: false,
+    layersPanelOpen: false,
+    layersAvail: "unknown",
+    pageIndexOpen: true,
+    urlSuspended: false,
+    urlTimer: undefined,
+  };
 
   /** Stale hashes already refetched: one metadata refetch per hash is the loop guard. */
   const staleHandled = new Set<Hash>();
 
-  // --- the URL -------------------------------------------------------------
-  // Page and query are written with `replaceState` via `onPosition`. Suspended
-  // through `open()`, whose `find.reset()` would otherwise publish an empty query
-  // and wipe the `?q=` it is about to prime.
-  let urlSuspended = false;
-  let urlTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** What the URL should say the search is: nothing at all while the bar is shut. */
   function urlQuery(): string {
@@ -412,35 +398,35 @@ export function createReader(deps: ReaderDeps): Reader {
   }
 
   function syncUrl(): void {
-    if (urlTimer !== undefined) {
-      clearTimeout(urlTimer);
-      urlTimer = undefined;
+    if (st.urlTimer !== undefined) {
+      clearTimeout(st.urlTimer);
+      st.urlTimer = undefined;
     }
-    if (!open || urlSuspended || !meta) return;
+    if (!st.open || st.urlSuspended || !st.meta) return;
     // Bin opens use the bin route (the live one 404s); history previews carry the md5.
-    if (mode === "note") {
-      if (fromBin) {
-        deps.onPosition?.(meta.id, pageIndex, "", undefined, true);
+    if (st.mode === "note") {
+      if (st.fromBin) {
+        deps.onPosition?.(st.meta.id, st.pageIndex, "", undefined, true);
         return;
       }
-      deps.onPosition?.(meta.id, pageIndex, urlQuery(), previewVersion?.md5);
+      deps.onPosition?.(st.meta.id, st.pageIndex, urlQuery(), st.previewVersion?.md5);
       return;
     }
     // An image publishes only for bin or history opens.
-    if (mode === "image") {
-      if (fromBin) {
-        deps.onPosition?.(meta.id, 0, "", undefined, true);
+    if (st.mode === "image") {
+      if (st.fromBin) {
+        deps.onPosition?.(st.meta.id, 0, "", undefined, true);
         return;
       }
-      if (previewVersion) deps.onPosition?.(meta.id, 0, "", previewVersion.md5);
+      if (st.previewVersion) deps.onPosition?.(st.meta.id, 0, "", st.previewVersion.md5);
     }
   }
 
   /** Debounced, for the find field: the URL settles on the word, not each prefix. */
   function queueUrlSync(): void {
-    if (urlTimer !== undefined) clearTimeout(urlTimer);
-    urlTimer = setTimeout(() => {
-      urlTimer = undefined;
+    if (st.urlTimer !== undefined) clearTimeout(st.urlTimer);
+    st.urlTimer = setTimeout(() => {
+      st.urlTimer = undefined;
       syncUrl();
     }, VIEWER_DEBOUNCE_MS);
   }
@@ -456,13 +442,13 @@ export function createReader(deps: ReaderDeps): Reader {
       dispatchApiFailure({ onSessionExpired: deps.onSessionExpired }, e);
       return;
     }
-    if (!open || meta?.id !== noteId) return; // closed / moved on while fetching
-    meta = fresh;
+    if (!st.open || st.meta?.id !== noteId) return; // closed / moved on while fetching
+    st.meta = fresh;
     // `setNote` drops the cached word boxes; the links memo would only hold dead entries.
     linksByPage.clear();
     find.setNote(fresh.id, fresh.fileHash, fresh.pages);
     buildFilmstrip();
-    void showPage(pageIndex);
+    void showPage(st.pageIndex);
   }
 
   const failures: ApiFailureSink = {
@@ -498,7 +484,7 @@ export function createReader(deps: ReaderDeps): Reader {
         ocrBody.replaceChildren(sidePanelState(state.kind, OCR_MESSAGE[state.kind]));
       },
       // The panel changes the stage width, so the page is re-measured.
-      relayout: () => void showPage(pageIndex),
+      relayout: () => void showPage(st.pageIndex),
     },
   });
 
@@ -544,9 +530,9 @@ export function createReader(deps: ReaderDeps): Reader {
    */
   function paintOvals(words: WordBox[], current: number): void {
     for (const old of Array.from(pageEl.querySelectorAll(".findbox"))) old.remove();
-    const m = meta;
+    const m = st.meta;
     if (!m) return;
-    const page = m.pages[pageIndex];
+    const page = m.pages[st.pageIndex];
     if (!page) return;
 
     const ovals = ovalsFor(words, m.pxPerMm, page.width, pageEl.clientWidth, pageEl.clientHeight);
@@ -582,8 +568,8 @@ export function createReader(deps: ReaderDeps): Reader {
    */
   async function paintLinks(index: number, token: number): Promise<void> {
     linkLayer.clear();
-    const m = meta;
-    if (!m || mode !== "note") return;
+    const m = st.meta;
+    if (!m || st.mode !== "note") return;
     const page = m.pages[index];
     if (!page) return;
     // Only notes built on an imported PDF template have a link block.
@@ -601,7 +587,7 @@ export function createReader(deps: ReaderDeps): Reader {
       linksByPage.set(key, links);
     }
     // The page turned (or the note closed) while we were fetching.
-    if (token !== paintToken || pageIndex !== index || !open) return;
+    if (token !== st.paintToken || st.pageIndex !== index || !st.open) return;
     if (links.length === 0) return;
 
     linkLayer.setLinks(links, {
@@ -609,7 +595,7 @@ export function createReader(deps: ReaderDeps): Reader {
       pagePt: { width: page.width, height: page.height },
       canvas: { width: pageEl.clientWidth, height: pageEl.clientHeight },
       // Real routes so links are shareable; bin opens keep the bin form.
-      hrefForPage: (target) => (fromBin ? binNotePageHref(m.id, target) : notePageHref(m.id, target)),
+      hrefForPage: (target) => (st.fromBin ? binNotePageHref(m.id, target) : notePageHref(m.id, target)),
       // A page turn, not a reopen.
       onJump: (target) => goToPage(target),
     });
@@ -654,11 +640,11 @@ export function createReader(deps: ReaderDeps): Reader {
     renderer,
     menu: exportMenu,
     toast: deps.toast,
-    meta: () => meta,
+    meta: () => st.meta,
     currentPage,
     layers: noteLayerCtl,
     // Only the focused page's stack (the previous one survives until the new one commits).
-    liveStack: () => (mode === "note" && stackIsCurrent() ? noteLayerCtl.stack() : null),
+    liveStack: () => (st.mode === "note" && stackIsCurrent() ? noteLayerCtl.stack() : null),
   });
 
   const filmEngine: LazyEngine = createLazyEngine({
@@ -672,7 +658,7 @@ export function createReader(deps: ReaderDeps): Reader {
   });
 
   function currentPage(): PageRef | undefined {
-    return meta?.pages[pageIndex];
+    return st.meta?.pages[st.pageIndex];
   }
 
   // --- the two non-note stages ---------------------------------------------
@@ -684,7 +670,7 @@ export function createReader(deps: ReaderDeps): Reader {
   }
 
   function showNoPreview(m: NoteMeta, title: string, body: string): void {
-    files.showNoPreview(m, title, body, rawFileUrl(m.id, m.fileHash, { download: true, bin: fromBin }));
+    files.showNoPreview(m, title, body, rawFileUrl(m.id, m.fileHash, { download: true, bin: st.fromBin }));
   }
 
   function showImage(m: NoteMeta, url: string): void {
@@ -695,7 +681,7 @@ export function createReader(deps: ReaderDeps): Reader {
 
   /** Enter (or leave) a non-note mode: swap stages and prune the toolbar. */
   function setMode(next: FileKind): void {
-    mode = next;
+    st.mode = next;
     const isNote = next === "note";
     stage.hidden = !isNote;
     fileStage.hidden = isNote;
@@ -719,9 +705,9 @@ export function createReader(deps: ReaderDeps): Reader {
    * `textHash: null` for every page after the first.
    */
   function refreshFindUi(): void {
-    const isNote = mode === "note";
+    const isNote = st.mode === "note";
     const searchable =
-      isNote && (metaResolved ? (meta?.pages.some((pg) => pg.textHash !== null) ?? false) : summaryRecognized);
+      isNote && (st.metaResolved ? (st.meta?.pages.some((pg) => pg.textHash !== null) ?? false) : st.summaryRecognized);
     findToggle.disabled = !searchable;
     findToggle.title = searchable ? "Find in this note" : "This note has no recognised text to search";
   }
@@ -734,7 +720,7 @@ export function createReader(deps: ReaderDeps): Reader {
    * width doesn't jump during a page turn's decode.
    */
   function layersPanelShown(): boolean {
-    return layersPanelOpen && mode === "note" && layersAvail === "some";
+    return st.layersPanelOpen && st.mode === "note" && st.layersAvail === "some";
   }
 
   /** Width of the open right dock(s), gap included, from the layout tokens. */
@@ -753,7 +739,7 @@ export function createReader(deps: ReaderDeps): Reader {
 
   /** Sync the page-index toggle and panel; shown only for a `.note`. */
   function refreshPageIndexUi(): void {
-    const shown = mode === "note" && pageIndexOpen;
+    const shown = st.mode === "note" && st.pageIndexOpen;
     pageIndexPanel.setOpen(shown);
     pagesToggle.setAttribute("aria-pressed", String(shown));
     pagesToggle.setAttribute("aria-expanded", String(shown));
@@ -761,23 +747,23 @@ export function createReader(deps: ReaderDeps): Reader {
 
   /** Relayouts because the panel takes stage width. */
   function setPageIndexOpen(next: boolean): void {
-    if (pageIndexOpen === next) return;
-    pageIndexOpen = next;
+    if (st.pageIndexOpen === next) return;
+    st.pageIndexOpen = next;
     refreshPageIndexUi();
-    void showPage(pageIndex);
+    void showPage(st.pageIndex);
   }
 
   /** Never squeeze the page from both sides: when a RIGHT tool has just opened on
    *  a stage too narrow to hold both docks, collapse the LEFT page index. */
   function relieveDoubleSqueeze(): void {
-    if (pageIndexOpen && mode === "note" && bothSidesTooTight()) setPageIndexOpen(false);
+    if (st.pageIndexOpen && st.mode === "note" && bothSidesTooTight()) setPageIndexOpen(false);
   }
 
   /** The symmetric half: reopening the page index on a narrow stage closes right docks. */
   function collapseRightPanels(): void {
     if (ocr.isOpen()) ocr.toggle();
-    if (layersPanelOpen) {
-      layersPanelOpen = false;
+    if (st.layersPanelOpen) {
+      st.layersPanelOpen = false;
       refreshLayersUi();
     }
   }
@@ -786,12 +772,12 @@ export function createReader(deps: ReaderDeps): Reader {
 
   /** Sync every layers affordance with the stack; called on every path that changes it. */
   function refreshLayersUi(): void {
-    const has = mode === "note" && layersAvail === "some";
+    const has = st.mode === "note" && st.layersAvail === "some";
     layersToggle.disabled = !has;
     // Unknown (skeleton meta) gets neutral wording, never "no layers".
     layersToggle.title = has
       ? "Layers"
-      : mode === "note" && layersAvail === "unknown"
+      : st.mode === "note" && st.layersAvail === "unknown"
         ? "Layers — still opening this page"
         : "This page has no layers";
     const open = layersPanelShown();
@@ -809,7 +795,7 @@ export function createReader(deps: ReaderDeps): Reader {
 
   /** Is the mounted stack the focused page's, at the current theme? */
   function stackIsCurrent(): boolean {
-    const page = meta?.pages[pageIndex];
+    const page = st.meta?.pages[st.pageIndex];
     return page !== undefined && page.hash !== "" && noteLayerCtl.isPresented(page.hash, getTheme());
   }
 
@@ -827,9 +813,9 @@ export function createReader(deps: ReaderDeps): Reader {
     }
     try {
       const bytes = await api.getPageBytes(noteId, page);
-      if (token !== paintToken) return false;
+      if (token !== st.paintToken) return false;
       const stack = await noteLayerCtl.present(noteId, page.hash, bytes, vos, theme);
-      if (token !== paintToken) return false;
+      if (token !== st.paintToken) return false;
       if (stack) {
         refreshLayersUi();
         return true;
@@ -844,22 +830,22 @@ export function createReader(deps: ReaderDeps): Reader {
   }
 
   async function showPage(index: number): Promise<void> {
-    if (!meta || mode !== "note") return;
-    pageIndex = Math.max(0, Math.min(meta.pages.length - 1, index));
-    const page = meta.pages[pageIndex];
+    if (!st.meta || st.mode !== "note") return;
+    st.pageIndex = Math.max(0, Math.min(st.meta.pages.length - 1, index));
+    const page = st.meta.pages[st.pageIndex];
     if (!page) return;
 
     // Every page change comes through here, so the strip follows for free.
-    pageIndexPanel.setCurrent(pageIndex);
-    pager.set(pageIndex, meta.pages.length);
+    pageIndexPanel.setCurrent(st.pageIndex);
+    pager.set(st.pageIndex, st.meta.pages.length);
 
     // Decided from metadata now, not after the decode. The server omits
     // `layers` when a page has none, so only skeleton pages (index > 0 before
     // the meta resolves) are unknown.
-    const pageIsAuthoritative = metaResolved || pageIndex === 0;
+    const pageIsAuthoritative = st.metaResolved || st.pageIndex === 0;
     const layerVos = page.layers ?? null;
     const pageHasLayers = layerVos !== null && layerVos.length > 0;
-    layersAvail = pageHasLayers ? "some" : pageIsAuthoritative ? "none" : "unknown";
+    st.layersAvail = pageHasLayers ? "some" : pageIsAuthoritative ? "none" : "unknown";
     refreshLayersUi();
 
     // Hide the previous page's stack so it doesn't cover the new page's blur-up.
@@ -875,13 +861,13 @@ export function createReader(deps: ReaderDeps): Reader {
     const aspect = page.width / page.height;
     let h = Math.min(Math.max(rect.height - 56, 120), 1000);
     // Note mode only, so `zoom` is a note-ladder value.
-    if (zoom !== FIT_PAGE && zoom in ZOOM_SCALE) h = 640 * ZOOM_SCALE[zoom as keyof typeof ZOOM_SCALE];
+    if (st.zoom !== FIT_PAGE && st.zoom in ZOOM_SCALE) h = 640 * ZOOM_SCALE[st.zoom as keyof typeof ZOOM_SCALE];
     let w = h * aspect;
     // Side panels take their widths from the layout tokens.
     const gap = tokenPx("--panel-gap", 22);
     const ocrW = ocr.isOpen() ? tokenPx("--panel-w", 268) + gap : 0;
     const layersW = layersPanelShown() ? tokenPx("--panel-w-wide", 320) + gap : 0;
-    const pagesW = pageIndexOpen ? tokenPx("--panel-w-narrow", 180) + gap : 0;
+    const pagesW = st.pageIndexOpen ? tokenPx("--panel-w-narrow", 180) + gap : 0;
     const maxW = Math.max(rect.width - 56 - ocrW - layersW - pagesW, 80);
     if (w > maxW) {
       w = maxW;
@@ -892,18 +878,18 @@ export function createReader(deps: ReaderDeps): Reader {
     pageWrap.style.height = `${Math.round(h)}px`;
 
     // OCR and find follow the page here; find after the resize, since ovals use page pixels.
-    ocr.setPage(meta.id, page);
-    find.setPage(pageIndex);
+    ocr.setPage(st.meta.id, page);
+    find.setPage(st.pageIndex);
 
-    const token = ++paintToken;
-    const noteId: Id = meta.id;
+    const token = ++st.paintToken;
+    const noteId: Id = st.meta.id;
 
     // Links depend on the page box, not pixels; not awaited so they never delay a turn.
-    void paintLinks(pageIndex, token);
+    void paintLinks(st.pageIndex, token);
 
     // Blur up the thumbnail, or draw the ruled sheet, so the old page doesn't linger.
     let thumbDrawn = false;
-    const thumbCanvas = pageIndexPanel.thumbCanvas(pageIndex);
+    const thumbCanvas = pageIndexPanel.thumbCanvas(st.pageIndex);
     if (thumbCanvas && thumbCanvas.width > 0 && thumbCanvas.height > 0) {
       const dpr = Math.min(typeof devicePixelRatio !== "undefined" ? devicePixelRatio : 1, DPR_CAP);
       pageCanvas.width = Math.round(w * dpr);
@@ -925,11 +911,11 @@ export function createReader(deps: ReaderDeps): Reader {
     let layeredUp = false;
     if (page.hash !== "" && pageHasLayers && layerVos) {
       layeredUp = await presentLayers(noteId, page, layerVos, token);
-      if (token !== paintToken) return; // a newer showPage superseded us
+      if (token !== st.paintToken) return; // a newer showPage superseded us
       // The decode can still fail (v1/hostile payload, slot mismatch, stale
       // wasm); stop offering a stack that will never load.
       if (!layeredUp) {
-        layersAvail = "none";
+        st.layersAvail = "none";
         refreshLayersUi();
       }
     } else {
@@ -943,7 +929,7 @@ export function createReader(deps: ReaderDeps): Reader {
     if (!layeredUp && page.hash !== "") {
       try {
         const bitmap = await renderPage({ api, renderer, cache, theme: getTheme() }, noteId, page, "full");
-        if (token !== paintToken) return; // a newer showPage superseded us
+        if (token !== st.paintToken) return; // a newer showPage superseded us
         const dpr = Math.min(typeof devicePixelRatio !== "undefined" ? devicePixelRatio : 1, DPR_CAP);
         pageCanvas.width = Math.round(w * dpr);
         pageCanvas.height = Math.round(h * dpr);
@@ -959,8 +945,8 @@ export function createReader(deps: ReaderDeps): Reader {
     }
 
     // Warm the neighbours so paging is instant.
-    for (const j of [pageIndex - 1, pageIndex + 1]) {
-      const neighbour = meta.pages[j];
+    for (const j of [st.pageIndex - 1, st.pageIndex + 1]) {
+      const neighbour = st.meta.pages[j];
       if (neighbour) filmEngine.prefetch(noteId, neighbour, "full");
     }
   }
@@ -977,24 +963,24 @@ export function createReader(deps: ReaderDeps): Reader {
   /** Rebuild the strip from `meta` (open, skeleton resolve, STALE_PAGE); badges survive. */
   function buildFilmstrip(): void {
     filmEngine.reset();
-    if (!meta) {
+    if (!st.meta) {
       pageIndexPanel.clear();
       return;
     }
-    pageIndexPanel.setPages(meta.pages.length);
+    pageIndexPanel.setPages(st.meta.pages.length);
     // `hasInk` comes with the page list, so it covers unpainted rows; pages
     // without it are omitted, not guessed.
     const inked = new Map<number, boolean>();
-    meta.pages.forEach((page, i) => {
+    st.meta.pages.forEach((page, i) => {
       if (page.hasInk !== undefined) inked.set(i, page.hasInk);
     });
     pageIndexPanel.setInk(inked);
-    pageIndexPanel.setCurrent(pageIndex);
+    pageIndexPanel.setCurrent(st.pageIndex);
   }
 
   // --- keyboard (only while open) ------------------------------------------
   function onKey(e: KeyboardEvent): void {
-    if (!open) return;
+    if (!st.open) return;
     // An open export menu and the find bar each take Escape before the reader.
     if (e.key === "Escape") {
       if (find.isOpen()) {
@@ -1004,7 +990,7 @@ export function createReader(deps: ReaderDeps): Reader {
       }
       return deps.onBack();
     }
-    if (mode !== "note") return;
+    if (st.mode !== "note") return;
 
     // Ctrl/Cmd+F is claimed only here, so the browser's find works elsewhere.
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "f" || e.key === "F")) {
@@ -1015,21 +1001,21 @@ export function createReader(deps: ReaderDeps): Reader {
 
     // Paging keys don't apply inside inputs (including the pager's field).
     if (e.target instanceof HTMLInputElement) return;
-    if (e.key === "ArrowRight") goToPage(pageIndex + 1);
-    else if (e.key === "ArrowLeft") goToPage(pageIndex - 1);
+    if (e.key === "ArrowRight") goToPage(st.pageIndex + 1);
+    else if (e.key === "ArrowLeft") goToPage(st.pageIndex - 1);
     // Home/End are prevented, or they would also scroll the document.
     else if (e.key === "Home") {
       e.preventDefault();
       goToPage(0);
-    } else if (e.key === "End" && meta) {
+    } else if (e.key === "End" && st.meta) {
       e.preventDefault();
-      goToPage(meta.pages.length - 1);
+      goToPage(st.meta.pages.length - 1);
     }
   }
 
   /** Apply the current zoom step to the image preview. */
   function sizeImage(): void {
-    if (zoom === FIT_PAGE) {
+    if (st.zoom === FIT_PAGE) {
       // Back to the CSS rule: fit the stage in both axes.
       fileImg.style.width = "";
       fileImg.style.maxWidth = "";
@@ -1039,13 +1025,13 @@ export function createReader(deps: ReaderDeps): Reader {
     // Past Fit the image may overflow `.filestage`, so lift the max-* clamps.
     fileImg.style.maxWidth = "none";
     fileImg.style.maxHeight = "none";
-    if (zoom === FIT_WIDTH) {
+    if (st.zoom === FIT_WIDTH) {
       // Unlike Fit, this enlarges small images.
       fileImg.style.width = "100%";
       return;
     }
     // Not `ZOOM_SCALE`: for an image 100% means natural size.
-    const factor = Number.parseInt(zoom, 10) / 100;
+    const factor = Number.parseInt(st.zoom, 10) / 100;
     const natural = fileImg.naturalWidth || fileImg.clientWidth;
     if (natural > 0 && Number.isFinite(factor)) {
       fileImg.style.width = `${Math.round(natural * factor)}px`;
@@ -1058,24 +1044,24 @@ export function createReader(deps: ReaderDeps): Reader {
     if (ocr.isOpen()) relieveDoubleSqueeze();
   });
   layersToggle.addEventListener("click", () => {
-    layersPanelOpen = !layersPanelOpen;
+    st.layersPanelOpen = !st.layersPanelOpen;
     refreshLayersUi();
-    if (layersPanelOpen) relieveDoubleSqueeze();
+    if (st.layersPanelOpen) relieveDoubleSqueeze();
     // The panel takes stage width; the stack is already up, so this is a CSS resize.
-    void showPage(pageIndex);
+    void showPage(st.pageIndex);
   });
   pagesToggle.addEventListener("click", () => {
-    if (!pageIndexOpen && bothSidesTooTight()) collapseRightPanels();
-    setPageIndexOpen(!pageIndexOpen);
+    if (!st.pageIndexOpen && bothSidesTooTight()) collapseRightPanels();
+    setPageIndexOpen(!st.pageIndexOpen);
   });
   moveBin.addEventListener("click", () => {
-    if (meta) deps.onMoveToBin?.(meta);
+    if (st.meta) deps.onMoveToBin?.(st.meta);
   });
   versionsBtn.addEventListener("click", () => {
-    if (meta) deps.onVersions?.(meta, versionsBtn, previewVersion?.md5);
+    if (st.meta) deps.onVersions?.(st.meta, versionsBtn, st.previewVersion?.md5);
   });
   restoreVersionBtn.addEventListener("click", () => {
-    if (meta && previewVersion) deps.onRestoreVersion?.(meta, previewVersion);
+    if (st.meta && st.previewVersion) deps.onRestoreVersion?.(st.meta, st.previewVersion);
   });
   findToggle.addEventListener("click", () => {
     find.toggle();
@@ -1101,22 +1087,22 @@ export function createReader(deps: ReaderDeps): Reader {
 
   /** Shared teardown for close and hide. */
   function closeReader(): void {
-    open = false;
-    if (urlTimer !== undefined) {
-      clearTimeout(urlTimer);
-      urlTimer = undefined;
+    st.open = false;
+    if (st.urlTimer !== undefined) {
+      clearTimeout(st.urlTimer);
+      st.urlTimer = undefined;
     }
     exportMenu.setOpen(false);
     ocr.reset();
     find.reset();
     findInput.value = "";
     // A closed reader holds no decoded RGBA (~10 MB per layer).
-    layersPanelOpen = false;
-    layersAvail = "unknown";
+    st.layersPanelOpen = false;
+    st.layersAvail = "unknown";
     noteLayerCtl.release();
     refreshLayersUi();
-    previewVersion = null;
-    previewViewOnly = false;
+    st.previewVersion = null;
+    st.previewViewOnly = false;
     restoreVersionBtn.hidden = false;
     versionBanner.hidden = true;
     root.classList.remove("is-previewing");
@@ -1128,7 +1114,7 @@ export function createReader(deps: ReaderDeps): Reader {
     files.clear();
     linkLayer.clear();
     linksByPage.clear();
-    meta = null;
+    st.meta = null;
   }
 
   return {
@@ -1136,14 +1122,14 @@ export function createReader(deps: ReaderDeps): Reader {
 
     async open(summary: NoteSummary, metaPromise: Promise<NoteMeta>, startPage = 0, origin: ReaderOrigin = LIBRARY_ORIGIN, query = ""): Promise<void> {
       // Applying the route: no URL writes until the end (see `urlSuspended`).
-      urlSuspended = true;
+      st.urlSuspended = true;
       // Background freshness refreshes re-call `open()` for the same file; only
       // a different file resets menus, find and panels.
-      const changedFile = meta?.id !== summary.id;
+      const changedFile = st.meta?.id !== summary.id;
 
       // Never replace a resolved meta with a skeleton on a same-file re-open.
-      const keepResolved = !changedFile && metaResolved && meta !== null;
-      summaryRecognized = summary.hasRecognizedText;
+      const keepResolved = !changedFile && st.metaResolved && st.meta !== null;
+      st.summaryRecognized = summary.hasRecognizedText;
       // Skeleton: page 0 from the summary, the rest placeholders (empty hash).
       const aspect = summary.thumbAspect ?? DEFAULT_PAGE_DIMS;
       const skeletonMeta: NoteMeta = {
@@ -1159,33 +1145,33 @@ export function createReader(deps: ReaderDeps): Reader {
           i === 0 ? summary.firstPage : skeletonPage(i, aspect),
         ),
       };
-      if (!keepResolved) metaResolved = false;
+      if (!keepResolved) st.metaResolved = false;
       // ONE assignment, so `meta` is provably non-null for the rest of `open`.
-      meta = keepResolved && meta ? meta : skeletonMeta;
+      st.meta = keepResolved && st.meta ? st.meta : skeletonMeta;
       
       if (changedFile) exportMenu.setOpen(false);
       const kind = fileKind(summary.fileType);
 
-      header.setName(meta.name);
+      header.setName(st.meta.name);
       header.setBackWord(backWord(origin));
       // A bin-origin file is already trashed: Restore/Delete replace Move to bin.
-      fromBin = origin.kind === "bin";
+      st.fromBin = origin.kind === "bin";
       // A history preview is a third context: only Restore-this-version, on the banner.
-      previewVersion = origin.kind === "history" ? (origin.version ?? null) : null;
-      const previewing = previewVersion !== null;
-      previewViewOnly = previewing && origin.viewOnly === true;
-      moveBin.hidden = fromBin || previewing;
+      st.previewVersion = origin.kind === "history" ? (origin.version ?? null) : null;
+      const previewing = st.previewVersion !== null;
+      st.previewViewOnly = previewing && origin.viewOnly === true;
+      moveBin.hidden = st.fromBin || previewing;
       // Versions: a real `.note` (live or bin), or any history preview.
-      const isRealNote = meta.fileType.trim().toLowerCase() === "note";
+      const isRealNote = st.meta.fileType.trim().toLowerCase() === "note";
       versionsBtn.hidden = !isRealNote && !previewing;
-      binActions.setBinMode(fromBin, fromBin ? origin.retention ?? null : null);
+      binActions.setBinMode(st.fromBin, st.fromBin ? origin.retention ?? null : null);
       // The exact timestamp rides `title`.
       versionBanner.hidden = !previewing;
-      restoreVersionBtn.hidden = previewViewOnly;
+      restoreVersionBtn.hidden = st.previewViewOnly;
       root.classList.toggle("is-previewing", previewing);
-      if (previewing && previewVersion) {
-        versionBannerText.textContent = `You're viewing a version from ${relativeTime(previewVersion.createdAt)} — this is not the current note.`;
-        versionBannerText.title = absoluteTime(previewVersion.createdAt);
+      if (previewing && st.previewVersion) {
+        versionBannerText.textContent = `You're viewing a version from ${relativeTime(st.previewVersion.createdAt)} — this is not the current note.`;
+        versionBannerText.title = absoluteTime(st.previewVersion.createdAt);
       }
       // A new file starts with the panel closed and no transcript carried over.
       ocr.reset();
@@ -1194,38 +1180,38 @@ export function createReader(deps: ReaderDeps): Reader {
         find.reset();
         findInput.value = "";
         // One file's layers must never label another's pixels.
-        layersPanelOpen = false;
-        layersAvail = "unknown";
+        st.layersPanelOpen = false;
+        st.layersAvail = "unknown";
         noteLayerCtl.release();
         refreshLayersUi();
         // Page index back to default open, only on a real file change.
-        pageIndexOpen = true;
+        st.pageIndexOpen = true;
       }
       setMode(kind);
       root.classList.add("is-open");
       root.setAttribute("aria-hidden", "false");
-      open = true;
+      st.open = true;
       document.addEventListener("keydown", onKey);
 
       if (kind === "note") {
         // Clamped once; a deep link past the end lands on the last page.
-        pageIndex = Math.max(0, Math.min(meta.pages.length - 1, Math.floor(startPage)));
-        zoom = FIT_PAGE;
+        st.pageIndex = Math.max(0, Math.min(st.meta.pages.length - 1, Math.floor(startPage)));
+        st.zoom = FIT_PAGE;
         zoomStepper.set(FIT_PAGE);
         header.setSubtitle(
-          subtitle(origin, `${meta.pages.length} ${meta.pages.length === 1 ? "page" : "pages"}`),
+          subtitle(origin, `${st.meta.pages.length} ${st.meta.pages.length === 1 ? "page" : "pages"}`),
         );
         setDownload(null);
         // In a preview the live raw route would serve the current blob, so use the version's.
         downloads.setRawHref(
           previewing
-            ? historyFileUrl(meta.id, previewVersion!.md5, { download: true, bin: previewViewOnly })
-            : rawFileUrl(meta.id, meta.fileHash, { download: true, bin: fromBin }),
+            ? historyFileUrl(st.meta.id, st.previewVersion!.md5, { download: true, bin: st.previewViewOnly })
+            : rawFileUrl(st.meta.id, st.meta.fileHash, { download: true, bin: st.fromBin }),
         );
         // Before the filmstrip (badges need the page list). The last argument:
         // the skeleton's `textHash: null`s are invented, so they count only when
         // the listing also says unrecognised.
-        find.setNote(meta.id, meta.fileHash, meta.pages, metaResolved || !summaryRecognized);
+        find.setNote(st.meta.id, st.meta.fileHash, st.meta.pages, st.metaResolved || !st.summaryRecognized);
         buildFilmstrip();
         // Prime find through the normal path; `setQuery` ignores a repeated query.
         const primed = findQuery(query);
@@ -1235,31 +1221,31 @@ export function createReader(deps: ReaderDeps): Reader {
           find.setQuery(primed);
         }
         // Paint after the overlay has laid out so the stage has real dimensions.
-        requestAnimationFrame(() => void showPage(pageIndex));
+        requestAnimationFrame(() => void showPage(st.pageIndex));
       } else {
-        pageIndex = 0;
+        st.pageIndex = 0;
         // Nothing to find in a PDF or an image: no recognition, no word boxes.
         find.reset();
         findInput.value = "";
         filmEngine.reset();
         pageIndexPanel.clear();
-        header.setSubtitle(subtitle(origin, `${meta.fileType.toUpperCase()} · ${formatBytes(meta.size)}`));
+        header.setSubtitle(subtitle(origin, `${st.meta.fileType.toUpperCase()} · ${formatBytes(st.meta.size)}`));
         // Bin and history previews need their own routes (see the note branch).
         setDownload(
           previewing
-            ? historyFileUrl(meta.id, previewVersion!.md5, { download: true, bin: previewViewOnly })
-            : rawFileUrl(meta.id, meta.fileHash, { download: true, bin: fromBin }),
+            ? historyFileUrl(st.meta.id, st.previewVersion!.md5, { download: true, bin: st.previewViewOnly })
+            : rawFileUrl(st.meta.id, st.meta.fileHash, { download: true, bin: st.fromBin }),
         );
 
         const preview = previewing
-          ? historyFileUrl(meta.id, previewVersion!.md5, { bin: previewViewOnly })
-          : rawFileUrl(meta.id, meta.fileHash, { bin: fromBin });
+          ? historyFileUrl(st.meta.id, st.previewVersion!.md5, { bin: st.previewViewOnly })
+          : rawFileUrl(st.meta.id, st.meta.fileHash, { bin: st.fromBin });
         if (kind === "image" && preview) {
-          showImage(meta, preview);
+          showImage(st.meta, preview);
         } else {
           showNoPreview(
-            meta,
-            meta.name,
+            st.meta,
+            st.meta.name,
             preview === null
               ? "This file has no stored contents to preview or download yet."
               : "There's no preview for this file type. Download it to open it in another app.",
@@ -1270,7 +1256,7 @@ export function createReader(deps: ReaderDeps): Reader {
       // Keep focus on the find field when the route asked for a search.
       if (!(kind === "note" && findQuery(query))) back.focus();
 
-      urlSuspended = false;
+      st.urlSuspended = false;
       // Publish once; this canonicalises a clamped page or a blank query.
       syncUrl();
 
@@ -1279,34 +1265,34 @@ export function createReader(deps: ReaderDeps): Reader {
       try {
         realMeta = await metaPromise;
       } catch (e) {
-        if (!open || meta?.id !== summary.id) return;
+        if (!st.open || st.meta?.id !== summary.id) return;
         // Non-session failures leave the readable skeleton on screen.
         dispatchApiFailure(failures, e);
         return;
       }
-      if (!open || meta?.id !== realMeta.id) return;
+      if (!st.open || st.meta?.id !== realMeta.id) return;
 
-      const paintedPage = meta?.pages[pageIndex];
-      meta = realMeta;
-      metaResolved = true;
+      const paintedPage = st.meta?.pages[st.pageIndex];
+      st.meta = realMeta;
+      st.metaResolved = true;
       // The page list is authoritative now.
       refreshFindUi();
 
       if (kind === "note") {
         header.setSubtitle(
-          subtitle(origin, `${meta.pages.length} ${meta.pages.length === 1 ? "page" : "pages"}`),
+          subtitle(origin, `${st.meta.pages.length} ${st.meta.pages.length === 1 ? "page" : "pages"}`),
         );
-        find.setNote(meta.id, meta.fileHash, meta.pages);
+        find.setNote(st.meta.id, st.meta.fileHash, st.meta.pages);
         buildFilmstrip();
         // Repaint only if the page changed: `buildFilmstrip` just emptied the
         // blur-up source, so an unconditional repaint flashes white.
-        const nextPage = meta.pages[pageIndex];
+        const nextPage = st.meta.pages[st.pageIndex];
         const alreadyPainted = paintedPage?.hash !== "" && paintedPage?.hash === nextPage?.hash;
         // Also repaint when the page gains layers (synthesized summaries, skeleton pages).
         const gainedLayers = (nextPage?.layers?.length ?? 0) > 0 && !paintedPage?.layers?.length;
-        if (!alreadyPainted || gainedLayers) void showPage(pageIndex);
+        if (!alreadyPainted || gainedLayers) void showPage(st.pageIndex);
       } else {
-        header.setSubtitle(subtitle(origin, `${meta.fileType.toUpperCase()} · ${formatBytes(meta.size)}`));
+        header.setSubtitle(subtitle(origin, `${st.meta.fileType.toUpperCase()} · ${formatBytes(st.meta.size)}`));
       }
     },
 
@@ -1316,14 +1302,14 @@ export function createReader(deps: ReaderDeps): Reader {
     hide: closeReader,
 
     isOpen(): boolean {
-      return open;
+      return st.open;
     },
 
     bumpTheme(): void {
       // Non-note modes are ordinary themed DOM.
-      if (mode !== "note") return;
+      if (st.mode !== "note") return;
       filmEngine.bumpTheme();
-      if (open && currentPage()) void showPage(pageIndex);
+      if (st.open && currentPage()) void showPage(st.pageIndex);
     },
 
     destroy(): void {
