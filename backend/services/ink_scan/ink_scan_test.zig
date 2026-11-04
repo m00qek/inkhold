@@ -1,20 +1,20 @@
 //! Tests for the ink scan.
 
 const std = @import("std");
-const sqlite = @import("../db/sqlite.zig");
-const blobstore = @import("../store/blobs.zig");
-const noteindex = @import("note_index.zig");
+const sqlite = @import("../../db/sqlite.zig");
+const blobstore = @import("../../store/blobs.zig");
+const noteindex = @import("../note_index.zig");
 const sn = @import("supernote");
 const Allocator = std.mem.Allocator;
 const index_version = noteindex.index_version;
 const LayerRef = noteindex.LayerRef;
 const max_layers = noteindex.max_layers;
 const testing = std.testing;
-const schema = @import("../db/schema.zig");
-const thumbstore = @import("../store/thumbs.zig");
-const filesmod = @import("files.zig");
+const schema = @import("../../db/schema.zig");
+const thumbstore = @import("../../store/thumbs.zig");
+const filesmod = @import("../files.zig");
 const nb = @import("note_builder");
-const ink_scan = @import("ink_scan.zig");
+const ink_scan = @import("../ink_scan.zig");
 const pageHasInk = ink_scan.pageHasInk;
 const inkNeedsScan = ink_scan.inkNeedsScan;
 const pendingInk = ink_scan.pendingInk;

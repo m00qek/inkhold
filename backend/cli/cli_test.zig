@@ -1,9 +1,9 @@
 //! Tests for the CLI: argument parsing and the admin subcommands.
 
 const std = @import("std");
-const config = @import("config.zig");
+const config = @import("../config.zig");
 const testing = std.testing;
-const cli = @import("cli.zig");
+const cli = @import("../cli.zig");
 const version = cli.version;
 const exit_ok = cli.exit_ok;
 const exit_failed = cli.exit_failed;
@@ -11,7 +11,7 @@ const Command = cli.Command;
 const parse = cli.parse;
 const Style = cli.Style;
 const writeHelp = cli.writeHelp;
-const fixture = @import("cli_test_fixture.zig");
+const fixture = @import("fixture.zig");
 const capture = fixture.capture;
 
 test "bare `inkhold` and an explicit `serve` both serve" {

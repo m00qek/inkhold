@@ -17,7 +17,7 @@ const pdftextpass = @import("../pdf/text.zig");
 
 const log = std.log.scoped(.deferred);
 
-const deferred_worker = @import("deferred_worker.zig");
+const deferred_worker = @import("deferred/worker.zig");
 pub const Worker = deferred_worker.Worker;
 pub const drainNow = deferred_worker.drainNow;
 const nice19 = deferred_worker.nice19;

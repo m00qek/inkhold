@@ -1,7 +1,7 @@
 //! Web upload and its onConflict modes.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const blobstore = @import("../../store/blobs.zig");
 const uploadcap = @import("../../handlers/upload_cap.zig");
 const context = @import("../../http/context.zig");

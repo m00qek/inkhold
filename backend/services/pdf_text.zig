@@ -257,7 +257,7 @@ const testing = std.testing;
 const schema = @import("../db/schema.zig");
 
 test {
-    _ = @import("pdf_text_test.zig");
+    _ = @import("pdf_text/pdf_text_test.zig");
 }
 
 // ---- tests of private helpers ----

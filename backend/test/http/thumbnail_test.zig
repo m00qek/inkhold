@@ -1,7 +1,7 @@
 //! The thumbnail and template byte routes over HTTP.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const noteindex = @import("../../services/note_index.zig");
 const gpa = std.testing.allocator;
 const harness = @import("harness.zig");

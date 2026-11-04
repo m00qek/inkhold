@@ -4,7 +4,7 @@
 //! Range requests.
 
 const std = @import("std");
-const expiring = @import("../expiring.zig");
+const expiring = @import("../util/expiring.zig");
 
 pub const Error = std.mem.Allocator.Error;
 

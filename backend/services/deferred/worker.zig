@@ -1,13 +1,13 @@
 //! The deferred worker thread: its loop, wakeups, and the synchronous drain.
 
 const std = @import("std");
-const sqlite = @import("../db/sqlite.zig");
-const blobstore = @import("../store/blobs.zig");
-const derivedstore = @import("../store/derived.zig");
-const derivesearch = @import("derive_search.zig");
-const noteindex = @import("note_index.zig");
+const sqlite = @import("../../db/sqlite.zig");
+const blobstore = @import("../../store/blobs.zig");
+const derivedstore = @import("../../store/derived.zig");
+const derivesearch = @import("../derive_search.zig");
+const noteindex = @import("../note_index.zig");
 const log = std.log.scoped(.deferred);
-const deferred = @import("deferred.zig");
+const deferred = @import("../deferred.zig");
 const Candidate = deferred.Candidate;
 const Found = deferred.Found;
 const deriveOne = deferred.deriveOne;
@@ -225,7 +225,7 @@ pub fn drainNow(
 }
 
 test {
-    _ = @import("deferred/tenant_test.zig");
-    _ = @import("deferred/ink_test.zig");
-    _ = @import("deferred/reconcile_test.zig");
+    _ = @import("tenant_test.zig");
+    _ = @import("ink_test.zig");
+    _ = @import("reconcile_test.zig");
 }

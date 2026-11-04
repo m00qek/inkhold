@@ -1,7 +1,7 @@
 //! Tests for indexing `.note` files and serving pages from the index.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const sqlite = @import("../../db/sqlite.zig");
 const blobstore = @import("../../store/blobs.zig");
 const blob_source = @import("../../store/blob_source.zig");

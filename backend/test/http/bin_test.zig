@@ -1,7 +1,7 @@
 //! The recycle bin over HTTP.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const context = @import("../../http/context.zig");
 const Context = context.Context;
 const gpa = std.testing.allocator;

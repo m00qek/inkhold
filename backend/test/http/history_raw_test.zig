@@ -1,7 +1,7 @@
 //! History raw bytes, version meta, restore and the must-change signal over HTTP.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const password = @import("../../services/auth/password.zig");
 const gpa = std.testing.allocator;
 const harness = @import("harness.zig");

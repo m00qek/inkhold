@@ -160,7 +160,7 @@ pub fn storeInk(db: sqlite.Db, blob_md5: []const u8, scan: InkScan) !void {
 }
 
 test {
-    _ = @import("ink_scan_test.zig");
+    _ = @import("ink_scan/ink_scan_test.zig");
 }
 
 // ---- tests of private helpers ----

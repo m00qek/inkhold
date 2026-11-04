@@ -1,13 +1,13 @@
 //! Parsing a `.note` into index rows (pure CPU, outside the DB lock), and layer packing.
 
 const std = @import("std");
-const blobstore = @import("../store/blobs.zig");
-const blob_source = @import("../store/blob_source.zig");
-const thumbnail = @import("thumbnail.zig");
-const inkscan = @import("ink_scan.zig");
+const blobstore = @import("../../store/blobs.zig");
+const blob_source = @import("../../store/blob_source.zig");
+const thumbnail = @import("../thumbnail.zig");
+const inkscan = @import("../ink_scan.zig");
 const sn = @import("supernote");
-const noteindex = @import("note_index.zig");
-const note_index_serve = @import("note_index_serve.zig");
+const noteindex = @import("../note_index.zig");
+const note_index_serve = @import("serve.zig");
 const Md5 = std.crypto.hash.Md5;
 const Allocator = std.mem.Allocator;
 const Error = noteindex.Error;
@@ -365,7 +365,7 @@ pub fn unpackLayers(blob: []const u8, buf: *[max_layers]LayerRef) Error![]const 
 // ---- tests of private helpers ----
 
 const testing = std.testing;
-const fixture = @import("note_index/fixture.zig");
+const fixture = @import("fixture.zig");
 const Blobs = fixture.Blobs;
 const PeakAllocator = fixture.PeakAllocator;
 const coveredNote = fixture.coveredNote;

@@ -1,19 +1,19 @@
 //! Tests for the pending-work tracker.
 
 const std = @import("std");
-const sqlite = @import("../db/sqlite.zig");
-const deferred = @import("deferred.zig");
+const sqlite = @import("../../db/sqlite.zig");
+const deferred = @import("../deferred.zig");
 const testing = std.testing;
-const schema = @import("../db/schema.zig");
-const blobstore = @import("../store/blobs.zig");
-const thumbstore = @import("../store/thumbs.zig");
-const filesmod = @import("files.zig");
-const pending = @import("pending.zig");
+const schema = @import("../../db/schema.zig");
+const blobstore = @import("../../store/blobs.zig");
+const thumbstore = @import("../../store/thumbs.zig");
+const filesmod = @import("../files.zig");
+const pending = @import("../pending.zig");
 const count_sql = pending.count_sql;
 const owesDerive = pending.owesDerive;
 const countFor = pending.countFor;
 const Pulse = pending.Pulse;
-const fixture = @import("pending_test_fixture.zig");
+const fixture = @import("fixture.zig");
 const owes_derive_d = fixture.owes_derive_d;
 
 /// Two users: one person's outstanding work must not be another's.
@@ -76,7 +76,7 @@ const Fixture = struct {
 
 const two_paragraphs = "First paragraph, with words in it.\n\nSecond paragraph, also with words.\n";
 
-const rotate90_pdf = @embedFile("../pdf/testdata/rotate90.pdf");
+const rotate90_pdf = @embedFile("../../pdf/testdata/rotate90.pdf");
 
 /// A real two-page capture: the only fixture the `ink` tenant will look at.
 const sample2_note = @embedFile("sample-2.note");

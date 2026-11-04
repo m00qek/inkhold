@@ -56,7 +56,7 @@ pub const Route = struct {
     /// writer. Leave false when in doubt: a wrong flag makes writes fail, at
     /// worst half-applying a read-modify-write. HTTP method is no guide (device
     /// reads are POSTs). Services are reader-bound copies, so in-memory mutation
-    /// is invisible too. `backend/test/reader_pool.zig` audits every flagged
+    /// is invisible too. `test/http/read_only_audit_test.zig` audits every flagged
     /// route against a real read-only connection.
     read_only: bool = false,
 };

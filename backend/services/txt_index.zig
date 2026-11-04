@@ -333,7 +333,7 @@ fn expectExactRanges(blob: []const u8, d: Derived) !void {
 }
 
 test {
-    _ = @import("txt_index_test.zig");
+    _ = @import("txt_index/txt_index_test.zig");
 }
 
 // ---- tests of private helpers ----

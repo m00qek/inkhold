@@ -1,7 +1,7 @@
 //! Recognised text over HTTP: page text, word boxes and the hasRecognizedText flag.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const transport = @import("../../http/transport.zig");
 const gpa = std.testing.allocator;
 const harness = @import("harness.zig");

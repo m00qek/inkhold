@@ -1,13 +1,13 @@
 //! The history-of-this-file listing.
 
 const std = @import("std");
-const controlplane = @import("controlplane.zig");
+const controlplane = @import("../controlplane.zig");
 const ControlPlaneService = controlplane.ControlPlaneService;
 const HistoryVersionVO = controlplane.HistoryVersionVO;
 const HistoryVO = controlplane.HistoryVO;
 const idStr = controlplane.idStr;
 const freeEntry = controlplane.freeEntry;
-const controlplane_meta = @import("controlplane_meta.zig");
+const controlplane_meta = @import("meta.zig");
 
 /// `GET /api/controlplane/note/{id}/history` — current blob first, then each
 /// retained `file_history` row. Null when missing, not owned, a folder or

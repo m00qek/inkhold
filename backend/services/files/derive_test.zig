@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const config = @import("../../config.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const derivedstore = @import("../../store/derived.zig");

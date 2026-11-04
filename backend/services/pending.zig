@@ -175,13 +175,13 @@ pub const Pulse = struct {
 };
 
 test {
-    _ = @import("pending_test.zig");
+    _ = @import("pending/pending_test.zig");
 }
 
 // ---- tests of private helpers ----
 
 const testing = std.testing;
-const fixture = @import("pending_test_fixture.zig");
+const fixture = @import("pending/fixture.zig");
 const owes_derive_d = fixture.owes_derive_d;
 
 const spelt_clauses = blk: {

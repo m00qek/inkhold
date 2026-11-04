@@ -1,7 +1,7 @@
 //! The cache-policy pin: every route classified, every response matching.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const app = @import("../../routes.zig");
 const password = @import("../../services/auth/password.zig");
 const gpa = std.testing.allocator;

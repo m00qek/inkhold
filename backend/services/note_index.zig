@@ -2,7 +2,7 @@
 //! the hot read paths need in `note_index` + `note_page_index`.
 
 const std = @import("std");
-const repeat = @import("../repeat.zig").repeat;
+const repeat = @import("../util/repeat.zig").repeat;
 const sqlite = @import("../db/sqlite.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
@@ -23,10 +23,10 @@ pub const index_version: i64 = 16;
 pub const LayerRef = sn.page_payload.LayerRef;
 pub const max_layers = sn.page_payload.max_layers;
 
-const note_index_parse = @import("note_index_parse.zig");
-const note_index_serve = @import("note_index_serve.zig");
+const note_index_parse = @import("note_index/parse.zig");
+const note_index_serve = @import("note_index/serve.zig");
 
-// ---- parsing a container into rows (`note_index_parse.zig`) ----
+// ---- parsing a container into rows (`note_index/parse.zig`) ----
 pub const parseBlob = note_index_parse.parseBlob;
 pub const parseBlobSource = note_index_parse.parseBlobSource;
 pub const pageContentHash = note_index_parse.pageContentHash;
@@ -38,7 +38,7 @@ pub const layer_rec_head_size = note_index_parse.layer_rec_head_size;
 pub const max_layer_name = note_index_parse.max_layer_name;
 pub const max_layer_rec_size = note_index_parse.max_layer_rec_size;
 
-// ---- serving pages from the index (`note_index_serve.zig`) ----
+// ---- serving pages from the index (`note_index/serve.zig`) ----
 pub const SliceSource = note_index_serve.SliceSource;
 pub const NoteHeader = note_index_serve.NoteHeader;
 pub const noteHeader = note_index_serve.noteHeader;

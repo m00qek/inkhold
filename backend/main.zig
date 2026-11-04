@@ -41,7 +41,7 @@ test {
     _ = @import("app.zig");
     _ = routes;
     _ = cli;
-    _ = @import("expiring.zig");
+    _ = @import("util/expiring.zig");
     _ = @import("pdf/probe.zig");
     _ = @import("pdf/text.zig");
     _ = @import("http/router.zig");

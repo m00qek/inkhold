@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const internal = @import("service/internal.zig");
-const expiring = @import("../../expiring.zig");
+const expiring = @import("../../util/expiring.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
 const password = @import("password.zig");

@@ -4,7 +4,7 @@
 //! still caught.
 
 const std = @import("std");
-const repeat = @import("../repeat.zig").repeat;
+const repeat = @import("../util/repeat.zig").repeat;
 
 /// Longest boundary accepted including `\r\n--` (RFC 2046 caps it at 70).
 pub const max_term = 128;

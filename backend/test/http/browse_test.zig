@@ -1,7 +1,7 @@
 //! The web app's browse and read endpoints over HTTP.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const transport = @import("../../http/transport.zig");
 const password = @import("../../services/auth/password.zig");
 const deferredmod = @import("../../services/deferred.zig");

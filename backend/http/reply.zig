@@ -1,7 +1,7 @@
 //! Shared reply and request-parsing helpers for the handlers.
 
 const std = @import("std");
-const repeat = @import("../repeat.zig").repeat;
+const repeat = @import("../util/repeat.zig").repeat;
 const json = @import("json.zig");
 const context = @import("context.zig");
 const router = @import("router.zig");

@@ -1,12 +1,12 @@
 //! The bench passes: fold, split, recover and compress, each timed.
 
 const std = @import("std");
-const sqlite = @import("db/sqlite.zig");
-const fuzzy = @import("services/search/fuzzy.zig");
-const derived = @import("store/derived.zig");
-const derivesearch = @import("services/derive_search.zig");
+const sqlite = @import("../db/sqlite.zig");
+const fuzzy = @import("../services/search/fuzzy.zig");
+const derived = @import("../store/derived.zig");
+const derivesearch = @import("../services/derive_search.zig");
 const Io = std.Io;
-const derive_bench = @import("derive_bench.zig");
+const derive_bench = @import("derive.zig");
 const Doc = derive_bench.Doc;
 const emit = derive_bench.emit;
 const msOf = derive_bench.msOf;

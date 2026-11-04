@@ -2,7 +2,7 @@
 //! facts (`spd_index`) and the embedded thumbnail (`thumbs/`).
 
 const std = @import("std");
-const repeat = @import("../repeat.zig").repeat;
+const repeat = @import("../util/repeat.zig").repeat;
 const sqlite = @import("../db/sqlite.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");

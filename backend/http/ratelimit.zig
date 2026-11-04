@@ -2,7 +2,7 @@
 //! created lazily and evicted when idle so the table stays bounded.
 
 const std = @import("std");
-const expiring = @import("../expiring.zig");
+const expiring = @import("../util/expiring.zig");
 
 pub const By = enum { ip, user, both };
 

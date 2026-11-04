@@ -264,7 +264,7 @@ pub fn build(b: *std.Build) void {
     // Derive-path bench: a standalone executable so it can be cross-compiled and
     // run on the Pi. Not installed by default; needs no MuPDF.
     const derive_mod = b.createModule(.{
-        .root_source_file = b.path("backend/derive_bench.zig"),
+        .root_source_file = b.path("backend/bench/derive.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -277,7 +277,7 @@ pub fn build(b: *std.Build) void {
 
     // Write-side bench (`--mode probe`), same arrangement.
     const idxwrite_mod = b.createModule(.{
-        .root_source_file = b.path("backend/index_write_bench.zig"),
+        .root_source_file = b.path("backend/bench/index_write.zig"),
         .target = target,
         .optimize = optimize,
     });

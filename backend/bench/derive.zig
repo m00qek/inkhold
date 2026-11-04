@@ -5,12 +5,12 @@
 //! in memory, so read its RSS as the bench's, not the server's.
 
 const std = @import("std");
-const sqlite = @import("db/sqlite.zig");
-const fuzzy = @import("services/search/fuzzy.zig");
-const derived = @import("store/derived.zig");
-const derivesearch = @import("services/derive_search.zig");
+const sqlite = @import("../db/sqlite.zig");
+const fuzzy = @import("../services/search/fuzzy.zig");
+const derived = @import("../store/derived.zig");
+const derivesearch = @import("../services/derive_search.zig");
 
-const derive_bench_passes = @import("derive_bench_passes.zig");
+const derive_bench_passes = @import("derive_passes.zig");
 const foldPass = derive_bench_passes.foldPass;
 const SplitResult = derive_bench_passes.SplitResult;
 const splitPass = derive_bench_passes.splitPass;

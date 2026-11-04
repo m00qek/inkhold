@@ -1,7 +1,7 @@
 //! The stitched search-index stream and the per-document text route.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const app = @import("../../routes.zig");
 const transport = @import("../../http/transport.zig");
 const password = @import("../../services/auth/password.zig");

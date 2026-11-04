@@ -13,10 +13,10 @@ const filesmod = @import("../services/files.zig");
 const authsvc = @import("../services/auth/service.zig");
 const blobstore = @import("../store/blobs.zig");
 
-const device_files = @import("device_files.zig");
-const device_upload = @import("device_upload.zig");
+const device_files = @import("device/files.zig");
+const device_upload = @import("device/upload.zig");
 
-// ---- the file API and OSS download (`device_files.zig`) ----
+// ---- the file API and OSS download (`device/files.zig`) ----
 pub const listFolder = device_files.listFolder;
 pub const queryByPathV3 = device_files.queryByPathV3;
 pub const queryV3 = device_files.queryV3;
@@ -27,7 +27,7 @@ pub const moveV3 = device_files.moveV3;
 pub const copyV3 = device_files.copyV3;
 pub const ossGet = device_files.ossGet;
 
-// ---- the three-step upload (`device_upload.zig`) ----
+// ---- the three-step upload (`device/upload.zig`) ----
 pub const uploadApply = device_upload.uploadApply;
 pub const ossPut = device_upload.ossPut;
 pub const uploadFinish = device_upload.uploadFinish;

@@ -1,7 +1,7 @@
 //! The bin's read-only views and its restore/purge routes over HTTP.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const gpa = std.testing.allocator;
 const harness = @import("harness.zig");
 const onboardWeb = harness.onboardWeb;

@@ -5,8 +5,8 @@
 //! card, not `/tmp` (a tmpfs on the target).
 
 const std = @import("std");
-const sqlite = @import("db/sqlite.zig");
-const txtindex = @import("services/txt_index.zig");
+const sqlite = @import("../db/sqlite.zig");
+const txtindex = @import("../services/txt_index.zig");
 
 const Io = std.Io;
 const Dir = std.Io.Dir;

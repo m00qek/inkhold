@@ -1,7 +1,7 @@
 //! The manifest bytes, PDF page shape, thumbAspect and layer descriptors over HTTP.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const password = @import("../../services/auth/password.zig");
 const deferredmod = @import("../../services/deferred.zig");
 const gpa = std.testing.allocator;

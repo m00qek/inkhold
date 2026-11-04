@@ -1,18 +1,18 @@
 //! Tests for PDF text derivation.
 
 const std = @import("std");
-const sqlite = @import("../db/sqlite.zig");
-const blobstore = @import("../store/blobs.zig");
-const noteindex = @import("note_index.zig");
-const pdfindex = @import("pdf_index.zig");
-const pdftext = @import("../pdf/text.zig");
+const sqlite = @import("../../db/sqlite.zig");
+const blobstore = @import("../../store/blobs.zig");
+const noteindex = @import("../note_index.zig");
+const pdfindex = @import("../pdf_index.zig");
+const pdftext = @import("../../pdf/text.zig");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
-const schema = @import("../db/schema.zig");
-const thumbstore = @import("../store/thumbs.zig");
-const filesmod = @import("files.zig");
-const deferredmod = @import("deferred.zig");
-const pdf_text = @import("pdf_text.zig");
+const schema = @import("../../db/schema.zig");
+const thumbstore = @import("../../store/thumbs.zig");
+const filesmod = @import("../files.zig");
+const deferredmod = @import("../deferred.zig");
+const pdf_text = @import("../pdf_text.zig");
 const max_pages = pdf_text.max_pages;
 const chunk_pages = pdf_text.chunk_pages;
 const Verdict = pdf_text.Verdict;
@@ -47,9 +47,9 @@ test "the page cap is a decision with a stated value, not an accident" {
 }
 
 /// 120 pages, each "Recipe N rutabaga leafNNN": three chunks at `chunk_pages`.
-const book_pdf = @embedFile("../pdf/testdata/text-120-page.pdf");
+const book_pdf = @embedFile("../../pdf/testdata/text-120-page.pdf");
 
-const scan_pdf = @embedFile("../pdf/testdata/three-page.pdf");
+const scan_pdf = @embedFile("../../pdf/testdata/three-page.pdf");
 
 const Fixture = struct {
     db: sqlite.Db,

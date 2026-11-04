@@ -1,19 +1,19 @@
 //! Note metadata for the reader: lookup by scope, file type, and the per-device geometry.
 
 const std = @import("std");
-const Entry = @import("files.zig").Entry;
+const Entry = @import("../files.zig").Entry;
 const sn = @import("supernote");
-const controlplane = @import("controlplane.zig");
+const controlplane = @import("../controlplane.zig");
 const ControlPlaneService = controlplane.ControlPlaneService;
 const NoteMetaVO = controlplane.NoteMetaVO;
 const fileTypeFor = controlplane.fileTypeFor;
 const idStr = controlplane.idStr;
 const freeEntry = controlplane.freeEntry;
-const controlplane_index = @import("controlplane_index.zig");
+const controlplane_index = @import("index.zig");
 
 /// Which state a read may see: `.trashed` for the bin's preview and history
 /// endpoints, `.live` otherwise. Same type as `Files.HistoryScope`.
-pub const ReadScope = @import("files.zig").HistoryScope;
+pub const ReadScope = @import("../files.zig").HistoryScope;
 
 /// Each scope refuses the other's rows.
 pub fn lookup(self: ControlPlaneService, scope: ReadScope, user_id: u64, id: u64) !?Entry {

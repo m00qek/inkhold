@@ -1,7 +1,7 @@
 //! Tests for orientation, layer records, file-type markers, covers and repair.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const sqlite = @import("../../db/sqlite.zig");
 const blobstore = @import("../../store/blobs.zig");
 const thumbnail = @import("../thumbnail.zig");

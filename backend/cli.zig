@@ -11,7 +11,7 @@ const schema = @import("db/schema.zig");
 const authsvc = @import("services/auth/service.zig");
 const passwordmod = @import("services/auth/password.zig");
 
-const cli_recovery = @import("cli_recovery.zig");
+const cli_recovery = @import("cli/recovery.zig");
 const listUsers = cli_recovery.listUsers;
 const resetPassword = cli_recovery.resetPassword;
 const makeAdmin = cli_recovery.makeAdmin;
@@ -269,4 +269,5 @@ pub fn execute(
 
 test {
     _ = cli_recovery;
+    _ = @import("cli/cli_test.zig");
 }

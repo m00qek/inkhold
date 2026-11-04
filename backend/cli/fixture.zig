@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const cli = @import("cli.zig");
+const cli = @import("../cli.zig");
 const Invocation = cli.Invocation;
 const Style = cli.Style;
 const execute = cli.execute;

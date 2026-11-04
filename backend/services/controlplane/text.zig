@@ -2,8 +2,8 @@
 
 const std = @import("std");
 const sn = @import("supernote");
-const blobstore = @import("../store/blobs.zig");
-const controlplane = @import("controlplane.zig");
+const blobstore = @import("../../store/blobs.zig");
+const controlplane = @import("../controlplane.zig");
 const ControlPlaneService = controlplane.ControlPlaneService;
 const WordVO = controlplane.WordVO;
 const PageText = controlplane.PageText;
@@ -11,8 +11,8 @@ const LinkVO = controlplane.LinkVO;
 const PageLinks = controlplane.PageLinks;
 const allowedLinkScheme = controlplane.allowedLinkScheme;
 const freeEntry = controlplane.freeEntry;
-const controlplane_index = @import("controlplane_index.zig");
-const controlplane_meta = @import("controlplane_meta.zig");
+const controlplane_index = @import("index.zig");
+const controlplane_meta = @import("meta.zig");
 
 /// `GET /note/{id}/page/{n}/text` — the stored transcript and its `text_hash`.
 /// Null when missing, not owned, or not recognized (`recogn_status != 1`), so

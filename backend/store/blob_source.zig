@@ -2,7 +2,7 @@
 //! which bounds-checks untrusted offsets, so parse memory is independent of size.
 
 const std = @import("std");
-const repeat = @import("../repeat.zig").repeat;
+const repeat = @import("../util/repeat.zig").repeat;
 const sn = @import("supernote");
 const blobstore = @import("blobs.zig");
 

@@ -1,9 +1,9 @@
 //! Response VOs for the control plane; field names mirror webapp/src/core/types.ts.
 
 const std = @import("std");
-const Files = @import("files.zig").Files;
-const noteindex = @import("note_index.zig");
-const blobstore = @import("../store/blobs.zig");
+const Files = @import("../files.zig").Files;
+const noteindex = @import("../note_index.zig");
+const blobstore = @import("../../store/blobs.zig");
 
 // ---- response VOs (field names mirror core/types.ts) ----
 

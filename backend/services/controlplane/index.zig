@@ -1,10 +1,10 @@
 //! Index-backed reads: page refs, aspect, layers and summaries with no file I/O.
 
 const std = @import("std");
-const Entry = @import("files.zig").Entry;
-const noteindex = @import("note_index.zig");
-const spdindex = @import("spd_index.zig");
-const controlplane = @import("controlplane.zig");
+const Entry = @import("../files.zig").Entry;
+const noteindex = @import("../note_index.zig");
+const spdindex = @import("../spd_index.zig");
+const controlplane = @import("../controlplane.zig");
 const ControlPlaneService = controlplane.ControlPlaneService;
 const PageRefVO = controlplane.PageRefVO;
 const LayerVO = controlplane.LayerVO;
@@ -12,7 +12,7 @@ const AspectVO = controlplane.AspectVO;
 const fileTypeFor = controlplane.fileTypeFor;
 const fallbackFirst = controlplane.fallbackFirst;
 const fallbackPage = controlplane.fallbackPage;
-const controlplane_meta = @import("controlplane_meta.zig");
+const controlplane_meta = @import("meta.zig");
 
 /// Note-level facts from `note_index`, or null when no current row exists.
 /// `px_per_mm` is resolved here because `columnText` borrows the row.

@@ -4,7 +4,7 @@
 //! backfilled on the spot.
 
 const std = @import("std");
-const repeat = @import("../repeat.zig").repeat;
+const repeat = @import("../util/repeat.zig").repeat;
 const Files = @import("files.zig").Files;
 const Entry = @import("files.zig").Entry;
 const sn = @import("supernote");
@@ -13,12 +13,12 @@ const spdindex = @import("spd_index.zig");
 const settingsmod = @import("settings.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
-const controlplane_meta = @import("controlplane_meta.zig");
-const controlplane_history = @import("controlplane_history.zig");
-const controlplane_text = @import("controlplane_text.zig");
-const controlplane_index = @import("controlplane_index.zig");
+const controlplane_meta = @import("controlplane/meta.zig");
+const controlplane_history = @import("controlplane/history.zig");
+const controlplane_text = @import("controlplane/text.zig");
+const controlplane_index = @import("controlplane/index.zig");
 
-const controlplane_vo = @import("controlplane_vo.zig");
+const controlplane_vo = @import("controlplane/vo.zig");
 pub const PageRefVO = controlplane_vo.PageRefVO;
 pub const LayerVO = controlplane_vo.LayerVO;
 pub const AspectVO = controlplane_vo.AspectVO;
@@ -253,7 +253,7 @@ pub const ControlPlaneService = struct {
     // The rest of the API, one concern per file; the doc comments live on the
     // definitions.
 
-    // ---- note metadata (`controlplane_meta.zig`) ----
+    // ---- note metadata (`controlplane/meta.zig`) ----
     pub const ReadScope = controlplane_meta.ReadScope;
     pub const lookup = controlplane_meta.lookup;
     pub const noteMeta = controlplane_meta.noteMeta;
@@ -262,19 +262,19 @@ pub const ControlPlaneService = struct {
     const noteMetaIn = controlplane_meta.noteMetaIn;
     pub const historyNoteMeta = controlplane_meta.historyNoteMeta;
 
-    // ---- version history (`controlplane_history.zig`) ----
+    // ---- version history (`controlplane/history.zig`) ----
     pub const history = controlplane_history.history;
     pub const binHistory = controlplane_history.binHistory;
     pub const historyIn = controlplane_history.historyIn;
 
-    // ---- recognised text and PDF links (`controlplane_text.zig`) ----
+    // ---- recognised text and PDF links (`controlplane/text.zig`) ----
     pub const pageText = controlplane_text.pageText;
     pub const binPageText = controlplane_text.binPageText;
     pub const pageTextForMd5 = controlplane_text.pageTextForMd5;
     pub const pageLinks = controlplane_text.pageLinks;
     pub const pageLinksForMd5 = controlplane_text.pageLinksForMd5;
 
-    // ---- index-backed reads, no file I/O (`controlplane_index.zig`) ----
+    // ---- index-backed reads, no file I/O (`controlplane/index.zig`) ----
     const aspectOf = controlplane_index.aspectOf;
     const indexRowEnsuring = controlplane_index.indexRowEnsuring;
     // No `.txt` twin of `backfill`: a lazy heal could only write the

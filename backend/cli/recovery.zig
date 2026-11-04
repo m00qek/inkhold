@@ -1,13 +1,13 @@
 //! The recovery verbs: users, reset-password and make-admin against an existing install.
 
 const std = @import("std");
-const config = @import("config.zig");
-const app = @import("app.zig");
-const sqlite = @import("db/sqlite.zig");
-const schema = @import("db/schema.zig");
-const authsvc = @import("services/auth/service.zig");
-const passwordmod = @import("services/auth/password.zig");
-const cli = @import("cli.zig");
+const config = @import("../config.zig");
+const app = @import("../app.zig");
+const sqlite = @import("../db/sqlite.zig");
+const schema = @import("../db/schema.zig");
+const authsvc = @import("../services/auth/service.zig");
+const passwordmod = @import("../services/auth/password.zig");
+const cli = @import("../cli.zig");
 const Command = cli.Command;
 const Invocation = cli.Invocation;
 const Style = cli.Style;
@@ -264,13 +264,9 @@ fn noSuchAccount(user: []const u8, err: *std.Io.Writer, st: Style) !u8 {
 
 const testing = std.testing;
 
-test {
-    _ = @import("cli_test.zig");
-}
-
 // ---- tests of private helpers ----
 
-const fixture = @import("cli_test_fixture.zig");
+const fixture = @import("fixture.zig");
 
 const capture = fixture.capture;
 

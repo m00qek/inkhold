@@ -1,12 +1,12 @@
 //! Serving a page from the index: header, page plan, templates and the SNPG stream.
 
 const std = @import("std");
-const sqlite = @import("../db/sqlite.zig");
-const blobstore = @import("../store/blobs.zig");
+const sqlite = @import("../../db/sqlite.zig");
+const blobstore = @import("../../store/blobs.zig");
 const sn = @import("supernote");
-const schema = @import("../db/schema.zig");
-const noteindex = @import("note_index.zig");
-const note_index_parse = @import("note_index_parse.zig");
+const schema = @import("../../db/schema.zig");
+const noteindex = @import("../note_index.zig");
+const note_index_parse = @import("parse.zig");
 const Error = noteindex.Error;
 const LayerRef = noteindex.LayerRef;
 const hexEncode = note_index_parse.hexEncode;
@@ -236,16 +236,16 @@ pub fn serializeFromIndex(
 }
 
 test {
-    _ = @import("note_index/index_test.zig");
-    _ = @import("note_index/index_cover_test.zig");
-    _ = @import("note_index/template_test.zig");
+    _ = @import("index_test.zig");
+    _ = @import("index_cover_test.zig");
+    _ = @import("template_test.zig");
 }
 
 // ---- tests of private helpers ----
 
 const testing = std.testing;
 const nb = @import("note_builder");
-const fixture = @import("note_index/fixture.zig");
+const fixture = @import("fixture.zig");
 const Blobs = fixture.Blobs;
 const indexInto = fixture.indexInto;
 

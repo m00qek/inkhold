@@ -1,7 +1,7 @@
 //! The byte routes: raw files, thumbnails and templates.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const password = @import("../../services/auth/password.zig");
 const noteindex = @import("../../services/note_index.zig");
 const context = @import("../../http/context.zig");

@@ -1,21 +1,21 @@
 //! Device file enumeration, tree edits (delete, create, move, copy) and raw download.
 
 const std = @import("std");
-const router = @import("../http/router.zig");
-const context = @import("../http/context.zig");
-const json = @import("../http/json.zig");
-const reply = @import("../http/reply.zig");
-const multipart = @import("../http/multipart.zig");
-const sync = @import("../services/sync.zig");
-const filesmod = @import("../services/files.zig");
-const blobstore = @import("../store/blobs.zig");
+const router = @import("../../http/router.zig");
+const context = @import("../../http/context.zig");
+const json = @import("../../http/json.zig");
+const reply = @import("../../http/reply.zig");
+const multipart = @import("../../http/multipart.zig");
+const sync = @import("../../services/sync.zig");
+const filesmod = @import("../../services/files.zig");
+const blobstore = @import("../../store/blobs.zig");
 const Context = context.Context;
 const Request = router.Request;
 const Params = router.Params;
 const fail = reply.fail;
 const badRequest = reply.badRequest;
 const serverError = reply.serverError;
-const device = @import("device.zig");
+const device = @import("../device.zig");
 const resolveEquipment = device.resolveEquipment;
 
 /// `page` is 0-based; `size <= 0` or absent means all.

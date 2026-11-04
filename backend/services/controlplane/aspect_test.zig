@@ -1,7 +1,7 @@
 //! Tests for `thumbAspect`.
 
 const std = @import("std");
-const repeat = @import("../../repeat.zig").repeat;
+const repeat = @import("../../util/repeat.zig").repeat;
 const Files = @import("../files.zig").Files;
 const testing = std.testing;
 const sqlite = @import("../../db/sqlite.zig");

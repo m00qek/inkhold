@@ -3,7 +3,7 @@
 //! All input is attacker-supplied: bounds-checked, no allocation, null on junk.
 
 const std = @import("std");
-const repeat = @import("../repeat.zig").repeat;
+const repeat = @import("../util/repeat.zig").repeat;
 const sn = @import("supernote");
 
 /// Largest source we buffer whole to extract from (SQLite `deserialize` needs
