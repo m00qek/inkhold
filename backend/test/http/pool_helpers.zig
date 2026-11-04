@@ -7,7 +7,7 @@ const Context = context.Context;
 
 /// A read-only handler through `ctx.files`, so pooled dispatch runs end to end.
 pub fn poolReadHandler(ctx: *Context, req: *router.Request, _: router.Params) anyerror!void {
-    const files = ctx.files.?;
+    const files = ctx.files;
     _ = files.syncVersion(1) catch return serverErrorish(req);
     try req.respond("{\"success\":true}", .{ .status = .ok });
 }

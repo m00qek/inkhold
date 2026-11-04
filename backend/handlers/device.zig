@@ -82,7 +82,7 @@ const ScheduleTaskAllVO = struct { success: bool = true, nextPageToken: []const 
 pub fn resolveEquipment(ctx: *Context, body_eno: ?[]const u8, caller: *const context.Caller) []const u8 {
     const eno = body_eno orelse caller.equipmentNo() orelse "";
     if (caller.audience == .device and body_eno != null and eno.len > 0) {
-        const svc = ctx.service.?;
+        const svc = ctx.service;
         if (!(svc.isDeviceBound(caller.user_id, eno) catch true)) {
             // A placeholder until `bindEquipment` reports the real name.
             svc.bindDevice(caller.user_id, eno, "Supernote") catch |e|
@@ -99,7 +99,7 @@ pub fn resolveEquipment(ctx: *Context, body_eno: ?[]const u8, caller: *const con
 /// `bindEquipment` re-binds anyway. Not yet validated on a live Nomad.
 pub fn unlinkEquipmentLenient(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     var parsed = json.readBody(UnbindReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
     const eno = parsed.value.equipmentNo;
@@ -113,7 +113,7 @@ pub fn unlinkEquipmentLenient(ctx: *Context, req: *Request, params: Params) anye
 /// `success:true` iff an account with this email exists here.
 pub fn checkExists(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     var parsed = json.readBody(UserCheckReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
     const email = parsed.value.email orelse return fail(ctx, req, .ok, "BAD_REQUEST", "email required");
@@ -134,7 +134,7 @@ pub fn queryServer(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// capacity row.
 pub fn bindEquipment(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     var parsed = json.readBody(BindReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
     const in = parsed.value;
@@ -163,15 +163,13 @@ pub fn bindEquipment(ctx: *Context, req: *Request, params: Params) anyerror!void
         std.log.info("device {s} bound via bindEquipment but reported NO name", .{in.equipmentNo});
     }
 
-    if (ctx.files) |files| {
-        // Creates the capacity row if missing but never lets the device set it:
-        // `totalCapacity` is ignored so a device token cannot raise its own quota.
-        files.ensureCapacity(user_id) catch |e| std.log.warn("user {d}: capacity row not created: {t}", .{ user_id, e });
-        if (in.label) |labels| {
-            // The device creates the folder itself on its first sync, so this is a convenience.
-            for (labels) |path| _ = files.ensureFolderPath(user_id, path) catch |e|
-                std.log.warn("user {d}: sync folder {s} not created: {t}", .{ user_id, path, e });
-        }
+    // Creates the capacity row if missing but never lets the device set it:
+    // `totalCapacity` is ignored so a device token cannot raise its own quota.
+    ctx.files.ensureCapacity(user_id) catch |e| std.log.warn("user {d}: capacity row not created: {t}", .{ user_id, e });
+    if (in.label) |labels| {
+        // The device creates the folder itself on its first sync, so this is a convenience.
+        for (labels) |path| _ = ctx.files.ensureFolderPath(user_id, path) catch |e|
+            std.log.warn("user {d}: sync folder {s} not created: {t}", .{ user_id, path, e });
     }
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
 }
@@ -181,16 +179,12 @@ pub fn bindEquipment(ctx: *Context, req: *Request, params: Params) anyerror!void
 /// bytes), and the bind-time KB field is a different quantity.
 pub fn userQuery(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const caller = ctx.caller.?; // device scope
     const info = (svc.userInfo(ctx.gpa, caller.user_id) catch return serverError(ctx, req)) orelse
         return fail(ctx, req, .unauthorized, "NO_USER", "session user no longer exists");
     defer ctx.gpa.free(info.email);
-    const total: i64 = blk: {
-        const files = ctx.files orelse break :blk 0;
-        const cap = files.capacity(caller.user_id) catch break :blk 0;
-        break :blk cap.total;
-    };
+    const total: i64 = if (ctx.files.capacity(caller.user_id)) |cap| cap.total else |_| 0;
     var cbuf: [24]u8 = undefined;
     const cap_str = std.fmt.bufPrint(&cbuf, "{d}", .{total}) catch "0";
     try json.respond(ctx.gpa, req, .ok, UserQueryVO{
@@ -206,7 +200,7 @@ pub fn userQuery(ctx: *Context, req: *Request, params: Params) anyerror!void {
 pub fn getSpaceUsage(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     if (json.readBody(SpaceUsageReq, ctx.gpa, req)) |parsed| parsed.deinit() else |_| {}
 
@@ -223,7 +217,7 @@ const BindStatusVO = struct { success: bool = true, errorCode: ?[]const u8 = nul
 /// Whether the account has any active binding; identified by token.
 pub fn bindStatus(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const caller = ctx.caller.?; // device scope
     const n = svc.deviceCount(caller.user_id) catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, BindStatusVO{ .bindStatus = n > 0 }, null);
@@ -235,7 +229,7 @@ const CapacityQueryVO = struct { success: bool = true, usedCapacity: i64, totalC
 pub fn capacityQuery(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const cap = files.capacity(caller.user_id) catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, CapacityQueryVO{
         .usedCapacity = cap.used,
@@ -269,7 +263,7 @@ pub fn summaryHash(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // device scope
     var parsed = json.readBody(PageReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena.deinit();
@@ -284,7 +278,7 @@ pub fn summaryById(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // device scope
     var parsed = json.readBody(SummaryByIdReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena.deinit();
@@ -300,7 +294,7 @@ pub fn summaryGroup(ctx: *Context, req: *Request, params: Params) anyerror!void 
     const caller = ctx.caller.?; // device scope
     var parsed = json.readBody(PageReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena.deinit();

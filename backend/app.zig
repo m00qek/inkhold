@@ -145,6 +145,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
         .config = cfg,
         .service = &svc,
         .files = &files_svc,
+        .db = db,
         .limiter = &limiter,
         .download_tokens = &download_tokens,
         .event_streams = &event_streams,

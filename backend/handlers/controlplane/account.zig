@@ -22,7 +22,7 @@ const UnbindReq = struct { equipmentNo: []const u8 };
 /// POST /api/controlplane/equipment/unlink -> revoke a device.
 pub fn unlink(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const caller = ctx.caller.?; // controlplane scope
     var parsed = json.readBody(UnbindReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
@@ -37,7 +37,7 @@ const UsageVO = struct { used_bytes: i64, total_bytes: i64 };
 pub fn usage(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const cap = files.capacity(caller.user_id) catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, UsageVO{ .used_bytes = cap.used, .total_bytes = cap.total }, null);
 }
@@ -71,9 +71,9 @@ const AccountVO = struct {
 
 pub fn account(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const token = transport.presentedToken(req) orelse return serverError(ctx, req);
 
     const info = (svc.accountInfo(ctx.gpa, caller.user_id) catch return serverError(ctx, req)) orelse
@@ -112,7 +112,7 @@ pub fn account(ctx: *Context, req: *Request, params: Params) anyerror!void {
 pub fn setVersions(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     var parsed = json.readBody(SetVersionsReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
@@ -160,7 +160,7 @@ const StorageVO = struct {
 pub fn accountStorage(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const cap = files.capacity(caller.user_id) catch return serverError(ctx, req);
     const b = files.storageBreakdown(caller.user_id) catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, StorageVO{
@@ -179,7 +179,7 @@ pub fn accountStorage(ctx: *Context, req: *Request, params: Params) anyerror!voi
 /// unknown one; `/equipment/unlink` instead answers 200 when nothing matched.
 pub fn unlinkMyDevice(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const caller = ctx.caller.?; // controlplane scope
     var parsed = json.readBody(UnbindReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
@@ -197,7 +197,7 @@ const SignedOutVO = struct { success: bool = true, revoked: i64 };
 
 pub fn signOutOthers(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const caller = ctx.caller.?; // controlplane scope
     const token = transport.presentedToken(req) orelse return serverError(ctx, req);
     const revoked = svc.signOutOtherSessions(caller.user_id, token) catch return serverError(ctx, req);
@@ -284,7 +284,7 @@ fn serverAddress(buf: []u8, cfg: config.Config) []const u8 {
 /// the login page needs first-run state and the LAN address before sign-in.
 pub fn serverInfo(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?; // set at startup, present on every route incl. public
+    const svc = ctx.service; // set at startup, present on every route incl. public
     const first_run = svc.isFirstRun() catch return serverError(ctx, req);
 
     var addr_buf: [64]u8 = undefined;

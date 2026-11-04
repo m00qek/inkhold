@@ -275,7 +275,7 @@ fn dispatchLocked(ctx: *Context, routes: []const router.Route, req: *router.Requ
         const caller = blk: {
             ctx.lockDb();
             defer ctx.unlockDb();
-            break :blk if (ctx.service) |svc| resolveCaller(svc, req) else null;
+            break :blk resolveCaller(ctx.service, req);
         };
         return router.dispatch(routes, ctx, req, caller);
     }
@@ -284,14 +284,14 @@ fn dispatchLocked(ctx: *Context, routes: []const router.Route, req: *router.Requ
         const caller = blk: {
             ctx.lockDb();
             defer ctx.unlockDb();
-            break :blk if (ctx.service) |svc| resolveCaller(svc, req) else null;
+            break :blk resolveCaller(ctx.service, req);
         };
         if (route == null) return router.dispatch(routes, ctx, req, caller);
         return dispatchReadOnly(ctx, routes, req, caller);
     }
     ctx.lockDb();
     defer ctx.unlockDb();
-    const caller = if (ctx.service) |svc| resolveCaller(svc, req) else null;
+    const caller = resolveCaller(ctx.service, req);
     if (admin_route) renewElevation(ctx, req);
     try router.dispatch(routes, ctx, req, caller);
 }
@@ -318,16 +318,10 @@ fn dispatchReadOnly(
         ctx.files = saved_files;
         ctx.service = saved_service;
     }
-    var ro_files: filesmod.Files = undefined;
-    var ro_service: authsvc.Service = undefined;
-    if (saved_files) |f| {
-        ro_files = f.readerView(lease.db);
-        ctx.files = &ro_files;
-    }
-    if (saved_service) |s| {
-        ro_service = s.readerView(lease.db);
-        ctx.service = &ro_service;
-    }
+    var ro_files = saved_files.readerView(lease.db);
+    var ro_service = saved_service.readerView(lease.db);
+    ctx.files = &ro_files;
+    ctx.service = &ro_service;
     return router.dispatch(routes, ctx, req, caller);
 }
 
@@ -335,7 +329,7 @@ fn dispatchReadOnly(
 /// Runs before `authorize`, which is safe because it only extends a live
 /// elevation and clamps to the hard ceiling. Best-effort.
 fn renewElevation(ctx: *Context, req: *router.Request) void {
-    const svc = ctx.service orelse return;
+    const svc = ctx.service;
     const token = presentedToken(req) orelse return;
     _ = svc.renewElevation(token) catch return;
 }

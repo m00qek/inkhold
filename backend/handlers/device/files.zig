@@ -154,7 +154,7 @@ fn splitPath(path: []const u8) SplitPath {
 pub fn listFolder(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     var parsed = json.readBody(ListFolderReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
@@ -195,7 +195,7 @@ pub fn listFolder(ctx: *Context, req: *Request, params: Params) anyerror!void {
 pub fn queryByPathV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     var parsed = json.readBody(QueryByPathReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
@@ -215,7 +215,7 @@ pub fn queryByPathV3(ctx: *Context, req: *Request, params: Params) anyerror!void
 pub fn queryV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     var parsed = json.readBody(QueryByIdReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
@@ -237,7 +237,7 @@ pub fn queryV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
 pub fn downloadV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     // Capture Host before the body read invalidates head strings.
     var host_buf: [256]u8 = undefined;
@@ -283,7 +283,7 @@ pub fn downloadV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
 pub fn deleteFolderV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     var parsed = json.readBody(DeleteFolderReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
@@ -319,7 +319,7 @@ pub fn deleteFolderV3(ctx: *Context, req: *Request, params: Params) anyerror!voi
 pub fn createFolderV2(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     var parsed = json.readBody(CreateFolderReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
@@ -358,7 +358,7 @@ pub fn createFolderV2(ctx: *Context, req: *Request, params: Params) anyerror!voi
 pub fn moveV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     var parsed = json.readBody(MoveReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
@@ -408,7 +408,7 @@ pub fn moveV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
 pub fn copyV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     var parsed = json.readBody(MoveReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
@@ -454,7 +454,7 @@ pub fn copyV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// 401 logs the device out. Served raw, not multipart (uploads are multipart;
 /// raw is accepted), streamed with a known length.
 pub fn ossGet(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return reply.notFound(req);
 
     const tokens = ctx.download_tokens orelse return reply.forbidden(req);

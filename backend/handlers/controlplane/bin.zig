@@ -19,7 +19,7 @@ const bytes = @import("bytes.zig");
 pub fn bin(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena.deinit();
@@ -33,7 +33,7 @@ pub fn bin(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// quota refund here; `purge` frees the bytes.
 pub fn trash(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
 
     // `get`, not `getAnyState`: an already-trashed row is a 404, like a missing one.
@@ -62,7 +62,7 @@ pub fn trash(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// auto-renames when a live entry took the name.
 pub fn restore(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
 
     const done = files.restore(caller.user_id, id) catch |err| switch (err) {
@@ -83,7 +83,7 @@ pub fn restore(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// A live id is a 404 (`Files.purge` refuses anything outside the bin).
 pub fn purge(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
 
     files.purge(caller.user_id, id) catch |err| switch (err) {
@@ -97,7 +97,7 @@ pub fn purge(ctx: *Context, req: *Request, params: Params) anyerror!void {
 pub fn emptyBin(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     const n = files.emptyBin(caller.user_id) catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, controlplane.EmptiedVO{ .entries = @intCast(n) }, null);
@@ -108,7 +108,7 @@ pub fn emptyBin(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// `Files.get` stays live-only.
 pub fn binNote(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
 
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
@@ -124,7 +124,7 @@ pub fn binNote(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// never `immutable`: nothing in the URL pins the JSON shape.
 pub fn binPageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const n = std.fmt.parseInt(u64, params.get("n") orelse return badRequest(ctx, req), 10) catch
         return badRequest(ctx, req);

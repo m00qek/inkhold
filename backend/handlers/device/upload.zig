@@ -70,7 +70,7 @@ fn uploadFolder(a: std.mem.Allocator, path: []const u8, file_name: []const u8) !
 pub fn uploadApply(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     // Capture Host before the body read invalidates head strings.
     var host_buf: [256]u8 = undefined;
@@ -176,7 +176,7 @@ fn chargeSession(
 /// `upload_cap.slack_bytes`.
 pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     // Copy the param out; the body read invalidates head strings.
     const inner_raw = params.get("innerName") orelse return reply.notFound(req);
@@ -305,7 +305,7 @@ pub fn ossPut(ctx: *Context, req: *Request, params: Params) anyerror!void {
 pub fn uploadFinish(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // device scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     var parsed = json.readBody(UploadFinishReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();

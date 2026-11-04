@@ -237,6 +237,7 @@ pub const Fixture = struct {
             .config = .{},
             .service = &f.svc,
             .files = &f.files,
+            .db = f.db,
             .limiter = &f.limiter,
             .download_tokens = &f.dltokens,
             .client_ip = "203.0.113.7", // a stable test client IP

@@ -10,6 +10,7 @@ const event_streams = @import("event_streams.zig");
 const filesmod = @import("../services/files.zig");
 const lock_stats = @import("lock_stats.zig");
 const reader_pool = @import("../db/reader_pool.zig");
+const sqlite = @import("../db/sqlite.zig");
 const pending = @import("../services/pending.zig");
 const authscope = @import("../services/auth/scope.zig");
 
@@ -24,8 +25,12 @@ pub const Context = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     config: config.Config,
-    service: ?*authsvc.Service = null,
-    files: ?*filesmod.Files = null,
+    service: *authsvc.Service,
+    files: *filesmod.Files,
+    /// The writer connection, for composing a service a handler needs (settings,
+    /// health) on a writer route. Never for SQL in a handler, and never on a
+    /// `read_only` route, whose services are reader-bound copies.
+    db: sqlite.Db,
     limiter: ?*ratelimit.Limiter = null,
     download_tokens: ?*download_tokens.DownloadTokens = null,
     /// SSE admission control. Null means never hold a connection: the events

@@ -50,7 +50,7 @@ fn indexSnapshot(ctx: *Context, user_id: u64) ?pendingsvc.Snapshot {
 pub fn searchIndexManifest(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     // Read the header before responding; responding invalidates head strings.
     var inm_buf: [64]u8 = undefined;
@@ -60,7 +60,7 @@ pub fn searchIndexManifest(ctx: *Context, req: *Request, params: Params) anyerro
     defer arena.deinit();
     const a = arena.allocator();
 
-    const m = index_export.manifest(a, files.db, caller.user_id, files.terms) catch return serverError(ctx, req);
+    const m = index_export.manifest(a, files.*, caller.user_id) catch return serverError(ctx, req);
     var body: std.ArrayList(u8) = .empty;
     index_export.writeManifest(a, &body, m) catch return serverError(ctx, req);
 
@@ -94,7 +94,7 @@ pub fn searchIndexManifest(ctx: *Context, req: *Request, params: Params) anyerro
 pub fn searchIndexStream(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     // No terms store: an empty-but-valid stream would make the client record
     // every document as arrived and stop asking.
     const terms = files.terms orelse return serverError(ctx, req);
@@ -115,12 +115,12 @@ pub fn searchIndexStream(ctx: *Context, req: *Request, params: Params) anyerror!
     const gate = blk: {
         if (ctx.borrowReader()) |lease| {
             defer ctx.returnReader(lease);
-            break :blk index_export.gate(a, ctx.gpa, lease.db, caller.user_id, files.terms) catch
+            break :blk index_export.gate(a, ctx.gpa, files.readerView(lease.db), caller.user_id) catch
                 return serverError(ctx, req);
         }
         ctx.lockDb();
         defer ctx.unlockDb();
-        break :blk index_export.gate(a, ctx.gpa, files.db, caller.user_id, files.terms) catch
+        break :blk index_export.gate(a, ctx.gpa, files.*, caller.user_id) catch
             return serverError(ctx, req);
     };
 
@@ -194,7 +194,7 @@ fn eventsOneShot(ctx: *Context, req: *Request, sync_version: i64, index: ?pendin
 /// as in the stitched stream.
 pub fn documentText(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const md5 = params.get("md5") orelse return badRequest(ctx, req);
 
     // No text store: a 404 ("nothing to load") is the truth here, unlike the
@@ -277,7 +277,7 @@ pub fn documentText(ctx: *Context, req: *Request, params: Params) anyerror!void 
 pub fn events(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     // The only DB touch before the head is sent.
     const initial: i64 = blk: {

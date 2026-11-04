@@ -47,7 +47,7 @@ const RenameReq = struct { name: []const u8 };
 /// trashed. Metadata only.
 pub fn rename(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
 
     var parsed = json.readBody(RenameReq, ctx.gpa, req) catch return badRequest(ctx, req);
@@ -151,7 +151,7 @@ fn onConflictFromTarget(target: []const u8) OnConflict {
 /// folder holds the name.
 pub fn upload(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     // Copy what we need out of the head first; reading the body invalidates it.
     const id_raw = params.get("id") orelse return badRequest(ctx, req);

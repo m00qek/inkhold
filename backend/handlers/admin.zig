@@ -83,7 +83,7 @@ const ElevateVO = struct { success: bool = true, elevatedUntil: i64 };
 /// returns it once; the account starts must-change.
 pub fn createUser(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const actor = ctx.caller.?; // require_admin guarantees an elevated admin caller
     var parsed = json.readBody(CreateUserReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
@@ -101,7 +101,7 @@ pub fn createUser(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
 pub fn listUsers(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const users = svc.listUsers(ctx.gpa) catch return serverError(ctx, req);
     defer authsvc.Service.freeUsers(ctx.gpa, users);
     try json.respond(ctx.gpa, req, .ok, UsersVO{ .users = users }, null);
@@ -109,9 +109,9 @@ pub fn listUsers(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
 /// DELETE /api/admin/users/:id. Not the last admin, not yourself.
 pub fn deleteUser(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const actor = ctx.caller.?;
-    const files = ctx.files.?; // deletion must release the account's blob references
+    const files = ctx.files; // deletion must release the account's blob references
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     svc.deleteUser(actor.user_id, id, files.*) catch |err| switch (err) {
         error.LastAdmin => return fail(ctx, req, .ok, "LAST_ADMIN", "cannot remove the last administrator"),
@@ -125,7 +125,7 @@ pub fn deleteUser(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// POST /api/admin/users/:id/reset. Server-picked temporary password, returned
 /// once; sets must-change and revokes the target's sessions (and so elevation).
 pub fn resetPassword(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const actor = ctx.caller.?;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const temp = svc.resetPassword(actor.user_id, id) catch |e| switch (e) {
@@ -140,7 +140,7 @@ pub fn resetPassword(ctx: *Context, req: *Request, params: Params) anyerror!void
 // shells never re-derive ownership.
 
 pub fn listDevices(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const actor = ctx.caller.?; // require_admin guarantees an elevated admin caller
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const devices = svc.listUserDevices(ctx.gpa, actor.user_id, id) catch |err| switch (err) {
@@ -155,7 +155,7 @@ pub fn listDevices(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// the binding row survives for re-pairing. `DEVICE_NOT_FOUND` (404) also covers
 /// a serial owned by another housemate, so nothing leaks.
 pub fn unlinkDevice(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const actor = ctx.caller.?;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     var parsed = json.readBody(UnlinkDeviceReq, ctx.gpa, req) catch return badRequest(ctx, req);
@@ -169,10 +169,10 @@ pub fn unlinkDevice(ctx: *Context, req: *Request, params: Params) anyerror!void 
 }
 
 pub fn getQuota(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const actor = ctx.caller.?;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const q = svc.userQuota(actor.user_id, id, files.*) catch |err| switch (err) {
         error.UserNotFound => return fail(ctx, req, .not_found, "USER_NOT_FOUND", "no such user"),
         else => return serverError(ctx, req),
@@ -183,13 +183,13 @@ pub fn getQuota(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// PUT /api/admin/users/{id}/quota. An allotment below usage is accepted and
 /// deletes nothing; the meter must draw `used > total`.
 pub fn setQuota(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const actor = ctx.caller.?;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     var parsed = json.readBody(SetQuotaReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const q = svc.setUserQuota(actor.user_id, id, parsed.value.totalBytes, files.*) catch |err| switch (err) {
         error.UserNotFound => return fail(ctx, req, .not_found, "USER_NOT_FOUND", "no such user"),
         error.InvalidQuota => return fail(ctx, req, .bad_request, "INVALID_QUOTA", "an allotment cannot be negative"),
@@ -202,8 +202,7 @@ pub fn setQuota(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
 pub fn getRetention(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const files = ctx.files orelse return serverError(ctx, req);
-    const set = settingsmod.Settings.init(ctx.io, files.db);
+    const set = settingsmod.Settings.init(ctx.io, ctx.db);
     const r = set.binRetention() catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, retentionVO(r), null);
 }
@@ -212,11 +211,10 @@ pub fn getRetention(ctx: *Context, req: *Request, params: Params) anyerror!void 
 /// window starts at this write (`settings.sweepCutoff`).
 pub fn setRetention(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const files = ctx.files orelse return serverError(ctx, req);
     var parsed = json.readBody(SetRetentionReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
-    const set = settingsmod.Settings.init(ctx.io, files.db);
+    const set = settingsmod.Settings.init(ctx.io, ctx.db);
     const r = set.setBinRetentionDays(parsed.value.retentionDays) catch |err| switch (err) {
         error.InvalidRetention => return fail(ctx, req, .bad_request, "INVALID_RETENTION", "retention must be between 1 and 365 days"),
         else => return serverError(ctx, req),
@@ -238,8 +236,7 @@ fn retentionVO(r: settingsmod.Retention) RetentionVO {
 /// `memory_bytes` is null where unknown and must not render as 0 B.
 pub fn health(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const files = ctx.files orelse return serverError(ctx, req);
-    const snap = healthmod.snapshot(ctx.io, files.db, authhandlers.api_version) catch
+    const snap = healthmod.snapshot(ctx.io, ctx.db, authhandlers.api_version) catch
         return serverError(ctx, req);
 
     // Stack-allocated: reporting the lock must not allocate on the path it measures.
@@ -264,7 +261,7 @@ pub fn health(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// admins cannot be enumerated.
 pub fn elevate(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const caller = ctx.caller.?;
     // Copy the token first: the body read overwrites the head buffer it slices.
     var token_buf: [128]u8 = undefined;
@@ -289,7 +286,7 @@ pub fn elevate(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// the session row per request); succeeds even after elevation lapsed.
 pub fn lock(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const token = transport.presentedToken(req) orelse return serverError(ctx, req);
     svc.lockElevation(token) catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);

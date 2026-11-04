@@ -297,7 +297,7 @@ const SlowRead = struct {
     }
 
     fn handler(ctx: *Context, req: *router.Request, _: router.Params) anyerror!void {
-        _ = ctx.files.?.syncVersion(1) catch {};
+        _ = ctx.files.syncVersion(1) catch {};
         inside.store(true, .seq_cst);
         while (!let_go.load(.seq_cst)) std.Thread.yield() catch {};
         try req.respond("{\"success\":true}", .{ .status = .ok });

@@ -98,7 +98,7 @@ pub const Fixture = struct {
     }
 
     pub fn manifest(f: *Fixture, user_id: u64) !Manifest {
-        return index_export.manifest(f.a(), f.db, user_id, f.files.terms);
+        return index_export.manifest(f.a(), f.files, user_id);
     }
 
     pub fn rowFor(f: *Fixture, user_id: u64, file_id: u64) !?Row {

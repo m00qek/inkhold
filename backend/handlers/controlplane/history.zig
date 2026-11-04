@@ -30,7 +30,7 @@ pub fn binHistory(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
 fn historyList(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
 
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
@@ -46,7 +46,7 @@ fn historyList(ctx: *Context, req: *Request, params: Params, scope: controlplane
 /// `size` are the version's; `id` and `name` stay the file's.
 pub fn historyMeta(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const md5 = params.get("md5") orelse return badRequest(ctx, req);
 
@@ -72,7 +72,7 @@ pub fn binHistoryPage(ctx: *Context, req: *Request, params: Params) anyerror!voi
 
 fn pageIn(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const md5 = params.get("md5") orelse return badRequest(ctx, req);
     const n = std.fmt.parseInt(u64, params.get("n") orelse return badRequest(ctx, req), 10) catch
@@ -97,7 +97,7 @@ fn pageIn(ctx: *Context, req: *Request, params: Params, scope: controlplane.Cont
 /// re-derived and the displaced current is retained (undoable). 507 over quota.
 pub fn historyRestore(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const md5 = params.get("md5") orelse return badRequest(ctx, req);
 
@@ -131,7 +131,7 @@ pub fn binHistoryRaw(ctx: *Context, req: *Request, params: Params) anyerror!void
 
 fn rawIn(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const md5 = params.get("md5") orelse return badRequest(ctx, req);
     // Capture query params BEFORE responding (responding invalidates head strings).
@@ -177,7 +177,7 @@ pub fn binHistoryPageText(ctx: *Context, req: *Request, params: Params) anyerror
 
 fn pageTextIn(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const md5 = params.get("md5") orelse return badRequest(ctx, req);
     const n = std.fmt.parseInt(u64, params.get("n") orelse return badRequest(ctx, req), 10) catch

@@ -62,7 +62,7 @@ pub fn binFile(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
 fn rawFile(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     // Capture query params BEFORE responding (responding invalidates head strings).
     const v = reply.queryParam(req.head.target, "v");
@@ -93,7 +93,7 @@ fn rawFile(ctx: *Context, req: *Request, params: Params, scope: controlplane.Con
 /// `nosniff`, `?download=1`, ranges) with the lock released. The caller resolved
 /// `name`, `md5` and `size` and checked ownership.
 pub fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []const u8, size: u64, forced_download: bool) anyerror!void {
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     if (md5.len != blobstore.md5_hex_len) return reply.notFound(req);
 
     const allowed = inlineTypeOf(name);
@@ -193,7 +193,7 @@ pub fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []cons
 /// thumbnail" so a bad file is parsed once. Immutable, ETag = hash, `nosniff`.
 pub fn thumbnail(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const hash = params.get("hash") orelse return badRequest(ctx, req);
 
     // The only handler-held lock window: ownership and the repair gate.
@@ -313,7 +313,7 @@ fn streamBlobRange(
 /// recorded `layers`. 404 for anything unowned, absent or over the size cap.
 pub fn template(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const hash = params.get("hash") orelse return badRequest(ctx, req);
     // A template hash is PAGESTYLEMD5; an implausible length is a 404.
@@ -364,7 +364,7 @@ fn streamNoteTemplate(
 /// it via `textContent`.
 pub fn pageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const n = std.fmt.parseInt(u64, params.get("n") orelse return badRequest(ctx, req), 10) catch
         return badRequest(ctx, req);
@@ -392,7 +392,7 @@ pub fn pageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// the PDF exporter reads this endpoint.
 pub fn pageLinks(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const n = std.fmt.parseInt(u64, params.get("n") orelse return badRequest(ctx, req), 10) catch
         return badRequest(ctx, req);

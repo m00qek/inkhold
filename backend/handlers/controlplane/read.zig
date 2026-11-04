@@ -20,7 +20,7 @@ const serverError = reply.serverError;
 pub fn tree(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
 
     const parent = reply.queryParam(req.head.target, "parent");
     var parent_id: ?u64 = null;
@@ -41,7 +41,7 @@ pub fn tree(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// hash and dims), for every previewable kind. A pure index read.
 pub fn note(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
 
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
@@ -70,7 +70,7 @@ pub fn binPage(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
 pub fn pageBytes(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files orelse return serverError(ctx, req);
+    const files = ctx.files;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
     const n = std.fmt.parseInt(u64, params.get("n") orelse return badRequest(ctx, req), 10) catch
         return badRequest(ctx, req);

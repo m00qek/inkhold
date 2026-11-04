@@ -71,7 +71,7 @@ pub fn version(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
 pub fn randomCode(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     var parsed = json.readBody(RandomCodeReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
@@ -84,7 +84,7 @@ pub fn randomCode(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// cookie; device logins get the token in the body.
 pub fn loginNew(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     var parsed = json.readBody(LoginReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
     const in = parsed.value;
@@ -121,7 +121,7 @@ pub fn loginNew(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// service verifies any password supplied, whatever the audience.
 pub fn changePassword(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const caller = ctx.caller.?; // guaranteed by the router (controlplane/pending scope)
     var parsed = json.readBody(ChangePasswordReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
@@ -143,7 +143,7 @@ pub fn changePassword(ctx: *Context, req: *Request, params: Params) anyerror!voi
 
 pub fn logout(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     // The cookie is cleared regardless; a row that outlives it expires on its own.
     if (transport.presentedToken(req)) |tok| svc.logout(tok) catch |e| std.log.warn("logout: session not revoked: {t}", .{e});
     var cbuf: [128]u8 = undefined;
@@ -153,7 +153,7 @@ pub fn logout(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
 pub fn me(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const svc = ctx.service.?;
+    const svc = ctx.service;
     const caller = ctx.caller.?;
     const info = (svc.userInfo(ctx.gpa, caller.user_id) catch return serverError(ctx, req)) orelse
         return fail(ctx, req, .unauthorized, "NO_USER", "session user no longer exists");
