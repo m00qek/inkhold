@@ -7,6 +7,7 @@ import { type SpdViewerSeam } from "../../src/pages/spdViewer";
 import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
 import type { NoteMeta } from "../../src/core/types";
 import { synthesizeSummary } from "../../src/pages/library";
+import { createSpdViewer } from "../../src/pages/spdViewer";
 
 // --- a fake decoder that speaks the real C-ABI ------------------------------
 
@@ -170,3 +171,34 @@ export async function until(pred: () => boolean, tries = 50): Promise<void> {
   }
   throw new Error("condition not met in time");
 }
+
+export function mount() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({ ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(8) })),
+  );
+  const bitmaps: Array<{ close: ReturnType<typeof vi.fn> }> = [];
+  const decodeTile = vi.fn(async () => {
+    const b = fakeBitmap();
+    bitmaps.push(b);
+    return b as unknown as CanvasImageSource;
+  });
+  const { exports } = makeFakeDecoder(SAMPLE);
+  const v = createSpdViewer(deps(), { loader: async () => exports, decodeTile });
+  document.body.append(v.el);
+  return { v, decodeTile, bitmaps };
+}
+
+/** The opacity fill bar, its fill/readout and the eye of a row, by list index. */
+export function barOf(v: { el: HTMLElement }, rowIdx: number) {
+  const row = Array.from(v.el.querySelectorAll(".spd-layer"))[rowIdx]!;
+  return {
+    row,
+    bar: row.querySelector(".spd-layer__bar")! as HTMLElement,
+    fill: row.querySelector(".spd-layer__bar-fill")! as HTMLElement,
+    pct: row.querySelector(".spd-layer__pct")! as HTMLElement,
+    barwrap: row.querySelector(".spd-layer__barwrap")! as HTMLElement,
+    eye: row.querySelector(".spd-layer__eye")! as HTMLButtonElement,
+  };
+}
+export const key = (k: string) => new KeyboardEvent("keydown", { key: k, bubbles: true });

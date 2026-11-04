@@ -6,45 +6,6 @@ import { signedIn, freezeMotion } from "./helpers/app";
 import { PANEL_PDF_BYTES, servePdf, inkFraction } from "./pdfViewer.shared";
 
 test.describe("PDF viewer (real MuPDF wasm)", () => {
-  /** Every row of a thumbnail canvas as a fraction of dark pixels, 0..1. */
-  async function thumbRowInk(canvas: Locator): Promise<number[]> {
-    return canvas.evaluate((c) => {
-      const cv = c as HTMLCanvasElement;
-      if (!cv.width || !cv.height) return [];
-      const d = cv.getContext("2d")!.getImageData(0, 0, cv.width, cv.height).data;
-      const rows: number[] = [];
-      for (let y = 0; y < cv.height; y++) {
-        let dark = 0;
-        for (let x = 0; x < cv.width; x++) {
-          const i = (y * cv.width + x) * 4;
-          if (d[i + 3]! > 10 && d[i]! < 128) dark++;
-        }
-        rows.push(dark / cv.width);
-      }
-      return rows;
-    });
-  }
-
-  /** The mean darkness over an inclusive band of thumbnail rows. */
-  const band = (rows: number[], from: number, to: number): number =>
-    rows.length === 0 ? -1 : rows.slice(from, to + 1).reduce((a, b) => a + b, 0) / (to - from + 1);
-
-  /** Open the marked PDF against the panel-aspect fixture, with Pages open. */
-  async function openStrip(page: Page): Promise<Locator> {
-    await signedIn(page);
-    await servePdf(page, PANEL_PDF_BYTES);
-    await page.goto("/#/note/178");
-    await freezeMotion(page);
-    const region = page.getByRole("region", { name: "PDF viewer" });
-    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
-    const pages = region.getByRole("button", { name: "Pages", exact: true });
-    if ((await pages.getAttribute("aria-pressed")) !== "true") await pages.click();
-    await expect(region.locator(".filmstrip__thumb:not(.is-loading)")).toHaveCount(2, {
-      timeout: 20_000,
-    });
-    return region;
-  }
-
   test("opens a .pdf in its own viewer and paints real pixels", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);

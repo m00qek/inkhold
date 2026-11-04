@@ -10,7 +10,7 @@ import { fakeFileHash } from "../../src/api/fake";
 // Fixture `src/api/binFake.ts`: a folder trashed with two notes, plus an older note four
 // days from expiry. Trash never confirms and purge always does; `renderGallery()`
 // overwriting the gallery is what closes the bin and leaves bin mode.
-import { binRow, openBin, openRowMenu, openFileActions, chooseMenuItem, PDF_BYTES, serveRawBytes } from "./bin.shared";
+import { binRow, openBin, openRowMenu, openFileActions, chooseMenuItem, PDF_BYTES, serveRawBytes, trashFromFiles } from "./bin.shared";
 
 /** `download_test.note` — the older trashed seed, by id (`src/api/binFake.ts`). */
 const BIN_OLD_NOTE_ID = "304";
@@ -35,25 +35,6 @@ async function trashAndReopenFromBin(page: Page, viewerRegion: string, rowName: 
 }
 
 test.describe("recycle bin", () => {
-  /** Trash one of the Files-folder fixtures from its list row — no viewer. The
-   *  row's delete is the "…" menu's Move to bin item. */
-  async function trashFromFiles(page: Page, name: string): Promise<void> {
-    await page
-      .getByRole("navigation", { name: "Folders" })
-      .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Files$/ }) })
-      .click();
-    await page.getByRole("button", { name: "List view" }).click();
-    const row = page.locator(".card", { hasText: name });
-    await chooseMenuItem(page, row.getByRole("button", { name: `Actions for ${name}` }), "Move to bin");
-    await expect(page.locator(".bin-toast")).toContainText(`Moved ${name}`);
-  }
-
-  // 120×160 PNG: the image-doc strategy decodes via `createImageBitmap`, so it must be real.
-  const IMG_PNG_BASE64 =
-    "iVBORw0KGgoAAAANSUhEUgAAAHgAAACgCAAAAADiYvdMAAAAZElEQVR42u3aAQ0AMAgEsfdvmqkAktEzUAOXWipgMBgMBoPBR+E0" +
-    "BwaDwWAwGAwGg8FgMBgMBoPBYDAYDAaDwWAwGAyegS03YDAYDAaDwWAwGAwGg8FgMBgMBoPBYDAYDAZ/Cz+nJdLCphXs6QAAAABJ" +
-    "RU5ErkJggg==";
-
   test("a trashed .note preview draws recognized-text ovals and find-in-note works", async ({ page }) => {
     await signedIn(page);
     // Served under the trashed blob's own md5 (`binFake.ts`'s `BlobHash`), not via `fallback`.

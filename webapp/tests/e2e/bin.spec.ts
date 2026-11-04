@@ -18,25 +18,6 @@ async function rowMenuItem(
 }
 
 test.describe("recycle bin", () => {
-  /** Trash one of the Files-folder fixtures from its list row — no viewer. The
-   *  row's delete is the "…" menu's Move to bin item. */
-  async function trashFromFiles(page: Page, name: string): Promise<void> {
-    await page
-      .getByRole("navigation", { name: "Folders" })
-      .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Files$/ }) })
-      .click();
-    await page.getByRole("button", { name: "List view" }).click();
-    const row = page.locator(".card", { hasText: name });
-    await chooseMenuItem(page, row.getByRole("button", { name: `Actions for ${name}` }), "Move to bin");
-    await expect(page.locator(".bin-toast")).toContainText(`Moved ${name}`);
-  }
-
-  // 120×160 PNG: the image-doc strategy decodes via `createImageBitmap`, so it must be real.
-  const IMG_PNG_BASE64 =
-    "iVBORw0KGgoAAAANSUhEUgAAAHgAAACgCAAAAADiYvdMAAAAZElEQVR42u3aAQ0AMAgEsfdvmqkAktEzUAOXWipgMBgMBoPBR+E0" +
-    "BwaDwWAwGAwGg8FgMBgMBoPBYDAYDAaDwWAwGAyegS03YDAYDAaDwWAwGAwGg8FgMBgMBoPBYDAYDAZ/Cz+nJdLCphXs6QAAAABJ" +
-    "RU5ErkJggg==";
-
   test("a hard reload straight onto #/bin shows the trashed rows — and keeps them when the tree lands", async ({
     page,
   }) => {

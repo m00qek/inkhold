@@ -8,28 +8,9 @@ import { fakeFileHash } from "../../src/api/fake";
 // Fixture `src/api/binFake.ts`: a folder trashed with two notes, plus an older note four
 // days from expiry. Trash never confirms and purge always does; `renderGallery()`
 // overwriting the gallery is what closes the bin and leaves bin mode.
-import { openBin, chooseMenuItem, PDF_BYTES, serveRawBytes, reader } from "./bin.shared";
+import { openBin, chooseMenuItem, PDF_BYTES, serveRawBytes, reader, trashFromFiles, IMG_PNG_BASE64 } from "./bin.shared";
 
 test.describe("recycle bin", () => {
-  /** Trash one of the Files-folder fixtures from its list row — no viewer. The
-   *  row's delete is the "…" menu's Move to bin item. */
-  async function trashFromFiles(page: Page, name: string): Promise<void> {
-    await page
-      .getByRole("navigation", { name: "Folders" })
-      .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Files$/ }) })
-      .click();
-    await page.getByRole("button", { name: "List view" }).click();
-    const row = page.locator(".card", { hasText: name });
-    await chooseMenuItem(page, row.getByRole("button", { name: `Actions for ${name}` }), "Move to bin");
-    await expect(page.locator(".bin-toast")).toContainText(`Moved ${name}`);
-  }
-
-  // 120×160 PNG: the image-doc strategy decodes via `createImageBitmap`, so it must be real.
-  const IMG_PNG_BASE64 =
-    "iVBORw0KGgoAAAANSUhEUgAAAHgAAACgCAAAAADiYvdMAAAAZElEQVR42u3aAQ0AMAgEsfdvmqkAktEzUAOXWipgMBgMBoPBR+E0" +
-    "BwaDwWAwGAwGg8FgMBgMBoPBYDAYDAaDwWAwGAyegS03YDAYDAaDwWAwGAwGg8FgMBgMBoPBYDAYDAZ/Cz+nJdLCphXs6QAAAABJ" +
-    "RU5ErkJggg==";
-
   test("a trashed .pdf renders its page 0 off the BIN route, and learns the page's shape", async ({ page }) => {
     // `two-page.pdf`'s page 0 is landscape, so the final lead shape proves the page was read.
     await signedIn(page);
