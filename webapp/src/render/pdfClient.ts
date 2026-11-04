@@ -7,6 +7,7 @@ import type { PdfLink } from "../core/types";
 import type { PdfWord } from "./pdfWire";
 import type { PdfOutlineEntry } from "./pdfWire";
 import type { PdfInkOverlay, PdfOpenMode, PdfRequest, PdfResponse } from "./pdfWorkerTypes";
+import { exposeForTests } from "../ui/testSeams";
 
 /** Re-exported so pages never import the worker protocol directly. */
 export type { PdfInkOverlay } from "./pdfWorkerTypes";
@@ -192,8 +193,7 @@ export function createPdfSession(makeWorker: PdfWorkerFactory = defaultWorker): 
     async stats() {
       const res = expect(await send({ kind: "stats" }), "stats");
       published = { mode: res.mode, cache: res.stats };
-      (globalThis as unknown as { __inkholdPdfStats?: PdfSessionStats }).__inkholdPdfStats =
-        published;
+      exposeForTests("__inkholdPdfStats", published);
       return published;
     },
     async close() {

@@ -9,6 +9,7 @@ import type { RenderCache, RenderKey } from "../../cache/types";
 import { createPageIndex, type PageIndex, type PageIndexRow } from "../pageIndex";
 import { placePanelOverPage } from "../../render/markGeometry";
 import type { PdfSession } from "../../render/pdfClient";
+import { exposeForTests } from "../../ui/testSeams";
 
 /** Thumbnail long edge, CSS px; small because a PDF thumbnail is expensive. */
 const THUMB_PX = 120;
@@ -90,9 +91,9 @@ export function createPdfThumbStrip(opts: PdfThumbStripOptions): PdfThumbStrip {
    */
   const thumbCounts = { hits: 0, renders: 0, inked: 0, probe: 0 };
   function publishThumbCounts(): void {
-    (globalThis as unknown as { __inkholdPdfThumbs?: typeof thumbCounts }).__inkholdPdfThumbs = {
+    exposeForTests("__inkholdPdfThumbs", {
       ...thumbCounts,
-    };
+    });
   }
 
   const thumbRows = new Map<number, PageIndexRow>();

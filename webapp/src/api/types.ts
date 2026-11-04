@@ -10,7 +10,11 @@
 //   getPageLinks → GET /note/{id}/page/{n}/links?v={linksHash}
 
 import type { PdfLink } from "../core/types";
-import type { Hash, Id, Listing, NoteMeta, PageRef, PageText } from "../core/types";
+import type { Entry, FileHistory, Hash, Id, Listing, NoteMeta, PageRef, PageText, RestoredVersion } from "../core/types";
+import type { Bin, Restored, Trashed } from "../core/binTypes";
+import type { AccountSecurity, MyDevice, StorageBreakdown, VersionPolicy, VersionPolicyChange } from "./accountTypes";
+import type { AdminDevice, AdminHealth, AdminQuota, AdminRetention, AdminUser } from "./adminTypes";
+import type { UploadConflictMode } from "./client";
 
 /** One page's links. An object, not a bare array, so the wire can gain fields. */
 export interface PageLinks {
@@ -64,7 +68,7 @@ export interface Api {
    * Every trashed entry, newest deletion first, plus the retention window and
    * byte total. Flat by contract; nesting is derived client-side.
    */
-  listBin(): Promise<import("../core/binTypes").Bin>;
+  listBin(): Promise<Bin>;
 
   /**
    * {@link getNoteMeta} for a trashed note. A separate route because the live
@@ -80,10 +84,10 @@ export interface Api {
    * Move a live entry to the bin; a folder takes its subtree, so the response
    * states the fanout. Reversible: offer undo, not a confirm.
    */
-  trashEntry(id: Id): Promise<import("../core/binTypes").Trashed>;
+  trashEntry(id: Id): Promise<Trashed>;
 
   /** Bring a trashed entry back; the result reports what it actually did. */
-  restoreEntry(id: Id): Promise<import("../core/binTypes").Restored>;
+  restoreEntry(id: Id): Promise<Restored>;
 
   /**
    * Permanently destroy one trashed entry and its subtree. A live id is a 404,
@@ -99,7 +103,7 @@ export interface Api {
   // any may answer 428; `pages/admin/admin.ts` handles the gate and retry.
 
   /** Every household account. Admin-only even as a read. */
-  adminListUsers(): Promise<import("./adminTypes").AdminUser[]>;
+  adminListUsers(): Promise<AdminUser[]>;
 
   /**
    * Create an account and return the server-generated temporary password. It
@@ -129,7 +133,7 @@ export interface Api {
   adminLock(): Promise<void>;
 
   /** One account's tablets, revoked included. 404 `USER_NOT_FOUND`. */
-  adminListDevices(userId: number): Promise<import("./adminTypes").AdminDevice[]>;
+  adminListDevices(userId: number): Promise<AdminDevice[]>;
 
   /**
    * Soft-revoke one tablet (re-pairable). 404 `DEVICE_NOT_FOUND` also covers a
@@ -138,25 +142,25 @@ export interface Api {
   adminUnlinkDevice(userId: number, equipmentNo: string): Promise<void>;
 
   /** One person's used/allotted bytes. */
-  adminGetQuota(userId: number): Promise<import("./adminTypes").AdminQuota>;
+  adminGetQuota(userId: number): Promise<AdminQuota>;
 
   /**
    * Set one person's allotment in bytes. Below current usage is legal and
    * deletes nothing; only negative is refused (400 `INVALID_QUOTA`).
    */
-  adminSetQuota(userId: number, totalBytes: number): Promise<import("./adminTypes").AdminQuota>;
+  adminSetQuota(userId: number, totalBytes: number): Promise<AdminQuota>;
 
   /** The bin retention window, with bounds for client-side validation. */
-  adminGetRetention(): Promise<import("./adminTypes").AdminRetention>;
+  adminGetRetention(): Promise<AdminRetention>;
 
   /**
    * Change the retention window; never purges retroactively. 400
    * `INVALID_RETENTION` outside the bounds.
    */
-  adminSetRetention(days: number): Promise<import("./adminTypes").AdminRetention>;
+  adminSetRetention(days: number): Promise<AdminRetention>;
 
   /** Server-wide health. */
-  adminHealth(): Promise<import("./adminTypes").AdminHealth>;
+  adminHealth(): Promise<AdminHealth>;
 
   // --- HISTORY ---
   // Note-scoped by `:id` (the `/note/:id` ownership gate); per-version routes
@@ -167,7 +171,7 @@ export interface Api {
    * A file's versions, newest-first: the current blob then every retained one.
    * `createdAt` is normalized to epoch ms.
    */
-  noteHistory(id: Id): Promise<import("../core/types").FileHistory>;
+  noteHistory(id: Id): Promise<FileHistory>;
 
   /**
    * A retained version's own page list and geometry (from its retained
@@ -187,7 +191,7 @@ export interface Api {
    * retains the displaced current, so restore is undoable. May fail with
    * `QUOTA_EXCEEDED` (507), changing nothing.
    */
-  restoreVersion(id: Id, md5: Hash): Promise<import("../core/types").RestoredVersion>;
+  restoreVersion(id: Id, md5: Hash): Promise<RestoredVersion>;
 
   /**
    * A retained version's raw blob bytes, for the client-rendered kinds (`.spd`,
@@ -209,7 +213,7 @@ export interface Api {
    * {@link noteHistory} for a trashed file; history follows the file into the
    * bin. View-only: restore the file first.
    */
-  binNoteHistory(id: Id): Promise<import("../core/types").FileHistory>;
+  binNoteHistory(id: Id): Promise<FileHistory>;
 
   /** {@link historyPageBytes} for a trashed file. */
   binHistoryPageBytes(id: Id, md5: Hash, index: number): Promise<ArrayBuffer>;
@@ -229,7 +233,7 @@ export interface Api {
    * A sibling with that exact name rejects with `NameTakenError` (409) rather
    * than auto-suffixing as device sync does, so the dialog can say it clashed.
    */
-  rename(id: Id, name: string): Promise<import("../core/types").Entry>;
+  rename(id: Id, name: string): Promise<Entry>;
 
   // --- UPLOAD ---
   // web → cloud → device: a file placed in the tree is pulled by the device on
@@ -248,8 +252,8 @@ export interface Api {
     file: File,
     onProgress?: (fraction: number) => void,
     signal?: AbortSignal,
-    onConflict?: import("./client").UploadConflictMode,
-  ): Promise<import("../core/types").Entry>;
+    onConflict?: UploadConflictMode,
+  ): Promise<Entry>;
 
   // --- ACCOUNT (self-service) ---
   // None of these take a target: the session is who this is about.
@@ -265,7 +269,7 @@ export interface Api {
    * The caller's own tablets. The route also returns revoked bindings; the
    * seam keeps only active ones.
    */
-  myDevices(): Promise<import("./accountTypes").MyDevice[]>;
+  myDevices(): Promise<MyDevice[]>;
 
   /**
    * Soft-revoke one of your own tablets. A serial not yours is a 404, same as
@@ -282,23 +286,23 @@ export interface Api {
    * Your storage split by kind. The five figures partition `usedBytes`
    * (asserted by the backend's partition audit); `byKind` null means unknown.
    */
-  storageBreakdown(): Promise<import("./accountTypes").StorageBreakdown>;
+  storageBreakdown(): Promise<StorageBreakdown>;
 
   /**
    * Versions kept per file, the admin ceiling, and per-file retained counts
    * (needed to state what lowering would discard).
    */
-  versionPolicy(): Promise<import("./accountTypes").VersionPolicy>;
+  versionPolicy(): Promise<VersionPolicy>;
 
   /**
    * Set versions kept per file, reporting what was discarded. Eviction is
    * immediate and skips the bin, so the UI states the count first. The server
    * clamps to `[0, maxKeep]`; 0 turns versioning off.
    */
-  setVersionPolicy(keep: number): Promise<import("./accountTypes").VersionPolicyChange>;
+  setVersionPolicy(keep: number): Promise<VersionPolicyChange>;
 
   /** Password age, other live sessions, and this browser's sign-in time; shares a request with {@link Api.myDevices}. */
-  accountSecurity(): Promise<import("./accountTypes").AccountSecurity>;
+  accountSecurity(): Promise<AccountSecurity>;
 
   /**
    * Change your own password, current password required. The handler requires
