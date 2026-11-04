@@ -3,6 +3,7 @@
 //! atomically rename into `<ab>/<md5>`. Existing blobs are never overwritten.
 
 const std = @import("std");
+const atomic = @import("atomic.zig");
 const Md5 = std.crypto.hash.Md5;
 const Io = std.Io;
 const Dir = std.Io.Dir;
@@ -38,7 +39,7 @@ pub const BlobStore = struct {
 
     /// Opens the store at `root`, creating its `tmp/` staging directory.
     pub fn init(io: Io, root: Dir) !BlobStore {
-        try ensureDir(io, root, "tmp");
+        try atomic.ensureDir(io, root, "tmp");
         return .{ .io = io, .root = root };
     }
 
@@ -63,7 +64,7 @@ pub const BlobStore = struct {
     /// Push-oriented sibling of `put`. `write_buf` must outlive the `Ingest`.
     pub fn beginIngest(self: BlobStore, write_buf: []u8) !Ingest {
         var tmp_buf: [20]u8 = undefined; // "tmp/" + 16 hex
-        const tmp_rel = self.tempName(&tmp_buf);
+        const tmp_rel = atomic.tempName(self.io, &tmp_buf);
         const file = try self.root.createFile(self.io, tmp_rel, .{});
         return .{
             .store = self,
@@ -197,21 +198,12 @@ pub const BlobStore = struct {
 
     /// Removes temp files abandoned by a crash.
     pub fn sweepTmp(self: BlobStore) void {
-        self.root.deleteTree(self.io, "tmp") catch {};
-        ensureDir(self.io, self.root, "tmp") catch {};
+        atomic.sweepTmp(self.io, self.root);
     }
 
     fn hasRel(self: BlobStore, rel: []const u8) bool {
         self.root.access(self.io, rel, .{}) catch return false;
         return true;
-    }
-
-    fn tempName(self: BlobStore, buf: *[20]u8) []const u8 {
-        var raw: [8]u8 = undefined;
-        self.io.random(&raw);
-        @memcpy(buf[0..4], "tmp/");
-        buf[4..20].* = std.fmt.bytesToHex(raw, .lower);
-        return buf[0..20];
     }
 };
 
@@ -254,7 +246,7 @@ pub const Ingest = struct {
             return .{ .md5 = md5, .size = self.size, .deduped = true };
         }
 
-        try ensureDir(self.store.io, self.store.root, md5[0..2]);
+        try atomic.ensureDir(self.store.io, self.store.root, md5[0..2]);
         try Dir.rename(self.store.root, tmp_rel, self.store.root, final_rel, self.store.io);
         return .{ .md5 = md5, .size = self.size, .deduped = false };
     }
@@ -348,14 +340,6 @@ test "stagedPartSize reports what a part holds, and 0 for one that is not there"
     try std.testing.expectEqual(@as(u64, 3), store.stagedPartSize("abcdef0123456789", 1));
 }
 
-fn ensureDir(io: Io, root: Dir, sub: []const u8) !void {
-    var d = root.createDirPathOpen(io, sub, .{}) catch |err| switch (err) {
-        error.PathAlreadyExists => return,
-        else => return err,
-    };
-    d.close(io);
-}
-
 /// "<ab>/<md5>", or null unless `md5` is 32 chars. `files.md5` is nullable and
 /// may be short ("" for folders); a missing blob must be a miss, not a panic.
 fn finalRel(buf: *[35]u8, md5: []const u8) ?[]const u8 {
@@ -378,18 +362,6 @@ pub fn md5HexOf(data: []const u8) [md5_hex_len]u8 {
 
 const md5Hex = md5HexOf;
 
-fn readAll(io: Io, file: File, buf: []u8) ![]u8 {
-    var rbuf: [chunk_len]u8 = undefined;
-    var fr = file.reader(io, &rbuf);
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n = try fr.interface.readSliceShort(buf[total..]);
-        if (n == 0) break;
-        total += n;
-    }
-    return buf[0..total];
-}
-
 test "put stores content-addressed bytes, dedups, and reads back exactly" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -408,7 +380,7 @@ test "put stores content-addressed bytes, dedups, and reads back exactly" {
     var f = try store.open(&res.md5);
     defer f.close(io);
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings(data, try readAll(io, f, &buf));
+    try std.testing.expectEqualStrings(data, try atomic.readAll(io, f, &buf));
 
     var r2 = Io.Reader.fixed(data);
     const res2 = try store.put(&r2, null);

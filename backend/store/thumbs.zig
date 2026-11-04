@@ -3,6 +3,7 @@
 //! crash cannot leave a zero-length file that `has()` would trust forever.
 
 const std = @import("std");
+const atomic = @import("atomic.zig");
 const blobstore = @import("blobs.zig");
 
 const Io = std.Io;
@@ -17,7 +18,7 @@ pub const ThumbStore = struct {
     root: Dir,
 
     pub fn init(io: Io, root: Dir) !ThumbStore {
-        try ensureDir(io, root, "tmp");
+        try atomic.ensureDir(io, root, "tmp");
         return .{ .io = io, .root = root };
     }
 
@@ -28,7 +29,7 @@ pub const ThumbStore = struct {
         const final_rel = finalRel(&final_buf, md5) orelse return error.InvalidMd5;
 
         var tmp_buf: [20]u8 = undefined; // "tmp/" + 16 hex
-        const tmp_rel = self.tempName(&tmp_buf);
+        const tmp_rel = atomic.tempName(self.io, &tmp_buf);
         const file = try self.root.createFile(self.io, tmp_rel, .{});
         var published = false;
         defer {
@@ -69,27 +70,11 @@ pub const ThumbStore = struct {
     }
 
     /// Removes staging files abandoned by a crash.
+    /// Removes temp files abandoned by a crash.
     pub fn sweepTmp(self: ThumbStore) void {
-        self.root.deleteTree(self.io, "tmp") catch {};
-        ensureDir(self.io, self.root, "tmp") catch {};
-    }
-
-    fn tempName(self: ThumbStore, buf: *[20]u8) []const u8 {
-        var raw: [8]u8 = undefined;
-        self.io.random(&raw);
-        @memcpy(buf[0..4], "tmp/");
-        buf[4..20].* = std.fmt.bytesToHex(raw, .lower);
-        return buf[0..20];
+        atomic.sweepTmp(self.io, self.root);
     }
 };
-
-fn ensureDir(io: Io, root: Dir, sub: []const u8) !void {
-    var d = root.createDirPathOpen(io, sub, .{}) catch |err| switch (err) {
-        error.PathAlreadyExists => return,
-        else => return err,
-    };
-    d.close(io);
-}
 
 /// The relative path (the md5 itself), or null unless `md5` is 32 chars; the
 /// one place a key becomes a path.
@@ -102,18 +87,6 @@ fn finalRel(buf: *[md5_hex_len]u8, md5: []const u8) ?[]const u8 {
 // ---- tests ----
 
 const testing = std.testing;
-
-fn readAll(io: Io, file: File, buf: []u8) ![]u8 {
-    var rbuf: [4096]u8 = undefined;
-    var fr = file.reader(io, &rbuf);
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n = try fr.interface.readSliceShort(buf[total..]);
-        if (n == 0) break;
-        total += n;
-    }
-    return buf[0..total];
-}
 
 test "put/open/has/remove round-trip, and overwrite is idempotent" {
     const io = testing.io;
@@ -130,7 +103,7 @@ test "put/open/has/remove round-trip, and overwrite is idempotent" {
         var f = try store.open(md5);
         defer f.close(io);
         var buf: [64]u8 = undefined;
-        try testing.expectEqualStrings("jpeg-bytes-v1", try readAll(io, f, &buf));
+        try testing.expectEqualStrings("jpeg-bytes-v1", try atomic.readAll(io, f, &buf));
     }
 
     try store.put(md5, "jpeg-bytes-v2");
@@ -138,7 +111,7 @@ test "put/open/has/remove round-trip, and overwrite is idempotent" {
         var f = try store.open(md5);
         defer f.close(io);
         var buf: [64]u8 = undefined;
-        try testing.expectEqualStrings("jpeg-bytes-v2", try readAll(io, f, &buf));
+        try testing.expectEqualStrings("jpeg-bytes-v2", try atomic.readAll(io, f, &buf));
     }
 
     store.remove(md5);

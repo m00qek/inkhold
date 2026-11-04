@@ -5,6 +5,7 @@
 //! owns the buffer its writer points into.
 
 const std = @import("std");
+const atomic = @import("atomic.zig");
 const blobstore = @import("blobs.zig");
 // This import is why the file only tests under `zig build test`.
 const gzip_stitch = @import("../compress/gzip_stitch.zig");
@@ -32,7 +33,7 @@ pub const DerivedStore = struct {
 
     /// Opens the store at `root`, creating its `tmp/` staging directory.
     pub fn init(io: Io, root: Dir) !DerivedStore {
-        try ensureDir(io, root, "tmp");
+        try atomic.ensureDir(io, root, "tmp");
         return .{ .io = io, .root = root };
     }
 
@@ -85,7 +86,7 @@ pub const DerivedStore = struct {
         s.version = version;
         s.done = false;
         @memcpy(&s.md5, md5[0..md5_hex_len]);
-        self.tempName(&s.tmp_name);
+        _ = atomic.tempName(self.io, &s.tmp_name);
 
         s.file = try self.root.createFile(self.io, s.tmpRel(), .{});
         errdefer {
@@ -156,26 +157,11 @@ pub const DerivedStore = struct {
     }
 
     /// Removes staging files abandoned by a crash.
+    /// Removes temp files abandoned by a crash.
     pub fn sweepTmp(self: DerivedStore) void {
-        self.root.deleteTree(self.io, "tmp") catch {};
-        ensureDir(self.io, self.root, "tmp") catch {};
-    }
-
-    fn tempName(self: DerivedStore, buf: *[20]u8) void {
-        var raw: [8]u8 = undefined;
-        self.io.random(&raw);
-        @memcpy(buf[0..4], "tmp/");
-        buf[4..20].* = std.fmt.bytesToHex(raw, .lower);
+        atomic.sweepTmp(self.io, self.root);
     }
 };
-
-fn ensureDir(io: Io, root: Dir, sub: []const u8) !void {
-    var d = root.createDirPathOpen(io, sub, .{}) catch |err| switch (err) {
-        error.PathAlreadyExists => return,
-        else => return err,
-    };
-    d.close(io);
-}
 
 /// `<md5>.<version>`, or null for a short key or negative version.
 fn finalRel(buf: *[max_name_len]u8, md5: []const u8, version: i64) ?[]const u8 {
@@ -194,23 +180,11 @@ const testing = std.testing;
 const md5_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const md5_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-fn readAll(io: Io, file: File, buf: []u8) ![]u8 {
-    var rbuf: [4096]u8 = undefined;
-    var fr = file.reader(io, &rbuf);
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n = try fr.interface.readSliceShort(buf[total..]);
-        if (n == 0) break;
-        total += n;
-    }
-    return buf[0..total];
-}
-
 fn expectContents(store: DerivedStore, md5: []const u8, v: i64, want: []const u8) !void {
     var f = try store.open(md5, v);
     defer f.close(store.io);
     var buf: [8192]u8 = undefined;
-    try testing.expectEqualStrings(want, try readAll(store.io, f, &buf));
+    try testing.expectEqualStrings(want, try atomic.readAll(store.io, f, &buf));
 }
 
 test "streaming put/open/has round-trip" {
