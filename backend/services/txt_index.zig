@@ -319,7 +319,7 @@ pub fn needsDerive(db: sqlite.Db, blob_md5: []const u8) !bool {
 const testing = std.testing;
 const schema = @import("../db/schema.zig");
 const thumbstore = @import("../store/thumbs.zig");
-const filesvc = @import("files.zig");
+const filesmod = @import("files.zig");
 const deferredmod = @import("deferred.zig");
 const derivedstore = @import("../store/derived.zig");
 const nb = @import("note_builder");

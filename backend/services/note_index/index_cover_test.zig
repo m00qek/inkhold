@@ -9,7 +9,7 @@ const sn = @import("supernote");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const schema = @import("../../db/schema.zig");
-const filesvc = @import("../files.zig");
+const filesmod = @import("../files.zig");
 const nb = @import("note_builder");
 const noteindex = @import("../note_index.zig");
 const index_version = noteindex.index_version;
@@ -438,7 +438,7 @@ test "eager indexing at ingest does not disturb the file tree it rides along wit
     try testing.expectEqual(@as(i64, 1), try f.countRows("SELECT COUNT(*) FROM note_page_index;"));
 
     const entries = try f.files.list(1, null);
-    defer filesvc.Files.freeEntries(testing.allocator, entries);
+    defer filesmod.Files.freeEntries(testing.allocator, entries);
     try testing.expectEqual(@as(usize, 2), entries.len);
     try testing.expectEqual(@as(i64, 2), try f.countRows("SELECT COUNT(*) FROM files;"));
 }

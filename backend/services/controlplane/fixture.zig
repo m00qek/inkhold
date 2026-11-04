@@ -64,7 +64,7 @@ pub fn seedBytes(f: *Fixture, parent: ?u64, name: []const u8, bytes: []const u8)
     return e.id;
 }
 
-/// Plans and streams a page as `controlplanePage` does; null where it would 404.
+/// Plans and streams a page as `page` does; null where it would 404.
 pub const Served = struct { bytes: []const u8, hash: [32]u8, content_length: u64 };
 
 pub fn servePage(

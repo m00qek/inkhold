@@ -16,7 +16,7 @@ const controlplane_meta = @import("controlplane_meta.zig");
 
 /// Note-level facts from `note_index`, or null when no current row exists.
 /// `px_per_mm` is resolved here because `columnText` borrows the row.
-pub const IndexRow = struct {
+const IndexRow = struct {
     indexable: bool,
     page_count: i64,
     /// `.note`: device panel; `.pdf`: page 1's box in points
@@ -93,7 +93,7 @@ pub fn aspectOf(row: IndexRow, first_page: ?PageRefVO) ?AspectVO {
 }
 
 /// Both known and positive, or null.
-pub fn positivePair(w: ?i64, h: ?i64) ?AspectVO {
+fn positivePair(w: ?i64, h: ?i64) ?AspectVO {
     const ww = w orelse return null;
     const hh = h orelse return null;
     return if (ww > 0 and hh > 0) .{ .w = ww, .h = hh } else null;
@@ -143,7 +143,7 @@ pub fn pageRefAt(self: ControlPlaneService, arena: std.mem.Allocator, md5: []con
 }
 
 /// Every page of a note in `page_index` order, one statement, no file I/O.
-pub fn pageRefsFromIndex(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8) ![]const PageRefVO {
+fn pageRefsFromIndex(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8) ![]const PageRefVO {
     var out: std.ArrayList(PageRefVO) = .empty;
     var s = try self.files.db.prepare(
         "SELECT page_index, content_hash, width, height, text_hash, layers, source_page, links_hash, has_ink " ++
@@ -175,7 +175,7 @@ pub fn pageRefsFromIndex(self: ControlPlaneService, arena: std.mem.Allocator, md
 
 /// The one serializer from a packed `layers` blob to panel VOs, shared by
 /// the page list and listing rows. Null for an empty or malformed blob.
-pub fn layerVOsFromBlob(arena: std.mem.Allocator, blob: []const u8) !?[]const LayerVO {
+fn layerVOsFromBlob(arena: std.mem.Allocator, blob: []const u8) !?[]const LayerVO {
     var buf: [noteindex.max_layers]noteindex.LayerRecord = undefined;
     const recs = noteindex.unpackLayerRecords(blob, &buf) catch return null;
     if (recs.len == 0) return null;

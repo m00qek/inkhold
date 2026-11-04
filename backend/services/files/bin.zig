@@ -97,7 +97,7 @@ pub fn trash(self: Files, user_id: u64, id: u64) !void {
 
 /// Inside an open transaction. A pair's roots share `ts`, so their retention
 /// clocks match and the bin groups them.
-pub fn trashSubtree(self: Files, user_id: u64, id: u64, ts: i64) !i64 {
+fn trashSubtree(self: Files, user_id: u64, id: u64, ts: i64) !i64 {
     var s = try self.db.prepare(subtree_trash_sql);
     defer s.finalize();
     s.bindInt(1, @intCast(id));
@@ -306,7 +306,7 @@ pub fn sweepBinBefore(self: Files, cutoff: i64) !usize {
     return total;
 }
 
-pub fn sweepBinForUser(self: Files, user_id: u64, cutoff: i64) !usize {
+fn sweepBinForUser(self: Files, user_id: u64, cutoff: i64) !usize {
     var gc: std.ArrayList([md5_len]u8) = .empty;
     defer gc.deinit(self.gpa);
 
@@ -401,7 +401,7 @@ pub fn purgeUser(self: Files, user_id: u64) !void {
 /// `deleted_path`. Gated on `deleted = 0` in the UPDATE, so trashed rows keep
 /// their `deleted_at` and path while live rows below them are caught. The walk
 /// ignores `deleted` so it can pass through trashed ancestors.
-pub const subtree_trash_sql =
+const subtree_trash_sql =
     \\WITH RECURSIVE
     \\  sub(id) AS (
     \\    SELECT id FROM files WHERE id = ?1 AND user_id = ?2
@@ -421,7 +421,7 @@ pub const subtree_trash_sql =
 
 /// Parents before children; `id` breaks ties so the older of two same-named
 /// siblings keeps the name, identically on every replay.
-pub const subtree_depth_sql =
+const subtree_depth_sql =
     \\WITH RECURSIVE sub(id, depth) AS (
     \\  SELECT id, 0 FROM files WHERE id = ?1 AND user_id = ?2
     \\  UNION ALL
@@ -430,7 +430,7 @@ pub const subtree_depth_sql =
     \\SELECT id FROM sub WHERE depth > 0 ORDER BY depth, id;
 ;
 
-pub const subtree_ids_sql =
+const subtree_ids_sql =
     \\WITH RECURSIVE sub(id) AS (
     \\  SELECT id FROM files WHERE id = ?1 AND user_id = ?2
     \\  UNION
@@ -440,7 +440,7 @@ pub const subtree_ids_sql =
 ;
 
 /// User ?1's bin plus everything reachable below it.
-pub const bin_ids_sql =
+const bin_ids_sql =
     \\WITH RECURSIVE sub(id) AS (
     \\  SELECT id FROM files WHERE user_id = ?1 AND deleted = 1
     \\  UNION
@@ -450,7 +450,7 @@ pub const bin_ids_sql =
 ;
 
 /// The same, trashed before ?2.
-pub const expired_bin_ids_sql =
+const expired_bin_ids_sql =
     \\WITH RECURSIVE sub(id) AS (
     \\  SELECT id FROM files
     \\  WHERE user_id = ?1 AND deleted = 1 AND COALESCE(deleted_at, 0) < ?2
@@ -483,7 +483,7 @@ pub const bin_listing_sql =
 
 /// The live subtree at ?1, counted as `trash` would tombstone it, minus paired
 /// `.mark`s below the anchor (the user never saw them).
-pub const live_subtree_count_sql =
+const live_subtree_count_sql =
     \\WITH RECURSIVE sub(id) AS (
     \\  SELECT id FROM files WHERE id = ?1 AND user_id = ?2 AND deleted = 0
     \\  UNION

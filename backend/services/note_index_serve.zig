@@ -5,22 +5,17 @@ const sqlite = @import("../db/sqlite.zig");
 const blobstore = @import("../store/blobs.zig");
 const sn = @import("supernote");
 const schema = @import("../db/schema.zig");
-const nb = @import("note_builder");
-const fixture = @import("note_index/fixture.zig");
-const Md5 = std.crypto.hash.Md5;
-const Allocator = std.mem.Allocator;
-const testing = std.testing;
-const Blobs = fixture.Blobs;
-const indexInto = fixture.indexInto;
-const note_index = @import("note_index.zig");
+const noteindex = @import("note_index.zig");
 const note_index_parse = @import("note_index_parse.zig");
-const Error = note_index.Error;
-const LayerRef = note_index.LayerRef;
+const Error = noteindex.Error;
+const LayerRef = noteindex.LayerRef;
 const hexEncode = note_index_parse.hexEncode;
-const index_version = note_index.index_version;
-const max_layers = note_index.max_layers;
+const index_version = noteindex.index_version;
+const max_layers = noteindex.max_layers;
 const md5Hex = note_index_parse.md5Hex;
 const unpackLayers = note_index_parse.unpackLayers;
+const Md5 = std.crypto.hash.Md5;
+const Allocator = std.mem.Allocator;
 
 // ---- serving a page from the index ----
 
@@ -245,6 +240,14 @@ test {
     _ = @import("note_index/index_cover_test.zig");
     _ = @import("note_index/template_test.zig");
 }
+
+// ---- tests of private helpers ----
+
+const testing = std.testing;
+const nb = @import("note_builder");
+const fixture = @import("note_index/fixture.zig");
+const Blobs = fixture.Blobs;
+const indexInto = fixture.indexInto;
 
 test "a multi-MB page streams byte-exactly, at the Content-Length the index predicted" {
     const gpa = testing.allocator;

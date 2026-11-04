@@ -37,7 +37,7 @@ pub const StorageBreakdown = struct {
     }
 };
 
-pub const storage_breakdown_sql =
+const storage_breakdown_sql =
     \\WITH live(md5, rank) AS (
     \\  SELECT f.md5,
     \\         MIN(CASE WHEN lower(f.name) LIKE '%.note' THEN 0

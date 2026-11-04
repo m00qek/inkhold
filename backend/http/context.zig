@@ -2,12 +2,12 @@
 
 const std = @import("std");
 const config = @import("../config.zig");
-const service = @import("../services/auth/service.zig");
+const authsvc = @import("../services/auth/service.zig");
 const router = @import("router.zig");
 const ratelimit = @import("ratelimit.zig");
 const download_tokens = @import("download_tokens.zig");
 const event_streams = @import("event_streams.zig");
-const files = @import("../services/files.zig");
+const filesmod = @import("../services/files.zig");
 const lock_stats = @import("lock_stats.zig");
 const reader_pool = @import("../db/reader_pool.zig");
 const pending = @import("../services/pending.zig");
@@ -44,8 +44,8 @@ pub const Context = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     config: config.Config,
-    service: ?*service.Service = null,
-    files: ?*files.Files = null,
+    service: ?*authsvc.Service = null,
+    files: ?*filesmod.Files = null,
     limiter: ?*ratelimit.Limiter = null,
     download_tokens: ?*download_tokens.DownloadTokens = null,
     /// SSE admission control. Null means never hold a connection: the events

@@ -47,7 +47,7 @@ fn nibble(c: u8) EncodeError!u8 {
 // ---- the manifest ----
 
 const sqlite = @import("../../db/sqlite.zig");
-const filesvc = @import("../files.zig");
+const filesmod = @import("../files.zig");
 const markpair = @import("../mark_pairing.zig");
 const pending = @import("../pending.zig");
 const derivedstore = @import("../../store/derived.zig");

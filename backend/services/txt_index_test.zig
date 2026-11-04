@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const schema = @import("../db/schema.zig");
 const thumbstore = @import("../store/thumbs.zig");
-const filesvc = @import("files.zig");
+const filesmod = @import("files.zig");
 const deferredmod = @import("deferred.zig");
 const derivedstore = @import("../store/derived.zig");
 const nb = @import("note_builder");
@@ -127,7 +127,7 @@ fn allTermsIn(text: []const u8, q: []const u8) bool {
 
 const Fixture = struct {
     db: sqlite.Db,
-    files: filesvc.Files,
+    files: filesmod.Files,
     terms: derivedstore.DerivedStore,
     text: derivedstore.DerivedStore,
     tmp: testing.TmpDir,
@@ -157,7 +157,7 @@ const Fixture = struct {
         const terms = try derivedstore.DerivedStore.init(testing.io, terms_dir);
         const text = try derivedstore.DerivedStore.init(testing.io, text_dir);
 
-        var files = filesvc.Files.init(testing.allocator, testing.io, db, store_, thumbs);
+        var files = filesmod.Files.init(testing.allocator, testing.io, db, store_, thumbs);
         // The purge path unlinks a reaped blob's derived files through these.
         files.terms = terms;
         files.text = text;

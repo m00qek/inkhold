@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const sqlite = @import("../../../db/sqlite.zig");
-const filesvc = @import("../../files.zig");
+const filesmod = @import("../../files.zig");
 const derivedstore = @import("../../../store/derived.zig");
 const testing = std.testing;
 const schema = @import("../../../db/schema.zig");
@@ -19,7 +19,7 @@ const manifest = index_export.manifest;
 /// never hand-inserted.
 pub const Fixture = struct {
     db: sqlite.Db,
-    files: filesvc.Files,
+    files: filesmod.Files,
     tmp: testing.TmpDir,
     arena: std.heap.ArenaAllocator,
     /// `drainNow` demands a real lock.
@@ -44,7 +44,7 @@ pub const Fixture = struct {
         const store = try blobstore.BlobStore.init(testing.io, tmp.dir);
         const thumbs_dir = try tmp.dir.createDirPathOpen(testing.io, "thumbs", .{});
         const thumbs = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
-        var files = filesvc.Files.init(testing.allocator, testing.io, db, store, thumbs);
+        var files = filesmod.Files.init(testing.allocator, testing.io, db, store, thumbs);
         // Without the derived stores the cursor falls back to the database.
         const terms_dir = try tmp.dir.createDirPathOpen(testing.io, "terms", .{});
         files.terms = try derivedstore.DerivedStore.init(testing.io, terms_dir);

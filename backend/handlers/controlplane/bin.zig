@@ -16,7 +16,7 @@ const bytes = @import("bytes.zig");
 
 /// GET /api/controlplane/bin -> the caller's trashed entries, newest deletion
 /// first, as a flat list; grouping is the client's.
-pub fn controlplaneBin(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn bin(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -31,7 +31,7 @@ pub fn controlplaneBin(ctx: *Context, req: *Request, params: Params) anyerror!vo
 /// DELETE /api/controlplane/entry/{id} -> move a live entry and its subtree to the
 /// bin. `entries` is the fanout for the undo toast, counted before the trash. No
 /// quota refund here; `purge` frees the bytes.
-pub fn controlplaneTrash(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn trash(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -61,7 +61,7 @@ pub fn controlplaneTrash(ctx: *Context, req: *Request, params: Params) anyerror!
 /// POST /api/controlplane/bin/{id}/restore -> bring a trashed entry back. Reports
 /// what happened: restore also revives the ancestor chain and descendants, and
 /// auto-renames when a live entry took the name.
-pub fn controlplaneRestore(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn restore(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -82,7 +82,7 @@ pub fn controlplaneRestore(ctx: *Context, req: *Request, params: Params) anyerro
 
 /// DELETE /api/controlplane/bin/{id} -> destroy one trashed entry and its subtree.
 /// A live id is a 404 (`Files.purge` refuses anything outside the bin).
-pub fn controlplanePurge(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn purge(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -95,7 +95,7 @@ pub fn controlplanePurge(ctx: *Context, req: *Request, params: Params) anyerror!
 }
 
 /// DELETE /api/controlplane/bin -> destroy everything in the caller's bin.
-pub fn controlplaneEmptyBin(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn emptyBin(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -107,7 +107,7 @@ pub fn controlplaneEmptyBin(ctx: *Context, req: *Request, params: Params) anyerr
 /// GET /api/controlplane/bin/file/metadata/{id} -> the page list of a trashed item.
 /// The bin routes read through `Files.getTrashed`, which sees only trashed rows;
 /// `Files.get` stays live-only.
-pub fn controlplaneBinNote(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn binNote(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -123,7 +123,7 @@ pub fn controlplaneBinNote(ctx: *Context, req: *Request, params: Params) anyerro
 /// GET /api/controlplane/bin/note/{id}/page/{n}/text -> a trashed note's page
 /// transcript (retained md5-keyed after trash). A live id is a 404. `no-cache`,
 /// never `immutable`: nothing in the URL pins the JSON shape.
-pub fn controlplaneBinPageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn binPageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);

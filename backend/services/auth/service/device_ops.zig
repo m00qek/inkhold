@@ -2,9 +2,9 @@
 
 const std = @import("std");
 const internal = @import("internal.zig");
-const service = @import("../service.zig");
-const Service = service.Service;
-const Error = service.Error;
+const authsvc = @import("../service.zig");
+const Service = authsvc.Service;
+const Error = authsvc.Error;
 
 /// Registers the device and binds it (after device login).
 pub fn bindDevice(self: *Service, user_id: u64, equipment_no: []const u8, name: []const u8) Error!void {

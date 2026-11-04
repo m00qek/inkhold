@@ -7,7 +7,7 @@ const testing = std.testing;
 const schema = @import("../db/schema.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
-const filesvc = @import("files.zig");
+const filesmod = @import("files.zig");
 const pending = @import("pending.zig");
 const count_sql = pending.count_sql;
 const owesDerive = pending.owesDerive;
@@ -19,7 +19,7 @@ const owes_derive_d = fixture.owes_derive_d;
 /// Two users: one person's outstanding work must not be another's.
 const Fixture = struct {
     db: sqlite.Db,
-    files: filesvc.Files,
+    files: filesmod.Files,
     tmp: testing.TmpDir,
     lock: std.Io.Mutex = .init,
 
@@ -45,7 +45,7 @@ const Fixture = struct {
         const thumbs = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
         return .{
             .db = db,
-            .files = filesvc.Files.init(testing.allocator, testing.io, db, blobs, thumbs),
+            .files = filesmod.Files.init(testing.allocator, testing.io, db, blobs, thumbs),
             .tmp = tmp,
         };
     }

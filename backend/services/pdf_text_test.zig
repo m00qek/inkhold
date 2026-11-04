@@ -10,7 +10,7 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const schema = @import("../db/schema.zig");
 const thumbstore = @import("../store/thumbs.zig");
-const filesvc = @import("files.zig");
+const filesmod = @import("files.zig");
 const deferredmod = @import("deferred.zig");
 const pdf_text = @import("pdf_text.zig");
 const max_pages = pdf_text.max_pages;
@@ -53,7 +53,7 @@ const scan_pdf = @embedFile("../pdf/testdata/three-page.pdf");
 
 const Fixture = struct {
     db: sqlite.Db,
-    files: filesvc.Files,
+    files: filesmod.Files,
     tmp: testing.TmpDir,
     arena: std.heap.ArenaAllocator,
     lock: std.Io.Mutex = .init,
@@ -79,7 +79,7 @@ const Fixture = struct {
         const thumbs = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
         return .{
             .db = db,
-            .files = filesvc.Files.init(testing.allocator, testing.io, db, store_, thumbs),
+            .files = filesmod.Files.init(testing.allocator, testing.io, db, store_, thumbs),
             .tmp = tmp,
             .arena = std.heap.ArenaAllocator.init(testing.allocator),
         };

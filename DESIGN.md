@@ -438,7 +438,7 @@ silently.
 | 6 | `pages/library.ts` — `viewerFor()` | which viewer opens it |
 | 7 | `api/fake.ts` | a fixture, or no e2e can reach it |
 | 8 | `backend/services/controlplane.zig` — `fileTypeFor()` | the type the server reports (parser-verified, not the extension) |
-| 9 | `backend/handlers/controlplane.zig` — `inline_types` | inline or attachment |
+| 9 | `backend/handlers/controlplane/bytes.zig` — `inline_types` | inline or attachment |
 
 4 and 5 must agree; `thumbnails.test.ts` asserts it for every type. 8 is why a
 `.mark` (a thin `.note`) reports as `"note"`.

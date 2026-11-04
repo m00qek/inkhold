@@ -80,95 +80,95 @@ pub const routes = [_]router.Route{
 
     // --- Control plane / browser ---
     // `.public`: the login page reads it before anyone can sign in.
-    .{ .method = .GET, .path = "/api/controlplane/server-info", .scopes = &.{.public}, .handler = controlplane.controlplaneServerInfo },
-    .{ .method = .POST, .path = "/api/controlplane/equipment/unlink", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneUnlink },
-    .{ .method = .GET, .path = "/api/controlplane/tree", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTree },
-    .{ .method = .GET, .path = "/api/controlplane/usage", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneUsage, .read_only = true },
+    .{ .method = .GET, .path = "/api/controlplane/server-info", .scopes = &.{.public}, .handler = controlplane.serverInfo },
+    .{ .method = .POST, .path = "/api/controlplane/equipment/unlink", .scopes = &.{.controlplane}, .handler = controlplane.unlink },
+    .{ .method = .GET, .path = "/api/controlplane/tree", .scopes = &.{.controlplane}, .handler = controlplane.tree },
+    .{ .method = .GET, .path = "/api/controlplane/usage", .scopes = &.{.controlplane}, .handler = controlplane.usage, .read_only = true },
 
     // --- The account screen: managing yourself ---
     // Nothing here takes a target; the session is the target. Not `require_admin`.
-    .{ .method = .GET, .path = "/api/controlplane/account", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneAccount },
-    .{ .method = .GET, .path = "/api/controlplane/account/storage", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneAccountStorage, .read_only = true },
+    .{ .method = .GET, .path = "/api/controlplane/account", .scopes = &.{.controlplane}, .handler = controlplane.account },
+    .{ .method = .GET, .path = "/api/controlplane/account/storage", .scopes = &.{.controlplane}, .handler = controlplane.accountStorage, .read_only = true },
     // Unlike `/api/controlplane/equipment/unlink`, 404s for a serial not the caller's.
-    .{ .method = .POST, .path = "/api/controlplane/account/devices/unlink", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneUnlinkMyDevice },
+    .{ .method = .POST, .path = "/api/controlplane/account/devices/unlink", .scopes = &.{.controlplane}, .handler = controlplane.unlinkMyDevice },
     // Not `.pending`: a session owing a password change may not revoke others.
-    .{ .method = .POST, .path = "/api/controlplane/account/sign-out-others", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSignOutOthers },
+    .{ .method = .POST, .path = "/api/controlplane/account/sign-out-others", .scopes = &.{.controlplane}, .handler = controlplane.signOutOthers },
     // PUT: idempotent set, so a retry does not evict twice.
-    .{ .method = .PUT, .path = "/api/controlplane/account/versions", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSetVersions },
+    .{ .method = .PUT, .path = "/api/controlplane/account/versions", .scopes = &.{.controlplane}, .handler = controlplane.setVersions },
     // Generic per-item metadata, fetched for every previewable kind.
-    .{ .method = .GET, .path = "/api/controlplane/file/metadata/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneNote },
+    .{ .method = .GET, .path = "/api/controlplane/file/metadata/:id", .scopes = &.{.controlplane}, .handler = controlplane.note },
     // --- The client-side search index ---
     // Search runs in the browser; the server ships the manifest and per-document
     // term records as raw bytes (no API response is compressed). The manifest
     // heals nothing, so it can be `read_only`; it is `no-cache` + ETag.
-    .{ .method = .GET, .path = "/api/controlplane/search-index/manifest", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexManifest, .read_only = true },
+    .{ .method = .GET, .path = "/api/controlplane/search-index/manifest", .scopes = &.{.controlplane}, .handler = controlplane.searchIndexManifest, .read_only = true },
     // Not `read_only`: the reader lease would be held for the whole download, and an
     // empty pool degrades to the writer under `db_lock`. The handler borrows a
     // reader around its manifest query only.
-    .{ .method = .GET, .path = "/api/controlplane/search-index/stream", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneSearchIndexStream, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/api/controlplane/search-index/stream", .scopes = &.{.controlplane}, .handler = controlplane.searchIndexStream, .manual_db_lock = true },
     // Content-addressed, so gated by `Files.reachesBlob` (live, trashed or retained
     // version). `manual_db_lock` for the stream route's reason.
-    .{ .method = .GET, .path = "/api/controlplane/text/:md5", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneDocumentText, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/api/controlplane/text/:md5", .scopes = &.{.controlplane}, .handler = controlplane.documentText, .manual_db_lock = true },
     // --- History of a file ---
     // `:md5` must be a retained version of that file (`Files.historyVersion`),
     // otherwise 404. Restore goes through the supersede path and is undoable.
-    .{ .method = .GET, .path = "/api/controlplane/note/:id/history", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistory },
+    .{ .method = .GET, .path = "/api/controlplane/note/:id/history", .scopes = &.{.controlplane}, .handler = controlplane.history },
     // The version's own page geometry, from its retained `note_index`.
-    .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/meta", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistoryMeta },
-    .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/page/:n", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistoryPage, .manual_db_lock = true },
-    .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistoryPageText },
+    .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/meta", .scopes = &.{.controlplane}, .handler = controlplane.historyMeta },
+    .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/page/:n", .scopes = &.{.controlplane}, .handler = controlplane.historyPage, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.historyPageText },
     // Whole-blob bytes of a version, for viewers that fetch a whole file.
-    .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/raw", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistoryRaw, .manual_db_lock = true },
-    .{ .method = .POST, .path = "/api/controlplane/note/:id/history/:md5/restore", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneHistoryRestore },
+    .{ .method = .GET, .path = "/api/controlplane/note/:id/history/:md5/raw", .scopes = &.{.controlplane}, .handler = controlplane.historyRaw, .manual_db_lock = true },
+    .{ .method = .POST, .path = "/api/controlplane/note/:id/history/:md5/restore", .scopes = &.{.controlplane}, .handler = controlplane.historyRestore },
     // Opening a note fires ~10 of these; the handler locks only its lookup and plan.
-    .{ .method = .GET, .path = "/note/:id/page/:n", .scopes = &.{.controlplane}, .handler = controlplane.controlplanePage, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/note/:id/page/:n", .scopes = &.{.controlplane}, .handler = controlplane.page, .manual_db_lock = true },
     // A page's custom image template, content-addressed and immutable.
-    .{ .method = .GET, .path = "/note/:id/template/:hash", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTemplate, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/note/:id/template/:hash", .scopes = &.{.controlplane}, .handler = controlplane.template, .manual_db_lock = true },
     // Raw bytes for non-`.note` files; only an allowlisted type is served `inline`
     // (`svg` is excluded).
-    .{ .method = .GET, .path = "/file/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneFile, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/file/:id", .scopes = &.{.controlplane}, .handler = controlplane.file, .manual_db_lock = true },
     // Embedded thumbnail, stored at `thumbs/<source_md5>`. `manual_db_lock` also
     // because this triggers the on-demand repair, whose lock order (repair mutex,
     // then db lock) needs the handler lock released. Foreign hash is a 404.
-    .{ .method = .GET, .path = "/thumbnail/:hash", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneThumbnail, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/thumbnail/:hash", .scopes = &.{.controlplane}, .handler = controlplane.thumbnail, .manual_db_lock = true },
     // Not immutable: `?v=` versions the transcript bytes, not the JSON struct around
     // them, which changes across deploys. A struct-serialized body revalidates.
-    .{ .method = .GET, .path = "/note/:id/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.controlplanePageText },
+    .{ .method = .GET, .path = "/note/:id/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.pageText },
     // A page's PDF links; same cache rule as `/text`. Per page, not per document:
     // one capture holds 51,256 records over 1702 pages.
-    .{ .method = .GET, .path = "/note/:id/page/:n/links", .scopes = &.{.controlplane}, .handler = controlplane.controlplanePageLinks },
+    .{ .method = .GET, .path = "/note/:id/page/:n/links", .scopes = &.{.controlplane}, .handler = controlplane.pageLinks },
     // SSE: a held connection. Without `manual_db_lock` it would hold the global DB
     // lock for the connection's lifetime and stall device sync. Over the stream cap
     // it degrades to a one-shot frame instead of refusing.
-    .{ .method = .GET, .path = "/api/controlplane/events", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneEvents, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/api/controlplane/events", .scopes = &.{.controlplane}, .handler = controlplane.events, .manual_db_lock = true },
 
     // --- Recycle bin ---
     // No CSRF token: the session cookie is `HttpOnly; SameSite=Strict`.
-    .{ .method = .GET, .path = "/api/controlplane/bin", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBin },
+    .{ .method = .GET, .path = "/api/controlplane/bin", .scopes = &.{.controlplane}, .handler = controlplane.bin },
     // Previews of trashed items go through `Files.getTrashed`, never a relaxed `Files.get`.
-    .{ .method = .GET, .path = "/api/controlplane/bin/file/metadata/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinNote },
-    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/page/:n", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinPage, .manual_db_lock = true },
-    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinPageText },
+    .{ .method = .GET, .path = "/api/controlplane/bin/file/metadata/:id", .scopes = &.{.controlplane}, .handler = controlplane.binNote },
+    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/page/:n", .scopes = &.{.controlplane}, .handler = controlplane.binPage, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.binPageText },
     // No `/restore` twin for trashed history: restore the file first.
-    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistory },
-    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/page/:n", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistoryPage, .manual_db_lock = true },
-    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistoryPageText },
-    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/raw", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinHistoryRaw, .manual_db_lock = true },
-    .{ .method = .GET, .path = "/api/controlplane/bin/file/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneBinFile, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history", .scopes = &.{.controlplane}, .handler = controlplane.binHistory },
+    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/page/:n", .scopes = &.{.controlplane}, .handler = controlplane.binHistoryPage, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/page/:n/text", .scopes = &.{.controlplane}, .handler = controlplane.binHistoryPageText },
+    .{ .method = .GET, .path = "/api/controlplane/bin/note/:id/history/:md5/raw", .scopes = &.{.controlplane}, .handler = controlplane.binHistoryRaw, .manual_db_lock = true },
+    .{ .method = .GET, .path = "/api/controlplane/bin/file/:id", .scopes = &.{.controlplane}, .handler = controlplane.binFile, .manual_db_lock = true },
     // Restore reports what it actually did (ancestors, descendants, auto-renames).
-    .{ .method = .POST, .path = "/api/controlplane/bin/:id/restore", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneRestore },
+    .{ .method = .POST, .path = "/api/controlplane/bin/:id/restore", .scopes = &.{.controlplane}, .handler = controlplane.restore },
     // Purge is where blob refcounts drop and quota is refunded.
-    .{ .method = .DELETE, .path = "/api/controlplane/bin/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplanePurge },
-    .{ .method = .DELETE, .path = "/api/controlplane/bin", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneEmptyBin },
+    .{ .method = .DELETE, .path = "/api/controlplane/bin/:id", .scopes = &.{.controlplane}, .handler = controlplane.purge },
+    .{ .method = .DELETE, .path = "/api/controlplane/bin", .scopes = &.{.controlplane}, .handler = controlplane.emptyBin },
     // The browser sends one request for a folder, so the subtree walk is server-side.
-    .{ .method = .DELETE, .path = "/api/controlplane/entry/:id", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneTrash },
+    .{ .method = .DELETE, .path = "/api/controlplane/entry/:id", .scopes = &.{.controlplane}, .handler = controlplane.trash },
 
     // A move to its own parent without autorename: a clash is a 409.
-    .{ .method = .POST, .path = "/api/controlplane/entry/:id/rename", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneRename },
+    .{ .method = .POST, .path = "/api/controlplane/entry/:id/rename", .scopes = &.{.controlplane}, .handler = controlplane.rename },
 
     // Browser upload into `:id` (`root` = library root); `?onConflict=rename|replace`,
     // default rename. Locks the DB only around its own DB touches.
-    .{ .method = .POST, .path = "/api/controlplane/folder/:id/upload", .scopes = &.{.controlplane}, .handler = controlplane.controlplaneUpload, .manual_db_lock = true },
+    .{ .method = .POST, .path = "/api/controlplane/folder/:id/upload", .scopes = &.{.controlplane}, .handler = controlplane.upload, .manual_db_lock = true },
 
     // --- Admin: re-authentication ("elevation") ---
     // Neither is `require_admin` (elevate would gate itself; lock must work after a

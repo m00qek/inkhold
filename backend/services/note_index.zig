@@ -12,7 +12,6 @@ const derivesearch = @import("derive_search.zig");
 const inkscan = @import("ink_scan.zig");
 const sn = @import("supernote");
 
-const Md5 = std.crypto.hash.Md5;
 const Allocator = std.mem.Allocator;
 
 /// Bump when anything the client caches under `(md5, index_version)` changes
@@ -20,19 +19,14 @@ const Allocator = std.mem.Allocator;
 /// that leaves `terms/`/`text/` byte-identical takes no bump. Never reuse a number.
 pub const index_version: i64 = 16;
 
-/// Bounds the memory a layer content hash costs.
-const hash_chunk_len = blobstore.chunk_len;
-
-/// Header window read from a cover block to sniff MIME and dims; the hard bound
-/// on one cover's RSS at index time.
-const cover_header_probe: usize = 64 * 1024;
-
 /// Re-exported so the indexer and `page_payload.serialize` share one emit list.
 pub const LayerRef = sn.page_payload.LayerRef;
 pub const max_layers = sn.page_payload.max_layers;
 
 const note_index_parse = @import("note_index_parse.zig");
 const note_index_serve = @import("note_index_serve.zig");
+
+// ---- parsing a container into rows (`note_index_parse.zig`) ----
 pub const parseBlob = note_index_parse.parseBlob;
 pub const parseBlobSource = note_index_parse.parseBlobSource;
 pub const pageContentHash = note_index_parse.pageContentHash;
@@ -40,6 +34,11 @@ pub const packLayers = note_index_parse.packLayers;
 pub const LayerRecord = note_index_parse.LayerRecord;
 pub const unpackLayerRecords = note_index_parse.unpackLayerRecords;
 pub const unpackLayers = note_index_parse.unpackLayers;
+pub const layer_rec_head_size = note_index_parse.layer_rec_head_size;
+pub const max_layer_name = note_index_parse.max_layer_name;
+pub const max_layer_rec_size = note_index_parse.max_layer_rec_size;
+
+// ---- serving pages from the index (`note_index_serve.zig`) ----
 pub const SliceSource = note_index_serve.SliceSource;
 pub const NoteHeader = note_index_serve.NoteHeader;
 pub const noteHeader = note_index_serve.noteHeader;
@@ -50,12 +49,6 @@ pub const TemplateLocation = note_index_serve.TemplateLocation;
 pub const templateLocation = note_index_serve.templateLocation;
 pub const streamPage = note_index_serve.streamPage;
 pub const serializeFromIndex = note_index_serve.serializeFromIndex;
-const layers_edited = fixture.layers_edited;
-const Fixture = fixture.Fixture;
-const Blobs = fixture.Blobs;
-const PeakAllocator = fixture.PeakAllocator;
-const indexInto = fixture.indexInto;
-const coveredNote = fixture.coveredNote;
 
 /// A layer as stored: the wire ref plus panel-only facts `noteMeta` serves.
 /// `name` is empty when the page has no usable `LAYERINFO`.
@@ -64,20 +57,6 @@ pub const IndexedLayer = struct {
     name: []const u8 = "",
     is_current: bool = false,
 };
-
-/// v5 packed record in the `layers` blob, variable stride: u32 offset,
-/// u32 length, u8 flags, u8 slot (wire id), u8 name_len, name bytes.
-pub const layer_rec_head_size = 11;
-/// Longest display name a record carries (`name_len` is one byte); longer truncates.
-pub const max_layer_name = 255;
-pub const max_layer_rec_size = layer_rec_head_size + max_layer_name;
-
-// bit0/bit1 mirror the SNPG wire flags; bit2 is index-only; bit3 is the wire's
-// bit2 (raster image), remapped by `page_payload.recordFlags` when serving.
-const flag_all_blank: u8 = 0x01;
-const flag_hidden: u8 = 0x02;
-const flag_current: u8 = 0x04;
-const flag_raster_image: u8 = 0x08;
 
 pub const Error = error{
     /// A stored range does not fit the bytes it is read from.
@@ -409,6 +388,12 @@ const testing = std.testing;
 const schema = @import("../db/schema.zig");
 const nb = @import("note_builder");
 const fixture = @import("note_index/fixture.zig");
+const layers_edited = fixture.layers_edited;
+const Fixture = fixture.Fixture;
+const Blobs = fixture.Blobs;
+const PeakAllocator = fixture.PeakAllocator;
+const indexInto = fixture.indexInto;
+const coveredNote = fixture.coveredNote;
 
 test "a v4 row (fixed-stride layers, no identity) lazily re-derives to v5 with slots+names" {
     var f = try Fixture.init();
@@ -427,7 +412,7 @@ test "a v4 row (fixed-stride layers, no identity) lazily re-derives to v5 with s
             const rec = old_blob[i * 9 ..][0..9];
             std.mem.writeInt(u32, rec[0..4], il.ref.offset, .little);
             std.mem.writeInt(u32, rec[4..8], il.ref.len, .little);
-            rec[8] = if (il.ref.all_blank) flag_all_blank else 0;
+            rec[8] = if (il.ref.all_blank) note_index_parse.flag_all_blank else 0;
         }
         var s = try f.db.prepare("UPDATE note_page_index SET layers = ?1 WHERE page_index = 1;");
         defer s.finalize();

@@ -18,13 +18,13 @@ const bytes = @import("bytes.zig");
 
 /// GET /api/controlplane/note/{id}/history -> the file's versions, newest first,
 /// current one flagged.
-pub fn controlplaneHistory(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn history(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return historyList(ctx, req, params, .live);
 }
 
 /// GET /api/controlplane/bin/note/{id}/history -> the version list of a trashed
 /// file, view-only; restore the file first to restore a version.
-pub fn controlplaneBinHistory(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn binHistory(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return historyList(ctx, req, params, .trashed);
 }
 
@@ -44,7 +44,7 @@ fn historyList(ctx: *Context, req: *Request, params: Params, scope: controlplane
 /// GET /api/controlplane/note/{id}/history/{md5}/meta -> a retained version's page
 /// list and geometry from its own `note_index`, as `NoteMetaVO`. `fileHash` and
 /// `size` are the version's; `id` and `name` stay the file's.
-pub fn controlplaneHistoryMeta(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn historyMeta(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -60,17 +60,17 @@ pub fn controlplaneHistoryMeta(ctx: *Context, req: *Request, params: Params) any
 
 /// GET /api/controlplane/note/{id}/history/{md5}/page/{n} -> page `n` of a retained
 /// version. No `?v=`: `{md5}` already pins the blob. `manual_db_lock`.
-pub fn controlplaneHistoryPage(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    return historyPage(ctx, req, params, .live);
+pub fn historyPage(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    return pageIn(ctx, req, params, .live);
 }
 
 /// GET /api/controlplane/bin/note/{id}/history/{md5}/page/{n} -> the same for a
 /// trashed file.
-pub fn controlplaneBinHistoryPage(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    return historyPage(ctx, req, params, .trashed);
+pub fn binHistoryPage(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    return pageIn(ctx, req, params, .trashed);
 }
 
-fn historyPage(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
+fn pageIn(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -95,7 +95,7 @@ fn historyPage(ctx: *Context, req: *Request, params: Params, scope: controlplane
 /// POST /api/controlplane/note/{id}/history/{md5}/restore -> re-point the file at a
 /// retained version through `linkBlobIndexed`, never a raw `UPDATE`, so it is
 /// re-derived and the displaced current is retained (undoable). 507 over quota.
-pub fn controlplaneHistoryRestore(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn historyRestore(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -120,17 +120,17 @@ pub fn controlplaneHistoryRestore(ctx: *Context, req: *Request, params: Params) 
 /// version's raw bytes, for the whole-blob viewers (`.spd`, `.txt`, images). Same
 /// headers as `/file/{id}` for the file's name; `{md5}` pins the blob, so no `?v=`.
 /// `manual_db_lock`, streamed unlocked.
-pub fn controlplaneHistoryRaw(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    return historyRaw(ctx, req, params, .live);
+pub fn historyRaw(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    return rawIn(ctx, req, params, .live);
 }
 
 /// GET /api/controlplane/bin/note/{id}/history/{md5}/raw[?download=1] -> the same
 /// for a trashed file.
-pub fn controlplaneBinHistoryRaw(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    return historyRaw(ctx, req, params, .trashed);
+pub fn binHistoryRaw(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    return rawIn(ctx, req, params, .trashed);
 }
 
-fn historyRaw(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
+fn rawIn(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -166,17 +166,17 @@ fn historyRaw(ctx: *Context, req: *Request, params: Params, scope: controlplane.
 /// version's page transcript and word boxes from its own `note_page_index`, never a
 /// re-parse. Same `PageTextVO` and `no-cache` policy as the live text route: `{md5}`
 /// pins the content, not the JSON shape. No finished recognition is a 404.
-pub fn controlplaneHistoryPageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    return historyPageText(ctx, req, params, .live);
+pub fn historyPageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    return pageTextIn(ctx, req, params, .live);
 }
 
 /// GET /api/controlplane/bin/note/{id}/history/{md5}/page/{n}/text -> the same for
 /// a trashed file.
-pub fn controlplaneBinHistoryPageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    return historyPageText(ctx, req, params, .trashed);
+pub fn binHistoryPageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    return pageTextIn(ctx, req, params, .trashed);
 }
 
-fn historyPageText(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
+fn pageTextIn(ctx: *Context, req: *Request, params: Params, scope: controlplane.ControlPlaneService.ReadScope) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);

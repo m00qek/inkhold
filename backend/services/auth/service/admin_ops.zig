@@ -2,19 +2,19 @@
 
 const std = @import("std");
 const internal = @import("internal.zig");
-const service = @import("../service.zig");
-const Service = service.Service;
-const Error = service.Error;
-const default_capacity = service.default_capacity;
-const DeviceInfo = service.DeviceInfo;
-const Quota = service.Quota;
-const UserInfo = service.UserInfo;
+const authsvc = @import("../service.zig");
+const Service = authsvc.Service;
+const Error = authsvc.Error;
+const default_capacity = authsvc.default_capacity;
+const DeviceInfo = authsvc.DeviceInfo;
+const Quota = authsvc.Quota;
+const UserInfo = authsvc.UserInfo;
 const device_ops = @import("device_ops.zig");
 const own_account = @import("own_account.zig");
 
 /// Self, or an admin. Self-service routes reuse these admin functions with
 /// actor = target so ownership is decided in one place.
-pub fn assertMayManage(self: *Service, actor_user_id: u64, target_user_id: u64) Error!void {
+fn assertMayManage(self: *Service, actor_user_id: u64, target_user_id: u64) Error!void {
     if (actor_user_id == target_user_id) return;
     if (!try own_account.isAdmin(self, actor_user_id)) return error.NotAdmin;
 }
@@ -63,7 +63,7 @@ pub fn listUserDevices(self: *Service, gpa: std.mem.Allocator, actor_user_id: u6
     return list.toOwnedSlice(gpa);
 }
 
-pub fn freeDevice(gpa: std.mem.Allocator, d: DeviceInfo) void {
+fn freeDevice(gpa: std.mem.Allocator, d: DeviceInfo) void {
     gpa.free(d.equipment_no);
     gpa.free(d.name);
     if (d.model) |m| gpa.free(m);
@@ -84,7 +84,7 @@ pub fn adminUnlinkDevice(self: *Service, actor_user_id: u64, target_user_id: u64
     try device_ops.unlinkDevice(self, target_user_id, equipment_no);
 }
 
-pub fn hasBinding(self: *Service, user_id: u64, equipment_no: []const u8) Error!bool {
+fn hasBinding(self: *Service, user_id: u64, equipment_no: []const u8) Error!bool {
     var s = try self.db.prepare("SELECT 1 FROM user_devices WHERE user_id = ?1 AND equipment_no = ?2 LIMIT 1;");
     defer s.finalize();
     s.bindInt(1, @intCast(user_id));

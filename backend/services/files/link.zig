@@ -9,10 +9,10 @@ const internal = @import("internal.zig");
 const bin = @import("bin.zig");
 const history = @import("history.zig");
 const log = std.log.scoped(.files);
-const files = @import("../files.zig");
-const Files = files.Files;
-const md5_len = files.md5_len;
-const Entry = files.Entry;
+const filesmod = @import("../files.zig");
+const Files = filesmod.Files;
+const md5_len = filesmod.md5_len;
+const Entry = filesmod.Entry;
 
 /// Streams `reader` into the blob store and links it, replacing a live file of
 /// that name. Enforces quota.
@@ -195,7 +195,7 @@ pub fn linkBlobIndexed(
 
 /// Derived files for one `.note`. Gated on `indexable`: non-notes parse to an
 /// empty `Parsed`, and an empty file would mark them derived for ever.
-pub fn writeNoteDerived(self: Files, md5: []const u8, p: *const noteindex.Parsed) !void {
+fn writeNoteDerived(self: Files, md5: []const u8, p: *const noteindex.Parsed) !void {
     if (!p.indexable) return;
     // Null store: nothing to write.
     const terms_store = self.terms orelse return;

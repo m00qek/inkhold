@@ -4,10 +4,10 @@ const std = @import("std");
 const sqlite = @import("../../../db/sqlite.zig");
 const schema = @import("../../../db/schema.zig");
 const password = @import("../password.zig");
-const service = @import("../service.zig");
-const code_len = service.code_len;
-const Session = service.Session;
-const Service = service.Service;
+const authsvc = @import("../service.zig");
+const code_len = authsvc.code_len;
+const Session = authsvc.Session;
+const Service = authsvc.Service;
 
 pub fn testService(db: sqlite.Db) !Service {
     try schema.migrate(db);

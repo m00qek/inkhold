@@ -9,7 +9,7 @@ const byte_range = @import("../../http/byte_range.zig");
 const controlplane = @import("../../services/controlplane.zig");
 const blobstore = @import("../../store/blobs.zig");
 const thumbnailmod = @import("../../services/thumbnail.zig");
-const filesvc = @import("../../services/files.zig");
+const filesmod = @import("../../services/files.zig");
 const config = @import("../../config.zig");
 const Context = context.Context;
 const Request = router.Request;
@@ -50,13 +50,13 @@ fn inlineTypeOf(name: []const u8) ?InlineType {
 /// a foreign id is a 404, not a 403, so it is no existence oracle. `?v=` must equal
 /// the blob md5, which makes `immutable` honest. `manual_db_lock`: one lookup under
 /// the lock, then a fixed-buffer stream bounded by `Content-Length`.
-pub fn controlplaneFile(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn file(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return rawFile(ctx, req, params, .live);
 }
 
 /// GET /api/controlplane/bin/file/{id}?v={md5} -> the same raw bytes for a trashed
 /// file.
-pub fn controlplaneBinFile(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn binFile(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return rawFile(ctx, req, params, .trashed);
 }
 
@@ -124,8 +124,8 @@ pub fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []cons
         });
     }
 
-    var file = files.blobs.open(md5) catch return reply.notFound(req);
-    defer file.close(ctx.io);
+    var blob = files.blobs.open(md5) catch return reply.notFound(req);
+    defer blob.close(ctx.io);
 
     const off: u64 = switch (want) {
         .partial => |p| p.off,
@@ -180,7 +180,7 @@ pub fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []cons
             left -= take;
         }
     } else {
-        var fr = file.reader(ctx.io, &rbuf);
+        var fr = blob.reader(ctx.io, &rbuf);
         fr.interface.streamExact64(&body.writer, size) catch return error.StreamTruncated;
     }
     body.end() catch {};
@@ -192,7 +192,7 @@ pub fn streamRawBlob(ctx: *Context, req: *Request, name: []const u8, md5: []cons
 /// `thumbNeedsRepair`, re-derive with the db lock released (lock order is
 /// repair-mutex then db-lock, see `Files.thumb_repair`); the row memoizes "no
 /// thumbnail" so a bad file is parsed once. Immutable, ETag = hash, `nosniff`.
-pub fn controlplaneThumbnail(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn thumbnail(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const hash = params.get("hash") orelse return badRequest(ctx, req);
@@ -219,15 +219,15 @@ pub fn controlplaneThumbnail(ctx: *Context, req: *Request, params: Params) anyer
         .none => return reply.notFound(req),
     }
 
-    var file = files.thumbs.open(hash) catch return reply.notFound(req);
-    defer file.close(ctx.io);
-    const size = (file.stat(ctx.io) catch return reply.notFound(req)).size;
+    var thumb = files.thumbs.open(hash) catch return reply.notFound(req);
+    defer thumb.close(ctx.io);
+    const size = (thumb.stat(ctx.io) catch return reply.notFound(req)).size;
     if (size == 0) return reply.notFound(req); // defensive: a torn file must not serve
 
     // Ingest only wrote bytes that pass `sniffMime`, so a failure here is corruption.
     var magic: [16]u8 = undefined;
     const head_len: usize = @intCast(@min(size, magic.len));
-    const got = file.readPositionalAll(ctx.io, magic[0..head_len], 0) catch return reply.notFound(req);
+    const got = thumb.readPositionalAll(ctx.io, magic[0..head_len], 0) catch return reply.notFound(req);
     if (got != head_len) return reply.notFound(req);
     const mime = thumbnailmod.sniffMime(magic[0..head_len]) orelse return reply.notFound(req);
 
@@ -250,14 +250,14 @@ pub fn controlplaneThumbnail(ctx: *Context, req: *Request, params: Params) anyer
 
     // On failure return short of `content_length`, never `body.end()` (see `rawFile`).
     var rbuf: [blobstore.chunk_len]u8 = undefined;
-    var fr = file.reader(ctx.io, &rbuf);
+    var fr = thumb.reader(ctx.io, &rbuf);
     fr.interface.streamExact64(&body.writer, size) catch return error.StreamTruncated;
     body.end() catch {};
 }
 
 /// Streams a `.note` cover from the immutable blob at the index-recorded range, a
 /// chunk at a time; 404 when the note has none.
-fn streamNoteCover(ctx: *Context, req: *Request, files: *filesvc.Files, hash: []const u8) anyerror!void {
+fn streamNoteCover(ctx: *Context, req: *Request, files: *filesmod.Files, hash: []const u8) anyerror!void {
     const loc = (files.noteCover(hash) catch return reply.notFound(req)) orelse return reply.notFound(req);
     // The cover's own hash is its blob key.
     return streamBlobRange(ctx, req, files, hash, hash, loc.offset, loc.length, loc.mime());
@@ -271,7 +271,7 @@ fn streamNoteCover(ctx: *Context, req: *Request, files: *filesvc.Files, hash: []
 fn streamBlobRange(
     ctx: *Context,
     req: *Request,
-    files: *filesvc.Files,
+    files: *filesmod.Files,
     blob_key: []const u8,
     etag_hash: []const u8,
     offset: u64,
@@ -312,7 +312,7 @@ fn streamBlobRange(
 /// the blob. Note-scoped, content-addressed (immutable, ETag = hash),
 /// `manual_db_lock`, and no `.note` parse: the range is read from the page's
 /// recorded `layers`. 404 for anything unowned, absent or over the size cap.
-pub fn controlplaneTemplate(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn template(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -341,7 +341,7 @@ pub fn controlplaneTemplate(ctx: *Context, req: *Request, params: Params) anyerr
 fn streamNoteTemplate(
     ctx: *Context,
     req: *Request,
-    files: *filesvc.Files,
+    files: *filesmod.Files,
     plan: controlplane.TemplatePlan,
     hash: []const u8,
 ) anyerror!void {
@@ -364,7 +364,7 @@ fn streamNoteTemplate(
 /// the pre-`words` shape for a year. 404 means "refetch metadata" (no such page,
 /// stale `?v=`, or no recognition). The text is device-authored; the client sets
 /// it via `textContent`.
-pub fn controlplanePageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn pageText(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -392,7 +392,7 @@ pub fn controlplanePageText(ctx: *Context, req: *Request, params: Params) anyerr
 /// `EXTERNALLINKINFO`, `no-cache`, 404 means stale. Decoded per request from one
 /// ranged read. The scheme allowlist (`allowedLinkScheme`) runs here too, because
 /// the PDF exporter reads this endpoint.
-pub fn controlplanePageLinks(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn pageLinks(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);

@@ -27,7 +27,7 @@ pub fn binPageText(self: ControlPlaneService, arena: std.mem.Allocator, user_id:
     return pageTextIn(self, arena, user_id, id, n, .trashed);
 }
 
-pub fn pageTextIn(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, n: u64, scope: controlplane_meta.ReadScope) !?PageText {
+fn pageTextIn(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, n: u64, scope: controlplane_meta.ReadScope) !?PageText {
     const entry = (try controlplane_meta.lookup(self, scope, user_id, id)) orelse return null;
     defer freeEntry(self.files.gpa, entry);
     if (entry.is_folder) return null;
@@ -68,11 +68,11 @@ pub fn pageTextForMd5(self: ControlPlaneService, arena: std.mem.Allocator, md5: 
 }
 
 /// Ceiling on a `RECOGNTEXT` read; the blob is device-controlled.
-pub const max_recogn_bytes: i64 = 1 << 20;
+const max_recogn_bytes: i64 = 1 << 20;
 
 /// Parses the stored `RECOGNTEXT` range into words, in millimetres.
 /// Best-effort: the caller turns any error into "no words".
-pub fn wordsAt(
+fn wordsAt(
     self: ControlPlaneService,
     arena: std.mem.Allocator,
     md5: []const u8,
@@ -140,16 +140,16 @@ pub fn pageLinksForMd5(self: ControlPlaneService, arena: std.mem.Allocator, md5:
 }
 
 /// Ceiling on an `EXTERNALLINKINFO` read (the worst page seen is ~11 KB).
-pub const max_links_bytes: i64 = 1 << 20;
+const max_links_bytes: i64 = 1 << 20;
 
 /// Cap on links served per page; each becomes a focusable anchor.
-pub const max_links_per_page: usize = 1024;
+const max_links_per_page: usize = 1024;
 
 /// Decodes the stored `EXTERNALLINKINFO` range. Best-effort: errors mean "no
 /// links". Converts 1-based targets to 0-based (dropping out-of-range ones),
 /// `none` to `page = -1`, and applies the scheme allowlist here too because
 /// export reads this endpoint. Empty rects are dropped.
-pub fn linksAt(
+fn linksAt(
     self: ControlPlaneService,
     arena: std.mem.Allocator,
     md5: []const u8,

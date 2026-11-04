@@ -4,11 +4,11 @@ const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
 const internal = @import("internal.zig");
 const quota = @import("quota.zig");
-const files = @import("../files.zig");
-const Files = files.Files;
-const TreeNode = files.TreeNode;
+const filesmod = @import("../files.zig");
+const Files = filesmod.Files;
+const TreeNode = filesmod.TreeNode;
 
-pub const tree_walk_sql =
+const tree_walk_sql =
     \\WITH RECURSIVE tree(id,name,is_folder,md5,size,updated_at,path,parent_path) AS (
     \\  SELECT id,name,is_folder,md5,size,updated_at, '/'||name, '/'
     \\  FROM files WHERE user_id=?1 AND parent_id IS NULL AND deleted=0
@@ -22,7 +22,7 @@ pub const tree_walk_sql =
 
 /// `tree_walk_sql` re-rooted at a folder: strict descendants only.
 /// ?1 = user_id, ?2 = root_path (non-root), ?3 = root_id.
-pub const subtree_walk_sql =
+const subtree_walk_sql =
     \\WITH RECURSIVE tree(id,name,is_folder,md5,size,updated_at,path,parent_path) AS (
     \\  SELECT id,name,is_folder,md5,size,updated_at, ?2||'/'||name, ?2
     \\  FROM files WHERE user_id=?1 AND parent_id=?3 AND deleted=0
@@ -46,7 +46,7 @@ pub fn walkTree(self: Files, alloc: std.mem.Allocator, user_id: u64) ![]TreeNode
 }
 
 /// Both walk statements select the same 8 columns.
-pub fn treeNodeFromWalkRow(alloc: std.mem.Allocator, s: *sqlite.Stmt) !TreeNode {
+fn treeNodeFromWalkRow(alloc: std.mem.Allocator, s: *sqlite.Stmt) !TreeNode {
     return .{
         .id = @intCast(s.columnInt(0)),
         .name = try alloc.dupe(u8, s.columnText(1)),

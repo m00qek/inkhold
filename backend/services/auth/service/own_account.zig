@@ -3,10 +3,10 @@
 const std = @import("std");
 const internal = @import("internal.zig");
 const password = @import("../password.zig");
-const service = @import("../service.zig");
-const Service = service.Service;
-const Error = service.Error;
-const idleWindow = service.idleWindow;
+const authsvc = @import("../service.zig");
+const Service = authsvc.Service;
+const Error = authsvc.Error;
+const idleWindow = authsvc.idleWindow;
 
 /// The caller's identity block; free via `freeAccount`.
 pub const AccountInfo = struct {

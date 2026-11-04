@@ -1,25 +1,25 @@
 //! Login challenges, sessions, password change and admin elevation.
 
-const ctx = @import("../../../http/context.zig");
+const context = @import("../../../http/context.zig");
 const std = @import("std");
 const internal = @import("internal.zig");
 const expiring = @import("../../../expiring.zig");
 const password = @import("../password.zig");
-const Scope = ctx.Scope;
-const Caller = ctx.Caller;
+const Scope = context.Scope;
+const Caller = context.Caller;
 const token_len = 32; // hex chars (16 random bytes)
 const challenge_ttl: i64 = 300; // 5 min
 const last_used_bump_s: i64 = 60;
-const service = @import("../service.zig");
-const Service = service.Service;
-const Error = service.Error;
-const code_len = service.code_len;
-const max_account_len = service.max_account_len;
-const absoluteCap = service.absoluteCap;
-const idleWindow = service.idleWindow;
-const elevation_idle_s = service.elevation_idle_s;
-const elevation_absolute_s = service.elevation_absolute_s;
-const Session = service.Session;
+const authsvc = @import("../service.zig");
+const Service = authsvc.Service;
+const Error = authsvc.Error;
+const code_len = authsvc.code_len;
+const max_account_len = authsvc.max_account_len;
+const absoluteCap = authsvc.absoluteCap;
+const idleWindow = authsvc.idleWindow;
+const elevation_idle_s = authsvc.elevation_idle_s;
+const elevation_absolute_s = authsvc.elevation_absolute_s;
+const Session = authsvc.Session;
 const admin_ops = @import("admin_ops.zig");
 const own_account = @import("own_account.zig");
 
@@ -57,7 +57,7 @@ pub fn getRandomCode(self: *Service, account: []const u8) Error![code_len]u8 {
     return code;
 }
 
-pub fn sweepChallenges(self: *Service, now_s: i64) void {
+fn sweepChallenges(self: *Service, now_s: i64) void {
     expiring.sweep(Service.Challenge, self.gpa, &self.challenges, now_s, struct {
         fn f(c: Service.Challenge, at: i64) bool {
             return at > c.expires;
@@ -65,7 +65,7 @@ pub fn sweepChallenges(self: *Service, now_s: i64) void {
     }.f);
 }
 
-pub fn dropChallenge(self: *Service, account: []const u8) void {
+fn dropChallenge(self: *Service, account: []const u8) void {
     if (self.challenges.fetchRemove(account)) |old| self.gpa.free(old.key);
 }
 
@@ -153,7 +153,7 @@ pub fn sweepExpiredSessions(self: *Service) Error!void {
     _ = try s.step();
 }
 
-pub fn createSession(self: *Service, token: []const u8, user_id: u64, audience: Scope, equipment_no: ?[]const u8) Error!void {
+fn createSession(self: *Service, token: []const u8, user_id: u64, audience: Scope, equipment_no: ?[]const u8) Error!void {
     var s = try self.db.prepare(
         "INSERT INTO sessions(token_hash, user_id, audience, equipment_no, created_at, expires_at, last_used_at) " ++
             "VALUES(?1,?2,?3,?4,?5,?6,?7);",
@@ -218,7 +218,7 @@ pub fn caller(self: *Service, token: []const u8) Error!?Caller {
     return who;
 }
 
-pub fn elevationLive(t: i64, elevated_at: ?i64, elevated_until: ?i64) bool {
+fn elevationLive(t: i64, elevated_at: ?i64, elevated_until: ?i64) bool {
     const started = elevated_at orelse return false;
     const idle_deadline = elevated_until orelse return false;
     return t < idle_deadline and t < started + elevation_absolute_s;

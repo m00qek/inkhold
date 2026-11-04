@@ -12,7 +12,7 @@ const config = @import("../../config.zig");
 
 /// `config.History.max_keep`, but never below the configured default (an
 /// older install's larger `keep` must not be silently clamped).
-pub fn historyCeiling(self: Files) u32 {
+fn historyCeiling(self: Files) u32 {
     return @max(self.history.keep, self.history.max_keep);
 }
 
@@ -305,7 +305,7 @@ pub fn restoreVersion(self: Files, user_id: u64, file_id: u64, md5: []const u8) 
 }
 
 /// Never decrefs or GCs: the live file references the blob.
-pub fn dropFileHistoryVersion(self: Files, file_id: u64, md5: []const u8) !void {
+fn dropFileHistoryVersion(self: Files, file_id: u64, md5: []const u8) !void {
     var s = try self.db.prepare("DELETE FROM file_history WHERE file_id = ?1 AND md5 = ?2;");
     defer s.finalize();
     s.bindInt(1, @intCast(file_id));

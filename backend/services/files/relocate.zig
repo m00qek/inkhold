@@ -4,10 +4,10 @@ const std = @import("std");
 const markpair = @import("../mark_pairing.zig");
 const internal = @import("internal.zig");
 const bin = @import("bin.zig");
-const files = @import("../files.zig");
-const Files = files.Files;
-const md5_len = files.md5_len;
-const Entry = files.Entry;
+const filesmod = @import("../files.zig");
+const Files = filesmod.Files;
+const md5_len = filesmod.md5_len;
+const Entry = filesmod.Entry;
 
 /// Moves and/or renames a live entry in one transaction. Paths are not
 /// materialized, so a folder's subtree follows for free.
@@ -231,7 +231,7 @@ pub fn copy(self: Files, user_id: u64, id: u64, new_parent_id: ?u64, new_name: [
 
 /// Whether moving folder `id` under `new_parent` would create a cycle (walks
 /// up from `new_parent`, 256-hop guard).
-pub fn wouldCycle(self: Files, user_id: u64, new_parent: ?u64, id: u64) !bool {
+fn wouldCycle(self: Files, user_id: u64, new_parent: ?u64, id: u64) !bool {
     var cur = new_parent;
     var guard: usize = 0;
     while (cur) |c| {

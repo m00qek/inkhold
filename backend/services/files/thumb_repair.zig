@@ -8,7 +8,7 @@ const thumbnail = @import("../thumbnail.zig");
 const spdindex = @import("../spd_index.zig");
 
 /// Extractor by the blob's own magic (the URL has no name); missing is `.none`.
-pub fn thumbSourceKind(self: Files, md5: []const u8) thumbnail.SourceKind {
+fn thumbSourceKind(self: Files, md5: []const u8) thumbnail.SourceKind {
     var head: [thumbnail.source_probe_len]u8 = undefined;
     const size = self.blobs.sizeOf(md5) catch return .none;
     const n: usize = @intCast(@min(size, head.len));

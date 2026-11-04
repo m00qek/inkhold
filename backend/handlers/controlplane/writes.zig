@@ -45,7 +45,7 @@ const RenameReq = struct { name: []const u8 };
 /// to the current parent with `autorename = false`, so a clash is 409 rather than a
 /// " (2)" suffix. 400 empty or '/'; 403 category folder; 404 foreign, missing or
 /// trashed. Metadata only.
-pub fn controlplaneRename(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn rename(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -152,7 +152,7 @@ fn onConflictFromTarget(target: []const u8) OnConflict {
 /// is stored, and the ingest is capped at remaining quota as bytes arrive.
 /// 200 `EntryVO`; 413 quota; 415 type; 400 name; 404 bad destination; 409 when a
 /// folder holds the name.
-pub fn controlplaneUpload(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn upload(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
 

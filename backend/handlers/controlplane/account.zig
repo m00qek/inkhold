@@ -20,7 +20,7 @@ const read = @import("read.zig");
 const UnbindReq = struct { equipmentNo: []const u8 };
 
 /// POST /api/controlplane/equipment/unlink -> revoke a device.
-pub fn controlplaneUnlink(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn unlink(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
     const caller = ctx.caller.?; // controlplane scope
@@ -34,7 +34,7 @@ pub fn controlplaneUnlink(ctx: *Context, req: *Request, params: Params) anyerror
 /// GET /api/controlplane/usage -> the caller's own storage usage.
 const UsageVO = struct { used_bytes: i64, total_bytes: i64 };
 
-pub fn controlplaneUsage(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn usage(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -69,16 +69,16 @@ const AccountVO = struct {
     versions: VersionPolicyVO,
 };
 
-pub fn controlplaneAccount(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn account(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const token = transport.presentedToken(req) orelse return serverError(ctx, req);
 
-    const account = (svc.accountInfo(ctx.gpa, caller.user_id) catch return serverError(ctx, req)) orelse
+    const info = (svc.accountInfo(ctx.gpa, caller.user_id) catch return serverError(ctx, req)) orelse
         return serverError(ctx, req); // the session resolved off this row moments ago
-    defer authsvc.Service.freeAccount(ctx.gpa, account);
+    defer authsvc.Service.freeAccount(ctx.gpa, info);
 
     const sessions = svc.sessionSummary(caller.user_id, token) catch return serverError(ctx, req);
 
@@ -90,11 +90,11 @@ pub fn controlplaneAccount(ctx: *Context, req: *Request, params: Params) anyerro
     const retained = files.retainedPerFile(ctx.gpa, caller.user_id) catch return serverError(ctx, req);
     defer ctx.gpa.free(retained);
     try json.respond(ctx.gpa, req, .ok, AccountVO{
-        .email = account.email,
-        .name = account.name,
-        .isAdmin = account.is_admin,
-        .createdAt = account.created_at,
-        .passwordChangedAt = account.password_changed_at,
+        .email = info.email,
+        .name = info.name,
+        .isAdmin = info.is_admin,
+        .createdAt = info.created_at,
+        .passwordChangedAt = info.password_changed_at,
         .thisSessionSince = sessions.this_since,
         .otherBrowsers = sessions.other_browsers,
         .devices = devices,
@@ -109,7 +109,7 @@ pub fn controlplaneAccount(ctx: *Context, req: *Request, params: Params) anyerro
 /// PUT /api/controlplane/account/versions -> set the per-file version count,
 /// evicting now. Values above the ceiling are clamped. Dropped versions skip the
 /// bin, so the response reports what was removed.
-pub fn controlplaneSetVersions(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn setVersions(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -157,7 +157,7 @@ const StorageVO = struct {
     versions: i64,
 };
 
-pub fn controlplaneAccountStorage(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn accountStorage(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -177,7 +177,7 @@ pub fn controlplaneAccountStorage(ctx: *Context, req: *Request, params: Params) 
 /// POST /api/controlplane/account/devices/unlink `{equipmentNo}`. Goes through
 /// `adminUnlinkDevice` so another user's serial is `DEVICE_NOT_FOUND`, like an
 /// unknown one; `/equipment/unlink` instead answers 200 when nothing matched.
-pub fn controlplaneUnlinkMyDevice(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn unlinkMyDevice(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
     const caller = ctx.caller.?; // controlplane scope
@@ -195,7 +195,7 @@ pub fn controlplaneUnlinkMyDevice(ctx: *Context, req: *Request, params: Params) 
 /// request's; `revoked` is the row count.
 const SignedOutVO = struct { success: bool = true, revoked: i64 };
 
-pub fn controlplaneSignOutOthers(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn signOutOthers(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?;
     const caller = ctx.caller.?; // controlplane scope
@@ -282,7 +282,7 @@ fn serverAddress(buf: []u8, cfg: config.Config) []const u8 {
 
 /// GET /api/controlplane/server-info -> `{ address, firstRun }`. Public on purpose:
 /// the login page needs first-run state and the LAN address before sign-in.
-pub fn controlplaneServerInfo(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn serverInfo(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const svc = ctx.service.?; // set at startup, present on every route incl. public
     const first_run = svc.isFirstRun() catch return serverError(ctx, req);

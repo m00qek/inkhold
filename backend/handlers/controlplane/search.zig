@@ -48,7 +48,7 @@ fn indexSnapshot(ctx: *Context, user_id: u64) ?pendingsvc.Snapshot {
 /// document set (`SMAN`). `private, no-cache` with an ETag hashed from the body
 /// (`index_export.bodyEtag`), so an unchanged library costs a 304 and the client
 /// may refetch on every visit.
-pub fn controlplaneSearchIndexManifest(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn searchIndexManifest(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -115,7 +115,7 @@ fn manifestGate(
 /// fragment GC'd mid-walk would break a promised `Content-Length`.
 /// `manual_db_lock`, not `read_only`: the reader is borrowed only around the
 /// manifest query, so a slow download never parks a pooled reader or the writer.
-pub fn controlplaneSearchIndexStream(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn searchIndexStream(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -216,7 +216,7 @@ fn eventsOneShot(ctx: *Context, req: *Request, sync_version: i64, index: ?pendin
 /// with no `max-age` unless `?v=` names the current `index_version`, because a
 /// parser bump re-derives the same md5. `manual_db_lock` with a borrowed reader,
 /// as in the stitched stream.
-pub fn controlplaneDocumentText(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn documentText(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const md5 = params.get("md5") orelse return badRequest(ctx, req);
@@ -298,7 +298,7 @@ pub fn controlplaneDocumentText(ctx: *Context, req: *Request, params: Params) an
 /// held for a minutes-long stream would stall device sync. Each tick takes the lock
 /// only around `files.syncVersion`; `indexSnapshot` runs outside every bracket.
 /// A `: ping` every `heartbeat_ms` surfaces dead peers as write errors.
-pub fn controlplaneEvents(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn events(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);

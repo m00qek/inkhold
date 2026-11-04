@@ -12,7 +12,7 @@ const max_layers = noteindex.max_layers;
 const testing = std.testing;
 const schema = @import("../db/schema.zig");
 const thumbstore = @import("../store/thumbs.zig");
-const filesvc = @import("files.zig");
+const filesmod = @import("files.zig");
 const nb = @import("note_builder");
 const ink_scan = @import("ink_scan.zig");
 const pageHasInk = ink_scan.pageHasInk;
@@ -43,7 +43,7 @@ const template_hash = "deadbeefdeadbeefdeadbeefdeadbeef";
 
 const Fixture = struct {
     db: sqlite.Db,
-    files: filesvc.Files,
+    files: filesmod.Files,
     tmp: testing.TmpDir,
 
     fn init() !Fixture {
@@ -55,7 +55,7 @@ const Fixture = struct {
         const store_ = try blobstore.BlobStore.init(testing.io, tmp.dir);
         const thumbs_dir = try tmp.dir.createDirPathOpen(testing.io, "thumbs", .{});
         const thumbs_ = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
-        return .{ .db = db, .files = filesvc.Files.init(testing.allocator, testing.io, db, store_, thumbs_), .tmp = tmp };
+        return .{ .db = db, .files = filesmod.Files.init(testing.allocator, testing.io, db, store_, thumbs_), .tmp = tmp };
     }
 
     fn deinit(f: *Fixture) void {

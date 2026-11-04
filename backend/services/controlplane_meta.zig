@@ -44,7 +44,7 @@ pub fn isPdf(file_type: ?[]const u8) bool {
 /// listings use `Entry.mark_id`, and the two are pinned to agree by test.
 /// The gate keys off the described type while pairing keys off the name, so
 /// a PDF named without the extension still finds its ink. Live only.
-pub fn annotationsIdFor(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, entry: Entry) !?[]const u8 {
+fn annotationsIdFor(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, entry: Entry) !?[]const u8 {
     const found = (try self.files.liveMarkIdFor(user_id, entry.parent_id, entry.name)) orelse return null;
     return try idStr(arena, found);
 }
@@ -121,7 +121,7 @@ pub fn pxPerMmFor(equipment: ?[]const u8, width: i64) ?f32 {
 
 /// The blob's verified type and mm→px scale, for callers that have only the
 /// entry. Shares `fileTypeFor` with `summarize`.
-pub const Described = struct { file_type: []const u8, px_per_mm: ?f32 };
+const Described = struct { file_type: []const u8, px_per_mm: ?f32 };
 
 pub fn describe(self: ControlPlaneService, arena: std.mem.Allocator, entry: Entry) !Described {
     var indexable = false;

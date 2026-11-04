@@ -7,15 +7,15 @@ const expiring = @import("../../expiring.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
 const password = @import("password.zig");
-const ctx = @import("../../http/context.zig");
-const filesvc = @import("../files.zig");
+const context = @import("../../http/context.zig");
+const filesmod = @import("../files.zig");
 const admin_ops = @import("service/admin_ops.zig");
 const own_account = @import("service/own_account.zig");
 const session_ops = @import("service/session_ops.zig");
 const device_ops = @import("service/device_ops.zig");
 
-const Scope = ctx.Scope;
-const Caller = ctx.Caller;
+const Scope = context.Scope;
+const Caller = context.Caller;
 
 pub const Error = error{
     EmailExists,
@@ -119,10 +119,6 @@ pub const UserInfo = struct {
 };
 
 pub const Service = struct {
-    const encryptCred = internal.encryptCred;
-    const decryptCred = internal.decryptCred;
-    const now = internal.now;
-    const randomHex = internal.randomHex;
     gpa: std.mem.Allocator,
     io: std.Io,
     db: sqlite.Db,
@@ -132,6 +128,10 @@ pub const Service = struct {
     /// Soft cap so the public `random/code` route cannot grow the map unboundedly.
     max_challenges: usize = 4096,
     read_only: bool = false,
+
+    // Shared with the parts under `service/`.
+    const encryptCred = internal.encryptCred;
+    const randomHex = internal.randomHex;
 
     pub const Challenge = struct { code: [code_len]u8, expires: i64 };
     pub const User = struct { id: u64, password_md5: [password.md5_len]u8, is_admin: bool, must_change: bool };
@@ -180,7 +180,7 @@ pub const Service = struct {
 
     /// Admin-only. `purgeUser` runs first because the FK cascade cannot decrement
     /// `blobs.refcount`, which would strand blobs and their index rows.
-    pub fn deleteUser(self: *Service, actor_user_id: u64, target_user_id: u64, files: filesvc.Files) Error!void {
+    pub fn deleteUser(self: *Service, actor_user_id: u64, target_user_id: u64, files: filesmod.Files) Error!void {
         if (!try self.isAdmin(actor_user_id)) return error.NotAdmin;
         // LastAdmin before CannotDeleteSelf: a sole admin gets the error whose
         // advice applies. Both refuse before `purgeUser` destroys anything.
@@ -270,24 +270,15 @@ pub const Service = struct {
         gpa.free(users);
     }
 
-    // ---- admin: one person's devices, and their quota ----
+    // The rest of the API, one concern per file under `service/`; the doc
+    // comments live on the definitions.
+
+    // ---- admin: users, one person's devices and quota (`service/admin_ops.zig`) ----
     // The target id comes off the URL, so each function re-derives ownership from
     // the target rather than relying on `caller.user_id` in the WHERE clause.
-
-    // ---- the caller's own account ----
-
-    // ---- login challenge + session ----
-
-    // ---- admin elevation (re-authentication) ----
-
-    // ---- devices ----
-
-    const assertMayManage = admin_ops.assertMayManage;
     pub const listUserDevices = admin_ops.listUserDevices;
-    const freeDevice = admin_ops.freeDevice;
     pub const freeDevices = admin_ops.freeDevices;
     pub const adminUnlinkDevice = admin_ops.adminUnlinkDevice;
-    const hasBinding = admin_ops.hasBinding;
     pub const userQuota = admin_ops.userQuota;
     pub const setUserQuota = admin_ops.setUserQuota;
     const userExists = admin_ops.userExists;
@@ -295,6 +286,7 @@ pub const Service = struct {
     const insertUser = admin_ops.insertUser;
     pub const userInfo = admin_ops.userInfo;
 
+    // ---- the caller's own account (`service/own_account.zig`) ----
     pub const AccountInfo = own_account.AccountInfo;
     pub const accountInfo = own_account.accountInfo;
     pub const freeAccount = own_account.freeAccount;
@@ -305,27 +297,23 @@ pub const Service = struct {
     pub const hasAnyUser = own_account.hasAnyUser;
     pub const isFirstRun = own_account.isFirstRun;
     const isAdmin = own_account.isAdmin;
-    const getUser = own_account.getUser;
     pub const ensureCapacity = own_account.ensureCapacity;
     pub const setCapacityTotal = own_account.setCapacityTotal;
     pub const userCapacity = own_account.userCapacity;
 
+    // ---- login challenge, sessions and admin elevation (`service/session_ops.zig`) ----
     pub const getRandomCode = session_ops.getRandomCode;
-    const sweepChallenges = session_ops.sweepChallenges;
-    const dropChallenge = session_ops.dropChallenge;
     pub const login = session_ops.login;
-    const issueSession = session_ops.issueSession;
     pub const changePassword = session_ops.changePassword;
     pub const logout = session_ops.logout;
     const revokeAllSessions = session_ops.revokeAllSessions;
     pub const sweepExpiredSessions = session_ops.sweepExpiredSessions;
-    const createSession = session_ops.createSession;
     pub const caller = session_ops.caller;
-    const elevationLive = session_ops.elevationLive;
     pub const elevate = session_ops.elevate;
     pub const lockElevation = session_ops.lockElevation;
     pub const renewElevation = session_ops.renewElevation;
 
+    // ---- devices (`service/device_ops.zig`) ----
     pub const bindDevice = device_ops.bindDevice;
     pub const deviceSessionOwner = device_ops.deviceSessionOwner;
     pub const nameDevice = device_ops.nameDevice;

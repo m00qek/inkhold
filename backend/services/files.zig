@@ -130,10 +130,6 @@ pub const Files = struct {
     /// one mutation outside the database.
     read_only: bool = false,
 
-    const assertFolder = internal.assertFolder;
-    const ensureBlobRow = internal.ensureBlobRow;
-    const incref = internal.incref;
-
     pub fn init(gpa: std.mem.Allocator, io: std.Io, db: sqlite.Db, blobs: blobstore.BlobStore, thumbs: thumbstore.ThumbStore) Files {
         return .{ .gpa = gpa, .io = io, .db = db, .blobs = blobs, .thumbs = thumbs };
     }
@@ -254,12 +250,10 @@ pub const Files = struct {
 
     /// Errors: NotFound / NotAFolder (bad parent), NameConflict.
     pub fn createFolder(self: Files, user_id: u64, parent_id: ?u64, name: []const u8) !Entry {
-        try self.assertFolder(user_id, parent_id);
+        try internal.assertFolder(self, user_id, parent_id);
         if (try internal.liveChild(self, user_id, parent_id, name) != null) return error.NameConflict;
 
-        const ts = internal.now(
-            self,
-        );
+        const ts = internal.now(self);
         var s = try self.db.prepare(
             "INSERT INTO files(user_id, parent_id, name, is_folder, created_at, updated_at) VALUES(?1,?2,?3,1,?4,?4);",
         );
@@ -390,8 +384,11 @@ pub const Files = struct {
         gpa.free(entries);
     }
 
+    // The rest of the API, one concern per file under `files/`; the doc
+    // comments live on the definitions.
+
+    // ---- recycle bin (`files/bin.zig`) ----
     pub const bin_retention_s = bin.bin_retention_s;
-    // The rest of the API, one concern per file under `files/`.
     pub const listBin = bin.listBin;
     pub const liveSubtreeCount = bin.liveSubtreeCount;
     pub const trash = bin.trash;
@@ -403,6 +400,7 @@ pub const Files = struct {
     pub const sweepBinBefore = bin.sweepBinBefore;
     pub const purgeUser = bin.purgeUser;
 
+    // ---- device upload sessions (`files/uploads.zig`) ----
     pub const createUploadSession = uploads.createUploadSession;
     pub const setUploadBlob = uploads.setUploadBlob;
     pub const addUploadReceived = uploads.addUploadReceived;
@@ -410,12 +408,14 @@ pub const Files = struct {
     pub const deleteUploadSession = uploads.deleteUploadSession;
     pub const sweepUploadSessions = uploads.sweepUploadSessions;
 
+    // ---- quota (`files/quota.zig`) ----
     pub const Cap = quota.Cap;
     pub const default_total_bytes = quota.default_total_bytes;
     pub const capacity = quota.capacity;
     pub const StorageBreakdown = quota.StorageBreakdown;
     pub const storageBreakdown = quota.storageBreakdown;
 
+    // ---- version history (`files/history.zig`) ----
     pub const VersionPolicy = history.VersionPolicy;
     pub const versionPolicy = history.versionPolicy;
     pub const retainedPerFile = history.retainedPerFile;
@@ -427,15 +427,14 @@ pub const Files = struct {
     pub const historyVersionIn = history.historyVersionIn;
     pub const restoreVersion = history.restoreVersion;
 
+    // ---- thumbnail repair (`files/thumb_repair.zig`) ----
     pub const thumbNeedsRepair = thumb_repair.thumbNeedsRepair;
     pub const thumbnailSourceKind = thumb_repair.thumbnailSourceKind;
     pub const noteCover = thumb_repair.noteCover;
     pub const repairDerivedThumb = thumb_repair.repairDerivedThumb;
 
-    const tree_walk_sql = walk.tree_walk_sql;
-    const subtree_walk_sql = walk.subtree_walk_sql;
+    // ---- tree walks and paths (`files/walk.zig`) ----
     pub const walkTree = walk.walkTree;
-    const treeNodeFromWalkRow = walk.treeNodeFromWalkRow;
     pub const walkChildren = walk.walkChildren;
     pub const walkSubtree = walk.walkSubtree;
     pub const nodeById = walk.nodeById;
@@ -443,15 +442,15 @@ pub const Files = struct {
     pub const wouldFit = walk.wouldFit;
     pub const pathOf = walk.pathOf;
 
+    // ---- linking blobs into the tree (`files/link.zig`) ----
     pub const putFile = link.putFile;
     pub const linkBlob = link.linkBlob;
     pub const linkBlobIndexed = link.linkBlobIndexed;
-    const writeNoteDerived = link.writeNoteDerived;
     pub const placeUpload = link.placeUpload;
 
+    // ---- move and copy (`files/relocate.zig`) ----
     pub const move = relocate.move;
     pub const copy = relocate.copy;
-    const wouldCycle = relocate.wouldCycle;
 };
 
 fn freeList(gpa: std.mem.Allocator, list: *std.ArrayList(Entry)) void {

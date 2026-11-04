@@ -6,33 +6,41 @@ const blob_source = @import("../store/blob_source.zig");
 const thumbnail = @import("thumbnail.zig");
 const inkscan = @import("ink_scan.zig");
 const sn = @import("supernote");
-const fixture = @import("note_index/fixture.zig");
+const noteindex = @import("note_index.zig");
+const note_index_serve = @import("note_index_serve.zig");
 const Md5 = std.crypto.hash.Md5;
 const Allocator = std.mem.Allocator;
+const Error = noteindex.Error;
+const IndexedLayer = noteindex.IndexedLayer;
+const LayerRef = noteindex.LayerRef;
+const NoteRow = noteindex.NoteRow;
+const PageRow = noteindex.PageRow;
+const Parsed = noteindex.Parsed;
+const isCurrent = noteindex.isCurrent;
+const max_layers = noteindex.max_layers;
+const noteHeader = note_index_serve.noteHeader;
+const store = noteindex.store;
+
+/// Bounds the memory a layer content hash costs.
 const hash_chunk_len = blobstore.chunk_len;
+
+/// Header window read from a cover block to sniff MIME and dims; the hard bound
+/// on one cover's RSS at index time.
 const cover_header_probe: usize = 64 * 1024;
-const flag_all_blank: u8 = 0x01;
+
+/// v5 packed record in the `layers` blob, variable stride: u32 offset,
+/// u32 length, u8 flags, u8 slot (wire id), u8 name_len, name bytes.
+pub const layer_rec_head_size = 11;
+/// Longest display name a record carries (`name_len` is one byte); longer truncates.
+pub const max_layer_name = 255;
+pub const max_layer_rec_size = layer_rec_head_size + max_layer_name;
+
+// bit0/bit1 mirror the SNPG wire flags; bit2 is index-only; bit3 is the wire's
+// bit2 (raster image), remapped by `page_payload.recordFlags` when serving.
+pub const flag_all_blank: u8 = 0x01;
 const flag_hidden: u8 = 0x02;
 const flag_current: u8 = 0x04;
 const flag_raster_image: u8 = 0x08;
-const testing = std.testing;
-const Blobs = fixture.Blobs;
-const PeakAllocator = fixture.PeakAllocator;
-const coveredNote = fixture.coveredNote;
-const note_index = @import("note_index.zig");
-const note_index_serve = @import("note_index_serve.zig");
-const Error = note_index.Error;
-const IndexedLayer = note_index.IndexedLayer;
-const LayerRef = note_index.LayerRef;
-const NoteRow = note_index.NoteRow;
-const PageRow = note_index.PageRow;
-const Parsed = note_index.Parsed;
-const isCurrent = note_index.isCurrent;
-const layer_rec_head_size = note_index.layer_rec_head_size;
-const max_layer_name = note_index.max_layer_name;
-const max_layers = note_index.max_layers;
-const noteHeader = note_index_serve.noteHeader;
-const store = note_index.store;
 
 // ---- parse: pure CPU, call outside the DB lock ----
 
@@ -353,6 +361,14 @@ pub fn unpackLayers(blob: []const u8, buf: *[max_layers]LayerRef) Error![]const 
     for (rs, 0..) |r, i| buf[i] = r.ref;
     return buf[0..rs.len];
 }
+
+// ---- tests of private helpers ----
+
+const testing = std.testing;
+const fixture = @import("note_index/fixture.zig");
+const Blobs = fixture.Blobs;
+const PeakAllocator = fixture.PeakAllocator;
+const coveredNote = fixture.coveredNote;
 
 test "a large cover (>2 MB, and at the 20 MB ceiling) is LOCATED without materializing it; the window streams byte-identical" {
     const gpa = testing.allocator;

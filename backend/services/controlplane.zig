@@ -229,12 +229,6 @@ pub const ControlPlaneService = struct {
         return self.files.holdsBlob(user_id, hash);
     }
 
-    // ---- index-backed reads (no file I/O) ----
-
-    // No `.txt` twin of `backfill`: a lazy heal could only write the
-    // `txt_index` verdict, and the verdict must never precede the derived files
-    // (`deferred.runTxt`). `Files.putFile` already wakes the worker.
-
     // ---- internals ----
 
     const First = struct { page: PageRefVO, count: i64 };
@@ -256,45 +250,38 @@ pub const ControlPlaneService = struct {
         return list.items;
     }
 
+    // The rest of the API, one concern per file; the doc comments live on the
+    // definitions.
+
+    // ---- note metadata (`controlplane_meta.zig`) ----
     pub const ReadScope = controlplane_meta.ReadScope;
     pub const lookup = controlplane_meta.lookup;
     pub const noteMeta = controlplane_meta.noteMeta;
     pub const binNoteMeta = controlplane_meta.binNoteMeta;
     const isPdf = controlplane_meta.isPdf;
-    const annotationsIdFor = controlplane_meta.annotationsIdFor;
     const noteMetaIn = controlplane_meta.noteMetaIn;
     pub const historyNoteMeta = controlplane_meta.historyNoteMeta;
-    const pxPerMmFor = controlplane_meta.pxPerMmFor;
-    const Described = controlplane_meta.Described;
-    const describe = controlplane_meta.describe;
 
+    // ---- version history (`controlplane_history.zig`) ----
     pub const history = controlplane_history.history;
     pub const binHistory = controlplane_history.binHistory;
     pub const historyIn = controlplane_history.historyIn;
 
+    // ---- recognised text and PDF links (`controlplane_text.zig`) ----
     pub const pageText = controlplane_text.pageText;
     pub const binPageText = controlplane_text.binPageText;
-    const pageTextIn = controlplane_text.pageTextIn;
     pub const pageTextForMd5 = controlplane_text.pageTextForMd5;
-    const max_recogn_bytes = controlplane_text.max_recogn_bytes;
-    const wordsAt = controlplane_text.wordsAt;
     pub const pageLinks = controlplane_text.pageLinks;
     pub const pageLinksForMd5 = controlplane_text.pageLinksForMd5;
-    const max_links_bytes = controlplane_text.max_links_bytes;
-    const max_links_per_page = controlplane_text.max_links_per_page;
-    const linksAt = controlplane_text.linksAt;
 
-    const IndexRow = controlplane_index.IndexRow;
-    const indexRow = controlplane_index.indexRow;
+    // ---- index-backed reads, no file I/O (`controlplane_index.zig`) ----
     const aspectOf = controlplane_index.aspectOf;
-    const positivePair = controlplane_index.positivePair;
     const indexRowEnsuring = controlplane_index.indexRowEnsuring;
+    // No `.txt` twin of `backfill`: a lazy heal could only write the
+    // `txt_index` verdict, and the verdict must never precede the derived files
+    // (`deferred.runTxt`). `Files.putFile` already wakes the worker.
     const backfill = controlplane_index.backfill;
     const pageRefAt = controlplane_index.pageRefAt;
-    const pageRefsFromIndex = controlplane_index.pageRefsFromIndex;
-    const layerVOsFromBlob = controlplane_index.layerVOsFromBlob;
-    const pageRefsOf = controlplane_index.pageRefsOf;
-    const Summary = controlplane_index.Summary;
     const summarize = controlplane_index.summarize;
 };
 
@@ -366,9 +353,6 @@ test {
     _ = @import("controlplane/mark_test.zig");
     _ = @import("controlplane/aspect_test.zig");
     _ = @import("controlplane/wire_test.zig");
-}
-
-test {
     _ = @import("controlplane/meta_test.zig");
 }
 

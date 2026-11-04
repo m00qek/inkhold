@@ -8,14 +8,14 @@ const txtindex = @import("../txt_index.zig");
 const schema = @import("../../db/schema.zig");
 const testing = std.testing;
 const thumbstore = @import("../../store/thumbs.zig");
-const filesvc = @import("../files.zig");
+const filesmod = @import("../files.zig");
 const deferred = @import("../deferred.zig");
 const drainNow = deferred.drainNow;
 
 /// Real database, blob store and ingest path, minus the thread.
 pub const Fixture = struct {
     db: sqlite.Db,
-    files: filesvc.Files,
+    files: filesmod.Files,
     tmp: testing.TmpDir,
     lock: std.Io.Mutex = .init,
 
@@ -37,7 +37,7 @@ pub const Fixture = struct {
         const thumbs = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
         return .{
             .db = db,
-            .files = filesvc.Files.init(testing.allocator, testing.io, db, blobs, thumbs),
+            .files = filesmod.Files.init(testing.allocator, testing.io, db, blobs, thumbs),
             .tmp = tmp,
         };
     }

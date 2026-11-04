@@ -9,7 +9,7 @@ const sn = @import("supernote");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const schema = @import("../../db/schema.zig");
-const filesvc = @import("../files.zig");
+const filesmod = @import("../files.zig");
 const nb = @import("note_builder");
 const noteindex = @import("../note_index.zig");
 const parseBlob = noteindex.parseBlob;
@@ -21,7 +21,7 @@ pub const layers_edited = @embedFile("layers_edited.note");
 
 pub const Fixture = struct {
     db: sqlite.Db,
-    files: filesvc.Files,
+    files: filesmod.Files,
     tmp: testing.TmpDir,
 
     pub fn init() !Fixture {
@@ -33,7 +33,7 @@ pub const Fixture = struct {
         const store_ = try blobstore.BlobStore.init(testing.io, tmp.dir);
         const thumbs_dir = try tmp.dir.createDirPathOpen(testing.io, "thumbs", .{});
         const thumbs_ = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
-        return .{ .db = db, .files = filesvc.Files.init(testing.allocator, testing.io, db, store_, thumbs_), .tmp = tmp };
+        return .{ .db = db, .files = filesmod.Files.init(testing.allocator, testing.io, db, store_, thumbs_), .tmp = tmp };
     }
 
     pub fn deinit(f: *Fixture) void {

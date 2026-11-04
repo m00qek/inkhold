@@ -17,7 +17,7 @@ const serverError = reply.serverError;
 /// GET /api/controlplane/tree?parent={id} -> a folder's children, breadcrumb and
 /// syncVersion (`parent` omitted or `root` = the root). A pure index read under the
 /// global lock; only a cold blob is backfilled (parsed) in-flight, once.
-pub fn controlplaneTree(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn tree(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
@@ -39,7 +39,7 @@ pub fn controlplaneTree(ctx: *Context, req: *Request, params: Params) anyerror!v
 
 /// GET /api/controlplane/file/metadata/{id} -> the full page list (per-page content
 /// hash and dims), for every previewable kind. A pure index read.
-pub fn controlplaneNote(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn note(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const caller = ctx.caller.?; // controlplane scope
     const files = ctx.files orelse return serverError(ctx, req);
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
@@ -58,13 +58,13 @@ pub fn controlplaneNote(ctx: *Context, req: *Request, params: Params) anyerror!v
 /// envelope is versioned in band, so bumping `page_payload.VERSION` must also turn
 /// over the `?v=` domain (`note_index.pageContentHash`). `manual_db_lock`: plan
 /// under the lock, then stream unlocked with a computed `Content-Length`.
-pub fn controlplanePage(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn page(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return pageBytes(ctx, req, params, .live);
 }
 
 /// GET /api/controlplane/bin/note/{id}/page/{n}?v={hash} -> the same for a trashed
 /// note; `.trashed` can never serve a live note, nor the live route a trashed one.
-pub fn controlplaneBinPage(ctx: *Context, req: *Request, params: Params) anyerror!void {
+pub fn binPage(ctx: *Context, req: *Request, params: Params) anyerror!void {
     return pageBytes(ctx, req, params, .trashed);
 }
 

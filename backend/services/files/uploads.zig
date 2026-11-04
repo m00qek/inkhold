@@ -122,7 +122,7 @@ pub fn sweepUploadSessions(self: Files, max_age_s: i64) !usize {
     return doomed.items.len;
 }
 
-pub fn blobRowExists(self: Files, md5: []const u8) !bool {
+fn blobRowExists(self: Files, md5: []const u8) !bool {
     var s = try self.db.prepare("SELECT 1 FROM blobs WHERE md5 = ?1;");
     defer s.finalize();
     s.bindText(1, md5);
