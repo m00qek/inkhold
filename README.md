@@ -72,6 +72,7 @@ not a multi-tenant service.
 - ⚠️ **Keep your notes backed up.** Your Supernote keeps its own local copy, and
   Inkhold never deletes device-side data — but this is early software syncing your
   real notebooks, so don't make it the *only* place your notes live yet.
+  `inkhold backup` makes that one line in cron: see [Back up your notes](#back-up-your-notes).
 - 🔑 **Back up `cred.key`** (created on first run). It encrypts stored credentials
   and lives outside the database, so a stolen database alone yields nothing —
   and losing the key means everyone has to reset their password.
@@ -194,6 +195,52 @@ first start — afterwards the account exists and changing it renames nothing.
 
 **It serves the browser app at `http://<LAN-IP>:<port>`.** Open that and sign in.
 `make lan-ip` prints the address; without the repository, `hostname -I` will do.
+
+## Back up your notes
+
+Inkhold backs itself up into a folder of plain files: put it on a NAS share, a
+USB disk, or inside your Dropbox or Google Drive folder. The server keeps
+running while it does.
+
+```sh
+inkhold backup create /mnt/nas/inkhold --keep=7   # the folder must already exist
+inkhold backup list   /mnt/nas/inkhold
+inkhold backup verify /mnt/nas/inkhold            # --deep re-reads every file
+```
+
+Each run adds only what is new, so after the first one a nightly backup is
+quick and small, and `--keep=7` keeps a week. Every snapshot in the folder is
+complete on its own. In the container: `docker exec inkhold /inkhold backup
+create /backup --keep=7`, with `/backup` mounted from the host.
+
+**To run it every night**, add one line with `crontab -e` (stdout is the
+summary; problems still go to cron's mail):
+
+```
+0 3 * * *  /usr/local/bin/inkhold --config=/etc/inkhold/config.zon backup create /mnt/nas/inkhold --keep=7 >/dev/null
+```
+
+**To restore**, onto a fresh install with the server stopped:
+
+```sh
+inkhold restore /mnt/nas/inkhold                  # the newest snapshot
+inkhold restore /mnt/nas/inkhold 2026-11-04T030000Z
+```
+
+Things worth knowing:
+
+- **The folder is not encrypted.** Keep it as private as the notes it holds.
+- **`cred.key` is left out** unless you pass `--include-cred-key`. Without it a
+  restore still brings back every note; every account just gets a temporary
+  password, printed once. Keeping `cred.key` somewhere else and putting it back
+  before restoring avoids even that.
+- **Back up each tablet before it signs in to a restored server.** A restore
+  signs every tablet out, because a tablet that syncs against a server older
+  than itself may delete files the server does not have.
+- A backup is slow on purpose: it runs at low priority and reads at 4 MiB/s
+  (`--max-rate` changes it), so syncing from the tablet stays quick meanwhile.
+- On FAT32 a single file cannot exceed 4 GB; on "online-only" cloud folders
+  `verify --deep` downloads everything to check it.
 
 ## Point your Supernote at it
 

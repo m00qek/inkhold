@@ -100,6 +100,51 @@ and [`parsers/spd/spd-format.md`](parsers/spd/spd-format.md).
 - A pair moves and renames as one. Ink is never composited onto a trashed
   document (trashed reads select `NULL` for the mark).
 
+### 2.6 Backups
+
+`inkhold backup` (`services/backup.zig`) is for a household: a folder of plain
+files that a NAS share, a USB disk or a Dropbox folder carries intact. It is a
+separate process beside a running server; scheduling is cron's or systemd's.
+
+- **Layout.** One shared store, `blobs/ab/<md5>[.gz]`, and one directory per
+  snapshot (`YYYY-MM-DDTHHMMSSZ/`: `inkhold.db.gz`, `manifest.txt`, optionally
+  `cred.key`). Blobs never change, so every snapshot is complete on its own:
+  restoring needs one snapshot and the store, never a chain. No packing, no
+  links: each run adds only new files, which is what sync clients upload.
+- **Consistency.** Copy every blob the live `blobs` table names; `VACUUM INTO`
+  a private copy; copy what that copy names and the store still lacks. A blob
+  gone from the live store then was uploaded and purged inside the window, so
+  the snapshot is retaken. Snapshot-first alone is wrong: blob-before-commit
+  (§2.1) covers additions, not purges. References come from `blobs` only, the
+  GC gate's record, which already counts the bin and history.
+- **Atomic.** A snapshot is built as `<name>.partial/`, the manifest written
+  last, then renamed. A manifest is refused when cut short, out of order or
+  disagreeing with its header; `prune` reads every kept one to its end before
+  deleting anything. One writer per directory: an O_EXCL lock file, not
+  `flock` (which SMB and synced folders do not honour), stale after six hours.
+- **Place.** The directory must already exist (a missing one is usually an
+  unmounted NAS; creating it would fill the SD card) and must not be inside
+  the live data. Sharing a filesystem with it is warned about. The private
+  snapshot lives in `<data_dir>/backup-tmp`, never in the watched folder.
+- **Compression.** gzip level 1 per blob, kept only when it saves 10%: on real
+  notebooks and PDFs higher levels buy nothing. md5 names the decompressed
+  bytes; gzip's trailer is checked by `gzfile.inflate`, since
+  `flate.Decompress` does not.
+- **Footprint.** 4 MB of anonymous memory whatever the library's size: md5s
+  are streamed 256 per statement (short read transactions, so the server's WAL
+  checkpoints), buffers sit in one ~420 KB scratch, each SQLite connection
+  gets 1 MB. The process drops to nice 19 and the idle I/O class and reads at
+  4 MiB/s by default. `scripts/footprint.py` pins all of it, at two sizes.
+- **`cred.key`** stays out unless asked for, and the snapshot's legacy
+  `password_md5` column is blanked, so a backup alone holds no usable
+  credential. `restore` uses the snapshot's key, else the install's own if it
+  decrypts the accounts, else a new key and a temporary password per account.
+- **Restore** never writes over a database, refuses while the port answers,
+  verifies first, and renames the database in last. It signs every device out:
+  a tablet that resumes syncing against an older server may delete what it
+  holds that the server lacks (#21's mechanism). Thumbnails and search text
+  are rebuilt by the server (§8.3).
+
 ## 3. Concurrency
 
 ### 3.1 Threads and locks
@@ -487,7 +532,7 @@ per-request bag of service pointers every handler receives.
 | entry | `backend/main.zig`, `cli.zig`, `cli/`, `app.zig`, `routes.zig`, `config.zig` | process start, the CLI grammar, the composition root, the route table |
 | transport | `http/` | the accept loop and TLS, the router, request context, replies, multipart, static files, rate limits, SSE admission, lock histograms |
 | handlers | `handlers/` | one function per route, in `auth`, `device/`, `controlplane/`, `admin`; thin HTTP shells that parse, call a service, reply |
-| services | `services/` | the domain: `files` (tree, bin, quota, history), `auth/`, `controlplane` (the browser's JSON shapes), `sync`, `settings`, the indexers (`note_index`, `spd_index`, `txt_index`, `pdf_index`, `pdf_text`, `ink_scan`, `derive_search`), `deferred` (the worker), `pending`, `search/` |
+| services | `services/` | the domain: `files` (tree, bin, quota, history), `auth/`, `controlplane` (the browser's JSON shapes), `sync`, `settings`, `backup` (§2.6), the indexers (`note_index`, `spd_index`, `txt_index`, `pdf_index`, `pdf_text`, `ink_scan`, `derive_search`), `deferred` (the worker), `pending`, `search/` |
 | stores | `store/` | content-addressed bytes on disk: blobs, thumbnails, derived files |
 | db | `db/` | the SQLite wrapper, the schema and migrations, the reader pool |
 | leaf | `compress/`, `pdf/`, `util/` | code with no dependency on the rest: the gzip stitcher, the MuPDF shims, small helpers |
