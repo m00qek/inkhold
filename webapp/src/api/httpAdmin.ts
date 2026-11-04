@@ -147,6 +147,7 @@ export const adminMethods = {
   },
 };
 
+/** Not clamped: over-quota is a real state the meter draws. */
 function quotaOf(r: { used_bytes?: number; total_bytes?: number }): { usedBytes: number; totalBytes: number } {
   const n = (v: number | undefined): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
   return { usedBytes: n(r.used_bytes), totalBytes: n(r.total_bytes) };

@@ -447,5 +447,3 @@ export function createHttpApi(): Api {
     ...accountMethods,
   };
 }
-
-/** Not clamped: over-quota is a real state the meter draws. */
