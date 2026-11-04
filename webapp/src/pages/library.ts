@@ -5,10 +5,8 @@
 // writers of the state that URL describes (see `router.ts`).
 
 import { el } from "../ui/dom";
-import { brandMark } from "../ui/chrome";
 import { SORT_KEY, readLocal, writeLocal } from "../ui/storage";
-import { accountHref, binNotePageHref, destinationHref, folderHref, go } from "../router";
-import { createFolderCache } from "./folderCache";
+import { binNotePageHref, folderHref, go } from "../router";
 import type { Api } from "../api/types";
 import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
@@ -21,14 +19,12 @@ import { createExporter, type Exporter } from "../export/exporter";
 import { createPdfThumbs, type PdfThumbs } from "../render/pdfThumb";
 import { createViewerSet, type ViewerSet } from "./viewerSet";
 import { createMasonry, type Masonry } from "./masonry";
-import { createNameplate, createQuotaMeter } from "./railFooter";
 import { createTopbar, type SortKey, type Topbar } from "./libraryTopbar";
 import { createAdminDestination, type AdminDestination } from "./adminDestination";
 import { createHistoryScope } from "./historyScope";
 // The breadcrumb is painted here, but its flattening rule is the rail's.
-import { createRail, createRailView, type RailController } from "./rail";
 // Paints into `gallery`; `renderGallery()` closes it, so no teardown hook.
-import { BIN_KEY, createBin, createBinScope, createBinView, type BinController } from "./bin";
+import { createBin, createBinScope, createBinView, type BinController } from "./bin";
 // Static, unlike the console: small, and every user has one.
 import { createAccountPage, type AccountPage } from "./account";
 import type { LibraryState } from "./libraryState";
@@ -41,6 +37,7 @@ import { createLibraryModes } from "./libraryModes";
 import { createLibraryEngines } from "./libraryEngines";
 import { createLibraryViewerDeps } from "./libraryViewerDeps";
 import { createLibraryPreviews } from "./libraryPreviews";
+import { createLibraryRail } from "./libraryRail";
 
 export const ADMIN_KEY = "admin";
 /**
@@ -231,85 +228,18 @@ export function createAppShell(deps: AppDeps): AppShell {
   }
 
   // ---- DOM: rail ----
-  // `aria-busy` until the walk lands: counts are provisional.
-  const nav = el("nav", { class: "nav", "aria-label": "Folders", "aria-busy": "true" });
-
-  /** The shell keeps only where the user is; the tree lives in `folderCache.ts`. */
-  const folderCache = createFolderCache({
-    api,
+  const { folderCache, rail, quota, sidebar } = createLibraryRail(st, {
     handled,
-    onWalked: (changed) => rail.treeWalked(changed),
+    identity: () => identity,
+    api: () => api,
+    enterPendingCategory: () => enterPendingCategory,
+    relabelFolders: () => relabelFolders,
+    renderGallery: () => renderGallery,
+    adminDest: () => adminDest,
+    bin: () => bin,
   });
 
-  const rail: RailController = createRail({
-    view: createRailView(nav),
-    tree: folderCache.tree,
-    // From the route via `folderId`/`destination`, not panel DOM. A destination
-    // reports no folder (one `aria-current` only); the shell's own `folderId` is
-    // kept so leaving the bin lands back in that folder.
-    place: () =>
-      st.destination !== null
-        ? { folderId: null, destination: st.destination, openPath: null }
-        : {
-            folderId: st.folderId,
-            destination: null,
-            openPath: st.listing ? st.listing.path : null,
-            // See `RailPlace.searching`.
-            searching: st.query.trim() !== "",
-          },
-    // The rail never navigates; it names a URL.
-    onOpenFolder: (id) => go(folderHref(id)),
-    onSelectCategory: () => enterPendingCategory(),
-    onOpenDestination: (key) => go(destinationHref(key)),
-    destinationCount: (key) => {
-      switch (key) {
-        // --- BIN COUNT ---
-        case BIN_KEY:
-          return bin.count();
-        // --- ADMIN COUNT ---
-        // None: a household headcount is an ambient stat about housemates.
-        default:
-          return 0;
-      }
-    },
-    destinationState: (key) => {
-      switch (key) {
-        // --- ADMIN STATE ---
-        // Read through `isElevated()`, the panel's fact. Locked before the console was
-        // ever imported, which is also what the gate will show.
-        case ADMIN_KEY:
-          return adminDest.isElevated()
-            ? { icon: "unlock", label: "Admin console unlocked" }
-            : { icon: "lock", label: "Admin console locked" };
-        // The bin has a count, and a row has room for one badge.
-        default:
-          return null;
-      }
-    },
-    isAdmin: () => identity.isAdmin,
-    onSettled: () => renderGallery({ rail: false }),
-    onLabelsSettled: () => relabelFolders(),
-  });
-
-  const nameplate = createNameplate(identity.email, () => go(accountHref()));
-  const quota = createQuotaMeter();
   quota.refresh();
-
-  // The storage meter stays under the nameplate: room for the file you're about
-  // to drop should be visible at a glance.
-  const sidebar = el(
-    "aside",
-    { class: "rail" },
-    el(
-      "div",
-      { class: "brand" },
-      el("span", { class: "brand__mark", html: brandMark() }),
-      el("span", { text: "INKHOLD" }),
-    ),
-    nav,
-    nameplate,
-    quota.el,
-  );
 
   // ---- DOM: topbar ----
   const topbar: Topbar = createTopbar({
