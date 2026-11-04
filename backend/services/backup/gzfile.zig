@@ -60,8 +60,10 @@ pub fn inflate(io: Io, src_dir: Dir, src: []const u8, sink: ?*Io.Writer, head: [
         if (n == 0) break;
         const bytes = s.chunk[0..n];
         if (total < head.len) {
-            const k = @min(head.len - total, n);
-            @memcpy(head[total..][0..k], bytes[0..k]);
+            // Below `head.len`, so it fits a usize on a 32-bit target too.
+            const at: usize = @intCast(total);
+            const k = @min(head.len - at, n);
+            @memcpy(head[at..][0..k], bytes[0..k]);
         }
         crc.update(bytes);
         total += n;
