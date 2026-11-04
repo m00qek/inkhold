@@ -25,8 +25,8 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
   // Six 300x200pt pages, three levels (two would pass a non-recursive walk).
   const bytes = fs.readFileSync(fixturePath("outlined-six-page.pdf"));
   const doc = openBytes(bytes);
-  check(doc >= 1, "outline: the host.fixture opens", `got ${doc}`);
-  equal(e.ink_page_count(doc), 6, "outline: the host.fixture has six pages");
+  check(doc >= 1, "outline: the fixture opens", `got ${doc}`);
+  equal(e.ink_page_count(doc), 6, "outline: the fixture has six pages");
 
   const got = outlineOf(doc);
   check(typeof got === "object", "outline: ink_load_outline succeeds", `got ${got}`);
@@ -60,7 +60,7 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
 
   host.fixture = bytes;
   const sdocOutline = e.ink_open_stream(BigInt(bytes.length));
-  check(sdocOutline >= 1, "outline: the host.fixture opens as a stream", `got ${sdocOutline}`);
+  check(sdocOutline >= 1, "outline: the fixture opens as a stream", `got ${sdocOutline}`);
   equal(outlineOf(sdocOutline).json, got.json, "outline: the streamed answer is byte-identical");
   e.ink_close(sdocOutline);
   host.fixture = savedFixture;
@@ -94,7 +94,7 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
       "<< /Title () /Parent 3 0 R /Dest (nowhere-at-all) /Prev 6 0 R >>",
     ]),
   );
-  check(doc >= 1, "unresolved outline: the host.fixture opens", `got ${doc}`);
+  check(doc >= 1, "unresolved outline: the fixture opens", `got ${doc}`);
   const got = outlineOf(doc);
   check(typeof got === "object", "unresolved outline: ink_load_outline succeeds", `got ${got}`);
 
@@ -131,7 +131,7 @@ const rowOfEntry = (o) => `${o.d}|${o.t}|${"p" in o ? o.p : "-"}`;
     bodies.push(`<< /Title (L${i}) /Parent ${parent} 0 R /Dest [4 0 R /Fit]${child} >>`);
   }
   const doc = openBytes(buildPdf(bodies));
-  check(doc >= 1, "deep outline: the host.fixture opens", `got ${doc}`);
+  check(doc >= 1, "deep outline: the fixture opens", `got ${doc}`);
   const got = outlineOf(doc);
   check(typeof got === "object", "deep outline: ink_load_outline succeeds", `got ${got}`);
 

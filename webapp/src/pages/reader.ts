@@ -8,23 +8,20 @@ import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
 import type { DocSearch } from "../search/docSearch";
 import type { Hash, Id, NoteMeta, NoteSummary, PageRef, Theme } from "../core/types";
-import { createLazyEngine, type LazyEngine } from "../render/lazy";
 import { createTemplateProvider } from "../render/template";
 import { type ApiFailureSink } from "../api/client";
 import { rawFileUrl } from "../core/fileKind";
-import { createOcrController, type OcrState } from "./ocrPanel";
-import { createFindController } from "./findInNote";
-import { createReaderExports } from "./readerExports";
+import { type OcrState } from "./ocrPanel";
 import { createToolbar } from "./toolbar";
 import { createFileStage, type FileStage } from "./fileStage";
-import { createFindBarView, createVersionBanner } from "./readerBars";
+import { createFindBarView, createReaderButtons, createVersionBanner } from "./readerBars";
 import { svg, VIEWER_IC } from "./viewerIcons";
 import { createPager, createZoomStepper, FIT_PAGE, FIT_WIDTH } from "./viewerControls";
 import { createViewerExportMenu } from "./viewerExportMenu";
 import { originSubtitle, createViewerHeader } from "./viewerChrome";
 import { createBinViewerActions, type BinRetention } from "../ui/binViewerActions";
 import { createLayersPanel } from "./layersPanel";
-import { createSidePanel, sidePanelState } from "../ui/sidePanel";
+import { createSidePanel } from "../ui/sidePanel";
 import { createPageIndex } from "./pageIndex";
 import { createLinkLayer } from "./linkLayer";
 import type { PdfLink } from "../core/types";
@@ -35,6 +32,7 @@ import { createReaderNav } from "./readerNav";
 import { createReaderPanels } from "./readerPanels";
 import { createReaderPaint } from "./readerPaint";
 import { createReaderLifecycle } from "./readerLifecycle";
+import { createReaderFeatures } from "./readerFeatures";
 
 export interface ReaderDeps {
   api: Api;
@@ -232,54 +230,7 @@ export function createReader(deps: ReaderDeps): Reader {
   // Icon-only by the user's explicit call, overriding the toolbar's icon+label
   // default for consequential actions; don't add the label back.
   const exportMenu = createViewerExportMenu({ toast: deps.toast, haspopup: "true" });
-  // Icon-only too, same call as Download.
-  const ocrToggle = el("button", {
-    class: "btn",
-    type: "button",
-    "aria-pressed": "false",
-    "aria-label": "Recognized text",
-    title: "Recognized text",
-    html: svg(VIEWER_IC.text, 1.7),
-  });
-  // Enabled only while the focused page has layers (per-page in a `.note`).
-  const layersToggle = el("button", {
-    class: "btn",
-    type: "button",
-    "aria-pressed": "false",
-    "aria-expanded": "false",
-    "aria-controls": "note-layers-panel",
-    "aria-label": "Layers",
-    title: "Layers",
-    html: svg(VIEWER_IC.layers, 1.7),
-  }) as HTMLButtonElement;
-  // Pressed by default: the page index opens with the note.
-  const pagesToggle = el("button", {
-    class: "btn",
-    type: "button",
-    "aria-pressed": "true",
-    "aria-expanded": "true",
-    "aria-controls": "note-pages-panel",
-    "aria-label": "Pages",
-    title: "Pages",
-    html: svg(VIEWER_IC.pages, 1.7),
-  }) as HTMLButtonElement;
-  // Neutral, not red (trash is recoverable; red is for purge), and labelled
-  // because a bare trash glyph reads as danger.
-  const moveBin = el("button", {
-    class: "btn",
-    type: "button",
-    "aria-label": "Move to bin",
-    title: "Move to bin",
-    html: svg(VIEWER_IC.trash, 1.8) + "Move to bin",
-  });
-  // Shown for a `.note` and in any history preview; see `open()`.
-  const versionsBtn = el("button", {
-    class: "btn",
-    type: "button",
-    "aria-label": "Version history",
-    title: "Version history",
-    html: svg(VIEWER_IC.restore, 1.7),
-  });
+  const { ocrToggle, layersToggle, pagesToggle, moveBin, versionsBtn, downloadLink } = createReaderButtons();
   // Bin-origin cluster (retention countdown + menu), swapped in for Move to bin.
   const binActions = createBinViewerActions({
     getMeta: () => st.meta,
@@ -306,15 +257,6 @@ export function createReader(deps: ReaderDeps): Reader {
   // Hidden in non-note modes. Zoom is not here: images zoom too.
   const noteOnly: HTMLElement[] = [findToggle, ocrToggle, layersToggle, pagesToggle, pager.el, exportMenu.el];
 
-  // Non-note modes only. The server sends `Content-Disposition: attachment` for
-  // this URL regardless of type.
-  const downloadLink = el("a", {
-    class: "btn",
-    hidden: true,
-    "aria-label": "Download",
-    title: "Download",
-    html: svg(VIEWER_IC.down, 1.8),
-  }) as HTMLAnchorElement;
   downloadLink.download = "";
 
   const title = header.title;
@@ -373,6 +315,7 @@ export function createReader(deps: ReaderDeps): Reader {
     urlSuspended: false,
     urlTimer: undefined,
   };
+
 
   const { readerApi } = createReaderLifecycle(st, {
     currentPage,
@@ -488,31 +431,6 @@ export function createReader(deps: ReaderDeps): Reader {
     error: "Couldn't load the recognized text. Change page to try again.",
   };
 
-  const ocr = createOcrController({
-    api,
-    failures,
-    view: {
-      setOpen(isOpen) {
-        ocrPanel.setOpen(isOpen);
-        ocrToggle.setAttribute("aria-pressed", String(isOpen));
-      },
-      setToggleEnabled(enabled) {
-        ocrToggle.disabled = !enabled;
-        ocrToggle.title = enabled ? "Recognized text" : "This page has no recognized text";
-      },
-      setState(state) {
-        if (state.kind === "text") {
-          // textContent: device content, never markup; `pre-wrap` keeps line breaks.
-          ocrBody.textContent = state.text;
-          return;
-        }
-        ocrBody.replaceChildren(sidePanelState(state.kind, OCR_MESSAGE[state.kind]));
-      },
-      // The panel changes the stage width, so the page is re-measured.
-      relayout: () => void showPage(st.pageIndex),
-    },
-  });
-
   // --- find in note ---------------------------------------------------------
 
   /**
@@ -520,62 +438,6 @@ export function createReader(deps: ReaderDeps): Reader {
    * relayout re-runs `showPage` and the response is `no-cache`.
    */
   const linksByPage = new Map<string, readonly PdfLink[]>();
-
-  const find = createFindController({
-    api,
-    docs: deps.docSearch,
-    failures,
-    view: {
-      setOpen(isOpen) {
-        root.classList.toggle("is-finding", isOpen);
-        findToggle.setAttribute("aria-pressed", String(isOpen));
-      },
-      setState(state) {
-        findCount.textContent = countText(state);
-        findCount.classList.toggle("is-none", countIsNone(state));
-        // Only a settled result can be approximate.
-        findFuzzy.hidden = !(state.kind === "settled" && state.fuzzy);
-        findAsk.hidden = state.kind !== "fuzzyPrompt";
-        if (state.kind === "idle" || state.kind === "unrecognised") findNote.hidden = true;
-      },
-      setPageMatches: paintOvals,
-      // The strip holds the counts, so they survive its rebuilds.
-      setPageCounts: (counts) => pageIndexPanel.setBadges(counts),
-      showPage: (index) => goToPage(index),
-      setStepEnabled(enabled) {
-        findPrev.disabled = !enabled;
-        findNext.disabled = !enabled;
-      },
-      focusField() {
-        findInput.focus();
-        findInput.select();
-      },
-    },
-  });
-
-  // --- the Export menu ------------------------------------------------------
-  // Reads page and stack through getters; both change on every page turn.
-  const downloads = createReaderExports({
-    api,
-    renderer,
-    menu: exportMenu,
-    toast: deps.toast,
-    meta: () => st.meta,
-    currentPage,
-    layers: noteLayerCtl,
-    // Only the focused page's stack (the previous one survives until the new one commits).
-    liveStack: () => (st.mode === "note" && stackIsCurrent() ? noteLayerCtl.stack() : null),
-  });
-
-  const filmEngine: LazyEngine = createLazyEngine({
-    api,
-    renderer,
-    cache,
-    getTheme,
-    // The panel is the scroll container, so it must be the observer root.
-    root: pageIndexPanel.el,
-    failures,
-  });
 
   function currentPage(): PageRef | undefined {
     return st.meta?.pages[st.pageIndex];
@@ -607,6 +469,37 @@ export function createReader(deps: ReaderDeps): Reader {
     ocr.toggle();
     // Never squeeze the page from both sides.
     if (ocr.isOpen()) relieveDoubleSqueeze();
+  });
+  const { ocr, find, downloads, filmEngine } = createReaderFeatures(st, {
+    deps,
+    currentPage,
+    api: () => api,
+    renderer: () => renderer,
+    cache: () => cache,
+    getTheme: () => getTheme,
+    noteLayerCtl: () => noteLayerCtl,
+    ocrPanel: () => ocrPanel,
+    ocrBody: () => ocrBody,
+    pageIndexPanel: () => pageIndexPanel,
+    exportMenu: () => exportMenu,
+    ocrToggle: () => ocrToggle,
+    findToggle: () => findToggle,
+    findInput: () => findInput,
+    findCount: () => findCount,
+    findNote: () => findNote,
+    findFuzzy: () => findFuzzy,
+    findAsk: () => findAsk,
+    findPrev: () => findPrev,
+    findNext: () => findNext,
+    root: () => root,
+    showPage: () => showPage,
+    stackIsCurrent: () => stackIsCurrent,
+    goToPage: () => goToPage,
+    countText: () => countText,
+    countIsNone: () => countIsNone,
+    paintOvals: () => paintOvals,
+    failures: () => failures,
+    OCR_MESSAGE: () => OCR_MESSAGE,
   });
   layersToggle.addEventListener("click", () => {
     st.layersPanelOpen = !st.layersPanelOpen;

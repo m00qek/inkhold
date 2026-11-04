@@ -35,14 +35,14 @@ function errorText() {
 // --- the round trip ---
 // Three pages with a /Link each; only page 1 is written on.
 const source = annotatedPdf(3);
-check(/\/Annots/.test(source.toString("latin1")), "the host.fixture really has /Annots");
+check(/\/Annots/.test(source.toString("latin1")), "the fixture really has /Annots");
 
 const wdoc2 = openBytes(source);
-check(wdoc2 >= 1, "the annotated host.fixture opens", `got ${wdoc2}`);
+check(wdoc2 >= 1, "the annotated fixture opens", `got ${wdoc2}`);
 const beforePages = [0, 1, 2].map((p) => renderCopy(wdoc2, p, 1));
 check(
   beforePages.every((f) => f && f.w === 200 && f.h === 100),
-  "the host.fixture's three pages render",
+  "the fixture's three pages render",
 );
 
 const inkBox = [[20, 10, 80, 30]];
@@ -122,7 +122,7 @@ if (delta) {
     "<< >>",
   ]);
   const sdoc = openBytes(shared);
-  check(sdoc >= 1, "the shared-resources host.fixture opens", `got ${sdoc}`);
+  check(sdoc >= 1, "the shared-resources fixture opens", `got ${sdoc}`);
   const m0 = coverage(100, 50, [[10, 5, 40, 15, 255]]);
   const m1 = coverage(100, 50, [[50, 30, 80, 40, 255]]);
   equal(annotate(sdoc, 0, m0, 100, 50, [2, 0, 0, 2, 0, 0]), 0, "shared: annotate page 0");
@@ -167,7 +167,7 @@ if (delta) {
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
   ]);
   const idoc = openBytes(inherited);
-  check(idoc >= 1, "the inherited-resources host.fixture opens", `got ${idoc}`);
+  check(idoc >= 1, "the inherited-resources fixture opens", `got ${idoc}`);
   const beforeInk = renderCopy(idoc, 0, 1);
   let inkyBefore = 0;
   for (let i = 0; i < beforeInk.px.length; i += 4) if (beforeInk.px[i] < 128) inkyBefore += 1;
@@ -246,7 +246,7 @@ const broken = Buffer.from(
   sound.toString("latin1").replace(/startxref\n(\d+)/, (_, n) => `startxref\n${"9".repeat(n.length)}`),
   "latin1",
 );
-check(!sound.equals(broken), "the repair host.fixture really is corrupted");
+check(!sound.equals(broken), "the repair fixture really is corrupted");
 const pdoc = openBytes(broken);
 check(pdoc >= 1, "MuPDF repairs and opens the broken file", `got ${pdoc}`);
 equal(annotate(pdoc, 0, mask, 100, 50, [2, 0, 0, 2, 0, 0]), -2, "a repaired file is refused");
@@ -296,7 +296,7 @@ if (delta) {
   host.fixture = annotatedPdf(3);
   check(host.fixture.equals(source), "the streamed run uses the same bytes as the buffered one");
   const sdoc3 = e.ink_open_stream(BigInt(host.fixture.length));
-  check(sdoc3 >= 1, "the annotated host.fixture opens as a stream", `got ${sdoc3}`);
+  check(sdoc3 >= 1, "the annotated fixture opens as a stream", `got ${sdoc3}`);
   equal(annotate(sdoc3, 1, mask, 100, 50, [2, 0, 0, 2, 0, 0]), 0, "annotate over the stream");
   const streamDelta = takeExport(e.ink_export_incremental(sdoc3));
   check(streamDelta !== null, "the streamed incremental export succeeds", errorText());

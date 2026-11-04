@@ -15,7 +15,7 @@ export function failureCount() {
 
 export const [, , wasmPath, pdfPath] = process.argv;
 if (!wasmPath || !pdfPath) {
-  console.error("usage: node pdf_decode_abi.mjs <pdf-decode.wasm> <host.fixture.pdf>");
+  console.error("usage: node pdf_decode_abi.mjs <pdf-decode.wasm> <fixture.pdf>");
   process.exit(2);
 }
 

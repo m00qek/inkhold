@@ -57,7 +57,7 @@ const LINK_ANNOTS = [
 /* --- upright: the rects, the resolved target, and what does NOT survive ---- */
 {
   const doc = openBytes(linkedPdf([0, 0, 200, 100], "", LINK_ANNOTS));
-  check(doc >= 1, "links: the host.fixture opens", `got ${doc}`);
+  check(doc >= 1, "links: the fixture opens", `got ${doc}`);
   const got = pageLinks(doc, 0);
   check(typeof got === "object", "links: ink_page_links succeeds", `got ${got}`);
 
@@ -108,7 +108,7 @@ const LINK_ANNOTS = [
 
   host.fixture = linkedPdf([0, 0, 200, 100], "", LINK_ANNOTS);
   const sdocL = e.ink_open_stream(BigInt(host.fixture.length));
-  check(sdocL >= 1, "links: the host.fixture opens as a stream", `got ${sdocL}`);
+  check(sdocL >= 1, "links: the fixture opens as a stream", `got ${sdocL}`);
   equal(pageLinks(sdocL, 0).json, got.json, "links: the streamed answer is byte-identical");
   e.ink_close(sdocL);
   host.fixture = savedFixture;
@@ -125,7 +125,7 @@ const LINK_ANNOTS = [
     linkAnnot([80, 60, 110, 80], "/S /URI /URI (https://example.invalid/crop)"),
   ];
   const doc = openBytes(linkedPdf([50, 30, 250, 130], " /CropBox [70 50 190 110]", cropAnnots));
-  check(doc >= 1, "cropped links: the host.fixture opens", `got ${doc}`);
+  check(doc >= 1, "cropped links: the fixture opens", `got ${doc}`);
   const at = e.ink_alloc(8);
   e.ink_page_size(doc, 0, at, at + 4);
   const sz = new DataView(e.memory.buffer);
@@ -147,7 +147,7 @@ const LINK_ANNOTS = [
 {
   const rotAnnots = [linkAnnot([20, 20, 80, 60], "/S /URI /URI (https://example.invalid/rot)")];
   const doc = openBytes(linkedPdf([0, 0, 200, 100], " /Rotate 90", rotAnnots));
-  check(doc >= 1, "rotated links: the host.fixture opens", `got ${doc}`);
+  check(doc >= 1, "rotated links: the fixture opens", `got ${doc}`);
   const at = e.ink_alloc(8);
   e.ink_page_size(doc, 0, at, at + 4);
   const sz = new DataView(e.memory.buffer);
@@ -174,7 +174,7 @@ const LINK_ANNOTS = [
     String.raw`/S /URI /URI (https://x.invalid/?a="b"\\\001)`,
   );
   const doc = openBytes(linkedPdf([0, 0, 200, 100], "", [nasty]));
-  check(doc >= 1, "hostile links: the host.fixture opens", `got ${doc}`);
+  check(doc >= 1, "hostile links: the fixture opens", `got ${doc}`);
   const got = pageLinks(doc, 0); // JSON.parse inside — a bad payload throws here
   equal(got.links.length, 1, "hostile links: the link survives escaping", got.json);
   equal(

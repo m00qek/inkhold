@@ -45,7 +45,7 @@ const WORDS_TEXT = String.raw`Marmalade, avalia\347\343o \(quince\) page-range`;
 let uprightWords = null;
 {
   const doc = openBytes(textPdf([0, 0, 300, 100], "", WORDS_TEXT));
-  check(doc >= 1, "words: the host.fixture opens", `got ${doc}`);
+  check(doc >= 1, "words: the fixture opens", `got ${doc}`);
   const got = pageWords(doc, 0);
   check(typeof got === "object", "words: ink_page_words succeeds", `got ${got}`);
 
@@ -85,7 +85,7 @@ let uprightWords = null;
 
   host.fixture = textPdf([0, 0, 300, 100], "", WORDS_TEXT);
   const swords = e.ink_open_stream(BigInt(host.fixture.length));
-  check(swords >= 1, "words: the host.fixture opens as a stream", `got ${swords}`);
+  check(swords >= 1, "words: the fixture opens as a stream", `got ${swords}`);
   equal(pageWords(swords, 0).json, got.json, "words: the streamed answer is byte-identical");
   e.ink_close(swords);
   host.fixture = savedFixture;
@@ -97,7 +97,7 @@ let uprightWords = null;
 /* --- /Rotate 90: a horizontal word becomes a tall box --- */
 if (uprightWords) {
   const doc = openBytes(textPdf([0, 0, 300, 100], " /Rotate 90", WORDS_TEXT));
-  check(doc >= 1, "rotated words: the host.fixture opens", `got ${doc}`);
+  check(doc >= 1, "rotated words: the fixture opens", `got ${doc}`);
   const at = e.ink_alloc(8);
   e.ink_page_size(doc, 0, at, at + 4);
   const sz = new DataView(e.memory.buffer);
@@ -161,7 +161,7 @@ function multiLinePdf(lines) {
       ["epsilon", 30],
     ]),
   );
-  check(doc >= 1, "line ids: the host.fixture opens", `got ${doc}`);
+  check(doc >= 1, "line ids: the fixture opens", `got ${doc}`);
   const got = pageWords(doc, 0);
   check(typeof got === "object", "line ids: ink_page_words succeeds", `got ${got}`);
 
@@ -218,7 +218,7 @@ function multiLinePdf(lines) {
     ["epsilon", 30],
   ]);
   const sline = e.ink_open_stream(BigInt(host.fixture.length));
-  check(sline >= 1, "line ids: the host.fixture opens as a stream", `got ${sline}`);
+  check(sline >= 1, "line ids: the fixture opens as a stream", `got ${sline}`);
   equal(pageWords(sline, 0).json, got.json, "line ids: the streamed answer is byte-identical");
   e.ink_close(sline);
   host.fixture = savedFixture;

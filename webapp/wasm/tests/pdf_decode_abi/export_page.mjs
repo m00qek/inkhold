@@ -35,7 +35,7 @@ if (upright) {
 // out with the same pixel count.
 const rotated = tinyPdf([0, 0, 200, 100], " /Rotate 90", "0 0 0 rg\n20 20 60 40 re f");
 const rdoc = openBytes(rotated);
-check(rdoc >= 1, "the /Rotate 90 host.fixture opens", `got ${rdoc}`);
+check(rdoc >= 1, "the /Rotate 90 fixture opens", `got ${rdoc}`);
 const rscratch = e.ink_alloc(8);
 e.ink_page_size(rdoc, 0, rscratch, rscratch + 4);
 const rdv = new DataView(e.memory.buffer);
