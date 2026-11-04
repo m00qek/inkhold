@@ -246,6 +246,12 @@ TLS 1.3 is terminated in-process (no reverse proxy needed). Set `tls.enabled =
 true` with a cert and key; `bash scripts/dev-cert.sh` makes a self-signed dev
 certificate to get started.
 
+If a reverse proxy terminates TLS instead, set `trusted_proxy` to its address so
+the per-IP rate limits key on the client in `X-Real-IP` (or the last
+`X-Forwarded-For` hop) rather than on the proxy; have the proxy mark the session
+cookie `Secure` (nginx: `proxy_cookie_flags ~ secure`), since Inkhold only does
+so when it terminates TLS itself.
+
 ## For developers
 
 [`DESIGN.md`](DESIGN.md) holds the invariants, the reverse-engineered device

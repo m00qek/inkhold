@@ -40,6 +40,12 @@
     // the next click. Generous, because under TLS a reopen is a handshake.
     .idle_timeout_s = 300,
 
+    // Behind ONE reverse proxy that terminates TLS, its address. Requests from
+    // that peer are rate-limited by the client in `X-Real-IP` (else the last
+    // `X-Forwarded-For` hop) instead of by the proxy, which would otherwise
+    // give every client a single shared bucket. Empty trusts no such header.
+    .trusted_proxy = "",
+
     .tls = .{
         // Terminate TLS in-process. When false, plaintext HTTP is served.
         .enabled = false,

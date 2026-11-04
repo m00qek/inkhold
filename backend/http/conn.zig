@@ -95,9 +95,25 @@ pub const Conn = struct {
         return self.stream.socket.handle;
     }
 
-    /// The peer's address for rate-limit keying (no proxy: TLS terminates here).
+    /// The socket peer's address.
     pub fn ip(self: *const Conn) ?[]const u8 {
         return if (self.ip_len == 0) null else self.ip_buf[0..self.ip_len];
+    }
+
+    /// The address rate limits key `req` by: the peer, unless the peer is the
+    /// configured `trusted_proxy`, in which case the client it says it fronts.
+    /// Points into the request head, so it lives as long as the request.
+    pub fn clientIp(self: *const Conn, trusted_proxy: []const u8, req: *router.Request) ?[]const u8 {
+        const peer = self.ip() orelse return null;
+        if (trusted_proxy.len == 0 or !std.mem.eql(u8, peer, trusted_proxy)) return peer;
+        var real_ip: ?[]const u8 = null;
+        var forwarded: ?[]const u8 = null;
+        var it = req.iterateHeaders();
+        while (it.next()) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "x-real-ip")) real_ip = h.value;
+            if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-for")) forwarded = h.value;
+        }
+        return forwardedClient(real_ip, forwarded) orelse peer;
     }
 
     fn handshake(self: *Conn, opts: TlsOptions) !void {
@@ -124,11 +140,11 @@ pub const Conn = struct {
                 return .close;
             };
         }
-        ctx.client_ip = self.ip();
         while (true) {
             // A closed peer, a malformed head or a read error all end here.
             var req = self.http.receiveHead() catch return .close;
             if (router.isHeld(routes, &req)) return .{ .held = req };
+            ctx.client_ip = self.clientIp(ctx.config.trusted_proxy, &req);
             transport.handle(ctx, routes, &req) catch |err| {
                 log.warn("connection error: {t}", .{err});
                 return .close;
@@ -139,6 +155,25 @@ pub const Conn = struct {
         }
     }
 };
+
+/// What a trusted proxy says about its client. `X-Real-IP` is what a single
+/// proxy sets outright; failing that, the LAST `X-Forwarded-For` hop, the one
+/// that proxy appended. Earlier hops are whatever the client claimed, and an
+/// implausible value is ignored rather than keyed on.
+fn forwardedClient(real_ip: ?[]const u8, forwarded: ?[]const u8) ?[]const u8 {
+    if (real_ip) |v| if (plausibleIp(std.mem.trim(u8, v, " "))) |ip| return ip;
+    const list = forwarded orelse return null;
+    var hops = std.mem.splitBackwardsScalar(u8, list, ',');
+    return plausibleIp(std.mem.trim(u8, hops.first(), " "));
+}
+
+/// An address-shaped string: short enough for a rate-limit key, hex digits,
+/// dots and colons only. Not a parse; just a refusal to key on junk.
+fn plausibleIp(s: []const u8) ?[]const u8 {
+    if (s.len == 0 or s.len > 45) return null;
+    for (s) |c| if (!std.ascii.isHex(c) and c != '.' and c != ':') return null;
+    return s;
+}
 
 fn peerIp(stream: Io.net.Stream, buf: []u8) ?[]const u8 {
     var storage: std.posix.sockaddr.storage = undefined;
@@ -175,6 +210,20 @@ test "formatPeerIp renders an IPv4 dotted quad" {
     in.addr = std.mem.bytesToValue(u32, &[4]u8{ 192, 168, 1, 42 });
     var buf: [46]u8 = undefined;
     try std.testing.expectEqualStrings("192.168.1.42", formatPeerIp(&storage, &buf).?);
+}
+
+test "forwardedClient prefers X-Real-IP, else the hop the proxy appended, and refuses junk" {
+    const expectEq = std.testing.expectEqualStrings;
+    try expectEq("203.0.113.7", forwardedClient("203.0.113.7", "1.2.3.4").?);
+    try expectEq("203.0.113.7", forwardedClient(" 203.0.113.7 ", null).?);
+    // Client-supplied hops come first; the trusted proxy appends the real one last.
+    try expectEq("203.0.113.7", forwardedClient(null, "spoofed, 10.0.0.9, 203.0.113.7").?);
+    try expectEq("2001:db8::1", forwardedClient(null, "2001:db8::1").?);
+    // Junk in X-Real-IP falls through to X-Forwarded-For; junk everywhere yields nothing.
+    try expectEq("203.0.113.7", forwardedClient("not an ip", "203.0.113.7").?);
+    try std.testing.expect(forwardedClient("evil;drop", "a b") == null);
+    try std.testing.expect(forwardedClient(null, "") == null);
+    try std.testing.expect(forwardedClient(null, null) == null);
 }
 
 test "a parked plaintext connection is one struct of about 34 KB; TLS state is separate" {

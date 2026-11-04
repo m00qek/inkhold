@@ -56,6 +56,12 @@ pub const Config = struct {
     /// A keep-alive socket idle this long is closed; the browser reopens one
     /// on the next click. Generous, since under TLS a reopen is a handshake.
     idle_timeout_s: u32 = 300,
+    /// The one reverse proxy allowed to speak for its clients. When the peer
+    /// is exactly this address, IP rate limits key on the client it names in
+    /// `X-Real-IP` (else the last `X-Forwarded-For` hop) instead of on the
+    /// proxy itself, which would give every client one shared bucket. Empty
+    /// (the default, TLS terminated here) trusts no header from anyone.
+    trusted_proxy: []const u8 = "",
     tls: Tls = .{},
     history: History = .{},
 };
@@ -188,6 +194,7 @@ test "parse full config" {
         \\.{
         \\    .host = "0.0.0.0",
         \\    .port = 9443,
+        \\    .trusted_proxy = "127.0.0.1",
         \\    .tls = .{
         \\        .enabled = true,
         \\        .cert_path = "/etc/sn/cert.pem",
@@ -200,6 +207,7 @@ test "parse full config" {
     const c = loaded.config;
     try std.testing.expectEqualStrings("0.0.0.0", c.host);
     try std.testing.expectEqual(@as(u16, 9443), c.port);
+    try std.testing.expectEqualStrings("127.0.0.1", c.trusted_proxy);
     try std.testing.expect(c.tls.enabled);
     try std.testing.expectEqualStrings("/etc/sn/cert.pem", c.tls.cert_path);
     try std.testing.expectEqual(@as(usize, 1), c.tls.cipher_suites.len);
@@ -212,6 +220,7 @@ test "defaults fill in for a minimal config" {
     try std.testing.expectEqual(@as(u16, 1234), loaded.config.port);
     try std.testing.expectEqualStrings("127.0.0.1", loaded.config.host);
     try std.testing.expect(!loaded.config.tls.enabled);
+    try std.testing.expectEqualStrings("", loaded.config.trusted_proxy);
     try std.testing.expectEqualStrings("certs/cert.pem", loaded.config.tls.cert_path);
     try std.testing.expectEqualStrings("inkhold.db", loaded.config.db_path);
     try std.testing.expectEqualStrings("data", loaded.config.data_dir);
