@@ -2,42 +2,33 @@
 
 import { currentTheme, setTheme } from "../../ui/theme";
 import type { Theme } from "../../core/types";
-import { type LazyEngine } from "../../render/lazy";
-import { type Thumbnails } from "../../render/thumbnails";
-import { type Topbar, type View } from "./libraryTopbar";
-// The breadcrumb is painted here, but its flattening rule is the rail's.
-// Paints into `gallery`; `renderGallery()` closes it, so no teardown hook.
-// Static, unlike the console: small, and every user has one.
-import type { LibraryState } from "./libraryState";
-import { createLibraryRender } from "./libraryRender";
-import { type AppDeps } from "./library";
+import { type View } from "./libraryTopbar";
+import type { LibraryCtx } from "./libraryContext";
 
-import type { ViewerSet } from "../viewer/viewerSet";
-
-export interface LibraryViewParts {
-  cache: () => AppDeps["cache"];
-  renderGallery: () => ReturnType<typeof createLibraryRender>["renderGallery"];
-  topbar: () => Topbar;
-  thumbnails: () => Thumbnails;
-  galleryEngine: () => LazyEngine;
-  reader: () => ViewerSet["reader"];
+export interface LibraryView {
+  setView(next: View): void;
+  /** Drop off-theme bitmaps and repaint what's on screen; the rest re-lazy. */
+  repaintForTheme(previous: Theme): void;
+  /** A no-op if already in force; the first press of the followed theme still pins it. */
+  setThemeTo(next: Theme): void;
 }
 
-export function createLibraryView(st: LibraryState, p: LibraryViewParts) {
+export function createLibraryView(ctx: LibraryCtx): LibraryView {
+  const { st } = ctx;
   function setView(next: View): void {
     st.view = next;
-    p.topbar().setView(next);
-    p.renderGallery()();
+    ctx.topbar.setView(next);
+    ctx.render.renderGallery();
   }
 
   /** Drop off-theme bitmaps and repaint what's on screen; the rest re-lazy. */
   function repaintForTheme(previous: Theme): void {
-    void p.cache().evictTheme?.(previous);
-    p.thumbnails().evictTheme(previous);
+    void ctx.cache.evictTheme?.(previous);
+    ctx.thumbnails.evictTheme(previous);
     // The Appearance control claims a theme, including on the OS-flip path.
     st.accountPage?.themeChanged();
-    p.galleryEngine().bumpTheme();
-    p.reader().bumpTheme();
+    ctx.galleryEngine.bumpTheme();
+    ctx.viewers.reader.bumpTheme();
   }
 
   /**

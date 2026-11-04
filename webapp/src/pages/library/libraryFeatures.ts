@@ -1,85 +1,46 @@
 // The library's feature wiring: version history, rename, card actions, gallery cards and search rows, uploads, and the account page's host.
 
 import { destinationHref, folderHref, go } from "../../router";
-import { createFolderCache } from "../folderCache";
-import type { Entry, Id } from "../../core/types";
+import type { Entry } from "../../core/types";
 import { NameTakenError } from "../../api/client";
 import { openRenameDialog } from "../../ui/renameDialog";
 import { createUploadZone, type UploadDestination, type UploadZone } from "../../ui/uploadZone";
 import { openConflictDialog } from "../../ui/uploadConflict";
-import { type Exporter } from "../../export/exporter";
-import { type LazyEngine } from "../../render/lazy";
-import { type ViewerSet } from "../viewer/viewerSet";
-import { createQuotaMeter } from "../railFooter";
 import { createGalleryCards, type GalleryCards } from "../galleryCards";
 import { createCardActions } from "../cardActions";
-import { createHistoryController } from "../historyPanel";
-import type { FileVersion } from "../../core/types";
+import { createHistoryController, type HistoryController } from "../historyPanel";
 import { createGallerySearch, type GallerySearch } from "../gallerySearch";
-// The breadcrumb is painted here, but its flattening rule is the rail's.
-import { type RailController } from "../rail";
-// Paints into `gallery`; `renderGallery()` closes it, so no teardown hook.
-import { BIN_KEY, type BinController } from "../bin/bin";
-// Static, unlike the console: small, and every user has one.
-import { type AccountHost, type AccountPage } from "../account/account";
-import type { LibraryState } from "./libraryState";
-import { createLibraryRender } from "./libraryRender";
-import { createLibraryData } from "./libraryData";
-import { createLibraryView } from "./libraryView";
-import { type AppDeps } from "./library";
+import { BIN_KEY } from "../bin/bin";
+import { type AccountHost } from "../account/account";
+import type { LibraryCtx } from "./libraryContext";
 
-import type { Topbar } from "./libraryTopbar";
-import type { Api } from "../../api/types";
-
-export interface LibraryFeaturesParts {
-  deps: AppDeps;
-  sessionDidExpire: () => void;
-  handled: (e: unknown) => boolean;
-  setDestinationMode: (which: "bin" | "admin" | "account", open: boolean) => void;
-  toast: (message: string) => void;
-  account: () => AccountPage;
-  scheduleSpan: () => void;
-  openHistoryPreview: (noteId: Id, version: FileVersion, startPage?: number) => Promise<void>;
-  openAnnotationsPreview: (documentId: Id, markId: Id, version: FileVersion) => Promise<void>;
-  restoreVersion: (noteId: Id, version: { md5: string; createdAt: number }, _noteName: string, returnTo?: Id) => Promise<boolean>;
-  identity: () => AppDeps["identity"];
-  api: () => Api;
-  setThemeTo: () => ReturnType<typeof createLibraryView>["setThemeTo"];
-  refetch: () => ReturnType<typeof createLibraryData>["refetch"];
-  renderGallery: () => ReturnType<typeof createLibraryRender>["renderGallery"];
-  emptyState: () => ReturnType<typeof createLibraryRender>["emptyState"];
-  key: () => (id: Id | null) => string;
-  folderCache: () => ReturnType<typeof createFolderCache>;
-  rail: () => RailController;
-  quota: () => ReturnType<typeof createQuotaMeter>;
-  crumbs: () => Topbar["crumbs"];
-  sortWrap: () => Topbar["sortWrap"];
-  segmented: () => Topbar["segmented"];
-  gallery: () => HTMLElementTagNameMap["section"];
-  content: () => HTMLElementTagNameMap["div"];
-  galleryEngine: () => LazyEngine;
-  imgLazy: () => IntersectionObserver | null;
-  exporter: () => Exporter;
-  viewers: () => ViewerSet;
-  root: () => HTMLElement;
-  bin: () => BinController;
+export interface LibraryFeatures {
+  historyController: HistoryController;
+  galleryCards: GalleryCards;
+  gallerySearch: GallerySearch;
+  /** Where a drop or Upload lands right now; null where Upload is hidden. */
+  uploadDestination(): UploadDestination | null;
+  uploadZone: UploadZone;
+  /** Everything the account page borrows from the shell. */
+  accountHost: AccountHost;
 }
 
-export function createLibraryFeatures(st: LibraryState, p: LibraryFeaturesParts) {
+export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
+  const { st } = ctx;
   // Each gets an explicit context; built once every dependency exists. Order
   // matters: cards use `cardActions`' menu, search rows use the card factory.
   const historyController = createHistoryController({
-    api: p.api(),
-    host: p.root(),
-    toast: p.toast,
-    handled: p.handled,
+    api: ctx.api,
+    host: ctx.root,
+    toast: ctx.toast,
+    handled: ctx.handled,
     // With `annotationsOn`, `noteId` is a `.mark` and the live document opens
     // with the ink rerouted; without it, the file's past version opens.
     openPreview: (noteId, version, annotationsOn) =>
       void (annotationsOn != null
-        ? p.openAnnotationsPreview(annotationsOn, noteId, version)
-        : p.openHistoryPreview(noteId, version)),
-    restore: (noteId, version, noteName) => p.restoreVersion(noteId, version, noteName),
+        ? ctx.previews.openAnnotationsPreview(annotationsOn, noteId, version)
+        : ctx.previews.openHistoryPreview(noteId, version)),
+    restore: (noteId, version, noteName) => ctx.previews.restoreVersion(noteId, version, noteName),
   });
 
   /**
@@ -89,7 +50,7 @@ export function createLibraryFeatures(st: LibraryState, p: LibraryFeaturesParts)
   */
   async function onRename(entry: Entry): Promise<void> {
     await openRenameDialog({
-      host: p.root(),
+      host: ctx.root,
       entry: {
         name: entry.name,
         fileType: entry.kind === "note" ? entry.fileType : "",
@@ -98,29 +59,29 @@ export function createLibraryFeatures(st: LibraryState, p: LibraryFeaturesParts)
       submit: async (fullName) => {
         let updated: Entry;
         try {
-          updated = await p.api().rename(entry.id, fullName);
+          updated = await ctx.api.rename(entry.id, fullName);
         } catch (e) {
           if (e instanceof NameTakenError) throw e; // the dialog keeps itself open
-          if (p.handled(e)) return; // a dead session etc. — routed, dialog closes
-          p.toast("Couldn't rename that. Try again.");
+          if (ctx.handled(e)) return; // a dead session etc. — routed, dialog closes
+          ctx.toast("Couldn't rename that. Try again.");
           return;
         }
         entry.name = updated.name;
-        p.renderGallery()();
-        p.toast(`Renamed to '${updated.name}'.`);
+        ctx.render.renderGallery();
+        ctx.toast(`Renamed to '${updated.name}'.`);
       },
     });
   }
 
   const cardActions = createCardActions({
-    api: p.api(),
-    exporter: p.exporter(),
-    toast: p.toast,
-    handled: p.handled,
-    sessionDidExpire: p.sessionDidExpire,
-    onTrash: (entry) => void p.bin().trash(entry),
+    api: ctx.api,
+    exporter: ctx.exporter,
+    toast: ctx.toast,
+    handled: ctx.handled,
+    sessionDidExpire: ctx.sessionDidExpire,
+    onTrash: (entry) => void ctx.bin.trash(entry),
     onRename: (entry) => void onRename(entry),
-    isCategoryRoot: (entry) => entry.kind === "folder" && p.rail().categoryIconFor(entry) !== null,
+    isCategoryRoot: (entry) => entry.kind === "folder" && ctx.rail.categoryIconFor(entry) !== null,
     onHistory: (noteSummary, anchor) =>
       historyController.open(
         { id: noteSummary.id, name: noteSummary.name, fileType: noteSummary.fileType },
@@ -134,26 +95,26 @@ export function createLibraryFeatures(st: LibraryState, p: LibraryFeaturesParts)
   });
 
   const galleryCards: GalleryCards = createGalleryCards({
-    galleryEngine: p.galleryEngine(),
-    imgLazy: p.imgLazy(),
+    galleryEngine: ctx.galleryEngine,
+    imgLazy: ctx.imgLazy,
     getView: () => st.view,
-    labelFor: (folder) => p.rail().labelFor(folder),
-    categoryIconFor: (folder) => p.rail().categoryIconFor(folder),
-    pendingCategoryOf: (folder) => p.rail().pendingCategoryOf(folder),
+    labelFor: (folder) => ctx.rail.labelFor(folder),
+    categoryIconFor: (folder) => ctx.rail.categoryIconFor(folder),
+    pendingCategoryOf: (folder) => ctx.rail.pendingCategoryOf(folder),
     // `selectCategory` already fires `onSelectCategory`; don't call it again.
-    onSelectCategory: (cat) => p.rail().selectCategory(cat),
-    scheduleSpan: p.scheduleSpan,
+    onSelectCategory: (cat) => ctx.rail.selectCategory(cat),
+    scheduleSpan: ctx.scheduleSpan,
     cardMenu: cardActions.cardMenu,
   });
 
   const gallerySearch: GallerySearch = createGallerySearch({
-    gallery: p.gallery(),
+    gallery: ctx.gallery,
     getSearchState: () => st.searchState,
-    folders: p.folderCache(),
-    treeLoaded: () => p.rail().loaded(),
-    labelFor: (folder) => p.rail().labelFor(folder),
+    folders: ctx.folderCache,
+    treeLoaded: () => ctx.rail.loaded(),
+    labelFor: (folder) => ctx.rail.labelFor(folder),
     resultCard: galleryCards.resultCard,
-    emptyState: p.emptyState(),
+    emptyState: ctx.render.emptyState,
     indexPending: () => st.indexPending,
   });
 
@@ -164,72 +125,72 @@ export function createLibraryFeatures(st: LibraryState, p: LibraryFeaturesParts)
   * rail's identity resolution.
   */
   function uploadDestination(): UploadDestination | null {
-    if (st.destination !== null || p.viewers().active() !== null) return null;
-    if (st.query.trim() !== "" || p.rail().pending() !== null) return null;
+    if (st.destination !== null || ctx.viewers.active() !== null) return null;
+    if (st.query.trim() !== "" || ctx.rail.pending() !== null) return null;
     return {
       id: st.folderId,
-      templates: st.folderId !== null && p.rail().categoryFor({ id: st.folderId })?.templates === true,
+      templates: st.folderId !== null && ctx.rail.categoryFor({ id: st.folderId })?.templates === true,
     };
   }
 
   /** The zone owns feedback, pre-flight, progress and toasts; the shell owns the rest. */
   const uploadZone: UploadZone = createUploadZone({
-    target: p.gallery(),
+    target: ctx.gallery,
     // Over the scroll container, not the gallery, so a short listing's empty space
     // is still a target.
-    overlayHost: p.content(),
-    listHost: p.root(),
+    overlayHost: ctx.content,
+    listHost: ctx.root,
     destination: uploadDestination,
     // Unknown never blocks; the server's 413 is the authority.
-    remainingBytes: () => p.quota().remainingBytes(),
+    remainingBytes: () => ctx.quota.remainingBytes(),
     // File names only: an upload never replaces a folder. Null means unknown, so
     // the zone doesn't ask.
     existingNames: (id) => {
-      const cached = p.folderCache().get(id);
+      const cached = ctx.folderCache.get(id);
       return cached ? cached.entries.filter((e) => e.kind === "note").map((e) => e.name) : null;
     },
-    confirmConflict: (req) => openConflictDialog({ host: p.root(), ...req }),
+    confirmConflict: (req) => openConflictDialog({ host: ctx.root, ...req }),
     upload: (folderIdArg, file, onProgress, signal, onConflict) =>
-      p.api().upload(folderIdArg, file, onProgress, signal, onConflict),
+      ctx.api.upload(folderIdArg, file, onProgress, signal, onConflict),
     onUploaded: (entry, dest) => {
       // Optimistic splice, then `refetch` corrects auto-renames.
-      const cached = p.folderCache().get(dest.id);
+      const cached = ctx.folderCache.get(dest.id);
       if (cached) {
         // A replace keeps its id, so it swaps in place.
         const at = cached.entries.findIndex((e) => e.id === entry.id);
         cached.entries =
           at >= 0 ? cached.entries.map((e, i) => (i === at ? entry : e)) : [...cached.entries, entry];
-        if (st.listing === cached || p.key()(st.folderId) === p.key()(dest.id)) {
+        if (st.listing === cached || ctx.key(st.folderId) === ctx.key(dest.id)) {
           st.listing = cached;
-          p.renderGallery()();
+          ctx.render.renderGallery();
         }
       }
-      p.quota().refresh();
-      void p.refetch()(st.folderId, p.folderCache().get(st.folderId));
-      void p.folderCache().prefetch(true);
+      ctx.quota.refresh();
+      void ctx.data.refetch(st.folderId, ctx.folderCache.get(st.folderId));
+      void ctx.folderCache.prefetch(true);
     },
-    toast: p.toast,
-    handled: p.handled,
+    toast: ctx.toast,
+    handled: ctx.handled,
   });
 
   /** Everything is the shell's; the page owns only where buttons sit. */
-  const ACCOUNT_HOST: AccountHost = {
-    api: p.api(),
-    account: p.identity().email,
-    content: p.content(),
-    gallery: p.gallery(),
-    crumbs: p.crumbs(),
-    sortWrap: p.sortWrap(),
-    segmented: p.segmented(),
-    setMode: (open) => p.setDestinationMode("account", open),
-    toast: p.toast,
-  root: p.root(),
+  const accountHost: AccountHost = {
+    api: ctx.api,
+    account: ctx.identity.email,
+    content: ctx.content,
+    gallery: ctx.gallery,
+    crumbs: ctx.topbar.crumbs,
+    sortWrap: ctx.topbar.sortWrap,
+    segmented: ctx.topbar.segmented,
+    setMode: (open) => ctx.modes.setDestinationMode("account", open),
+    toast: ctx.toast,
+  root: ctx.root,
     onLeave: () => go(folderHref(null)),
     onOpenBin: () => go(destinationHref(BIN_KEY)),
-    onSignOut: () => p.deps.onSignOut(),
-    onSessionExpired: p.sessionDidExpire,
-    onSetTheme: (next) => p.setThemeTo()(next),
+    onSignOut: () => ctx.deps.onSignOut(),
+    onSessionExpired: ctx.sessionDidExpire,
+    onSetTheme: (next) => ctx.view.setThemeTo(next),
   };
 
-  return { historyController, onRename, cardActions, galleryCards, gallerySearch, uploadDestination, uploadZone, ACCOUNT_HOST };
+  return { historyController, galleryCards, gallerySearch, uploadDestination, uploadZone, accountHost };
 }

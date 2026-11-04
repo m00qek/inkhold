@@ -1,60 +1,45 @@
 // The library's data path: navigating to a folder, refetching it, the delayed loading paint and live sync bumps.
 
 import { folderHref, redirect, replaceRoute } from "../../router";
-import { createFolderCache } from "../folderCache";
 import type { IndexStatus } from "../../sync/types";
 import type { Id, Listing } from "../../core/types";
 import { ApiError } from "../../api/client";
 import { classify, reconcile } from "../../sync/freshness";
-import { type ViewerSet } from "../viewer/viewerSet";
-import { createNoteSearch } from "../noteSearch";
-// The breadcrumb is painted here, but its flattening rule is the rail's.
-import { type RailController } from "../rail";
-// Paints into `gallery`; `renderGallery()` closes it, so no teardown hook.
-import { type BinController } from "../bin/bin";
-// Static, unlike the console: small, and every user has one.
-import type { LibraryState } from "./libraryState";
-import { createLibraryRender } from "./libraryRender";
+import type { LibraryCtx } from "./libraryContext";
 
-import type { Topbar } from "./libraryTopbar";
-
-export interface LibraryDataParts {
-  handled: (e: unknown) => boolean;
-  toast: (message: string) => void;
-  hideActiveViewer: () => void;
-  leaveAccount: () => void;
-  setReading: (reading: boolean) => void;
-  renderGallery: () => ReturnType<typeof createLibraryRender>["renderGallery"];
-  emptyState: () => ReturnType<typeof createLibraryRender>["emptyState"];
-  folderCache: () => ReturnType<typeof createFolderCache>;
-  rail: () => RailController;
-  searchInput: () => Topbar["searchInput"];
-  gallery: () => HTMLElementTagNameMap["section"];
-  search: () => ReturnType<typeof createNoteSearch>;
-  viewers: () => ViewerSet;
-  leaveAdmin: () => () => void;
-  bin: () => BinController;
+export interface LibraryData {
+  /** A category with no device folder yet: not a navigation, no request. */
+  enterPendingCategory(): void;
+  cancelLoadingPaint(): void;
+  /** The `#/folder/:id` route body. */
+  navigate(id: Id | null): Promise<void>;
+  /** False over a destination or the bin, where a late answer must be dropped. */
+  galleryIsOnScreen(): boolean;
+  refetch(id: Id | null, prev: Listing | undefined): Promise<void>;
+  onBump(version: number): void;
+  onIndex(status: IndexStatus): void;
 }
 
-export function createLibraryData(st: LibraryState, p: LibraryDataParts) {
+export function createLibraryData(ctx: LibraryCtx): LibraryData {
+  const { st } = ctx;
   /**
   * A category with no device folder yet: not a root navigation, no request.
   * The one unaddressable place (no id); the URL is replaced with the root so it
   * doesn't lie, via `replaceRoute` so the pending state survives.
   */
   function enterPendingCategory(): void {
-    p.hideActiveViewer();
-    p.setReading(false);
-    p.leaveAdmin()();
-    p.leaveAccount();
+    ctx.hideActiveViewer();
+    ctx.setReading(false);
+    ctx.leaveAdmin();
+    ctx.leaveAccount();
     st.destination = null;
     st.folderId = null;
     st.listing = undefined;
     st.query = "";
-    p.searchInput().value = "";
-    p.search().reset();
+    ctx.topbar.searchInput.value = "";
+    ctx.search.reset();
     replaceRoute(folderHref(null));
-    p.renderGallery()();
+    ctx.render.renderGallery();
   }
 
   /** The usual "no longer instantaneous" threshold. */
@@ -77,9 +62,9 @@ export function createLibraryData(st: LibraryState, p: LibraryDataParts) {
       if (st.folderId !== id || st.destination !== null || st.query.trim() !== "") return;
       if (st.listing !== undefined) return; // a st.listing arrived by another path
       // The walk may have cached it meanwhile.
-      const cached = p.folderCache().get(id);
+      const cached = ctx.folderCache.get(id);
       if (cached) st.listing = cached;
-      p.renderGallery()();
+      ctx.render.renderGallery();
     }, LOADING_PAINT_DELAY_MS);
   }
 
@@ -93,16 +78,16 @@ export function createLibraryData(st: LibraryState, p: LibraryDataParts) {
     // newer one's loading paint.
     const mine = st.routeToken;
     cancelLoadingPaint();
-    p.rail().clearPending();
+    ctx.rail.clearPending();
     st.folderId = id;
     st.query = "";
-    p.searchInput().value = "";
+    ctx.topbar.searchInput.value = "";
     // Clears transcript hits too.
-    p.search().reset();
-    const cached = p.folderCache().get(id);
+    ctx.search.reset();
+    const cached = ctx.folderCache.get(id);
     if (cached) {
       st.listing = cached;
-      p.renderGallery()(); // stale-while-revalidate: paint immediately
+      ctx.render.renderGallery(); // stale-while-revalidate: paint immediately
     } else {
       // Cache miss: drop `listing` now (it describes the old folder, and any repaint
       // meanwhile would mix the two); only the paint waits.
@@ -118,7 +103,7 @@ export function createLibraryData(st: LibraryState, p: LibraryDataParts) {
   * `redirect`, not `go`, so Back can't climb onto it; the toast explains.
   */
   function missingFolder(): void {
-    p.toast("That folder isn't there any more.");
+    ctx.toast("That folder isn't there any more.");
     redirect(folderHref(null));
   }
 
@@ -127,17 +112,17 @@ export function createLibraryData(st: LibraryState, p: LibraryDataParts) {
   * failure can't replace an open bin or redirect out of it.
   */
   function galleryIsOnScreen(): boolean {
-    return st.destination === null && !p.bin().isOpen();
+    return st.destination === null && !ctx.bin.isOpen();
   }
 
   async function refetch(id: Id | null, prev: Listing | undefined): Promise<void> {
     let fresh: Listing;
     try {
       // Through the cache, so boot's root listing and walk share one request.
-      fresh = await p.folderCache().listFolder(id);
+      fresh = await ctx.folderCache.listFolder(id);
     } catch (e) {
       // A dead session isn't "couldn't load".
-      if (p.handled(e)) return;
+      if (ctx.handled(e)) return;
       if (id !== st.folderId) return; // navigated away while failing
       if (!galleryIsOnScreen()) return;
       // A 404 won't improve on retry; other failures keep the retry state.
@@ -147,7 +132,7 @@ export function createLibraryData(st: LibraryState, p: LibraryDataParts) {
       }
       if (!prev) {
         st.listing = undefined;
-        p.gallery().replaceChildren(p.emptyState()("Couldn't load", "Check your connection and try again."));
+        ctx.gallery.replaceChildren(ctx.render.emptyState("Couldn't load", "Check your connection and try again."));
       }
       return;
     }
@@ -161,20 +146,20 @@ export function createLibraryData(st: LibraryState, p: LibraryDataParts) {
 
     const result = reconcile(prev, fresh);
     // `result.listing` keeps unchanged entry objects, so identity-keyed work stays put.
-    p.folderCache().put(id, result.listing);
+    ctx.folderCache.put(id, result.listing);
     if (result.changed || st.listing !== result.listing) {
       st.listing = result.listing;
       // Not while the bin is open: a restore triggers this refetch and repainting
       // would close the bin.
-      if (!p.bin().isOpen()) p.renderGallery()();
+      if (!ctx.bin.isOpen()) ctx.render.renderGallery();
     }
   }
 
   function onBump(version: number): void {
     st.knownSyncVersion = Math.max(st.knownSyncVersion, version);
-    if (classify(p.folderCache().get(st.folderId), st.knownSyncVersion) === "stale") {
-      void refetch(st.folderId, p.folderCache().get(st.folderId));
-      void p.folderCache().prefetch(true);
+    if (classify(ctx.folderCache.get(st.folderId), st.knownSyncVersion) === "stale") {
+      void refetch(st.folderId, ctx.folderCache.get(st.folderId));
+      void ctx.folderCache.prefetch(true);
     }
   }
 
@@ -182,8 +167,8 @@ export function createLibraryData(st: LibraryState, p: LibraryDataParts) {
   function onIndex(status: IndexStatus): void {
     if (status.pending === st.indexPending) return;
     st.indexPending = status.pending;
-    if (st.query.trim() !== "" && st.destination === null && p.viewers().active() === null) p.renderGallery()();
+    if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
   }
 
-  return { enterPendingCategory, LOADING_PAINT_DELAY_MS, cancelLoadingPaint, scheduleLoadingPaint, navigate, missingFolder, galleryIsOnScreen, refetch, onBump, onIndex };
+  return { enterPendingCategory, cancelLoadingPaint, navigate, galleryIsOnScreen, refetch, onBump, onIndex };
 }

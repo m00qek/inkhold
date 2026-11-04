@@ -4,58 +4,38 @@ import { el } from "../../ui/dom";
 import { closeOpenMenu } from "../../ui/menu";
 import { folderHref, go } from "../../router";
 import type { Entry, Folder, NoteSummary } from "../../core/types";
-import { type UploadDestination } from "../../ui/uploadZone";
-import { type LazyEngine } from "../../render/lazy";
-import { createNoteSearch, MIN_GLOBAL_QUERY_LEN } from "../noteSearch";
-import { type GalleryCards } from "../galleryCards";
-import { type GallerySearch } from "../gallerySearch";
-// The breadcrumb is painted here, but its flattening rule is the rail's.
-import { crumbPath, type RailController } from "../rail";
-// Paints into `gallery`; `renderGallery()` closes it, so no teardown hook.
-// Static, unlike the console: small, and every user has one.
-import type { LibraryState } from "./libraryState";
-
-import type { Topbar } from "./libraryTopbar";
+import { MIN_GLOBAL_QUERY_LEN } from "../noteSearch";
+import { crumbPath } from "../rail";
+import type { LibraryCtx } from "./libraryContext";
 
 export interface RenderOpts {
   /** False on the typing path: typing can't change the tree. */
   rail?: boolean;
 }
 
-export interface LibraryRenderParts {
-  setBinMode: (open: boolean, count: number, busy?: boolean) => void;
-  uploadDestination: () => UploadDestination | null;
-  scheduleSpan: () => void;
-  galleryIsOnScreen: () => boolean;
-  rail: () => RailController;
-  crumbs: () => Topbar["crumbs"];
-  sortWrap: () => Topbar["sortWrap"];
-  segmented: () => Topbar["segmented"];
-  uploadBtn: () => Topbar["uploadBtn"];
-  toolsSep: () => Topbar["toolsSep"];
-  gallery: () => HTMLElementTagNameMap["section"];
-  galleryEngine: () => LazyEngine;
-  imgLazy: () => IntersectionObserver | null;
-  search: () => ReturnType<typeof createNoteSearch>;
-  galleryCards: () => GalleryCards;
-  gallerySearch: () => GallerySearch;
+export interface LibraryRender {
+  /** The narrow repaint the walk owes a listing: crumbs and folder cards only. */
+  relabelFolders(): void;
+  renderGallery(opts?: RenderOpts): void;
+  emptyState(title: string, body: string): HTMLElement;
 }
 
-export function createLibraryRender(st: LibraryState, p: LibraryRenderParts) {
+export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
+  const { st } = ctx;
   function buildCrumbs(): void {
     const parts: (Node | string)[] = [];
     const home = el("button", { type: "button", text: "Library" });
     home.addEventListener("click", () => go(folderHref(null)));
     if (st.query.trim()) {
       // Just "Search": results span the library, so a folder crumb would lie.
-      p.crumbs().replaceChildren(el("span", { class: "crumbs__here", text: "Search" }));
+      ctx.topbar.crumbs.replaceChildren(el("span", { class: "crumbs__here", text: "Search" }));
       return;
     }
-    const pending = p.rail().pending();
+    const pending = ctx.rail.pending();
     if (pending) {
       // "Library" would contradict the highlighted rail row.
       parts.push(home, el("span", { class: "crumbs__sep", text: "/" }), el("span", { class: "crumbs__here", text: pending.label }));
-      p.crumbs().replaceChildren(...parts);
+      ctx.topbar.crumbs.replaceChildren(...parts);
       return;
     }
     if (!st.listing || (st.listing.folderId === null && st.listing.path.length === 0)) {
@@ -66,7 +46,7 @@ export function createLibraryRender(st: LibraryState, p: LibraryRenderParts) {
       trail.forEach((folder, i) => {
         parts.push(el("span", { class: "crumbs__sep", text: "/" }));
         // The rail's label, so the crumb can't read `EXPORT` beside `Export`.
-        const label = p.rail().labelFor(folder);
+        const label = ctx.rail.labelFor(folder);
         if (i === trail.length - 1) {
           parts.push(el("span", { class: "crumbs__here", text: label }));
         } else {
@@ -76,7 +56,7 @@ export function createLibraryRender(st: LibraryState, p: LibraryRenderParts) {
         }
       });
     }
-    p.crumbs().replaceChildren(...parts);
+    ctx.topbar.crumbs.replaceChildren(...parts);
   }
 
   /**
@@ -85,20 +65,20 @@ export function createLibraryRender(st: LibraryState, p: LibraryRenderParts) {
   * so they line up by position; a length mismatch touches nothing.
   */
   function relabelFolders(): void {
-    if (!p.galleryIsOnScreen()) return;
+    if (!ctx.data.galleryIsOnScreen()) return;
     buildCrumbs();
     if (st.query.trim() !== "" || !st.listing) return;
     const folders = visibleEntries().filter((e): e is Folder => e.kind === "folder");
     if (folders.length === 0) return;
-    const cards = p.gallery().querySelectorAll<HTMLElement>(".card--folder");
+    const cards = ctx.gallery.querySelectorAll<HTMLElement>(".card--folder");
     if (cards.length !== folders.length) return;
 
     // Only cards whose label or category status moved: a replaced node is
     // detached from under the user's hover or focus, and this runs on every sync.
     const stale = folders.filter((folder, i) => {
       const card = cards[i]!;
-      const labelMoved = card.querySelector(".card__title")?.textContent !== p.rail().labelFor(folder);
-      const categoryMoved = card.classList.contains("card--category") !== (p.rail().categoryIconFor(folder) !== null);
+      const labelMoved = card.querySelector(".card__title")?.textContent !== ctx.rail.labelFor(folder);
+      const categoryMoved = card.classList.contains("card--category") !== (ctx.rail.categoryIconFor(folder) !== null);
       return labelMoved || categoryMoved;
     });
     if (stale.length === 0) return;
@@ -106,16 +86,16 @@ export function createLibraryRender(st: LibraryState, p: LibraryRenderParts) {
     closeOpenMenu(); // a folder row's menu is about to be replaced
     folders.forEach((folder, i) => {
       if (!stale.includes(folder)) return;
-      cards[i]!.replaceWith(p.galleryCards().folderCard(folder));
+      cards[i]!.replaceWith(ctx.features.galleryCards.folderCard(folder));
     });
-    p.scheduleSpan();
+    ctx.scheduleSpan();
   }
 
   function visibleEntries(): Entry[] {
     if (!st.listing) return [];
     // Only the root is rewritten (containers out). No query filter: a query
     // replaces the gallery with library-wide results.
-    const entries = st.folderId === null ? p.rail().rootEntries(st.listing.entries) : st.listing.entries;
+    const entries = st.folderId === null ? ctx.rail.rootEntries(st.listing.entries) : st.listing.entries;
     const folders = entries.filter((e): e is Folder => e.kind === "folder");
     const notes = entries.filter((e): e is NoteSummary => e.kind === "note");
     notes.sort((a, b) => {
@@ -131,42 +111,42 @@ export function createLibraryRender(st: LibraryState, p: LibraryRenderParts) {
     // late search answers) must not paint over it. Route exits reassign
     // `destination` before repainting, so they pass.
     if (st.destination !== null) return;
-    if (opts.rail !== false) p.rail().build();
+    if (opts.rail !== false) ctx.rail.build();
     buildCrumbs();
     const searching = st.query.trim() !== "";
-    p.sortWrap().hidden = searching;
-    p.segmented().hidden = searching;
+    ctx.topbar.sortWrap.hidden = searching;
+    ctx.topbar.segmented.hidden = searching;
     // `uploadDestination()` decides, so the button and drop target agree.
-    p.uploadBtn().hidden = p.uploadDestination() === null;
-    p.toolsSep().hidden = p.uploadBtn().hidden;
+    ctx.topbar.uploadBtn.hidden = ctx.features.uploadDestination() === null;
+    ctx.topbar.toolsSep.hidden = ctx.topbar.uploadBtn.hidden;
     // This repaint is how the bin closes, so it also ends bin mode.
-    p.setBinMode(false, 0);
+    ctx.modes.setBinMode(false, 0);
     // Results are always a list: only a row has room for path, date and page count.
-    p.gallery().className = `gallery${searching || st.view === "list" ? " is-list" : ""}`;
-    p.galleryEngine().reset();
-    p.imgLazy()?.disconnect(); // drop the previous repaint's native-image observations
+    ctx.gallery.className = `gallery${searching || st.view === "list" ? " is-list" : ""}`;
+    ctx.galleryEngine.reset();
+    ctx.imgLazy?.disconnect(); // drop the previous repaint's native-image observations
     closeOpenMenu(); // a card/row menu's DOM is about to be replaced
-    p.gallery().replaceChildren();
+    ctx.gallery.replaceChildren();
     // Scheduled before appending; `spanTiles` knows which layouts span.
-    p.scheduleSpan();
+    ctx.scheduleSpan();
 
     if (searching) {
       const q = st.query.trim();
       // Below the floor: a quiet hint, no search. In-doc find is unaffected.
       if (q.length < MIN_GLOBAL_QUERY_LEN) {
-        p.gallery().append(
+        ctx.gallery.append(
           emptyState("Keep typing", `Type at least ${MIN_GLOBAL_QUERY_LEN} characters to search your library.`),
         );
         return;
       }
-      p.gallerySearch().renderSearch(q);
+      ctx.features.gallerySearch.renderSearch(q);
       return;
     }
 
-    const pending = p.rail().pending();
+    const pending = ctx.rail.pending();
     if (pending) {
-      p.gallery().append(
-        p.rail().loaded()
+      ctx.gallery.append(
+        ctx.rail.loaded()
           ? // Nothing to list and no id to list it with: a st.destination, not a
             // load and not a failure.
             emptyState(`${pending.label} is empty`, pending.pending)
@@ -176,14 +156,14 @@ export function createLibraryRender(st: LibraryState, p: LibraryRenderParts) {
     }
 
     if (!st.listing) {
-      p.gallery().append(emptyState("Loading…", "Fetching your notebooks."));
+      ctx.gallery.append(emptyState("Loading…", "Fetching your notebooks."));
       return;
     }
     const entries = visibleEntries();
     if (entries.length === 0) {
       // The empty state names the thing to do; a cloud file reaches the device on
       // the next sync.
-      p.gallery().append(
+      ctx.gallery.append(
         emptyState(
           "This folder is empty",
           "Drop a PDF here to read it on your Nomad — or it'll fill up as your Supernote syncs.",
@@ -192,10 +172,10 @@ export function createLibraryRender(st: LibraryState, p: LibraryRenderParts) {
       return;
     }
 
-    p.gallery().append(el("div", { class: "section-head" }, el("span", { text: listingSummary(entries) })));
+    ctx.gallery.append(el("div", { class: "section-head" }, el("span", { text: listingSummary(entries) })));
 
     for (const [i, entry] of entries.entries()) {
-      p.gallery().append(entry.kind === "folder" ? p.galleryCards().folderCard(entry) : p.galleryCards().noteCard(entry, i));
+      ctx.gallery.append(entry.kind === "folder" ? ctx.features.galleryCards.folderCard(entry) : ctx.features.galleryCards.noteCard(entry, i));
     }
   }
 
@@ -220,11 +200,11 @@ export function createLibraryRender(st: LibraryState, p: LibraryRenderParts) {
     return el(
       "div",
       { class: "empty" },
-      el("div", { class: "empty__mark", text: p.rail().pending()?.label ?? (st.folderId ? "Folder" : "Library") }),
+      el("div", { class: "empty__mark", text: ctx.rail.pending()?.label ?? (st.folderId ? "Folder" : "Library") }),
       el("h3", { text: title }),
       el("p", { text: body }),
     );
   }
 
-  return { buildCrumbs, relabelFolders, visibleEntries, renderGallery, plural, listingSummary, emptyState };
+  return { relabelFolders, renderGallery, emptyState };
 }

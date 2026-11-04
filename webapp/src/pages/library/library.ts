@@ -3,6 +3,10 @@
 // gallery state survives opening a note. The route is the source of truth:
 // every entry point only `go()`s a URL, and the `show*` handlers are the only
 // writers of the state that URL describes (see `router.ts`).
+//
+// This file is the wiring: it fills a `LibraryCtx` in dependency order and
+// hands it to the parts (`libraryContext.ts` has the rule). The behaviour is
+// in the parts, one concern each.
 
 import { el } from "../../ui/dom";
 import { SORT_KEY, readLocal, writeLocal } from "../../ui/storage";
@@ -14,30 +18,28 @@ import type { PersistentThumbStore } from "../../cache/idb";
 import type { LiveChannel } from "../../sync/types";
 import type { Hash, Id, NoteMeta, NoteSummary } from "../../core/types";
 import { skeletonPage } from "../../core/noteSkeleton";
-import { dispatchApiFailure, type ApiFailureSink } from "../../api/client";
-import { createExporter, type Exporter } from "../../export/exporter";
-import { createPdfThumbs, type PdfThumbs } from "../../render/pdfThumb";
-import { createViewerSet, type ViewerSet } from "../viewer/viewerSet";
-import { createMasonry, type Masonry } from "../masonry";
-import { createTopbar, type SortKey, type Topbar } from "./libraryTopbar";
-import { createAdminDestination, type AdminDestination } from "../admin/adminDestination";
+import { dispatchApiFailure } from "../../api/client";
+import { createExporter } from "../../export/exporter";
+import { createPdfThumbs } from "../../render/pdfThumb";
+import { createViewerSet } from "../viewer/viewerSet";
+import { createMasonry } from "../masonry";
+import { createTopbar, type SortKey } from "./libraryTopbar";
+import { createAdminDestination } from "../admin/adminDestination";
 import { createHistoryScope } from "../historyScope";
-// The breadcrumb is painted here, but its flattening rule is the rail's.
-// Paints into `gallery`; `renderGallery()` closes it, so no teardown hook.
-import { createBin, createBinScope, createBinView, type BinController } from "../bin/bin";
-// Static, unlike the console: small, and every user has one.
-import { createAccountPage, type AccountPage } from "../account/account";
+import { createBin, createBinScope, createBinView } from "../bin/bin";
+import { createAccountPage } from "../account/account";
 import type { LibraryState } from "./libraryState";
-import { createLibraryRender } from "./libraryRender";
-import { createLibraryData } from "./libraryData";
-import { createLibraryView } from "./libraryView";
-import { createLibraryFeatures } from "./libraryFeatures";
-import { createLibraryRoutes } from "./libraryRoutes";
+import { seedContext } from "./libraryContext";
 import { createLibraryModes } from "./libraryModes";
-import { createLibraryEngines } from "./libraryEngines";
+import { createLibraryView } from "./libraryView";
+import { createLibraryData } from "./libraryData";
+import { createLibraryRender } from "./libraryRender";
+import { installLibraryRail } from "./libraryRail";
+import { installLibraryEngines } from "./libraryEngines";
 import { createLibraryViewerDeps } from "./libraryViewerDeps";
+import { createLibraryFeatures } from "./libraryFeatures";
 import { createLibraryPreviews } from "./libraryPreviews";
-import { createLibraryRail } from "./libraryRail";
+import { createLibraryRoutes } from "./libraryRoutes";
 
 export const ADMIN_KEY = "admin";
 /**
@@ -93,9 +95,6 @@ export interface AppShell {
   */
   openBinNote(id: Id, page?: number): Promise<void>;
   destroy(): void;
-
-  // ---- destination views ----
-  // A destination is a line in `DESTINATIONS` plus an arm in `showDestination`.
 }
 
 /** Validated, not cast: localStorage may hold a stale or hand-edited key. */
@@ -106,17 +105,6 @@ function readStoredSort(): SortKey {
 
 export function createAppShell(deps: AppDeps): AppShell {
   const { renderer, cache, live, identity } = deps;
-
-  /**
-  * Wrapped once here so the reader, lazy engine, exporter and `openNote` never
-  * learn the bin exists. `attach` comes later; until then nothing is trashed.
-  */
-  const binScope = createBinScope();
-
-  // Two composed `Api` wrappers: version preview and bin. They never both fire
-  // (previews are of live notes) and pass through when inactive.
-  const historyScope = createHistoryScope();
-  const api = historyScope.wrap(binScope.wrap(deps.api));
 
   // ---- state ----
   const st: LibraryState = {
@@ -138,224 +126,153 @@ export function createAppShell(deps: AppDeps): AppShell {
     resizeTimer: undefined,
   };
 
-  const { applyQuery, setDestinationMode, setBinMode } = createLibraryModes(st, {
-    leaveAccount,
-    renderGallery: () => renderGallery,
-    rail: () => rail,
-    uploadBtn: () => uploadBtn,
-    toolsSep: () => toolsSep,
-    emptyBinBtn: () => emptyBinBtn,
-    lockAdminBtn: () => lockAdminBtn,
-    destinationsOpen: () => destinationsOpen,
-    search: () => search,
-    root: () => root,
-    leaveAdmin: () => leaveAdmin,
-  });
+  // Two composed `Api` wrappers: version preview and bin. They never both fire
+  // (previews are of live notes) and pass through when inactive. `binScope`
+  // is wrapped once here so the reader, lazy engine, exporter and `openNote`
+  // never learn the bin exists; `attach` comes later, until then nothing is trashed.
+  const binScope = createBinScope();
+  const historyScope = createHistoryScope();
+  const api = historyScope.wrap(binScope.wrap(deps.api));
 
-  const { setView, repaintForTheme, setThemeTo } = createLibraryView(st, {
-    cache: () => cache,
-    renderGallery: () => renderGallery,
-    topbar: () => topbar,
-    thumbnails: () => thumbnails,
-    galleryEngine: () => galleryEngine,
-    reader: () => reader,
-  });
-
-  const { enterPendingCategory, cancelLoadingPaint, navigate, galleryIsOnScreen, refetch, onBump, onIndex } = createLibraryData(st, {
-    handled,
-    toast,
-    hideActiveViewer,
-    leaveAccount,
-    setReading,
-    renderGallery: () => renderGallery,
-    emptyState: () => emptyState,
-    folderCache: () => folderCache,
-    rail: () => rail,
-    searchInput: () => searchInput,
-    gallery: () => gallery,
-    search: () => search,
-    viewers: () => viewers,
-    leaveAdmin: () => leaveAdmin,
-    bin: () => bin,
-  });
-
-  const { relabelFolders, renderGallery, emptyState } = createLibraryRender(st, {
-    setBinMode,
-    uploadDestination: () => uploadDestination(),
-    scheduleSpan,
-    galleryIsOnScreen,
-    rail: () => rail,
-    crumbs: () => crumbs,
-    sortWrap: () => sortWrap,
-    segmented: () => segmented,
-    uploadBtn: () => uploadBtn,
-    toolsSep: () => toolsSep,
-    gallery: () => gallery,
-    galleryEngine: () => galleryEngine,
-    imgLazy: () => imgLazy,
-    search: () => search,
-    galleryCards: () => galleryCards,
-    gallerySearch: () => gallerySearch,
-  });
-  const key = (id: Id | null) => id ?? "\0root";
-
-  // ---- failure routing ----
-  function sessionDidExpire(): void {
-    if (st.sessionExpired) return;
-    st.sessionExpired = true;
-    deps.onSessionExpired();
-  }
+  // ---- DOM skeleton ----
+  const gallery = el("section", { class: "gallery", id: "gallery", "aria-label": "Notes" });
+  const content = el("div", { class: "content" }, gallery);
+  const toastEl = el("div", { class: "toast", role: "status", "aria-live": "polite" });
 
   /**
   * A thumbnail's `?v=` 404'd: refetch the listing (STALE_PAGE). Once per hash,
   * so new hashes that also 404 can't spin.
   */
   const staleHandled = new Set<Hash>();
-  function onStaleThumbnail(hash: Hash): void {
-    if (st.sessionExpired || staleHandled.has(hash)) return;
-    staleHandled.add(hash);
-    void refetch(st.folderId, folderCache.get(st.folderId));
-  }
 
-  const failures: ApiFailureSink = {
-    onSessionExpired: sessionDidExpire,
-    onStalePage: (_noteId, page) => onStaleThumbnail(page.hash),
-  };
+  // The members below this literal are assigned in dependency order; a part
+  // reads them only when called (see `libraryContext.ts`).
+  const ctx = seedContext({
+    deps,
+    identity,
+    renderer,
+    cache,
+    live,
+    api,
+    historyScope,
+    binScope,
+    st,
+    gallery,
+    content,
+    toastEl,
+    destinationsOpen: { bin: false, admin: false, account: false },
 
-  /** For listing/metadata errors; true means handled, skip the fallback. */
-  function handled(e: unknown): boolean {
-    return dispatchApiFailure(failures, e);
-  }
+    // ---- failure routing ----
+    failures: {
+      onSessionExpired: () => ctx.sessionDidExpire(),
+      onStalePage: (_noteId, page) => {
+        if (st.sessionExpired || staleHandled.has(page.hash)) return;
+        staleHandled.add(page.hash);
+        void ctx.data.refetch(st.folderId, ctx.folderCache.get(st.folderId));
+      },
+    },
+    handled: (e) => dispatchApiFailure(ctx.failures, e),
+    sessionDidExpire() {
+      if (st.sessionExpired) return;
+      st.sessionExpired = true;
+      deps.onSessionExpired();
+    },
+    toast(message) {
+      toastEl.textContent = message;
+      toastEl.classList.add("is-shown");
+      if (st.toastTimer !== undefined) clearTimeout(st.toastTimer);
+      st.toastTimer = setTimeout(() => toastEl.classList.remove("is-shown"), 2400);
+    },
 
-  // ---- DOM: rail ----
-  const { folderCache, rail, quota, sidebar } = createLibraryRail(st, {
-    handled,
-    identity: () => identity,
-    api: () => api,
-    enterPendingCategory: () => enterPendingCategory,
-    relabelFolders: () => relabelFolders,
-    renderGallery: () => renderGallery,
-    adminDest: () => adminDest,
-    bin: () => bin,
+    // ---- small shell helpers ----
+    key: (id) => id ?? "\0root",
+    scheduleSpan: () => ctx.masonry.schedule(),
+    setReading: (reading) => ctx.root.classList.toggle("is-reading", reading),
+    hideActiveViewer() {
+      // The next live read must not stay pinned to a retained version.
+      historyScope.clear();
+      ctx.viewers.hideActive();
+    },
+    account() {
+      st.accountPage ??= createAccountPage(ctx.features.accountHost);
+      return st.accountPage;
+    },
+    leaveAccount: () => st.accountPage?.close(),
+    leaveAdmin: () => ctx.adminDest.leave(),
+    openAdmin: () => ctx.adminDest.open(),
   });
 
-  quota.refresh();
+  // ---- the parts that only read lazily ----
+  ctx.modes = createLibraryModes(ctx);
+  ctx.view = createLibraryView(ctx);
+  ctx.data = createLibraryData(ctx);
+  ctx.render = createLibraryRender(ctx);
 
-  // ---- DOM: topbar ----
-  const topbar: Topbar = createTopbar({
+  // ---- DOM: rail and topbar ----
+  installLibraryRail(ctx);
+  ctx.quota.refresh();
+
+  ctx.topbar = createTopbar({
     initialSort: st.sort,
     folderId: () => st.folderId,
-    applyQuery: (q) => applyQuery(q),
+    applyQuery: (q) => ctx.modes.applyQuery(q),
     onSort: (next) => {
       st.sort = next;
       writeLocal(SORT_KEY, st.sort);
-      renderGallery();
+      ctx.render.renderGallery();
     },
-    onView: (next) => setView(next),
-    onEmptyBin: () => bin.empty(),
-    onLockAdmin: () => adminDest.lock(),
-    onFiles: (files) => uploadZone.add(files),
+    onView: (next) => ctx.view.setView(next),
+    onEmptyBin: () => ctx.bin.empty(),
+    onLockAdmin: () => ctx.adminDest.lock(),
+    onFiles: (files) => ctx.features.uploadZone.add(files),
   });
-  const { crumbs, searchInput, sortWrap, segmented, uploadBtn, toolsSep, emptyBinBtn, lockAdminBtn } = topbar;
 
-  // ---- destination mode ----
-  // `is-destination` hides the search box (it would search a library not on
-  // screen and navigate away). Tracked per destination: `renderGallery()` runs on
-  // sync bumps and must not strip another destination's mode.
-  const destinationsOpen = { bin: false, admin: false, account: false };
-
-  // ---- DOM: content (gallery + reader) ----
-  const gallery = el("section", { class: "gallery", id: "gallery", "aria-label": "Notes" });
-  const content = el("div", { class: "content" }, gallery);
-  const toastEl = el("div", { class: "toast", role: "status", "aria-live": "polite" });
-
+  // ---- engines ----
   // The thumbnail facade: every tile is a WebP blob from one call. PDF page 0
   // uses the viewer's MuPDF wasm, inert until a visible, uncached PDF tile needs
   // it (a persistent `sn-thumbs` hit answers first).
-  const pdfThumbs: PdfThumbs = createPdfThumbs();
-  const { thumbnails, galleryEngine, imgLazy, searchService, search } = createLibraryEngines(st, {
-    deps,
-    renderer: () => renderer,
-    cache: () => cache,
-    api: () => api,
-    renderGallery: () => renderGallery,
-    failures: () => failures,
-    folderCache: () => folderCache,
-    rail: () => rail,
-    content: () => content,
-    pdfThumbs: () => pdfThumbs,
-    root: () => root,
-  });
+  ctx.pdfThumbs = createPdfThumbs();
+  installLibraryEngines(ctx);
+  ctx.exporter = createExporter({ api, renderer });
 
-  // ---- transcript search ----
+  // ---- viewers ----
+  ctx.viewers = createViewerSet(createLibraryViewerDeps(ctx), content, gallery);
 
-  function toast(message: string): void {
-    toastEl.textContent = message;
-    toastEl.classList.add("is-shown");
-    if (st.toastTimer !== undefined) clearTimeout(st.toastTimer);
-    st.toastTimer = setTimeout(() => toastEl.classList.remove("is-shown"), 2400);
-  }
-
-  const exporter: Exporter = createExporter({ api, renderer });
-
-  const { viewerDeps } = createLibraryViewerDeps(st, {
-    sessionDidExpire,
-    toast,
-    restoreVersion: (...a) => restoreVersion(...a),
-    renderer: () => renderer,
-    cache: () => cache,
-    api: () => api,
-    searchService: () => searchService,
-    bin: () => bin,
-    historyController: () => historyController,
-  });
-
-  const viewers: ViewerSet = createViewerSet(viewerDeps, content, gallery);
-  const { reader, viewerFor } = viewers;
-  const activate = viewers.activate;
-
-  function hideActiveViewer(): void {
-    // The next live read must not stay pinned to a retained version.
-    historyScope.clear();
-    viewers.hideActive();
-  }
-
-  const root = el(
+  ctx.root = el(
     "div",
     { class: "sn-root" },
-    el("div", { class: "app" }, sidebar, el("main", { class: "main" }, topbar.el, content)),
+    el("div", { class: "app" }, ctx.sidebar, el("main", { class: "main" }, ctx.topbar.el, content)),
     toastEl,
   );
 
-  const adminDest: AdminDestination = createAdminDestination({
+  // ---- destinations ----
+  ctx.adminDest = createAdminDestination({
     api,
     account: identity.email,
     content,
     gallery,
-    crumbs,
-    sortWrap,
-    segmented,
-    lockBtn: lockAdminBtn,
-    setMode: (open) => setDestinationMode("admin", open),
-    rebuildRail: () => rail.build(),
+    crumbs: ctx.topbar.crumbs,
+    sortWrap: ctx.topbar.sortWrap,
+    segmented: ctx.topbar.segmented,
+    lockBtn: ctx.topbar.lockAdminBtn,
+    setMode: (open) => ctx.modes.setDestinationMode("admin", open),
+    rebuildRail: () => ctx.rail.build(),
     isCurrent: () => st.destination === ADMIN_KEY,
-    toast,
-    onSessionExpired: sessionDidExpire,
+    toast: ctx.toast,
+    onSessionExpired: ctx.sessionDidExpire,
   });
-  const leaveAdmin = (): void => adminDest.leave();
-  const openAdmin = (): void => adminDest.open();
 
-  const bin: BinController = createBin({
+  ctx.bin = createBin({
     api,
     // The gallery's own engine; its `reset()` is the bin's teardown.
     view: createBinView({
       gallery,
-      crumbs,
-      sortWrap,
-      segmented,
-      root,
-      engine: galleryEngine,
-      setMode: setBinMode,
+      crumbs: ctx.topbar.crumbs,
+      sortWrap: ctx.topbar.sortWrap,
+      segmented: ctx.topbar.segmented,
+      root: ctx.root,
+      engine: ctx.galleryEngine,
+      setMode: ctx.modes.setBinMode,
       onLeave: () => go(folderHref(null)),
     }),
     // Routed to `#/bin/note/:id` (the live route 404s for trashed files) so Back,
@@ -363,163 +280,83 @@ export function createAppShell(deps: AppDeps): AppShell {
     onOpen: (entry) => go(binNotePageHref(entry.id)),
     onChanged: (mutated) => {
       // The badge moves every refresh; the folder only refetches on a real mutation.
-      rail.build();
-      if (mutated) void refetch(st.folderId, folderCache.get(st.folderId));
+      ctx.rail.build();
+      if (mutated) void ctx.data.refetch(st.folderId, ctx.folderCache.get(st.folderId));
     },
-    handled,
+    handled: ctx.handled,
   });
-  binScope.attach((id) => bin.isTrashed(id));
+  binScope.attach((id) => ctx.bin.isTrashed(id));
 
-  // ---- the extracted features ----
-  const { historyController, galleryCards, gallerySearch, uploadDestination, uploadZone, ACCOUNT_HOST } = createLibraryFeatures(st, {
-    deps,
-    sessionDidExpire,
-    handled,
-    setDestinationMode,
-    toast,
-    account,
-    scheduleSpan,
-    openHistoryPreview: (...a) => openHistoryPreview(...a),
-    openAnnotationsPreview: (...a) => openAnnotationsPreview(...a),
-    restoreVersion: (...a) => restoreVersion(...a),
-    identity: () => identity,
-    api: () => api,
-    setThemeTo: () => setThemeTo,
-    refetch: () => refetch,
-    renderGallery: () => renderGallery,
-    emptyState: () => emptyState,
-    key: () => key,
-    folderCache: () => folderCache,
-    rail: () => rail,
-    quota: () => quota,
-    crumbs: () => crumbs,
-    sortWrap: () => sortWrap,
-    segmented: () => segmented,
-    gallery: () => gallery,
-    content: () => content,
-    galleryEngine: () => galleryEngine,
-    imgLazy: () => imgLazy,
-    exporter: () => exporter,
-    viewers: () => viewers,
-    root: () => root,
-    bin: () => bin,
-  });
+  // ---- features, previews, routes ----
+  ctx.features = createLibraryFeatures(ctx);
+  ctx.masonry = createMasonry(gallery, () => st.view === "grid" && st.query.trim() === "");
+  ctx.previews = createLibraryPreviews(ctx);
 
-  function account(): AccountPage {
-    st.accountPage ??= createAccountPage(ACCOUNT_HOST);
-    return st.accountPage;
-  }
-
-  function leaveAccount(): void {
-    st.accountPage?.close();
-  }
-
-  // ---- rendering ----
-
-  const masonry: Masonry = createMasonry(gallery, () => st.view === "grid" && st.query.trim() === "");
-  function scheduleSpan(): void {
-    masonry.schedule();
-  }
-
-  // ---- where the reader was opened from ----
-
-  /** Reading hides the topbar; toggled only in `openNote` and `enterPlace`. */
-  function setReading(reading: boolean): void {
-    root.classList.toggle("is-reading", reading);
-  }
-
-  const { openHistoryPreview, openAnnotationsPreview, restoreVersion } = createLibraryPreviews(st, {
-    handled,
-    toast,
-    setReading,
-    historyScope: () => historyScope,
-    api: () => api,
-    refetch: () => refetch,
-    folderCache: () => folderCache,
-    rail: () => rail,
-    viewers: () => viewers,
-    root: () => root,
-    bin: () => bin,
-    currentFolderPath: () => currentFolderPath,
-  });
-
-  // ---- data / freshness ----
-
-  // ---- the delayed loading paint ----
-  // Loading, known-empty and "still the last folder" are different states. The
-  // "Loading…" paint is delayed so a fast response shows none at all.
-
-  const unsubscribe = live.subscribe(onBump, onIndex);
-
+  // ---- live data ----
+  const unsubscribe = live.subscribe(ctx.data.onBump, ctx.data.onIndex);
   // The index's lifecycle on the same socket: derive-complete and sync frames
   // coalesce in `attachLive`, so a big sync is a few manifest requests. Nothing
   // here instantiates the engine; only `search()` does.
-  const detachSearchLive = searchService.attachLive(live);
-  void searchService.syncNow();
+  const detachSearchLive = ctx.searchService.attachLive(live);
+  void ctx.searchService.syncNow();
 
-  // ---- view / theme ----
-
+  // ---- theme and viewport ----
   // Follow the OS theme until one is pinned (`data-theme` wins). Handlers are
   // named so `destroy()` can remove them.
   const osThemeQuery = window.matchMedia?.("(prefers-color-scheme: dark)");
   const onOsThemeChange = (e: MediaQueryListEvent): void => {
     if (document.documentElement.getAttribute("data-theme")) return;
     // The theme being left is the inverse of the new one.
-    repaintForTheme(e.matches ? "light" : "dark");
+    ctx.view.repaintForTheme(e.matches ? "light" : "dark");
   };
   osThemeQuery?.addEventListener("change", onOsThemeChange);
 
   const onWindowResize = (): void => {
     if (st.resizeTimer !== undefined) clearTimeout(st.resizeTimer);
     st.resizeTimer = setTimeout(() => {
-      galleryEngine.repaintVisible();
-      reader.bumpTheme();
+      ctx.galleryEngine.repaintVisible();
+      ctx.viewers.reader.bumpTheme();
     }, 150);
   };
   window.addEventListener("resize", onWindowResize);
 
   // The first listing comes from main.ts's route dispatch; listing here would race it.
-  void folderCache.prefetch();
+  void ctx.folderCache.prefetch();
 
-  const { currentFolderPath, shellApi } = createLibraryRoutes(st, {
-    handled,
-    applyQuery,
-    toast,
-    hideActiveViewer,
-    account,
-    leaveAccount,
-    setReading,
-    openHistoryPreview,
-    historyScope: () => historyScope,
-    api: () => api,
-    cancelLoadingPaint: () => cancelLoadingPaint,
-    navigate: () => navigate,
-    renderGallery: () => renderGallery,
-    key: () => key,
-    folderCache: () => folderCache,
-    rail: () => rail,
-    topbar: () => topbar,
-    searchInput: () => searchInput,
-    pdfThumbs: () => pdfThumbs,
-    galleryEngine: () => galleryEngine,
-    searchService: () => searchService,
-    search: () => search,
-    viewers: () => viewers,
-    viewerFor: () => viewerFor,
-    activate: () => activate,
-    root: () => root,
-    adminDest: () => adminDest,
-    leaveAdmin: () => leaveAdmin,
-    openAdmin: () => openAdmin,
-    bin: () => bin,
-    uploadZone: () => uploadZone,
-    unsubscribe: () => unsubscribe,
-    detachSearchLive: () => detachSearchLive,
-    osThemeQuery: () => osThemeQuery,
-    onOsThemeChange: () => onOsThemeChange,
-    onWindowResize: () => onWindowResize,
-  });
-  return shellApi;
+  ctx.routes = createLibraryRoutes(ctx);
+  const routes = ctx.routes;
+  return {
+    el: ctx.root,
+    showFolder: routes.showFolder,
+    showSearch: routes.showSearch,
+    showDestination: routes.showDestination,
+    showAccount: routes.showAccount,
+    openNote: routes.openNote,
+    openNoteVersion: routes.openNoteVersion,
+    openBinNote: routes.openBinNote,
+    destroy(): void {
+      unsubscribe();
+      // Otherwise one coalescing window and engine memory leak per sign-in cycle.
+      detachSearchLive();
+      ctx.searchService.dispose();
+      // Otherwise these accumulate per sign-in cycle, each holding the shell alive.
+      osThemeQuery?.removeEventListener("change", onOsThemeChange);
+      window.removeEventListener("resize", onWindowResize);
+      if (st.resizeTimer !== undefined) clearTimeout(st.resizeTimer);
+      ctx.data.cancelLoadingPaint();
+      // Kills the debounce timer and orphans in-flight queries.
+      ctx.search.reset();
+      ctx.bin.destroy();
+      ctx.viewers.destroy();
+      ctx.adminDest.destroy();
+      st.accountPage?.destroy();
+      // Aborts uploads and drops the document-level drag swallowers.
+      ctx.features.uploadZone.destroy();
+      ctx.galleryEngine.destroy();
+      // Release the ~5 MB MuPDF worker now, not after its idle window.
+      ctx.pdfThumbs.destroy();
+    },
+  };
 }
 
 export function synthesizeSummary(meta: NoteMeta): NoteSummary {

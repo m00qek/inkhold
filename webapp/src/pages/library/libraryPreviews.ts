@@ -1,62 +1,43 @@
 // Version and annotation previews, and the one restore path, wired to the shell.
 
 import { folderHref, go, noteHref } from "../../router";
-import { createFolderCache } from "../folderCache";
-import type { Api } from "../../api/types";
 import type { Id } from "../../core/types";
-import { type ViewerSet } from "../viewer/viewerSet";
 import { createVersionPreviews, type VersionPreviews } from "../versionPreview";
-import { createHistoryScope } from "../historyScope";
 import type { FileVersion } from "../../core/types";
-// The breadcrumb is painted here, but its flattening rule is the rail's.
-import { type RailController } from "../rail";
-// Paints into `gallery`; `renderGallery()` closes it, so no teardown hook.
-import { type BinController } from "../bin/bin";
-// Static, unlike the console: small, and every user has one.
-import type { LibraryState } from "./libraryState";
-import { createLibraryData } from "./libraryData";
-import { createLibraryRoutes } from "./libraryRoutes";
-
+import type { LibraryCtx } from "./libraryContext";
 import { synthesizeSummary } from "./library";
 
-export interface LibraryPreviewsParts {
-  handled: (e: unknown) => boolean;
-  toast: (message: string) => void;
-  setReading: (reading: boolean) => void;
-  historyScope: () => ReturnType<typeof createHistoryScope>;
-  api: () => Api;
-  refetch: () => ReturnType<typeof createLibraryData>["refetch"];
-  folderCache: () => ReturnType<typeof createFolderCache>;
-  rail: () => RailController;
-  viewers: () => ViewerSet;
-  root: () => HTMLElement;
-  bin: () => BinController;
-  currentFolderPath: () => ReturnType<typeof createLibraryRoutes>["currentFolderPath"];
+export interface LibraryPreviews {
+  openHistoryPreview(noteId: Id, version: FileVersion, startPage?: number): Promise<void>;
+  openAnnotationsPreview(documentId: Id, markId: Id, version: FileVersion): Promise<void>;
+  /** True when restored; `returnTo` is the file that reopens (a PDF for its `.mark`). */
+  restoreVersion(noteId: Id, version: { md5: string; createdAt: number }, noteName: string, returnTo?: Id): Promise<boolean>;
 }
 
-export function createLibraryPreviews(st: LibraryState, p: LibraryPreviewsParts) {
+export function createLibraryPreviews(ctx: LibraryCtx): LibraryPreviews {
+  const { st } = ctx;
   const previews: VersionPreviews = createVersionPreviews({
-    api: p.api(),
-    viewers: p.viewers(),
-    historyScope: p.historyScope(),
-    host: p.root(),
-    isTrashed: (id) => p.bin().isTrashed(id),
-    currentFolderPath: () => p.currentFolderPath()(),
+    api: ctx.api,
+    viewers: ctx.viewers,
+    historyScope: ctx.historyScope,
+    host: ctx.root,
+    isTrashed: (id) => ctx.bin.isTrashed(id),
+    currentFolderPath: () => ctx.routes.currentFolderPath(),
     folderHref: () => folderHref(st.folderId),
     setReaderBack: (href) => {
       st.readerBack = href;
     },
-    setReading: p.setReading,
+    setReading: ctx.setReading,
     nextRoute: () => ++st.routeToken,
     isRoute: (token) => token === st.routeToken,
     synthesizeSummary,
     onRestored: (returnTo) => {
-      void p.refetch()(st.folderId, p.folderCache().get(st.folderId));
-      p.rail().build();
+      void ctx.data.refetch(st.folderId, ctx.folderCache.get(st.folderId));
+      ctx.rail.build();
       go(noteHref(returnTo));
     },
-    toast: p.toast,
-    handled: p.handled,
+    toast: ctx.toast,
+    handled: ctx.handled,
   });
 
   function openHistoryPreview(noteId: Id, version: FileVersion, startPage = 0): Promise<void> {
@@ -76,5 +57,5 @@ export function createLibraryPreviews(st: LibraryState, p: LibraryPreviewsParts)
     return previews.restore(noteId, version, returnTo);
   }
 
-  return { previews, openHistoryPreview, openAnnotationsPreview, restoreVersion };
+  return { openHistoryPreview, openAnnotationsPreview, restoreVersion };
 }
