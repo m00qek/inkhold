@@ -4,17 +4,19 @@
 // (the admin decides those). Pure decisions and copy first, then the painter.
 
 import { el } from "../ui/dom";
-import { field, statusLine } from "../ui/form";
+import { button, deviceHint, failed, pending, row, section, type Load } from "./accountDom";
+import { createPasswordForm } from "./accountPasswordForm";
+import { createVersionsControl } from "./accountVersions";
+import * as accountStorage from "./accountStorage";
 import { openDialog } from "../ui/confirm";
 import { ICONS, svg, type IconName } from "../ui/icons";
 import { absoluteTime } from "../ui/relativeTime";
-import { formatBytes } from "../core/fileKind";
 import { currentTheme } from "../ui/theme";
-import { ApiError, dispatchApiFailure, type ApiFailureSink } from "../api/client";
-import type { AccountSecurity, MyDevice, StorageBreakdown, VersionPolicy } from "../api/accountTypes";
+import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
+import type { AccountSecurity, MyDevice, StorageBreakdown } from "../api/accountTypes";
 import type { Api } from "../api/types";
 import type { Theme } from "../core/types";
-import { discardNotice, storageRows, passwordAgeLabel, otherSessionsLabel, deviceSeenLabel, thisBrowserLabel, failureMessage, passwordChangeConsequence, passwordFailureMessage } from "./accountCopy";
+import { passwordAgeLabel, otherSessionsLabel, deviceSeenLabel, thisBrowserLabel, failureMessage } from "./accountCopy";
 export { versionsToDiscard, discardNotice, storageRows, passwordAgeLabel, otherSessionsLabel, deviceSeenLabel, thisBrowserLabel, failureMessage, passwordChangeConsequence, passwordFailureMessage } from "./accountCopy";
 export type { StorageRow } from "./accountCopy";
 
@@ -64,7 +66,6 @@ export interface AccountPage {
   destroy(): void;
 }
 
-type Load<T> = { kind: "loading" } | { kind: "ready"; data: T } | { kind: "failed"; message: string };
 
 export function createAccountPage(host: AccountHost): AccountPage {
   const failureSink: ApiFailureSink = { onSessionExpired: host.onSessionExpired };
@@ -77,10 +78,8 @@ export function createAccountPage(host: AccountHost): AccountPage {
   let security: Load<AccountSecurity> = { kind: "loading" };
   let devices: Load<MyDevice[]> = { kind: "loading" };
   let storage: Load<StorageBreakdown> = { kind: "loading" };
-  let policy: Load<VersionPolicy> = { kind: "loading" };
   /** In-flight guards against a second write. */
   let signingOutEverywhere = false;
-  let savingPolicy = false;
   const unlinking = new Set<string>();
 
   // ---- DOM: built once and filled ----
@@ -93,15 +92,16 @@ export function createAccountPage(host: AccountHost): AccountPage {
   const storageBody = el("div", { class: "acct-rows" });
   const versionsBody = el("div", { class: "acct-versions" });
   const appearanceBody = el("div", { class: "acct-rows" });
+  const versions = createVersionsControl({
+    api: host.api,
+    body: versionsBody,
+    toast: host.toast,
+    handled,
+    generation: () => generation,
+    onSaved: (mine) => void loadStorage(mine),
+  });
+  const renderStorage = (): void => accountStorage.renderStorage(storageBody, storage, host.onOpenBin);
 
-  function section(label: string, ...children: (Node | null)[]): HTMLElement {
-    return el(
-      "section",
-      { class: "acct-sec" },
-      el("h2", { class: "acct-sec__label", text: label }),
-      el("div", { class: "acct-sec__body" }, ...children),
-    );
-  }
 
   const body = el(
     "div",
@@ -129,54 +129,26 @@ export function createAccountPage(host: AccountHost): AccountPage {
   const panel = el("section", { class: "acct", "aria-label": "Your account", hidden: true }, body);
   host.content.append(panel);
 
-  function deviceHint(): HTMLElement {
-    return el("p", {
-      class: "acct-hint",
-      text: "Unlinking stops sync until the device is paired again. Nothing already synced is removed.",
-    });
-  }
 
-  // ---- generic row ----
-  interface Row {
-    node: HTMLElement;
-    value: HTMLElement;
-    actions: HTMLElement;
-  }
-
-  function row(label: string): Row {
-    const value = el("div", { class: "acct-row__v acct-data" });
-    const actions = el("div", { class: "acct-row__acts" });
-    return {
-      node: el("div", { class: "acct-row" }, el("div", { class: "acct-row__k", text: label }), value, actions),
-      value,
-      actions,
-    };
-  }
-
-  function button(label: string, onClick: () => void, opts: { danger?: boolean; ariaLabel?: string } = {}): HTMLButtonElement {
-    const b = el("button", {
-      class: opts.danger ? "acct-btn acct-btn--danger" : "acct-btn",
-      type: "button",
-      text: label,
-    });
-    if (opts.ariaLabel) b.setAttribute("aria-label", opts.ariaLabel);
-    b.addEventListener("click", onClick);
-    return b;
-  }
-
-  /** Never a zero, empty list or dash while still fetching. */
-  function pending(): HTMLElement {
-    return el("p", { class: "acct-pending", text: "Loading…" });
-  }
-
-  function failed(message: string): HTMLElement {
-    return el("p", { class: "acct-failed", role: "status", text: message });
-  }
 
   // ---- Signing in ----
 
   const passwordRow = row("Password");
-  const passwordForm = buildPasswordForm();
+  const passwordForm = createPasswordForm({
+    api: host.api,
+    handled,
+    generation: () => generation,
+    onCancel: () => togglePasswordForm(false),
+    onChanged: () => {
+      togglePasswordForm(false);
+      security = {
+        kind: "ready",
+        data: { ...currentSecurity(), passwordChangedAt: Math.floor(Date.now() / 1000), otherSessions: 0 },
+      };
+      renderSecurity();
+      host.toast("Password changed. Your other browsers are signed out.");
+    },
+  });
   const sessionsRow = row("Other sessions");
   const thisBrowserRow = row("This browser");
 
@@ -260,120 +232,6 @@ export function createAccountPage(host: AccountHost): AccountPage {
       : { passwordChangedAt: null, otherSessions: 0, thisSessionSince: null };
   }
 
-  // ---- change password ----
-  // Current, new and confirm; the current password is required because a
-  // session is not a password prompt (borrowed laptop, unlocked screen). Copy is
-  // separate from the first-login screen's.
-  interface PasswordForm {
-    node: HTMLFormElement;
-    reset(): void;
-    focus(): void;
-    syncConsequence(devices: readonly MyDevice[]): void;
-  }
-
-  function buildPasswordForm(): PasswordForm {
-    const current = field({
-      id: "acct-current-password",
-      label: "Current password",
-      type: "password",
-      autocomplete: "current-password",
-    });
-    const next = field({
-      id: "acct-new-password",
-      label: "New password",
-      type: "password",
-      autocomplete: "new-password",
-      minLength: MIN_PASSWORD_LENGTH,
-      // Both constraints where the choice is made, not one field too late.
-      hint: `At least ${MIN_PASSWORD_LENGTH} characters, and you'll type it on the Supernote too — pick something easy on a tablet keyboard.`,
-    });
-    const confirm = field({
-      id: "acct-confirm-password",
-      label: "Confirm new password",
-      type: "password",
-      autocomplete: "new-password",
-      minLength: MIN_PASSWORD_LENGTH,
-    });
-    const status = statusLine();
-    // Filled by `syncConsequence` once devices arrive.
-    const consequence = el("p", { class: "acct-hint" });
-    const submit = el("button", { class: "acct-btn acct-btn--go", type: "submit", text: "Change password" });
-    const cancel = el("button", { class: "acct-btn", type: "button", text: "Cancel" });
-
-    const node = el(
-      "form",
-      { class: "acct-pw", id: "acct-pw-form", hidden: true },
-      current.row,
-      next.row,
-      confirm.row,
-      consequence,
-      el("div", { class: "acct-pw__acts" }, submit, cancel),
-      status.node,
-    );
-
-    const reset = (): void => {
-      current.input.value = "";
-      next.input.value = "";
-      confirm.input.value = "";
-      status.clear();
-      submit.disabled = false;
-      submit.textContent = "Change password";
-    };
-
-    cancel.addEventListener("click", () => togglePasswordForm(false));
-
-    node.addEventListener("submit", (e) => {
-      e.preventDefault();
-      if (submit.disabled) return;
-      status.clear();
-      if (current.input.value === "") {
-        status.error("Enter your current password.");
-        current.input.focus();
-        return;
-      }
-      const value = next.input.value;
-      if (value.length < MIN_PASSWORD_LENGTH) {
-        status.error(`Use at least ${MIN_PASSWORD_LENGTH} characters.`);
-        next.input.focus();
-        return;
-      }
-      if (value !== confirm.input.value) {
-        status.error("The two passwords don't match.");
-        confirm.input.focus();
-        return;
-      }
-      submit.disabled = true;
-      submit.textContent = "Changing…";
-      const mine = generation;
-      void host.api
-        .changePassword(current.input.value, value)
-        .then(() => {
-          if (mine !== generation) return;
-          togglePasswordForm(false);
-          security = {
-            kind: "ready",
-            data: { ...currentSecurity(), passwordChangedAt: Math.floor(Date.now() / 1000), otherSessions: 0 },
-          };
-          renderSecurity();
-          host.toast("Password changed. Your other browsers are signed out.");
-        })
-        .catch((err: unknown) => {
-          if (mine !== generation) return;
-          submit.disabled = false;
-          submit.textContent = "Change password";
-          if (handled(err)) return;
-          status.error(passwordFailureMessage(err));
-          if (err instanceof ApiError && err.code === "INVALID_CREDENTIALS") current.input.focus();
-        });
-    });
-
-    const syncConsequence = (list: readonly MyDevice[]): void => {
-      consequence.textContent = passwordChangeConsequence(list);
-    };
-    syncConsequence([]);
-
-    return { node, reset, focus: () => current.input.focus(), syncConsequence };
-  }
 
   function togglePasswordForm(show: boolean): void {
     passwordForm.node.hidden = !show;
@@ -477,191 +335,7 @@ export function createAccountPage(host: AccountHost): AccountPage {
     }
   }
 
-  // ---- Storage ----
 
-  function renderStorage(): void {
-    if (storage.kind === "loading") {
-      storageBody.replaceChildren(pending());
-      return;
-    }
-    if (storage.kind === "failed") {
-      storageBody.replaceChildren(failed(storage.message));
-      return;
-    }
-    const data = storage.data;
-    const total = el(
-      "div",
-      { class: "acct-total" },
-      el("span", { class: "acct-total__v acct-data", text: formatBytes(data.usedBytes) }),
-      el("span", { class: "acct-total__k", text: `of ${formatBytes(data.totalBytes)}` }),
-    );
-    if (data.byKind === null) {
-      // A real state, not an error: the total is known, the split is not.
-      storageBody.replaceChildren(
-        total,
-        el("p", { class: "acct-hint", text: "This server can't break the total down by kind yet." }),
-      );
-      return;
-    }
-    storageBody.replaceChildren(
-      total,
-      ...storageRows(data.byKind).map((r) =>
-        el(
-          "div",
-          { class: "acct-row acct-kind" },
-          el(
-            "div",
-            { class: "acct-row__k" },
-            el("span", { text: r.label }),
-            el("span", { class: "acct-kind__hint", text: r.hint }),
-          ),
-          el("div", { class: "acct-row__v acct-data", text: formatBytes(r.bytes) }),
-          el(
-            "div",
-            { class: "acct-row__acts" },
-            r.key === "bin" ? button("Open", () => host.onOpenBin(), { ariaLabel: "Open the recycle bin" }) : null,
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ---- the versions control ----
-  // No byte figure on this line: beside a pending change it read as the cost.
-  // Bounded above by the server; global `max_bytes` is a backstop.
-
-  // A stepper: the value moves by one, and native spinners vanish on some platforms.
-  const keepInput = el("input", {
-    class: "acct-keep acct-data",
-    id: "acct-keep",
-    type: "number",
-    inputmode: "numeric",
-    min: "0",
-    step: "1",
-    "aria-describedby": "acct-keep-note",
-  }) as HTMLInputElement;
-  const keepDown = el("button", {
-    class: "acct-step",
-    type: "button",
-    "aria-label": "Keep one fewer",
-    text: "−", // MINUS SIGN, not a hyphen — it sits on the digits' baseline
-  }) as HTMLButtonElement;
-  const keepUp = el("button", {
-    class: "acct-step",
-    type: "button",
-    "aria-label": "Keep one more",
-    text: "+",
-  }) as HTMLButtonElement;
-  const keepStepper = el("div", { class: "acct-stepper" }, keepDown, keepInput, keepUp);
-
-  /** Same path as typing, so notice, Save and bounds behave the same. */
-  function step(by: number): void {
-    if (policy.kind !== "ready") return;
-    const from = typedKeep() ?? policy.data.keep;
-    const next = Math.min(Math.max(from + by, 0), policy.data.maxKeep);
-    keepInput.value = String(next);
-    updateKeepNote();
-  }
-  keepDown.addEventListener("click", () => step(-1));
-  keepUp.addEventListener("click", () => step(1));
-  const keepNote = el("p", { class: "acct-keep__note", id: "acct-keep-note", role: "status", "aria-live": "polite" });
-  const keepSave = el("button", { class: "acct-btn acct-btn--go acct-keep__save", type: "button", text: "Save", hidden: true });
-  const keepLine = el(
-    "div",
-    { class: "acct-keep__line" },
-    el("label", { class: "acct-keep__label", htmlFor: "acct-keep", text: "Keep the last" }),
-    keepStepper,
-    el("span", { class: "acct-keep__of", text: "of each file" }),
-    keepSave,
-  );
-
-  keepInput.addEventListener("input", () => updateKeepNote());
-  keepSave.addEventListener("click", () => void savePolicy());
-
-  function typedKeep(): number | null {
-    const raw = keepInput.value.trim();
-    if (raw === "") return null;
-    const n = Number.parseInt(raw, 10);
-    return Number.isSafeInteger(n) ? n : null;
-  }
-
-  function updateKeepNote(): void {
-    if (policy.kind !== "ready") return;
-    const p = policy.data;
-    const typed = typedKeep();
-    if (typed === null) {
-      keepNote.textContent = "";
-      keepSave.hidden = true;
-      return;
-    }
-    if (typed > p.maxKeep) {
-      keepNote.textContent = `This server keeps at most ${p.maxKeep} for each file.`;
-      keepSave.hidden = true;
-      return;
-    }
-    if (typed < 0) {
-      keepNote.textContent = "The fewest you can keep is 0.";
-      keepSave.hidden = true;
-      return;
-    }
-    keepNote.textContent = typed === p.keep ? "" : (discardNotice(p.retainedPerFile, typed) ?? "");
-    keepSave.hidden = typed === p.keep;
-  }
-
-  function renderPolicy(): void {
-    if (policy.kind === "loading") {
-      versionsBody.replaceChildren(pending());
-      return;
-    }
-    if (policy.kind === "failed") {
-      versionsBody.replaceChildren(failed(policy.message));
-      return;
-    }
-    const p = policy.data;
-    keepInput.max = String(p.maxKeep);
-    // Not while the user is mid-edit.
-    if (document.activeElement !== keepInput) keepInput.value = String(p.keep);
-    keepSave.disabled = savingPolicy;
-    versionsBody.replaceChildren(
-      keepLine,
-      keepNote,
-      el("p", {
-        class: "acct-hint",
-        // Per file, not a pool: the one thing about `keep` a reader can get wrong.
-        text: "This applies to each file on its own, not to a shared total. Discarded versions can't be recovered — the recycle bin doesn't hold them.",
-      }),
-    );
-    updateKeepNote();
-  }
-
-  async function savePolicy(): Promise<void> {
-    if (savingPolicy || policy.kind !== "ready") return;
-    const typed = typedKeep();
-    if (typed === null || typed < 0 || typed > policy.data.maxKeep) return;
-    savingPolicy = true;
-    keepSave.disabled = true;
-    keepSave.textContent = "Saving…";
-    const mine = generation;
-    try {
-      const result = await host.api.setVersionPolicy(typed);
-      if (mine !== generation) return;
-      policy = { kind: "ready", data: result.policy };
-      host.toast(
-        result.removedVersions === 0
-          ? `Keeping the last ${result.policy.keep} of each file.`
-          : `Removed ${result.removedVersions === 1 ? "1 version" : `${result.removedVersions} versions`}, freeing ${formatBytes(result.freedBytes)}.`,
-      );
-      // Re-read rather than doing the arithmetic in two places.
-      void loadStorage(mine);
-    } catch (e) {
-      if (mine !== generation) return;
-      if (!handled(e)) host.toast(failureMessage(e));
-    } finally {
-      savingPolicy = false;
-      keepSave.textContent = "Save";
-      if (mine === generation) renderPolicy();
-    }
-  }
 
   // ---- Appearance ----
   // A set-once override of `prefers-color-scheme`; a two-option control, since a
@@ -758,14 +432,12 @@ export function createAccountPage(host: AccountHost): AccountPage {
     return host.api.versionPolicy().then(
       (data) => {
         if (mine !== generation) return;
-        policy = { kind: "ready", data };
-        renderPolicy();
+        versions.set({ kind: "ready", data });
       },
       (e: unknown) => {
         if (mine !== generation) return;
         if (handled(e)) return;
-        policy = { kind: "failed", message: failureMessage(e) };
-        renderPolicy();
+        versions.set({ kind: "failed", message: failureMessage(e) });
       },
     );
   }
@@ -799,7 +471,7 @@ export function createAccountPage(host: AccountHost): AccountPage {
       if (security.kind !== "ready") renderSecurity();
       if (devices.kind !== "ready") renderDevices();
       if (storage.kind !== "ready") renderStorage();
-      if (policy.kind !== "ready") renderPolicy();
+      if (!versions.isReady()) versions.render();
       renderTheme();
       void loadSecurity(mine);
       void loadDevices(mine);
