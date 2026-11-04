@@ -504,7 +504,7 @@ export function createAccountPage(host: AccountHost): AccountPage {
 }
 
 /** Same derivation as the rail's nameplate. */
-function initials(email: string): string {
+export function initials(email: string): string {
   const name = (email || "").split("@")[0] ?? "";
   const parts = name.split(/[.\-_]+/).filter(Boolean);
   const a = parts[0]?.[0] ?? "?";
