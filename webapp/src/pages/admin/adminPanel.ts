@@ -35,6 +35,8 @@ export interface AdminPanel {
   isOpen(): boolean;
   lock(): Promise<void>;
   isElevated(): boolean;
+  /** Scrolls to the Server panel's backups once the household is shown. */
+  revealBackups(): void;
   destroy(): void;
 }
 
@@ -111,6 +113,7 @@ export function createAdminPanel(host: AdminHost): AdminPanel {
 
     lock: () => console_.lock(),
     isElevated: () => console_.isElevated(),
+    revealBackups: () => view.revealBackups(),
 
     destroy(): void {
       panel.remove();

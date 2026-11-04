@@ -54,8 +54,21 @@ export function createAdminView(opts: {
   onRetention(): void;
   onBackupDismiss(dismissed: boolean): void;
   onBackupForget(dir: string): void;
-}): AdminView {
+}): AdminView & { revealBackups(): void } {
   const { host, body } = opts;
+
+  /** Set by "Open backups": the next ready paint scrolls there and focuses it. */
+  let revealPending = false;
+
+  function reveal(): void {
+    // The Server panel when there is no backup record to show.
+    const target = body.querySelector<HTMLElement>(".admin-backups__title") ?? body.querySelector<HTMLElement>(".admin-server");
+    // Still hidden (the console reopening) or not drawn yet: keep the wish.
+    if (!target || target.getClientRects().length === 0) return;
+    revealPending = false;
+    target.scrollIntoView({ block: "start" });
+    target.focus({ preventScroll: true });
+  }
 
   function gate(state: Extract<AdminState, { kind: "locked" }>): HTMLElement {
     // The app's real auth field, from `ui/form.ts`.
@@ -246,10 +259,11 @@ export function createAdminView(opts: {
     );
   }
 
-  function statCard(k: string, value: string, sub: string, meter: Meter | null, control: HTMLElement | null): HTMLElement {
+  /** `danger`: the value reads in the console's danger colour, like an overfull meter's label. */
+  function statCard(k: string, value: string, sub: string, meter: Meter | null, control: HTMLElement | null, danger = false): HTMLElement {
     return el(
       "div",
-      { class: "admin-stat" },
+      { class: danger ? "admin-stat admin-stat--danger" : "admin-stat" },
       el("div", { class: "admin-stat__k", text: k }),
       el("div", { class: "admin-stat__v" }, el("span", { text: value }), control),
       el("div", { class: "admin-stat__sub", text: sub }),
@@ -291,7 +305,7 @@ export function createAdminView(opts: {
 
     if (backups) {
       const card = backupsCard(backups);
-      cards.push(statCard("Backups", card.value, card.sub, null, null));
+      cards.push(statCard("Backups", card.value, card.sub, null, null, card.danger));
     }
 
     return el(
@@ -352,8 +366,16 @@ export function createAdminView(opts: {
     render(state: AdminState): void {
       if (state.kind === "locked") body.replaceChildren(gate(state));
       else if (state.kind === "loading") body.replaceChildren(notice("Loading…", "Fetching the household."));
-      else if (state.kind === "ready") body.replaceChildren(ready(state));
-      else body.replaceChildren(notice("The console could not be loaded", state.message));
+      else if (state.kind === "ready") {
+        body.replaceChildren(ready(state));
+        if (revealPending) reveal();
+      } else body.replaceChildren(notice("The console could not be loaded", state.message));
+    },
+
+    /** Now if the household is on screen, else at the next ready paint (after unlocking). */
+    revealBackups(): void {
+      revealPending = true;
+      reveal();
     },
 
     confirm(spec: ConfirmSpec): Promise<boolean> {

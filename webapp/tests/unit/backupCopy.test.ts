@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { backupNoticeText, backupsCard, backupRunLine, BACKUP_COMMAND } from "../../src/pages/admin/backupCopy";
+import { backupNoticeText, backupsCard, backupRunLine, noticeTone, BACKUP_COMMAND } from "../../src/pages/admin/backupCopy";
 import type { AdminBackups, BackupRun } from "../../src/api/adminTypes";
 
 // Seconds, as the server sends them; `NOW` in ms, as the copy takes it.
@@ -33,10 +33,13 @@ describe("the library's backup notice", () => {
     expect(backupNoticeText({ kind: "none", dir: null, at: null, message: null }, NOW)).toBeNull();
   });
 
-  it("names the failing directory, when, and what the command said", () => {
+  it("names the folder once: the command's message usually already does", () => {
     expect(
       backupNoticeText({ kind: "failed", dir: "/mnt/nas", at: T, message: "No backup directory at: /mnt/nas" }, NOW),
-    ).toBe("The last backup to /mnt/nas failed 1 hour ago: No backup directory at: /mnt/nas");
+    ).toBe("The last backup failed 1 hour ago: No backup directory at: /mnt/nas");
+    expect(backupNoticeText({ kind: "failed", dir: "/mnt/nas", at: T, message: "disk full" }, NOW)).toBe(
+      "The last backup to /mnt/nas failed 1 hour ago: disk full",
+    );
   });
 
   it("asks whether the schedule still runs when the newest success is old", () => {
@@ -48,38 +51,58 @@ describe("the library's backup notice", () => {
   it("says plainly that nothing is backed up yet", () => {
     expect(backupNoticeText({ kind: "never", dir: null, at: null, message: null }, NOW)).toMatch(/Nothing has been backed up yet/);
   });
+
+  it("speaks in the app's two tints: danger for failed and late, information for nothing yet", () => {
+    expect(noticeTone("failed")).toBe("danger");
+    expect(noticeTone("late")).toBe("danger");
+    expect(noticeTone("never")).toBe("info");
+    expect(noticeTone("none")).toBeNull();
+  });
 });
 
 describe("the Server panel's Backups card", () => {
-  it("shows the newest success, with its size and directory", () => {
+  it("shows the newest success, with its size and folder, in plain ink", () => {
     const c = backupsCard(backups({ runs: [run({ dir: "/media/usb", lastOkAt: T - 100 * HOUR }), run()] }), NOW);
-    expect(c.value).toBe("1 hour ago");
-    expect(c.sub).toBe("37 files, 112 MB in /mnt/nas");
+    expect(c).toEqual({ value: "1 hour ago", sub: "37 files, 112 MB in /mnt/nas", danger: false });
   });
 
-  it("reads Failing with the error, None yet with the command, Elsewhere once dismissed", () => {
-    expect(backupsCard(backups({ notice: { kind: "failed", dir: "/mnt/nas", at: T, message: "disk full" } }), NOW)).toEqual({
-      value: "Failing",
-      sub: "disk full",
+  it("summarises a failure instead of repeating it, in the danger colour", () => {
+    const failing = backups({
+      notice: { kind: "failed", dir: "/media/usb", at: T, message: "disk full" },
+      runs: [run(), run({ dir: "/media/usb", lastError: "disk full" })],
     });
-    expect(backupsCard(backups({ notice: { kind: "never", dir: null, at: null, message: null } }), NOW).sub).toContain(BACKUP_COMMAND);
-    expect(backupsCard(backups({ neverDismissed: true }), NOW).value).toBe("Elsewhere");
+    expect(backupsCard(failing, NOW)).toEqual({ value: "Failing", sub: "1 of 2 folders failing", danger: true });
   });
 
-  it("says how old the newest backup is when late, and against what", () => {
-    const c = backupsCard(backups({ notice: { kind: "late", dir: "/mnt/nas", at: T - 72 * HOUR, message: null } }), NOW);
-    expect(c).toEqual({ value: "3 days ago", sub: "newest backup, older than 48 hours" });
+  it("late is danger; none yet and elsewhere are not, and the command is not on the card", () => {
+    expect(backupsCard(backups({ notice: { kind: "late", dir: "/mnt/nas", at: T - 72 * HOUR, message: null } }), NOW)).toEqual({
+      value: "3 days ago",
+      sub: "newest backup, older than 48 hours",
+      danger: true,
+    });
+    const never = backupsCard(backups({ notice: { kind: "never", dir: null, at: null, message: null } }), NOW);
+    expect(never).toEqual({ value: "None yet", sub: "no backup recorded", danger: false });
+    expect(never.sub).not.toContain(BACKUP_COMMAND);
+    expect(backupsCard(backups({ neverDismissed: true }), NOW).value).toBe("Elsewhere");
   });
 });
 
-describe("one directory's line", () => {
-  it("is ok with the last success and check, and failing with its error", () => {
-    expect(backupRunLine(run({ verifiedAt: T }), NOW)).toEqual({
-      ok: true,
-      detail: "backed up 1 hour ago, checked 1 hour ago · 37 files, 112 MB",
+describe("one folder's row", () => {
+  it("is a plain sentence when healthy, with the exact time and snapshot for its title", () => {
+    const line = backupRunLine(run({ verifiedAt: T }), NOW);
+    expect(line.status).toBe("ok");
+    expect(line.chip).toBeNull();
+    expect(line.detail).toBe("backed up 1 hour ago, checked 1 hour ago · 37 files, 112 MB");
+    expect(line.title).toMatch(/^Backed up .+ · snapshot 2026-11-04T030000Z$/);
+  });
+
+  it("carries trouble in a chip and keeps the sentence plain", () => {
+    expect(backupRunLine(run({ lastRunAt: T, lastError: "disk full" }), NOW)).toMatchObject({
+      status: "failed",
+      chip: "Failing",
+      detail: "disk full, 1 hour ago",
     });
-    expect(backupRunLine(run({ lastRunAt: T, lastError: "disk full" }), NOW)).toEqual({ ok: false, detail: "failed 1 hour ago: disk full" });
-    expect(backupRunLine(run({ verifiedAt: T, verifyError: "1 missing" }), NOW).ok).toBe(false);
+    expect(backupRunLine(run({ verifiedAt: T, verifyError: "1 missing" }), NOW)).toMatchObject({ status: "check-failed", chip: "Check failed" });
     expect(backupRunLine(run({ lastOkAt: null, lastRunAt: null, verifiedAt: T }), NOW).detail).toBe(
       "checked 1 hour ago, no backup recorded",
     );

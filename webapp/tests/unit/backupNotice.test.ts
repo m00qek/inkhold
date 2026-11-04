@@ -19,6 +19,8 @@ function build(answer: BackupNotice | Error, isAdmin = true) {
   return { n, api, onOpen, set: (next: BackupNotice | Error) => void (current = next) };
 }
 
+const failed: BackupNotice = { kind: "failed", dir: "/mnt/nas", at: T, message: "disk full" };
+
 describe("the library's backup notice", () => {
   it("is hidden while all is well", async () => {
     const t = build({ kind: "none", dir: null, at: null, message: null });
@@ -26,18 +28,32 @@ describe("the library's backup notice", () => {
     expect(t.n.el.hidden).toBe(true);
   });
 
-  it("shows a failure to an admin, and opens the console from its button", async () => {
-    const t = build({ kind: "failed", dir: "/mnt/nas", at: T, message: "disk full" });
+  it("is the app's banner: a badge, the sentence with its exact time, one shared button", async () => {
+    const t = build(failed);
     await flush();
     expect(t.n.el.hidden).toBe(false);
-    expect(t.n.el.dataset.kind).toBe("failed");
-    expect(t.n.el.textContent).toContain("The last backup to /mnt/nas failed 1 hour ago: disk full");
+    expect(t.n.el.classList.contains("banner")).toBe(true);
+    expect(t.n.el.querySelector(".banner__badge svg")).not.toBeNull();
+    const text = t.n.el.querySelector<HTMLElement>(".banner__text")!;
+    expect(text.textContent).toBe("The last backup to /mnt/nas failed 1 hour ago: disk full");
+    expect(text.title).not.toBe("");
+    expect(t.n.el.querySelector("button")!.className).toBe("btn banner__act");
     t.n.el.querySelector("button")!.click();
     expect(t.onOpen).toHaveBeenCalledTimes(1);
   });
 
+  it("wears the danger tint for failed and late, the information tint for nothing yet", async () => {
+    const t = build(failed);
+    await flush();
+    expect(t.n.el.classList.contains("banner--danger")).toBe(true);
+    t.set({ kind: "never", dir: null, at: null, message: null });
+    await t.n.refresh();
+    expect(t.n.el.hidden).toBe(false);
+    expect(t.n.el.classList.contains("banner--danger")).toBe(false);
+  });
+
   it("never asks, and never shows, for someone who is not an admin", async () => {
-    const t = build({ kind: "failed", dir: "/mnt/nas", at: T, message: "disk full" }, false);
+    const t = build(failed, false);
     await flush();
     expect(t.api.backupNotice).not.toHaveBeenCalled();
     expect(t.n.el.hidden).toBe(true);
@@ -49,12 +65,15 @@ describe("the library's backup notice", () => {
     expect(t.n.el.hidden).toBe(true);
   });
 
-  it("refresh follows the server: a fixed backup clears the line", async () => {
-    const t = build({ kind: "late", dir: "/mnt/nas", at: T - 72 * 3600, message: null });
+  it("stands down while the console is open, and re-asks on leaving it", async () => {
+    const t = build(failed);
     await flush();
-    expect(t.n.el.hidden).toBe(false);
-    t.set({ kind: "none", dir: null, at: null, message: null });
-    await t.n.refresh();
+    t.n.setConsoleOpen(true);
+    expect(t.n.el.hidden).toBe(true);
+    t.set({ kind: "none", dir: null, at: null, message: null }); // fixed in the console
+    t.n.setConsoleOpen(false);
+    await flush();
+    expect(t.api.backupNotice).toHaveBeenCalledTimes(2);
     expect(t.n.el.hidden).toBe(true);
     t.n.destroy();
   });

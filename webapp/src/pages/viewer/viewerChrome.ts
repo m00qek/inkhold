@@ -63,17 +63,17 @@ export type VersionBannerKind = "note" | "annotations";
 /** The "viewing an older version" strip; Restore is routed to `deps.onRestoreVersion`. */
 export function createVersionBanner(opts: { onRestore: () => void; kind?: VersionBannerKind }): VersionBanner {
   const kind = opts.kind ?? "note";
-  const text = el("span", { class: "version-banner__text" });
+  const text = el("span", { class: "banner__text version-banner__text" });
   const restore = el("button", {
-    class: "btn version-banner__restore",
+    class: "btn banner__act version-banner__restore",
     type: "button",
     text: "Restore this version",
   }) as HTMLButtonElement;
   restore.addEventListener("click", () => opts.onRestore());
   const banner = el(
     "div",
-    { class: "version-banner", role: "status", hidden: true },
-    el("span", { class: "version-banner__badge", "aria-hidden": "true", html: svg(VIEWER_IC.restore, 1.6) }),
+    { class: "banner version-banner", role: "status", hidden: true },
+    el("span", { class: "banner__badge version-banner__badge", "aria-hidden": "true", html: svg(VIEWER_IC.restore, 1.6) }),
     text,
     restore,
   );

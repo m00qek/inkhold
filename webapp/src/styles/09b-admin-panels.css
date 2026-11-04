@@ -138,7 +138,10 @@
  * An explicit labelled control, not a dismiss "×": cutting a tablet off needs
  * the device in hand to undo. 26px clears the 24px target.
  */
-.admin-device__cut {
+/* A row's quiet remove: soft ink until hovered. Devices (Unlink) and backup
+   folders (Forget). */
+.admin-device__cut,
+.admin-row-act {
   display: inline-flex;
   align-items: center;
   min-height: 26px;
@@ -155,7 +158,8 @@
   cursor: pointer;
 }
 
-.admin-device__cut:hover {
+.admin-device__cut:hover,
+.admin-row-act:hover:not(:disabled) {
   color: var(--admin-danger);
   border-color: color-mix(in srgb, var(--margin) 45%, var(--line));
   background: color-mix(in srgb, var(--margin) 8%, var(--sheet));
@@ -223,6 +227,11 @@
   color: var(--ink-soft);
 }
 
+/* A bad state reads like an overfull meter's label. */
+.admin-stat--danger .admin-stat__v {
+  color: var(--admin-danger);
+}
+
 .admin-stat .admin-meter {
   max-width: none;
 }
@@ -243,7 +252,7 @@
   margin-top: 22px;
 }
 
-/* The panel's small-caps label voice, as on `.admin-stat__k`. */
+/* The cards' own label voice (`.admin-stat__k`). */
 .admin-backups__title {
   margin: 0 0 8px;
   font-family: var(--font-mono);
@@ -278,26 +287,30 @@
   white-space: nowrap;
 }
 
+/* Status is the chip's job; the sentence stays plain. */
 .admin-backup__detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
   color: var(--ink-soft);
 }
 
-/* A failing directory reads in the margin's red, the app's one alarm colour. */
-.admin-backup[data-ok="false"] .admin-backup__detail {
-  color: var(--margin-ink);
+.admin-backups__cmd {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
 }
 
-.admin-backups__acts {
-  margin-top: 10px;
-}
-
-.admin-btn--quiet {
-  border-color: transparent;
-  background: transparent;
-}
-
-.admin-btn--quiet:hover:not(:disabled) {
-  border-color: var(--line);
+.admin-backups__setting {
+  margin-top: 14px;
+  max-width: 62ch;
 }
 
 @media (max-width: 640px) {

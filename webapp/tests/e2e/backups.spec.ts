@@ -82,42 +82,59 @@ test.describe("backups: the library's notice", () => {
     await page.reload();
     await railSettled(page);
     await expect(notice(page)).toBeVisible();
-    await expect(notice(page)).toContainText("The last backup to /media/usb/inkhold failed 2 hours ago");
-    await expect(notice(page)).toContainText("No backup directory at: /media/usb/inkhold");
+    await expect(notice(page).locator(".banner__text")).toHaveText("The last backup failed 2 hours ago: No backup directory at: /media/usb/inkhold");
   });
 
-  test("leads to the Server panel, where forgetting the dead disk clears the warning", async ({ page }) => {
+  test("lands on the backups, hides while the console says it all, and clears once the dead disk is forgotten", async ({ page }) => {
     await seed(page, { runs: [nasOk(), usbFailing()] });
     await signedIn(page, true);
     await page.goto("/");
     await railSettled(page);
+    await expect(notice(page)).toHaveClass(/banner--danger/);
+    // The path is in the command's message; the sentence does not say it twice.
+    await expect(notice(page).locator(".banner__text")).toHaveText(/^The last backup failed 2 hours ago: No backup directory at: \/media\/usb\/inkhold$/);
 
     await notice(page).getByRole("button", { name: "Open backups" }).click();
     await expect(page).toHaveURL(/#\/admin$/);
     await unlock(page);
+    // Landed on the backup folders, focused, and the notice stands down.
+    await expect(page.getByRole("heading", { name: "Backup folders" })).toBeFocused();
+    await expect(page.getByRole("heading", { name: "Backup folders" })).toBeInViewport();
+    await expect(notice(page)).toBeHidden();
 
     const dirs = page.getByRole("list", { name: "Backup directories" });
     await expect(dirs.getByRole("listitem")).toHaveCount(2);
-    await expect(page.locator(".admin-stat", { hasText: "Backups" })).toContainText("Failing");
+    await expect(dirs.getByRole("listitem").filter({ hasText: "/media/usb/inkhold" })).toContainText("Failing");
+    await expect(page.locator(".admin-stat", { hasText: "Backups" })).toContainText("1 of 2 folders failing");
 
     await page.getByRole("button", { name: "Forget /media/usb/inkhold" }).click();
     await page.getByRole("dialog").getByRole("button", { name: "Forget", exact: true }).click();
     await expect(dirs.getByRole("listitem")).toHaveCount(1);
+
+    await page.locator(".nav__item", { hasText: "Note" }).first().click();
+    await railSettled(page);
     await expect(notice(page)).toBeHidden();
   });
 
-  test("nothing backed up yet: said once, until an admin says they back up another way", async ({ page }) => {
+  test("nothing backed up yet: an invitation, not an alarm, until an admin turns the reminder off", async ({ page }) => {
     await seed(page, { runs: [] });
     await signedIn(page, true);
     await page.goto("/");
     await railSettled(page);
     await expect(notice(page)).toContainText("Nothing has been backed up yet");
+    await expect(notice(page)).not.toHaveClass(/banner--danger/);
 
     await notice(page).getByRole("button", { name: "Open backups" }).click();
     await unlock(page);
     await expect(page.locator(".admin-stat", { hasText: "Backups" })).toContainText("None yet");
-    await page.getByRole("button", { name: "I back up another way" }).click();
+    await expect(page.locator(".admin-backups__cmd")).toHaveText("inkhold backup create <dir> --keep=7");
+    const remind = page.getByRole("checkbox", { name: "Remind admins when nothing is backed up" });
+    await expect(remind).toBeChecked();
+    await remind.uncheck();
+    await expect(page.getByRole("checkbox", { name: "Remind admins when nothing is backed up" })).not.toBeChecked();
+
+    await page.locator(".nav__item", { hasText: "Note" }).first().click();
+    await railSettled(page);
     await expect(notice(page)).toBeHidden();
-    await expect(page.getByRole("button", { name: "Remind me when nothing is backed up" })).toBeVisible();
   });
 });

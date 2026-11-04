@@ -3,34 +3,8 @@
    tokens. The restore confirm uses the shared `.confirm`. */
 
 /* ---------------- the reader banner ----------------
-   Information, not a warning, so it uses the accent; Restore is the one action. */
-.version-banner {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: 10px var(--sp-4);
-  background: color-mix(in srgb, var(--sheet), var(--accent) 12%);
-  border-bottom: 1px solid color-mix(in srgb, var(--line), var(--accent) 30%);
-  color: var(--ink);
-  font-size: var(--fs-body);
-}
-.version-banner[hidden] {
-  display: none;
-}
-.version-banner__badge {
-  display: inline-flex;
-  color: var(--accent);
-  flex: none;
-}
-.version-banner__badge svg {
-  width: 18px;
-  height: 18px;
-}
-.version-banner__text {
-  flex: 1 1 auto;
-  min-width: 0;
-  line-height: 1.4;
-}
+   Information, not a warning: a `.banner` in the accent (03-main-topbar.css).
+   Restore is its one action. */
 .version-banner__restore {
   flex: none;
 }

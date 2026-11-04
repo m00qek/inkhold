@@ -243,7 +243,10 @@ export function createAppShell(deps: AppDeps): AppShell {
   const backupNotice = createBackupNotice({
     api,
     isAdmin: () => identity.isAdmin,
-    onOpen: () => go(destinationHref(ADMIN_KEY)),
+    onOpen: () => {
+      ctx.adminDest.revealBackups();
+      go(destinationHref(ADMIN_KEY));
+    },
   });
 
   ctx.root = el(
@@ -263,7 +266,10 @@ export function createAppShell(deps: AppDeps): AppShell {
     sortWrap: ctx.topbar.sortWrap,
     segmented: ctx.topbar.segmented,
     lockBtn: ctx.topbar.lockAdminBtn,
-    setMode: (open) => ctx.modes.setDestinationMode("admin", open),
+    setMode: (open) => {
+      ctx.modes.setDestinationMode("admin", open);
+      backupNotice.setConsoleOpen(open);
+    },
     rebuildRail: () => ctx.rail.build(),
     isCurrent: () => st.destination === ADMIN_KEY,
     toast: ctx.toast,

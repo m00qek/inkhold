@@ -41,6 +41,8 @@ export interface AdminDestination {
   /** Locked before the console was ever imported, which is also what the gate shows. */
   isElevated(): boolean;
   lock(): void;
+  /** The next open lands on the backups section (the library's "Open backups"). */
+  revealBackups(): void;
   destroy(): void;
 }
 
@@ -56,6 +58,9 @@ function adminNotice(title: string, text: string): HTMLElement {
 export function createAdminDestination(deps: AdminDestinationDeps): AdminDestination {
   /** Created on first entry (dynamic import) and kept for the shell's life. */
   let admin: AdminPanel | null = null;
+
+  /** Asked for before the console's chunk arrived; honoured once it does. */
+  let revealWanted = false;
 
   /**
    * Stand-in painted over the import, so the old gallery doesn't linger under the
@@ -132,6 +137,10 @@ export function createAdminDestination(deps: AdminDestinationDeps): AdminDestina
           // Hand over rather than tear down, to avoid flashing the gallery.
           hideBooting(true);
           admin.open();
+          if (revealWanted) {
+            revealWanted = false;
+            admin.revealBackups();
+          }
           deps.rebuildRail(); // the console is open now; repaint the highlight
         })
         .catch(() => {
@@ -150,6 +159,10 @@ export function createAdminDestination(deps: AdminDestinationDeps): AdminDestina
     },
     isElevated: () => admin?.isElevated() ?? false,
     lock: () => void admin?.lock(),
+    revealBackups(): void {
+      if (admin) admin.revealBackups();
+      else revealWanted = true;
+    },
     destroy: () => admin?.destroy(),
   };
 }

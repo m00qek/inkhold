@@ -286,8 +286,9 @@
   border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
 }
 
-/* Red: a temporary password is unfinished. */
-.admin-chip--pending {
+/* Red: a temporary password is unfinished, or a backup folder is failing. */
+.admin-chip--pending,
+.admin-chip--danger {
   color: var(--admin-danger);
   border-color: color-mix(in srgb, var(--margin) 40%, var(--line));
 }

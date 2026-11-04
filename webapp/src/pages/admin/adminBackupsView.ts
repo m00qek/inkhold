@@ -1,7 +1,7 @@
-// The Server panel's backup detail: one line per backup directory, what last
-// happened there, and the two things an admin can do about it here (forget a
-// directory no longer used; say they back up another way). Starting a backup
-// is the server's command line, never this page.
+// The Server panel's backup detail: one row per backup folder, in the
+// console's own vocabulary (a red chip for trouble, as for a pending password;
+// the device list's quiet remove button), and the one setting an admin has
+// here. Starting a backup is the server's command line, never this page.
 
 import { el } from "../../ui/dom";
 import type { AdminBackups } from "../../api/adminTypes";
@@ -16,7 +16,7 @@ export function backupsDetail(b: AdminBackups, busy: boolean, act: BackupsAction
   const rows = b.runs.map((r) => {
     const line = backupRunLine(r, nowMs);
     const forget = el("button", {
-      class: "admin-btn admin-btn--quiet",
+      class: "admin-row-act",
       type: "button",
       text: "Forget",
       disabled: busy,
@@ -25,38 +25,47 @@ export function backupsDetail(b: AdminBackups, busy: boolean, act: BackupsAction
     forget.addEventListener("click", () => act.onForget(r.dir));
     return el(
       "li",
-      { class: "admin-backup", "data-ok": String(line.ok) },
-      el("code", { class: "admin-backup__dir", text: r.dir }),
-      el("span", { class: "admin-backup__detail", text: line.detail }),
+      { class: "admin-backup", "data-status": line.status },
+      el("code", { class: "admin-backup__dir", text: r.dir, title: r.dir }),
+      el(
+        "span",
+        { class: "admin-backup__detail" },
+        line.chip ? el("span", { class: "admin-chip admin-chip--danger", text: line.chip }) : null,
+        el("span", { text: line.detail, title: line.title }),
+      ),
       forget,
     );
   });
 
-  // Offered while it means something: nothing has succeeded, or it was said already.
-  const showToggle = b.neverDismissed || !b.runs.some((r) => r.lastOkAt !== null);
-  const toggle = showToggle
-    ? el("button", {
-        class: "admin-btn admin-btn--quiet",
-        type: "button",
-        disabled: busy,
-        text: b.neverDismissed ? "Remind me when nothing is backed up" : "I back up another way",
-      })
-    : null;
-  toggle?.addEventListener("click", () => act.onDismiss(!b.neverDismissed));
+  // A setting, so a checkbox like "Also an administrator", offered while it
+  // means something: nothing has succeeded yet, or it is already off.
+  let setting: HTMLElement | null = null;
+  if (b.neverDismissed || !b.runs.some((r) => r.lastOkAt !== null)) {
+    const box = el("input", { type: "checkbox", id: "admin-backup-remind", disabled: busy }) as HTMLInputElement;
+    box.checked = !b.neverDismissed;
+    box.addEventListener("change", () => act.onDismiss(!box.checked));
+    setting = el(
+      "label",
+      { class: "admin-check admin-backups__setting" },
+      box,
+      el("span", { text: "Remind admins when nothing is backed up" }),
+      el("small", { text: "Turn this off if the server is backed up some other way. A failing backup is always shown." }),
+    );
+  }
 
   return el(
-    "div",
-    { class: "admin-backups" },
-    el("h3", { class: "admin-backups__title", text: "Backup folders" }),
+    "section",
+    { class: "admin-backups", "aria-labelledby": "admin-backups-title" },
+    // Focusable, so "Open backups" can land here.
+    el("h3", { class: "admin-backups__title", id: "admin-backups-title", tabindex: "-1", text: "Backup folders" }),
     rows.length
       ? el("ul", { class: "admin-backups__list", "aria-label": "Backup directories" }, ...rows)
       : el(
-          "p",
-          { class: "admin-server__note" },
-          "No backup has been recorded. On the server, run ",
-          el("code", { text: BACKUP_COMMAND }),
-          ", nightly from cron; the README has the details.",
+          "div",
+          { class: "admin-backups__empty" },
+          el("p", { class: "admin-server__note", text: "No backup has been recorded. Run this on the server, nightly from cron; the README has the details:" }),
+          el("pre", { class: "admin-backups__cmd" }, el("code", { text: BACKUP_COMMAND })),
         ),
-    toggle ? el("div", { class: "admin-backups__acts" }, toggle) : null,
+    setting,
   );
 }

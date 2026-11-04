@@ -12,16 +12,16 @@ export interface ReaderVersionBanner {
 
 /** History mode only; Restore is the one mutating action on this surface. */
 export function createVersionBanner(): ReaderVersionBanner {
-  const versionBannerText = el("span", { class: "version-banner__text" });
+  const versionBannerText = el("span", { class: "banner__text version-banner__text" });
   const restoreVersionBtn = el("button", {
-    class: "btn version-banner__restore",
+    class: "btn banner__act version-banner__restore",
     type: "button",
     text: "Restore this version",
   }) as HTMLButtonElement;
   const versionBanner = el(
     "div",
-    { class: "version-banner", role: "status", hidden: true },
-    el("span", { class: "version-banner__badge", "aria-hidden": "true", html: svg(VIEWER_IC.restore, 1.6) }),
+    { class: "banner version-banner", role: "status", hidden: true },
+    el("span", { class: "banner__badge version-banner__badge", "aria-hidden": "true", html: svg(VIEWER_IC.restore, 1.6) }),
     versionBannerText,
     restoreVersionBtn,
   );
