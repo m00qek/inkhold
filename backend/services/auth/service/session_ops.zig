@@ -135,6 +135,15 @@ pub fn revokeAllSessions(self: *Service, user_id: u64) Error!void {
     try self.db.run("DELETE FROM sessions WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }});
 }
 
+/// Signs every device out, every account: each must log in again. A restored
+/// server is older than the tablets bound to it, and a device that resumes
+/// syncing against it may delete what it holds that the server lacks.
+/// Returns how many sessions ended.
+pub fn revokeDeviceSessions(self: *Service) Error!i64 {
+    try self.db.run("DELETE FROM sessions WHERE audience = 'device';", &.{});
+    return self.db.changes();
+}
+
 /// Reclaims rows past the absolute cap.
 pub fn sweepExpiredSessions(self: *Service) Error!void {
     try self.db.run("DELETE FROM sessions WHERE expires_at < ?1;", &.{.{ .int = clock.nowSeconds(self.io) }});

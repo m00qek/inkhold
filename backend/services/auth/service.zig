@@ -298,6 +298,7 @@ pub const Service = struct {
     pub const logout = session_ops.logout;
     const revokeAllSessions = session_ops.revokeAllSessions;
     pub const sweepExpiredSessions = session_ops.sweepExpiredSessions;
+    pub const revokeDeviceSessions = session_ops.revokeDeviceSessions;
     pub const caller = session_ops.caller;
     pub const elevate = session_ops.elevate;
     pub const lockElevation = session_ops.lockElevation;

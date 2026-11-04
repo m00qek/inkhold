@@ -142,6 +142,11 @@ pub fn create(gpa: std.mem.Allocator, io: Io, paths: Paths, backup_dir: []const 
         defer snap.close();
         // A standalone file: no -wal beside it to forget.
         try snap.exec("PRAGMA journal_mode = DELETE;");
+        // The legacy plaintext-md5 column is never read (login decrypts
+        // `cred_enc`) and new rows leave it blank; an old install may still
+        // carry values. Blank them in the copy, so a backup without cred.key
+        // holds no usable credential. The live table is not touched.
+        try snap.exec("UPDATE users SET password_md5 = '' WHERE password_md5 <> '';");
 
         // 3. Whatever landed between 1 and 2.
         copy.all(snap, .strict) catch |e| switch (e) {

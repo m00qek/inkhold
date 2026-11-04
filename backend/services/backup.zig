@@ -45,6 +45,14 @@ const prune_mod = @import("backup/prune.zig");
 pub const PruneReport = prune_mod.Report;
 pub const prune = prune_mod.prune;
 
+// ---- restore ----
+const restore_mod = @import("backup/restore.zig");
+pub const RestoreOptions = restore_mod.Options;
+pub const RestoreReport = restore_mod.Report;
+pub const RestoreKey = restore_mod.Key;
+pub const restore = restore_mod.restore;
+pub const serverAnswers = restore_mod.serverAnswers;
+
 test {
     _ = layout;
     _ = manifest;
@@ -57,6 +65,8 @@ test {
     _ = gzfile;
     _ = verify_mod;
     _ = prune_mod;
+    _ = restore_mod;
+    _ = @import("backup/restore_test.zig");
     _ = @import("backup/verify_test.zig");
     _ = @import("backup/prune_test.zig");
     _ = @import("backup/create_test.zig");
