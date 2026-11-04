@@ -91,6 +91,7 @@ test {
     _ = @import("compress/gzip_stitch.zig");
     _ = @import("test/http/auth_test.zig");
     _ = @import("test/http/admin_http_test.zig");
+    _ = @import("test/http/backups_http_test.zig");
     _ = @import("test/http/elevation_test.zig");
     _ = @import("test/http/history_test.zig");
     _ = @import("test/http/history_raw_test.zig");

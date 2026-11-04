@@ -6,6 +6,7 @@ const auth = @import("handlers/auth.zig");
 const device = @import("handlers/device.zig");
 const controlplane = @import("handlers/controlplane.zig");
 const admin = @import("handlers/admin.zig");
+const backups = @import("handlers/backups.zig");
 
 /// Smoke-test API version (distinct from the package version).
 pub const api_version = auth.api_version;
@@ -199,6 +200,16 @@ pub const routes = [_]router.Route{
     .{ .method = .PUT, .path = "/api/admin/settings/retention", .scopes = &.{.controlplane}, .require_admin = true, .handler = admin.setRetention },
     // Household-wide totals only, never per-person activity.
     .{ .method = .GET, .path = "/api/admin/health", .scopes = &.{.controlplane}, .require_admin = true, .handler = admin.health },
+
+    // --- Backups: what `inkhold backup` last did (DESIGN.md §2.6) ---
+    // The library's notice: any signed-in caller may ask, only an admin hears
+    // anything but `none`, and without elevation, or it would hide behind a prompt.
+    .{ .method = .GET, .path = "/api/backup-notice", .scopes = &.{.controlplane}, .handler = backups.notice, .read_only = true },
+    .{ .method = .GET, .path = "/api/admin/backups", .scopes = &.{.controlplane}, .require_admin = true, .handler = backups.list },
+    // "I back up another way": silences `never`, never `failed`.
+    .{ .method = .PUT, .path = "/api/admin/backups/dismissed", .scopes = &.{.controlplane}, .require_admin = true, .handler = backups.setDismissed },
+    // A destination no longer in use: its last failure stops warning.
+    .{ .method = .POST, .path = "/api/admin/backups/forget", .scopes = &.{.controlplane}, .require_admin = true, .handler = backups.forget },
 };
 
 // A capture beyond `router.Params.max` would be dropped at match time.
