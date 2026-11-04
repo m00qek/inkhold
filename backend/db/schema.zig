@@ -66,7 +66,8 @@ fn applyStep(db: sqlite.Db, comptime n: comptime_int, ddl: [:0]const u8) !void {
     try db.exec("COMMIT;");
 }
 
-fn userVersion(db: sqlite.Db) !i64 {
+/// The database's `user_version`: the schema step it has reached.
+pub fn userVersion(db: sqlite.Db) !i64 {
     var r = (try db.row("PRAGMA user_version;", &.{})) orelse return 0;
     defer r.finalize();
     return r.int(0);

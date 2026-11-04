@@ -132,3 +132,27 @@ test "Db.row: no-row returns null, one-row reads int + text with int/text/null b
     try std.testing.expectEqual(@as(i64, 7), r.int(0));
     try std.testing.expectEqualStrings("a@example.com", r.text(1));
 }
+
+test "openNoCreate opens an existing database and never creates a missing one" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const gpa = std.testing.allocator;
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    defer gpa.free(dir);
+    const path = try std.fmt.allocPrintSentinel(gpa, "{s}/x.db", .{dir}, 0);
+    defer gpa.free(path);
+
+    try std.testing.expectError(error.Open, Db.openNoCreate(path, 1000));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "x.db", .{}));
+
+    {
+        const made = try Db.open(path);
+        defer made.close();
+        try made.exec("CREATE TABLE t(v INTEGER); INSERT INTO t VALUES(7);");
+    }
+    const db = try Db.openNoCreate(path, 1000);
+    defer db.close();
+    var r = (try db.row("SELECT v FROM t;", &.{})).?;
+    defer r.finalize();
+    try std.testing.expectEqual(@as(i64, 7), r.int(0));
+}

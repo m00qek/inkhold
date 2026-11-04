@@ -79,6 +79,27 @@ pub const Db = struct {
         return db;
     }
 
+    /// Opens an existing database read-write without ever creating it (a
+    /// missing file is `error.Open`), with a page cache of `cache_kib` and no
+    /// mmap. For tools that run beside the server, such as `inkhold backup`:
+    /// they must not create an empty database from a mistyped path, and they
+    /// must stay small. No `journal_mode`: the server's WAL setting stands.
+    pub fn openNoCreate(path: [:0]const u8, cache_kib: u32) Error!Db {
+        var handle: ?*c.sqlite3 = null;
+        if (c.sqlite3_open_v2(path.ptr, &handle, c.SQLITE_OPEN_READWRITE, null) != c.SQLITE_OK) {
+            if (handle) |h| _ = c.sqlite3_close(h);
+            return error.Open;
+        }
+        const db: Db = .{ .handle = handle.? };
+        errdefer db.close();
+        try db.exec("PRAGMA busy_timeout = 5000;");
+        try db.exec("PRAGMA foreign_keys = ON;");
+        var buf: [48]u8 = undefined;
+        const sql = std.fmt.bufPrintSentinel(&buf, "PRAGMA cache_size = -{d};", .{cache_kib}, 0) catch unreachable;
+        try db.exec(sql);
+        return db;
+    }
+
     pub fn openMemory() Error!Db {
         return open(":memory:");
     }
