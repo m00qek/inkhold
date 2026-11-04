@@ -4,20 +4,13 @@
 // Past versions of a PDF are not previewable (`canPreviewHistory` excludes it).
 
 import { el } from "../ui/dom";
-import type { Id, NoteMeta, NoteSummary, PageRef } from "../core/types";
-import { formatBytes, rawFileUrl } from "../core/fileKind";
+import type { PageRef } from "../core/types";
 import { createToolbar } from "./toolbar";
 import { svg, VIEWER_IC } from "./viewerIcons";
 import { createPager, createZoomStepper, FIT_PAGE } from "./viewerControls";
 import { createViewerExportMenu } from "./viewerExportMenu";
-import {
-  backWord,
-  createViewerHeader,
-  originSubtitle,
-  createViewerBody,
-  createVersionBanner,
-} from "./viewerChrome";
-import type { ReaderOrigin, VersionSubject, Viewer, ViewerDeps } from "./viewer";
+import { createViewerHeader, createViewerBody, createVersionBanner } from "./viewerChrome";
+import type { VersionSubject, Viewer, ViewerDeps } from "./viewer";
 import { createPdfOutlinePanel } from "./pdfOutlinePanel";
 import { createPdfThumbStrip } from "./pdfThumbStrip";
 import { createPdfPageRenderer, PDF_LAYER_ID, ZOOMS, type Zoom } from "./pdfPageRenderer";
@@ -38,7 +31,10 @@ import { createPdfExports } from "./pdfExports";
 import { createPdfViewerExports } from "./pdfViewerExports";
 import { supportsWasmExceptions } from "../render/pdfLoader";
 import type { PdfWord } from "../render/pdfWire";
-import { PdfLoadError, createPdfSession, type PdfSession } from "../render/pdfClient";
+import { createPdfSession, type PdfSession } from "../render/pdfClient";
+import type { PdfViewerState } from "./pdfViewerState";
+import { createPdfLifecycle } from "./pdfViewerLifecycle";
+import { createPdfNav } from "./pdfViewerNav";
 
 /** The versions control offers the ink's history, never a past PDF. */
 const ANNOTATIONS_HISTORY = "Annotation history";
@@ -58,37 +54,36 @@ export function defaultPdfSeam(): PdfSeam {
 
 export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam()): Viewer {
   // ---- state ----
-  /** One session for the viewer's life: MuPDF is ~5 MB of wasm to compile. */
-  let session: PdfSession | null = null;
-  let open_ = false;
-  let pageIndex = 0;
-  let pageCount = 0;
-  let zoom: Zoom = FIT_PAGE;
-  let fromBin = false;
-  /** What the file-zone actions act on; cleared by `release()`. */
-  let meta: NoteMeta | null = null;
-  /** The paired `.mark` by 0-based PDF page. Sparse: a missing key means no annotations. */
-  let markId: Id | null = null;
+  const st: PdfViewerState = {
+    session: null,
+    open_: false,
+    pageIndex: 0,
+    pageCount: 0,
+    zoom: FIT_PAGE,
+    fromBin: false,
+    meta: null,
+    markId: null,
+    annotationsId: null,
+    previewVersion: null,
+    previewViewOnly: false,
+    docHash: "",
+    generation: 0,
+  };
+
+  const { syncPager, syncUrl, go, onKey, onCopy } = createPdfNav(st, {
+    deps,
+    pager: () => pager,
+    find: () => find,
+    pagesPanel: () => pagesPanel,
+    outlinePanel: () => outlinePanel,
+    renderer: () => renderer,
+    root: () => root,
+    selectLayer: () => selectLayer,
+    findInput: () => findInput,
+  });
+  document.addEventListener("keydown", onKey);
+  document.addEventListener("copy", onCopy);
   const markPages = new Map<number, PageRef>();
-  /**
-   * The mark id from the metadata, available before `loadMark` sets `markId`, so
-   * the versions control does not flicker from dimmed to live.
-   */
-  let annotationsId: Id | null = null;
-  /**
-   * The annotation version being previewed, or null. The PDF itself is always
-   * live; this drives the banner, Restore, and salts thumbnail cache keys so a
-   * preview is never served live ink.
-   */
-  let previewVersion: { md5: string; createdAt: number } | null = null;
-  /** The previewed annotations belong to a trashed document: no Restore. */
-  let previewViewOnly = false;
-  let docHash = "";
-  /**
-   * Bumped per open and teardown; async steps check it so a superseded load never
-   * renders through a handle `hide()` closed.
-   */
-  let generation = 0;
 
   // ---- DOM ----
   const header = createViewerHeader({
@@ -128,17 +123,17 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
 
   const zoomStepper = createZoomStepper<Zoom>({
     readoutClass: "pdf-zoom",
-    initial: zoom,
+    initial: st.zoom,
     format: (z) => z,
     labels: { out: "Zoom out", in: "Zoom in" },
     onStep: (dir) => {
-      const at = ZOOMS.indexOf(zoom);
+      const at = ZOOMS.indexOf(st.zoom);
       const next = ZOOMS[Math.min(ZOOMS.length - 1, Math.max(0, at + dir))]!;
-      if (next !== zoom) {
-        zoom = next;
+      if (next !== st.zoom) {
+        st.zoom = next;
         void renderer.paint();
       }
-      return zoom;
+      return st.zoom;
     },
   });
 
@@ -149,8 +144,8 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   const downloads = createPdfExports({
     menu: exportMenu,
     toast: deps.toast,
-    docName: () => meta?.name ?? null,
-    pageIndex: () => pageIndex,
+    docName: () => st.meta?.name ?? null,
+    pageIndex: () => st.pageIndex,
     model: (opts) => exportDriver.model(opts),
     exportPagePdf: (page, ink) => exportDriver.exportPagePdf(page, ink),
     exportDocumentPdf: (onProgress) => exportDriver.exportDocumentPdf(onProgress),
@@ -166,10 +161,10 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     html: svg(VIEWER_IC.trash, 1.8) + "Move to bin",
   });
   moveBin.addEventListener("click", () => {
-    if (meta) deps.onMoveToBin?.(meta);
+    if (st.meta) deps.onMoveToBin?.(st.meta);
   });
   const binActions = createBinViewerActions({
-    getMeta: () => meta,
+    getMeta: () => st.meta,
     onRestore: deps.onRestore,
     onPurge: deps.onPurge,
     // Wired only when the shell can open history, so there is no dead row.
@@ -185,13 +180,13 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   const versionsBtn = versionsOpener.el;
   versionsBtn.addEventListener("click", () => {
     const subject = versionSubject();
-    if (subject) deps.onVersions?.(subject, versionsBtn, previewVersion?.md5);
+    if (subject) deps.onVersions?.(subject, versionsBtn, st.previewVersion?.md5);
   });
 
   /** The paired `.mark` under the document's name; `annotationsOn` carries the distinction. */
   function versionSubject(): VersionSubject | null {
-    if (!meta || annotationsId === null) return null;
-    return { id: annotationsId, name: meta.name, fileType: "mark", annotationsOn: meta.id };
+    if (!st.meta || st.annotationsId === null) return null;
+    return { id: st.annotationsId, name: st.meta.name, fileType: "mark", annotationsOn: st.meta.id };
   }
 
   const setVersionsAvailable = versionsOpener.setAvailable;
@@ -201,7 +196,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     kind: "annotations",
     onRestore: () => {
       const subject = versionSubject();
-      if (subject && previewVersion) deps.onRestoreVersion?.(subject, previewVersion);
+      if (subject && st.previewVersion) deps.onRestoreVersion?.(subject, st.previewVersion);
     },
   });
 
@@ -234,13 +229,13 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   const thumbs = createPdfThumbStrip({
     deps,
     state: {
-      session: () => session,
-      isOpen: () => open_,
-      generation: () => generation,
-      docHash: () => docHash,
-      markId: () => markId,
+      session: () => st.session,
+      isOpen: () => st.open_,
+      generation: () => st.generation,
+      docHash: () => st.docHash,
+      markId: () => st.markId,
       markPages: () => markPages,
-      previewVersion: () => previewVersion,
+      previewVersion: () => st.previewVersion,
     },
     inkRaster: (bytes, dst) => markCtl.inkRaster(bytes, dst),
     onPick: (i) => void go(i),
@@ -301,7 +296,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     layersToggle,
     stageWidth: () => renderer.stageInner().w,
     repaint: () => {
-      if (open_) void renderer.paint();
+      if (st.open_) void renderer.paint();
     },
   });
   const setDocks = docks.set;
@@ -381,15 +376,15 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   const renderer = createPdfPageRenderer({
     deps,
     state: {
-      session: () => session,
-      isOpen: () => open_,
-      generation: () => generation,
-      pageIndex: () => pageIndex,
-      pageCount: () => pageCount,
-      zoom: () => zoom,
-      meta: () => meta,
-      fromBin: () => fromBin,
-      markId: () => markId,
+      session: () => st.session,
+      isOpen: () => st.open_,
+      generation: () => st.generation,
+      pageIndex: () => st.pageIndex,
+      pageCount: () => st.pageCount,
+      zoom: () => st.zoom,
+      meta: () => st.meta,
+      fromBin: () => st.fromBin,
+      markId: () => st.markId,
       markPages: () => markPages,
       // Mounted panels only; {@link tooTight} weighs hypothetical ones.
       dockedPanels: () =>
@@ -430,7 +425,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     docs: deps.docSearch,
     failures: { onSessionExpired: deps.onSessionExpired },
     // The locator; a page that will not read just has no boxes.
-    words: async (page) => (session && open_ ? session.pageWords(page) : []),
+    words: async (page) => (st.session && st.open_ ? st.session.pageWords(page) : []),
     view: {
       setOpen(isOpen) {
         findBar.hidden = !isOpen;
@@ -479,336 +474,51 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   const exportDriver = createPdfViewerExports({
     deps,
     state: {
-      session: () => session,
-      isOpen: () => open_,
-      generation: () => generation,
-      pageIndex: () => pageIndex,
-      pageCount: () => pageCount,
-      meta: () => meta,
-      fromBin: () => fromBin,
-      markId: () => markId,
+      session: () => st.session,
+      isOpen: () => st.open_,
+      generation: () => st.generation,
+      pageIndex: () => st.pageIndex,
+      pageCount: () => st.pageCount,
+      meta: () => st.meta,
+      fromBin: () => st.fromBin,
+      markId: () => st.markId,
       markPages: () => markPages,
     },
     dom: { canvas, markCtl },
   });
 
-  function syncPager(): void {
-    pager.set(pageIndex, pageCount);
-  }
-
-  /**
-   * Publish the page (and query) to the URL. Bin origins use
-   * `#/bin/note/:id/page/:n` with no query, since a trashed blob is not served
-   * at the live route.
-   */
-  function syncUrl(): void {
-    if (!open_ || !meta) return;
-    deps.onPosition?.(meta.id, pageIndex, fromBin ? "" : find.query(), undefined, fromBin || undefined);
-  }
-
-  async function go(to: number): Promise<void> {
-    if (!open_ || to < 0 || to >= pageCount || to === pageIndex) return;
-    pageIndex = to;
-    syncPager();
-    pagesPanel.setCurrent(to);
-    // Tracks the entry the page is inside, not the last one clicked.
-    outlinePanel.setCurrent(to);
-    // Before `syncUrl` and the raster, so URL and marks are already the new page's.
-    find.setPage(to);
-    syncUrl();
-    await renderer.paint();
-  }
-
-  // ---- keyboard (only while on screen) ----
-  // Paging matches the reader, including leaving modified arrows alone.
-  function onKey(e: KeyboardEvent): void {
-    if (root.hidden) return;
-    // Ctrl+F before the input guard, so it reaches (or re-focuses) the field from anywhere.
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
-      e.preventDefault();
-      find.open();
-      return;
-    }
-    // Escape unwinds one thing at a time: selection, find, then the viewer.
-    if (e.key === "Escape") {
-      if (selectLayer.has()) {
-        selectLayer.clear();
-        return;
-      }
-      if (find.isOpen()) {
-        find.close();
-        findInput.value = "";
-        return;
-      }
-      return deps.onBack();
-    }
-    // Paging keys do not apply in inputs, including the pager's own field.
-    if (e.target instanceof HTMLInputElement) return;
-    if (e.key === "ArrowRight") void go(pageIndex + 1);
-    else if (e.key === "ArrowLeft") void go(pageIndex - 1);
-    // Home/End are prevented, or they also scroll the stage to its ends.
-    else if (e.key === "Home") {
-      e.preventDefault();
-      void go(0);
-    } else if (e.key === "End" && pageCount > 0) {
-      e.preventDefault();
-      void go(pageCount - 1);
-    }
-  }
-  document.addEventListener("keydown", onKey);
-
-  /**
-   * Ctrl+C via the `copy` event, whose `clipboardData` works over plain HTTP
-   * where the async clipboard does not. Yields to a real DOM selection (e.g. in
-   * the find field).
-   */
-  function onCopy(e: ClipboardEvent): void {
-    if (root.hidden || !open_) return;
-    if (!selectLayer.has()) return;
-    if ((globalThis.getSelection?.()?.toString() ?? "") !== "") return;
-    const text = selectLayer.text();
-    if (text === "") return;
-    e.clipboardData?.setData("text/plain", text);
-    e.preventDefault();
-  }
-  document.addEventListener("copy", onCopy);
-
-  /**
-   * The strip's ink rail, from the mark. No mark page means `false` (known); a
-   * mark page without `hasInk` is left out, which blanks the rail (the strip's
-   * all-or-nothing rule). No mark at all gives an empty map.
-   */
-  function refreshInk(): void {
-    const inked = new Map<number, boolean>();
-    if (markPages.size > 0) {
-      for (let p = 0; p < pageCount; p++) {
-        const ref = markPages.get(p);
-        if (!ref) inked.set(p, false);
-        else if (ref.hasInk !== undefined) inked.set(p, ref.hasInk);
-      }
-    }
-    pagesPanel.setInk(inked);
-  }
-
-  /**
-   * Index the `.mark`'s pages by PDF page (`sourcePage` is 1-based). Pages without
-   * one are skipped rather than guessed, or ink lands on the wrong page.
-   */
-  async function loadMark(id: Id, mine: number): Promise<void> {
-    let mm: NoteMeta;
-    try {
-      mm = await deps.api.getNoteMeta(id);
-    } catch {
-      return; // no annotations is a fine state; the PDF is the document
-    }
-    if (mine !== generation) return;
-    markId = id;
-    markPages.clear();
-    layersToggle.hidden = false;
-    for (const ref of mm.pages) {
-      if (ref.sourcePage !== null && ref.sourcePage > 0) markPages.set(ref.sourcePage - 1, ref);
-    }
-    // The whole-document export row learns about ink here, not on visiting the page.
-    downloads.refreshGroups();
-    if (open_ && markPages.has(pageIndex)) void renderer.paint();
-    // And the strip, which was painted before the mark landed.
-    thumbs.repaintInked();
-    refreshInk();
-  }
-
   // ---- open / teardown ----
-
-  function release(): void {
-    generation++; // anything in flight stops before it touches the handle
-    if (open_ && session) {
-      // Fire and forget; the worker serialises, so a later `open` cannot overtake it.
-      void session.close().catch(() => {});
-    }
-    open_ = false;
-    pageCount = 0;
-    pageIndex = 0;
-    markId = null;
-    annotationsId = null;
-    markPages.clear();
-    // Preview state too: `thumbKey` salts on `previewVersion`.
-    previewVersion = null;
-    previewViewOnly = false;
-    setVersionsAvailable(false);
-    versionBanner.setVersion(null);
-    // Released, not hidden: only `release` zeroes the full-resolution canvases.
-    // A page turn does not come through here, so the stack survives paging.
-    markCtl.release();
-    markCtl.el.hidden = true;
-    linkLayer.clear();
-    find.reset();
-    findInput.value = "";
-    findLayer.clear();
-    selectLayer.clear();
-    renderer.reset();
-    layersToggle.hidden = true;
-    // Through `setDocks` so `aria-pressed` stays correct.
-    setDocks(docks.left(), false, null, false);
-    // The file-zone controls outlive the document, so forget their target.
-    meta = null;
-    thumbs.reset();
-    outlinePanel.clear();
-    setOutlineAvailable(false); // …which also shuts the panel and un-presses it
-    downloads.refreshGroups();
-    exportMenu.setOpen(false);
-    // The raw href is per open; left set it would offer the previous file until metadata lands.
-    downloads.setRawHref(null);
-  }
-
-  async function open(
-    summary: NoteSummary,
-    metaPromise: Promise<NoteMeta>,
-    page: number,
-    origin: ReaderOrigin,
-    query: string,
-  ): Promise<void> {
-    release();
-    const mine = generation;
-    root.hidden = false;
-    fromBin = origin.kind === "bin";
-    /**
-     * An annotation preview is the live document with the `.mark` rerouted to a
-     * past version; only the ink and the chrome differ.
-     */
-    previewVersion = origin.kind === "history" ? (origin.version ?? null) : null;
-    const previewing = previewVersion !== null;
-    previewViewOnly = previewing && origin.viewOnly === true;
-    // Set before metadata lands so the wrong pair never shows. A preview drops Move to bin.
-    moveBin.hidden = fromBin || previewing;
-    binActions.setBinMode(fromBin, fromBin ? (origin.retention ?? null) : null);
-    // Up from the first frame, since it qualifies the page.
-    versionBanner.setVersion(previewVersion, previewViewOnly);
-    // Dimmed until metadata says there is a mark.
-    setVersionsAvailable(false);
-    header.setName(summary.name);
-    header.setBackWord(backWord(origin));
-    // The subtitle fills in: folder path, then size, then page count.
-    header.setSubtitle(originSubtitle(origin, summary.fileType?.toUpperCase() || "PDF"));
-    zoom = FIT_PAGE;
-    // The stepper keeps its own label, so reset the readout too.
-    zoomStepper.set(FIT_PAGE);
-    pageIndex = Math.max(0, page);
-    body.showPlaceholder(summary.name, "Opening this PDF…");
-    syncPager();
-
-    if (!seam.supported()) {
-      // MuPDF's error handling needs wasm exception handling.
-      body.showPlaceholder(
-        summary.name,
-        "This browser can't preview PDFs. Download it to read it, or try a newer browser.",
-      );
-      return;
-    }
-
-    let m: NoteMeta;
-    try {
-      m = await metaPromise;
-    } catch {
-      if (mine !== generation) return;
-      body.showPlaceholder(summary.name, "Couldn't read this file.");
-      return;
-    }
-    if (mine !== generation) return;
-    meta = m;
-    docHash = m.fileHash ?? "";
-    // The `.mark` loads without blocking; `loadMark` repaints when it lands.
-    annotationsId = m.annotationsId;
-    // "Has handwriting" comes from the pairing; "can paint it" is `loadMark`'s question.
-    setVersionsAvailable(annotationsId !== null);
-    if (m.annotationsId) void loadMark(m.annotationsId, mine);
-    if (m.size > 0) header.setSubtitle(originSubtitle(origin, formatBytes(m.size)));
-    const url = rawFileUrl(m.id, m.fileHash, { download: false, bin: fromBin });
-    // Decided off the URL, never a read-back `href` (an empty one resolves to the
-    // app). `null` disables only the raw row.
-    downloads.setRawHref(rawFileUrl(m.id, m.fileHash, { download: true, bin: fromBin }));
-
-    if (!url) {
-      body.showPlaceholder(summary.name, "This file has no readable address.");
-      return;
-    }
-
-    // No size gate: with range-served blocks page 1 costs only its own blocks.
-    session ??= seam.createSession();
-    const s = session;
-    let pages: number;
-    try {
-      ({ pageCount: pages } = await s.open(url, m.size));
-      open_ = true;
-    } catch (err) {
-      if (mine !== generation) return;
-      if (err instanceof PdfLoadError && (err.status === 401 || err.status === 403)) {
-        deps.onSessionExpired();
-        return;
-      }
-      // MuPDF's message goes to the console. It cannot tell "encrypted" from "not
-      // a PDF" (the shim never calls `fz_needs_password`), so the only distinction
-      // shown is bytes not arriving versus not opening.
-      if (err instanceof PdfLoadError) {
-        body.showPlaceholder(summary.name, "Couldn't load this PDF.");
-      } else {
-        console.warn("[pdf] open failed:", (err as Error).message ?? err);
-        body.showPlaceholder(summary.name, "Couldn't read this file.");
-      }
-      return;
-    }
-    if (mine !== generation) return;
-    pageCount = pages;
-    header.setSubtitle(
-      originSubtitle(origin, `${pageCount} ${pageCount === 1 ? "page" : "pages"}`),
-    );
-    if (pageCount === 0) {
-      body.showPlaceholder(summary.name, "This PDF has no pages.");
-      release();
-      return;
-    }
-    pageIndex = Math.min(pageIndex, pageCount - 1);
-    // Prime find from a `?q=` deep link, after the clamp. Bin URLs carry no query.
-    find.setDocument(m.id, m.fileHash);
-    find.setPage(pageIndex);
-    if (query !== "") {
-      findInput.value = query;
-      find.open();
-      find.setQuery(query);
-    }
-    // Only now is the page count known, so the URL can reflect the clamped page.
-    syncUrl();
-
-    // Reserve every row's shape from this page's aspect; other sizes self-correct.
-    try {
-      const first = await s.pageSize(pageIndex);
-      if (mine !== generation) return;
-      if (first.height > 0) thumbs.setFirstAspect(first.width / first.height);
-    } catch {
-      // Keep the default aspect.
-    }
-    // The outline, once per document and not awaited; failure only dims the opener.
-    void s
-      .outline()
-      .then((entries) => {
-        if (mine !== generation) return;
-        outlinePanel.setEntries(entries);
-        outlinePanel.setCurrent(pageIndex);
-        setOutlineAvailable(entries.length > 0);
-      })
-      .catch(() => {
-        if (mine !== generation) return;
-        setOutlineAvailable(false);
-      });
-    pagesPanel.setPages(pageCount);
-    // The mark may have landed already, so compute the rail here as well as in `loadMark`.
-    refreshInk();
-    pagesPanel.setCurrent(pageIndex);
-    // First moment the export menu knows `pageCount`.
-    downloads.refreshGroups();
-
-    await renderer.paint();
-    // Logs first-page cost; see `lastPdfStats`.
-    if (mine === generation) void s.stats().catch(() => {});
-  }
+  const { open, release } = createPdfLifecycle(st, {
+    deps,
+    seam,
+    binActions,
+    body,
+    downloads,
+    find,
+    header,
+    moveBin,
+    outlinePanel,
+    pagesPanel,
+    renderer,
+    root,
+    thumbs,
+    versionBanner,
+    zoomStepper,
+    docks,
+    exportMenu,
+    findLayer,
+    findInput,
+    layersToggle,
+    linkLayer,
+    markCtl,
+    selectLayer,
+    markPages,
+    setVersionsAvailable,
+    setOutlineAvailable,
+    setDocks,
+    syncPager,
+    syncUrl,
+  });
 
   return {
     el: root,
@@ -826,8 +536,8 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       selectLayer.destroy();
       exportMenu.destroy(); // its outside-click + Escape listeners are on `document`
       thumbs.destroy();
-      session?.destroy();
-      session = null;
+      st.session?.destroy();
+      st.session = null;
       root.remove();
     },
   };
