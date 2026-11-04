@@ -10,11 +10,15 @@ for the web bundle).
     make footprint            # builds, then measures
     scripts/footprint.py BIN  # measures an existing binary
 
+It then seeds a library at two sizes and runs `inkhold backup create` beside
+the serving server, pinning the backup's memory (and that it does not grow
+with the library) and the server's latency and memory meanwhile.
+
 Numbers are x86_64 Linux. They stand in for the Pi (one core, ARMv6): the
 structure they pin (threads do not grow with sockets) is the same there; the
 absolute values are a proxy until a Pi runner exists.
 """
-import os, re, socket, subprocess, sys, tempfile, time
+import os, re, shutil, socket, subprocess, sys, tempfile, time
 
 # ---- ceilings (KB unless noted) ----------------------------------------------
 # Measured 2026-11-04 after the poller/worker transport: idle RssAnon 2,996 KB
@@ -24,6 +28,17 @@ PER_SOCKET_MAX_KB = 80
 HELD_SOCKETS = 64
 HELD_THREADS_MAX = 12          # main + 4 workers + poller + deferred worker, plus slack
 TOTAL_ANON_MAX_KB = 16_000     # idle + 64 sockets, under the ~50 MB budget with room for work
+
+# ---- backup ceilings (DESIGN.md §2.6) ------------------------------------------
+# `inkhold backup create` runs beside the server. Its memory must not depend on
+# the library's size, and the server must not notice it.
+BACKUP_ANON_MAX_KB = 4_096     # the 4 MB target: SQLite cache 1 MB/connection, ~420 KB scratch
+BACKUP_DRIFT_MAX_KB = 512      # small library vs large: equal within noise, or it is not O(1)
+BACKUP_SMALL, BACKUP_LARGE = 100, 2_000   # blobs
+BLOB_BYTES = 16 * 1024
+LATENCY_FACTOR = 2.0           # server p50 during a backup vs idle ...
+LATENCY_SLACK_MS = 2.0         # ... plus this much, since idle p50 is a fraction of a ms
+SERVER_DRIFT_MAX_KB = 512      # the server's own anon memory across a backup
 
 def status(pid):
     out = {}
@@ -47,6 +62,66 @@ def request(sock, line):
     while len(body) < n:
         body += sock.recv(65536)
     return head
+
+def anon_kb(pid):
+    try:
+        for line in open(f"/proc/{pid}/status"):
+            if line.startswith("RssAnon:"):
+                return int(line.split()[1])
+    except FileNotFoundError:
+        pass
+    return 0
+
+def seed(d, first, count):
+    """Adds `count` blobs (half compressible text, half noise) with their rows."""
+    import hashlib, random, sqlite3
+    rnd = random.Random(first)
+    db = sqlite3.connect(os.path.join(d, "inkhold.db"), timeout=10)
+    for i in range(first, first + count):
+        if i % 2:
+            body = (f"page {i} of a notebook, strokes and words " * 400).encode()[:BLOB_BYTES]
+        else:
+            body = rnd.randbytes(BLOB_BYTES)
+        md5 = hashlib.md5(body).hexdigest()
+        fan = os.path.join(d, "data", "blobs", md5[:2])
+        os.makedirs(fan, exist_ok=True)
+        with open(os.path.join(fan, md5), "wb") as f:
+            f.write(body)
+        db.execute("INSERT OR IGNORE INTO blobs(md5, size, refcount, created_at) VALUES(?, ?, 1, 0)", (md5, len(body)))
+    db.commit()
+    db.close()
+
+def p50_ms(port, n=200):
+    """Median latency of a cheap request on a fresh keep-alive socket."""
+    s = socket.create_connection(("127.0.0.1", port))
+    times = []
+    for _ in range(n):
+        t = time.perf_counter()
+        request(s, b"GET /api/version HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+        times.append((time.perf_counter() - t) * 1000)
+    s.close()
+    times.sort()
+    return times[len(times) // 2]
+
+def backup_run(binary, cfg, out_dir, port, rate):
+    """Runs `backup create`, sampling its RssAnon; returns (peak KB, server p50 ms meanwhile)."""
+    os.makedirs(out_dir, exist_ok=True)
+    proc = subprocess.Popen([binary, f"--config={cfg}", "backup", "create", out_dir, f"--max-rate={rate}"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    peak, lat = 0, []
+    s = socket.create_connection(("127.0.0.1", port))
+    while proc.poll() is None:
+        peak = max(peak, anon_kb(proc.pid))
+        t = time.perf_counter()
+        request(s, b"GET /api/version HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")
+        lat.append((time.perf_counter() - t) * 1000)
+        time.sleep(0.005)
+    s.close()
+    err = proc.stderr.read().decode()
+    if proc.returncode != 0:
+        sys.exit(f"backup create failed ({proc.returncode}): {err}")
+    lat.sort()
+    return peak, (lat[len(lat) // 2] if lat else 0.0)
 
 def main():
     # Absolute, since the server runs with the temp dir as its cwd.
@@ -80,6 +155,19 @@ def main():
                 s.close()
             time.sleep(1.0)
             after_anon, after_threads, _ = status(proc.pid)
+
+            # A backup beside the serving server, at two library sizes; into a
+            # directory of its own, since one inside the live data is refused.
+            bdir = tempfile.mkdtemp(prefix="inkhold-footprint-backup-")
+            idle_p50 = p50_ms(port)
+            server_before = anon_kb(proc.pid)
+            seed(d, 0, BACKUP_SMALL)
+            small_peak, _ = backup_run(binary, cfg, os.path.join(bdir, "small"), port, "0")
+            seed(d, BACKUP_SMALL, BACKUP_LARGE - BACKUP_SMALL)
+            # The large run at the default pace: the one a person's cron would run.
+            large_peak, busy_p50 = backup_run(binary, cfg, os.path.join(bdir, "large"), port, "4M")
+            server_after = anon_kb(proc.pid)
+            shutil.rmtree(bdir, ignore_errors=True)
         finally:
             proc.kill()
             proc.wait()
@@ -91,6 +179,15 @@ def main():
         ("per parked socket", f"{per_socket:.0f} KB", per_socket <= PER_SOCKET_MAX_KB, f"<= {PER_SOCKET_MAX_KB}"),
         (f"threads with {HELD_SOCKETS} sockets", f"{held_threads}", held_threads <= HELD_THREADS_MAX, f"<= {HELD_THREADS_MAX}"),
         ("threads after close", f"{after_threads}", after_threads <= idle_threads, f"<= idle ({idle_threads})"),
+    ]
+    latency_ceiling = max(idle_p50 * LATENCY_FACTOR, idle_p50 + LATENCY_SLACK_MS)
+    drift = abs(large_peak - small_peak)
+    rows += [
+        (f"backup RssAnon, {BACKUP_SMALL} blobs", f"{small_peak} KB", small_peak <= BACKUP_ANON_MAX_KB, f"<= {BACKUP_ANON_MAX_KB}"),
+        (f"backup RssAnon, {BACKUP_LARGE} blobs", f"{large_peak} KB", large_peak <= BACKUP_ANON_MAX_KB, f"<= {BACKUP_ANON_MAX_KB}"),
+        ("backup memory vs library size", f"{drift} KB", drift <= BACKUP_DRIFT_MAX_KB, f"<= {BACKUP_DRIFT_MAX_KB} apart"),
+        ("server p50 during a backup", f"{busy_p50:.2f} ms", busy_p50 <= latency_ceiling, f"<= {latency_ceiling:.2f} (idle {idle_p50:.2f})"),
+        ("server RssAnon across a backup", f"{server_after - server_before:+d} KB", server_after - server_before <= SERVER_DRIFT_MAX_KB, f"<= +{SERVER_DRIFT_MAX_KB}"),
     ]
     ok = True
     for name, value, passed, ceiling in rows:
