@@ -8,8 +8,8 @@ import { el } from "../ui/dom";
 import { brandMark } from "../ui/chrome";
 import { currentTheme } from "../ui/theme";
 import { SORT_KEY, readLocal, writeLocal } from "../ui/storage";
-import { accountHref, binNotePageHref, destinationHref, folderHref, go, noteHref, notePageHref, redirect, replaceBinNotePosition, replaceNotePosition, replaceNoteVersionPosition, searchHref } from "../router";
-import { resolveVersionShort, shortMd5 } from "./versionShort";
+import { accountHref, binNotePageHref, destinationHref, folderHref, go, noteHref, replaceBinNotePosition, replaceNotePosition, replaceNoteVersionPosition } from "../router";
+import { shortMd5 } from "./versionShort";
 import { createFolderCache } from "./folderCache";
 import type { Api } from "../api/types";
 import type { NoteRenderer } from "../render/types";
@@ -28,7 +28,6 @@ import {
   type Thumbnails,
 } from "../render/thumbnails";
 import { createPdfThumbs, type PdfThumbs } from "../render/pdfThumb";
-import type { ReaderOrigin } from "./reader";
 import type { ViewerDeps } from "./viewer";
 import { createViewerSet, type ViewerSet } from "./viewerSet";
 import { createMasonry, type Masonry } from "./masonry";
@@ -42,7 +41,7 @@ import { createDocSearch } from "../search/docSearch";
 import { createHistoryScope } from "./historyScope";
 import type { FileVersion } from "../core/types";
 // The breadcrumb is painted here, but its flattening rule is the rail's.
-import { createRail, createRailView, crumbPath, type RailController } from "./rail";
+import { createRail, createRailView, type RailController } from "./rail";
 // Paints into `gallery`; `renderGallery()` closes it, so no teardown hook.
 import { BIN_KEY, createBin, createBinScope, createBinView, type BinController } from "./bin";
 // Static, unlike the console: small, and every user has one.
@@ -52,13 +51,14 @@ import { createLibraryRender } from "./libraryRender";
 import { createLibraryData } from "./libraryData";
 import { createLibraryView } from "./libraryView";
 import { createLibraryFeatures } from "./libraryFeatures";
+import { createLibraryRoutes } from "./libraryRoutes";
 
-const ADMIN_KEY = "admin";
+export const ADMIN_KEY = "admin";
 /**
 * Not a `Destination` (no rail row), but written into `destination` so every
 * "is a folder listing on screen?" guard treats it like the bin and console.
 */
-const ACCOUNT_KEY = "account";
+export const ACCOUNT_KEY = "account";
 
 export interface AppDeps {
   api: Api;
@@ -151,6 +151,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     indexPending: null,
     resizeTimer: undefined,
   };
+
 
   const { setView, repaintForTheme, setThemeTo } = createLibraryView(st, {
     cache: () => cache,
@@ -624,49 +625,6 @@ export function createAppShell(deps: AppDeps): AppShell {
   }
 
   // ---- where the reader was opened from ----
-  /**
-  * The note's folder path from the whole-tree cache (search results carry no
-  * folder), flattened like the breadcrumb. Null when unknown; the reader then
-  * omits it rather than guessing.
-  */
-  function folderPathOf(noteId: Id): string | null {
-    for (const cached of folderCache.values()) {
-      if (!cached.entries.some((e) => e.kind === "note" && e.id === noteId)) continue;
-      const names = crumbPath(cached.path).map((f) => rail.labelFor(f));
-      return names.length === 0 ? null : names.join(" / ");
-    }
-    return null;
-  }
-
-  /** Null at the root. Names via `rail.labelFor`, never `folder.name`. */
-  function currentFolderPath(): string | null {
-    const pending = rail.pending();
-    if (pending) return pending.label;
-    if (!st.listing) return null;
-    const names = crumbPath(st.listing.path).map((f) => rail.labelFor(f));
-    return names.length === 0 ? null : names.join(" / ");
-  }
-
-  /**
-  * A non-empty shell query makes it a search arrival. `folder` names where the
-  * user stands (Back returns to that listing); `search` names the note's own
-  * folder, which the user doesn't know yet.
-  */
-  function readerReturn(noteId: Id): { origin: ReaderOrigin; href: string } {
-    // Bin first: a trashed file is in no folder or search; its path is the one it
-    // had when deleted.
-    if (bin.isTrashed(noteId)) {
-      // So the viewer paints the same countdown as the bin row.
-      return {
-        origin: { kind: "bin", folderPath: bin.pathOf(noteId), retention: bin.retentionOf(noteId) },
-        href: destinationHref(BIN_KEY),
-      };
-    }
-    // The shell's `query`, never the route's `?q=`, which is in-note find.
-    const q = st.query.trim();
-    if (q) return { origin: { kind: "search", folderPath: folderPathOf(noteId) }, href: searchHref(q) };
-    return { origin: { kind: "folder", folderPath: currentFolderPath() }, href: folderHref(st.folderId) };
-  }
 
   /** Reading hides the topbar; toggled only in `openNote` and `enterPlace`. */
   function setReading(reading: boolean): void {
@@ -679,7 +637,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     historyScope,
     host: root,
     isTrashed: (id) => bin.isTrashed(id),
-    currentFolderPath,
+    currentFolderPath: () => currentFolderPath(),
     folderHref: () => folderHref(st.folderId),
     setReaderBack: (href) => {
       st.readerBack = href;
@@ -746,209 +704,48 @@ export function createAppShell(deps: AppDeps): AppShell {
   };
   window.addEventListener("resize", onWindowResize);
 
-  /** The shell-level reset every route into a place performs. */
-  function enterPlace(): void {
-    st.routeToken++;
-    hideActiveViewer();
-    setReading(false);
-    rail.clearPending();
-  }
-
   // The first listing comes from main.ts's route dispatch; listing here would race it.
   void folderCache.prefetch();
 
-  return {
-    el: root,
-
-    showFolder(id: Id | null): void {
-      enterPlace();
-      leaveAdmin();
-      leaveAccount();
-      st.destination = null;
-      void navigate(id);
-      requestAnimationFrame(() => galleryEngine.repaintVisible());
-    },
-
-    showSearch(q: string): void {
-      // An empty `#/search` is corrected, not rendered.
-      if (q.trim() === "") {
-        redirect(folderHref(st.folderId));
-        return;
-      }
-      enterPlace();
-      st.destination = null;
-      // The box agrees with the URL on reload or shared link.
-      if (searchInput.value !== q) searchInput.value = q;
-      applyQuery(q);
-      // After the arriving-keystroke navigation's blur; a no-op otherwise.
-      topbar.restoreSearchFocus();
-    },
-
-    showDestination(key: string): void {
-      enterPlace();
-      leaveAccount();
-      st.query = "";
-      searchInput.value = "";
-      search.reset();
-      // Assigned per arm: the admin arm must first repaint over a mounted bin, which
-      // `renderGallery` refuses while `destination` names one.
-      st.destination = null;
-      switch (key) {
-        // --- BIN ROUTE ---
-        case BIN_KEY:
-          leaveAdmin(); // one st.destination at a time
-          st.destination = key;
-          bin.open();
-          rail.build(); // the bin is open now; repaint the highlight
-          return;
-        // --- ADMIN ROUTE ---
-        case ADMIN_KEY:
-          // The bin closes by being repainted over; do it while `destination` is null so
-          // the guard lets it through.
-          if (bin.isOpen()) renderGallery({ rail: false });
-          st.destination = key;
-          openAdmin();
-          return;
-        default:
-          // Unreachable via the router; a removed destination's URL still lands somewhere.
-          redirect(folderHref(st.folderId));
-          return;
-      }
-    },
-
-    showAccount(): void {
-      enterPlace();
-      // Same as the admin arm.
-      if (bin.isOpen()) renderGallery({ rail: false });
-      leaveAdmin();
-      st.query = "";
-      searchInput.value = "";
-      search.reset();
-      st.destination = ACCOUNT_KEY;
-      account().open();
-      // No rail row matches, so the highlight goes off.
-      rail.build();
-    },
-
-    async openNote(id: Id, page = 0, q = ""): Promise<void> {
-      const mine = ++st.routeToken;
-      historyScope.clear();
-      try {
-        const { origin, href } = readerReturn(id);
-        
-        let summary: NoteSummary | undefined;
-        if (st.listing) {
-          summary = st.listing.entries.find((e): e is NoteSummary => e.kind === "note" && e.id === id);
-        }
-        
-        let metaPromise: Promise<NoteMeta>;
-        if (summary) {
-          metaPromise = api.getNoteMeta(id);
-        } else {
-          const meta = await api.getNoteMeta(id);
-          if (mine !== st.routeToken) return;
-          summary = synthesizeSummary(meta);
-          metaPromise = Promise.resolve(meta);
-        }
-        
-        st.readerBack = href;
-        const v = viewerFor(summary.fileType);
-        activate(v);
-        v.open(summary, metaPromise, page, origin, q);
-        setReading(true);
-      } catch (e) {
-        if (handled(e)) return;
-        toast("That note couldn't be opened.");
-        // `redirect`, not `go`: a gone note never named a place.
-        redirect(folderHref(st.folderId));
-      }
-    },
-
-    async openNoteVersion(id: Id, short: string, page = 0): Promise<void> {
-      const mine = ++st.routeToken;
-      // Resolved against the panel's list; a non-session failure degrades to the live note.
-      let history: Awaited<ReturnType<typeof api.noteHistory>>;
-      try {
-        history = await api.noteHistory(id);
-      } catch (e) {
-        if (mine !== st.routeToken) return;
-        if (handled(e)) return;
-        redirect(notePageHref(id, page));
-        return;
-      }
-      if (mine !== st.routeToken) return; // routed away while fetching
-      const match = resolveVersionShort(history.versions, short);
-      if (match.kind === "past") {
-        await openHistoryPreview(id, match.version, page);
-        return;
-      }
-      // Current or none: the live note at its canonical URL (`redirect` replaces).
-      // Current must not 404 after a restore; none gets a notice.
-      if (match.kind === "none") toast("That version is no longer available.");
-      redirect(notePageHref(id, page));
-    },
-
-    async openBinNote(id: Id, page = 0): Promise<void> {
-      const mine = ++st.routeToken;
-      // A bin open is never a version preview.
-      historyScope.clear();
-      // On a cold `#/bin/note/:id` this awaits the boot listing.
-      try {
-        await bin.ensureLoaded();
-      } catch (e) {
-        if (mine !== st.routeToken) return;
-        if (handled(e)) return;
-        // The bin will show its own load error.
-        redirect(destinationHref(BIN_KEY));
-        return;
-      }
-      if (mine !== st.routeToken) return; // routed away while the st.listing loaded
-      // Not in the bin (purged, restored, never trashed): the listing plus a notice.
-      if (!bin.isTrashed(id)) {
-        toast("That file is no longer in the recycle bin.");
-        redirect(destinationHref(BIN_KEY));
-        return;
-      }
-      try {
-        // The same origin a row click produces; meta comes via `binScope`.
-        const { origin, href } = readerReturn(id);
-        const meta = await api.getNoteMeta(id);
-        if (mine !== st.routeToken) return; // routed away while fetching
-        st.readerBack = href;
-        const v = viewerFor(meta.fileType);
-        activate(v);
-        v.open(synthesizeSummary(meta), Promise.resolve(meta), page, origin, "");
-        setReading(true);
-      } catch (e) {
-        if (handled(e)) return;
-        toast("That file couldn't be opened.");
-        redirect(destinationHref(BIN_KEY));
-      }
-    },
-
-    destroy(): void {
-      unsubscribe();
-      // Otherwise one coalescing window and engine memory leak per sign-in cycle.
-      detachSearchLive();
-      searchService.dispose();
-      // Otherwise these accumulate per sign-in cycle, each holding the shell alive.
-      osThemeQuery?.removeEventListener("change", onOsThemeChange);
-      window.removeEventListener("resize", onWindowResize);
-      if (st.resizeTimer !== undefined) clearTimeout(st.resizeTimer);
-      cancelLoadingPaint();
-      // Kills the debounce timer and orphans in-flight queries.
-      search.reset();
-      bin.destroy();
-      viewers.destroy();
-      adminDest.destroy();
-      st.accountPage?.destroy();
-      // Aborts uploads and drops the document-level drag swallowers.
-      uploadZone.destroy();
-      galleryEngine.destroy();
-      // Release the ~5 MB MuPDF worker now, not after its idle window.
-      pdfThumbs.destroy();
-    },
-  };
+  const { currentFolderPath, shellApi } = createLibraryRoutes(st, {
+    handled,
+    applyQuery,
+    toast,
+    hideActiveViewer,
+    account,
+    leaveAccount,
+    setReading,
+    openHistoryPreview,
+    historyScope: () => historyScope,
+    api: () => api,
+    cancelLoadingPaint: () => cancelLoadingPaint,
+    navigate: () => navigate,
+    renderGallery: () => renderGallery,
+    key: () => key,
+    folderCache: () => folderCache,
+    rail: () => rail,
+    topbar: () => topbar,
+    searchInput: () => searchInput,
+    pdfThumbs: () => pdfThumbs,
+    galleryEngine: () => galleryEngine,
+    searchService: () => searchService,
+    search: () => search,
+    viewers: () => viewers,
+    viewerFor: () => viewerFor,
+    activate: () => activate,
+    root: () => root,
+    adminDest: () => adminDest,
+    leaveAdmin: () => leaveAdmin,
+    openAdmin: () => openAdmin,
+    bin: () => bin,
+    uploadZone: () => uploadZone,
+    unsubscribe: () => unsubscribe,
+    detachSearchLive: () => detachSearchLive,
+    osThemeQuery: () => osThemeQuery,
+    onOsThemeChange: () => onOsThemeChange,
+    onWindowResize: () => onWindowResize,
+  });
+  return shellApi;
 }
 
 export function synthesizeSummary(meta: NoteMeta): NoteSummary {
