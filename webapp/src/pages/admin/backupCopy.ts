@@ -51,14 +51,22 @@ export function backupRunLine(r: BackupRun, nowMs: number = Date.now()): { ok: b
   if (r.verifyError !== null) return { ok: false, detail: `check failed ${ago(r.verifiedAt, nowMs)}: ${r.verifyError}` };
   if (r.lastOkAt === null) return { ok: true, detail: `checked ${ago(r.verifiedAt, nowMs)}, no backup recorded` };
   const checked = r.verifiedAt !== null ? `, checked ${ago(r.verifiedAt, nowMs)}` : "";
-  return { ok: true, detail: `backed up ${ago(r.lastOkAt, nowMs)}${checked} · ${snapshotLine(r)}` };
+  // The directory is the row's own first column; not repeated here.
+  const size = sizeLine(r);
+  return { ok: true, detail: `backed up ${ago(r.lastOkAt, nowMs)}${checked}${size ? ` · ${size}` : ""}` };
 }
 
+/** On the card, which shows no directory, the size says where. */
 function snapshotLine(r: BackupRun): string {
+  const size = sizeLine(r);
+  return size ? `${size} in ${r.dir}` : r.dir;
+}
+
+function sizeLine(r: BackupRun): string {
   const parts: string[] = [];
   if (r.files !== null) parts.push(`${r.files.toLocaleString("en-GB")} ${r.files === 1 ? "file" : "files"}`);
   if (r.bytes !== null) parts.push(formatBytes(r.bytes));
-  return parts.length ? `${parts.join(", ")} in ${r.dir}` : r.dir;
+  return parts.join(", ");
 }
 
 function newestSuccess(runs: BackupRun[]): BackupRun | null {

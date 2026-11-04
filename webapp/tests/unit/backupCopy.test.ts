@@ -76,7 +76,7 @@ describe("one directory's line", () => {
   it("is ok with the last success and check, and failing with its error", () => {
     expect(backupRunLine(run({ verifiedAt: T }), NOW)).toEqual({
       ok: true,
-      detail: "backed up 1 hour ago, checked 1 hour ago · 37 files, 112 MB in /mnt/nas",
+      detail: "backed up 1 hour ago, checked 1 hour ago · 37 files, 112 MB",
     });
     expect(backupRunLine(run({ lastRunAt: T, lastError: "disk full" }), NOW)).toEqual({ ok: false, detail: "failed 1 hour ago: disk full" });
     expect(backupRunLine(run({ verifiedAt: T, verifyError: "1 missing" }), NOW).ok).toBe(false);

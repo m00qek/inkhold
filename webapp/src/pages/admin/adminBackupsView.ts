@@ -47,6 +47,7 @@ export function backupsDetail(b: AdminBackups, busy: boolean, act: BackupsAction
   return el(
     "div",
     { class: "admin-backups" },
+    el("h3", { class: "admin-backups__title", text: "Backup folders" }),
     rows.length
       ? el("ul", { class: "admin-backups__list", "aria-label": "Backup directories" }, ...rows)
       : el(

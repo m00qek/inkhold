@@ -305,15 +305,16 @@ export function createAdminView(opts: {
         el("span", { class: "admin-head__rule", "aria-hidden": "true" }),
       ),
       el("div", { class: "admin-stats" }, ...cards),
-      backups
-        ? backupsDetail(backups, busy, { onDismiss: opts.onBackupDismiss, onForget: opts.onBackupForget })
-        : null,
+      // Right under the cards: it is about the Recycle bin card, not the backups below.
       retention
         ? el("p", {
             class: "admin-server__note",
             // Also on the card: the reader of the number needs to know lowering it is safe.
             text: RETENTION_NEVER_PURGES,
           })
+        : null,
+      backups
+        ? backupsDetail(backups, busy, { onDismiss: opts.onBackupDismiss, onForget: opts.onBackupForget })
         : null,
     );
   }

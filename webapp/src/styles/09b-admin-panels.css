@@ -240,7 +240,18 @@
 /* --- backups: the Server panel's detail ------------------------------------ */
 
 .admin-backups {
-  margin-top: 12px;
+  margin-top: 22px;
+}
+
+/* The panel's small-caps label voice, as on `.admin-stat__k`. */
+.admin-backups__title {
+  margin: 0 0 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
 }
 
 .admin-backups__list {
