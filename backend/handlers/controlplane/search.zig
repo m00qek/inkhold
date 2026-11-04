@@ -12,7 +12,7 @@ const indexstream = @import("../../services/search/index_stream.zig");
 const wantbitmap = @import("../../services/search/want_bitmap.zig");
 const derived = @import("../../store/derived.zig");
 const derivesearch = @import("../../services/derive_search.zig");
-const gzip_stitch = @import("../../http/gzip_stitch.zig");
+const gzip_stitch = @import("../../compress/gzip_stitch.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const Context = context.Context;
 const Request = router.Request;
@@ -109,7 +109,7 @@ fn manifestGate(
 
 /// GET /api/controlplane/search-index/stream?m=<manifest etag>&want=<base64url>
 /// -> the wanted documents' terms as one gzip stream stitched from stored
-/// raw-deflate fragments (`http/gzip_stitch.zig`). Not concatenated gzip members:
+/// raw-deflate fragments (`compress/gzip_stitch.zig`). Not concatenated gzip members:
 /// browsers decode only the first member and report success. Always
 /// `Content-Encoding: gzip`, since no identity form exists. Chunked, because a
 /// fragment GC'd mid-walk would break a promised `Content-Length`.

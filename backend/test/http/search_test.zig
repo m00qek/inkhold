@@ -58,7 +58,7 @@ fn dechunk(a: std.mem.Allocator, raw: []const u8) ![]u8 {
 /// `std.compress.flate.Decompress` never verifies the gzip CRC, so it is
 /// checked here.
 fn inflateStitched(a: std.mem.Allocator, body: []const u8) ![]u8 {
-    const gzip_stitch = @import("../../http/gzip_stitch.zig");
+    const gzip_stitch = @import("../../compress/gzip_stitch.zig");
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, body, gzip_stitch.header));
 
     var input: std.Io.Reader = .fixed(body);

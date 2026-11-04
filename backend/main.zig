@@ -83,7 +83,7 @@ test {
     _ = @import("handlers/device.zig");
     _ = @import("handlers/controlplane.zig");
     _ = @import("handlers/admin.zig");
-    _ = @import("http/gzip_stitch.zig");
+    _ = @import("compress/gzip_stitch.zig");
     _ = @import("test/http/auth_test.zig");
     _ = @import("test/http/admin_http_test.zig");
     _ = @import("test/http/elevation_test.zig");

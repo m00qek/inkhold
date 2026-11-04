@@ -2,7 +2,7 @@
 
 const std = @import("std");
 // This import is why the file only tests under `zig build test`.
-const gzip_stitch = @import("../http/gzip_stitch.zig");
+const gzip_stitch = @import("../compress/gzip_stitch.zig");
 const Io = std.Io;
 const File = std.Io.File;
 const testing = std.testing;

@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const derived = @import("../../store/derived.zig");
-const gzip_stitch = @import("../../http/gzip_stitch.zig");
+const gzip_stitch = @import("../../compress/gzip_stitch.zig");
 const index_export = @import("index_export.zig");
 const want_bitmap = @import("want_bitmap.zig");
 

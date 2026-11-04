@@ -7,7 +7,7 @@
 const std = @import("std");
 const blobstore = @import("blobs.zig");
 // This import is why the file only tests under `zig build test`.
-const gzip_stitch = @import("../http/gzip_stitch.zig");
+const gzip_stitch = @import("../compress/gzip_stitch.zig");
 
 const derived_format = @import("derived_format.zig");
 pub const header_len = derived_format.header_len;
