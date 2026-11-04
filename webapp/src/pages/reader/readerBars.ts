@@ -3,8 +3,14 @@
 import { el } from "../../ui/dom";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
 
+export interface ReaderVersionBanner {
+  el: HTMLElement;
+  text: HTMLElement;
+  restore: HTMLButtonElement;
+}
+
 /** History mode only; Restore is the one mutating action on this surface. */
-export function createVersionBanner() {
+export function createVersionBanner(): ReaderVersionBanner {
   const versionBannerText = el("span", { class: "version-banner__text" });
   const restoreVersionBtn = el("button", {
     class: "btn version-banner__restore",
@@ -21,7 +27,23 @@ export function createVersionBanner() {
   return { el: versionBanner, text: versionBannerText, restore: restoreVersionBtn };
 }
 
-export function createFindBarView() {
+export interface FindBarView {
+  el: HTMLElement;
+  toggle: HTMLButtonElement;
+  input: HTMLInputElement;
+  count: HTMLElement;
+  /** "Not recognised" and similar notes under the count. */
+  note: HTMLElement;
+  /** Shown when a settled result is approximate. */
+  fuzzy: HTMLElement;
+  /** "Search similar?" prompt. */
+  ask: HTMLButtonElement;
+  prev: HTMLButtonElement;
+  next: HTMLButtonElement;
+  close: HTMLButtonElement;
+}
+
+export function createFindBarView(): FindBarView {
   const findToggle = el("button", {
     class: "btn",
     type: "button",
@@ -106,8 +128,17 @@ export function createFindBarView() {
   };
 }
 
+export interface ReaderButtons {
+  ocrToggle: HTMLButtonElement;
+  layersToggle: HTMLButtonElement;
+  pagesToggle: HTMLButtonElement;
+  moveBin: HTMLButtonElement;
+  versionsBtn: HTMLButtonElement;
+  downloadLink: HTMLAnchorElement;
+}
+
 /** The reader's toolbar buttons: transcript, layers, pages, move to bin, versions, download. */
-export function createReaderButtons() {
+export function createReaderButtons(): ReaderButtons {
   // Icon-only too, same call as Download.
   const ocrToggle = el("button", {
     class: "btn",

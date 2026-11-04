@@ -2,27 +2,24 @@
 
 import { el } from "../../ui/dom";
 import type { WordBox } from "../../core/types";
-import { dispatchApiFailure, type ApiFailureSink } from "../../api/client";
+import { dispatchApiFailure } from "../../api/client";
 import { type FindState } from "../findInNote";
 import { OVAL_VIEWBOX, ovalsFor } from "../findOvals";
-import { createLinkLayer } from "../linkLayer";
-import type { PdfLink } from "../../core/types";
 import { binNotePageHref, notePageHref } from "../../router";
-import type { ReaderState } from "./readerState";
+import type { ReaderCtx } from "./readerContext";
 
-import type { ReaderDeps } from "./reader";
-
-export interface ReaderOverlaysParts {
-  goToPage: (index: number) => void;
-  api: () => ReaderDeps["api"];
-  findNote: () => HTMLElement;
-  linkLayer: () => ReturnType<typeof createLinkLayer>;
-  pageEl: () => HTMLElement;
-  failures: () => ApiFailureSink;
-  linksByPage: () => Map<string, readonly PdfLink[]>;
+export interface ReaderOverlays {
+  /** The find bar's count readout for a find state. */
+  countText(state: FindState): string;
+  countIsNone(state: FindState): boolean;
+  /** Draws the match ovals over the page, `current` highlighted. */
+  paintOvals(words: WordBox[], current: number): void;
+  /** Paints the page's PDF-template links; `token` drops a stale paint. */
+  paintLinks(index: number, token: number): Promise<void>;
 }
 
-export function createReaderOverlays(st: ReaderState, p: ReaderOverlaysParts) {
+export function createReaderOverlays(ctx: ReaderCtx): ReaderOverlays {
+  const { st } = ctx;
   /**
    * `unrecognised` must not say "No matches" (no search happened over ink the
    * device never recognised), and `counting` shows no total until it is final.
@@ -62,15 +59,15 @@ export function createReaderOverlays(st: ReaderState, p: ReaderOverlaysParts) {
    * note-wide. Always rebuilt, since positions belong to the page's size.
    */
   function paintOvals(words: WordBox[], current: number): void {
-    for (const old of Array.from(p.pageEl().querySelectorAll(".findbox"))) old.remove();
+    for (const old of Array.from(ctx.pageEl.querySelectorAll(".findbox"))) old.remove();
     const m = st.meta;
     if (!m) return;
     const page = m.pages[st.pageIndex];
     if (!page) return;
 
-    const ovals = ovalsFor(words, m.pxPerMm, page.width, p.pageEl().clientWidth, p.pageEl().clientHeight);
+    const ovals = ovalsFor(words, m.pxPerMm, page.width, ctx.pageEl.clientWidth, ctx.pageEl.clientHeight);
     // Null = unverified or mismatched mm scale: draw nothing and explain instead.
-    p.findNote().hidden = ovals !== null;
+    ctx.findBar.note.hidden = ovals !== null;
     if (ovals === null) return;
 
     for (const [i, oval] of ovals.entries()) {
@@ -83,7 +80,7 @@ export function createReaderOverlays(st: ReaderState, p: ReaderOverlaysParts) {
       box.style.width = `${oval.width}px`;
       box.style.height = `${oval.height}px`;
       box.style.transform = `rotate(${oval.rotateDeg}deg)`;
-      p.pageEl().append(box);
+      ctx.pageEl.append(box);
     }
   }
 
@@ -94,7 +91,7 @@ export function createReaderOverlays(st: ReaderState, p: ReaderOverlaysParts) {
    * failure just leaves the page without links.
    */
   async function paintLinks(index: number, token: number): Promise<void> {
-    p.linkLayer().clear();
+    ctx.linkLayer.clear();
     const m = st.meta;
     if (!m || st.mode !== "note") return;
     const page = m.pages[index];
@@ -103,28 +100,28 @@ export function createReaderOverlays(st: ReaderState, p: ReaderOverlaysParts) {
     if (page.linksHash === null) return;
 
     const key = `${page.index}:${page.linksHash}`;
-    let links = p.linksByPage().get(key);
+    let links = ctx.linksByPage.get(key);
     if (links === undefined) {
       try {
-        links = (await p.api().getPageLinks(m.id, page)).links;
+        links = (await ctx.api.getPageLinks(m.id, page)).links;
       } catch (e) {
-        dispatchApiFailure(p.failures(), e, m.id, page);
+        dispatchApiFailure(ctx.failures, e, m.id, page);
         return;
       }
-      p.linksByPage().set(key, links);
+      ctx.linksByPage.set(key, links);
     }
     // The page turned (or the note closed) while we were fetching.
     if (token !== st.paintToken || st.pageIndex !== index || !st.open) return;
     if (links.length === 0) return;
 
-    p.linkLayer().setLinks(links, {
+    ctx.linkLayer.setLinks(links, {
       // Panel pixels over the page box's CSS pixels: the ink's own scale.
       pagePt: { width: page.width, height: page.height },
-      canvas: { width: p.pageEl().clientWidth, height: p.pageEl().clientHeight },
+      canvas: { width: ctx.pageEl.clientWidth, height: ctx.pageEl.clientHeight },
       // Real routes so links are shareable; bin opens keep the bin form.
       hrefForPage: (target) => (st.fromBin ? binNotePageHref(m.id, target) : notePageHref(m.id, target)),
       // A page turn, not a reopen.
-      onJump: (target) => p.goToPage(target),
+      onJump: (target) => ctx.nav.goToPage(target),
     });
   }
 

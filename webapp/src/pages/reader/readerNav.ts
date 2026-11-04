@@ -1,25 +1,27 @@
 // The reader's navigation: page turns, the URL it publishes, the keyboard and image sizing.
 
-import { createFindController } from "../findInNote";
-import { createFindBarView } from "./readerBars";
 import { FIT_PAGE, FIT_WIDTH } from "../viewer/viewerControls";
 import { VIEWER_DEBOUNCE_MS } from "../viewer/viewerChrome";
-import type { ReaderState } from "./readerState";
+import type { ReaderCtx } from "./readerContext";
 
-import type { ReaderDeps } from "./reader";
-
-export interface ReaderNavParts {
-  deps: ReaderDeps;
-  showPage: (index: number) => Promise<void>;
-  fileImg: () => HTMLImageElement;
-  findInput: () => ReturnType<typeof createFindBarView>["input"];
-  find: () => ReturnType<typeof createFindController>;
+export interface ReaderNav {
+  /** What the URL should say the search is: nothing while the bar is shut. */
+  urlQuery(): string;
+  findQuery(raw: string): string;
+  /** Publishes page and query through `onPosition` (see `ReaderState.urlSuspended`). */
+  syncUrl(): void;
+  queueUrlSync(): void;
+  goToPage(index: number): void;
+  onKey(e: KeyboardEvent): void;
+  /** Applies the image zoom ladder to the `<img>` stage. */
+  sizeImage(): void;
 }
 
-export function createReaderNav(st: ReaderState, p: ReaderNavParts) {
+export function createReaderNav(ctx: ReaderCtx): ReaderNav {
+  const { st } = ctx;
   /** What the URL should say the search is: nothing at all while the bar is shut. */
   function urlQuery(): string {
-    return p.find().isOpen() ? p.findInput().value.trim() : "";
+    return ctx.find.isOpen() ? ctx.findBar.input.value.trim() : "";
   }
 
   /** Trimmed as {@link urlQuery} trims, so priming doesn't rewrite the URL. */
@@ -36,19 +38,19 @@ export function createReaderNav(st: ReaderState, p: ReaderNavParts) {
     // Bin opens use the bin route (the live one 404s); history previews carry the md5.
     if (st.mode === "note") {
       if (st.fromBin) {
-        p.deps.onPosition?.(st.meta.id, st.pageIndex, "", undefined, true);
+        ctx.deps.onPosition?.(st.meta.id, st.pageIndex, "", undefined, true);
         return;
       }
-      p.deps.onPosition?.(st.meta.id, st.pageIndex, urlQuery(), st.previewVersion?.md5);
+      ctx.deps.onPosition?.(st.meta.id, st.pageIndex, urlQuery(), st.previewVersion?.md5);
       return;
     }
     // An image publishes only for bin or history opens.
     if (st.mode === "image") {
       if (st.fromBin) {
-        p.deps.onPosition?.(st.meta.id, 0, "", undefined, true);
+        ctx.deps.onPosition?.(st.meta.id, 0, "", undefined, true);
         return;
       }
-      if (st.previewVersion) p.deps.onPosition?.(st.meta.id, 0, "", st.previewVersion.md5);
+      if (st.previewVersion) ctx.deps.onPosition?.(st.meta.id, 0, "", st.previewVersion.md5);
     }
   }
 
@@ -66,7 +68,7 @@ export function createReaderNav(st: ReaderState, p: ReaderNavParts) {
    * `showPage` awaits the paint, and the URL should follow the turn.
    */
   function goToPage(index: number): void {
-    void p.showPage(index);
+    void ctx.paint.showPage(index);
     syncUrl();
   }
 
@@ -75,19 +77,19 @@ export function createReaderNav(st: ReaderState, p: ReaderNavParts) {
     if (!st.open) return;
     // An open export menu and the find bar each take Escape before the reader.
     if (e.key === "Escape") {
-      if (p.find().isOpen()) {
-        p.find().close();
+      if (ctx.find.isOpen()) {
+        ctx.find.close();
         syncUrl();
         return;
       }
-      return p.deps.onBack();
+      return ctx.deps.onBack();
     }
     if (st.mode !== "note") return;
 
     // Ctrl/Cmd+F is claimed only here, so the browser's find works elsewhere.
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "f" || e.key === "F")) {
       e.preventDefault();
-      p.find().open();
+      ctx.find.open();
       return;
     }
 
@@ -109,24 +111,24 @@ export function createReaderNav(st: ReaderState, p: ReaderNavParts) {
   function sizeImage(): void {
     if (st.zoom === FIT_PAGE) {
       // Back to the CSS rule: fit the stage in both axes.
-      p.fileImg().style.width = "";
-      p.fileImg().style.maxWidth = "";
-      p.fileImg().style.maxHeight = "";
+      ctx.files.img.style.width = "";
+      ctx.files.img.style.maxWidth = "";
+      ctx.files.img.style.maxHeight = "";
       return;
     }
     // Past Fit the image may overflow `.filestage`, so lift the max-* clamps.
-    p.fileImg().style.maxWidth = "none";
-    p.fileImg().style.maxHeight = "none";
+    ctx.files.img.style.maxWidth = "none";
+    ctx.files.img.style.maxHeight = "none";
     if (st.zoom === FIT_WIDTH) {
       // Unlike Fit, this enlarges small images.
-      p.fileImg().style.width = "100%";
+      ctx.files.img.style.width = "100%";
       return;
     }
     // Not `ZOOM_SCALE`: for an image 100% means natural size.
     const factor = Number.parseInt(st.zoom, 10) / 100;
-    const natural = p.fileImg().naturalWidth || p.fileImg().clientWidth;
+    const natural = ctx.files.img.naturalWidth || ctx.files.img.clientWidth;
     if (natural > 0 && Number.isFinite(factor)) {
-      p.fileImg().style.width = `${Math.round(natural * factor)}px`;
+      ctx.files.img.style.width = `${Math.round(natural * factor)}px`;
     }
   }
 
