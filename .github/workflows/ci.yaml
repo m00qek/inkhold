@@ -32,6 +32,22 @@ jobs:
       - name: Test Backend
         run: make test
 
+  footprint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      # The memory ceilings in scripts/footprint.py: idle RSS, the cost of a
+      # parked socket, and that threads follow requests rather than sockets.
+      - name: Measure the server footprint
+        run: make footprint
+
   test-frontend:
     runs-on: ubuntu-latest
     steps:

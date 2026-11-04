@@ -112,7 +112,7 @@ and [`parsers/spd/spd-format.md`](parsers/spd/spd-format.md).
   route (the SSE channel) gets a thread of its own, capped by `max_held`;
   sockets idle past `idle_timeout_s` are closed. Worker and held-stream stacks
   are 1 MiB, bisected empirically against a live 32 MB upload; re-bisect if
-  the upload path's frames change.
+  the upload path's frames change. `scripts/footprint.py` pins these numbers in CI.
 - One shared SQLite writer connection, serialised by `db_lock` around the whole
   handler. `std.Io.Mutex` is not reentrant: anything that takes `db_lock`
   itself (`indexSnapshot`, `pending.Pulse`) must not be called inside a

@@ -23,6 +23,7 @@ help:
 	@echo "  make run            build + run (uses config.zon if present, else defaults; --config=PATH to override)"
 	@echo "  make serve          build wasm+SPA+server, then serve device sync AND the browser UI on ONE port ($(PORT); PORT= to override)"
 	@echo "  make test           run the root Zig suite (backend + note unit tests)"
+	@echo "  make footprint      build ReleaseSafe and check the server's memory ceilings"
 	@echo "  make parser-test    run the standalone parser suites (note + spd, incl. property/golden)"
 	@echo "  make test-all       run the root Zig suite, the parser suites, AND the web suite"
 	@echo "  make web-test       run the web suite (unit + e2e)"
@@ -244,6 +245,13 @@ serve: build $(WEB)/node_modules/.package-lock.json server/8089/serve.zon
 
 test:
 	zig build test --summary all
+
+# The server's memory footprint against its ceilings (scripts/footprint.py):
+# idle, per parked socket, and that threads do not grow with sockets. Builds
+# ReleaseSafe first, since Debug numbers mean nothing.
+footprint:
+	zig build -Doptimize=ReleaseSafe
+	python3 scripts/footprint.py zig-out/bin/inkhold
 
 # The standalone parser suites. The root `test` above builds the note/spd
 # parsers as MODULES and runs their colocated unit tests, but the SPD suite and
