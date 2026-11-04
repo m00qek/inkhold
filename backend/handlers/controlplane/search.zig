@@ -13,7 +13,6 @@ const wantbitmap = @import("../../services/search/want_bitmap.zig");
 const derived = @import("../../store/derived.zig");
 const derivesearch = @import("../../services/derive_search.zig");
 const gzip_stitch = @import("../../compress/gzip_stitch.zig");
-const sqlite = @import("../../db/sqlite.zig");
 const Context = context.Context;
 const Request = router.Request;
 const Params = router.Params;
@@ -84,29 +83,6 @@ pub fn searchIndexManifest(ctx: *Context, req: *Request, params: Params) anyerro
     try req.respond(body.items, .{ .status = .ok, .extra_headers = &headers });
 }
 
-/// The manifest as one request sees it: rows in order, and the body's ETag.
-const ManifestGate = struct {
-    rows: []const index_export.Row,
-    etag: [32]u8,
-};
-
-/// Re-run the manifest query and hash what it would serialize to. The bytes come
-/// from `gpa` and are freed here; the rows live in the request arena.
-fn manifestGate(
-    arena: std.mem.Allocator,
-    gpa: std.mem.Allocator,
-    db: sqlite.Db,
-    user_id: u64,
-    terms: ?derived.DerivedStore,
-) !ManifestGate {
-    // Must be the same store the manifest route passes, or the ETags differ.
-    const m = try index_export.manifest(arena, db, user_id, terms);
-    var body: std.ArrayList(u8) = .empty;
-    defer body.deinit(gpa);
-    try index_export.writeManifest(gpa, &body, m);
-    return .{ .rows = m.rows, .etag = index_export.bodyEtag(body.items) };
-}
-
 /// GET /api/controlplane/search-index/stream?m=<manifest etag>&want=<base64url>
 /// -> the wanted documents' terms as one gzip stream stitched from stored
 /// raw-deflate fragments (`compress/gzip_stitch.zig`). Not concatenated gzip members:
@@ -139,12 +115,12 @@ pub fn searchIndexStream(ctx: *Context, req: *Request, params: Params) anyerror!
     const gate = blk: {
         if (ctx.borrowReader()) |lease| {
             defer ctx.returnReader(lease);
-            break :blk manifestGate(a, ctx.gpa, lease.db, caller.user_id, files.terms) catch
+            break :blk index_export.gate(a, ctx.gpa, lease.db, caller.user_id, files.terms) catch
                 return serverError(ctx, req);
         }
         ctx.lockDb();
         defer ctx.unlockDb();
-        break :blk manifestGate(a, ctx.gpa, files.db, caller.user_id, files.terms) catch
+        break :blk index_export.gate(a, ctx.gpa, files.db, caller.user_id, files.terms) catch
             return serverError(ctx, req);
     };
 

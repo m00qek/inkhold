@@ -303,6 +303,31 @@ pub fn bodyEtag(bytes: []const u8) [32]u8 {
     return hex;
 }
 
+/// The manifest as one request sees it: rows in order, and the body's ETag.
+pub const Gate = struct {
+    rows: []const Row,
+    etag: [32]u8,
+};
+
+/// Re-runs the manifest query and hashes what it would serialize to, so a
+/// stream request can prove its `want` bitmap indexes the ordering the client
+/// holds. The body bytes come from `gpa` and are freed here; the rows live in
+/// `arena`. Must be given the same store the manifest route uses, or the ETags
+/// differ.
+pub fn gate(
+    arena: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    db: sqlite.Db,
+    user_id: u64,
+    terms: ?derivedstore.DerivedStore,
+) !Gate {
+    const m = try manifest(arena, db, user_id, terms);
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    try writeManifest(gpa, &body, m);
+    return .{ .rows = m.rows, .etag = bodyEtag(body.items) };
+}
+
 test {
     _ = @import("index_export/manifest_test.zig");
     _ = @import("index_export/wire_test.zig");
