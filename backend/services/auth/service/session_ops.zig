@@ -1,12 +1,12 @@
 //! Login challenges, sessions, password change and admin elevation.
 
-const context = @import("../../../http/context.zig");
+const authscope = @import("../scope.zig");
 const std = @import("std");
 const internal = @import("internal.zig");
 const expiring = @import("../../../util/expiring.zig");
 const password = @import("../password.zig");
-const Scope = context.Scope;
-const Caller = context.Caller;
+const Scope = authscope.Scope;
+const Caller = authscope.Caller;
 const token_len = 32; // hex chars (16 random bytes)
 const challenge_ttl: i64 = 300; // 5 min
 const last_used_bump_s: i64 = 60;

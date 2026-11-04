@@ -7,15 +7,15 @@ const expiring = @import("../../util/expiring.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
 const password = @import("password.zig");
-const context = @import("../../http/context.zig");
+const authscope = @import("scope.zig");
 const filesmod = @import("../files.zig");
 const admin_ops = @import("service/admin_ops.zig");
 const own_account = @import("service/own_account.zig");
 const session_ops = @import("service/session_ops.zig");
 const device_ops = @import("service/device_ops.zig");
 
-const Scope = context.Scope;
-const Caller = context.Caller;
+const Scope = authscope.Scope;
+const Caller = authscope.Caller;
 
 pub const Error = error{
     EmailExists,

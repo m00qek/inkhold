@@ -1,4 +1,4 @@
-//! Per-request context passed to every handler, and the auth scope types.
+//! Per-request context passed to every handler.
 
 const std = @import("std");
 const config = @import("../config.zig");
@@ -11,34 +11,14 @@ const filesmod = @import("../services/files.zig");
 const lock_stats = @import("lock_stats.zig");
 const reader_pool = @import("../db/reader_pool.zig");
 const pending = @import("../services/pending.zig");
+const authscope = @import("../services/auth/scope.zig");
 
 pub const session_cookie_name = "sn_session";
 
-/// Route scope / caller audience. Device (`x-access-token`) and control-plane
-/// (session cookie) authority are not interchangeable; `public` is a route
-/// scope only; `pending` is the first-login token, accepted only by routes
-/// that list it.
-pub const Scope = enum { public, device, controlplane, pending };
-
-pub const Caller = struct {
-    user_id: u64,
-    audience: Scope,
-    is_admin: bool = false,
-    /// The session's admin elevation (password re-entered recently), resolved
-    /// per request so it lapses by itself. `require_admin` needs this and
-    /// `is_admin`: an unlocked tablet still carries `is_admin`.
-    elevated: bool = false,
-    /// Device serial, copied inline because `json.readBody` invalidates head
-    /// strings; read via `equipmentNo()`. `equipment_len == 0` means none.
-    equipment_buf: [max_equipment_len]u8 = undefined,
-    equipment_len: usize = 0,
-
-    pub const max_equipment_len = 64;
-
-    pub fn equipmentNo(self: *const Caller) ?[]const u8 {
-        return if (self.equipment_len == 0) null else self.equipment_buf[0..self.equipment_len];
-    }
-};
+/// Defined by the auth service (`services/auth/scope.zig`); re-exported so
+/// handlers and the router read them from the request context.
+pub const Scope = authscope.Scope;
+pub const Caller = authscope.Caller;
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
