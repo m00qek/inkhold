@@ -24,8 +24,6 @@ import { createPdfPageRenderer, PDF_LAYER_ID, ZOOMS, type Zoom } from "./pdfPage
 import { createLinkLayer } from "./linkLayer";
 import { createPdfHighlightLayer } from "./pdfHighlightLayer";
 import { createPdfSelectionLayer } from "./pdfSelectionLayer";
-import { tokenPx, MIN_PAGE_W } from "../ui/sidePanel";
-import { copyText } from "../ui/clipboard";
 import {
   createPdfFindController,
   pdfCountIsNone,
@@ -34,6 +32,7 @@ import {
 } from "./pdfFind";
 import { createBinViewerActions } from "../ui/binViewerActions";
 import { createLayersPanel } from "./layersPanel";
+import { contextualOpener, createCopyControl, createPdfDocks, createPdfFindBarView } from "./pdfChrome";
 import { buildNoteLayerThumb, createNoteLayersController } from "./noteLayers";
 import { createPdfExports } from "./pdfExports";
 import { createPdfViewerExports } from "./pdfViewerExports";
@@ -45,36 +44,6 @@ import { PdfLoadError, createPdfSession, type PdfSession } from "../render/pdfCl
 const ANNOTATIONS_HISTORY = "Annotation history";
 const ANNOTATIONS_NO_INK = "this document has no annotations";
 
-/**
- * A toolbar control that is always present, dimmed with the reason on its
- * accessible name when unavailable, so the bar keeps its shape per document.
- */
-function contextualOpener(spec: {
-  icon: string;
-  label: string;
-  reason: string;
-  attrs?: Record<string, string>;
-}): { el: HTMLButtonElement; setAvailable(has: boolean): void } {
-  const dimmed = `${spec.label} — ${spec.reason}`;
-  const button = el("button", {
-    class: "btn",
-    type: "button",
-    ...spec.attrs,
-    "aria-label": dimmed,
-    title: dimmed,
-    disabled: true,
-    html: svg(spec.icon, 1.8),
-  }) as HTMLButtonElement;
-  return {
-    el: button,
-    setAvailable(has: boolean): void {
-      button.disabled = !has;
-      const name = has ? spec.label : dimmed;
-      button.setAttribute("aria-label", name);
-      button.title = name;
-    },
-  };
-}
 
 /** The browser seams, injectable so the viewer is testable without a worker. */
 export interface PdfSeam {
@@ -278,10 +247,6 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   });
   const pagesPanel = thumbs.panel;
 
-  /** Pages and Outline share the left dock, so one value makes both-open unrepresentable. */
-  type LeftDock = "pages" | "outline";
-  let leftDock: LeftDock | null = null;
-  let rightDock = false;
 
   const pagesToggle = el("button", {
     class: "btn",
@@ -293,57 +258,8 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     html: svg(VIEWER_IC.pages, 1.8),
   }) as HTMLButtonElement;
 
-  /**
-   * A dock's width from the CSS tokens: unlike `availableBox`, this answers
-   * whether a not-yet-mounted panel would fit.
-   */
-  function dockPx(track: string, fallback: number): number {
-    return tokenPx(track, fallback) + tokenPx("--panel-gap", 22);
-  }
-  function leftDockPx(left: LeftDock | null): number {
-    if (left === "pages") return dockPx("--panel-w-narrow", 180);
-    if (left === "outline") return dockPx("--panel-w", 268);
-    return 0;
-  }
-  function rightDockPx(right: boolean): number {
-    return right ? dockPx("--panel-w-wide", 320) : 0;
-  }
-  /** Below {@link MIN_PAGE_W} with these docks? An unlaid-out stage protects nothing. */
-  function tooTight(left: number, right: number): boolean {
-    const { w } = renderer.stageInner();
-    return w > 0 && w - left - right < MIN_PAGE_W;
-  }
-
-  /**
-   * The one place any panel opens or shuts. The page is never squeezed from both
-   * sides: if both docks together would leave it under {@link MIN_PAGE_W}, the
-   * side the user just touched (`asked`) wins. Repaint is needed on a toggle since
-   * panels narrow a Fit page; skipped only for programmatic closes.
-   */
-  function setDocks(
-    left: LeftDock | null,
-    right: boolean,
-    asked: "left" | "right" | null,
-    repaint = true,
-  ): void {
-    if (asked === "left" && left !== null && tooTight(leftDockPx(left), rightDockPx(right))) {
-      right = false;
-    }
-    if (asked === "right" && right && tooTight(leftDockPx(left), rightDockPx(right))) {
-      left = null;
-    }
-    leftDock = left;
-    rightDock = right;
-    pagesPanel.setOpen(left === "pages");
-    outlinePanel.setOpen(left === "outline");
-    layersPanel.el.hidden = !right;
-    pagesToggle.setAttribute("aria-pressed", String(left === "pages"));
-    outlineToggle.setAttribute("aria-pressed", String(left === "outline"));
-    layersToggle.setAttribute("aria-pressed", String(right));
-    if (repaint && open_) void renderer.paint();
-  }
   pagesToggle.addEventListener("click", () =>
-    setDocks(leftDock === "pages" ? null : "pages", rightDock, "left"),
+    setDocks(docks.left() === "pages" ? null : "pages", docks.right(), "left"),
   );
 
   // ---- outline ----
@@ -356,13 +272,13 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   });
   const outlineToggle = outlineOpener.el;
   outlineToggle.addEventListener("click", () =>
-    setDocks(leftDock === "outline" ? null : "outline", rightDock, "left"),
+    setDocks(docks.left() === "outline" ? null : "outline", docks.right(), "left"),
   );
 
   function setOutlineAvailable(has: boolean): void {
     outlineOpener.setAvailable(has);
     // No repaint: callers paint on their own path.
-    if (!has && leftDock === "outline") setDocks(null, rightDock, null, false);
+    if (!has && docks.left() === "outline") setDocks(null, docks.right(), null, false);
   }
 
   const layersToggle = el("button", {
@@ -374,35 +290,24 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     title: "Annotations",
     html: svg(VIEWER_IC.layers, 1.8),
   }) as HTMLButtonElement;
-  layersToggle.addEventListener("click", () => setDocks(leftDock, !rightDock, "right"));
+  layersToggle.addEventListener("click", () => setDocks(docks.left(), !docks.right(), "right"));
 
-  /**
-   * Shown only with a selection. Reports failure: on plain HTTP the async
-   * clipboard is unavailable and `copyText` falls back, which can still fail.
-   */
-  const copyBtn = el("button", {
-    class: "btn",
-    type: "button",
-    "aria-label": "Copy selected text",
-    title: "Copy selected text",
-    html: svg(VIEWER_IC.copy, 1.7),
-    hidden: true,
-  }) as HTMLButtonElement;
-  const copyLive = el("span", { class: "pdf-copy__live", role: "status" });
-  let copyLabelTimer = 0;
-  async function runCopy(): Promise<void> {
-    const text = selectLayer.text();
-    if (text === "") return;
-    const ok = await copyText(text);
-    copyLive.textContent = ok ? "Copied" : "Could not copy";
-    copyBtn.classList.toggle("is-failed", !ok);
-    window.clearTimeout(copyLabelTimer);
-    copyLabelTimer = window.setTimeout(() => {
-      copyLive.textContent = "";
-      copyBtn.classList.remove("is-failed");
-    }, 1800);
-  }
-  copyBtn.addEventListener("click", () => void runCopy());
+  const docks = createPdfDocks({
+    pagesPanel,
+    outlinePanel,
+    layersPanel,
+    pagesToggle,
+    outlineToggle,
+    layersToggle,
+    stageWidth: () => renderer.stageInner().w,
+    repaint: () => {
+      if (open_) void renderer.paint();
+    },
+  });
+  const setDocks = docks.set;
+
+  const { btn: copyBtn, live: copyLive } = createCopyControl(() => selectLayer.text());
+
 
   // ---- find ----
   // Enabled for every PDF: there is no "unrecognised" state as for notes.
@@ -414,51 +319,16 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     title: "Find in this file (Ctrl+F)",
     html: svg(VIEWER_IC.find, 1.8),
   }) as HTMLButtonElement;
+  const {
+    bar: findBar,
+    input: findInput,
+    count: findCount,
+    ask: findAsk,
+    prev: findPrev,
+    next: findNext,
+    close: findClose,
+  } = createPdfFindBarView();
 
-  const findInput = el("input", {
-    type: "text",
-    autocomplete: "off",
-    placeholder: "Find in this file",
-    "aria-label": "Find in this file",
-  }) as HTMLInputElement;
-  const findCount = el("span", { class: "pdfbar__count", role: "status", "aria-live": "polite" });
-  const findAsk = el("button", {
-    class: "pdfbar__ask",
-    type: "button",
-    hidden: true,
-    text: "Search similar",
-  }) as HTMLButtonElement;
-  const findPrev = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Previous match",
-    title: "Previous match",
-    html: svg(VIEWER_IC.prev, 1.9),
-  }) as HTMLButtonElement;
-  const findNext = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Next match",
-    title: "Next match",
-    html: svg(VIEWER_IC.next, 1.9),
-  }) as HTMLButtonElement;
-  const findClose = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Close find",
-    title: "Close find",
-    html: svg(VIEWER_IC.close, 1.9),
-  }) as HTMLButtonElement;
-  const findBar = el(
-    "div",
-    { class: "pdfbar", hidden: true },
-    el("span", { class: "pdfbar__field", html: svg(VIEWER_IC.find, 1.8) }, findInput),
-    findCount,
-    findAsk,
-    findPrev,
-    findNext,
-    findClose,
-  );
 
   const toolbar = createToolbar({
     label: "PDF viewer",
@@ -524,9 +394,9 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       // Mounted panels only; {@link tooTight} weighs hypothetical ones.
       dockedPanels: () =>
         [
-          leftDock === "pages" ? pagesPanel.el : null,
-          leftDock === "outline" ? outlinePanel.el : null,
-          rightDock ? layersPanel.el : null,
+          docks.left() === "pages" ? pagesPanel.el : null,
+          docks.left() === "outline" ? outlinePanel.el : null,
+          docks.right() ? layersPanel.el : null,
         ].filter((panel): panel is HTMLElement => panel !== null),
     },
     dom: { main, stage, canvas, body, markCtl, linkLayer, selectLayer, layersPanel },
@@ -777,7 +647,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     renderer.reset();
     layersToggle.hidden = true;
     // Through `setDocks` so `aria-pressed` stays correct.
-    setDocks(leftDock, false, null, false);
+    setDocks(docks.left(), false, null, false);
     // The file-zone controls outlive the document, so forget their target.
     meta = null;
     thumbs.reset();
