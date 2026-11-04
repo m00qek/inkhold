@@ -468,3 +468,64 @@ silently.
   `ink.host_read` must be wrapped for JSPI.
 - MuPDF is a pinned, unpatched dependency; upstream bugs are worked around by
   excluding sources and supplying stubs (`load-jpx.c`), not by patching.
+
+## 12. Where things live
+
+The directories are layers. An import points down the list, never up: a file
+in `services/` may import `store/` and `db/`, and nothing in `store/` knows
+`http/` exists. The one deliberate exception is `http/context.zig`, the
+per-request bag of service pointers every handler receives.
+
+| layer | directory | holds |
+|---|---|---|
+| entry | `backend/main.zig`, `cli.zig`, `cli/`, `app.zig`, `routes.zig`, `config.zig` | process start, the CLI grammar, the composition root, the route table |
+| transport | `http/` | the accept loop and TLS, the router, request context, replies, multipart, static files, rate limits, SSE admission, lock histograms |
+| handlers | `handlers/` | one function per route, in `auth`, `device/`, `controlplane/`, `admin`; thin HTTP shells that parse, call a service, reply |
+| services | `services/` | the domain: `files` (tree, bin, quota, history), `auth/`, `controlplane` (the browser's JSON shapes), `sync`, `settings`, the indexers (`note_index`, `spd_index`, `txt_index`, `pdf_index`, `pdf_text`, `ink_scan`, `derive_search`), `deferred` (the worker), `pending`, `search/` |
+| stores | `store/` | content-addressed bytes on disk: blobs, thumbnails, derived files |
+| db | `db/` | the SQLite wrapper, the schema and migrations, the reader pool |
+| leaf | `compress/`, `pdf/`, `util/` | code with no dependency on the rest: the gzip stitcher, the MuPDF shims, small helpers |
+| tests | `test/http/` | integration tests over the in-memory transport; unit tests sit beside the code (below) |
+| benches | `bench/` | measurement programs, built on demand, never shipped |
+
+Within `services/`, the indexers sit below `files` (which calls them inside
+its transactions), and `controlplane`, `sync` and `auth` sit above it. Each
+SQL table has one owner, and only the owner writes it: `files` owns `files`,
+`blobs`, `capacity`, `file_history`, `sync_state` and `upload_sessions`; `auth`
+owns `users`, `sessions`, `devices` and `user_devices`; `settings` owns
+`settings`; `note_index` owns `note_index` and `note_page_index`, where the
+other indexers record their per-blob verdict through it (§8); `spd_index` owns
+`spd_index`. Any module may read a table it does not own, joining through
+`files` for ownership (§2.1).
+
+### 12.1 A module in parts
+
+A module is one file, `x.zig`, until it outgrows 500 lines. Then `x.zig`
+stays as the façade (the types, the struct, `pub const f = part.f;` for each
+exported function, grouped under one header per part) and the parts move to
+`x/`: `x/part.zig` holds the code, `x/part_test.zig` its tests, `x/fixture.zig`
+what the tests share, `x/internal.zig` what the parts share and nothing else
+calls. Nothing becomes `pub` for a test's sake: a test that needs a private
+helper stays inline, under `// ---- tests of private helpers ----` at the end
+of the file. `files.zig` + `files/` is the model.
+
+### 12.2 Naming
+
+- Handlers are named after the resource, not the face: `controlplane.tree`,
+  `admin.listUsers`, `device.listFolder`. The face is the module.
+- One import alias per module, everywhere: `filesmod`, `authsvc`, `context`,
+  `noteindex`, `blobstore`, `thumbstore`, `derivedstore`, `sqlite`, `schema`.
+- A section header `// ---- name ----` sits above code; a header with nothing
+  under it is deleted, not kept.
+- Every file starts with a `//!` line saying what it is for; every `pub fn`
+  that is not a one-line wrapper carries a `///` saying what the caller may
+  assume.
+
+### 12.3 The test gate
+
+`make test` is the gate (`zig build test`, the parsers, `zig fmt --check`),
+and a commit lands only when its summary line reads `N/N tests passed`.
+The sample notebooks the tests embed (`sample.note`, `sample-2.note`,
+`layers_edited.note`) are named modules supplied by `build.zig` from
+`parsers/note/tests/fixtures/`, so `@embedFile("sample.note")` is the same
+spelling from any directory.
