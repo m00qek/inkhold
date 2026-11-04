@@ -20,7 +20,7 @@
 @import "./styles/07-find-in-note.css";
 @import "./styles/08-bin.css";
 @import "./styles/09-admin.css";
-@import "./styles/09-admin-panels.css";
+@import "./styles/09b-admin-panels.css";
 @import "./styles/10-toolbar.css";
 @import "./styles/11-viewer-stub.css";
 @import "./styles/12-spd-viewer.css";
@@ -31,6 +31,6 @@
 @import "./styles/17-rename.css";
 @import "./styles/18-upload.css";
 @import "./styles/19-account.css";
-@import "./styles/19-account-panels.css";
+@import "./styles/19b-account-panels.css";
 @import "./styles/20-pdf-viewer.css";
 @import "./styles/21-link-layer.css";

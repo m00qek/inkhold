@@ -1,3 +1,6 @@
+// The skeleton page: what the reader shows for a page whose real geometry has
+// not arrived yet, and the signal that it must not be rendered.
+
 import type { PageRef } from "./types";
 
 /**

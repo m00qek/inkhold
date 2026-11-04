@@ -1,3 +1,6 @@
+// A windowed list: only the rows near the viewport exist in the DOM, recycled as
+// the user scrolls, so a long listing costs a screen of nodes.
+
 import { el } from "./dom";
 
 export interface VirtualListOptions {
