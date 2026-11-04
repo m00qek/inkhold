@@ -2,6 +2,9 @@
 // (`render/pdfClient.ts`). Pages share resources through the xref, so the
 // document is opened once and held; range-served blocks mean no size ceiling.
 // Past versions of a PDF are not previewable (`canPreviewHistory` excludes it).
+//
+// This file builds the DOM and wires the parts through a `PdfViewerCtx`
+// (`pdfViewerContext.ts` has the rule).
 
 import { el } from "../../ui/dom";
 import type { PageRef } from "../../core/types";
@@ -33,13 +36,13 @@ import { supportsWasmExceptions } from "../../render/pdfLoader";
 import type { PdfWord } from "../../render/pdfWire";
 import { createPdfSession, type PdfSession } from "../../render/pdfClient";
 import type { PdfViewerState } from "./pdfViewerState";
+import { seedPdfViewerContext } from "./pdfViewerContext";
 import { createPdfLifecycle } from "./pdfViewerLifecycle";
 import { createPdfNav } from "./pdfViewerNav";
 
 /** The versions control offers the ink's history, never a past PDF. */
 const ANNOTATIONS_HISTORY = "Annotation history";
 const ANNOTATIONS_NO_INK = "this document has no annotations";
-
 
 /** The browser seams, injectable so the viewer is testable without a worker. */
 export interface PdfSeam {
@@ -70,22 +73,10 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     generation: 0,
   };
 
-  const { syncPager, syncUrl, go, onKey, onCopy } = createPdfNav(st, {
-    deps,
-    pager: () => pager,
-    find: () => find,
-    pagesPanel: () => pagesPanel,
-    outlinePanel: () => outlinePanel,
-    renderer: () => renderer,
-    root: () => root,
-    selectLayer: () => selectLayer,
-    findInput: () => findInput,
-  });
-  document.addEventListener("keydown", onKey);
-  document.addEventListener("copy", onCopy);
   const markPages = new Map<number, PageRef>();
 
   // ---- DOM ----
+  // Callbacks reach the parts through `ctx`, which exists by the time any fires.
   const header = createViewerHeader({
     classes: { back: "viewer__back", backLabel: "viewer__back-label", title: "viewer__title" },
     onBack: () => deps.onBack(),
@@ -107,7 +98,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   /** The one pointer-taking layer; under the links so a press on a link reaches it. */
   const selectLayer = createPdfSelectionLayer({
     onChange: (has) => {
-      copyBtn.hidden = !has;
+      copy.btn.hidden = !has;
     },
   });
   const stage = el(
@@ -137,7 +128,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     },
   });
 
-  const pager = createPager({ readoutClass: "pdf-pager__count", onGo: (index) => void go(index) });
+  const pager = createPager({ readoutClass: "pdf-pager__count", onGo: (index) => void ctx.nav.go(index) });
 
   // ---- download / export menu ----
   const exportMenu = createViewerExportMenu({ toast: deps.toast, className: "viewer__export" });
@@ -177,10 +168,9 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     label: ANNOTATIONS_HISTORY,
     reason: ANNOTATIONS_NO_INK,
   });
-  const versionsBtn = versionsOpener.el;
-  versionsBtn.addEventListener("click", () => {
+  versionsOpener.el.addEventListener("click", () => {
     const subject = versionSubject();
-    if (subject) deps.onVersions?.(subject, versionsBtn, st.previewVersion?.md5);
+    if (subject) deps.onVersions?.(subject, versionsOpener.el, st.previewVersion?.md5);
   });
 
   /** The paired `.mark` under the document's name; `annotationsOn` carries the distinction. */
@@ -188,8 +178,6 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     if (!st.meta || st.annotationsId === null) return null;
     return { id: st.annotationsId, name: st.meta.name, fileType: "mark", annotationsOn: st.meta.id };
   }
-
-  const setVersionsAvailable = versionsOpener.setAvailable;
 
   /** `annotations` wording: the document is current, Restore changes only the ink. */
   const versionBanner = createVersionBanner({
@@ -238,10 +226,9 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       previewVersion: () => st.previewVersion,
     },
     inkRaster: (bytes, dst) => markCtl.inkRaster(bytes, dst),
-    onPick: (i) => void go(i),
+    onPick: (i) => void ctx.nav.go(i),
   });
   const pagesPanel = thumbs.panel;
-
 
   const pagesToggle = el("button", {
     class: "btn",
@@ -254,27 +241,20 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   }) as HTMLButtonElement;
 
   pagesToggle.addEventListener("click", () =>
-    setDocks(docks.left() === "pages" ? null : "pages", docks.right(), "left"),
+    docks.set(docks.left() === "pages" ? null : "pages", docks.right(), "left"),
   );
 
   // ---- outline ----
-  const outlinePanel = createPdfOutlinePanel({ onPick: (page) => void go(page) });
+  const outlinePanel = createPdfOutlinePanel({ onPick: (page) => void ctx.nav.go(page) });
   const outlineOpener = contextualOpener({
     icon: VIEWER_IC.outline,
     label: "Outline",
     reason: "this document has none",
     attrs: { "aria-pressed": "false", "aria-controls": "pdf-outline-panel" },
   });
-  const outlineToggle = outlineOpener.el;
-  outlineToggle.addEventListener("click", () =>
-    setDocks(docks.left() === "outline" ? null : "outline", docks.right(), "left"),
+  outlineOpener.el.addEventListener("click", () =>
+    docks.set(docks.left() === "outline" ? null : "outline", docks.right(), "left"),
   );
-
-  function setOutlineAvailable(has: boolean): void {
-    outlineOpener.setAvailable(has);
-    // No repaint: callers paint on their own path.
-    if (!has && docks.left() === "outline") setDocks(null, docks.right(), null, false);
-  }
 
   const layersToggle = el("button", {
     class: "btn",
@@ -285,24 +265,21 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     title: "Annotations",
     html: svg(VIEWER_IC.layers, 1.8),
   }) as HTMLButtonElement;
-  layersToggle.addEventListener("click", () => setDocks(docks.left(), !docks.right(), "right"));
+  layersToggle.addEventListener("click", () => docks.set(docks.left(), !docks.right(), "right"));
 
   const docks = createPdfDocks({
     pagesPanel,
     outlinePanel,
     layersPanel,
     pagesToggle,
-    outlineToggle,
+    outlineToggle: outlineOpener.el,
     layersToggle,
     stageWidth: () => renderer.stageInner().w,
     repaint: () => {
       if (st.open_) void renderer.paint();
     },
   });
-  const setDocks = docks.set;
-
-  const { btn: copyBtn, live: copyLive } = createCopyControl(() => selectLayer.text());
-
+  const copy = createCopyControl(() => selectLayer.text());
 
   // ---- find ----
   // Enabled for every PDF: there is no "unrecognised" state as for notes.
@@ -314,16 +291,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     title: "Find in this file (Ctrl+F)",
     html: svg(VIEWER_IC.find, 1.8),
   }) as HTMLButtonElement;
-  const {
-    bar: findBar,
-    input: findInput,
-    count: findCount,
-    ask: findAsk,
-    prev: findPrev,
-    next: findNext,
-    close: findClose,
-  } = createPdfFindBarView();
-
+  const findBar = createPdfFindBarView();
 
   const toolbar = createToolbar({
     label: "PDF viewer",
@@ -337,15 +305,15 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus },
       { kind: "custom", key: "find", el: findToggle, focus: [findToggle] },
       { kind: "custom", key: "pages", el: pagesToggle, focus: [pagesToggle] },
-      { kind: "custom", key: "outline", el: outlineToggle, focus: [outlineToggle] },
+      { kind: "custom", key: "outline", el: outlineOpener.el, focus: [outlineOpener.el] },
       // Shown only when a `.mark` exists.
       { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle] },
-      { kind: "custom", key: "copy", el: copyBtn, focus: [copyBtn] },
-      { kind: "custom", key: "copy-live", el: copyLive, focus: [] },
+      { kind: "custom", key: "copy", el: copy.btn, focus: [copy.btn] },
+      { kind: "custom", key: "copy-live", el: copy.live, focus: [] },
     ],
     file: [
       { kind: "custom", key: "download", el: exportMenu.el, focus: [exportMenu.trigger] },
-      { kind: "custom", key: "versions", el: versionsBtn, focus: [versionsBtn] },
+      { kind: "custom", key: "versions", el: versionsOpener.el, focus: [versionsOpener.el] },
       { kind: "custom", key: "move-bin", el: moveBin, focus: [moveBin] },
       // Mutually exclusive with Move to bin.
       { kind: "custom", key: "bin-actions", el: binActions.el, focus: [binActions.trigger] },
@@ -368,7 +336,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     toolbar.el,
     // Above the page, since it qualifies what is on screen.
     versionBanner.el,
-    findBar,
+    findBar.bar,
     main,
   );
 
@@ -401,9 +369,9 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       wordsKnown: (page) => find.wordsKnown(page),
       wordsFor: (page) => find.wordsFor(page),
     },
-    syncPager: () => syncPager(),
+    syncPager: () => ctx.nav.syncPager(),
     refreshGroups: () => downloads.refreshGroups(),
-    onJump: (page) => void go(page),
+    onJump: (page) => void ctx.nav.go(page),
   });
   // ---- find in this PDF ----
 
@@ -428,47 +396,47 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     words: async (page) => (st.session && st.open_ ? st.session.pageWords(page) : []),
     view: {
       setOpen(isOpen) {
-        findBar.hidden = !isOpen;
+        findBar.bar.hidden = !isOpen;
         root.classList.toggle("is-finding", isOpen);
         findToggle.setAttribute("aria-pressed", String(isOpen));
         if (!isOpen) findLayer.clear();
       },
       setState(state) {
-        findCount.textContent = pdfCountText(state);
-        findCount.classList.toggle("is-none", pdfCountIsNone(state));
-        findAsk.hidden = state.kind !== "fuzzyPrompt";
+        findBar.count.textContent = pdfCountText(state);
+        findBar.count.classList.toggle("is-none", pdfCountIsNone(state));
+        findBar.ask.hidden = state.kind !== "fuzzyPrompt";
         // The URL follows the query, so a find is shareable.
-        syncUrl();
+        ctx.nav.syncUrl();
       },
       setPageMarks: paintFindMarks,
       setPageCounts: (counts) => pagesPanel.setBadges(counts),
-      showPage: (index) => void go(index),
+      showPage: (index) => void ctx.nav.go(index),
       setStepEnabled(enabled) {
-        findPrev.disabled = !enabled;
-        findNext.disabled = !enabled;
+        findBar.prev.disabled = !enabled;
+        findBar.next.disabled = !enabled;
       },
       focusField() {
-        findInput.focus();
-        findInput.select();
+        findBar.input.focus();
+        findBar.input.select();
       },
     },
   });
 
   findToggle.addEventListener("click", () => find.toggle());
-  findClose.addEventListener("click", () => {
+  findBar.close.addEventListener("click", () => {
     find.close();
-    findInput.value = "";
+    findBar.input.value = "";
   });
-  findInput.addEventListener("input", () => find.setQuery(findInput.value));
-  findInput.addEventListener("keydown", (e) => {
+  findBar.input.addEventListener("input", () => find.setQuery(findBar.input.value));
+  findBar.input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
       find.step(e.shiftKey ? -1 : 1);
     }
   });
-  findPrev.addEventListener("click", () => find.step(-1));
-  findNext.addEventListener("click", () => find.step(1));
-  findAsk.addEventListener("click", () => find.searchSimilar());
+  findBar.prev.addEventListener("click", () => find.step(-1));
+  findBar.next.addEventListener("click", () => find.step(1));
+  findBar.ask.addEventListener("click", () => find.searchSimilar());
 
   // ---- exports ----
   const exportDriver = createPdfViewerExports({
@@ -487,52 +455,69 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     dom: { canvas, markCtl },
   });
 
-  // ---- open / teardown ----
-  const { open, release } = createPdfLifecycle(st, {
+  // ---- the context and the parts ----
+  const ctx = seedPdfViewerContext({
     deps,
     seam,
-    binActions,
-    body,
-    downloads,
-    find,
-    header,
-    moveBin,
-    outlinePanel,
-    pagesPanel,
-    renderer,
-    root,
-    thumbs,
-    versionBanner,
-    zoomStepper,
-    docks,
-    exportMenu,
-    findLayer,
-    findInput,
-    layersToggle,
-    linkLayer,
-    markCtl,
-    selectLayer,
+    st,
     markPages,
-    setVersionsAvailable,
-    setOutlineAvailable,
-    setDocks,
-    syncPager,
-    syncUrl,
+    header,
+    canvas,
+    markCtl,
+    linkLayer,
+    findLayer,
+    selectLayer,
+    stage,
+    body,
+    zoomStepper,
+    pager,
+    exportMenu,
+    downloads,
+    moveBin,
+    binActions,
+    versionsOpener,
+    versionBanner,
+    layersPanel,
+    thumbs,
+    pagesPanel,
+    pagesToggle,
+    outlinePanel,
+    outlineOpener,
+    layersToggle,
+    docks,
+    copy,
+    findToggle,
+    findBar,
+    main,
+    root,
+    renderer,
+    find,
+    exportDriver,
+    setVersionsAvailable: versionsOpener.setAvailable,
+    setOutlineAvailable(has) {
+      outlineOpener.setAvailable(has);
+      // No repaint: callers paint on their own path.
+      if (!has && docks.left() === "outline") docks.set(null, docks.right(), null, false);
+    },
   });
+  ctx.nav = createPdfNav(ctx);
+  ctx.lifecycle = createPdfLifecycle(ctx);
+  document.addEventListener("keydown", ctx.nav.onKey);
+  document.addEventListener("copy", ctx.nav.onCopy);
 
   return {
     el: root,
-    open,
+    open: ctx.lifecycle.open,
     hide(): void {
-      release();
+      ctx.lifecycle.release();
       root.hidden = true;
     },
     destroy(): void {
-      release();
+      ctx.lifecycle.release();
       // For a viewer destroyed without ever opening.
       find.reset();
-      document.removeEventListener("keydown", onKey);
-      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("keydown", ctx.nav.onKey);
+      document.removeEventListener("copy", ctx.nav.onCopy);
       selectLayer.destroy();
       exportMenu.destroy(); // its outside-click + Escape listeners are on `document`
       thumbs.destroy();

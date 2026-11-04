@@ -531,6 +531,19 @@ after the feature (`pages/library/library.ts`); a single-file screen stays at
 `pages/`. Unit tests live under `tests/unit/`, end-to-end specs under
 `tests/e2e/`, mirroring the source names.
 
+A screen that outgrows one file is not cut into closures fed by thunks. It
+gets one typed context object (`LibraryCtx`, `ReaderCtx`, `PdfViewerCtx`)
+that names everything its parts share, built once in dependency order by the
+screen's entry module; each part is `createX(ctx)` returning a named
+interface, and reads a member only when one of its functions runs. The
+context file states the order rule; the entry module is the only place that
+has to get it right.
+
+Stylesheets are a list of rules, so the 500-line target is for code, not for
+them. `styles.css` is an ordered manifest and the order is load-bearing; a
+sheet that grows is split by component (`09-admin.css`, `09b-admin-panels.css`),
+the continuation imported right after its base so the cascade is unchanged.
+
 ### 12.4 The test gate
 
 `make test` is the gate (`zig build test`, the parsers, `zig fmt --check`),

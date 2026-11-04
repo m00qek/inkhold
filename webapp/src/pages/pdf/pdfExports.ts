@@ -3,7 +3,6 @@
  * view, whole document) and the composition of a PDF page with its `.mark` ink,
  * which unlike a `.note`'s layers do not share one grid.
  */
-
 import { el } from "../../ui/dom";
 import { download } from "../../export/exporter";
 import {

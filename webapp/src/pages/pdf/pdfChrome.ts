@@ -6,6 +6,11 @@ import { copyText } from "../../ui/clipboard";
 import { tokenPx, MIN_PAGE_W } from "../../ui/sidePanel";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
 
+export interface ContextualOpener {
+  el: HTMLButtonElement;
+  setAvailable(has: boolean): void;
+}
+
 /**
  * A toolbar control that is always present, dimmed with the reason on its
  * accessible name when unavailable, so the bar keeps its shape per document.
@@ -15,7 +20,7 @@ export function contextualOpener(spec: {
   label: string;
   reason: string;
   attrs?: Record<string, string>;
-}): { el: HTMLButtonElement; setAvailable(has: boolean): void } {
+}): ContextualOpener {
   const dimmed = `${spec.label} — ${spec.reason}`;
   const button = el("button", {
     class: "btn",
@@ -37,7 +42,18 @@ export function contextualOpener(spec: {
   };
 }
 
-export function createPdfFindBarView() {
+export interface PdfFindBarView {
+  bar: HTMLElement;
+  input: HTMLInputElement;
+  count: HTMLElement;
+  /** "Search similar" prompt. */
+  ask: HTMLButtonElement;
+  prev: HTMLButtonElement;
+  next: HTMLButtonElement;
+  close: HTMLButtonElement;
+}
+
+export function createPdfFindBarView(): PdfFindBarView {
   const findInput = el("input", {
     type: "text",
     autocomplete: "off",
@@ -85,8 +101,14 @@ export function createPdfFindBarView() {
   return { bar: findBar, input: findInput, count: findCount, ask: findAsk, prev: findPrev, next: findNext, close: findClose };
 }
 
+export interface CopyControl {
+  btn: HTMLButtonElement;
+  /** The "Copied" / "Could not copy" status line. */
+  live: HTMLElement;
+}
+
 /** Copy for the selection layer's text; `selectedText` is read at click time. */
-export function createCopyControl(selectedText: () => string) {
+export function createCopyControl(selectedText: () => string): CopyControl {
   /**
    * Shown only with a selection. Reports failure: on plain HTTP the async
    * clipboard is unavailable and `copyText` falls back, which can still fail.

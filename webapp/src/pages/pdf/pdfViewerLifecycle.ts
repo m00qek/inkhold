@@ -1,67 +1,23 @@
 // The PDF viewer's document lifecycle: open a file (with its `.mark`), and
-// release it. Works on the viewer's shared state and the parts it built.
+// release it.
 
-import type { Id, NoteMeta, NoteSummary, PageRef } from "../../core/types";
+import type { Id, NoteMeta, NoteSummary } from "../../core/types";
 import { formatBytes, rawFileUrl } from "../../core/fileKind";
-import { createZoomStepper, FIT_PAGE } from "../viewer/viewerControls";
-import { createViewerExportMenu } from "../viewer/viewerExportMenu";
-import {
-  backWord,
-  createViewerHeader,
-  originSubtitle,
-  createViewerBody,
-  createVersionBanner,
-} from "../viewer/viewerChrome";
-import type { ReaderOrigin, ViewerDeps } from "../viewer/viewer";
-import { createPdfOutlinePanel } from "./pdfOutlinePanel";
-import { createPdfThumbStrip } from "./pdfThumbStrip";
-import { createPdfPageRenderer, type Zoom } from "./pdfPageRenderer";
-import { createLinkLayer } from "../linkLayer";
-import { createPdfHighlightLayer } from "./pdfHighlightLayer";
-import { createPdfSelectionLayer } from "./pdfSelectionLayer";
-import { type PdfFindController } from "./pdfFind";
-import { createBinViewerActions } from "../../ui/binViewerActions";
-import { createNoteLayersController } from "../noteLayers";
-import { createPdfExports } from "./pdfExports";
+import { FIT_PAGE } from "../viewer/viewerControls";
+import { backWord, originSubtitle } from "../viewer/viewerChrome";
+import type { ReaderOrigin } from "../viewer/viewer";
 import { PdfLoadError } from "../../render/pdfClient";
-import type { PdfViewerState } from "./pdfViewerState";
-import type { PdfDocks } from "./pdfChrome";
-import type { PdfSeam } from "./pdfViewer";
+import type { PdfViewerCtx } from "./pdfViewerContext";
+import type { Viewer } from "../viewer/viewer";
 
-export interface PdfLifecycleParts {
-  deps: ViewerDeps;
-  seam: PdfSeam;
-  binActions: ReturnType<typeof createBinViewerActions>;
-  body: ReturnType<typeof createViewerBody>;
-  downloads: ReturnType<typeof createPdfExports>;
-  find: PdfFindController;
-  header: ReturnType<typeof createViewerHeader>;
-  moveBin: HTMLElement;
-  outlinePanel: ReturnType<typeof createPdfOutlinePanel>;
-  pagesPanel: ReturnType<typeof createPdfThumbStrip>["panel"];
-  renderer: ReturnType<typeof createPdfPageRenderer>;
-  root: HTMLElement;
-  thumbs: ReturnType<typeof createPdfThumbStrip>;
-  versionBanner: ReturnType<typeof createVersionBanner>;
-  zoomStepper: ReturnType<typeof createZoomStepper<Zoom>>;
-  docks: PdfDocks;
-  exportMenu: ReturnType<typeof createViewerExportMenu>;
-  findLayer: ReturnType<typeof createPdfHighlightLayer>;
-  findInput: HTMLInputElement;
-  layersToggle: HTMLButtonElement;
-  linkLayer: ReturnType<typeof createLinkLayer>;
-  markCtl: ReturnType<typeof createNoteLayersController>;
-  selectLayer: ReturnType<typeof createPdfSelectionLayer>;
-  markPages: Map<number, PageRef>;
-  setVersionsAvailable: (has: boolean) => void;
-  setOutlineAvailable: (has: boolean) => void;
-  setDocks: PdfDocks["set"];
-  syncPager: () => void;
-  syncUrl: () => void;
+export interface PdfLifecycle {
+  open: Viewer["open"];
+  /** Drops the document, its session and every per-document view; idempotent. */
+  release(): void;
 }
 
-export function createPdfLifecycle(st: PdfViewerState, parts: PdfLifecycleParts) {
-  const { deps, seam, findInput, binActions, body, downloads, find, header, moveBin, outlinePanel, pagesPanel, renderer, root, thumbs, versionBanner, zoomStepper, docks, exportMenu, findLayer, layersToggle, linkLayer, markCtl, selectLayer, markPages, setVersionsAvailable, setOutlineAvailable, setDocks, syncPager, syncUrl } = parts;
+export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
+  const { st, deps, seam, findBar, binActions, body, downloads, find, header, moveBin, outlinePanel, pagesPanel, renderer, root, thumbs, versionBanner, zoomStepper, docks, exportMenu, findLayer, layersToggle, linkLayer, markCtl, selectLayer, markPages, setVersionsAvailable, setOutlineAvailable } = ctx;
 
   /**
    * The strip's ink rail, from the mark. No mark page means `false` (known); a
@@ -129,13 +85,13 @@ export function createPdfLifecycle(st: PdfViewerState, parts: PdfLifecycleParts)
     markCtl.el.hidden = true;
     linkLayer.clear();
     find.reset();
-    findInput.value = "";
+    findBar.input.value = "";
     findLayer.clear();
     selectLayer.clear();
     renderer.reset();
     layersToggle.hidden = true;
     // Through `setDocks` so `aria-pressed` stays correct.
-    setDocks(docks.left(), false, null, false);
+    docks.set(docks.left(), false, null, false);
     // The file-zone controls outlive the document, so forget their target.
     st.meta = null;
     thumbs.reset();
@@ -181,7 +137,7 @@ export function createPdfLifecycle(st: PdfViewerState, parts: PdfLifecycleParts)
     zoomStepper.set(FIT_PAGE);
     st.pageIndex = Math.max(0, page);
     body.showPlaceholder(summary.name, "Opening this PDF…");
-    syncPager();
+    ctx.nav.syncPager();
 
     if (!seam.supported()) {
       // MuPDF's error handling needs wasm exception handling.
@@ -257,12 +213,12 @@ export function createPdfLifecycle(st: PdfViewerState, parts: PdfLifecycleParts)
     find.setDocument(m.id, m.fileHash);
     find.setPage(st.pageIndex);
     if (query !== "") {
-      findInput.value = query;
+      findBar.input.value = query;
       find.open();
       find.setQuery(query);
     }
     // Only now is the page count known, so the URL can reflect the clamped page.
-    syncUrl();
+    ctx.nav.syncUrl();
 
     // Reserve every row's shape from this page's aspect; other sizes self-correct.
     try {
@@ -297,5 +253,5 @@ export function createPdfLifecycle(st: PdfViewerState, parts: PdfLifecycleParts)
     if (mine === st.generation) void s.stats().catch(() => {});
   }
 
-  return { open, release, loadMark, refreshInk };
+  return { open, release };
 }
