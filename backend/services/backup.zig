@@ -16,6 +16,7 @@ pub const lock = @import("backup/lock.zig");
 pub const pace = @import("backup/pace.zig");
 pub const blob_copy = @import("backup/blob_copy.zig");
 pub const place = @import("backup/place.zig");
+pub const gzfile = @import("backup/gzfile.zig");
 
 // ---- create ----
 const create_mod = @import("backup/create.zig");
@@ -32,6 +33,18 @@ pub const StoreStats = list_mod.StoreStats;
 pub const list = list_mod.list;
 pub const storeStats = list_mod.storeStats;
 
+// ---- verify ----
+const verify_mod = @import("backup/verify.zig");
+pub const VerifyOptions = verify_mod.Options;
+pub const VerifyResult = verify_mod.Result;
+pub const Verified = verify_mod.Verified;
+pub const verify = verify_mod.verify;
+
+// ---- prune ----
+const prune_mod = @import("backup/prune.zig");
+pub const PruneReport = prune_mod.Report;
+pub const prune = prune_mod.prune;
+
 test {
     _ = layout;
     _ = manifest;
@@ -41,5 +54,10 @@ test {
     _ = place;
     _ = create_mod;
     _ = list_mod;
+    _ = gzfile;
+    _ = verify_mod;
+    _ = prune_mod;
+    _ = @import("backup/verify_test.zig");
+    _ = @import("backup/prune_test.zig");
     _ = @import("backup/create_test.zig");
 }

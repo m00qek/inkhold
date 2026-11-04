@@ -19,11 +19,12 @@ const lock = @import("lock.zig");
 const pace_mod = @import("pace.zig");
 const blob_copy = @import("blob_copy.zig");
 const place = @import("place.zig");
+const gzfile = @import("gzfile.zig");
+const prune_mod = @import("prune.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
 const blobstore = @import("../../store/blobs.zig");
 const atomic = @import("../../store/atomic.zig");
-const flate = std.compress.flate;
 const Io = std.Io;
 const Dir = Io.Dir;
 
@@ -35,6 +36,8 @@ pub const Paths = struct {
 };
 
 pub const Options = struct {
+    /// After a good snapshot, prune to this many (`prune.pruneLocked`).
+    keep: ?u32 = null,
     compress: bool = true,
     include_cred_key: bool = false,
     /// Source bytes per second; 0 is unlimited.
@@ -58,6 +61,8 @@ pub const Report = struct {
     holder: lock.Holder = .{},
     /// On `SourceCorrupt` / `BlobLost`: which blob.
     md5: [layout.md5_len]u8 = @splat('0'),
+    /// What `keep` removed.
+    pruned: prune_mod.Report = .{},
 };
 
 pub const CreateError = error{
@@ -90,7 +95,7 @@ pub fn create(gpa: std.mem.Allocator, io: Io, paths: Paths, backup_dir: []const 
     const where = try place.check(io, backup_dir, paths.data_dir, paths.db_path);
     report.same_filesystem = where.same_filesystem;
 
-    var dst = try Dir.cwd().openDir(io, backup_dir, .{});
+    var dst = try Dir.cwd().openDir(io, backup_dir, .{ .iterate = true });
     defer dst.close(io);
     const held = try lock.acquire(io, dst, now, opts.host, opts.pid, &report.holder);
     defer held.release(io);
@@ -148,8 +153,10 @@ pub fn create(gpa: std.mem.Allocator, io: Io, paths: Paths, backup_dir: []const 
         };
 
         try writeSnapshot(io, snap, snap_path, dst, partial, now, paths, opts, s, &pace, report);
-        return;
+        break;
     }
+    // Under the same lock, so no other run sees the store mid-sweep.
+    if (opts.keep) |keep| try prune_mod.pruneLocked(gpa, io, dst, keep, &report.pruned);
 }
 
 const Copy = struct {
@@ -237,7 +244,7 @@ fn writeSnapshot(
     var pdir = try dst.openDir(io, partial, .{});
     defer pdir.close(io);
 
-    try gzipFile(io, Dir.cwd(), snap_path, pdir, layout.db_name, s, pace);
+    try gzfile.deflate(io, Dir.cwd(), snap_path, pdir, layout.db_name, s, pace);
     if (opts.include_cred_key) try copyCredKey(io, paths.cred_key_path, pdir);
 
     {
@@ -258,26 +265,6 @@ fn writeSnapshot(
     }
     report.blobs = h.blobs;
     report.bytes = h.bytes;
-}
-
-/// `src_dir/src` gzipped (level 1) into `dst_dir/dst`, fsynced.
-fn gzipFile(io: Io, src_dir: Dir, src: []const u8, dst_dir: Dir, dst: []const u8, s: *blob_copy.Scratch, pace: *pace_mod.Pace) !void {
-    const in = try src_dir.openFile(io, src, .{});
-    defer in.close(io);
-    var fr = in.reader(io, &s.read_buf);
-    const out = try dst_dir.createFile(io, dst, .{});
-    defer out.close(io);
-    var fw = out.writerStreaming(io, &s.write_buf);
-    s.compress = try flate.Compress.init(&fw.interface, &s.window, .gzip, .level_1);
-    while (true) {
-        const n = try fr.interface.readSliceShort(&s.chunk);
-        if (n == 0) break;
-        try s.compress.writer.writeAll(s.chunk[0..n]);
-        pace.take(io, n);
-    }
-    try s.compress.finish();
-    try fw.interface.flush();
-    try out.sync(io);
 }
 
 fn copyCredKey(io: Io, path: []const u8, pdir: Dir) !void {
