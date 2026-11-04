@@ -298,8 +298,7 @@ pub fn deleteFolderV3(ctx: *Context, req: *Request, params: Params) anyerror!voi
     // Read before trashing so a retry still reports the name.
     const entry = (files.getAnyState(caller.user_id, id) catch return serverError(ctx, req)) orelse
         return json.respond(ctx.gpa, req, .ok, DeleteFolderVO{ .equipmentNo = eno }, null);
-    defer ctx.gpa.free(entry.name);
-    defer if (entry.md5) |m| ctx.gpa.free(m);
+    defer entry.deinit(ctx.gpa);
 
     const name = try a.dupe(u8, entry.name);
     files.trash(caller.user_id, id) catch return serverError(ctx, req);
@@ -337,8 +336,7 @@ pub fn createFolderV2(ctx: *Context, req: *Request, params: Params) anyerror!voi
         error.NameConflict, error.NotFound, error.NotAFolder => return json.respond(ctx.gpa, req, .ok, CreateFolderVO{ .equipmentNo = eno }, null),
         else => return serverError(ctx, req),
     };
-    defer ctx.gpa.free(entry.name);
-    defer if (entry.md5) |m| ctx.gpa.free(m);
+    defer entry.deinit(ctx.gpa);
 
     // The real path: `autorename` may have changed the leaf.
     const display = files.pathOf(a, caller.user_id, entry.id) catch return serverError(ctx, req);
@@ -380,8 +378,7 @@ pub fn moveV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
     // Foreign or unknown id settles as success; no phantom destination folders.
     const gate = (files.getAnyState(caller.user_id, id) catch return serverError(ctx, req)) orelse
         return json.respond(ctx.gpa, req, .ok, MoveVO{ .equipmentNo = eno }, null);
-    ctx.gpa.free(gate.name);
-    if (gate.md5) |m| ctx.gpa.free(m);
+    gate.deinit(ctx.gpa);
 
     // A file on the parent path is a NameConflict and settles as success.
     const parent: ?u64 = if (std.mem.eql(u8, split.parent, "/"))
@@ -398,8 +395,7 @@ pub fn moveV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
         error.NotFound, error.NameConflict, error.InvalidMove, error.NotAFolder => return json.respond(ctx.gpa, req, .ok, MoveVO{ .equipmentNo = eno }, null),
         else => return serverError(ctx, req),
     };
-    ctx.gpa.free(moved.name);
-    if (moved.md5) |m| ctx.gpa.free(m);
+    moved.deinit(ctx.gpa);
 
     const node = (files.nodeById(a, caller.user_id, moved.id) catch return serverError(ctx, req)) orelse
         return json.respond(ctx.gpa, req, .ok, MoveVO{ .equipmentNo = eno }, null);
@@ -431,8 +427,7 @@ pub fn copyV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
 
     const gate = (files.getAnyState(caller.user_id, id) catch return serverError(ctx, req)) orelse
         return json.respond(ctx.gpa, req, .ok, MoveVO{ .equipmentNo = eno }, null);
-    ctx.gpa.free(gate.name);
-    if (gate.md5) |m| ctx.gpa.free(m);
+    gate.deinit(ctx.gpa);
 
     const parent: ?u64 = if (std.mem.eql(u8, split.parent, "/"))
         null
@@ -447,8 +442,7 @@ pub fn copyV3(ctx: *Context, req: *Request, params: Params) anyerror!void {
         error.NotFound, error.IsFolder, error.NameConflict, error.NotAFolder, error.QuotaExceeded => return json.respond(ctx.gpa, req, .ok, MoveVO{ .equipmentNo = eno }, null),
         else => return serverError(ctx, req),
     };
-    ctx.gpa.free(copied.name);
-    if (copied.md5) |m| ctx.gpa.free(m);
+    copied.deinit(ctx.gpa);
 
     const node = (files.nodeById(a, caller.user_id, copied.id) catch return serverError(ctx, req)) orelse
         return json.respond(ctx.gpa, req, .ok, MoveVO{ .equipmentNo = eno }, null);
@@ -475,8 +469,7 @@ pub fn ossGet(ctx: *Context, req: *Request, params: Params) anyerror!void {
         break :blk files.get(user_id, id);
     };
     const entry = (got catch return serverError(ctx, req)) orelse return reply.notFound(req);
-    defer ctx.gpa.free(entry.name);
-    defer if (entry.md5) |m| ctx.gpa.free(m);
+    defer entry.deinit(ctx.gpa);
     if (entry.is_folder) return reply.notFound(req);
     const md5 = entry.md5 orelse return reply.notFound(req);
 

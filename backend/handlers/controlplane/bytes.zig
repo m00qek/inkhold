@@ -80,8 +80,7 @@ fn rawFile(ctx: *Context, req: *Request, params: Params, scope: controlplane.Con
         break :blk svc.lookup(scope, caller.user_id, id);
     };
     const entry = (got catch return serverError(ctx, req)) orelse return reply.notFound(req);
-    defer ctx.gpa.free(entry.name);
-    defer if (entry.md5) |m| ctx.gpa.free(m);
+    defer entry.deinit(ctx.gpa);
     if (entry.is_folder) return reply.notFound(req);
     const md5 = entry.md5 orelse return reply.notFound(req);
     if (md5.len != blobstore.md5_hex_len) return reply.notFound(req);
@@ -328,8 +327,7 @@ pub fn template(ctx: *Context, req: *Request, params: Params) anyerror!void {
         defer ctx.unlockDb();
         const entry = (svc.lookup(.live, caller.user_id, id) catch return serverError(ctx, req)) orelse
             break :blk null;
-        defer ctx.gpa.free(entry.name);
-        defer if (entry.md5) |m| ctx.gpa.free(m);
+        defer entry.deinit(ctx.gpa);
         break :blk svc.templatePlanOf(entry, hash) catch return serverError(ctx, req);
     } orelse return reply.notFound(req);
 

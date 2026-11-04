@@ -44,8 +44,7 @@ pub const Fixture = struct {
     pub fn put(f: *Fixture, name: []const u8, data: []const u8) ![blobstore.md5_hex_len]u8 {
         var r = std.Io.Reader.fixed(data);
         const e = try f.files.putFile(1, null, name, &r, null);
-        defer testing.allocator.free(e.name);
-        defer if (e.md5) |m| testing.allocator.free(m);
+        defer e.deinit(testing.allocator);
         var out: [blobstore.md5_hex_len]u8 = undefined;
         @memcpy(&out, e.md5.?[0..blobstore.md5_hex_len]);
         return out;

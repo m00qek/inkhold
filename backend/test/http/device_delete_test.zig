@@ -143,8 +143,7 @@ test "device delete_folder_v3 soft-deletes: leaves listings and search, but the 
     const rec_id = try seedRecognizedNote(f, alice, "rec.note", &.{ "Zebra", "Quokka" });
     const md5 = blk: {
         const e = (try f.files.get(alice, rec_id)).?;
-        defer gpa.free(e.name);
-        defer if (e.md5) |m| gpa.free(m);
+        defer e.deinit(gpa);
         var out: [blobstore.md5_hex_len]u8 = undefined;
         @memcpy(&out, e.md5.?);
         break :blk out;
@@ -189,8 +188,7 @@ test "device delete_folder_v3 soft-deletes: leaves listings and search, but the 
     (try f.files.restore(alice, rec_id)).deinit(gpa);
 
     const back = (try f.files.get(alice, rec_id)).?;
-    defer gpa.free(back.name);
-    defer if (back.md5) |m| gpa.free(m);
+    defer back.deinit(gpa);
     const want_bytes = try f.files.blobs.sizeOf(back.md5.?);
     const got = try gpa.alloc(u8, @intCast(want_bytes));
     defer gpa.free(got);
@@ -307,8 +305,7 @@ test "device delete_folder_v3: scope enforced, and a foreign id is indistinguish
     try std.testing.expectEqualStrings("{\"success\":true,\"equipmentNo\":\"SN1\"}", foreign.body);
     {
         const still = (try f.files.get(bob, bob_id)).?;
-        defer gpa.free(still.name);
-        defer if (still.md5) |m| gpa.free(m);
+        defer still.deinit(gpa);
         try std.testing.expectEqualStrings("bob.note", still.name);
     }
     try std.testing.expectEqual(@as(i64, 0), try countTrashed(f, bob));

@@ -157,7 +157,7 @@ pub const ControlPlaneService = struct {
     /// payload. Null if missing, not owned, or not a `.note`.
     pub fn pagePlan(self: ControlPlaneService, user_id: u64, id: u64, n: u64) !?PagePlan {
         const entry = (try self.files.get(user_id, id)) orelse return null;
-        defer freeEntry(self.files.gpa, entry);
+        defer entry.deinit(self.files.gpa);
         return self.pagePlanOf(entry, n);
     }
 
@@ -242,7 +242,7 @@ pub const ControlPlaneService = struct {
             guard += 1;
             if (guard > 256) break; // cycle guard (should never trigger)
             const e = (try self.files.get(user_id, cid)) orelse break;
-            defer freeEntry(self.files.gpa, e);
+            defer e.deinit(self.files.gpa);
             try list.append(arena, .{ .id = try idStr(arena, e.id), .name = try arena.dupe(u8, e.name) });
             cur = e.parent_id;
         }
@@ -340,11 +340,6 @@ fn fallbackHash(file_md5: ?[]const u8) [32]u8 {
 
 pub fn idStr(arena: std.mem.Allocator, id: u64) ![]const u8 {
     return std.fmt.allocPrint(arena, "{d}", .{id});
-}
-
-pub fn freeEntry(gpa: std.mem.Allocator, e: Entry) void {
-    gpa.free(e.name);
-    if (e.md5) |m| gpa.free(m);
 }
 
 test {

@@ -337,8 +337,7 @@ pub fn uploadFinish(ctx: *Context, req: *Request, params: Params) anyerror!void 
         error.NameConflict => return fail(ctx, req, .ok, "NAME_CONFLICT", "name already used by a folder"),
         else => return serverError(ctx, req),
     };
-    ctx.gpa.free(entry.name);
-    if (entry.md5) |m| ctx.gpa.free(m);
+    entry.deinit(ctx.gpa);
 
     // The blob is linked; a session this fails to drop is reclaimed by the daily sweep.
     files.deleteUploadSession(in.innerName) catch |e| std.log.warn("upload {s}: session not dropped: {t}", .{ in.innerName, e });

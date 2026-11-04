@@ -22,8 +22,7 @@ pub fn seedRecognizedVersion(f: *Fixture, user_id: u64, name: []const u8, bitmap
 
     var r = std.Io.Reader.fixed(bytes);
     const e = try f.files.putFile(user_id, null, name, &r, null);
-    defer gpa.free(e.name);
-    if (e.md5) |m| gpa.free(m);
+    defer e.deinit(gpa);
     return e.id;
 }
 
@@ -48,7 +47,6 @@ pub fn seedRecognizedVersionPages(f: *Fixture, user_id: u64, name: []const u8, p
 
     var r = std.Io.Reader.fixed(bytes);
     const e = try f.files.putFile(user_id, null, name, &r, null);
-    defer gpa.free(e.name);
-    if (e.md5) |m| gpa.free(m);
+    defer e.deinit(gpa);
     return e.id;
 }

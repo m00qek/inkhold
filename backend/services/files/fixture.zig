@@ -92,8 +92,7 @@ pub fn hasCapacityRow(f: *Fixture, user_id: u64) !bool {
 }
 
 pub fn freeEntry(e: Entry) void {
-    testing.allocator.free(e.name);
-    if (e.md5) |m| testing.allocator.free(m);
+    e.deinit(testing.allocator);
 }
 
 pub fn dupeMd5(m: []const u8) [md5_len]u8 {

@@ -106,8 +106,7 @@ pub fn historyRestore(ctx: *Context, req: *Request, params: Params) anyerror!voi
         error.QuotaExceeded => return fail(ctx, req, .insufficient_storage, "QUOTA_EXCEEDED", "restoring this version would exceed your storage"),
         else => return serverError(ctx, req),
     };
-    defer ctx.gpa.free(entry.name);
-    defer if (entry.md5) |m| ctx.gpa.free(m);
+    defer entry.deinit(ctx.gpa);
 
     try json.respond(ctx.gpa, req, .ok, controlplane.RestoredVersionVO{
         .md5 = entry.md5 orelse "",

@@ -140,8 +140,7 @@ test "web upload: the DEFAULT and an unrecognised onConflict both auto-rename â€
 
     {
         const kept = (try f.files.get(admin, id)).?;
-        defer gpa.free(kept.name);
-        defer if (kept.md5) |m| gpa.free(m);
+        defer kept.deinit(gpa);
         try std.testing.expectEqualStrings("notes.pdf", kept.name);
         try std.testing.expectEqualStrings(&blobstore.md5HexOf(occupant), kept.md5.?);
     }
@@ -169,8 +168,7 @@ test "web upload onConflict=replace: a FOLDER holding the name is still 409, and
 
     {
         const kept = (try f.files.get(admin, dir.id)).?;
-        defer gpa.free(kept.name);
-        defer if (kept.md5) |m| gpa.free(m);
+        defer kept.deinit(gpa);
         try std.testing.expect(kept.is_folder);
         try std.testing.expectEqualStrings("archive.pdf", kept.name);
     }

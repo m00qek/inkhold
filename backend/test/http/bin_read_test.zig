@@ -432,6 +432,5 @@ test "bin routes: a foreign id is indistinguishable from a missing one, over a D
     try std.testing.expectEqual(@as(usize, 0), admin_bin.value.entries.len);
     try std.testing.expect(f.files.blobs.has(&theirs.md5));
     const still_theirs = (try f.files.get(admin, theirs.id)).?;
-    defer gpa.free(still_theirs.name);
-    defer if (still_theirs.md5) |m| gpa.free(m);
+    defer still_theirs.deinit(gpa);
 }

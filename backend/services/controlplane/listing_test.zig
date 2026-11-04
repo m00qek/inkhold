@@ -124,8 +124,7 @@ test "listing/bin firstPage: layer descriptors ride along, and are OMITTED when 
 
     var r = std.Io.Reader.fixed(layers_edited);
     const layered = try f.files.putFile(1, null, "layers.note", &r, null);
-    defer testing.allocator.free(layered.name);
-    defer if (layered.md5) |m| testing.allocator.free(m);
+    defer layered.deinit(testing.allocator);
 
     // A page with no layer records at all.
     const empty_bytes = try nb.serialize(testing.allocator, .{

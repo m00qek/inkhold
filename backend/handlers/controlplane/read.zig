@@ -86,8 +86,7 @@ pub fn pageBytes(ctx: *Context, req: *Request, params: Params, scope: controlpla
         defer ctx.unlockDb();
         const entry = (svc.lookup(scope, caller.user_id, id) catch return serverError(ctx, req)) orelse
             break :blk null;
-        defer ctx.gpa.free(entry.name);
-        defer if (entry.md5) |m| ctx.gpa.free(m);
+        defer entry.deinit(ctx.gpa);
         break :blk svc.pagePlanOf(entry, n) catch return serverError(ctx, req);
     } orelse return reply.notFound(req);
 

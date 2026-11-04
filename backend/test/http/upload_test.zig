@@ -79,8 +79,7 @@ test "web upload: stores the blob, links the row, charges quota, bumps syncVersi
 
     {
         const entry = (try f.files.get(admin, file_id)).?;
-        defer gpa.free(entry.name);
-        defer if (entry.md5) |m| gpa.free(m);
+        defer entry.deinit(gpa);
         try std.testing.expectEqualStrings("Ozymandias.pdf", entry.name);
         try std.testing.expect(!entry.is_folder);
         try std.testing.expectEqual(dir.id, entry.parent_id.?);
@@ -104,8 +103,7 @@ test "web upload: stores the blob, links the row, charges quota, bumps syncVersi
         var p = try std.json.parseFromSlice(UploadedBody, gpa, resp.body, .{ .ignore_unknown_fields = true });
         defer p.deinit();
         const at_root = (try f.files.get(admin, try std.fmt.parseInt(u64, p.value.id, 10))).?;
-        defer gpa.free(at_root.name);
-        defer if (at_root.md5) |m| gpa.free(m);
+        defer at_root.deinit(gpa);
         try std.testing.expect(at_root.parent_id == null);
     }
 }
@@ -158,8 +156,7 @@ test "web upload: a name collision auto-renames instead of replacing the file al
 
     {
         const kept = (try f.files.get(admin, first)).?;
-        defer gpa.free(kept.name);
-        defer if (kept.md5) |m| gpa.free(m);
+        defer kept.deinit(gpa);
         try std.testing.expectEqualStrings("notes.pdf", kept.name);
         try std.testing.expectEqualStrings(&blobstore.md5HexOf("the occupant's bytes"), kept.md5.?);
     }
@@ -298,8 +295,7 @@ test "web upload: an off-list extension is 415 and an unsafe filename is 400, bo
         defer p.deinit();
         try std.testing.expectEqualStrings("passwd.txt", p.value.name);
         const e = (try f.files.get(admin, try std.fmt.parseInt(u64, p.value.id, 10))).?;
-        defer gpa.free(e.name);
-        defer if (e.md5) |m| gpa.free(m);
+        defer e.deinit(gpa);
         try std.testing.expect(e.parent_id == null);
     }
 

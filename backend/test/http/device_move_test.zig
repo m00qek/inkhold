@@ -104,8 +104,7 @@ test "device move_v3 NEVER 404s: unknown and foreign ids settle as idempotent su
 
     {
         const still = (try f.files.get(bob, bob_id)).?;
-        defer gpa.free(still.name);
-        defer if (still.md5) |m| gpa.free(m);
+        defer still.deinit(gpa);
         try std.testing.expectEqualStrings("bob.note", still.name);
         try std.testing.expectEqual(@as(?u64, null), still.parent_id);
     }

@@ -118,8 +118,7 @@ test "device upload M2: apply → /oss/put → finish stores the blob and links 
 
     {
         const entry = (try f.files.get(alice, file_id)).?;
-        defer gpa.free(entry.name);
-        defer if (entry.md5) |m| gpa.free(m);
+        defer entry.deinit(gpa);
         try std.testing.expectEqualStrings("up.note", entry.name);
         try std.testing.expect(!entry.is_folder);
         try std.testing.expectEqualStrings(&md5, entry.md5.?);
@@ -280,8 +279,7 @@ test "device upload M2: commits the INGESTED size, not the device-declared size"
     }
 
     const entry = (try f.files.get(alice, file_id)).?;
-    defer gpa.free(entry.name);
-    defer if (entry.md5) |m| gpa.free(m);
+    defer entry.deinit(gpa);
     try std.testing.expectEqual(@as(u64, file_bytes.len), entry.size);
     try std.testing.expectEqual(@as(i64, @intCast(file_bytes.len)), try usedBytes(f, alice));
 }

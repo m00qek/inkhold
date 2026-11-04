@@ -110,8 +110,7 @@ pub fn walkSubtree(self: Files, alloc: std.mem.Allocator, user_id: u64, root_id:
 /// A single `TreeNode` for `id`, or null if absent/foreign. Slices owned by `alloc`.
 pub fn nodeById(self: Files, alloc: std.mem.Allocator, user_id: u64, id: u64) !?TreeNode {
     const e = (try self.get(user_id, id)) orelse return null;
-    defer self.gpa.free(e.name);
-    defer if (e.md5) |m| self.gpa.free(m);
+    defer e.deinit(self.gpa);
     return .{
         .id = e.id,
         .name = try alloc.dupe(u8, e.name),

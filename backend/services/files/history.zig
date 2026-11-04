@@ -289,8 +289,7 @@ pub fn historyVersionIn(self: Files, scope: HistoryScope, user_id: u64, file_id:
 pub fn restoreVersion(self: Files, user_id: u64, file_id: u64, md5: []const u8) !Entry {
     const v = (try self.historyVersion(user_id, file_id, md5)) orelse return error.NotFound;
     const entry = (try self.get(user_id, file_id)) orelse return error.NotFound;
-    defer self.gpa.free(entry.name);
-    defer if (entry.md5) |m| self.gpa.free(m);
+    defer entry.deinit(self.gpa);
     if (entry.is_folder) return error.NotFound;
 
     // Same name and parent supersedes this very row; `file_id` is unchanged.

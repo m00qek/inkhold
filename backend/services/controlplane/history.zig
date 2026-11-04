@@ -6,7 +6,6 @@ const ControlPlaneService = controlplane.ControlPlaneService;
 const HistoryVersionVO = controlplane.HistoryVersionVO;
 const HistoryVO = controlplane.HistoryVO;
 const idStr = controlplane.idStr;
-const freeEntry = controlplane.freeEntry;
 const controlplane_meta = @import("meta.zig");
 
 /// `GET /api/controlplane/note/{id}/history` — current blob first, then each
@@ -24,7 +23,7 @@ pub fn binHistory(self: ControlPlaneService, arena: std.mem.Allocator, user_id: 
 
 pub fn historyIn(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, scope: controlplane_meta.ReadScope) !?HistoryVO {
     const entry = (try controlplane_meta.lookup(self, scope, user_id, id)) orelse return null;
-    defer freeEntry(self.files.gpa, entry);
+    defer entry.deinit(self.files.gpa);
     if (entry.is_folder) return null;
     const cur_md5 = entry.md5 orelse return null; // a blob-less file has no versions
 

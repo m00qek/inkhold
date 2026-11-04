@@ -16,7 +16,6 @@ const ControlPlaneService = cp.ControlPlaneService;
 const fileTypeFor = cp.fileTypeFor;
 const fallbackPage = cp.fallbackPage;
 const idStr = cp.idStr;
-const freeEntry = cp.freeEntry;
 const Fixture = fixture.Fixture;
 const seedBytes = fixture.seedBytes;
 const sample = @embedFile("sample.note");
@@ -30,7 +29,7 @@ const sample2 = @embedFile("sample-2.note");
 /// The md5 of the blob behind file `id`, as an owned 32-hex array.
 fn md5Of(f: *Fixture, id: u64) ![blobstore.md5_hex_len]u8 {
     const e = (try f.files.get(1, id)).?;
-    defer freeEntry(testing.allocator, e);
+    defer e.deinit(testing.allocator);
     var out: [blobstore.md5_hex_len]u8 = undefined;
     @memcpy(&out, e.md5.?[0..blobstore.md5_hex_len]);
     return out;
@@ -43,8 +42,7 @@ test "noteMeta: per-page layers carry {slot, name, visible, isCurrent} from the 
 
     var r = std.Io.Reader.fixed(layers_edited);
     const e = try f.files.putFile(1, null, "layers.note", &r, null);
-    defer testing.allocator.free(e.name);
-    defer if (e.md5) |m| testing.allocator.free(m);
+    defer e.deinit(testing.allocator);
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -85,7 +83,7 @@ test "noteMeta: per-page layers carry {slot, name, visible, isCurrent} from the 
 
     // And so does `entryVO` (the rename response).
     const one = (try f.files.get(1, e.id)).?;
-    defer freeEntry(testing.allocator, one);
+    defer one.deinit(testing.allocator);
     const renamed = try svc.entryVO(arena.allocator(), 1, one);
     try expectSameLayers(meta.pages[0].layers, renamed.firstPage.?.layers);
 }

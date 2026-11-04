@@ -190,8 +190,7 @@ fn seedLinkedNote(f: *Fixture, user_id: u64, name: []const u8) !u64 {
 
     var r = std.Io.Reader.fixed(bytes);
     const e = try f.files.putFile(user_id, null, name, &r, null);
-    defer gpa.free(e.name);
-    if (e.md5) |m| gpa.free(m);
+    defer e.deinit(gpa);
     return e.id;
 }
 

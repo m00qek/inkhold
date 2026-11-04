@@ -8,7 +8,6 @@ const ControlPlaneService = controlplane.ControlPlaneService;
 const NoteMetaVO = controlplane.NoteMetaVO;
 const fileTypeFor = controlplane.fileTypeFor;
 const idStr = controlplane.idStr;
-const freeEntry = controlplane.freeEntry;
 const controlplane_index = @import("index.zig");
 
 /// Which state a read may see: `.trashed` for the bin's preview and history
@@ -51,7 +50,7 @@ fn annotationsIdFor(self: ControlPlaneService, arena: std.mem.Allocator, user_id
 
 pub fn noteMetaIn(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, scope: ReadScope) !?NoteMetaVO {
     const entry = (try lookup(self, scope, user_id, id)) orelse return null;
-    defer freeEntry(self.files.gpa, entry);
+    defer entry.deinit(self.files.gpa);
     if (entry.is_folder) return null;
 
     const described = try describe(self, arena, entry);
@@ -80,7 +79,7 @@ pub fn historyNoteMeta(self: ControlPlaneService, arena: std.mem.Allocator, user
     const version = (try self.files.historyVersion(user_id, id, md5)) orelse return null;
 
     const entry = (try lookup(self, .live, user_id, id)) orelse return null;
-    defer freeEntry(self.files.gpa, entry);
+    defer entry.deinit(self.files.gpa);
     if (entry.is_folder) return null;
 
     // The file's identity with the version's md5 and size. Borrows `entry`'s

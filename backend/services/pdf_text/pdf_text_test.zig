@@ -96,8 +96,7 @@ const Fixture = struct {
     fn putRaw(f: *Fixture, user_id: u64, name: []const u8, bytes: []const u8) ![32]u8 {
         var r = std.Io.Reader.fixed(bytes);
         const e = try f.files.putFile(user_id, null, name, &r, null);
-        defer testing.allocator.free(e.name);
-        defer if (e.md5) |m| testing.allocator.free(m);
+        defer e.deinit(testing.allocator);
         var md5: [32]u8 = undefined;
         @memcpy(&md5, e.md5.?[0..32]);
         return md5;

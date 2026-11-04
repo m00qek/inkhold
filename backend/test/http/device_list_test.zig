@@ -39,8 +39,7 @@ test "device sync M1: file enumeration (list_folder, query_v3, download_v3) + ra
     const top_id = try putSeed(f, alice, null, "top.note", "x"); // a second file, for cross-file scoping
     const a_md5 = blobstore.md5HexOf(blob_bytes);
     const a_entry = (try f.files.get(alice, a_id)).?;
-    defer gpa.free(a_entry.name);
-    defer if (a_entry.md5) |m| gpa.free(m);
+    defer a_entry.deinit(gpa);
 
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/files/list_folder", &dev_tok, "SN1", "{\"path\":\"/NOTE/Note\",\"recursive\":false}");

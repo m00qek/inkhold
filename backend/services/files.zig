@@ -41,6 +41,12 @@ pub const Entry = struct {
     /// Always NULL on trashed reads (live ink must not composite onto a deleted
     /// document). Not defaulted, so every producer must say.
     mark_id: ?u64,
+
+    /// Releases the owned `name` and `md5`; the one way an `Entry` is dropped.
+    pub fn deinit(self: Entry, gpa: std.mem.Allocator) void {
+        gpa.free(self.name);
+        if (self.md5) |m| gpa.free(m);
+    }
 };
 
 /// One retained version (`file_history` row). Retention keeps its blob and
@@ -378,8 +384,7 @@ pub const Files = struct {
 
     pub fn freeEntries(gpa: std.mem.Allocator, entries: []Entry) void {
         for (entries) |e| {
-            gpa.free(e.name);
-            if (e.md5) |m| gpa.free(m);
+            e.deinit(gpa);
         }
         gpa.free(entries);
     }
@@ -457,8 +462,7 @@ pub const Files = struct {
 
 fn freeList(gpa: std.mem.Allocator, list: *std.ArrayList(Entry)) void {
     for (list.items) |e| {
-        gpa.free(e.name);
-        if (e.md5) |m| gpa.free(m);
+        e.deinit(gpa);
     }
     list.deinit(gpa);
 }

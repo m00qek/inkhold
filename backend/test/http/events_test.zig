@@ -149,8 +149,7 @@ test "`event: index` is emitted when a derive completes, and NOT when an unrelat
         defer lock.unlock(std.testing.io);
         var r = std.Io.Reader.fixed("A paragraph.\n\nAnd a second one.\n");
         const e = try f.files.putFile(who.id, null, "notes.txt", &r, null);
-        gpa.free(e.name);
-        if (e.md5) |m| gpa.free(m);
+        e.deinit(gpa);
     }
 
     var worker: deferredsvc.Worker = .{
@@ -236,8 +235,7 @@ test "the DEGRADED one-shot shape carries the index frame too — it is the clie
         defer lock.unlock(std.testing.io);
         var r = std.Io.Reader.fixed("A paragraph.\n\nAnd a second one.\n");
         const e = try f.files.putFile(who.id, null, "notes.txt", &r, null);
-        gpa.free(e.name);
-        if (e.md5) |m| gpa.free(m);
+        e.deinit(gpa);
     }
     var pulse: pendingsvc.Pulse = .{ .db = f.db, .db_lock = &lock, .io = std.testing.io };
     ctx.pending = &pulse;

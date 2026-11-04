@@ -63,15 +63,13 @@ pub fn rename(ctx: *Context, req: *Request, params: Params) anyerror!void {
     // `get` hardcodes `deleted = 0`: foreign, missing and trashed are one 404.
     const entry = (files.get(caller.user_id, id) catch return serverError(ctx, req)) orelse
         return fail(ctx, req, .not_found, "NOT_FOUND", "no such entry");
-    defer ctx.gpa.free(entry.name);
-    defer if (entry.md5) |m| ctx.gpa.free(m);
+    defer entry.deinit(ctx.gpa);
 
     if (entry.is_folder) {
         if (entry.parent_id) |pid| {
             // An anchor's parent must itself be root-level.
             if (files.get(caller.user_id, pid) catch return serverError(ctx, req)) |parent| {
-                defer ctx.gpa.free(parent.name);
-                defer if (parent.md5) |m| ctx.gpa.free(m);
+                defer parent.deinit(ctx.gpa);
                 if (parent.parent_id == null and isCategoryAnchor(parent.name, entry.name))
                     return fail(ctx, req, .forbidden, "RESERVED_FOLDER", "this system folder can't be renamed");
             }
@@ -85,8 +83,7 @@ pub fn rename(ctx: *Context, req: *Request, params: Params) anyerror!void {
         error.NotFound => return fail(ctx, req, .not_found, "NOT_FOUND", "no such entry"),
         else => return serverError(ctx, req),
     };
-    defer ctx.gpa.free(moved.name);
-    defer if (moved.md5) |m| ctx.gpa.free(m);
+    defer moved.deinit(ctx.gpa);
 
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena.deinit();
@@ -180,8 +177,7 @@ pub fn upload(ctx: *Context, req: *Request, params: Params) anyerror!void {
         ctx.unlockDb();
         const dest = (got catch return serverError(ctx, req)) orelse
             return fail(ctx, req, .not_found, "NOT_FOUND", "no such folder");
-        defer ctx.gpa.free(dest.name);
-        defer if (dest.md5) |m| ctx.gpa.free(m);
+        defer dest.deinit(ctx.gpa);
         if (!dest.is_folder) return fail(ctx, req, .not_found, "NOT_FOUND", "no such folder");
         parent = id;
     }
@@ -249,8 +245,7 @@ pub fn upload(ctx: *Context, req: *Request, params: Params) anyerror!void {
                 else => serverError(ctx, req),
             };
         };
-        defer ctx.gpa.free(entry.name);
-        defer if (entry.md5) |m| ctx.gpa.free(m);
+        defer entry.deinit(ctx.gpa);
         // Under the same lock: `entryVO` reads the DB.
         vo = svc.entryVO(arena.allocator(), caller.user_id, entry) catch return serverError(ctx, req);
     }

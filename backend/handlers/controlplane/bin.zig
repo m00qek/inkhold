@@ -39,8 +39,7 @@ pub fn trash(ctx: *Context, req: *Request, params: Params) anyerror!void {
     // `get`, not `getAnyState`: an already-trashed row is a 404, like a missing one.
     const entry = (files.get(caller.user_id, id) catch return serverError(ctx, req)) orelse
         return fail(ctx, req, .not_found, "NOT_FOUND", "no such entry");
-    defer ctx.gpa.free(entry.name);
-    defer if (entry.md5) |m| ctx.gpa.free(m);
+    defer entry.deinit(ctx.gpa);
 
     const fanout = files.liveSubtreeCount(caller.user_id, id) catch return serverError(ctx, req);
     files.trash(caller.user_id, id) catch |err| switch (err) {

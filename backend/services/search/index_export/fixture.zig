@@ -81,8 +81,7 @@ pub const Fixture = struct {
     pub fn putBytes(f: *Fixture, user_id: u64, name: []const u8, bytes: []const u8) !u64 {
         var r = std.Io.Reader.fixed(bytes);
         const e = try f.files.putFile(user_id, null, name, &r, null);
-        defer testing.allocator.free(e.name);
-        if (e.md5) |m| testing.allocator.free(m);
+        defer e.deinit(testing.allocator);
         return e.id;
     }
 

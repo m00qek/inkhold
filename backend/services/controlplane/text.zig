@@ -10,7 +10,6 @@ const PageText = controlplane.PageText;
 const LinkVO = controlplane.LinkVO;
 const PageLinks = controlplane.PageLinks;
 const allowedLinkScheme = controlplane.allowedLinkScheme;
-const freeEntry = controlplane.freeEntry;
 const controlplane_index = @import("index.zig");
 const controlplane_meta = @import("meta.zig");
 
@@ -29,7 +28,7 @@ pub fn binPageText(self: ControlPlaneService, arena: std.mem.Allocator, user_id:
 
 fn pageTextIn(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, n: u64, scope: controlplane_meta.ReadScope) !?PageText {
     const entry = (try controlplane_meta.lookup(self, scope, user_id, id)) orelse return null;
-    defer freeEntry(self.files.gpa, entry);
+    defer entry.deinit(self.files.gpa);
     if (entry.is_folder) return null;
     const md5 = entry.md5 orelse return null;
     return pageTextForMd5(self, arena, md5, n);
@@ -108,7 +107,7 @@ fn wordsAt(
 /// when missing, not owned, or the page has no `EXTERNALLINKINFO`.
 pub fn pageLinks(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, n: u64) !?PageLinks {
     const entry = (try controlplane_meta.lookup(self, .live, user_id, id)) orelse return null;
-    defer freeEntry(self.files.gpa, entry);
+    defer entry.deinit(self.files.gpa);
     if (entry.is_folder) return null;
     const md5 = entry.md5 orelse return null;
     return pageLinksForMd5(self, arena, md5, n);

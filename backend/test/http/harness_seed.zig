@@ -67,8 +67,7 @@ pub fn deviceLogin(ctx: *Context, obuf: []u8, reqbuf: []u8, account: []const u8,
 pub fn putSeed(f: *Fixture, user_id: u64, parent: ?u64, name: []const u8, data: []const u8) !u64 {
     var r = std.Io.Reader.fixed(data);
     const e = try f.files.putFile(user_id, parent, name, &r, null);
-    defer gpa.free(e.name);
-    if (e.md5) |m| gpa.free(m);
+    defer e.deinit(gpa);
     return e.id;
 }
 
@@ -146,8 +145,7 @@ pub fn seedNoteHttp(f: *Fixture, user_id: u64, parent: ?u64, name: []const u8, p
 
     var r = std.Io.Reader.fixed(bytes);
     const e = try f.files.putFile(user_id, parent, name, &r, null);
-    defer gpa.free(e.name);
-    if (e.md5) |m| gpa.free(m);
+    defer e.deinit(gpa);
     return e.id;
 }
 
@@ -188,8 +186,7 @@ pub fn seedRecognizedElements(
 
     var r = std.Io.Reader.fixed(bytes);
     const e = try f.files.putFile(user_id, null, name, &r, null);
-    defer gpa.free(e.name);
-    if (e.md5) |m| gpa.free(m);
+    defer e.deinit(gpa);
     return e.id;
 }
 
@@ -199,8 +196,7 @@ pub const Seeded = struct { id: u64, md5: [32]u8 };
 pub fn putSeedHashed(f: *Fixture, user_id: u64, parent: ?u64, name: []const u8, data: []const u8) !Seeded {
     var r = std.Io.Reader.fixed(data);
     const e = try f.files.putFile(user_id, parent, name, &r, null);
-    defer gpa.free(e.name);
-    defer if (e.md5) |m| gpa.free(m);
+    defer e.deinit(gpa);
     var out: Seeded = .{ .id = e.id, .md5 = undefined };
     @memcpy(&out.md5, e.md5.?);
     return out;
