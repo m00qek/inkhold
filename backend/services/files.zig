@@ -412,6 +412,8 @@ pub const Files = struct {
     pub const Cap = quota.Cap;
     pub const default_total_bytes = quota.default_total_bytes;
     pub const capacity = quota.capacity;
+    pub const ensureCapacity = quota.ensureCapacity;
+    pub const setCapacityTotal = quota.setCapacityTotal;
     pub const StorageBreakdown = quota.StorageBreakdown;
     pub const storageBreakdown = quota.storageBreakdown;
 

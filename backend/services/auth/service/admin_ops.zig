@@ -5,12 +5,12 @@ const internal = @import("internal.zig");
 const authsvc = @import("../service.zig");
 const Service = authsvc.Service;
 const Error = authsvc.Error;
-const default_capacity = authsvc.default_capacity;
 const DeviceInfo = authsvc.DeviceInfo;
 const Quota = authsvc.Quota;
 const UserInfo = authsvc.UserInfo;
 const device_ops = @import("device_ops.zig");
 const own_account = @import("own_account.zig");
+const filesmod = @import("../../files.zig");
 
 /// Self, or an admin. Self-service routes reuse these admin functions with
 /// actor = target so ownership is decided in one place.
@@ -92,24 +92,23 @@ fn hasBinding(self: *Service, user_id: u64, equipment_no: []const u8) Error!bool
     return try s.step();
 }
 
-/// Admin-only. No `capacity` row reads as the default, matching `Files.capacity`.
-pub fn userQuota(self: *Service, actor_user_id: u64, target_user_id: u64) Error!Quota {
+/// Admin-only. The numbers are `Files.capacity`'s (a missing row reads as the
+/// default); this adds the policy.
+pub fn userQuota(self: *Service, actor_user_id: u64, target_user_id: u64, files: filesmod.Files) Error!Quota {
     if (!try own_account.isAdmin(self, actor_user_id)) return error.NotAdmin;
     if (!try userExists(self, target_user_id)) return error.UserNotFound;
-    var r = (try self.db.row("SELECT used_bytes, total_bytes FROM capacity WHERE user_id = ?1;", &.{.{ .int = @intCast(target_user_id) }})) orelse
-        return .{ .used_bytes = 0, .total_bytes = default_capacity };
-    defer r.finalize();
-    return .{ .used_bytes = r.int(0), .total_bytes = r.int(1) };
+    const cap = try files.capacity(target_user_id);
+    return .{ .used_bytes = cap.used, .total_bytes = cap.total };
 }
 
 /// Admin-only. Below current usage is allowed and deletes nothing (it just stops
 /// further syncs); zero means "no new uploads".
-pub fn setUserQuota(self: *Service, actor_user_id: u64, target_user_id: u64, total_bytes: i64) Error!Quota {
+pub fn setUserQuota(self: *Service, actor_user_id: u64, target_user_id: u64, total_bytes: i64, files: filesmod.Files) Error!Quota {
     if (!try own_account.isAdmin(self, actor_user_id)) return error.NotAdmin;
     if (!try userExists(self, target_user_id)) return error.UserNotFound;
     if (total_bytes < 0) return error.InvalidQuota;
-    try own_account.setCapacityTotal(self, target_user_id, total_bytes);
-    return userQuota(self, actor_user_id, target_user_id);
+    try files.setCapacityTotal(target_user_id, total_bytes);
+    return userQuota(self, actor_user_id, target_user_id, files);
 }
 
 pub fn userExists(self: *Service, user_id: u64) Error!bool {
@@ -133,13 +132,11 @@ pub fn insertUser(self: *Service, email: []const u8, password_md5: []const u8, i
     s.bindText(1, email);
     s.bindText(2, &internal.encryptCred(self, password_md5));
     s.bindInt(3, if (is_admin) 1 else 0);
-    s.bindInt(4, internal.now(
-        self,
-    ));
+    s.bindInt(4, internal.now(self));
     _ = s.step() catch return error.EmailExists; // UNIQUE(email) violation
-    const id: u64 = @intCast(self.db.lastInsertRowId());
-    try own_account.ensureCapacity(self, id, default_capacity);
-    return id;
+    // No `capacity` row yet: `Files` reads a missing row as the default and
+    // creates it on the first write or device bind.
+    return @intCast(self.db.lastInsertRowId());
 }
 
 /// Caller owns `email`.

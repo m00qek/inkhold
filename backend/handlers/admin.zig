@@ -2,7 +2,6 @@
 //! settings and health, and the elevation gate. Everything but `elevate`/`lock`
 //! is `require_admin` (admin plus a recent password re-entry).
 
-const std = @import("std");
 const router = @import("../http/router.zig");
 const context = @import("../http/context.zig");
 const json = @import("../http/json.zig");
@@ -173,7 +172,8 @@ pub fn getQuota(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const svc = ctx.service.?;
     const actor = ctx.caller.?;
     const id = reply.pathId(params) orelse return badRequest(ctx, req);
-    const q = svc.userQuota(actor.user_id, id) catch |err| switch (err) {
+    const files = ctx.files orelse return serverError(ctx, req);
+    const q = svc.userQuota(actor.user_id, id, files.*) catch |err| switch (err) {
         error.UserNotFound => return fail(ctx, req, .not_found, "USER_NOT_FOUND", "no such user"),
         else => return serverError(ctx, req),
     };
@@ -189,7 +189,8 @@ pub fn setQuota(ctx: *Context, req: *Request, params: Params) anyerror!void {
     var parsed = json.readBody(SetQuotaReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
 
-    const q = svc.setUserQuota(actor.user_id, id, parsed.value.totalBytes) catch |err| switch (err) {
+    const files = ctx.files orelse return serverError(ctx, req);
+    const q = svc.setUserQuota(actor.user_id, id, parsed.value.totalBytes, files.*) catch |err| switch (err) {
         error.UserNotFound => return fail(ctx, req, .not_found, "USER_NOT_FOUND", "no such user"),
         error.InvalidQuota => return fail(ctx, req, .bad_request, "INVALID_QUOTA", "an allotment cannot be negative"),
         else => return serverError(ctx, req),

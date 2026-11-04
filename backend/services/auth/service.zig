@@ -3,9 +3,7 @@
 
 const std = @import("std");
 const internal = @import("service/internal.zig");
-const expiring = @import("../../util/expiring.zig");
 const sqlite = @import("../../db/sqlite.zig");
-const schema = @import("../../db/schema.zig");
 const password = @import("password.zig");
 const authscope = @import("scope.zig");
 const filesmod = @import("../files.zig");
@@ -37,9 +35,6 @@ pub const Error = error{
     /// A write on a `readerView`: a route wrongly marked `read_only`.
     ReadOnlyService,
 } || sqlite.Error || std.mem.Allocator.Error;
-
-/// 10 GiB, defined in the db layer so migrations can write it in SQL.
-pub const default_capacity: i64 = schema.default_capacity_bytes;
 
 pub const code_len = 16; // hex chars: a 64-bit single-use nonce, 5-min TTL
 const token_len = 32; // hex chars (16 random bytes)
@@ -297,9 +292,6 @@ pub const Service = struct {
     pub const hasAnyUser = own_account.hasAnyUser;
     pub const isFirstRun = own_account.isFirstRun;
     const isAdmin = own_account.isAdmin;
-    pub const ensureCapacity = own_account.ensureCapacity;
-    pub const setCapacityTotal = own_account.setCapacityTotal;
-    pub const userCapacity = own_account.userCapacity;
 
     // ---- login challenge, sessions and admin elevation (`service/session_ops.zig`) ----
     pub const getRandomCode = session_ops.getRandomCode;

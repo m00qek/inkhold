@@ -3,11 +3,8 @@
 const std = @import("std");
 const repeat = @import("../../util/repeat.zig").repeat;
 const app = @import("../../routes.zig");
-const sqlite = @import("../../db/sqlite.zig");
-const authsvc = @import("../../services/auth/service.zig");
 const password = @import("../../services/auth/password.zig");
 const filesmod = @import("../../services/files.zig");
-const blobstore = @import("../../store/blobs.zig");
 const context = @import("../../http/context.zig");
 const Context = context.Context;
 const gpa = std.testing.allocator;
@@ -420,7 +417,7 @@ test "app login (equipment:2, no serial) yields a body token, reaches device rou
         var p = try std.json.parseFromSlice(struct { success: bool, usedCapacity: i64, totalCapacity: i64 }, gpa, resp.body, .{ .ignore_unknown_fields = true });
         defer p.deinit();
         try std.testing.expect(p.value.success);
-        try std.testing.expectEqual(authsvc.default_capacity, p.value.totalCapacity);
+        try std.testing.expectEqual(filesmod.Files.default_total_bytes, p.value.totalCapacity);
     }
 
     {

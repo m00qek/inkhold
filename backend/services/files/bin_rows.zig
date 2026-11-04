@@ -132,9 +132,7 @@ pub fn restoreRow(self: Files, user_id: u64, id: u64, opts: RestoreName) !Restor
     );
     defer s.finalize();
     s.bindText(1, final);
-    s.bindInt(2, internal.now(
-        self,
-    ));
+    s.bindInt(2, internal.now(self));
     s.bindInt(3, @intCast(id));
     _ = try s.step();
     return .{ .name = final, .was_trashed = true, .renamed = !std.mem.eql(u8, final, name) };

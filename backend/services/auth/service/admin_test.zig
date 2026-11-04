@@ -6,7 +6,9 @@ const password = @import("../password.zig");
 const authscope = @import("../scope.zig");
 const Scope = authscope.Scope;
 const authsvc = @import("../service.zig");
-const default_capacity = authsvc.default_capacity;
+const filesmod = @import("../../files.zig");
+const default_capacity = filesmod.Files.default_total_bytes;
+const TestStorage = @import("session_helpers.zig").TestStorage;
 const elevation_idle_s = authsvc.elevation_idle_s;
 const elevation_absolute_s = authsvc.elevation_absolute_s;
 const Service = authsvc.Service;
@@ -117,26 +119,30 @@ test "admin quota: read defaults, write, and lowering BELOW usage is allowed and
     defer db.close();
     var svc = try testService(db);
     defer svc.deinit();
+    var storage = try TestStorage.init(db);
+    defer storage.deinit();
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
     const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
 
     {
-        const q = try svc.userQuota(admin, alice);
+        const q = try svc.userQuota(admin, alice, storage.files);
         try std.testing.expectEqual(@as(i64, 0), q.used_bytes);
         try std.testing.expectEqual(default_capacity, q.total_bytes);
     }
 
+    // An account with no capacity row yet: the write path would create it, this seeds it directly.
+    try storage.files.ensureCapacity(alice);
     try db.exec("UPDATE capacity SET used_bytes = 5000 WHERE user_id = (SELECT id FROM users WHERE email = 'alice@home');");
 
     {
-        const q = try svc.setUserQuota(admin, alice, 1_000_000);
+        const q = try svc.setUserQuota(admin, alice, 1_000_000, storage.files);
         try std.testing.expectEqual(@as(i64, 5000), q.used_bytes);
         try std.testing.expectEqual(@as(i64, 1_000_000), q.total_bytes);
     }
 
     // Below usage: stored verbatim, nothing deleted; the meter draws used > total.
     {
-        const q = try svc.setUserQuota(admin, alice, 100);
+        const q = try svc.setUserQuota(admin, alice, 100, storage.files);
         try std.testing.expectEqual(@as(i64, 100), q.total_bytes); // NOT clamped to 5000
         try std.testing.expectEqual(@as(i64, 5000), q.used_bytes); // usage untouched
         try std.testing.expect(q.used_bytes > q.total_bytes);
@@ -149,15 +155,15 @@ test "admin quota: read defaults, write, and lowering BELOW usage is allowed and
         try std.testing.expectEqual(@as(i64, 5000), s.columnInt(0));
     }
 
-    try std.testing.expectEqual(@as(i64, 0), (try svc.setUserQuota(admin, alice, 0)).total_bytes);
-    try std.testing.expectError(error.InvalidQuota, svc.setUserQuota(admin, alice, -1));
-    try std.testing.expectEqual(@as(i64, 0), (try svc.userQuota(admin, alice)).total_bytes);
+    try std.testing.expectEqual(@as(i64, 0), (try svc.setUserQuota(admin, alice, 0, storage.files)).total_bytes);
+    try std.testing.expectError(error.InvalidQuota, svc.setUserQuota(admin, alice, -1, storage.files));
+    try std.testing.expectEqual(@as(i64, 0), (try svc.userQuota(admin, alice, storage.files)).total_bytes);
 
     // A quota is an allotment, not a self-service setting.
-    try std.testing.expectError(error.NotAdmin, svc.userQuota(alice, alice));
-    try std.testing.expectError(error.NotAdmin, svc.setUserQuota(alice, alice, 1 << 40));
-    try std.testing.expectError(error.UserNotFound, svc.userQuota(admin, 9999));
-    try std.testing.expectError(error.UserNotFound, svc.setUserQuota(admin, 9999, 1));
+    try std.testing.expectError(error.NotAdmin, svc.userQuota(alice, alice, storage.files));
+    try std.testing.expectError(error.NotAdmin, svc.setUserQuota(alice, alice, 1 << 40, storage.files));
+    try std.testing.expectError(error.UserNotFound, svc.userQuota(admin, 9999, storage.files));
+    try std.testing.expectError(error.UserNotFound, svc.setUserQuota(admin, 9999, 1, storage.files));
 }
 
 /// Writes elevation columns directly, to test the window boundaries.

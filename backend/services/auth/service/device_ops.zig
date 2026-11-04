@@ -12,9 +12,7 @@ pub fn bindDevice(self: *Service, user_id: u64, equipment_no: []const u8, name: 
         var s = try self.db.prepare("INSERT OR IGNORE INTO devices(equipment_no, created_at) VALUES(?1, ?2);");
         defer s.finalize();
         s.bindText(1, equipment_no);
-        s.bindInt(2, internal.now(
-            self,
-        ));
+        s.bindInt(2, internal.now(self));
         _ = try s.step();
     }
     {
@@ -32,9 +30,7 @@ pub fn bindDevice(self: *Service, user_id: u64, equipment_no: []const u8, name: 
         s.bindInt(1, @intCast(user_id));
         s.bindText(2, equipment_no);
         s.bindText(3, name);
-        s.bindInt(4, internal.now(
-            self,
-        ));
+        s.bindInt(4, internal.now(self));
         _ = try s.step();
     }
 }
@@ -49,9 +45,7 @@ pub fn deviceSessionOwner(self: *Service, equipment_no: []const u8, email: []con
         "SELECT s.user_id FROM sessions s JOIN users u ON u.id = s.user_id " ++
             "WHERE s.equipment_no = ?1 AND s.audience = 'device' AND u.email = ?2 AND s.expires_at > ?3 " ++
             "LIMIT 1;",
-        &.{ .{ .text = equipment_no }, .{ .text = email }, .{ .int = internal.now(
-            self,
-        ) } },
+        &.{ .{ .text = equipment_no }, .{ .text = email }, .{ .int = internal.now(self) } },
     )) orelse return null;
     defer r.finalize();
     return @intCast(r.int(0));

@@ -100,9 +100,7 @@ pub fn move(self: Files, user_id: u64, id: u64, new_parent_id: ?u64, new_name: [
         }
     }
 
-    const ts = internal.now(
-        self,
-    );
+    const ts = internal.now(self);
     try self.db.exec("BEGIN IMMEDIATE;");
     errdefer self.db.exec("ROLLBACK;") catch {};
     {
@@ -180,9 +178,7 @@ pub fn copy(self: Files, user_id: u64, id: u64, new_parent_id: ?u64, new_name: [
         final_name = owned_name.?;
     }
 
-    const ts = internal.now(
-        self,
-    );
+    const ts = internal.now(self);
     try self.db.exec("BEGIN IMMEDIATE;");
     errdefer self.db.exec("ROLLBACK;") catch {};
 

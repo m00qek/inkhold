@@ -69,7 +69,7 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         try std.testing.expectEqual(@as(usize, 1), devs.len);
         try std.testing.expectEqualStrings("Nomad", devs[0].name);
     }
-    try std.testing.expectEqual(authsvc.default_capacity, try f.svc.userCapacity(alice));
+    try std.testing.expectEqual(filesmod.Files.default_total_bytes, (try f.files.capacity(alice)).total);
 
     {
         const root = try f.files.list(alice, null);
@@ -211,5 +211,5 @@ test "capacity onboarding: wouldFit defaults for a user with no row; bindEquipme
     defer s.finalize();
     s.bindInt(1, @intCast(alice));
     try std.testing.expect(try s.step()); // the row was created
-    try std.testing.expectEqual(authsvc.default_capacity, s.columnInt(0));
+    try std.testing.expectEqual(filesmod.Files.default_total_bytes, s.columnInt(0));
 }

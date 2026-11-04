@@ -6,7 +6,6 @@ const password = @import("../password.zig");
 const authscope = @import("../scope.zig");
 const Scope = authscope.Scope;
 const authsvc = @import("../service.zig");
-const default_capacity = authsvc.default_capacity;
 const max_account_len = authsvc.max_account_len;
 const controlplane_idle_s = authsvc.controlplane_idle_s;
 const Service = authsvc.Service;
@@ -164,7 +163,7 @@ test "scope-dependent expiry: idle lapses controlplane but never device; pending
     try std.testing.expect((try svc.caller(&pending.token)) == null); // past its absolute cap
 }
 
-test "user existence, capacity set/read, and pre-login global device unlink" {
+test "user existence and pre-login global device unlink" {
     var db = try sqlite.Db.openMemory();
     defer db.close();
     var svc = try testService(db);
@@ -174,10 +173,6 @@ test "user existence, capacity set/read, and pre-login global device unlink" {
 
     try std.testing.expect(try svc.userExistsByEmail("alice@home"));
     try std.testing.expect(!try svc.userExistsByEmail("nobody@home"));
-
-    try std.testing.expectEqual(default_capacity, try svc.userCapacity(alice));
-    try svc.setCapacityTotal(alice, 25485312 * 1024);
-    try std.testing.expectEqual(@as(i64, 25485312 * 1024), try svc.userCapacity(alice));
 
     const equipment_no = "SN2026NOMAD0001";
     const dev = blk: {

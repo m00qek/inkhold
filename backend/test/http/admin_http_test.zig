@@ -171,6 +171,8 @@ test "admin devices + quota over HTTP: the gate, the 403, and the cross-user unl
 
     // Quota below usage is accepted and reports used > total.
     const quota_path = try std.fmt.bufPrint(&quotabuf, "/api/admin/users/{d}/quota", .{alice});
+    // An account with no capacity row yet: the write path would create it, this seeds it directly.
+    try f.files.ensureCapacity(alice);
     {
         var s = try f.db.prepare("UPDATE capacity SET used_bytes = 5000 WHERE user_id = ?1;");
         defer s.finalize();

@@ -97,9 +97,7 @@ pub fn linkBlobIndexed(
     if (!same_content) new_charge = try internal.userChargedRefs(self, user_id, md5) == 0;
 
     var file_id: u64 = undefined;
-    const ts = internal.now(
-        self,
-    );
+    const ts = internal.now(self);
 
     // Rolls back with the link.
     if (parsed) |p| try noteindex.store(self.db, md5, p.*, ts);

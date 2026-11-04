@@ -33,9 +33,7 @@ pub fn getRandomCode(self: *Service, account: []const u8) Error![code_len]u8 {
     if (account.len > max_account_len) return error.OutOfMemory;
 
     const code = internal.randomHex(self, code_len);
-    sweepChallenges(self, internal.now(
-        self,
-    )); // reclaim expired before we (maybe) grow
+    sweepChallenges(self, internal.now(self)); // reclaim expired before we (maybe) grow
 
     if (self.challenges.count() >= self.max_challenges and !self.challenges.contains(account)) {
         return error.OutOfMemory;
@@ -51,9 +49,7 @@ pub fn getRandomCode(self: *Service, account: []const u8) Error![code_len]u8 {
         };
         gop.key_ptr.* = owned;
     }
-    gop.value_ptr.* = .{ .code = code, .expires = internal.now(
-        self,
-    ) + challenge_ttl };
+    gop.value_ptr.* = .{ .code = code, .expires = internal.now(self) + challenge_ttl };
     return code;
 }
 
@@ -73,9 +69,7 @@ fn dropChallenge(self: *Service, account: []const u8) void {
 /// official app is a device client that logs in without a serial.
 pub fn login(self: *Service, account: []const u8, submitted_password: []const u8, is_device: bool, equipment_no: ?[]const u8) Error!Session {
     const ch = self.challenges.get(account) orelse return error.NoChallenge;
-    if (internal.now(
-        self,
-    ) > ch.expires) {
+    if (internal.now(self) > ch.expires) {
         dropChallenge(self, account);
         return error.NoChallenge;
     }
@@ -119,9 +113,7 @@ pub fn changePassword(self: *Service, user_id: u64, current_md5: ?[]const u8, ne
         defer s.finalize();
         s.bindText(1, &internal.encryptCred(self, new_md5));
         s.bindInt(2, @intCast(user_id));
-        s.bindInt(3, internal.now(
-            self,
-        ));
+        s.bindInt(3, internal.now(self));
         _ = try s.step();
     }
     try revokeAllSessions(self, user_id);
@@ -147,9 +139,7 @@ pub fn revokeAllSessions(self: *Service, user_id: u64) Error!void {
 pub fn sweepExpiredSessions(self: *Service) Error!void {
     var s = try self.db.prepare("DELETE FROM sessions WHERE expires_at < ?1;");
     defer s.finalize();
-    s.bindInt(1, internal.now(
-        self,
-    ));
+    s.bindInt(1, internal.now(self));
     _ = try s.step();
 }
 
@@ -159,9 +149,7 @@ fn createSession(self: *Service, token: []const u8, user_id: u64, audience: Scop
             "VALUES(?1,?2,?3,?4,?5,?6,?7);",
     );
     defer s.finalize();
-    const now_ts = internal.now(
-        self,
-    );
+    const now_ts = internal.now(self);
     s.bindText(1, &password.hashToken(token)); // the raw token never touches disk
     s.bindInt(2, @intCast(user_id));
     s.bindText(3, @tagName(audience));
@@ -175,9 +163,7 @@ fn createSession(self: *Service, token: []const u8, user_id: u64, audience: Scop
 /// Null if unknown or expired. Equipment identity comes from the request header.
 pub fn caller(self: *Service, token: []const u8) Error!?Caller {
     const th = password.hashToken(token);
-    const t = internal.now(
-        self,
-    );
+    const t = internal.now(self);
     var who: Caller = undefined;
     var last_used: i64 = 0;
     {
@@ -232,9 +218,7 @@ pub fn elevate(self: *Service, user_id: u64, token: []const u8, submitted_passwo
     defer self.gpa.free(info.email);
 
     const ch = self.challenges.get(info.email) orelse return error.NoChallenge;
-    if (internal.now(
-        self,
-    ) > ch.expires) {
+    if (internal.now(self) > ch.expires) {
         dropChallenge(self, info.email);
         return error.NoChallenge;
     }
@@ -244,9 +228,7 @@ pub fn elevate(self: *Service, user_id: u64, token: []const u8, submitted_passwo
 
     if (!ok or !user.is_admin or user.must_change) return error.InvalidCredentials;
 
-    const t = internal.now(
-        self,
-    );
+    const t = internal.now(self);
     const until = t + elevation_idle_s;
     var s = try self.db.prepare("UPDATE sessions SET elevated_at = ?1, elevated_until = ?2 WHERE token_hash = ?3;");
     defer s.finalize();
@@ -268,9 +250,7 @@ pub fn lockElevation(self: *Service, token: []const u8) Error!void {
 /// Extends only an already-live elevation, clamped to the ceiling; null if none.
 /// So transport can renew on every admin request without granting anything.
 pub fn renewElevation(self: *Service, token: []const u8) Error!?i64 {
-    const t = internal.now(
-        self,
-    );
+    const t = internal.now(self);
     var started: i64 = undefined;
     {
         var r = (try self.db.row("SELECT elevated_at, elevated_until FROM sessions WHERE token_hash = ?1;", &.{.{ .text = &password.hashToken(token) }})) orelse return null;

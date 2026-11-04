@@ -296,7 +296,7 @@ test "get_space_usage reports the caller's real capacity row, in the exact shape
     const admin = try f.svc.bootstrapAdmin("admin", "temp0000");
     const alice = (try f.svc.createUser(admin, "alice", false)).id;
     _ = try f.svc.changePassword(alice, null, &password.md5Hex("apass111"));
-    try f.svc.setCapacityTotal(alice, 10 * 1024 * 1024 * 1024); // 10 GiB, server-owned
+    try f.files.setCapacityTotal(alice, 10 * 1024 * 1024 * 1024); // 10 GiB, server-owned
 
     var obuf: [4096]u8 = undefined;
     var reqbuf: [1024]u8 = undefined;

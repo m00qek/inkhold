@@ -20,9 +20,7 @@ pub fn createUploadSession(self: Files, user_id: u64, inner_name: []const u8, pa
     s.bindText(3, path);
     s.bindText(4, file_name);
     s.bindInt(5, @intCast(declared_size));
-    s.bindInt(6, internal.now(
-        self,
-    ));
+    s.bindInt(6, internal.now(self));
     _ = try s.step();
 }
 
@@ -89,9 +87,7 @@ pub fn deleteUploadSession(self: Files, inner_name: []const u8) !void {
 /// Drops sessions older than `max_age_s` and their on-disk blob when it has no
 /// `blobs` row (created only at finish, so a shared md5 is left alone).
 pub fn sweepUploadSessions(self: Files, max_age_s: i64) !usize {
-    const cutoff = internal.now(
-        self,
-    ) - max_age_s;
+    const cutoff = internal.now(self) - max_age_s;
 
     var doomed: std.ArrayList([]u8) = .empty; // inner_names, owned
     defer {

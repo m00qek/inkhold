@@ -1,7 +1,7 @@
 //! The device upload byte caps, number guards and the pre-auth unlink limit.
 
 const std = @import("std");
-const authsvc = @import("../../services/auth/service.zig");
+const filesmod = @import("../../services/files.zig");
 const password = @import("../../services/auth/password.zig");
 const blobstore = @import("../../store/blobs.zig");
 const uploadcap = @import("../../handlers/upload_cap.zig");
@@ -328,7 +328,7 @@ test "oversized device numbers are rejected, not panicked (overflow guard)" {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/terminal/user/bindEquipment", &dev_tok, "SN1", body);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
-    try std.testing.expectEqual(authsvc.default_capacity, try f.svc.userCapacity(alice));
+    try std.testing.expectEqual(filesmod.Files.default_total_bytes, (try f.files.capacity(alice)).total);
 }
 
 test "public pre-auth unlink is IP rate-limited (429 after the burst)" {

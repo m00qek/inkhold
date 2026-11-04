@@ -28,7 +28,7 @@ const ddl_v14 = schema_ddl.ddl_v14;
 /// that version would never run it.
 pub const version: i64 = 16;
 
-/// Default per-user quota (10 GiB); `authsvc.default_capacity` and
+/// Default per-user quota (10 GiB); `Files.default_total_bytes` and
 /// `Files.default_total_bytes` alias it.
 pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 

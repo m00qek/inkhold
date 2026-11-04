@@ -2,14 +2,14 @@
 
 const filesmod = @import("../files.zig");
 const Files = filesmod.Files;
-const authsvc = @import("../auth/service.zig");
+const schema = @import("../../db/schema.zig");
 
 /// Charged bytes and quota, as `get_space_usage` reports them.
 pub const Cap = struct { used: i64, total: i64 };
 
-/// Quota for a user with no `capacity` row; one definition shared with the
-/// db layer and the v10 repair migration.
-pub const default_total_bytes: i64 = authsvc.default_capacity;
+/// Quota for a user with no `capacity` row (10 GiB). Defined in the db layer
+/// so the v10 repair migration can write the same number in SQL.
+pub const default_total_bytes: i64 = schema.default_capacity_bytes;
 
 /// A missing row reads as 0 used of the default (nothing stored yet).
 pub fn capacity(self: Files, user_id: u64) !Cap {
@@ -17,6 +17,30 @@ pub fn capacity(self: Files, user_id: u64) !Cap {
         return .{ .used = 0, .total = default_total_bytes };
     defer r.finalize();
     return .{ .used = r.int(0), .total = r.int(1) };
+}
+
+/// Creates the `capacity` row at the default if missing, never raising one
+/// that exists: device bind calls this and must not set its own quota, and
+/// `addUsed` needs a row or its UPDATE matches nothing and quota is silently off.
+pub fn ensureCapacity(self: Files, user_id: u64) !void {
+    var s = try self.db.prepare("INSERT OR IGNORE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, ?2);");
+    defer s.finalize();
+    s.bindInt(1, @intCast(user_id));
+    s.bindInt(2, default_total_bytes);
+    _ = try s.step();
+}
+
+/// Sets the quota, creating the row for an account that never had one. Below
+/// current usage is allowed and deletes nothing; it stops new syncs.
+pub fn setCapacityTotal(self: Files, user_id: u64, total_bytes: i64) !void {
+    var s = try self.db.prepare(
+        "INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, ?2) " ++
+            "ON CONFLICT(user_id) DO UPDATE SET total_bytes = ?2;",
+    );
+    defer s.finalize();
+    s.bindInt(1, @intCast(user_id));
+    s.bindInt(2, total_bytes);
+    _ = try s.step();
 }
 
 /// The account screen's five-way split of charged bytes, over distinct blobs.

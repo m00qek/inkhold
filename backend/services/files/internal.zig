@@ -10,6 +10,7 @@ const noteindex = @import("../note_index.zig");
 const spdindex = @import("../spd_index.zig");
 const md5_len = filesmod.md5_len;
 const markpair = @import("../mark_pairing.zig");
+const quota = @import("quota.zig");
 const Paired = Files.Paired;
 const Child = Files.Child;
 
@@ -113,7 +114,7 @@ pub fn parentOf(self: Files, user_id: u64, id: u64) !?u64 {
 }
 
 pub fn addUsed(self: Files, user_id: u64, delta: i64) !void {
-    try ensureCapacity(self, user_id); // or the UPDATE no-ops
+    try quota.ensureCapacity(self, user_id); // or the UPDATE no-ops
     var s = try self.db.prepare("UPDATE capacity SET used_bytes = used_bytes + ?1 WHERE user_id = ?2;");
     defer s.finalize();
     s.bindInt(1, delta);
@@ -211,16 +212,6 @@ pub fn existsTrashed(self: Files, user_id: u64, id: u64) !bool {
 
 pub fn bindOpt(s: sqlite.Stmt, idx: c_int, v: ?u64) void {
     if (v) |x| s.bindInt(idx, @intCast(x)) else s.bindNull(idx);
-}
-
-/// Ensures a `capacity` row exists; otherwise `addUsed` matches zero rows for
-/// users created without one and quota is silently off.
-pub fn ensureCapacity(self: Files, user_id: u64) !void {
-    var s = try self.db.prepare("INSERT OR IGNORE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, ?2);");
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    s.bindInt(2, Files.default_total_bytes);
-    _ = try s.step();
 }
 
 /// The user's charged references to `md5`: `files` rows (live or trashed) plus

@@ -1,4 +1,4 @@
-//! Helpers shared by the `session_test` tests.
+//! Storage for the auth tests that need a real `Files` (`deleteUser`, quota).
 
 const std = @import("std");
 const sqlite = @import("../../../db/sqlite.zig");

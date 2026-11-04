@@ -6,12 +6,7 @@ const router = @import("../http/router.zig");
 const context = @import("../http/context.zig");
 const json = @import("../http/json.zig");
 const reply = @import("../http/reply.zig");
-const multipart = @import("../http/multipart.zig");
-const upload_cap = @import("upload_cap.zig");
 const sync = @import("../services/sync.zig");
-const filesmod = @import("../services/files.zig");
-const authsvc = @import("../services/auth/service.zig");
-const blobstore = @import("../store/blobs.zig");
 
 const device_files = @import("device/files.zig");
 const device_upload = @import("device/upload.zig");
@@ -165,10 +160,10 @@ pub fn bindEquipment(ctx: *Context, req: *Request, params: Params) anyerror!void
         std.log.info("device {s} bound via bindEquipment but reported NO name", .{in.equipmentNo});
     }
 
-    // Creates the capacity row if missing but never lets the device set it:
-    // `totalCapacity` is ignored so a device token cannot raise its own quota.
-    svc.ensureCapacity(user_id, authsvc.default_capacity) catch {};
     if (ctx.files) |files| {
+        // Creates the capacity row if missing but never lets the device set it:
+        // `totalCapacity` is ignored so a device token cannot raise its own quota.
+        files.ensureCapacity(user_id) catch {};
         if (in.label) |labels| {
             for (labels) |path| _ = files.ensureFolderPath(user_id, path) catch {};
         }
@@ -186,7 +181,11 @@ pub fn userQuery(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const info = (svc.userInfo(ctx.gpa, caller.user_id) catch return serverError(ctx, req)) orelse
         return fail(ctx, req, .unauthorized, "NO_USER", "session user no longer exists");
     defer ctx.gpa.free(info.email);
-    const total = svc.userCapacity(caller.user_id) catch 0;
+    const total: i64 = blk: {
+        const files = ctx.files orelse break :blk 0;
+        const cap = files.capacity(caller.user_id) catch break :blk 0;
+        break :blk cap.total;
+    };
     var cbuf: [24]u8 = undefined;
     const cap_str = std.fmt.bufPrint(&cbuf, "{d}", .{total}) catch "0";
     try json.respond(ctx.gpa, req, .ok, UserQueryVO{

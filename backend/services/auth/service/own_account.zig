@@ -1,4 +1,4 @@
-//! The caller's own account: sign-in facts, other sessions, capacity.
+//! The caller's own account: sign-in facts and other sessions.
 
 const std = @import("std");
 const internal = @import("internal.zig");
@@ -52,9 +52,7 @@ pub const SessionSummary = struct {
 /// enforces, so no unusable session is reported as signed in.
 pub fn sessionSummary(self: *Service, user_id: u64, token: []const u8) Error!SessionSummary {
     const th = password.hashToken(token);
-    const t = internal.now(
-        self,
-    );
+    const t = internal.now(self);
     const idle = idleWindow(.controlplane) orelse 0;
 
     var this_since: ?i64 = null;
@@ -137,32 +135,4 @@ pub fn getUser(self: *Service, email: []const u8) Error!?Service.User {
         .is_admin = r.int(2) != 0,
         .must_change = r.int(3) != 0,
     };
-}
-
-/// INSERT OR IGNORE: device bind must never set or raise its own quota.
-pub fn ensureCapacity(self: *Service, user_id: u64, total: i64) Error!void {
-    var s = try self.db.prepare("INSERT OR IGNORE INTO capacity(user_id, total_bytes) VALUES(?1, ?2);");
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    s.bindInt(2, total);
-    _ = try s.step();
-}
-
-/// Upsert, since a freshly onboarded account may lack the row.
-pub fn setCapacityTotal(self: *Service, user_id: u64, total_bytes: i64) Error!void {
-    var s = try self.db.prepare(
-        "INSERT INTO capacity(user_id, total_bytes) VALUES(?1, ?2) " ++
-            "ON CONFLICT(user_id) DO UPDATE SET total_bytes = ?2;",
-    );
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    s.bindInt(2, total_bytes);
-    _ = try s.step();
-}
-
-/// For the device `user/query` VO; 0 if absent.
-pub fn userCapacity(self: *Service, user_id: u64) Error!i64 {
-    var r = (try self.db.row("SELECT total_bytes FROM capacity WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return 0;
-    defer r.finalize();
-    return r.int(0);
 }
