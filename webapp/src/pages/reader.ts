@@ -10,8 +10,8 @@ import type { DocSearch } from "../search/docSearch";
 import type { Hash, Id, NoteMeta, NoteSummary, PageRef, Theme } from "../core/types";
 import { createLazyEngine, type LazyEngine } from "../render/lazy";
 import { createTemplateProvider } from "../render/template";
-import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
-import { fileKind, formatBytes, rawFileUrl, historyFileUrl } from "../core/fileKind";
+import { type ApiFailureSink } from "../api/client";
+import { rawFileUrl } from "../core/fileKind";
 import { createOcrController, type OcrState } from "./ocrPanel";
 import { createFindController } from "./findInNote";
 import { createReaderExports } from "./readerExports";
@@ -21,21 +21,20 @@ import { createFindBarView, createVersionBanner } from "./readerBars";
 import { svg, VIEWER_IC } from "./viewerIcons";
 import { createPager, createZoomStepper, FIT_PAGE, FIT_WIDTH } from "./viewerControls";
 import { createViewerExportMenu } from "./viewerExportMenu";
-import { backWord, originSubtitle, createViewerHeader } from "./viewerChrome";
+import { originSubtitle, createViewerHeader } from "./viewerChrome";
 import { createBinViewerActions, type BinRetention } from "../ui/binViewerActions";
-import { relativeTime, absoluteTime } from "../ui/relativeTime";
 import { createLayersPanel } from "./layersPanel";
 import { createSidePanel, sidePanelState } from "../ui/sidePanel";
 import { createPageIndex } from "./pageIndex";
 import { createLinkLayer } from "./linkLayer";
 import type { PdfLink } from "../core/types";
-import { DEFAULT_PAGE_DIMS, skeletonPage } from "../core/noteSkeleton";
 import { buildNoteLayerThumb, createNoteLayersController } from "./noteLayers";
 import type { ReaderState } from "./readerState";
 import { createReaderOverlays } from "./readerOverlays";
 import { createReaderNav } from "./readerNav";
 import { createReaderPanels } from "./readerPanels";
 import { createReaderPaint } from "./readerPaint";
+import { createReaderLifecycle } from "./readerLifecycle";
 
 export interface ReaderDeps {
   api: Api;
@@ -86,7 +85,7 @@ export interface ReaderOrigin {
 }
 
 /** The default when nothing better is known: Back goes to the whole library. */
-const LIBRARY_ORIGIN: ReaderOrigin = { kind: "folder", folderPath: null };
+export const LIBRARY_ORIGIN: ReaderOrigin = { kind: "folder", folderPath: null };
 
 export interface Reader {
   /** The `.reader` section, mounted once inside the library's content area. */
@@ -127,7 +126,7 @@ export const ZOOM_SCALE: Record<(typeof ZOOMS)[number], number> = {
 export const DPR_CAP = 2;
 
 /** Local alias for the shared {@link originSubtitle}. */
-const subtitle = originSubtitle;
+export const subtitle = originSubtitle;
 
 export function createReader(deps: ReaderDeps): Reader {
   const { api, renderer, cache, getTheme } = deps;
@@ -375,6 +374,43 @@ export function createReader(deps: ReaderDeps): Reader {
     urlTimer: undefined,
   };
 
+  const { readerApi } = createReaderLifecycle(st, {
+    currentPage,
+    setDownload,
+    showNoPreview,
+    showImage,
+    header: () => header,
+    back: () => back,
+    noteLayerCtl: () => noteLayerCtl,
+    linkLayer: () => linkLayer,
+    pageIndexPanel: () => pageIndexPanel,
+    files: () => files,
+    zoomStepper: () => zoomStepper,
+    exportMenu: () => exportMenu,
+    moveBin: () => moveBin,
+    versionsBtn: () => versionsBtn,
+    binActions: () => binActions,
+    versionBanner: () => versionBanner,
+    versionBannerText: () => versionBannerText,
+    restoreVersionBtn: () => restoreVersionBtn,
+    findInput: () => findInput,
+    root: () => root,
+    showPage: () => showPage,
+    buildFilmstrip: () => buildFilmstrip,
+    setMode: () => setMode,
+    refreshFindUi: () => refreshFindUi,
+    refreshLayersUi: () => refreshLayersUi,
+    findQuery: () => findQuery,
+    syncUrl: () => syncUrl,
+    onKey: () => onKey,
+    failures: () => failures,
+    ocr: () => ocr,
+    linksByPage: () => linksByPage,
+    find: () => find,
+    downloads: () => downloads,
+    filmEngine: () => filmEngine,
+  });
+
   const { refetchMeta, showPage, buildFilmstrip } = createReaderPaint(st, {
     deps,
     api: () => api,
@@ -614,239 +650,5 @@ export function createReader(deps: ReaderDeps): Reader {
     find.step(e.shiftKey ? -1 : 1);
   });
 
-  /** Shared teardown for close and hide. */
-  function closeReader(): void {
-    st.open = false;
-    if (st.urlTimer !== undefined) {
-      clearTimeout(st.urlTimer);
-      st.urlTimer = undefined;
-    }
-    exportMenu.setOpen(false);
-    ocr.reset();
-    find.reset();
-    findInput.value = "";
-    // A closed reader holds no decoded RGBA (~10 MB per layer).
-    st.layersPanelOpen = false;
-    st.layersAvail = "unknown";
-    noteLayerCtl.release();
-    refreshLayersUi();
-    st.previewVersion = null;
-    st.previewViewOnly = false;
-    restoreVersionBtn.hidden = false;
-    versionBanner.hidden = true;
-    root.classList.remove("is-previewing");
-    root.classList.remove("is-open");
-    root.setAttribute("aria-hidden", "true");
-    document.removeEventListener("keydown", onKey);
-    filmEngine.reset();
-    // Also keeps a reopen from flashing the previous image.
-    files.clear();
-    linkLayer.clear();
-    linksByPage.clear();
-    st.meta = null;
-  }
-
-  return {
-    el: root,
-
-    async open(summary: NoteSummary, metaPromise: Promise<NoteMeta>, startPage = 0, origin: ReaderOrigin = LIBRARY_ORIGIN, query = ""): Promise<void> {
-      // Applying the route: no URL writes until the end (see `urlSuspended`).
-      st.urlSuspended = true;
-      // Background freshness refreshes re-call `open()` for the same file; only
-      // a different file resets menus, find and panels.
-      const changedFile = st.meta?.id !== summary.id;
-
-      // Never replace a resolved meta with a skeleton on a same-file re-open.
-      const keepResolved = !changedFile && st.metaResolved && st.meta !== null;
-      st.summaryRecognized = summary.hasRecognizedText;
-      // Skeleton: page 0 from the summary, the rest placeholders (empty hash).
-      const aspect = summary.thumbAspect ?? DEFAULT_PAGE_DIMS;
-      const skeletonMeta: NoteMeta = {
-        id: summary.id,
-        name: summary.name,
-        fileType: summary.fileType,
-        fileHash: summary.fileHash,
-        // Listing rows don't carry the pairing.
-        annotationsId: null,
-        size: 0,
-        pxPerMm: null,
-        pages: Array.from({ length: summary.pageCount }, (_, i) =>
-          i === 0 ? summary.firstPage : skeletonPage(i, aspect),
-        ),
-      };
-      if (!keepResolved) st.metaResolved = false;
-      // ONE assignment, so `meta` is provably non-null for the rest of `open`.
-      st.meta = keepResolved && st.meta ? st.meta : skeletonMeta;
-      
-      if (changedFile) exportMenu.setOpen(false);
-      const kind = fileKind(summary.fileType);
-
-      header.setName(st.meta.name);
-      header.setBackWord(backWord(origin));
-      // A bin-origin file is already trashed: Restore/Delete replace Move to bin.
-      st.fromBin = origin.kind === "bin";
-      // A history preview is a third context: only Restore-this-version, on the banner.
-      st.previewVersion = origin.kind === "history" ? (origin.version ?? null) : null;
-      const previewing = st.previewVersion !== null;
-      st.previewViewOnly = previewing && origin.viewOnly === true;
-      moveBin.hidden = st.fromBin || previewing;
-      // Versions: a real `.note` (live or bin), or any history preview.
-      const isRealNote = st.meta.fileType.trim().toLowerCase() === "note";
-      versionsBtn.hidden = !isRealNote && !previewing;
-      binActions.setBinMode(st.fromBin, st.fromBin ? origin.retention ?? null : null);
-      // The exact timestamp rides `title`.
-      versionBanner.hidden = !previewing;
-      restoreVersionBtn.hidden = st.previewViewOnly;
-      root.classList.toggle("is-previewing", previewing);
-      if (previewing && st.previewVersion) {
-        versionBannerText.textContent = `You're viewing a version from ${relativeTime(st.previewVersion.createdAt)} — this is not the current note.`;
-        versionBannerText.title = absoluteTime(st.previewVersion.createdAt);
-      }
-      // A new file starts with the panel closed and no transcript carried over.
-      ocr.reset();
-      // A query carried across files would count one note over another's pages.
-      if (changedFile) {
-        find.reset();
-        findInput.value = "";
-        // One file's layers must never label another's pixels.
-        st.layersPanelOpen = false;
-        st.layersAvail = "unknown";
-        noteLayerCtl.release();
-        refreshLayersUi();
-        // Page index back to default open, only on a real file change.
-        st.pageIndexOpen = true;
-      }
-      setMode(kind);
-      root.classList.add("is-open");
-      root.setAttribute("aria-hidden", "false");
-      st.open = true;
-      document.addEventListener("keydown", onKey);
-
-      if (kind === "note") {
-        // Clamped once; a deep link past the end lands on the last page.
-        st.pageIndex = Math.max(0, Math.min(st.meta.pages.length - 1, Math.floor(startPage)));
-        st.zoom = FIT_PAGE;
-        zoomStepper.set(FIT_PAGE);
-        header.setSubtitle(
-          subtitle(origin, `${st.meta.pages.length} ${st.meta.pages.length === 1 ? "page" : "pages"}`),
-        );
-        setDownload(null);
-        // In a preview the live raw route would serve the current blob, so use the version's.
-        downloads.setRawHref(
-          previewing
-            ? historyFileUrl(st.meta.id, st.previewVersion!.md5, { download: true, bin: st.previewViewOnly })
-            : rawFileUrl(st.meta.id, st.meta.fileHash, { download: true, bin: st.fromBin }),
-        );
-        // Before the filmstrip (badges need the page list). The last argument:
-        // the skeleton's `textHash: null`s are invented, so they count only when
-        // the listing also says unrecognised.
-        find.setNote(st.meta.id, st.meta.fileHash, st.meta.pages, st.metaResolved || !st.summaryRecognized);
-        buildFilmstrip();
-        // Prime find through the normal path; `setQuery` ignores a repeated query.
-        const primed = findQuery(query);
-        if (primed) {
-          findInput.value = primed;
-          find.open();
-          find.setQuery(primed);
-        }
-        // Paint after the overlay has laid out so the stage has real dimensions.
-        requestAnimationFrame(() => void showPage(st.pageIndex));
-      } else {
-        st.pageIndex = 0;
-        // Nothing to find in a PDF or an image: no recognition, no word boxes.
-        find.reset();
-        findInput.value = "";
-        filmEngine.reset();
-        pageIndexPanel.clear();
-        header.setSubtitle(subtitle(origin, `${st.meta.fileType.toUpperCase()} · ${formatBytes(st.meta.size)}`));
-        // Bin and history previews need their own routes (see the note branch).
-        setDownload(
-          previewing
-            ? historyFileUrl(st.meta.id, st.previewVersion!.md5, { download: true, bin: st.previewViewOnly })
-            : rawFileUrl(st.meta.id, st.meta.fileHash, { download: true, bin: st.fromBin }),
-        );
-
-        const preview = previewing
-          ? historyFileUrl(st.meta.id, st.previewVersion!.md5, { bin: st.previewViewOnly })
-          : rawFileUrl(st.meta.id, st.meta.fileHash, { bin: st.fromBin });
-        if (kind === "image" && preview) {
-          showImage(st.meta, preview);
-        } else {
-          showNoPreview(
-            st.meta,
-            st.meta.name,
-            preview === null
-              ? "This file has no stored contents to preview or download yet."
-              : "There's no preview for this file type. Download it to open it in another app.",
-          );
-        }
-      }
-
-      // Keep focus on the find field when the route asked for a search.
-      if (!(kind === "note" && findQuery(query))) back.focus();
-
-      st.urlSuspended = false;
-      // Publish once; this canonicalises a clamped page or a blank query.
-      syncUrl();
-
-      // The real metadata. Must catch: the shell does not await `open`.
-      let realMeta: NoteMeta;
-      try {
-        realMeta = await metaPromise;
-      } catch (e) {
-        if (!st.open || st.meta?.id !== summary.id) return;
-        // Non-session failures leave the readable skeleton on screen.
-        dispatchApiFailure(failures, e);
-        return;
-      }
-      if (!st.open || st.meta?.id !== realMeta.id) return;
-
-      const paintedPage = st.meta?.pages[st.pageIndex];
-      st.meta = realMeta;
-      st.metaResolved = true;
-      // The page list is authoritative now.
-      refreshFindUi();
-
-      if (kind === "note") {
-        header.setSubtitle(
-          subtitle(origin, `${st.meta.pages.length} ${st.meta.pages.length === 1 ? "page" : "pages"}`),
-        );
-        find.setNote(st.meta.id, st.meta.fileHash, st.meta.pages);
-        buildFilmstrip();
-        // Repaint only if the page changed: `buildFilmstrip` just emptied the
-        // blur-up source, so an unconditional repaint flashes white.
-        const nextPage = st.meta.pages[st.pageIndex];
-        const alreadyPainted = paintedPage?.hash !== "" && paintedPage?.hash === nextPage?.hash;
-        // Also repaint when the page gains layers (synthesized summaries, skeleton pages).
-        const gainedLayers = (nextPage?.layers?.length ?? 0) > 0 && !paintedPage?.layers?.length;
-        if (!alreadyPainted || gainedLayers) void showPage(st.pageIndex);
-      } else {
-        header.setSubtitle(subtitle(origin, `${st.meta.fileType.toUpperCase()} · ${formatBytes(st.meta.size)}`));
-      }
-    },
-
-    close: closeReader,
-
-    // Switching to another viewer is a full close (see the doc on {@link Reader.hide}).
-    hide: closeReader,
-
-    isOpen(): boolean {
-      return st.open;
-    },
-
-    bumpTheme(): void {
-      // Non-note modes are ordinary themed DOM.
-      if (st.mode !== "note") return;
-      filmEngine.bumpTheme();
-      if (st.open && currentPage()) void showPage(st.pageIndex);
-    },
-
-    destroy(): void {
-      document.removeEventListener("keydown", onKey);
-      exportMenu.destroy();
-      filmEngine.destroy();
-      pageIndexPanel.destroy();
-      noteLayerCtl.release();
-    },
-  };
+  return readerApi;
 }
