@@ -7,43 +7,35 @@ import type { Api } from "../api/types";
 import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
 import type { DocSearch } from "../search/docSearch";
-import type { Hash, Id, NoteMeta, NoteSummary, PageRef, Theme, WordBox } from "../core/types";
-import { createLazyEngine, defaultPlaceholder, renderPage, type LazyEngine } from "../render/lazy";
+import type { Hash, Id, NoteMeta, NoteSummary, PageRef, Theme } from "../core/types";
+import { createLazyEngine, type LazyEngine } from "../render/lazy";
 import { createTemplateProvider } from "../render/template";
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
-import { fileKind, formatBytes, rawFileUrl, historyFileUrl, type FileKind } from "../core/fileKind";
+import { fileKind, formatBytes, rawFileUrl, historyFileUrl } from "../core/fileKind";
 import { createOcrController, type OcrState } from "./ocrPanel";
-import { createFindController, type FindState } from "./findInNote";
+import { createFindController } from "./findInNote";
 import { createReaderExports } from "./readerExports";
-import { OVAL_VIEWBOX, ovalsFor } from "./findOvals";
 import { createToolbar } from "./toolbar";
 import { createFileStage, type FileStage } from "./fileStage";
 import { createFindBarView, createVersionBanner } from "./readerBars";
 import { svg, VIEWER_IC } from "./viewerIcons";
 import { createPager, createZoomStepper, FIT_PAGE, FIT_WIDTH } from "./viewerControls";
 import { createViewerExportMenu } from "./viewerExportMenu";
-import {
-  VIEWER_DEBOUNCE_MS,
-  backWord,
-  originSubtitle,
-  createViewerHeader,
-} from "./viewerChrome";
+import { backWord, originSubtitle, createViewerHeader } from "./viewerChrome";
 import { createBinViewerActions, type BinRetention } from "../ui/binViewerActions";
 import { relativeTime, absoluteTime } from "../ui/relativeTime";
 import { createLayersPanel } from "./layersPanel";
-import { createSidePanel, sidePanelState, tokenPx, MIN_PAGE_W } from "../ui/sidePanel";
+import { createSidePanel, sidePanelState } from "../ui/sidePanel";
 import { createPageIndex } from "./pageIndex";
 import { createLinkLayer } from "./linkLayer";
 import type { PdfLink } from "../core/types";
-import { binNotePageHref, notePageHref } from "../router";
 import { DEFAULT_PAGE_DIMS, skeletonPage } from "../core/noteSkeleton";
-import {
-  buildNoteLayerThumb,
-  createNoteLayersController,
-  toPanelLayers,
-} from "./noteLayers";
-import type { PageLayer } from "../core/types";
+import { buildNoteLayerThumb, createNoteLayersController } from "./noteLayers";
 import type { ReaderState } from "./readerState";
+import { createReaderOverlays } from "./readerOverlays";
+import { createReaderNav } from "./readerNav";
+import { createReaderPanels } from "./readerPanels";
+import { createReaderPaint } from "./readerPaint";
 
 export interface ReaderDeps {
   api: Api;
@@ -127,12 +119,12 @@ export type Zoom = (typeof ZOOMS)[number] | (typeof IMAGE_ZOOMS)[number];
  * Note-page factors, tuned to the 640px height heuristic in `showPage`; images
  * treat the label as a real percentage and must not use them.
  */
-const ZOOM_SCALE: Record<(typeof ZOOMS)[number], number> = {
+export const ZOOM_SCALE: Record<(typeof ZOOMS)[number], number> = {
   [FIT_PAGE]: 1,
   "100%": 1.18,
   "150%": 1.68,
 };
-const DPR_CAP = 2;
+export const DPR_CAP = 2;
 
 /** Local alias for the shared {@link originSubtitle}. */
 const subtitle = originSubtitle;
@@ -383,73 +375,70 @@ export function createReader(deps: ReaderDeps): Reader {
     urlTimer: undefined,
   };
 
+  const { refetchMeta, showPage, buildFilmstrip } = createReaderPaint(st, {
+    deps,
+    api: () => api,
+    renderer: () => renderer,
+    cache: () => cache,
+    getTheme: () => getTheme,
+    pageCanvas: () => pageCanvas,
+    noteLayerCtl: () => noteLayerCtl,
+    pageEl: () => pageEl,
+    pageIndexPanel: () => pageIndexPanel,
+    pageWrap: () => pageWrap,
+    stage: () => stage,
+    pager: () => pager,
+    layersPanelShown: () => layersPanelShown,
+    refreshLayersUi: () => refreshLayersUi,
+    stackIsCurrent: () => stackIsCurrent,
+    paintLinks: () => paintLinks,
+    staleHandled: () => staleHandled,
+    failures: () => failures,
+    ocr: () => ocr,
+    linksByPage: () => linksByPage,
+    find: () => find,
+    filmEngine: () => filmEngine,
+  });
+
+  const { setMode, refreshFindUi, layersPanelShown, bothSidesTooTight, setPageIndexOpen, relieveDoubleSqueeze, collapseRightPanels, refreshLayersUi, stackIsCurrent } = createReaderPanels(st, {
+    showPage,
+    getTheme: () => getTheme,
+    noteLayerCtl: () => noteLayerCtl,
+    linkLayer: () => linkLayer,
+    layersPanel: () => layersPanel,
+    pageIndexPanel: () => pageIndexPanel,
+    stage: () => stage,
+    fileStage: () => fileStage,
+    zoomEl: () => zoomEl,
+    layersToggle: () => layersToggle,
+    pagesToggle: () => pagesToggle,
+    findToggle: () => findToggle,
+    noteOnly: () => noteOnly,
+    sizeImage: () => sizeImage,
+    ocr: () => ocr,
+    downloads: () => downloads,
+  });
+
+  const { findQuery, syncUrl, queueUrlSync, goToPage, onKey, sizeImage } = createReaderNav(st, {
+    deps,
+    showPage,
+    fileImg: () => fileImg,
+    findInput: () => findInput,
+    find: () => find,
+  });
+
+  const { countText, countIsNone, paintOvals, paintLinks } = createReaderOverlays(st, {
+    goToPage,
+    api: () => api,
+    linkLayer: () => linkLayer,
+    pageEl: () => pageEl,
+    failures: () => failures,
+    linksByPage: () => linksByPage,
+    findNote: () => findNote,
+  });
+
   /** Stale hashes already refetched: one metadata refetch per hash is the loop guard. */
   const staleHandled = new Set<Hash>();
-
-
-  /** What the URL should say the search is: nothing at all while the bar is shut. */
-  function urlQuery(): string {
-    return find.isOpen() ? findInput.value.trim() : "";
-  }
-
-  /** Trimmed as {@link urlQuery} trims, so priming doesn't rewrite the URL. */
-  function findQuery(raw: string): string {
-    return raw.trim();
-  }
-
-  function syncUrl(): void {
-    if (st.urlTimer !== undefined) {
-      clearTimeout(st.urlTimer);
-      st.urlTimer = undefined;
-    }
-    if (!st.open || st.urlSuspended || !st.meta) return;
-    // Bin opens use the bin route (the live one 404s); history previews carry the md5.
-    if (st.mode === "note") {
-      if (st.fromBin) {
-        deps.onPosition?.(st.meta.id, st.pageIndex, "", undefined, true);
-        return;
-      }
-      deps.onPosition?.(st.meta.id, st.pageIndex, urlQuery(), st.previewVersion?.md5);
-      return;
-    }
-    // An image publishes only for bin or history opens.
-    if (st.mode === "image") {
-      if (st.fromBin) {
-        deps.onPosition?.(st.meta.id, 0, "", undefined, true);
-        return;
-      }
-      if (st.previewVersion) deps.onPosition?.(st.meta.id, 0, "", st.previewVersion.md5);
-    }
-  }
-
-  /** Debounced, for the find field: the URL settles on the word, not each prefix. */
-  function queueUrlSync(): void {
-    if (st.urlTimer !== undefined) clearTimeout(st.urlTimer);
-    st.urlTimer = setTimeout(() => {
-      st.urlTimer = undefined;
-      syncUrl();
-    }, VIEWER_DEBOUNCE_MS);
-  }
-
-  /** A `?v=` 404'd (STALE_PAGE): refetch the metadata and rebuild. */
-  async function refetchMeta(noteId: Id, page: PageRef): Promise<void> {
-    if (staleHandled.has(page.hash)) return;
-    staleHandled.add(page.hash);
-    let fresh: NoteMeta;
-    try {
-      fresh = await api.getNoteMeta(noteId);
-    } catch (e) {
-      dispatchApiFailure({ onSessionExpired: deps.onSessionExpired }, e);
-      return;
-    }
-    if (!st.open || st.meta?.id !== noteId) return; // closed / moved on while fetching
-    st.meta = fresh;
-    // `setNote` drops the cached word boxes; the links memo would only hold dead entries.
-    linksByPage.clear();
-    find.setNote(fresh.id, fresh.fileHash, fresh.pages);
-    buildFilmstrip();
-    void showPage(st.pageIndex);
-  }
 
   const failures: ApiFailureSink = {
     onSessionExpired: () => deps.onSessionExpired(),
@@ -491,115 +480,10 @@ export function createReader(deps: ReaderDeps): Reader {
   // --- find in note ---------------------------------------------------------
 
   /**
-   * `unrecognised` must not say "No matches" (no search happened over ink the
-   * device never recognised), and `counting` shows no total until it is final.
-   */
-  function countText(state: FindState): string {
-    switch (state.kind) {
-      case "idle":
-        return "";
-      case "unrecognised":
-        return "Not recognised on the device";
-      case "counting": {
-        const n = state.recognisedPages;
-        const here = state.onThisPage > 0 ? `${state.onThisPage} on this page · ` : "";
-        // null: the page list is still the skeleton, so the count is unknown.
-        if (n === null) return `${here}searching…`;
-        return `${here}searching ${n} ${n === 1 ? "page" : "pages"}…`;
-      }
-      case "settled":
-        return `${state.at + 1} of ${state.total}`;
-      case "fuzzyPrompt":
-        return "No matches";
-      case "empty":
-        return "No matches";
-      case "error":
-        return "Couldn't search this note. Keep typing to retry.";
-    }
-  }
-
-  /** The dimmer treatment: every state that is not a live count of matches. */
-  function countIsNone(state: FindState): boolean {
-    return state.kind !== "settled" && state.kind !== "idle";
-  }
-
-  /**
-   * Ovals are per-page only: their rects need `getPageText`, one request per
-   * page against a server serialised on `db_lock`. Counts and badges are
-   * note-wide. Always rebuilt, since positions belong to the page's size.
-   */
-  function paintOvals(words: WordBox[], current: number): void {
-    for (const old of Array.from(pageEl.querySelectorAll(".findbox"))) old.remove();
-    const m = st.meta;
-    if (!m) return;
-    const page = m.pages[st.pageIndex];
-    if (!page) return;
-
-    const ovals = ovalsFor(words, m.pxPerMm, page.width, pageEl.clientWidth, pageEl.clientHeight);
-    // Null = unverified or mismatched mm scale: draw nothing and explain instead.
-    findNote.hidden = ovals !== null;
-    if (ovals === null) return;
-
-    for (const [i, oval] of ovals.entries()) {
-      const box = el("div", {
-        class: i === current ? "findbox is-current" : "findbox",
-        html: `<svg viewBox="${OVAL_VIEWBOX}" preserveAspectRatio="none" aria-hidden="true"><path d="${oval.path}"/></svg>`,
-      });
-      box.style.left = `${oval.left}px`;
-      box.style.top = `${oval.top}px`;
-      box.style.width = `${oval.width}px`;
-      box.style.height = `${oval.height}px`;
-      box.style.transform = `rotate(${oval.rotateDeg}deg)`;
-      pageEl.append(box);
-    }
-  }
-
-  /**
    * Links per page, keyed by index and `linksHash`. Memoised because every
    * relayout re-runs `showPage` and the response is `no-cache`.
    */
   const linksByPage = new Map<string, readonly PdfLink[]>();
-
-  /**
-   * Overlay the page's links. `EXTERNALLINKINFO` rects are in device panel
-   * pixels and a `.note` page is the panel, so its native dims are `pagePt` with
-   * no letterbox mapping. Old links are cleared before any await; a fetch
-   * failure just leaves the page without links.
-   */
-  async function paintLinks(index: number, token: number): Promise<void> {
-    linkLayer.clear();
-    const m = st.meta;
-    if (!m || st.mode !== "note") return;
-    const page = m.pages[index];
-    if (!page) return;
-    // Only notes built on an imported PDF template have a link block.
-    if (page.linksHash === null) return;
-
-    const key = `${page.index}:${page.linksHash}`;
-    let links = linksByPage.get(key);
-    if (links === undefined) {
-      try {
-        links = (await api.getPageLinks(m.id, page)).links;
-      } catch (e) {
-        dispatchApiFailure(failures, e, m.id, page);
-        return;
-      }
-      linksByPage.set(key, links);
-    }
-    // The page turned (or the note closed) while we were fetching.
-    if (token !== st.paintToken || st.pageIndex !== index || !st.open) return;
-    if (links.length === 0) return;
-
-    linkLayer.setLinks(links, {
-      // Panel pixels over the page box's CSS pixels: the ink's own scale.
-      pagePt: { width: page.width, height: page.height },
-      canvas: { width: pageEl.clientWidth, height: pageEl.clientHeight },
-      // Real routes so links are shareable; bin opens keep the bin form.
-      hrefForPage: (target) => (st.fromBin ? binNotePageHref(m.id, target) : notePageHref(m.id, target)),
-      // A page turn, not a reopen.
-      onJump: (target) => goToPage(target),
-    });
-  }
 
   const find = createFindController({
     api,
@@ -679,364 +563,9 @@ export function createReader(deps: ReaderDeps): Reader {
     );
   }
 
-  /** Enter (or leave) a non-note mode: swap stages and prune the toolbar. */
-  function setMode(next: FileKind): void {
-    st.mode = next;
-    const isNote = next === "note";
-    stage.hidden = !isNote;
-    fileStage.hidden = isNote;
-    // A link layer over a non-note would describe the wrong document.
-    if (!isNote) linkLayer.clear();
-    refreshPageIndexUi();
-    for (const control of noteOnly) control.hidden = !isNote;
-    // A no-preview file has nothing to scale.
-    zoomEl.hidden = !(isNote || next === "image");
-    if (next === "image") sizeImage();
-
-    if (!isNote) noteLayerCtl.release();
-    refreshLayersUi();
-
-    refreshFindUi();
-  }
-
-  /**
-   * Find needs device recognition (`textHash !== null`). Until the meta
-   * resolves use the listing's whole-note flag: the skeleton invents
-   * `textHash: null` for every page after the first.
-   */
-  function refreshFindUi(): void {
-    const isNote = st.mode === "note";
-    const searchable =
-      isNote && (st.metaResolved ? (st.meta?.pages.some((pg) => pg.textHash !== null) ?? false) : st.summaryRecognized);
-    findToggle.disabled = !searchable;
-    findToggle.title = searchable ? "Find in this note" : "This note has no recognised text to search";
-  }
-
   // --- the page-index panel (docked LEFT, open by default) ------------------
 
-  /**
-   * Whether the layers panel is on screen; the toggle and every width
-   * reservation read this. Keyed on `layersAvail`, not the stack, so the page
-   * width doesn't jump during a page turn's decode.
-   */
-  function layersPanelShown(): boolean {
-    return st.layersPanelOpen && st.mode === "note" && st.layersAvail === "some";
-  }
-
-  /** Width of the open right dock(s), gap included, from the layout tokens. */
-  function rightPanelsWidth(): number {
-    const gap = tokenPx("--panel-gap", 22);
-    const ocrW = ocr.isOpen() ? tokenPx("--panel-w", 268) + gap : 0;
-    const layersW = layersPanelShown() ? tokenPx("--panel-w-wide", 320) + gap : 0;
-    return ocrW + layersW;
-  }
-
-  /** The page index plus the right dock(s) would leave the page below {@link MIN_PAGE_W}. */
-  function bothSidesTooTight(): boolean {
-    const leftW = tokenPx("--panel-w-narrow", 180) + tokenPx("--panel-gap", 22);
-    return stage.getBoundingClientRect().width - 56 - leftW - rightPanelsWidth() < MIN_PAGE_W;
-  }
-
-  /** Sync the page-index toggle and panel; shown only for a `.note`. */
-  function refreshPageIndexUi(): void {
-    const shown = st.mode === "note" && st.pageIndexOpen;
-    pageIndexPanel.setOpen(shown);
-    pagesToggle.setAttribute("aria-pressed", String(shown));
-    pagesToggle.setAttribute("aria-expanded", String(shown));
-  }
-
-  /** Relayouts because the panel takes stage width. */
-  function setPageIndexOpen(next: boolean): void {
-    if (st.pageIndexOpen === next) return;
-    st.pageIndexOpen = next;
-    refreshPageIndexUi();
-    void showPage(st.pageIndex);
-  }
-
-  /** Never squeeze the page from both sides: when a RIGHT tool has just opened on
-   *  a stage too narrow to hold both docks, collapse the LEFT page index. */
-  function relieveDoubleSqueeze(): void {
-    if (st.pageIndexOpen && st.mode === "note" && bothSidesTooTight()) setPageIndexOpen(false);
-  }
-
-  /** The symmetric half: reopening the page index on a narrow stage closes right docks. */
-  function collapseRightPanels(): void {
-    if (ocr.isOpen()) ocr.toggle();
-    if (st.layersPanelOpen) {
-      st.layersPanelOpen = false;
-      refreshLayersUi();
-    }
-  }
-
   // --- the layers panel + stack (see pages/noteLayers.ts) -------------------
-
-  /** Sync every layers affordance with the stack; called on every path that changes it. */
-  function refreshLayersUi(): void {
-    const has = st.mode === "note" && st.layersAvail === "some";
-    layersToggle.disabled = !has;
-    // Unknown (skeleton meta) gets neutral wording, never "no layers".
-    layersToggle.title = has
-      ? "Layers"
-      : st.mode === "note" && st.layersAvail === "unknown"
-        ? "Layers — still opening this page"
-        : "This page has no layers";
-    const open = layersPanelShown();
-    if (open) {
-      // Only this page's stack; the previous page's stays mounted until the new one commits.
-      const stack = stackIsCurrent() ? noteLayerCtl.stack() : null;
-      if (stack) layersPanel.setLayers(toPanelLayers(stack.views));
-      else layersPanel.setState("loading", "Loading this page's layers…");
-    }
-    layersPanel.el.hidden = !open;
-    layersToggle.setAttribute("aria-pressed", String(open));
-    layersToggle.setAttribute("aria-expanded", String(open));
-    downloads.refreshGroups();
-  }
-
-  /** Is the mounted stack the focused page's, at the current theme? */
-  function stackIsCurrent(): boolean {
-    const page = st.meta?.pages[st.pageIndex];
-    return page !== undefined && page.hash !== "" && noteLayerCtl.isPresented(page.hash, getTheme());
-  }
-
-  /**
-   * Try the per-layer path for the focused page; false means fall back to the
-   * composite. Same page and theme short-circuits, so relayouts are CSS-only.
-   */
-  async function presentLayers(noteId: Id, page: PageRef, vos: PageLayer[], token: number): Promise<boolean> {
-    const theme = getTheme();
-    if (noteLayerCtl.isPresented(page.hash, theme)) {
-      // Same page: just undo `showPage`'s hide (same task, so no flicker).
-      noteLayerCtl.el.hidden = false;
-      refreshLayersUi();
-      return true;
-    }
-    try {
-      const bytes = await api.getPageBytes(noteId, page);
-      if (token !== st.paintToken) return false;
-      const stack = await noteLayerCtl.present(noteId, page.hash, bytes, vos, theme);
-      if (token !== st.paintToken) return false;
-      if (stack) {
-        refreshLayersUi();
-        return true;
-      }
-    } catch (e) {
-      // The layered path must still report session/stale failures.
-      dispatchApiFailure(failures, e, noteId, page);
-    }
-    noteLayerCtl.release();
-    refreshLayersUi();
-    return false;
-  }
-
-  async function showPage(index: number): Promise<void> {
-    if (!st.meta || st.mode !== "note") return;
-    st.pageIndex = Math.max(0, Math.min(st.meta.pages.length - 1, index));
-    const page = st.meta.pages[st.pageIndex];
-    if (!page) return;
-
-    // Every page change comes through here, so the strip follows for free.
-    pageIndexPanel.setCurrent(st.pageIndex);
-    pager.set(st.pageIndex, st.meta.pages.length);
-
-    // Decided from metadata now, not after the decode. The server omits
-    // `layers` when a page has none, so only skeleton pages (index > 0 before
-    // the meta resolves) are unknown.
-    const pageIsAuthoritative = st.metaResolved || st.pageIndex === 0;
-    const layerVos = page.layers ?? null;
-    const pageHasLayers = layerVos !== null && layerVos.length > 0;
-    st.layersAvail = pageHasLayers ? "some" : pageIsAuthoritative ? "none" : "unknown";
-    refreshLayersUi();
-
-    // Hide the previous page's stack so it doesn't cover the new page's blur-up.
-    // Hidden, not released: release bumps `gen` and loses the `isPresented`
-    // short-circuit that makes relayouts free.
-    if (!stackIsCurrent()) {
-      noteLayerCtl.el.hidden = true;
-      pageCanvas.hidden = false;
-    }
-
-    // Size the page: fit the stage height (or a zoom step), clamp to width.
-    const rect = stage.getBoundingClientRect();
-    const aspect = page.width / page.height;
-    let h = Math.min(Math.max(rect.height - 56, 120), 1000);
-    // Note mode only, so `zoom` is a note-ladder value.
-    if (st.zoom !== FIT_PAGE && st.zoom in ZOOM_SCALE) h = 640 * ZOOM_SCALE[st.zoom as keyof typeof ZOOM_SCALE];
-    let w = h * aspect;
-    // Side panels take their widths from the layout tokens.
-    const gap = tokenPx("--panel-gap", 22);
-    const ocrW = ocr.isOpen() ? tokenPx("--panel-w", 268) + gap : 0;
-    const layersW = layersPanelShown() ? tokenPx("--panel-w-wide", 320) + gap : 0;
-    const pagesW = st.pageIndexOpen ? tokenPx("--panel-w-narrow", 180) + gap : 0;
-    const maxW = Math.max(rect.width - 56 - ocrW - layersW - pagesW, 80);
-    if (w > maxW) {
-      w = maxW;
-      h = w / aspect;
-    }
-    pageEl.style.width = `${Math.round(w)}px`;
-    pageEl.style.height = `${Math.round(h)}px`;
-    pageWrap.style.height = `${Math.round(h)}px`;
-
-    // OCR and find follow the page here; find after the resize, since ovals use page pixels.
-    ocr.setPage(st.meta.id, page);
-    find.setPage(st.pageIndex);
-
-    const token = ++st.paintToken;
-    const noteId: Id = st.meta.id;
-
-    // Links depend on the page box, not pixels; not awaited so they never delay a turn.
-    void paintLinks(st.pageIndex, token);
-
-    // Blur up the thumbnail, or draw the ruled sheet, so the old page doesn't linger.
-    let thumbDrawn = false;
-    const thumbCanvas = pageIndexPanel.thumbCanvas(st.pageIndex);
-    if (thumbCanvas && thumbCanvas.width > 0 && thumbCanvas.height > 0) {
-      const dpr = Math.min(typeof devicePixelRatio !== "undefined" ? devicePixelRatio : 1, DPR_CAP);
-      pageCanvas.width = Math.round(w * dpr);
-      pageCanvas.height = Math.round(h * dpr);
-      const ctx = pageCanvas.getContext("2d");
-      if (ctx) {
-        ctx.drawImage(thumbCanvas, 0, 0, pageCanvas.width, pageCanvas.height);
-        pageCanvas.classList.add("is-loading");
-        thumbDrawn = true;
-      }
-    }
-    if (!thumbDrawn) {
-      // The strip is virtualised, so a far jump may have no painted thumb to blur.
-      pageCanvas.classList.remove("is-loading");
-      defaultPlaceholder(pageCanvas, page);
-    }
-
-    // Layered path: focused page only; any failure paints the composite below.
-    let layeredUp = false;
-    if (page.hash !== "" && pageHasLayers && layerVos) {
-      layeredUp = await presentLayers(noteId, page, layerVos, token);
-      if (token !== st.paintToken) return; // a newer showPage superseded us
-      // The decode can still fail (v1/hostile payload, slot mismatch, stale
-      // wasm); stop offering a stack that will never load.
-      if (!layeredUp) {
-        st.layersAvail = "none";
-        refreshLayersUi();
-      }
-    } else {
-      noteLayerCtl.release();
-      refreshLayersUi();
-    }
-    // One paint owns the page; the other is hidden.
-    pageCanvas.hidden = layeredUp;
-    if (layeredUp) pageCanvas.classList.remove("is-loading");
-
-    if (!layeredUp && page.hash !== "") {
-      try {
-        const bitmap = await renderPage({ api, renderer, cache, theme: getTheme() }, noteId, page, "full");
-        if (token !== st.paintToken) return; // a newer showPage superseded us
-        const dpr = Math.min(typeof devicePixelRatio !== "undefined" ? devicePixelRatio : 1, DPR_CAP);
-        pageCanvas.width = Math.round(w * dpr);
-        pageCanvas.height = Math.round(h * dpr);
-        const ctx = pageCanvas.getContext("2d");
-        if (ctx) {
-          ctx.drawImage(bitmap, 0, 0, pageCanvas.width, pageCanvas.height);
-          pageCanvas.classList.remove("is-loading");
-        }
-      } catch (e) {
-        // Keep the previous paint; session/stale errors still go to the sink.
-        dispatchApiFailure(failures, e, noteId, page);
-      }
-    }
-
-    // Warm the neighbours so paging is instant.
-    for (const j of [st.pageIndex - 1, st.pageIndex + 1]) {
-      const neighbour = st.meta.pages[j];
-      if (neighbour) filmEngine.prefetch(noteId, neighbour, "full");
-    }
-  }
-
-  /**
-   * Publish the position after `showPage`, in one place. Not folded in because
-   * `showPage` awaits the paint, and the URL should follow the turn.
-   */
-  function goToPage(index: number): void {
-    void showPage(index);
-    syncUrl();
-  }
-
-  /** Rebuild the strip from `meta` (open, skeleton resolve, STALE_PAGE); badges survive. */
-  function buildFilmstrip(): void {
-    filmEngine.reset();
-    if (!st.meta) {
-      pageIndexPanel.clear();
-      return;
-    }
-    pageIndexPanel.setPages(st.meta.pages.length);
-    // `hasInk` comes with the page list, so it covers unpainted rows; pages
-    // without it are omitted, not guessed.
-    const inked = new Map<number, boolean>();
-    st.meta.pages.forEach((page, i) => {
-      if (page.hasInk !== undefined) inked.set(i, page.hasInk);
-    });
-    pageIndexPanel.setInk(inked);
-    pageIndexPanel.setCurrent(st.pageIndex);
-  }
-
-  // --- keyboard (only while open) ------------------------------------------
-  function onKey(e: KeyboardEvent): void {
-    if (!st.open) return;
-    // An open export menu and the find bar each take Escape before the reader.
-    if (e.key === "Escape") {
-      if (find.isOpen()) {
-        find.close();
-        syncUrl();
-        return;
-      }
-      return deps.onBack();
-    }
-    if (st.mode !== "note") return;
-
-    // Ctrl/Cmd+F is claimed only here, so the browser's find works elsewhere.
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "f" || e.key === "F")) {
-      e.preventDefault();
-      find.open();
-      return;
-    }
-
-    // Paging keys don't apply inside inputs (including the pager's field).
-    if (e.target instanceof HTMLInputElement) return;
-    if (e.key === "ArrowRight") goToPage(st.pageIndex + 1);
-    else if (e.key === "ArrowLeft") goToPage(st.pageIndex - 1);
-    // Home/End are prevented, or they would also scroll the document.
-    else if (e.key === "Home") {
-      e.preventDefault();
-      goToPage(0);
-    } else if (e.key === "End" && st.meta) {
-      e.preventDefault();
-      goToPage(st.meta.pages.length - 1);
-    }
-  }
-
-  /** Apply the current zoom step to the image preview. */
-  function sizeImage(): void {
-    if (st.zoom === FIT_PAGE) {
-      // Back to the CSS rule: fit the stage in both axes.
-      fileImg.style.width = "";
-      fileImg.style.maxWidth = "";
-      fileImg.style.maxHeight = "";
-      return;
-    }
-    // Past Fit the image may overflow `.filestage`, so lift the max-* clamps.
-    fileImg.style.maxWidth = "none";
-    fileImg.style.maxHeight = "none";
-    if (st.zoom === FIT_WIDTH) {
-      // Unlike Fit, this enlarges small images.
-      fileImg.style.width = "100%";
-      return;
-    }
-    // Not `ZOOM_SCALE`: for an image 100% means natural size.
-    const factor = Number.parseInt(st.zoom, 10) / 100;
-    const natural = fileImg.naturalWidth || fileImg.clientWidth;
-    if (natural > 0 && Number.isFinite(factor)) {
-      fileImg.style.width = `${Math.round(natural * factor)}px`;
-    }
-  }
 
   ocrToggle.addEventListener("click", () => {
     ocr.toggle();

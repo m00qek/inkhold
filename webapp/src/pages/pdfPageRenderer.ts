@@ -22,7 +22,7 @@ import type { PdfSession } from "../render/pdfClient";
  */
 export const ZOOMS = [FIT_PAGE, FIT_WIDTH, "150%", "200%", "300%"] as const;
 export type Zoom = (typeof ZOOMS)[number];
-const ZOOM_SCALE: Record<Zoom, number> = {
+export const ZOOM_SCALE: Record<Zoom, number> = {
   [FIT_PAGE]: 1,
   [FIT_WIDTH]: 1,
   "150%": 1.5,
