@@ -13,9 +13,13 @@ const std = @import("std");
 pub const layout = @import("backup/layout.zig");
 pub const manifest = @import("backup/manifest.zig");
 pub const lock = @import("backup/lock.zig");
+pub const pace = @import("backup/pace.zig");
+pub const blob_copy = @import("backup/blob_copy.zig");
 
 test {
     _ = layout;
     _ = manifest;
     _ = lock;
+    _ = pace;
+    _ = blob_copy;
 }
