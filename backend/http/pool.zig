@@ -48,7 +48,7 @@ pub const Pool = struct {
             while (self.ready.items.len == 0) self.cond.waitUncancelable(self.io, &self.mutex);
             const conn = self.ready.pop().?;
             self.mutex.unlock(self.io);
-            self.serve.work(conn);
+            self.serve.work(conn); // closes it instead once stopping
         }
     }
 };

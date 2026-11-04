@@ -25,6 +25,7 @@ const conn_mod = @import("conn.zig");
 const Conn = conn_mod.Conn;
 const Poller = @import("poller.zig").Poller;
 const Pool = @import("pool.zig").Pool;
+const shutdown = @import("shutdown.zig");
 
 pub const Error = error{UnknownCipherSuite} || std.mem.Allocator.Error;
 
@@ -140,15 +141,45 @@ pub const Serve = struct {
     held: ConnLimiter,
     poller: Poller,
     pool: Pool,
+    /// Set on SIGTERM: nothing new is served; the process exits shortly.
+    stopping: std.atomic.Value(bool) = .init(false),
+    /// Workers inside a request, which a stop waits for (held streams are not
+    /// counted: an `EventSource` reconnects, and they last minutes).
+    busy: std.atomic.Value(u32) = .init(0),
 
     /// A worker's turn with `conn`.
     pub fn work(self: *Serve, conn: *Conn) void {
+        if (self.isStopping()) return self.finish(conn);
+        _ = self.busy.fetchAdd(1, .acq_rel);
+        defer _ = self.busy.fetchSub(1, .acq_rel);
         var local = self.ctx.*;
         switch (conn.serve(&local, self.routes, self.tls_opts)) {
-            .park => self.poller.park(conn),
+            .park => if (self.isStopping()) self.finish(conn) else self.poller.park(conn),
             .close => self.finish(conn),
             .held => |req| self.hold(conn, req),
         }
+    }
+
+    pub fn isStopping(self: *const Serve) bool {
+        return self.stopping.load(.acquire);
+    }
+
+    /// Waits for SIGTERM/SIGINT, then stops: no new requests, those in flight
+    /// get `shutdown.grace_ms`, the database lock is taken so no transaction is
+    /// mid-way, the WAL is checkpointed, and the process exits 0.
+    fn stopOnSignal(self: *Serve) void {
+        const sig = shutdown.waitStopSignal();
+        log.info("stopping on SIG{t}", .{sig});
+        self.stopping.store(true, .release);
+        self.poller.interrupt();
+        if (!shutdown.waitIdle(self.io, &self.busy, shutdown.grace_ms)) {
+            log.warn("{d} request(s) still running after {d} ms; stopping anyway", .{ self.busy.load(.acquire), shutdown.grace_ms });
+        }
+        // Held until exit: no handler or worker can begin a transaction after.
+        if (self.ctx.db_lock) |lock| lock.lockUncancelable(self.io);
+        self.ctx.db.exec("PRAGMA wal_checkpoint(TRUNCATE);") catch {};
+        log.info("stopped", .{});
+        std.process.exit(0);
     }
 
     /// Closes and frees `conn` and returns its socket slot.
@@ -217,6 +248,9 @@ pub fn listenAndServe(
     serve.pool = .{ .io = io, .gpa = ctx.gpa, .serve = &serve };
     try serve.pool.start(cfg.workers);
     try serve.poller.start();
+    // SIGTERM/SIGINT were blocked before any thread started (`app.run`), so
+    // only this thread takes them.
+    (try std.Thread.spawn(.{}, Serve.stopOnSignal, .{&serve})).detach();
 
     log.info("listening on {s}://{s}:{d} ({d} workers)", .{
         if (cfg.tls.enabled) "https" else "http", cfg.host, cfg.port, cfg.workers,
@@ -225,9 +259,16 @@ pub fn listenAndServe(
     var refusing = false; // log once per over-capacity episode
     while (true) {
         const stream = listener.accept(io) catch |err| {
+            if (serve.isStopping()) continue;
             log.warn("accept failed: {t}", .{err});
             continue;
         };
+        // Stopping: a new connection is refused at once; the process exits
+        // within the grace period.
+        if (serve.isStopping()) {
+            stream.close(io);
+            continue;
+        }
         // Over the cap, close immediately and keep accepting.
         if (!serve.sockets.tryAcquire()) {
             stream.close(io);

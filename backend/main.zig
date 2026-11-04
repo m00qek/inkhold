@@ -54,6 +54,7 @@ test {
     _ = @import("http/conn.zig");
     _ = @import("http/poller.zig");
     _ = @import("http/pool.zig");
+    _ = @import("http/shutdown.zig");
     _ = @import("http/reply.zig");
     _ = @import("http/multipart.zig");
     _ = @import("http/byte_range.zig");

@@ -8,6 +8,7 @@ const Io = std.Io;
 const config = @import("config.zig");
 const router = @import("http/router.zig");
 const transport = @import("http/transport.zig");
+const shutdown = @import("http/shutdown.zig");
 const Context = @import("http/context.zig").Context;
 const sqlite = @import("db/sqlite.zig");
 const reader_pool = @import("db/reader_pool.zig");
@@ -28,6 +29,9 @@ const passwordmod = @import("services/auth/password.zig");
 
 /// Builds everything and serves; never returns on success.
 pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const router.Route) !void {
+    // Before any thread exists, so every thread inherits the mask and only the
+    // transport's stop thread takes SIGTERM/SIGINT (http/shutdown.zig).
+    shutdown.blockStopSignals();
     var rng_source: std.Random.IoSource = .{ .io = io };
     const rng = rng_source.interface();
 

@@ -40,6 +40,11 @@ pub const Poller = struct {
         t.detach();
     }
 
+    /// Interrupts a sleeping `poll`, so a stop is seen at once.
+    pub fn interrupt(self: *Poller) void {
+        _ = linux.write(self.wake[1], "x", 1);
+    }
+
     /// Parks `conn` until its socket is readable, closed or idle too long.
     pub fn park(self: *Poller, conn: *Conn) void {
         conn.parked_at_ms = self.nowMs();
@@ -47,7 +52,7 @@ pub const Poller = struct {
         const appended = self.parked.append(self.gpa, conn);
         self.mutex.unlock(self.io);
         if (appended) |_| {
-            _ = linux.write(self.wake[1], "x", 1);
+            self.interrupt();
         } else |err| {
             log.warn("park list full ({t}); closing a connection", .{err});
             self.serve.finish(conn);
@@ -71,6 +76,12 @@ pub const Poller = struct {
     /// One poll and its consequences. Errors here are per socket and never stop
     /// the loop; an allocation failure drops the pass and retries on the next tick.
     fn pass(self: *Poller) void {
+        // Stopping: hand nothing more to the workers; the process exits soon,
+        // closing every parked socket with it.
+        if (self.serve.isStopping()) {
+            self.io.sleep(.fromMilliseconds(tick_ms), .awake) catch {};
+            return;
+        }
         // Under the lock: snapshot who is parked and build the fd list.
         self.mutex.lockUncancelable(self.io);
         self.fds.clearRetainingCapacity();

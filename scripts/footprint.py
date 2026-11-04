@@ -18,7 +18,7 @@ Numbers are x86_64 Linux. They stand in for the Pi (one core, ARMv6): the
 structure they pin (threads do not grow with sockets) is the same there; the
 absolute values are a proxy until a Pi runner exists.
 """
-import os, re, shutil, socket, subprocess, sys, tempfile, time
+import os, re, shutil, signal, socket, subprocess, sys, tempfile, time
 
 # ---- ceilings (KB unless noted) ----------------------------------------------
 # Measured 2026-11-04 after the poller/worker transport: idle RssAnon 2,996 KB
@@ -39,6 +39,9 @@ BLOB_BYTES = 16 * 1024
 LATENCY_FACTOR = 2.0           # server p50 during a backup vs idle ...
 LATENCY_SLACK_MS = 2.0         # ... plus this much, since idle p50 is a fraction of a ms
 SERVER_DRIFT_MAX_KB = 512      # the server's own anon memory across a backup
+
+# ---- stopping (http/shutdown.zig) ----------------------------------------------
+STOP_MAX_S = 2.0               # SIGTERM to exit, idle; podman SIGKILLs at 10 s
 
 def status(pid):
     out = {}
@@ -162,15 +165,28 @@ def main():
             idle_p50 = p50_ms(port)
             server_before = anon_kb(proc.pid)
             seed(d, 0, BACKUP_SMALL)
-            small_peak, _ = backup_run(binary, cfg, os.path.join(bdir, "small"), port, "0")
+            # Both at the default pace, so the sampler sees each run's steady state:
+            # an unpaced small run ends between samples and reads low.
+            small_peak, _ = backup_run(binary, cfg, os.path.join(bdir, "small"), port, "4M")
             seed(d, BACKUP_SMALL, BACKUP_LARGE - BACKUP_SMALL)
-            # The large run at the default pace: the one a person's cron would run.
             large_peak, busy_p50 = backup_run(binary, cfg, os.path.join(bdir, "large"), port, "4M")
             server_after = anon_kb(proc.pid)
             shutil.rmtree(bdir, ignore_errors=True)
+
+            # SIGTERM stops it: promptly, exit 0, the WAL checkpointed away.
+            t = time.perf_counter()
+            proc.send_signal(signal.SIGTERM)
+            try:
+                stop_code = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                stop_code = None
+            stop_s = time.perf_counter() - t
+            wal = os.path.join(d, "inkhold.db-wal")
+            wal_bytes = os.path.getsize(wal) if os.path.exists(wal) else 0
         finally:
-            proc.kill()
-            proc.wait()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
 
     per_socket = (held_anon - idle_anon) / HELD_SOCKETS
     rows = [
@@ -188,6 +204,8 @@ def main():
         ("backup memory vs library size", f"{drift} KB", drift <= BACKUP_DRIFT_MAX_KB, f"<= {BACKUP_DRIFT_MAX_KB} apart"),
         ("server p50 during a backup", f"{busy_p50:.2f} ms", busy_p50 <= latency_ceiling, f"<= {latency_ceiling:.2f} (idle {idle_p50:.2f})"),
         ("server RssAnon across a backup", f"{server_after - server_before:+d} KB", server_after - server_before <= SERVER_DRIFT_MAX_KB, f"<= +{SERVER_DRIFT_MAX_KB}"),
+        ("SIGTERM to exit", f"{stop_s:.2f} s, code {stop_code}", stop_code == 0 and stop_s <= STOP_MAX_S, f"<= {STOP_MAX_S}, code 0"),
+        ("WAL left after stopping", f"{wal_bytes} B", wal_bytes == 0, "0 (checkpointed)"),
     ]
     ok = True
     for name, value, passed, ceiling in rows:
