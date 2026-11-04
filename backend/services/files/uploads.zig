@@ -1,6 +1,7 @@
 //! Device upload sessions: upload/apply, /oss/put, upload/finish.
 
 const std = @import("std");
+const clock = @import("../../util/clock.zig");
 const filesmod = @import("../files.zig");
 const Files = filesmod.Files;
 const internal = @import("internal.zig");
@@ -19,7 +20,7 @@ pub fn createUploadSession(self: Files, user_id: u64, inner_name: []const u8, pa
             .{ .text = path },
             .{ .text = file_name },
             .{ .int = @intCast(declared_size) },
-            .{ .int = internal.now(self) },
+            .{ .int = clock.nowSeconds(self.io) },
         },
     );
 }
@@ -78,7 +79,7 @@ pub fn deleteUploadSession(self: Files, inner_name: []const u8) !void {
 /// Drops sessions older than `max_age_s` and their on-disk blob when it has no
 /// `blobs` row (created only at finish, so a shared md5 is left alone).
 pub fn sweepUploadSessions(self: Files, max_age_s: i64) !usize {
-    const cutoff = internal.now(self) - max_age_s;
+    const cutoff = clock.nowSeconds(self.io) - max_age_s;
 
     var doomed: std.ArrayList([]u8) = .empty; // inner_names, owned
     defer {

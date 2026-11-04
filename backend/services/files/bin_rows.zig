@@ -1,6 +1,7 @@
 //! Row-level helpers for the bin: pair closure, releasing ids, restoring a row under a free name.
 
 const std = @import("std");
+const clock = @import("../../util/clock.zig");
 const filesmod = @import("../files.zig");
 const internal = @import("internal.zig");
 const markpair = @import("../mark_pairing.zig");
@@ -128,7 +129,7 @@ pub fn restoreRow(self: Files, user_id: u64, id: u64, opts: RestoreName) !Restor
     // `deleted_path` is NULL for live rows.
     try self.db.run(
         "UPDATE files SET deleted = 0, deleted_at = NULL, deleted_path = NULL, name = ?1, updated_at = ?2 WHERE id = ?3;",
-        &.{ .{ .text = final }, .{ .int = internal.now(self) }, .{ .int = @intCast(id) } },
+        &.{ .{ .text = final }, .{ .int = clock.nowSeconds(self.io) }, .{ .int = @intCast(id) } },
     );
     return .{ .name = final, .was_trashed = true, .renamed = !std.mem.eql(u8, final, name) };
 }

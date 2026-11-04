@@ -1,6 +1,7 @@
 //! Moving and copying entries, pairs included, without cycles.
 
 const std = @import("std");
+const clock = @import("../../util/clock.zig");
 const markpair = @import("../mark_pairing.zig");
 const internal = @import("internal.zig");
 const bin = @import("bin.zig");
@@ -100,7 +101,7 @@ pub fn move(self: Files, user_id: u64, id: u64, new_parent_id: ?u64, new_name: [
         }
     }
 
-    const ts = internal.now(self);
+    const ts = clock.nowSeconds(self.io);
     try self.db.exec("BEGIN IMMEDIATE;");
     errdefer self.db.exec("ROLLBACK;") catch {};
     {
@@ -178,7 +179,7 @@ pub fn copy(self: Files, user_id: u64, id: u64, new_parent_id: ?u64, new_name: [
         final_name = owned_name.?;
     }
 
-    const ts = internal.now(self);
+    const ts = clock.nowSeconds(self.io);
     try self.db.exec("BEGIN IMMEDIATE;");
     errdefer self.db.exec("ROLLBACK;") catch {};
 

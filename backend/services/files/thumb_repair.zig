@@ -1,6 +1,7 @@
 //! On-demand repair of derived thumbnails.
 
 const filesmod = @import("../files.zig");
+const clock = @import("../../util/clock.zig");
 const Files = filesmod.Files;
 const internal = @import("internal.zig");
 const noteindex = @import("../note_index.zig");
@@ -73,7 +74,7 @@ pub fn repairDerivedThumb(self: *Files, lk: anytype, md5: []const u8) void {
             lk.lockDb();
             defer lk.unlockDb();
             self.db.exec("BEGIN IMMEDIATE;") catch return;
-            spdindex.store(self.db, md5, derived, internal.now(self.*)) catch {
+            spdindex.store(self.db, md5, derived, clock.nowSeconds(self.io)) catch {
                 self.db.exec("ROLLBACK;") catch {};
                 return;
             };
@@ -89,7 +90,7 @@ pub fn repairDerivedThumb(self: *Files, lk: anytype, md5: []const u8) void {
             lk.lockDb();
             defer lk.unlockDb();
             self.db.exec("BEGIN IMMEDIATE;") catch return;
-            noteindex.store(self.db, md5, parsed, internal.now(self.*)) catch {
+            noteindex.store(self.db, md5, parsed, clock.nowSeconds(self.io)) catch {
                 self.db.exec("ROLLBACK;") catch {};
                 return;
             };

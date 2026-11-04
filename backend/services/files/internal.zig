@@ -3,6 +3,7 @@
 //! `Files`, whose methods hold the transactions these assume.
 
 const std = @import("std");
+const clock = @import("../../util/clock.zig");
 const filesmod = @import("../files.zig");
 const Files = filesmod.Files;
 const sqlite = @import("../../db/sqlite.zig");
@@ -13,10 +14,6 @@ const markpair = @import("../mark_pairing.zig");
 const quota = @import("quota.zig");
 const Paired = Files.Paired;
 const Child = Files.Child;
-
-pub fn now(self: Files) i64 {
-    return std.Io.Clock.real.now(self.io).toSeconds();
-}
 
 /// Shared by the listing and `get`, so both read one expression.
 pub const paired_mark_id = markpair.pairedMarkId("f");
@@ -229,7 +226,7 @@ pub fn assertFolder(self: Files, user_id: u64, parent_id: ?u64) !void {
 pub fn ensureBlobRow(self: Files, md5: []const u8, size: u64) !void {
     try self.db.run(
         "INSERT INTO blobs(md5, size, refcount, created_at) VALUES(?1,?2,0,?3) ON CONFLICT(md5) DO NOTHING;",
-        &.{ .{ .text = md5 }, .{ .int = @intCast(size) }, .{ .int = now(self) } },
+        &.{ .{ .text = md5 }, .{ .int = @intCast(size) }, .{ .int = clock.nowSeconds(self.io) } },
     );
 }
 

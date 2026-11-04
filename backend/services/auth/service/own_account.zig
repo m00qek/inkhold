@@ -1,6 +1,7 @@
 //! The caller's own account: sign-in facts and other sessions.
 
 const std = @import("std");
+const clock = @import("../../../util/clock.zig");
 const internal = @import("internal.zig");
 const password = @import("../password.zig");
 const authsvc = @import("../service.zig");
@@ -52,7 +53,7 @@ pub const SessionSummary = struct {
 /// enforces, so no unusable session is reported as signed in.
 pub fn sessionSummary(self: *Service, user_id: u64, token: []const u8) Error!SessionSummary {
     const th = password.hashToken(token);
-    const t = internal.now(self);
+    const t = clock.nowSeconds(self.io);
     const idle = idleWindow(.controlplane) orelse 0;
 
     var this_since: ?i64 = null;

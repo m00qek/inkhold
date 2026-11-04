@@ -14,10 +14,6 @@ pub fn decryptCred(self: *Service, cred_enc_hex: []const u8) password.CredError!
 }
 
 /// Epoch seconds (0.16 has no `std.time.timestamp`).
-pub fn now(self: *Service) i64 {
-    return std.Io.Clock.real.now(self.io).toSeconds();
-}
-
 pub fn randomHex(self: *Service, comptime n: usize) [n]u8 {
     var raw: [n / 2]u8 = undefined;
     var src: std.Random.IoSource = .{ .io = self.io };

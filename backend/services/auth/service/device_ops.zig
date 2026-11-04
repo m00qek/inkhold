@@ -1,6 +1,7 @@
 //! Device bindings: bind, name, unlink and lookups.
 
 const std = @import("std");
+const clock = @import("../../../util/clock.zig");
 const internal = @import("internal.zig");
 const authsvc = @import("../service.zig");
 const Service = authsvc.Service;
@@ -11,7 +12,7 @@ pub fn bindDevice(self: *Service, user_id: u64, equipment_no: []const u8, name: 
     {
         try self.db.run(
             "INSERT OR IGNORE INTO devices(equipment_no, created_at) VALUES(?1, ?2);",
-            &.{ .{ .text = equipment_no }, .{ .int = internal.now(self) } },
+            &.{ .{ .text = equipment_no }, .{ .int = clock.nowSeconds(self.io) } },
         );
     }
     {
@@ -28,7 +29,7 @@ pub fn bindDevice(self: *Service, user_id: u64, equipment_no: []const u8, name: 
                 .{ .int = @intCast(user_id) },
                 .{ .text = equipment_no },
                 .{ .text = name },
-                .{ .int = internal.now(self) },
+                .{ .int = clock.nowSeconds(self.io) },
             },
         );
     }
@@ -44,7 +45,7 @@ pub fn deviceSessionOwner(self: *Service, equipment_no: []const u8, email: []con
         "SELECT s.user_id FROM sessions s JOIN users u ON u.id = s.user_id " ++
             "WHERE s.equipment_no = ?1 AND s.audience = 'device' AND u.email = ?2 AND s.expires_at > ?3 " ++
             "LIMIT 1;",
-        &.{ .{ .text = equipment_no }, .{ .text = email }, .{ .int = internal.now(self) } },
+        &.{ .{ .text = equipment_no }, .{ .text = email }, .{ .int = clock.nowSeconds(self.io) } },
     )) orelse return null;
     defer r.finalize();
     return @intCast(r.int(0));

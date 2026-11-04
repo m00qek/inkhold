@@ -2,6 +2,7 @@
 
 const authscope = @import("../scope.zig");
 const std = @import("std");
+const clock = @import("../../../util/clock.zig");
 const internal = @import("internal.zig");
 const expiring = @import("../../../util/expiring.zig");
 const password = @import("../password.zig");
@@ -33,7 +34,7 @@ pub fn getRandomCode(self: *Service, account: []const u8) Error![code_len]u8 {
     if (account.len > max_account_len) return error.OutOfMemory;
 
     const code = internal.randomHex(self, code_len);
-    sweepChallenges(self, internal.now(self)); // reclaim expired before we (maybe) grow
+    sweepChallenges(self, clock.nowSeconds(self.io)); // reclaim expired before we (maybe) grow
 
     if (self.challenges.count() >= self.max_challenges and !self.challenges.contains(account)) {
         return error.OutOfMemory;
@@ -49,7 +50,7 @@ pub fn getRandomCode(self: *Service, account: []const u8) Error![code_len]u8 {
         };
         gop.key_ptr.* = owned;
     }
-    gop.value_ptr.* = .{ .code = code, .expires = internal.now(self) + challenge_ttl };
+    gop.value_ptr.* = .{ .code = code, .expires = clock.nowSeconds(self.io) + challenge_ttl };
     return code;
 }
 
@@ -69,7 +70,7 @@ fn dropChallenge(self: *Service, account: []const u8) void {
 /// official app is a device client that logs in without a serial.
 pub fn login(self: *Service, account: []const u8, submitted_password: []const u8, is_device: bool, equipment_no: ?[]const u8) Error!Session {
     const ch = self.challenges.get(account) orelse return error.NoChallenge;
-    if (internal.now(self) > ch.expires) {
+    if (clock.nowSeconds(self.io) > ch.expires) {
         dropChallenge(self, account);
         return error.NoChallenge;
     }
@@ -114,7 +115,7 @@ pub fn changePassword(self: *Service, user_id: u64, current_md5: ?[]const u8, ne
             &.{
                 .{ .text = &internal.encryptCred(self, new_md5) },
                 .{ .int = @intCast(user_id) },
-                .{ .int = internal.now(self) },
+                .{ .int = clock.nowSeconds(self.io) },
             },
         );
     }
@@ -136,7 +137,7 @@ pub fn revokeAllSessions(self: *Service, user_id: u64) Error!void {
 
 /// Reclaims rows past the absolute cap.
 pub fn sweepExpiredSessions(self: *Service) Error!void {
-    try self.db.run("DELETE FROM sessions WHERE expires_at < ?1;", &.{.{ .int = internal.now(self) }});
+    try self.db.run("DELETE FROM sessions WHERE expires_at < ?1;", &.{.{ .int = clock.nowSeconds(self.io) }});
 }
 
 fn createSession(self: *Service, token: []const u8, user_id: u64, audience: Scope, equipment_no: ?[]const u8) Error!void {
@@ -145,7 +146,7 @@ fn createSession(self: *Service, token: []const u8, user_id: u64, audience: Scop
             "VALUES(?1,?2,?3,?4,?5,?6,?7);",
     );
     defer s.finalize();
-    const now_ts = internal.now(self);
+    const now_ts = clock.nowSeconds(self.io);
     s.bindText(1, &password.hashToken(token)); // the raw token never touches disk
     s.bindInt(2, @intCast(user_id));
     s.bindText(3, @tagName(audience));
@@ -159,7 +160,7 @@ fn createSession(self: *Service, token: []const u8, user_id: u64, audience: Scop
 /// Null if unknown or expired. Equipment identity comes from the request header.
 pub fn caller(self: *Service, token: []const u8) Error!?Caller {
     const th = password.hashToken(token);
-    const t = internal.now(self);
+    const t = clock.nowSeconds(self.io);
     var who: Caller = undefined;
     var last_used: i64 = 0;
     {
@@ -214,7 +215,7 @@ pub fn elevate(self: *Service, user_id: u64, token: []const u8, submitted_passwo
     defer self.gpa.free(info.email);
 
     const ch = self.challenges.get(info.email) orelse return error.NoChallenge;
-    if (internal.now(self) > ch.expires) {
+    if (clock.nowSeconds(self.io) > ch.expires) {
         dropChallenge(self, info.email);
         return error.NoChallenge;
     }
@@ -224,7 +225,7 @@ pub fn elevate(self: *Service, user_id: u64, token: []const u8, submitted_passwo
 
     if (!ok or !user.is_admin or user.must_change) return error.InvalidCredentials;
 
-    const t = internal.now(self);
+    const t = clock.nowSeconds(self.io);
     const until = t + elevation_idle_s;
     try self.db.run(
         "UPDATE sessions SET elevated_at = ?1, elevated_until = ?2 WHERE token_hash = ?3;",
@@ -244,7 +245,7 @@ pub fn lockElevation(self: *Service, token: []const u8) Error!void {
 /// Extends only an already-live elevation, clamped to the ceiling; null if none.
 /// So transport can renew on every admin request without granting anything.
 pub fn renewElevation(self: *Service, token: []const u8) Error!?i64 {
-    const t = internal.now(self);
+    const t = clock.nowSeconds(self.io);
     var started: i64 = undefined;
     {
         var r = (try self.db.row("SELECT elevated_at, elevated_until FROM sessions WHERE token_hash = ?1;", &.{.{ .text = &password.hashToken(token) }})) orelse return null;

@@ -1,6 +1,7 @@
 //! Linking a stored blob into the tree, with ingest-time derivation.
 
 const std = @import("std");
+const clock = @import("../../util/clock.zig");
 const derivesearch = @import("../derive_search.zig");
 const noteindex = @import("../note_index.zig");
 const thumbnail = @import("../thumbnail.zig");
@@ -97,7 +98,7 @@ pub fn linkBlobIndexed(
     if (!same_content) new_charge = try internal.userChargedRefs(self, user_id, md5) == 0;
 
     var file_id: u64 = undefined;
-    const ts = internal.now(self);
+    const ts = clock.nowSeconds(self.io);
 
     // Rolls back with the link.
     if (parsed) |p| try noteindex.store(self.db, md5, p.*, ts);

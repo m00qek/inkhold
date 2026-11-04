@@ -1,6 +1,7 @@
 //! Fixture and helpers shared by the `service` tests.
 
 const std = @import("std");
+const clock = @import("../../../util/clock.zig");
 const sqlite = @import("../../../db/sqlite.zig");
 const schema = @import("../../../db/schema.zig");
 const password = @import("../password.zig");
@@ -42,5 +43,5 @@ pub fn sessionRowCount(db: *sqlite.Db, token_hash: []const u8) i64 {
 }
 
 pub fn nowSeconds() i64 {
-    return std.Io.Clock.real.now(std.testing.io).toSeconds();
+    return clock.nowSeconds(std.testing.io);
 }

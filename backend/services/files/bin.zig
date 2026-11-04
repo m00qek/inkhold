@@ -1,6 +1,7 @@
 //! The recycle bin: trash, restore, purge and the retention sweep.
 
 const std = @import("std");
+const clock = @import("../../util/clock.zig");
 const filesmod = @import("../files.zig");
 const Files = filesmod.Files;
 const internal = @import("internal.zig");
@@ -84,7 +85,7 @@ pub fn trash(self: Files, user_id: u64, id: u64) !void {
     // The rule, spent once, before any write.
     const partner = try internal.pairOf(self, user_id, id);
 
-    const ts = internal.now(self);
+    const ts = clock.nowSeconds(self.io);
     var changed = try trashSubtree(self, user_id, id, ts);
     if (partner) |p| changed += try trashSubtree(self, user_id, p.id, ts);
 
@@ -278,7 +279,7 @@ pub fn emptyBin(self: Files, user_id: u64) !usize {
 /// Purges entries trashed more than `max_age_s` ago, for every user, one user
 /// at a time (quota is per user), each expanded to its subtree closure.
 pub fn sweepBin(self: Files, max_age_s: i64) !usize {
-    return self.sweepBinBefore(internal.now(self) - max_age_s);
+    return self.sweepBinBefore(clock.nowSeconds(self.io) - max_age_s);
 }
 
 /// `sweepBin` against a cutoff computed by `settings.sweepCutoff` (which

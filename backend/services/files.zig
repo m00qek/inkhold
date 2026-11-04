@@ -5,6 +5,7 @@
 //! quota, history and thumbnail repair live in `files/`.
 
 const std = @import("std");
+const clock = @import("../util/clock.zig");
 const config = @import("../config.zig");
 const sqlite = @import("../db/sqlite.zig");
 const blobstore = @import("../store/blobs.zig");
@@ -259,7 +260,7 @@ pub const Files = struct {
         try internal.assertFolder(self, user_id, parent_id);
         if (try internal.liveChild(self, user_id, parent_id, name) != null) return error.NameConflict;
 
-        const ts = internal.now(self);
+        const ts = clock.nowSeconds(self.io);
         var s = try self.db.prepare(
             "INSERT INTO files(user_id, parent_id, name, is_folder, created_at, updated_at) VALUES(?1,?2,?3,1,?4,?4);",
         );

@@ -1,6 +1,7 @@
 //! An admin acting on one person: their devices, quota and existence checks.
 
 const std = @import("std");
+const clock = @import("../../../util/clock.zig");
 const internal = @import("internal.zig");
 const authsvc = @import("../service.zig");
 const Service = authsvc.Service;
@@ -132,7 +133,7 @@ pub fn insertUser(self: *Service, email: []const u8, password_md5: []const u8, i
     s.bindText(1, email);
     s.bindText(2, &internal.encryptCred(self, password_md5));
     s.bindInt(3, if (is_admin) 1 else 0);
-    s.bindInt(4, internal.now(self));
+    s.bindInt(4, clock.nowSeconds(self.io));
     _ = s.step() catch return error.EmailExists; // UNIQUE(email) violation
     // No `capacity` row yet: `Files` reads a missing row as the default and
     // creates it on the first write or device bind.
