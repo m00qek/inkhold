@@ -2,7 +2,7 @@
 // The readout is an input written by both the viewer (`set`) and the person typing.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { createPager } from "../../src/pages/viewerControls";
+import { createPager } from "../../src/pages/viewer/viewerControls";
 
 let mounted: HTMLElement | null = null;
 

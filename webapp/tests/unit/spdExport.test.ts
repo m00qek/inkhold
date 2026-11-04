@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect } from "vitest";
-import { exportSpdPng, exportSpdOra, buildStackXml, crc32 } from "../../src/pages/spdExport";
-import type { SpdExportLayer, SpdExportModel } from "../../src/pages/spdViewer";
+import { exportSpdPng, exportSpdOra, buildStackXml, crc32 } from "../../src/pages/spd/spdExport";
+import type { SpdExportLayer, SpdExportModel } from "../../src/pages/spd/spdViewer";
 
 // --- fakes ------------------------------------------------------------------
 

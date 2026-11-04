@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { clampRasterScale, fitScaleIn, MAX_RASTER_PIXELS } from "../../src/pages/pdfPageRenderer";
+import { clampRasterScale, fitScaleIn, MAX_RASTER_PIXELS } from "../../src/pages/pdf/pdfPageRenderer";
 
 describe("the fit", () => {
   const box = { w: 800, h: 600 };

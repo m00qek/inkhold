@@ -2,10 +2,10 @@
 // The txt viewer: find and the abort hazard.
 
 import { describe, it, expect, vi } from "vitest";
-import { createTxtViewer } from "../../src/pages/txtViewer";
-import type { ViewerDeps } from "../../src/pages/viewer";
+import { createTxtViewer } from "../../src/pages/txt/txtViewer";
+import type { ViewerDeps } from "../../src/pages/viewer/viewer";
 import type { DocSearch, DocSearchResult, DocSegmentMatch } from "../../src/search/docSearch";
-import { synthesizeSummary } from "../../src/pages/library";
+import { synthesizeSummary } from "../../src/pages/library/library";
 import { deps, meta, FOLDER, HISTORY, flush, fakeSeam, mount, q } from "./txtViewer.shared";
 
 describe("txt viewer — find", () => {

@@ -5,7 +5,7 @@
 import { el } from "../ui/dom";
 import { createSidePanel } from "../ui/sidePanel";
 import { VirtualList } from "../ui/virtualList";
-import { svg, VIEWER_IC } from "./viewerIcons";
+import { svg, VIEWER_IC } from "./viewer/viewerIcons";
 
 /** Fixed row height, px (`--preview-h-filmstrip`); the virtual scroll math depends on it. */
 const ROW_H = 124;

@@ -3,7 +3,7 @@
 // policy. Real pixels are in e2e/pdfViewer.spec.ts; happy-dom has no 2D context.
 
 import { describe, it, expect } from "vitest";
-import { composeMarkExportModel, inkAlpha } from "../../src/pages/pdfExports";
+import { composeMarkExportModel, inkAlpha } from "../../src/pages/pdf/pdfExports";
 import { flattenLayers } from "../../src/export/layered";
 import { markExportSpace } from "../../src/render/markGeometry";
 import type { PdfInkOverlay } from "../../src/render/pdfClient";

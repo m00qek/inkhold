@@ -2,7 +2,7 @@
 // the no-preview block with a download.
 
 import { el } from "../ui/dom";
-import { svg, VIEWER_IC } from "./viewerIcons";
+import { svg, VIEWER_IC } from "./viewer/viewerIcons";
 import type { Id, NoteMeta } from "../core/types";
 
 export interface FileStageDeps {

@@ -3,8 +3,8 @@
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { parseSpd, spdBbox, spdBaseDims, type SpdDoc } from "../../src/render/spdDecode";
-import { createSpdViewer } from "../../src/pages/spdViewer";
-import { synthesizeSummary } from "../../src/pages/library";
+import { createSpdViewer } from "../../src/pages/spd/spdViewer";
+import { synthesizeSummary } from "../../src/pages/library/library";
 
 // --- a fake decoder that speaks the real C-ABI ------------------------------
 import { makeFakeDecoder, SAMPLE, BASE, deps, meta, FOLDER, fakeBitmap, seamOf, stackCanvases, until, mount, barOf, key } from "./spdViewer.shared";

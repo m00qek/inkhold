@@ -371,9 +371,9 @@ test.describe("the admin console's chunk-import window", () => {
       "user/me": { json: { ...ME, isAdmin: true } },
     });
     // Hold the chunk: under the dev server the console module is an ordinary request.
-    const isChunk = (u: string) => new URL(u).pathname.endsWith("/src/pages/admin.ts");
+    const isChunk = (u: string) => new URL(u).pathname.endsWith("/src/pages/admin/admin.ts");
     await page.route(
-      (url) => url.pathname.endsWith("/src/pages/admin.ts"),
+      (url) => url.pathname.endsWith("/src/pages/admin/admin.ts"),
       async (route) => {
         await new Promise((r) => setTimeout(r, 4000));
         await route.continue();

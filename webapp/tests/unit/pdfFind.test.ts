@@ -5,7 +5,7 @@ import {
   pdfCountText,
   type PdfFindState,
   type PdfFindView,
-} from "../../src/pages/pdfFind";
+} from "../../src/pages/pdf/pdfFind";
 import { parsePageWords, type PdfWord } from "../../src/render/pdfWire";
 import { ovalsFor } from "../../src/pages/findOvals";
 import { fold, words as wordTerms } from "../../src/search/fold";
@@ -445,7 +445,7 @@ describe("the oval path is untouched", () => {
     };
     for (const path of [
       "../../src/pages/findOvals.ts",
-      "../../src/pages/pdfHighlightLayer.ts",
+      "../../src/pages/pdf/pdfHighlightLayer.ts",
     ]) {
       const src = await read(path);
       // Both files discuss file types in comments; strip them before looking.

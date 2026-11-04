@@ -3,11 +3,11 @@
 
 import { vi } from "vitest";
 import { type SpdDecoderExports } from "../../src/render/spdDecode";
-import { type SpdViewerSeam } from "../../src/pages/spdViewer";
-import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
+import { type SpdViewerSeam } from "../../src/pages/spd/spdViewer";
+import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer/viewer";
 import type { NoteMeta } from "../../src/core/types";
-import { synthesizeSummary } from "../../src/pages/library";
-import { createSpdViewer } from "../../src/pages/spdViewer";
+import { synthesizeSummary } from "../../src/pages/library/library";
+import { createSpdViewer } from "../../src/pages/spd/spdViewer";
 
 // --- a fake decoder that speaks the real C-ABI ------------------------------
 

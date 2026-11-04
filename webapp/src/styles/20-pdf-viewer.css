@@ -1,5 +1,5 @@
 /* ---- PDF viewer ----
-   One page at a time, rastered by MuPDF in the browser (`pages/pdfViewer.ts`);
+   One page at a time, rastered by MuPDF in the browser (`pages/pdf/pdfViewer.ts`);
    states reuse the stub's `.viewer__placeholder`. */
 
 /* The reader's stage: the page index sits inside it, so panel and page float
@@ -120,7 +120,7 @@
   cursor: default;
 }
 
-/* Find marks, under the ink (`pages/pdfHighlightLayer.ts`): the `.txt` viewer's
+/* Find marks, under the ink (`pages/pdf/pdfHighlightLayer.ts`): the `.txt` viewer's
    wash at the same two weights. */
 .pdf-find-marks {
   position: absolute;
@@ -223,7 +223,7 @@
 }
 
 /* ---- outline ----
-   The document's table of contents (`pages/pdfOutlinePanel.ts`), in the page
+   The document's table of contents (`pages/pdf/pdfOutlinePanel.ts`), in the page
    index's slot and exclusive with it, at the default `--panel-w`. Depth is
    indent plus type, never colour: colour means current. */
 .pdf-outline {

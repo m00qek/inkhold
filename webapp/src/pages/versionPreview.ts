@@ -8,8 +8,8 @@ import { versionMeta, rawVersionMeta, type HistoryScope } from "./historyScope";
 import { runRestore, confirmRestore } from "./historyPanel";
 import type { Api } from "../api/types";
 import type { FileVersion, Id, NoteMeta, NoteSummary } from "../core/types";
-import type { ReaderOrigin } from "./reader";
-import type { ViewerSet } from "./viewerSet";
+import type { ReaderOrigin } from "./reader/reader";
+import type { ViewerSet } from "./viewer/viewerSet";
 
 export interface VersionPreviewDeps {
   api: Api;

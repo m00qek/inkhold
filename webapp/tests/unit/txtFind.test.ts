@@ -9,8 +9,8 @@ import {
   txtCountText,
   markParagraph,
   buildFindContent,
-} from "../../src/pages/txtFind";
-import type { TxtSegmentMatch } from "../../src/pages/txtFind";
+} from "../../src/pages/txt/txtFind";
+import type { TxtSegmentMatch } from "../../src/pages/txt/txtFind";
 
 describe("fold", () => {
   it("strips diacritics and lowercases, like the index", () => {

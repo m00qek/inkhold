@@ -11,7 +11,7 @@ import { loginPage } from "./pages/login";
 import { bootFailurePage } from "./pages/bootFailure";
 import { changePasswordPage } from "./pages/changePassword";
 import { connectPage } from "./pages/connect";
-import { createAppShell, type AppShell } from "./pages/library";
+import { createAppShell, type AppShell } from "./pages/library/library";
 import { createWasmRenderer } from "./render/wasm";
 import { createTemplateProvider } from "./render/template";
 import { createRenderCache } from "./cache/renderCache";

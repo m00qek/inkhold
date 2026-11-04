@@ -1,7 +1,7 @@
 // Helpers shared by the admin tests.
 
 import { vi } from "vitest";
-import { createAdminConsole, GB, type AdminApi, type AdminState, type AdminView, type ConfirmSpec, type NewPerson, type NumberSpec } from "../../src/pages/admin";
+import { createAdminConsole, GB, type AdminApi, type AdminState, type AdminView, type ConfirmSpec, type NewPerson, type NumberSpec } from "../../src/pages/admin/admin";
 import { ApiError } from "../../src/api/client";
 import type { AdminDevice, AdminUser } from "../../src/api/adminTypes";
 

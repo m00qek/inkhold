@@ -96,7 +96,7 @@ export interface Api {
 
   // --- ADMIN WRITES ---
   // All `require_admin` (is_admin and a live elevation) except elevate/lock, so
-  // any may answer 428; `pages/admin.ts` handles the gate and retry.
+  // any may answer 428; `pages/admin/admin.ts` handles the gate and retry.
 
   /** Every household account. Admin-only even as a read. */
   adminListUsers(): Promise<import("./adminTypes").AdminUser[]>;
@@ -199,7 +199,7 @@ export interface Api {
   // --- BIN-SCOPED READS ---
   // `/bin/…` twins of the reads above, for a trashed file (its blob, transcript
   // and history are retained). Separate routes because the live ones hardcode
-  // `deleted = 0`. `createBinScope` (pages/bin.ts) reroutes a trashed id's reads
+  // `deleted = 0`. `createBinScope` (pages/bin/bin.ts) reroutes a trashed id's reads
   // onto these, so the reader never learns a bin exists.
 
   /** {@link getPageText} for a trashed note. */

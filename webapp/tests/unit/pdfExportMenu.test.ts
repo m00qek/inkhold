@@ -2,9 +2,9 @@
 // The PDF export menu and its per-page and whole-document exports.
 
 import { describe, it, expect, vi } from "vitest";
-import { composeMarkExportModel, createPdfExports, type PdfExportState } from "../../src/pages/pdfExports";
+import { composeMarkExportModel, createPdfExports, type PdfExportState } from "../../src/pages/pdf/pdfExports";
 import { type LayeredExportModel } from "../../src/export/layered";
-import { createViewerExportMenu } from "../../src/pages/viewerExportMenu";
+import { createViewerExportMenu } from "../../src/pages/viewer/viewerExportMenu";
 import type { PdfInkOverlay } from "../../src/render/pdfClient";
 
 // --- fakes ------------------------------------------------------------------

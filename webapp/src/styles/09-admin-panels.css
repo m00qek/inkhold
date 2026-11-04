@@ -1,4 +1,4 @@
-/* The admin console, continued (src/pages/admin.ts): storage, the allotment editor, devices and the server panel. Loaded right after 09-admin.css. */
+/* The admin console, continued (src/pages/admin/admin.ts): storage, the allotment editor, devices and the server panel. Loaded right after 09-admin.css. */
 
 /* --- storage, as a rule ---
  * The recycle bin's countdown idiom, so "how much is left" reads the same. */

@@ -435,7 +435,7 @@ silently.
 | 3 | `core/fileKind.ts` — `UPLOAD_ACCEPT` | whether the web may upload it |
 | 4 | `render/thumbnails.ts` — `strategyFor()` | which thumbnail strategy draws its tile |
 | 5 | `pages/galleryCards.ts` — `FACADE_THUMB_TYPES` | whether the card asks for a tile at all |
-| 6 | `pages/library.ts` — `viewerFor()` | which viewer opens it |
+| 6 | `pages/library/library.ts` — `viewerFor()` | which viewer opens it |
 | 7 | `api/fake.ts` | a fixture, or no e2e can reach it |
 | 8 | `backend/services/controlplane.zig` — `fileTypeFor()` | the type the server reports (parser-verified, not the extension) |
 | 9 | `backend/handlers/controlplane/bytes.zig` — `inline_types` | inline or attachment |
@@ -521,7 +521,17 @@ of the file. `files.zig` + `files/` is the model.
   that is not a one-line wrapper carries a `///` saying what the caller may
   assume.
 
-### 12.3 The test gate
+### 12.3 The browser app
+
+`webapp/src/` is laid out by role: `api/` (the server client and its fake),
+`core/` (shared types), `render/`, `search/`, `export/`, `cache/`, `sync/`,
+`ui/` (DOM helpers) and `pages/` (the screens). A screen with more than one
+module gets its own folder, `pages/<feature>/`, with the entry module named
+after the feature (`pages/library/library.ts`); a single-file screen stays at
+`pages/`. Unit tests live under `tests/unit/`, end-to-end specs under
+`tests/e2e/`, mirroring the source names.
+
+### 12.4 The test gate
 
 `make test` is the gate (`zig build test`, the parsers, `zig fmt --check`),
 and a commit lands only when its summary line reads `N/N tests passed`.

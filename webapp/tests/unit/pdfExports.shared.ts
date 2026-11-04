@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // Helpers shared by the pdfExports tests.
 
-import { composeMarkExportModel } from "../../src/pages/pdfExports";
+import { composeMarkExportModel } from "../../src/pages/pdf/pdfExports";
 import { type CanvasFactory, type LayeredExportModel } from "../../src/export/layered";
 import type { PdfInkOverlay } from "../../src/render/pdfClient";
 

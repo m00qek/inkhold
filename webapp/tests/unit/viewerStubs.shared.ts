@@ -2,8 +2,8 @@
 // Helpers shared by the viewerStubs tests.
 
 import { vi } from "vitest";
-import { type PdfSeam } from "../../src/pages/pdfViewer";
-import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
+import { type PdfSeam } from "../../src/pages/pdf/pdfViewer";
+import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer/viewer";
 import type { NoteMeta } from "../../src/core/types";
 
 /** Deps whose callbacks are spies — the seam's only observable effects. */

@@ -2,11 +2,11 @@
 // The .pdf viewer past the shared viewer seam.
 
 import { describe, it, expect, vi } from "vitest";
-import { createPdfViewer, type PdfSeam } from "../../src/pages/pdfViewer";
-import type { ViewerDeps } from "../../src/pages/viewer";
-import { FIT_PAGE } from "../../src/pages/viewerControls";
+import { createPdfViewer, type PdfSeam } from "../../src/pages/pdf/pdfViewer";
+import type { ViewerDeps } from "../../src/pages/viewer/viewer";
+import { FIT_PAGE } from "../../src/pages/viewer/viewerControls";
 import type { NoteMeta } from "../../src/core/types";
-import { synthesizeSummary } from "../../src/pages/library";
+import { synthesizeSummary } from "../../src/pages/library/library";
 import { deps, meta, INERT_PDF_SEAM, FOLDER } from "./viewerStubs.shared";
 
 describe(".pdf viewer, past the shared seam", () => {

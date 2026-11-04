@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi } from "vitest";
-import { FIT_PAGE, FIT_WIDTH } from "../../src/pages/viewerControls";
-import { createTxtViewer, TxtLoadError } from "../../src/pages/txtViewer";
-import { synthesizeSummary } from "../../src/pages/library";
+import { FIT_PAGE, FIT_WIDTH } from "../../src/pages/viewer/viewerControls";
+import { createTxtViewer, TxtLoadError } from "../../src/pages/txt/txtViewer";
+import { synthesizeSummary } from "../../src/pages/library/library";
 import { deps, meta, FOLDER, HISTORY_VERSION, HISTORY, flush, fakeSeam, mount, q } from "./txtViewer.shared";
 
 describe("txt viewer — render", () => {

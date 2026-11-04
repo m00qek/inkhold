@@ -2,8 +2,8 @@
 // Helpers shared by the txtViewer tests.
 
 import { vi } from "vitest";
-import { createTxtViewer, type TxtSeam } from "../../src/pages/txtViewer";
-import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer";
+import { createTxtViewer, type TxtSeam } from "../../src/pages/txt/txtViewer";
+import type { ViewerDeps, ReaderOrigin } from "../../src/pages/viewer/viewer";
 import type { NoteMeta } from "../../src/core/types";
 import type { DocSearch } from "../../src/search/docSearch";
 

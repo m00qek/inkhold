@@ -1,5 +1,5 @@
 /* ---- .txt viewer ----
-   The text column `pages/txtViewer.ts` paints into, on the shared frame and
+   The text column `pages/txt/txtViewer.ts` paints into, on the shared frame and
    toolbar; its width scales by `--txt-zoom`. */
 
 /* With text on screen, a fixed portrait page centres in the stage and scrolls

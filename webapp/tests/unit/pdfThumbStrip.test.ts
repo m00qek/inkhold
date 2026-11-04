@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { pdfPageThumbKey, pdfThumbKey } from "../../src/pages/pdfThumbStrip";
+import { pdfPageThumbKey, pdfThumbKey } from "../../src/pages/pdf/pdfThumbStrip";
 import type { Hash, PageRef } from "../../src/core/types";
 
 // A colliding key would serve the wrong picture from IndexedDB indefinitely.

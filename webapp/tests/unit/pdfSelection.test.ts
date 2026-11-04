@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { nearestWord, selectionText, wordAtPoint, wordsInRange } from "../../src/pages/pdfSelection";
+import { nearestWord, selectionText, wordAtPoint, wordsInRange } from "../../src/pages/pdf/pdfSelection";
 import type { PdfWord } from "../../src/render/pdfWire";
 
 /** A word on `line`, `n`th across, boxes 20 wide and 10 tall on a 12pt grid. */

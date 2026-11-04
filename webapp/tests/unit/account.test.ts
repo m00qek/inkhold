@@ -10,7 +10,7 @@ import {
   storageRows,
   thisBrowserLabel,
   versionsToDiscard,
-} from "../../src/pages/account";
+} from "../../src/pages/account/account";
 import { ApiError, RateLimitError } from "../../src/api/client";
 import type { MyDevice } from "../../src/api/accountTypes";
 

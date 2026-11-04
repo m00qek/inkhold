@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, afterEach } from "vitest";
-import { createPdfOutlinePanel, type PdfOutlinePanel } from "../../src/pages/pdfOutlinePanel";
+import { createPdfOutlinePanel, type PdfOutlinePanel } from "../../src/pages/pdf/pdfOutlinePanel";
 import type { PdfOutlineEntry } from "../../src/render/pdfWire";
 
 let panel: PdfOutlinePanel | null = null;

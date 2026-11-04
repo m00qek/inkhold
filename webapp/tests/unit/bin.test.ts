@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { binRows, emptyConfirm, emptyStateBody, folderLabel, groupLabel, purgeConfirm, restoreMessage, trashMessage } from "../../src/pages/bin";
+import { binRows, emptyConfirm, emptyStateBody, folderLabel, groupLabel, purgeConfirm, restoreMessage, trashMessage } from "../../src/pages/bin/bin";
 import type { Bin, BinEntry } from "../../src/core/binTypes";
 
 // --- fixtures ----------------------------------------------------------------

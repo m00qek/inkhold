@@ -1,7 +1,7 @@
 // The admin console: actions, copy, storage, devices, allotment and retention.
 
 import { describe, it, expect } from "vitest";
-import { accountAge, deviceMeta, deviceTitle, displayName, failureMessage, formatBytes, initials, memoryCard, meterFor, GB, RETENTION_NEVER_PURGES, type AdminState } from "../../src/pages/admin";
+import { accountAge, deviceMeta, deviceTitle, displayName, failureMessage, formatBytes, initials, memoryCard, meterFor, GB, RETENTION_NEVER_PURGES, type AdminState } from "../../src/pages/admin/admin";
 import { ApiError, RateLimitError } from "../../src/api/client";
 import type { AdminDevice, AdminUser } from "../../src/api/adminTypes";
 

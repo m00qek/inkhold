@@ -1,7 +1,7 @@
 // The bin controller: what asks, what opens where, by-id actions and shell seams.
 
 import { describe, it, expect, vi } from "vitest";
-import { BIN_KEY, DEVICE_LINE, binFileUrl, binRows, createBin, createBinScope, type BinActions, type BinModel, type BinView, type ConfirmSpec } from "../../src/pages/bin";
+import { BIN_KEY, DEVICE_LINE, binFileUrl, binRows, createBin, createBinScope, type BinActions, type BinModel, type BinView, type ConfirmSpec } from "../../src/pages/bin/bin";
 import { DESTINATIONS } from "../../src/pages/rail";
 import type { Api } from "../../src/api/types";
 import type { Bin, BinEntry } from "../../src/core/binTypes";

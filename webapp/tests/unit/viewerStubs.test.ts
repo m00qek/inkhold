@@ -3,12 +3,12 @@
 // toolbar zone, and the bin-context cluster.
 
 import { describe, it, expect, vi } from "vitest";
-import { createSpdViewer } from "../../src/pages/spdViewer";
-import { createTxtViewer, type TxtSeam } from "../../src/pages/txtViewer";
-import { createPdfViewer } from "../../src/pages/pdfViewer";
-import type { Viewer, ViewerDeps } from "../../src/pages/viewer";
+import { createSpdViewer } from "../../src/pages/spd/spdViewer";
+import { createTxtViewer, type TxtSeam } from "../../src/pages/txt/txtViewer";
+import { createPdfViewer } from "../../src/pages/pdf/pdfViewer";
+import type { Viewer, ViewerDeps } from "../../src/pages/viewer/viewer";
 import type { NoteMeta } from "../../src/core/types";
-import { synthesizeSummary } from "../../src/pages/library";
+import { synthesizeSummary } from "../../src/pages/library/library";
 import { deps, meta, INERT_PDF_SEAM, FOLDER } from "./viewerStubs.shared";
 
 // An inert TxtSeam; render behaviour is `txtViewer.test.ts`'s.

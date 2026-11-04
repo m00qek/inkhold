@@ -17,7 +17,7 @@ import {
 import { SearchWireError } from "../../src/search/manifestCodec";
 import { textKeyOf, type TextStore } from "../../src/cache/textStore";
 import type { CoreLoader, SearchCoreExports } from "../../src/search/indexEngine";
-import { byteToCharMap, resolveFindSegments } from "../../src/pages/txtFind";
+import { byteToCharMap, resolveFindSegments } from "../../src/pages/txt/txtFind";
 
 // Against the real `public/sqlite-core.wasm`: the tokenizer, fold and typo ladder
 // are what is under test, so a stub would prove nothing.

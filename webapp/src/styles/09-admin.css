@@ -1,5 +1,5 @@
 /*
- * The admin console (src/pages/admin.ts): tokens only; red is danger, green is
+ * The admin console (src/pages/admin/admin.ts): tokens only; red is danger, green is
  * brand and state; no filled buttons. Two radius vocabularies by surface: the
  * gate is an auth surface and takes 2px; everything else follows the shell
  * (row 4px, nested/chip 3px, track 1px, modal 12px, control `var(--radius)`).

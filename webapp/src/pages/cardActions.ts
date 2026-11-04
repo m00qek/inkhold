@@ -7,7 +7,7 @@ import { el } from "../ui/dom";
 import { createMenu, DEFAULT_SECTION_TITLE, type MenuItemSpec, type MenuSection } from "../ui/menu";
 import { rawFileUrl, canPreviewHistory } from "../core/fileKind";
 import { download, savedPdfMessage, type Exporter } from "../export/exporter";
-import { exportSpdPng, exportSpdOra } from "./spdExport";
+import { exportSpdPng, exportSpdOra } from "./spd/spdExport";
 import { buildSpdExportModel } from "../export/spdModel";
 import type { Api } from "../api/types";
 import type { Entry, Id, NoteSummary } from "../core/types";

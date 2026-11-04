@@ -9,7 +9,7 @@
 import type { Hash, Id, PageRef, RenderSize, Theme } from "../core/types";
 import type { Api } from "../api/types";
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
-import type { NoteRenderer } from "../render/types";
+import type { NoteRenderer } from "./types";
 import type { RenderCache } from "../cache/types";
 import type { ThumbSource } from "./thumbnails";
 

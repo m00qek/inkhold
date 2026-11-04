@@ -5,7 +5,7 @@
 
 import { el } from "../ui/dom";
 import { createSidePanel, sidePanelState, type SidePanelStateKind } from "../ui/sidePanel";
-import { svg, VIEWER_IC } from "./viewerIcons";
+import { svg, VIEWER_IC } from "./viewer/viewerIcons";
 
 /** One layer's viewed state; `opacity` (0..1) present means the row gets a fill bar. */
 export interface PanelLayer {

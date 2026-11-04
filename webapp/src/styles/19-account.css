@@ -1,5 +1,5 @@
 /*
- * Your own account (src/pages/account.ts). Prefixed `acct-`, not `account-`,
+ * Your own account (src/pages/account/account.ts). Prefixed `acct-`, not `account-`,
  * which is the rail nameplate's. The red margin rule runs down the page as a
  * spine with section labels in the margin; all data is Space Mono (`.acct-data`);
  * red words use `--margin-ink` (`--margin` is 4.49:1 as text).
