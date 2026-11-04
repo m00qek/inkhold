@@ -335,6 +335,24 @@ pub const ddl_v16 =
     \\ALTER TABLE note_page_index ADD COLUMN has_ink INTEGER;
 ;
 
+/// v17: what `inkhold backup` last did, one row per backup directory, read by
+/// the admin console's backup notice (DESIGN.md §2.6). Written by the backup
+/// process beside the server; `restore` empties it, or a restored server would
+/// report the snapshot day's backups as its own.
+pub const ddl_v17 =
+    \\CREATE TABLE backup_runs (
+    \\  dir          TEXT    PRIMARY KEY,     -- the directory as given to `backup create`
+    \\  last_run_at  INTEGER,                 -- the last `create`, good or not; NULL: verify only
+    \\  last_ok_at   INTEGER,                 -- NULL: never succeeded here
+    \\  last_error   TEXT,                    -- NULL when the last `create` succeeded
+    \\  snapshot     TEXT,                    -- the last good snapshot's name
+    \\  blobs        INTEGER,
+    \\  bytes        INTEGER,
+    \\  verified_at  INTEGER,                 -- the last `verify`, NULL: never
+    \\  verify_error TEXT                     -- NULL when the last `verify` passed
+    \\);
+;
+
 // v14: drops the server-side search index. Order matters: the FTS5 table before
 // its content view, `segment_search` (FK to pages) before the page rows.
 pub const ddl_v14 =

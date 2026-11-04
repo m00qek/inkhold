@@ -172,3 +172,40 @@ test "a backup inside the live data is refused" {
     try testing.expectEqual(exit_failed, c.code);
     try testing.expect(std.mem.indexOf(u8, c.err, "inside the live data") != null);
 }
+
+test "every run is recorded for the admin notice, the failures most of all" {
+    var inst = try bfix.Install.init();
+    defer inst.deinit();
+    _ = try inst.addBlob("x");
+    var cbuf: [256]u8 = undefined;
+    const cfg = try configPath(inst.tmp, inst.root, &cbuf);
+    var dbuf: [256]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&dbuf, "{s}/nas-not-mounted", .{inst.root});
+
+    for ([_][]const []const u8{
+        &.{ "--config", cfg, "backup", "create", inst.backup_dir, "--max-rate=0" },
+        &.{ "--config", cfg, "backup", "verify", inst.backup_dir, "--max-rate=0" },
+        &.{ "--config", cfg, "backup", "create", missing },
+    }) |argv| {
+        const c = try run(argv);
+        c.deinit(testing.allocator);
+    }
+
+    {
+        var r = (try inst.db.row("SELECT last_ok_at IS NOT NULL, last_error IS NULL, snapshot, verified_at IS NOT NULL, verify_error IS NULL FROM backup_runs WHERE dir LIKE '%/backup';", &.{})).?;
+        defer r.finalize();
+        try testing.expectEqual(@as(i64, 1), r.int(0));
+        try testing.expectEqual(@as(i64, 1), r.int(1));
+        try testing.expectEqual(@as(usize, 18), r.text(2).len);
+        try testing.expectEqual(@as(i64, 1), r.int(3));
+        try testing.expectEqual(@as(i64, 1), r.int(4));
+    }
+    {
+        // The unmounted share: recorded by the path as typed, with the first line a person read.
+        var r = (try inst.db.row("SELECT last_ok_at IS NULL, last_error FROM backup_runs WHERE dir LIKE '%/nas-not-mounted';", &.{})).?;
+        defer r.finalize();
+        try testing.expectEqual(@as(i64, 1), r.int(0));
+        try testing.expect(std.mem.startsWith(u8, r.text(1), "No backup directory at:"));
+        try testing.expect(std.mem.indexOfScalar(u8, r.text(1), '\x1b') == null); // no styling stored
+    }
+}

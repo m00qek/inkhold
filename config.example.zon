@@ -46,6 +46,10 @@
     // give every client a single shared bucket. Empty trusts no such header.
     .trusted_proxy = "",
 
+    // Admins see a notice in the library when the newest successful
+    // `inkhold backup create` (any directory) is older than this.
+    .backup_warn_after_hours = 48,
+
     .tls = .{
         // Terminate TLS in-process. When false, plaintext HTTP is served.
         .enabled = false,

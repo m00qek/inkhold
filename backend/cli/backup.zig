@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const config = @import("../config.zig");
 const backup = @import("../services/backup.zig");
+const sqlite = @import("../db/sqlite.zig");
 const cli = @import("../cli.zig");
 const Invocation = cli.Invocation;
 const Style = cli.Style;
@@ -84,6 +85,25 @@ fn size(w: *Writer, n: u64) !void {
     try w.print("{d:.1} {s}", .{ v, units[u] });
 }
 
+/// The directory as recorded: its real path when it exists, so `/backup` and
+/// `/backup/` are one destination; as typed when it does not (an unmounted NAS).
+fn dirKey(io: Io, path: []const u8, buf: *[Dir.max_path_bytes]u8) []const u8 {
+    const n = Dir.cwd().realPathFile(io, path, buf) catch return std.mem.trimEnd(u8, path, "/");
+    return buf[0..n];
+}
+
+/// Records a run for the admin notice (`backup/status.zig`). Best effort: a
+/// database that cannot be reached changes nothing about the run's own result.
+fn record(gpa: std.mem.Allocator, cfg: config.Config, err: *Writer, comptime f: anytype, args: anytype) void {
+    const z = gpa.dupeSentinel(u8, cfg.db_path, 0) catch return;
+    defer gpa.free(z);
+    const db = sqlite.Db.openNoCreate(z, 256) catch return; // no install here: nothing to tell
+    defer db.close();
+    @call(.auto, f, .{db} ++ args) catch |e| {
+        err.print("(could not record this run for the admin notice: {t})\n", .{e}) catch {};
+    };
+}
+
 fn plural(n: u64, one: []const u8, many: []const u8) []const u8 {
     return if (n == 1) one else many;
 }
@@ -97,8 +117,11 @@ pub fn create(gpa: std.mem.Allocator, io: Io, inv: Invocation, out: *Writer, err
 
     backup.pace.lowerPriority();
     var hbuf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+    var kbuf: [Dir.max_path_bytes]u8 = undefined;
+    const key = dirKey(io, inv.backup_dir, &kbuf);
+    const started = now(io);
     var report: backup.CreateReport = .{};
-    backup.create(gpa, io, paths(cfg), inv.backup_dir, now(io), .{
+    backup.create(gpa, io, paths(cfg), inv.backup_dir, started, .{
         .keep = inv.flags.keep,
         .compress = !inv.flags.no_compress,
         .include_cred_key = inv.flags.include_cred_key,
@@ -106,7 +129,19 @@ pub fn create(gpa: std.mem.Allocator, io: Io, inv: Invocation, out: *Writer, err
         .host = hostName(&hbuf),
         .pid = pid(),
         .version = cli.version,
-    }, &report) catch |e| return createFailed(e, inv, cfg, &report, err, st);
+    }, &report) catch |e| {
+        // The plain text is what the admin notice shows; the styled one is printed.
+        var plain: Writer.Allocating = .init(gpa);
+        defer plain.deinit();
+        _ = createFailed(e, inv, cfg, &report, &plain.writer, Style.plain) catch {};
+        record(gpa, cfg, err, backup.status.recordCreate, .{ key, started, backup.status.CreateResult{ .failed = plain.written() } });
+        return createFailed(e, inv, cfg, &report, err, st);
+    };
+    record(gpa, cfg, err, backup.status.recordCreate, .{ key, started, backup.status.CreateResult{ .ok = .{
+        .snapshot = &report.name,
+        .blobs = report.blobs,
+        .bytes = report.bytes,
+    } } });
 
     try out.print("Snapshot {s}: {d} {s} (", .{ &report.name, report.blobs, plural(report.blobs, "file", "files") });
     try size(out, report.bytes);
@@ -211,7 +246,14 @@ pub fn list(gpa: std.mem.Allocator, io: Io, inv: Invocation, out: *Writer, err: 
 pub fn verify(gpa: std.mem.Allocator, io: Io, inv: Invocation, out: *Writer, err: *Writer, st: Style) !u8 {
     var loaded = (try loadConfig(gpa, io, inv, err, st)) orelse return exit_failed;
     defer loaded.deinit();
-    var dir = (try openDir(io, inv.backup_dir, err, st)) orelse return exit_failed;
+    const cfg = loaded.config;
+    var kbuf: [Dir.max_path_bytes]u8 = undefined;
+    const key = dirKey(io, inv.backup_dir, &kbuf);
+    const started = now(io);
+    var dir = (try openDir(io, inv.backup_dir, err, st)) orelse {
+        record(gpa, cfg, err, backup.status.recordVerify, .{ key, started, @as(?[]const u8, "No backup directory there: is it mounted?") });
+        return exit_failed;
+    };
     defer dir.close(io);
     backup.pace.lowerPriority();
 
@@ -225,6 +267,7 @@ pub fn verify(gpa: std.mem.Allocator, io: Io, inv: Invocation, out: *Writer, err
         .tmp_dir = tmp,
     }) catch |e| switch (e) {
         error.NoSnapshots => {
+            record(gpa, cfg, err, backup.status.recordVerify, .{ key, started, @as(?[]const u8, "No snapshots to verify.") });
             try err.print("No snapshots in {s} to verify.\n", .{inv.backup_dir});
             return exit_failed;
         },
@@ -250,9 +293,32 @@ pub fn verify(gpa: std.mem.Allocator, io: Io, inv: Invocation, out: *Writer, err
         try out.writeAll("\n");
     }
     if (inv.flags.deep) try out.print("\nRe-read {d} {s} in the shared store.\n", .{ v.hashed, plural(v.hashed, "file", "files") });
+    // A verify of one named snapshot says nothing about the rest: not recorded.
+    if (inv.snapshot == null) {
+        var line_buf: [160]u8 = undefined;
+        record(gpa, cfg, err, backup.status.recordVerify, .{ key, started, verifyFailure(&v, &line_buf) });
+    }
     if (v.allOk()) return exit_ok;
     try err.print("\n{s}Some snapshots cannot be restored as they are.{s} Restore an older one that passed, and keep this backup's disk under watch.\n", .{ st.bold, st.reset });
     return exit_failed;
+}
+
+/// The first failing snapshot as one line, or null when all passed.
+fn verifyFailure(v: *const backup.Verified, buf: []u8) ?[]const u8 {
+    var bad: u32 = 0;
+    var first: ?backup.VerifyResult = null;
+    for (v.results.items) |r| if (!r.ok()) {
+        bad += 1;
+        if (first == null) first = r;
+    };
+    const r = first orelse return null;
+    var w: Writer = .fixed(buf);
+    w.print("{d} of {d} snapshots cannot be restored; {s}:", .{ bad, v.results.items.len, &r.name }) catch {};
+    if (!r.manifest_ok) w.writeAll(" manifest unreadable;") catch {};
+    if (!r.db_ok) w.writeAll(" database damaged;") catch {};
+    if (r.missing > 0) w.print(" {d} missing;", .{r.missing}) catch {};
+    if (r.corrupt > 0) w.print(" {d} damaged;", .{r.corrupt}) catch {};
+    return std.mem.trimEnd(u8, w.buffered(), ";");
 }
 
 fn verifyTmp(gpa: std.mem.Allocator, io: Io, cfg: config.Config, backup_dir: []const u8) ![]u8 {

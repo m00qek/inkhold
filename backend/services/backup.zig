@@ -17,6 +17,7 @@ pub const pace = @import("backup/pace.zig");
 pub const blob_copy = @import("backup/blob_copy.zig");
 pub const place = @import("backup/place.zig");
 pub const gzfile = @import("backup/gzfile.zig");
+pub const status = @import("backup/status.zig");
 
 // ---- create ----
 const create_mod = @import("backup/create.zig");
@@ -63,6 +64,7 @@ test {
     _ = create_mod;
     _ = list_mod;
     _ = gzfile;
+    _ = status;
     _ = verify_mod;
     _ = prune_mod;
     _ = restore_mod;

@@ -54,3 +54,16 @@ test "deleting a user cascades their files" {
     _ = try s.step();
     try std.testing.expectEqual(@as(i64, 0), s.columnInt(0)); // both file rows cascaded away
 }
+
+test "v17: backup_runs holds one row per directory, empty on a migrated install" {
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    try migrate(db);
+    var r = (try db.row("SELECT COUNT(*) FROM backup_runs;", &.{})).?;
+    try std.testing.expectEqual(@as(i64, 0), r.int(0));
+    r.finalize();
+    try db.exec("INSERT INTO backup_runs(dir, last_run_at) VALUES('/mnt/nas', 1);");
+    var dup = try db.prepare("INSERT INTO backup_runs(dir, last_run_at) VALUES('/mnt/nas', 2);");
+    defer dup.finalize();
+    try std.testing.expectError(error.Step, dup.step());
+}

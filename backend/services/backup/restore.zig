@@ -12,6 +12,7 @@
 //!     older than the tablets, and a tablet that resumed syncing against it
 //!     might delete what it holds that the server lacks.
 //!   - Half-finished uploads are dropped; their chunks were never backed up.
+//!   - The record of past backups is emptied: it is the snapshot day's.
 //!   - The credential key: the snapshot's if it carried one; else the install's
 //!     own, if it can decrypt the restored accounts; else a new key, and every
 //!     account gets a temporary password (returned once, to print) because no
@@ -28,6 +29,7 @@ const blob_copy = @import("blob_copy.zig");
 const gzfile = @import("gzfile.zig");
 const pace_mod = @import("pace.zig");
 const create_mod = @import("create.zig");
+const status_mod = @import("status.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
 const blobstore = @import("../../store/blobs.zig");
@@ -221,6 +223,8 @@ fn prepare(gpa: std.mem.Allocator, io: Io, db: sqlite.Db, paths: create_mod.Path
     defer thumbs_dir.close(io);
     const files = filesmod.Files.init(gpa, io, db, store, try thumbstore.ThumbStore.init(io, thumbs_dir));
     _ = try files.sweepUploadSessions(-1);
+    // The snapshot's record of backups is the snapshot day's, not this server's.
+    try status_mod.clear(db);
     return if (chosen.write) key else null;
 }
 

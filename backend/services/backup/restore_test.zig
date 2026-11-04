@@ -230,3 +230,21 @@ test "serverAnswers sees a listener and nothing where there is none" {
     const port = server.socket.address.getPort();
     try testing.expect(restore_mod.serverAnswers(testing.io, "127.0.0.1", port));
 }
+
+test "a restored server starts with no record of past backups" {
+    var inst = try fixture.Install.init();
+    defer inst.deinit();
+    _ = try inst.addUser("ana@home.lan", "pw");
+    try inst.db.exec("INSERT INTO backup_runs(dir, last_run_at, last_ok_at) VALUES('/mnt/nas', 1, 1);");
+    try backUp(&inst, true);
+    var target = try fixture.Target.init();
+    defer target.deinit();
+    var dir = try inst.backup();
+    defer dir.close(testing.io);
+    var rep: restore_mod.Report = .{};
+    defer rep.deinit(testing.allocator);
+    try restore(testing.allocator, testing.io, target.paths(), dir, .{}, &rep);
+    const db = try target.openDb();
+    defer db.close();
+    try testing.expectEqual(@as(i64, 0), try count(db, "SELECT COUNT(*) FROM backup_runs;"));
+}

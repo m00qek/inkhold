@@ -62,6 +62,9 @@ pub const Config = struct {
     /// proxy itself, which would give every client one shared bucket. Empty
     /// (the default, TLS terminated here) trusts no header from anyone.
     trusted_proxy: []const u8 = "",
+    /// The admin notice calls backups late when the newest successful
+    /// `inkhold backup create` (any directory) is older than this.
+    backup_warn_after_hours: u32 = 48,
     tls: Tls = .{},
     history: History = .{},
 };
