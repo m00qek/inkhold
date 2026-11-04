@@ -16,12 +16,9 @@ import type { NoteRenderer } from "../render/types";
 import type { RenderCache } from "../cache/types";
 import type { PersistentThumbStore } from "../cache/idb";
 import type { LiveChannel } from "../sync/types";
-import type { Entry, Hash, Id, NoteMeta, NoteSummary } from "../core/types";
+import type { Hash, Id, NoteMeta, NoteSummary } from "../core/types";
 import { skeletonPage } from "../core/noteSkeleton";
-import { NameTakenError, dispatchApiFailure, type ApiFailureSink } from "../api/client";
-import { openRenameDialog } from "../ui/renameDialog";
-import { createUploadZone, type UploadDestination, type UploadZone } from "../ui/uploadZone";
-import { openConflictDialog } from "../ui/uploadConflict";
+import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
 import { createExporter, type Exporter } from "../export/exporter";
 import { createLazyEngine, renderPage, type LazyEngine } from "../render/lazy";
 import {
@@ -42,22 +39,19 @@ import { createAdminDestination, type AdminDestination } from "./adminDestinatio
 import { createNoteSearch } from "./noteSearch";
 import { createSearchService } from "../search/searchService";
 import { createDocSearch } from "../search/docSearch";
-import { createGalleryCards, type GalleryCards } from "./galleryCards";
-import { createCardActions } from "./cardActions";
 import { createHistoryScope } from "./historyScope";
-import { createHistoryController } from "./historyPanel";
 import type { FileVersion } from "../core/types";
-import { createGallerySearch, type GallerySearch } from "./gallerySearch";
 // The breadcrumb is painted here, but its flattening rule is the rail's.
 import { createRail, createRailView, crumbPath, type RailController } from "./rail";
 // Paints into `gallery`; `renderGallery()` closes it, so no teardown hook.
 import { BIN_KEY, createBin, createBinScope, createBinView, type BinController } from "./bin";
 // Static, unlike the console: small, and every user has one.
-import { createAccountPage, type AccountHost, type AccountPage } from "./account";
+import { createAccountPage, type AccountPage } from "./account";
 import type { LibraryState } from "./libraryState";
 import { createLibraryRender } from "./libraryRender";
 import { createLibraryData } from "./libraryData";
 import { createLibraryView } from "./libraryView";
+import { createLibraryFeatures } from "./libraryFeatures";
 
 const ADMIN_KEY = "admin";
 /**
@@ -187,7 +181,7 @@ export function createAppShell(deps: AppDeps): AppShell {
 
   const { relabelFolders, renderGallery, emptyState } = createLibraryRender(st, {
     setBinMode,
-    uploadDestination,
+    uploadDestination: () => uploadDestination(),
     scheduleSpan,
     galleryIsOnScreen,
     rail: () => rail,
@@ -579,167 +573,40 @@ export function createAppShell(deps: AppDeps): AppShell {
   binScope.attach((id) => bin.isTrashed(id));
 
   // ---- the extracted features ----
-  // Each gets an explicit context; built once every dependency exists. Order
-  // matters: cards use `cardActions`' menu, search rows use the card factory.
-  const historyController = createHistoryController({
-    api,
-    host: root,
-    toast,
-    handled,
-    // With `annotationsOn`, `noteId` is a `.mark` and the live document opens
-    // with the ink rerouted; without it, the file's past version opens.
-    openPreview: (noteId, version, annotationsOn) =>
-      void (annotationsOn != null
-        ? openAnnotationsPreview(annotationsOn, noteId, version)
-        : openHistoryPreview(noteId, version)),
-    restore: (noteId, version, noteName) => restoreVersion(noteId, version, noteName),
-  });
-  /**
-  * `entry` is the object the cached listing holds, so one field write plus a
-  * repaint updates it; the SSE bump reconciles. `NameTakenError` is rethrown to
-  * keep the dialog open.
-  */
-  async function onRename(entry: Entry): Promise<void> {
-    await openRenameDialog({
-      host: root,
-      entry: {
-        name: entry.name,
-        fileType: entry.kind === "note" ? entry.fileType : "",
-        isFolder: entry.kind === "folder",
-      },
-      submit: async (fullName) => {
-        let updated: Entry;
-        try {
-          updated = await api.rename(entry.id, fullName);
-        } catch (e) {
-          if (e instanceof NameTakenError) throw e; // the dialog keeps itself open
-          if (handled(e)) return; // a dead session etc. — routed, dialog closes
-          toast("Couldn't rename that. Try again.");
-          return;
-        }
-        entry.name = updated.name;
-        renderGallery();
-        toast(`Renamed to '${updated.name}'.`);
-      },
-    });
-  }
-
-  const cardActions = createCardActions({
-    api,
-    exporter,
-    toast,
-    handled,
+  const { historyController, galleryCards, gallerySearch, uploadDestination, uploadZone, ACCOUNT_HOST } = createLibraryFeatures(st, {
+    deps,
     sessionDidExpire,
-    onTrash: (entry) => void bin.trash(entry),
-    onRename: (entry) => void onRename(entry),
-    isCategoryRoot: (entry) => entry.kind === "folder" && rail.categoryIconFor(entry) !== null,
-    onHistory: (noteSummary, anchor) =>
-      historyController.open(
-        { id: noteSummary.id, name: noteSummary.name, fileType: noteSummary.fileType },
-        { anchor },
-      ),
-    onAnnotationHistory: (doc, annotationsId, anchor) =>
-      historyController.open(
-        { id: annotationsId, name: doc.name, fileType: "mark" },
-        { anchor, annotationsOn: doc.id },
-      ),
-  });
-  const galleryCards: GalleryCards = createGalleryCards({
-    galleryEngine,
-    imgLazy,
-    getView: () => st.view,
-    labelFor: (folder) => rail.labelFor(folder),
-    categoryIconFor: (folder) => rail.categoryIconFor(folder),
-    pendingCategoryOf: (folder) => rail.pendingCategoryOf(folder),
-    // `selectCategory` already fires `onSelectCategory`; don't call it again.
-    onSelectCategory: (cat) => rail.selectCategory(cat),
-    scheduleSpan,
-    cardMenu: cardActions.cardMenu,
-  });
-  const gallerySearch: GallerySearch = createGallerySearch({
-    gallery,
-    getSearchState: () => st.searchState,
-    folders: folderCache,
-    treeLoaded: () => rail.loaded(),
-    labelFor: (folder) => rail.labelFor(folder),
-    resultCard: galleryCards.resultCard,
-    emptyState,
-    indexPending: () => st.indexPending,
-  });
-
-  /**
-  * Read per event, so a drag that ends after a navigation can't upload into
-  * the folder left. Null over a destination, results, a pending category or an
-  * open viewer: the same places Upload is hidden. `templates` comes from the
-  * rail's identity resolution.
-  */
-  function uploadDestination(): UploadDestination | null {
-    if (st.destination !== null || viewers.active() !== null) return null;
-    if (st.query.trim() !== "" || rail.pending() !== null) return null;
-    return {
-      id: st.folderId,
-      templates: st.folderId !== null && rail.categoryFor({ id: st.folderId })?.templates === true,
-    };
-  }
-
-  /** The zone owns feedback, pre-flight, progress and toasts; the shell owns the rest. */
-  const uploadZone: UploadZone = createUploadZone({
-    target: gallery,
-    // Over the scroll container, not the gallery, so a short listing's empty space
-    // is still a target.
-    overlayHost: content,
-    listHost: root,
-    destination: uploadDestination,
-    // Unknown never blocks; the server's 413 is the authority.
-    remainingBytes: () => quota.remainingBytes(),
-    // File names only: an upload never replaces a folder. Null means unknown, so
-    // the zone doesn't ask.
-    existingNames: (id) => {
-      const cached = folderCache.get(id);
-      return cached ? cached.entries.filter((e) => e.kind === "note").map((e) => e.name) : null;
-    },
-    confirmConflict: (req) => openConflictDialog({ host: root, ...req }),
-    upload: (folderIdArg, file, onProgress, signal, onConflict) =>
-      api.upload(folderIdArg, file, onProgress, signal, onConflict),
-    onUploaded: (entry, dest) => {
-      // Optimistic splice, then `refetch` corrects auto-renames.
-      const cached = folderCache.get(dest.id);
-      if (cached) {
-        // A replace keeps its id, so it swaps in place.
-        const at = cached.entries.findIndex((e) => e.id === entry.id);
-        cached.entries =
-          at >= 0 ? cached.entries.map((e, i) => (i === at ? entry : e)) : [...cached.entries, entry];
-        if (st.listing === cached || key(st.folderId) === key(dest.id)) {
-          st.listing = cached;
-          renderGallery();
-        }
-      }
-      quota.refresh();
-      void refetch(st.folderId, folderCache.get(st.folderId));
-      void folderCache.prefetch(true);
-    },
-    toast,
     handled,
+    setDestinationMode,
+    toast,
+    account,
+    scheduleSpan,
+    openHistoryPreview,
+    openAnnotationsPreview,
+    restoreVersion,
+    identity: () => identity,
+    api: () => api,
+    setThemeTo: () => setThemeTo,
+    refetch: () => refetch,
+    renderGallery: () => renderGallery,
+    emptyState: () => emptyState,
+    key: () => key,
+    folderCache: () => folderCache,
+    rail: () => rail,
+    quota: () => quota,
+    crumbs: () => crumbs,
+    sortWrap: () => sortWrap,
+    segmented: () => segmented,
+    gallery: () => gallery,
+    content: () => content,
+    galleryEngine: () => galleryEngine,
+    imgLazy: () => imgLazy,
+    exporter: () => exporter,
+    viewers: () => viewers,
+    root: () => root,
+    bin: () => bin,
   });
 
-  /** Everything is the shell's; the page owns only where buttons sit. */
-  const ACCOUNT_HOST: AccountHost = {
-    api,
-    account: identity.email,
-    content,
-    gallery,
-    crumbs,
-    sortWrap,
-    segmented,
-    setMode: (open) => setDestinationMode("account", open),
-    toast,
-root,
-    onLeave: () => go(folderHref(null)),
-    onOpenBin: () => go(destinationHref(BIN_KEY)),
-    onSignOut: () => deps.onSignOut(),
-    onSessionExpired: sessionDidExpire,
-    onSetTheme: (next) => setThemeTo(next),
-  };
   function account(): AccountPage {
     st.accountPage ??= createAccountPage(ACCOUNT_HOST);
     return st.accountPage;
