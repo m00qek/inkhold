@@ -299,10 +299,12 @@ pub fn buildMupdfWasm(b: *std.Build, dep: *std.Build.Dependency) *std.Build.Step
 
     addMupdfSources(b, dep, mod, &mupdf_wasm_flags);
 
-    mod.addCSourceFile(.{
-        .file = b.path("webapp/wasm/pdf_shim.c"),
-        .flags = &mupdf_wasm_flags,
-    });
+    for ([_][]const u8{ "pdf_shim.c", "pdf_shim_links.c", "pdf_shim_text.c", "pdf_shim_export.c" }) |shim| {
+        mod.addCSourceFile(.{
+            .file = b.path(b.pathJoin(&.{ "webapp/wasm", shim })),
+            .flags = &mupdf_wasm_flags,
+        });
+    }
 
     // Zig's vendored setjmp runtime, located via the lib dir so any toolchain works.
     mod.addCSourceFile(.{
