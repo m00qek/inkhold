@@ -70,3 +70,43 @@ export interface AdminHealth {
   blobBytes: number;
   blobCount: number;
 }
+
+/**
+ * What to tell an admin about backups (`services/backup/status.zig`): `failed`
+ * when any directory's last run failed, `never` when nothing has succeeded and
+ * the admin has not said they back up another way, `late` when the newest
+ * success anywhere is older than the server's threshold.
+ */
+export type BackupNoticeKind = "none" | "never" | "late" | "failed";
+
+export interface BackupNotice {
+  kind: BackupNoticeKind;
+  /** The directory concerned: the failing one, or the one with the newest success. */
+  dir: string | null;
+  /** Epoch seconds: when it failed, or the newest success (`late`). */
+  at: number | null;
+  /** The first line the backup command printed when it failed. */
+  message: string | null;
+}
+
+/** One backup directory's record. Epoch seconds; null where it never happened. */
+export interface BackupRun {
+  dir: string;
+  lastRunAt: number | null;
+  lastOkAt: number | null;
+  lastError: string | null;
+  snapshot: string | null;
+  files: number | null;
+  bytes: number | null;
+  verifiedAt: number | null;
+  verifyError: string | null;
+}
+
+export interface AdminBackups {
+  warnAfterHours: number;
+  /** An admin said they back up another way: `never` is not shown. */
+  neverDismissed: boolean;
+  notice: BackupNotice;
+  /** Most recent activity first. */
+  runs: BackupRun[];
+}

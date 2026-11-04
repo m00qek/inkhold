@@ -6,6 +6,54 @@
   min-height: 0;
 }
 
+/* The topbar and, for admins, the backup notice: one grid row, so `.main`
+   keeps its two. */
+.main__head {
+  min-width: 0;
+}
+
+/* One line above the gallery when a backup failed, is late, or never ran.
+   Quiet by design (paper and the margin's red), never a modal. */
+.backup-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 8px 24px;
+  border-bottom: 1px solid color-mix(in srgb, var(--margin) 35%, var(--line));
+  background: color-mix(in srgb, var(--margin) 7%, var(--sheet));
+  font-size: var(--fs-caption);
+  color: var(--ink);
+}
+
+.backup-notice[hidden] {
+  display: none;
+}
+
+.backup-notice__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.backup-notice__open {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--margin) 45%, var(--line));
+  border-radius: var(--radius);
+  background: var(--sheet);
+  font: inherit;
+  color: var(--margin-ink);
+  cursor: pointer;
+}
+
+.backup-notice__open:hover {
+  border-color: var(--margin);
+}
+
+.backup-notice__open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .topbar {
   display: flex;
   align-items: center;

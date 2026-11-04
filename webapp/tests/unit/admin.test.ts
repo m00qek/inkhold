@@ -248,3 +248,45 @@ describe("admin console: elevate and retry", () => {
 });
 
 // --- the actions -------------------------------------------------------------
+
+// --- backups -------------------------------------------------------------------
+
+describe("admin console: backups", () => {
+  async function ready() {
+    const t = build();
+    t.state.elevated = true;
+    await t.console.open();
+    return t;
+  }
+
+  it("loads the backup record into the Server panel", async () => {
+    const t = await ready();
+    const s = t.console.state();
+    expect(s.kind === "ready" && s.server.backups?.runs.map((r) => r.dir)).toEqual(["/mnt/nas"]);
+  });
+
+  it("forgetting a directory asks first, then tells the library to re-ask", async () => {
+    const t = await ready();
+    t.answers.confirm = false;
+    await t.console.forgetBackupDir("/mnt/nas");
+    expect(t.api.adminForgetBackupDir).not.toHaveBeenCalled();
+
+    t.answers.confirm = true;
+    await t.console.forgetBackupDir("/mnt/nas");
+    expect(t.api.adminForgetBackupDir).toHaveBeenCalledWith("/mnt/nas");
+    expect(t.seen.confirms.at(-1)?.text).toMatch(/backup files themselves are not touched/);
+    const s = t.console.state();
+    expect(s.kind === "ready" && s.server.backups?.runs).toEqual([]);
+    expect(t.onBackupsChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("'I back up another way' is saved and announced, and can be taken back", async () => {
+    const t = await ready();
+    await t.console.setBackupDismissed(true);
+    expect(t.state.backupDismissed).toBe(true);
+    expect(t.view.toast).toHaveBeenLastCalledWith("Inkhold will stop asking about backups");
+    await t.console.setBackupDismissed(false);
+    expect(t.state.backupDismissed).toBe(false);
+    expect(t.onBackupsChanged).toHaveBeenCalledTimes(2);
+  });
+});

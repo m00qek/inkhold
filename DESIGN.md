@@ -144,6 +144,15 @@ separate process beside a running server; scheduling is cron's or systemd's.
   a tablet that resumes syncing against an older server may delete what it
   holds that the server lacks (#21's mechanism). Thumbnails and search text
   are rebuilt by the server (§8.3).
+- **The notice.** Households never read cron mail. `create` and `verify`
+  record every run, good or failed, in `backup_runs` (one row per directory,
+  schema v17), whenever the database is reachable; `restore` empties it.
+  `backup/status.zig` judges it: a directory whose last run failed is
+  `failed`, always; no success anywhere is `never`, unless an admin said they
+  back up another way; the newest success anywhere older than
+  `backup_warn_after_hours` (48) is `late`, so a weekly USB disk beside a
+  nightly NAS is fine. Admins see it as one line in the library (no elevation,
+  or it would hide behind a prompt); the Server panel lists each directory.
 
 ## 3. Concurrency
 

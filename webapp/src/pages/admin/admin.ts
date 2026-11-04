@@ -4,7 +4,7 @@
 // absent: it would be surveillance of a housemate.
 
 import { ApiError, dispatchApiFailure, type ApiFailureSink } from "../../api/client";
-import type { AdminDevice, AdminHealth, AdminQuota, AdminRetention, AdminUser } from "../../api/adminTypes";
+import type { AdminBackups, AdminDevice, AdminHealth, AdminQuota, AdminRetention, AdminUser } from "../../api/adminTypes";
 import type { Api } from "../../api/types";
 import { displayName, RETENTION_NEVER_PURGES, GB, formatBytes, deviceTitle, failureMessage, gateMessage } from "./adminCopy";
 export { displayName, initials, accountAge, RETENTION_NEVER_PURGES, GB, formatBytes, meterFor, memoryCard, deviceTitle, deviceMeta, failureMessage } from "./adminCopy";
@@ -28,6 +28,9 @@ export type AdminApi = Pick<
   | "adminGetRetention"
   | "adminSetRetention"
   | "adminHealth"
+  | "adminBackups"
+  | "adminSetBackupDismissed"
+  | "adminForgetBackupDir"
 >;
 
 /** `locked` is the entry state, not an error; a lapsed elevation returns here. */
@@ -47,6 +50,7 @@ export interface Person {
 export interface Server {
   health: AdminHealth | null;
   retention: AdminRetention | null;
+  backups: AdminBackups | null;
 }
 
 export interface ConfirmSpec {
@@ -103,6 +107,8 @@ export interface AdminDeps {
   onSessionExpired(): void;
   /** Fired only on a real change; the rail's padlock repaints on it. */
   onElevationChanged(): void;
+  /** A dismissal or a forgotten directory: the library's notice re-asks. */
+  onBackupsChanged(): void;
 }
 
 export interface AdminConsole {
@@ -119,6 +125,10 @@ export interface AdminConsole {
   setQuota(person: Person): Promise<void>;
   unlinkDevice(person: Person, device: AdminDevice): Promise<void>;
   setRetention(): Promise<void>;
+  /** "I back up another way", or take it back. */
+  setBackupDismissed(dismissed: boolean): Promise<void>;
+  /** Forget a directory no longer in use, after asking. */
+  forgetBackupDir(dir: string): Promise<void>;
   state(): AdminState;
   /**
   * Tracked from server evidence (a listing succeeded, or a 428), not from
@@ -260,6 +270,7 @@ export function createAdminConsole(deps: AdminDeps): AdminConsole {
       const server: Server = {
         health: await detail(() => api.adminHealth()),
         retention: await detail(() => api.adminGetRetention()),
+        backups: await detail(() => api.adminBackups()),
       };
       if (mine !== refreshToken) return;
       set({ kind: "ready", people, server, busy: false });
@@ -468,6 +479,30 @@ export function createAdminConsole(deps: AdminDeps): AdminConsole {
       }
       await refresh();
       view.toast(`Notes now wait ${saved.retentionDays} days before being removed`);
+    },
+
+    async setBackupDismissed(dismissed: boolean): Promise<void> {
+      if (state.kind !== "ready" || state.busy) return;
+      busy(true);
+      if ((await run(() => api.adminSetBackupDismissed(dismissed))) === null) return busy(false);
+      await refresh();
+      deps.onBackupsChanged();
+      view.toast(dismissed ? "Inkhold will stop asking about backups" : "Inkhold will remind you again if nothing is backed up");
+    },
+
+    async forgetBackupDir(dir: string): Promise<void> {
+      if (state.kind !== "ready" || state.busy) return;
+      const ok = await view.confirm({
+        title: `Forget ${dir}?`,
+        text: "Its record goes, and so does any warning about it. The backup files themselves are not touched.",
+        label: "Forget",
+      });
+      if (!ok) return;
+      busy(true);
+      if ((await run(() => api.adminForgetBackupDir(dir))) === null) return busy(false);
+      await refresh();
+      deps.onBackupsChanged();
+      view.toast(`Forgot ${dir}`);
     },
   };
 }

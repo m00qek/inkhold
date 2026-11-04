@@ -236,3 +236,66 @@
   line-height: 1.5;
   color: var(--ink-soft);
 }
+
+/* --- backups: the Server panel's detail ------------------------------------ */
+
+.admin-backups {
+  margin-top: 12px;
+}
+
+.admin-backups__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--row-rule);
+}
+
+.admin-backup {
+  display: grid;
+  grid-template-columns: minmax(0, 14rem) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: var(--row-pad-y-tight) 0;
+  border-bottom: 1px solid var(--row-rule);
+  font-size: var(--fs-caption);
+}
+
+.admin-backup__dir {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-backup__detail {
+  color: var(--ink-soft);
+}
+
+/* A failing directory reads in the margin's red, the app's one alarm colour. */
+.admin-backup[data-ok="false"] .admin-backup__detail {
+  color: var(--margin-ink);
+}
+
+.admin-backups__acts {
+  margin-top: 10px;
+}
+
+.admin-btn--quiet {
+  border-color: transparent;
+  background: transparent;
+}
+
+.admin-btn--quiet:hover:not(:disabled) {
+  border-color: var(--line);
+}
+
+@media (max-width: 640px) {
+  .admin-backup {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .admin-backup__detail {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}

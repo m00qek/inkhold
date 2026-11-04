@@ -24,6 +24,7 @@ export interface AdminHost {
   toast(message: string): void;
   onSessionExpired(): void;
   onElevationChanged(): void;
+  onBackupsChanged(): void;
 }
 
 /** Same open/isOpen shape as `BinController`, so the shell treats both alike. */
@@ -55,6 +56,8 @@ export function createAdminPanel(host: AdminHost): AdminPanel {
     onQuota: (person) => void console_.setQuota(person),
     onUnlink: (person, device) => void console_.unlinkDevice(person, device),
     onRetention: () => void console_.setRetention(),
+    onBackupDismiss: (dismissed) => void console_.setBackupDismissed(dismissed),
+    onBackupForget: (dir) => void console_.forgetBackupDir(dir),
   });
 
   const console_ = createAdminConsole({
@@ -63,6 +66,7 @@ export function createAdminPanel(host: AdminHost): AdminPanel {
     account: host.account,
     onSessionExpired: host.onSessionExpired,
     onElevationChanged: host.onElevationChanged,
+    onBackupsChanged: host.onBackupsChanged,
   });
 
   let open = false;

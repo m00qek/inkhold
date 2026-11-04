@@ -1,6 +1,7 @@
 // The fake API's admin console: a mutable household, elevation, quotas and health.
 
 import { delay } from "./fake";
+import type { AdminBackups, BackupNotice } from "./adminTypes";
 
 export function fakeAdminMethods(latency: number) {
   // Per instance: each fake API gets its own household to mutate.
@@ -50,6 +51,39 @@ export function fakeAdminMethods(latency: number) {
 
   let retentionDays = 30;
   let retentionChangedAt = 0;
+
+  /**
+   * Backups start healthy (a nightly NAS run an hour ago), so no spec sees a
+   * notice it did not ask for. A spec seeds another state before boot with
+   * `page.addInitScript(() => { globalThis.__snFakeBackups = {...} })`.
+   */
+  const nowS = (): number => Math.floor(Date.now() / 1000);
+  const seeded = (globalThis as { __snFakeBackups?: { runs?: AdminBackups["runs"]; neverDismissed?: boolean } }).__snFakeBackups;
+  let backupRuns: AdminBackups["runs"] = seeded?.runs ?? [
+    { dir: "/mnt/nas/inkhold", lastRunAt: nowS() - 3600, lastOkAt: nowS() - 3600, lastError: null, snapshot: "2026-11-04T030000Z", files: 1284, bytes: 4.8 * 1024 * 1024 * 1024, verifiedAt: null, verifyError: null },
+  ];
+  let backupNeverDismissed = seeded?.neverDismissed ?? false;
+  const WARN_AFTER_HOURS = 48;
+
+  /** The server's rules (`backup/status.zig`), so the UI is exercised against them. */
+  const judgeBackups = (): BackupNotice => {
+    const failing = backupRuns
+      .filter((r) => r.lastError !== null || r.verifyError !== null)
+      .map((r) => ({ r, at: r.lastError !== null ? r.lastRunAt : r.verifiedAt }))
+      .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))[0];
+    if (failing) return { kind: "failed", dir: failing.r.dir, at: failing.at, message: failing.r.lastError ?? failing.r.verifyError };
+    const newest = backupRuns.filter((r) => r.lastOkAt !== null).sort((a, b) => b.lastOkAt! - a.lastOkAt!)[0];
+    if (!newest) return backupNeverDismissed ? none() : { kind: "never", dir: null, at: null, message: null };
+    if (nowS() - newest.lastOkAt! > WARN_AFTER_HOURS * 3600) return { kind: "late", dir: newest.dir, at: newest.lastOkAt, message: null };
+    return none();
+  };
+  const none = (): BackupNotice => ({ kind: "none", dir: null, at: null, message: null });
+  const backups = (): AdminBackups => ({
+    warnAfterHours: WARN_AFTER_HOURS,
+    neverDismissed: backupNeverDismissed,
+    notice: judgeBackups(),
+    runs: backupRuns.map((r) => ({ ...r })),
+  });
 
   const notFound = () => httpError("USER_NOT_FOUND", "no such user", 404);
 
@@ -174,6 +208,35 @@ export function fakeAdminMethods(latency: number) {
       // Not retroactive: nothing is purged; `changedAt` gives existing entries a new window.
       retentionChangedAt = Math.floor(Date.now() / 1000);
       return { retentionDays, defaultDays: 30, minDays: 1, maxDays: 365, changedAt: retentionChangedAt };
+    },
+
+    /** Ana is the fake's admin; the shell's `/me` mock decides who is signed in. */
+    async backupNotice(): Promise<BackupNotice> {
+      await delay(latency);
+      return judgeBackups();
+    },
+
+    async adminBackups(): Promise<AdminBackups> {
+      await delay(latency);
+      if (!elevated) throw await needsElevation();
+      return backups();
+    },
+
+    async adminSetBackupDismissed(dismissed: boolean): Promise<AdminBackups> {
+      await delay(latency);
+      if (!elevated) throw await needsElevation();
+      backupNeverDismissed = dismissed;
+      return backups();
+    },
+
+    async adminForgetBackupDir(dir: string): Promise<AdminBackups> {
+      await delay(latency);
+      if (!elevated) throw await needsElevation();
+      if (!backupRuns.some((r) => r.dir === dir)) {
+        throw await httpError("NO_SUCH_BACKUP_DIR", "no backup has been recorded for that directory", 404);
+      }
+      backupRuns = backupRuns.filter((r) => r.dir !== dir);
+      return backups();
     },
 
     async adminHealth() {

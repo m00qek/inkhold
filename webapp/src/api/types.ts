@@ -13,7 +13,7 @@ import type { PdfLink } from "../core/types";
 import type { Entry, FileHistory, Hash, Id, Listing, NoteMeta, PageRef, PageText, RestoredVersion } from "../core/types";
 import type { Bin, Restored, Trashed } from "../core/binTypes";
 import type { AccountSecurity, MyDevice, StorageBreakdown, VersionPolicy, VersionPolicyChange } from "./accountTypes";
-import type { AdminDevice, AdminHealth, AdminQuota, AdminRetention, AdminUser } from "./adminTypes";
+import type { AdminDevice, AdminHealth, AdminQuota, AdminRetention, AdminUser, AdminBackups, BackupNotice } from "./adminTypes";
 import type { UploadConflictMode } from "./client";
 
 /** One page's links. An object, not a bare array, so the wire can gain fields. */
@@ -161,6 +161,21 @@ export interface Api {
 
   /** Server-wide health. */
   adminHealth(): Promise<AdminHealth>;
+
+  /**
+   * The library's backup notice. Answered for any signed-in caller, but only an
+   * admin hears anything other than `none`; no elevation needed.
+   */
+  backupNotice(): Promise<BackupNotice>;
+
+  /** Every backup directory's record, and the notice. */
+  adminBackups(): Promise<AdminBackups>;
+
+  /** "I back up another way": silences `never`, never `failed`. */
+  adminSetBackupDismissed(dismissed: boolean): Promise<AdminBackups>;
+
+  /** Forget a directory no longer used, so its last failure stops warning. 404 `NO_SUCH_BACKUP_DIR`. */
+  adminForgetBackupDir(dir: string): Promise<AdminBackups>;
 
   // --- HISTORY ---
   // Note-scoped by `:id` (the `/note/:id` ownership gate); per-version routes

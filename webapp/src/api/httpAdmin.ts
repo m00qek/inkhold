@@ -3,6 +3,7 @@
 import { challengeHash } from "./crypto";
 import { ApiError } from "./errors";
 import { request } from "./request";
+import type { AdminBackups, BackupNotice, BackupNoticeKind, BackupRun } from "./adminTypes";
 
 export const adminMethods = {
   // --- ADMIN WRITES ---
@@ -145,7 +146,71 @@ export const adminMethods = {
       blobCount: h.blob_count ?? 0,
     };
   },
+
+  // --- BACKUPS ---
+  // The notice is the library's (any signed-in caller, no elevation); the rest
+  // is the Server panel's and `require_admin` like the calls above.
+
+  async backupNotice(): Promise<BackupNotice> {
+    return noticeOf(await request<RawNotice>("GET", "/api/backup-notice"));
+  },
+
+  async adminBackups(): Promise<AdminBackups> {
+    return backupsOf(await request<RawBackups>("GET", "/api/admin/backups"));
+  },
+
+  async adminSetBackupDismissed(dismissed: boolean): Promise<AdminBackups> {
+    return backupsOf(await request<RawBackups>("PUT", "/api/admin/backups/dismissed", { dismissed }));
+  },
+
+  async adminForgetBackupDir(dir: string): Promise<AdminBackups> {
+    return backupsOf(await request<RawBackups>("POST", "/api/admin/backups/forget", { dir }));
+  },
 };
+
+// ---- backups: the server omits a null field, so absent becomes null here ----
+
+type RawNotice = { kind?: string; dir?: string; at?: number; message?: string };
+type RawRun = Partial<Record<keyof BackupRun, unknown>>;
+type RawBackups = { warnAfterHours?: number; neverDismissed?: boolean; notice?: RawNotice; runs?: RawRun[] };
+
+const KINDS: readonly BackupNoticeKind[] = ["none", "never", "late", "failed"];
+
+/** An unknown kind reads as `none`: a newer server must not paint a false alarm. */
+function noticeOf(r: RawNotice | undefined): BackupNotice {
+  const kind = KINDS.includes(r?.kind as BackupNoticeKind) ? (r!.kind as BackupNoticeKind) : "none";
+  return { kind, dir: r?.dir ?? null, at: num(r?.at), message: r?.message ?? null };
+}
+
+function backupsOf(r: RawBackups): AdminBackups {
+  const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  return {
+    warnAfterHours: typeof r.warnAfterHours === "number" ? r.warnAfterHours : 48,
+    neverDismissed: r.neverDismissed === true,
+    notice: noticeOf(r.notice),
+    runs: (r.runs ?? []).flatMap((x) =>
+      typeof x.dir === "string"
+        ? [
+            {
+              dir: x.dir,
+              lastRunAt: num(x.lastRunAt),
+              lastOkAt: num(x.lastOkAt),
+              lastError: str(x.lastError),
+              snapshot: str(x.snapshot),
+              files: num(x.files),
+              bytes: num(x.bytes),
+              verifiedAt: num(x.verifiedAt),
+              verifyError: str(x.verifyError),
+            },
+          ]
+        : [],
+    ),
+  };
+}
+
+function num(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
 
 /** Not clamped: over-quota is a real state the meter draws. */
 function quotaOf(r: { used_bytes?: number; total_bytes?: number }): { usedBytes: number; totalBytes: number } {

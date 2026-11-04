@@ -3,7 +3,7 @@
 import { vi } from "vitest";
 import { createAdminConsole, GB, type AdminApi, type AdminState, type AdminView, type ConfirmSpec, type NewPerson, type NumberSpec } from "../../src/pages/admin/admin";
 import { ApiError } from "../../src/api/client";
-import type { AdminDevice, AdminUser } from "../../src/api/adminTypes";
+import type { AdminBackups, AdminDevice, AdminUser, BackupRun } from "../../src/api/adminTypes";
 
 // --- fixtures ----------------------------------------------------------------
 
@@ -48,6 +48,20 @@ export function server(people: AdminUser[] = [ANA, RUI]) {
       { usedBytes: number; totalBytes: number }
     >,
     retentionDays: 30,
+    backupRuns: [
+      {
+        dir: "/mnt/nas",
+        lastRunAt: 1_760_000_000,
+        lastOkAt: 1_760_000_000,
+        lastError: null,
+        snapshot: "2025-10-09T090000Z",
+        files: 12,
+        bytes: 3 * GB,
+        verifiedAt: null,
+        verifyError: null,
+      },
+    ] as BackupRun[],
+    backupDismissed: false,
   };
 
   const gated = <T>(fn: () => T): Promise<T> =>
@@ -110,7 +124,29 @@ export function server(people: AdminUser[] = [ANA, RUI]) {
         blobCount: 1284,
       })),
     ),
+    adminBackups: vi.fn(() => gated(() => backups())),
+    adminSetBackupDismissed: vi.fn((dismissed: boolean) =>
+      gated(() => {
+        state.backupDismissed = dismissed;
+        return backups();
+      }),
+    ),
+    adminForgetBackupDir: vi.fn((dir: string) =>
+      gated(() => {
+        state.backupRuns = state.backupRuns.filter((r) => r.dir !== dir);
+        return backups();
+      }),
+    ),
   } satisfies AdminApi;
+
+  function backups(): AdminBackups {
+    return {
+      warnAfterHours: 48,
+      neverDismissed: state.backupDismissed,
+      notice: { kind: "none", dir: null, at: null, message: null },
+      runs: state.backupRuns.map((r) => ({ ...r })),
+    };
+  }
 
   return { api, state };
 }
@@ -150,14 +186,16 @@ export function build(people?: AdminUser[]) {
   const v = view();
   const onSessionExpired = vi.fn();
   const onElevationChanged = vi.fn();
+  const onBackupsChanged = vi.fn();
   const console_ = createAdminConsole({
     api: s.api,
     view: v.view,
     account: "ana@household.lan",
     onSessionExpired,
     onElevationChanged,
+    onBackupsChanged,
   });
-  return { ...s, ...v, console: console_, onSessionExpired, onElevationChanged };
+  return { ...s, ...v, console: console_, onSessionExpired, onElevationChanged, onBackupsChanged };
 }
 
 export const shown = (state: AdminState | undefined): string[] =>

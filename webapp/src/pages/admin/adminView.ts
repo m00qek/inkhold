@@ -7,6 +7,8 @@ import { ICONS, svg } from "../../ui/icons";
 import { type AdminDevice, type AdminUser } from "../../api/adminTypes";
 import { type AdminState, type Person, type Server, type ConfirmSpec, type NewPerson, type NumberSpec, type HandOver, type AdminView } from "./admin";
 import { type Meter, displayName, deviceTitle, deviceMeta, accountAge, meterFor, memoryCard, formatBytes, RETENTION_NEVER_PURGES } from "./adminCopy";
+import { backupsCard } from "./backupCopy";
+import { backupsDetail } from "./adminBackupsView";
 import { initials } from "../account/account";
 
 // ---- the painter ----
@@ -50,6 +52,8 @@ export function createAdminView(opts: {
   onQuota(person: Person): void;
   onUnlink(person: Person, device: AdminDevice): void;
   onRetention(): void;
+  onBackupDismiss(dismissed: boolean): void;
+  onBackupForget(dir: string): void;
 }): AdminView {
   const { host, body } = opts;
 
@@ -255,8 +259,8 @@ export function createAdminView(opts: {
 
   /** Household totals only; no uptime or last-sync cards (activity surveillance). */
   function serverPanel(server: Server, busy: boolean): HTMLElement | null {
-    const { health, retention } = server;
-    if (!health && !retention) return null; // nothing readable: draw no panel at all
+    const { health, retention, backups } = server;
+    if (!health && !retention && !backups) return null; // nothing readable: draw no panel at all
 
     const cards: (HTMLElement | null)[] = [];
     if (health) {
@@ -285,6 +289,11 @@ export function createAdminView(opts: {
       );
     }
 
+    if (backups) {
+      const card = backupsCard(backups);
+      cards.push(statCard("Backups", card.value, card.sub, null, null));
+    }
+
     return el(
       "section",
       { class: "admin-server" },
@@ -296,6 +305,9 @@ export function createAdminView(opts: {
         el("span", { class: "admin-head__rule", "aria-hidden": "true" }),
       ),
       el("div", { class: "admin-stats" }, ...cards),
+      backups
+        ? backupsDetail(backups, busy, { onDismiss: opts.onBackupDismiss, onForget: opts.onBackupForget })
+        : null,
       retention
         ? el("p", {
             class: "admin-server__note",

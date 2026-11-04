@@ -23,6 +23,8 @@ export interface AdminDestinationDeps {
   isCurrent: () => boolean;
   toast: (message: string) => void;
   onSessionExpired: () => void;
+  /** The console changed what the library's backup notice should say. */
+  onBackupsChanged: () => void;
 }
 
 export interface AdminDestination {
@@ -119,6 +121,7 @@ export function createAdminDestination(deps: AdminDestinationDeps): AdminDestina
             // Elevation changes only inside the panel (unlock, lock, 428); rebuild the
             // rail so the padlock never lies.
             onElevationChanged: () => deps.rebuildRail(),
+            onBackupsChanged: deps.onBackupsChanged,
             toast: deps.toast,
             onSessionExpired: deps.onSessionExpired,
           });

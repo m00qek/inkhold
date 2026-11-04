@@ -237,6 +237,11 @@ Things worth knowing:
 - **Back up each tablet before it signs in to a restored server.** A restore
   signs every tablet out, because a tablet that syncs against a server older
   than itself may delete files the server does not have.
+- **Admins are told when backups stop.** A line in the library says when the
+  last backup failed, is more than two days old (`.backup_warn_after_hours`
+  in the config), or never happened; the admin console's Server panel lists
+  every backup folder. If you back up some other way, say so there and the
+  "never" reminder stops; a failing `inkhold backup` still shows.
 - A backup is slow on purpose: it runs at low priority and reads at 4 MiB/s
   (`--max-rate` changes it), so syncing from the tablet stays quick meanwhile.
 - On FAT32 a single file cannot exceed 4 GB; on "online-only" cloud folders

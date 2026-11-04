@@ -10,7 +10,8 @@
 
 import { el } from "../../ui/dom";
 import { SORT_KEY, readLocal, writeLocal } from "../../ui/storage";
-import { binNotePageHref, folderHref, go } from "../../router";
+import { binNotePageHref, destinationHref, folderHref, go } from "../../router";
+import { createBackupNotice } from "./backupNotice";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";
 import type { RenderCache } from "../../cache/types";
@@ -238,10 +239,17 @@ export function createAppShell(deps: AppDeps): AppShell {
   // ---- viewers ----
   ctx.viewers = createViewerSet(createLibraryViewerDeps(ctx), content, gallery);
 
+  // Admins only: a backup that failed, is late, or never happened.
+  const backupNotice = createBackupNotice({
+    api,
+    isAdmin: () => identity.isAdmin,
+    onOpen: () => go(destinationHref(ADMIN_KEY)),
+  });
+
   ctx.root = el(
     "div",
     { class: "sn-root" },
-    el("div", { class: "app" }, ctx.sidebar, el("main", { class: "main" }, ctx.topbar.el, content)),
+    el("div", { class: "app" }, ctx.sidebar, el("main", { class: "main" }, el("div", { class: "main__head" }, ctx.topbar.el, backupNotice.el), content)),
     toastEl,
   );
 
@@ -260,6 +268,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     isCurrent: () => st.destination === ADMIN_KEY,
     toast: ctx.toast,
     onSessionExpired: ctx.sessionDidExpire,
+    onBackupsChanged: () => void backupNotice.refresh(),
   });
 
   ctx.bin = createBin({
@@ -349,6 +358,7 @@ export function createAppShell(deps: AppDeps): AppShell {
       ctx.bin.destroy();
       ctx.viewers.destroy();
       ctx.adminDest.destroy();
+      backupNotice.destroy();
       st.accountPage?.destroy();
       // Aborts uploads and drops the document-level drag swallowers.
       ctx.features.uploadZone.destroy();
