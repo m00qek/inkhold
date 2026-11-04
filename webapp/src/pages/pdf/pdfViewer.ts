@@ -28,7 +28,8 @@ import {
 } from "./pdfFind";
 import { createBinViewerActions } from "../../ui/binViewerActions";
 import { createLayersPanel } from "../layersPanel";
-import { contextualOpener, createCopyControl, createPdfDocks, createPdfFindBarView } from "./pdfChrome";
+import { contextualOpener, createCopyControl, createPdfDocks } from "./pdfChrome";
+import { createFindBar } from "../viewer/findBar";
 import { buildNoteLayerThumb, createNoteLayersController } from "../noteLayers";
 import { createPdfExports } from "./pdfExports";
 import { createPdfViewerExports } from "./pdfViewerExports";
@@ -291,7 +292,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     title: "Find in this file (Ctrl+F)",
     html: svg(VIEWER_IC.find, 1.8),
   }) as HTMLButtonElement;
-  const findBar = createPdfFindBarView();
+  const findBar = createFindBar({ block: "pdfbar", label: "Find in this file" });
 
   const toolbar = createToolbar({
     label: "PDF viewer",
@@ -336,7 +337,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     toolbar.el,
     // Above the page, since it qualifies what is on screen.
     versionBanner.el,
-    findBar.bar,
+    findBar.el,
     main,
   );
 
@@ -396,7 +397,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     words: async (page) => (st.session && st.open_ ? st.session.pageWords(page) : []),
     view: {
       setOpen(isOpen) {
-        findBar.bar.hidden = !isOpen;
+        findBar.el.hidden = !isOpen;
         root.classList.toggle("is-finding", isOpen);
         findToggle.setAttribute("aria-pressed", String(isOpen));
         if (!isOpen) findLayer.clear();

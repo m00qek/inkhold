@@ -17,7 +17,8 @@ import type { LinkLayer } from "../linkLayer";
 import type { NoteLayersController } from "../noteLayers";
 import type { PdfSeam } from "./pdfViewer";
 import type { PdfViewerState } from "./pdfViewerState";
-import type { ContextualOpener, CopyControl, PdfDocks, PdfFindBarView } from "./pdfChrome";
+import type { ContextualOpener, CopyControl, PdfDocks } from "./pdfChrome";
+import type { FindBar } from "../viewer/findBar";
 import type { PdfExports } from "./pdfExports";
 import type { PdfFindController } from "./pdfFind";
 import type { PdfHighlightLayer } from "./pdfHighlightLayer";
@@ -72,7 +73,7 @@ export interface PdfViewerCtx {
   docks: PdfDocks;
   copy: CopyControl;
   findToggle: HTMLButtonElement;
-  findBar: PdfFindBarView;
+  findBar: FindBar;
   main: HTMLElement;
   root: HTMLElement;
 

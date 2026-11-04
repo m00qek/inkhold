@@ -2,6 +2,7 @@
 
 import { el } from "../../ui/dom";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
+import { createFindBar } from "../viewer/findBar";
 
 export interface ReaderVersionBanner {
   el: HTMLElement;
@@ -52,20 +53,6 @@ export function createFindBarView(): FindBarView {
     title: "Find in this note (Ctrl+F)",
     html: svg(VIEWER_IC.find, 1.8),
   });
-  const findInput = el("input", {
-    type: "text",
-    autocomplete: "off",
-    placeholder: "Find in this note",
-    "aria-label": "Find in this note",
-  }) as HTMLInputElement;
-  const findCount = el("span", { class: "findbar__count", role: "status", "aria-live": "polite" });
-  // Shown when ovals cannot be drawn (unverified or mismatched `pxPerMm`), so a
-  // correct count beside an unmarked page is explained.
-  const findNote = el("span", {
-    class: "findbar__note",
-    hidden: true,
-    text: "Match positions aren't available for this device.",
-  });
   // Said once beside the counter, never per match.
   const findFuzzy = el("span", {
     class: "findbar__fuzzy",
@@ -73,59 +60,16 @@ export function createFindBarView(): FindBarView {
     hidden: true,
     text: "No exact match — showing close matches.",
   });
-  // Offered when the exact find is empty but a fuzzy one would match; reveals
-  // the fuzzy result already returned.
-  const findAsk = el("button", {
-    class: "findbar__ask",
-    type: "button",
+  // Shown when ovals cannot be drawn (unverified or mismatched `pxPerMm`), so a
+  // correct count beside an unmarked page is explained.
+  const findNote = el("span", {
+    class: "findbar__note",
     hidden: true,
-    text: "Search similar",
-  }) as HTMLButtonElement;
-  const findPrev = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Previous match",
-    title: "Previous match",
-    html: svg(VIEWER_IC.prev, 1.9),
-  }) as HTMLButtonElement;
-  const findNext = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Next match",
-    title: "Next match",
-    html: svg(VIEWER_IC.next, 1.9),
-  }) as HTMLButtonElement;
-  const findClose = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Close find",
-    title: "Close find",
-    html: svg(VIEWER_IC.close, 1.9),
+    text: "Match positions aren't available for this device.",
   });
-  const findBar = el(
-    "div",
-    { class: "findbar" },
-    el("span", { class: "findbar__field", html: svg(VIEWER_IC.find, 1.8) }, findInput),
-    findCount,
-    findAsk,
-    findFuzzy,
-    findNote,
-    findPrev,
-    findNext,
-    findClose,
-  );
-  return {
-    el: findBar,
-    toggle: findToggle,
-    input: findInput,
-    count: findCount,
-    note: findNote,
-    fuzzy: findFuzzy,
-    ask: findAsk,
-    prev: findPrev,
-    next: findNext,
-    close: findClose,
-  };
+  // Shown through `.is-finding` on the reader, not `hidden`.
+  const bar = createFindBar({ block: "findbar", label: "Find in this note", hidden: false, extras: [findFuzzy, findNote] });
+  return { ...bar, toggle: findToggle, note: findNote, fuzzy: findFuzzy };
 }
 
 export interface ReaderButtons {

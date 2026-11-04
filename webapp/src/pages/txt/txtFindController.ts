@@ -2,10 +2,9 @@
 // index names matching paragraphs with byte ranges, which are mapped into the
 // loaded string. Steps between matching paragraphs rather than pages.
 
-import { el } from "../../ui/dom";
 import { dispatchApiFailure } from "../../api/client";
-import { svg, VIEWER_IC } from "../viewer/viewerIcons";
 import { VIEWER_DEBOUNCE_MS } from "../viewer/viewerChrome";
+import { createFindBar } from "../viewer/findBar";
 import type { ViewerDeps } from "../viewer/viewer";
 import {
   buildFindContent,
@@ -72,55 +71,11 @@ export function createTxtFind(deps: TxtFindDeps): TxtFindController {
   let pendingTarget: number | null = null;
 
   // ---- find bar ----
-  // Steps between matching paragraphs rather than pages.
-  const findInput = el("input", {
-    type: "text",
-    autocomplete: "off",
-    placeholder: "Find in this file",
-    "aria-label": "Find in this file",
-  }) as HTMLInputElement;
-  const findCount = el("span", { class: "txtbar__count", role: "status", "aria-live": "polite" });
-  // The manual-fuzzy opt-in: offered when exact find is empty but fuzzy found
-  // matches; reveals the already-computed held result.
-  const findAsk = el("button", {
-    class: "txtbar__ask",
-    type: "button",
-    hidden: true,
-    text: "Search similar",
-  }) as HTMLButtonElement;
-  const findPrev = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Previous match",
-    title: "Previous match",
-    html: svg(VIEWER_IC.prev, 1.9),
-  }) as HTMLButtonElement;
-  const findNext = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Next match",
-    title: "Next match",
-    html: svg(VIEWER_IC.next, 1.9),
-  }) as HTMLButtonElement;
-  const findClose = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Close find",
-    title: "Close find",
-    html: svg(VIEWER_IC.close, 1.9),
-  });
-  // Own class, not `.findbar`: both viewers are mounted and the reader's tests
-  // query `.findbar` globally.
-  const findBar = el(
-    "div",
-    { class: "txtbar", hidden: true },
-    el("span", { class: "txtbar__field", html: svg(VIEWER_IC.find, 1.8) }, findInput),
-    findCount,
-    findAsk,
-    findPrev,
-    findNext,
-    findClose,
-  );
+  // Steps between matching paragraphs rather than pages. Own block, not
+  // `.findbar`: both viewers are mounted and the reader's tests query `.findbar`
+  // globally.
+  const { el: findBar, input: findInput, count: findCount, ask: findAsk, prev: findPrev, next: findNext, close: findClose } =
+    createFindBar({ block: "txtbar", label: "Find in this file" });
 
   // ---- find ----
 

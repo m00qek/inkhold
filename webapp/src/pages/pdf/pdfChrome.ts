@@ -1,5 +1,5 @@
-// The PDF viewer's chrome pieces: the dimmable opener, the find bar's DOM, the
-// copy control and the dock layout that keeps the page from being squeezed.
+// The PDF viewer's chrome pieces: the dimmable opener, the copy control and the
+// dock layout that keeps the page from being squeezed.
 
 import { el } from "../../ui/dom";
 import { copyText } from "../../ui/clipboard";
@@ -40,65 +40,6 @@ export function contextualOpener(spec: {
       button.title = name;
     },
   };
-}
-
-export interface PdfFindBarView {
-  bar: HTMLElement;
-  input: HTMLInputElement;
-  count: HTMLElement;
-  /** "Search similar" prompt. */
-  ask: HTMLButtonElement;
-  prev: HTMLButtonElement;
-  next: HTMLButtonElement;
-  close: HTMLButtonElement;
-}
-
-export function createPdfFindBarView(): PdfFindBarView {
-  const findInput = el("input", {
-    type: "text",
-    autocomplete: "off",
-    placeholder: "Find in this file",
-    "aria-label": "Find in this file",
-  }) as HTMLInputElement;
-  const findCount = el("span", { class: "pdfbar__count", role: "status", "aria-live": "polite" });
-  const findAsk = el("button", {
-    class: "pdfbar__ask",
-    type: "button",
-    hidden: true,
-    text: "Search similar",
-  }) as HTMLButtonElement;
-  const findPrev = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Previous match",
-    title: "Previous match",
-    html: svg(VIEWER_IC.prev, 1.9),
-  }) as HTMLButtonElement;
-  const findNext = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Next match",
-    title: "Next match",
-    html: svg(VIEWER_IC.next, 1.9),
-  }) as HTMLButtonElement;
-  const findClose = el("button", {
-    class: "icon-btn",
-    type: "button",
-    "aria-label": "Close find",
-    title: "Close find",
-    html: svg(VIEWER_IC.close, 1.9),
-  }) as HTMLButtonElement;
-  const findBar = el(
-    "div",
-    { class: "pdfbar", hidden: true },
-    el("span", { class: "pdfbar__field", html: svg(VIEWER_IC.find, 1.8) }, findInput),
-    findCount,
-    findAsk,
-    findPrev,
-    findNext,
-    findClose,
-  );
-  return { bar: findBar, input: findInput, count: findCount, ask: findAsk, prev: findPrev, next: findNext, close: findClose };
 }
 
 export interface CopyControl {
