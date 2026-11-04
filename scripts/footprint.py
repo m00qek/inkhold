@@ -32,10 +32,20 @@ TOTAL_ANON_MAX_KB = 16_000     # idle + 64 sockets, under the ~50 MB budget with
 # ---- backup ceilings (DESIGN.md §2.6) ------------------------------------------
 # `inkhold backup create` runs beside the server. Its memory must not depend on
 # the library's size, and the server must not notice it.
-BACKUP_ANON_MAX_KB = 4_096     # the 4 MB target: SQLite cache 1 MB/connection, ~420 KB scratch
-BACKUP_DRIFT_MAX_KB = 512      # small library vs large: equal within noise, or it is not O(1)
-BACKUP_SMALL, BACKUP_LARGE = 100, 2_000   # blobs
+BACKUP_ANON_MAX_KB = 4_096     # the 4 MB target: SQLite cache 256 KB/connection, ~420 KB scratch
+BACKUP_SMALL, BACKUP_LARGE = 100, 2_000   # blobs, really copied
 BLOB_BYTES = 16 * 1024
+# Memory must stop growing once SQLite's page caches (256 KB on each of the
+# backup's two connections; 1 MB until a Pi 1 measured 4.8 MB) are full: below that, a bigger library fills more
+# cache, which is bounded and fine. Measured 2026-11-04 on the Pi 1 B+: 656 KB
+# between 100 and 2,000 blobs, still filling. So two sizes well past the cache
+# (a blob row is ~100 B: 16,000 rows is ~1.6 MB of database) must agree.
+# Their blobs are put in the backup store beforehand, so these runs do all of
+# a real run's reading and none of its copying (32,000 fsyncs would take an
+# hour on an SD card; the copy path's memory is pinned by the runs above).
+PLATEAU_LOW, PLATEAU_HIGH = 16_000, 32_000   # blobs, already in the store
+PLATEAU_BYTES = 1024
+PLATEAU_MAX_KB = 256           # high vs low, both past the cache: flat, or it is not O(1)
 LATENCY_FACTOR = 2.0           # server p50 during a backup vs idle ...
 LATENCY_SLACK_MS = 2.0         # ... plus this much, since idle p50 is a fraction of a ms
 SERVER_DRIFT_MAX_KB = 512      # the server's own anon memory across a backup
@@ -75,21 +85,23 @@ def anon_kb(pid):
         pass
     return 0
 
-def seed(d, first, count):
-    """Adds `count` blobs (half compressible text, half noise) with their rows."""
+def seed(d, first, count, size=BLOB_BYTES, also_into=None):
+    """Adds `count` blobs (half compressible text, half noise) with their rows;
+    `also_into`, a backup directory, gets each one too, as if already copied."""
     import hashlib, random, sqlite3
     rnd = random.Random(first)
     db = sqlite3.connect(os.path.join(d, "inkhold.db"), timeout=10)
     for i in range(first, first + count):
         if i % 2:
-            body = (f"page {i} of a notebook, strokes and words " * 400).encode()[:BLOB_BYTES]
+            body = (f"page {i} of a notebook, strokes and words " * 400).encode()[:size]
         else:
-            body = rnd.randbytes(BLOB_BYTES)
+            body = rnd.randbytes(size)
         md5 = hashlib.md5(body).hexdigest()
-        fan = os.path.join(d, "data", "blobs", md5[:2])
-        os.makedirs(fan, exist_ok=True)
-        with open(os.path.join(fan, md5), "wb") as f:
-            f.write(body)
+        for root in [os.path.join(d, "data", "blobs")] + ([os.path.join(also_into, "blobs")] if also_into else []):
+            fan = os.path.join(root, md5[:2])
+            os.makedirs(fan, exist_ok=True)
+            with open(os.path.join(fan, md5), "wb") as f:
+                f.write(body)
         db.execute("INSERT OR IGNORE INTO blobs(md5, size, refcount, created_at) VALUES(?, ?, 1, 0)", (md5, len(body)))
     db.commit()
     db.close()
@@ -109,6 +121,7 @@ def p50_ms(port, n=200):
 def backup_run(binary, cfg, out_dir, port, rate):
     """Runs `backup create`, sampling its RssAnon; returns (peak KB, server p50 ms meanwhile)."""
     os.makedirs(out_dir, exist_ok=True)
+    time.sleep(1.1)  # snapshot names are per second; a second run in one second is refused
     proc = subprocess.Popen([binary, f"--config={cfg}", "backup", "create", out_dir, f"--max-rate={rate}"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     peak, lat = 0, []
@@ -171,6 +184,17 @@ def main():
             seed(d, BACKUP_SMALL, BACKUP_LARGE - BACKUP_SMALL)
             large_peak, busy_p50 = backup_run(binary, cfg, os.path.join(bdir, "large"), port, "4M")
             server_after = anon_kb(proc.pid)
+
+            # Past the page caches: the store already holds everything, so
+            # these read like real runs and copy nothing. The two seeded
+            # libraries are the earlier blobs plus these, all in one store.
+            big = os.path.join(bdir, "plateau")
+            os.makedirs(big, exist_ok=True)
+            seed(d, BACKUP_LARGE, PLATEAU_LOW - BACKUP_LARGE, PLATEAU_BYTES, also_into=big)
+            backup_run(binary, cfg, big, port, "0")  # copies the first 2,000 once
+            low_peak, _ = backup_run(binary, cfg, big, port, "0")
+            seed(d, PLATEAU_LOW, PLATEAU_HIGH - PLATEAU_LOW, PLATEAU_BYTES, also_into=big)
+            high_peak, _ = backup_run(binary, cfg, big, port, "0")
             shutil.rmtree(bdir, ignore_errors=True)
 
             # SIGTERM stops it: promptly, exit 0, the WAL checkpointed away.
@@ -197,11 +221,13 @@ def main():
         ("threads after close", f"{after_threads}", after_threads <= idle_threads, f"<= idle ({idle_threads})"),
     ]
     latency_ceiling = max(idle_p50 * LATENCY_FACTOR, idle_p50 + LATENCY_SLACK_MS)
-    drift = abs(large_peak - small_peak)
+    plateau = high_peak - low_peak
     rows += [
         (f"backup RssAnon, {BACKUP_SMALL} blobs", f"{small_peak} KB", small_peak <= BACKUP_ANON_MAX_KB, f"<= {BACKUP_ANON_MAX_KB}"),
         (f"backup RssAnon, {BACKUP_LARGE} blobs", f"{large_peak} KB", large_peak <= BACKUP_ANON_MAX_KB, f"<= {BACKUP_ANON_MAX_KB}"),
-        ("backup memory vs library size", f"{drift} KB", drift <= BACKUP_DRIFT_MAX_KB, f"<= {BACKUP_DRIFT_MAX_KB} apart"),
+        (f"backup RssAnon, {PLATEAU_LOW} blobs", f"{low_peak} KB", low_peak <= BACKUP_ANON_MAX_KB, f"<= {BACKUP_ANON_MAX_KB}"),
+        (f"backup RssAnon, {PLATEAU_HIGH} blobs", f"{high_peak} KB", high_peak <= BACKUP_ANON_MAX_KB, f"<= {BACKUP_ANON_MAX_KB}"),
+        (f"backup growth {PLATEAU_LOW}->{PLATEAU_HIGH}", f"{plateau:+d} KB", plateau <= PLATEAU_MAX_KB, f"<= +{PLATEAU_MAX_KB} (flat)"),
         ("server p50 during a backup", f"{busy_p50:.2f} ms", busy_p50 <= latency_ceiling, f"<= {latency_ceiling:.2f} (idle {idle_p50:.2f})"),
         ("server RssAnon across a backup", f"{server_after - server_before:+d} KB", server_after - server_before <= SERVER_DRIFT_MAX_KB, f"<= +{SERVER_DRIFT_MAX_KB}"),
         ("SIGTERM to exit", f"{stop_s:.2f} s, code {stop_code}", stop_code == 0 and stop_s <= STOP_MAX_S, f"<= {STOP_MAX_S}, code 0"),

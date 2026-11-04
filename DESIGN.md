@@ -133,7 +133,8 @@ separate process beside a running server; scheduling is cron's or systemd's.
 - **Footprint.** 4 MB of anonymous memory whatever the library's size: md5s
   are streamed 256 per statement (short read transactions, so the server's WAL
   checkpoints), buffers sit in one ~420 KB scratch, each SQLite connection
-  gets 1 MB. The process drops to nice 19 and the idle I/O class and reads at
+  gets a 256 KB page cache (it reads each page once; 1 MB pushed a Pi 1 past
+  the budget at 16,000 blobs). The process drops to nice 19 and the idle I/O class and reads at
   4 MiB/s by default. `scripts/footprint.py` pins all of it, at two sizes.
 - **`cred.key`** stays out unless asked for, and the snapshot's legacy
   `password_md5` column is blanked, so a backup alone holds no usable

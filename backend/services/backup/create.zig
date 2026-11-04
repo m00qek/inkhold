@@ -75,9 +75,12 @@ pub const CreateError = error{
     BlobLost,
 };
 
-/// Page cache for each of the backup's connections: it reads every page about
-/// once, so a big cache only costs memory (the 4 MB budget, DESIGN.md §2.6).
-pub const cache_kib = 1000;
+/// Page cache for each of the backup's connections. It reads every page about
+/// once, so a big cache only costs memory: at 1000 KiB a 16,000-blob library
+/// took the backup to 4.8 MB on a Pi 1 (over the 4 MB budget, DESIGN.md
+/// §2.6); at 256 KiB it is 1.9 MB on x86_64, flat however big the library,
+/// and no slower.
+pub const cache_kib = 256;
 
 /// md5s read per statement in the copy passes: short read transactions, so the
 /// server's WAL can checkpoint while blobs are being copied.
