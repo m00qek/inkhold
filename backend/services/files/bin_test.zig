@@ -273,11 +273,10 @@ test "the retention sweep purges only entries past the window" {
     try f.files.trash(1, recent.id);
 
     {
-        var s = try f.db.prepare("UPDATE files SET deleted_at = deleted_at - ?1 WHERE id = ?2;");
-        defer s.finalize();
-        s.bindInt(1, Files.bin_retention_s + 60);
-        s.bindInt(2, @intCast(old.id));
-        _ = try s.step();
+        try f.db.run(
+            "UPDATE files SET deleted_at = deleted_at - ?1 WHERE id = ?2;",
+            &.{ .{ .int = Files.bin_retention_s + 60 }, .{ .int = @intCast(old.id) } },
+        );
     }
 
     try testing.expectEqual(@as(usize, 1), try f.files.sweepBin(Files.bin_retention_s));
@@ -306,11 +305,10 @@ test "shortening the retention window purges nothing, and the sweep applies it g
     try f.files.trash(1, entry.id);
     const day = settings.seconds_per_day;
     {
-        var s = try f.db.prepare("UPDATE files SET deleted_at = deleted_at - ?1 WHERE id = ?2;");
-        defer s.finalize();
-        s.bindInt(1, 20 * day);
-        s.bindInt(2, @intCast(entry.id));
-        _ = try s.step();
+        try f.db.run(
+            "UPDATE files SET deleted_at = deleted_at - ?1 WHERE id = ?2;",
+            &.{ .{ .int = 20 * day }, .{ .int = @intCast(entry.id) } },
+        );
     }
 
     const now = std.Io.Clock.real.now(testing.io).toSeconds();

@@ -185,10 +185,10 @@ test "a mark id is a LIVE fact on both sides — the bin never carries one" {
         try testing.expectEqual(@as(?u64, ink.id), (try rowNamed(before, "new.pdf")).mark_id);
     }
 
-    var s = try f.db.prepare("UPDATE files SET deleted = 1, deleted_at = 1 WHERE id = ?1;");
-    defer s.finalize();
-    s.bindInt(1, @intCast(ink.id));
-    _ = try s.step();
+    try f.db.run(
+        "UPDATE files SET deleted = 1, deleted_at = 1 WHERE id = ?1;",
+        &.{.{ .int = @intCast(ink.id) }},
+    );
 
     const after = try f.files.list(1, null);
     defer Files.freeEntries(testing.allocator, after);

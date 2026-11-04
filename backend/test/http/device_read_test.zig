@@ -194,10 +194,7 @@ test "capacity onboarding: wouldFit defaults for a user with no row; bindEquipme
 
     // No capacity row: the state that used to make upload/apply 500.
     {
-        var s = try f.db.prepare("DELETE FROM capacity WHERE user_id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(alice));
-        _ = try s.step();
+        try f.db.run("DELETE FROM capacity WHERE user_id = ?1;", &.{.{ .int = @intCast(alice) }});
     }
 
     try std.testing.expect(try f.files.wouldFit(alice, 1024));

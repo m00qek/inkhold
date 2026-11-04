@@ -27,16 +27,14 @@ const Fixture = struct {
         var db = try sqlite.Db.openMemory();
         try schema.migrate(db);
         for ([_]u8{ 1, 2 }) |id| {
-            var s = try db.prepare(
+            try db.run(
                 "INSERT INTO users(id, email, password_md5, created_at) VALUES(?1, 'a' || ?1 || '@b.c', '0123456789abcdef0123456789abcdef', 0);",
+                &.{.{ .int = id }},
             );
-            defer s.finalize();
-            s.bindInt(1, id);
-            _ = try s.step();
-            var c = try db.prepare("INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 1000000000);");
-            defer c.finalize();
-            c.bindInt(1, id);
-            _ = try c.step();
+            try db.run(
+                "INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 1000000000);",
+                &.{.{ .int = id }},
+            );
         }
 
         const tmp = testing.tmpDir(.{});

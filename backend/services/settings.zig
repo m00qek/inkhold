@@ -63,15 +63,11 @@ pub const Settings = struct {
         if (days < min_retention_days or days > max_retention_days) return error.InvalidRetention;
         const seconds = days * seconds_per_day;
         const t = self.now();
-        var s = try self.db.prepare(
+        try self.db.run(
             "INSERT INTO settings(key, value, updated_at) VALUES(?1, ?2, ?3) " ++
                 "ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3;",
+            &.{ .{ .text = bin_retention_key }, .{ .int = seconds }, .{ .int = t } },
         );
-        defer s.finalize();
-        s.bindText(1, bin_retention_key);
-        s.bindInt(2, seconds);
-        s.bindInt(3, t);
-        _ = try s.step();
         return .{ .seconds = seconds, .changed_at = t };
     }
 };

@@ -63,16 +63,14 @@ const Fixture = struct {
         var db = try sqlite.Db.openMemory();
         try schema.migrate(db);
         for ([_]u8{ 1, 2 }) |uid| {
-            var s = try db.prepare(
+            try db.run(
                 "INSERT INTO users(id, email, password_md5, created_at) VALUES(?1, ?1 || '@b.c', '0123456789abcdef0123456789abcdef', 0);",
+                &.{.{ .int = uid }},
             );
-            defer s.finalize();
-            s.bindInt(1, uid);
-            _ = try s.step();
-            var c = try db.prepare("INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 1000000000);");
-            defer c.finalize();
-            c.bindInt(1, uid);
-            _ = try c.step();
+            try db.run(
+                "INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 1000000000);",
+                &.{.{ .int = uid }},
+            );
         }
         const store_ = try blobstore.BlobStore.init(testing.io, tmp.dir);
         const thumbs_dir = try tmp.dir.createDirPathOpen(testing.io, "thumbs", .{});
@@ -271,11 +269,10 @@ test "a TERMINAL verdict is not retried by that rule — it never stored a shape
     const md5 = try f.put(1, "book.pdf", book_pdf);
     for ([_]pdfindex.Verdict{ .unopenable, .encrypted, .no_pages }) |v| {
         try f.db.exec("UPDATE note_index SET page_count = 0;");
-        var s = try f.db.prepare("UPDATE note_index SET pdf_probe = ?2 WHERE blob_md5 = ?1;");
-        defer s.finalize();
-        s.bindText(1, &md5);
-        s.bindInt(2, @backingInt(v));
-        _ = try s.step();
+        try f.db.run(
+            "UPDATE note_index SET pdf_probe = ?2 WHERE blob_md5 = ?1;",
+            &.{ .{ .text = &md5 }, .{ .int = @backingInt(v) } },
+        );
         try testing.expect(!try pdfindex.needsProbe(f.db, &md5));
     }
 }

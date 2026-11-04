@@ -44,9 +44,7 @@ test "a missing capacity row is created on the write path and used_bytes accrues
     try testing.expectEqual(@as(i64, 4), try f.used(3)); // accounting is live
 
     {
-        var s = try f.db.prepare("UPDATE capacity SET total_bytes = 5 WHERE user_id = 3;");
-        defer s.finalize();
-        _ = try s.step();
+        try f.db.run("UPDATE capacity SET total_bytes = 5 WHERE user_id = 3;", &.{});
     }
     var r = std.Io.Reader.fixed("bb"); // 4 + 2 = 6 > 5
     try testing.expectError(error.QuotaExceeded, f.files.putFile(3, null, "b.note", &r, null));

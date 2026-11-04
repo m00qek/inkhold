@@ -372,13 +372,11 @@ test "expired sessions are swept but live ones survive" {
     const live = try webLogin(&svc, "alice@home", "alicepw");
 
     {
-        var s = try db.prepare(
+        try db.run(
             "INSERT INTO sessions(token_hash, user_id, audience, equipment_no, created_at, expires_at) " ++
                 "VALUES('expired-token', ?1, 'controlplane', NULL, 0, 1);",
+            &.{.{ .int = @intCast(alice) }},
         );
-        defer s.finalize();
-        s.bindInt(1, @intCast(alice));
-        _ = try s.step();
     }
     try std.testing.expectEqual(@as(i64, 1), sessionRowCount(&db, "expired-token"));
 

@@ -68,10 +68,7 @@ test "CursorWatch sees a DELETE issued inside an open cursor, and not one issued
         var s = try db.prepare("SELECT k FROM t ORDER BY k;");
         defer s.finalize();
         while (try s.step()) {
-            var d = try db.prepare("DELETE FROM t WHERE k = ?1;");
-            defer d.finalize();
-            d.bindInt(1, s.columnInt(0));
-            _ = try d.step();
+            try db.run("DELETE FROM t WHERE k = ?1;", &.{.{ .int = s.columnInt(0) }});
         }
         try std.testing.expectEqual(@as(usize, 3), w.mutations);
         try std.testing.expectEqual(@as(usize, 3), w.overlaps);
@@ -149,9 +146,7 @@ test "WriteWatch counts mutations in main and ignores the temp scratch a reader 
     defer w.disarm();
 
     {
-        var s = try db.prepare("SELECT COUNT(*) FROM t;");
-        defer s.finalize();
-        _ = try s.step();
+        try db.run("SELECT COUNT(*) FROM t;", &.{});
     }
     try std.testing.expectEqual(@as(usize, 0), w.mutations);
 

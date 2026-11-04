@@ -23,24 +23,20 @@ pub fn capacity(self: Files, user_id: u64) !Cap {
 /// that exists: device bind calls this and must not set its own quota, and
 /// `addUsed` needs a row or its UPDATE matches nothing and quota is silently off.
 pub fn ensureCapacity(self: Files, user_id: u64) !void {
-    var s = try self.db.prepare("INSERT OR IGNORE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, ?2);");
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    s.bindInt(2, default_total_bytes);
-    _ = try s.step();
+    try self.db.run(
+        "INSERT OR IGNORE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, ?2);",
+        &.{ .{ .int = @intCast(user_id) }, .{ .int = default_total_bytes } },
+    );
 }
 
 /// Sets the quota, creating the row for an account that never had one. Below
 /// current usage is allowed and deletes nothing; it stops new syncs.
 pub fn setCapacityTotal(self: Files, user_id: u64, total_bytes: i64) !void {
-    var s = try self.db.prepare(
+    try self.db.run(
         "INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, ?2) " ++
             "ON CONFLICT(user_id) DO UPDATE SET total_bytes = ?2;",
+        &.{ .{ .int = @intCast(user_id) }, .{ .int = total_bytes } },
     );
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    s.bindInt(2, total_bytes);
-    _ = try s.step();
 }
 
 /// The account screen's five-way split of charged bytes, over distinct blobs.

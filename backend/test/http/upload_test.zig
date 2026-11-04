@@ -183,10 +183,10 @@ test "web upload: an over-quota file is 413 and leaves the tree and the charge a
     var reqbuf: [8192]u8 = undefined;
 
     {
-        var s = try f.db.prepare("INSERT OR REPLACE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 8);");
-        defer s.finalize();
-        s.bindInt(1, @intCast(admin));
-        _ = try s.step();
+        try f.db.run(
+            "INSERT OR REPLACE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 8);",
+            &.{.{ .int = @intCast(admin) }},
+        );
     }
 
     const v0 = try f.files.syncVersion(admin);
@@ -215,10 +215,10 @@ test "web upload: a body past the caller's remaining quota is refused MID-STREAM
     var obuf: [16384]u8 = undefined;
 
     {
-        var s = try f.db.prepare("INSERT OR REPLACE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 8);");
-        defer s.finalize();
-        s.bindInt(1, @intCast(admin));
-        _ = try s.step();
+        try f.db.run(
+            "INSERT OR REPLACE INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 8);",
+            &.{.{ .int = @intCast(admin) }},
+        );
     }
 
     const v0 = try f.files.syncVersion(admin);
@@ -246,11 +246,10 @@ test "web upload: a body past the caller's remaining quota is refused MID-STREAM
     }
 
     {
-        var s = try f.db.prepare("UPDATE capacity SET total_bytes = ?1 WHERE user_id = ?2;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(payload.len * 2));
-        s.bindInt(2, @intCast(admin));
-        _ = try s.step();
+        try f.db.run(
+            "UPDATE capacity SET total_bytes = ?1 WHERE user_id = ?2;",
+            &.{ .{ .int = @intCast(payload.len * 2) }, .{ .int = @intCast(admin) } },
+        );
     }
     const ok = try uploadFile(ctx, &obuf, reqbuf, &web, "root", "flood.pdf", payload);
     try std.testing.expectEqual(@as(u16, 200), ok.status);

@@ -273,11 +273,10 @@ pub fn verdictFor(d: Derived) Verdict {
 /// Call inside the caller's transaction, last: the memo must not be true before
 /// the derived output is.
 pub fn storeVerdict(db: sqlite.Db, blob_md5: []const u8, v: Verdict) !void {
-    var s = try db.prepare("UPDATE note_index SET txt_index = ?2 WHERE blob_md5 = ?1;");
-    defer s.finalize();
-    s.bindText(1, blob_md5);
-    s.bindInt(2, @backingInt(v));
-    _ = try s.step();
+    try db.run(
+        "UPDATE note_index SET txt_index = ?2 WHERE blob_md5 = ?1;",
+        &.{ .{ .text = blob_md5 }, .{ .int = @backingInt(v) } },
+    );
 }
 
 /// The `.txt` tenant's predicate as a bare FROM/WHERE (aliases `f`, `b`, `ni`;

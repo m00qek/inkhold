@@ -237,29 +237,31 @@ fn upsertPage(db: sqlite.Db, blob_md5: []const u8, page: PageRow, buf: []u8) !vo
 /// racing parses are harmless and a page keeps its `id` across re-index.
 pub fn store(db: sqlite.Db, blob_md5: []const u8, p: Parsed, now: i64) !void {
     {
-        var s = try db.prepare(upsert_note_sql);
-        defer s.finalize();
-        s.bindText(1, blob_md5);
-        s.bindInt(2, index_version);
-        s.bindInt(3, if (p.indexable) 1 else 0);
-        s.bindInt(4, p.note.page_count);
-        s.bindTextOpt(5, p.note.signature);
-        s.bindInt(6, p.note.signature_version);
-        s.bindTextOpt(7, p.note.equipment);
-        s.bindInt(8, p.note.width);
-        s.bindInt(9, p.note.height);
-        s.bindInt(10, p.note.rle_variant);
-        s.bindTextOpt(11, p.note.recogn_type);
-        s.bindTextOpt(12, p.note.recogn_language);
-        s.bindInt(13, p.note.recognized_page_count);
-        s.bindInt(14, now);
-        s.bindIntOpt(15, if (p.note.cover_w) |v| @as(i64, v) else null);
-        s.bindIntOpt(16, if (p.note.cover_h) |v| @as(i64, v) else null);
-        s.bindIntOpt(17, if (p.note.cover_offset) |v| @as(i64, @intCast(v)) else null);
-        s.bindIntOpt(18, if (p.note.cover_length) |v| @as(i64, v) else null);
-        s.bindTextOpt(19, p.note.cover_mime);
-        s.bindTextOpt(20, p.note.filetype);
-        _ = try s.step();
+        try db.run(
+            upsert_note_sql,
+            &.{
+                .{ .text = blob_md5 },
+                .{ .int = index_version },
+                .{ .int = if (p.indexable) 1 else 0 },
+                .{ .int = p.note.page_count },
+                .{ .text_opt = p.note.signature },
+                .{ .int = p.note.signature_version },
+                .{ .text_opt = p.note.equipment },
+                .{ .int = p.note.width },
+                .{ .int = p.note.height },
+                .{ .int = p.note.rle_variant },
+                .{ .text_opt = p.note.recogn_type },
+                .{ .text_opt = p.note.recogn_language },
+                .{ .int = p.note.recognized_page_count },
+                .{ .int = now },
+                .{ .int_opt = if (p.note.cover_w) |v| @as(i64, v) else null },
+                .{ .int_opt = if (p.note.cover_h) |v| @as(i64, v) else null },
+                .{ .int_opt = if (p.note.cover_offset) |v| @as(i64, @intCast(v)) else null },
+                .{ .int_opt = if (p.note.cover_length) |v| @as(i64, v) else null },
+                .{ .text_opt = p.note.cover_mime },
+                .{ .text_opt = p.note.filetype },
+            },
+        );
     }
 
     var layer_buf: [max_layers * max_layer_rec_size]u8 = undefined;
@@ -269,13 +271,10 @@ pub fn store(db: sqlite.Db, blob_md5: []const u8, p: Parsed, now: i64) !void {
     // note parser rejected `page_count` is 0, so unscoped this would drop every
     // other format's rows.
     {
-        var s = try db.prepare(
+        try db.run(
             "DELETE FROM note_page_index WHERE blob_md5 = ?1 AND page_index >= ?2 AND kind = 0;",
+            &.{ .{ .text = blob_md5 }, .{ .int = p.note.page_count } },
         );
-        defer s.finalize();
-        s.bindText(1, blob_md5);
-        s.bindInt(2, p.note.page_count);
-        _ = try s.step();
     }
 }
 
@@ -339,15 +338,9 @@ pub fn coverLocation(db: sqlite.Db, md5: []const u8) !?CoverLocation {
 /// is the backstop; this also works with FKs off.
 pub fn deleteForBlob(db: sqlite.Db, blob_md5: []const u8) !void {
     {
-        var s = try db.prepare("DELETE FROM note_page_index WHERE blob_md5 = ?1;");
-        defer s.finalize();
-        s.bindText(1, blob_md5);
-        _ = try s.step();
+        try db.run("DELETE FROM note_page_index WHERE blob_md5 = ?1;", &.{.{ .text = blob_md5 }});
     }
-    var s = try db.prepare("DELETE FROM note_index WHERE blob_md5 = ?1;");
-    defer s.finalize();
-    s.bindText(1, blob_md5);
-    _ = try s.step();
+    try db.run("DELETE FROM note_index WHERE blob_md5 = ?1;", &.{.{ .text = blob_md5 }});
 }
 
 // ---- parsing a stored blob (ranged reads) ----
@@ -414,10 +407,10 @@ test "a v4 row (fixed-stride layers, no identity) lazily re-derives to v5 with s
             std.mem.writeInt(u32, rec[4..8], il.ref.len, .little);
             rec[8] = if (il.ref.all_blank) note_index_parse.flag_all_blank else 0;
         }
-        var s = try f.db.prepare("UPDATE note_page_index SET layers = ?1 WHERE page_index = 1;");
-        defer s.finalize();
-        s.bindBlob(1, old_blob[0 .. layers.len * 9]);
-        _ = try s.step();
+        try f.db.run(
+            "UPDATE note_page_index SET layers = ?1 WHERE page_index = 1;",
+            &.{.{ .blob = old_blob[0 .. layers.len * 9] }},
+        );
     }
     try f.db.exec("UPDATE note_index SET index_version = 4;");
     try testing.expect(!try isCurrent(f.db, &md5));

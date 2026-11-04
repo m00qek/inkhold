@@ -182,10 +182,7 @@ pub const Service = struct {
         if (try self.isAdmin(target_user_id) and (try self.adminCount()) <= 1) return error.LastAdmin;
         if (actor_user_id == target_user_id) return error.CannotDeleteSelf;
         try files.purgeUser(target_user_id);
-        var s = try self.db.prepare("DELETE FROM users WHERE id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(target_user_id));
-        _ = try s.step();
+        try self.db.run("DELETE FROM users WHERE id = ?1;", &.{.{ .int = @intCast(target_user_id) }});
     }
 
     /// Admin-only recovery of another account: server-generated temp password,
@@ -204,11 +201,13 @@ pub const Service = struct {
         const temp = self.tempPassword();
         {
             // Stored encrypted in `cred_enc`; `password_md5` is blanked.
-            var s = try self.db.prepare("UPDATE users SET cred_enc = ?1, password_md5 = '', must_change_password = 1 WHERE id = ?2;");
-            defer s.finalize();
-            s.bindText(1, &self.encryptCred(&password.md5Hex(temp.slice())));
-            s.bindInt(2, @intCast(target_user_id));
-            _ = try s.step();
+            try self.db.run(
+                "UPDATE users SET cred_enc = ?1, password_md5 = '', must_change_password = 1 WHERE id = ?2;",
+                &.{
+                    .{ .text = &self.encryptCred(&password.md5Hex(temp.slice())) },
+                    .{ .int = @intCast(target_user_id) },
+                },
+            );
         }
         try self.revokeAllSessions(target_user_id);
         return temp;
@@ -222,11 +221,10 @@ pub const Service = struct {
         const was = try self.isAdmin(target_user_id);
         if (was == is_admin) return false;
         if (was and (try self.adminCount()) <= 1) return error.LastAdmin;
-        var s = try self.db.prepare("UPDATE users SET is_admin = ?1 WHERE id = ?2;");
-        defer s.finalize();
-        s.bindInt(1, if (is_admin) 1 else 0);
-        s.bindInt(2, @intCast(target_user_id));
-        _ = try s.step();
+        try self.db.run(
+            "UPDATE users SET is_admin = ?1 WHERE id = ?2;",
+            &.{ .{ .int = if (is_admin) 1 else 0 }, .{ .int = @intCast(target_user_id) } },
+        );
         return true;
     }
 

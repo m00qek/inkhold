@@ -168,12 +168,10 @@ test "admin quota: read defaults, write, and lowering BELOW usage is allowed and
 
 /// Writes elevation columns directly, to test the window boundaries.
 fn plantElevation(db: *sqlite.Db, token: []const u8, at: ?i64, until: ?i64) !void {
-    var s = try db.prepare("UPDATE sessions SET elevated_at = ?1, elevated_until = ?2 WHERE token_hash = ?3;");
-    defer s.finalize();
-    s.bindIntOpt(1, at);
-    s.bindIntOpt(2, until);
-    s.bindText(3, &password.hashToken(token));
-    _ = try s.step();
+    try db.run(
+        "UPDATE sessions SET elevated_at = ?1, elevated_until = ?2 WHERE token_hash = ?3;",
+        &.{ .{ .int_opt = at }, .{ .int_opt = until }, .{ .text = &password.hashToken(token) } },
+    );
 }
 
 test "elevation: an admin re-authenticates through the challenge flow; a session starts un-elevated" {

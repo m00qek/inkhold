@@ -29,16 +29,14 @@ pub const Fixture = struct {
         const db = try sqlite.Db.openMemory();
         try schema.migrate(db);
         for ([_]u8{ 1, 2 }) |uid| {
-            var s = try db.prepare(
+            try db.run(
                 "INSERT INTO users(id, email, password_md5, created_at) VALUES(?1, ?1 || '@b.c', '0123456789abcdef0123456789abcdef', 0);",
+                &.{.{ .int = uid }},
             );
-            defer s.finalize();
-            s.bindInt(1, uid);
-            _ = try s.step();
-            var c = try db.prepare("INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 1000000000);");
-            defer c.finalize();
-            c.bindInt(1, uid);
-            _ = try c.step();
+            try db.run(
+                "INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(?1, 0, 1000000000);",
+                &.{.{ .int = uid }},
+            );
         }
         const tmp = testing.tmpDir(.{});
         const store = try blobstore.BlobStore.init(testing.io, tmp.dir);
@@ -94,11 +92,10 @@ pub const Fixture = struct {
     }
 
     pub fn touch(f: *Fixture, id: u64, at: i64) !void {
-        var s = try f.db.prepare("UPDATE files SET updated_at = ?2 WHERE id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(id));
-        s.bindInt(2, at);
-        _ = try s.step();
+        try f.db.run(
+            "UPDATE files SET updated_at = ?2 WHERE id = ?1;",
+            &.{ .{ .int = @intCast(id) }, .{ .int = at } },
+        );
     }
 
     pub fn manifest(f: *Fixture, user_id: u64) !Manifest {

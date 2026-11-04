@@ -26,10 +26,7 @@ fn buildSpdBytes(thumb: []const u8) ![]u8 {
     defer db.close();
     try db.exec("CREATE TABLE config(name TEXT PRIMARY KEY NOT NULL, value BLOB);");
     try db.exec("INSERT INTO config(name, value) VALUES('fmt_ver', '2');");
-    var s = try db.prepare("INSERT INTO config(name, value) VALUES('thumbnail', ?1);");
-    defer s.finalize();
-    s.bindBlob(1, thumb);
-    _ = try s.step();
+    try db.run("INSERT INTO config(name, value) VALUES('thumbnail', ?1);", &.{.{ .blob = thumb }});
     return db.serializeAlloc(testing.allocator);
 }
 

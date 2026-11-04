@@ -96,12 +96,10 @@ pub fn trash(self: Files, user_id: u64, id: u64) !void {
 /// Inside an open transaction. A pair's roots share `ts`, so their retention
 /// clocks match and the bin groups them.
 fn trashSubtree(self: Files, user_id: u64, id: u64, ts: i64) !i64 {
-    var s = try self.db.prepare(subtree_trash_sql);
-    defer s.finalize();
-    s.bindInt(1, @intCast(id));
-    s.bindInt(2, @intCast(user_id));
-    s.bindInt(3, ts);
-    _ = try s.step();
+    try self.db.run(
+        subtree_trash_sql,
+        &.{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) }, .{ .int = ts } },
+    );
     return self.db.changes();
 }
 
@@ -375,10 +373,7 @@ pub fn purgeUser(self: Files, user_id: u64) !void {
 
     // In the same transaction as the decrefs, so refcount never disagrees.
     {
-        var s = try self.db.prepare("DELETE FROM files WHERE user_id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        _ = try s.step();
+        try self.db.run("DELETE FROM files WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }});
     }
 
     var gc: std.ArrayList([md5_len]u8) = .empty;

@@ -29,10 +29,7 @@ fn buildSpd(gpa: std.mem.Allocator, thumb: ?[]const u8) ![]u8 {
     try db.exec("CREATE TABLE config(name TEXT PRIMARY KEY NOT NULL, value BLOB);");
     try db.exec("INSERT INTO config(name, value) VALUES('fmt_ver', '2');");
     if (thumb) |t| {
-        var s = try db.prepare("INSERT INTO config(name, value) VALUES('thumbnail', ?1);");
-        defer s.finalize();
-        s.bindBlob(1, t);
-        _ = try s.step();
+        try db.run("INSERT INTO config(name, value) VALUES('thumbnail', ?1);", &.{.{ .blob = t }});
     }
     return db.serializeAlloc(gpa);
 }

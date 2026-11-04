@@ -333,10 +333,7 @@ test "get_space_usage reports the caller's real capacity row, in the exact shape
     }
 
     {
-        var s = try f.db.prepare("DELETE FROM capacity WHERE user_id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(alice));
-        _ = try s.step();
+        try f.db.run("DELETE FROM capacity WHERE user_id = ?1;", &.{.{ .int = @intCast(alice) }});
     }
     {
         const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/2/users/get_space_usage", &dev, "SN1", "{}");

@@ -171,10 +171,10 @@ test "CHANGE PASSWORD: the RIGHT current password rotates it, revokes every othe
 
     // Backdate so "it moved" holds even when the suite finishes within a second.
     {
-        var s = try f.db.prepare("UPDATE users SET password_changed_at = 0 WHERE id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(admin));
-        _ = try s.step();
+        try f.db.run(
+            "UPDATE users SET password_changed_at = 0 WHERE id = ?1;",
+            &.{.{ .int = @intCast(admin) }},
+        );
     }
 
     var fresh: [32]u8 = undefined;

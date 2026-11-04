@@ -9,29 +9,28 @@ const Error = authsvc.Error;
 /// Registers the device and binds it (after device login).
 pub fn bindDevice(self: *Service, user_id: u64, equipment_no: []const u8, name: []const u8) Error!void {
     {
-        var s = try self.db.prepare("INSERT OR IGNORE INTO devices(equipment_no, created_at) VALUES(?1, ?2);");
-        defer s.finalize();
-        s.bindText(1, equipment_no);
-        s.bindInt(2, internal.now(self));
-        _ = try s.step();
+        try self.db.run(
+            "INSERT OR IGNORE INTO devices(equipment_no, created_at) VALUES(?1, ?2);",
+            &.{ .{ .text = equipment_no }, .{ .int = internal.now(self) } },
+        );
     }
     {
         // Upsert that reactivates: unlink keeps the row as 'N', so OR IGNORE
         // would make unlinking permanent. An active row is untouched (this
         // runs every login); a revoked one is renamed and re-dated.
-        var s = try self.db.prepare(
+        try self.db.run(
             "INSERT INTO user_devices(user_id, equipment_no, name, status, created_at) VALUES(?1,?2,?3,'Y',?4) " ++
                 "ON CONFLICT(user_id, equipment_no) DO UPDATE SET " ++
                 "  status = 'Y'," ++
                 "  name = CASE WHEN user_devices.status = 'N' THEN excluded.name ELSE user_devices.name END," ++
                 "  created_at = CASE WHEN user_devices.status = 'N' THEN excluded.created_at ELSE user_devices.created_at END;",
+            &.{
+                .{ .int = @intCast(user_id) },
+                .{ .text = equipment_no },
+                .{ .text = name },
+                .{ .int = internal.now(self) },
+            },
         );
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindText(2, equipment_no);
-        s.bindText(3, name);
-        s.bindInt(4, internal.now(self));
-        _ = try s.step();
     }
 }
 
@@ -55,29 +54,25 @@ pub fn deviceSessionOwner(self: *Service, equipment_no: []const u8, email: []con
 /// overwrites a label, so this is the only way a real name replaces the placeholder.
 pub fn nameDevice(self: *Service, user_id: u64, equipment_no: []const u8, name: []const u8) Error!void {
     if (name.len == 0) return;
-    var s = try self.db.prepare("UPDATE user_devices SET name = ?3 WHERE user_id = ?1 AND equipment_no = ?2;");
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    s.bindText(2, equipment_no);
-    s.bindText(3, name);
-    _ = try s.step();
+    try self.db.run(
+        "UPDATE user_devices SET name = ?3 WHERE user_id = ?1 AND equipment_no = ?2;",
+        &.{ .{ .int = @intCast(user_id) }, .{ .text = equipment_no }, .{ .text = name } },
+    );
 }
 
 /// Revokes a device: marks the binding inactive and deletes its sessions.
 pub fn unlinkDevice(self: *Service, user_id: u64, equipment_no: []const u8) Error!void {
     {
-        var s = try self.db.prepare("UPDATE user_devices SET status = 'N' WHERE user_id = ?1 AND equipment_no = ?2;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindText(2, equipment_no);
-        _ = try s.step();
+        try self.db.run(
+            "UPDATE user_devices SET status = 'N' WHERE user_id = ?1 AND equipment_no = ?2;",
+            &.{ .{ .int = @intCast(user_id) }, .{ .text = equipment_no } },
+        );
     }
     {
-        var s = try self.db.prepare("DELETE FROM sessions WHERE user_id = ?1 AND equipment_no = ?2;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindText(2, equipment_no);
-        _ = try s.step();
+        try self.db.run(
+            "DELETE FROM sessions WHERE user_id = ?1 AND equipment_no = ?2;",
+            &.{ .{ .int = @intCast(user_id) }, .{ .text = equipment_no } },
+        );
     }
 }
 
@@ -85,16 +80,13 @@ pub fn unlinkDevice(self: *Service, user_id: u64, equipment_no: []const u8) Erro
 /// `equipment/unlink` route: that would be an unauthenticated LAN DoS.
 pub fn unlinkDeviceGlobal(self: *Service, equipment_no: []const u8) Error!void {
     {
-        var s = try self.db.prepare("UPDATE user_devices SET status = 'N' WHERE equipment_no = ?1;");
-        defer s.finalize();
-        s.bindText(1, equipment_no);
-        _ = try s.step();
+        try self.db.run(
+            "UPDATE user_devices SET status = 'N' WHERE equipment_no = ?1;",
+            &.{.{ .text = equipment_no }},
+        );
     }
     {
-        var s = try self.db.prepare("DELETE FROM sessions WHERE equipment_no = ?1;");
-        defer s.finalize();
-        s.bindText(1, equipment_no);
-        _ = try s.step();
+        try self.db.run("DELETE FROM sessions WHERE equipment_no = ?1;", &.{.{ .text = equipment_no }});
     }
 }
 

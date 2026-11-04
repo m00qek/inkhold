@@ -84,11 +84,10 @@ pub fn sessionSummary(self: *Service, user_id: u64, token: []const u8) Error!Ses
 /// bindings are untouched.
 pub fn signOutOtherSessions(self: *Service, user_id: u64, token: []const u8) Error!i64 {
     const th = password.hashToken(token);
-    var s = try self.db.prepare("DELETE FROM sessions WHERE user_id = ?1 AND token_hash <> ?2;");
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    s.bindText(2, &th);
-    _ = try s.step();
+    try self.db.run(
+        "DELETE FROM sessions WHERE user_id = ?1 AND token_hash <> ?2;",
+        &.{ .{ .int = @intCast(user_id) }, .{ .text = &th } },
+    );
     return self.db.changes();
 }
 

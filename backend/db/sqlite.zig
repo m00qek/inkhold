@@ -124,24 +124,22 @@ pub const Db = struct {
     pub fn row(self: Db, sql: []const u8, binds: []const Bind) Error!?Row {
         var stmt = try self.prepare(sql);
         errdefer stmt.finalize();
-        for (binds, 0..) |b, i| {
-            const idx: c_int = @intCast(i + 1);
-            switch (b) {
-                .int => |v| stmt.bindInt(idx, v),
-                .text => |v| stmt.bindText(idx, v),
-                .blob => |v| stmt.bindBlob(idx, v),
-                .null => stmt.bindNull(idx),
-                .float => |v| stmt.bindFloat(idx, v),
-                .int_opt => |v| stmt.bindIntOpt(idx, v),
-                .text_opt => |v| stmt.bindTextOpt(idx, v),
-                .float_opt => |v| stmt.bindFloatOpt(idx, v),
-            }
-        }
+        bindAll(stmt, binds);
         if (!try stmt.step()) {
             stmt.finalize();
             return null;
         }
         return .{ .stmt = stmt };
+    }
+
+    /// The write twin of `row`: prepares `sql`, binds `binds[i]` to `?(i+1)`,
+    /// steps once and finalizes. For INSERT/UPDATE/DELETE with no result row;
+    /// `changes()` and `lastInsertRowId()` still describe it afterwards.
+    pub fn run(self: Db, sql: []const u8, binds: []const Bind) Error!void {
+        var stmt = try self.prepare(sql);
+        defer stmt.finalize();
+        bindAll(stmt, binds);
+        _ = try stmt.step();
     }
 
     pub fn lastInsertRowId(self: Db) i64 {
@@ -157,6 +155,23 @@ pub const Db = struct {
         return std.mem.span(c.sqlite3_errmsg(self.handle));
     }
 };
+
+/// `binds[i]` to `?(i+1)`, by kind.
+fn bindAll(stmt: Stmt, binds: []const Bind) void {
+    for (binds, 0..) |b, i| {
+        const idx: c_int = @intCast(i + 1);
+        switch (b) {
+            .int => |v| stmt.bindInt(idx, v),
+            .text => |v| stmt.bindText(idx, v),
+            .blob => |v| stmt.bindBlob(idx, v),
+            .null => stmt.bindNull(idx),
+            .float => |v| stmt.bindFloat(idx, v),
+            .int_opt => |v| stmt.bindIntOpt(idx, v),
+            .text_opt => |v| stmt.bindTextOpt(idx, v),
+            .float_opt => |v| stmt.bindFloatOpt(idx, v),
+        }
+    }
+}
 
 /// Asserts every bind's return code. A failed bind (`SQLITE_RANGE`: bind list and
 /// SQL drifted apart) otherwise leaves the parameter NULL, so a keyed UPDATE

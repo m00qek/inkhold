@@ -174,10 +174,10 @@ test "admin devices + quota over HTTP: the gate, the 403, and the cross-user unl
     // An account with no capacity row yet: the write path would create it, this seeds it directly.
     try f.files.ensureCapacity(alice);
     {
-        var s = try f.db.prepare("UPDATE capacity SET used_bytes = 5000 WHERE user_id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(alice));
-        _ = try s.step();
+        try f.db.run(
+            "UPDATE capacity SET used_bytes = 5000 WHERE user_id = ?1;",
+            &.{.{ .int = @intCast(alice) }},
+        );
     }
     {
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "PUT", quota_path, &admin_tok, "{\"totalBytes\":100}");

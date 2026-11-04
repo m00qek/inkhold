@@ -24,10 +24,7 @@ pub fn foldRows(db: sqlite.Db, text: []const u8) !sqlite.Stmt {
     try db.exec(fold_ddl);
     try db.exec(fold_reset_sql);
     {
-        var s = try db.prepare("INSERT INTO temp.token_fold(rowid, t) VALUES(1, ?1);");
-        defer s.finalize();
-        s.bindText(1, text);
-        _ = try s.step();
+        try db.run("INSERT INTO temp.token_fold(rowid, t) VALUES(1, ?1);", &.{.{ .text = text }});
     }
     return db.prepare("SELECT term, cnt FROM temp.token_fold_vocab;");
 }
@@ -90,10 +87,7 @@ fn benchFold(db: sqlite.Db, comptime table: []const u8, reset: [:0]const u8, tex
     const t0 = std.Io.Clock.awake.now(testing.io);
     try db.exec(reset);
     {
-        var s = try db.prepare("INSERT INTO temp." ++ table ++ "(rowid, t) VALUES(1, ?1);");
-        defer s.finalize();
-        s.bindText(1, text);
-        _ = try s.step();
+        try db.run("INSERT INTO temp." ++ table ++ "(rowid, t) VALUES(1, ?1);", &.{.{ .text = text }});
     }
     var s = try db.prepare("SELECT term, cnt FROM temp." ++ table ++ "_vocab;");
     defer s.finalize();

@@ -22,14 +22,11 @@ pub const Fixture = struct {
     pub fn init() !Fixture {
         var db = try sqlite.Db.openMemory();
         try schema.migrate(db);
-        var s = try db.prepare(
+        try db.run(
             "INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@b.c', '0123456789abcdef0123456789abcdef', 0);",
+            &.{},
         );
-        defer s.finalize();
-        _ = try s.step();
-        var c = try db.prepare("INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(1, 0, 1000000000);");
-        defer c.finalize();
-        _ = try c.step();
+        try db.run("INSERT INTO capacity(user_id, used_bytes, total_bytes) VALUES(1, 0, 1000000000);", &.{});
 
         const tmp = testing.tmpDir(.{});
         const blobs = try blobstore.BlobStore.init(testing.io, tmp.dir);

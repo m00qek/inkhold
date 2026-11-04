@@ -61,11 +61,10 @@ pub fn releaseIds(self: Files, user_id: u64, ids: []const u64, gc: *std.ArrayLis
     }
 
     for (ids) |fid| {
-        var s = try self.db.prepare("DELETE FROM files WHERE id = ?1 AND user_id = ?2;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(fid));
-        s.bindInt(2, @intCast(user_id));
-        _ = try s.step();
+        try self.db.run(
+            "DELETE FROM files WHERE id = ?1 AND user_id = ?2;",
+            &.{ .{ .int = @intCast(fid) }, .{ .int = @intCast(user_id) } },
+        );
     }
 
     // Refund per distinct blob the user no longer holds in any charged sense,
@@ -127,14 +126,10 @@ pub fn restoreRow(self: Files, user_id: u64, id: u64, opts: RestoreName) !Restor
     errdefer self.gpa.free(final);
 
     // `deleted_path` is NULL for live rows.
-    var s = try self.db.prepare(
+    try self.db.run(
         "UPDATE files SET deleted = 0, deleted_at = NULL, deleted_path = NULL, name = ?1, updated_at = ?2 WHERE id = ?3;",
+        &.{ .{ .text = final }, .{ .int = internal.now(self) }, .{ .int = @intCast(id) } },
     );
-    defer s.finalize();
-    s.bindText(1, final);
-    s.bindInt(2, internal.now(self));
-    s.bindInt(3, @intCast(id));
-    _ = try s.step();
     return .{ .name = final, .was_trashed = true, .renamed = !std.mem.eql(u8, final, name) };
 }
 

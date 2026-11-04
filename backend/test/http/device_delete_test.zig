@@ -252,10 +252,10 @@ test "device delete_folder_v3: an idempotent retry succeeds without restarting t
     }
 
     {
-        var s = try f.db.prepare("UPDATE files SET deleted_at = 1000 WHERE user_id = ?1 AND deleted = 1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(alice));
-        _ = try s.step();
+        try f.db.run(
+            "UPDATE files SET deleted_at = 1000 WHERE user_id = ?1 AND deleted = 1;",
+            &.{.{ .int = @intCast(alice) }},
+        );
     }
     const ver_before = try f.files.syncVersion(alice);
 

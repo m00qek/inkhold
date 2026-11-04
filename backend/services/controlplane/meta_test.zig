@@ -200,11 +200,10 @@ test "a STALE index row is still repaired, though nothing asks isCurrent first" 
     const fresh = (try svc.noteMeta(a, 1, id)).?;
 
     {
-        var s = try f.db.prepare("UPDATE note_index SET index_version = ?1 WHERE blob_md5 = ?2;");
-        defer s.finalize();
-        s.bindInt(1, noteindex.index_version - 1);
-        s.bindText(2, &md5);
-        _ = try s.step();
+        try f.db.run(
+            "UPDATE note_index SET index_version = ?1 WHERE blob_md5 = ?2;",
+            &.{ .{ .int = noteindex.index_version - 1 }, .{ .text = &md5 } },
+        );
     }
     try testing.expect(!try noteindex.isCurrent(f.db, &md5));
 

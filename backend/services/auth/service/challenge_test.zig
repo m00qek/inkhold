@@ -189,19 +189,17 @@ test "user existence and pre-login global device unlink" {
 }
 
 fn setLastUsed(db: *sqlite.Db, token: []const u8, v: i64) !void {
-    var s = try db.prepare("UPDATE sessions SET last_used_at = ?1 WHERE token_hash = ?2;");
-    defer s.finalize();
-    s.bindInt(1, v);
-    s.bindText(2, &password.hashToken(token));
-    _ = try s.step();
+    try db.run(
+        "UPDATE sessions SET last_used_at = ?1 WHERE token_hash = ?2;",
+        &.{ .{ .int = v }, .{ .text = &password.hashToken(token) } },
+    );
 }
 
 fn setExpires(db: *sqlite.Db, token: []const u8, v: i64) !void {
-    var s = try db.prepare("UPDATE sessions SET expires_at = ?1 WHERE token_hash = ?2;");
-    defer s.finalize();
-    s.bindInt(1, v);
-    s.bindText(2, &password.hashToken(token));
-    _ = try s.step();
+    try db.run(
+        "UPDATE sessions SET expires_at = ?1 WHERE token_hash = ?2;",
+        &.{ .{ .int = v }, .{ .text = &password.hashToken(token) } },
+    );
 }
 
 test "admin user management: list users, last-admin guard, and password reset" {

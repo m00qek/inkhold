@@ -131,11 +131,10 @@ pub const PeakAllocator = struct {
 /// Indexes `bytes` under `md5` into `db`, blobs row included so the FK holds.
 pub fn indexInto(db: sqlite.Db, md5: []const u8, bytes: []const u8) !void {
     {
-        var s = try db.prepare("INSERT OR IGNORE INTO blobs(md5, size, refcount, created_at) VALUES(?1,?2,1,0);");
-        defer s.finalize();
-        s.bindText(1, md5);
-        s.bindInt(2, @intCast(bytes.len));
-        _ = try s.step();
+        try db.run(
+            "INSERT OR IGNORE INTO blobs(md5, size, refcount, created_at) VALUES(?1,?2,1,0);",
+            &.{ .{ .text = md5 }, .{ .int = @intCast(bytes.len) } },
+        );
     }
     var p = try parseBlob(testing.allocator, bytes);
     defer p.deinit();

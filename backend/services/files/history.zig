@@ -72,11 +72,10 @@ pub fn setVersionPolicy(self: Files, user_id: u64, want: u32) !VersionPolicyChan
     errdefer self.db.exec("ROLLBACK;") catch {};
 
     {
-        var s = try self.db.prepare("UPDATE users SET history_keep = ?2 WHERE id = ?1;");
-        defer s.finalize();
-        s.bindInt(1, @intCast(user_id));
-        s.bindInt(2, @intCast(keep));
-        _ = try s.step();
+        try self.db.run(
+            "UPDATE users SET history_keep = ?2 WHERE id = ?1;",
+            &.{ .{ .int = @intCast(user_id) }, .{ .int = @intCast(keep) } },
+        );
     }
 
     var gc: std.ArrayList([md5_len]u8) = .empty;
@@ -119,15 +118,15 @@ pub fn setVersionPolicy(self: Files, user_id: u64, want: u32) !VersionPolicyChan
 /// Appends a superseded version, in the same transaction as the repoint and
 /// decref. The row is itself the blob's keep-alive.
 pub fn recordHistory(self: Files, file_id: u64, md5: []const u8, size: u64, ts: i64) !void {
-    var s = try self.db.prepare(
+    try self.db.run(
         "INSERT INTO file_history(file_id, md5, size, created_at) VALUES(?1,?2,?3,?4);",
+        &.{
+            .{ .int = @intCast(file_id) },
+            .{ .text = md5 },
+            .{ .int = @intCast(size) },
+            .{ .int = ts },
+        },
     );
-    defer s.finalize();
-    s.bindInt(1, @intCast(file_id));
-    s.bindText(2, md5);
-    s.bindInt(3, @intCast(size));
-    s.bindInt(4, ts);
-    _ = try s.step();
 }
 
 /// Install-wide retained footprint: distinct history blobs no live file holds.
@@ -228,10 +227,7 @@ pub fn evictOldestVersion(self: Files, user_id: u64, gc: *std.ArrayList([md5_len
         break :blk r.int(0);
     };
     {
-        var d = try self.db.prepare("DELETE FROM file_history WHERE rowid = ?1;");
-        defer d.finalize();
-        d.bindInt(1, doomed_rowid);
-        _ = try d.step();
+        try self.db.run("DELETE FROM file_history WHERE rowid = ?1;", &.{.{ .int = doomed_rowid }});
     }
     if (try internal.reapIfUnreferenced(self, &out.md5)) try gc.append(self.gpa, out.md5);
     return out;
@@ -308,11 +304,10 @@ pub fn restoreVersion(self: Files, user_id: u64, file_id: u64, md5: []const u8) 
 
 /// Never decrefs or GCs: the live file references the blob.
 fn dropFileHistoryVersion(self: Files, file_id: u64, md5: []const u8) !void {
-    var s = try self.db.prepare("DELETE FROM file_history WHERE file_id = ?1 AND md5 = ?2;");
-    defer s.finalize();
-    s.bindInt(1, @intCast(file_id));
-    s.bindText(2, md5);
-    _ = try s.step();
+    try self.db.run(
+        "DELETE FROM file_history WHERE file_id = ?1 AND md5 = ?2;",
+        &.{ .{ .int = @intCast(file_id) }, .{ .text = md5 } },
+    );
 }
 
 /// Reaps each distinct md5 through the GC gate.

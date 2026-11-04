@@ -87,11 +87,10 @@ pub fn store(db: sqlite.Db, blob_md5: []const u8, shape: pdfprobe.Shape) !void {
 /// Record a non-shape verdict so the file is never probed again. The shape
 /// columns stay zero, which `aspectOf` reads as "no fact".
 pub fn storeVerdict(db: sqlite.Db, blob_md5: []const u8, v: Verdict) !void {
-    var s = try db.prepare("UPDATE note_index SET pdf_probe = ?2 WHERE blob_md5 = ?1;");
-    defer s.finalize();
-    s.bindText(1, blob_md5);
-    s.bindInt(2, @backingInt(v));
-    _ = try s.step();
+    try db.run(
+        "UPDATE note_index SET pdf_probe = ?2 WHERE blob_md5 = ?1;",
+        &.{ .{ .text = blob_md5 }, .{ .int = @backingInt(v) } },
+    );
 }
 
 // ---------------------------------------------------------------------------

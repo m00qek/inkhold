@@ -77,13 +77,11 @@ pub fn pairOf(self: Files, user_id: u64, id: u64) !?Paired {
 
 /// Callers holding a transaction bump inside it, so it commits atomically.
 pub fn bumpSync(self: Files, user_id: u64) !void {
-    var s = try self.db.prepare(
+    try self.db.run(
         "INSERT INTO sync_state(user_id, version) VALUES(?1, 1) " ++
             "ON CONFLICT(user_id) DO UPDATE SET version = version + 1;",
+        &.{.{ .int = @intCast(user_id) }},
     );
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    _ = try s.step();
 }
 
 /// Refunds `size` if `md5` is now unreferenced by the user, once per
@@ -115,11 +113,10 @@ pub fn parentOf(self: Files, user_id: u64, id: u64) !?u64 {
 
 pub fn addUsed(self: Files, user_id: u64, delta: i64) !void {
     try quota.ensureCapacity(self, user_id); // or the UPDATE no-ops
-    var s = try self.db.prepare("UPDATE capacity SET used_bytes = used_bytes + ?1 WHERE user_id = ?2;");
-    defer s.finalize();
-    s.bindInt(1, delta);
-    s.bindInt(2, @intCast(user_id));
-    _ = try s.step();
+    try self.db.run(
+        "UPDATE capacity SET used_bytes = used_bytes + ?1 WHERE user_id = ?2;",
+        &.{ .{ .int = delta }, .{ .int = @intCast(user_id) } },
+    );
 }
 
 /// Removes a blob and every derived file after the releasing transaction
@@ -136,10 +133,7 @@ pub fn removeBlobFiles(self: Files, md5: []const u8) void {
 /// True means: remove the bytes after commit.
 pub fn decref(self: Files, md5: []const u8) !bool {
     {
-        var s = try self.db.prepare("UPDATE blobs SET refcount = refcount - 1 WHERE md5 = ?1;");
-        defer s.finalize();
-        s.bindText(1, md5);
-        _ = try s.step();
+        try self.db.run("UPDATE blobs SET refcount = refcount - 1 WHERE md5 = ?1;", &.{.{ .text = md5 }});
     }
     return reapIfUnreferenced(self, md5);
 }
@@ -168,10 +162,7 @@ pub fn reapIfUnreferenced(self: Files, md5: []const u8) !bool {
     // The index dies with the blob, in this transaction (CASCADE is the backstop).
     try noteindex.deleteForBlob(self.db, md5);
     try spdindex.deleteForBlob(self.db, md5); // intent; the FK cascade is the backstop
-    var s = try self.db.prepare("DELETE FROM blobs WHERE md5 = ?1;");
-    defer s.finalize();
-    s.bindText(1, md5);
-    _ = try s.step();
+    try self.db.run("DELETE FROM blobs WHERE md5 = ?1;", &.{.{ .text = md5 }});
     return true;
 }
 
@@ -236,17 +227,12 @@ pub fn assertFolder(self: Files, user_id: u64, parent_id: ?u64) !void {
 }
 
 pub fn ensureBlobRow(self: Files, md5: []const u8, size: u64) !void {
-    var s = try self.db.prepare("INSERT INTO blobs(md5, size, refcount, created_at) VALUES(?1,?2,0,?3) ON CONFLICT(md5) DO NOTHING;");
-    defer s.finalize();
-    s.bindText(1, md5);
-    s.bindInt(2, @intCast(size));
-    s.bindInt(3, now(self));
-    _ = try s.step();
+    try self.db.run(
+        "INSERT INTO blobs(md5, size, refcount, created_at) VALUES(?1,?2,0,?3) ON CONFLICT(md5) DO NOTHING;",
+        &.{ .{ .text = md5 }, .{ .int = @intCast(size) }, .{ .int = now(self) } },
+    );
 }
 
 pub fn incref(self: Files, md5: []const u8) !void {
-    var s = try self.db.prepare("UPDATE blobs SET refcount = refcount + 1 WHERE md5 = ?1;");
-    defer s.finalize();
-    s.bindText(1, md5);
-    _ = try s.step();
+    try self.db.run("UPDATE blobs SET refcount = refcount + 1 WHERE md5 = ?1;", &.{.{ .text = md5 }});
 }

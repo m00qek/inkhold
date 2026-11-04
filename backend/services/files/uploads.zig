@@ -11,27 +11,25 @@ const md5_len = filesmod.md5_len;
 /// name and declared size at `upload/apply`. These values, not finish's echoed
 /// path, are authoritative.
 pub fn createUploadSession(self: Files, user_id: u64, inner_name: []const u8, path: []const u8, file_name: []const u8, declared_size: u64) !void {
-    var s = try self.db.prepare(
+    try self.db.run(
         "INSERT INTO upload_sessions(inner_name, user_id, path, file_name, declared_size, blob_md5, created_at) VALUES(?1,?2,?3,?4,?5,NULL,?6);",
+        &.{
+            .{ .text = inner_name },
+            .{ .int = @intCast(user_id) },
+            .{ .text = path },
+            .{ .text = file_name },
+            .{ .int = @intCast(declared_size) },
+            .{ .int = internal.now(self) },
+        },
     );
-    defer s.finalize();
-    s.bindText(1, inner_name);
-    s.bindInt(2, @intCast(user_id));
-    s.bindText(3, path);
-    s.bindText(4, file_name);
-    s.bindInt(5, @intCast(declared_size));
-    s.bindInt(6, internal.now(self));
-    _ = try s.step();
 }
 
 /// The md5 the blob store computed at `/oss/put`. NotFound if no such session.
 pub fn setUploadBlob(self: Files, user_id: u64, inner_name: []const u8, md5: []const u8) !void {
-    var s = try self.db.prepare("UPDATE upload_sessions SET blob_md5 = ?1 WHERE inner_name = ?2 AND user_id = ?3;");
-    defer s.finalize();
-    s.bindText(1, md5);
-    s.bindText(2, inner_name);
-    s.bindInt(3, @intCast(user_id));
-    _ = try s.step();
+    try self.db.run(
+        "UPDATE upload_sessions SET blob_md5 = ?1 WHERE inner_name = ?2 AND user_id = ?3;",
+        &.{ .{ .text = md5 }, .{ .text = inner_name }, .{ .int = @intCast(user_id) } },
+    );
     if (self.db.changes() == 0) return error.NotFound;
 }
 
@@ -40,15 +38,11 @@ pub fn setUploadBlob(self: Files, user_id: u64, inner_name: []const u8, md5: []c
 /// clamped at 0. NotFound if not this caller's session.
 pub fn addUploadReceived(self: Files, user_id: u64, inner_name: []const u8, delta: i64) !u64 {
     {
-        var s = try self.db.prepare(
+        try self.db.run(
             "UPDATE upload_sessions SET received_bytes = MAX(0, received_bytes + ?1) " ++
                 "WHERE inner_name = ?2 AND user_id = ?3;",
+            &.{ .{ .int = delta }, .{ .text = inner_name }, .{ .int = @intCast(user_id) } },
         );
-        defer s.finalize();
-        s.bindInt(1, delta);
-        s.bindText(2, inner_name);
-        s.bindInt(3, @intCast(user_id));
-        _ = try s.step();
         if (self.db.changes() == 0) return error.NotFound;
     }
     var r = (try self.db.row(
@@ -78,10 +72,7 @@ pub fn uploadSession(self: Files, alloc: std.mem.Allocator, user_id: u64, inner_
 }
 
 pub fn deleteUploadSession(self: Files, inner_name: []const u8) !void {
-    var s = try self.db.prepare("DELETE FROM upload_sessions WHERE inner_name = ?1;");
-    defer s.finalize();
-    s.bindText(1, inner_name);
-    _ = try s.step();
+    try self.db.run("DELETE FROM upload_sessions WHERE inner_name = ?1;", &.{.{ .text = inner_name }});
 }
 
 /// Drops sessions older than `max_age_s` and their on-disk blob when it has no

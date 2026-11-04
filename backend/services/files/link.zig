@@ -107,13 +107,15 @@ pub fn linkBlobIndexed(
 
     if (existing) |e| {
         file_id = e.id;
-        var s = try self.db.prepare("UPDATE files SET md5 = ?1, size = ?2, updated_at = ?3 WHERE id = ?4;");
-        defer s.finalize();
-        s.bindText(1, md5);
-        s.bindInt(2, @intCast(size));
-        s.bindInt(3, ts);
-        s.bindInt(4, @intCast(file_id));
-        _ = try s.step();
+        try self.db.run(
+            "UPDATE files SET md5 = ?1, size = ?2, updated_at = ?3 WHERE id = ?4;",
+            &.{
+                .{ .text = md5 },
+                .{ .int = @intCast(size) },
+                .{ .int = ts },
+                .{ .int = @intCast(file_id) },
+            },
+        );
     } else {
         var s = try self.db.prepare(
             "INSERT INTO files(user_id, parent_id, name, is_folder, md5, size, created_at, updated_at) VALUES(?1,?2,?3,0,?4,?5,?6,?6);",

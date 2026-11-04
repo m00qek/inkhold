@@ -220,10 +220,10 @@ test "GET /thumbnail/{hash}: a .note cover serves 200 immutable; a coverless not
     const path = try std.fmt.bufPrint(&pbuf, "/thumbnail/{s}", .{coverless.md5[0..]});
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "", 404);
     {
-        var s = try f.db.prepare("UPDATE note_index SET indexed_at = 54321 WHERE blob_md5 = ?1;");
-        defer s.finalize();
-        s.bindText(1, &coverless.md5);
-        _ = try s.step();
+        try f.db.run(
+            "UPDATE note_index SET indexed_at = 54321 WHERE blob_md5 = ?1;",
+            &.{.{ .text = &coverless.md5 }},
+        );
     }
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "GET", path, &admin_tok, "", 404);
     {

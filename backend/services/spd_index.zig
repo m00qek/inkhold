@@ -158,23 +158,25 @@ const upsert_sql =
 /// Upserts `d`'s row. Call inside the caller's transaction; the `blobs` row must
 /// exist (FK). Racing derives are wasteful but never a constraint violation.
 pub fn store(db: sqlite.Db, blob_md5: []const u8, d: Derived, now: i64) !void {
-    var s = try db.prepare(upsert_sql);
-    defer s.finalize();
-    s.bindText(1, blob_md5);
-    s.bindInt(2, index_version);
-    s.bindInt(3, if (d.row.indexable) 1 else 0);
-    s.bindInt(4, now);
-    s.bindFloatOpt(5, widen(d.row.surface_w));
-    s.bindFloatOpt(6, widen(d.row.surface_h));
-    s.bindIntOpt(7, widenInt(d.row.ppi));
-    s.bindFloatOpt(8, widen(d.row.vp_x));
-    s.bindFloatOpt(9, widen(d.row.vp_y));
-    s.bindTextOpt(10, d.row.app_version);
-    s.bindTextOpt(11, d.row.fmt_ver);
-    s.bindInt(12, d.row.layer_count);
-    s.bindIntOpt(13, widenInt(d.row.thumb_w));
-    s.bindIntOpt(14, widenInt(d.row.thumb_h));
-    _ = try s.step();
+    try db.run(
+        upsert_sql,
+        &.{
+            .{ .text = blob_md5 },
+            .{ .int = index_version },
+            .{ .int = if (d.row.indexable) 1 else 0 },
+            .{ .int = now },
+            .{ .float_opt = widen(d.row.surface_w) },
+            .{ .float_opt = widen(d.row.surface_h) },
+            .{ .int_opt = widenInt(d.row.ppi) },
+            .{ .float_opt = widen(d.row.vp_x) },
+            .{ .float_opt = widen(d.row.vp_y) },
+            .{ .text_opt = d.row.app_version },
+            .{ .text_opt = d.row.fmt_ver },
+            .{ .int = d.row.layer_count },
+            .{ .int_opt = widenInt(d.row.thumb_w) },
+            .{ .int_opt = widenInt(d.row.thumb_h) },
+        },
+    );
 }
 
 /// Zig does not coerce optional payloads implicitly.
@@ -198,10 +200,7 @@ pub fn isCurrent(db: sqlite.Db, blob_md5: []const u8) !bool {
 
 /// Called inside the blob GC transaction; ON DELETE CASCADE is the backstop.
 pub fn deleteForBlob(db: sqlite.Db, blob_md5: []const u8) !void {
-    var s = try db.prepare("DELETE FROM spd_index WHERE blob_md5 = ?1;");
-    defer s.finalize();
-    s.bindText(1, blob_md5);
-    _ = try s.step();
+    try db.run("DELETE FROM spd_index WHERE blob_md5 = ?1;", &.{.{ .text = blob_md5 }});
 }
 
 /// The repair gate: true when no row exists at the current `index_version`, or
@@ -255,11 +254,10 @@ fn buildSpd(gpa: Allocator, spec: SpdSpec) ![]u8 {
     const put = struct {
         fn kv(d: sqlite.Db, name: []const u8, value: ?[]const u8) !void {
             const v = value orelse return;
-            var s = try d.prepare("INSERT INTO config(name, value) VALUES(?1, ?2);");
-            defer s.finalize();
-            s.bindText(1, name);
-            s.bindBlob(2, v);
-            _ = try s.step();
+            try d.run(
+                "INSERT INTO config(name, value) VALUES(?1, ?2);",
+                &.{ .{ .text = name }, .{ .blob = v } },
+            );
         }
     }.kv;
     try put(db, "thumbnail", spec.thumbnail);
@@ -298,10 +296,10 @@ const Fixture = struct {
     }
 
     fn storeWithBlob(f: *Fixture, md5: []const u8, d: Derived, now: i64) !void {
-        var s = try f.db.prepare("INSERT OR IGNORE INTO blobs(md5, size, refcount, created_at) VALUES(?1, 1, 1, 0);");
-        defer s.finalize();
-        s.bindText(1, md5);
-        _ = try s.step();
+        try f.db.run(
+            "INSERT OR IGNORE INTO blobs(md5, size, refcount, created_at) VALUES(?1, 1, 1, 0);",
+            &.{.{ .text = md5 }},
+        );
         try store(f.db, md5, d, now);
     }
 };

@@ -109,12 +109,14 @@ pub fn changePassword(self: *Service, user_id: u64, current_md5: ?[]const u8, ne
     {
         // Only path that stamps `password_changed_at`; an admin reset does not
         // choose the kept credential, so it doesn't.
-        var s = try self.db.prepare("UPDATE users SET cred_enc = ?1, password_md5 = '', must_change_password = 0, password_changed_at = ?3 WHERE id = ?2;");
-        defer s.finalize();
-        s.bindText(1, &internal.encryptCred(self, new_md5));
-        s.bindInt(2, @intCast(user_id));
-        s.bindInt(3, internal.now(self));
-        _ = try s.step();
+        try self.db.run(
+            "UPDATE users SET cred_enc = ?1, password_md5 = '', must_change_password = 0, password_changed_at = ?3 WHERE id = ?2;",
+            &.{
+                .{ .text = &internal.encryptCred(self, new_md5) },
+                .{ .int = @intCast(user_id) },
+                .{ .int = internal.now(self) },
+            },
+        );
     }
     try revokeAllSessions(self, user_id);
     return try issueSession(self, user_id, .controlplane, null);
@@ -122,25 +124,19 @@ pub fn changePassword(self: *Service, user_id: u64, current_md5: ?[]const u8, ne
 
 /// Keyed by `sha256(token)`.
 pub fn logout(self: *Service, token: []const u8) Error!void {
-    var s = try self.db.prepare("DELETE FROM sessions WHERE token_hash = ?1;");
-    defer s.finalize();
-    s.bindText(1, &password.hashToken(token));
-    _ = try s.step();
+    try self.db.run(
+        "DELETE FROM sessions WHERE token_hash = ?1;",
+        &.{.{ .text = &password.hashToken(token) }},
+    );
 }
 
 pub fn revokeAllSessions(self: *Service, user_id: u64) Error!void {
-    var s = try self.db.prepare("DELETE FROM sessions WHERE user_id = ?1;");
-    defer s.finalize();
-    s.bindInt(1, @intCast(user_id));
-    _ = try s.step();
+    try self.db.run("DELETE FROM sessions WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }});
 }
 
 /// Reclaims rows past the absolute cap.
 pub fn sweepExpiredSessions(self: *Service) Error!void {
-    var s = try self.db.prepare("DELETE FROM sessions WHERE expires_at < ?1;");
-    defer s.finalize();
-    s.bindInt(1, internal.now(self));
-    _ = try s.step();
+    try self.db.run("DELETE FROM sessions WHERE expires_at < ?1;", &.{.{ .int = internal.now(self) }});
 }
 
 fn createSession(self: *Service, token: []const u8, user_id: u64, audience: Scope, equipment_no: ?[]const u8) Error!void {
@@ -230,21 +226,19 @@ pub fn elevate(self: *Service, user_id: u64, token: []const u8, submitted_passwo
 
     const t = internal.now(self);
     const until = t + elevation_idle_s;
-    var s = try self.db.prepare("UPDATE sessions SET elevated_at = ?1, elevated_until = ?2 WHERE token_hash = ?3;");
-    defer s.finalize();
-    s.bindInt(1, t);
-    s.bindInt(2, until);
-    s.bindText(3, &password.hashToken(token));
-    _ = try s.step();
+    try self.db.run(
+        "UPDATE sessions SET elevated_at = ?1, elevated_until = ?2 WHERE token_hash = ?3;",
+        &.{ .{ .int = t }, .{ .int = until }, .{ .text = &password.hashToken(token) } },
+    );
     return until;
 }
 
 /// Clears this session's elevation ("Lock console"); idempotent.
 pub fn lockElevation(self: *Service, token: []const u8) Error!void {
-    var s = try self.db.prepare("UPDATE sessions SET elevated_at = NULL, elevated_until = NULL WHERE token_hash = ?1;");
-    defer s.finalize();
-    s.bindText(1, &password.hashToken(token));
-    _ = try s.step();
+    try self.db.run(
+        "UPDATE sessions SET elevated_at = NULL, elevated_until = NULL WHERE token_hash = ?1;",
+        &.{.{ .text = &password.hashToken(token) }},
+    );
 }
 
 /// Extends only an already-live elevation, clamped to the ceiling; null if none.
@@ -259,10 +253,9 @@ pub fn renewElevation(self: *Service, token: []const u8) Error!?i64 {
         started = r.int(0);
     }
     const until = @min(t + elevation_idle_s, started + elevation_absolute_s);
-    var s = try self.db.prepare("UPDATE sessions SET elevated_until = ?1 WHERE token_hash = ?2;");
-    defer s.finalize();
-    s.bindInt(1, until);
-    s.bindText(2, &password.hashToken(token));
-    _ = try s.step();
+    try self.db.run(
+        "UPDATE sessions SET elevated_until = ?1 WHERE token_hash = ?2;",
+        &.{ .{ .int = until }, .{ .text = &password.hashToken(token) } },
+    );
     return until;
 }
