@@ -1,0 +1,85 @@
+#!/bin/sh
+# The image's PID 1. `serve` (the default): start the server, and when
+# something is mounted at /backup, crond with /etc/inkhold/crontab beside it.
+# Anything else (`restore /backup`, `users reset-password ...`) goes straight
+# to the binary.
+
+config=/etc/inkhold/config.zon
+crontab=/etc/inkhold/crontab
+spool=/var/spool/cron/crontabs
+lock=/backup/.inkhold-backup.lock
+
+[ "${1:-}" = serve ] || exec /inkhold --config="$config" "$@"
+
+say() { echo "inkhold-entrypoint: $*" >&2; }
+
+# The first job line of the crontab, without its five schedule fields.
+first_job() {
+    grep -v -E '^[[:space:]]*(#|$)|^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$crontab" |
+        head -n 1 | sed -E 's/^[[:space:]]*([^[:space:]]+[[:space:]]+){5}//'
+}
+
+# Seconds since the newest snapshot (named by its UTC time), or a large number
+# when there is none.
+backup_age() {
+    newest=$(ls /backup 2>/dev/null | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z$' | sort | tail -n 1)
+    then=0
+    [ -n "$newest" ] && then=$(date -u -D '%Y-%m-%dT%H%M%SZ' -d "$newest" +%s 2>/dev/null || echo 0)
+    echo $(( $(date -u +%s) - then ))
+}
+
+# A backup still running at shutdown is stopped and its lock removed, so the
+# next run is not refused for hours. Only a lock this container wrote.
+stop_backup() {
+    [ -f "$lock" ] || return 0
+    pid=$(sed -n 's/^pid //p' "$lock")
+    host=$(sed -n 's/^host //p' "$lock")
+    [ "$host" = "$(hostname)" ] && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 0
+    kill -TERM "$pid" 2>/dev/null
+    for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+    rm -f "$lock"
+}
+
+cron=
+catchup=
+if mountpoint -q /backup; then
+    # crond reads only crontabs owned by root, and a file mounted from the
+    # host keeps its host owner: so it runs from a copy.
+    mkdir -p "$spool" && cat "$crontab" > "$spool/root" || say "cannot copy $crontab to $spool"
+    crond -f -c "$spool" -L /dev/stderr &
+    cron=$!
+    # A missed night (the machine was off at the scheduled time): run the
+    # first job once, after the server has had a minute to start
+    # (INKHOLD_CATCHUP_DELAY, in seconds, shortens it for tests).
+    (
+        sleep "${INKHOLD_CATCHUP_DELAY:-60}"
+        if [ "$(backup_age)" -gt 86400 ]; then
+            say "newest backup is over a day old: running the backup now"
+            sh -c "$(first_job)"
+        fi
+    ) &
+    catchup=$!
+    say "backups: /backup on the schedule in $crontab"
+else
+    say "no volume mounted at /backup: automatic backups are off"
+fi
+
+/inkhold --config="$config" "$@" &
+server=$!
+
+stopping=
+shutdown() {
+    stopping=1
+    kill -TERM "$server" 2>/dev/null
+    [ -n "$catchup" ] && kill -TERM "$catchup" 2>/dev/null
+    [ -n "$cron" ] && kill -TERM "$cron" 2>/dev/null
+    [ -n "$cron" ] && stop_backup
+}
+trap shutdown TERM INT
+
+# A trapped signal interrupts `wait` (status 128+n) before the server is done;
+# the second `wait` collects its real exit status, even if it already exited.
+wait "$server"; status=$?
+[ -n "$stopping" ] && { wait "$server"; status=$?; }
+[ -n "$cron" ] && kill -TERM "$cron" 2>/dev/null
+exit "$status"

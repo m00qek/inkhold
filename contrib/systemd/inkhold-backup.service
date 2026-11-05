@@ -9,10 +9,8 @@
 #                    synced cloud folder): a backup on the same disk goes
 #                    down with it
 #
-# In Docker, swap the two Exec lines for:
-#   ExecStart=/usr/bin/docker exec inkhold /inkhold backup create /backup --keep=7
-#   ExecStartPost=/usr/bin/docker exec inkhold /inkhold backup verify /backup
-# and drop User=/Group=.
+# Not needed in Docker: the image schedules its own backups when a folder is
+# mounted at /backup (README, "Back up your notes").
 #
 # The admin screen shows the result of every run, so a failure is seen even
 # when nobody reads the journal.

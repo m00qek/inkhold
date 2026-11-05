@@ -1,0 +1,12 @@
+# Inkhold's backup schedule (busybox crond). Times are UTC unless the
+# container gets a POSIX TZ, e.g. `-e TZ=CET-1CEST,M3.5.0,M10.5.0/3`.
+#
+# Runs only when something is mounted at /backup. To change when it runs or
+# what it does (--keep, --include-cred-key, a weekly `verify --deep`), mount
+# your own copy of this file:  -v ./crontab:/etc/inkhold/crontab:ro
+#
+# The FIRST job line is also what runs at container start when the newest
+# snapshot in /backup is more than a day old (a night the machine was off).
+#
+# min hour day month weekday  command
+0 3 * * *  /inkhold --config=/etc/inkhold/config.zon backup create /backup --keep=7 >/proc/1/fd/1 2>/proc/1/fd/2 && /inkhold --config=/etc/inkhold/config.zon backup verify /backup >/proc/1/fd/1 2>/proc/1/fd/2

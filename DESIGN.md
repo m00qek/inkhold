@@ -105,7 +105,8 @@ and [`parsers/spd/spd-format.md`](parsers/spd/spd-format.md).
 `inkhold backup` (`services/backup.zig`) is for a household: a folder of plain
 files that a NAS share, a USB disk or a Dropbox folder carries intact. It is a
 separate process beside a running server; scheduling is cron's or systemd's
-(`contrib/systemd/` has a timer, shipped disabled).
+(`contrib/systemd/` has a timer, shipped disabled; the Docker image runs
+busybox crond beside the server when a volume is mounted at `/backup`).
 
 - **Layout.** One shared store, `blobs/ab/<md5>[.gz]`, and one directory per
   snapshot (`YYYY-MM-DDTHHMMSSZ/`: `inkhold.db.gz`, `manifest.txt`, optionally

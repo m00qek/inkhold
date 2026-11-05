@@ -126,16 +126,20 @@ listen on every interface, or your server's LAN address to pin it to one.
 docker volume create inkhold
 docker run -d --name inkhold -p 8089:8089 \
   -v inkhold:/var/lib/inkhold \
+  -v /mnt/nas/inkhold-backup:/backup \
   ghcr.io/m00qek/inkhold-beta:latest
 docker logs inkhold          # the first-run admin password is printed here
 ```
+
+The `/backup` line is optional and turns on nightly backups into that folder
+(see [Back up your notes](#back-up-your-notes)); leave it out and there are none.
 
 One tag covers **x86_64, aarch64, 32-bit ARM and 32-bit x86** — Docker pulls the
 one that matches your machine. The ARM image is built for ARMv6, so it runs on
 every Pi from the original B+ upward. The image is built `FROM scratch`: the server is
 statically linked, so there is no base distribution in there at all, which is
-why it is ~25 MB and has nothing to patch. It also means there is no shell, so
-`docker exec` will not give you one.
+why it is ~25 MB. The one extra is a static busybox (1 MB) that schedules the
+backups; it also means `docker exec -it inkhold sh` gives you a shell.
 
 Everything that must survive an upgrade — the database, `cred.key`, your notes
 and the search index — lives in the `/var/lib/inkhold` volume. The image's
@@ -210,8 +214,21 @@ inkhold backup verify /mnt/nas/inkhold            # --deep re-reads every file
 
 Each run adds only what is new, so after the first one a nightly backup is
 quick and small, and `--keep=7` keeps a week. Every snapshot in the folder is
-complete on its own. In the container: `docker exec inkhold /inkhold backup
-create /backup --keep=7`, with `/backup` mounted from the host.
+complete on its own.
+
+**In Docker, mount a folder at `/backup` and that is all.** The container then
+backs up every night at 03:00 UTC, keeps 7 snapshots and checks each new one;
+`docker logs inkhold` shows each run. If the machine was off at 03:00, the
+container backs up a minute after it next starts. Without a `/backup` mount
+nothing is scheduled. To change the time or the options (`--keep`,
+`--include-cred-key`, a weekly `verify --deep`), copy
+[`docker/rootfs/etc/inkhold/crontab`](docker/rootfs/etc/inkhold/crontab), edit it,
+and mount it with `-v ./crontab:/etc/inkhold/crontab:ro`; for local time instead
+of UTC, pass a POSIX zone such as `-e TZ=CET-1CEST,M3.5.0,M10.5.0/3`. Mount the
+NAS share itself (or a volume backed by it): a bind mount of a host folder
+whose share has dropped off quietly fills the host's own disk instead. To run
+one by hand:
+`docker exec inkhold /inkhold --config=/etc/inkhold/config.zon backup create /backup --keep=7`.
 
 **To run it every night**, add one line with `crontab -e` (stdout is the
 summary; problems still go to cron's mail):
@@ -232,6 +249,13 @@ for you: only you know where the backup should go.
 ```sh
 inkhold restore /mnt/nas/inkhold                  # the newest snapshot
 inkhold restore /mnt/nas/inkhold 2026-11-04T030000Z
+```
+
+In Docker, with the server container stopped, onto a new volume:
+
+```sh
+docker run --rm -v inkhold-new:/var/lib/inkhold -v /mnt/nas/inkhold-backup:/backup \
+  ghcr.io/m00qek/inkhold-beta:latest restore /backup
 ```
 
 Things worth knowing:

@@ -1,5 +1,5 @@
-# Inkhold, as a container: the statically linked server, the built SPA, nothing
-# else.
+# Inkhold, as a container: the statically linked server, the built SPA, and a
+# static busybox for the nightly backup.
 #
 # FROM scratch, NOT alpine, and the reason is that there is nothing for a base
 # image to provide. `make release-artifact` links against musl STATICALLY, so
@@ -7,13 +7,15 @@
 # connection, so it needs no CA bundle; it formats no local times, so it needs
 # no tzdata; and `-DSQLITE_TEMP_STORE=3` keeps every SQLite temp table in
 # memory, so it needs no writable /tmp. An alpine base would add ~8 MB and a
-# package surface to patch, in exchange for a shell.
+# package surface to patch.
 #
-# THE TRADE THAT BUYS, stated so nobody has to discover it: there is no shell in
-# here, so `docker exec` cannot give you one. To look inside, `docker cp` the
-# path out, or run the binary with `--help`/`--version`. Swapping the first line
-# for `FROM alpine:3` is all it takes to get a shell back if that is ever worth
-# 8 MB to you.
+# BUSYBOX, ONE STATIC BINARY (~1 MB), is the exception, for scheduling: when a
+# volume is mounted at /backup, its crond runs `inkhold backup` nightly
+# (`rootfs/etc/inkhold/crontab`), and its ash runs the entrypoint that starts
+# crond beside the server (`rootfs/usr/local/bin/entrypoint`). Scheduling is a
+# distribution's job, like a systemd timer, so it lives here and not in the
+# server. A side effect: `docker exec -it inkhold sh` works, with the applets
+# linked in `rootfs/bin` (any other one as `busybox <applet>`).
 #
 # ONE IMAGE PER PLATFORM, assembled into a manifest list by buildx. The binaries
 # are CROSS-COMPILED on the runner by Zig rather than built under QEMU inside
@@ -41,6 +43,13 @@ LABEL org.opencontainers.image.title="Inkhold" \
       org.opencontainers.image.revision="${VERSION}" \
       org.opencontainers.image.version="${VERSION}"
 
+# Busybox, copied from the official image for the same platform: a COPY, so
+# nothing foreign runs during the build (no QEMU). Then the applet links, the
+# passwd crond needs to accept the `root` crontab, the crontab, the entrypoint.
+COPY --from=busybox:1.37.0-musl /bin/busybox /bin/busybox
+COPY rootfs/ /
+ENV PATH=/usr/local/bin:/bin
+
 # The server, and the SPA it serves on the same port.
 COPY context/${TARGETPLATFORM}/inkhold /inkhold
 COPY context/webapp/dist /srv/webapp/dist
@@ -53,13 +62,19 @@ COPY context/webapp/dist /srv/webapp/dist
 COPY config.zon /etc/inkhold/config.zon
 
 # Everything that must survive the container: the database, the credential key,
-# the blob store and the derived search index.
+# the blob store and the derived search index. NOT /backup: the entrypoint
+# turns backups on when something is mounted there, and a VOLUME line would
+# mount an anonymous volume on every run (on the same disk, too).
 VOLUME ["/var/lib/inkhold"]
 WORKDIR /var/lib/inkhold
 
 EXPOSE 8089
 
-# No HEALTHCHECK: it would need a shell or curl, and neither is in here. Point
-# your orchestrator at `GET /api/admin/health` instead.
-ENTRYPOINT ["/inkhold", "--config=/etc/inkhold/config.zon"]
+# No HEALTHCHECK: there is no HTTP client in here. Point your orchestrator at
+# `GET /api/admin/health` instead.
+#
+# `serve` runs under the entrypoint (server + crond, signals forwarded); any
+# other command (`restore /backup`, `users reset-password ...`) is handed to
+# `/inkhold --config=/etc/inkhold/config.zon` unchanged, as before.
+ENTRYPOINT ["/usr/local/bin/entrypoint"]
 CMD ["serve"]
