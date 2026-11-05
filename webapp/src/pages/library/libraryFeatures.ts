@@ -7,6 +7,8 @@ import { openRenameDialog } from "../../ui/renameDialog";
 import { createUploadZone, type UploadDestination, type UploadZone } from "../../ui/uploadZone";
 import { openConflictDialog } from "../../ui/uploadConflict";
 import { createGalleryCards, type GalleryCards } from "../galleryCards";
+import { createSearchExcerpts } from "../searchExcerpts";
+import { openTextStore } from "../../cache/textStore";
 import { createCardActions } from "../cardActions";
 import { createHistoryController, type HistoryController } from "../historyPanel";
 import { createGallerySearch, type GallerySearch } from "../gallerySearch";
@@ -96,9 +98,12 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
       ),
   });
 
+  // The line under each search result, from text the browser already holds.
+  const excerpts = createSearchExcerpts({ store: openTextStore(), indexVersion: (md5) => ctx.searchService.indexVersion(md5) });
   const galleryCards: GalleryCards = createGalleryCards({
     galleryEngine: ctx.galleryEngine,
     imgLazy: ctx.imgLazy,
+    excerpts,
     getView: () => st.view,
     labelFor: (folder) => ctx.rail.labelFor(folder),
     categoryIconFor: (folder) => ctx.rail.categoryIconFor(folder),

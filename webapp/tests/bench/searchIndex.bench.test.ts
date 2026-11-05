@@ -11,6 +11,7 @@ import { it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { SearchIndex, type CoreLoader, type SearchCoreExports, type TermsDocument } from "../../src/search/indexEngine";
+import { excerptQuery, pickExcerpt, MAX_PAGES } from "../../src/search/excerpt";
 
 const HUB = { docs: 45, pagesPerDoc: 231 / 45, wordsPerPage: 54, vocabulary: 3559 };
 
@@ -107,6 +108,30 @@ it("search index at 1x, 10x and 100x the hub's library", async () => {
         `rebuild ${build.toFixed(0).padStart(5)} ms | memory ${mem.toFixed(0).padStart(4)} MB | ` +
         `1 word ${one.toFixed(1)} ms | 2 words ${two.toFixed(1)} ms | prefix ${prefix.toFixed(1)} ms | typo ${typo.toFixed(0)} ms`,
     );
+  }
+  console.log("\n" + rows.join("\n"));
+});
+
+// The excerpt line, per result: its document's matching pages scanned for the
+// closest stretch of the query's words. Budget: 10 ms a result on a laptop.
+it("excerpt per result: a note, and a dense PDF at the page cap", () => {
+  const r = rng(7);
+  const vocab = vocabulary(20_000, r).map((w, i) => (i % 5 === 0 ? w.replace(/a/, "ã") : w));
+  const pick = () => vocab[Math.floor(Math.pow(r(), 2.2) * vocab.length)]!;
+  const page = (p: number, n: number) => {
+    const ws = Array.from({ length: n }, () => pick());
+    // The query's words, far apart, on every page: the worst case for the window.
+    ws[Math.floor(n * 0.1)] = "reunião";
+    ws[Math.floor(n * 0.9)] = "pais";
+    return { p, o: null, l: null, t: ws.map((w, i) => (i % 12 === 11 ? w + "\n" : w)).join(" ") };
+  };
+  const q = excerptQuery("reuniao pa")!;
+  const rows: string[] = [];
+  for (const [label, pages, words] of [["note, 5 pages x 150 words", 5, 150], ["PDF, 50 pages x 500 words", MAX_PAGES, 500], ["PDF, 900 pages x 500 words", 900, 500]] as const) {
+    const doc = { segments: Array.from({ length: pages }, (_, i) => page(i, words)) };
+    const all = doc.segments.map((s) => s.p);
+    const ms = time(() => pickExcerpt(doc, all, q), 20);
+    rows.push(`${label.padEnd(28)} | ${ms.toFixed(2).padStart(6)} ms a result | 20 results ${(ms * 20).toFixed(0)} ms`);
   }
   console.log("\n" + rows.join("\n"));
 });

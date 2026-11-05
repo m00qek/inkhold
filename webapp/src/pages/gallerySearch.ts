@@ -86,13 +86,14 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
           nameMatched: matchesName(known.note.name, query),
           pages: doc.pages,
           kind: segmentKind(known.note),
+          md5: doc.md5,
         });
       }
     }
 
     for (const [noteId, { note, folderPath }] of cached) {
       if (byId.has(noteId) || !matchesName(note.name, query)) continue;
-      byId.set(noteId, { noteId, note, folderPath, nameMatched: true, pages: [], kind: segmentKind(note) });
+      byId.set(noteId, { noteId, note, folderPath, nameMatched: true, pages: [], kind: segmentKind(note), md5: null });
     }
 
     const all = [...byId.values()];

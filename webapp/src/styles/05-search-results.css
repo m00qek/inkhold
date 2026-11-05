@@ -40,8 +40,34 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The line where the words matched (`searchExcerpts.ts`): two lines at most,
+   in the quiet ink, the page it is from first. Empty, it takes no room. */
+.card__excerpt {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  min-height: 1px;
+  margin-top: 2px;
+  font-size: var(--fs-caption);
+  line-height: 1.45;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.card__excerpt.is-filled {
+  margin-top: 4px;
+}
+.card__excerpt-page {
+  margin-right: 6px;
+  font-family: var(--font-mono);
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Mirrors `.ocr__body mark`: one highlight look in titles and transcripts. */
-.card__title mark {
+.card__title mark,
+.card__excerpt mark {
   background: color-mix(in srgb, var(--accent) 24%, transparent);
   color: var(--ink);
   border-radius: 2px;

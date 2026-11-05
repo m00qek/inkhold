@@ -511,6 +511,15 @@ one-shot frame plus `retry:`, never a 503.
   58 MB). Queries stay under 10 ms; a typo-ladder scan is 90 ms at 100x. So the
   rebuild only matters past a few thousand documents; IndexedDB reads are not
   in these numbers.
+- **Excerpts** (`search/excerpt.ts`, `pages/searchExcerpts.ts`): a result's
+  line is cut in the browser from text it already holds (the tier-1 prefetch
+  and earlier finds); a search never fetches text. Among the first 50 matching
+  pages, the shortest stretch holding every query word wins, then words matched
+  whole over a typed prefix, then the earliest page; where the typo ladder
+  answered, its words are looked for. The result opens on the excerpt's page.
+  Lines fill as results scroll into view, after the row is painted, and work
+  for a result a newer query replaced is skipped. Measured: 0.2 ms for a
+  5-page note, 5.5 ms for a dense PDF at the 50-page cap.
 
 ## 11. Browser app
 

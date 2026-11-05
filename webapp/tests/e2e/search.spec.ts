@@ -296,6 +296,25 @@ test.describe("universal search", () => {
     expect(strays).toEqual([]);
   });
 
+  test("a transcript hit shows the line where the words matched, and opens on its page", async ({ page }) => {
+    await signedIn(page);
+    await mockSearchIndex(page, { rows: INDEX_ROWS, documents: INDEX_DOCS });
+    await mockDocText(page, INDEX_TEXT);
+    await page.goto("/");
+    await railSettled(page);
+
+    await searchBox(page).fill("Endor");
+    const row = results(page).filter({ hasText: "Project Aurora — kickoff" });
+    await expect(row).toHaveCount(1, { timeout: 20_000 });
+    // Filled from the prefetched text, after the row itself is painted.
+    const line = row.locator(".card__excerpt");
+    await expect(line.locator("mark").first()).toHaveText(/^endor$/i, { timeout: 20_000 });
+    await expect(line.locator(".card__excerpt-page")).toHaveText("p. 2");
+
+    await row.locator(".card__open").click();
+    await expect(page).toHaveURL(/#\/note\/121\/page\/2\?q=Endor$/);
+  });
+
   // "ednor" is a transposition one edit from "Endor" and no other fixture term is that close.
   test("a corrected query says which word it searched, and opens the viewer on it", async ({ page }) => {
     await signedIn(page);
@@ -314,6 +333,8 @@ test.describe("universal search", () => {
     await expect(notice.locator(".hits__matched")).toHaveText("endor");
     await expect(page.locator(".hit__snippet")).toHaveCount(0);
     await expect(matchLine(row)).toHaveText("Matches on 2 pages");
+    // The line shows what the page says, not what was typed.
+    await expect(row.locator(".card__excerpt mark").first()).toHaveText(/^endor$/i, { timeout: 20_000 });
 
     // The deep link carries the correction, or the viewer would find nothing.
     await row.locator(".card__open").click();

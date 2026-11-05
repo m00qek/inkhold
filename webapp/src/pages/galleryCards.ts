@@ -2,6 +2,7 @@
 // thumbnail/aspect/marks helpers they share. Shell state arrives through
 // `GalleryCardsCtx`.
 
+import type { SearchExcerpts } from "./searchExcerpts";
 import { insideQuery, nameMarks, nameQuery } from "../search/match";
 import { el } from "../ui/dom";
 import { learnsAspect, pinAspect, provisionalAspect } from "../ui/tileAspect";
@@ -41,6 +42,8 @@ export interface SearchResult {
   pages: readonly number[];
   /** 0 = `.note` pages, 1 = `.txt` paragraphs. Wording only; routing uses `fileType`. */
   kind: number;
+  /** The document's content hash, for its excerpt; null for a name-only match. */
+  md5: string | null;
 }
 
 /** Read through getters so a card reflects view state at build time. */
@@ -56,6 +59,8 @@ export interface GalleryCardsCtx {
   onSelectCategory: (cat: Category) => void;
   scheduleSpan: () => void;
   cardMenu: (entry: Entry) => HTMLElement;
+  /** The excerpt line under a result with content hits (`searchExcerpts.ts`); absent: none. */
+  excerpts?: SearchExcerpts;
 }
 
 export interface GalleryCards {
@@ -338,7 +343,8 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
   function resultCard(result: SearchResult, i: number, q: string, expansions: readonly Expansion[] = []): HTMLElement {
     const note = result.note;
     const { node: media, target, thumbClass, thumb, alt } = thumbMedia(note);
-    const top = result.pages[0];
+    // The page the result opens on: the first match, then the excerpt's page once shown.
+    let top = result.pages[0];
     const matchLine = pageSummary(result.pages.length, result.kind);
 
     const tile = el("div", { class: thumbClass }, media);
@@ -365,6 +371,11 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
             matchLine ? el("span", { class: "dot" }) : null,
             matchLine ? el("span", { class: "card__matches", text: matchLine }) : null,
           ),
+          result.md5 && result.pages.length > 0 && ctx.excerpts
+            ? ctx.excerpts.slot({ md5: result.md5, pages: result.pages }, q, expansions, result.kind === 1 ? null : "p.", (segment) => {
+                top = segment;
+              })
+            : null,
         ),
       ),
     );
