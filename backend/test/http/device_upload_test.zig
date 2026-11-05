@@ -106,13 +106,16 @@ test "device upload M2: apply → /oss/put → finish stores the blob and links 
             id: []const u8,
             name: []const u8,
             path_display: []const u8,
+            size: u64,
             content_hash: []const u8,
         }, gpa, resp.body, .{ .ignore_unknown_fields = true });
         defer p.deinit();
         try std.testing.expect(p.value.success);
         try std.testing.expectEqualStrings("up.note", p.value.name);
         try std.testing.expectEqualStrings(&md5, p.value.content_hash);
-        try std.testing.expectEqualStrings("/NOTE/Note/", p.value.path_display);
+        // The file's own path and real size, not the folder the device sent.
+        try std.testing.expectEqualStrings("/NOTE/Note/up.note", p.value.path_display);
+        try std.testing.expectEqual(@as(u64, file_bytes.len), p.value.size);
         file_id = try std.fmt.parseInt(u64, p.value.id, 10);
     }
 

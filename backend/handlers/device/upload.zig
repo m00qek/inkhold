@@ -51,8 +51,11 @@ const UploadFinishVO = struct {
     equipmentNo: []const u8,
     id: []const u8, // the real created files.id, as a string
     name: []const u8,
+    // The file's own path and size, as list_folder gives them: the Nomad
+    // records `path_display` as the file's cloud path. A folder here made its
+    // conflict rename name the copy after the folder (seen on hardware).
     path_display: []const u8,
-    size: i64 = 0, // the capture returned 0 here; the device ignores it
+    size: u64,
     content_hash: []const u8,
 };
 
@@ -343,11 +346,13 @@ pub fn uploadFinish(ctx: *Context, req: *Request, params: Params) anyerror!void 
     files.deleteUploadSession(in.innerName) catch |e| std.log.warn("upload {s}: session not dropped: {t}", .{ in.innerName, e });
 
     const id_str = try std.fmt.allocPrint(a, "{d}", .{entry.id});
+    const display = files.pathOf(a, caller.user_id, entry.id) catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, UploadFinishVO{
         .equipmentNo = eno,
         .id = id_str,
         .name = session.file_name,
-        .path_display = in.path orelse session.path, // echo the device's folder, à la capture
+        .path_display = display,
+        .size = real_size,
         .content_hash = blob_md5,
     }, null);
 }
