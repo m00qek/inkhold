@@ -55,7 +55,7 @@ test "handle() drives requests through the db_lock path without deadlocking" {
     }
 }
 
-test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the raw-file routes, the thumbnail route, the SSE route, the device list_folder route and the web upload route" {
+test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the raw-file routes, the thumbnail route, the SSE route, the device socket route, the device list_folder route and the web upload route" {
     // `manual_db_lock` opts a route out of the whole-handler DB lock; a handler
     // that then touches the DB without `ctx.db_lock` is a silent data race.
     // Adding a route here means auditing its DB touches: each must lock only
@@ -68,6 +68,8 @@ test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the 
         "/file/:id",
         "/thumbnail/:hash",
         "/api/controlplane/events",
+        // Held for the tablet's whole connection; locks only to check the token.
+        "/socket.io/",
         "/api/controlplane/bin/note/:id/page/:n",
         "/api/controlplane/bin/file/:id",
         "/api/file/2/files/list_folder",

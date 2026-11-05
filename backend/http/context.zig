@@ -42,6 +42,9 @@ pub const Context = struct {
     pending: ?*pending.Pulse = null,
     /// The caller's formatted IP, per connection.
     client_ip: ?[]const u8 = null,
+    /// The connection's socket, on a `held` route: a handler that waits for
+    /// the peer (the websocket) polls it. Null elsewhere and in tests.
+    conn_fd: ?std.posix.socket_t = null,
     /// Serializes the single shared writer connection across connection
     /// threads; null in single-threaded tests.
     db_lock: ?*std.Io.Mutex = null,

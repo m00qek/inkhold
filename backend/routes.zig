@@ -75,6 +75,10 @@ pub const routes = [_]router.Route{
     .{ .method = .POST, .path = "/api/file/3/files/upload/apply", .scopes = &.{.device}, .handler = device.uploadApply },
     .{ .method = .POST, .path = "/oss/put/:innerName", .scopes = &.{.device}, .handler = device.ossPut, .manual_db_lock = true },
     .{ .method = .POST, .path = "/api/file/2/files/upload/finish", .scopes = &.{.device}, .handler = device.uploadFinish },
+    // The tablet's auto-sync channel (Socket.IO 2 over a websocket). `.public`: the
+    // device token arrives in the query, and the handler checks it. Held for as
+    // long as the tablet stays connected; locks the DB only to check the token.
+    .{ .method = .GET, .path = "/socket.io/", .scopes = &.{.public}, .handler = device.socketIo, .manual_db_lock = true, .held = true },
     // Planner/calendar calls, stubbed empty.
     .{ .method = .POST, .path = "/api/file/schedule/group/all", .scopes = &.{.device}, .handler = device.scheduleGroupAll },
     .{ .method = .POST, .path = "/api/file/schedule/task/all", .scopes = &.{.device}, .handler = device.scheduleTaskAll },

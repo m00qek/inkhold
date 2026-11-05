@@ -68,6 +68,7 @@ const non_immutable_routes = [_][]const u8{
     "/api/controlplane/entry/:id/rename",
     "/api/controlplane/equipment/unlink",
     "/api/controlplane/events",
+    "/socket.io/",
     "/api/controlplane/file/metadata/:id",
     "/api/controlplane/folder/:id/upload",
     "/api/controlplane/note/:id/history",

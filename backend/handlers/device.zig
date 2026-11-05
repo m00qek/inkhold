@@ -11,6 +11,7 @@ const library = @import("../services/library.zig");
 
 const device_files = @import("device/files.zig");
 const device_upload = @import("device/upload.zig");
+const device_socket = @import("device/socket.zig");
 
 // ---- the file API and OSS download (`device/files.zig`) ----
 pub const listFolder = device_files.listFolder;
@@ -27,6 +28,7 @@ pub const ossGet = device_files.ossGet;
 pub const uploadApply = device_upload.uploadApply;
 pub const ossPut = device_upload.ossPut;
 pub const uploadFinish = device_upload.uploadFinish;
+pub const socketIo = device_socket.socketIo;
 const PageReq = device_files.PageReq;
 const SummaryByIdReq = device_files.SummaryByIdReq;
 
@@ -326,4 +328,5 @@ pub fn scheduleTaskAll(ctx: *Context, req: *Request, params: Params) anyerror!vo
 test {
     _ = device_files;
     _ = device_upload;
+    _ = device_socket;
 }

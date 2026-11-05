@@ -212,6 +212,7 @@ pub const Serve = struct {
         var req = req_in;
         var local = self.ctx.*;
         local.client_ip = conn.clientIp(local.config.trusted_proxy, &req);
+        local.conn_fd = conn.stream.socket.handle;
         handle(&local, self.routes, &req) catch |err| log.warn("connection error: {t}", .{err});
         self.finish(conn);
     }
