@@ -137,6 +137,9 @@ export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
         ctx.gallery.append(
           emptyState("Keep typing", `Type at least ${MIN_GLOBAL_QUERY_LEN} characters to search your library.`),
         );
+        // What search will be able to find, before it runs.
+        const cov = ctx.features.gallerySearch.coverageBlock();
+        if (cov) ctx.gallery.append(cov);
         return;
       }
       ctx.features.gallerySearch.renderSearch(q);

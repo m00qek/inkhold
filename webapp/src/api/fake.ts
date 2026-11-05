@@ -376,5 +376,18 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
     // --- account (self-service) ---
     ...fakeAccountMethods(latency),
     ...fakeTodoMethods(latency),
+
+    // Every `.note` is written on every page; a recognized one has text from
+    // its first recognized page on, an unrecognized one has recognition off.
+    async searchCoverage() {
+      await delay(latency);
+      return Object.values(ALL_NOTES)
+        .filter((n) => n.fileType === "note")
+        .map((n) => {
+          const from = RECOGNIZED_FROM[n.id] ?? 0;
+          const recognized = n.hasRecognizedText ? Math.max(0, n.pageCount - from) : 0;
+          return { id: n.id, recognition: n.hasRecognizedText, written: n.pageCount, recognized, running: 0 };
+        });
+    },
   };
 }

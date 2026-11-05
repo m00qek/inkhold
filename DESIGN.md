@@ -523,6 +523,18 @@ one-shot frame plus `retry:`, never a 503.
   so it can't tell a page about a word from one that mentions it. How close the
   words sit picks a document's excerpt, not its place: ranking by it would read
   every result's text before showing any.
+- **Coverage** (`services/search/coverage.zig`, `GET
+  /api/controlplane/search-index/coverage`, `pages/searchCoverage.ts`): only
+  what the tablet recognized is searchable, so search says how much that is.
+  Per live `.note` with writing: pages with writing (`has_ink` not 0, or
+  recognized to non-empty text; the tablet also "recognizes" blank pages, to
+  nothing), how many were recognized, how many it was still recognizing at
+  sync (`RECOGNSTATUS` 2), and whether recognition is on (`FILE_RECOGN_TYPE`).
+  One query, asked for by search (at most once a minute), never by listings.
+  Shown as a line under results, under "No matches" and while the query is
+  too short, opening to the notes search can't fully read and why. The
+  tablet's titles and keywords are not indexed; none of the hub's notes had
+  any (2026-11-05).
 - **Excerpts** (`search/excerpt.ts`, `pages/searchExcerpts.ts`): a result's
   line is cut in the browser from text it already holds; a search never
   fetches text. After each sync the browser keeps text ahead of time

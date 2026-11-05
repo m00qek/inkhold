@@ -8,6 +8,8 @@ const controlplane = @import("../../services/controlplane.zig");
 const eventstreams = @import("../../http/event_streams.zig");
 const pendingsvc = @import("../../services/pending.zig");
 const index_export = @import("../../services/search/index_export.zig");
+const search_coverage = @import("../../services/search/coverage.zig");
+const json = @import("../../http/json.zig");
 const indexstream = @import("../../services/search/index_stream.zig");
 const wantbitmap = @import("../../services/search/want_bitmap.zig");
 const derived = @import("../../store/derived.zig");
@@ -81,6 +83,36 @@ pub fn searchIndexManifest(ctx: *Context, req: *Request, params: Params) anyerro
         return req.respond("", .{ .status = .not_modified, .extra_headers = &headers });
     }
     try req.respond(body.items, .{ .status = .ok, .extra_headers = &headers });
+}
+
+const CoverageNoteVO = struct {
+    id: []const u8,
+    recognition: bool,
+    written: u32,
+    recognized: u32,
+    running: u32,
+};
+
+/// GET /api/controlplane/search-index/coverage -> `{"notes":[…]}`: per live
+/// note with writing on it, how many of its written pages the tablet
+/// recognized (only those are searchable), how many it was still
+/// recognizing, and whether recognition is on for it
+/// (`services/search/coverage.zig`). Asked for by search, not by listings.
+pub fn searchCoverage(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rows = search_coverage.coverage(a, ctx.db, ctx.caller.?.user_id) catch return serverError(ctx, req);
+    const notes = try a.alloc(CoverageNoteVO, rows.len);
+    for (rows, notes) |r, *o| o.* = .{
+        .id = try std.fmt.allocPrint(a, "{d}", .{r.file_id}),
+        .recognition = r.recognition,
+        .written = r.written,
+        .recognized = r.recognized,
+        .running = r.running,
+    };
+    try json.respond(ctx.gpa, req, .ok, .{ .notes = notes }, null);
 }
 
 /// GET /api/controlplane/search-index/stream?m=<manifest etag>&want=<base64url>

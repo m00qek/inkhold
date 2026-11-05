@@ -78,6 +78,7 @@ test {
     _ = @import("services/note_index.zig");
     _ = @import("services/search/fuzzy.zig");
     _ = @import("services/search/index_export.zig");
+    _ = @import("services/search/coverage.zig");
     _ = @import("services/search/want_bitmap.zig");
     _ = @import("services/search/index_stream.zig");
     _ = @import("services/derive_search.zig");

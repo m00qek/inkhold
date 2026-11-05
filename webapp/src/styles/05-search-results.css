@@ -111,3 +111,65 @@
   }
 }
 
+
+/* How much handwriting search can find (`searchCoverage.ts`): a quiet line
+   under the results, opening to the notes it can't read and why. */
+.coverage {
+  grid-column: 1 / -1;
+  max-width: 760px;
+  margin: var(--sp-6) 2px var(--sp-4);
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+.coverage summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+  cursor: pointer;
+  list-style: none;
+}
+.coverage summary::-webkit-details-marker {
+  display: none;
+}
+.coverage summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.coverage__more {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+.coverage[open] .coverage__more {
+  text-decoration-color: currentColor;
+}
+.coverage__how {
+  margin: var(--sp-2) 0;
+  max-width: 64ch;
+}
+.coverage__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--row-rule);
+}
+.coverage__list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--row-rule);
+}
+.coverage__name {
+  color: var(--ink);
+  font-size: var(--fs-body);
+  text-decoration: none;
+}
+.coverage__name:hover {
+  text-decoration: underline;
+}
+.coverage__why {
+  font-family: var(--font-mono);
+}

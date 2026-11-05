@@ -178,6 +178,12 @@ export interface Api {
   /** Forget a directory no longer used, so its last failure stops warning. 404 `NO_SUCH_BACKUP_DIR`. */
   adminForgetBackupDir(dir: string): Promise<AdminBackups>;
 
+  // --- SEARCH COVERAGE ---
+  // Only handwriting the tablet recognized is searchable. Per live note with
+  // writing on it: GET /api/controlplane/search-index/coverage.
+
+  searchCoverage(): Promise<NoteCoverage[]>;
+
   // --- TO-DO ---
   // The signed-in person's own lists and tasks; each change reaches the tablet
   // at its next sync. While the server keeps no To-Do, `todo()` answers
@@ -349,4 +355,17 @@ export interface Api {
    */
   changePassword(currentPlaintext: string, newPlaintext: string): Promise<void>;
   // ---------------------------------------------------------------------------
+}
+
+/** How much of one note's handwriting search can find. */
+export interface NoteCoverage {
+  readonly id: Id;
+  /** Recognition is switched on for the note on the tablet. */
+  readonly recognition: boolean;
+  /** Pages with writing on them; blank pages are not counted. */
+  readonly written: number;
+  /** Of those, recognized: only these are searchable. */
+  readonly recognized: number;
+  /** Still being recognized on the tablet when it last synced. */
+  readonly running: number;
 }

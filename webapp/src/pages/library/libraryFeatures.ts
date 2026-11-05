@@ -8,6 +8,7 @@ import { createUploadZone, type UploadDestination, type UploadZone } from "../..
 import { openConflictDialog } from "../../ui/uploadConflict";
 import { createGalleryCards, type GalleryCards } from "../galleryCards";
 import { createSearchExcerpts } from "../searchExcerpts";
+import { createSearchCoverage } from "../searchCoverage";
 import { openTextStore } from "../../cache/textStore";
 import { createCardActions } from "../cardActions";
 import { createHistoryController, type HistoryController } from "../historyPanel";
@@ -124,6 +125,10 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     folderCard: galleryCards.folderCard,
     emptyState: ctx.render.emptyState,
     indexPending: () => st.indexPending,
+    // Repaints only an open search, as the index frame does.
+    coverage: createSearchCoverage(ctx.api, () => {
+      if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
+    }),
     moreResults: (q) =>
       todoHits(
         ctx.todo?.snapshot() ?? null,

@@ -116,6 +116,8 @@ pub const routes = [_]router.Route{
     // term records as raw bytes (no API response is compressed). The manifest
     // heals nothing, so it can be `read_only`; it is `no-cache` + ETag.
     .{ .method = .GET, .path = "/api/controlplane/search-index/manifest", .scopes = &.{.controlplane}, .handler = controlplane.searchIndexManifest, .read_only = true },
+    // How much handwriting search can find: one query, asked for by search only.
+    .{ .method = .GET, .path = "/api/controlplane/search-index/coverage", .scopes = &.{.controlplane}, .handler = controlplane.searchCoverage, .read_only = true },
     // Not `read_only`: the reader lease would be held for the whole download, and an
     // empty pool degrades to the writer under `db_lock`. The handler borrows a
     // reader around its manifest query only.

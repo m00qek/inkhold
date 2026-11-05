@@ -75,6 +75,7 @@ const non_immutable_routes = [_][]const u8{
     "/api/controlplane/note/:id/history/:md5/meta",
     "/api/controlplane/note/:id/history/:md5/page/:n/text",
     "/api/controlplane/note/:id/history/:md5/restore",
+    "/api/controlplane/search-index/coverage",
     "/api/controlplane/search-index/manifest",
     // no-store: a document still deriving is skipped, so identical requests
     // may differ.

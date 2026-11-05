@@ -99,6 +99,7 @@ fn readOnlyProbes(a: std.mem.Allocator, note_id: u64) ![]const ReadOnlyProbe {
         .{ .route = "/api/file/3/files/query/by/path_v3", .path = "/api/file/3/files/query/by/path_v3", .method = "POST", .body = "{\"path\":\"/audit.note\"}", .face = .device },
         // The manifest never calls `indexRowEnsuring`, so it heals nothing.
         .{ .route = "/api/controlplane/search-index/manifest", .path = "/api/controlplane/search-index/manifest", .method = "GET", .face = .web },
+        .{ .route = "/api/controlplane/search-index/coverage", .path = "/api/controlplane/search-index/coverage", .method = "GET", .face = .web },
     };
     try out.appendSlice(a, &fixed);
 

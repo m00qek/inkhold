@@ -6,6 +6,7 @@ import { el } from "../ui/dom";
 import { coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail";
 import { matchesName, nameQueryFor, type NameQuery } from "../search/match";
+import type { SearchCoverage } from "./searchCoverage";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
 import type { Expansion } from "../search/localSearch";
@@ -40,10 +41,14 @@ export interface GallerySearchCtx {
   indexPending: () => number | null;
   /** Another group of results painted after the notes (the to-dos); null: none. */
   moreResults?: (q: string) => HTMLElement | null;
+  /** How much handwriting search can find (`searchCoverage.ts`); absent: not said. */
+  coverage?: SearchCoverage;
 }
 
 export interface GallerySearch {
   renderSearch: (q: string) => void;
+  /** The coverage line and its list, for a search too short to run; null: none yet. */
+  coverageBlock: () => HTMLElement | null;
 }
 
 export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
@@ -99,6 +104,13 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
 
     const all = [...byId.values()];
     return [...all.filter((r) => r.nameMatched), ...all.filter((r) => !r.nameMatched)];
+  }
+
+  /** The coverage block, naming notes from the cached tree. */
+  function coverageBlock(): HTMLElement | null {
+    if (!ctx.coverage) return null;
+    const notes = allCachedNotes();
+    return ctx.coverage.block((id) => notes.get(id)?.note.name ?? null);
   }
 
   /** Every note and folder name the search can show, for choosing the rule. */
@@ -177,6 +189,8 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       // The notes may still answer; say so rather than "no notes".
       if (searchState.kind === "searching") gallery.append(el("p", { class: "hits__notice", role: "status", text: "Searching handwriting…" }));
       if (more) gallery.append(more);
+      const cov = coverageBlock();
+      if (cov) gallery.append(cov);
       return;
     }
 
@@ -191,8 +205,11 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         gallery.append(ctx.emptyState("Searching…", "Looking through every note — names, typing and handwriting."));
       } else {
         const still = pendingLine(pending);
-        const why = coverageLine();
-        gallery.append(ctx.emptyState(`No matches for “${q}”`, still ? `${still} ${why}` : why));
+        // The coverage block says the rest, with numbers, once it has them.
+        const cov = coverageBlock();
+        const why = cov ? "" : coverageLine();
+        gallery.append(ctx.emptyState(`No matches for “${q}”`, [still, why].filter(Boolean).join(" ")));
+        if (cov) gallery.append(cov);
       }
       return;
     }
@@ -213,7 +230,9 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       gallery.append(ctx.resultCard(result, i, q, expansions));
     }
     if (more && at < 0) gallery.append(more);
+    const cov = coverageBlock();
+    if (cov) gallery.append(cov);
   }
 
-  return { renderSearch };
+  return { renderSearch, coverageBlock };
 }

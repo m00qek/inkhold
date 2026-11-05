@@ -445,6 +445,14 @@ export function createHttpApi(): Api {
       });
     },
 
+    async searchCoverage() {
+      const r = await request<{ notes?: { id: string; recognition: boolean; written: number; recognized: number; running: number }[] }>(
+        "GET",
+        "/api/controlplane/search-index/coverage",
+      );
+      return (r.notes ?? []).map((n) => ({ id: String(n.id), recognition: n.recognition, written: n.written, recognized: n.recognized, running: n.running }));
+    },
+
     ...accountMethods,
     ...todoMethods,
   };

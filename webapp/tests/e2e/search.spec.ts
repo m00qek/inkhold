@@ -296,6 +296,30 @@ test.describe("universal search", () => {
     expect(strays).toEqual([]);
   });
 
+  test("search says how much handwriting it can read, and which notes it can't", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/");
+    await railSettled(page);
+    await searchBox(page).fill("Aurora");
+    const cov = page.locator(".coverage");
+    await expect(cov.locator(".coverage__line")).toHaveText(/^Handwriting is searchable on \d+ of \d+ pages with writing\.$/);
+    await cov.locator("summary").click();
+    // A note with recognition off says so, and opens from the list.
+    const off = cov.locator("li", { hasText: "Recognition is off on the tablet" }).first();
+    await expect(off).toBeVisible();
+    const name = (await off.locator(".coverage__name").textContent())!;
+    await off.locator(".coverage__name").click();
+    await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
+    await expect(page.locator(".backbtn")).toBeVisible();
+    expect(name.length).toBeGreaterThan(0);
+
+    // Before a search can run, the same line says what it will be able to find.
+    await page.goto("/");
+    await railSettled(page);
+    await searchBox(page).fill("Au");
+    await expect(page.locator(".coverage__line")).toBeVisible();
+  });
+
   test("a transcript hit shows the line where the words matched, and opens on its page", async ({ page }) => {
     await signedIn(page);
     await mockSearchIndex(page, { rows: INDEX_ROWS, documents: INDEX_DOCS });

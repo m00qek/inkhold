@@ -55,6 +55,7 @@ pub const pageText = bytes_handlers.pageText;
 pub const pageLinks = bytes_handlers.pageLinks;
 
 pub const searchIndexManifest = search_handlers.searchIndexManifest;
+pub const searchCoverage = search_handlers.searchCoverage;
 pub const searchIndexStream = search_handlers.searchIndexStream;
 pub const documentText = search_handlers.documentText;
 pub const events = search_handlers.events;
