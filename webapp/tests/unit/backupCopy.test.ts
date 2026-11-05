@@ -23,33 +23,42 @@ const run = (over: Partial<BackupRun> = {}): BackupRun => ({
 const backups = (over: Partial<AdminBackups>): AdminBackups => ({
   warnAfterHours: 48,
   neverDismissed: false,
-  notice: { kind: "none", dir: null, at: null, message: null },
+  notice: { kind: "none", dir: null, at: null, message: null, check: false },
   runs: [],
   ...over,
 });
 
 describe("the library's backup notice", () => {
   it("says nothing when all is well", () => {
-    expect(backupNoticeText({ kind: "none", dir: null, at: null, message: null }, NOW)).toBeNull();
+    expect(backupNoticeText({ kind: "none", dir: null, at: null, message: null, check: false }, NOW)).toBeNull();
   });
 
   it("names the folder once: the command's message usually already does", () => {
     expect(
-      backupNoticeText({ kind: "failed", dir: "/mnt/nas", at: T, message: "No backup directory at: /mnt/nas" }, NOW),
+      backupNoticeText({ kind: "failed", dir: "/mnt/nas", at: T, message: "No backup directory at: /mnt/nas", check: false }, NOW),
     ).toBe("The last backup failed 1 hour ago: No backup directory at: /mnt/nas");
-    expect(backupNoticeText({ kind: "failed", dir: "/mnt/nas", at: T, message: "disk full" }, NOW)).toBe(
+    expect(backupNoticeText({ kind: "failed", dir: "/mnt/nas", at: T, message: "disk full", check: false }, NOW)).toBe(
       "The last backup to /mnt/nas failed 1 hour ago: disk full",
     );
   });
 
+  it("tells a failed check from a failed backup", () => {
+    expect(backupNoticeText({ kind: "failed", dir: "/backup/old-usb-disk", at: T, message: "No snapshots to verify.", check: true }, NOW)).toBe(
+      "The last check of the backups in /backup/old-usb-disk failed 1 hour ago: No snapshots to verify.",
+    );
+    expect(backupNoticeText({ kind: "failed", dir: "/mnt/nas", at: T, message: "1 missing in /mnt/nas", check: true }, NOW)).toBe(
+      "The last check of the backups failed 1 hour ago: 1 missing in /mnt/nas",
+    );
+  });
+
   it("asks whether the schedule still runs when the newest success is old", () => {
-    expect(backupNoticeText({ kind: "late", dir: "/mnt/nas", at: T - 72 * HOUR, message: null }, NOW)).toBe(
+    expect(backupNoticeText({ kind: "late", dir: "/mnt/nas", at: T - 72 * HOUR, message: null, check: false }, NOW)).toBe(
       "The last backup was 3 days ago, to /mnt/nas. Is the scheduled one still running?",
     );
   });
 
   it("says plainly that nothing is backed up yet", () => {
-    expect(backupNoticeText({ kind: "never", dir: null, at: null, message: null }, NOW)).toMatch(/Nothing has been backed up yet/);
+    expect(backupNoticeText({ kind: "never", dir: null, at: null, message: null, check: false }, NOW)).toMatch(/Nothing has been backed up yet/);
   });
 
   it("speaks in the app's two tints: danger for failed and late, information for nothing yet", () => {
@@ -68,19 +77,29 @@ describe("the Server panel's Backups card", () => {
 
   it("summarises a failure instead of repeating it, in the danger colour", () => {
     const failing = backups({
-      notice: { kind: "failed", dir: "/media/usb", at: T, message: "disk full" },
+      notice: { kind: "failed", dir: "/media/usb", at: T, message: "disk full", check: false },
       runs: [run(), run({ dir: "/media/usb", lastError: "disk full" })],
     });
     expect(backupsCard(failing, NOW)).toEqual({ value: "Failing", sub: "1 of 2 folders failing", danger: true });
   });
 
+  it("with one folder, says whether its backup or its check failed", () => {
+    const ran = backups({ notice: { kind: "failed", dir: "/mnt/nas", at: T, message: "disk full", check: false }, runs: [run({ lastError: "disk full" })] });
+    expect(backupsCard(ran, NOW).sub).toBe("its last backup failed");
+    const checked = backups({
+      notice: { kind: "failed", dir: "/mnt/nas", at: T, message: "1 missing", check: true },
+      runs: [run({ verifiedAt: T, verifyError: "1 missing" })],
+    });
+    expect(backupsCard(checked, NOW).sub).toBe("its last check failed");
+  });
+
   it("late is danger; none yet and elsewhere are not, and the command is not on the card", () => {
-    expect(backupsCard(backups({ notice: { kind: "late", dir: "/mnt/nas", at: T - 72 * HOUR, message: null } }), NOW)).toEqual({
+    expect(backupsCard(backups({ notice: { kind: "late", dir: "/mnt/nas", at: T - 72 * HOUR, message: null, check: false } }), NOW)).toEqual({
       value: "3 days ago",
       sub: "newest backup, older than 48 hours",
       danger: true,
     });
-    const never = backupsCard(backups({ notice: { kind: "never", dir: null, at: null, message: null } }), NOW);
+    const never = backupsCard(backups({ notice: { kind: "never", dir: null, at: null, message: null, check: false } }), NOW);
     expect(never).toEqual({ value: "None yet", sub: "no backup recorded", danger: false });
     expect(never.sub).not.toContain(BACKUP_COMMAND);
     expect(backupsCard(backups({ neverDismissed: true }), NOW).value).toBe("Elsewhere");

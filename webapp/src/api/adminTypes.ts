@@ -87,6 +87,8 @@ export interface BackupNotice {
   at: number | null;
   /** The first line the backup command printed when it failed. */
   message: string | null;
+  /** `failed` only: it was the check of the backups (`verify`), not a backup run. */
+  check: boolean;
 }
 
 /** One backup directory's record. Epoch seconds; null where it never happened. */

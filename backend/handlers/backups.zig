@@ -33,6 +33,8 @@ const NoticeVO = struct {
     /// Epoch seconds: when it failed, or the newest success (`late`).
     at: ?i64 = null,
     message: ?[]const u8 = null,
+    /// `failed` only: the check of the backups failed, not a backup run.
+    check: bool = false,
 };
 
 const RunVO = struct {
@@ -106,7 +108,7 @@ fn judge(ctx: *Context, runs: []const backupstatus.Run, dismissed: bool) backups
 }
 
 fn noticeVO(n: backupstatus.Notice) NoticeVO {
-    return .{ .kind = @tagName(n.kind), .dir = n.dir, .at = n.at, .message = n.message };
+    return .{ .kind = @tagName(n.kind), .dir = n.dir, .at = n.at, .message = n.message, .check = n.check };
 }
 
 fn respondBackups(ctx: *Context, req: *Request) !void {

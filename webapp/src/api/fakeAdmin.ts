@@ -71,13 +71,13 @@ export function fakeAdminMethods(latency: number) {
       .filter((r) => r.lastError !== null || r.verifyError !== null)
       .map((r) => ({ r, at: r.lastError !== null ? r.lastRunAt : r.verifiedAt }))
       .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))[0];
-    if (failing) return { kind: "failed", dir: failing.r.dir, at: failing.at, message: failing.r.lastError ?? failing.r.verifyError };
+    if (failing) return { kind: "failed", dir: failing.r.dir, at: failing.at, message: failing.r.lastError ?? failing.r.verifyError, check: failing.r.lastError === null };
     const newest = backupRuns.filter((r) => r.lastOkAt !== null).sort((a, b) => b.lastOkAt! - a.lastOkAt!)[0];
-    if (!newest) return backupNeverDismissed ? none() : { kind: "never", dir: null, at: null, message: null };
-    if (nowS() - newest.lastOkAt! > WARN_AFTER_HOURS * 3600) return { kind: "late", dir: newest.dir, at: newest.lastOkAt, message: null };
+    if (!newest) return backupNeverDismissed ? none() : { kind: "never", dir: null, at: null, message: null, check: false };
+    if (nowS() - newest.lastOkAt! > WARN_AFTER_HOURS * 3600) return { kind: "late", dir: newest.dir, at: newest.lastOkAt, message: null, check: false };
     return none();
   };
-  const none = (): BackupNotice => ({ kind: "none", dir: null, at: null, message: null });
+  const none = (): BackupNotice => ({ kind: "none", dir: null, at: null, message: null, check: false });
   const backups = (): AdminBackups => ({
     warnAfterHours: WARN_AFTER_HOURS,
     neverDismissed: backupNeverDismissed,

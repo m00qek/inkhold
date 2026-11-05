@@ -127,6 +127,9 @@ pub const Notice = struct {
     /// When the failure happened, or the newest success.
     at: ?i64 = null,
     message: ?[]const u8 = null,
+    /// `failed` only: the failure is the check of the backups (`verify`), not
+    /// a backup run, so the notice can say which.
+    check: bool = false,
 };
 
 /// Judges `runs` by the rules at the top of this file.
@@ -139,7 +142,13 @@ pub fn assess(runs: []const Run, now: i64, warn_after_s: i64, never_dismissed: b
         if (!create_failed and !verify_failed) continue;
         const at = if (create_failed) r.last_run_at else r.verified_at;
         if (failed == null or (at orelse 0) > (failed.?.at orelse 0)) {
-            failed = .{ .kind = .failed, .dir = r.dir, .at = at, .message = if (create_failed) r.last_error else r.verify_error };
+            failed = .{
+                .kind = .failed,
+                .dir = r.dir,
+                .at = at,
+                .message = if (create_failed) r.last_error else r.verify_error,
+                .check = !create_failed,
+            };
         }
     }
     if (failed) |f| return f;
@@ -242,7 +251,10 @@ test "assess: several directories are judged together, a failure anywhere still 
     var v = run("/nas", now - day, null, now - day);
     v.verify_error = "1 missing";
     v.verified_at = now;
-    try testing.expectEqual(Kind.failed, assess(&.{v}, now, warn, false).kind);
+    const checked = assess(&.{v}, now, warn, false);
+    try testing.expectEqual(Kind.failed, checked.kind);
+    try testing.expect(checked.check);
+    try testing.expect(!n.check); // the USB disk's failure was a backup run
 }
 
 test "an error is kept to its first line, and to a sane length" {

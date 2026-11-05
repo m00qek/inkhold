@@ -170,7 +170,7 @@ export const adminMethods = {
 
 // ---- backups: the server omits a null field, so absent becomes null here ----
 
-type RawNotice = { kind?: string; dir?: string; at?: number; message?: string };
+type RawNotice = { kind?: string; dir?: string; at?: number; message?: string; check?: boolean };
 type RawRun = Partial<Record<keyof BackupRun, unknown>>;
 type RawBackups = { warnAfterHours?: number; neverDismissed?: boolean; notice?: RawNotice; runs?: RawRun[] };
 
@@ -179,7 +179,7 @@ const KINDS: readonly BackupNoticeKind[] = ["none", "never", "late", "failed"];
 /** An unknown kind reads as `none`: a newer server must not paint a false alarm. */
 function noticeOf(r: RawNotice | undefined): BackupNotice {
   const kind = KINDS.includes(r?.kind as BackupNoticeKind) ? (r!.kind as BackupNoticeKind) : "none";
-  return { kind, dir: r?.dir ?? null, at: num(r?.at), message: r?.message ?? null };
+  return { kind, dir: r?.dir ?? null, at: num(r?.at), message: r?.message ?? null, check: r?.check === true };
 }
 
 function backupsOf(r: RawBackups): AdminBackups {

@@ -19,11 +19,11 @@ function build(answer: BackupNotice | Error, isAdmin = true) {
   return { n, api, onOpen, set: (next: BackupNotice | Error) => void (current = next) };
 }
 
-const failed: BackupNotice = { kind: "failed", dir: "/mnt/nas", at: T, message: "disk full" };
+const failed: BackupNotice = { kind: "failed", dir: "/mnt/nas", at: T, message: "disk full", check: false };
 
 describe("the library's backup notice", () => {
   it("is hidden while all is well", async () => {
-    const t = build({ kind: "none", dir: null, at: null, message: null });
+    const t = build({ kind: "none", dir: null, at: null, message: null, check: false });
     await flush();
     expect(t.n.el.hidden).toBe(true);
   });
@@ -46,7 +46,7 @@ describe("the library's backup notice", () => {
     const t = build(failed);
     await flush();
     expect(t.n.el.classList.contains("banner--danger")).toBe(true);
-    t.set({ kind: "never", dir: null, at: null, message: null });
+    t.set({ kind: "never", dir: null, at: null, message: null, check: false });
     await t.n.refresh();
     expect(t.n.el.hidden).toBe(false);
     expect(t.n.el.classList.contains("banner--danger")).toBe(false);
@@ -70,7 +70,7 @@ describe("the library's backup notice", () => {
     await flush();
     t.n.setConsoleOpen(true);
     expect(t.n.el.hidden).toBe(true);
-    t.set({ kind: "none", dir: null, at: null, message: null }); // fixed in the console
+    t.set({ kind: "none", dir: null, at: null, message: null, check: false }); // fixed in the console
     t.n.setConsoleOpen(false);
     await flush();
     expect(t.api.backupNotice).toHaveBeenCalledTimes(2);

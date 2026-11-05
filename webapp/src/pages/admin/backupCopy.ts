@@ -34,8 +34,11 @@ export function backupNoticeText(n: BackupNotice, nowMs: number = Date.now()): s
       return null;
     case "failed": {
       // The command's message usually names the folder already; say it once.
-      const where = n.dir && !(n.message ?? "").includes(n.dir) ? ` to ${n.dir}` : "";
-      return `The last backup${where} failed ${ago(n.at, nowMs)}` + (n.message ? `: ${n.message}` : ".");
+      const named = n.dir !== null && !(n.message ?? "").includes(n.dir);
+      const what = n.check
+        ? `The last check of the backups${named ? ` in ${n.dir}` : ""}`
+        : `The last backup${named ? ` to ${n.dir}` : ""}`;
+      return `${what} failed ${ago(n.at, nowMs)}` + (n.message ? `: ${n.message}` : ".");
     }
     case "late":
       return `The last backup was ${ago(n.at, nowMs)}${n.dir ? `, to ${n.dir}` : ""}. Is the scheduled one still running?`;
@@ -50,7 +53,8 @@ export function backupsCard(b: AdminBackups, nowMs: number = Date.now()): { valu
     case "failed": {
       const failing = b.runs.filter((r) => runStatus(r) !== "ok").length;
       const of = b.runs.length;
-      return { value: "Failing", sub: of > 1 ? `${failing} of ${of} folders failing` : "its last run failed", danger: true };
+      const single = b.notice.check ? "its last check failed" : "its last backup failed";
+      return { value: "Failing", sub: of > 1 ? `${failing} of ${of} folders failing` : single, danger: true };
     }
     case "late":
       return { value: ago(b.notice.at, nowMs), sub: `newest backup, older than ${b.warnAfterHours} hours`, danger: true };

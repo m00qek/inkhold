@@ -143,7 +143,7 @@ export function server(people: AdminUser[] = [ANA, RUI]) {
     return {
       warnAfterHours: 48,
       neverDismissed: state.backupDismissed,
-      notice: { kind: "none", dir: null, at: null, message: null },
+      notice: { kind: "none", dir: null, at: null, message: null, check: false },
       runs: state.backupRuns.map((r) => ({ ...r })),
     };
   }
