@@ -62,13 +62,25 @@ const WORD = /[\p{L}\p{M}\p{N}]+/gu;
  */
 export function nameMarks(text: string, query: NameQuery | null): [number, number][] {
   if (!query || !matchesName(text, query)) return [];
-  if (query.inside !== undefined) return insideMarks(text, query.inside);
+  return queryMarks(text, query);
+}
+
+/**
+ * The query's words in `text`, whether or not `text` matched on its own: a
+ * to-do matches on its title, notebook and list together, and its title shows
+ * whichever of the words it holds.
+ */
+export function queryMarks(text: string, query: NameQuery | null): [number, number][] {
+  if (!query) return [];
+  if (query.inside !== undefined) return text === "" ? [] : insideMarks(text, query.inside);
+  return wordMarks(text, (w) => query.whole.includes(w) || w.startsWith(query.start));
+}
+
+/** Whole words of `text` (original positions) one of whose folded parts `accept` takes. */
+export function wordMarks(text: string, accept: (folded: string) => boolean): [number, number][] {
   const out: [number, number][] = [];
   for (const m of text.matchAll(WORD)) {
-    // One original word can fold to several ("l'école" is already split here).
-    const parts = words(m[0]);
-    const hit = parts.some((p) => query.whole.includes(p) || p.startsWith(query.start));
-    if (hit) out.push([m.index, m.index + m[0].length]);
+    if (words(m[0]).some(accept)) out.push([m.index, m.index + m[0].length]);
   }
   return out;
 }

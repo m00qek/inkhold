@@ -129,8 +129,10 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     coverage: createSearchCoverage(ctx.api, () => {
       if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
     }),
-    moreResults: (q) =>
-      todoHits(
+    moreResults: (q) => {
+      // To-dos read at start can be stale: a search asks again (`load` repaints).
+      ctx.todo.freshen();
+      return todoHits(
         ctx.todo?.snapshot() ?? null,
         q,
         Date.now(),
@@ -139,7 +141,9 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
           go(todoHref(viewPath(homeView(t))));
         },
         (t) => ctx.todoInk.chip(t),
-      ),
+        (view) => go(todoHref(viewPath(view))),
+      );
+    },
   });
 
   /**

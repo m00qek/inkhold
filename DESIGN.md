@@ -498,6 +498,15 @@ one-shot frame plus `retry:`, never a 503.
 - **Typo ladder** (in-wasm, Damerau-Levenshtein): only when the exact query has
   zero hits — the corpus is misspelt handwriting recognition. English-oriented
   stemmers/spellfix were rejected (the corpus is Portuguese).
+- **To-dos in search** (`todoModel.findTodos`, `todo/todoSearch.ts`): a task
+  is found by its title, the notebook and the words it was lassoed from
+  (`link_text`, so a renamed task is still found by what was written) and its
+  list's name, all together by the name rule; lists named like the query are
+  results too. Matched words are marked. When nothing matches as typed, the
+  typo ladder's rules (`search/typo.ts`, a browser copy of the wasm one) pick
+  the nearest spelling, said as for notes. To-dos are read at start and, while
+  the To-Do page is closed, again by a search when over a minute old; an
+  answer repaints the open search.
 - **One rule for names.** Note and folder names and to-dos are not in the
   index; `webapp/src/search/match.ts` matches them by the index's rule: the
   query's words folded the same way, all present in any order, only the last

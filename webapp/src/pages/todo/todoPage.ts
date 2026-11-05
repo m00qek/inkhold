@@ -65,6 +65,11 @@ export interface TodoPage {
   snapshot(): TodoSnapshot | null;
   /** Re-reads the server (shell start, tab back in focus). */
   load(): Promise<void>;
+  /**
+   * Re-reads the server when the last read is over a minute old and the page
+   * is closed (open, it keeps up on its own): a search reaching for to-dos.
+   */
+  freshen(): void;
   /** Select this task when its page next opens (a search result). */
   reveal(taskId: string): void;
   destroy(): void;
@@ -73,6 +78,8 @@ export interface TodoPage {
 const UNDO_MS = 6000;
 /** While open and in view, the tablet's edits show up within this. */
 const POLL_MS = 30_000;
+/** Closed, a search re-reads to-dos older than this. */
+const FRESH_MS = 60_000;
 
 export function createTodoPage(host: TodoHost): TodoPage {
   const root = el("section", { class: "todo", "aria-labelledby": "todo-title", hidden: true });
@@ -116,8 +123,12 @@ export function createTodoPage(host: TodoHost): TodoPage {
 
   // ---- server ----
 
+  /** When the server was last asked, answered or not: a failure is not re-asked at once. */
+  let askedAt = 0;
+
   async function load(): Promise<void> {
     const mine = ++loadToken;
+    askedAt = Date.now();
     try {
       const s = await host.api.todo();
       if (mine !== loadToken) return;
@@ -463,6 +474,9 @@ export function createTodoPage(host: TodoHost): TodoPage {
   }, POLL_MS);
 
   return {
+    freshen() {
+      if (!open_ && Date.now() - askedAt > FRESH_MS) void load();
+    },
     open(next) {
       if (!open_ || !sameView(next, view)) {
         selected = null;

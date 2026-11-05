@@ -243,6 +243,28 @@ test.describe("To-Do", () => {
     await expect(row(page, "Haus of gabin")).toHaveClass(/is-selected/);
   });
 
+  test("search finds lists by name, marks the words, and corrects a typo as notes do", async ({ page }) => {
+    await openTodo(page);
+    const box = page.getByRole("searchbox", { name: "Search notes and to-dos" });
+    const group = page.locator(".todo-hits");
+
+    await box.fill("casa dentista");
+    await expect(group.locator(".todo-hit:not(.todo-hit--list) .todo-hit__title")).toHaveText(["Ligar para o dentista"]);
+    await expect(group.locator(".todo-hit__title mark")).toHaveText(["dentista"]);
+
+    await box.fill("casa");
+    const list = group.locator(".todo-hit--list");
+    await expect(list.locator(".todo-hit__title")).toHaveText("Casa");
+    await expect(group.locator(".section-head")).toHaveText(/^1 list · \d+ to-dos?$/);
+    await list.click();
+    await expect(page.locator(".todo-place__name")).toHaveText("Casa");
+
+    await openTodo(page);
+    await box.fill("dentsta");
+    await expect(group.locator(".hits__notice")).toHaveText("Matched dentista instead of “dentsta”.");
+    await expect(group.locator(".todo-hit__title")).toHaveText(["Ligar para o dentista"]);
+  });
+
   test("Download: this list on a list's page, all lists in All, none elsewhere", async ({ page }) => {
     await openTodo(page, "/list/" + "1".padStart(32, "0"));
     const btn = page.locator("#todo-download");

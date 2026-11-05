@@ -269,6 +269,19 @@
   color: var(--ink-soft);
   text-decoration: line-through;
 }
+/* A list among the results: its icon where a task has its ring. */
+.todo-hit__icon {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--ink-soft);
+}
+.todo-hit__icon svg {
+  width: 16px;
+  height: 16px;
+}
 
 /* ---- the add form ---- */
 .todo-add {

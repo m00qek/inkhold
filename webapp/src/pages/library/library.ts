@@ -283,7 +283,11 @@ export function createAppShell(deps: AppDeps): AppShell {
     setSearchShown: (shown) => ctx.root.classList.toggle("is-todo-browse", shown),
     toast: ctx.toast,
     handled: ctx.handled,
-    onChanged: () => ctx.rail.build(),
+    onChanged: () => {
+      ctx.rail.build();
+      // New to-dos reach an open search too.
+      if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
+    },
     go: (view) => go(todoHref(view)),
   });
   // Once at start: the rail shows To-Do only when the server keeps to-dos.
