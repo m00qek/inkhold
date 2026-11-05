@@ -190,6 +190,9 @@ pub fn taskAll(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const out = try a.alloc(TaskOut, page.items.len);
     for (page.items, out) |t, *o| o.* = taskOut(t);
     const now_ms = std.Io.Clock.real.now(ctx.io).toMilliseconds();
+    // The first page is the start of a sync: what the browser changed is fetched now.
+    if (parsed.value.nextPageTokens == null or parsed.value.nextPageTokens.?.len == 0)
+        todo.markTabletListed(ctx.db, user_id, now_ms) catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, TaskAllVO{ .nextPageToken = page.next, .nextSyncToken = now_ms, .scheduleTask = out }, null);
 }
 

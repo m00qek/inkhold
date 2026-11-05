@@ -70,7 +70,8 @@ pub fn putList(db: sqlite.Db, user_id: u64, l: List) sqlite.Error!void {
         \\VALUES (?1, ?2, ?3, ?4, ?5, ?6)
         \\ON CONFLICT (user_id, list_id) DO UPDATE SET
         \\  title = excluded.title, create_time = excluded.create_time,
-        \\  last_modified = excluded.last_modified, deleted = excluded.deleted;
+        \\  last_modified = excluded.last_modified, deleted = excluded.deleted,
+        \\  web_changed_at = NULL;
     , &.{
         .{ .int = @intCast(user_id) }, .{ .text = l.id },             .{ .text = l.title },
         .{ .int = l.create_time },     .{ .int = l.last_modified },   .{ .int = @intFromBool(l.deleted) },
@@ -128,7 +129,8 @@ pub fn putTask(db: sqlite.Db, user_id: u64, t: Task) sqlite.Error!void {
         \\  completed_time = excluded.completed_time, last_modified = excluded.last_modified,
         \\  sort = excluded.sort, sort_completed = excluded.sort_completed,
         \\  sort_time = excluded.sort_time, planner_sort = excluded.planner_sort,
-        \\  planner_sort_time = excluded.planner_sort_time, deleted = excluded.deleted;
+        \\  planner_sort_time = excluded.planner_sort_time, deleted = excluded.deleted,
+        \\  web_changed_at = NULL;
     , &.{
         .{ .int = @intCast(user_id) },     .{ .text = t.id },                    .{ .text_opt = t.list_id },
         .{ .text = t.title },              .{ .text_opt = t.detail },            .{ .text = t.status },
@@ -153,6 +155,15 @@ pub fn deleteTask(db: sqlite.Db, user_id: u64, task_id: []const u8) sqlite.Error
     try db.runCached("DELETE FROM todo_tasks WHERE user_id = ?1 AND task_id = ?2;", &.{
         .{ .int = @intCast(user_id) }, .{ .text = task_id },
     });
+}
+
+/// A tablet listed this account's tasks at `now_ms`: everything the browser
+/// changed before that has reached it ("Waiting for the tablet" clears).
+pub fn markTabletListed(db: sqlite.Db, user_id: u64, now_ms: i64) sqlite.Error!void {
+    try db.runCached(
+        \\INSERT INTO todo_sync_state (user_id, tablet_listed_at) VALUES (?1, ?2)
+        \\ON CONFLICT (user_id) DO UPDATE SET tablet_listed_at = excluded.tablet_listed_at;
+    , &.{ .{ .int = @intCast(user_id) }, .{ .int = now_ms } });
 }
 
 /// Up to `limit` tasks after `after` (an id), in id order.

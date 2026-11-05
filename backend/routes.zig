@@ -7,6 +7,7 @@ const device = @import("handlers/device.zig");
 const controlplane = @import("handlers/controlplane.zig");
 const admin = @import("handlers/admin.zig");
 const backups = @import("handlers/backups.zig");
+const todoweb = @import("handlers/todo.zig");
 
 /// Smoke-test API version (distinct from the package version).
 pub const api_version = auth.api_version;
@@ -216,6 +217,15 @@ pub const routes = [_]router.Route{
     // --- Backups: what `inkhold backup` last did (DESIGN.md §2.6) ---
     // The library's notice: any signed-in caller may ask, only an admin hears
     // anything but `none`, and without elevation, or it would hide behind a prompt.
+    // The signed-in person's To-Do (`handlers/todo.zig`); reaches the tablet at its next sync.
+    .{ .method = .GET, .path = "/api/controlplane/todo", .scopes = &.{.controlplane}, .handler = todoweb.get, .read_only = true },
+    .{ .method = .POST, .path = "/api/controlplane/todo/lists", .scopes = &.{.controlplane}, .handler = todoweb.createList },
+    .{ .method = .PUT, .path = "/api/controlplane/todo/lists/:id", .scopes = &.{.controlplane}, .handler = todoweb.renameList },
+    .{ .method = .DELETE, .path = "/api/controlplane/todo/lists/:id", .scopes = &.{.controlplane}, .handler = todoweb.deleteList },
+    .{ .method = .POST, .path = "/api/controlplane/todo/tasks", .scopes = &.{.controlplane}, .handler = todoweb.createTask },
+    .{ .method = .PUT, .path = "/api/controlplane/todo/tasks/:id", .scopes = &.{.controlplane}, .handler = todoweb.updateTask },
+    .{ .method = .DELETE, .path = "/api/controlplane/todo/tasks/:id", .scopes = &.{.controlplane}, .handler = todoweb.deleteTask },
+    .{ .method = .PUT, .path = "/api/controlplane/todo/order", .scopes = &.{.controlplane}, .handler = todoweb.reorder },
     .{ .method = .GET, .path = "/api/backup-notice", .scopes = &.{.controlplane}, .handler = backups.notice, .read_only = true },
     .{ .method = .GET, .path = "/api/admin/backups", .scopes = &.{.controlplane}, .require_admin = true, .handler = backups.list },
     // "I back up another way": silences `never`, never `failed`.

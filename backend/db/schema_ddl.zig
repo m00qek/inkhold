@@ -443,6 +443,20 @@ pub const ddl_v20 =
     \\CREATE INDEX todo_tasks_list ON todo_tasks(user_id, list_id);
 ;
 
+// v21: what the browser changed that a tablet has not fetched yet. A row's
+// `web_changed_at` is set by a browser edit and cleared when a tablet sends
+// the row; `todo_sync_state` keeps, per account, when a tablet last listed its
+// tasks and when the browser last changed anything (deletes included).
+pub const ddl_v21 =
+    \\ALTER TABLE todo_lists ADD COLUMN web_changed_at INTEGER;
+    \\ALTER TABLE todo_tasks ADD COLUMN web_changed_at INTEGER;
+    \\CREATE TABLE todo_sync_state (
+    \\  user_id          INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    \\  tablet_listed_at INTEGER,
+    \\  web_changed_at   INTEGER
+    \\);
+;
+
 // v14: drops the server-side search index. Order matters: the FTS5 table before
 // its content view, `segment_search` (FK to pages) before the page rows.
 pub const ddl_v14 =

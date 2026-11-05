@@ -89,6 +89,7 @@ fn readOnlyProbes(a: std.mem.Allocator, note_id: u64) ![]const ReadOnlyProbe {
         .{ .route = "/api/controlplane/usage", .path = "/api/controlplane/usage", .method = "GET", .face = .web },
         .{ .route = "/api/controlplane/account/storage", .path = "/api/controlplane/account/storage", .method = "GET", .face = .web },
         .{ .route = "/api/backup-notice", .path = "/api/backup-notice", .method = "GET", .face = .web },
+        .{ .route = "/api/controlplane/todo", .path = "/api/controlplane/todo", .method = "GET", .face = .web },
         .{ .route = "/api/user/query", .path = "/api/user/query", .method = "POST", .body = "{}", .face = .device },
         .{ .route = "/api/equipment/bind/status", .path = "/api/equipment/bind/status", .method = "POST", .body = "{}", .face = .device },
         .{ .route = "/api/file/capacity/query", .path = "/api/file/capacity/query", .method = "POST", .body = "{}", .face = .device },
