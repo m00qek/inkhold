@@ -44,6 +44,8 @@ export interface SearchResult {
   kind: number;
   /** The document's content hash, for its excerpt; null for a name-only match. */
   md5: string | null;
+  /** Something the person wrote (a note), or unknown; false: a PDF or `.txt`, marked or not. */
+  written: boolean;
 }
 
 /** Read through getters so a card reflects view state at build time. */

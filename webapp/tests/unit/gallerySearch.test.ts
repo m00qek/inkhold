@@ -8,7 +8,7 @@ import type { Entry, Id, Listing, NoteSummary } from "../../src/core/types";
 import type { Expansion, LocalHit } from "../../src/search/localSearch";
 
 function doc(fileId: number, pages: number[], updatedAt = 0): LocalHit {
-  return { md5: `md5-${fileId}`, fileId, pages, updatedAt };
+  return { md5: `md5-${fileId}`, fileId, pages, updatedAt, tier: "note", pageCount: null };
 }
 
 function note(id: string, name: string, fileType = "note"): NoteSummary {
@@ -34,7 +34,7 @@ function results(query: string, documents: LocalHit[], expansions: Expansion[] =
 }
 
 /** The renderer with every collaborator stubbed; `resultCard` records the join. */
-function harness(initial: { state: SearchState; pending: number | null; tree?: Entry[]; treeLoaded?: boolean }) {
+function harness(initial: { state: SearchState; pending: number | null; tree?: Entry[]; treeLoaded?: boolean; more?: () => HTMLElement }) {
   const gallery = document.createElement("section");
   let state = initial.state;
   let pending = initial.pending;
@@ -70,6 +70,7 @@ function harness(initial: { state: SearchState; pending: number | null; tree?: E
       return box;
     },
     indexPending: () => pending,
+    moreResults: initial.more ? () => initial.more!() : undefined,
   };
 
   const search = createGallerySearch(ctx);
@@ -423,5 +424,27 @@ describe("names follow the index's rule", () => {
     h.paint("receitas");
     expect(h.folderRows()).toEqual(["Receitas"]);
     expect(h.gallery.querySelector(".empty")).toBeNull();
+  });
+});
+
+describe("where the to-dos go", () => {
+  const todos = () => {
+    const box = document.createElement("section");
+    box.className = "todo-hits";
+    return box;
+  };
+  const order = (g: HTMLElement) => [...g.children].map((c) => (c.className === "todo-hits" ? "todos" : c.textContent));
+
+  it("before the first document that is neither named like the query nor written by the person", () => {
+    const book = { ...doc(2, [0]), tier: "other" as const };
+    const h = harness({ state: results("q", [doc(1, [0]), book]), pending: 0, tree: [note("1", "Diário"), note("2", "Les Misérables")], more: todos });
+    const g = h.paint("valjean");
+    expect(order(g).filter((x) => x !== "2 notes · 2 pages")).toEqual(["Diário", "todos", "Les Misérables"]);
+  });
+
+  it("at the end when everything found is the person's writing", () => {
+    const h = harness({ state: results("q", [doc(1, [0])]), pending: 0, tree: [note("1", "Diário")], more: todos });
+    const g = h.paint("valjean");
+    expect(order(g).slice(-2)).toEqual(["Diário", "todos"]);
   });
 });

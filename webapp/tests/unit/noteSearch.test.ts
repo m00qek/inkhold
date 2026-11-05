@@ -20,8 +20,8 @@ import { ApiError } from "../../src/api/client";
 
 const DEBOUNCE = DEFAULT_DEBOUNCE_MS;
 
-function doc(fileId: number, pages: number[], updatedAt = 0): LocalHit {
-  return { md5: `md5-${fileId}`, fileId, pages, updatedAt };
+function doc(fileId: number, pages: number[], updatedAt = 0, pageCount: number | null = null, tier: LocalHit["tier"] = "note"): LocalHit {
+  return { md5: `md5-${fileId}`, fileId, pages, updatedAt, tier, pageCount };
 }
 
 function painted(query: string, documents: LocalHit[], expansions: Expansion[] = []): SearchState {
@@ -373,12 +373,25 @@ describe("createNoteSearch", () => {
 
 // Renderers downstream never re-sort, which is only correct if this holds.
 describe("rankDocuments, as the view relies on it", () => {
-  it("ranks by matching pages, then by recency", () => {
-    const few = doc(1, [0], 900);
-    const many = doc(2, [0, 1, 2], 100);
-    const alsoFew = doc(3, [7], 500);
+  it("ranks by how much of the document matched, then by recency", () => {
+    const few = doc(1, [0], 900, 1);
+    const many = doc(2, [0, 1, 2], 100, 300);
+    const alsoFew = doc(3, [7], 500, 1);
+    // 1 of 1 page twice (the newer first), then 3 of 300.
+    expect(rankDocuments([few, many, alsoFew]).map((d) => d.fileId)).toEqual([1, 3, 2]);
+  });
 
-    expect(rankDocuments([few, many, alsoFew]).map((d) => d.fileId)).toEqual([2, 1, 3]);
+  it("what the person wrote outweighs a document as it came, but doesn't always beat it", () => {
+    const note = doc(1, [0], 0, 10); // 1 of 10 pages: 1/12
+    const book = doc(2, [0, 1, 2, 3], 0, 4, "other"); // 4 of 4, at 0.6: 0.4
+    const sparseBook = doc(3, [0], 0, 10, "other"); // 1 of 10 at 0.6
+    const marked = doc(4, [0], 0, 10, "marked"); // 1 of 10 at 0.8: between the two
+    expect(rankDocuments([sparseBook, note, book]).map((d) => d.fileId)).toEqual([2, 1, 3]);
+    expect(rankDocuments([sparseBook, marked, note]).map((d) => d.fileId)).toEqual([1, 4, 3]);
+  });
+
+  it("without the document's size, its matches stand in for it", () => {
+    expect(rankDocuments([doc(1, [0]), doc(2, [0, 1, 2])]).map((d) => d.fileId)).toEqual([2, 1]);
   });
 });
 

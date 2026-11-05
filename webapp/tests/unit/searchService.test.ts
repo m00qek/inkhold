@@ -190,7 +190,7 @@ describe("createIndexSearch", () => {
     expect(loads()).toBe(1);
   });
 
-  it("groups pages by document, joins the manifest, and ranks by match count then recency", async () => {
+  it("groups pages by document, joins the manifest, and ranks by how much of each matched", async () => {
     const { load } = spyLoader();
     const { sync } = fakeSync();
     const local = createIndexSearch({ sync, load });
@@ -199,10 +199,11 @@ describe("createIndexSearch", () => {
     const results = await local.search("reuniao");
     expect(results.query).toBe("reuniao");
     expect(results.totalPages).toBe(6);
-    expect(results.documents.map((d) => d.md5)).toEqual([ALFA, CHARLIE, BRAVO]);
+    // 2 of 5 pages, then 1 of 2, then 3 of 12: density, not the count of pages.
+    expect(results.documents.map((d) => d.md5)).toEqual([CHARLIE, BRAVO, ALFA]);
     // Ascending: the row deep-links to the first matching page in the document.
-    expect(results.documents[0]).toEqual({ md5: ALFA, fileId: 10, pages: [0, 4, 11], updatedAt: 1000 });
-    expect(results.documents[2]).toEqual({ md5: BRAVO, fileId: 20, pages: [1], updatedAt: 5000 });
+    expect(results.documents[2]).toEqual({ md5: ALFA, fileId: 10, pages: [0, 4, 11], updatedAt: 1000, tier: "note", pageCount: 12 });
+    expect(results.documents[1]).toEqual({ md5: BRAVO, fileId: 20, pages: [1], updatedAt: 5000, tier: "note", pageCount: 2 });
   });
 
   it("breaks a tie on match count by recency", async () => {
@@ -232,7 +233,7 @@ describe("createIndexSearch", () => {
     await local.sync();
 
     const results = await local.search("reuniao");
-    expect(results.documents.map((d) => d.md5)).toEqual([ALFA, BRAVO]);
+    expect(results.documents.map((d) => d.md5)).toEqual([BRAVO, ALFA]);
     expect(results.totalPages).toBe(4);
   });
 
@@ -282,7 +283,9 @@ describe("createIndexSearch", () => {
 
     expect(local.ready).toBe(true);
     const results = await local.search("reuniao");
-    expect(results.documents.map((d) => d.md5)).toEqual([ALFA, BRAVO]);
+    expect(results.documents.map((d) => d.md5)).toEqual([BRAVO, ALFA]);
+    // Offline: no manifest, so no tier; nothing is penalised for it.
+    expect(results.documents.every((d) => d.tier === null)).toBe(true);
     expect(results.totalPages).toBe(4);
   });
 

@@ -64,11 +64,14 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   // Bumped when the store changed; a deletion needs no rebuild, the intersection hides it.
   let rows = 0;
   let built = -1;
+  /** Each built document's page count, for density; replaced with every build. */
+  let pageCounts = new Map<string, number>();
 
   async function build(): Promise<SearchEngine> {
     const target = rows;
     // Dedupe again: `SearchIndex.build` throws on a repeated md5.
-    const docs: TermsDocument[] = newestPerDocument(await sync.documents());
+    const stored = newestPerDocument(await sync.documents());
+    const docs: TermsDocument[] = stored;
     const engine = index ?? createSearchEngine({ load });
     try {
       await engine.build(docs);
@@ -81,6 +84,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     }
     index = engine;
     built = target;
+    pageCounts = new Map(stored.map((d) => [d.md5, d.pageCount]));
     return engine;
   }
 
@@ -136,7 +140,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
       if (signal?.aborted) throw abortError();
       // With the typo ladder: handwriting recognition defeats exact matching.
       const answer = await idx.query(query, ALL_PAGES, true, signal);
-      return { query, ...group(answer, live ?? offlineLive()) };
+      return { query, ...group(answer, live ?? offlineLive(), pageCounts) };
     },
   };
 }
@@ -147,7 +151,8 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
  */
 function group(
   result: QueryResult,
-  live: ReadonlyMap<string, LiveDocument>,
+  live: ReadonlyMap<string, LiveDocument | ManifestRow>,
+  pageCounts: ReadonlyMap<string, number>,
 ): Omit<LocalResults, "query"> {
   const pages = new Map<string, number[]>();
   for (const hit of result.hits) {
@@ -162,7 +167,14 @@ function group(
     const row = live.get(md5)!;
     ordinals.sort((a, b) => a - b);
     totalPages += ordinals.length;
-    documents.push({ md5, fileId: row.fileId, pages: ordinals, updatedAt: row.updatedAt });
+    documents.push({
+      md5,
+      fileId: row.fileId,
+      pages: ordinals,
+      updatedAt: row.updatedAt,
+      tier: "tier" in row ? row.tier : null,
+      pageCount: pageCounts.get(md5) ?? null,
+    });
   }
   // Only with a surviving row, or "matched X" would sit over an empty list.
   const expansions = documents.length > 0 ? result.expansions : [];

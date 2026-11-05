@@ -87,13 +87,14 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
           pages: doc.pages,
           kind: segmentKind(known.note),
           md5: doc.md5,
+          written: doc.tier !== "other" && doc.tier !== "marked",
         });
       }
     }
 
     for (const [noteId, { note, folderPath }] of cached) {
       if (byId.has(noteId) || !matchesName(note.name, query)) continue;
-      byId.set(noteId, { noteId, note, folderPath, nameMatched: true, pages: [], kind: segmentKind(note), md5: null });
+      byId.set(noteId, { noteId, note, folderPath, nameMatched: true, pages: [], kind: segmentKind(note), md5: null, written: true });
     }
 
     const all = [...byId.values()];
@@ -204,8 +205,14 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         searchState.kind === "searching" ? el("span", { class: "hits__count", text: "Searching handwriting…" }) : null,
       ),
     );
-    for (const [i, result] of results.entries()) gallery.append(ctx.resultCard(result, i, q, expansions));
-    if (more) gallery.append(more);
+    // The to-dos are the person's writing: before the first document that is
+    // neither named like the query nor a note, else at the end.
+    const at = results.findIndex((r) => !r.nameMatched && !r.written);
+    for (const [i, result] of results.entries()) {
+      if (i === at && more) gallery.append(more);
+      gallery.append(ctx.resultCard(result, i, q, expansions));
+    }
+    if (more && at < 0) gallery.append(more);
   }
 
   return { renderSearch };

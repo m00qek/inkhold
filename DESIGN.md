@@ -511,6 +511,18 @@ one-shot frame plus `retry:`, never a 503.
   58 MB). Queries stay under 10 ms; a typo-ladder scan is 90 ms at 100x. So the
   rebuild only matters past a few thousand documents; IndexedDB reads are not
   in these numbers.
+- **Ranking** (`search/localSearch.ts`): names matched by words first (then,
+  only when none did, names matched inside), then documents by relevance:
+  matching pages over the document's pages plus two, weighted 1 for what the
+  person wrote (notes), 0.8 for a document they wrote on (a `.mark`: its ink
+  is not indexed, only the printed words, but it was worked with) and 0.6 for
+  a PDF or `.txt` as it came; recency breaks ties. A weight, not an order: a
+  document about the words still beats a note that mentions them once. The
+  to-dos, also the person's writing, sit before the first document that is
+  neither named like the query nor a note. bm25 is not used: the terms are one per page,
+  so it can't tell a page about a word from one that mentions it. How close the
+  words sit picks a document's excerpt, not its place: ranking by it would read
+  every result's text before showing any.
 - **Excerpts** (`search/excerpt.ts`, `pages/searchExcerpts.ts`): a result's
   line is cut in the browser from text it already holds; a search never
   fetches text. After each sync the browser keeps text ahead of time
