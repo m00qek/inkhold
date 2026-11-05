@@ -1,6 +1,8 @@
 // Which documents' text the browser keeps ahead of time, so the first find
-// skips the fetch. Tier 1 (notes) is always kept; tier 2 (marked documents)
-// until the byte budget is spent. Tier comes from the manifest only.
+// skips the fetch and a search result can show its line (`search/excerpt.ts`).
+// Tier 1 (notes) is always kept; tier 2 (marked documents), then tier 3 (every
+// other PDF and `.txt`), until the byte budget is spent. Tier comes from the
+// manifest only.
 
 import {
   openTextStore,
@@ -23,12 +25,13 @@ export interface PrefetchCandidate {
 }
 
 /**
- * Tier 1, then tier 2, newest first. Drops rows with no `indexVersion` (no key)
- * and rows not `derived` (no file yet). Tier 3 is on-demand only.
+ * Tier 1, then tier 2, then tier 3, each newest first. Drops rows with no
+ * `indexVersion` (no key) and rows not `derived` (no file yet).
  */
 export function orderCandidates(rows: readonly ManifestRow[]): PrefetchCandidate[] {
   const notes: PrefetchCandidate[] = [];
   const marked: PrefetchCandidate[] = [];
+  const other: PrefetchCandidate[] = [];
   // Newest first, so a library over quota loses its oldest notes.
   const newestFirst = [...rows].sort((a, b) => b.updatedAt - a.updatedAt);
   for (const row of newestFirst) {
@@ -37,8 +40,9 @@ export function orderCandidates(rows: readonly ManifestRow[]): PrefetchCandidate
     const { md5, fileId } = row;
     if (row.tier === "note") notes.push({ md5, fileId, indexVersion, protect: true });
     else if (row.tier === "marked") marked.push({ md5, fileId, indexVersion, protect: false });
+    else other.push({ md5, fileId, indexVersion, protect: false });
   }
-  return [...notes, ...marked];
+  return [...notes, ...marked, ...other];
 }
 
 export interface PrefetchOutcome {
@@ -59,13 +63,52 @@ export interface TextPrefetch {
 export interface TextPrefetchOptions {
   store?: TextStore;
   transport?: TextTransport;
+  /** Documents fetched once and found too big; kept across visits by default. */
+  refusals?: Refusals;
+}
+
+/** Text versions fetched, weighed and refused: never fetched again to be refused again. */
+export interface Refusals {
+  has(key: string): boolean;
+  add(key: string): void;
+}
+
+const REFUSALS_KEY = "inkhold:text-refused";
+/** Enough for any household library; the oldest are forgotten first. */
+const REFUSALS_MAX = 500;
+
+/**
+ * Refusals in `localStorage`, so a big textbook isn't downloaded again on
+ * every visit only to be dropped. A per-visit set where storage is refused.
+ * The key carries the text version, so a re-derived document is weighed anew.
+ */
+export function storedRefusals(): Refusals {
+  const read = (): string[] => {
+    try {
+      const v = JSON.parse(localStorage.getItem(REFUSALS_KEY) ?? "[]") as unknown;
+      return Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : [];
+    } catch {
+      return [];
+    }
+  };
+  const keys = new Set(read());
+  return {
+    has: (key) => keys.has(key),
+    add(key) {
+      keys.add(key);
+      try {
+        localStorage.setItem(REFUSALS_KEY, JSON.stringify([...keys].slice(-REFUSALS_MAX)));
+      } catch {
+        // Kept for this visit only.
+      }
+    },
+  };
 }
 
 export function createTextPrefetch(opts: TextPrefetchOptions = {}): TextPrefetch {
   const store = opts.store ?? openTextStore();
   const transport = opts.transport ?? httpTextTransport();
-  /** Fetched once and refused, for this session. */
-  const refused = new Set<string>();
+  const refused = opts.refusals ?? storedRefusals();
   let running: Promise<PrefetchOutcome> | null = null;
 
   async function fetchInto(candidate: PrefetchCandidate, signal?: AbortSignal): Promise<number> {

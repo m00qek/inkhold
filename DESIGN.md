@@ -512,8 +512,12 @@ one-shot frame plus `retry:`, never a 503.
   rebuild only matters past a few thousand documents; IndexedDB reads are not
   in these numbers.
 - **Excerpts** (`search/excerpt.ts`, `pages/searchExcerpts.ts`): a result's
-  line is cut in the browser from text it already holds (the tier-1 prefetch
-  and earlier finds); a search never fetches text. Among the first 50 matching
+  line is cut in the browser from text it already holds; a search never
+  fetches text. After each sync the browser keeps text ahead of time
+  (`search/textPrefetch.ts`): every note, then marked documents, then every
+  other PDF and `.txt`, newest first, within a 2 MB allowance (a quarter of it
+  at most per document). A document too big for it is remembered in
+  `localStorage` by text version, so it isn't fetched again only to be refused. Among the first 50 matching
   pages, the shortest stretch holding every query word wins, then words matched
   whole over a typed prefix, then the earliest page; where the typo ladder
   answered, its words are looked for. The result opens on the excerpt's page.

@@ -186,23 +186,23 @@ describe("orderCandidates", () => {
     row(OTHER, "other", 3, 300),
   ];
 
-  it("keeps tier 1 and tier 2, and never tier 3 at all", () => {
+  it("tier 1, then tier 2, then tier 3; only notes are protected", () => {
     const ordered = orderCandidates(rows);
-    expect(ordered.map((c) => c.md5)).toEqual([NOTE, MARKED]);
-    expect(ordered.map((c) => c.protect)).toEqual([true, false]);
+    expect(ordered.map((c) => c.md5)).toEqual([NOTE, MARKED, OTHER]);
+    expect(ordered.map((c) => c.protect)).toEqual([true, false, false]);
   });
 
   it("orders each group newest first", () => {
     const olderNote = row(md5("d"), "note", 4, 50);
     const ordered = orderCandidates([olderNote, ...rows]);
-    expect(ordered.map((c) => c.md5)).toEqual([NOTE, md5("d"), MARKED]);
+    expect(ordered.map((c) => c.md5)).toEqual([NOTE, md5("d"), MARKED, OTHER]);
   });
 
   it("refuses a row that cannot be keyed, and one that is not derived yet", () => {
     const unkeyed = row(md5("e"), "note", 5, 400, null);
     const pending = row(md5("f"), "note", 6, 400, 15, "pending");
     const ordered = orderCandidates([unkeyed, pending, ...rows]);
-    expect(ordered.map((c) => c.md5)).toEqual([NOTE, MARKED]);
+    expect(ordered.map((c) => c.md5)).toEqual([NOTE, MARKED, OTHER]);
   });
 });
 
@@ -219,14 +219,32 @@ describe("the prefetch", () => {
     expect(store.metas.get(textKeyOf(NOTE, 15))!.protect).toBe(true);
   });
 
-  it("leaves another format alone entirely — there is no opt-in to override it", async () => {
-    const store = memoryStore();
-    const { transport, calls } = transportOf({ [OTHER]: text(OTHER, 15, 300) });
-
+  it("keeps another format too, after the notes and marked documents, within the budget", async () => {
+    // A document may take a quarter of the budget: 300 of 2,000 fits.
+    const store = memoryStore(true, 2_000);
+    const { transport, calls } = transportOf({
+      [NOTE]: text(NOTE, 15, 300),
+      [MARKED]: text(MARKED, 15, 300),
+      [OTHER]: text(OTHER, 15, 300),
+    });
     const prefetch = createTextPrefetch({ store, transport });
-    await prefetch.prefetch([row(OTHER, "other", 3, 300)]);
-    expect(await isHeld(store, OTHER, 15)).toBe(false);
-    expect(calls).toEqual([]);
+    await prefetch.prefetch([row(OTHER, "other", 3, 900), row(MARKED, "marked", 2, 200), row(NOTE, "note", 1, 100)]);
+    expect(await isHeld(store, OTHER, 15)).toBe(true);
+    // The newest document still waits for the notes and the marked ones.
+    expect(calls).toEqual([`${NOTE}.15`, `${MARKED}.15`, `${OTHER}.15`]);
+  });
+
+  it("a document refused as too big is not fetched again on the next visit", async () => {
+    const store = memoryStore(true, 4_000);
+    const { transport, calls } = transportOf({ [OTHER]: text(OTHER, 15, 3_000) });
+    const kept = new Set<string>();
+    const refusals = { has: (k: string) => kept.has(k), add: (k: string) => void kept.add(k) };
+    const rows = [row(OTHER, "other", 3, 300)];
+
+    await createTextPrefetch({ store, transport, refusals }).prefetch(rows);
+    // A new visit: a new prefetch, the same remembered refusals.
+    await createTextPrefetch({ store, transport, refusals }).prefetch(rows);
+    expect(calls).toEqual([`${OTHER}.15`]);
   });
 
   it("releases a record a previous build had pinned, and lets it be evicted", async () => {
@@ -349,5 +367,26 @@ describe("openTextStore", () => {
     await store.drop([{ md5: NOTE, indexVersion: 15 }]);
     await store.clear();
     expect(await store.get(NOTE, 15)).toBeNull();
+  });
+});
+
+describe("remembered refusals", () => {
+  it("survive a new visit, and are only a convenience where storage is refused", async () => {
+    const { storedRefusals } = await import("../../src/search/textPrefetch");
+    const mem = new Map<string, string>();
+    const g = globalThis as { localStorage?: unknown };
+    const saved = g.localStorage;
+    g.localStorage = { getItem: (k: string) => mem.get(k) ?? null, setItem: (k: string, v: string) => void mem.set(k, v) };
+    try {
+      storedRefusals().add("a.15");
+      expect(storedRefusals().has("a.15")).toBe(true);
+      expect(storedRefusals().has("a.16")).toBe(false);
+      g.localStorage = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } };
+      const r = storedRefusals();
+      r.add("b.15");
+      expect(r.has("b.15")).toBe(true);
+    } finally {
+      g.localStorage = saved;
+    }
   });
 });
