@@ -10,10 +10,12 @@
   z-index: 2;
   overflow-y: auto;
   background: var(--desk);
-  padding: 22px 28px 96px;
+  padding: 46px 28px 96px;
 }
+/* One centred column, the recycle bin's width: the destinations line up. */
 .todo > * {
-  max-width: 900px;
+  max-width: 760px;
+  margin-inline: auto;
 }
 
 .todo-ico {
@@ -25,15 +27,25 @@
   height: 16px;
 }
 
-/* ---- header ---- */
-.todo-head {
-  padding-bottom: var(--sp-4);
+/* ---- in the shell's topbar: what is open, the reader's title shape ---- */
+.todo-place {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  white-space: nowrap;
 }
-.todo-head h1 {
-  margin: 0;
-  font: 500 var(--fs-heading) / 1.2 var(--font-display);
-  text-wrap: balance;
-  overflow-wrap: anywhere;
+.todo-place__name {
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  letter-spacing: normal;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.todo-place span {
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-faint);
 }
 
 /* ---- in the shell's topbar: the sync status ---- */
@@ -353,7 +365,7 @@
 
 /* The shortcuts, folded behind their summary. */
 .todo-keys {
-  margin: var(--sp-4) 0 0;
+  margin-top: var(--sp-4);
   font-size: var(--fs-caption);
   color: var(--ink-soft);
 }

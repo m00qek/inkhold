@@ -39,8 +39,6 @@ export interface TodoHost {
   go(viewPath: string): void;
   /** Open a notebook at a page (0-based). */
   openNote(id: string, page: number): void;
-  /** The breadcrumb's "Library". */
-  onLeave(): void;
 }
 
 export interface TodoPage {
@@ -177,11 +175,11 @@ export function createTodoPage(host: TodoHost): TodoPage {
       host.status.classList.toggle("is-waiting", snap.waiting);
       if (view.kind === "list") host.listBtn.setAttribute("aria-label", `Options for the list ${viewTitle(view, snap.lists)}`);
     }
-    const home = el("button", { type: "button", text: "Library" });
-    home.addEventListener("click", () => host.onLeave());
-    const todo = el("button", { type: "button", text: "To-Do" });
-    todo.addEventListener("click", () => host.go("all"));
-    host.crumbs.replaceChildren(home, el("span", { class: "crumbs__sep", text: "/" }), todo, el("span", { class: "crumbs__sep", text: "/" }), el("span", { class: "crumbs__here", text: snap ? viewTitle(view, snap.lists) : "" }));
+    // Like the reader: the name of what is open, with where it lives under it.
+    // No trail: the rail is the way around, and To-Do is not in the library.
+    host.crumbs.replaceChildren(
+      el("div", { class: "todo-place" }, el("b", { class: "todo-place__name", text: snap ? viewTitle(view, snap.lists) : "To-Do" }), el("span", { text: "To-Do" })),
+    );
   }
 
   function dueFor(v: TodoView, now: number): number | null {

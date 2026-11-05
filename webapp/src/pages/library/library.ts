@@ -280,7 +280,6 @@ export function createAppShell(deps: AppDeps): AppShell {
     handled: ctx.handled,
     onChanged: () => ctx.rail.build(),
     go: (view) => go(todoHref(view)),
-    onLeave: () => go(folderHref(null)),
   });
   // Once at start: the rail shows To-Do only when the server keeps to-dos.
   void ctx.todo.load();

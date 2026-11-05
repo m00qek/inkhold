@@ -21,7 +21,7 @@ test.describe("To-Do", () => {
   test("lives in the rail: unfolded on its pages, folded elsewhere", async ({ page }) => {
     await openTodo(page);
     // The bare route lands on the overview.
-    await expect(page.locator(".crumbs__here")).toHaveText("All");
+    await expect(page.locator(".todo-place__name")).toHaveText("All");
     const nav = rail(page);
     // Views first, then the lists under their own label, Inbox at their head.
     const names = await nav.locator(".nav__item.is-nested .nav__name, .nav__label.is-nested").allInnerTexts();
@@ -49,7 +49,7 @@ test.describe("To-Do", () => {
     await openTodo(page);
     await rail(page).getByRole("button", { name: /^Français/ }).click();
     // A draft belongs to its view: type only once the list is on screen.
-    await expect(page.locator(".crumbs__here")).toHaveText("Français");
+    await expect(page.locator(".todo-place__name")).toHaveText("Français");
     await page.getByLabel("New task").fill("Fazer os exercícios");
     await page.getByRole("button", { name: "Add", exact: true }).click();
     const added = row(page, "Fazer os exercícios");
@@ -127,7 +127,7 @@ test.describe("To-Do", () => {
     await page.getByRole("menuitem", { name: "Rename list" }).click();
     await page.getByRole("dialog").getByLabel("Name").fill("Francês");
     await page.getByRole("button", { name: "Rename", exact: true }).click();
-    await expect(page.locator(".crumbs__here")).toHaveText("Francês");
+    await expect(page.locator(".todo-place__name")).toHaveText("Francês");
     await expect(rail(page).getByRole("button", { name: /^Francês/ })).toBeVisible();
 
     // Off To-Do, the topbar is the library's again.
@@ -141,7 +141,7 @@ test.describe("To-Do", () => {
     await page.getByRole("button", { name: "New list" }).click();
     await page.getByLabel("Name").fill("Trabalho");
     await page.getByRole("button", { name: "Create list" }).click();
-    await expect(page.locator(".crumbs__here")).toHaveText("Trabalho");
+    await expect(page.locator(".todo-place__name")).toHaveText("Trabalho");
     await expect(page.locator(".todo-empty")).toContainText("This list is empty");
     await expect(rail(page).getByRole("button", { name: /^Trabalho/ })).toBeVisible();
   });

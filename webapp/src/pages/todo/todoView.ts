@@ -53,8 +53,9 @@ export function syncText(snap: TodoSnapshot): string {
   return at === null ? "No tablet has synced these yet" : `On the tablet as of ${time}`;
 }
 
+/** The topbar shows the name; the page keeps it as its heading for screen readers. */
 export function header(p: TodoPaint): HTMLElement {
-  return el("header", { class: "todo-head" }, el("h1", { id: "todo-title", text: p.title }));
+  return el("h1", { id: "todo-title", class: "todo-sr", text: p.title });
 }
 
 export function addForm(p: TodoPaint, a: TodoActions): HTMLElement | null {
