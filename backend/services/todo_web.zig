@@ -238,6 +238,45 @@ pub fn reorder(db: sqlite.Db, user_id: u64, list_id: ?[]const u8, ids: []const [
     try db.exec("COMMIT;");
 }
 
+// ---- links back to a notebook page ----
+
+/// Where a task lassoed from a notebook points: the tablet's path and page
+/// (1-based), from its `links` (Base64 JSON, decompiled `LinkInfo`).
+pub const Link = struct { path: []const u8, page: i64 };
+
+pub fn decodeLink(arena: std.mem.Allocator, links: []const u8) ?Link {
+    const dec = std.base64.standard.Decoder;
+    const n = dec.calcSizeForSlice(links) catch return null;
+    const raw = arena.alloc(u8, n) catch return null;
+    dec.decode(raw, links) catch return null;
+    const Wire = struct { filePath: ?[]const u8 = null, page: ?i64 = null };
+    const parsed = std.json.parseFromSliceLeaky(Wire, arena, raw, .{ .ignore_unknown_fields = true }) catch return null;
+    const path = parsed.filePath orelse return null;
+    const page = parsed.page orelse return null;
+    if (page < 1) return null;
+    return .{ .path = path, .page = page };
+}
+
+/// The tablet's storage root, and its top folders as the library names them
+/// (the device syncs `Note` under `NOTE`, `Document` under `DOCUMENT`).
+const tablet_root = "/storage/emulated/0/";
+const tablet_roots = [_]struct { tablet: []const u8, library: []const u8 }{
+    .{ .tablet = "Note", .library = "NOTE/Note" },
+    .{ .tablet = "MyStyle", .library = "NOTE/MyStyle" },
+    .{ .tablet = "Document", .library = "DOCUMENT/Document" },
+};
+
+/// A tablet path in the library's own form, or null for one outside its storage.
+pub fn libraryPath(arena: std.mem.Allocator, tablet_path: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, tablet_path, tablet_root)) return null;
+    const rest = tablet_path[tablet_root.len..];
+    const cut = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    const top = rest[0..cut];
+    for (tablet_roots) |r| if (std.mem.eql(u8, r.tablet, top))
+        return std.fmt.allocPrint(arena, "{s}{s}", .{ r.library, rest[cut..] }) catch null;
+    return rest;
+}
+
 // ---- tests ----
 
 const testing = std.testing;
@@ -372,4 +411,19 @@ test "new ids look like the tablet's" {
     try testing.expectEqual(@as(usize, id_len), id.len);
     try testing.expect(todo.validId(&id));
     try testing.expectEqualStrings("deadbeef", id[0..8]);
+}
+
+test "a lassoed task's link: the tablet path becomes the library's, page 1-based" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // "Haus of gabin", as the tablet stored it.
+    const links = "eyJhcHBOYW1lIjoibm90ZSIsImZpbGVJZCI6IkYyMDI2MTEwMzA4MDUzMTc4MDY3NURtSHl1TlRQMGtMciIsImZpbGVQYXRoIjoiL3N0b3JhZ2UvZW11bGF0ZWQvMC9Ob3RlL0ZyYW7Dp2Fpcy9BMC5BMSDDiWNvbGUgRHVmbGUvQXBvc3RpbGEubm90ZSIsInBhZ2UiOjI3LCJwYWdlSWQiOiJQMjAyNjExMDMwODExMjAwMTA2ODVENTlhYWlWalNrTGEifQ==";
+    const l = decodeLink(a, links).?;
+    try testing.expectEqual(@as(i64, 27), l.page);
+    try testing.expectEqualStrings("NOTE/Note/Français/A0.A1 École Dufle/Apostila.note", libraryPath(a, l.path).?);
+    try testing.expectEqualStrings("INBOX/a.note", libraryPath(a, "/storage/emulated/0/INBOX/a.note").?);
+    try testing.expectEqualStrings("NOTE/MyStyle/x.note", libraryPath(a, "/storage/emulated/0/MyStyle/x.note").?);
+    try testing.expectEqual(@as(?[]const u8, null), libraryPath(a, "/sdcard/elsewhere.note"));
+    try testing.expectEqual(@as(?Link, null), decodeLink(a, "not base64 at all!"));
 }

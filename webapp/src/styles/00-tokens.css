@@ -30,6 +30,8 @@
      Border-box, so this is the visual height. `--topbar-control-h` is an alias. */
   --control-h: 34px;
   --control-h-sm: 28px;
+  /* The smallest pointer target for a control drawn smaller (the To-Do check). */
+  --hit-target: 32px;
   --topbar-control-h: var(--control-h);
 
   /* The layers panel's opacity fill-bar track height. */

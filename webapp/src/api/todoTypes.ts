@@ -23,6 +23,8 @@ export interface TodoTask {
   sortTime: number;
   /** Lassoed from a notebook page on the tablet. */
   linked: boolean;
+  /** That notebook in the library and its page (1-based); null when not found there. */
+  link: { noteId: string; page: number; name: string } | null;
   waiting: boolean;
 }
 

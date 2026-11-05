@@ -1,14 +1,16 @@
-// The To-Do page's painter: header, the add form, sections and task rows.
-// Knows nothing about the API; every click is a call on `TodoActions`.
+// The To-Do page's painter: the title, the add form, sections and task rows.
+// Knows nothing about the API; every click is a call on `TodoActions`. The
+// page-level tools (status, list options, New list) live in the shell's topbar.
 
 import { el } from "../../ui/dom";
 import { ICONS, svg, type IconName } from "../../ui/icons";
-import { createMenu } from "../../ui/menu";
 import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
-import { addTarget, dueLabel, inputFromDue, listName, siblings, type TodoSection, type TodoView } from "./todoModel";
+import { addTarget, dueLabel, listName, siblings, type TodoSection, type TodoView } from "./todoModel";
 
 export interface TodoActions {
-  add(title: string, due: string): void;
+  add(title: string): void;
+  /** Opens the add form's date menu. */
+  addDate(trigger: HTMLElement): void;
   toggle(task: TodoTask): void;
   select(task: TodoTask | null): void;
   startRename(task: TodoTask): void;
@@ -19,10 +21,7 @@ export interface TodoActions {
   reorder(task: TodoTask, dir: -1 | 1): void;
   remove(task: TodoTask): void;
   toggleSection(key: string): void;
-  newList(): void;
-  renameList(): void;
-  deleteList(): void;
-  retry(): void;
+  openNote(task: TodoTask): void;
 }
 
 export interface TodoPaint {
@@ -37,53 +36,54 @@ export interface TodoPaint {
   /** Ids hidden while their delete can still be undone. */
   hidden: ReadonlySet<string>;
   busy: boolean;
+  /** The date the next added task gets; null: none. */
+  addDue: number | null;
 }
+
+/** Shared by every row's `aria-describedby`: what the keyboard can do. */
+export const ROW_HELP_ID = "todo-row-help";
 
 const icon = (name: IconName, cls = "todo-ico"): HTMLElement => el("span", { class: cls, "aria-hidden": "true", html: svg(ICONS[name]) });
 
-export function syncLine(snap: TodoSnapshot): HTMLElement {
+/** The topbar status line's words. */
+export function syncText(snap: TodoSnapshot): string {
   const at = snap.tabletSyncedAt;
   const time = at === null ? null : new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  const text = snap.waiting
-    ? at === null ? "Changes reach the tablet at its next sync." : `Changes reach the tablet at its next sync. Last sync ${time}.`
-    : at === null ? "No tablet has synced these to-dos yet." : `On the tablet as of ${time}.`;
-  return el("p", { class: "todo-sync" + (snap.waiting ? " is-waiting" : ""), role: "status" }, el("span", { class: "todo-sync__dot", "aria-hidden": "true" }), el("span", { text }));
+  if (snap.waiting) return "Changes reach the tablet at its next sync";
+  return at === null ? "No tablet has synced these yet" : `On the tablet as of ${time}`;
 }
 
-export function header(p: TodoPaint, a: TodoActions): HTMLElement {
-  const newList = el("button", { class: "todo-btn", type: "button" }, icon("plus"), el("span", { text: "New list" }));
-  newList.addEventListener("click", () => a.newList());
-  const more = p.view.kind === "list"
-    ? createMenu({
-        triggerLabel: `Options for the list ${p.title}`,
-        wrapClass: "todo-head__menu",
-        title: "LIST",
-        items: [
-          { label: "Rename list", icon: "edit", onSelect: () => a.renameList() },
-          { label: "Delete list", icon: "trash", danger: true, onSelect: () => a.deleteList() },
-        ],
-      })
-    : null;
-  return el(
-    "header",
-    { class: "todo-head" },
-    el("div", { class: "todo-head__title" }, el("h1", { id: "todo-title", text: p.title }), more),
-    el("div", { class: "todo-head__side" }, syncLine(p.snap), newList),
-  );
+export function header(p: TodoPaint): HTMLElement {
+  return el("header", { class: "todo-head" }, el("h1", { id: "todo-title", text: p.title }));
 }
 
 export function addForm(p: TodoPaint, a: TodoActions): HTMLElement | null {
-  const target = addTarget(p.view, p.now);
-  if (!target) return null;
-  const placeholder = p.view.kind === "planned" ? "Add a task for today" : p.view.kind === "list" ? `Add a task to ${p.title}` : "Add a task";
+  if (!addTarget(p.view, p.now)) return null;
+  const placeholder = p.view.kind === "list" ? `Add a task to ${p.title}` : "Add a task";
   const title = el("input", { id: "todo-add-title", type: "text", placeholder, "aria-label": "New task", maxlength: "200", autocomplete: "off" }) as HTMLInputElement;
-  const due = el("input", { id: "todo-add-due", type: "date", "aria-label": "Due date (optional)", value: target.due === null ? "" : inputFromDue(target.due) }) as HTMLInputElement;
-  const add = el("button", { class: "todo-add__go", type: "submit", text: "Add", disabled: true }) as HTMLButtonElement;
+  const date = el(
+    "button",
+    {
+      class: "todo-add__date" + (p.addDue !== null ? " is-set" : ""),
+      type: "button",
+      id: "todo-add-date",
+      "aria-haspopup": "menu",
+      "aria-label": p.addDue === null ? "Add a due date" : `Due ${dueLabel(p.addDue, p.now)}; change the date`,
+      title: p.addDue === null ? "Add a due date" : "Change the date",
+    },
+    icon("calendar"),
+    p.addDue !== null ? el("span", { text: dueLabel(p.addDue, p.now) }) : null,
+  );
+  date.addEventListener("click", (e) => {
+    e.stopPropagation();
+    a.addDate(date);
+  });
+  const add = el("button", { class: "btn todo-add__go", type: "submit", text: "Add", disabled: true }) as HTMLButtonElement;
   title.addEventListener("input", () => (add.disabled = title.value.trim() === "" || p.busy));
-  const form = el("form", { class: "todo-add" }, title, el("label", { class: "todo-add__date" }, icon("calendar"), due), add);
+  const form = el("form", { class: "todo-add" }, title, date, add);
   form.addEventListener("submit", (e) => {
     e.preventDefault();
-    if (title.value.trim() !== "") a.add(title.value, due.value);
+    if (title.value.trim() !== "") a.add(title.value);
   });
   return form;
 }
@@ -100,10 +100,9 @@ function emptyText(v: TodoView): [string, string] {
 
 export function body(p: TodoPaint, a: TodoActions): HTMLElement {
   const parts: HTMLElement[] = [];
-  let shown = 0;
+  const visible = (sec: TodoSection) => sec.tasks.filter((t) => !p.hidden.has(t.id));
   for (const sec of p.sections) {
-    const tasks = sec.tasks.filter((t) => !p.hidden.has(t.id));
-    shown += tasks.length;
+    const tasks = visible(sec);
     if (tasks.length === 0) continue;
     if (sec.label === null) {
       parts.push(el("div", { class: "todo-group", role: "list" }, ...tasks.map((t) => row(t, sec, p, a))));
@@ -121,8 +120,8 @@ export function body(p: TodoPaint, a: TodoActions): HTMLElement {
     parts.push(el("section", { class: "todo-group", "aria-label": sec.label }, head, folded ? null : el("div", { role: "list" }, ...tasks.map((t) => row(t, sec, p, a)))));
   }
   // Empty means nothing open: a folded "Completed" below doesn't count.
-  const open = p.sections.filter((sec) => !sec.collapsedByDefault).reduce((n, sec) => n + sec.tasks.filter((t) => !p.hidden.has(t.id)).length, 0);
-  if (open === 0 && (shown === 0 || p.view.kind !== "completed")) {
+  const open = p.sections.filter((sec) => !sec.collapsedByDefault).reduce((n, sec) => n + visible(sec).length, 0);
+  if (open === 0) {
     const [h, text] = emptyText(p.view);
     parts.unshift(el("div", { class: "todo-empty" }, el("p", { class: "todo-empty__title", text: h }), el("p", { text })));
   }
@@ -131,14 +130,12 @@ export function body(p: TodoPaint, a: TodoActions): HTMLElement {
 
 function row(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLElement {
   const selected = p.selected === t.id;
-  const check = el("button", {
-    class: "todo-check",
-    type: "button",
-    "aria-pressed": String(t.done),
-    "aria-label": `${t.done ? "Mark as not done" : "Mark as done"}: ${t.title}`,
-    html: svg(ICONS.done),
-    disabled: p.busy,
-  });
+  // A 32px target around the 22px ring the eye sees.
+  const check = el(
+    "button",
+    { class: "todo-check", type: "button", "aria-pressed": String(t.done), "aria-label": `${t.done ? "Mark as not done" : "Mark as done"}: ${t.title}`, disabled: p.busy },
+    el("span", { class: "todo-check__ring", "aria-hidden": "true", html: svg(ICONS.done) }),
+  );
   check.addEventListener("click", (e) => {
     e.stopPropagation();
     a.toggle(t);
@@ -166,33 +163,64 @@ function row(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLE
 
   const meta: HTMLElement[] = [];
   if (t.due !== null && !t.done) {
-    const late = t.due < p.now && dueLabel(t.due, p.now) !== "Today";
-    meta.push(el("span", { class: late ? "is-overdue" : "", text: late ? `Overdue, ${dueLabel(t.due, p.now)}` : dueLabel(t.due, p.now) }));
+    const label = dueLabel(t.due, p.now);
+    const late = t.due < p.now && label !== "Today";
+    // Under the "Overdue" heading the word is said once, by the heading.
+    meta.push(el("span", { class: late ? "is-overdue" : "", text: late && !sec.overdue ? `Overdue, ${label}` : label }));
   }
   if (t.done && t.completedAt !== null) {
     const when = dueLabel(t.completedAt, p.now);
     meta.push(el("span", { text: `Done ${when === "Today" || when === "Yesterday" ? when.toLowerCase() : when}` }));
   }
-  if (sec.showList) meta.push(el("span", { class: "todo-meta__list", text: listName(p.snap, t.listId) }));
-  if (t.linked) meta.push(el("span", { class: "todo-meta__list", text: "From a notebook page" }));
+  if (sec.showList) meta.push(el("span", { text: listName(p.snap, t.listId) }));
+  if (t.link) {
+    const link = el("a", { class: "todo-meta__note", href: "#", text: `From ${t.link.name}, page ${t.link.page}` });
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      a.openNote(t);
+    });
+    meta.push(link);
+  } else if (t.linked) {
+    meta.push(el("span", { text: "From a notebook page" }));
+  }
   if (t.waiting) meta.push(el("span", { class: "todo-meta__wait", text: "Waiting for the tablet" }));
 
   const main = el("div", { class: "todo-row__main" }, title, meta.length ? el("div", { class: "todo-meta" }, ...meta) : null);
-  const r = el("div", { class: "todo-row" + (t.done ? " is-done" : "") + (selected ? " is-selected" : ""), role: "listitem", tabindex: "-1", "data-id": t.id }, check, main, selected ? actions(t, p, a) : null);
+  const r = el(
+    "div",
+    {
+      class: "todo-row" + (t.done ? " is-done" : "") + (selected ? " is-selected" : ""),
+      role: "listitem",
+      tabindex: "0",
+      "aria-describedby": ROW_HELP_ID,
+      "aria-current": selected ? "true" : null,
+      "data-id": t.id,
+    },
+    check,
+    main,
+    selected ? actions(t, sec, p, a) : null,
+  );
+  // Clicking a selected row keeps it selected; Escape or a click elsewhere lets go.
   r.addEventListener("click", (e) => {
-    if ((e.target as HTMLElement).closest(".todo-actions, .todo-title-edit")) return;
-    a.select(selected ? null : t);
+    if ((e.target as HTMLElement).closest(".todo-actions, .todo-title-edit, a")) return;
+    if (!selected) a.select(t);
+  });
+  r.addEventListener("keydown", (e) => {
+    if (e.target !== r || (e.key !== "Enter" && e.key !== " ")) return;
+    e.preventDefault();
+    a.select(t);
   });
   return r;
 }
 
-function actions(t: TodoTask, p: TodoPaint, a: TodoActions): HTMLElement {
+function actions(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLElement {
   const sib = siblings(p.snap, t);
   const i = sib.findIndex((x) => x.id === t.id);
-  const btn = (name: IconName, label: string, key: string | null, run: (b: HTMLElement) => void, opts: { disabled?: boolean; danger?: boolean; iconOnly?: boolean } = {}) => {
+  const btn = (name: IconName, label: string, key: string, run: (b: HTMLElement) => void, opts: { disabled?: boolean; danger?: boolean; iconOnly?: boolean } = {}) => {
     const b = el(
       "button",
-      { class: "todo-act" + (opts.danger ? " is-danger" : ""), type: "button", disabled: opts.disabled === true || p.busy, "aria-label": label, title: key ? `${label} (${key})` : label },
+      { class: "todo-act" + (opts.danger ? " is-danger" : ""), type: "button", disabled: opts.disabled === true || p.busy, "aria-label": label, title: `${label} (${key})` },
       icon(name),
       opts.iconOnly ? null : el("span", { text: label }),
     );
@@ -202,25 +230,36 @@ function actions(t: TodoTask, p: TodoPaint, a: TodoActions): HTMLElement {
     });
     return b;
   };
+  // Up and down only where the list's own order is what is on screen.
+  const ordered = sec.reorderable !== undefined && !t.done;
   return el(
     "div",
     { class: "todo-actions", role: "toolbar", "aria-label": `Actions for ${t.title}` },
     btn("edit", "Rename", "E", () => a.startRename(t)),
     btn("move", "Move", "M", (b) => a.move(t, b)),
     btn("calendar", "Date", "D", (b) => a.date(t, b)),
-    btn("up", "Move up", "Alt+↑", () => a.reorder(t, -1), { disabled: t.done || i <= 0, iconOnly: true }),
-    btn("down", "Move down", "Alt+↓", () => a.reorder(t, 1), { disabled: t.done || i < 0 || i >= sib.length - 1, iconOnly: true }),
-    btn("trash", "Delete", "Del", () => a.remove(t), { danger: true }),
+    ordered ? btn("up", "Move up", "Alt+↑", () => a.reorder(t, -1), { disabled: i <= 0, iconOnly: true }) : null,
+    ordered ? btn("down", "Move down", "Alt+↓", () => a.reorder(t, 1), { disabled: i < 0 || i >= sib.length - 1, iconOnly: true }) : null,
+    btn("trash", "Delete", "Delete", () => a.remove(t), { danger: true }),
   );
 }
 
-export function keysHint(): HTMLElement {
-  const k = (keys: string[], what: string) => el("span", {}, ...keys.map((x) => el("kbd", { text: x })), ` ${what}`);
-  return el("p", { class: "todo-keys", "aria-hidden": "true" }, k(["N"], "new task"), k(["↑", "↓"], "select"), k(["X"], "done"), k(["E"], "rename"), k(["M"], "move"), k(["D"], "date"), k(["Alt", "↑↓"], "reorder"), k(["Del"], "delete"));
+/** Folded behind its summary: there for whoever wants it, quiet for everyone else. */
+export function keysHint(p: TodoPaint): HTMLElement {
+  const k = (keys: string[], what: string) => el("li", {}, ...keys.map((x) => el("kbd", { text: x })), el("span", { text: what }));
+  const items = [k(["N"], "new task"), k(["↑", "↓"], "select"), k(["X"], "done"), k(["E"], "rename"), k(["M"], "move"), k(["D"], "date")];
+  if (p.view.kind !== "planned" && p.view.kind !== "completed") items.push(k(["Alt", "↑↓"], "reorder"));
+  items.push(k(["Delete"], "delete"), k(["Esc"], "let go"));
+  return el("details", { class: "todo-keys" }, el("summary", { text: "Keyboard shortcuts" }), el("ul", {}, ...items));
+}
+
+/** Read out with every row, so the shortcuts are found without the details. */
+export function rowHelp(): HTMLElement {
+  return el("p", { id: ROW_HELP_ID, class: "todo-sr", text: "Enter selects the task. Then X completes it, E renames, M moves, D sets the date, Delete deletes." });
 }
 
 export function notice(title: string, text: string, retry: (() => void) | null): HTMLElement {
-  const b = retry ? el("button", { class: "todo-btn", type: "button", text: "Try again" }) : null;
+  const b = retry ? el("button", { class: "btn", type: "button", text: "Try again" }) : null;
   b?.addEventListener("click", () => retry!());
   return el("div", { class: "todo-empty" }, el("p", { class: "todo-empty__title", text: title }), el("p", { text }), b);
 }

@@ -10,7 +10,7 @@
 
 import { el } from "../../ui/dom";
 import { SORT_KEY, readLocal, writeLocal } from "../../ui/storage";
-import { binNotePageHref, destinationHref, folderHref, go, todoHref } from "../../router";
+import { binNotePageHref, destinationHref, folderHref, go, notePageHref, todoHref } from "../../router";
 import { createBackupNotice } from "./backupNotice";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";
@@ -271,6 +271,10 @@ export function createAppShell(deps: AppDeps): AppShell {
     crumbs: ctx.topbar.crumbs,
     sortWrap: ctx.topbar.sortWrap,
     segmented: ctx.topbar.segmented,
+    status: ctx.topbar.todoStatus,
+    listBtn: ctx.topbar.todoListBtn,
+    newListBtn: ctx.topbar.todoNewListBtn,
+    openNote: (id, page) => go(notePageHref(id, page)),
     setMode: (open) => ctx.modes.setDestinationMode("todo", open),
     toast: ctx.toast,
     handled: ctx.handled,

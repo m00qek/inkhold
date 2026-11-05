@@ -34,6 +34,10 @@ export interface Topbar {
   toolsSep: HTMLElement;
   emptyBinBtn: HTMLButtonElement;
   lockAdminBtn: HTMLButtonElement;
+  /** To-Do's: whether the tablet has its changes, its list menu and New list. */
+  todoStatus: HTMLElement;
+  todoListBtn: HTMLButtonElement;
+  todoNewListBtn: HTMLButtonElement;
   setView(view: View): void;
   /** Restores the caret the arriving keystroke's navigation took from the box. */
   restoreSearchFocus(): void;
@@ -142,6 +146,12 @@ export function createTopbar(deps: TopbarDeps): Topbar {
   const lockAdminBtn = topbarAction({ id: "lock-console", label: "Lock console", icon: "lock" });
   lockAdminBtn.addEventListener("click", () => deps.onLockAdmin());
 
+  // To-Do's tools; the page wires and shows them (`pages/todo/todoPage.ts`).
+  const todoStatus = el("span", { class: "todo-sync", role: "status", hidden: true });
+  const todoListBtn = topbarAction({ id: "todo-list-options", label: "List options", icon: "more", ariaLabel: "List options", iconOnly: true });
+  todoListBtn.setAttribute("aria-haspopup", "menu");
+  const todoNewListBtn = topbarAction({ id: "todo-new-list", label: "New list", icon: "plus" });
+
   // The discoverable, keyboard- and touch-reachable twin of drag and drop; both
   // hand files to the same `uploadZone.add`. Shown only over a folder listing.
   const uploadBtn = topbarAction({
@@ -183,7 +193,7 @@ export function createTopbar(deps: TopbarDeps): Topbar {
       // `aria-hidden`: the placeholder already says it.
       el("span", { class: "search__ocr", "aria-hidden": "true", text: "OCR" }),
     ),
-    el("div", { class: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, lockAdminBtn),
+    el("div", { class: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, todoStatus, todoListBtn, todoNewListBtn, lockAdminBtn),
     filePicker,
   );
 
@@ -197,6 +207,9 @@ export function createTopbar(deps: TopbarDeps): Topbar {
     toolsSep,
     emptyBinBtn,
     lockAdminBtn,
+    todoStatus,
+    todoListBtn,
+    todoNewListBtn,
     setView(view) {
       gridBtn.setAttribute("aria-pressed", String(view === "grid"));
       listBtn.setAttribute("aria-pressed", String(view === "list"));

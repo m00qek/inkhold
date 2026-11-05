@@ -8,7 +8,7 @@ const NOW = new Date(2026, 10, 5, 9, 30).getTime();
 const DAY = 86_400_000;
 let n = 0;
 const task = (p: Partial<TodoTask>): TodoTask => ({
-  id: `t${++n}`, listId: null, title: "x", done: false, due: null, completedAt: null, sort: 0, sortTime: 0, linked: false, waiting: false, ...p,
+  id: `t${++n}`, listId: null, title: "x", done: false, due: null, completedAt: null, sort: 0, sortTime: 0, linked: false, link: null, waiting: false, ...p,
 });
 const snap = (tasks: TodoTask[]): TodoSnapshot => ({
   enabled: true, lists: [{ id: "fr", title: "Français", waiting: false }], tasks, tabletSyncedAt: null, waiting: false,

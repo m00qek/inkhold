@@ -114,13 +114,15 @@ export interface Destination {
   icon: IconName;
   /** Hidden from non-admins; a door, not a lock (the server gates admin routes). */
   adminOnly?: boolean;
+  /** The tablet's apps (To-Do) get their own "Apps" group; the rest sit under "Other". */
+  group?: "apps";
 }
 
 export const DESTINATIONS: Destination[] = [
   // Under "Other": it isn't a folder (nothing moves in, it doesn't sync).
   { key: "bin", label: "Recycle bin", icon: "trash" },
   // The tablet's to-dos; shown only while the server keeps them (`destinationShown`).
-  { key: "todo", label: "To-Do", icon: "todo" },
+  { key: "todo", label: "To-Do", icon: "todo", group: "apps" },
   // No count: a badge here would be a stat about housemates.
   { key: "admin", label: "Admin", icon: "users", adminOnly: true },
 ];
@@ -413,19 +415,28 @@ export function createRail(deps: RailDeps): RailController {
       if (folder && open.has(folder.id)) walk(folder.id, 1);
     }
 
+    const visible = visibleDestinations();
+    const pushDest = (dest: Destination): void => {
+      const children = deps.destinationChildren?.(dest.key) ?? null;
+      out.push(destinationRow(dest, destination ?? null, children));
+      if (children?.expanded) out.push(...childRows(children));
+    };
+    // The tablet's apps: what it makes besides files, so neither a folder nor a tool.
+    const apps = visible.filter((d) => d.group === "apps");
+    if (apps.length > 0) {
+      out.push({ kind: "label", text: "Apps" });
+      apps.forEach(pushDest);
+    }
+
     const others = otherRootFolders();
-    const dests = visibleDestinations();
+    const dests = visible.filter((d) => d.group !== "apps");
     if (others.length > 0 || dests.length > 0) {
       out.push({ kind: "label", text: "Other" });
       for (const folder of others) {
         out.push(folderRow(folder, 0, folderId));
         if (open.has(folder.id)) walk(folder.id, 1);
       }
-      for (const dest of dests) {
-        const children = deps.destinationChildren?.(dest.key) ?? null;
-        out.push(destinationRow(dest, destination ?? null, children));
-        if (children?.expanded) out.push(...childRows(children));
-      }
+      dests.forEach(pushDest);
     }
 
     return out;

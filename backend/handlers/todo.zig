@@ -38,6 +38,11 @@ const TaskVO = struct {
     sortTime: i64,
     /// Lassoed from a notebook page on the tablet.
     linked: bool,
+    /// That notebook in the library and its page (1-based), when it is found there.
+    noteId: ?u64 = null,
+    notePage: ?i64 = null,
+    /// The notebook's name, without `.note`.
+    noteName: ?[]const u8 = null,
     waiting: bool,
 };
 
@@ -89,6 +94,14 @@ pub fn get(ctx: *Context, req: *Request, params: Params) anyerror!void {
             .sortTime = t.sort_time,
             .linked = t.links != null,
             .waiting = w.waiting,
+        };
+        if (t.links) |links| if (web.decodeLink(a, links)) |l| if (web.libraryPath(a, l.path)) |p| {
+            if (ctx.files.resolvePath(ctx.caller.?.user_id, p) catch null) |id| {
+                o.noteId = id;
+                o.notePage = l.page;
+                const base = std.fs.path.basename(p);
+                o.noteName = if (std.mem.endsWith(u8, base, ".note")) base[0 .. base.len - 5] else base;
+            }
         };
     }
     try json.respond(ctx.gpa, req, .ok, TodoVO{

@@ -129,8 +129,8 @@ export function sections(s: TodoSnapshot, v: TodoView, now: number): TodoSection
     }
     case "all":
       return [
-        { key: "all:inbox", label: "Inbox", tasks: open(null), showList: false },
-        ...s.lists.map((l): TodoSection => ({ key: `all:${l.id}`, label: l.title, tasks: open(l.id), showList: false })),
+        { key: "all:inbox", label: "Inbox", tasks: open(null), showList: false, reorderable: { listId: null } },
+        ...s.lists.map((l): TodoSection => ({ key: `all:${l.id}`, label: l.title, tasks: open(l.id), showList: false, reorderable: { listId: l.id } })),
         { key: "all:done", label: "Completed", tasks: s.tasks.filter((t) => t.done).sort(newestDone), showList: true, collapsedByDefault: true },
       ];
     case "completed":

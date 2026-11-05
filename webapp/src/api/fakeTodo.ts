@@ -25,16 +25,16 @@ export function fakeTodoMethods(latency: number) {
   const [fr, casa] = [lists[0]!.id, lists[1]!.id];
   const t = (p: Partial<TodoTask> & Pick<TodoTask, "title">): TodoTask => ({
     id: id(), listId: null, done: false, due: null, completedAt: null, sort: 0, sortTime: now() - DAY,
-    linked: false, waiting: false, ...p,
+    linked: false, link: null, waiting: false, ...p,
   });
   const tasks: TodoTask[] = [
     t({ title: "Estudar", listId: fr, due: noonIn(8), sort: 0 }),
     t({ title: "Ler", listId: fr, sort: 1 }),
-    t({ title: "Revisar o passé composé", listId: fr, sort: 2, linked: true }),
+    t({ title: "Revisar o passé composé", listId: fr, sort: 2, linked: true, link: { noteId: "101", page: 2, name: "Weekly review" } }),
     t({ title: "Devolver o livro na biblioteca", listId: casa, due: noonIn(-1), sort: 0 }),
     t({ title: "Ligar para o dentista", listId: casa, due: noonIn(0), sort: 1 }),
     t({ title: "Comprar papel para a impressora", listId: casa, done: true, completedAt: now() - 2 * DAY, sort: 2 }),
-    t({ title: "Haus of gabin", done: true, completedAt: now() - 3 * 3_600_000, linked: true }),
+    t({ title: "Haus of gabin", done: true, completedAt: now() - 3 * 3_600_000, linked: true, link: { noteId: "101", page: 3, name: "Weekly review" } }),
     t({ title: "after snapshot" }),
   ];
   let tabletSyncedAt: number | null = now() - 4 * 60_000;

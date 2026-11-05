@@ -27,63 +27,43 @@
 
 /* ---- header ---- */
 .todo-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--sp-3) var(--sp-6);
   padding-bottom: var(--sp-4);
 }
-.todo-head__title {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-.todo-head__title h1 {
+.todo-head h1 {
   margin: 0;
   font: 500 var(--fs-heading) / 1.2 var(--font-display);
   text-wrap: balance;
   overflow-wrap: anywhere;
 }
-.todo-head__side {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--sp-3) var(--sp-4);
-}
+
+/* ---- in the shell's topbar: the sync status ---- */
 .todo-sync {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
-  margin: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-right: var(--sp-2);
   font-size: var(--fs-caption);
   color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.todo-sync__dot {
+.todo-sync::before {
+  content: "";
+  flex: none;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--accent);
 }
-.todo-sync.is-waiting .todo-sync__dot {
+.todo-sync.is-waiting::before {
   background: transparent;
   box-shadow: inset 0 0 0 1.5px var(--ink-soft);
 }
-.todo-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: var(--control-h-sm);
-  padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--sheet);
-  color: var(--ink);
-  cursor: pointer;
-}
-.todo-btn:hover {
-  background: var(--hover-fill);
+.todo-sync[hidden] {
+  display: none;
 }
 
 /* ---- the add form ---- */
@@ -113,13 +93,28 @@
 .todo-add input:focus {
   outline: none;
 }
+/* The date is a chip: a calendar alone until one is set, then the day too. */
 .todo-add__date {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  height: var(--control-h-sm);
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
   color: var(--ink-soft);
+  font: var(--fs-caption) var(--font-mono);
+  cursor: pointer;
 }
-.todo-add__date input,
+.todo-add__date:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.todo-add__date.is-set {
+  border-color: var(--line);
+  color: var(--ink);
+}
 .todo-pop__date {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -128,19 +123,9 @@
   font: var(--fs-caption) var(--font-mono);
   padding: 3px 6px;
 }
-.todo-add__go {
+.btn.todo-add__go {
   height: var(--control-h-sm);
   padding: 0 16px;
-  border: 0;
-  border-radius: var(--radius);
-  background: var(--ink);
-  color: var(--sheet);
-  font-weight: 500;
-  cursor: pointer;
-}
-.todo-add__go:disabled {
-  background: var(--line);
-  cursor: default;
 }
 
 /* ---- groups and rows ---- */
@@ -179,12 +164,12 @@
 }
 .todo-group__n {
   font: var(--fs-eyebrow) var(--font-mono);
-  color: var(--ink-faint);
+  color: var(--ink-soft);
 }
 
 .todo-row {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
   align-items: start;
   gap: 4px var(--sp-3);
   padding: 10px var(--sp-4);
@@ -207,29 +192,45 @@
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
+/* A 32px target; the ring the eye sees is 22px. */
 .todo-check {
+  display: grid;
+  place-items: center;
+  width: var(--hit-target);
+  height: var(--hit-target);
+  margin: -4px 0 0 -5px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+.todo-check:hover .todo-check__ring {
+  background: var(--hover);
+}
+.todo-check__ring {
   display: grid;
   place-items: center;
   width: 22px;
   height: 22px;
-  margin-top: 1px;
-  padding: 0;
   border: 1.6px solid var(--ink);
   border-radius: 50%;
-  background: transparent;
   color: var(--sheet);
-  cursor: pointer;
 }
 .todo-check svg {
   width: 22px;
   height: 22px;
   opacity: 0;
 }
-.todo-row.is-done .todo-check {
+.todo-row.is-done .todo-check__ring {
   background: var(--ink);
 }
 .todo-row.is-done .todo-check svg {
   opacity: 1;
+}
+.todo-check:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .todo-title {
   position: relative;
@@ -239,7 +240,7 @@
   overflow-wrap: anywhere;
 }
 .todo-row.is-done .todo-title {
-  color: var(--ink-faint);
+  color: var(--ink-soft);
 }
 /* Completing draws a pen line across the title before the row moves. */
 .todo-strike {
@@ -284,8 +285,15 @@
 .todo-meta .is-overdue {
   color: var(--margin-ink);
 }
-.todo-meta__list {
-  color: var(--ink-faint);
+.todo-meta__note {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+.todo-meta__note:hover {
+  color: var(--ink);
+  text-decoration-color: currentColor;
 }
 .todo-meta__wait {
   display: inline-flex;
@@ -343,50 +351,57 @@
   color: var(--ink);
 }
 
+/* The shortcuts, folded behind their summary. */
 .todo-keys {
+  margin: var(--sp-4) 0 0;
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+.todo-keys summary {
+  width: fit-content;
+  cursor: pointer;
+}
+.todo-keys ul {
   display: flex;
   flex-wrap: wrap;
   gap: 6px var(--sp-4);
-  margin: var(--sp-4) 0 0;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  list-style: none;
   font: var(--fs-eyebrow) var(--font-mono);
-  color: var(--ink-faint);
+}
+.todo-keys li {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 .todo-keys kbd {
   font: inherit;
   padding: 0 4px;
   border: 1px solid var(--line);
   border-radius: 2px;
-  color: var(--ink-soft);
+  color: var(--ink);
+}
+.todo-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .todo-pop .todo-pop__date {
   margin: 4px 10px 8px;
 }
 
-/* The Undo after a delete: fixed to the bottom of the content area. */
-.todo-undo {
-  position: fixed;
-  left: 50%;
-  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-4);
-  max-width: calc(100% - 32px);
-  padding: 10px 14px;
-  border-radius: var(--radius-card);
-  background: var(--ink);
-  color: var(--sheet);
-  box-shadow: 0 10px 30px -10px var(--shadow);
-  transform: translateX(-50%);
-}
-.todo-undo button {
-  border: 0;
-  background: none;
-  color: var(--sheet);
-  font-weight: 700;
-  text-decoration: underline;
-  cursor: pointer;
+/* The rename-style name field inside the shared confirm dialog. */
+.todo-dialog .rename__field {
+  width: 100%;
+  margin-top: var(--sp-3);
 }
 
 @media (max-width: 620px) {
@@ -394,7 +409,7 @@
     padding: 16px 12px 96px;
   }
   .todo-row {
-    grid-template-columns: 28px minmax(0, 1fr);
+    grid-template-columns: 24px minmax(0, 1fr);
     padding-inline: var(--sp-3);
   }
   .todo-actions {
@@ -407,7 +422,4 @@
   .todo-group__chev svg {
     transition: none;
   }
-}
-.todo-undo[hidden] {
-  display: none;
 }

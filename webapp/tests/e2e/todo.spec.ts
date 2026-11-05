@@ -68,7 +68,7 @@ test.describe("To-Do", () => {
     await expect(page.getByRole("toolbar", { name: "Actions for after snapshot" })).toBeVisible();
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/selected.png` });
 
-    await page.getByRole("button", { name: "Date" }).click();
+    await page.getByRole("button", { name: "Date", exact: true }).click();
     await page.getByRole("menuitem", { name: "Tomorrow" }).click();
     await expect(row(page, "after snapshot")).toContainText("Tomorrow");
 
@@ -80,10 +80,56 @@ test.describe("To-Do", () => {
     await expect(row(page, "after snapshot")).toBeVisible();
 
     await row(page, "after snapshot").click();
-    await page.getByRole("button", { name: "Delete" }).click();
+    await page.getByRole("button", { name: "Delete", exact: true }).click();
     await expect(row(page, "after snapshot")).toHaveCount(0);
+    await expect(page.locator(".bin-toast.is-shown")).toContainText('Deleted "after snapshot"');
     await page.locator(".todo-undo").getByRole("button", { name: "Undo" }).click();
     await expect(row(page, "after snapshot")).toBeVisible();
+  });
+
+  test("clicking a selected task keeps it selected; Escape lets go; Enter selects from Tab", async ({ page }) => {
+    await openTodo(page, "/inbox");
+    await row(page, "after snapshot").click();
+    await row(page, "after snapshot").click();
+    await expect(row(page, "after snapshot")).toHaveClass(/is-selected/);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".todo-row.is-selected")).toHaveCount(0);
+    await row(page, "after snapshot").focus();
+    await page.keyboard.press("Enter");
+    await expect(row(page, "after snapshot")).toHaveClass(/is-selected/);
+    // Backspace is not delete: only the Delete key is.
+    await page.keyboard.press("Backspace");
+    await expect(row(page, "after snapshot")).toBeVisible();
+  });
+
+  test("Planned: no reorder, no repeated Overdue, and the notebook link opens its page", async ({ page }) => {
+    await openTodo(page, "/planned");
+    const overdue = page.locator(".todo-group", { has: page.locator(".todo-group__head", { hasText: "Overdue" }) });
+    await expect(overdue.locator(".todo-meta")).not.toContainText("Overdue");
+    await overdue.locator(".todo-row").first().click();
+    await expect(page.getByRole("button", { name: "Move up" })).toHaveCount(0);
+
+    await openTodo(page, "/list/" + "1".padStart(32, "0"));
+    const link = page.locator(".todo-meta__note").first();
+    await expect(link).toHaveText(/^From .+, page \d+$/);
+    await link.click();
+    await expect(page).toHaveURL(/#\/note\/101\/page\/2$/);
+  });
+
+  test("the list's options live in the topbar: rename the list", async ({ page }) => {
+    await openTodo(page, "/list/" + "1".padStart(32, "0"));
+    await expect(page.locator("#todo-new-list")).toBeVisible();
+    await page.locator("#todo-list-options").click();
+    await page.getByRole("menuitem", { name: "Rename list" }).click();
+    await page.getByRole("dialog").getByLabel("Name").fill("Francês");
+    await page.getByRole("button", { name: "Rename", exact: true }).click();
+    await expect(page.locator(".crumbs__here")).toHaveText("Francês");
+    await expect(rail(page).getByRole("button", { name: /^Francês/ })).toBeVisible();
+
+    // Off To-Do, the topbar is the library's again.
+    await rail(page).getByRole("button", { name: /^Note/ }).click();
+    await expect(page.locator("#todo-new-list")).toBeHidden();
+    await expect(page.locator("#todo-list-options")).toBeHidden();
   });
 
   test("New list asks for a name and opens the list", async ({ page }) => {

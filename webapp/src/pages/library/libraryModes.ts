@@ -43,6 +43,11 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
     }
     if (!ctx.destinationsOpen.bin) ctx.topbar.emptyBinBtn.hidden = true;
     if (!ctx.destinationsOpen.admin) ctx.topbar.lockAdminBtn.hidden = true;
+    if (!ctx.destinationsOpen.todo) {
+      ctx.topbar.todoStatus.hidden = true;
+      ctx.topbar.todoListBtn.hidden = true;
+      ctx.topbar.todoNewListBtn.hidden = true;
+    }
   }
 
   function setBinMode(open: boolean, count: number, busy = false): void {
