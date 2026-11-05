@@ -79,9 +79,10 @@ not a multi-tenant service.
 - 🔁 **A new or restored server is a new library.** Each Inkhold library has its
   own identity, so a tablet signing in after a reinstall or a restore notices,
   forgets what it synced before and syncs from scratch, uploading what the
-  server lacks instead of deleting it (tested on a Nomad). If the tablet asks
-  how to treat its digest and to-do data, choose **"Retain locally"**: "Delete
-  locally" removes them from the tablet. After that sign-in, check **Settings →
+  server lacks instead of deleting it (tested on a Nomad). That protection
+  covers files only. If the tablet asks how to treat its digest and to-do data,
+  choose **"Retain locally"**: "Delete locally" removes them from the tablet,
+  and after a restore that loses any newer than the snapshot. After that sign-in, check **Settings →
   Drive → Private Cloud**: Auto Sync is off and the folders to sync may need
   ticking again.
 - 🔑 **Back up `cred.key`** (created on first run). It encrypts stored credentials

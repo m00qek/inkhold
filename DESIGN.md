@@ -307,10 +307,17 @@ hardware unless marked otherwise.
   by an explicit delete (which always succeeds: one failed delete aborts the
   app's whole sync) or with their account. Deleting a list takes its tasks.
   Behind `config.todo_sync`, off until proven on a tablet; off, every call is
-  refused. Server switches are the firmware's: at sign-in to another account
-  Settings asks "Retain locally" (marks every to-do unsynced, so it uploads)
-  or "Delete locally" (`todo/delete_synced_data`); the library-id reset takes
-  the retaining path. Digest stays refused.
+  refused. **The library id does NOT protect to-dos**: its reset at sign-in
+  (`doLogin: clear table of private cloud`, `clearSyncTable`) clears file
+  records only (seen on hardware 2026-11-05). What protects them is a prompt
+  the same sign-in shows whenever the tablet remembers a previous account,
+  same account included: "Retain locally" marks every to-do unsynced, so it
+  uploads; "Delete locally" (`todo/delete_synced_data`) removes the synced
+  ones, losing any newer than a restored snapshot. A restore or reinstall
+  always forces that sign-in (sessions revoked, tokens invalid), so the
+  README, the restore command and the config tell users to choose Retain.
+  Unverified: whether a tablet that was unregistered first (`hasUnregister`)
+  skips the prompt and keeps its marks. Digest stays refused.
 
 ## 5. Auth and credentials
 

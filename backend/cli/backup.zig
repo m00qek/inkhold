@@ -410,8 +410,10 @@ pub fn restore(gpa: std.mem.Allocator, io: Io, inv: Invocation, out: *Writer, er
         \\
         \\{[b]s}Every tablet was signed out,{[r]s} and the library has a new identity: a tablet
         \\signing in again forgets what it synced before and syncs from scratch, so it
-        \\uploads the files this snapshot lacks instead of deleting them. Backing a
-        \\tablet up before it signs in is still the safe way. Afterwards, check its
+        \\uploads the files this snapshot lacks instead of deleting them. That covers
+        \\files only: when the tablet asks how to treat its digest and to-do data,
+        \\choose "Retain locally", or to-dos newer than this snapshot are lost. Backing
+        \\a tablet up before it signs in is still the safe way. Afterwards, check its
         \\Settings > Drive > Private Cloud: Auto Sync is off and may need its folders.
         \\
         \\Start the server when ready: inkhold serve
