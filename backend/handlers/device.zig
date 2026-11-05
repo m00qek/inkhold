@@ -83,8 +83,6 @@ const SyncEndReq = struct { equipmentNo: ?[]const u8 = null, flag: ?[]const u8 =
 const SyncEndVO = struct { success: bool = true, equipmentNo: []const u8 };
 
 /// Planner stubs: empty lists keep the Planner app from erroring during sync.
-const ScheduleGroupAllVO = struct { success: bool = true, pageToken: []const u8 = "", scheduleTaskGroup: []const struct {} = &.{} };
-const ScheduleTaskAllVO = struct { success: bool = true, nextPageToken: []const u8 = "", nextSyncToken: i64 = 0, scheduleTask: []const struct {} = &.{} };
 
 // ---- handlers ----
 
@@ -314,16 +312,25 @@ pub fn summaryGroup(ctx: *Context, req: *Request, params: Params) anyerror!void 
     try json.respond(ctx.gpa, req, .ok, vo, null);
 }
 
-/// Planner app stubs.
+/// The To-Do app's listings: REFUSED until Inkhold stores to-dos. The app
+/// (decompiled `TaskSync.syncTaskList`) deletes from the tablet every list it
+/// once synced that the server does not list, so an honest "no lists" would
+/// wipe them. A `success: false` reply at 200 ends its sync with a generic
+/// error before it compares anything (401/403/404 take other paths in the
+/// app). The earlier stub's `pageToken: ""` read as "another page" and looped
+/// the app into a crash, which by accident protected the lists too.
 pub fn scheduleGroupAll(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    try json.respond(ctx.gpa, req, .ok, ScheduleGroupAllVO{}, null);
+    return fail(ctx, req, .ok, todo_unsupported, todo_unsupported_msg);
 }
 
 pub fn scheduleTaskAll(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    try json.respond(ctx.gpa, req, .ok, ScheduleTaskAllVO{}, null);
+    return fail(ctx, req, .ok, todo_unsupported, todo_unsupported_msg);
 }
+
+const todo_unsupported = "TODO_SYNC_UNSUPPORTED";
+const todo_unsupported_msg = "To-Do sync is not supported by this server yet";
 
 test {
     _ = device_files;

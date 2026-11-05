@@ -69,6 +69,20 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         try std.testing.expectEqual(@as(u16, 200), resp.status);
     }
     try std.testing.expect(try f.svc.isDeviceBound(alice, "SN1"));
+
+    // The To-Do listings are refused: an empty list would make the tablet
+    // delete every list it once synced (decompiled TaskSync), and a page
+    // token of "" looped it into a crash.
+    {
+        const groups = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/schedule/group/all", &dev_tok, "SN1", "{\"maxResults\":\"200\",\"pageToken\":\"\"}");
+        try std.testing.expectEqual(@as(u16, 200), groups.status);
+        try expectFailure(groups.body, "TODO_SYNC_UNSUPPORTED");
+        try std.testing.expect(std.mem.indexOf(u8, groups.body, "scheduleTaskGroup") == null);
+        const tasks = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/schedule/task/all", &dev_tok, "SN1", "{\"maxResults\":\"200\"}");
+        try std.testing.expectEqual(@as(u16, 200), tasks.status);
+        try expectFailure(tasks.body, "TODO_SYNC_UNSUPPORTED");
+    }
+
     // Asserted through the route: the handler, not `nameDevice`, was the bug.
     {
         const devs = try f.svc.listUserDevices(gpa, alice, alice);
