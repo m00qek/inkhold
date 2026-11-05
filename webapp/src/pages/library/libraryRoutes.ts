@@ -1,7 +1,7 @@
 // The library's route handlers: each place a URL names, and opening notes, versions and trashed files.
 
-import { parseView } from "../todo/todoModel";
-import { destinationHref, folderHref, notePageHref, redirect, searchHref } from "../../router";
+import { parseView, viewPath } from "../todo/todoModel";
+import { destinationHref, folderHref, notePageHref, redirect, searchHref, todoHref } from "../../router";
 import { resolveVersionShort } from "../versionShort";
 import type { Api } from "../../api/types";
 import type { Id, NoteMeta, NoteSummary } from "../../core/types";
@@ -57,6 +57,9 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
         href: destinationHref(BIN_KEY),
       };
     }
+    // A task's notebook link: Back returns to the To-Do page it was on.
+    const todoView = ctx.todo?.view();
+    if (todoView) return { origin: { kind: "todo", folderPath: folderPathOf(noteId) }, href: todoHref(viewPath(todoView)) };
     // The shell's `query`, never the route's `?q=`, which is in-note find.
     const q = st.query.trim();
     if (q) return { origin: { kind: "search", folderPath: folderPathOf(noteId) }, href: searchHref(q) };
@@ -185,6 +188,8 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
         }
       
         st.readerBack = href;
+        // To-Do covers the content area; the note opens in its place.
+        if (origin.kind === "todo") ctx.leaveTodo();
         const v = ctx.viewers.viewerFor(summary.fileType);
         ctx.viewers.activate(v);
         v.open(summary, metaPromise, page, origin, q);

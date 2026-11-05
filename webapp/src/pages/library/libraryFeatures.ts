@@ -1,6 +1,6 @@
 // The library's feature wiring: version history, rename, card actions, gallery cards and search rows, uploads, and the account page's host.
 
-import { destinationHref, folderHref, go } from "../../router";
+import { destinationHref, folderHref, go, todoHref } from "../../router";
 import type { Entry } from "../../core/types";
 import { NameTakenError } from "../../api/client";
 import { openRenameDialog } from "../../ui/renameDialog";
@@ -11,6 +11,8 @@ import { createCardActions } from "../cardActions";
 import { createHistoryController, type HistoryController } from "../historyPanel";
 import { createGallerySearch, type GallerySearch } from "../gallerySearch";
 import { BIN_KEY } from "../bin/bin";
+import { todoHits } from "../todo/todoSearch";
+import { homeView, viewPath } from "../todo/todoModel";
 import { type AccountHost } from "../account/account";
 import type { LibraryCtx } from "./libraryContext";
 
@@ -116,6 +118,11 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     resultCard: galleryCards.resultCard,
     emptyState: ctx.render.emptyState,
     indexPending: () => st.indexPending,
+    moreResults: (q) =>
+      todoHits(ctx.todo?.snapshot() ?? null, q, Date.now(), (t) => {
+        ctx.todo.reveal(t.id);
+        go(todoHref(viewPath(homeView(t))));
+      }),
   });
 
   /**

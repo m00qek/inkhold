@@ -76,8 +76,8 @@ export function createTopbar(deps: TopbarDeps): Topbar {
     id: "search",
     type: "search",
     autocomplete: "off",
-    placeholder: "Search across every note — typed and handwritten",
-    "aria-label": "Search notes",
+    placeholder: "Search notes and to-dos — typed and handwritten",
+    "aria-label": "Search notes and to-dos",
   }) as HTMLInputElement;
   // The first letter pushes (folder to results is a navigation); later letters
   // and clearing replace, so one search episode is one history entry.
@@ -150,7 +150,8 @@ export function createTopbar(deps: TopbarDeps): Topbar {
   const todoStatus = el("span", { class: "todo-sync", role: "status", hidden: true });
   const todoListBtn = topbarAction({ id: "todo-list-options", label: "List options", icon: "more", ariaLabel: "List options", iconOnly: true });
   todoListBtn.setAttribute("aria-haspopup", "menu");
-  const todoNewListBtn = topbarAction({ id: "todo-new-list", label: "New list", icon: "plus" });
+  // Icon-only, like Upload over a folder: the one way to add on the Lists page.
+  const todoNewListBtn = topbarAction({ id: "todo-new-list", label: "New list", icon: "plus", ariaLabel: "New list", iconOnly: true });
 
   // The discoverable, keyboard- and touch-reachable twin of drag and drop; both
   // hand files to the same `uploadZone.add`. Shown only over a folder listing.

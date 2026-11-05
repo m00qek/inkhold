@@ -72,7 +72,8 @@ export interface ReaderDeps {
  * says it). `folderPath` is null when unknown and is then rendered as absent.
  */
 export interface ReaderOrigin {
-  kind: "folder" | "search" | "bin" | "history";
+  /** `todo`: from a task's "From <note>, page N" link; Back returns to that page of To-Do. */
+  kind: "folder" | "search" | "bin" | "history" | "todo";
   /** Human path of the note's folder (`Note / Projects`), or null if unknown. */
   folderPath: string | null;
   /** History origin only: the previewed version (`createdAt` in epoch ms). */

@@ -1,20 +1,26 @@
 // The To-Do destination: the person's lists and tasks, the same ones the
 // tablet's To-Do app syncs. Mounted in the shell's content area like the
-// account page; painted by `todoView.ts` from `todoModel.ts`. Its page-level
-// tools (sync status, list options, New list) are the shell topbar's.
+// account page; painted by `todoView.ts` from `todoModel.ts`, with its menus
+// and dialogs in `todoMenus.ts`, dragging in `todoDrag.ts` and the Undo in
+// `todoUndo.ts`. Its page-level tools (sync status, list menu, New list) are
+// the shell topbar's.
 //
 // Every edit goes to the server, then the page re-reads it: the server owns
 // the times and the order the tablet will merge by. A delete waits a few
 // seconds behind an Undo first, because once the tablet syncs it is gone there.
 
 import { el } from "../../ui/dom";
-import { ICONS, svg, type IconName } from "../../ui/icons";
-import { openDialog } from "../../ui/confirm";
-import { clearPopover, getPortalRoot, openPopover, placePop, type OpenPopover } from "../../ui/popover";
+import { DEFAULT_SECTION_TITLE } from "../../ui/menu";
 import type { Api } from "../../api/types";
 import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
-import { addTarget, dueFromInput, inputFromDue, sameView, sections, siblings, viewPath, viewTitle, type TodoView } from "./todoModel";
-import { addForm, body, header, keysHint, notice, rowHelp, syncText, type TodoActions, type TodoPaint } from "./todoView";
+import {
+  addTarget, dropOrder, listKey, sameView, sections, siblings, viewPath, viewTitle, withOrder, withoutTask, type TodoView,
+} from "./todoModel";
+import { addForm, body, header, keysHint, notice, overview, placeTitle, rowHelp, syncText, type TodoActions, type TodoPaint } from "./todoView";
+import { createTodoMenus } from "./todoMenus";
+import { dragRow } from "./todoDrag";
+import { createUndoToast } from "./todoUndo";
+import { onTodoKey } from "./todoKeys";
 
 export interface TodoHost {
   api: Api;
@@ -30,6 +36,8 @@ export interface TodoHost {
   /** The topbar's New list button. */
   newListBtn: HTMLButtonElement;
   setMode(open: boolean): void;
+  /** The library's search box in the topbar. */
+  setSearchShown(shown: boolean): void;
   toast(message: string): void;
   /** Session expiry and the like; true when the shell took care of it. */
   handled(e: unknown): boolean;
@@ -51,41 +59,54 @@ export interface TodoPage {
   snapshot(): TodoSnapshot | null;
   /** Re-reads the server (shell start, tab back in focus). */
   load(): Promise<void>;
+  /** Select this task when its page next opens (a search result). */
+  reveal(taskId: string): void;
   destroy(): void;
 }
 
 const UNDO_MS = 6000;
 /** While open and in view, the tablet's edits show up within this. */
 const POLL_MS = 30_000;
-const DAY_MS = 86_400_000;
-const DIALOG = { dialog: "confirm todo-dialog", body: "confirm__body", actions: "confirm__actions", cancel: "btn", go: "btn" };
 
 export function createTodoPage(host: TodoHost): TodoPage {
   const root = el("section", { class: "todo", "aria-labelledby": "todo-title", hidden: true });
   host.content.append(root);
 
-  // The bin's Undo toast, reused as is; in the document only while it shows.
-  const undoMsg = el("span", { class: "bin-toast__msg" });
-  const undoSub = el("span", { class: "bin-toast__sub", text: "It leaves the tablet at its next sync." });
-  const undoBtn = el("button", { class: "bin-toast__action", type: "button", text: "Undo" });
-  const undoBar = el("div", { class: "bin-toast todo-undo", role: "status", "aria-live": "polite" }, el("span", { class: "bin-toast__lines" }, undoMsg, undoSub), undoBtn);
-  let undoGone: ReturnType<typeof setTimeout> | undefined;
+  const menus = createTodoMenus();
+  const undo = createUndoToast(() => {
+    if (!pendingDelete) return;
+    clearTimeout(pendingDelete.timer);
+    pendingDelete = null;
+    undo.hide();
+    host.onChanged();
+    paint();
+  });
 
   let snap: TodoSnapshot | null = null;
   let failed = false;
   let open_ = false;
-  let view: TodoView = { kind: "all" };
+  let view: TodoView = { kind: "overview" };
   let selected: string | null = null;
+  // What the page is in the middle of. A background re-read waits until it is
+  // `settled()`, and nothing repaints the rows under a drag.
+  /** The task whose name is being edited in its row. */
   let editing: string | null = null;
+  /** A save in flight; its own re-read follows. */
   let busy = false;
+  /** A task held by its grip. */
+  let dragging = false;
   const collapsed = new Set<string>();
   /** The add form's date, per view; absent: the view's default. */
   const addDue = new Map<string, number | null>();
   /** A delete waiting out its Undo. */
   let pendingDelete: { task: TodoTask; timer: ReturnType<typeof setTimeout> } | null = null;
   let loadToken = 0;
+  /** A task to select on the next open, done tasks' section unfolded. */
+  let revealing: string | null = null;
   /** The view last painted, so a repaint of the same view keeps the add form's draft. */
   let paintedView: TodoView | null = null;
+
+  const settled = () => !busy && !dragging && editing === null;
 
   // ---- server ----
 
@@ -126,60 +147,54 @@ export function createTodoPage(host: TodoHost): TodoPage {
     host.toast(message);
   }
 
-  function showUndo(title: string): void {
-    clearTimeout(undoGone);
-    undoMsg.textContent = `Deleted "${title}"`;
-    if (!undoBar.isConnected) {
-      document.body.append(undoBar);
-      void undoBar.offsetWidth; // so it slides in rather than appearing
-    }
-    undoBar.classList.add("is-shown");
-  }
-
-  function hideUndo(): void {
-    undoBar.classList.remove("is-shown");
-    clearTimeout(undoGone);
-    undoGone = setTimeout(() => undoBar.remove(), 260);
-  }
-
   function commitDelete(): void {
     const p = pendingDelete;
     if (!p) return;
     clearTimeout(p.timer);
     pendingDelete = null;
-    hideUndo();
+    undo.hide();
     void run("delete the task", () => host.api.todoDeleteTask(p.task.id));
   }
 
-  undoBtn.addEventListener("click", () => {
-    if (!pendingDelete) return;
-    clearTimeout(pendingDelete.timer);
-    pendingDelete = null;
-    hideUndo();
-    host.onChanged();
-    paint();
-  });
-
   // ---- painting ----
 
+  /** The snapshot as the person sees it: a delete waiting on Undo is gone. */
+  function visibleSnap(): TodoSnapshot | null {
+    return snap && pendingDelete ? withoutTask(snap, pendingDelete.task.id) : snap;
+  }
+
+  /** Saves a new order (and maybe a new list) for one list, showing it at once. */
+  function saveOrder(listId: string | null, ids: string[], moved?: TodoTask): void {
+    if (!snap) return;
+    snap = withOrder(snap, ids, moved ? { id: moved.id, listId } : undefined);
+    void run(moved ? "move the task" : "reorder", async () => {
+      if (moved) await host.api.todoUpdateTask(moved.id, { listId });
+      await host.api.todoReorder(listId, ids);
+    });
+  }
+
+  /** The shell's topbar dressed for To-Do (`mine`), or handed back to the library. */
   function chrome(mine: boolean): void {
     host.sortWrap.hidden = mine;
     host.segmented.hidden = mine;
     host.setMode(mine);
+    // Each page's own tools: New list where the lists are, the list's menu on
+    // a list of one's own (never the Inbox), the sync line everywhere.
     host.status.hidden = !mine || !snap?.enabled;
-    host.newListBtn.hidden = !mine || !snap?.enabled;
+    host.newListBtn.hidden = !mine || !snap?.enabled || view.kind !== "overview";
     host.listBtn.hidden = !mine || !snap?.enabled || view.kind !== "list";
+    // The search box only where To-Do is browsed, like a folder; inside a list
+    // or a view, as inside a note, it would only carry the person away.
+    host.setSearchShown(mine && view.kind === "overview");
     if (!mine) return;
     if (snap?.enabled) {
-      host.status.textContent = syncText(snap);
+      const sync = syncText(snap);
+      host.status.textContent = sync.short;
+      host.status.title = sync.long;
       host.status.classList.toggle("is-waiting", snap.waiting);
       if (view.kind === "list") host.listBtn.setAttribute("aria-label", `Options for the list ${viewTitle(view, snap.lists)}`);
     }
-    // Like the reader: the name of what is open, with where it lives under it.
-    // No trail: the rail is the way around, and To-Do is not in the library.
-    host.crumbs.replaceChildren(
-      el("div", { class: "todo-place" }, el("b", { class: "todo-place__name", text: snap ? viewTitle(view, snap.lists) : "To-Do" }), el("span", { text: "To-Do" })),
-    );
+    host.crumbs.replaceChildren(placeTitle(visibleSnap(), view, Date.now()));
   }
 
   function dueFor(v: TodoView, now: number): number | null {
@@ -189,7 +204,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
   }
 
   function paint(): void {
-    if (!open_) return;
+    if (!open_ || dragging) return;
     chrome(true);
     const keep = document.activeElement instanceof HTMLElement && root.contains(document.activeElement) ? document.activeElement.id : "";
     const keepRow = document.activeElement instanceof HTMLElement && root.contains(document.activeElement) ? document.activeElement.closest<HTMLElement>(".todo-row")?.dataset.id ?? null : null;
@@ -210,7 +225,8 @@ export function createTodoPage(host: TodoHost): TodoPage {
       };
       const keys = keysHint(p);
       (keys as HTMLDetailsElement).open = keysOpen;
-      kids.push(header(p), addForm(p, actions), body(p, actions), keys, rowHelp());
+      if (view.kind === "overview") kids.push(header(p), overview(p, actions));
+      else kids.push(header(p), addForm(p, actions), body(p, actions), keys, rowHelp());
     }
     root.replaceChildren(...kids.filter((k): k is HTMLElement => k !== null));
     paintedView = view;
@@ -237,96 +253,10 @@ export function createTodoPage(host: TodoHost): TodoPage {
     }
   }
 
-  // ---- popovers and dialogs ----
-
-  let popClose: () => void = () => {};
-
-  function pop(trigger: HTMLElement, items: HTMLElement[]): void {
-    popClose();
-    const box = el("div", { class: "menu__pop menu__pop--float is-open todo-pop", role: "menu" }, ...items);
-    const self: OpenPopover = {
-      trigger,
-      contains: (t) => box.contains(t) || trigger.contains(t),
-      close: () => {
-        box.remove();
-        clearPopover(self);
-        trigger.setAttribute("aria-expanded", "false");
-        popClose = () => {};
-      },
-    };
-    getPortalRoot().append(box);
-    placePop(trigger, box);
-    openPopover(self);
-    trigger.setAttribute("aria-expanded", "true");
-    box.querySelector<HTMLElement>("button, input")?.focus();
-    box.addEventListener("click", (e) => e.stopPropagation());
-    popClose = self.close;
-  }
-
-  function item(label: string, iconName: IconName, onSelect: () => void, danger = false): HTMLElement {
-    const b = el(
-      "button",
-      { class: "menu__item menu__item--lead" + (danger ? " menu__item--danger" : ""), type: "button", role: "menuitem" },
-      el("span", { class: "menu__item-mark", html: svg(ICONS[iconName]) }),
-      el("span", { text: label }),
-    );
-    b.addEventListener("click", () => {
-      popClose();
-      onSelect();
-    });
-    return b;
-  }
-
-  const section = (text: string) => el("div", { class: "menu__section", role: "presentation", text });
-
-  /** Today, Tomorrow, a picked day, and "No date" when there is one. */
-  function dateMenu(trigger: HTMLElement, current: number | null, set: (due: number | null) => void): void {
-    const input = el("input", { class: "todo-pop__date", type: "date", "aria-label": "Pick a day", value: current === null ? "" : inputFromDue(current) }) as HTMLInputElement;
-    input.addEventListener("change", () => {
-      const due = dueFromInput(input.value);
-      if (due === null) return;
-      popClose();
-      set(due);
-    });
-    const day = (offset: number) => dueFromInput(inputFromDue(Date.now() + offset * DAY_MS));
-    pop(trigger, [
-      section("DUE"),
-      item("Today", "calendar", () => set(day(0))),
-      item("Tomorrow", "calendar", () => set(day(1))),
-      input,
-      ...(current !== null ? [el("div", { class: "menu__sep", "aria-hidden": "true" }), item("No date", "trash", () => set(null))] : []),
-    ]);
-  }
-
-  function askName(title: string, goLabel: string, initial: string): Promise<string | null> {
-    const input = el("input", { class: "rename__field todo-dialog__name", type: "text", "aria-label": "Name", maxlength: "60", autocomplete: "off", spellcheck: "false", value: initial }) as HTMLInputElement;
-    const { done } = openDialog({
-      host: document.body,
-      classes: DIALOG,
-      goLabel,
-      cancelLabel: "Cancel",
-      labelledBy: "todo-dialog-title",
-      build: (content, { go }) => {
-        content.append(el("h2", { id: "todo-dialog-title", text: title }), input);
-        const check = () => (go.disabled = input.value.trim() === "" || input.value.trim() === initial);
-        input.addEventListener("input", check);
-        check();
-        input.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            if (!go.disabled) go.click();
-          }
-        });
-      },
-    });
-    // The name is what is being asked for: focus it, not Cancel.
-    input.focus();
-    input.select();
-    return done.then((ok) => (ok && input.value.trim() !== "" ? input.value.trim() : null));
-  }
+  // ---- lists ----
 
   async function newList(then?: (id: string) => Promise<unknown>): Promise<void> {
-    const title = await askName("New list", "Create list", "");
+    const title = await menus.askName("New list", "Create list", "");
     if (!title) return;
     let created = "";
     if (!(await run("create the list", async () => { created = await host.api.todoCreateList(title); }))) return;
@@ -337,45 +267,37 @@ export function createTodoPage(host: TodoHost): TodoPage {
     }
   }
 
-  function renameList(): void {
-    if (!snap || view.kind !== "list") return;
-    const id = view.id;
+  /** The list on screen, or the one a card's menu names. */
+  const listHere = (): string | null => (view.kind === "list" ? view.id : null);
+
+  function renameList(id = listHere()): void {
+    if (!snap || id === null) return;
     const current = snap.lists.find((l) => l.id === id)?.title ?? "";
-    void askName("Rename list", "Rename", current).then((title) => {
+    void menus.askName("Rename list", "Rename", current).then((title) => {
       if (title && title !== current) void run("rename the list", () => host.api.todoRenameList(id, title));
     });
   }
 
-  function deleteList(): void {
-    if (!snap || view.kind !== "list") return;
-    const id = view.id;
+  function deleteList(id = listHere()): void {
+    if (!snap || id === null) return;
     const list = snap.lists.find((l) => l.id === id);
     if (!list) return;
     const n = snap.tasks.filter((t) => t.listId === id).length;
-    const { done } = openDialog({
-      host: document.body,
-      classes: { ...DIALOG, go: "btn is-danger" },
-      goLabel: "Delete list",
-      cancelLabel: "Cancel",
-      labelledBy: "todo-dialog-title",
-      build: (content) => content.append(
-        el("h2", { id: "todo-dialog-title", text: n ? `Delete "${list.title}" and its ${n} task${n === 1 ? "" : "s"}?` : `Delete "${list.title}"?` }),
-        el("p", { text: n ? "They are also removed from the tablet at its next sync. This can't be undone." : "It is also removed from the tablet at its next sync." }),
-      ),
-    });
+    const done = menus.confirmDeleteList(list.title, n);
     void done.then(async (ok) => {
       if (!ok) return;
       if (await run("delete the list", () => host.api.todoDeleteList(id))) {
         say(`Deleted "${list.title}".`);
-        host.go("all");
+        if (view.kind !== "overview") host.go("");
       }
     });
   }
 
   const onListBtn = (e: MouseEvent) => {
     e.stopPropagation();
-    if (host.listBtn.getAttribute("aria-expanded") === "true") return popClose();
-    pop(host.listBtn, [item("Rename list", "edit", renameList), item("Delete list", "trash", deleteList, true)]);
+    if (host.listBtn.getAttribute("aria-expanded") === "true") return menus.close();
+    // The card's ⋯ menu, header and all.
+    menus.pop(host.listBtn, [menus.section(DEFAULT_SECTION_TITLE), menus.item("Rename list", "edit", () => renameList()), menus.item("Delete list", "trash", () => deleteList(), true)]);
   };
   const onNewList = () => void newList();
   host.listBtn.addEventListener("click", onListBtn);
@@ -384,6 +306,11 @@ export function createTodoPage(host: TodoHost): TodoPage {
   // ---- actions ----
 
   const actions: TodoActions = {
+    show(v) {
+      host.go(viewPath(v));
+    },
+    renameList: (id) => renameList(id),
+    deleteList: (id) => deleteList(id),
     add(title) {
       if (!snap) return;
       const target = addTarget(view, Date.now());
@@ -402,7 +329,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
     },
     addDate(trigger) {
       const v = view;
-      dateMenu(trigger, dueFor(v, Date.now()), (due) => {
+      menus.dateMenu(trigger, dueFor(v, Date.now()), (due) => {
         addDue.set(viewPath(v), due);
         paint();
         root.querySelector<HTMLInputElement>("#todo-add-title")?.focus();
@@ -437,15 +364,30 @@ export function createTodoPage(host: TodoHost): TodoPage {
     move(t, trigger) {
       if (!snap) return;
       const targets: [string | null, string][] = [[null, "Inbox"], ...snap.lists.map((l): [string, string] => [l.id, l.title])];
-      pop(trigger, [
-        section("MOVE TO"),
-        ...targets.filter(([id]) => id !== t.listId).map(([id, name]) => item(name, id === null ? "inbox" : "list", () => void run("move the task", () => host.api.todoUpdateTask(t.id, { listId: id })))),
-        el("div", { class: "menu__sep", "aria-hidden": "true" }),
-        item("New list…", "plus", () => void newList((id) => host.api.todoUpdateTask(t.id, { listId: id }))),
+      menus.pop(trigger, [
+        menus.section("MOVE TO"),
+        ...targets
+          .filter(([id]) => id !== t.listId)
+          .map(([id, name]) => menus.item(name, id === null ? "inbox" : "list", () => void run("move the task", () => host.api.todoUpdateTask(t.id, { listId: id })))),
+        menus.sep(),
+        menus.item("New list…", "plus", () => void newList((id) => host.api.todoUpdateTask(t.id, { listId: id }))),
       ]);
     },
     date(t, trigger) {
-      dateMenu(trigger, t.due, (due) => void run(due === null ? "remove the date" : "set the date", () => host.api.todoUpdateTask(t.id, { due })));
+      menus.dateMenu(trigger, t.due, (due) => void run(due === null ? "remove the date" : "set the date", () => host.api.todoUpdateTask(t.id, { due })));
+    },
+    drag(t, row, e) {
+      if (!snap || dragging) return;
+      dragging = true;
+      menus.close();
+      // In All every list's group takes a drop; on one list's page, just its own.
+      dragRow(row, e, [...root.querySelectorAll<HTMLElement>("[data-list]")], (drop) => {
+        dragging = false;
+        if (!drop.changed || !snap) return paint();
+        selected = t.id;
+        const moved = drop.listId !== t.listId;
+        saveOrder(drop.listId, dropOrder(snap, t, drop.listId, drop.nextShown), moved ? t : undefined);
+      });
     },
     reorder(t, dir) {
       if (!snap) return;
@@ -455,13 +397,13 @@ export function createTodoPage(host: TodoHost): TodoPage {
       if (i < 0 || j < 0 || j >= sib.length) return;
       const ids = sib.map((x) => x.id);
       [ids[i], ids[j]] = [ids[j]!, ids[i]!];
-      void run("reorder", () => host.api.todoReorder(t.listId, ids));
+      saveOrder(t.listId, ids);
     },
     remove(t) {
       commitDelete(); // one Undo at a time
       selected = null;
       pendingDelete = { task: t, timer: setTimeout(commitDelete, UNDO_MS) };
-      showUndo(t.title);
+      undo.show(t.title);
       host.onChanged();
       paint();
     },
@@ -471,43 +413,24 @@ export function createTodoPage(host: TodoHost): TodoPage {
       paint();
     },
     openNote(t) {
-      if (t.link) host.openNote(t.link.noteId, Math.max(0, t.link.page - 1));
+      if (!t.link) return;
+      // Back from the note lands on this task again.
+      revealing = t.id;
+      host.openNote(t.link.noteId, Math.max(0, t.link.page - 1));
     },
   };
 
   // ---- keyboard and pointer ----
 
   function onKey(e: KeyboardEvent): void {
-    if (!open_ || e.defaultPrevented || e.metaKey || e.ctrlKey) return;
-    const target = e.target as HTMLElement;
-    if (target.closest("input, textarea, select, dialog, summary, [contenteditable]")) return;
-    if (!snap?.enabled) return;
-    const rows = [...root.querySelectorAll<HTMLElement>(".todo-row")].map((r) => r.dataset.id!);
-    const task = snap.tasks.find((t) => t.id === selected) ?? null;
-    if (e.key === "n" || e.key === "N") { e.preventDefault(); root.querySelector<HTMLInputElement>("#todo-add-title")?.focus(); return; }
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      if (e.altKey) {
-        // Only where the list's own order is on screen, like the buttons.
-        if (task && root.querySelector(`.todo-row[data-id="${CSS.escape(task.id)}"] .todo-act[aria-label="Move up"]`)) actions.reorder(task, e.key === "ArrowUp" ? -1 : 1);
-        return;
-      }
-      const from = selected ?? (target.closest<HTMLElement>(".todo-row")?.dataset.id ?? null);
-      const i = from ? rows.indexOf(from) : -1;
-      const j = i < 0 ? 0 : Math.max(0, Math.min(rows.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)));
-      selected = rows[j] ?? null;
-      return paint();
-    }
-    if (e.key === "Escape" && selected) { selected = null; return paint(); }
-    if (!task) return;
-    const btn = (label: string) => root.querySelector<HTMLElement>(`.todo-row[data-id="${CSS.escape(task.id)}"] .todo-act[aria-label="${label}"]`);
-    switch (e.key.toLowerCase()) {
-      case "x": e.preventDefault(); return actions.toggle(task);
-      case "e": e.preventDefault(); return actions.startRename(task);
-      case "m": { e.preventDefault(); const b = btn("Move"); if (b) actions.move(task, b); return; }
-      case "d": { e.preventDefault(); const b = btn("Date"); if (b) actions.date(task, b); return; }
-      case "delete": e.preventDefault(); return actions.remove(task);
-    }
+    if (!open_ || !snap?.enabled) return;
+    onTodoKey(e, {
+      root, snap, view, selected, actions,
+      select: (id) => {
+        selected = id;
+        paint();
+      },
+    });
   }
 
   /** A click outside every row lets the selection go. */
@@ -526,13 +449,26 @@ export function createTodoPage(host: TodoHost): TodoPage {
   document.addEventListener("visibilitychange", onVisible);
   // The tablet syncs on its own: keep up while someone is looking.
   const poll = setInterval(() => {
-    if (open_ && !busy && editing === null && document.visibilityState === "visible") void load();
+    if (open_ && settled() && document.visibilityState === "visible") void load();
   }, POLL_MS);
 
   return {
     open(next) {
-      if (!open_ || !sameView(next, view)) { selected = null; editing = null; popClose(); }
+      if (!open_ || !sameView(next, view)) {
+        selected = null;
+        editing = null;
+        menus.close();
+      }
       view = next;
+      if (revealing !== null) {
+        const t = snap?.tasks.find((x) => x.id === revealing);
+        if (t) {
+          selected = t.id;
+          // Done tasks wait in the list's folded Completed: open it.
+          if (t.done) collapsed.add(`${listKey(t.listId)}:done`);
+        }
+        revealing = null;
+      }
       if (!open_) {
         open_ = true;
         root.hidden = false;
@@ -547,17 +483,16 @@ export function createTodoPage(host: TodoHost): TodoPage {
       open_ = false;
       root.hidden = true;
       host.gallery.hidden = false;
-      popClose();
+      menus.close();
       chrome(false);
     },
     isOpen: () => open_,
     view: () => (open_ ? view : null),
-    snapshot: () => {
-      if (!snap || !pendingDelete) return snap;
-      const gone = pendingDelete.task.id;
-      return { ...snap, tasks: snap.tasks.filter((t) => t.id !== gone) };
-    },
+    snapshot: visibleSnap,
     load,
+    reveal(id) {
+      revealing = id;
+    },
     destroy() {
       commitDelete();
       clearInterval(poll);
@@ -566,9 +501,8 @@ export function createTodoPage(host: TodoHost): TodoPage {
       document.removeEventListener("visibilitychange", onVisible);
       host.listBtn.removeEventListener("click", onListBtn);
       host.newListBtn.removeEventListener("click", onNewList);
-      popClose();
-      clearTimeout(undoGone);
-      undoBar.remove();
+      menus.close();
+      undo.destroy();
       root.remove();
     },
   };

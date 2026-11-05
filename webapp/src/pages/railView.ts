@@ -30,12 +30,7 @@ export function createRailView(nav: HTMLElement): RailView {
     render(rows: readonly RailRow[]): void {
       nav.replaceChildren(
         ...rows.map((row) => {
-          if (row.kind === "label") {
-            if (!row.depth) return el("div", { class: "nav__label", text: row.text });
-            const label = el("div", { class: "nav__label is-nested", text: row.text });
-            label.style.setProperty("--depth", String(row.depth));
-            return label;
-          }
+          if (row.kind === "label") return el("div", { class: "nav__label", text: row.text });
           const item = el(
             "button",
             {

@@ -35,6 +35,8 @@ export interface GallerySearchCtx {
   * frame, or `null` if unknown. Read at paint time.
   */
   indexPending: () => number | null;
+  /** Another group of results painted after the notes (the to-dos); null: none. */
+  moreResults?: (q: string) => HTMLElement | null;
 }
 
 export interface GallerySearch {
@@ -138,6 +140,14 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       if (grow) gallery.append(el("p", { class: "hits__notice", role: "status", text: grow }));
     }
 
+    const more = ctx.moreResults?.(q) ?? null;
+    if (results.length === 0 && more) {
+      // The notes may still answer; say so rather than "no notes".
+      if (searchState.kind === "searching") gallery.append(el("p", { class: "hits__notice", role: "status", text: "Searching handwriting…" }));
+      gallery.append(more);
+      return;
+    }
+
     if (results.length === 0) {
       if (searchState.kind === "error" && ctx.treeLoaded()) {
         // Gated on the walk: the index raises while the tree cache is still empty,
@@ -164,6 +174,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       ),
     );
     for (const [i, result] of results.entries()) gallery.append(ctx.resultCard(result, i, q, expansions));
+    if (more) gallery.append(more);
   }
 
   return { renderSearch };

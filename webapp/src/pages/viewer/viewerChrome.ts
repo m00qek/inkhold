@@ -9,10 +9,11 @@ import type { ReaderOrigin } from "./viewer";
 /** Find/URL-sync debounce, ms; one value so all search-as-you-type matches. */
 export const VIEWER_DEBOUNCE_MS = 220;
 
-/** Back's label: a folder's deepest segment, else `Library`/`Search`/`Recycle bin`. */
+/** Back's label: a folder's deepest segment, else `Library`/`Search`/`Recycle bin`/`To-Do`. */
 export function backWord(origin: ReaderOrigin): string {
   if (origin.kind === "search") return "Search";
   if (origin.kind === "bin") return "Recycle bin";
+  if (origin.kind === "todo") return "To-Do";
   const parts = (origin.folderPath ?? "").split("/").map((s) => s.trim()).filter(Boolean);
   return parts.length === 0 ? "Library" : parts[parts.length - 1]!;
 }

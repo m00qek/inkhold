@@ -276,6 +276,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     newListBtn: ctx.topbar.todoNewListBtn,
     openNote: (id, page) => go(notePageHref(id, page)),
     setMode: (open) => ctx.modes.setDestinationMode("todo", open),
+    setSearchShown: (shown) => ctx.root.classList.toggle("is-todo-browse", shown),
     toast: ctx.toast,
     handled: ctx.handled,
     onChanged: () => ctx.rail.build(),

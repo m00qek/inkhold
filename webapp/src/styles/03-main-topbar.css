@@ -152,21 +152,23 @@
   border-color: var(--accent);
 }
 
+/* A control's height even with every control hidden, so the bar never shrinks. */
 .tools {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  min-height: var(--control-h);
 }
 
 /* ---- destinations ----
  * `.sn-root.is-destination` is set for full-content views that aren't a folder
  * listing (bin, admin console). The search box leaves: it searches the library,
  * and typing in it would navigate away. */
-.sn-root.is-destination .search {
+.sn-root.is-destination:not(.is-todo-browse) .search {
   display: none;
 }
 /* Restores the position the search box held, so the topbar doesn't shift. */
-.sn-root.is-destination .tools {
+.sn-root.is-destination:not(.is-todo-browse) .tools {
   margin-left: auto;
 }
 

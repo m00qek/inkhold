@@ -13,8 +13,7 @@ import type { RailChildren } from "../rail";
 import { FIXED_VIEWS, openCount, sameView, viewPath, type TodoView } from "../todo/todoModel";
 import type { IconName } from "../../ui/icons";
 
-/** Builds the folder cache, the rail, the nameplate and the storage meter onto `ctx`. */
-/** To-Do's rows in the rail: the views across every list, then the lists, Inbox first. */
+/** To-Do's rows in the rail, in the tablet's order; the lists besides the Inbox are the overview's cards. */
 const VIEW_ROWS: Record<(typeof FIXED_VIEWS)[number], { name: string; icon: IconName }> = {
   inbox: { name: "Inbox", icon: "inbox" },
   planned: { name: "Planned", icon: "clock" },
@@ -22,6 +21,7 @@ const VIEW_ROWS: Record<(typeof FIXED_VIEWS)[number], { name: string; icon: Icon
   completed: { name: "Completed", icon: "done" },
 };
 
+/** Builds the folder cache, the rail, the nameplate and the storage meter onto `ctx`. */
 export function installLibraryRail(ctx: LibraryCtx): void {
   const { st } = ctx;
   /**
@@ -51,18 +51,13 @@ export function installLibraryRail(ctx: LibraryCtx): void {
     });
     return {
       expanded,
-      toggleLabel: expanded ? "Fold the To-Do lists" : "Unfold the To-Do lists",
+      toggleLabel: expanded ? "Fold To-Do" : "Unfold To-Do",
       onToggle: () => {
         if (onTodo) todoFolded = !todoFolded;
         else todoPeek = !todoPeek;
         ctx.rail.build();
       },
-      rows: [
-        ...(["all", "planned", "completed"] as const).map((k) => row({ kind: k }, VIEW_ROWS[k].name, VIEW_ROWS[k].icon)),
-        { label: "Lists" },
-        row({ kind: "inbox" }, VIEW_ROWS.inbox.name, VIEW_ROWS.inbox.icon),
-        ...snap.lists.map((l) => row({ kind: "list", id: l.id }, l.title, "list")),
-      ],
+      rows: FIXED_VIEWS.map((k) => row({ kind: k }, VIEW_ROWS[k].name, VIEW_ROWS[k].icon)),
     };
   }
   // `aria-busy` until the walk lands: counts are provisional.

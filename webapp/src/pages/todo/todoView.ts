@@ -3,11 +3,16 @@
 // page-level tools (status, list options, New list) live in the shell's topbar.
 
 import { el } from "../../ui/dom";
+import { createMenu } from "../../ui/menu";
 import { ICONS, svg, type IconName } from "../../ui/icons";
 import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
-import { addTarget, dueLabel, listName, siblings, type TodoSection, type TodoView } from "./todoModel";
+import { addTarget, cards, dateLine, dueLabel, listName, siblings, summary, viewPath, viewTitle, type TodoSection, type TodoView } from "./todoModel";
 
 export interface TodoActions {
+  /** Open another view or list. */
+  show(view: TodoView): void;
+  renameList(id: string): void;
+  deleteList(id: string): void;
   add(title: string): void;
   /** Opens the add form's date menu. */
   addDate(trigger: HTMLElement): void;
@@ -19,6 +24,8 @@ export interface TodoActions {
   move(task: TodoTask, trigger: HTMLElement): void;
   date(task: TodoTask, trigger: HTMLElement): void;
   reorder(task: TodoTask, dir: -1 | 1): void;
+  /** A press on a task's grip: drag it to a new place in its list. */
+  drag(task: TodoTask, row: HTMLElement, e: PointerEvent): void;
   remove(task: TodoTask): void;
   toggleSection(key: string): void;
   openNote(task: TodoTask): void;
@@ -45,12 +52,83 @@ export const ROW_HELP_ID = "todo-row-help";
 
 const icon = (name: IconName, cls = "todo-ico"): HTMLElement => el("span", { class: cls, "aria-hidden": "true", html: svg(ICONS[name]) });
 
-/** The topbar status line's words. */
-export function syncText(snap: TodoSnapshot): string {
+/** The topbar status: a few words, and the whole sentence for its tooltip. */
+export function syncText(snap: TodoSnapshot): { short: string; long: string } {
   const at = snap.tabletSyncedAt;
   const time = at === null ? null : new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  if (snap.waiting) return "Changes reach the tablet at its next sync";
-  return at === null ? "No tablet has synced these yet" : `On the tablet as of ${time}`;
+  if (snap.waiting) return { short: "Waiting for the tablet", long: "Changes here reach the tablet at its next sync." };
+  if (at === null) return { short: "Not synced yet", long: "No tablet has synced these to-dos yet." };
+  return { short: `Synced ${time}`, long: `The tablet has everything here, as of its sync at ${time}.` };
+}
+
+/**
+ * The topbar's left side, the reader's title shape: the name of what is open,
+ * and under it what the page holds, in the cards' words. No trail: the rail is
+ * the way around, and To-Do is not in the library.
+ */
+export function placeTitle(snap: TodoSnapshot | null, view: TodoView, now: number): HTMLElement {
+  const sum = snap?.enabled ? summary(snap, view, now) : null;
+  return el(
+    "div",
+    { class: "todo-place" },
+    el("b", { class: "todo-place__name", text: snap ? viewTitle(view, snap.lists) : "To-Do" }),
+    el(
+      "span",
+      { class: "todo-place__sum" },
+      sum ? sum.text : "To-Do",
+      sum && sum.overdue > 0 ? " · " : null,
+      sum && sum.overdue > 0 ? el("span", { class: "is-overdue", text: `${sum.overdue} overdue` }) : null,
+    ),
+  );
+}
+
+/**
+ * The landing page: a card per list, like a folder's contents in the library.
+ * Each says how much is open and late, and shows the first few tasks.
+ */
+export function overview(p: TodoPaint, a: TodoActions): HTMLElement {
+  const items = cards(p.snap, p.now).map((c) => {
+    const counts = [c.open === 0 ? "Nothing to do" : `${c.open} to do`];
+    const late = c.overdue > 0 ? el("span", { class: "is-overdue", text: `${c.overdue} overdue` }) : null;
+    const more = c.open - c.peek.length;
+    // The name is the link, stretched over the card; the ⋯ sits above it, like
+    // a note card's, so a button never nests inside a link.
+    const link = el("a", { class: "todo-card__link", href: `#/todo/${viewPath(c.view)}`, text: c.name });
+    const id = c.view.kind === "list" ? c.view.id : null;
+    // Every card has its ⋯, like a note card; the Inbox's is there but disabled,
+    // since the tablet's Inbox can't be renamed or deleted.
+    const menu = createMenu({
+      triggerLabel: id === null ? `${c.name} can't be renamed or deleted` : `Actions for ${c.name}`,
+      wrapClass: "card__menu",
+      disabled: id === null,
+      items: id === null ? [] : [
+        { label: "Rename list", icon: "edit", onSelect: () => a.renameList(id) },
+        { label: "Delete list", icon: "trash", danger: true, onSelect: () => a.deleteList(id) },
+      ],
+    });
+    const card = el(
+      "div",
+      { class: "todo-card" },
+      el("span", { class: "todo-card__head" }, icon(c.view.kind === "inbox" ? "inbox" : "list"), el("span", { class: "todo-card__name" }, link)),
+      el("span", { class: "todo-card__counts" }, el("span", { text: counts[0]! }), late),
+      c.peek.length
+        ? el(
+            "ul",
+            { class: "todo-card__peek" },
+            ...c.peek.map((t) => el("li", { text: t.title })),
+            more > 0 ? el("li", { class: "todo-card__more", text: `and ${more} more` }) : null,
+          )
+        : null,
+      menu,
+    );
+    link.addEventListener("click", (e) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+      e.preventDefault();
+      a.show(c.view);
+    });
+    return el("li", {}, card);
+  });
+  return el("ul", { class: "todo-cards", "aria-label": "Lists" }, ...items);
 }
 
 /** The topbar shows the name; the page keeps it as its heading for screen readers. */
@@ -59,8 +137,10 @@ export function header(p: TodoPaint): HTMLElement {
 }
 
 export function addForm(p: TodoPaint, a: TodoActions): HTMLElement | null {
-  if (!addTarget(p.view, p.now)) return null;
-  const placeholder = p.view.kind === "list" ? `Add a task to ${p.title}` : "Add a task";
+  const target = addTarget(p.view, p.now);
+  if (!target) return null;
+  // Always say where it lands: All and Planned add to the Inbox.
+  const placeholder = `Add a task to ${listName(p.snap, target.listId)}`;
   const title = el("input", { id: "todo-add-title", type: "text", placeholder, "aria-label": "New task", maxlength: "200", autocomplete: "off" }) as HTMLInputElement;
   const date = el(
     "button",
@@ -91,6 +171,7 @@ export function addForm(p: TodoPaint, a: TodoActions): HTMLElement | null {
 
 function emptyText(v: TodoView): [string, string] {
   switch (v.kind) {
+    case "overview": return ["", ""];
     case "inbox": return ["Nothing in the Inbox", "Tasks you add without a list land here, on the tablet too."];
     case "planned": return ["No dates set", "Give a task a date and it shows up here, by when it is due."];
     case "completed": return ["Nothing completed yet", "Tick a task off and it moves here, newest first."];
@@ -105,8 +186,10 @@ export function body(p: TodoPaint, a: TodoActions): HTMLElement {
   for (const sec of p.sections) {
     const tasks = visible(sec);
     if (tasks.length === 0) continue;
+    // A list's own rows say which list they are, so a drag can land in another.
+    const listAttr = sec.reorderable ? { "data-list": sec.reorderable.listId ?? "" } : {};
     if (sec.label === null) {
-      parts.push(el("div", { class: "todo-group", role: "list" }, ...tasks.map((t) => row(t, sec, p, a))));
+      parts.push(el("div", { class: "todo-group", role: "list", ...listAttr }, ...tasks.map((t) => row(t, sec, p, a))));
       continue;
     }
     const folded = p.collapsed.has(sec.key) !== (sec.collapsedByDefault === true);
@@ -118,7 +201,7 @@ export function body(p: TodoPaint, a: TodoActions): HTMLElement {
       el("span", { class: "todo-group__n", text: String(tasks.length) }),
     );
     head.addEventListener("click", () => a.toggleSection(sec.key));
-    parts.push(el("section", { class: "todo-group", "aria-label": sec.label }, head, folded ? null : el("div", { role: "list" }, ...tasks.map((t) => row(t, sec, p, a)))));
+    parts.push(el("section", { class: "todo-group", "aria-label": sec.label }, head, folded ? null : el("div", { role: "list", ...listAttr }, ...tasks.map((t) => row(t, sec, p, a)))));
   }
   // Empty means nothing open: a folded "Completed" below doesn't count.
   const open = p.sections.filter((sec) => !sec.collapsedByDefault).reduce((n, sec) => n + visible(sec).length, 0);
@@ -162,32 +245,8 @@ function row(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLE
     title = el("span", { class: "todo-title" }, el("span", { text: t.title }), el("span", { class: "todo-strike", "aria-hidden": "true" }));
   }
 
-  const meta: HTMLElement[] = [];
-  if (t.due !== null && !t.done) {
-    const label = dueLabel(t.due, p.now);
-    const late = t.due < p.now && label !== "Today";
-    // Under the "Overdue" heading the word is said once, by the heading.
-    meta.push(el("span", { class: late ? "is-overdue" : "", text: late && !sec.overdue ? `Overdue, ${label}` : label }));
-  }
-  if (t.done && t.completedAt !== null) {
-    const when = dueLabel(t.completedAt, p.now);
-    meta.push(el("span", { text: `Done ${when === "Today" || when === "Yesterday" ? when.toLowerCase() : when}` }));
-  }
-  if (sec.showList) meta.push(el("span", { text: listName(p.snap, t.listId) }));
-  if (t.link) {
-    const link = el("a", { class: "todo-meta__note", href: "#", text: `From ${t.link.name}, page ${t.link.page}` });
-    link.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      a.openNote(t);
-    });
-    meta.push(link);
-  } else if (t.linked) {
-    meta.push(el("span", { text: "From a notebook page" }));
-  }
-  if (t.waiting) meta.push(el("span", { class: "todo-meta__wait", text: "Waiting for the tablet" }));
-
-  const main = el("div", { class: "todo-row__main" }, title, meta.length ? el("div", { class: "todo-meta" }, ...meta) : null);
+  const meta = taskMeta(t, p.snap, p.now, { showList: sec.showList, underOverdue: sec.overdue === true, openNote: () => a.openNote(t) });
+  const main = el("div", { class: "todo-row__main" }, title, meta);
   const r = el(
     "div",
     {
@@ -200,11 +259,22 @@ function row(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLE
     },
     check,
     main,
-    selected ? actions(t, sec, p, a) : null,
+    rowMenu(t, sec, p, a),
   );
+  // Where the list's own order is on screen, a grip to drag the task by. Move
+  // up and down in the ⋯ and Alt+↑/↓ do the same without a pointer.
+  if (sec.reorderable !== undefined && !t.done && p.editing !== t.id) {
+    const grip = el("span", { class: "todo-grip", "aria-hidden": "true", title: "Drag to reorder", html: svg(ICONS.grip) });
+    grip.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || p.busy) return;
+      e.preventDefault();
+      a.drag(t, r, e);
+    });
+    r.prepend(grip);
+  }
   // Clicking a selected row keeps it selected; Escape or a click elsewhere lets go.
   r.addEventListener("click", (e) => {
-    if ((e.target as HTMLElement).closest(".todo-actions, .todo-title-edit, a")) return;
+    if ((e.target as HTMLElement).closest(".card__menu, .todo-title-edit, a")) return;
     if (!selected) a.select(t);
   });
   r.addEventListener("keydown", (e) => {
@@ -215,34 +285,68 @@ function row(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLE
   return r;
 }
 
-function actions(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLElement {
+/**
+ * The line under a task's title: its date (red when late), its list where the
+ * view mixes lists, the notebook it came from, and whether the tablet has it.
+ * Shared by the rows and the search results. Null when there is nothing to say.
+ */
+export function taskMeta(
+  t: TodoTask,
+  snap: TodoSnapshot,
+  now: number,
+  opts: { showList: boolean; underOverdue?: boolean; openNote?: () => void },
+): HTMLElement | null {
+  const meta: HTMLElement[] = [];
+  const date = dateLine(t, now, opts.underOverdue);
+  if (date) meta.push(el("span", { class: date.late ? "is-overdue" : "", text: date.text }));
+  if (opts.showList) meta.push(el("span", { text: listName(snap, t.listId) }));
+  if (t.link) {
+    const text = `From ${t.link.name}, page ${t.link.page}`;
+    if (opts.openNote) {
+      const open = opts.openNote;
+      const link = el("a", { class: "todo-meta__note", href: "#", text });
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        open();
+      });
+      meta.push(link);
+    } else {
+      meta.push(el("span", { text }));
+    }
+  } else if (t.linked) {
+    meta.push(el("span", { text: "From a notebook page" }));
+  }
+  if (t.waiting) meta.push(el("span", { class: "todo-meta__wait", text: "Waiting for the tablet" }));
+  return meta.length ? el("div", { class: "todo-meta" }, ...meta) : null;
+}
+
+/**
+ * Each task's ⋯, the note cards' menu: everything that can be done to it.
+ * Move and Date open their own menus from the same ⋯.
+ */
+function rowMenu(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLElement {
   const sib = siblings(p.snap, t);
   const i = sib.findIndex((x) => x.id === t.id);
-  const btn = (name: IconName, label: string, key: string, run: (b: HTMLElement) => void, opts: { disabled?: boolean; danger?: boolean; iconOnly?: boolean } = {}) => {
-    const b = el(
-      "button",
-      { class: "todo-act" + (opts.danger ? " is-danger" : ""), type: "button", disabled: opts.disabled === true || p.busy, "aria-label": label, title: `${label} (${key})` },
-      icon(name),
-      opts.iconOnly ? null : el("span", { text: label }),
-    );
-    b.addEventListener("click", (e) => {
-      e.stopPropagation();
-      run(b);
-    });
-    return b;
-  };
   // Up and down only where the list's own order is what is on screen.
   const ordered = sec.reorderable !== undefined && !t.done;
-  return el(
-    "div",
-    { class: "todo-actions", role: "toolbar", "aria-label": `Actions for ${t.title}` },
-    btn("edit", "Rename", "E", () => a.startRename(t)),
-    btn("move", "Move", "M", (b) => a.move(t, b)),
-    btn("calendar", "Date", "D", (b) => a.date(t, b)),
-    ordered ? btn("up", "Move up", "Alt+↑", () => a.reorder(t, -1), { disabled: i <= 0, iconOnly: true }) : null,
-    ordered ? btn("down", "Move down", "Alt+↓", () => a.reorder(t, 1), { disabled: i < 0 || i >= sib.length - 1, iconOnly: true }) : null,
-    btn("trash", "Delete", "Delete", () => a.remove(t), { danger: true }),
-  );
+  // Move to… and the date open from the ⋯ itself, once the menu has closed.
+  const wrap: { el: HTMLElement | null } = { el: null };
+  const trigger = (): HTMLElement => wrap.el?.querySelector<HTMLElement>(".card__more") ?? wrap.el!;
+  wrap.el = createMenu({
+    triggerLabel: `Actions for ${t.title}`,
+    wrapClass: "card__menu todo-row__menu",
+    disabled: p.busy,
+    items: [
+      { label: "Rename", icon: "edit", onSelect: () => a.startRename(t) },
+      { label: "Move to…", icon: "move", onSelect: () => a.move(t, trigger()) },
+      { label: t.due === null ? "Add a date…" : "Change the date…", icon: "calendar", onSelect: () => a.date(t, trigger()) },
+      ordered && i > 0 ? { label: "Move up", icon: "up", onSelect: () => a.reorder(t, -1) } : null,
+      ordered && i >= 0 && i < sib.length - 1 ? { label: "Move down", icon: "down", onSelect: () => a.reorder(t, 1) } : null,
+      { label: "Delete", icon: "trash", danger: true, onSelect: () => a.remove(t) },
+    ],
+  });
+  return wrap.el;
 }
 
 /** Folded behind its summary: there for whoever wants it, quiet for everyone else. */

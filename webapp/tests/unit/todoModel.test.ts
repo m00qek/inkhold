@@ -2,7 +2,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { TodoSnapshot, TodoTask } from "../../src/api/todoTypes";
-import { addTarget, byTabletOrder, dayOffset, dueFromInput, dueLabel, inputFromDue, openCount, parseView, sections, siblings, viewPath } from "../../src/pages/todo/todoModel";
+import { addTarget, byTabletOrder, canReorder, cards, dateLine, dropOrder, isOverdue, summary, withOrder, withoutTask, dayOffset, dueFromInput, dueLabel, inputFromDue, openCount, parseView, sections, siblings, viewPath } from "../../src/pages/todo/todoModel";
 
 const NOW = new Date(2026, 10, 5, 9, 30).getTime();
 const DAY = 86_400_000;
@@ -15,10 +15,10 @@ const snap = (tasks: TodoTask[]): TodoSnapshot => ({
 });
 
 describe("To-Do views", () => {
-  it("round-trips view paths; anything unknown is the Inbox", () => {
-    for (const v of [{ kind: "planned" }, { kind: "list", id: "a/b c" }] as const) expect(parseView(viewPath(v))).toEqual(v);
-    expect(parseView("nonsense")).toEqual({ kind: "all" });
-    expect(parseView("")).toEqual({ kind: "all" });
+  it("round-trips view paths; the bare path and anything unknown is the overview", () => {
+    for (const v of [{ kind: "overview" }, { kind: "planned" }, { kind: "list", id: "a/b c" }] as const) expect(parseView(viewPath(v))).toEqual(v);
+    expect(parseView("nonsense")).toEqual({ kind: "overview" });
+    expect(parseView("")).toEqual({ kind: "overview" });
   });
 
   it("orders like the tablet: sort ascending, then the newest sort time", () => {
@@ -45,13 +45,40 @@ describe("To-Do views", () => {
     expect(u!.tasks).toEqual([soon]);
   });
 
-  it("All shows the Inbox, each list, then everything completed; counts are open tasks", () => {
+  it("All shows the open tasks of the Inbox and each list; counts are open tasks", () => {
     const s = snap([task({}), task({ listId: "fr" }), task({ done: true }), task({ listId: "fr", due: NOW })]);
-    expect(sections(s, { kind: "all" }, NOW).map((x) => [x.label, x.tasks.length])).toEqual([["Inbox", 1], ["Français", 2], ["Completed", 1]]);
+    expect(sections(s, { kind: "all" }, NOW).map((x) => [x.label, x.tasks.length])).toEqual([["Inbox", 1], ["Français", 2]]);
     expect(openCount(s, { kind: "all" })).toBe(3);
     expect(openCount(s, { kind: "planned" })).toBe(1);
     expect(openCount(s, { kind: "inbox" })).toBe(1);
     expect(openCount(s, { kind: "completed" })).toBe(0);
+  });
+
+  it("Completed groups the done tasks by list, Inbox first, newest first in each", () => {
+    const old = task({ done: true, completedAt: NOW - 2 }), recent = task({ done: true, completedAt: NOW - 1 });
+    const fr = task({ listId: "fr", done: true, completedAt: NOW }), open = task({});
+    const secs = sections(snap([old, fr, recent, open]), { kind: "completed" }, NOW);
+    expect(secs.map((x) => [x.label, x.tasks.map((t) => t.id)])).toEqual([["Inbox", [recent.id, old.id]], ["Français", [fr.id]]]);
+  });
+
+  it("the overview: a card per list, Inbox first, with open, overdue and the first tasks", () => {
+    const late = task({ listId: "fr", due: NOW - 2 * 86_400_000, sort: 0 });
+    const a = task({ listId: "fr", sort: 1 }), b = task({ listId: "fr", sort: 2 }), c = task({ listId: "fr", sort: 3 });
+    const done = task({ listId: "fr", done: true });
+    const [inbox, fr] = cards(snap([late, a, b, c, done]), NOW);
+    expect(inbox).toMatchObject({ name: "Inbox", open: 0, overdue: 0, peek: [] });
+    expect(fr).toMatchObject({ name: "Français", open: 4, overdue: 1 });
+    expect(fr!.peek.map((t) => t.id)).toEqual([late.id, a.id, b.id]);
+  });
+
+  it("the topbar's summary: to do and overdue, done on Completed, lists on the overview", () => {
+    const late = task({ listId: "fr", due: NOW - 2 * DAY }), inbox = task({}), done = task({ done: true });
+    const s = snap([late, inbox, done]);
+    expect(summary(s, { kind: "list", id: "fr" }, NOW)).toEqual({ text: "1 to do", overdue: 1 });
+    expect(summary(s, { kind: "inbox" }, NOW)).toEqual({ text: "1 to do", overdue: 0 });
+    expect(summary(s, { kind: "completed" }, NOW)).toEqual({ text: "1 done", overdue: 0 });
+    expect(summary(s, { kind: "overview" }, NOW)).toEqual({ text: "2 lists · 2 to do", overdue: 1 });
+    expect(summary(snap([]), { kind: "inbox" }, NOW).text).toBe("Nothing to do");
   });
 
   it("siblings are the open tasks of the same list, in order", () => {
@@ -80,5 +107,52 @@ describe("To-Do dates", () => {
     expect(inputFromDue(addTarget({ kind: "planned" }, NOW)!.due!)).toBe("2026-11-05");
     expect(addTarget({ kind: "list", id: "fr" }, NOW)).toEqual({ listId: "fr", due: null });
     expect(addTarget({ kind: "completed" }, NOW)).toBeNull();
+  });
+
+  it("overdue is a day before today; due today is not late yet; done is never late", () => {
+    expect(isOverdue(task({ due: NOW - DAY }), NOW)).toBe(true);
+    expect(isOverdue(task({ due: NOW - 3600_000 }), NOW)).toBe(false);
+    expect(isOverdue(task({ due: NOW - DAY, done: true }), NOW)).toBe(false);
+    expect(isOverdue(task({}), NOW)).toBe(false);
+  });
+
+  it("a task's date line: late ones say so, once under an Overdue heading", () => {
+    const late = task({ due: NOW - 2 * DAY });
+    expect(dateLine(late, NOW)).toEqual({ text: `Overdue, ${dueLabel(late.due!, NOW)}`, late: true });
+    expect(dateLine(late, NOW, true)).toEqual({ text: dueLabel(late.due!, NOW), late: true });
+    expect(dateLine(task({ due: NOW + DAY }), NOW)).toEqual({ text: "Tomorrow", late: false });
+    expect(dateLine(task({ done: true, completedAt: NOW - DAY }), NOW)).toEqual({ text: "Done yesterday", late: false });
+    // A month stays capitalised: only Today and Yesterday read as words.
+    expect(dateLine(task({ done: true, completedAt: NOW - 9 * DAY }), NOW)!.text).toBe(`Done ${dueLabel(NOW - 9 * DAY, NOW)}`);
+    expect(dateLine(task({}), NOW)).toBeNull();
+  });
+
+  it("reordering only where a list's own order is on screen", () => {
+    const t = task({ listId: "fr", due: NOW }), done = task({ listId: "fr", done: true });
+    const s = snap([t, done]);
+    expect(canReorder(s, { kind: "list", id: "fr" }, t, NOW)).toBe(true);
+    expect(canReorder(s, { kind: "all" }, t, NOW)).toBe(true);
+    expect(canReorder(s, { kind: "planned" }, t, NOW)).toBe(false);
+    expect(canReorder(s, { kind: "list", id: "fr" }, done, NOW)).toBe(false);
+  });
+
+  it("a drop lands just before the task below it, or last; tasks off screen keep their place", () => {
+    const a = task({ listId: "fr", sort: 0 }), b = task({ listId: "fr", sort: 1 }), c = task({ listId: "fr", sort: 2 });
+    const inbox = task({ sort: 0 });
+    const s = snap([a, b, c, inbox]);
+    expect(dropOrder(s, c, "fr", a.id)).toEqual([c.id, a.id, b.id]);
+    expect(dropOrder(s, a, "fr", undefined)).toEqual([b.id, c.id, a.id]);
+    // Into another list: the moved task joins its order.
+    expect(dropOrder(s, inbox, "fr", b.id)).toEqual([a.id, inbox.id, b.id, c.id]);
+    // With `b` off screen (its delete waits on Undo), `c` dropped last of what is shown: `b` keeps its slot.
+    expect(dropOrder(s, c, "fr", undefined)).toEqual([a.id, b.id, c.id]);
+  });
+
+  it("an order shown at once: positions renumbered, a moved task in its new list; a pending delete gone", () => {
+    const a = task({ listId: "fr", sort: 5 }), b = task({ sort: 9 });
+    const s = withOrder(snap([a, b]), [b.id, a.id], { id: b.id, listId: "fr" });
+    expect(s.tasks.find((t) => t.id === b.id)).toMatchObject({ listId: "fr", sort: 0 });
+    expect(s.tasks.find((t) => t.id === a.id)).toMatchObject({ sort: 1 });
+    expect(withoutTask(s, a.id).tasks.map((t) => t.id)).toEqual([b.id]);
   });
 });

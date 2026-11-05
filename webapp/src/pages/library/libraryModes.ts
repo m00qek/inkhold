@@ -34,6 +34,7 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
     ctx.destinationsOpen[which] = open;
     const anyOpen = ctx.destinationsOpen.bin || ctx.destinationsOpen.admin || ctx.destinationsOpen.account || ctx.destinationsOpen.todo;
     ctx.root.classList.toggle("is-destination", anyOpen);
+    if (!ctx.destinationsOpen.todo) ctx.root.classList.remove("is-todo-browse");
 
     // Only takes controls away; each destination shows its own action and
     // `renderGallery` brings Upload back.
