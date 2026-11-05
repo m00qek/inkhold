@@ -37,6 +37,7 @@ export interface Topbar {
   /** To-Do's: whether the tablet has its changes, its list menu and New list. */
   todoStatus: HTMLElement;
   todoListBtn: HTMLButtonElement;
+  todoDownloadBtn: HTMLButtonElement;
   todoNewListBtn: HTMLButtonElement;
   setView(view: View): void;
   /** Restores the caret the arriving keystroke's navigation took from the box. */
@@ -151,6 +152,9 @@ export function createTopbar(deps: TopbarDeps): Topbar {
   const todoListBtn = topbarAction({ id: "todo-list-options", label: "List options", icon: "more", ariaLabel: "List options", iconOnly: true });
   todoListBtn.setAttribute("aria-haspopup", "menu");
   // Icon-only, like Upload over a folder: the one way to add on the Lists page.
+  // The reader's Download: icon-only, a menu of formats.
+  const todoDownloadBtn = topbarAction({ id: "todo-download", label: "Download", icon: "download", ariaLabel: "Download", iconOnly: true });
+  todoDownloadBtn.setAttribute("aria-haspopup", "menu");
   const todoNewListBtn = topbarAction({ id: "todo-new-list", label: "New list", icon: "plus", ariaLabel: "New list", iconOnly: true });
 
   // The discoverable, keyboard- and touch-reachable twin of drag and drop; both
@@ -194,7 +198,7 @@ export function createTopbar(deps: TopbarDeps): Topbar {
       // `aria-hidden`: the placeholder already says it.
       el("span", { class: "search__ocr", "aria-hidden": "true", text: "OCR" }),
     ),
-    el("div", { class: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, todoStatus, todoListBtn, todoNewListBtn, lockAdminBtn),
+    el("div", { class: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, todoStatus, todoListBtn, todoDownloadBtn, todoNewListBtn, lockAdminBtn),
     filePicker,
   );
 
@@ -210,6 +214,7 @@ export function createTopbar(deps: TopbarDeps): Topbar {
     lockAdminBtn,
     todoStatus,
     todoListBtn,
+    todoDownloadBtn,
     todoNewListBtn,
     setView(view) {
       gridBtn.setAttribute("aria-pressed", String(view === "grid"));

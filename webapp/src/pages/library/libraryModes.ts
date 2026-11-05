@@ -47,6 +47,7 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
     if (!ctx.destinationsOpen.todo) {
       ctx.topbar.todoStatus.hidden = true;
       ctx.topbar.todoListBtn.hidden = true;
+      ctx.topbar.todoDownloadBtn.hidden = true;
       ctx.topbar.todoNewListBtn.hidden = true;
     }
   }

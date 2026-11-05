@@ -21,6 +21,7 @@ import { createTodoMenus } from "./todoMenus";
 import { dragRow } from "./todoDrag";
 import { createUndoToast } from "./todoUndo";
 import { onTodoKey } from "./todoKeys";
+import { createTodoDownloads } from "./todoDownload";
 
 export interface TodoHost {
   api: Api;
@@ -33,6 +34,8 @@ export interface TodoHost {
   status: HTMLElement;
   /** The topbar's list options button (a list's view only). */
   listBtn: HTMLButtonElement;
+  /** The topbar's Download (a list's page, and All). */
+  downloadBtn: HTMLButtonElement;
   /** The topbar's New list button. */
   newListBtn: HTMLButtonElement;
   setMode(open: boolean): void;
@@ -179,19 +182,21 @@ export function createTodoPage(host: TodoHost): TodoPage {
     host.segmented.hidden = mine;
     host.setMode(mine);
     // Each page's own tools: New list where the lists are, the list's menu on
-    // a list of one's own (never the Inbox), the sync line everywhere.
-    host.status.hidden = !mine || !snap?.enabled;
+    // a list of one's own (never the Inbox); the sync status only while waiting.
+    const sync = snap?.enabled ? syncText(snap) : null;
+    host.status.hidden = !mine || sync === null;
     host.newListBtn.hidden = !mine || !snap?.enabled || view.kind !== "overview";
     host.listBtn.hidden = !mine || !snap?.enabled || view.kind !== "list";
+    host.downloadBtn.hidden = !mine || !snap?.enabled || downloads.scope() === null;
     // The search box only where To-Do is browsed, like a folder; inside a list
     // or a view, as inside a note, it would only carry the person away.
     host.setSearchShown(mine && view.kind === "overview");
     if (!mine) return;
-    if (snap?.enabled) {
-      const sync = syncText(snap);
+    if (sync) {
       host.status.textContent = sync.short;
       host.status.title = sync.long;
-      host.status.classList.toggle("is-waiting", snap.waiting);
+    }
+    if (snap?.enabled) {
       if (view.kind === "list") host.listBtn.setAttribute("aria-label", `Options for the list ${viewTitle(view, snap.lists)}`);
     }
     host.crumbs.replaceChildren(placeTitle(visibleSnap(), view, Date.now()));
@@ -299,6 +304,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
     // The card's ⋯ menu, header and all.
     menus.pop(host.listBtn, [menus.section(DEFAULT_SECTION_TITLE), menus.item("Rename list", "edit", () => renameList()), menus.item("Delete list", "trash", () => deleteList(), true)]);
   };
+  const downloads = createTodoDownloads({ button: host.downloadBtn, menus, snapshot: () => snap, view: () => view, say });
   const onNewList = () => void newList();
   host.listBtn.addEventListener("click", onListBtn);
   host.newListBtn.addEventListener("click", onNewList);
@@ -500,6 +506,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
       document.removeEventListener("click", onPointer);
       document.removeEventListener("visibilitychange", onVisible);
       host.listBtn.removeEventListener("click", onListBtn);
+      downloads.destroy();
       host.newListBtn.removeEventListener("click", onNewList);
       menus.close();
       undo.destroy();

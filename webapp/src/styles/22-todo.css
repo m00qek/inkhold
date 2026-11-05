@@ -53,7 +53,7 @@
   color: var(--margin-ink);
 }
 
-/* ---- in the shell's topbar: the sync status ---- */
+/* ---- in the shell's topbar: the sync status, only while a change waits ---- */
 .todo-sync {
   display: inline-flex;
   align-items: center;
@@ -67,16 +67,13 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* An open ring: something here the tablet hasn't taken yet. */
 .todo-sync::before {
   content: "";
   flex: none;
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--accent);
-}
-.todo-sync.is-waiting::before {
-  background: transparent;
   box-shadow: inset 0 0 0 1.5px var(--ink-soft);
 }
 .todo-sync[hidden] {
@@ -536,18 +533,6 @@
 .todo-meta__note:hover {
   color: var(--ink);
   text-decoration-color: currentColor;
-}
-.todo-meta__wait {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-.todo-meta__wait::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 1.5px currentColor;
 }
 
 /* A task's ⋯: always there (a touch screen has no hover), quiet until the row

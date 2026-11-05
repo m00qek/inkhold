@@ -52,13 +52,18 @@ export const ROW_HELP_ID = "todo-row-help";
 
 const icon = (name: IconName, cls = "todo-ico"): HTMLElement => el("span", { class: cls, "aria-hidden": "true", html: svg(ICONS[name]) });
 
-/** The topbar status: a few words, and the whole sentence for its tooltip. */
-export function syncText(snap: TodoSnapshot): { short: string; long: string } {
+/**
+ * The one sync signal: in the topbar, and only while a change made here waits
+ * for the tablet (null otherwise). The last sync's time is in its tooltip.
+ */
+export function syncText(snap: TodoSnapshot): { short: string; long: string } | null {
+  if (!snap.waiting) return null;
   const at = snap.tabletSyncedAt;
   const time = at === null ? null : new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  if (snap.waiting) return { short: "Waiting for the tablet", long: "Changes here reach the tablet at its next sync." };
-  if (at === null) return { short: "Not synced yet", long: "No tablet has synced these to-dos yet." };
-  return { short: `Synced ${time}`, long: `The tablet has everything here, as of its sync at ${time}.` };
+  return {
+    short: "Waiting for the tablet",
+    long: time === null ? "Changes here reach the tablet at its next sync." : `Changes here reach the tablet at its next sync. Its last sync was at ${time}.`,
+  };
 }
 
 /**
@@ -175,8 +180,8 @@ function emptyText(v: TodoView): [string, string] {
     case "inbox": return ["Nothing in the Inbox", "Tasks you add without a list land here, on the tablet too."];
     case "planned": return ["No dates set", "Give a task a date and it shows up here, by when it is due."];
     case "completed": return ["Nothing completed yet", "Tick a task off and it moves here, newest first."];
-    case "all": return ["No to-dos yet", "Add one above. It reaches the tablet at its next sync."];
-    case "list": return ["This list is empty", "Add a task above. It reaches the tablet at its next sync."];
+    case "all": return ["No to-dos yet", "Add one above."];
+    case "list": return ["This list is empty", "Add a task above."];
   }
 }
 
@@ -287,7 +292,7 @@ function row(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLE
 
 /**
  * The line under a task's title: its date (red when late), its list where the
- * view mixes lists, the notebook it came from, and whether the tablet has it.
+ * view mixes lists, and the notebook it came from.
  * Shared by the rows and the search results. Null when there is nothing to say.
  */
 export function taskMeta(
@@ -317,7 +322,6 @@ export function taskMeta(
   } else if (t.linked) {
     meta.push(el("span", { text: "From a notebook page" }));
   }
-  if (t.waiting) meta.push(el("span", { class: "todo-meta__wait", text: "Waiting for the tablet" }));
   return meta.length ? el("div", { class: "todo-meta" }, ...meta) : null;
 }
 

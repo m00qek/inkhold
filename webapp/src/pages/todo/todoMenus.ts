@@ -19,6 +19,8 @@ export interface TodoMenus {
   close(): void;
   item(label: string, icon: IconName, onSelect: () => void, danger?: boolean): HTMLElement;
   section(title: string): HTMLElement;
+  /** A download row, the reader's: the format's name, its extension on the right. */
+  fileItem(label: string, ext: string, onSelect: () => void): HTMLElement;
   sep(): HTMLElement;
   /** Today, Tomorrow, a picked day, and "No date" when there is one. */
   dateMenu(trigger: HTMLElement, current: number | null, set: (due: number | null) => void): void;
@@ -41,6 +43,15 @@ export function createTodoMenus(): TodoMenus {
       el("span", { class: "menu__item-mark", html: svg(ICONS[icon]) }),
       el("span", { text: label }),
     );
+    b.addEventListener("click", () => {
+      closeOpen();
+      onSelect();
+    });
+    return b;
+  }
+
+  function fileItem(label: string, ext: string, onSelect: () => void): HTMLElement {
+    const b = el("button", { class: "menu__item", type: "button", role: "menuitem" }, el("span", { text: label }), el("kbd", { text: ext }));
     b.addEventListener("click", () => {
       closeOpen();
       onSelect();
@@ -145,5 +156,5 @@ export function createTodoMenus(): TodoMenus {
     }).done;
   }
 
-  return { pop, close: () => closeOpen(), item, section, sep, dateMenu, askName, confirmDeleteList };
+  return { pop, close: () => closeOpen(), item, section, fileItem, sep, dateMenu, askName, confirmDeleteList };
 }

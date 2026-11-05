@@ -70,7 +70,7 @@ test.describe("To-Do", () => {
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/card-menu.png` });
   });
 
-  test("adds a task to a list, marked as waiting for the tablet", async ({ page }) => {
+  test("adds a task to a list; the topbar says the tablet is waiting for it", async ({ page }) => {
     await openTodo(page);
     await openList(page, "Français");
     // A draft belongs to its view: type only once the list is on screen.
@@ -79,7 +79,6 @@ test.describe("To-Do", () => {
     await page.getByRole("button", { name: "Add", exact: true }).click();
     const added = row(page, "Fazer os exercícios");
     await expect(added).toBeVisible();
-    await expect(added).toContainText("Waiting for the tablet");
     await expect(page.locator(".todo-sync")).toHaveText("Waiting for the tablet");
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/list.png` });
   });
@@ -220,7 +219,8 @@ test.describe("To-Do", () => {
     await expect(search).toBeVisible();
     await expect(page.locator("#todo-new-list")).toBeVisible();
     await expect(page.locator("#todo-list-options")).toBeHidden();
-    await expect(page.locator(".todo-sync")).toHaveText(/^(Synced|Waiting|Not synced)/);
+    // The sync status only shows while a change waits for the tablet.
+    await expect(page.locator(".todo-sync")).toBeHidden();
     for (const name of ["Inbox", "Planned"]) {
       await rail(page).locator(".nav__item.is-nested", { hasText: name }).click();
       await expect(page.locator(".todo-place__name")).toHaveText(name);
@@ -240,6 +240,33 @@ test.describe("To-Do", () => {
     await hits.nth(1).click();
     await expect(page.locator(".todo-place__name")).toHaveText("Inbox");
     await expect(row(page, "Haus of gabin")).toHaveClass(/is-selected/);
+  });
+
+  test("Download: this list on a list's page, all lists in All, none elsewhere", async ({ page }) => {
+    await openTodo(page, "/list/" + "1".padStart(32, "0"));
+    const btn = page.locator("#todo-download");
+    await btn.click();
+    await expect(page.locator(".todo-pop .menu__section")).toHaveText(["This list"]);
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/download.png` });
+    const saving = page.waitForEvent("download");
+    await page.getByRole("menuitem", { name: /^Tasks/ }).click();
+    const file = await saving;
+    expect(file.suggestedFilename()).toBe("Français.ics");
+    const text = await (await file.createReadStream()).toArray().then((c) => Buffer.concat(c).toString("utf8"));
+    expect(text.match(/BEGIN:VTODO/g)).toHaveLength(3);
+
+    await page.goto("/#/todo/all");
+    await btn.click();
+    await expect(page.locator(".todo-pop .menu__section")).toHaveText(["All lists"]);
+    const saving2 = page.waitForEvent("download");
+    await page.getByRole("menuitem", { name: /^Plain text/ }).click();
+    expect((await saving2).suggestedFilename()).toBe("To-Do.txt");
+
+    for (const where of ["", "/planned", "/completed"]) {
+      await page.goto(`/#/todo${where}`);
+      await expect(page.locator(".todo-place__name")).toBeVisible();
+      await expect(btn).toBeHidden();
+    }
   });
 
   test("New list asks for a name and opens the list", async ({ page }) => {

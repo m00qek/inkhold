@@ -273,6 +273,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     segmented: ctx.topbar.segmented,
     status: ctx.topbar.todoStatus,
     listBtn: ctx.topbar.todoListBtn,
+    downloadBtn: ctx.topbar.todoDownloadBtn,
     newListBtn: ctx.topbar.todoNewListBtn,
     openNote: (id, page) => go(notePageHref(id, page)),
     setMode: (open) => ctx.modes.setDestinationMode("todo", open),
