@@ -20,6 +20,7 @@ import type { Thumbnails } from "../../render/thumbnails";
 import type { PdfThumbs } from "../../render/pdfThumb";
 import type { SearchService } from "../../search/searchService";
 import type { Exporter } from "../../export/exporter";
+import type { TodoInk } from "../todo/todoInk";
 import type { Masonry } from "../masonry";
 import type { RailController } from "../rail";
 import type { FolderCache } from "../folderCache";
@@ -91,6 +92,8 @@ export interface LibraryCtx {
   searchService: SearchService;
   search: NoteSearchController;
   exporter: Exporter;
+  /** Lassoed to-dos' handwriting, cut from their note pages (the To-Do page and search). */
+  todoInk: TodoInk;
   masonry: Masonry;
   viewers: ViewerSet;
   adminDest: AdminDestination;

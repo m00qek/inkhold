@@ -45,6 +45,8 @@ export interface TodoPaint {
   busy: boolean;
   /** The date the next added task gets; null: none. */
   addDue: number | null;
+  /** A lassoed task's handwriting, filled in as it scrolls into view (`todoInk.ts`). */
+  ink(task: TodoTask): HTMLElement | null;
 }
 
 /** Shared by every row's `aria-describedby`: what the keyboard can do. */
@@ -120,7 +122,7 @@ export function overview(p: TodoPaint, a: TodoActions): HTMLElement {
         ? el(
             "ul",
             { class: "todo-card__peek" },
-            ...c.peek.map((t) => el("li", { text: t.title })),
+            ...c.peek.map((t) => el("li", {}, el("span", { class: "todo-card__task", text: t.title }), p.ink(t))),
             more > 0 ? el("li", { class: "todo-card__more", text: `and ${more} more` }) : null,
           )
         : null,
@@ -251,7 +253,7 @@ function row(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLE
   }
 
   const meta = taskMeta(t, p.snap, p.now, { showList: sec.showList, underOverdue: sec.overdue === true, openNote: () => a.openNote(t) });
-  const main = el("div", { class: "todo-row__main" }, title, meta);
+  const main = el("div", { class: "todo-row__main" }, title, p.editing === t.id ? null : p.ink(t), meta);
   const r = el(
     "div",
     {

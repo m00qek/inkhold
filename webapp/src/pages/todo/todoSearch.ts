@@ -8,7 +8,13 @@ import { homeView, searchTasks, viewPath } from "./todoModel";
 import { taskMeta } from "./todoView";
 
 /** Null when nothing matched (or To-Do is off): the search says nothing about to-dos. */
-export function todoHits(snap: TodoSnapshot | null, q: string, now: number, open: (task: TodoTask) => void): HTMLElement | null {
+export function todoHits(
+  snap: TodoSnapshot | null,
+  q: string,
+  now: number,
+  open: (task: TodoTask) => void,
+  ink: (task: TodoTask) => HTMLElement | null,
+): HTMLElement | null {
   if (!snap?.enabled) return null;
   const tasks = searchTasks(snap, q);
   if (tasks.length === 0) return null;
@@ -17,7 +23,7 @@ export function todoHits(snap: TodoSnapshot | null, q: string, now: number, open
       "a",
       { class: "todo-hit" + (t.done ? " is-done" : ""), href: `#/todo/${viewPath(homeView(t))}` },
       el("span", { class: "todo-hit__ring", "aria-hidden": "true", html: t.done ? svg(ICONS.tick, 2.4) : "" }),
-      el("div", { class: "todo-hit__main" }, el("span", { class: "todo-hit__title", text: t.title }), taskMeta(t, snap, now, { showList: true })),
+      el("div", { class: "todo-hit__main" }, el("span", { class: "todo-hit__title", text: t.title }), ink(t), taskMeta(t, snap, now, { showList: true })),
       t.done ? el("span", { class: "todo-sr", text: " (done)" }) : null,
     );
     row.addEventListener("click", (e) => {

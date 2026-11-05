@@ -9,7 +9,7 @@ type Raw = Partial<{
   tasks: {
     id?: string; listId?: string; title?: string; done?: boolean; due?: number; completedAt?: number;
     sort?: number; sortTime?: number; linked?: boolean; waiting?: boolean;
-    noteId?: number | string; notePage?: number; noteName?: string;
+    noteId?: number | string; notePage?: number; noteName?: string; noteText?: string;
   }[];
   tabletSyncedAt: number;
   waiting: boolean;
@@ -36,7 +36,7 @@ export function todoOf(r: Raw): TodoSnapshot {
             linked: t.linked === true,
             link:
               (typeof t.noteId === "number" || typeof t.noteId === "string") && typeof t.notePage === "number"
-                ? { noteId: String(t.noteId), page: t.notePage, name: t.noteName ?? "" }
+                ? { noteId: String(t.noteId), page: t.notePage, name: t.noteName ?? "", text: typeof t.noteText === "string" ? t.noteText : null }
                 : null,
             waiting: t.waiting === true,
           }]

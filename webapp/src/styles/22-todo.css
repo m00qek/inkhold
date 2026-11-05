@@ -512,6 +512,28 @@
 .todo-title-edit:focus {
   outline: none;
 }
+/* A lassoed task's handwriting, cut from its page: under the title, about a
+   written line high, never wider than the row. Rendered in the page's theme. */
+.todo-ink {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  max-height: 44px;
+  margin-top: 4px;
+  border-radius: 3px;
+}
+.todo-ink-slot {
+  display: block;
+  min-height: 1px;
+}
+.todo-card__peek .todo-ink {
+  max-height: 24px;
+  margin: 2px 0 2px 17px;
+}
+.todo-hit .todo-ink {
+  max-height: 36px;
+}
+
 .todo-meta {
   display: flex;
   flex-wrap: wrap;

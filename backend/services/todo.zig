@@ -42,6 +42,9 @@ pub const Task = struct {
     recurrence: ?[]const u8 = null,
     /// The notebook page a lassoed task came from, as the tablet's JSON.
     links: ?[]const u8 = null,
+    /// The title it had when that link arrived (schema v22), kept through
+    /// renames: the words to find on the page. Read only; `putTask` keeps it.
+    link_text: ?[]const u8 = null,
     reminder_on: bool = false,
     due_time: i64 = 0,
     completed_time: i64 = 0,
@@ -119,9 +122,14 @@ pub fn putTask(db: sqlite.Db, user_id: u64, t: Task) sqlite.Error!void {
     try db.runCached(
         \\INSERT INTO todo_tasks (user_id, task_id, list_id, title, detail, status, importance,
         \\  recurrence, links, reminder_on, due_time, completed_time, last_modified, sort,
-        \\  sort_completed, sort_time, planner_sort, planner_sort_time, deleted)
-        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+        \\  sort_completed, sort_time, planner_sort, planner_sort_time, deleted, link_text)
+        \\VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
+        \\  CASE WHEN ?9 IS NULL THEN NULL ELSE ?4 END)
         \\ON CONFLICT (user_id, task_id) DO UPDATE SET
+        \\  link_text = CASE
+        \\    WHEN excluded.links IS NULL THEN NULL
+        \\    WHEN todo_tasks.links IS excluded.links AND todo_tasks.link_text IS NOT NULL THEN todo_tasks.link_text
+        \\    ELSE excluded.title END,
         \\  list_id = excluded.list_id, title = excluded.title, detail = excluded.detail,
         \\  status = excluded.status, importance = excluded.importance,
         \\  recurrence = excluded.recurrence, links = excluded.links,
@@ -171,7 +179,7 @@ pub fn tasksPage(db: sqlite.Db, arena: std.mem.Allocator, user_id: u64, after: ?
     var st = try db.prepareCached(
         \\SELECT task_id, list_id, title, detail, status, importance, recurrence, links,
         \\  reminder_on, due_time, completed_time, last_modified, sort, sort_completed,
-        \\  sort_time, planner_sort, planner_sort_time, deleted
+        \\  sort_time, planner_sort, planner_sort_time, deleted, link_text
         \\FROM todo_tasks WHERE user_id = ?1 AND task_id > ?2 ORDER BY task_id LIMIT ?3;
     );
     defer st.finalize();
@@ -199,6 +207,7 @@ pub fn tasksPage(db: sqlite.Db, arena: std.mem.Allocator, user_id: u64, after: ?
             .planner_sort = st.columnInt(15),
             .planner_sort_time = st.columnInt(16),
             .deleted = st.columnInt(17) != 0,
+            .link_text = try optText(arena, st, 18),
         });
     }
     return pageOf(Task, out.items, limit);
@@ -259,6 +268,30 @@ test "a task comes back exactly as the tablet sent it, and a resend replaces it"
     try testing.expectEqual(@as(?[]const u8, null), got.list_id);
     try testing.expectEqualStrings("{\"page\":3}", got.links.?);
     try testing.expectEqualStrings("buy groceries", got.title);
+}
+
+test "a link's words are the title it arrived with, kept through renames, reset by a new link" {
+    var db = try testDb();
+    defer db.close();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try putTask(db, 1, .{ .id = "plain", .title = "no link" });
+    try putTask(db, 1, .{ .id = "t", .title = "Haus of gabin", .links = "L1" });
+    var renamed: Task = .{ .id = "t", .title = "Haus of gaben", .links = "L1" };
+    try putTask(db, 1, renamed); // renamed on the tablet: the words on the page stay
+    const kept = (try tasksPage(db, a, 1, null, 20)).items;
+    try testing.expectEqual(@as(?[]const u8, null), kept[0].link_text);
+    try testing.expectEqualStrings("Haus of gaben", kept[1].title);
+    try testing.expectEqualStrings("Haus of gabin", kept[1].link_text.?);
+
+    renamed.links = "L2"; // lassoed again elsewhere: those words now
+    try putTask(db, 1, renamed);
+    try testing.expectEqualStrings("Haus of gaben", (try tasksPage(db, a, 1, null, 20)).items[1].link_text.?);
+    renamed.links = null; // the link removed: no words
+    try putTask(db, 1, renamed);
+    try testing.expectEqual(@as(?[]const u8, null), (try tasksPage(db, a, 1, null, 20)).items[1].link_text);
 }
 
 test "deleting a list takes its tasks; other lists, the Inbox and other accounts stay" {

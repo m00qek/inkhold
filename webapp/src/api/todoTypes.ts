@@ -24,7 +24,12 @@ export interface TodoTask {
   /** Lassoed from a notebook page on the tablet. */
   linked: boolean;
   /** That notebook in the library and its page (1-based); null when not found there. */
-  link: { noteId: string; page: number; name: string } | null;
+  /**
+   * The notebook page it was lassoed from, when the library has that notebook:
+   * `page` is 1-based; `text` is the words lassoed there (the title it came
+   * with, kept through renames), to find its handwriting; null when unknown.
+   */
+  link: { noteId: string; page: number; name: string; text: string | null } | null;
   waiting: boolean;
 }
 

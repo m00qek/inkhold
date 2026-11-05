@@ -312,7 +312,13 @@ hardware unless marked otherwise.
   the tablet's app does: server-stamped times, new and moved tasks on top
   (sort 0, newest sort time), a reorder as positions plus one sort time.
   "Waiting for the tablet" is schema v21: a browser edit marks the row and the
-  account, and a tablet's next task listing clears it. **The library id does NOT protect to-dos**: its reset at sign-in
+  account, and a tablet's next task listing clears it. A lassoed task's
+  handwriting is cut in the browser (`webapp/src/pages/todo/todoInk.ts`): the
+  task's page is fetched and rendered once, the words it was lassoed from are
+  found in the page's recognized text, and only that crop is kept, in the
+  persistent thumbnail store under the page's version. Those words are schema
+  v22's `link_text`: the title the task had when its link arrived, kept through
+  renames so the match survives them. **The library id does NOT protect to-dos**: its reset at sign-in
   (`doLogin: clear table of private cloud`, `clearSyncTable`) clears file
   records only (seen on hardware 2026-11-05). What protects them is a prompt
   the same sign-in shows whenever the tablet remembers a previous account,

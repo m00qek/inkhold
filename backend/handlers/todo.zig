@@ -43,6 +43,9 @@ const TaskVO = struct {
     notePage: ?i64 = null,
     /// The notebook's name, without `.note`.
     noteName: ?[]const u8 = null,
+    /// The words the task was lassoed from (its title when the link came, kept
+    /// through renames), to find its handwriting on that page.
+    noteText: ?[]const u8 = null,
     waiting: bool,
 };
 
@@ -101,6 +104,7 @@ pub fn get(ctx: *Context, req: *Request, params: Params) anyerror!void {
                 o.notePage = l.page;
                 const base = std.fs.path.basename(p);
                 o.noteName = if (std.mem.endsWith(u8, base, ".note")) base[0 .. base.len - 5] else base;
+                o.noteText = t.link_text;
             }
         };
     }

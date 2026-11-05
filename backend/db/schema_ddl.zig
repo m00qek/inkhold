@@ -457,6 +457,16 @@ pub const ddl_v21 =
     \\);
 ;
 
+// v22: the words a lassoed task was made from. `link_text` is the task's title
+// when its notebook link arrived from a tablet, kept through every rename (on
+// the tablet or in the browser) so the browser can still find those words on
+// the page; a new link resets it, a removed one clears it. Existing linked
+// tasks start from their current title.
+pub const ddl_v22 =
+    \\ALTER TABLE todo_tasks ADD COLUMN link_text TEXT;
+    \\UPDATE todo_tasks SET link_text = title WHERE links IS NOT NULL;
+;
+
 // v14: drops the server-side search index. Order matters: the FTS5 table before
 // its content view, `segment_search` (FK to pages) before the page rows.
 pub const ddl_v14 =

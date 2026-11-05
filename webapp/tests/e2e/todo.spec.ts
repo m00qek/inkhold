@@ -269,6 +269,19 @@ test.describe("To-Do", () => {
     }
   });
 
+  test("a lassoed task shows its handwriting, cut from its page; no recognized words, no strip", async ({ page }) => {
+    await openTodo(page, "/list/" + "1".padStart(32, "0"));
+    await expect(row(page, "Revisar o passé composé").locator("img.todo-ink")).toBeVisible();
+    await expect(row(page, "Estudar").locator(".todo-ink-slot")).toHaveCount(0);
+    // "Haus of gabin" was lassoed on page 3, which has no recognized text in the fixture.
+    await openTodo(page, "/completed");
+    const haus = row(page, "Haus of gabin");
+    await expect(haus).toBeVisible();
+    await expect(haus.locator(".todo-ink-slot")).toHaveCount(1);
+    await page.waitForTimeout(500);
+    await expect(haus.locator("img.todo-ink")).toHaveCount(0);
+  });
+
   test("New list asks for a name and opens the list", async ({ page }) => {
     await openTodo(page);
     await page.getByRole("button", { name: "New list" }).click();

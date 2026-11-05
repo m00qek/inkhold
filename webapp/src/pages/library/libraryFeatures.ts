@@ -119,10 +119,16 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     emptyState: ctx.render.emptyState,
     indexPending: () => st.indexPending,
     moreResults: (q) =>
-      todoHits(ctx.todo?.snapshot() ?? null, q, Date.now(), (t) => {
-        ctx.todo.reveal(t.id);
-        go(todoHref(viewPath(homeView(t))));
-      }),
+      todoHits(
+        ctx.todo?.snapshot() ?? null,
+        q,
+        Date.now(),
+        (t) => {
+          ctx.todo.reveal(t.id);
+          go(todoHref(viewPath(homeView(t))));
+        },
+        (t) => ctx.todoInk.slot(t),
+      ),
   });
 
   /**

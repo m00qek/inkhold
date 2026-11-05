@@ -22,6 +22,7 @@ import { dragRow } from "./todoDrag";
 import { createUndoToast } from "./todoUndo";
 import { onTodoKey } from "./todoKeys";
 import { createTodoDownloads } from "./todoDownload";
+import type { TodoInk } from "./todoInk";
 
 export interface TodoHost {
   api: Api;
@@ -48,6 +49,8 @@ export interface TodoHost {
   onChanged(): void;
   /** Go to a To-Do view (its `viewPath`). */
   go(viewPath: string): void;
+  /** Lassoed tasks' handwriting. */
+  ink: TodoInk;
   /** Open a notebook at a page (0-based). */
   openNote(id: string, page: number): void;
 }
@@ -227,6 +230,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
       const p: TodoPaint = {
         snap, view, now, title: viewTitle(view, snap.lists), sections: sections(snap, view, now), collapsed,
         selected, editing, hidden: new Set(pendingDelete ? [pendingDelete.task.id] : []), busy, addDue: dueFor(view, now),
+        ink: (t) => host.ink.slot(t),
       };
       const keys = keysHint(p);
       (keys as HTMLDetailsElement).open = keysOpen;
