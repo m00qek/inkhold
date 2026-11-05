@@ -366,6 +366,43 @@ pub const ddl_v18 =
     \\INSERT INTO library (id, machine_id) VALUES (1, lower(hex(randomblob(16))));
 ;
 
+/// v19: file ids are never reused. Tablets key their sync records by the
+/// server's id; a plain `INTEGER PRIMARY KEY` hands the top id out again once
+/// that row is purged, so a tablet that missed the purge would take a new file
+/// for the old one. AUTOINCREMENT keeps the high-water mark in
+/// `sqlite_sequence`. SQLite cannot add it in place, so the table is rebuilt
+/// with the same columns and indexes; `schema.zig` runs this step with foreign
+/// keys off, or the DROP's implicit DELETE would cascade into `file_history`.
+/// Ids already purged off the top before v19 cannot be known; none is reused
+/// from here on.
+pub const ddl_v19 =
+    \\CREATE TABLE files_v19 (
+    \\  id         INTEGER PRIMARY KEY AUTOINCREMENT,  -- never reused, by SQLite
+    \\  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  parent_id  INTEGER REFERENCES files(id) ON DELETE CASCADE, -- NULL = root
+    \\  name       TEXT    NOT NULL,
+    \\  is_folder  INTEGER NOT NULL DEFAULT 0,
+    \\  md5        TEXT,                          -- content hash (files only)
+    \\  size       INTEGER NOT NULL DEFAULT 0,
+    \\  created_at INTEGER NOT NULL,
+    \\  updated_at INTEGER NOT NULL,
+    \\  deleted    INTEGER NOT NULL DEFAULT 0,
+    \\  deleted_at INTEGER,
+    \\  deleted_path TEXT
+    \\);
+    \\INSERT INTO files_v19 (id, user_id, parent_id, name, is_folder, md5, size, created_at, updated_at, deleted, deleted_at, deleted_path)
+    \\  SELECT id, user_id, parent_id, name, is_folder, md5, size, created_at, updated_at, deleted, deleted_at, deleted_path FROM files;
+    \\DROP TABLE files;
+    \\ALTER TABLE files_v19 RENAME TO files;
+    \\CREATE INDEX files_deleted_at ON files(deleted_at) WHERE deleted = 1;
+    \\CREATE UNIQUE INDEX files_live_name
+    \\  ON files(user_id, COALESCE(parent_id, 0), name) WHERE deleted = 0;
+    \\CREATE INDEX files_md5 ON files(md5);
+    \\CREATE INDEX files_user_parent ON files(user_id, parent_id, deleted);
+    \\CREATE INDEX files_bin_name
+    \\  ON files(user_id, COALESCE(parent_id, 0), name) WHERE deleted = 1;
+;
+
 // v14: drops the server-side search index. Order matters: the FTS5 table before
 // its content view, `segment_search` (FK to pages) before the page rows.
 pub const ddl_v14 =

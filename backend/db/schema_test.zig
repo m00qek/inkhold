@@ -67,3 +67,57 @@ test "v17: backup_runs holds one row per directory, empty on a migrated install"
     defer dup.finalize();
     try std.testing.expectError(error.Step, dup.step());
 }
+
+/// Every index on `files`, as SQLite stores its definition.
+fn fileIndexes(gpa: std.mem.Allocator, db: sqlite.Db) ![]const u8 {
+    var s = try db.prepare("SELECT name, sql FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'files' AND sql IS NOT NULL ORDER BY name;");
+    defer s.finalize();
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    while (try s.step()) try out.print(gpa, "{s}: {s}\n", .{ s.columnText(0), s.columnText(1) });
+    return out.toOwnedSlice(gpa);
+}
+
+fn count(db: sqlite.Db, sql: []const u8) !i64 {
+    var r = (try db.row(sql, &.{})).?;
+    defer r.finalize();
+    return r.int(0);
+}
+
+test "v19: files keep their ids, rows, history and indexes, and a purged top id is never handed out again" {
+    const gpa = std.testing.allocator;
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    try schema.migrateTo(db, 18);
+    try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@home', '', 0);");
+    try db.exec("INSERT INTO files(id, user_id, name, is_folder, created_at, updated_at) VALUES(1, 1, 'Note', 1, 0, 0);");
+    try db.exec("INSERT INTO files(id, user_id, parent_id, name, md5, size, created_at, updated_at) VALUES(2, 1, 1, 'a.note', 'aa', 1, 0, 0);");
+    try db.exec("INSERT INTO files(id, user_id, parent_id, name, md5, size, created_at, updated_at, deleted, deleted_at, deleted_path) VALUES(7, 1, 1, 'b.note', 'bb', 2, 0, 0, 1, 5, '/Note/b.note');");
+    try db.exec("INSERT INTO file_history(file_id, md5, size, created_at) VALUES(2, 'old', 1, 0);");
+    const before = try fileIndexes(gpa, db);
+    defer gpa.free(before);
+
+    try migrate(db);
+    try std.testing.expectEqual(@as(i64, 19), try schema.userVersion(db));
+
+    // Same rows, same ids, and the history that hangs off them survived the DROP.
+    try std.testing.expectEqual(@as(i64, 3), try count(db, "SELECT COUNT(*) FROM files;"));
+    try std.testing.expectEqual(@as(i64, 1), try count(db, "SELECT COUNT(*) FROM file_history WHERE file_id = 2;"));
+    try std.testing.expectEqual(@as(i64, 5), try count(db, "SELECT deleted_at FROM files WHERE id = 7 AND deleted = 1 AND deleted_path = '/Note/b.note';"));
+    const after = try fileIndexes(gpa, db);
+    defer gpa.free(after);
+    try std.testing.expectEqualStrings(before, after);
+
+    // Foreign keys are back on, still pointing at the rebuilt table.
+    try std.testing.expectEqual(@as(i64, 1), try count(db, "PRAGMA foreign_keys;"));
+    sqlite.log_exec_errors = false;
+    defer sqlite.log_exec_errors = true;
+    try std.testing.expectError(error.Exec, db.exec("INSERT INTO file_history(file_id, md5, size, created_at) VALUES(99, 'x', 1, 0);"));
+    try db.exec("DELETE FROM files WHERE id = 2;");
+    try std.testing.expectEqual(@as(i64, 0), try count(db, "SELECT COUNT(*) FROM file_history;"));
+
+    // The top id is purged; the next file still gets a new one.
+    try db.exec("DELETE FROM files WHERE id = 7;");
+    try db.exec("INSERT INTO files(user_id, parent_id, name, md5, size, created_at, updated_at) VALUES(1, 1, 'c.note', 'cc', 3, 0, 0);");
+    try std.testing.expectEqual(@as(i64, 8), try count(db, "SELECT MAX(id) FROM files;"));
+}
