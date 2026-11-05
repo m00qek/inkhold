@@ -173,7 +173,7 @@ pub fn caller(self: *Service, token: []const u8) Error!?Caller {
     var who: Caller = undefined;
     var last_used: i64 = 0;
     {
-        var r = (try self.db.row(
+        var r = (try self.db.rowCached(
             "SELECT s.user_id, s.audience, s.expires_at, u.is_admin, s.elevated_at, s.elevated_until, s.last_used_at " ++
                 "FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?1;",
             &.{.{ .text = &th }},
@@ -200,7 +200,7 @@ pub fn caller(self: *Service, token: []const u8) Error!?Caller {
     }
     // Lazy, best-effort bump: a failed write must not reject a valid session.
     if (t - last_used > last_used_bump_s) {
-        if (self.db.prepare("UPDATE sessions SET last_used_at = ?1 WHERE token_hash = ?2;")) |u| {
+        if (self.db.prepareCached("UPDATE sessions SET last_used_at = ?1 WHERE token_hash = ?2;")) |u| {
             defer u.finalize();
             u.bindInt(1, t);
             u.bindText(2, &th);

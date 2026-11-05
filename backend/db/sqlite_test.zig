@@ -156,3 +156,60 @@ test "openNoCreate opens an existing database and never creates a missing one" {
     defer r.finalize();
     try std.testing.expectEqual(@as(i64, 7), r.int(0));
 }
+
+test "a cached statement is prepared once, reused, reset between uses, and freed on close" {
+    var db = try Db.openMemory();
+    defer db.close();
+    try db.exec("CREATE TABLE t(k INTEGER PRIMARY KEY, v TEXT); INSERT INTO t VALUES(1, 'one'), (2, 'two');");
+    const sql = "SELECT v FROM t WHERE k = ?1;";
+
+    var first: ?*anyopaque = null;
+    for ([_]i64{ 1, 2, 1 }, [_][]const u8{ "one", "two", "one" }) |k, want| {
+        var r = (try db.rowCached(sql, &.{.{ .int = k }})).?;
+        defer r.finalize();
+        try std.testing.expectEqualStrings(want, r.text(0));
+        // The same statement every time: prepared once.
+        if (first == null) first = r.stmt.stmt else try std.testing.expectEqual(first, @as(?*anyopaque, r.stmt.stmt));
+    }
+    // A missing row resets it too, so the next use starts clean.
+    try std.testing.expect(try db.rowCached(sql, &.{.{ .int = 9 }}) == null);
+    var again = (try db.rowCached(sql, &.{.{ .int = 2 }})).?;
+    defer again.finalize();
+    try std.testing.expectEqualStrings("two", again.text(0));
+}
+
+test "a cached statement still in use is never handed out twice" {
+    var db = try Db.openMemory();
+    defer db.close();
+    try db.exec("CREATE TABLE t(k INTEGER); INSERT INTO t VALUES(1), (2), (3);");
+    const sql = "SELECT k FROM t ORDER BY k;";
+    var outer = try db.prepareCached(sql);
+    defer outer.finalize();
+    try std.testing.expect(try outer.step());
+    // Nested use of the same SQL gets its own statement, not outer's.
+    var inner = try db.prepareCached(sql);
+    try std.testing.expect(inner.stmt != outer.stmt);
+    try std.testing.expect(try inner.step());
+    try std.testing.expectEqual(@as(i64, 1), inner.columnInt(0));
+    inner.finalize();
+    // Outer's cursor was untouched.
+    try std.testing.expect(try outer.step());
+    try std.testing.expectEqual(@as(i64, 2), outer.columnInt(0));
+}
+
+test "runCached writes, and a statement left half-read is reset before reuse" {
+    var db = try Db.openMemory();
+    defer db.close();
+    try db.exec("CREATE TABLE t(k INTEGER);");
+    for (0..3) |i| try db.runCached("INSERT INTO t VALUES(?1);", &.{.{ .int = @intCast(i) }});
+    const sql = "SELECT k FROM t ORDER BY k;";
+    {
+        var st = try db.prepareCached(sql);
+        defer st.finalize();
+        try std.testing.expect(try st.step()); // read one row of three, then stop
+    }
+    var st = try db.prepareCached(sql);
+    defer st.finalize();
+    try std.testing.expect(try st.step());
+    try std.testing.expectEqual(@as(i64, 0), st.columnInt(0)); // from the start again
+}

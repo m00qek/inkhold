@@ -43,7 +43,7 @@ const IndexRow = struct {
 
 pub fn indexRow(self: ControlPlaneService, md5: []const u8) !?IndexRow {
     // The LEFT JOIN keeps this one single-row lookup per note per listing.
-    var r = (try self.files.db.row(
+    var r = (try self.files.db.rowCached(
         "SELECT n.indexable, n.page_count, n.recognized_page_count, n.equipment, n.width, " ++
             "n.cover_w, n.cover_h, sp.thumb_w, sp.thumb_h, sp.surface_w, sp.surface_h, n.filetype, n.height FROM note_index n " ++
             "LEFT JOIN spd_index sp ON sp.blob_md5 = n.blob_md5 AND sp.index_version = ?3 " ++
@@ -125,7 +125,7 @@ pub fn backfill(self: ControlPlaneService, md5: []const u8) void {
 /// One page's ref from `note_page_index`, with its effective (orientation
 /// applied) dims and layer panel. Used for a listing's page 0.
 pub fn pageRefAt(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8, n: u64) !?PageRefVO {
-    var r = (try self.files.db.row(
+    var r = (try self.files.db.rowCached(
         "SELECT content_hash, width, height, text_hash, layers, links_hash FROM note_page_index " ++
             "WHERE blob_md5 = ?1 AND page_index = ?2;",
         &.{ .{ .text = md5 }, .{ .int = @intCast(n) } },
@@ -145,7 +145,7 @@ pub fn pageRefAt(self: ControlPlaneService, arena: std.mem.Allocator, md5: []con
 /// Every page of a note in `page_index` order, one statement, no file I/O.
 fn pageRefsFromIndex(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8) ![]const PageRefVO {
     var out: std.ArrayList(PageRefVO) = .empty;
-    var s = try self.files.db.prepare(
+    var s = try self.files.db.prepareCached(
         "SELECT page_index, content_hash, width, height, text_hash, layers, source_page, links_hash, has_ink " ++
             "FROM note_page_index " ++
             "WHERE blob_md5 = ?1 ORDER BY page_index;",

@@ -36,8 +36,31 @@ pub var log_exec_errors: bool = true;
 /// Multiplied by the pool size; it is a lazily-filled ceiling.
 pub const reader_cache_size_kib = 1000;
 
+/// Statements kept prepared per connection, for the hot paths (`prepareCached`).
+/// Preparing is most of a small query's cost on a slow core: on a Pi 1 a folder
+/// listing's two per-entry queries took 3.1 ms prepared each time, 1.2 ms
+/// reused. Fixed size; past it, or for a statement already in use, a query is
+/// prepared and finalized as before.
+pub const cache_slots = 32;
+
+const Slot = struct {
+    /// Address of the SQL text: a comptime literal, so stable for the program.
+    key: usize = 0,
+    len: usize = 0,
+    stmt: ?*c.sqlite3_stmt = null,
+    /// Handed out and not yet finalized: a nested use gets its own statement.
+    busy: bool = false,
+};
+
+const StmtCache = struct {
+    slots: [cache_slots]Slot = @splat(.{}),
+};
+
 pub const Db = struct {
     handle: *c.sqlite3,
+    /// Per connection; shared by copies of this `Db`, which are the same
+    /// connection. Null (allocation failed) only means nothing is cached.
+    cache: ?*StmtCache = null,
 
     /// Opens (creating if needed) the database at `path` (":memory:" for an
     /// in-memory db) and applies the standard pragmas.
@@ -47,7 +70,7 @@ pub const Db = struct {
             if (handle) |h| _ = c.sqlite3_close(h);
             return error.Open;
         }
-        const db: Db = .{ .handle = handle.? };
+        const db: Db = .{ .handle = handle.?, .cache = newCache() };
         try db.exec("PRAGMA journal_mode = WAL;");
         try db.exec("PRAGMA foreign_keys = ON;");
         try db.exec("PRAGMA busy_timeout = 5000;");
@@ -70,7 +93,7 @@ pub const Db = struct {
             if (handle) |h| _ = c.sqlite3_close(h);
             return error.Open;
         }
-        const db: Db = .{ .handle = handle.? };
+        const db: Db = .{ .handle = handle.?, .cache = newCache() };
         errdefer db.close();
         try db.exec("PRAGMA busy_timeout = 5000;");
         try db.exec(std.fmt.comptimePrint("PRAGMA cache_size = -{d};", .{reader_cache_size_kib}));
@@ -90,7 +113,7 @@ pub const Db = struct {
             if (handle) |h| _ = c.sqlite3_close(h);
             return error.Open;
         }
-        const db: Db = .{ .handle = handle.? };
+        const db: Db = .{ .handle = handle.?, .cache = newCache() };
         errdefer db.close();
         try db.exec("PRAGMA busy_timeout = 5000;");
         try db.exec("PRAGMA foreign_keys = ON;");
@@ -114,8 +137,57 @@ pub const Db = struct {
         return gpa.dupe(u8, @as([*]const u8, @ptrCast(p))[0..@intCast(size)]);
     }
 
+    /// Finalizes the cached statements first: `sqlite3_close` refuses to close a
+    /// connection that still has any.
     pub fn close(self: Db) void {
+        if (self.cache) |cache| {
+            for (&cache.slots) |*slot| if (slot.stmt) |st| {
+                _ = c.sqlite3_finalize(st);
+            };
+            std.heap.c_allocator.destroy(cache);
+        }
         _ = c.sqlite3_close(self.handle);
+    }
+
+    /// `prepare`, reusing this connection's prepared copy of `sql` when it has
+    /// one free. `finalize` on the result resets it for the next caller instead
+    /// of destroying it, so treat it exactly like a `prepare`d statement.
+    pub fn prepareCached(self: Db, comptime sql: []const u8) Error!Stmt {
+        const cache = self.cache orelse return self.prepare(sql);
+        const key = @intFromPtr(sql.ptr);
+        var free: ?*Slot = null;
+        for (&cache.slots) |*slot| {
+            if (slot.key == key and slot.len == sql.len) {
+                if (slot.busy) return self.prepare(sql); // nested: its own statement
+                slot.busy = true;
+                return .{ .stmt = slot.stmt.?, .slot = slot };
+            }
+            if (slot.key == 0 and free == null) free = slot;
+        }
+        const st = try self.prepare(sql);
+        const slot = free orelse return st; // full: as before
+        slot.* = .{ .key = key, .len = sql.len, .stmt = st.stmt, .busy = true };
+        return .{ .stmt = st.stmt, .slot = slot };
+    }
+
+    /// `row` on a cached statement (`prepareCached`).
+    pub fn rowCached(self: Db, comptime sql: []const u8, binds: []const Bind) Error!?Row {
+        var stmt = try self.prepareCached(sql);
+        errdefer stmt.finalize();
+        bindAll(stmt, binds);
+        if (!try stmt.step()) {
+            stmt.finalize();
+            return null;
+        }
+        return .{ .stmt = stmt };
+    }
+
+    /// `run` on a cached statement (`prepareCached`).
+    pub fn runCached(self: Db, comptime sql: []const u8, binds: []const Bind) Error!void {
+        var stmt = try self.prepareCached(sql);
+        defer stmt.finalize();
+        bindAll(stmt, binds);
+        _ = try stmt.step();
     }
 
     /// Runs one or more statements with no result rows (DDL, INSERT, etc.).
@@ -177,6 +249,12 @@ pub const Db = struct {
     }
 };
 
+fn newCache() ?*StmtCache {
+    const cache = std.heap.c_allocator.create(StmtCache) catch return null;
+    cache.* = .{};
+    return cache;
+}
+
 /// `binds[i]` to `?(i+1)`, by kind.
 fn bindAll(stmt: Stmt, binds: []const Bind) void {
     for (binds, 0..) |b, i| {
@@ -204,6 +282,8 @@ fn checkBind(rc: c_int) void {
 
 pub const Stmt = struct {
     stmt: *c.sqlite3_stmt,
+    /// Set when the statement belongs to the connection's cache.
+    slot: ?*Slot = null,
 
     /// Parameters are 1-indexed (`?1`, `?2`, …).
     pub fn bindText(self: Stmt, index: c_int, text: []const u8) void {
@@ -290,7 +370,15 @@ pub const Stmt = struct {
     pub fn reset(self: Stmt) void {
         _ = c.sqlite3_reset(self.stmt);
     }
+    /// Destroys the statement, or, for a cached one, resets it and clears its
+    /// bindings for the next caller. Either way the caller is done with it.
     pub fn finalize(self: Stmt) void {
+        if (self.slot) |slot| {
+            _ = c.sqlite3_reset(self.stmt);
+            _ = c.sqlite3_clear_bindings(self.stmt);
+            slot.busy = false;
+            return;
+        }
         _ = c.sqlite3_finalize(self.stmt);
     }
 };

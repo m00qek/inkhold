@@ -187,7 +187,7 @@ pub const Files = struct {
         var out: std.ArrayList(Entry) = .empty;
         errdefer freeList(self.gpa, &out);
 
-        var s = try self.db.prepare(
+        var s = try self.db.prepareCached(
             "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at, " ++
                 internal.paired_mark_id ++
                 " FROM files f " ++
@@ -205,7 +205,7 @@ pub const Files = struct {
     /// Live direct children of any kind ("items", not notes). Trashed rows never
     /// count. One index range over `files_user_parent`.
     pub fn childCount(self: Files, user_id: u64, folder_id: u64) !i64 {
-        var r = (try self.db.row(
+        var r = (try self.db.rowCached(
             "SELECT COUNT(*) FROM files f WHERE f.user_id = ?1 AND f.parent_id = ?2 AND f.deleted = 0" ++
                 internal.hide_paired_mark ++ ";",
             &.{ .{ .int = @intCast(user_id) }, .{ .int = @intCast(folder_id) } },
@@ -216,14 +216,14 @@ pub const Files = struct {
 
     /// Monotonic per-user counter bumped on every tree change; 0 with no row.
     pub fn syncVersion(self: Files, user_id: u64) !i64 {
-        var r = (try self.db.row("SELECT version FROM sync_state WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return 0;
+        var r = (try self.db.rowCached("SELECT version FROM sync_state WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return 0;
         defer r.finalize();
         return r.int(0);
     }
 
     /// One live entry by id (scoped to `user_id`), or null.
     pub fn get(self: Files, user_id: u64, id: u64) !?Entry {
-        var r = (try self.db.row(
+        var r = (try self.db.rowCached(
             "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at, " ++
                 // Live, so it carries its ink: rename/move/upload responses are built from it.
                 internal.paired_mark_id ++
@@ -238,7 +238,7 @@ pub const Files = struct {
     /// state-blind `getAnyState`, and `get` is never relaxed. Foreign, missing and
     /// live ids all read as null.
     pub fn getTrashed(self: Files, user_id: u64, id: u64) !?Entry {
-        var r = (try self.db.row(
+        var r = (try self.db.rowCached(
             // NULL, not `pairedMarkId`: the mark it would find is live.
             "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at, NULL " ++
                 "FROM files f WHERE f.id = ?1 AND f.user_id = ?2 AND f.deleted = 1;",
@@ -251,7 +251,7 @@ pub const Files = struct {
     /// One entry in either state, for the bin's own paths and the device delete
     /// retry. Not a general read path: `get` is the ownership boundary for reads.
     pub fn getAnyState(self: Files, user_id: u64, id: u64) !?Entry {
-        var r = (try self.db.row(
+        var r = (try self.db.rowCached(
             // NULL: a state-blind read cannot scope a mark id.
             "SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5, f.size, f.updated_at, NULL " ++
                 "FROM files f WHERE f.id = ?1 AND f.user_id = ?2;",
