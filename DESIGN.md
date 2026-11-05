@@ -278,7 +278,18 @@ hardware unless marked otherwise.
   are credited back.
 - `get_space_usage` is bytes (confirmed on screen); `user/query.totalCapacity`
   is bytes by assumption.
-- The device's To-Do/Digest data uses a separate protocol, not implemented.
+- **Auto Sync** is a Socket.IO 2 / Engine.IO 3 websocket at `/socket.io/`
+  (device token in the query; the `sign=` HMAC uses a firmware key and is not
+  checked). While it is up the tablet uploads each local change at once and
+  full-syncs on connect. It sends no Engine.IO pings: the server's
+  `ratta_ping` every 20 s, which it answers, is the heartbeat. Changes made
+  elsewhere go out as `ServerMessage` `{"code":"200","data":[MessageBean]}`;
+  the tablet re-reads each by `id` and reconciles, so only the id, a type it
+  acts on (`MODIFYFILE`, `DELETEFILE`, …) and a path inside a synced folder
+  matter. Its own uploads come back too, as a no-op. `STARTSYNC` is honoured
+  only before the first full sync succeeds, so it cannot carry later changes.
+- The device's To-Do/Digest data uses a separate protocol, not implemented
+  (its `to-do`/`digest` events ride the same socket).
 
 ## 5. Auth and credentials
 

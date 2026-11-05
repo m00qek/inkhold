@@ -234,9 +234,12 @@ Things worth knowing:
   restore still brings back every note; every account just gets a temporary
   password, printed once. Keeping `cred.key` somewhere else and putting it back
   before restoring avoids even that.
-- **Back up each tablet before it signs in to a restored server.** A restore
-  signs every tablet out, because a tablet that syncs against a server older
-  than itself may delete files the server does not have.
+- **Back up each tablet before it signs in to a restored server.** A tablet
+  that syncs against a server older than itself deletes the files the server
+  does not have, and signing it out alone does not stop that. So a restore
+  also gives the library a new identity: each tablet notices at its next
+  sign-in and syncs from scratch, uploading what the server lacks instead of
+  deleting it. A copy of the tablet first is still the safe way.
 - **Admins are told when backups stop.** A line in the library says when the
   last backup failed, is more than two days old (`.backup_warn_after_hours`
   in the config), or never happened; the admin console's Server panel lists
@@ -252,6 +255,10 @@ Things worth knowing:
 On the device: **Settings → Supernote Cloud / Private Cloud → server address**,
 and enter the same `http://<LAN-IP>:<port>`. Sign in with an Inkhold account, and
 your notebooks sync into the library.
+
+Sync by hand from the tablet's top bar, or turn on **Settings → Drive → Private
+Cloud → Auto Sync**: the tablet then uploads each change as you make it, and
+gets what you change in the browser within a second or two.
 
 > Running over plain HTTP is fine on a trusted home network. For sync across the
 > internet, Inkhold can terminate **TLS itself** (no reverse proxy) — see

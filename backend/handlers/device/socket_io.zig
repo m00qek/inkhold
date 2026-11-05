@@ -74,6 +74,39 @@ fn eventName(array: []const u8) ?[]const u8 {
     return rest[0..end];
 }
 
+/// One change, as the tablet's `MessageBean` has it. The tablet re-reads the
+/// file by `id` and reconciles it, so the type only has to be one it acts on;
+/// the paths only have to land in a synced folder.
+pub const Bean = struct {
+    id: u64,
+    messageType: []const u8,
+    originalPath: []const u8,
+    originalName: []const u8,
+    newPath: []const u8,
+    newName: []const u8,
+    equipmentNo: []const u8 = "",
+    timestamp: i64,
+};
+
+/// `ServerMessage`'s payload: the envelope the tablet parses (`code` "200").
+pub const Envelope = struct {
+    code: []const u8 = "200",
+    msg: []const u8 = "",
+    data: []const Bean,
+};
+
+/// The message type for a change the tablet should re-read.
+pub fn messageType(is_folder: bool, deleted: bool) []const u8 {
+    if (deleted) return if (is_folder) "DELETEFOLDER" else "DELETEFILE";
+    return if (is_folder) "MODIFYFOLDER" else "MODIFYFILE";
+}
+
+/// `/NOTE/Note/a.note` → `/NOTE/Note` and `a.note`.
+pub fn splitPath(path: []const u8) struct { dir: []const u8, name: []const u8 } {
+    const i = std.mem.lastIndexOfScalar(u8, path, '/') orelse return .{ .dir = "/", .name = path };
+    return .{ .dir = if (i == 0) "/" else path[0..i], .name = path[i + 1 ..] };
+}
+
 /// The acknowledgement of event `id`, with no arguments.
 pub fn ackPacket(buf: []u8, id: u64) ![]const u8 {
     return std.fmt.bufPrint(buf, "43{d}[]", .{id});
@@ -114,6 +147,23 @@ test "client packets: pings, closes, events with and without an ack id" {
     try testing.expectEqual(Incoming.other, parse("42"));
     try testing.expectEqual(Incoming.other, parse("42{}"));
     try testing.expectEqual(Incoming.other, parse("4299999999999999999999[\"x\"]"));
+}
+
+test "a change becomes a bean the tablet acts on" {
+    try testing.expectEqualStrings("MODIFYFILE", messageType(false, false));
+    try testing.expectEqualStrings("DELETEFOLDER", messageType(true, true));
+    const s = splitPath("/NOTE/Note/a.note");
+    try testing.expectEqualStrings("/NOTE/Note", s.dir);
+    try testing.expectEqualStrings("a.note", s.name);
+    try testing.expectEqualStrings("/", splitPath("/INBOX").dir);
+
+    const beans = [_]Bean{.{ .id = 7, .messageType = "MODIFYFILE", .originalPath = "/NOTE/Note", .originalName = "a.note", .newPath = "/NOTE/Note", .newName = "a.note", .timestamp = 1 }};
+    const json = try std.json.Stringify.valueAlloc(testing.allocator, Envelope{ .data = &beans }, .{});
+    defer testing.allocator.free(json);
+    try testing.expectEqualStrings(
+        "{\"code\":\"200\",\"msg\":\"\",\"data\":[{\"id\":7,\"messageType\":\"MODIFYFILE\",\"originalPath\":\"/NOTE/Note\",\"originalName\":\"a.note\",\"newPath\":\"/NOTE/Note\",\"newName\":\"a.note\",\"equipmentNo\":\"\",\"timestamp\":1}]}",
+        json,
+    );
 }
 
 test "acks and events are framed the Socket.IO 2 way" {

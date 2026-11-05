@@ -8,12 +8,19 @@
 //! that needs nothing from the server but a live connection, which the
 //! server's `ratta_ping` keeps: the tablet answers it, and sends nothing else
 //! unprompted.
+//!
+//! Changes made elsewhere (the browser, another tablet) are pushed: when the
+//! in-memory change counter moves, the account's rows changed since the last
+//! check go out as one `ServerMessage`, and the tablet re-reads each by id.
+//! Its own uploads come back too; re-reading those finds nothing to do.
 
 const std = @import("std");
 const router = @import("../../http/router.zig");
 const context = @import("../../http/context.zig");
 const reply = @import("../../http/reply.zig");
 const sio = @import("socket_io.zig");
+const clock = @import("../../util/clock.zig");
+const filesmod = @import("../../services/files.zig");
 
 const Context = context.Context;
 const Request = router.Request;
@@ -22,6 +29,9 @@ const WebSocket = std.http.Server.WebSocket;
 
 /// How long one wait for the tablet lasts before the loop looks around.
 const tick_ms: i32 = 1000;
+
+/// Rows per `ServerMessage`; more go out in further messages.
+const push_page = 100;
 
 pub fn socketIo(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
@@ -42,14 +52,14 @@ pub fn socketIo(ctx: *Context, req: *Request, params: Params) anyerror!void {
         else => return reply.badRequest(ctx, req),
     };
     var ws = req.respondWebSocket(.{ .key = key }) catch return;
-    serve(ctx, &ws) catch |err| switch (err) {
+    serve(ctx, &ws, caller.user_id) catch |err| switch (err) {
         error.Gone => {},
         else => std.log.info("socket.io: user {d} closed: {t}", .{ caller.user_id, err }),
     };
 }
 
 /// Opens the session, then answers the tablet until it leaves or goes quiet.
-fn serve(ctx: *Context, ws: *WebSocket) !void {
+fn serve(ctx: *Context, ws: *WebSocket, user_id: u64) !void {
     var buf: [256]u8 = undefined;
     var sid_bytes: [10]u8 = undefined;
     ctx.io.random(&sid_bytes);
@@ -59,7 +69,17 @@ fn serve(ctx: *Context, ws: *WebSocket) !void {
 
     var last_heard = nowMs(ctx);
     var last_ping = last_heard;
+    // The tablet runs a full sync on connect, so the push starts from now.
+    var since_s = clock.nowSeconds(ctx.io);
+    var seen_changes: ?u32 = if (ctx.files.changes) |c| c.load(.acquire) else null;
     while (true) {
+        if (ctx.files.changes) |c| {
+            const n = c.load(.acquire);
+            if (n != seen_changes.?) {
+                seen_changes = n;
+                since_s = try push(ctx, ws, user_id, since_s);
+            }
+        }
         const now = nowMs(ctx);
         if (now - last_heard > sio.ping_interval_ms + sio.ping_timeout_ms) return error.Gone;
         if (now - last_ping >= sio.ratta_ping_ms) {
@@ -84,6 +104,49 @@ fn serve(ctx: *Context, ws: *WebSocket) !void {
             .other => {},
         }
     }
+}
+
+/// Sends what changed in the account in `since_s` or later; returns where the
+/// next check starts: the second this one began, so a change within it is
+/// sent again rather than missed (`ChangeCursor.since`).
+fn push(ctx: *Context, ws: *WebSocket, user_id: u64, since_s: i64) !i64 {
+    const started = clock.nowSeconds(ctx.io);
+    var cursor: filesmod.Files.ChangeCursor = .since(since_s);
+    while (true) {
+        const page = blk: {
+            ctx.lockDb();
+            defer ctx.unlockDb();
+            break :blk try ctx.files.changedAfter(ctx.gpa, user_id, cursor, push_page);
+        };
+        defer page.deinit(ctx.gpa);
+        if (std.meta.eql(page.next, cursor)) break; // nothing more
+        cursor = page.next;
+        if (page.changes.len == 0) continue; // only rows without a path
+        try sendChanges(ctx, ws, page.changes);
+    }
+    return started;
+}
+
+fn sendChanges(ctx: *Context, ws: *WebSocket, changes: []const filesmod.Files.FileChange) !void {
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const beans = try a.alloc(sio.Bean, changes.len);
+    const ts = std.Io.Clock.real.now(ctx.io).toMilliseconds();
+    for (changes, beans) |c, *b| {
+        const at = sio.splitPath(c.path);
+        b.* = .{
+            .id = c.id,
+            .messageType = sio.messageType(c.is_folder, c.deleted),
+            .originalPath = at.dir,
+            .originalName = at.name,
+            .newPath = at.dir,
+            .newName = at.name,
+            .timestamp = ts,
+        };
+    }
+    const json = try std.json.Stringify.valueAlloc(a, sio.Envelope{ .data = beans }, .{});
+    try ws.writeMessage(try std.fmt.allocPrint(a, "42[\"ServerMessage\",{s}]", .{json}), .text);
 }
 
 /// Whether a message is waiting, after at most `tick_ms`. Bytes already

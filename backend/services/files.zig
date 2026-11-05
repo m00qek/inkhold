@@ -24,6 +24,7 @@ const quota = @import("files/quota.zig");
 const history = @import("files/history.zig");
 const thumb_repair = @import("files/thumb_repair.zig");
 const walk = @import("files/walk.zig");
+const changes_part = @import("files/changes.zig");
 const link = @import("files/link.zig");
 const relocate = @import("files/relocate.zig");
 
@@ -458,6 +459,12 @@ pub const Files = struct {
     pub const wouldFit = walk.wouldFit;
     pub const pathOf = walk.pathOf;
 
+    // ---- what changed, for the auto-sync push (`files/changes.zig`) ----
+    pub const ChangeCursor = changes_part.Cursor;
+    pub const ChangePage = changes_part.Page;
+    pub const FileChange = changes_part.Change;
+    pub const changedAfter = changes_part.changedAfter;
+
     // ---- linking blobs into the tree (`files/link.zig`) ----
     pub const putFile = link.putFile;
     pub const linkBlob = link.linkBlob;
@@ -478,6 +485,7 @@ fn freeList(gpa: std.mem.Allocator, list: *std.ArrayList(Entry)) void {
 
 test {
     _ = @import("files/tree_test.zig");
+    _ = changes_part;
     _ = @import("files/history_test.zig");
     _ = @import("files/quota_test.zig");
     _ = @import("files/uploads_test.zig");
