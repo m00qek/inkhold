@@ -20,8 +20,12 @@ const row = (page: Page, title: string) => page.locator(".todo-row").filter({ ha
 test.describe("To-Do", () => {
   test("lives in the rail: unfolded on its pages, folded elsewhere", async ({ page }) => {
     await openTodo(page);
-    await expect(page.locator(".crumbs__here")).toHaveText("Inbox");
+    // The bare route lands on the overview.
+    await expect(page.locator(".crumbs__here")).toHaveText("All");
     const nav = rail(page);
+    // Views first, then the lists under their own label, Inbox at their head.
+    const names = await nav.locator(".nav__item.is-nested .nav__name, .nav__label.is-nested").allInnerTexts();
+    expect(names.map((n) => n.trim().toLowerCase())).toEqual(["all", "planned", "completed", "lists", "inbox", "français", "casa"]);
     await expect(nav.getByRole("button", { name: /^Planned/ })).toBeVisible();
     await expect(nav.getByRole("button", { name: /^Français/ })).toBeVisible();
     await nav.getByRole("button", { name: /^Planned/ }).click();

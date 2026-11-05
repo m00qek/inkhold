@@ -76,7 +76,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
   let snap: TodoSnapshot | null = null;
   let failed = false;
   let open_ = false;
-  let view: TodoView = { kind: "inbox" };
+  let view: TodoView = { kind: "all" };
   let selected: string | null = null;
   let editing: string | null = null;
   let busy = false;
@@ -180,7 +180,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
     const home = el("button", { type: "button", text: "Library" });
     home.addEventListener("click", () => host.onLeave());
     const todo = el("button", { type: "button", text: "To-Do" });
-    todo.addEventListener("click", () => host.go("inbox"));
+    todo.addEventListener("click", () => host.go("all"));
     host.crumbs.replaceChildren(home, el("span", { class: "crumbs__sep", text: "/" }), todo, el("span", { class: "crumbs__sep", text: "/" }), el("span", { class: "crumbs__here", text: snap ? viewTitle(view, snap.lists) : "" }));
   }
 

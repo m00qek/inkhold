@@ -152,7 +152,7 @@ export type RailBadge =
 
 /** One painted row; says nothing about why it exists. */
 export type RailRow =
-  | { kind: "label"; text: string }
+  | { kind: "label"; text: string; depth?: number }
   | {
       kind: "item";
       icon: IconName;
@@ -172,7 +172,8 @@ export interface RailChildren {
   /** The chevron's accessible name; says what it will do. */
   toggleLabel: string;
   onToggle(): void;
-  rows: readonly { icon: IconName; name: string; count: number; current: boolean; select(): void }[];
+  /** Items, and `{ label }` rows that name the items under them. */
+  rows: readonly ({ icon: IconName; name: string; count: number; current: boolean; select(): void } | { label: string })[];
 }
 
 export interface RailView {
@@ -369,14 +370,14 @@ export function createRail(deps: RailDeps): RailController {
       badge: state ? { kind: "state", ...state } : count > 0 ? { kind: "count", value: count } : null,
       depth: 0,
       // With its rows unfolded one of them is current; folded, the parent stands in.
-      current: current === dest.key && !(children?.expanded && children.rows.some((r) => r.current)),
+      current: current === dest.key && !(children?.expanded && children.rows.some((r) => "current" in r && r.current)),
       select: () => deps.onOpenDestination(dest.key),
       toggle: children ? { expanded: children.expanded, label: children.toggleLabel, onToggle: children.onToggle } : undefined,
     };
   }
 
   function childRows(children: RailChildren): RailRow[] {
-    return children.rows.map((r) => ({
+    return children.rows.map((r): RailRow => "label" in r ? { kind: "label", text: r.label, depth: 1 } : ({
       kind: "item",
       icon: r.icon,
       name: r.name,

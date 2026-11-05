@@ -22,7 +22,8 @@ export function parseView(path: string): TodoView {
   if ((FIXED_VIEWS as readonly string[]).includes(path)) return { kind: path as Exclude<TodoView["kind"], "list"> };
   const m = path.match(/^list\/(.+)$/);
   if (m) return { kind: "list", id: decodeURIComponent(m[1]!) };
-  return { kind: "inbox" };
+  // The bare `#/todo` (and anything unknown) lands on the overview.
+  return { kind: "all" };
 }
 
 export function sameView(a: TodoView, b: TodoView): boolean {

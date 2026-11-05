@@ -14,7 +14,7 @@ import { FIXED_VIEWS, openCount, sameView, viewPath, type TodoView } from "../to
 import type { IconName } from "../../ui/icons";
 
 /** Builds the folder cache, the rail, the nameplate and the storage meter onto `ctx`. */
-/** To-Do's rows in the rail: its views, then the person's lists. */
+/** To-Do's rows in the rail: the views across every list, then the lists, Inbox first. */
 const VIEW_ROWS: Record<(typeof FIXED_VIEWS)[number], { name: string; icon: IconName }> = {
   inbox: { name: "Inbox", icon: "inbox" },
   planned: { name: "Planned", icon: "clock" },
@@ -58,7 +58,9 @@ export function installLibraryRail(ctx: LibraryCtx): void {
         ctx.rail.build();
       },
       rows: [
-        ...FIXED_VIEWS.map((k) => row({ kind: k }, VIEW_ROWS[k].name, VIEW_ROWS[k].icon)),
+        ...(["all", "planned", "completed"] as const).map((k) => row({ kind: k }, VIEW_ROWS[k].name, VIEW_ROWS[k].icon)),
+        { label: "Lists" },
+        row({ kind: "inbox" }, VIEW_ROWS.inbox.name, VIEW_ROWS.inbox.icon),
         ...snap.lists.map((l) => row({ kind: "list", id: l.id }, l.title, "list")),
       ],
     };

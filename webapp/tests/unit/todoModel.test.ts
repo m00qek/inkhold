@@ -17,7 +17,8 @@ const snap = (tasks: TodoTask[]): TodoSnapshot => ({
 describe("To-Do views", () => {
   it("round-trips view paths; anything unknown is the Inbox", () => {
     for (const v of [{ kind: "planned" }, { kind: "list", id: "a/b c" }] as const) expect(parseView(viewPath(v))).toEqual(v);
-    expect(parseView("nonsense")).toEqual({ kind: "inbox" });
+    expect(parseView("nonsense")).toEqual({ kind: "all" });
+    expect(parseView("")).toEqual({ kind: "all" });
   });
 
   it("orders like the tablet: sort ascending, then the newest sort time", () => {
