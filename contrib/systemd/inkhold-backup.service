@@ -1,0 +1,35 @@
+# Nightly Inkhold backup: one snapshot into BACKUP_DIR, then a quick check of
+# it. Started by inkhold-backup.timer; run it by hand with
+#   systemctl start inkhold-backup
+#
+# Edit before enabling (or use `systemctl edit inkhold-backup`):
+#   - User=/Group= : the account that runs the server and owns its state
+#   - --config=    : the server's config file
+#   - BACKUP_DIR   : an existing folder, best on another disk (NAS, USB, a
+#                    synced cloud folder): a backup on the same disk goes
+#                    down with it
+#
+# In Docker, swap the two Exec lines for:
+#   ExecStart=/usr/bin/docker exec inkhold /inkhold backup create /backup --keep=7
+#   ExecStartPost=/usr/bin/docker exec inkhold /inkhold backup verify /backup
+# and drop User=/Group=.
+#
+# The admin screen shows the result of every run, so a failure is seen even
+# when nobody reads the journal.
+
+[Unit]
+Description=Inkhold backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=inkhold
+Group=inkhold
+Environment=BACKUP_DIR=/mnt/nas/inkhold
+ExecStart=/usr/local/bin/inkhold --config=/etc/inkhold/config.zon backup create ${BACKUP_DIR} --keep=7
+ExecStartPost=/usr/local/bin/inkhold --config=/etc/inkhold/config.zon backup verify ${BACKUP_DIR}
+# The backup lowers its own priority; these repeat it for whatever it starts.
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=idle

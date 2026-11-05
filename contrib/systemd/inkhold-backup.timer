@@ -1,0 +1,18 @@
+# Runs inkhold-backup.service every night at 03:00. A night missed while the
+# machine was off is made up at the next boot (Persistent=true).
+#
+#   cp inkhold-backup.service inkhold-backup.timer /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now inkhold-backup.timer
+#   systemctl list-timers inkhold-backup.timer   # when it runs next
+
+[Unit]
+Description=Nightly Inkhold backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

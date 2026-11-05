@@ -220,6 +220,13 @@ summary; problems still go to cron's mail):
 0 3 * * *  /usr/local/bin/inkhold --config=/etc/inkhold/config.zon backup create /mnt/nas/inkhold --keep=7 >/dev/null
 ```
 
+With systemd instead, [`contrib/systemd/`](contrib/systemd/) has a service
+and a timer: edit the account, config path and folder at the top of
+`inkhold-backup.service`, copy both to `/etc/systemd/system/`, then
+`systemctl enable --now inkhold-backup.timer`. It backs up at 03:00, makes up
+a night the machine was off, and checks each new snapshot. Neither is enabled
+for you: only you know where the backup should go.
+
 **To restore**, onto a fresh install with the server stopped:
 
 ```sh
