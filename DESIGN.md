@@ -244,9 +244,10 @@ hardware unless marked otherwise.
   children first, with retries. `move_v3`/`copy_v3` carry a full destination
   path including the filename; copy is used for conflict resolution
   (`…_CONFLICT_<ts>.note`). Without `create_folder_v2` empty folders never sync.
-- Sync is hash-based and stateless: the device pulls `query/summary/hash`,
-  diffs md5s, then fetches details. Paths are computed in SQL from a folder-only
-  recursive CTE; whole-library materialisation was a 3–5× regression.
+- File sync walks the tree (`list_folder`, recursive) and diffs md5s; paths
+  are computed in SQL from a folder-only recursive CTE (whole-library
+  materialisation was a 3–5× regression). `query/summary/*` is NOT file sync:
+  it is the Digest app's protocol (decompiled `KnowledgeApiService`).
 - **Sync records survive sign-out.** The tablet keeps one record per synced
   file (path, md5, the server's id). A record whose file is missing from the
   server reads as "deleted in the cloud", and the tablet deletes its copy. It
@@ -291,7 +292,13 @@ hardware unless marked otherwise.
   matter. Its own uploads come back too, as a no-op. `STARTSYNC` is honoured
   only before the first full sync succeeds, so it cannot carry later changes.
 - The device's To-Do/Digest data uses a separate protocol, not implemented
-  (its `to-do`/`digest` events ride the same socket).
+  (its `to-do`/`digest` events ride the same socket). Its listings
+  (`schedule/*/all`, `query/summary/*`) are REFUSED with `success: false`, and
+  must stay refused until the data is really stored: an empty or made-up
+  answer is destructive. The To-Do app deletes every list it once synced that
+  the server does not list; the Digest app imports whatever the server lists
+  as collections (it imported every folder when `query/summary/group`
+  presented folders as groups, seen on hardware 2026-11-05).
 
 ## 5. Auth and credentials
 

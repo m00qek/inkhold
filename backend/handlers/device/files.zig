@@ -6,7 +6,6 @@ const context = @import("../../http/context.zig");
 const json = @import("../../http/json.zig");
 const reply = @import("../../http/reply.zig");
 const multipart = @import("../../http/multipart.zig");
-const sync = @import("../../services/sync.zig");
 const filesmod = @import("../../services/files.zig");
 const blobstore = @import("../../store/blobs.zig");
 const Context = context.Context;

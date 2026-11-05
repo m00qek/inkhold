@@ -68,7 +68,6 @@ test {
     _ = @import("services/files.zig");
     _ = @import("services/thumbnail.zig");
     _ = @import("services/spd_index.zig");
-    _ = @import("services/sync.zig");
     _ = @import("services/controlplane.zig");
     _ = @import("services/settings.zig");
     _ = @import("services/library.zig");

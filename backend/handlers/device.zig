@@ -6,7 +6,6 @@ const router = @import("../http/router.zig");
 const context = @import("../http/context.zig");
 const json = @import("../http/json.zig");
 const reply = @import("../http/reply.zig");
-const sync = @import("../services/sync.zig");
 const library = @import("../services/library.zig");
 
 const device_files = @import("device/files.zig");
@@ -29,8 +28,6 @@ pub const uploadApply = device_upload.uploadApply;
 pub const ossPut = device_upload.ossPut;
 pub const uploadFinish = device_upload.uploadFinish;
 pub const socketIo = device_socket.socketIo;
-const PageReq = device_files.PageReq;
-const SummaryByIdReq = device_files.SummaryByIdReq;
 
 const Context = context.Context;
 const Request = router.Request;
@@ -265,52 +262,29 @@ pub fn syncEnd(ctx: *Context, req: *Request, params: Params) anyerror!void {
     try json.respond(ctx.gpa, req, .ok, SyncEndVO{ .equipmentNo = eno }, null);
 }
 
-/// The md5 diff source: one entry per live file.
+/// The Digest app's listings (`file/query/summary/*`, decompiled
+/// `KnowledgeApiService`): REFUSED until Inkhold stores digests. They used to
+/// present the files table as Digest data, folders as collections; a full
+/// sync then imported every folder into the tablet's Digest app as a
+/// collection (seen on hardware). `success: false` at 200 makes the app's
+/// `getServiceIdMapFromServer` throw before it compares or imports anything.
 pub fn summaryHash(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const caller = ctx.caller.?; // device scope
-    var parsed = json.readBody(PageReq, ctx.gpa, req) catch return badRequest(ctx, req);
-    defer parsed.deinit();
-    const files = ctx.files;
-
-    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena.deinit();
-    var syncsvc = sync.SyncService.init(files);
-    const vo = syncsvc.summaryHash(arena.allocator(), caller.user_id, parsed.value.page orelse 0, parsed.value.size orelse 0) catch
-        return serverError(ctx, req);
-    try json.respond(ctx.gpa, req, .ok, vo, null);
+    return fail(ctx, req, .ok, digest_unsupported, digest_unsupported_msg);
 }
 
 pub fn summaryById(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const caller = ctx.caller.?; // device scope
-    var parsed = json.readBody(SummaryByIdReq, ctx.gpa, req) catch return badRequest(ctx, req);
-    defer parsed.deinit();
-    const files = ctx.files;
-
-    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena.deinit();
-    var syncsvc = sync.SyncService.init(files);
-    const ids = parsed.value.ids orelse &[_]i64{};
-    const vo = syncsvc.summaryById(arena.allocator(), caller.user_id, ids) catch return serverError(ctx, req);
-    try json.respond(ctx.gpa, req, .ok, vo, null);
+    return fail(ctx, req, .ok, digest_unsupported, digest_unsupported_msg);
 }
 
-/// Folders as summary groups.
 pub fn summaryGroup(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const caller = ctx.caller.?; // device scope
-    var parsed = json.readBody(PageReq, ctx.gpa, req) catch return badRequest(ctx, req);
-    defer parsed.deinit();
-    const files = ctx.files;
-
-    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena.deinit();
-    var syncsvc = sync.SyncService.init(files);
-    const vo = syncsvc.summaryGroup(arena.allocator(), caller.user_id, parsed.value.page orelse 0, parsed.value.size orelse 0) catch
-        return serverError(ctx, req);
-    try json.respond(ctx.gpa, req, .ok, vo, null);
+    return fail(ctx, req, .ok, digest_unsupported, digest_unsupported_msg);
 }
+
+const digest_unsupported = "DIGEST_SYNC_UNSUPPORTED";
+const digest_unsupported_msg = "Digest sync is not supported by this server yet";
 
 /// The To-Do app's listings: REFUSED until Inkhold stores to-dos. The app
 /// (decompiled `TaskSync.syncTaskList`) deletes from the tablet every list it

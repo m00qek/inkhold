@@ -6,7 +6,6 @@ const authsvc = @import("../../services/auth/service.zig");
 const password = @import("../../services/auth/password.zig");
 const filesmod = @import("../../services/files.zig");
 const library = @import("../../services/library.zig");
-const blobstore = @import("../../store/blobs.zig");
 const context = @import("../../http/context.zig");
 const Context = context.Context;
 const gpa = std.testing.allocator;
@@ -23,7 +22,7 @@ const expectStatusWithCookie = harness.expectStatusWithCookie;
 const expectSuccess = harness.expectSuccess;
 const expectFailure = harness.expectFailure;
 
-test "device sync M1: login/equipment, bind (folders + capacity), and the hash-diff read path" {
+test "device sync M1: login/equipment, bind (folders + capacity), and the Digest and To-Do listings refused" {
     const f = try Fixture.init();
     defer f.deinit();
     const ctx = &f.ctx;
@@ -100,55 +99,17 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
     }
     const note_id = try f.files.ensureFolderPath(alice, "NOTE/Note"); // idempotent → existing id
 
-    const a_id = try putSeed(f, alice, note_id, "a.note", "aaaa");
+    // Files exist, so a listing that leaked them would show.
+    _ = try putSeed(f, alice, note_id, "a.note", "aaaa");
     _ = try putSeed(f, alice, note_id, "b.note", "bbbbbb");
-    const a_md5 = blobstore.md5HexOf("aaaa");
 
-    {
-        const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/query/summary/hash", &dev_tok, "SN1", "{\"page\":0,\"size\":100}");
+    // The Digest listings are refused: they used to present files as Digest
+    // data, and the tablet imported every folder as a Digest collection.
+    for ([_][]const u8{ "/api/file/query/summary/hash", "/api/file/query/summary/id", "/api/file/query/summary/group" }) |path| {
+        const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", path, &dev_tok, "SN1", "{\"page\":0,\"size\":100}");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
-        var p = try std.json.parseFromSlice(struct {
-            success: bool,
-            totalRecords: i64,
-            summaryInfoVOList: []const struct {
-                id: i64,
-                md5Hash: []const u8,
-                handwriteMd5: []const u8,
-                metadataMap: struct { path: []const u8 },
-            },
-        }, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expect(p.value.success);
-        try std.testing.expectEqual(@as(i64, 2), p.value.totalRecords);
-        try std.testing.expectEqual(@as(usize, 2), p.value.summaryInfoVOList.len);
-        const first = p.value.summaryInfoVOList[0];
-        try std.testing.expectEqual(a_id, @as(u64, @intCast(first.id)));
-        try std.testing.expectEqualStrings(&a_md5, first.md5Hash);
-        try std.testing.expectEqualStrings(&a_md5, first.handwriteMd5); // mirrored (§7.1)
-        try std.testing.expectEqualStrings("/NOTE/Note/a.note", first.metadataMap.path);
-    }
-
-    {
-        const body = try std.fmt.allocPrint(gpa, "{{\"ids\":[{d}]}}", .{a_id});
-        defer gpa.free(body);
-        const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/query/summary/id", &dev_tok, "SN1", body);
-        var p = try std.json.parseFromSlice(struct {
-            summaryDOList: []const struct { id: i64, name: []const u8, sourcePath: []const u8, md5Hash: []const u8, isSummaryGroup: []const u8 },
-        }, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expectEqual(@as(usize, 1), p.value.summaryDOList.len);
-        const d = p.value.summaryDOList[0];
-        try std.testing.expectEqualStrings("a.note", d.name);
-        try std.testing.expectEqualStrings("/NOTE/Note/a.note", d.sourcePath);
-        try std.testing.expectEqualStrings("N", d.isSummaryGroup);
-    }
-
-    {
-        const resp = try deviceRequest(ctx, &obuf, &reqbuf, "POST", "/api/file/query/summary/group", &dev_tok, "SN1", "{\"page\":0,\"size\":100}");
-        var p = try std.json.parseFromSlice(struct { totalRecords: i64, summaryDOList: []const struct { isSummaryGroup: []const u8 } }, gpa, resp.body, .{ .ignore_unknown_fields = true });
-        defer p.deinit();
-        try std.testing.expectEqual(@as(i64, 5), p.value.totalRecords);
-        for (p.value.summaryDOList) |g| try std.testing.expectEqualStrings("Y", g.isSummaryGroup);
+        try expectFailure(resp.body, "DIGEST_SYNC_UNSUPPORTED");
+        try std.testing.expect(std.mem.indexOf(u8, resp.body, "summaryDOList") == null);
     }
 
     {
