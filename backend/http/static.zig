@@ -88,7 +88,7 @@ pub fn serve(ctx: *Context, req: *Request) !bool {
     // match is a 304 with no body, where without one every visit re-sent the
     // 1.5 MB PDF renderer. Both headers key off the base path.
     var etag_buf: [80]u8 = undefined;
-    const etag = etagOf(&etag_buf, stream_size, stream_mtime, content_encoding);
+    const etag = etagOf(ctx.io, &etag_buf, stream_file, stream_size, stream_mtime, content_encoding);
     var headers: [5]std.http.Header = undefined;
     var nh: usize = 0;
     headers[nh] = .{ .name = "content-type", .value = contentType(rel) };
@@ -129,17 +129,43 @@ pub fn serve(ctx: *Context, req: *Request) !bool {
     return true;
 }
 
-/// A strong validator for one served representation: size and modification
-/// time of the file actually sent, plus its encoding, so the `br`, `gzip` and
-/// raw bytes of one path never share a tag. A rebuild rewrites the files and
-/// so changes the tag.
-fn etagOf(buf: []u8, size: u64, mtime: std.Io.Timestamp, encoding: ?[]const u8) []const u8 {
+/// Files up to this size are tagged by their contents. That covers
+/// `index.html`, the one file whose staleness breaks the app: a rebuild keeps
+/// its size (it only renames hashed scripts, same length), and a build or
+/// image step may reset modification times, so size and time alone could
+/// keep a browser on a page that asks for scripts no longer there.
+pub const content_etag_max = 256 * 1024;
+
+/// A strong validator for one served representation, distinct per encoding.
+/// Small files: an md5 of the bytes (one extra read of at most
+/// `content_etag_max`). Larger ones (the wasm modules): size and
+/// modification time, since a compressed multi-megabyte file that changes
+/// keeps its exact size only in theory. Falls back to size and time if the
+/// file cannot be read.
+fn etagOf(io: std.Io, buf: []u8, file: std.Io.File, size: u64, mtime: std.Io.Timestamp, encoding: ?[]const u8) []const u8 {
+    const dash: []const u8 = if (encoding != null) "-" else "";
+    const enc = encoding orelse "";
+    if (size <= content_etag_max) content: {
+        var md5 = std.crypto.hash.Md5.init(.{});
+        var chunk: [16 * 1024]u8 = undefined;
+        var at: u64 = 0;
+        while (at < size) {
+            const n = file.readPositional(io, &.{chunk[0..]}, at) catch break :content;
+            if (n == 0) break :content; // shorter than its stat said
+            md5.update(chunk[0..n]);
+            at += n;
+        }
+        var digest: [16]u8 = undefined;
+        md5.final(&digest);
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        return std.fmt.bufPrint(buf, "\"{s}{s}{s}\"", .{ &hex, dash, enc }) catch unreachable;
+    }
     const ns: i128 = mtime.nanoseconds;
     return std.fmt.bufPrint(buf, "\"{x}-{x}{s}{s}\"", .{
         size,
         @as(u128, @bitCast(ns)),
-        if (encoding != null) "-" else "",
-        encoding orelse "",
+        dash,
+        enc,
     }) catch unreachable; // 16 + 32 hex digits, a dash and "gzip" fit in 80
 }
 

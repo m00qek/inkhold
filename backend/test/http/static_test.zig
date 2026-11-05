@@ -238,3 +238,47 @@ test "static serving validates: an ETag per representation, and a 304 with no bo
         try std.testing.expectEqualStrings("BROTLI", resp.body);
     }
 }
+
+test "a rebuilt index.html of the same size and modification time still gets a new ETag" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+
+    var web = std.testing.tmpDir(.{});
+    defer web.cleanup();
+    var wd_buf: [256]u8 = undefined;
+    ctx.config.web_dir = try std.fmt.bufPrint(&wd_buf, ".zig-cache/tmp/{s}", .{web.sub_path});
+
+    // A rebuild renames the hashed bundle and keeps its length; a reproducible
+    // build may also pin every file's modification time.
+    const pinned: std.Io.Timestamp = .{ .nanoseconds = 1_700_000_000 * std.time.ns_per_s };
+    const builds = [_][]const u8{
+        "<script src=\"./assets/index-AAAAAAAA.js\"></script>",
+        "<script src=\"./assets/index-BBBBBBBB.js\"></script>",
+    };
+    var tags: [2][128]u8 = undefined;
+    var lens: [2]usize = undefined;
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+    for (builds, 0..) |html, i| {
+        try web.dir.writeFile(std.testing.io, .{ .sub_path = "index.html", .data = html });
+        var file = try web.dir.openFile(std.testing.io, "index.html", .{ .mode = .read_write });
+        try file.setTimestamps(std.testing.io, .{ .modify_timestamp = .{ .new = pinned } });
+        file.close(std.testing.io);
+
+        const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/", &.{}, ""), &obuf);
+        try std.testing.expectEqualStrings(html, resp.body);
+        const t = try harness.headerValue(resp.head, "etag", &tags[i]);
+        lens[i] = t.len;
+    }
+    try std.testing.expect(!std.mem.eql(u8, tags[0][0..lens[0]], tags[1][0..lens[1]]));
+
+    // And the old tag no longer earns a 304: the browser gets the new page.
+    {
+        const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/", &.{
+            .{ .name = "if-none-match", .value = tags[0][0..lens[0]] },
+        }, ""), &obuf);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expectEqualStrings(builds[1], resp.body);
+    }
+}
