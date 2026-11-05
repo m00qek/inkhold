@@ -239,7 +239,9 @@ Things worth knowing:
   does not have, and signing it out alone does not stop that. So a restore
   also gives the library a new identity: each tablet notices at its next
   sign-in and syncs from scratch, uploading what the server lacks instead of
-  deleting it. A copy of the tablet first is still the safe way.
+  deleting it (tested on a Nomad). A copy of the tablet first is still the safe
+  way. After signing in, open **Settings → Drive → Private Cloud**: the reset
+  turns Auto Sync off, and may clear the folders chosen to sync.
 - **Admins are told when backups stop.** A line in the library says when the
   last backup failed, is more than two days old (`.backup_warn_after_hours`
   in the config), or never happened; the admin console's Server panel lists

@@ -408,9 +408,11 @@ pub fn restore(gpa: std.mem.Allocator, io: Io, inv: Invocation, out: *Writer, er
     }
     try out.print(
         \\
-        \\{[b]s}Every tablet was signed out.{[r]s} Before one signs in again, back it up:
-        \\it last synced with a newer server than this snapshot, and may delete files
-        \\it holds that the snapshot does not have.
+        \\{[b]s}Every tablet was signed out,{[r]s} and the library has a new identity: a tablet
+        \\signing in again forgets what it synced before and syncs from scratch, so it
+        \\uploads the files this snapshot lacks instead of deleting them. Backing a
+        \\tablet up before it signs in is still the safe way. Afterwards, check its
+        \\Settings > Drive > Private Cloud: Auto Sync is off and may need its folders.
         \\
         \\Start the server when ready: inkhold serve
         \\

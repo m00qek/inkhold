@@ -352,8 +352,8 @@ pub fn writeHelp(w: *std.Io.Writer, st: Style) !void {
         \\  To run one nightly, see the README.
         \\
         \\  {[b]s}Before restoring, back up each tablet.{[r]s} A restore signs every tablet
-        \\  out; one that syncs against the older server may delete files it holds
-        \\  that the snapshot does not.
+        \\  out and gives the library a new identity, so each one syncs from scratch
+        \\  at its next sign-in and uploads what the snapshot lacks.
         \\
         \\{[b]s}Notes:{[r]s}
         \\  The database must already exist. Every command except `serve` and `restore`
