@@ -317,6 +317,9 @@ pub fn events(ctx: *Context, req: *Request, params: Params) anyerror!void {
     var last_index = initial_index;
     var since_write_ms: i64 = 0;
     var lived_ms: i64 = 0;
+    // Any library's version moving, in memory. Read before the version query, so
+    // a bump this tick cannot slip between the two (`internal.bumpSync`).
+    var seen_changes: ?u32 = if (files.changes) |c| c.load(.acquire) else null;
 
     while (lived_ms < streams.max_lifetime_ms) {
         // Unlocked wait. Cancellation (shutdown) ends the stream cleanly.
@@ -324,9 +327,15 @@ pub fn events(ctx: *Context, req: *Request, params: Params) anyerror!void {
         lived_ms += streams.poll_interval_ms;
         since_write_ms += streams.poll_interval_ms;
 
-        // Narrow bracket each tick. A read error counts as "no change", so a
-        // transient failure never fabricates a refetch.
+        // The database only when some library's version moved: an idle tab costs a
+        // wake-up and an atomic read. A narrow bracket; a read error counts as
+        // "no change", so a transient failure never fabricates a refetch.
         const current: i64 = blk: {
+            if (files.changes) |c| {
+                const now = c.load(.acquire);
+                if (now == seen_changes.?) break :blk last;
+                seen_changes = now;
+            }
             ctx.lockDb();
             defer ctx.unlockDb();
             break :blk files.syncVersion(caller.user_id) catch last;

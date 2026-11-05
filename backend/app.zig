@@ -104,7 +104,10 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     const text_store = try derivedstore.DerivedStore.init(io, text_dir);
     text_store.sweepTmp();
 
+    // The live-update streams' cue (`Files.changes`); lives as long as the process.
+    var library_changes: std.atomic.Value(u32) = .init(0);
     var files_svc = filesmod.Files.init(gpa, io, db, blob_store, thumb_store);
+    files_svc.changes = &library_changes;
     files_svc.terms = terms_store;
     files_svc.text = text_store;
     files_svc.history = cfg.history; // hot-cache versioning bounds (keep / max_bytes)

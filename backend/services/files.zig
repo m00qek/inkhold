@@ -137,6 +137,14 @@ pub const Files = struct {
     /// one mutation outside the database.
     read_only: bool = false,
 
+    /// Moves on every `sync_state` bump, any user's (`internal.bumpSync`). The
+    /// live-update streams compare it instead of querying the database every
+    /// tick: an idle tab cost a Pi 1 ~5% of its core in queries that found
+    /// nothing. Null in tests, where a stream queries each tick as before.
+    /// A u32: ARMv6 has no 64-bit atomics, and streams only compare it for
+    /// equality, so wrapping is harmless.
+    changes: ?*std.atomic.Value(u32) = null,
+
     pub fn init(gpa: std.mem.Allocator, io: std.Io, db: sqlite.Db, blobs: blobstore.BlobStore, thumbs: thumbstore.ThumbStore) Files {
         return .{ .gpa = gpa, .io = io, .db = db, .blobs = blobs, .thumbs = thumbs };
     }

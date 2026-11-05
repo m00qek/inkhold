@@ -73,12 +73,17 @@ pub fn pairOf(self: Files, user_id: u64, id: u64) !?Paired {
 }
 
 /// Callers holding a transaction bump inside it, so it commits atomically.
+/// Also moves `Files.changes`, the live-update streams' cue to look again.
 pub fn bumpSync(self: Files, user_id: u64) !void {
     try self.db.run(
         "INSERT INTO sync_state(user_id, version) VALUES(?1, 1) " ++
             "ON CONFLICT(user_id) DO UPDATE SET version = version + 1;",
         &.{.{ .int = @intCast(user_id) }},
     );
+    // Before the commit, and that is safe: every write runs under `db_lock` and
+    // commits before releasing it, and a stream reads the version under the same
+    // lock, so one that sees this move waits for the commit before it reads.
+    if (self.changes) |c| _ = c.fetchAdd(1, .release);
 }
 
 /// Refunds `size` if `md5` is now unreferenced by the user, once per

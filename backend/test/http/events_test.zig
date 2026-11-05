@@ -135,6 +135,50 @@ test "a held stream pushes a NEW syncVersion when the tree changes, then release
     try std.testing.expectEqual(@as(u32, 0), streams.countFor(std.testing.io, who.id));
 }
 
+test "with the change cue wired, an idle stream skips the database yet sees a change at once" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+    var lock: std.Io.Mutex = .init;
+    ctx.db_lock = &lock;
+    var changes: std.atomic.Value(u32) = .init(0);
+    f.files.changes = &changes;
+
+    const who = try onboardedAdmin(f);
+    const other = try f.svc.bootstrapAdmin("rui", "ruitemp00");
+
+    var streams: eventstreams.EventStreams = .{
+        .poll_interval_ms = 5,
+        .heartbeat_ms = 1_000_000,
+        .max_lifetime_ms = 400,
+    };
+    ctx.event_streams = &streams;
+
+    var runner: StreamRunner = .{ .ctx = ctx, .token = who.token };
+    const t = try std.Thread.spawn(.{}, StreamRunner.run, .{&runner});
+    try runner.waitUntilHeld(&streams);
+
+    {
+        lock.lockUncancelable(std.testing.io);
+        defer lock.unlock(std.testing.io);
+        // Someone else's library: the cue moves, this stream looks, says nothing.
+        const theirs = try f.files.createFolder(other, null, "Theirs");
+        gpa.free(theirs.name);
+        // Then this person's: the next look finds it.
+        const dir = try f.files.createFolder(who.id, null, "Dir");
+        gpa.free(dir.name);
+    }
+    try std.testing.expectEqual(@as(u32, 2), changes.load(.acquire));
+
+    t.join();
+    try std.testing.expectEqual(@as(u16, 200), runner.status);
+    const out = runner.output();
+    try std.testing.expect(std.mem.indexOf(u8, out, "data: 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "data: 1") != null);
+    // The other library's bump is not this stream's news.
+    try std.testing.expect(std.mem.indexOf(u8, out, "data: 2") == null);
+}
+
 test "`event: index` is emitted when a derive completes, and NOT when an unrelated file is renamed" {
     // Frames only on change (the link is treated as 3G): a tree change emits
     // `event: sync` and leaves `event: index` silent.
