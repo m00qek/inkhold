@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .tls = .{
-            .url = "git+https://github.com/m00qek/tls.zig#d0ca2495d87caab617919cc310709717711abd07",
-            .hash = "tls-0.1.0-ER2e0uCxBgCMrQxwXrMhlIMGhojGUPTa9PlA5Q4H080R",
+            .url = "git+https://github.com/m00qek/tls.zig#396868454669fbac68cb13b4d75c929f5dfc5846",
+            .hash = "tls-0.1.0-ER2e0jC-BgD3owUZMLSnfXOTcIElzTceqwTLl_RUQUnj",
         },
         .mupdf = .{
             .url = "https://mupdf.com/downloads/archive/mupdf-1.28.1-source.tar.gz",
