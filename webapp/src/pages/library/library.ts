@@ -10,7 +10,7 @@
 
 import { el } from "../../ui/dom";
 import { SORT_KEY, readLocal, writeLocal } from "../../ui/storage";
-import { binNotePageHref, destinationHref, folderHref, go } from "../../router";
+import { binNotePageHref, destinationHref, folderHref, go, todoHref } from "../../router";
 import { createBackupNotice } from "./backupNotice";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";
@@ -42,6 +42,7 @@ import { createLibraryFeatures } from "./libraryFeatures";
 import { createLibraryPreviews } from "./libraryPreviews";
 import { createLibraryRoutes } from "./libraryRoutes";
 import { warmWasm } from "../../core/warmWasm";
+import { createTodoPage } from "../todo/todoPage";
 
 export const ADMIN_KEY = "admin";
 /**
@@ -49,6 +50,8 @@ export const ADMIN_KEY = "admin";
 * "is a folder listing on screen?" guard treats it like the bin and console.
 */
 export const ACCOUNT_KEY = "account";
+/** The To-Do destination's rail key; its routes are `#/todo/<view>`. */
+export const TODO_KEY = "todo";
 
 export interface AppDeps {
   api: Api;
@@ -78,6 +81,8 @@ export interface AppShell {
   showDestination(key: string): void;
   /** Not a `Destination`; open to any signed-in user. */
   showAccount(): void;
+  /** To-Do at one of its views (`inbox`, `planned`, `list/<id>` …). */
+  showTodo(view: string): void;
   /**
   * `page` is 0-based; the router converts from the URL's 1-based pages. `q`
   * primes find-in-note. All from the route, so reloads and links land exactly.
@@ -162,7 +167,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     gallery,
     content,
     toastEl,
-    destinationsOpen: { bin: false, admin: false, account: false },
+    destinationsOpen: { bin: false, admin: false, account: false, todo: false },
 
     // ---- failure routing ----
     failures: {
@@ -201,6 +206,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     },
     leaveAccount: () => st.accountPage?.close(),
     leaveAdmin: () => ctx.adminDest.leave(),
+    leaveTodo: () => ctx.todo?.close(),
     openAdmin: () => ctx.adminDest.open(),
   });
 
@@ -258,6 +264,23 @@ export function createAppShell(deps: AppDeps): AppShell {
   );
 
   // ---- destinations ----
+  ctx.todo = createTodoPage({
+    api,
+    content,
+    gallery,
+    crumbs: ctx.topbar.crumbs,
+    sortWrap: ctx.topbar.sortWrap,
+    segmented: ctx.topbar.segmented,
+    setMode: (open) => ctx.modes.setDestinationMode("todo", open),
+    toast: ctx.toast,
+    handled: ctx.handled,
+    onChanged: () => ctx.rail.build(),
+    go: (view) => go(todoHref(view)),
+    onLeave: () => go(folderHref(null)),
+  });
+  // Once at start: the rail shows To-Do only when the server keeps to-dos.
+  void ctx.todo.load();
+
   ctx.adminDest = createAdminDestination({
     api,
     account: identity.email,
@@ -351,6 +374,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     showSearch: routes.showSearch,
     showDestination: routes.showDestination,
     showAccount: routes.showAccount,
+    showTodo: routes.showTodo,
     openNote: routes.openNote,
     openNoteVersion: routes.openNoteVersion,
     openBinNote: routes.openBinNote,
@@ -372,6 +396,7 @@ export function createAppShell(deps: AppDeps): AppShell {
       ctx.adminDest.destroy();
       backupNotice.destroy();
       st.accountPage?.destroy();
+      ctx.todo.destroy();
       // Aborts uploads and drops the document-level drag swallowers.
       ctx.features.uploadZone.destroy();
       ctx.galleryEngine.destroy();

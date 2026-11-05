@@ -1,0 +1,413 @@
+/*
+ * To-Do (src/pages/todo/). An overlay on the content area like the account
+ * page: a plain sheet of tasks, no ruled lines. The overdue tone is
+ * `--margin-ink` (text); the accent marks selection and focus only.
+ */
+
+.todo {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow-y: auto;
+  background: var(--desk);
+  padding: 22px 28px 96px;
+}
+.todo > * {
+  max-width: 900px;
+}
+
+.todo-ico {
+  display: inline-flex;
+  flex: none;
+}
+.todo-ico svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ---- header ---- */
+.todo-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-3) var(--sp-6);
+  padding-bottom: var(--sp-4);
+}
+.todo-head__title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.todo-head__title h1 {
+  margin: 0;
+  font: 500 var(--fs-heading) / 1.2 var(--font-display);
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+.todo-head__side {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3) var(--sp-4);
+}
+.todo-sync {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+.todo-sync__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.todo-sync.is-waiting .todo-sync__dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--ink-soft);
+}
+.todo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-h-sm);
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  color: var(--ink);
+  cursor: pointer;
+}
+.todo-btn:hover {
+  background: var(--hover-fill);
+}
+
+/* ---- the add form ---- */
+.todo-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  padding: 4px 4px 4px var(--sp-3);
+  margin-bottom: var(--sp-4);
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.todo-add:focus-within {
+  border-color: var(--accent);
+}
+.todo-add input[type="text"] {
+  flex: 1 1 220px;
+  min-width: 0;
+  height: var(--control-h);
+  border: 0;
+  background: transparent;
+  font-size: var(--fs-title);
+  color: var(--ink);
+}
+.todo-add input:focus {
+  outline: none;
+}
+.todo-add__date {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+}
+.todo-add__date input,
+.todo-pop__date {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink);
+  font: var(--fs-caption) var(--font-mono);
+  padding: 3px 6px;
+}
+.todo-add__go {
+  height: var(--control-h-sm);
+  padding: 0 16px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: var(--sheet);
+  font-weight: 500;
+  cursor: pointer;
+}
+.todo-add__go:disabled {
+  background: var(--line);
+  cursor: default;
+}
+
+/* ---- groups and rows ---- */
+.todo-body {
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--sp-2) 0;
+}
+.todo-group + .todo-group {
+  margin-top: var(--sp-2);
+}
+.todo-group__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: 8px var(--sp-4);
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.todo-group__head.is-overdue {
+  color: var(--margin-ink);
+}
+.todo-group__chev svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.12s ease;
+}
+.todo-group__head[aria-expanded="false"] .todo-group__chev svg {
+  transform: rotate(-90deg);
+}
+.todo-group__n {
+  font: var(--fs-eyebrow) var(--font-mono);
+  color: var(--ink-faint);
+}
+
+.todo-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 4px var(--sp-3);
+  padding: 10px var(--sp-4);
+  cursor: default;
+}
+.todo-row + .todo-row {
+  box-shadow: 0 -1px 0 var(--row-rule);
+}
+.todo-row:hover {
+  background: var(--hover);
+}
+.todo-row.is-selected {
+  background: color-mix(in srgb, var(--sheet), var(--accent) 8%);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.todo-row:focus {
+  outline: none;
+}
+.todo-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.todo-check {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  padding: 0;
+  border: 1.6px solid var(--ink);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--sheet);
+  cursor: pointer;
+}
+.todo-check svg {
+  width: 22px;
+  height: 22px;
+  opacity: 0;
+}
+.todo-row.is-done .todo-check {
+  background: var(--ink);
+}
+.todo-row.is-done .todo-check svg {
+  opacity: 1;
+}
+.todo-title {
+  position: relative;
+  display: inline;
+  font-size: var(--fs-title);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.todo-row.is-done .todo-title {
+  color: var(--ink-faint);
+}
+/* Completing draws a pen line across the title before the row moves. */
+.todo-strike {
+  position: absolute;
+  left: -2px;
+  right: -2px;
+  top: 52%;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--paper-ink);
+  transform: scaleX(0);
+  transform-origin: left;
+}
+.todo-row.is-done .todo-strike {
+  transform: scaleX(1);
+}
+.todo-row.is-striking .todo-strike {
+  transform: scaleX(1);
+  transition: transform 0.38s cubic-bezier(0.4, 0.1, 0.3, 1);
+}
+.todo-title-edit {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--accent);
+  background: transparent;
+  color: var(--ink);
+  font-size: var(--fs-title);
+  padding: 0 0 2px;
+}
+.todo-title-edit:focus {
+  outline: none;
+}
+.todo-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px var(--sp-3);
+  margin-top: 3px;
+  font: var(--fs-caption) var(--font-mono);
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+.todo-meta .is-overdue {
+  color: var(--margin-ink);
+}
+.todo-meta__list {
+  color: var(--ink-faint);
+}
+.todo-meta__wait {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.todo-meta__wait::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+
+.todo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px;
+}
+.todo-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: var(--fs-caption);
+  cursor: pointer;
+}
+.todo-act:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.todo-act.is-danger:hover {
+  color: var(--margin-ink);
+}
+.todo-act:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.todo-empty {
+  padding: var(--sp-6) var(--sp-4);
+  color: var(--ink-soft);
+  max-width: 52ch;
+}
+.todo-empty p {
+  margin: 0 0 var(--sp-2);
+}
+.todo-empty__title {
+  font: 500 var(--fs-title) var(--font-display);
+  color: var(--ink);
+}
+
+.todo-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px var(--sp-4);
+  margin: var(--sp-4) 0 0;
+  font: var(--fs-eyebrow) var(--font-mono);
+  color: var(--ink-faint);
+}
+.todo-keys kbd {
+  font: inherit;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--ink-soft);
+}
+
+.todo-pop .todo-pop__date {
+  margin: 4px 10px 8px;
+}
+
+/* The Undo after a delete: fixed to the bottom of the content area. */
+.todo-undo {
+  position: fixed;
+  left: 50%;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  max-width: calc(100% - 32px);
+  padding: 10px 14px;
+  border-radius: var(--radius-card);
+  background: var(--ink);
+  color: var(--sheet);
+  box-shadow: 0 10px 30px -10px var(--shadow);
+  transform: translateX(-50%);
+}
+.todo-undo button {
+  border: 0;
+  background: none;
+  color: var(--sheet);
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+@media (max-width: 620px) {
+  .todo {
+    padding: 16px 12px 96px;
+  }
+  .todo-row {
+    grid-template-columns: 28px minmax(0, 1fr);
+    padding-inline: var(--sp-3);
+  }
+  .todo-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .todo-row.is-striking .todo-strike,
+  .todo-group__chev svg {
+    transition: none;
+  }
+}
+.todo-undo[hidden] {
+  display: none;
+}

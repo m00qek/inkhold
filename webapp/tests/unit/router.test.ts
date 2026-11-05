@@ -8,6 +8,7 @@ import {
   folderHref,
   searchHref,
   destinationHref,
+  todoHref,
 } from "../../src/router";
 import { DESTINATIONS } from "../../src/pages/rail";
 
@@ -78,10 +79,19 @@ describe("the four places that used to have no URL", () => {
   });
 
   it("routes a destination by the rail's own key", () => {
-    for (const dest of DESTINATIONS) {
+    // To-Do has its own route, which carries the view (`#/todo/planned`).
+    for (const dest of DESTINATIONS.filter((d) => d.key !== "todo")) {
       expect(parseRoute(destinationHref(dest.key).slice(1))).toEqual({ name: "destination", key: dest.key });
     }
-    expect(DESTINATIONS.map((d) => d.key)).toEqual(["bin", "admin"]);
+    expect(DESTINATIONS.map((d) => d.key)).toEqual(["bin", "todo", "admin"]);
+  });
+
+  it("routes To-Do with its view; the rail's bare key lands on the default view", () => {
+    expect(parseRoute(destinationHref("todo").slice(1))).toEqual({ name: "todo", view: "" });
+    expect(parseRoute("/todo/planned")).toEqual({ name: "todo", view: "planned" });
+    expect(parseRoute("/todo/list/abc")).toEqual({ name: "todo", view: "list/abc" });
+    expect(todoHref("list/abc")).toBe("#/todo/list/abc");
+    expect(todoHref("")).toBe("#/todo");
   });
 
   it("never lets a destination key shadow a fixed route", () => {

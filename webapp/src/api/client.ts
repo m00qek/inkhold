@@ -13,6 +13,7 @@ import type { Entry, Hash, Id, Listing, NoteMeta, PageRef, PageText, WordBox } f
 import { adminMethods } from "./httpAdmin";
 import { historyMethods } from "./httpHistory";
 import { accountMethods } from "./httpAccount";
+import { todoMethods } from "./httpTodo";
 
 export {
   ApiError,
@@ -445,5 +446,6 @@ export function createHttpApi(): Api {
     },
 
     ...accountMethods,
+    ...todoMethods,
   };
 }

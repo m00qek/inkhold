@@ -307,3 +307,43 @@
   height: 15px;
 }
 
+
+/* A destination with rows beneath it (To-Do): the row plus a chevron that folds them. */
+.nav__row {
+  display: flex;
+  align-items: center;
+}
+.nav__row .nav__item {
+  flex: 1;
+  min-width: 0;
+}
+.nav__toggle {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin-left: 2px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.nav__toggle:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.nav__toggle svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.12s ease;
+}
+.nav__toggle[aria-expanded="false"] svg {
+  transform: rotate(-90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .nav__toggle svg {
+    transition: none;
+  }
+}

@@ -31,6 +31,12 @@ export type Route =
   | { name: "search"; q: string }
   /** A rail {@link Destination} (bin, admin), keyed by the rail's own key. */
   | { name: "destination"; key: string }
+  /**
+   * To-Do, at one of its views: `inbox`, `planned`, `all`, `completed` or
+   * `list/<id>`; `""` is the default. The view is parsed by the page, so the
+   * router stays free of `pages/`.
+   */
+  | { name: "todo"; view: string }
   | {
       name: "note";
       id: string;
@@ -87,6 +93,9 @@ export function parseRoute(raw: string): Route {
   // A fixed path, so a later `account` destination key cannot shadow it.
   if (p === "/account") return { name: "account" };
   if (p === "/search") return { name: "search", q: readQ(search) };
+  // Before the destination fallback, which would read `/todo` alone and drop the view.
+  const todo = p.match(/^\/todo(?:\/(.*))?$/);
+  if (todo) return { name: "todo", view: todo[1] ?? "" };
   // Ids are percent-encoded, so `[^/]+` can't swallow a separator.
   const folder = p.match(/^\/folder\/([^/]+)$/);
   if (folder) return { name: "folder", id: decodeURIComponent(folder[1]!) };
@@ -151,6 +160,11 @@ export function searchHref(q: string): string {
 /** Hash href for a {@link Destination} — `#/bin`, `#/admin`. */
 export function destinationHref(key: string): string {
   return `#/${key}`;
+}
+
+/** Hash href for a To-Do view (`inbox`, `planned`, `list/<id>` …). */
+export function todoHref(view: string): string {
+  return view === "" ? "#/todo" : `#/todo/${view}`;
 }
 
 /** Hash href for your own account page. */

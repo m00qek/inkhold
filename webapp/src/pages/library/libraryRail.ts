@@ -2,17 +2,67 @@
 
 import { el } from "../../ui/dom";
 import { brandMark } from "../../ui/chrome";
-import { accountHref, destinationHref, folderHref, go } from "../../router";
+import { accountHref, destinationHref, folderHref, go, todoHref } from "../../router";
 import { createFolderCache } from "../folderCache";
 import { createNameplate, createQuotaMeter } from "../railFooter";
 import { createRail, createRailView } from "../rail";
 import { BIN_KEY } from "../bin/bin";
 import type { LibraryCtx } from "./libraryContext";
-import { ADMIN_KEY } from "./library";
+import { ADMIN_KEY, TODO_KEY } from "./library";
+import type { RailChildren } from "../rail";
+import { FIXED_VIEWS, openCount, sameView, viewPath, type TodoView } from "../todo/todoModel";
+import type { IconName } from "../../ui/icons";
 
 /** Builds the folder cache, the rail, the nameplate and the storage meter onto `ctx`. */
+/** To-Do's rows in the rail: its views, then the person's lists. */
+const VIEW_ROWS: Record<(typeof FIXED_VIEWS)[number], { name: string; icon: IconName }> = {
+  inbox: { name: "Inbox", icon: "inbox" },
+  planned: { name: "Planned", icon: "clock" },
+  all: { name: "All", icon: "stack" },
+  completed: { name: "Completed", icon: "done" },
+};
+
 export function installLibraryRail(ctx: LibraryCtx): void {
   const { st } = ctx;
+  /**
+  * To-Do's rows unfold while you are in To-Do and fold everywhere else; the
+  * chevron overrides that until you next enter or leave To-Do.
+  */
+  let todoFolded = false;
+  let todoPeek = false;
+  let wasOnTodo = false;
+  function todoChildren(): RailChildren | null {
+    const snap = ctx.todo?.snapshot();
+    if (!snap?.enabled) return null;
+    const onTodo = st.destination === TODO_KEY;
+    if (onTodo !== wasOnTodo) {
+      todoFolded = false;
+      todoPeek = false;
+      wasOnTodo = onTodo;
+    }
+    const expanded = onTodo ? !todoFolded : todoPeek;
+    const here = ctx.todo.view();
+    const row = (v: TodoView, name: string, icon: IconName) => ({
+      icon,
+      name,
+      count: openCount(snap, v),
+      current: onTodo && here !== null && sameView(here, v),
+      select: () => go(todoHref(viewPath(v))),
+    });
+    return {
+      expanded,
+      toggleLabel: expanded ? "Fold the To-Do lists" : "Unfold the To-Do lists",
+      onToggle: () => {
+        if (onTodo) todoFolded = !todoFolded;
+        else todoPeek = !todoPeek;
+        ctx.rail.build();
+      },
+      rows: [
+        ...FIXED_VIEWS.map((k) => row({ kind: k }, VIEW_ROWS[k].name, VIEW_ROWS[k].icon)),
+        ...snap.lists.map((l) => row({ kind: "list", id: l.id }, l.title, "list")),
+      ],
+    };
+  }
   // `aria-busy` until the walk lands: counts are provisional.
   const nav = el("nav", { class: "nav", "aria-label": "Folders", "aria-busy": "true" });
 
@@ -48,6 +98,11 @@ export function installLibraryRail(ctx: LibraryCtx): void {
         // --- BIN COUNT ---
         case BIN_KEY:
           return ctx.bin.count();
+        // --- TO-DO COUNT --- open tasks, everywhere
+        case TODO_KEY: {
+          const snap = ctx.todo?.snapshot();
+          return snap?.enabled ? openCount(snap, { kind: "all" }) : 0;
+        }
         // --- ADMIN COUNT ---
         // None: a household headcount is an ambient stat about housemates.
         default:
@@ -69,6 +124,9 @@ export function installLibraryRail(ctx: LibraryCtx): void {
       }
     },
     isAdmin: () => ctx.identity.isAdmin,
+    // To-Do only while the server keeps to-dos: an off switch is not a place to go.
+    destinationShown: (key) => key !== TODO_KEY || ctx.todo?.snapshot()?.enabled === true,
+    destinationChildren: (key) => (key === TODO_KEY ? todoChildren() : null),
     onSettled: () => ctx.render.renderGallery({ rail: false }),
     onLabelsSettled: () => ctx.render.relabelFolders(),
   });

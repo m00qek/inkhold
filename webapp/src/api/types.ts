@@ -13,6 +13,7 @@ import type { PdfLink } from "../core/types";
 import type { Entry, FileHistory, Hash, Id, Listing, NoteMeta, PageRef, PageText, RestoredVersion } from "../core/types";
 import type { Bin, Restored, Trashed } from "../core/binTypes";
 import type { AccountSecurity, MyDevice, StorageBreakdown, VersionPolicy, VersionPolicyChange } from "./accountTypes";
+import type { NewTodoTask, TodoSnapshot, TodoTaskPatch } from "./todoTypes";
 import type { AdminDevice, AdminHealth, AdminQuota, AdminRetention, AdminUser, AdminBackups, BackupNotice } from "./adminTypes";
 import type { UploadConflictMode } from "./client";
 
@@ -176,6 +177,26 @@ export interface Api {
 
   /** Forget a directory no longer used, so its last failure stops warning. 404 `NO_SUCH_BACKUP_DIR`. */
   adminForgetBackupDir(dir: string): Promise<AdminBackups>;
+
+  // --- TO-DO ---
+  // The signed-in person's own lists and tasks; each change reaches the tablet
+  // at its next sync. While the server keeps no To-Do, `todo()` answers
+  // `enabled: false` and every edit is a 409 `TODO_SYNC_OFF`.
+
+  todo(): Promise<TodoSnapshot>;
+  /** Returns the new list's id. 400 `BAD_TITLE` for an empty or overlong name. */
+  todoCreateList(title: string): Promise<string>;
+  todoRenameList(id: string, title: string): Promise<void>;
+  /** The list and every task in it. */
+  todoDeleteList(id: string): Promise<void>;
+  /** Returns the new task's id; it goes on top of its list. 404 `NO_SUCH_LIST`. */
+  todoCreateTask(task: NewTodoTask): Promise<string>;
+  /** 404 `NO_SUCH_TASK` / `NO_SUCH_LIST`. A move puts the task on top of its new list. */
+  todoUpdateTask(id: string, patch: TodoTaskPatch): Promise<void>;
+  /** Gone from the tablet at its next sync. Deleting what is gone is fine. */
+  todoDeleteTask(id: string): Promise<void>;
+  /** The open tasks of one list (null: the Inbox), in this order. */
+  todoReorder(listId: string | null, ids: string[]): Promise<void>;
 
   // --- HISTORY ---
   // Note-scoped by `:id` (the `/note/:id` ownership gate); per-version routes

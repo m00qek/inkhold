@@ -307,7 +307,12 @@ hardware unless marked otherwise.
   by an explicit delete (which always succeeds: one failed delete aborts the
   app's whole sync) or with their account. Deleting a list takes its tasks.
   Behind `config.todo_sync`, off until proven on a tablet; off, every call is
-  refused. **The library id does NOT protect to-dos**: its reset at sign-in
+  refused. The browser edits the same rows (`services/todo_web.zig`,
+  `/api/controlplane/todo`, the To-Do page in `webapp/src/pages/todo/`) the way
+  the tablet's app does: server-stamped times, new and moved tasks on top
+  (sort 0, newest sort time), a reorder as positions plus one sort time.
+  "Waiting for the tablet" is schema v21: a browser edit marks the row and the
+  account, and a tablet's next task listing clears it. **The library id does NOT protect to-dos**: its reset at sign-in
   (`doLogin: clear table of private cloud`, `clearSyncTable`) clears file
   records only (seen on hardware 2026-11-05). What protects them is a prompt
   the same sign-in shows whenever the tablet remembers a previous account,

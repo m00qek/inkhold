@@ -3,8 +3,7 @@
 // `DESTINATIONS`); the painter knows nothing about them. Also the one home of
 // container flattening, shared by the rail, the breadcrumb and the root gallery.
 
-import { el } from "../ui/dom";
-import { ICONS, svg, type IconName } from "../ui/icons";
+import { type IconName } from "../ui/icons";
 import { type DestinationKey } from "../core/destinations";
 import type { Entry, Folder, Id } from "../core/types";
 
@@ -120,6 +119,8 @@ export interface Destination {
 export const DESTINATIONS: Destination[] = [
   // Under "Other": it isn't a folder (nothing moves in, it doesn't sync).
   { key: "bin", label: "Recycle bin", icon: "trash" },
+  // The tablet's to-dos; shown only while the server keeps them (`destinationShown`).
+  { key: "todo", label: "To-Do", icon: "todo" },
   // No count: a badge here would be a stat about housemates.
   { key: "admin", label: "Admin", icon: "users", adminOnly: true },
 ];
@@ -159,7 +160,18 @@ export type RailRow =
       depth: number;
       current: boolean;
       select(): void;
+      /** A chevron that folds the rows beneath (To-Do's views). */
+      toggle?: { expanded: boolean; label: string; onToggle(): void };
     };
+
+/** Rows nested under a destination, e.g. To-Do's views and lists. */
+export interface RailChildren {
+  expanded: boolean;
+  /** The chevron's accessible name; says what it will do. */
+  toggleLabel: string;
+  onToggle(): void;
+  rows: readonly { icon: IconName; name: string; count: number; current: boolean; select(): void }[];
+}
 
 export interface RailView {
   render(rows: readonly RailRow[]): void;
@@ -185,6 +197,10 @@ export interface RailDeps {
   */
   destinationState(key: string): { icon: IconName; label: string } | null;
   isAdmin(): boolean;
+  /** False hides the row (To-Do while the server keeps none). Default: shown. */
+  destinationShown?(key: string): boolean;
+  /** Rows nested under a destination, or null for none. */
+  destinationChildren?(key: string): RailChildren | null;
   /** Repaint the gallery without rebuilding the rail. */
   onSettled(): void;
   /**
@@ -341,7 +357,7 @@ export function createRail(deps: RailDeps): RailController {
   * A destination's 0 is nothing (empty bin), unlike a folder's, so it is
   * omitted here rather than by the painter. A state wins over a count.
   */
-  function destinationRow(dest: Destination, current: string | null): RailRow {
+  function destinationRow(dest: Destination, current: string | null, children: RailChildren | null): RailRow {
     const state = deps.destinationState(dest.key);
     const count = deps.destinationCount(dest.key);
     return {
@@ -350,14 +366,28 @@ export function createRail(deps: RailDeps): RailController {
       name: dest.label,
       badge: state ? { kind: "state", ...state } : count > 0 ? { kind: "count", value: count } : null,
       depth: 0,
-      current: current === dest.key,
+      // With its rows unfolded one of them is current; folded, the parent stands in.
+      current: current === dest.key && !(children?.expanded && children.rows.some((r) => r.current)),
       select: () => deps.onOpenDestination(dest.key),
+      toggle: children ? { expanded: children.expanded, label: children.toggleLabel, onToggle: children.onToggle } : undefined,
     };
+  }
+
+  function childRows(children: RailChildren): RailRow[] {
+    return children.rows.map((r) => ({
+      kind: "item",
+      icon: r.icon,
+      name: r.name,
+      badge: r.count > 0 ? { kind: "count", value: r.count } : null,
+      depth: 1,
+      current: r.current,
+      select: r.select,
+    }));
   }
 
   function visibleDestinations(): Destination[] {
     const admin = deps.isAdmin();
-    return DESTINATIONS.filter((d) => !d.adminOnly || admin);
+    return DESTINATIONS.filter((d) => (!d.adminOnly || admin) && (deps.destinationShown?.(d.key) ?? true));
   }
 
   function rows(): RailRow[] {
@@ -391,7 +421,11 @@ export function createRail(deps: RailDeps): RailController {
         out.push(folderRow(folder, 0, folderId));
         if (open.has(folder.id)) walk(folder.id, 1);
       }
-      for (const dest of dests) out.push(destinationRow(dest, destination ?? null));
+      for (const dest of dests) {
+        const children = deps.destinationChildren?.(dest.key) ?? null;
+        out.push(destinationRow(dest, destination ?? null, children));
+        if (children?.expanded) out.push(...childRows(children));
+      }
     }
 
     return out;
@@ -481,52 +515,5 @@ export function createRail(deps: RailDeps): RailController {
   };
 }
 
-// ---- the painter ----
-
-/**
-* The DOM half. Knows nothing about categories or padlocks. Names are always
-* set as text: device text must never take a markup path.
-*/
-export function createRailView(nav: HTMLElement): RailView {
-  /** Null paints nothing (the admin row has nothing to count). */
-  function badgeEl(badge: RailBadge | null): HTMLElement | null {
-    if (badge === null) return null;
-    if (badge.kind === "count") return el("span", { class: "nav__count", text: String(badge.value) });
-    // The label moves with the state; the glyph swap alone isn't accessible.
-    return el("span", {
-      class: "nav__state",
-      role: "img",
-      "aria-label": badge.label,
-      title: badge.label,
-      html: svg(ICONS[badge.icon], 1.7),
-    });
-  }
-
-  return {
-    render(rows: readonly RailRow[]): void {
-      nav.replaceChildren(
-        ...rows.map((row) => {
-          if (row.kind === "label") return el("div", { class: "nav__label", text: row.text });
-          const item = el(
-            "button",
-            {
-              class: row.depth > 0 ? "nav__item is-nested" : "nav__item",
-              type: "button",
-              "aria-current": String(row.current),
-            },
-            el("span", { class: "nav__glyph", html: svg(ICONS[row.icon]) }),
-            el("span", { class: "nav__name", text: row.name }),
-            badgeEl(row.badge),
-          );
-          item.style.setProperty("--depth", String(row.depth));
-          item.addEventListener("click", () => row.select());
-          return item;
-        }),
-      );
-    },
-
-    setBusy(busy: boolean): void {
-      nav.setAttribute("aria-busy", String(busy));
-    },
-  };
-}
+// The DOM half lives in `railView.ts`.
+export { createRailView } from "./railView";

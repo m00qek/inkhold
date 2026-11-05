@@ -5,7 +5,7 @@ import type { LibraryCtx } from "./libraryContext";
 export interface LibraryModes {
   /** Shared by keystrokes and the `#/search?q=` route; doesn't touch the URL. */
   applyQuery(next: string): void;
-  setDestinationMode(which: "bin" | "admin" | "account", open: boolean): void;
+  setDestinationMode(which: "bin" | "admin" | "account" | "todo", open: boolean): void;
   setBinMode(open: boolean, count: number, busy?: boolean): void;
 }
 
@@ -16,6 +16,7 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
     // The results belong in the gallery, which the console or account page covers.
     ctx.leaveAdmin();
     ctx.leaveAccount();
+    ctx.leaveTodo();
     st.query = next;
     // Names paint on the keystroke from the cached tree; transcripts arrive after
     // the debounce. `rail: false`: typing can't change the tree.
@@ -23,15 +24,15 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
     ctx.render.renderGallery({ rail: false });
   }
 
-  function setDestinationMode(which: "bin" | "admin" | "account", open: boolean): void {
+  function setDestinationMode(which: "bin" | "admin" | "account" | "todo", open: boolean): void {
     // Mutually exclusive: opening one closes the rest, so flags describe one screen.
     if (open) {
-      for (const other of ["bin", "admin", "account"] as const) {
+      for (const other of ["bin", "admin", "account", "todo"] as const) {
         if (other !== which) ctx.destinationsOpen[other] = false;
       }
     }
     ctx.destinationsOpen[which] = open;
-    const anyOpen = ctx.destinationsOpen.bin || ctx.destinationsOpen.admin || ctx.destinationsOpen.account;
+    const anyOpen = ctx.destinationsOpen.bin || ctx.destinationsOpen.admin || ctx.destinationsOpen.account || ctx.destinationsOpen.todo;
     ctx.root.classList.toggle("is-destination", anyOpen);
 
     // Only takes controls away; each destination shows its own action and

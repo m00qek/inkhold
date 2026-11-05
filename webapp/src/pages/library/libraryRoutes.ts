@@ -1,5 +1,6 @@
 // The library's route handlers: each place a URL names, and opening notes, versions and trashed files.
 
+import { parseView } from "../todo/todoModel";
 import { destinationHref, folderHref, notePageHref, redirect, searchHref } from "../../router";
 import { resolveVersionShort } from "../versionShort";
 import type { Api } from "../../api/types";
@@ -8,10 +9,10 @@ import type { ReaderOrigin } from "../reader/reader";
 import { crumbPath } from "../rail";
 import { BIN_KEY } from "../bin/bin";
 import type { LibraryCtx } from "./libraryContext";
-import { type AppShell, ADMIN_KEY, ACCOUNT_KEY, synthesizeSummary } from "./library";
+import { type AppShell, ADMIN_KEY, ACCOUNT_KEY, TODO_KEY, synthesizeSummary } from "./library";
 
 /** The route handlers of `AppShell`, plus the folder path the reader shows. */
-export interface LibraryRoutes extends Pick<AppShell, "showFolder" | "showSearch" | "showDestination" | "showAccount" | "openNote" | "openNoteVersion" | "openBinNote"> {
+export interface LibraryRoutes extends Pick<AppShell, "showFolder" | "showSearch" | "showDestination" | "showAccount" | "showTodo" | "openNote" | "openNoteVersion" | "openBinNote"> {
   /** Null at the root. Names via `rail.labelFor`, never `folder.name`. */
   currentFolderPath(): string | null;
 }
@@ -77,6 +78,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
       enterPlace();
       ctx.leaveAdmin();
       ctx.leaveAccount();
+      ctx.leaveTodo();
       st.destination = null;
       void ctx.data.navigate(id);
       requestAnimationFrame(() => ctx.galleryEngine.repaintVisible());
@@ -100,6 +102,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
     showDestination(key: string): void {
       enterPlace();
       ctx.leaveAccount();
+      ctx.leaveTodo();
       st.query = "";
       ctx.topbar.searchInput.value = "";
       ctx.search.reset();
@@ -110,6 +113,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
         // --- BIN ROUTE ---
         case BIN_KEY:
           ctx.leaveAdmin(); // one st.destination at a time
+          ctx.leaveTodo();
           st.destination = key;
           ctx.bin.open();
           ctx.rail.build(); // the ctx.bin is open now; repaint the highlight
@@ -119,6 +123,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
           // The bin closes by being repainted over; do it while `destination` is null so
           // the guard lets it through.
           if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
+          ctx.leaveTodo();
           st.destination = key;
           ctx.openAdmin();
           return;
@@ -129,11 +134,26 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
       }
     },
 
+    showTodo(view: string): void {
+      enterPlace();
+      // Same as the account arm: repaint over a mounted bin while `destination` is null.
+      if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
+      ctx.leaveAdmin();
+      ctx.leaveAccount();
+      st.query = "";
+      ctx.topbar.searchInput.value = "";
+      ctx.search.reset();
+      st.destination = TODO_KEY;
+      ctx.todo.open(parseView(view));
+      ctx.rail.build();
+    },
+
     showAccount(): void {
       enterPlace();
       // Same as the admin arm.
       if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
       ctx.leaveAdmin();
+      ctx.leaveTodo();
       st.query = "";
       ctx.topbar.searchInput.value = "";
       ctx.search.reset();

@@ -6,6 +6,7 @@ import type { Entry, FileHistory, FileVersion, Id, Listing, NoteMeta, NoteSummar
 import { isAcceptedUpload, nextAvailableName, uploadExtension } from "../core/fileKind";
 import { fakeAdminMethods } from "./fakeAdmin";
 import { fakeAccountMethods } from "./fakeAccount";
+import { fakeTodoMethods } from "./fakeTodo";
 
 export { FAKE_UPLOAD_HEADROOM, fakeFileHash, MARKED_PDF_ID, PDF_MARK_ID } from "./fakeFixtures";
 import { createBinFake } from "./binFake";
@@ -374,5 +375,6 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     // --- account (self-service) ---
     ...fakeAccountMethods(latency),
+    ...fakeTodoMethods(latency),
   };
 }

@@ -8,6 +8,7 @@
 // Reading a member before the shell assigned it is a programming error that
 // the boot path (every e2e test) surfaces at once.
 
+import type { TodoPage } from "../todo/todoPage";
 import type { Api } from "../../api/types";
 import type { ApiFailureSink } from "../../api/client";
 import type { NoteRenderer } from "../../render/types";
@@ -76,7 +77,7 @@ export interface LibraryCtx {
   * Which destination owns the surface. Tracked per destination because
   * `renderGallery()` runs on sync bumps and must not strip another's mode.
   */
-  destinationsOpen: { bin: boolean; admin: boolean; account: boolean };
+  destinationsOpen: { bin: boolean; admin: boolean; account: boolean; todo: boolean };
 
   // ---- collaborators, built once ----
   folderCache: FolderCache;
@@ -93,6 +94,8 @@ export interface LibraryCtx {
   masonry: Masonry;
   viewers: ViewerSet;
   adminDest: AdminDestination;
+  /** The To-Do destination; built at start so the rail knows whether to show it. */
+  todo: TodoPage;
   bin: BinController;
 
   // ---- the parts ----
@@ -117,6 +120,7 @@ export interface LibraryCtx {
   account(): AccountPage;
   leaveAccount(): void;
   leaveAdmin(): void;
+  leaveTodo(): void;
   openAdmin(): void;
 }
 
@@ -126,7 +130,7 @@ export type LibraryCtxSeed = Pick<
   | "deps" | "identity" | "renderer" | "cache" | "live" | "api" | "historyScope" | "binScope" | "st"
   | "gallery" | "content" | "toastEl" | "destinationsOpen"
   | "failures" | "handled" | "sessionDidExpire" | "toast"
-  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "openAdmin"
+  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "openAdmin"
 >;
 
 /**
