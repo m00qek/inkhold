@@ -51,6 +51,7 @@ pub fn serve(ctx: *Context, req: *Request) !bool {
 
     var stream_file = file;
     var stream_size = st.size;
+    var stream_mtime = st.mtime;
     var content_encoding: ?[]const u8 = null;
     var variant_file: ?std.Io.File = null;
 
@@ -75,15 +76,20 @@ pub fn serve(ctx: *Context, req: *Request) !bool {
         variant_file = vf;
         stream_file = vf;
         stream_size = vst.size;
+        stream_mtime = vst.mtime;
         content_encoding = p.enc;
         break;
     }
     defer if (variant_file) |*vf| vf.close(ctx.io);
 
-    // Hashed `/assets/*` are immutable. `index.html` must be `no-cache`: it
-    // points at the current bundle, and without a validator browsers kept
-    // loading a stale one after a rebuild. Both headers key off the base path.
-    var headers: [4]std.http.Header = undefined;
+    // Hashed `/assets/*` are immutable. Everything else (`index.html`, the
+    // wasm modules, icons) is `no-cache`: its URL never changes, so the
+    // browser must ask each time. The ETag is what makes asking cheap: a
+    // match is a 304 with no body, where without one every visit re-sent the
+    // 1.5 MB PDF renderer. Both headers key off the base path.
+    var etag_buf: [80]u8 = undefined;
+    const etag = etagOf(&etag_buf, stream_size, stream_mtime, content_encoding);
+    var headers: [5]std.http.Header = undefined;
     var nh: usize = 0;
     headers[nh] = .{ .name = "content-type", .value = contentType(rel) };
     nh += 1;
@@ -97,6 +103,15 @@ pub fn serve(ctx: *Context, req: *Request) !bool {
         nh += 1;
         headers[nh] = .{ .name = "vary", .value = "Accept-Encoding" };
         nh += 1;
+    }
+    headers[nh] = .{ .name = "etag", .value = etag };
+    nh += 1;
+
+    var inm_buf: [512]u8 = undefined;
+    if (etagMatches(router.headerCopy(req, "if-none-match", &inm_buf), etag)) {
+        // Same headers minus the body's: content-type stays, it is harmless.
+        try req.respond("", .{ .status = .not_modified, .extra_headers = headers[0..nh] });
+        return true;
     }
 
     var wbuf: [64 * 1024]u8 = undefined;
@@ -112,6 +127,33 @@ pub fn serve(ctx: *Context, req: *Request) !bool {
     _ = fr.interface.streamRemaining(&body.writer) catch return error.StreamTruncated;
     body.end() catch {};
     return true;
+}
+
+/// A strong validator for one served representation: size and modification
+/// time of the file actually sent, plus its encoding, so the `br`, `gzip` and
+/// raw bytes of one path never share a tag. A rebuild rewrites the files and
+/// so changes the tag.
+fn etagOf(buf: []u8, size: u64, mtime: std.Io.Timestamp, encoding: ?[]const u8) []const u8 {
+    const ns: i128 = mtime.nanoseconds;
+    return std.fmt.bufPrint(buf, "\"{x}-{x}{s}{s}\"", .{
+        size,
+        @as(u128, @bitCast(ns)),
+        if (encoding != null) "-" else "",
+        encoding orelse "",
+    }) catch unreachable; // 16 + 32 hex digits, a dash and "gzip" fit in 80
+}
+
+/// True if `If-None-Match` names `etag` (or is `*`). Weak comparison, as
+/// RFC 9110 asks for a GET: a `W/` prefix is ignored.
+fn etagMatches(if_none_match: []const u8, etag: []const u8) bool {
+    var it = std.mem.splitScalar(u8, if_none_match, ',');
+    while (it.next()) |raw| {
+        var tag = std.mem.trim(u8, raw, " \t");
+        if (std.mem.eql(u8, tag, "*")) return true;
+        if (std.mem.startsWith(u8, tag, "W/")) tag = tag[2..];
+        if (std.mem.eql(u8, tag, etag)) return true;
+    }
+    return false;
 }
 
 /// True if `Accept-Encoding` lists `enc` without `;q=0`.
@@ -203,6 +245,11 @@ test "isSafeRel rejects traversal and accepts real paths" {
 test "encodingAccepted: token scan, whitespace, case, and q=0" {
     const acc = encodingAccepted;
     try std.testing.expect(acc("gzip, deflate, br", "br"));
+    try std.testing.expect(etagMatches("\"a-1\"", "\"a-1\""));
+    try std.testing.expect(etagMatches("\"z\", W/\"a-1\"", "\"a-1\""));
+    try std.testing.expect(etagMatches("*", "\"a-1\""));
+    try std.testing.expect(!etagMatches("", "\"a-1\""));
+    try std.testing.expect(!etagMatches("\"a-1-br\"", "\"a-1\""));
     try std.testing.expect(acc("gzip, deflate, br", "gzip"));
     try std.testing.expect(acc("br", "br"));
     try std.testing.expect(acc("  BR  ", "br"));

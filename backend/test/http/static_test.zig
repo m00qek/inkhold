@@ -177,3 +177,64 @@ test "static serving negotiates precompressed variants: br > gzip > raw, honorin
         try std.testing.expect(std.mem.indexOf(u8, resp.head, "content-type: text/css") != null);
     }
 }
+
+test "static serving validates: an ETag per representation, and a 304 with no body when it matches" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    const ctx = &f.ctx;
+
+    var web = std.testing.tmpDir(.{});
+    defer web.cleanup();
+    try web.dir.writeFile(std.testing.io, .{ .sub_path = "big.wasm", .data = "\x00asm\x01\x00\x00\x00RAW" });
+    try web.dir.writeFile(std.testing.io, .{ .sub_path = "big.wasm.br", .data = "BROTLI" });
+
+    var wd_buf: [256]u8 = undefined;
+    ctx.config.web_dir = try std.fmt.bufPrint(&wd_buf, ".zig-cache/tmp/{s}", .{web.sub_path});
+
+    var obuf: [4096]u8 = undefined;
+    var reqbuf: [1024]u8 = undefined;
+    var tag_buf: [128]u8 = undefined;
+    var br_tag_buf: [128]u8 = undefined;
+    var hdr_buf: [160]u8 = undefined;
+
+    const raw_tag = blk: {
+        const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/big.wasm", &.{}, ""), &obuf);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try expectHeaderContains(resp.head, "cache-control: no-cache");
+        const t = try harness.headerValue(resp.head, "etag", &tag_buf);
+        try std.testing.expect(t.len > 2 and t[0] == '"' and t[t.len - 1] == '"');
+        break :blk t;
+    };
+    const br_tag = blk: {
+        const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/big.wasm", &.{
+            .{ .name = "accept-encoding", .value = "br" },
+        }, ""), &obuf);
+        try std.testing.expectEqualStrings("BROTLI", resp.body);
+        break :blk try harness.headerValue(resp.head, "etag", &br_tag_buf);
+    };
+    // The br and raw bytes are different representations: never one tag.
+    try std.testing.expect(!std.mem.eql(u8, raw_tag, br_tag));
+
+    // The browser's revalidation: a match is a 304 with no body.
+    {
+        const inm = try std.fmt.bufPrint(&hdr_buf, "{s}", .{br_tag});
+        const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/big.wasm", &.{
+            .{ .name = "accept-encoding", .value = "br" },
+            .{ .name = "if-none-match", .value = inm },
+        }, ""), &obuf);
+        try std.testing.expectEqual(@as(u16, 304), resp.status);
+        try std.testing.expectEqual(@as(usize, 0), resp.body.len);
+        try expectHeaderContains(resp.head, "cache-control: no-cache");
+    }
+
+    // A tag for another representation is no match: the bytes are sent.
+    {
+        const inm = try std.fmt.bufPrint(&hdr_buf, "{s}", .{raw_tag});
+        const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "GET", "/big.wasm", &.{
+            .{ .name = "accept-encoding", .value = "br" },
+            .{ .name = "if-none-match", .value = inm },
+        }, ""), &obuf);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expectEqualStrings("BROTLI", resp.body);
+    }
+}

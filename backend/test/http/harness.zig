@@ -280,7 +280,8 @@ pub fn headerValue(head: []const u8, name: []const u8, buf: []u8) ![]const u8 {
     const needle = try std.fmt.bufPrint(&needle_buf, "\r\n{s}: ", .{name});
     const at = std.mem.indexOf(u8, lower, needle) orelse return error.HeaderMissing;
     const start = at + needle.len;
-    const end = std.mem.indexOfPos(u8, head, start, "\r\n") orelse return error.HeaderMissing;
+    // The last header may end the head with no line break of its own.
+    const end = std.mem.indexOfPos(u8, head, start, "\r\n") orelse head.len;
     const value = head[start..end];
     if (value.len > buf.len) return error.HeaderTooLong;
     @memcpy(buf[0..value.len], value);
