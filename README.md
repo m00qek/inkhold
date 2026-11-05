@@ -298,6 +298,11 @@ TLS 1.3 is terminated in-process (no reverse proxy needed). Set `tls.enabled =
 true` with a cert and key; `bash scripts/dev-cert.sh` makes a self-signed dev
 certificate to get started.
 
+The server picks the cipher suite, by what is cheap on *its* CPU: AES-GCM where
+the processor has AES instructions, ChaCha20-Poly1305 where it does not (a
+Raspberry Pi 1, 3 or 4). On a Pi 1, AES costs about three times ChaCha20 per
+byte, so leave `cipher_suites` empty unless you have a reason not to.
+
 If a reverse proxy terminates TLS instead, set `trusted_proxy` to its address so
 the per-IP rate limits key on the client in `X-Real-IP` (or the last
 `X-Forwarded-For` hop) rather than on the proxy; have the proxy mark the session
