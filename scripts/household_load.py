@@ -26,6 +26,15 @@ would compete with the server it is measuring.
     zig build -Doptimize=ReleaseSafe
     scripts/household_load.py zig-out/bin/inkhold [--seconds 60] [--people 4] [--think 0]
     scripts/household_load.py --ssh devlab-pi1bplus --remote-binary inkhold-load/inkhold
+    scripts/household_load.py --ssh devlab-pi1bplus --attach 8080 --admin EMAIL:PASSWORD \
+        --seconds 900 --stop-file /tmp/stop-load
+
+`--attach` loads a server that is already running there (say, one a real tablet
+syncs with) instead of a fresh install: it never stops it or deletes anything.
+The admin's own library is browsed as it is and gets no seeded files, so
+nothing new syncs down to that account's tablet; the other people are created
+fresh, with names unique to the run. `--stop-file` ends the evening early
+once that local file exists (e.g. after a real tablet finished syncing).
 """
 import argparse, base64, hashlib, http.client, json, os, random, re, socket, ssl, subprocess, sys, tempfile, threading, time
 
@@ -102,6 +111,14 @@ def challenge(md5_pw, code):
 def md5h(s):
     return hashlib.md5(s.encode()).hexdigest()
 
+def log_in(host, port, stats, email, password):
+    """An existing account's sign-in, no password change."""
+    s = Session(host, port, stats, email)
+    _, r = s.json("POST", "/api/official/user/query/random/code", {"account": email})
+    st, _ = s.json("POST", "/api/official/user/account/login/new", {"account": email, "password": challenge(md5h(password), r["randomCode"])})
+    assert st == 200, f"login {email}: {st}"
+    return s
+
 def sign_in(host, port, stats, email, temp, final):
     s = Session(host, port, stats, email)
     _, r = s.json("POST", "/api/official/user/query/random/code", {"account": email})
@@ -162,9 +179,21 @@ def parse_sample(status_text, stat_text):
 class Server:
     """`inkhold serve` on a temp install, here or on `ssh` host."""
 
-    def __init__(self, binary, ssh, remote_binary, port, tls=None, suites=()):
-        """`tls`: (cert.pem, key.pem) paths here, sent along when remote."""
-        self.ssh, self.port = ssh, port
+    def __init__(self, binary, ssh, remote_binary, port, tls=None, suites=(), attach=False):
+        """`tls`: (cert.pem, key.pem) paths here, sent along when remote.
+        `attach`: use the server already listening on `port` on `ssh`; never stop it."""
+        self.ssh, self.port, self.attached = ssh, port, attach
+        if attach:
+            assert ssh, "--attach needs --ssh"
+            self.host = subprocess.check_output(["ssh", "-G", ssh], text=True).split("\nhostname ")[1].split()[0]
+            # The process that owns the listening port, not a name match: a
+            # pattern can also match the ssh command that runs it.
+            pids = subprocess.check_output(["ssh", "-o", "BatchMode=yes", ssh,
+                                            f"ss -Hltnp 'sport = :{port}' | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u"], text=True).split()
+            assert len(pids) == 1, f"expected one process on port {port}, found {pids}"
+            self.pid = int(pids[0])
+            self.ticks = int(subprocess.check_output(["ssh", "-o", "BatchMode=yes", ssh, "getconf CLK_TCK"]))
+            return
         tls_cfg = ""
         if tls:
             names = ", ".join(f'"{x}"' for x in suites)
@@ -243,6 +272,8 @@ class Server:
         return time.time() - t0
 
     def stop(self):
+        if self.attached:
+            return  # not ours: leave it running, with its data
         if self.ssh:
             subprocess.run(["ssh", "-o", "BatchMode=yes", self.ssh,
                             f"kill {self.pid}; sleep 1; cd && rm -rf {self.dir}"], check=False)
@@ -344,6 +375,9 @@ def main():
     ap.add_argument("--remote-binary", default="inkhold-load/inkhold", help="its path under the remote $HOME")
     ap.add_argument("--tls", nargs=2, metavar=("CERT", "KEY"), help="serve HTTPS with this certificate and key")
     ap.add_argument("--suite", action="append", default=[], help="TLS 1.3 cipher suite to allow (repeatable)")
+    ap.add_argument("--attach", type=int, metavar="PORT", help="load the server already running on --ssh at this port")
+    ap.add_argument("--admin", metavar="EMAIL:PASSWORD", help="with --attach: an existing admin account")
+    ap.add_argument("--stop-file", help="end the evening early once this local file exists")
     a = ap.parse_args()
     global TLS_CTX
     if a.tls:
@@ -353,30 +387,42 @@ def main():
     global THINK_SCALE
     THINK_SCALE = a.think
     binary = os.path.abspath(a.binary)
-    port = free_port() if not a.ssh else 18400
+    port = a.attach or (free_port() if not a.ssh else 18400)
+    if a.attach and not a.admin:
+        ap.error("--attach needs --admin EMAIL:PASSWORD")
     stats = Stats()
     rng = random.Random(7)
 
-    srv = Server(binary, a.ssh, a.remote_binary, port, tls=a.tls, suites=a.suite)
+    srv = Server(binary, a.ssh, a.remote_binary, port, tls=a.tls, suites=a.suite, attach=bool(a.attach))
     try:
-        temp = srv.first_run_password()
         P = srv.port
         H = srv.host
         if True:
             # ---- the household -------------------------------------------------
-            people = [sign_in(H, P, stats, "ana@home.lan", temp, "ana-pw")]
+            if a.attach:
+                admin_email, admin_pw = a.admin.split(":", 1)
+                people = [log_in(H, P, stats, admin_email, admin_pw)]
+                suffix = f"-{int(time.time()) % 100000}"
+            else:
+                admin_email, admin_pw = "ana@home.lan", "ana-pw"
+                people = [sign_in(H, P, stats, admin_email, srv.first_run_password(), admin_pw)]
+                suffix = ""
             admin = people[0]
-            _, r = admin.json("POST", "/api/official/user/query/random/code", {"account": "ana@home.lan"})
-            st, _ = admin.json("POST", "/api/admin/elevate", {"password": challenge(md5h("ana-pw"), r["randomCode"])})
+            _, r = admin.json("POST", "/api/official/user/query/random/code", {"account": admin_email})
+            st, _ = admin.json("POST", "/api/admin/elevate", {"password": challenge(md5h(admin_pw), r["randomCode"])})
             assert st == 200, f"elevate: {st}"
             for name in ["rui", "bia", "leo"][: a.people - 1]:
-                _, created = admin.json("POST", "/api/admin/users", {"email": f"{name}@home.lan"})
-                people.append(sign_in(H, P, stats, f"{name}@home.lan", created["temporaryPassword"], f"{name}-pw"))
+                email = f"{name}{suffix}@home.lan"
+                _, created = admin.json("POST", "/api/admin/users", {"email": email})
+                people.append(sign_in(H, P, stats, email, created["temporaryPassword"], f"{name}-pw"))
 
             # ---- their libraries: every notebook a distinct one ----------------
+            # Attached, the admin's library is a real tablet's: browse it as it is.
             t_seed = time.perf_counter()
             seeded = 0
             for i, s in enumerate(people):
+                if a.attach and s is admin:
+                    continue
                 for k, path in enumerate(NOTES * 4):
                     data = unique_note(open(path, "rb").read(), 0x1000 * (i + 1) + k)
                     assert upload(s, f"notebook-{k}.note", data, kind="seed") == 200
@@ -398,14 +444,16 @@ def main():
                 # Its own connection and session: an http.client connection is not
                 # shared between threads (sharing one stalled a request for 15 s).
                 tab = Session(H, P, stats, f"tablet{t}")
-                tab.cookie = people[t].cookie
+                # Attached, the admin is a real tablet's account: the simulated
+                # tablets sync as the others, so nothing lands on the real one.
+                tab.cookie = people[t + 1 if a.attach else t].cookie
                 threads.append(threading.Thread(target=tablet, args=(tab, stop, random.Random(rng.random()), f"tablet{t}"), daemon=True))
             before = srv.sample()
             peak = dict(before)
             t0 = time.time()
             for t in threads:
                 t.start()
-            while time.time() - t0 < a.seconds:
+            while time.time() - t0 < a.seconds and not (a.stop_file and os.path.exists(a.stop_file)):
                 time.sleep(1.0)
                 cur = srv.sample()
                 for k in ("RssAnon", "VmRSS", "Threads"):
