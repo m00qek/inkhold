@@ -190,6 +190,15 @@ describe("in-document search, on the real engine", () => {
     expect(ordinals(await search.search(NOTE_MD5, "reuniao caligrafia"))).toEqual([3]);
   });
 
+  it("a quoted phrase: only the segments where its words sit together, in order", async () => {
+    const { search } = docs();
+    expect(ordinals(await search.search(NOTE_MD5, '"do projeto"'))).toEqual([0, 11]);
+    expect(ordinals(await search.search(NOTE_MD5, '"projeto do"'))).toEqual([]);
+    expect(ordinals(await search.search(NOTE_MD5, '"mais uma reuniao"'))).toEqual([11]);
+    // Unquoted, the same words anywhere in the segment still match.
+    expect(ordinals(await search.search(NOTE_MD5, "projeto do"))).toEqual([0, 11]);
+  });
+
   it("names the terms and the counts the viewer marks from", async () => {
     const { search } = docs();
     const r = await search.search(NOTE_MD5, "projeto");

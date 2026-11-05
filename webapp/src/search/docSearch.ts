@@ -6,6 +6,7 @@ import type { CoreLoader, TermsDocument } from "./indexEngine";
 import { createSearchEngine, type SearchEngine } from "./searchEngine";
 import { httpTextTransport, type DocumentText, type TextTransport } from "./docText";
 import { words } from "./fold";
+import { holdsAll, phrasesOf, withExpansions } from "./phrase";
 import { openTextStore, type TextStore } from "../cache/textStore";
 import type { Expansion } from "./localSearch";
 
@@ -195,10 +196,12 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
       // matching fails even on correct spellings.
       const answer = await engine.query(query, ALL_SEGMENTS, true, signal);
       const plan = planMarks(query, answer.expansions);
+      // A quoted phrase: only segments where its words sit together.
+      const phrases = withExpansions(phrasesOf(query), answer.expansions);
       const segments: DocSegmentMatch[] = [];
       for (const hit of answer.hits) {
         const seg = hit.md5 === md5 ? byOrdinal.get(hit.page) : undefined;
-        if (!seg) continue;
+        if (!seg || !holdsAll(seg.t, phrases)) continue;
         const { terms, matches } = countMarks(seg.t, plan);
         segments.push({ segment: seg.p, offset: seg.o, length: seg.l, matches, terms });
       }

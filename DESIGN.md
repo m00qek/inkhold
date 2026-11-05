@@ -535,6 +535,14 @@ one-shot frame plus `retry:`, never a 503.
   too short, opening to the notes search can't fully read and why. The
   tablet's titles and keywords are not indexed; none of the hub's notes had
   any (2026-11-05).
+- **Quoted phrases** (`search/phrase.ts`): `"passé composé"` wants the words
+  together, in order. The terms are one set per page, so the index finds the
+  candidate pages and the page text decides: library search checks against
+  the text the browser holds (`searchService.checkPhrases`), keeping and
+  counting, never dropping, a document whose text it doesn't hold ("N results
+  couldn't be checked"); in-document find checks the segments it already
+  loaded; names and to-dos check their own words. A quote still being typed is
+  a phrase whose last word may be a start; a single quoted word is a word.
 - **Excerpts** (`search/excerpt.ts`, `pages/searchExcerpts.ts`): a result's
   line is cut in the browser from text it already holds; a search never
   fetches text. After each sync the browser keeps text ahead of time

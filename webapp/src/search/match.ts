@@ -10,6 +10,7 @@
 // widening, like the index's typo ladder.
 
 import { fold, words } from "./fold";
+import { holdsAll, phrasesOf, type Phrase } from "./phrase";
 
 /** A query ready to test names against; null when it has no words. */
 export interface NameQuery {
@@ -18,17 +19,19 @@ export interface NameQuery {
   readonly start: string;
   /** The fallback's: the folded query, matched anywhere in the folded name. */
   readonly inside?: string;
+  /** Quoted phrases: their words next to each other, in order (`phrase.ts`). */
+  readonly phrases?: readonly Phrase[];
 }
 
 export function nameQuery(q: string): NameQuery | null {
   const terms = words(q);
   if (terms.length === 0) return null;
-  return { whole: terms.slice(0, -1), start: terms[terms.length - 1]! };
+  return { whole: terms.slice(0, -1), start: terms[terms.length - 1]!, phrases: phrasesOf(q) };
 }
 
 /** The fallback: the typed text, folded, anywhere in a name. Null when blank. */
 export function insideQuery(q: string): NameQuery | null {
-  const inside = fold(q).replace(/\s+/g, " ").trim();
+  const inside = fold(q).replace(/"/g, "").replace(/\s+/g, " ").trim();
   return inside === "" ? null : { whole: [], start: "", inside };
 }
 
@@ -45,7 +48,8 @@ export function matchesName(text: string, query: NameQuery | null): boolean {
   if (query.inside !== undefined) return fold(text).includes(query.inside);
   const have = words(text);
   if (!query.whole.every((t) => have.includes(t))) return false;
-  return have.some((w) => w.startsWith(query.start));
+  if (!have.some((w) => w.startsWith(query.start))) return false;
+  return holdsAll(text, query.phrases ?? []);
 }
 
 /** A word of the name, by where it sits in the original string. */

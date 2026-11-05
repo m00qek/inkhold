@@ -173,6 +173,14 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     const matched = expansionBlock(expansions, results);
     if (matched) gallery.append(matched);
 
+    // A phrase checked against text the browser doesn't hold for every result.
+    const unchecked = searchState.kind === "results" ? (searchState.unchecked ?? 0) : 0;
+    if (unchecked > 0 && results.some((r) => r.pages.length > 0)) {
+      gallery.append(
+        el("p", { class: "hits__notice", role: "status", text: `${plural(unchecked, "result")} couldn't be checked for the exact phrase: ${unchecked === 1 ? "its" : "their"} text isn't in this browser yet.` }),
+      );
+    }
+
     if (results.length > 0) {
       const grow = resultsMayGrowLine(pending);
       if (grow) gallery.append(el("p", { class: "hits__notice", role: "status", text: grow }));

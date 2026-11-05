@@ -37,6 +37,11 @@ export interface LocalResults {
   readonly documents: readonly LocalHit[];
   /** Non-empty only when the ladder answered, for "matched X". */
   readonly expansions: readonly Expansion[];
+  /**
+   * Documents kept for a quoted phrase without being checked: their text is
+   * not in the browser, so whether the words sit together is not known.
+   */
+  readonly unchecked?: number;
 }
 
 export interface LocalSearch {

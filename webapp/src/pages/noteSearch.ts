@@ -28,6 +28,8 @@ export type SearchState =
       documents: readonly LocalHit[];
       /** What the typo ladder substituted, per token rather than per document. */
       expansions: readonly Expansion[];
+      /** Kept for a quoted phrase without being checked (`LocalResults.unchecked`). */
+      unchecked?: number;
     }
   | { kind: "error"; query: string };
 
@@ -84,7 +86,14 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
     try {
       const results = await engine.search(query, ac.signal);
       if (mine !== token) return; // a later keystroke superseded us — drop it
-      view.setState({ kind: "results", query, documents: results.documents, expansions: results.expansions });
+      view.setState({
+        kind: "results",
+        query,
+        documents: results.documents,
+        expansions: results.expansions,
+        // Only a phrase search that couldn't check everything says so.
+        ...(results.unchecked ? { unchecked: results.unchecked } : {}),
+      });
     } catch (e) {
       if (mine !== token) return;
       if (dispatchApiFailure(failures, e)) return;

@@ -8,7 +8,9 @@ import type { CoreLoader } from "./indexEngine";
 import type { IndexSync } from "./indexSync";
 import { createIndexSearch, type LiveDocument } from "./indexSearch";
 import { createTextPrefetch, type TextPrefetch } from "./textPrefetch";
-import type { LocalSearch } from "./localSearch";
+import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
+import { holdsAll, phrasesOf, withExpansions } from "./phrase";
+import { openTextStore, type TextStore } from "../cache/textStore";
 
 /** The manifest costs ~150 ms on a Pi and device syncs burst; much longer feels like "not findable yet". */
 const COALESCE_MS = 1500;
@@ -20,6 +22,8 @@ export interface SearchServiceOptions {
   /** The cached file listing, the offline stand-in for the manifest. */
   listing?: () => readonly LiveDocument[];
   textPrefetch?: TextPrefetch;
+  /** The browser's document text, to check quoted phrases against. */
+  store?: Pick<TextStore, "get">;
 }
 
 export interface SearchService extends LocalSearch {
@@ -40,6 +44,12 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
   const local = createIndexSearch({ sync: opts.sync, load: opts.load, listing: opts.listing });
   const textPrefetch = opts.textPrefetch ?? createTextPrefetch();
   const coalesceMs = opts.coalesceMs ?? COALESCE_MS;
+  let store = opts.store ?? null;
+
+  const phraseCheck = (res: LocalResults) => {
+    store ??= openTextStore();
+    return checkPhrases(res, (md5) => local.indexVersion(md5), store);
+  };
 
   let timer: ReturnType<typeof setTimeout> | null = null;
   let running: Promise<void> | null = null;
@@ -79,7 +89,7 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
     get ready() {
       return local.ready;
     },
-    search: (query, signal) => local.search(query, signal),
+    search: (query, signal) => local.search(query, signal).then(phraseCheck),
 
     refresh,
 
@@ -104,4 +114,34 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
       local.drop();
     },
   };
+}
+
+/**
+ * A quoted phrase: the index found pages holding its words; keep the pages
+ * whose text holds them next to each other. A document whose text isn't in
+ * the browser is kept, and counted in `unchecked`, rather than guessed about.
+ */
+export async function checkPhrases(
+  res: LocalResults,
+  indexVersion: (md5: string) => number | null,
+  store: Pick<TextStore, "get">,
+): Promise<LocalResults> {
+  const phrases = withExpansions(phrasesOf(res.query), res.expansions);
+  if (phrases.length === 0) return res;
+  const kept: LocalHit[] = [];
+  let unchecked = 0;
+  for (const doc of res.documents) {
+    const v = indexVersion(doc.md5);
+    const text = v === null ? null : await store.get(doc.md5, v).catch(() => null);
+    if (!text) {
+      unchecked++;
+      kept.push(doc);
+      continue;
+    }
+    const bySegment = new Map(text.segments.map((seg) => [seg.p, seg.t]));
+    const pages = doc.pages.filter((p) => holdsAll(bySegment.get(p) ?? "", phrases));
+    if (pages.length > 0) kept.push({ ...doc, pages });
+  }
+  const totalPages = kept.reduce((n, d) => n + d.pages.length, 0);
+  return { ...res, documents: rankDocuments(kept), totalPages, unchecked };
 }

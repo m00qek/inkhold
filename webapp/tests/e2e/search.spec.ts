@@ -320,6 +320,31 @@ test.describe("universal search", () => {
     await expect(page.locator(".coverage__line")).toBeVisible();
   });
 
+  test("a quoted phrase matches its words together and in order, in results and in the note", async ({ page }) => {
+    await signedIn(page);
+    const index = await mockSearchIndex(page, { rows: INDEX_ROWS, documents: INDEX_DOCS });
+    const text = await mockDocText(page, INDEX_TEXT);
+    await page.goto("/");
+    await railSettled(page);
+    await expect.poll(() => index.streamHits(), { timeout: 20_000 }).toBe(1);
+    // The phrase is checked against prefetched text: wait for it to be held.
+    await expect.poll(() => text.searchPaths().filter((p) => p.startsWith("/api/controlplane/text/")).length, { timeout: 20_000 }).toBeGreaterThan(0);
+
+    const row = results(page).filter({ hasText: "Project Aurora — kickoff" });
+    await searchBox(page).fill('"budget serving"');
+    await expect(page.locator(".gallery .empty").first()).toContainText("No matches", { timeout: 20_000 });
+    await expect(row).toHaveCount(0);
+
+    await searchBox(page).fill('"serving budget"');
+    await expect(row).toHaveCount(1, { timeout: 20_000 });
+    await expect(row.locator(".card__excerpt mark").first()).toHaveText(/^serving$/i, { timeout: 20_000 });
+
+    await row.locator(".card__open").click();
+    await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "Find in this note" })).toHaveValue('"serving budget"');
+    await expect(page.locator(".findbar__count")).toHaveText(/^1 of \d+$/, { timeout: 20_000 });
+  });
+
   test("a transcript hit shows the line where the words matched, and opens on its page", async ({ page }) => {
     await signedIn(page);
     await mockSearchIndex(page, { rows: INDEX_ROWS, documents: INDEX_DOCS });
