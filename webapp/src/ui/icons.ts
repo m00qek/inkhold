@@ -31,6 +31,8 @@ export const ICONS = {
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   stack: '<rect x="8" y="8" width="12" height="12" rx="1.5"/><path d="M4 16V5a1 1 0 0 1 1-1h11"/>',
   done: '<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
+  /** A bare check mark, for drawing inside a ring of its own. */
+  tick: '<path d="m7 12.5 3.2 3.2L17 9"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
   move: '<path d="M4 7h13l-3-3M20 17H7l3 3"/>',

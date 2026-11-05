@@ -218,8 +218,8 @@
   color: var(--sheet);
 }
 .todo-check svg {
-  width: 22px;
-  height: 22px;
+  width: 16px;
+  height: 16px;
   opacity: 0;
 }
 .todo-row.is-done .todo-check__ring {

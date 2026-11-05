@@ -134,7 +134,7 @@ function row(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLE
   const check = el(
     "button",
     { class: "todo-check", type: "button", "aria-pressed": String(t.done), "aria-label": `${t.done ? "Mark as not done" : "Mark as done"}: ${t.title}`, disabled: p.busy },
-    el("span", { class: "todo-check__ring", "aria-hidden": "true", html: svg(ICONS.done) }),
+    el("span", { class: "todo-check__ring", "aria-hidden": "true", html: svg(ICONS.tick, 2.4) }),
   );
   check.addEventListener("click", (e) => {
     e.stopPropagation();
