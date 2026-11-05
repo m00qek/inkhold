@@ -315,8 +315,11 @@ hardware unless marked otherwise.
   account, and a tablet's next task listing clears it. A lassoed task's
   handwriting is cut in the browser (`webapp/src/pages/todo/todoInk.ts`): the
   task's page is fetched and rendered once, the words it was lassoed from are
-  found in the page's recognized text, and only that crop is kept, in the
-  persistent thumbnail store under the page's version. Those words are schema
+  found in the page's recognized text, and only the strokes of that crop are
+  kept (paper and template lines turned transparent, trimmed to the ink), in
+  the persistent thumbnail store under the page's version. It is shown as a
+  mask painted in the theme's ink, in a chip at the row's edge that also opens
+  the note. Those words are schema
   v22's `link_text`: the title the task had when its link arrived, kept through
   renames so the match survives them. **The library id does NOT protect to-dos**: its reset at sign-in
   (`doLogin: clear table of private cloud`, `clearSyncTable`) clears file

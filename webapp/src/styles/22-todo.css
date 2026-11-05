@@ -171,6 +171,13 @@
   color: var(--ink-soft);
 }
 .todo-card__peek li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.todo-card__task {
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -182,7 +189,7 @@
   display: inline-block;
   width: 9px;
   height: 9px;
-  margin-right: 8px;
+  flex: none;
   border: 1.3px solid var(--ink-soft);
   border-radius: 50%;
   vertical-align: 0;
@@ -220,6 +227,8 @@
 .todo-hit {
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);
+  grid-auto-columns: auto;
+  grid-auto-flow: column;
   gap: var(--sp-3);
   align-items: start;
   padding: 10px var(--sp-4);
@@ -368,7 +377,9 @@
 .todo-row {
   position: relative;
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
+  grid-template-columns: 24px minmax(0, 1fr);
+  grid-auto-columns: auto;
+  grid-auto-flow: column;
   align-items: start;
   gap: 4px var(--sp-3);
   padding: 10px var(--sp-4);
@@ -512,26 +523,80 @@
 .todo-title-edit:focus {
   outline: none;
 }
-/* A lassoed task's handwriting, cut from its page: under the title, about a
-   written line high, never wider than the row. Rendered in the page's theme. */
-.todo-ink {
-  display: block;
-  max-width: 100%;
-  height: auto;
-  max-height: 44px;
-  margin-top: 4px;
-  border-radius: 3px;
+/* A lassoed task's chip, at the row's edge beside its ⋯: a slip of paper with
+   the handwriting the task was cut from, and the button to its note. The
+   strokes are a mask painted in the theme's ink, so one cut serves both themes.
+   Until the strip is in (or when the words weren't found), the page number. */
+.todo-chip {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  height: var(--hit-target);
+  min-width: var(--hit-target);
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--sheet);
+  color: var(--ink-soft);
+  font: var(--fs-caption) var(--font-mono);
+  cursor: pointer;
 }
-.todo-ink-slot {
+.todo-chip:hover {
+  border-color: var(--ink-soft);
+  color: var(--ink);
+}
+.todo-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.todo-chip__page {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.todo-chip__page svg {
+  width: 13px;
+  height: 13px;
+}
+/* As wide as its height allows, up to the chip's width; a long line shrinks. */
+.todo-ink {
+  --ink-h: 20px;
+  --ink-max: 116px;
   display: block;
-  min-height: 1px;
+  width: min(calc(var(--ink-h) * var(--ink-ar)), var(--ink-max));
+  aspect-ratio: var(--ink-ar);
+  background: var(--paper-ink);
+  -webkit-mask: var(--ink-src) center / contain no-repeat;
+  mask: var(--ink-src) center / contain no-repeat;
+}
+.todo-row.is-done .todo-chip .todo-ink {
+  opacity: 0.45;
+}
+/* Only a picture where the whole card or result is the link. */
+.todo-chip--still {
+  cursor: inherit;
+  pointer-events: none;
+}
+/* Empty until its strip is in: no room taken, but still there to come into view. */
+.todo-chip--still:not(.has-ink) {
+  visibility: hidden;
+  width: 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+.todo-card__peek .todo-chip {
+  height: 22px;
+  min-width: 0;
+  padding: 0 6px;
+  margin-left: auto;
 }
 .todo-card__peek .todo-ink {
-  max-height: 24px;
-  margin: 2px 0 2px 17px;
+  --ink-h: 14px;
+  --ink-max: 82px;
 }
-.todo-hit .todo-ink {
-  max-height: 36px;
+.todo-hit .todo-chip {
+  margin-top: -2px;
 }
 
 .todo-meta {
@@ -545,16 +610,6 @@
 }
 .todo-meta .is-overdue {
   color: var(--margin-ink);
-}
-.todo-meta__note {
-  color: inherit;
-  text-decoration: underline;
-  text-decoration-color: var(--line);
-  text-underline-offset: 3px;
-}
-.todo-meta__note:hover {
-  color: var(--ink);
-  text-decoration-color: currentColor;
 }
 
 /* A task's ⋯: always there (a touch screen has no hover), quiet until the row

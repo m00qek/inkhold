@@ -174,17 +174,18 @@ test.describe("To-Do", () => {
     await expect(row(page, "after snapshot")).toBeVisible();
   });
 
-  test("Planned: no reorder, no repeated Overdue, and the notebook link opens its page", async ({ page }) => {
+  test("Planned: no reorder, no repeated Overdue, and the note chip opens its page", async ({ page }) => {
     await openTodo(page, "/planned");
     const overdue = page.locator(".todo-group", { has: page.locator(".todo-group__head", { hasText: "Overdue" }) });
     await expect(overdue.locator(".todo-meta")).not.toContainText("Overdue");
     await page.getByRole("button", { name: /^Actions for / }).first().click();
     await expect(page.getByRole("menuitem", { name: /^Move (up|down)$/ })).toHaveCount(0);
+    await page.keyboard.press("Escape");
 
     await openTodo(page, "/list/" + "1".padStart(32, "0"));
-    const link = page.locator(".todo-meta__note").first();
-    await expect(link).toHaveText(/^From .+, page \d+$/);
-    await link.click();
+    const chip = row(page, "Revisar o passé composé").getByRole("button", { name: /^Open .+, page 2$/ });
+    await expect(row(page, "Revisar o passé composé")).not.toContainText("From");
+    await chip.click();
     await expect(page).toHaveURL(/#\/note\/101\/page\/2$/);
     // The note takes To-Do's place, and Back says where it returns to.
     await expect(page.locator(".todo")).toBeHidden();
@@ -269,17 +270,20 @@ test.describe("To-Do", () => {
     }
   });
 
-  test("a lassoed task shows its handwriting, cut from its page; no recognized words, no strip", async ({ page }) => {
+  test("a lassoed task shows its handwriting in a chip; no recognized words, the page number", async ({ page }) => {
     await openTodo(page, "/list/" + "1".padStart(32, "0"));
-    await expect(row(page, "Revisar o passé composé").locator("img.todo-ink")).toBeVisible();
-    await expect(row(page, "Estudar").locator(".todo-ink-slot")).toHaveCount(0);
-    // "Haus of gabin" was lassoed on page 3, which has no recognized text in the fixture.
+    const revisar = row(page, "Revisar o passé composé");
+    await expect(revisar.locator(".todo-chip .todo-ink")).toBeVisible();
+    await expect(row(page, "Estudar").locator(".todo-chip")).toHaveCount(0);
+    // "Haus of gabin" was lassoed on page 3, which has no recognized text in the
+    // fixture: its chip keeps the page number, and still opens the note.
     await openTodo(page, "/completed");
     const haus = row(page, "Haus of gabin");
     await expect(haus).toBeVisible();
-    await expect(haus.locator(".todo-ink-slot")).toHaveCount(1);
+    const chip = haus.getByRole("button", { name: /^Open .*, page 3$/ });
+    await expect(chip).toHaveText("3");
     await page.waitForTimeout(500);
-    await expect(haus.locator("img.todo-ink")).toHaveCount(0);
+    await expect(haus.locator(".todo-ink")).toHaveCount(0);
   });
 
   test("New list asks for a name and opens the list", async ({ page }) => {

@@ -44,7 +44,6 @@ import { createLibraryRoutes } from "./libraryRoutes";
 import { warmWasm } from "../../core/warmWasm";
 import { createTodoPage } from "../todo/todoPage";
 import { createTodoInk } from "../todo/todoInk";
-import { currentTheme } from "../../ui/theme";
 
 export const ADMIN_KEY = "admin";
 /**
@@ -244,7 +243,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   ctx.pdfThumbs = createPdfThumbs();
   installLibraryEngines(ctx);
   ctx.exporter = createExporter({ api, renderer });
-  ctx.todoInk = createTodoInk({ api, renderer, store: deps.persistentThumbs ?? null, theme: currentTheme });
+  ctx.todoInk = createTodoInk({ api, renderer, store: deps.persistentThumbs ?? null });
 
   // ---- viewers ----
   ctx.viewers = createViewerSet(createLibraryViewerDeps(ctx), content, gallery);

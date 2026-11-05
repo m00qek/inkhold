@@ -230,7 +230,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
       const p: TodoPaint = {
         snap, view, now, title: viewTitle(view, snap.lists), sections: sections(snap, view, now), collapsed,
         selected, editing, hidden: new Set(pendingDelete ? [pendingDelete.task.id] : []), busy, addDue: dueFor(view, now),
-        ink: (t) => host.ink.slot(t),
+        chip: (t, open) => host.ink.chip(t, open),
       };
       const keys = keysHint(p);
       (keys as HTMLDetailsElement).open = keysOpen;

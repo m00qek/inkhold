@@ -127,7 +127,7 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
           ctx.todo.reveal(t.id);
           go(todoHref(viewPath(homeView(t))));
         },
-        (t) => ctx.todoInk.slot(t),
+        (t) => ctx.todoInk.chip(t),
       ),
   });
 

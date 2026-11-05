@@ -45,8 +45,8 @@ export interface TodoPaint {
   busy: boolean;
   /** The date the next added task gets; null: none. */
   addDue: number | null;
-  /** A lassoed task's handwriting, filled in as it scrolls into view (`todoInk.ts`). */
-  ink(task: TodoTask): HTMLElement | null;
+  /** A lassoed task's chip: its handwriting, and with `open` the way to its note (`todoInk.ts`). */
+  chip(task: TodoTask, open?: () => void): HTMLElement | null;
 }
 
 /** Shared by every row's `aria-describedby`: what the keyboard can do. */
@@ -122,7 +122,7 @@ export function overview(p: TodoPaint, a: TodoActions): HTMLElement {
         ? el(
             "ul",
             { class: "todo-card__peek" },
-            ...c.peek.map((t) => el("li", {}, el("span", { class: "todo-card__task", text: t.title }), p.ink(t))),
+            ...c.peek.map((t) => el("li", {}, el("span", { class: "todo-card__task", text: t.title }), p.chip(t))),
             more > 0 ? el("li", { class: "todo-card__more", text: `and ${more} more` }) : null,
           )
         : null,
@@ -252,8 +252,9 @@ function row(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLE
     title = el("span", { class: "todo-title" }, el("span", { text: t.title }), el("span", { class: "todo-strike", "aria-hidden": "true" }));
   }
 
-  const meta = taskMeta(t, p.snap, p.now, { showList: sec.showList, underOverdue: sec.overdue === true, openNote: () => a.openNote(t) });
-  const main = el("div", { class: "todo-row__main" }, title, p.editing === t.id ? null : p.ink(t), meta);
+  // The note is reached by the chip at the row's edge, so the line under the title doesn't name it.
+  const meta = taskMeta(t, p.snap, p.now, { showList: sec.showList, underOverdue: sec.overdue === true, noteShown: true });
+  const main = el("div", { class: "todo-row__main" }, title, meta);
   const r = el(
     "div",
     {
@@ -266,6 +267,7 @@ function row(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLE
     },
     check,
     main,
+    p.chip(t, () => a.openNote(t)),
     rowMenu(t, sec, p, a),
   );
   // Where the list's own order is on screen, a grip to drag the task by. Move
@@ -294,33 +296,21 @@ function row(t: TodoTask, sec: TodoSection, p: TodoPaint, a: TodoActions): HTMLE
 
 /**
  * The line under a task's title: its date (red when late), its list where the
- * view mixes lists, and the notebook it came from.
+ * view mixes lists, and the notebook it came from (unless a chip already shows it).
  * Shared by the rows and the search results. Null when there is nothing to say.
  */
 export function taskMeta(
   t: TodoTask,
   snap: TodoSnapshot,
   now: number,
-  opts: { showList: boolean; underOverdue?: boolean; openNote?: () => void },
+  opts: { showList: boolean; underOverdue?: boolean; noteShown?: boolean },
 ): HTMLElement | null {
   const meta: HTMLElement[] = [];
   const date = dateLine(t, now, opts.underOverdue);
   if (date) meta.push(el("span", { class: date.late ? "is-overdue" : "", text: date.text }));
   if (opts.showList) meta.push(el("span", { text: listName(snap, t.listId) }));
   if (t.link) {
-    const text = `From ${t.link.name}, page ${t.link.page}`;
-    if (opts.openNote) {
-      const open = opts.openNote;
-      const link = el("a", { class: "todo-meta__note", href: "#", text });
-      link.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        open();
-      });
-      meta.push(link);
-    } else {
-      meta.push(el("span", { text }));
-    }
+    if (!opts.noteShown) meta.push(el("span", { text: `From ${t.link.name}, page ${t.link.page}` }));
   } else if (t.linked) {
     meta.push(el("span", { text: "From a notebook page" }));
   }

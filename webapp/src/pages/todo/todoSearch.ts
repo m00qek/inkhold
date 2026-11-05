@@ -13,7 +13,7 @@ export function todoHits(
   q: string,
   now: number,
   open: (task: TodoTask) => void,
-  ink: (task: TodoTask) => HTMLElement | null,
+  chip: (task: TodoTask) => HTMLElement | null,
 ): HTMLElement | null {
   if (!snap?.enabled) return null;
   const tasks = searchTasks(snap, q);
@@ -23,7 +23,8 @@ export function todoHits(
       "a",
       { class: "todo-hit" + (t.done ? " is-done" : ""), href: `#/todo/${viewPath(homeView(t))}` },
       el("span", { class: "todo-hit__ring", "aria-hidden": "true", html: t.done ? svg(ICONS.tick, 2.4) : "" }),
-      el("div", { class: "todo-hit__main" }, el("span", { class: "todo-hit__title", text: t.title }), ink(t), taskMeta(t, snap, now, { showList: true })),
+      el("div", { class: "todo-hit__main" }, el("span", { class: "todo-hit__title", text: t.title }), taskMeta(t, snap, now, { showList: true })),
+      chip(t),
       t.done ? el("span", { class: "todo-sr", text: " (done)" }) : null,
     );
     row.addEventListener("click", (e) => {
