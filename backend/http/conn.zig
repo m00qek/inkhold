@@ -78,6 +78,7 @@ pub const Conn = struct {
             self.http = std.http.Server.init(&self.sr.interface, &self.sw.interface);
         }
         if (peerIp(stream, &self.ip_buf)) |addr| self.ip_len = @intCast(addr.len);
+        noDelay(stream);
         return self;
     }
 
@@ -175,6 +176,16 @@ fn plausibleIp(s: []const u8) ?[]const u8 {
     return s;
 }
 
+/// Sends each write at once. A TLS response leaves as several records (the
+/// head, then the body), each its own small write, and with Nagle's algorithm
+/// the second waits for the client's delayed ACK: a flat ~40 ms on every page,
+/// file and thumbnail over HTTPS, measured against 0.4 ms in plain HTTP (whose
+/// head and body share one write). Best effort: a refusal changes nothing else.
+fn noDelay(stream: Io.net.Stream) void {
+    const on: c_int = 1;
+    std.posix.setsockopt(stream.socket.handle, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&on)) catch {};
+}
+
 fn peerIp(stream: Io.net.Stream, buf: []u8) ?[]const u8 {
     var storage: std.posix.sockaddr.storage = undefined;
     var len: std.posix.socklen_t = @sizeOf(@TypeOf(storage));
@@ -231,4 +242,23 @@ test "a parked plaintext connection is one struct of about 34 KB; TLS state is s
     try std.testing.expect(@sizeOf(Conn) < 40 * 1024);
     try std.testing.expect(@sizeOf(Conn) > sock_read_len + sock_write_len);
     try std.testing.expect(@sizeOf(Session) > 2 * plain_len);
+}
+
+test "an accepted socket sends at once: TCP_NODELAY, or every TLS response waits ~40 ms" {
+    const io = std.testing.io;
+    const addr = try Io.net.IpAddress.parse("127.0.0.1", 0);
+    var server = try addr.listen(io, .{ .mode = .stream });
+    defer server.deinit(io);
+    const client = try server.socket.address.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    const accepted = try server.accept(io);
+    const conn = try Conn.create(std.testing.allocator, io, accepted, false);
+    defer conn.destroy(std.testing.allocator);
+
+    const linux = std.os.linux;
+    var on: c_int = 0;
+    var len: std.posix.socklen_t = @sizeOf(c_int);
+    const rc = linux.getsockopt(conn.fd(), std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, @ptrCast(&on), &len);
+    try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+    try std.testing.expect(on != 0);
 }

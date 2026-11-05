@@ -27,7 +27,7 @@ would compete with the server it is measuring.
     scripts/household_load.py zig-out/bin/inkhold [--seconds 60] [--people 4] [--think 0]
     scripts/household_load.py --ssh devlab-pi1bplus --remote-binary inkhold-load/inkhold
 """
-import argparse, hashlib, http.client, json, os, random, re, socket, subprocess, sys, tempfile, threading, time
+import argparse, base64, hashlib, http.client, json, os, random, re, socket, ssl, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -48,7 +48,7 @@ def free_port():
 class Session:
     def __init__(self, host, port, stats, name):
         self.host, self.port, self.stats, self.name, self.cookie = host, port, stats, name, None
-        self.conn = http.client.HTTPConnection(host, port, timeout=30)
+        self.conn = connect(host, port)
 
     def call(self, method, path, body=None, headers=None, kind=None, record=True):
         h = dict(headers or {})
@@ -67,7 +67,7 @@ class Session:
             except (http.client.HTTPException, OSError):
                 # A keep-alive the server closed (idle timeout): one fresh retry, as a browser would.
                 self.conn.close()
-                self.conn = http.client.HTTPConnection(self.host, self.port, timeout=30)
+                self.conn = connect(self.host, self.port)
                 if attempt:
                     raise
         ms = (time.perf_counter() - t) * 1000
@@ -113,6 +113,15 @@ def sign_in(host, port, stats, email, temp, final):
 
 THINK_SCALE = 1.0
 
+# Set by `--tls`: the client side of HTTPS. The server's certificate is
+# self-signed, so it is not verified; this measures cost, not trust.
+TLS_CTX = None
+
+def connect(host, port, timeout=30):
+    if TLS_CTX:
+        return http.client.HTTPSConnection(host, port, timeout=timeout, context=TLS_CTX)
+    return http.client.HTTPConnection(host, port, timeout=timeout)
+
 def upload(s, name, data, kind="upload"):
     b = "----inkhold" + os.urandom(8).hex()
     body = (f"--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n"
@@ -153,16 +162,23 @@ def parse_sample(status_text, stat_text):
 class Server:
     """`inkhold serve` on a temp install, here or on `ssh` host."""
 
-    def __init__(self, binary, ssh, remote_binary, port):
+    def __init__(self, binary, ssh, remote_binary, port, tls=None, suites=()):
+        """`tls`: (cert.pem, key.pem) paths here, sent along when remote."""
         self.ssh, self.port = ssh, port
+        tls_cfg = ""
+        if tls:
+            names = ", ".join(f'"{x}"' for x in suites)
+            tls_cfg = f', .tls = .{{ .enabled = true, .cert_path = "cert.pem", .key_path = "key.pem", .cipher_suites = .{{ {names} }} }}'
+        pems = [base64.b64encode(open(f, "rb").read()).decode() for f in tls] if tls else []
         self.host = "127.0.0.1"
         if ssh:
             self.host = subprocess.check_output(["ssh", "-G", ssh], text=True).split("\nhostname ")[1].split()[0]
             d = f"inkhold-load-{port}"
             cfg = (f'.{{ .host = "0.0.0.0", .port = {port}, .db_path = "inkhold.db", .cred_key_path = "cred.key", '
-                   f'.data_dir = "data", .web_dir = "", .admin_email = "ana@home.lan" }}')
+                   f'.data_dir = "data", .web_dir = "", .admin_email = "ana@home.lan"{tls_cfg} }}')
+            certs = (f"echo {pems[0]} | base64 -d > cert.pem && echo {pems[1]} | base64 -d > key.pem && ") if tls else ""
             # `exec` keeps the pid we echo; the first-run banner comes back on stderr.
-            cmd = (f"rm -rf {d} && mkdir -p {d} && cd {d} && printf '%s\\n' '{cfg}' > c.zon && "
+            cmd = (f"rm -rf {d} && mkdir -p {d} && cd {d} && {certs}printf '%s\\n' '{cfg}' > c.zon && "
                    f"echo $$ && exec $HOME/{remote_binary} --config=c.zon serve")
             self.proc = subprocess.Popen(["ssh", "-o", "BatchMode=yes", ssh, cmd],
                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -172,10 +188,13 @@ class Server:
         else:
             self.tmp = tempfile.TemporaryDirectory(prefix="inkhold-load-")
             d = self.tmp.name
+            if tls:
+                for name, pem in zip(("cert.pem", "key.pem"), pems):
+                    open(os.path.join(d, name), "wb").write(base64.b64decode(pem))
             with open(os.path.join(d, "config.zon"), "w") as f:
                 f.write(f'.{{ .host = "127.0.0.1", .port = {port}, .db_path = "{d}/inkhold.db", '
                         f'.cred_key_path = "{d}/cred.key", .data_dir = "{d}/data", .web_dir = "", '
-                        f'.admin_email = "ana@home.lan" }}\n')
+                        f'.admin_email = "ana@home.lan"{tls_cfg} }}\n')
             self.proc = subprocess.Popen([binary, f"--config={d}/config.zon", "serve"], cwd=d,
                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             self.pid = self.proc.pid
@@ -273,6 +292,8 @@ def hold_events(host, port, cookie, stop):
     """The live-update stream a browser tab keeps open."""
     try:
         c = socket.create_connection((host, port), timeout=5)
+        if TLS_CTX:
+            c = TLS_CTX.wrap_socket(c, server_hostname=host)
         c.sendall(f"GET /api/controlplane/events HTTP/1.1\r\nHost: x\r\nCookie: {cookie}\r\nAccept: text/event-stream\r\n\r\n".encode())
         c.settimeout(1.0)
         while not stop.is_set():
@@ -321,7 +342,14 @@ def main():
     ap.add_argument("--think", type=float, default=1.0, help="scale the pause between clicks; 0 = no pause (stress)")
     ap.add_argument("--ssh", help="run the server on this ssh host and load it from here")
     ap.add_argument("--remote-binary", default="inkhold-load/inkhold", help="its path under the remote $HOME")
+    ap.add_argument("--tls", nargs=2, metavar=("CERT", "KEY"), help="serve HTTPS with this certificate and key")
+    ap.add_argument("--suite", action="append", default=[], help="TLS 1.3 cipher suite to allow (repeatable)")
     a = ap.parse_args()
+    global TLS_CTX
+    if a.tls:
+        TLS_CTX = ssl.create_default_context()
+        TLS_CTX.check_hostname = False
+        TLS_CTX.verify_mode = ssl.CERT_NONE
     global THINK_SCALE
     THINK_SCALE = a.think
     binary = os.path.abspath(a.binary)
@@ -329,7 +357,7 @@ def main():
     stats = Stats()
     rng = random.Random(7)
 
-    srv = Server(binary, a.ssh, a.remote_binary, port)
+    srv = Server(binary, a.ssh, a.remote_binary, port, tls=a.tls, suites=a.suite)
     try:
         temp = srv.first_run_password()
         P = srv.port
@@ -392,6 +420,7 @@ def main():
 
     cpu_pct = 100 * (after["cpu_ticks"] - before["cpu_ticks"]) / srv.ticks / elapsed
     total = sum(len(v) for k, v in stats.ms.items() if k != "seed")
+    print(f"over {'HTTPS ' + (','.join(a.suite) or 'default suites') if a.tls else 'plain HTTP'}")
     print(f"{a.people} people browsing + {TABLETS} tablets syncing, {elapsed:.0f} s, "
           f"{total} requests ({total / elapsed:.1f}/s)")
     print(f"libraries: {seeded} files uploaded in {seed_s:.1f} s, indexed by {index_s:.0f} s later")
