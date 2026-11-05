@@ -207,7 +207,8 @@ test.describe("universal search", () => {
     await searchBox(page).fill("Project");
     await expect(results(page)).not.toHaveCount(0);
 
-    const head = page.locator(".gallery .section-head");
+    // A folder named like the query has its own header, before the notes'.
+    const head = page.locator(".gallery .section-head").filter({ hasNotText: /folders?$/ });
     await expect(head).toHaveText(/^\d+ notes?$/);
     await expect(head).not.toContainText("+");
   });

@@ -2,6 +2,7 @@
 // thumbnail/aspect/marks helpers they share. Shell state arrives through
 // `GalleryCardsCtx`.
 
+import { insideQuery, nameMarks, nameQuery } from "../search/match";
 import { el } from "../ui/dom";
 import { learnsAspect, pinAspect, provisionalAspect } from "../ui/tileAspect";
 import { ICONS, svg, type IconName } from "../ui/icons";
@@ -126,21 +127,19 @@ function cardMarks(note: NoteSummary): HTMLElement {
 }
 
 /**
-* Marks query occurrences as text nodes and `<mark>`, never markup: names are
-* raw device text. A marked title is how a name match shows itself.
+* Marks the query's words as text nodes and `<mark>`, never markup: names are
+* raw device text. A marked title is how a name match shows itself. The words
+* are the ones `search/match.ts` matched on, accents and order aside.
 */
 function markedText(text: string, q: string): Node[] {
-  const needle = q.toLowerCase();
-  if (needle === "") return [document.createTextNode(text)];
-  const hay = text.toLowerCase();
   const out: Node[] = [];
   let from = 0;
-  for (;;) {
-    const at = hay.indexOf(needle, from);
-    if (at < 0) break;
-    if (at > from) out.push(document.createTextNode(text.slice(from, at)));
-    out.push(el("mark", { text: text.slice(at, at + needle.length) }));
-    from = at + needle.length;
+  // The word rule's marks, or the fallback's when the name matched only that way.
+  const strict = nameMarks(text, nameQuery(q));
+  for (const [start, end] of strict.length > 0 ? strict : nameMarks(text, insideQuery(q))) {
+    if (start > from) out.push(document.createTextNode(text.slice(from, start)));
+    out.push(el("mark", { text: text.slice(start, end) }));
+    from = end;
   }
   if (from < text.length) out.push(document.createTextNode(text.slice(from)));
   return out;

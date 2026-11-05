@@ -1,6 +1,7 @@
 // What each To-Do view shows, in the tablet's own order: pure functions over a
 // `TodoSnapshot`, so the page and its tests agree on every row.
 
+import { matchesName, nameQueryFor } from "../../search/match";
 import type { TodoList, TodoSnapshot, TodoTask } from "../../api/todoTypes";
 
 export type TodoView =
@@ -237,9 +238,13 @@ export function cards(s: TodoSnapshot, now: number, peek = 3): TodoCard[] {
  * done ones, newest first.
  */
 export function searchTasks(s: TodoSnapshot, q: string): TodoTask[] {
-  const needle = q.trim().toLowerCase();
-  if (needle === "") return [];
-  const hit = s.tasks.filter((t) => t.title.toLowerCase().includes(needle) || (t.link?.name.toLowerCase().includes(needle) ?? false));
+  // The library's rule for names (`search/match.ts`): the words in any order,
+  // accents aside, found in the title and the notebook it came from together.
+  // The typed text anywhere in a title only when no task matched by words.
+  const text = (t: TodoTask) => (t.link ? `${t.title} ${t.link.name}` : t.title);
+  const query = nameQueryFor(q, s.tasks.map(text));
+  if (!query) return [];
+  const hit = s.tasks.filter((t) => matchesName(text(t), query));
   const listOrder = new Map<string | null, number>([[null, 0], ...s.lists.map((l, i): [string, number] => [l.id, i + 1])]);
   const open = hit.filter((t) => !t.done).sort((a, b) => (listOrder.get(a.listId) ?? 0) - (listOrder.get(b.listId) ?? 0) || byTabletOrder(a, b));
   const done = hit.filter((t) => t.done).sort(newestDone);

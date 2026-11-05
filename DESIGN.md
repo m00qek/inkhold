@@ -498,6 +498,19 @@ one-shot frame plus `retry:`, never a 503.
 - **Typo ladder** (in-wasm, Damerau-Levenshtein): only when the exact query has
   zero hits — the corpus is misspelt handwriting recognition. English-oriented
   stemmers/spellfix were rejected (the corpus is Portuguese).
+- **One rule for names.** Note and folder names and to-dos are not in the
+  index; `webapp/src/search/match.ts` matches them by the index's rule: the
+  query's words folded the same way, all present in any order, only the last
+  matched as the start of a word. Only when that matches no name at all does
+  the typed text match anywhere inside one ("style" in "MyStyle"): a fallback,
+  never a widening, like the typo ladder.
+- **Measured** (`npm run bench:search`, laptop, 2026-11-05; real wasm, libraries
+  shaped like the hub's: 45 docs, 231 text pages, 54 distinct words a page).
+  A whole rebuild, which every sync that brings anything new costs the next
+  search: 4 ms at 1x, 24 ms at 10x (450 docs), 674 ms at 100x (4,500 docs,
+  58 MB). Queries stay under 10 ms; a typo-ladder scan is 90 ms at 100x. So the
+  rebuild only matters past a few thousand documents; IndexedDB reads are not
+  in these numbers.
 
 ## 11. Browser app
 

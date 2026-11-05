@@ -5,6 +5,7 @@
 import { el } from "../ui/dom";
 import { coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail";
+import { matchesName, nameQueryFor, type NameQuery } from "../search/match";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
 import type { Expansion } from "../search/localSearch";
@@ -29,6 +30,8 @@ export interface GallerySearchCtx {
   /** Category-aware label; never `folder.name` directly. */
   labelFor: (folder: Folder) => string;
   resultCard: (result: SearchResult, i: number, q: string, expansions?: readonly Expansion[]) => HTMLElement;
+  /** A folder whose name matched, as the gallery shows folders. */
+  folderCard: (folder: Folder) => HTMLElement;
   emptyState: (title: string, body: string) => HTMLElement;
   /**
   * Documents still being derived, from the live channel's `event: index`
@@ -65,9 +68,8 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   * drops hits the tree doesn't name: the local index may be a superset of the
   * live library. Name matches first; otherwise the engine's order is kept.
   */
-  function searchResults(q: string): SearchResult[] {
+  function searchResults(query: NameQuery | null): SearchResult[] {
     const searchState = ctx.getSearchState();
-    const needle = q.toLowerCase();
     const cached = allCachedNotes();
     const byId = new Map<Id, SearchResult>();
 
@@ -81,7 +83,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
           noteId,
           note: known.note,
           folderPath: known.folderPath,
-          nameMatched: known.note.name.toLowerCase().includes(needle),
+          nameMatched: matchesName(known.note.name, query),
           pages: doc.pages,
           kind: segmentKind(known.note),
         });
@@ -89,12 +91,31 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     }
 
     for (const [noteId, { note, folderPath }] of cached) {
-      if (byId.has(noteId) || !note.name.toLowerCase().includes(needle)) continue;
+      if (byId.has(noteId) || !matchesName(note.name, query)) continue;
       byId.set(noteId, { noteId, note, folderPath, nameMatched: true, pages: [], kind: segmentKind(note) });
     }
 
     const all = [...byId.values()];
     return [...all.filter((r) => r.nameMatched), ...all.filter((r) => !r.nameMatched)];
+  }
+
+  /** Every note and folder name the search can show, for choosing the rule. */
+  function* allNames(): Generator<string> {
+    for (const cached of ctx.folders.values()) {
+      for (const e of cached.entries) yield e.kind === "folder" ? ctx.labelFor(e) : e.name;
+    }
+  }
+
+  /** Folders named like the query, by the label the rail shows; each once. */
+  function folderResults(query: NameQuery | null): Folder[] {
+    const seen = new Map<Id, Folder>();
+    for (const cached of ctx.folders.values()) {
+      for (const e of cached.entries) {
+        if (e.kind !== "folder" || seen.has(e.id) || !matchesName(ctx.labelFor(e), query)) continue;
+        seen.set(e.id, e);
+      }
+    }
+    return [...seen.values()];
   }
 
   /**
@@ -126,7 +147,10 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   */
   function renderSearch(q: string): void {
     const searchState = ctx.getSearchState();
-    const results = searchResults(q);
+    // The word rule; typed text anywhere in a name only when no name matched it.
+    const query = nameQueryFor(q, allNames());
+    const results = searchResults(query);
+    const folders = folderResults(query);
     const pages = results.reduce((n, r) => n + r.pages.length, 0);
 
     const pending = ctx.indexPending() ?? 0;
@@ -140,11 +164,17 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       if (grow) gallery.append(el("p", { class: "hits__notice", role: "status", text: grow }));
     }
 
+    // Folders first: a name typed to get somewhere. Their own group, like the to-dos'.
+    if (folders.length > 0) {
+      gallery.append(el("div", { class: "section-head" }, el("span", { text: plural(folders.length, "folder") })));
+      for (const f of folders) gallery.append(ctx.folderCard(f));
+    }
+
     const more = ctx.moreResults?.(q) ?? null;
-    if (results.length === 0 && more) {
+    if (results.length === 0 && (more || folders.length > 0)) {
       // The notes may still answer; say so rather than "no notes".
       if (searchState.kind === "searching") gallery.append(el("p", { class: "hits__notice", role: "status", text: "Searching handwriting…" }));
-      gallery.append(more);
+      if (more) gallery.append(more);
       return;
     }
 

@@ -2,7 +2,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { TodoSnapshot, TodoTask } from "../../src/api/todoTypes";
-import { addTarget, byTabletOrder, canReorder, cards, dateLine, dropOrder, isOverdue, summary, withOrder, withoutTask, dayOffset, dueFromInput, dueLabel, inputFromDue, openCount, parseView, sections, siblings, viewPath } from "../../src/pages/todo/todoModel";
+import { addTarget, byTabletOrder, canReorder, cards, dateLine, dropOrder, isOverdue, summary, withOrder, withoutTask, dayOffset, dueFromInput, dueLabel, inputFromDue, openCount, parseView, searchTasks, sections, siblings, viewPath } from "../../src/pages/todo/todoModel";
 
 const NOW = new Date(2026, 10, 5, 9, 30).getTime();
 const DAY = 86_400_000;
@@ -154,5 +154,19 @@ describe("To-Do dates", () => {
     expect(s.tasks.find((t) => t.id === b.id)).toMatchObject({ listId: "fr", sort: 0 });
     expect(s.tasks.find((t) => t.id === a.id)).toMatchObject({ sort: 1 });
     expect(withoutTask(s, a.id).tasks.map((t) => t.id)).toEqual([b.id]);
+  });
+});
+
+describe("finding to-dos", () => {
+  it("by the library's rule: accents aside, words in any order, the note's name too", () => {
+    const a = task({ id: "a", title: "Revisar o passé composé" });
+    const b = task({ id: "b", title: "Haus of gabin", link: { noteId: "9", page: 27, name: "Apostila", text: null } });
+    const s = snap([a, b]);
+    expect(searchTasks(s, "passe compose").map((t) => t.id)).toEqual(["a"]);
+    expect(searchTasks(s, "composé revisar").map((t) => t.id)).toEqual(["a"]);
+    expect(searchTasks(s, "gabin apostila").map((t) => t.id)).toEqual(["b"]);
+    // No task has a word starting "abin": then the text anywhere in a title.
+    expect(searchTasks(s, "abin").map((t) => t.id)).toEqual(["b"]);
+    expect(searchTasks(s, "passe compose zzz")).toEqual([]);
   });
 });

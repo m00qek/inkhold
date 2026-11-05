@@ -116,6 +116,7 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     treeLoaded: () => ctx.rail.loaded(),
     labelFor: (folder) => ctx.rail.labelFor(folder),
     resultCard: galleryCards.resultCard,
+    folderCard: galleryCards.folderCard,
     emptyState: ctx.render.emptyState,
     indexPending: () => st.indexPending,
     moreResults: (q) =>

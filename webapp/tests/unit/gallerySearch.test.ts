@@ -56,6 +56,12 @@ function harness(initial: { state: SearchState; pending: number | null; tree?: E
       card.textContent = r.note.name;
       return card;
     },
+    folderCard: (f) => {
+      const card = document.createElement("article");
+      card.className = "card--folder";
+      card.textContent = f.name;
+      return card;
+    },
     emptyState: (title, body) => {
       const box = document.createElement("div");
       box.className = "empty";
@@ -89,6 +95,7 @@ function harness(initial: { state: SearchState; pending: number | null; tree?: E
     notices: () => [...gallery.querySelectorAll(".hits__notice")].map((n) => n.textContent),
     matchedWords: () => [...gallery.querySelectorAll(".hits__matched")].map((n) => n.textContent),
     rows: () => [...gallery.querySelectorAll(".card--result")].map((n) => n.textContent),
+    folderRows: () => [...gallery.querySelectorAll(".card--folder")].map((n) => n.textContent),
   };
 }
 
@@ -369,5 +376,52 @@ describe("the search renderer's pending sentences", () => {
     h.paint();
     expect(h.emptyBody()).not.toContain("still being indexed");
     expect(h.notices()).toEqual([]);
+  });
+});
+
+describe("names follow the index's rule", () => {
+  const folder = (id: string, name: string): Entry => ({ kind: "folder", id, name }) as Entry;
+  const idle: SearchState = results("x", []);
+
+  it("ignores accents and case, and takes the words in any order", () => {
+    const h = harness({ state: idle, pending: 0, tree: [note("1", "Reunião de pais"), note("2", "Haus of gabin"), note("3", "Ideias")] });
+    h.paint("reuniao");
+    expect(h.rows()).toEqual(["Reunião de pais"]);
+    h.paint("gabin haus");
+    expect(h.rows()).toEqual(["Haus of gabin"]);
+  });
+
+  it("the last word may be the start of one; the others are whole words", () => {
+    const h = harness({ state: idle, pending: 0, tree: [note("1", "Haus of gabin")] });
+    h.paint("haus gab");
+    expect(h.rows()).toEqual(["Haus of gabin"]);
+    h.paint("hau gabin");
+    expect(h.rows()).toEqual([]);
+  });
+
+  it("falls back to the text inside a name only when no name matched by words", () => {
+    const h = harness({ state: idle, pending: 0, tree: [note("1", "MyStyle"), note("2", "Style guide")] });
+    // "style" is a word of "Style guide": the word rule answers, alone.
+    h.paint("style");
+    expect(h.rows()).toEqual(["Style guide"]);
+    // No name has the word "tyle": then anywhere inside a name.
+    h.paint("tyle");
+    expect(h.rows()).toEqual(["MyStyle", "Style guide"]);
+  });
+
+  it("finds folders by name, in their own group before the notes", () => {
+    const h = harness({ state: idle, pending: 0, tree: [folder("f1", "Aulas de Francês"), note("1", "Francês 3")] });
+    const g = h.paint("frances");
+    expect(h.folderRows()).toEqual(["Aulas de Francês"]);
+    expect(h.rows()).toEqual(["Francês 3"]);
+    expect(g.querySelector(".section-head")?.textContent).toBe("1 folder");
+    expect(g.firstElementChild?.nextElementSibling?.className).toBe("card--folder");
+  });
+
+  it("a folder alone is an answer, not 'no matches'", () => {
+    const h = harness({ state: idle, pending: 0, tree: [folder("f1", "Receitas")] });
+    h.paint("receitas");
+    expect(h.folderRows()).toEqual(["Receitas"]);
+    expect(h.gallery.querySelector(".empty")).toBeNull();
   });
 });
