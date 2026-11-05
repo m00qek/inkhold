@@ -141,10 +141,13 @@ separate process beside a running server; scheduling is cron's or systemd's.
   credential. `restore` uses the snapshot's key, else the install's own if it
   decrypts the accounts, else a new key and a temporary password per account.
 - **Restore** never writes over a database, refuses while the port answers,
-  verifies first, and renames the database in last. It signs every device out:
-  a tablet that resumes syncing against an older server may delete what it
-  holds that the server lacks (#21's mechanism). Thumbnails and search text
-  are rebuilt by the server (§8.3).
+  verifies first, and renames the database in last. A tablet that resumes
+  syncing against an older server deletes what it holds that the server lacks
+  (#21's mechanism; seen on a Nomad), and signing it out is not enough: it
+  keeps its sync records across sign-out. So restore signs every device out
+  AND gives the library a new id (§4), which makes each tablet start from
+  scratch at its next sign-in. Thumbnails and search text are rebuilt by the
+  server (§8.3).
 - **The notice.** Households never read cron mail. `create` and `verify`
   record every run, good or failed, in `backup_runs` (one row per directory,
   schema v17), whenever the database is reachable; `restore` empties it.
@@ -242,6 +245,16 @@ hardware unless marked otherwise.
 - Sync is hash-based and stateless: the device pulls `query/summary/hash`,
   diffs md5s, then fetches details. Paths are computed in SQL from a folder-only
   recursive CTE; whole-library materialisation was a 3–5× regression.
+- **Sync records survive sign-out.** The tablet keeps one record per synced
+  file (path, md5, the server's id). A record whose file is missing from the
+  server reads as "deleted in the cloud", and the tablet deletes its copy. It
+  drops the records only at sign-in, when `check/exists/server`'s `userId` or
+  `uniqueMachineId`, or the email, differs from what it stored; an empty
+  stored value counts as a match. Inkhold reports the account id and the
+  library id (`library` table, v18). A new library id makes tablets resync
+  from scratch: they merge and upload, never delete. (Decompiled from the
+  Settings app, firmware Chauvet.E103.2606141001; the deletion was seen on a
+  Nomad switched to an empty server under the same email.)
 - **Login:** `password = sha256_hex(md5_hex(pw) + randomCode)`. The kind of
   client comes from `equipment` (1 web, 2 app, 3 terminal), not `equipmentNo`:
   the Android app logs in with no serial. Device logins get the token in the

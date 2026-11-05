@@ -171,8 +171,8 @@ test "user existence and pre-login global device unlink" {
     const admin = try svc.bootstrapAdmin("admin@home", "adminpw");
     const alice = try onboardUser(&svc, admin, "alice@home", "alicepw");
 
-    try std.testing.expect(try svc.userExistsByEmail("alice@home"));
-    try std.testing.expect(!try svc.userExistsByEmail("nobody@home"));
+    try std.testing.expect(try svc.userIdByEmail("alice@home") != null);
+    try std.testing.expect(try svc.userIdByEmail("nobody@home") == null);
 
     const equipment_no = "SN2026NOMAD0001";
     const dev = blk: {

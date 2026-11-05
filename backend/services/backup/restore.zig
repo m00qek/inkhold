@@ -13,6 +13,9 @@
 //!     might delete what it holds that the server lacks.
 //!   - Half-finished uploads are dropped; their chunks were never backed up.
 //!   - The record of past backups is emptied: it is the snapshot day's.
+//!   - The library gets a new id. Signing out alone is not enough: a tablet
+//!     keeps its file-sync records across sign-out, and only drops them at
+//!     sign-in when the library id (or the account) changed. Seen on a Nomad.
 //!   - The credential key: the snapshot's if it carried one; else the install's
 //!     own, if it can decrypt the restored accounts; else a new key, and every
 //!     account gets a temporary password (returned once, to print) because no
@@ -30,6 +33,7 @@ const gzfile = @import("gzfile.zig");
 const pace_mod = @import("pace.zig");
 const create_mod = @import("create.zig");
 const status_mod = @import("status.zig");
+const library = @import("../library.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const schema = @import("../../db/schema.zig");
 const blobstore = @import("../../store/blobs.zig");
@@ -225,6 +229,9 @@ fn prepare(gpa: std.mem.Allocator, io: Io, db: sqlite.Db, paths: create_mod.Path
     _ = try files.sweepUploadSessions(-1);
     // The snapshot's record of backups is the snapshot day's, not this server's.
     try status_mod.clear(db);
+    // A new library id: tablets compare it at sign-in and, seeing it changed,
+    // sync from scratch instead of deleting what this older server lacks.
+    try library.renew(db);
     return if (chosen.write) key else null;
 }
 

@@ -286,7 +286,6 @@ pub const Service = struct {
     pub const SessionSummary = own_account.SessionSummary;
     pub const sessionSummary = own_account.sessionSummary;
     pub const signOutOtherSessions = own_account.signOutOtherSessions;
-    pub const userExistsByEmail = own_account.userExistsByEmail;
     pub const hasAnyUser = own_account.hasAnyUser;
     pub const isFirstRun = own_account.isFirstRun;
     const isAdmin = own_account.isAdmin;

@@ -7,6 +7,7 @@ const context = @import("../http/context.zig");
 const json = @import("../http/json.zig");
 const reply = @import("../http/reply.zig");
 const sync = @import("../services/sync.zig");
+const library = @import("../services/library.zig");
 
 const device_files = @import("device/files.zig");
 const device_upload = @import("device/upload.zig");
@@ -56,6 +57,15 @@ const BindReq = struct {
 const UnbindReq = struct { equipmentNo: []const u8 };
 
 const UserCheckReq = struct { email: ?[]const u8 = null };
+
+/// The tablet stores `userId` and `uniqueMachineId` at sign-in and drops its
+/// file-sync records when either differs next time (DESIGN.md §4): the
+/// library id is what tells it that it now talks to another library.
+const CheckExistsVO = struct {
+    success: bool = true,
+    userId: u64,
+    uniqueMachineId: []const u8,
+};
 const UserQueryVO = struct { success: bool = true, email: []const u8, userName: []const u8, totalCapacity: []const u8 };
 
 /// `get_space_usage`. Field names and nesting are literal from a live Nomad
@@ -117,12 +127,10 @@ pub fn checkExists(ctx: *Context, req: *Request, params: Params) anyerror!void {
     var parsed = json.readBody(UserCheckReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
     const email = parsed.value.email orelse return fail(ctx, req, .ok, "BAD_REQUEST", "email required");
-    const exists = svc.userExistsByEmail(email) catch return serverError(ctx, req);
-    if (exists) {
-        try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
-    } else {
-        try fail(ctx, req, .ok, "USER_NOT_FOUND", "no such account");
-    }
+    const user_id = (svc.userIdByEmail(email) catch return serverError(ctx, req)) orelse
+        return fail(ctx, req, .ok, "USER_NOT_FOUND", "no such account");
+    const machine_id = library.machineId(svc.db) catch return serverError(ctx, req);
+    try json.respond(ctx.gpa, req, .ok, CheckExistsVO{ .userId = user_id, .uniqueMachineId = &machine_id }, null);
 }
 
 pub fn queryServer(ctx: *Context, req: *Request, params: Params) anyerror!void {

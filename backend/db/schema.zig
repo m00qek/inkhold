@@ -22,12 +22,13 @@ const ddl_v13 = schema_ddl.ddl_v13;
 const ddl_v15 = schema_ddl.ddl_v15;
 const ddl_v16 = schema_ddl.ddl_v16;
 const ddl_v17 = schema_ddl.ddl_v17;
+const ddl_v18 = schema_ddl.ddl_v18;
 const ddl_v14 = schema_ddl.ddl_v14;
 
 /// Current schema version. Bump + add a migration step when the schema changes.
 /// Never fold a change into an earlier step: an install that already applied
 /// that version would never run it.
-pub const version: i64 = 17;
+pub const version: i64 = 18;
 
 /// Default per-user quota (10 GiB); `Files.default_total_bytes` and
 /// `Files.default_total_bytes` alias it.
@@ -35,7 +36,7 @@ pub const default_capacity_bytes: i64 = 10 * 1024 * 1024 * 1024;
 
 /// The migration steps in order: `steps[i]` takes a database from version `i` to
 /// version `i + 1`.
-const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12, ddl_v13, ddl_v14, ddl_v15, ddl_v16, ddl_v17 };
+const steps = [_][:0]const u8{ ddl_v1, ddl_v2, ddl_v3, ddl_v4, ddl_v5, ddl_v6, ddl_v7, ddl_v8, ddl_v9, ddl_v10, ddl_v11, ddl_v12, ddl_v13, ddl_v14, ddl_v15, ddl_v16, ddl_v17, ddl_v18 };
 
 comptime {
     if (steps.len != version) @compileError(

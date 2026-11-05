@@ -353,6 +353,19 @@ pub const ddl_v17 =
     \\);
 ;
 
+/// v18: the library's identity, a random id made once per library. Tablets
+/// get it as `uniqueMachineId` from `check/exists/server` at sign-in and drop
+/// their file-sync records when it differs from the one they stored (DESIGN.md
+/// §4). `restore` gives the restored library a new one, so a tablet that held
+/// newer files starts fresh instead of deleting what the server lacks.
+pub const ddl_v18 =
+    \\CREATE TABLE library (
+    \\  id         INTEGER PRIMARY KEY CHECK (id = 1),  -- exactly one row
+    \\  machine_id TEXT    NOT NULL                     -- 32 lowercase hex, random
+    \\);
+    \\INSERT INTO library (id, machine_id) VALUES (1, lower(hex(randomblob(16))));
+;
+
 // v14: drops the server-side search index. Order matters: the FTS5 table before
 // its content view, `segment_search` (FK to pages) before the page rows.
 pub const ddl_v14 =

@@ -7,6 +7,7 @@ const layout = @import("layout.zig");
 const create_mod = @import("create.zig");
 const restore_mod = @import("restore.zig");
 const fixture = @import("fixture.zig");
+const library = @import("../library.zig");
 const sqlite = @import("../../db/sqlite.zig");
 const password = @import("../auth/password.zig");
 const repeat = @import("../../util/repeat.zig").repeat;
@@ -46,6 +47,7 @@ test "a backup with its key restores whole: notes, accounts, browser sessions; t
     var inst = try fixture.Install.init();
     defer inst.deinit();
     const md5s = try household(&inst);
+    const backed_up_id = try library.machineId(inst.db);
     try backUp(&inst, true);
 
     var target = try fixture.Target.init();
@@ -72,6 +74,8 @@ test "a backup with its key restores whole: notes, accounts, browser sessions; t
     try testing.expectEqual(@as(i64, 2), try count(db, "SELECT COUNT(*) FROM blobs;"));
     try testing.expectEqual(@as(i64, 0), try count(db, "SELECT COUNT(*) FROM sessions WHERE audience = 'device';"));
     try testing.expectEqual(@as(i64, 1), try count(db, "SELECT COUNT(*) FROM sessions WHERE audience = 'controlplane';"));
+    // A new library id: a tablet signing back in syncs from scratch.
+    try testing.expect(!std.mem.eql(u8, &backed_up_id, &(try library.machineId(db))));
 
     // The blobs are back in the live store, byte for byte.
     var blobs = try target.tmp.dir.openDir(testing.io, "state/data/blobs", .{});

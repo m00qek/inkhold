@@ -92,14 +92,6 @@ pub fn signOutOtherSessions(self: *Service, user_id: u64, token: []const u8) Err
     return self.db.changes();
 }
 
-/// Device `check/exists/server`.
-pub fn userExistsByEmail(self: *Service, email: []const u8) Error!bool {
-    var s = try self.db.prepare("SELECT 1 FROM users WHERE email = ?1 LIMIT 1;");
-    defer s.finalize();
-    s.bindText(1, email);
-    return try s.step();
-}
-
 pub fn hasAnyUser(self: *Service) Error!bool {
     var s = try self.db.prepare("SELECT 1 FROM users LIMIT 1;");
     defer s.finalize();

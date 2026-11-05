@@ -5,6 +5,7 @@ const app = @import("../../routes.zig");
 const authsvc = @import("../../services/auth/service.zig");
 const password = @import("../../services/auth/password.zig");
 const filesmod = @import("../../services/files.zig");
+const library = @import("../../services/library.zig");
 const blobstore = @import("../../store/blobs.zig");
 const context = @import("../../http/context.zig");
 const Context = context.Context;
@@ -40,6 +41,12 @@ test "device sync M1: login/equipment, bind (folders + capacity), and the hash-d
         const resp = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/official/user/check/exists/server", &.{.{ .name = "content-type", .value = "application/json" }}, "{\"email\":\"alice\"}"), &obuf);
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try expectSuccess(resp.body);
+        // The account's id and the library's: the tablet drops its sync
+        // records at sign-in when either changed since it last stored them.
+        var p = try std.json.parseFromSlice(struct { userId: u64, uniqueMachineId: []const u8 }, std.testing.allocator, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expectEqual(alice, p.value.userId);
+        try std.testing.expectEqualSlices(u8, &(try library.machineId(f.svc.db)), p.value.uniqueMachineId);
         const miss = try roundtrip(ctx, try buildRequest(&reqbuf, "POST", "/api/official/user/check/exists/server", &.{.{ .name = "content-type", .value = "application/json" }}, "{\"email\":\"ghost\"}"), &obuf);
         try expectFailure(miss.body, "USER_NOT_FOUND");
     }

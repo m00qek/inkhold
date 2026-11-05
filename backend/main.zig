@@ -71,6 +71,7 @@ test {
     _ = @import("services/sync.zig");
     _ = @import("services/controlplane.zig");
     _ = @import("services/settings.zig");
+    _ = @import("services/library.zig");
     _ = @import("services/backup.zig");
     _ = @import("services/health.zig");
     _ = @import("services/note_index.zig");
