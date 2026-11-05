@@ -41,6 +41,7 @@ import { createLibraryViewerDeps } from "./libraryViewerDeps";
 import { createLibraryFeatures } from "./libraryFeatures";
 import { createLibraryPreviews } from "./libraryPreviews";
 import { createLibraryRoutes } from "./libraryRoutes";
+import { warmWasm } from "../../core/warmWasm";
 
 export const ADMIN_KEY = "admin";
 /**
@@ -338,6 +339,10 @@ export function createAppShell(deps: AppDeps): AppShell {
   // The first listing comes from main.ts's route dispatch; listing here would race it.
   void ctx.folderCache.prefetch();
 
+  // Signed in, so worth it: the search and PDF wasm modules download in the
+  // background, after the gallery and when the browser is idle.
+  const cancelWarmWasm = warmWasm();
+
   ctx.routes = createLibraryRoutes(ctx);
   const routes = ctx.routes;
   return {
@@ -350,6 +355,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     openNoteVersion: routes.openNoteVersion,
     openBinNote: routes.openBinNote,
     destroy(): void {
+      cancelWarmWasm();
       unsubscribe();
       // Otherwise one coalescing window and engine memory leak per sign-in cycle.
       detachSearchLive();
