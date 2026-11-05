@@ -79,9 +79,17 @@ pub const routes = [_]router.Route{
     // device token arrives in the query, and the handler checks it. Held for as
     // long as the tablet stays connected; locks the DB only to check the token.
     .{ .method = .GET, .path = "/socket.io/", .scopes = &.{.public}, .handler = device.socketIo, .manual_db_lock = true, .held = true },
-    // Planner/calendar calls, stubbed empty.
-    .{ .method = .POST, .path = "/api/file/schedule/group/all", .scopes = &.{.device}, .handler = device.scheduleGroupAll },
-    .{ .method = .POST, .path = "/api/file/schedule/task/all", .scopes = &.{.device}, .handler = device.scheduleTaskAll },
+    // The To-Do app's sync (`handlers/device/todo.zig`): refused unless
+    // `todo_sync`. The app calls exactly these; deletes never fail.
+    .{ .method = .POST, .path = "/api/file/schedule/group/all", .scopes = &.{.device}, .handler = device.todoGroupAll },
+    .{ .method = .POST, .path = "/api/file/schedule/group", .scopes = &.{.device}, .handler = device.todoGroupInsert },
+    .{ .method = .PUT, .path = "/api/file/schedule/group", .scopes = &.{.device}, .handler = device.todoGroupUpdate },
+    .{ .method = .DELETE, .path = "/api/file/schedule/group/:id", .scopes = &.{.device}, .handler = device.todoGroupDelete },
+    .{ .method = .POST, .path = "/api/file/schedule/task/all", .scopes = &.{.device}, .handler = device.todoTaskAll },
+    .{ .method = .POST, .path = "/api/file/schedule/task", .scopes = &.{.device}, .handler = device.todoTaskInsert },
+    .{ .method = .PUT, .path = "/api/file/schedule/task", .scopes = &.{.device}, .handler = device.todoTaskUpdate },
+    .{ .method = .PUT, .path = "/api/file/schedule/task/list", .scopes = &.{.device}, .handler = device.todoTaskUpdateList },
+    .{ .method = .DELETE, .path = "/api/file/schedule/task/:id", .scopes = &.{.device}, .handler = device.todoTaskDelete },
 
     // --- Control plane / browser ---
     // `.public`: the login page reads it before anyone can sign in.

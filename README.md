@@ -79,9 +79,11 @@ not a multi-tenant service.
 - 🔁 **A new or restored server is a new library.** Each Inkhold library has its
   own identity, so a tablet signing in after a reinstall or a restore notices,
   forgets what it synced before and syncs from scratch, uploading what the
-  server lacks instead of deleting it (tested on a Nomad). After that sign-in,
-  check **Settings → Drive → Private Cloud**: Auto Sync is off and the folders
-  to sync may need ticking again.
+  server lacks instead of deleting it (tested on a Nomad). If the tablet asks
+  how to treat its digest and to-do data, choose **"Retain locally"**: "Delete
+  locally" removes them from the tablet. After that sign-in, check **Settings →
+  Drive → Private Cloud**: Auto Sync is off and the folders to sync may need
+  ticking again.
 - 🔑 **Back up `cred.key`** (created on first run). It encrypts stored credentials
   and lives outside the database, so a stolen database alone yields nothing —
   and losing the key means everyone has to reset their password.
@@ -312,7 +314,7 @@ Honest gaps, so you know before you try:
 
 | | |
 |---|---|
-| **Data Sync — To-Do and Digest** | The tablet's To-Do and Digest data does not sync: they ride a separate protocol that has not been reverse-engineered. Inkhold refuses their requests on purpose, so with those switches on the tablet shows a sync error for the two apps. Answering instead would be destructive: told "no lists", the To-Do app deletes the ones it synced before, and the Digest app imports whatever it is shown. Notes, folders, and the other synced types are unaffected. |
+| **Data Sync — To-Do and Digest** | Off by default: Inkhold refuses their requests on purpose, so with those switches on the tablet shows a sync error for the two apps. Answering wrongly would be destructive: told "no lists", the To-Do app deletes the ones it synced before, and the Digest app imports whatever it is shown. **To-Do sync is implemented but experimental**: set `.todo_sync = true` to try it, after copying the tablet, and choose **"Retain locally"** if the tablet asks at sign-in how to treat its digest and to-do data. Digest is not implemented. Notes, folders, and the other synced types are unaffected. |
 | **EPUB and Office files** | An `.epub` or a `.doc` uploads, syncs and downloads, but the browser has no viewer for it and its text is not searchable. Notebooks, PDFs, sketches, images and text files all render; notebooks, PDFs and text files are all searchable. |
 | **The Supernote mobile app** | Deliberately out of scope: it expects the server to render pages, which is the one thing Inkhold pushes to the browser instead. The device syncs directly; the app does not. |
 

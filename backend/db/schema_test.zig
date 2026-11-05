@@ -97,7 +97,7 @@ test "v19: files keep their ids, rows, history and indexes, and a purged top id 
     const before = try fileIndexes(gpa, db);
     defer gpa.free(before);
 
-    try migrate(db);
+    try schema.migrateTo(db, 19);
     try std.testing.expectEqual(@as(i64, 19), try schema.userVersion(db));
 
     // Same rows, same ids, and the history that hangs off them survived the DROP.

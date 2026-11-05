@@ -11,6 +11,7 @@ const library = @import("../services/library.zig");
 const device_files = @import("device/files.zig");
 const device_upload = @import("device/upload.zig");
 const device_socket = @import("device/socket.zig");
+const device_todo = @import("device/todo.zig");
 
 // ---- the file API and OSS download (`device/files.zig`) ----
 pub const listFolder = device_files.listFolder;
@@ -28,6 +29,15 @@ pub const uploadApply = device_upload.uploadApply;
 pub const ossPut = device_upload.ossPut;
 pub const uploadFinish = device_upload.uploadFinish;
 pub const socketIo = device_socket.socketIo;
+pub const todoGroupAll = device_todo.groupAll;
+pub const todoGroupInsert = device_todo.groupInsert;
+pub const todoGroupUpdate = device_todo.groupUpdate;
+pub const todoGroupDelete = device_todo.groupDelete;
+pub const todoTaskAll = device_todo.taskAll;
+pub const todoTaskInsert = device_todo.taskInsert;
+pub const todoTaskUpdate = device_todo.taskUpdate;
+pub const todoTaskUpdateList = device_todo.taskUpdateList;
+pub const todoTaskDelete = device_todo.taskDelete;
 
 const Context = context.Context;
 const Request = router.Request;
@@ -286,28 +296,10 @@ pub fn summaryGroup(ctx: *Context, req: *Request, params: Params) anyerror!void 
 const digest_unsupported = "DIGEST_SYNC_UNSUPPORTED";
 const digest_unsupported_msg = "Digest sync is not supported by this server yet";
 
-/// The To-Do app's listings: REFUSED until Inkhold stores to-dos. The app
-/// (decompiled `TaskSync.syncTaskList`) deletes from the tablet every list it
-/// once synced that the server does not list, so an honest "no lists" would
-/// wipe them. A `success: false` reply at 200 ends its sync with a generic
-/// error before it compares anything (401/403/404 take other paths in the
-/// app). The earlier stub's `pageToken: ""` read as "another page" and looped
-/// the app into a crash, which by accident protected the lists too.
-pub fn scheduleGroupAll(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    _ = params;
-    return fail(ctx, req, .ok, todo_unsupported, todo_unsupported_msg);
-}
-
-pub fn scheduleTaskAll(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    _ = params;
-    return fail(ctx, req, .ok, todo_unsupported, todo_unsupported_msg);
-}
-
-const todo_unsupported = "TODO_SYNC_UNSUPPORTED";
-const todo_unsupported_msg = "To-Do sync is not supported by this server yet";
 
 test {
     _ = device_files;
     _ = device_upload;
     _ = device_socket;
+    _ = device_todo;
 }

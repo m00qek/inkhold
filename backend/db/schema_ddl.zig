@@ -403,6 +403,46 @@ pub const ddl_v19 =
     \\  ON files(user_id, COALESCE(parent_id, 0), name) WHERE deleted = 1;
 ;
 
+// v20: the tablet's To-Do data, stored as the To-Do app sends it (decompiled
+// `TaskSync`, July capture). Ids are the tablet's own (32 hex), unique per
+// account. A task with no `list_id` is in the Inbox. The app deletes from the
+// tablet any synced list or task the server does not list, so rows leave only
+// by an explicit delete from a tablet, or with their account.
+pub const ddl_v20 =
+    \\CREATE TABLE todo_lists (
+    \\  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  list_id       TEXT    NOT NULL,
+    \\  title         TEXT    NOT NULL DEFAULT '',
+    \\  create_time   INTEGER NOT NULL DEFAULT 0,
+    \\  last_modified INTEGER NOT NULL DEFAULT 0,
+    \\  deleted       INTEGER NOT NULL DEFAULT 0,
+    \\  PRIMARY KEY (user_id, list_id)
+    \\) WITHOUT ROWID;
+    \\CREATE TABLE todo_tasks (
+    \\  user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  task_id           TEXT    NOT NULL,
+    \\  list_id           TEXT,
+    \\  title             TEXT    NOT NULL DEFAULT '',
+    \\  detail            TEXT,
+    \\  status            TEXT    NOT NULL DEFAULT 'needsAction',
+    \\  importance        TEXT,
+    \\  recurrence        TEXT,
+    \\  links             TEXT,
+    \\  reminder_on       INTEGER NOT NULL DEFAULT 0,
+    \\  due_time          INTEGER NOT NULL DEFAULT 0,
+    \\  completed_time    INTEGER NOT NULL DEFAULT 0,
+    \\  last_modified     INTEGER NOT NULL DEFAULT 0,
+    \\  sort              INTEGER NOT NULL DEFAULT 0,
+    \\  sort_completed    INTEGER NOT NULL DEFAULT 0,
+    \\  sort_time         INTEGER NOT NULL DEFAULT 0,
+    \\  planner_sort      INTEGER NOT NULL DEFAULT 0,
+    \\  planner_sort_time INTEGER NOT NULL DEFAULT 0,
+    \\  deleted           INTEGER NOT NULL DEFAULT 0,
+    \\  PRIMARY KEY (user_id, task_id)
+    \\) WITHOUT ROWID;
+    \\CREATE INDEX todo_tasks_list ON todo_tasks(user_id, list_id);
+;
+
 // v14: drops the server-side search index. Order matters: the FTS5 table before
 // its content view, `segment_search` (FK to pages) before the page rows.
 pub const ddl_v14 =

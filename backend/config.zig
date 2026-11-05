@@ -65,6 +65,10 @@ pub const Config = struct {
     /// The admin notice calls backups late when the newest successful
     /// `inkhold backup create` (any directory) is older than this.
     backup_warn_after_hours: u32 = 48,
+    /// Store and serve the tablet's To-Do lists (`handlers/device/todo.zig`).
+    /// Off until it is proven on a tablet: while off, the To-Do app's calls are
+    /// refused and its sync stops with an error, touching nothing.
+    todo_sync: bool = false,
     tls: Tls = .{},
     history: History = .{},
 };

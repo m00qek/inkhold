@@ -10,7 +10,7 @@ const std = @import("std");
 const router = @import("router.zig");
 
 /// One slot per route index plus a shared overflow slot.
-pub const max_routes = 96;
+pub const max_routes = 112;
 
 /// Below this, timings are bucketed exactly (the log-linear scheme needs a
 /// leading bit).

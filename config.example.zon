@@ -50,6 +50,12 @@
     // `inkhold backup create` (any directory) is older than this.
     .backup_warn_after_hours = 48,
 
+    // Sync the tablet's To-Do lists and tasks. Experimental, so off: while off,
+    // the tablet's To-Do app shows a sync error and nothing is touched. Before
+    // turning it on, copy the tablet first and, when a tablet asks how to treat
+    // its digest and to-do data at sign-in, choose "Retain locally".
+    .todo_sync = false,
+
     .tls = .{
         // Terminate TLS in-process. When false, plaintext HTTP is served.
         .enabled = false,

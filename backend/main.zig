@@ -71,6 +71,7 @@ test {
     _ = @import("services/controlplane.zig");
     _ = @import("services/settings.zig");
     _ = @import("services/library.zig");
+    _ = @import("services/todo.zig");
     _ = @import("services/backup.zig");
     _ = @import("services/health.zig");
     _ = @import("services/note_index.zig");
@@ -96,6 +97,7 @@ test {
     _ = @import("test/http/history_test.zig");
     _ = @import("test/http/history_raw_test.zig");
     _ = @import("test/http/device_read_test.zig");
+    _ = @import("test/http/device_todo_test.zig");
     _ = @import("test/http/device_list_test.zig");
     _ = @import("test/http/device_upload_test.zig");
     _ = @import("test/http/device_cap_test.zig");

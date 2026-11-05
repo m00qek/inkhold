@@ -291,14 +291,26 @@ hardware unless marked otherwise.
   acts on (`MODIFYFILE`, `DELETEFILE`, …) and a path inside a synced folder
   matter. Its own uploads come back too, as a no-op. `STARTSYNC` is honoured
   only before the first full sync succeeds, so it cannot carry later changes.
-- The device's To-Do/Digest data uses a separate protocol, not implemented
-  (its `to-do`/`digest` events ride the same socket). Its listings
-  (`schedule/*/all`, `query/summary/*`) are REFUSED with `success: false`, and
-  must stay refused until the data is really stored: an empty or made-up
-  answer is destructive. The To-Do app deletes every list it once synced that
-  the server does not list; the Digest app imports whatever the server lists
-  as collections (it imported every folder when `query/summary/group`
-  presented folders as groups, seen on hardware 2026-11-05).
+- To-Do and Digest ride their own protocol (`schedule/*`, `query/summary/*`;
+  their `to-do`/`digest` events share the socket). Neither may ever get an
+  empty or made-up answer: the To-Do app deletes every list and task it once
+  synced that the server does not list, and the Digest app imports whatever
+  the server lists as collections (it imported every folder when
+  `query/summary/group` presented folders as groups, seen on hardware
+  2026-11-05). Refused with `success: false` at 200 (401/403/404 take other
+  paths in the apps), the sync stops before comparing anything.
+- **To-Do sync** (schema v20, `services/todo.zig`, `handlers/device/todo.zig`)
+  stores lists and tasks exactly as the app sends them, keyed by the tablet's
+  own ids per account; the app decides every merge itself. A full sync starts
+  at token 0 and reads absence as deletion, so listings return everything
+  stored and the incoming `nextSyncToken` never narrows them; rows leave only
+  by an explicit delete (which always succeeds: one failed delete aborts the
+  app's whole sync) or with their account. Deleting a list takes its tasks.
+  Behind `config.todo_sync`, off until proven on a tablet; off, every call is
+  refused. Server switches are the firmware's: at sign-in to another account
+  Settings asks "Retain locally" (marks every to-do unsynced, so it uploads)
+  or "Delete locally" (`todo/delete_synced_data`); the library-id reset takes
+  the retaining path. Digest stays refused.
 
 ## 5. Auth and credentials
 
