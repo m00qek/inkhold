@@ -316,6 +316,9 @@ hardware unless marked otherwise.
   ones, losing any newer than a restored snapshot. A restore or reinstall
   always forces that sign-in (sessions revoked, tokens invalid), so the
   README, the restore command and the config tell users to choose Retain.
+  Tested on a Nomad 2026-11-05: create, complete, rename, move and delete of
+  tasks and lists all synced; after a restore to a snapshot older than one
+  synced task, Retain kept it on the tablet and uploaded it again.
   Unverified: whether a tablet that was unregistered first (`hasUnregister`)
   skips the prompt and keeps its marks. Digest stays refused.
 
