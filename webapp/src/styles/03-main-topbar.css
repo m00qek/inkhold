@@ -148,9 +148,11 @@
 .search input::placeholder {
   color: var(--ink-faint);
 }
+/* Focus: the border turns accent and doubles, as heavy as the app's 2px ring. */
 .search input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 /* A control's height even with every control hidden, so the bar never shrinks. */

@@ -101,8 +101,10 @@
   outline: none;
 }
 /* Focus ring on the whole control. */
+/* Focus: the border turns accent and doubles, as heavy as the app's 2px ring. */
 .acct-stepper:focus-within {
   border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 .acct-step {
   display: grid;

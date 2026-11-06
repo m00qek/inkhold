@@ -295,8 +295,10 @@
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
+/* Focus: the border turns accent and doubles, as heavy as the app's 2px ring. */
 .todo-add:focus-within {
   border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 .todo-add input[type="text"] {
   flex: 1 1 220px;

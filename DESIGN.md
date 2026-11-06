@@ -671,8 +671,7 @@ silently.
 Held by `tests/e2e/semantics.spec.ts` (every main screen, at desktop in both
 themes and at phone width): axe-core's WCAG 2.2 AA and best-practice rules,
 plus the structure axe doesn't judge (`helpers/semantics.ts`). Both must find
-nothing; the per-screen record (`semantics-baseline/`) is empty and may only
-stay so.
+nothing. `tests/e2e/focus.spec.ts` holds that every Tab stop shows focus.
 
 - **Landmarks:** one `<main>` (the content area; pre-auth screens have their
   own), the top bar a `<header>`, the search box a search landmark, the rail

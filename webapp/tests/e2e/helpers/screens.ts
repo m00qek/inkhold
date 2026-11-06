@@ -16,6 +16,10 @@ export interface Screen {
  * and changes counts). At most 10 s for the quiet part.
  */
 export async function settle(page: Page): Promise<void> {
+  // Every screen here is inside the app: wait for the rail to be drawn first,
+  // or the checks below see no rail and skip their waits (a deep link can
+  // take a moment to draw it).
+  await page.locator(".rail").waitFor({ state: "attached", timeout: 15_000 });
   // The folder walk adds rail rows with pauses longer than the quiet window:
   // the rail says when it is done.
   const folders = page.locator('[aria-label="Folders"][aria-busy="false"]');
