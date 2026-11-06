@@ -1,7 +1,7 @@
 // The bin's words and rows: grouping by day, confirmations and result messages. No DOM.
 
 import { pinAspect } from "../../ui/tileAspect";
-import { labelPathSegments } from "../rail";
+import { labelPathSegments } from "../rail/railPlaces";
 import { formatBytes } from "../../core/fileKind";
 import { type Bin, type BinEntry, type Restored, type Trashed } from "../../core/binTypes";
 import { type Id } from "../../core/types";

@@ -1,7 +1,7 @@
 /**
  * The keys of the rail's non-folder destinations. They live in `core/` so the
  * router can tell destinations from folder ids without importing `pages/`;
- * labels and icons stay in `pages/rail.ts`, which is not forced to match.
+ * labels and icons stay in `pages/rail/railPlaces.ts`, which is not forced to match.
  */
 export type DestinationKey = "bin" | "todo" | "admin";
 

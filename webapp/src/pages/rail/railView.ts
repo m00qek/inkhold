@@ -1,9 +1,9 @@
 // The rail's painter: rows to DOM. Knows nothing about categories, padlocks or
 // To-Do; split from `rail.ts` so the model stays readable on its own.
 
-import { el } from "../ui/dom";
-import { ICONS, svg } from "../ui/icons";
-import { onPlainClick } from "../ui/link";
+import { el } from "../../ui/dom";
+import { ICONS, svg } from "../../ui/icons";
+import { onPlainClick } from "../../ui/link";
 import type { RailBadge, RailRow, RailView } from "./rail";
 
 // ---- the painter ----

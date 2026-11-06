@@ -8,7 +8,7 @@ import { closePopoverWithin } from "../../ui/popover";
 import { folderHref, go } from "../../router";
 import type { Entry, Folder, NoteSummary } from "../../core/types";
 import { MIN_GLOBAL_QUERY_LEN } from "../noteSearch";
-import { crumbPath } from "../rail";
+import { crumbPath } from "../rail/railPlaces";
 import type { LibraryCtx } from "./libraryContext";
 
 export interface RenderOpts {

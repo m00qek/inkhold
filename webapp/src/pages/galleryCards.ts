@@ -14,7 +14,7 @@ import { go, folderHref, noteHref, notePageHref } from "../router";
 import { pageSummary, deepLinkQuery } from "./noteSearch";
 import type { Expansion } from "../search/localSearch";
 import type { Entry, Folder, Hash, Id, NoteSummary } from "../core/types";
-import type { Category } from "./rail";
+import type { Category } from "./rail/railPlaces";
 import type { LazyEngine } from "../render/lazy";
 
 /**

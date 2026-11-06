@@ -2,8 +2,8 @@
 // The rail painter: a row with an address is a link, one without is a button.
 
 import { describe, it, expect, vi } from "vitest";
-import { createRailView } from "../../src/pages/railView";
-import type { RailRow } from "../../src/pages/rail";
+import { createRailView } from "../../src/pages/rail/railView";
+import type { RailRow } from "../../src/pages/rail/rail";
 
 const row = (over: Partial<Extract<RailRow, { kind: "item" }>>): RailRow => ({
   kind: "item",

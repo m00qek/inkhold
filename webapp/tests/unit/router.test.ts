@@ -10,7 +10,7 @@ import {
   destinationHref,
   todoHref,
 } from "../../src/router";
-import { DESTINATIONS } from "../../src/pages/rail";
+import { DESTINATIONS } from "../../src/pages/rail/railPlaces";
 
 describe("parseRoute", () => {
   it("reads the three shapes of a note route", () => {

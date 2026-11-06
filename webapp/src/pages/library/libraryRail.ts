@@ -5,11 +5,11 @@ import { brandMark } from "../../ui/chrome";
 import { accountHref, destinationHref, folderHref, go, todoHref } from "../../router";
 import { createFolderCache } from "../folderCache";
 import { createNameplate, createQuotaMeter } from "../railFooter";
-import { createRail, createRailView } from "../rail";
+import { createRail, createRailView } from "../rail/rail";
 import { BIN_KEY } from "../bin/bin";
 import type { LibraryCtx } from "./libraryContext";
 import { ADMIN_KEY, TODO_KEY } from "./library";
-import type { RailChildren } from "../rail";
+import type { RailChildren } from "../rail/rail";
 import { FIXED_VIEWS, openCount, sameView, viewPath, type TodoView } from "../todo/todoModel";
 import type { IconName } from "../../ui/icons";
 

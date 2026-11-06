@@ -23,7 +23,7 @@ import type { SearchService } from "../../search/searchService";
 import type { Exporter } from "../../export/exporter";
 import type { TodoInk } from "../todo/todoInk";
 import type { Masonry } from "../masonry";
-import type { RailController } from "../rail";
+import type { RailController } from "../rail/rail";
 import type { FolderCache } from "../folderCache";
 import type { QuotaMeter } from "../railFooter";
 import type { NoteSearchController } from "../noteSearch";

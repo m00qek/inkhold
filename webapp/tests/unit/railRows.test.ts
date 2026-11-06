@@ -1,7 +1,7 @@
 // Rail containers, nested rows, root entries, crumbs, labels and destinations.
 
 import { describe, it, expect, afterEach, beforeEach, afterAll } from "vitest";
-import { crumbPath, CONTAINER_NAMES, labelPathSegments, DESTINATIONS, type Destination } from "../../src/pages/rail";
+import { crumbPath, CONTAINER_NAMES, labelPathSegments, DESTINATIONS, type Destination } from "../../src/pages/rail/railPlaces";
 import type { Entry, Folder } from "../../src/core/types";
 import { SHIPPED, folder, FULL, SPARSE, build, names, item } from "./rail.shared";
 

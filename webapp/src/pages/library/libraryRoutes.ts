@@ -6,7 +6,7 @@ import { resolveVersionShort } from "../versionShort";
 import type { Api } from "../../api/types";
 import type { Id, NoteMeta, NoteSummary } from "../../core/types";
 import type { ReaderOrigin } from "../reader/reader";
-import { crumbPath } from "../rail";
+import { crumbPath } from "../rail/railPlaces";
 import { BIN_KEY } from "../bin/bin";
 import type { LibraryCtx } from "./libraryContext";
 import { type AppShell, ADMIN_KEY, ACCOUNT_KEY, TODO_KEY, synthesizeSummary } from "./library";

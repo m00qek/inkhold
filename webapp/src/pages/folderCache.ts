@@ -5,7 +5,7 @@
 
 import type { Api } from "../api/types";
 import type { Folder, Id, Listing } from "../core/types";
-import type { FolderTree } from "./rail";
+import type { FolderTree } from "./rail/rail";
 
 const key = (id: Id | null) => id ?? "\0root";
 

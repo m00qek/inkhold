@@ -1,7 +1,8 @@
 // Helpers shared by the rail tests.
 
 import { it, vi } from "vitest";
-import { createRail, DESTINATIONS, type FolderTree, type RailPlace, type RailRow, type RailView, type Destination } from "../../src/pages/rail";
+import { createRail, type FolderTree, type RailPlace, type RailRow, type RailView } from "../../src/pages/rail/rail";
+import { DESTINATIONS, type Destination } from "../../src/pages/rail/railPlaces";
 import type { IconName } from "../../src/ui/icons";
 import type { Folder, Id } from "../../src/core/types";
 

@@ -5,7 +5,7 @@
 import { cardList } from "./galleryCards";
 import { el } from "../ui/dom";
 import { coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
-import { crumbPath } from "./rail";
+import { crumbPath } from "./rail/railPlaces";
 import { matchesName, nameQueryFor, type NameQuery } from "../search/match";
 import type { SearchCoverage } from "./searchCoverage";
 import type { FolderCache } from "./folderCache";

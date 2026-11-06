@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
-import { createRail, CATEGORIES, DESTINATIONS, type FolderTree, type RailRow } from "../../src/pages/rail";
+import { createRail, type FolderTree, type RailRow } from "../../src/pages/rail/rail";
+import { CATEGORIES, DESTINATIONS } from "../../src/pages/rail/railPlaces";
 import { SHIPPED, Spec, folder, treeOf, FULL, SPARSE, build, names, item } from "./rail.shared";
 
 beforeEach(() => void DESTINATIONS.splice(0, DESTINATIONS.length));
