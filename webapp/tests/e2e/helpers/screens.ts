@@ -12,21 +12,25 @@ export interface Screen {
 
 /**
  * Waits until the folder walk is done and the page stops changing: the number
- * of elements holds for a second (data arriving adds rows). At most 10 s
- * for the quiet part.
+ * of elements and the page's text hold for a second (data arriving adds rows
+ * and changes counts). At most 10 s for the quiet part.
  */
 export async function settle(page: Page): Promise<void> {
   // The folder walk adds rail rows with pauses longer than the quiet window:
   // the rail says when it is done.
   const folders = page.locator('[aria-label="Folders"][aria-busy="false"]');
   if ((await page.locator('[aria-label="Folders"]').count()) > 0) await folders.waitFor({ state: "attached", timeout: 15_000 });
+  // The walk can start late on a deep link (admin, a note): wait for a folder
+  // the test data has, which only the finished walk lists.
+  if ((await page.locator(".rail").count()) > 0) await page.locator(".rail .nav__item", { hasText: "Files" }).first().waitFor({ state: "attached", timeout: 15_000 });
   // To-Do joins the rail when its first read lands, apart from the walk.
   if ((await page.locator(".rail").count()) > 0) await page.locator(".rail .nav__item", { hasText: "To-Do" }).first().waitFor({ state: "attached", timeout: 15_000 });
-  let last = -1;
+  let last = "";
   let still = 0;
   for (let i = 0; i < 100 && still < 10; i++) {
     await page.waitForTimeout(100);
-    const n = await page.evaluate(() => document.getElementsByTagName("*").length);
+    // Elements and text: a count arriving changes "0" to "5", not the tree.
+    const n = await page.evaluate(() => `${document.getElementsByTagName("*").length}:${document.body.innerText}`);
     still = n === last ? still + 1 : 0;
     last = n;
   }

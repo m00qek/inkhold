@@ -158,12 +158,17 @@ test.describe("recycle bin", () => {
     await expect(rows.nth(1)).toHaveClass(/is-child/);
     await expect(rows.nth(2)).toHaveClass(/is-child/);
 
+    // Resolved to px through a probe: the tokens are written in rem.
     const tokens = await page.evaluate(() => {
-      const cs = getComputedStyle(document.documentElement);
-      return {
-        full: parseFloat(cs.getPropertyValue("--row-pad-y")),
-        tight: parseFloat(cs.getPropertyValue("--row-pad-y-tight")),
+      const px = (token: string) => {
+        const probe = document.createElement("div");
+        probe.style.paddingTop = `var(${token})`;
+        document.body.append(probe);
+        const v = parseFloat(getComputedStyle(probe).paddingTop);
+        probe.remove();
+        return v;
       };
+      return { full: px("--row-pad-y"), tight: px("--row-pad-y-tight") };
     });
     expect(tokens.tight).toBeLessThan(tokens.full);
 

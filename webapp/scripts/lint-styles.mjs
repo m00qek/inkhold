@@ -2,7 +2,8 @@
 /*
  * Design-system drift gate: fails when a raw `font-size` or a raw control-band
  * `height` (>= 30px, outside avatar rules) appears in src/styles/*.css other
- * than 00-tokens.css. New sizes go in 00-tokens.css as tokens.
+ * than 00-tokens.css, or when a type, spacing or control-height token there
+ * is not in rem. New sizes go in 00-tokens.css as tokens.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -45,6 +46,20 @@ for (const file of files) {
   }
 }
 
+// The tokens text and spacing come from follow the reader's text size: rem,
+// never px (a touch target may floor itself with max(<px>, <rem>)).
+const tokens = readFileSync(join(stylesDir, "00-tokens.css"), "utf8").split("\n");
+const SCALED = /^\s*--(fs|sp|control-h|row-pad|hit-target)[a-z0-9-]*:\s*([^;]+);/;
+for (let i = 0; i < tokens.length; i++) {
+  const m = SCALED.exec(tokens[i]);
+  if (!m || m[2].startsWith("var(")) continue;
+  const value = m[2].trim();
+  const floored = /^max\(\s*\d+px\s*,\s*[0-9.]+rem\s*\)$/.test(value);
+  if (!floored && !/^[0-9.]+rem$/.test(value)) {
+    problems.push(`00-tokens.css:${i + 1}  --${m[1]}… must be in rem so it follows the text size:\n    ${tokens[i].trim()}`);
+  }
+}
+
 if (problems.length) {
   console.error(
     `\nstyle drift: ${problems.length} raw value(s) that must come from 00-tokens.css\n`,
@@ -57,4 +72,4 @@ if (problems.length) {
   process.exit(1);
 }
 
-console.log(`lint-styles: ${files.length} files clean — every size/height is a token.`);
+console.log(`lint-styles: ${files.length} files clean — every size/height is a token, and text and spacing tokens are rem.`);

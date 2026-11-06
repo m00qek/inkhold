@@ -10,32 +10,35 @@
   --font-mono: "Space Mono", ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
   color-scheme: light dark;
 
+  /* Type and spacing in rem: they follow the reader's text-size setting (at
+     the default 16px, 1rem = 16px, so 0.84375rem is the old 13.5px). Lines
+     and geometry (radii, tiles, panels) stay in px. */
   /* One type scale, six steps; a mono uppercase label is an eyebrow even at 12px. */
-  --fs-eyebrow: 11px; /* mono uppercase labels, eyebrows */
-  --fs-caption: 12px; /* meta, timestamps, hints */
-  --fs-body: 13.5px; /* reading default */
-  --fs-title: 16px; /* item / panel titles */
-  --fs-heading: 22px; /* section heads */
-  --fs-display: 30px; /* the rare big moment */
+  --fs-eyebrow: 0.6875rem; /* mono uppercase labels, eyebrows */
+  --fs-caption: 0.75rem; /* meta, timestamps, hints */
+  --fs-body: 0.84375rem; /* reading default */
+  --fs-title: 1rem; /* item / panel titles */
+  --fs-heading: 1.375rem; /* section heads */
+  --fs-display: 1.875rem; /* the rare big moment */
 
   /* One spacing ramp. */
-  --sp-1: 4px;
-  --sp-2: 8px;
-  --sp-3: 12px;
-  --sp-4: 16px;
-  --sp-6: 24px;
-  --sp-8: 32px;
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-6: 1.5rem;
+  --sp-8: 2rem;
 
   /* Two control heights: 34px default/topbar, 28px compact viewer toolbars.
      Border-box, so this is the visual height. `--topbar-control-h` is an alias. */
-  --control-h: 34px;
-  --control-h-sm: 28px;
+  --control-h: 2.125rem;
+  --control-h-sm: 1.75rem;
   /* The smallest pointer target for a control drawn smaller (the To-Do check). */
-  --hit-target: 32px;
+  --hit-target: 2rem;
   /* The smallest thing a finger is asked to hit (WCAG 2.5.5, platform guides). */
-  --hit-target-touch: 44px;
+  --hit-target-touch: max(44px, 2.75rem);
   /* The smallest a pointer target may be anywhere (WCAG 2.5.8). */
-  --hit-target-min: 24px;
+  --hit-target-min: max(24px, 1.5rem);
   --topbar-control-h: var(--control-h);
 
   /* The layers panel's opacity fill-bar track height. */
@@ -55,8 +58,8 @@
   --panel-gap: 22px;
 
   /* Row rhythm shared by the list view and the bin. */
-  --row-pad-y: 15px;
-  --row-pad-y-tight: 7px;
+  --row-pad-y: 0.9375rem;
+  --row-pad-y-tight: 0.4375rem;
 
   /* Preview size classes; each fixes the axis its layout holds constant (rows
      fix height, masonry columns fix width). `--tile-w-icon` must equal
