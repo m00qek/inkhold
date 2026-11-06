@@ -80,9 +80,11 @@ function structure(opts: CheckOptions): Record<string, string[]> {
   // Title.
   if (opts.ownTitle && document.title.trim() === "Inkhold") add("own-title", `title is "${document.title}"`);
 
-  // Navigation is a link; an action is a button. These controls go somewhere.
-  for (const e of document.querySelectorAll("nav button,.card__open,.crumbs button,.coverage button")) {
-    if (shown(e) && !e.closest("[role=menu],[aria-haspopup]") && !e.hasAttribute("aria-expanded") && !e.hasAttribute("aria-pressed")) add("navigates-by-button", e);
+  // Navigation is a link; an action is a button. These controls go somewhere;
+  // `data-no-address` marks a place that has none (a category not created yet).
+  for (const e of document.querySelectorAll("nav button,button.card__open,.coverage button")) {
+    if (e.hasAttribute("data-no-address") || e.hasAttribute("aria-expanded") || e.hasAttribute("aria-pressed") || e.hasAttribute("aria-haspopup")) continue;
+    if (shown(e) && !e.closest("[role=menu]")) add("navigates-by-button", e);
   }
 
   // Collections are lists.

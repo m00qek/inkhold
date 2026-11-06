@@ -51,7 +51,7 @@ test.describe("accessibility — library & reader", () => {
 
     await expect(page.getByRole("navigation", { name: "Library" })).toBeVisible();
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Your account: ana@household.lan" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Your account: ana@household.lan" })).toBeVisible();
   });
 
   test("the account page's landmarks and controls carry accessible names", async ({ page }) => {

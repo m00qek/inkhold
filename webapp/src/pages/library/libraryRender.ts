@@ -1,5 +1,7 @@
 // The library's gallery painting: crumbs, the folder listing or search results, and the empty states.
 
+import type { Id } from "../../core/types";
+import { crumbHere, crumbLink, crumbSep } from "../../ui/crumbs";
 import { el } from "../../ui/dom";
 import { closeOpenMenu } from "../../ui/menu";
 import { folderHref, go } from "../../router";
@@ -22,38 +24,36 @@ export interface LibraryRender {
 
 export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
   const { st } = ctx;
+  /** A crumb back up to `id`'s folder. */
+  const folderCrumb = (label: string, id: Id | null) => crumbLink(label, folderHref(id), () => go(folderHref(id)));
+  const sep = crumbSep;
+  const here = crumbHere;
+
   function buildCrumbs(): void {
     const parts: (Node | string)[] = [];
-    const home = el("button", { type: "button", text: "Library" });
-    home.addEventListener("click", () => go(folderHref(null)));
+    const home = folderCrumb("Library", null);
     if (st.query.trim()) {
       // Just "Search": results span the library, so a folder crumb would lie.
-      ctx.topbar.crumbs.replaceChildren(el("span", { class: "crumbs__here", text: "Search" }));
+      ctx.topbar.crumbs.replaceChildren(here("Search"));
       return;
     }
     const pending = ctx.rail.pending();
     if (pending) {
       // "Library" would contradict the highlighted rail row.
-      parts.push(home, el("span", { class: "crumbs__sep", text: "/" }), el("span", { class: "crumbs__here", text: pending.label }));
+      parts.push(home, sep(), here(pending.label));
       ctx.topbar.crumbs.replaceChildren(...parts);
       return;
     }
     if (!st.listing || (st.listing.folderId === null && st.listing.path.length === 0)) {
-      parts.push(el("span", { class: "crumbs__here", text: "Library" }));
+      parts.push(here("Library"));
     } else {
       parts.push(home);
       const trail = crumbPath(st.listing.path);
       trail.forEach((folder, i) => {
-        parts.push(el("span", { class: "crumbs__sep", text: "/" }));
+        parts.push(sep());
         // The rail's label, so the crumb can't read `EXPORT` beside `Export`.
         const label = ctx.rail.labelFor(folder);
-        if (i === trail.length - 1) {
-          parts.push(el("span", { class: "crumbs__here", text: label }));
-        } else {
-          const crumb = el("button", { type: "button", text: label });
-          crumb.addEventListener("click", () => go(folderHref(folder.id)));
-          parts.push(crumb);
-        }
+        parts.push(i === trail.length - 1 ? here(label) : folderCrumb(label, folder.id));
       });
     }
     ctx.topbar.crumbs.replaceChildren(...parts);

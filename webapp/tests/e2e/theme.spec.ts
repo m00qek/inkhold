@@ -43,7 +43,7 @@ test.describe("theme toggle", () => {
     await expect.poll(async () => imgInkFraction(firstImg), { timeout: 5000 }).toBeGreaterThan(0.003);
     expect(await imgPainted(lastImg)).toBe(false);
 
-    await page.getByRole("button", { name: "Your account" }).click();
+    await page.getByRole("link", { name: "Your account" }).click();
     await page.locator(".acct-theme").getByRole("button", { name: "Paper Dark" }).click();
 
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
@@ -130,7 +130,7 @@ test.describe("theme persistence", () => {
 // Regression: the control vanished while reading because its container was hidden.
 // Asserts computed geometry, since `toBeVisible()` passes for a zero-width box.
 test.describe("theme control reach", () => {
-  const nameplate = (page: Page) => page.getByRole("button", { name: "Your account" });
+  const nameplate = (page: Page) => page.getByRole("link", { name: "Your account" });
 
   async function probe(page: Page) {
     // An automated tab is `visibilityState: hidden`, which freezes CSS transitions mid-flight.

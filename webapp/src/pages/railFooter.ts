@@ -1,5 +1,7 @@
 // The rail's footer: the account nameplate and the storage meter under it.
 
+import { onPlainClick } from "../ui/link";
+import { accountHref } from "../router";
 import { el } from "../ui/dom";
 import { ICONS, svg } from "../ui/icons";
 import { formatBytes } from "../core/fileKind";
@@ -14,15 +16,15 @@ function initials(email: string): string {
 }
 
 /**
- * One button opening the account page; sign out and the theme toggle live
- * there, which gives the name column room.
+ * One link to the account page; sign out and the theme toggle live there,
+ * which gives the name column room.
  */
 export function createNameplate(email: string, onOpen: () => void): HTMLElement {
   const nameplate = el(
-    "button",
+    "a",
     {
       class: "account",
-      type: "button",
+      href: accountHref(),
       // Says what pressing does and who it's about.
       "aria-label": `Your account: ${email || "signed in"}`,
       title: "Your account",
@@ -36,7 +38,7 @@ export function createNameplate(email: string, onOpen: () => void): HTMLElement 
     ),
     el("span", { class: "account__chevron", "aria-hidden": "true", html: svg(ICONS.chevron, 1.8) }),
   );
-  nameplate.addEventListener("click", onOpen);
+  onPlainClick(nameplate, onOpen);
   return nameplate;
 }
 

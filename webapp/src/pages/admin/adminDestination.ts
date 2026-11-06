@@ -1,6 +1,7 @@
 // The admin destination inside the shell: a loading stand-in over the
 // `import("./admin")` round trip, then the console itself, built once.
 
+import { libraryTrail } from "../../ui/crumbs";
 import { el } from "../../ui/dom";
 import { folderHref, go } from "../../router";
 import type { Api } from "../../api/types";
@@ -81,13 +82,7 @@ export function createAdminDestination(deps: AdminDestinationDeps): AdminDestina
     deps.sortWrap.hidden = true;
     deps.segmented.hidden = true;
     deps.setMode(true);
-    const home = el("button", { type: "button", text: "Library" });
-    home.addEventListener("click", () => go(folderHref(null)));
-    deps.crumbs.replaceChildren(
-      home,
-      el("span", { class: "crumbs__sep", text: "/" }),
-      el("span", { class: "crumbs__here", text: "Admin" }),
-    );
+    deps.crumbs.replaceChildren(...libraryTrail("Admin", () => go(folderHref(null)), folderHref(null)));
     deps.rebuildRail(); // the highlight reads the shell's destination, already admin
   }
 

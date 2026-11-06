@@ -370,7 +370,7 @@ test.describe("reader", () => {
       await signedIn(page);
       await page.goto("/");
       await railSettled(page);
-      await page.getByRole("button", { name: "Document" }).first().click();
+      await page.getByRole("link", { name: "Document" }).first().click();
       await cardButton(page, /Attention Is All You Need/).click();
 
       await expect(page.locator(".backbtn")).toHaveText("Document");

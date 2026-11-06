@@ -2,6 +2,7 @@
 // Knows nothing about the API; every click is a call on `TodoActions`. The
 // page-level tools (status, list options, New list) live in the shell's topbar.
 
+import { onPlainClick } from "../../ui/link";
 import { el } from "../../ui/dom";
 import { createMenu } from "../../ui/menu";
 import { ICONS, svg, type IconName } from "../../ui/icons";
@@ -128,11 +129,7 @@ export function overview(p: TodoPaint, a: TodoActions): HTMLElement {
         : null,
       menu,
     );
-    link.addEventListener("click", (e) => {
-      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
-      e.preventDefault();
-      a.show(c.view);
-    });
+    onPlainClick(link, () => a.show(c.view));
     return el("li", {}, card);
   });
   return el("ul", { class: "todo-cards", "aria-label": "Lists" }, ...items);

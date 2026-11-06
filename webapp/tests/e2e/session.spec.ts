@@ -54,7 +54,7 @@ test.describe("session restore on load", () => {
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
 
     // `exact`: "Sign out everywhere" also matches as a substring.
-    await page.getByRole("button", { name: "Your account" }).click();
+    await page.getByRole("link", { name: "Your account" }).click();
     await page.getByRole("button", { name: "Sign out", exact: true }).click();
 
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();

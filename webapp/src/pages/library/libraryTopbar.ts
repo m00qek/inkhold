@@ -71,7 +71,8 @@ function topbarAction(opts: {
 }
 
 export function createTopbar(deps: TopbarDeps): Topbar {
-  const crumbs = el("div", { class: "crumbs", id: "crumbs" });
+  // Where you are, as links back up: a breadcrumb navigation.
+  const crumbs = el("nav", { class: "crumbs", id: "crumbs", "aria-label": "Breadcrumb" });
   const searchInput = el("input", {
     class: "search__input",
     id: "search",

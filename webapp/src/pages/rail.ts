@@ -161,6 +161,8 @@ export type RailRow =
       badge: RailBadge | null;
       depth: number;
       current: boolean;
+      /** Where the row goes, so it is a link; null for a place with no address (a category not created yet). */
+      href: string | null;
       select(): void;
       /** A chevron that folds the rows beneath (To-Do's views). */
       toggle?: { expanded: boolean; label: string; onToggle(): void };
@@ -172,7 +174,7 @@ export interface RailChildren {
   /** The chevron's accessible name; says what it will do. */
   toggleLabel: string;
   onToggle(): void;
-  rows: readonly { icon: IconName; name: string; count: number; current: boolean; select(): void }[];
+  rows: readonly { icon: IconName; name: string; count: number; current: boolean; href: string; select(): void }[];
 }
 
 export interface RailView {
@@ -189,6 +191,9 @@ export interface RailDeps {
   /** No id to list; the shell paints `Category.pending` and fetches nothing. */
   onSelectCategory(cat: Category): void;
   onOpenDestination(key: string): void;
+  /** The addresses rows link to; without them rows are buttons (tests). */
+  folderHref?(id: Id): string;
+  destinationHref?(key: string): string;
   /** 0 renders as no badge. */
   destinationCount(key: string): number;
   /**
@@ -332,6 +337,7 @@ export function createRail(deps: RailDeps): RailController {
       badge: { kind: "count", value: itemsIn(folder) },
       depth,
       current: currentId === folder.id,
+      href: deps.folderHref?.(folder.id) ?? null,
       select: () => deps.onOpenFolder(folder.id),
     };
   }
@@ -345,6 +351,7 @@ export function createRail(deps: RailDeps): RailController {
       badge: { kind: "count", value: itemsIn(folder) },
       depth: 0,
       current: folder ? currentId === folder.id : pendingCategory === cat,
+      href: folder ? (deps.folderHref?.(folder.id) ?? null) : null,
       select: folder ? () => deps.onOpenFolder(folder.id) : () => selectCategory(cat),
     };
   }
@@ -370,6 +377,7 @@ export function createRail(deps: RailDeps): RailController {
       depth: 0,
       // With its rows unfolded one of them is current; folded, the parent stands in.
       current: current === dest.key && !(children?.expanded && children.rows.some((r) => r.current)),
+      href: deps.destinationHref?.(dest.key) ?? null,
       select: () => deps.onOpenDestination(dest.key),
       toggle: children ? { expanded: children.expanded, label: children.toggleLabel, onToggle: children.onToggle } : undefined,
     };
@@ -383,6 +391,7 @@ export function createRail(deps: RailDeps): RailController {
       badge: r.count > 0 ? { kind: "count", value: r.count } : null,
       depth: 1,
       current: r.current,
+      href: r.href,
       select: r.select,
     }));
   }

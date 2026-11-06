@@ -1,5 +1,7 @@
 // The bin's read-scoped Api wrapper and its gallery painter.
 
+import { folderHref } from "../../router";
+import { libraryTrail } from "../../ui/crumbs";
 import { el } from "../../ui/dom";
 import { openDialog } from "../../ui/confirm";
 import { learnsAspect, pinAspect, provisionalAspect } from "../../ui/tileAspect";
@@ -272,13 +274,7 @@ export function createBinView(opts: BinViewOptions): BinView {
       sortWrap.hidden = true;
       segmented.hidden = true;
       // Library is a way out: the account page's `Open` sends people here directly.
-      const home = el("button", { type: "button", text: "Library" });
-      home.addEventListener("click", () => onLeave());
-      crumbs.replaceChildren(
-        home,
-        el("span", { class: "crumbs__sep", text: "/" }),
-        el("span", { class: "crumbs__here", text: "Recycle bin" }),
-      );
+      crumbs.replaceChildren(...libraryTrail("Recycle bin", () => onLeave(), folderHref(null)));
       // Told every render: the count decides whether `Empty bin` is live.
       setMode(true, model.rows.length, model.emptying);
 

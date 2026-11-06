@@ -5,7 +5,7 @@ import { railSettled, signedIn } from "./helpers/app";
 
 async function openAccount(page: Page): Promise<void> {
   await page.goto("/");
-  await page.getByRole("button", { name: "Your account" }).click();
+  await page.getByRole("link", { name: "Your account" }).click();
   await expect(page.locator(".acct")).toBeVisible();
 }
 
@@ -22,7 +22,7 @@ test.describe("the rail footer nameplate", () => {
     await expect(rail.getByRole("button", { name: "Toggle light or dark" })).toHaveCount(0);
     await expect(rail.getByRole("button", { name: "Sign out" })).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Your account" }).click();
+    await page.getByRole("link", { name: "Your account" }).click();
 
     await expect(page).toHaveURL(/#\/account$/);
     await expect(page.locator(".acct")).toBeVisible();
@@ -264,7 +264,7 @@ test.describe("the account page", () => {
     await expect(page.getByRole("navigation", { name: "Library" })).toBeVisible();
     await expect(page.locator(".rail").getByRole("button", { name: "Admin" })).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Your account" }).click();
+    await page.getByRole("link", { name: "Your account" }).click();
     await expect(page.locator(".acct")).toBeVisible();
     await expect(section(page, "Storage").locator(".acct-kind")).toHaveCount(5);
     await expect(section(page, "Devices")).toContainText("Nomad");
@@ -277,12 +277,12 @@ test.describe("the account page", () => {
     await page.goto("/");
 
     await expect(page.locator("#upload")).toBeVisible();
-    await page.getByRole("button", { name: "Your account" }).click();
+    await page.getByRole("link", { name: "Your account" }).click();
     await expect(page.locator(".acct")).toBeVisible();
     await expect(page.locator("#upload")).toBeHidden();
     await expect(page.locator(".tools__sep")).toBeHidden();
 
-    await page.locator(".crumbs button", { hasText: "Library" }).click();
+    await page.locator(".crumbs a", { hasText: "Library" }).click();
     await expect(page.locator(".acct")).toBeHidden();
     await expect(page.locator("#upload")).toBeVisible();
 
@@ -291,7 +291,7 @@ test.describe("the account page", () => {
       .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Recycle bin$/ }) })
       .click();
     await expect(page.locator("#empty-bin")).toBeVisible();
-    await page.getByRole("button", { name: "Your account" }).click();
+    await page.getByRole("link", { name: "Your account" }).click();
     await expect(page.locator(".acct")).toBeVisible();
     await expect(page.locator("#empty-bin")).toBeHidden();
     await expect(page.locator("#upload")).toBeHidden();
@@ -305,7 +305,7 @@ test.describe("the account page", () => {
     await expect(page.locator(".sn-root")).toHaveClass(/is-destination/);
     await expect(page.locator("#sort")).toBeHidden();
 
-    await page.locator(".crumbs").getByRole("button", { name: "Library" }).click();
+    await page.locator(".crumbs").getByRole("link", { name: "Library" }).click();
 
     await expect(page.locator(".acct")).toBeHidden();
     await expect(page.locator("#sort")).toBeVisible();
@@ -320,7 +320,7 @@ test.describe("the account page", () => {
     await railSettled(page);
     const before = await page.locator(".card").count();
 
-    await page.getByRole("button", { name: "Your account" }).click();
+    await page.getByRole("link", { name: "Your account" }).click();
     await expect(page.locator(".acct")).toBeVisible();
     expect(await page.locator(".card").count()).toBe(before);
 

@@ -100,6 +100,7 @@
   background: transparent;
   color: var(--ink-soft);
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
   border-radius: 3px;
   transition:
@@ -158,12 +159,14 @@
   /* Not dimmed like the category marks: this glyph is the information. */
   opacity: 1;
 }
+.nav__item[aria-current="page"],
 .nav__item[aria-current="true"] {
   color: var(--ink);
   border-left-color: var(--accent);
   background: var(--hover);
   font-weight: 500;
 }
+.nav__item[aria-current="page"] svg,
 .nav__item[aria-current="true"] svg {
   opacity: 1;
 }
@@ -183,6 +186,7 @@
   color: inherit;
   font: inherit;
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
   transition: background 0.12s ease;
 }

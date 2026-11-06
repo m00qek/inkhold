@@ -277,9 +277,9 @@ export async function mockThumbnailBackend(
   return { thumbnailHits: tally(thumbHits), fileHits: tally(fileHits), binFileHits: tally(binHits) };
 }
 
-/** A card's opening button. A bare name regex also matches the "Actions for X" trigger. */
+/** A card's opening link. A bare name regex also matches the "Actions for X" trigger. */
 export function cardButton(page: Page, name: string | RegExp): Locator {
-  return page.getByRole("button", { name }).and(page.locator(".card__open"));
+  return page.getByRole("link", { name }).and(page.locator(".card__open"));
 }
 
 /**

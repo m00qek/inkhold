@@ -3,6 +3,7 @@
 
 import { el } from "../ui/dom";
 import { ICONS, svg } from "../ui/icons";
+import { onPlainClick } from "../ui/link";
 import type { RailBadge, RailRow, RailView } from "./rail";
 
 // ---- the painter ----
@@ -31,19 +32,21 @@ export function createRailView(nav: HTMLElement): RailView {
       nav.replaceChildren(
         ...rows.map((row) => {
           if (row.kind === "label") return el("div", { class: "nav__label", text: row.text });
-          const item = el(
-            "button",
-            {
-              class: row.depth > 0 ? "nav__item is-nested" : "nav__item",
-              type: "button",
-              "aria-current": String(row.current),
-            },
+          const cls = row.depth > 0 ? "nav__item is-nested" : "nav__item";
+          const parts = [
             el("span", { class: "nav__glyph", html: svg(ICONS[row.icon]) }),
             el("span", { class: "nav__name", text: row.name }),
             badgeEl(row.badge),
-          );
+          ];
+          // A row with an address is a link: it can open in a new tab and says
+          // where it goes. A plain click still runs the row's own action.
+          const item =
+            row.href !== null
+              ? el("a", { class: cls, href: row.href, "aria-current": row.current ? "page" : null }, ...parts)
+              : el("button", { class: cls, type: "button", "aria-current": String(row.current), "data-no-address": "" }, ...parts);
           item.style.setProperty("--depth", String(row.depth));
-          item.addEventListener("click", () => row.select());
+          if (row.href !== null) onPlainClick(item, () => row.select());
+          else item.addEventListener("click", () => row.select());
           if (!row.toggle) return item;
           const t = row.toggle;
           const toggle = el("button", {

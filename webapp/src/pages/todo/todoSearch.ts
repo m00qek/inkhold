@@ -9,6 +9,7 @@ import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
 import { findTodos, homeView, openCount, viewPath, type TodoView } from "./todoModel";
 import { taskMeta } from "./todoView";
 import { expansionNotice } from "../noteSearch";
+import { onPlainClick } from "../../ui/link";
 
 /** Text and `<mark>` around the given ranges; never markup: titles are the person's own text. */
 function marked(text: string, ranges: readonly (readonly [number, number])[]): Node[] {
@@ -25,14 +26,7 @@ function marked(text: string, ranges: readonly (readonly [number, number])[]): N
 
 const plural = (n: number, one: string) => `${n} ${n === 1 ? one : `${one}s`}`;
 
-/** Opens `href` itself unless the click asks for a new tab or window. */
-function onOpen(a: HTMLElement, open: () => void): void {
-  a.addEventListener("click", (e) => {
-    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
-    e.preventDefault();
-    open();
-  });
-}
+const onOpen = (a: HTMLElement, open: () => void) => onPlainClick(a, open);
 
 /** Null when nothing matched (or To-Do is off): the search says nothing about to-dos. */
 export function todoHits(

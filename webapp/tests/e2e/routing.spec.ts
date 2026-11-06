@@ -22,7 +22,7 @@ function reader(page: Page): Locator {
 
 /** The row the rail is currently marking as where you are. */
 function currentNavItem(page: Page): Locator {
-  return page.getByRole("navigation", { name: "Library" }).locator('.nav__item[aria-current="true"]');
+  return page.getByRole("navigation", { name: "Library" }).locator('.nav__item[aria-current="page"]');
 }
 
 const searchBox = (page: Page) => page.getByRole("searchbox", { name: "Search notes" });

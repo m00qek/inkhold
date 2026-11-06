@@ -3,6 +3,8 @@
 // distinctly from known-empty. Quota and self-delete are deliberately absent
 // (the admin decides those). Pure decisions and copy first, then the painter.
 
+import { folderHref } from "../../router";
+import { libraryTrail } from "../../ui/crumbs";
 import { el } from "../../ui/dom";
 import { button, deviceHint, failed, pending, row, section, type Load } from "./accountDom";
 import { createPasswordForm } from "./accountPasswordForm";
@@ -448,13 +450,7 @@ export function createAccountPage(host: AccountHost): AccountPage {
     host.segmented.hidden = mine;
     host.setMode(mine);
     if (!mine) return;
-    const home = el("button", { type: "button", text: "Library" });
-    home.addEventListener("click", () => host.onLeave());
-    host.crumbs.replaceChildren(
-      home,
-      el("span", { class: "crumbs__sep", text: "/" }),
-      el("span", { class: "crumbs__here", text: "You" }),
-    );
+    host.crumbs.replaceChildren(...libraryTrail("You", () => host.onLeave(), folderHref(null)));
   }
 
   return {

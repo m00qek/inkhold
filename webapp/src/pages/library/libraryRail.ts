@@ -47,6 +47,7 @@ export function installLibraryRail(ctx: LibraryCtx): void {
       name,
       count: openCount(snap, v),
       current: onTodo && here !== null && sameView(here, v),
+      href: todoHref(viewPath(v)),
       select: () => go(todoHref(viewPath(v))),
     });
     return {
@@ -90,6 +91,8 @@ export function installLibraryRail(ctx: LibraryCtx): void {
     onOpenFolder: (id) => go(folderHref(id)),
     onSelectCategory: () => ctx.data.enterPendingCategory(),
     onOpenDestination: (key) => go(destinationHref(key)),
+    folderHref: (id) => folderHref(id),
+    destinationHref: (key) => destinationHref(key),
     destinationCount: (key) => {
       switch (key) {
         // --- BIN COUNT ---

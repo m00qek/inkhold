@@ -86,14 +86,12 @@
   color: var(--ink-faint);
   white-space: nowrap;
 }
-.crumbs button {
-  border: 0;
-  background: transparent;
-  cursor: pointer;
+.crumbs a {
   color: var(--ink-soft);
+  text-decoration: none;
   padding: 2px;
 }
-.crumbs button:hover {
+.crumbs a:hover {
   color: var(--ink);
 }
 .crumbs .crumbs__here {

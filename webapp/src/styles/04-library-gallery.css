@@ -53,8 +53,8 @@
 
 /* folder card: a folder is a full `.card.card--folder`, same footprint as a note. */
 
-/* note card: a wrapper, not a <button>, because a list row also has its own
-   action button inside; `.card__open` is the button. */
+/* note card: a wrapper, because a list row also has its own action button
+   inside; `.card__open` is the link that opens it. */
 .card {
   position: relative;
   animation: rise 0.45s cubic-bezier(0.2, 0.7, 0.2, 1) both;
@@ -76,6 +76,7 @@
   background: transparent;
   padding: 0;
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
   font: inherit;
   color: inherit;

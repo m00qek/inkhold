@@ -17,7 +17,7 @@ async function openTodo(page: Page, path = ""): Promise<void> {
 const rail = (page: Page) => page.locator(".rail");
 /** A list is reached through the overview's cards; only the Inbox is in the rail. */
 async function openList(page: Page, name: string): Promise<void> {
-  await rail(page).getByRole("button", { name: /^To-Do/ }).click();
+  await rail(page).getByRole("link", { name: /^To-Do/ }).click();
   await page.locator(".todo-card", { hasText: name }).click();
   await expect(page.locator(".todo-place__name")).toHaveText(name);
 }
@@ -32,22 +32,22 @@ test.describe("To-Do", () => {
     // The tablet's order; the other lists are the overview's cards.
     const names = await nav.locator(".nav__item.is-nested .nav__name").allInnerTexts();
     expect(names.map((n) => n.trim())).toEqual(["Inbox", "Planned", "All", "Completed"]);
-    await expect(nav.getByRole("button", { name: /^Planned/ })).toBeVisible();
-    await nav.getByRole("button", { name: /^Planned/ }).click();
+    await expect(nav.getByRole("link", { name: /^Planned/ })).toBeVisible();
+    await nav.getByRole("link", { name: /^Planned/ }).click();
     await expect(page).toHaveURL(/#\/todo\/planned$/);
     await expect(page.locator(".todo-group__head", { hasText: "Overdue" })).toBeVisible();
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/planned.png` });
 
     // The chevron folds the views away while staying on To-Do.
     await nav.getByRole("button", { name: "Fold To-Do" }).click();
-    await expect(nav.getByRole("button", { name: /^Planned/ })).toHaveCount(0);
+    await expect(nav.getByRole("link", { name: /^Planned/ })).toHaveCount(0);
     await nav.getByRole("button", { name: "Unfold To-Do" }).click();
 
     // Leaving To-Do folds it.
-    await nav.getByRole("button", { name: /^Note/ }).click();
+    await nav.getByRole("link", { name: /^Note/ }).click();
     await expect(page.locator(".todo")).toBeHidden();
-    await expect(nav.getByRole("button", { name: /^Planned/ })).toHaveCount(0);
-    await expect(nav.getByRole("button", { name: /^To-Do/ })).toBeVisible();
+    await expect(nav.getByRole("link", { name: /^Planned/ })).toHaveCount(0);
+    await expect(nav.getByRole("link", { name: /^To-Do/ })).toBeVisible();
   });
 
   test("the overview: a card per list, Inbox first, each opening its list", async ({ page }) => {
@@ -209,7 +209,7 @@ test.describe("To-Do", () => {
     await expect(rail(page).getByRole("button", { name: /^Francês/ })).toHaveCount(0);
 
     // Off To-Do, the topbar is the library's again.
-    await rail(page).getByRole("button", { name: /^Note/ }).click();
+    await rail(page).getByRole("link", { name: /^Note/ }).click();
     await expect(page.locator("#todo-new-list")).toBeHidden();
     await expect(page.locator("#todo-list-options")).toBeHidden();
   });
@@ -315,7 +315,7 @@ test.describe("To-Do", () => {
     await page.getByRole("button", { name: "Create list" }).click();
     await expect(page.locator(".todo-place__name")).toHaveText("Trabalho");
     await expect(page.locator(".todo-empty")).toContainText("This list is empty");
-    await rail(page).getByRole("button", { name: /^To-Do/ }).click();
+    await rail(page).getByRole("link", { name: /^To-Do/ }).click();
     await expect(page.locator(".todo-card", { hasText: "Trabalho" })).toBeVisible();
   });
 

@@ -2,6 +2,7 @@
 // thumbnail/aspect/marks helpers they share. Shell state arrives through
 // `GalleryCardsCtx`.
 
+import { onPlainClick } from "../ui/link";
 import type { SearchExcerpts } from "./searchExcerpts";
 import { insideQuery, nameMarks, nameQuery } from "../search/match";
 import { el } from "../ui/dom";
@@ -252,6 +253,21 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
   * Grid: a compact chip sized to its name (no page to preview). List: the same
   * row markup as a note, so both share one alignment system.
   */
+  /**
+   * A card's open control: a link to `href`, followed by the app on a plain
+   * click; a button where there is no address (a category not created yet).
+   */
+  function openControl(href: string | null, onOpen: () => void, ...kids: (Node | null)[]): HTMLElement {
+    if (href === null) {
+      const b = el("button", { class: "card__open", type: "button", "data-no-address": "" }, ...kids);
+      b.addEventListener("click", onOpen);
+      return b;
+    }
+    const a = el("a", { class: "card__open", href }, ...kids);
+    onPlainClick(a, onOpen);
+    return a;
+  }
+
   function folderCard(folder: Folder): HTMLElement {
     const inList = ctx.getView() === "list";
     const meta = itemCountLabel(folder);
@@ -261,9 +277,10 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
       ? el("div", { class: "thumb thumb--category", html: categoryTileHtml(catIcon) })
       : // A folder has no page to preview, so its tile carries a centred glyph on
         el("div", { class: "thumb thumb--folder", html: svg(ICONS.folder, 1.4) });
-    const open = el(
-      "button",
-      { class: "card__open", type: "button" },
+    // A stand-in has no folder; routing to its synthetic id would 404.
+    const open = openControl(
+      pendingCat ? null : folderHref(folder.id),
+      () => (pendingCat ? ctx.onSelectCategory(pendingCat) : go(folderHref(folder.id))),
       tile,
       el(
         "div",
@@ -278,10 +295,6 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
           meta === null ? null : el("div", { class: "card__meta" }, el("span", { text: meta })),
         ),
       ),
-    );
-    // A stand-in has no folder; routing to its synthetic id would 404.
-    open.addEventListener("click", () =>
-      pendingCat ? ctx.onSelectCategory(pendingCat) : go(folderHref(folder.id)),
     );
     // List view only: the grid chip has nowhere for "…". None on a stand-in.
     return el(
@@ -302,9 +315,9 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
     const marks = cardMarks(note);
     const tile = el("div", { class: thumbClass }, inList ? null : marks, media);
     applyTileAspect(tile, note, media, inList);
-    const open = el(
-      "button",
-      { class: "card__open", type: "button" },
+    const open = openControl(
+      noteHref(note.id),
+      () => go(noteHref(note.id)),
       tile,
       el(
         "div",
@@ -324,7 +337,6 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
         ),
       ),
     );
-    open.addEventListener("click", () => go(noteHref(note.id)));
 
     const card = el(
       "div",
@@ -352,9 +364,13 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
     const tile = el("div", { class: thumbClass }, media);
     applyTileAspect(tile, note, media, true);
 
-    const open = el(
-      "button",
-      { class: "card__open", type: "button" },
+    // The query rides the URL, so the link survives reload and can be shared.
+    // Only rows with transcript hits carry the expansion (`deepLinkQuery`).
+    const linkQ = deepLinkQuery(q, result.pages.length > 0 ? expansions : []);
+    const opensAt = () => (top === undefined ? noteHref(result.noteId, linkQ) : notePageHref(result.noteId, top, linkQ));
+    const open = openControl(
+      opensAt(),
+      () => go(opensAt()),
       tile,
       el(
         "div",
@@ -376,16 +392,11 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
           result.md5 && result.pages.length > 0 && ctx.excerpts
             ? ctx.excerpts.slot({ md5: result.md5, pages: result.pages }, q, expansions, result.kind === 1 ? null : "p.", (segment) => {
                 top = segment;
+                open.setAttribute("href", opensAt());
               })
             : null,
         ),
       ),
-    );
-    // The query rides the URL, so the link survives reload and can be shared.
-    // Only rows with transcript hits carry the expansion (`deepLinkQuery`).
-    const linkQ = deepLinkQuery(q, result.pages.length > 0 ? expansions : []);
-    open.addEventListener("click", () =>
-      go(top === undefined ? noteHref(result.noteId, linkQ) : notePageHref(result.noteId, top, linkQ)),
     );
 
     const card = el("div", { class: "card card--result" }, open);

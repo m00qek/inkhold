@@ -122,7 +122,7 @@ test.describe("recycle bin", () => {
     await expect(page.locator(".segmented")).toBeVisible();
     await expect(page.locator(".select")).toBeVisible();
     await expect(page.locator("#empty-bin")).toBeHidden();
-    await expect(binRow(page)).toHaveAttribute("aria-current", "false");
+    await expect(binRow(page)).not.toHaveAttribute("aria-current", "page");
   });
 
   test("Delete permanently is legible and red in the menu, and clears the 24px target", async ({ page }) => {

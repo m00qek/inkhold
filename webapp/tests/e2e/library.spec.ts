@@ -114,7 +114,7 @@ test.describe("library rail + gallery", () => {
     await openCategory(page, "Document");
     await expect(cardButton(page, /Attention Is All You Need/)).toBeVisible();
 
-    await page.getByRole("button", { name: "Library", exact: true }).click();
+    await page.getByRole("link", { name: "Library", exact: true }).click();
     await expect(page.locator(".card--folder", { hasText: "Archive" })).toBeVisible();
 
     for (const label of ["Note", "Document", "MyStyle", "Export", "Screenshot", "Inbox"]) {
@@ -238,7 +238,7 @@ test.describe("library rail + gallery", () => {
       await expect(empty).toContainText("after a sync");
       await expect(empty).not.toContainText(/couldn't|error|failed/i);
 
-      await expect(navItem(page, "Export")).toHaveAttribute("aria-current", "true");
+      await expect(navItem(page, "Export")).toHaveAttribute("aria-current", "true"); // not created yet: a button
       await expect(page.locator(".crumbs__here")).toHaveText("Export");
 
       await page.waitForTimeout(300);

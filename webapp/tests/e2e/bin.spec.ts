@@ -49,7 +49,7 @@ test.describe("recycle bin", () => {
     await expect(page.locator(".crumbs__here")).toHaveText("Recycle bin");
     await expect(page.locator(".segmented")).toBeHidden();
     await expect(page.locator(".select")).toBeHidden();
-    await expect(row).toHaveAttribute("aria-current", "true");
+    await expect(row).toHaveAttribute("aria-current", "page");
   });
 
   test("the crumb is a way OUT, not just a label", async ({ page }) => {
@@ -60,7 +60,7 @@ test.describe("recycle bin", () => {
     await binRow(page).click();
 
     await expect(page.locator(".crumbs__here")).toHaveText("Recycle bin");
-    const home = page.locator(".crumbs button", { hasText: "Library" });
+    const home = page.locator(".crumbs a", { hasText: "Library" });
     await expect(home).toBeVisible();
 
     await home.click();
