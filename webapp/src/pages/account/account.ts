@@ -115,7 +115,7 @@ export function createAccountPage(host: AccountHost): AccountPage {
       el(
         "div",
         {},
-        el("h1", { class: "acct__title", text: name }),
+        el("h2", { class: "acct__title", text: name }),
         el("p", { class: "acct__mail acct-data", text: host.account }),
       ),
     ),
@@ -450,7 +450,7 @@ export function createAccountPage(host: AccountHost): AccountPage {
     host.segmented.hidden = mine;
     host.setMode(mine);
     if (!mine) return;
-    host.crumbs.replaceChildren(...libraryTrail("You", () => host.onLeave(), folderHref(null)));
+    host.crumbs.replaceChildren(...libraryTrail("Your account", () => host.onLeave(), folderHref(null)));
   }
 
   return {

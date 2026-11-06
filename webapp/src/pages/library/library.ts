@@ -8,6 +8,7 @@
 // hands it to the parts (`libraryContext.ts` has the rule). The behaviour is
 // in the parts, one concern each.
 
+import { createPlace } from "../../ui/place";
 import { el } from "../../ui/dom";
 import { SORT_KEY, readLocal, writeLocal } from "../../ui/storage";
 import { binNotePageHref, destinationHref, folderHref, go, notePageHref, todoHref } from "../../router";
@@ -159,7 +160,8 @@ export function createAppShell(deps: AppDeps): AppShell {
   const gallery = el("section", { class: "gallery", id: "gallery", "aria-label": "Notes" });
   // The one <main>: what the bar and the rail are around. Focusable from code,
   // for the skip link and a change of screen.
-  const content = el("main", { class: "content", id: "content", tabindex: "-1" }, gallery);
+  const place = createPlace();
+  const content = el("main", { class: "content", id: "content", tabindex: "-1" }, place.heading, gallery);
   const toastEl = el("div", { class: "toast", role: "status", "aria-live": "polite" });
 
   /**
@@ -182,6 +184,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     st,
     gallery,
     content,
+    place,
     toastEl,
     destinationsOpen: { bin: false, admin: false, account: false, todo: false },
 
@@ -210,7 +213,10 @@ export function createAppShell(deps: AppDeps): AppShell {
     // ---- small shell helpers ----
     key: (id) => id ?? "\0root",
     scheduleSpan: () => ctx.masonry.schedule(),
-    setReading: (reading) => ctx.root.classList.toggle("is-reading", reading),
+    setReading: (reading, name) => {
+      ctx.root.classList.toggle("is-reading", reading);
+      ctx.place.overlay(reading ? (name ?? null) : null);
+    },
     hideActiveViewer() {
       // The next live read must not stay pinned to a retained version.
       historyScope.clear();
@@ -282,10 +288,18 @@ export function createAppShell(deps: AppDeps): AppShell {
   );
 
   // ---- destinations ----
+  // The breadcrumbs' current place names every library screen (folders,
+  // search, the bin, admin, the account page), whoever painted them.
+  new MutationObserver(() => {
+    const here = ctx.topbar.crumbs.querySelector('[aria-current="page"]');
+    if (here) ctx.place.set(here.textContent ?? "");
+  }).observe(ctx.topbar.crumbs, { childList: true });
+
   ctx.todo = createTodoPage({
     api,
     content,
     gallery,
+    setPlace: (name) => ctx.place.overlay(name),
     crumbs: ctx.topbar.crumbs,
     sortWrap: ctx.topbar.sortWrap,
     segmented: ctx.topbar.segmented,

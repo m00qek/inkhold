@@ -16,7 +16,7 @@ import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
 import {
   addTarget, dropOrder, listKey, sameView, sections, siblings, viewPath, viewTitle, withOrder, withoutTask, type TodoView,
 } from "./todoModel";
-import { addForm, body, header, keysHint, notice, overview, placeTitle, rowHelp, syncText, type TodoActions, type TodoPaint } from "./todoView";
+import { addForm, body, keysHint, notice, overview, placeTitle, rowHelp, syncText, type TodoActions, type TodoPaint } from "./todoView";
 import { createTodoMenus } from "./todoMenus";
 import { dragRow } from "./todoDrag";
 import { createUndoToast } from "./todoUndo";
@@ -29,6 +29,8 @@ export interface TodoHost {
   content: HTMLElement;
   gallery: HTMLElement;
   crumbs: HTMLElement;
+  /** Names the screen (the tab's title and the page's <h1>) while To-Do is open; null on leaving. */
+  setPlace(name: string | null): void;
   sortWrap: HTMLElement;
   segmented: HTMLElement;
   /** The topbar's sync status line. */
@@ -245,8 +247,9 @@ export function createTodoPage(host: TodoHost): TodoPage {
       };
       const keys = keysHint(p);
       (keys as HTMLDetailsElement).open = keysOpen;
-      if (view.kind === "overview") kids.push(header(p), overview(p, actions));
-      else kids.push(header(p), addForm(p, actions), body(p, actions), keys, rowHelp());
+      host.setPlace(p.title);
+      if (view.kind === "overview") kids.push(overview(p, actions));
+      else kids.push(addForm(p, actions), body(p, actions), keys, rowHelp());
     }
     root.replaceChildren(...kids.filter((k): k is HTMLElement => k !== null));
     paintedView = view;
@@ -507,6 +510,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
       open_ = false;
       root.hidden = true;
       host.gallery.hidden = false;
+      host.setPlace(null);
       menus.close();
       chrome(false);
     },

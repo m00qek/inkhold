@@ -193,7 +193,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
         const v = ctx.viewers.viewerFor(summary.fileType);
         ctx.viewers.activate(v);
         v.open(summary, metaPromise, page, origin, q);
-        ctx.setReading(true);
+        ctx.setReading(true, summary.name);
       } catch (e) {
         if (ctx.handled(e)) return;
         ctx.toast("That note couldn't be opened.");
@@ -256,7 +256,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
         const v = ctx.viewers.viewerFor(meta.fileType);
         ctx.viewers.activate(v);
         v.open(synthesizeSummary(meta), Promise.resolve(meta), page, origin, "");
-        ctx.setReading(true);
+        ctx.setReading(true, meta.name);
       } catch (e) {
         if (ctx.handled(e)) return;
         ctx.toast("That file couldn't be opened.");

@@ -40,7 +40,7 @@ export function createFileStage(deps: FileStageDeps): FileStage {
     body.replaceChildren(
       el("div", { class: "empty__mark", text: m.fileType.toUpperCase() }),
       // Device-authored: textContent, like every other name on this surface.
-      el("h3", { text: title }),
+      el("h2", { text: title }),
       el("p", { text }),
       ...(downloadUrl
         ? [el("a", { class: "btn filestage__download", href: downloadUrl, download: "", html: svg(VIEWER_IC.down, 1.8) + "Download" })]
@@ -53,7 +53,7 @@ export function createFileStage(deps: FileStageDeps): FileStage {
     body.hidden = false;
     body.replaceChildren(
       el("div", { class: "empty__mark", text: m.fileType.toUpperCase() }),
-      el("h3", { text: m.name }),
+      el("h2", { text: m.name }),
       el("p", { text: "Loading this picture…" }),
     );
   }

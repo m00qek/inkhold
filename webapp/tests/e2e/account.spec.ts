@@ -27,7 +27,7 @@ test.describe("the rail footer nameplate", () => {
     await expect(page).toHaveURL(/#\/account$/);
     await expect(page.locator(".acct")).toBeVisible();
     await expect(page.locator(".crumbs")).toContainText("Library");
-    await expect(page.locator(".crumbs__here")).toHaveText("You");
+    await expect(page.locator(".crumbs__here")).toHaveText("Your account");
 
     await expect(page.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
     await expect(page.getByRole("group", { name: "Theme" })).toBeVisible();

@@ -86,7 +86,7 @@
   text-transform: uppercase;
   color: var(--ink-faint);
 }
-.viewer__placeholder h3 {
+.viewer__placeholder h2 {
   font-size: var(--fs-title);
   font-weight: 600;
   margin: 10px 0 6px;

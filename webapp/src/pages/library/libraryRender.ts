@@ -175,7 +175,7 @@ export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
       return;
     }
 
-    ctx.gallery.append(el("div", { class: "section-head" }, el("span", { text: listingSummary(entries) })));
+    ctx.gallery.append(el("h2", { class: "section-head" }, el("span", { text: listingSummary(entries) })));
 
     for (const [i, entry] of entries.entries()) {
       ctx.gallery.append(entry.kind === "folder" ? ctx.features.galleryCards.folderCard(entry) : ctx.features.galleryCards.noteCard(entry, i));
@@ -204,7 +204,7 @@ export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
       "div",
       { class: "empty" },
       el("div", { class: "empty__mark", text: ctx.rail.pending()?.label ?? (st.folderId ? "Folder" : "Library") }),
-      el("h3", { text: title }),
+      el("h2", { text: title }),
       el("p", { text: body }),
     );
   }

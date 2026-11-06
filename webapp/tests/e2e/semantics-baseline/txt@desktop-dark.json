@@ -1,6 +1,3 @@
 {
- "axe/color-contrast": 5,
- "axe/page-has-heading-one": 1,
- "one-h1": 1,
- "own-title": 1
+ "axe/color-contrast": 5
 }

@@ -135,11 +135,6 @@ export function overview(p: TodoPaint, a: TodoActions): HTMLElement {
   return el("ul", { class: "todo-cards", "aria-label": "Lists" }, ...items);
 }
 
-/** The topbar shows the name; the page keeps it as its heading for screen readers. */
-export function header(p: TodoPaint): HTMLElement {
-  return el("h1", { id: "todo-title", class: "todo-sr", text: p.title });
-}
-
 export function addForm(p: TodoPaint, a: TodoActions): HTMLElement | null {
   const target = addTarget(p.view, p.now);
   if (!target) return null;

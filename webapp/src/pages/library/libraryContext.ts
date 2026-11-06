@@ -8,6 +8,7 @@
 // Reading a member before the shell assigned it is a programming error that
 // the boot path (every e2e test) surfaces at once.
 
+import type { Place } from "../../ui/place";
 import type { TodoPage } from "../todo/todoPage";
 import type { Api } from "../../api/types";
 import type { ApiFailureSink } from "../../api/client";
@@ -96,6 +97,8 @@ export interface LibraryCtx {
   todoInk: TodoInk;
   masonry: Masonry;
   viewers: ViewerSet;
+  /** Where you are: the tab's title and the page's <h1> (`ui/place.ts`). */
+  place: Place;
   adminDest: AdminDestination;
   /** The To-Do destination; built at start so the rail knows whether to show it. */
   todo: TodoPage;
@@ -116,7 +119,8 @@ export interface LibraryCtx {
   /** Re-spans the masonry after the gallery's children changed. */
   scheduleSpan(): void;
   /** Reading hides the topbar; toggled only by `openNote` and `enterPlace`. */
-  setReading(reading: boolean): void;
+  /** `name`: the open document's, for the tab's title and the <h1>. */
+  setReading(reading: boolean, name?: string): void;
   /** Closes the active viewer and drops any version pin. */
   hideActiveViewer(): void;
   /** The account page, built on first entry (see `LibraryState.accountPage`). */
@@ -131,7 +135,7 @@ export interface LibraryCtx {
 export type LibraryCtxSeed = Pick<
   LibraryCtx,
   | "deps" | "identity" | "renderer" | "cache" | "live" | "api" | "historyScope" | "binScope" | "st"
-  | "gallery" | "content" | "toastEl" | "destinationsOpen"
+  | "gallery" | "content" | "place" | "toastEl" | "destinationsOpen"
   | "failures" | "handled" | "sessionDidExpire" | "toast"
   | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "openAdmin"
 >;

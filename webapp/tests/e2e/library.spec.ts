@@ -234,7 +234,7 @@ test.describe("library rail + gallery", () => {
 
       const empty = page.locator("#gallery .empty");
       await expect(empty).toBeVisible();
-      await expect(empty.locator("h3")).toHaveText("Export is empty");
+      await expect(empty.locator("h2")).toHaveText("Export is empty");
       await expect(empty).toContainText("after a sync");
       await expect(empty).not.toContainText(/couldn't|error|failed/i);
 
@@ -245,7 +245,7 @@ test.describe("library rail + gallery", () => {
       expect(treeCalls.slice(before)).toEqual([]);
 
       await openCategory(page, "Note");
-      await expect(page.locator(".empty h3")).toHaveText("This folder is empty");
+      await expect(page.locator(".empty h2")).toHaveText("This folder is empty");
     });
   });
 

@@ -188,7 +188,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
 
     // Folders first: a name typed to get somewhere. Their own group, like the to-dos'.
     if (folders.length > 0) {
-      gallery.append(el("div", { class: "section-head" }, el("span", { text: plural(folders.length, "folder") })));
+      gallery.append(el("h2", { class: "section-head" }, el("span", { text: plural(folders.length, "folder") })));
       for (const f of folders) gallery.append(ctx.folderCard(f));
     }
 
@@ -224,7 +224,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
 
     gallery.append(
       el(
-        "div",
+        "h2",
         { class: "section-head" },
         el("span", { text: searchCountLabel(results.length, pages) }),
         searchState.kind === "searching" ? el("span", { class: "hits__count", text: "Searching handwriting…" }) : null,

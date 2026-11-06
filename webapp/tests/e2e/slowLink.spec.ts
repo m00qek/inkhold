@@ -29,7 +29,7 @@ test.describe("what is painted while a listing is in flight", () => {
     });
     await page.goto("/?real");
 
-    await expect(galleryEmpty(page).locator("h3")).toHaveText("Loading…");
+    await expect(galleryEmpty(page).locator("h2")).toHaveText("Loading…");
     await expect(galleryEmpty(page)).toContainText("Fetching your notebooks");
   });
 
@@ -55,7 +55,7 @@ test.describe("what is painted while a listing is in flight", () => {
 
     await page.locator(".card__open", { hasText: "Archive" }).click();
 
-    await expect(galleryEmpty(page).locator("h3")).toHaveText("Loading…");
+    await expect(galleryEmpty(page).locator("h2")).toHaveText("Loading…");
     await expect(page.locator("#gallery")).not.toContainText("Root readme");
   });
 
@@ -229,7 +229,7 @@ test.describe("a search inside a subfolder, while the tree walk is outstanding",
     await page.getByRole("searchbox", { name: "Search notes" }).fill("Zebra");
 
     await expect(page.getByRole("group", { name: "Folders" })).toHaveAttribute("aria-busy", "true");
-    await expect(galleryEmpty(page).locator("h3")).toHaveText("Searching…");
+    await expect(galleryEmpty(page).locator("h2")).toHaveText("Searching…");
     expect(await gallery.everShowed("No matches")).toBe(false);
     expect(await gallery.everShowed("Searching…")).toBe(true);
   });
@@ -350,11 +350,11 @@ test.describe("the recycle bin's own listing, retried", () => {
 
     await page.getByRole("navigation", { name: "Library" }).getByText("Recycle bin").click();
 
-    await expect(galleryEmpty(page).locator("h3")).toHaveText("Loading…");
+    await expect(galleryEmpty(page).locator("h2")).toHaveText("Loading…");
     // Recorded: the stale failure was replaced when the held listing landed.
     expect(await gallery.everShowed("Couldn’t load the bin")).toBe(false);
 
-    await expect(galleryEmpty(page).locator("h3")).toHaveText("Nothing deleted", { timeout: 10_000 });
+    await expect(galleryEmpty(page).locator("h2")).toHaveText("Nothing deleted", { timeout: 10_000 });
   });
 });
 

@@ -90,7 +90,7 @@
   text-transform: uppercase;
   color: var(--ink-faint);
 }
-.empty h3 {
+.empty h2 {
   font-size: var(--fs-title);
   font-weight: 600;
   margin: 10px 0 6px;

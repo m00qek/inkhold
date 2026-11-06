@@ -38,7 +38,7 @@ export function createViewerBody(opts: { mark: string }): ViewerBody {
   function showPlaceholder(title: string, body: string): void {
     placeholder.replaceChildren(
       el("div", { class: "viewer__mark", text: opts.mark }),
-      el("h3", { text: title }),
+      el("h2", { text: title }),
       el("p", { text: body }),
     );
     main.replaceChildren(placeholder);

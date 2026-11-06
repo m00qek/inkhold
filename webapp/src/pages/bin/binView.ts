@@ -261,7 +261,7 @@ export function createBinView(opts: BinViewOptions): BinView {
       "div",
       { class: "empty" },
       el("div", { class: "empty__mark", text: "Recycle bin" }),
-      el("h3", { text: title }),
+      el("h2", { text: title }),
       el("p", { text: bodyText }),
     );
   }
@@ -355,7 +355,7 @@ export function createBinView(opts: BinViewOptions): BinView {
               "div",
               { class: "empty" },
               el("div", { class: "empty__mark", text: (e.fileType || "file").toUpperCase() }),
-              el("h3", { text: "No preview for this file" }),
+              el("h2", { text: "No preview for this file" }),
               el("p", { text: `${(e.fileType || "file").toUpperCase()} · ${formatBytes(e.size)}. Download it if you need to look inside before deciding.` }),
               // No Export: a download takes a copy of what is about to go.
               src ? el("a", { class: "btn", href: binFileUrl(e, { download: true }) ?? src, download: e.name, text: "Download" }) : null,

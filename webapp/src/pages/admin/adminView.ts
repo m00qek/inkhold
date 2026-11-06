@@ -60,7 +60,7 @@ export function createAdminView(opts: AdminViewOptions): AdminView & { revealBac
       "form",
       { class: "admin-gate__form" },
       el("p", { class: "admin-gate__mark", text: "Admin console" }),
-      el("h1", { class: "admin-gate__title", text: "Confirm your password" }),
+      el("h2", { class: "admin-gate__title", text: "Confirm your password" }),
       el("p", {
         class: "admin-gate__why",
         text:

@@ -82,7 +82,7 @@ export function todoHits(
   return el(
     "section",
     { class: "todo-hits", "aria-label": "To-dos" },
-    el("div", { class: "section-head" }, el("span", { text: counts.join(" · ") })),
+    el("h2", { class: "section-head" }, el("span", { text: counts.join(" · ") })),
     notice
       ? el(
           "p",

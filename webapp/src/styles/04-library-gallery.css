@@ -41,6 +41,8 @@
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--ink-faint);
+  /* An <h2>: the section's heading, in the eyebrow's look. */
+  font-weight: 400;
   margin: 4px 2px -6px;
 }
 .section-head::after {

@@ -124,7 +124,7 @@ test.describe("recycle bin", () => {
     await expect(dialog.locator("h2")).toHaveText("Delete all 4 items permanently?");
     await dialog.locator(".is-danger").click();
 
-    await expect(page.locator(".bin .empty h3")).toHaveText("Nothing deleted");
+    await expect(page.locator(".bin .empty h2")).toHaveText("Nothing deleted");
     await expect(empty).toBeVisible();
     await expect(empty).toBeDisabled();
   });
@@ -270,7 +270,7 @@ test.describe("recycle bin", () => {
 
     await dialog.locator(".is-danger").click();
     await expect(page.locator(".bin__row")).toHaveCount(0);
-    await expect(page.locator(".bin .empty h3")).toHaveText("Nothing deleted");
+    await expect(page.locator(".bin .empty h2")).toHaveText("Nothing deleted");
     await expect(page.locator(".bin .empty p")).toContainText("30 days");
   });
 
