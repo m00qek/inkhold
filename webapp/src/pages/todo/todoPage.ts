@@ -10,9 +10,7 @@
 // seconds behind an Undo first, because once the tablet syncs it is gone there.
 
 import { setMenuRows } from "../../ui/barMenu";
-import { ICONS } from "../../ui/icons";
 import { el } from "../../ui/dom";
-import { DEFAULT_SECTION_TITLE } from "../../ui/menu";
 import type { Api } from "../../api/types";
 import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
 import {
@@ -24,6 +22,8 @@ import { dragRow } from "./todoDrag";
 import { createUndoToast } from "./todoUndo";
 import { onTodoKey } from "./todoKeys";
 import { createTodoDownloads } from "./todoDownload";
+import { initialTodoState, type TodoCtx, type TodoState } from "./todoContext";
+import { createTodoLists } from "./todoLists";
 import type { TodoInk } from "./todoInk";
 
 export interface TodoHost {
@@ -90,65 +90,40 @@ export function createTodoPage(host: TodoHost): TodoPage {
   host.content.append(root);
 
   const menus = createTodoMenus();
+  const st: TodoState = initialTodoState();
   const undo = createUndoToast(() => {
-    if (!pendingDelete) return;
-    clearTimeout(pendingDelete.timer);
-    pendingDelete = null;
+    if (!st.pendingDelete) return;
+    clearTimeout(st.pendingDelete.timer);
+    st.pendingDelete = null;
     undo.hide();
     host.onChanged();
     paint();
   });
 
-  let snap: TodoSnapshot | null = null;
-  let failed = false;
-  let open_ = false;
-  let view: TodoView = { kind: "overview" };
-  let selected: string | null = null;
-  // What the page is in the middle of. A background re-read waits until it is
-  // `settled()`, and nothing repaints the rows under a drag.
-  /** The task whose name is being edited in its row. */
-  let editing: string | null = null;
-  /** A save in flight; its own re-read follows. */
-  let busy = false;
-  /** A task held by its grip. */
-  let dragging = false;
-  const collapsed = new Set<string>();
-  /** The add form's date, per view; absent: the view's default. */
-  const addDue = new Map<string, number | null>();
-  /** A delete waiting out its Undo. */
-  let pendingDelete: { task: TodoTask; timer: ReturnType<typeof setTimeout> } | null = null;
-  let loadToken = 0;
-  /** A task to select on the next open, done tasks' section unfolded. */
-  let revealing: string | null = null;
-  /** The view last painted, so a repaint of the same view keeps the add form's draft. */
-  let paintedView: TodoView | null = null;
-
-  const settled = () => !busy && !dragging && editing === null;
+  const settled = () => !st.busy && !st.dragging && st.editing === null;
 
   // ---- server ----
 
-  /** When the server was last asked, answered or not: a failure is not re-asked at once. */
-  let askedAt = 0;
 
   async function load(): Promise<void> {
-    const mine = ++loadToken;
-    askedAt = Date.now();
+    const mine = ++st.loadToken;
+    st.askedAt = Date.now();
     try {
       const s = await host.api.todo();
-      if (mine !== loadToken) return;
-      snap = s;
-      failed = false;
+      if (mine !== st.loadToken) return;
+      st.snap = s;
+      st.failed = false;
     } catch (e) {
-      if (mine !== loadToken || host.handled(e)) return;
-      failed = snap === null;
+      if (mine !== st.loadToken || host.handled(e)) return;
+      st.failed = st.snap === null;
     }
     host.onChanged();
-    if (open_) paint();
+    if (st.open_) paint();
   }
 
   /** One edit: the call, then a fresh read. A failure says so and changes nothing. */
   async function run(what: string, op: () => Promise<unknown>): Promise<boolean> {
-    busy = true;
+    st.busy = true;
     paint();
     try {
       await op();
@@ -157,7 +132,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
       if (!host.handled(e)) say(`Couldn't ${what}. Check your connection and try again.`);
       return false;
     } finally {
-      busy = false;
+      st.busy = false;
       await load();
     }
   }
@@ -169,10 +144,10 @@ export function createTodoPage(host: TodoHost): TodoPage {
   }
 
   function commitDelete(): void {
-    const p = pendingDelete;
+    const p = st.pendingDelete;
     if (!p) return;
     clearTimeout(p.timer);
-    pendingDelete = null;
+    st.pendingDelete = null;
     undo.hide();
     void run("delete the task", () => host.api.todoDeleteTask(p.task.id));
   }
@@ -181,13 +156,13 @@ export function createTodoPage(host: TodoHost): TodoPage {
 
   /** The snapshot as the person sees it: a delete waiting on Undo is gone. */
   function visibleSnap(): TodoSnapshot | null {
-    return snap && pendingDelete ? withoutTask(snap, pendingDelete.task.id) : snap;
+    return st.snap && st.pendingDelete ? withoutTask(st.snap, st.pendingDelete.task.id) : st.snap;
   }
 
   /** Saves a new order (and maybe a new list) for one list, showing it at once. */
   function saveOrder(listId: string | null, ids: string[], moved?: TodoTask): void {
-    if (!snap) return;
-    snap = withOrder(snap, ids, moved ? { id: moved.id, listId } : undefined);
+    if (!st.snap) return;
+    st.snap = withOrder(st.snap, ids, moved ? { id: moved.id, listId } : undefined);
     void run(moved ? "move the task" : "reorder", async () => {
       if (moved) await host.api.todoUpdateTask(moved.id, { listId });
       await host.api.todoReorder(listId, ids);
@@ -201,142 +176,89 @@ export function createTodoPage(host: TodoHost): TodoPage {
     host.setMode(mine);
     // Each page's own tools: New list where the lists are, the list's menu on
     // a list of one's own (never the Inbox); the sync status only while waiting.
-    const sync = snap?.enabled ? syncText(snap) : null;
+    const sync = st.snap?.enabled ? syncText(st.snap) : null;
     host.status.hidden = !mine || sync === null;
-    host.newListBtn.hidden = !mine || !snap?.enabled || view.kind !== "overview";
-    host.listBtn.hidden = !mine || !snap?.enabled || view.kind !== "list";
-    host.downloadBtn.hidden = !mine || !snap?.enabled || downloads.scope() === null;
+    host.newListBtn.hidden = !mine || !st.snap?.enabled || st.view.kind !== "overview";
+    host.listBtn.hidden = !mine || !st.snap?.enabled || st.view.kind !== "list";
+    host.downloadBtn.hidden = !mine || !st.snap?.enabled || downloads.scope() === null;
     // The search box only where To-Do is browsed, like a folder; inside a list
-    // or a view, as inside a note, it would only carry the person away.
-    host.setSearchShown(mine && view.kind === "overview");
+    // or a st.view, as inside a note, it would only carry the person away.
+    host.setSearchShown(mine && st.view.kind === "overview");
     if (!mine) return;
     if (sync) {
       host.status.textContent = sync.short;
       host.status.title = sync.long;
     }
-    if (snap?.enabled) {
-      if (view.kind === "list") host.listBtn.setAttribute("aria-label", `List options for ${viewTitle(view, snap.lists)}`);
+    if (st.snap?.enabled) {
+      if (st.view.kind === "list") host.listBtn.setAttribute("aria-label", `List options for ${viewTitle(st.view, st.snap.lists)}`);
     }
-    host.crumbs.replaceChildren(placeTitle(visibleSnap(), view, Date.now()));
+    host.crumbs.replaceChildren(placeTitle(visibleSnap(), st.view, Date.now()));
   }
 
   function dueFor(v: TodoView, now: number): number | null {
     const key = viewPath(v);
-    if (addDue.has(key)) return addDue.get(key)!;
+    if (st.addDue.has(key)) return st.addDue.get(key)!;
     return addTarget(v, now)?.due ?? null;
   }
 
   function paint(): void {
-    if (!open_ || dragging) return;
+    if (!st.open_ || st.dragging) return;
     chrome(true);
     const keep = document.activeElement instanceof HTMLElement && root.contains(document.activeElement) ? document.activeElement.id : "";
     const keepRow = document.activeElement instanceof HTMLElement && root.contains(document.activeElement) ? document.activeElement.closest<HTMLElement>(".todo-row")?.dataset.id ?? null : null;
     // A repaint must not wipe what is being typed into the add form.
     const draftTitle = root.querySelector<HTMLInputElement>("#todo-add-title");
-    const draft = draftTitle && paintedView && sameView(paintedView, view) ? { title: draftTitle.value, caret: draftTitle.selectionStart } : null;
+    const draft = draftTitle && st.paintedView && sameView(st.paintedView, st.view) ? { title: draftTitle.value, caret: draftTitle.selectionStart } : null;
     const keysOpen = root.querySelector<HTMLDetailsElement>(".todo-keys")?.open ?? false;
     const kids: (HTMLElement | null)[] = [];
-    if (snap === null) {
-      kids.push(failed ? notice("Your to-dos could not be loaded", "Check your connection and try again.", () => void load()) : notice("Loading…", "Reading your to-dos.", null));
-    } else if (!snap.enabled) {
+    if (st.snap === null) {
+      kids.push(st.failed ? notice("Your to-dos could not be loaded", "Check your connection and try again.", () => void load()) : notice("Loading…", "Reading your to-dos.", null));
+    } else if (!st.snap.enabled) {
       kids.push(notice("To-Do sync is off on this server", "The tablet's to-dos are not kept here. An administrator can turn it on with todo_sync in the server's config.", null));
     } else {
       const now = Date.now();
       const p: TodoPaint = {
-        snap, view, now, title: viewTitle(view, snap.lists), sections: sections(snap, view, now), collapsed,
-        selected, editing, hidden: new Set(pendingDelete ? [pendingDelete.task.id] : []), busy, addDue: dueFor(view, now),
+        snap: st.snap, view: st.view, now, title: viewTitle(st.view, st.snap.lists), sections: sections(st.snap, st.view, now), collapsed: st.collapsed,
+        selected: st.selected, editing: st.editing, hidden: new Set(st.pendingDelete ? [st.pendingDelete.task.id] : []), busy: st.busy, addDue: dueFor(st.view, now),
         chip: (t, open) => host.ink.chip(t, open),
       };
       const keys = keysHint(p);
       (keys as HTMLDetailsElement).open = keysOpen;
       host.setPlace(p.title);
-      if (view.kind === "overview") kids.push(overview(p, actions));
+      if (st.view.kind === "overview") kids.push(overview(p, actions));
       else kids.push(addForm(p, actions), body(p, actions), keys, rowHelp());
     }
     root.replaceChildren(...kids.filter((k): k is HTMLElement => k !== null));
-    paintedView = view;
+    st.paintedView = st.view;
     if (draft) {
       const t = root.querySelector<HTMLInputElement>("#todo-add-title");
       if (t) {
         t.value = draft.title;
         const go = root.querySelector<HTMLButtonElement>(".todo-add__go");
-        if (go) go.disabled = draft.title.trim() === "" || busy;
+        if (go) go.disabled = draft.title.trim() === "" || st.busy;
         if (keep === "todo-add-title" && draft.caret !== null) t.setSelectionRange(draft.caret, draft.caret);
       }
     }
     const rowEl = (id: string) => root.querySelector<HTMLElement>(`.todo-row[data-id="${CSS.escape(id)}"]`);
-    if (editing) {
-      const input = root.querySelector<HTMLInputElement>(`#todo-edit-${CSS.escape(editing)}`);
+    if (st.editing) {
+      const input = root.querySelector<HTMLInputElement>(`#todo-edit-${CSS.escape(st.editing)}`);
       input?.focus();
       input?.select();
     } else if (keep) {
       document.getElementById(keep)?.focus();
-    } else if (selected && rowEl(selected)) {
-      rowEl(selected)!.focus();
+    } else if (st.selected && rowEl(st.selected)) {
+      rowEl(st.selected)!.focus();
     } else if (keepRow) {
       rowEl(keepRow)?.focus();
     }
   }
 
-  // ---- lists ----
+  // ---- lists and downloads ----
 
-  async function newList(then?: (id: string) => Promise<unknown>): Promise<void> {
-    const title = await menus.askName("New list", "Create list", "");
-    if (!title) return;
-    let created = "";
-    if (!(await run("create the list", async () => { created = await host.api.todoCreateList(title); }))) return;
-    if (then) {
-      if (await run("move the task", () => then(created))) say(`Created "${title}" and moved the task there.`);
-    } else {
-      host.go(viewPath({ kind: "list", id: created }));
-    }
-  }
-
-  /** The list on screen, or the one a card's menu names. */
-  const listHere = (): string | null => (view.kind === "list" ? view.id : null);
-
-  function renameList(id = listHere()): void {
-    if (!snap || id === null) return;
-    const current = snap.lists.find((l) => l.id === id)?.title ?? "";
-    void menus.askName("Rename list", "Rename", current).then((title) => {
-      if (title && title !== current) void run("rename the list", () => host.api.todoRenameList(id, title));
-    });
-  }
-
-  function deleteList(id = listHere()): void {
-    if (!snap || id === null) return;
-    const list = snap.lists.find((l) => l.id === id);
-    if (!list) return;
-    const n = snap.tasks.filter((t) => t.listId === id).length;
-    const done = menus.confirmDeleteList(list.title, n);
-    void done.then(async (ok) => {
-      if (!ok) return;
-      if (await run("delete the list", () => host.api.todoDeleteList(id))) {
-        say(`Deleted "${list.title}".`);
-        if (view.kind !== "overview") host.go("");
-      }
-    });
-  }
-
-  const onListBtn = (e: MouseEvent) => {
-    e.stopPropagation();
-    if (host.listBtn.getAttribute("aria-expanded") === "true") return menus.close();
-    // The card's ⋯ menu, header and all.
-    menus.pop(host.listBtn, listItems());
-  };
-  const listItems = () => [menus.section(DEFAULT_SECTION_TITLE), menus.item("Rename list", "edit", () => renameList()), menus.item("Delete list", "trash", () => deleteList(), true)];
-  const downloads = createTodoDownloads({ button: host.downloadBtn, menus, snapshot: () => snap, view: () => view, say });
-  const onNewList = () => void newList();
-  host.listBtn.addEventListener("click", onListBtn);
-  host.newListBtn.addEventListener("click", onNewList);
-  // On a phone the bar folds into ⋯ (`ui/barMenu.ts`); these two are menus
-  // of their own, so they hand it their rows rather than opening a menu
-  // inside a menu.
-  setMenuRows(host.listBtn, () => [
-    { kind: "section", title: DEFAULT_SECTION_TITLE },
-    { kind: "item", label: "Rename list", icon: ICONS.edit, onSelect: () => renameList() },
-    { kind: "item", label: "Delete list", icon: ICONS.trash, danger: true, onSelect: () => deleteList() },
-  ]);
+  const ctx: TodoCtx = { host, root, menus, st, run, say, paint };
+  const lists = createTodoLists(ctx);
+  const downloads = createTodoDownloads({ button: host.downloadBtn, menus, snapshot: () => st.snap, view: () => st.view, say });
+  // On a phone the bar folds into ⋯; the download menu hands it its rows.
   setMenuRows(host.downloadBtn, () => downloads.barRows());
 
   // ---- actions ----
@@ -345,13 +267,13 @@ export function createTodoPage(host: TodoHost): TodoPage {
     show(v) {
       host.go(viewPath(v));
     },
-    renameList: (id) => renameList(id),
-    deleteList: (id) => deleteList(id),
+    renameList: (id) => lists.renameList(id),
+    deleteList: (id) => lists.deleteList(id),
     add(title) {
-      if (!snap) return;
-      const target = addTarget(view, Date.now());
+      if (!st.snap) return;
+      const target = addTarget(st.view, Date.now());
       if (!target) return;
-      const due = dueFor(view, Date.now());
+      const due = dueFor(st.view, Date.now());
       void run("add the task", () => host.api.todoCreateTask({ title: title.trim(), listId: target.listId, due })).then((ok) => {
         const input = root.querySelector<HTMLInputElement>("#todo-add-title");
         if (!input) return;
@@ -364,9 +286,9 @@ export function createTodoPage(host: TodoHost): TodoPage {
       });
     },
     addDate(trigger) {
-      const v = view;
+      const v = st.view;
       menus.dateMenu(trigger, dueFor(v, Date.now()), (due) => {
-        addDue.set(viewPath(v), due);
+        st.addDue.set(viewPath(v), due);
         paint();
         root.querySelector<HTMLInputElement>("#todo-add-title")?.focus();
       });
@@ -375,59 +297,59 @@ export function createTodoPage(host: TodoHost): TodoPage {
       const r = root.querySelector(`.todo-row[data-id="${CSS.escape(t.id)}"]`);
       const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
       if (!t.done && r && !reduce) r.classList.add("is-striking");
-      if (selected === t.id) selected = null;
+      if (st.selected === t.id) st.selected = null;
       setTimeout(() => void run(t.done ? "reopen the task" : "complete the task", () => host.api.todoUpdateTask(t.id, { done: !t.done })), !t.done && !reduce ? 420 : 0);
     },
     select(t) {
-      selected = t?.id ?? null;
-      editing = null;
+      st.selected = t?.id ?? null;
+      st.editing = null;
       paint();
     },
     startRename(t) {
-      editing = t.id;
+      st.editing = t.id;
       paint();
     },
     rename(t, title) {
-      editing = null;
+      st.editing = null;
       const next = title.trim();
       if (next === "" || next === t.title) return paint();
       void run("rename the task", () => host.api.todoUpdateTask(t.id, { title: next }));
     },
     cancelRename() {
-      editing = null;
+      st.editing = null;
       paint();
     },
     move(t, trigger) {
-      if (!snap) return;
-      const targets: [string | null, string][] = [[null, "Inbox"], ...snap.lists.map((l): [string, string] => [l.id, l.title])];
+      if (!st.snap) return;
+      const targets: [string | null, string][] = [[null, "Inbox"], ...st.snap.lists.map((l): [string, string] => [l.id, l.title])];
       menus.pop(trigger, [
         menus.section("MOVE TO"),
         ...targets
           .filter(([id]) => id !== t.listId)
           .map(([id, name]) => menus.item(name, id === null ? "inbox" : "list", () => void run("move the task", () => host.api.todoUpdateTask(t.id, { listId: id })))),
         menus.sep(),
-        menus.item("New list…", "plus", () => void newList((id) => host.api.todoUpdateTask(t.id, { listId: id }))),
+        menus.item("New list…", "plus", () => void lists.newList((id) => host.api.todoUpdateTask(t.id, { listId: id }))),
       ]);
     },
     date(t, trigger) {
       menus.dateMenu(trigger, t.due, (due) => void run(due === null ? "remove the date" : "set the date", () => host.api.todoUpdateTask(t.id, { due })));
     },
     drag(t, row, e) {
-      if (!snap || dragging) return;
-      dragging = true;
+      if (!st.snap || st.dragging) return;
+      st.dragging = true;
       menus.close();
       // In All every list's group takes a drop; on one list's page, just its own.
       dragRow(row, e, [...root.querySelectorAll<HTMLElement>("[data-list]")], (drop) => {
-        dragging = false;
-        if (!drop.changed || !snap) return paint();
-        selected = t.id;
+        st.dragging = false;
+        if (!drop.changed || !st.snap) return paint();
+        st.selected = t.id;
         const moved = drop.listId !== t.listId;
-        saveOrder(drop.listId, dropOrder(snap, t, drop.listId, drop.nextShown), moved ? t : undefined);
+        saveOrder(drop.listId, dropOrder(st.snap, t, drop.listId, drop.nextShown), moved ? t : undefined);
       });
     },
     reorder(t, dir) {
-      if (!snap) return;
-      const sib = siblings(snap, t);
+      if (!st.snap) return;
+      const sib = siblings(st.snap, t);
       const i = sib.findIndex((x) => x.id === t.id);
       const j = i + dir;
       if (i < 0 || j < 0 || j >= sib.length) return;
@@ -437,21 +359,21 @@ export function createTodoPage(host: TodoHost): TodoPage {
     },
     remove(t) {
       commitDelete(); // one Undo at a time
-      selected = null;
-      pendingDelete = { task: t, timer: setTimeout(commitDelete, UNDO_MS) };
+      st.selected = null;
+      st.pendingDelete = { task: t, timer: setTimeout(commitDelete, UNDO_MS) };
       undo.show(t.title);
       host.onChanged();
       paint();
     },
     toggleSection(key) {
-      if (collapsed.has(key)) collapsed.delete(key);
-      else collapsed.add(key);
+      if (st.collapsed.has(key)) st.collapsed.delete(key);
+      else st.collapsed.add(key);
       paint();
     },
     openNote(t) {
       if (!t.link) return;
       // Back from the note lands on this task again.
-      revealing = t.id;
+      st.revealing = t.id;
       host.openNote(t.link.noteId, Math.max(0, t.link.page - 1));
     },
   };
@@ -459,11 +381,11 @@ export function createTodoPage(host: TodoHost): TodoPage {
   // ---- keyboard and pointer ----
 
   function onKey(e: KeyboardEvent): void {
-    if (!open_ || !snap?.enabled) return;
+    if (!st.open_ || !st.snap?.enabled) return;
     onTodoKey(e, {
-      root, snap, view, selected, actions,
+      root, snap: st.snap, view: st.view, selected: st.selected, actions,
       select: (id) => {
-        selected = id;
+        st.selected = id;
         paint();
       },
     });
@@ -471,45 +393,45 @@ export function createTodoPage(host: TodoHost): TodoPage {
 
   /** A click outside every row lets the selection go. */
   function onPointer(e: MouseEvent): void {
-    if (!open_ || selected === null) return;
+    if (!st.open_ || st.selected === null) return;
     const t = e.target as HTMLElement;
     if (!(t instanceof Element) || !t.isConnected) return;
     if (t.closest(".todo-row, dialog, .menu__pop, .bin-toast")) return;
-    selected = null;
+    st.selected = null;
     paint();
   }
 
   document.addEventListener("keydown", onKey);
   document.addEventListener("click", onPointer);
-  const onVisible = () => { if (document.visibilityState === "visible" && open_) void load(); };
+  const onVisible = () => { if (document.visibilityState === "visible" && st.open_) void load(); };
   document.addEventListener("visibilitychange", onVisible);
   // The tablet syncs on its own: keep up while someone is looking.
   const poll = setInterval(() => {
-    if (open_ && settled() && document.visibilityState === "visible") void load();
+    if (st.open_ && settled() && document.visibilityState === "visible") void load();
   }, POLL_MS);
 
   return {
     freshen() {
-      if (!open_ && Date.now() - askedAt > FRESH_MS) void load();
+      if (!st.open_ && Date.now() - st.askedAt > FRESH_MS) void load();
     },
     open(next) {
-      if (!open_ || !sameView(next, view)) {
-        selected = null;
-        editing = null;
+      if (!st.open_ || !sameView(next, st.view)) {
+        st.selected = null;
+        st.editing = null;
         menus.close();
       }
-      view = next;
-      if (revealing !== null) {
-        const t = snap?.tasks.find((x) => x.id === revealing);
+      st.view = next;
+      if (st.revealing !== null) {
+        const t = st.snap?.tasks.find((x) => x.id === st.revealing);
         if (t) {
-          selected = t.id;
+          st.selected = t.id;
           // Done tasks wait in the list's folded Completed: open it.
-          if (t.done) collapsed.add(`${listKey(t.listId)}:done`);
+          if (t.done) st.collapsed.add(`${listKey(t.listId)}:done`);
         }
-        revealing = null;
+        st.revealing = null;
       }
-      if (!open_) {
-        open_ = true;
+      if (!st.open_) {
+        st.open_ = true;
         root.hidden = false;
         host.gallery.hidden = true;
       }
@@ -517,21 +439,21 @@ export function createTodoPage(host: TodoHost): TodoPage {
       void load();
     },
     close() {
-      if (!open_) return;
+      if (!st.open_) return;
       commitDelete();
-      open_ = false;
+      st.open_ = false;
       root.hidden = true;
       host.gallery.hidden = false;
       host.setPlace(null);
       menus.close();
       chrome(false);
     },
-    isOpen: () => open_,
-    view: () => (open_ ? view : null),
+    isOpen: () => st.open_,
+    view: () => (st.open_ ? st.view : null),
     snapshot: visibleSnap,
     load,
     reveal(id) {
-      revealing = id;
+      st.revealing = id;
     },
     destroy() {
       commitDelete();
@@ -539,9 +461,8 @@ export function createTodoPage(host: TodoHost): TodoPage {
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("click", onPointer);
       document.removeEventListener("visibilitychange", onVisible);
-      host.listBtn.removeEventListener("click", onListBtn);
+      lists.destroy();
       downloads.destroy();
-      host.newListBtn.removeEventListener("click", onNewList);
       menus.close();
       undo.destroy();
       root.remove();

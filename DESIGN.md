@@ -878,7 +878,8 @@ after the feature (`pages/library/library.ts`); a single-file screen stays at
 `tests/e2e/`, mirroring the source names.
 
 A screen that outgrows one file is not cut into closures fed by thunks. It
-gets one typed context object (`LibraryCtx`, `ReaderCtx`, `PdfViewerCtx`)
+gets one typed context object (`LibraryCtx`, `ReaderCtx`, `PdfViewerCtx`,
+`TodoCtx`)
 that names everything its parts share, built once in dependency order by the
 screen's entry module; each part is `createX(ctx)` returning a named
 interface, and reads a member only when one of its functions runs. The
