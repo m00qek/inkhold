@@ -13,7 +13,7 @@ const SHOW = process.env.SEMANTICS_SHOW;
 for (const v of VARIANTS) {
   test.describe(`semantics, ${v.name}`, () => {
     // No motion: axe would measure a card's colour halfway through its fade-in.
-    test.use({ viewport: { width: v.width, height: v.height }, colorScheme: v.dark ? "dark" : "light", hasTouch: v.name === "phone" || v.name === "tablet", reducedMotion: "reduce" });
+    test.use({ viewport: { width: v.width, height: v.height }, colorScheme: v.dark ? "dark" : "light", hasTouch: v.touch, reducedMotion: "reduce" });
     for (const s of SCREENS) {
       test(s.name, async ({ page }) => {
         await signedIn(page);

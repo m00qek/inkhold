@@ -107,7 +107,8 @@ test.describe("non-.note files", () => {
     const shot = card(page, "pricing page");
     const thumb = shot.locator(".thumb__img");
     await expect(thumb).toBeVisible();
-    expect(await thumb.getAttribute("src")).toMatch(/^\/file\/151\?v=[0-9a-f]{32}$/);
+    // Retrying: the card can paint a beat before its image is pointed at the file.
+    await expect(thumb).toHaveAttribute("src", /^\/file\/151\?v=[0-9a-f]{32}$/);
     await expect.poll(async () => thumb.evaluate((e: HTMLImageElement) => e.naturalWidth)).toBeGreaterThan(0);
     // Registering a canvas would ask the SNPG pipeline for pages that do not exist.
     await expect(shot.locator(".thumb canvas")).toHaveCount(0);

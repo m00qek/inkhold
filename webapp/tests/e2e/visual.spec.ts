@@ -12,7 +12,7 @@ const DIR = process.env.VISUAL_DIR;
 for (const v of VARIANTS) {
   test.describe(`visual, ${v.name}`, () => {
     test.skip(!DIR, "VISUAL_DIR not set");
-    test.use({ viewport: { width: v.width, height: v.height }, colorScheme: v.dark ? "dark" : "light", hasTouch: v.name === "phone" || v.name === "tablet" });
+    test.use({ viewport: { width: v.width, height: v.height }, colorScheme: v.dark ? "dark" : "light", hasTouch: v.touch });
     for (const s of SCREENS) {
       test(s.name, async ({ page }) => {
         // Times shown relative to now ("21:01") must not move between runs.

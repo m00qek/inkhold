@@ -714,8 +714,18 @@ nothing. `tests/e2e/focus.spec.ts` holds that every Tab stop shows focus.
 
 ### 11.9 Phones and tablets
 
-By the room there is (`00-tokens.css`): phone below 700px, tablet to
-1099px, desktop from 1100px.
+Intrinsic first: content sizes itself (grids that fill, rows that wrap,
+rem sizes), a component asks its container how much room it has, and media
+queries only switch the page's shape. That shape follows the room there is
+(`00-tokens.css`): phone below 700px, tablet to 1099px, desktop from 1100px.
+Touch is its own question, `(pointer: coarse)`, never inferred from width.
+
+- **Viewer bars** (`styles/10-toolbar.css`) are containers (`bar`). Under
+  60rem of bar, Back and the file's actions drop their words (still named)
+  and controls in a zone close up; under what that fits, the zones wrap. A
+  title gives way first (`flex: 1 1 8rem`). The export menu hangs from the
+  trigger's start when the bar has wrapped. On a phone the bar is no
+  container, so its bottom row can be `fixed` to the screen.
 
 - **Phone** (`pages/library/libraryPhone.ts`, `styles/23-phone.css`): the
   rail is a drawer from the bar's ☰ (modal: the rest is inert, focus goes in
@@ -734,7 +744,8 @@ By the room there is (`00-tokens.css`): phone below 700px, tablet to
   nothing. On touch screens the root takes Apple's body style
   (`-apple-system-body`), so iPhones follow the system's Larger Text; on a Mac
   it would shrink the app, hence touch only.
-- **Tests:** the guard adds a tablet size; `tests/e2e/phone.spec.ts` holds the
+- **Tests:** the guard adds a tablet in portrait (820px) and in landscape
+  (1180px, desktop layout under a finger), both with touch; `tests/e2e/phone.spec.ts` holds the
   drawer, the tab bar, search, sheets and the viewer's bottom bar.
 
 ## 12. Where things live

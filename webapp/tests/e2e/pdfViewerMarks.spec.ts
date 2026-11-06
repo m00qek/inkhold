@@ -128,6 +128,9 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   test("thumbnails come back from the cache on a REOPEN, still drawable", async ({ page }) => {
     // The cache owns its bitmaps (`renderCache.ts`); a viewer closing one leaves a dead entry
     // that only a later read finds. Reopening forces that read.
+    // Two opens of the real MuPDF engine: the waits below allow 90s between
+    // them, so the test's own limit must too (a busy machine boots it slowly).
+    test.setTimeout(90_000);
     await signedIn(page);
     await servePdf(page);
     await page.goto("/#/note/178");

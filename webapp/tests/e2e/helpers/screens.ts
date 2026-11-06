@@ -121,8 +121,10 @@ export const SCREENS: Screen[] = [
 
 
 export const VARIANTS = [
-  { name: "desktop-light", width: 1280, height: 900, dark: false, minTarget: 24 },
-  { name: "desktop-dark", width: 1280, height: 900, dark: true, minTarget: 24 },
-  { name: "phone", width: 390, height: 844, dark: false, minTarget: 44 },
-  { name: "tablet", width: 820, height: 1180, dark: false, minTarget: 44 },
+  { name: "desktop-light", width: 1280, height: 900, dark: false, touch: false, minTarget: 24 },
+  { name: "desktop-dark", width: 1280, height: 900, dark: true, touch: false, minTarget: 24 },
+  { name: "phone", width: 390, height: 844, dark: false, touch: true, minTarget: 44 },
+  { name: "tablet", width: 820, height: 1180, dark: false, touch: true, minTarget: 44 },
+  // A desktop-wide layout under a finger: the full rail, touch-sized targets.
+  { name: "tablet-landscape", width: 1180, height: 820, dark: false, touch: true, minTarget: 44 },
 ] as const;

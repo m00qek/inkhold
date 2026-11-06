@@ -17,6 +17,37 @@
 .toolbar > .viewer__title {
   flex: 1 1 8rem;
 }
+/* A viewer's bar sizes its contents by the room the bar has, not by the
+   window: the same bar is narrow beside a wide rail, in a split screen or on
+   a tablet. A container's own box is a stacking context, so it is lifted
+   above the page its menus open over. */
+.reader__bar,
+.viewer__bar {
+  container: bar / inline-size;
+  position: relative;
+  z-index: var(--z-raised);
+}
+/* Too narrow for words beside the icons: Back and the file's actions keep
+   their icon and are named by their (still announced) label. Narrower still,
+   the zones wrap (`flex-wrap` above). */
+@container bar (width < 60rem) {
+  .backbtn__label,
+  .viewer__back-label {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .toolbar__group--file .btn__label {
+    display: none;
+  }
+  /* Controls within a zone sit closer; the zones keep the bar's gap. */
+  .toolbar > .toolbar__group {
+    gap: var(--sp-1);
+  }
+}
 /* Pushes the two zones to the trailing edge. */
 .toolbar__spacer {
   flex: 1;

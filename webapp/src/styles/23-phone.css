@@ -201,6 +201,9 @@ html {
      zoom, find, panels) become a bar at the bottom, where a thumb is. */
   .reader__bar,
   .viewer__bar {
+    /* Not a container here: a container would hold the bottom bar (fixed,
+       below) inside the top one. The phone layout is the media query's. */
+    container-type: normal;
     flex-wrap: nowrap;
     gap: var(--sp-1);
     padding: var(--sp-1) var(--sp-2);
