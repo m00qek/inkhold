@@ -1,8 +1,8 @@
 // The PDF viewer's shared context: everything its parts read, named once.
 //
 // `createPdfViewer` builds the DOM and the per-document collaborators, seeds a
-// `PdfViewerCtx` with them, then creates the two parts that need the whole:
-// navigation and the lifecycle. A part reads a member only when one of its
+// `PdfViewerCtx` with them, then creates the three parts that need the whole:
+// find, navigation and the lifecycle. A part reads a member only when one of its
 // functions runs, so the construction order in `pdfViewer.ts` is the one place
 // that has to be right.
 
@@ -79,10 +79,10 @@ export interface PdfViewerCtx {
 
   // ---- per-document machinery ----
   renderer: PdfPageRenderer;
-  find: PdfFindController;
   exportDriver: PdfViewerExports;
 
   // ---- the parts ----
+  find: PdfFindController;
   nav: PdfNav;
   lifecycle: PdfLifecycle;
 
@@ -92,8 +92,8 @@ export interface PdfViewerCtx {
   setOutlineAvailable(has: boolean): void;
 }
 
-/** The members `createPdfViewer` has before the two parts are built. */
-export type PdfViewerCtxSeed = Omit<PdfViewerCtx, "nav" | "lifecycle">;
+/** The members `createPdfViewer` has before the three parts are built. */
+export type PdfViewerCtxSeed = Omit<PdfViewerCtx, "find" | "nav" | "lifecycle">;
 
 /** Starts a context from its seed; `createPdfViewer` assigns the parts next. The cast is that lifecycle, stated once. */
 export function seedPdfViewerContext(seed: PdfViewerCtxSeed): PdfViewerCtx {

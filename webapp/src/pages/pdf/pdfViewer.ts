@@ -23,12 +23,6 @@ import { createPdfPageRenderer, PDF_LAYER_ID, ZOOMS, type Zoom } from "./pdfPage
 import { createLinkLayer } from "../linkLayer";
 import { createPdfHighlightLayer } from "./pdfHighlightLayer";
 import { createPdfSelectionLayer } from "./pdfSelectionLayer";
-import {
-  createPdfFindController,
-  pdfCountIsNone,
-  pdfCountText,
-  type PdfFindController,
-} from "./pdfFind";
 import { createBinViewerActions } from "../../ui/binViewerActions";
 import { createLayersPanel } from "../layersPanel";
 import { contextualOpener, createCopyControl, createPdfDocks } from "./pdfChrome";
@@ -37,12 +31,12 @@ import { buildNoteLayerThumb, createNoteLayersController } from "../noteLayers";
 import { createPdfExports } from "./pdfExports";
 import { createPdfViewerExports } from "./pdfViewerExports";
 import { supportsWasmExceptions } from "../../render/pdfLoader";
-import type { PdfWord } from "../../render/pdfWire";
 import { createPdfSession, type PdfSession } from "../../render/pdfClient";
 import type { PdfViewerState } from "./pdfViewerState";
 import { seedPdfViewerContext } from "./pdfViewerContext";
 import { createPdfLifecycle } from "./pdfViewerLifecycle";
 import { createPdfNav } from "./pdfViewerNav";
+import { createPdfViewerFind } from "./pdfViewerFind";
 
 /** The versions control offers the ink's history, never a past PDF. */
 const ANNOTATIONS_HISTORY = "Annotation history";
@@ -386,81 +380,16 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
             ].filter((panel): panel is HTMLElement => panel !== null),
     },
     dom: { main, stage, canvas, body, markCtl, linkLayer, selectLayer, layersPanel },
-    // Through arrows: `find` is built below and the two reference each other.
+    // Through arrows: find is a part, built from the context below.
     find: {
-      repaint: () => find.repaint(),
-      wordsKnown: (page) => find.wordsKnown(page),
-      wordsFor: (page) => find.wordsFor(page),
+      repaint: () => ctx.find.repaint(),
+      wordsKnown: (page) => ctx.find.wordsKnown(page),
+      wordsFor: (page) => ctx.find.wordsFor(page),
     },
     syncPager: () => ctx.nav.syncPager(),
     refreshGroups: () => downloads.refreshGroups(),
     onJump: (page) => void ctx.nav.go(page),
   });
-  // ---- find in this PDF ----
-
-  /** Words are in page points and placed by the same transform as the ink; no size yet clears the layer. */
-  function paintFindMarks(words: PdfWord[], current: number): void {
-    const size = renderer.pageSizePt();
-    if (!size || words.length === 0) {
-      findLayer.clear();
-      return;
-    }
-    findLayer.setMarks(words, {
-      pagePt: size,
-      canvas: renderer.cssCanvasSize(),
-      current,
-    });
-  }
-
-  const find: PdfFindController = createPdfFindController({
-    docs: deps.docSearch,
-    failures: { onSessionExpired: deps.onSessionExpired },
-    // The locator; a page that will not read just has no boxes.
-    words: async (page) => (st.session && st.open_ ? st.session.pageWords(page) : []),
-    view: {
-      setOpen(isOpen) {
-        findBar.el.hidden = !isOpen;
-        root.classList.toggle("is-finding", isOpen);
-        findToggle.setAttribute("aria-pressed", String(isOpen));
-        if (!isOpen) findLayer.clear();
-      },
-      setState(state) {
-        findBar.count.textContent = pdfCountText(state);
-        findBar.count.classList.toggle("is-none", pdfCountIsNone(state));
-        findBar.ask.hidden = state.kind !== "fuzzyPrompt";
-        // The URL follows the query, so a find is shareable.
-        ctx.nav.syncUrl();
-      },
-      setPageMarks: paintFindMarks,
-      setPageCounts: (counts) => pagesPanel.setBadges(counts),
-      showPage: (index) => void ctx.nav.go(index),
-      setStepEnabled(enabled) {
-        findBar.prev.disabled = !enabled;
-        findBar.next.disabled = !enabled;
-      },
-      focusField() {
-        findBar.input.focus();
-        findBar.input.select();
-      },
-    },
-  });
-
-  findToggle.addEventListener("click", () => find.toggle());
-  findBar.close.addEventListener("click", () => {
-    find.close();
-    findBar.input.value = "";
-  });
-  findBar.input.addEventListener("input", () => find.setQuery(findBar.input.value));
-  findBar.input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      find.step(e.shiftKey ? -1 : 1);
-    }
-  });
-  findBar.prev.addEventListener("click", () => find.step(-1));
-  findBar.next.addEventListener("click", () => find.step(1));
-  findBar.ask.addEventListener("click", () => find.searchSimilar());
-
   // ---- exports ----
   const exportDriver = createPdfViewerExports({
     deps,
@@ -514,7 +443,6 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     main,
     root,
     renderer,
-    find,
     exportDriver,
     setVersionsAvailable: versionsOpener.setAvailable,
     setOutlineAvailable(has) {
@@ -523,6 +451,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       if (!has && docks.left() === "outline") docks.set(null, docks.right(), null, false);
     },
   });
+  ctx.find = createPdfViewerFind(ctx);
   ctx.nav = createPdfNav(ctx);
   ctx.lifecycle = createPdfLifecycle(ctx);
   document.addEventListener("keydown", ctx.nav.onKey);
@@ -556,7 +485,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     destroy(): void {
       ctx.lifecycle.release();
       // For a viewer destroyed without ever opening.
-      find.reset();
+      ctx.find.reset();
       document.removeEventListener("keydown", ctx.nav.onKey);
       document.removeEventListener("copy", ctx.nav.onCopy);
       selectLayer.destroy();
