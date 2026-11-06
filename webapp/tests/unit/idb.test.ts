@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planEviction, budgetForQuota, openDimsStore, type PersistedMeta } from "../../src/cache/idb";
+import { planEviction, budgetForQuota, openDimsStore, storedImage, type PersistedMeta } from "../../src/cache/idb";
 
 const meta = (key: string, size: number, lastAccess: number): PersistedMeta => ({ key, size, lastAccess });
 
@@ -63,5 +63,30 @@ describe("openDimsStore", () => {
     await expect(store.put("h1", { w: 1, h: 2 })).resolves.toBeUndefined();
     await expect(store.clear()).resolves.toBeUndefined();
     await expect(store.get("h1")).resolves.toBeNull();
+  });
+});
+
+describe("storedImage: a stored thumbnail read back", () => {
+  const bytes = new Uint8Array([1, 2, 3]).buffer;
+
+  it("reads the bytes shape into a fresh Blob of the stored type", async () => {
+    const got = await storedImage({ bytes, type: "image/webp" });
+    expect(got?.blob.type).toBe("image/webp");
+    expect(new Uint8Array(await got!.blob.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  it("reads the older Blob shape once into memory, keeping its bytes to rewrite", async () => {
+    const got = await storedImage({ image: new Blob([new Uint8Array([4, 5])], { type: "image/png" }) });
+    expect(got?.blob.type).toBe("image/png");
+    expect(got?.bytes.byteLength).toBe(2);
+  });
+
+  // WebKit has handed back IndexedDB Blobs that cannot be read: forget them
+  // and draw again, never show a broken image.
+  it("gives null for a Blob that cannot be read, or an empty one", async () => {
+    const broken = { arrayBuffer: () => Promise.reject(new Error("NotReadableError")), type: "image/webp" } as unknown as Blob;
+    expect(await storedImage({ image: broken })).toBeNull();
+    expect(await storedImage({ bytes: new ArrayBuffer(0) })).toBeNull();
+    expect(await storedImage({})).toBeNull();
   });
 });

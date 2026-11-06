@@ -304,13 +304,32 @@ export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
    * Point an <img> at a fresh object URL and revoke the previous one, or every
    * repaint leaks a pinned blob. The new URL stays live for the async load.
    */
-  function paintImg(slot: Slot, blob: Blob): void {
+  function paintImg(slot: Slot, blob: Blob, isGlyph = false): void {
     const next = objectUrl(blob);
     const img = slot.target as HTMLImageElement;
+    // A picture that won't load (a stored one Safari can't read back) shows
+    // the type's glyph, never a broken image with its alt text over the card;
+    // `painted` false so the next sight of the card tries the real one again.
+    img.onerror = isGlyph
+      ? null
+      : () => {
+          slot.painted = false;
+          showGlyph(slot);
+        };
     img.src = next.url;
     if (slot.alt !== undefined) img.alt = slot.alt;
     slot.urlHandle?.release(); // the previous paint's URL is now safe to drop
     slot.urlHandle = next;
+  }
+
+  function showGlyph(slot: Slot): void {
+    if (!getGlyph || !isImgTarget(slot.target)) return;
+    const version = themeVersion;
+    void getGlyph(slot.thumb?.fileType ?? "note")
+      .then((g) => {
+        if (version === themeVersion && slots.has(slot.target)) paintImg(slot, g, true);
+      })
+      .catch(() => {});
   }
 
   function releaseSlot(slot: Slot): void {
@@ -356,7 +375,7 @@ export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
           // Interim only: `painted` stays false, and a failure here is ignored.
           await getGlyph(fileType)
             .then((g) => {
-              if (renderVersion === themeVersion && slots.has(slot.target)) paintImg(slot, g);
+              if (renderVersion === themeVersion && slots.has(slot.target)) paintImg(slot, g, true);
             })
             .catch(() => {});
         }
@@ -384,9 +403,11 @@ export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
         if (owned) bitmap.close();
       }
     } catch (e) {
-      // Non-fatal: leave the placeholder and retry next intersection, but report
-      // session and staleness failures, which a retry won't fix.
+      // Non-fatal: retry next intersection, but report session and staleness
+      // failures, which a retry won't fix. An <img> with no picture yet shows
+      // the glyph meanwhile (bare, Safari draws its alt text and a "?").
       slot.painted = false;
+      if (isImgTarget(slot.target) && slot.urlHandle === null) showGlyph(slot);
       report(e, slot.noteId, slot.page);
     } finally {
       slot.inFlight = false;

@@ -392,12 +392,19 @@ test.describe("find in note", () => {
     await expect(ovals(page)).toHaveCount(2);
 
     // Waits for the oval, which is cleared and repainted, so it can be absent for a frame;
-    // 0 stands in for a null box so the poll retries.
+    // 0 stands in for a null box so the poll retries. The box the poll saw is the one
+    // measured: a second read can land in the next repaint's empty frame.
+    let after: { x: number; width: number } | null = null;
     await expect
-      .poll(async () => (await ovals(page).first().boundingBox())?.width ?? 0, { timeout: 10_000 })
+      .poll(
+        async () => {
+          after = await ovals(page).first().boundingBox();
+          return after?.width ?? 0;
+        },
+        { timeout: 10_000 },
+      )
       .toBeGreaterThan(before.width);
-
-    const after = (await ovals(page).first().boundingBox())!;
+    after = after!;
     const pageAfter = (await page.locator(".page").boundingBox())!;
     expect(after.width).toBeGreaterThan(before.width);
     const relBefore = (before.x - pageBefore.x) / pageBefore.width;

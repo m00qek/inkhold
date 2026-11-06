@@ -1,5 +1,5 @@
-// The persistent tier of the render cache: thumbnails in IndexedDB as WebP
-// Blobs (raw RGBA was 20-40x larger), under our own LRU byte cap clamped to
+// The persistent tier of the render cache: thumbnails in IndexedDB as encoded
+// WebP bytes (raw RGBA was 20-40x larger; bytes, not Blobs: `StoredRecord`), under our own LRU byte cap clamped to
 // the origin quota. Never a source of truth: any failure degrades to a no-op.
 
 /** Per-entry bookkeeping, mirrored in memory so eviction never reads records. */
@@ -87,11 +87,34 @@ function promisify<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
+/**
+ * A stored thumbnail: `image`, the Blob `put` was given, or `bytes` + `type`
+ * once the LRU touch has rewritten it. WebKit (Safari, every iPhone browser)
+ * has handed back IndexedDB Blobs that look whole but cannot be read, and has
+ * stored empty ones when a Blob read from the store is written back, which
+ * the old touch did on every read: installed on an iPhone, every preview
+ * became a broken image. So a read takes the bytes into memory first (an
+ * unreadable record is dropped and drawn again), and the touch writes those
+ * bytes, never the Blob it read.
+ */
 interface StoredRecord {
   key: string;
-  image: Blob;
+  bytes?: ArrayBuffer;
+  type?: string;
+  image?: Blob;
   size: number;
   lastAccess: number;
+}
+
+/** The record's picture as a fresh in-memory Blob; null when it can't be read. */
+export async function storedImage(rec: Pick<StoredRecord, "bytes" | "type" | "image">): Promise<{ blob: Blob; bytes: ArrayBuffer } | null> {
+  try {
+    const bytes = rec.bytes ?? (rec.image ? await rec.image.arrayBuffer() : null);
+    if (!bytes || bytes.byteLength === 0) return null;
+    return { blob: new Blob([bytes], { type: rec.type ?? rec.image?.type ?? "" }), bytes };
+  } catch {
+    return null;
+  }
 }
 
 /** Never throws: any failure yields a no-op store. */
@@ -170,20 +193,41 @@ export function openThumbStore(opts: ThumbStoreOptions = {}): PersistentThumbSto
     async get(key) {
       const rec = await withStore("readonly", (store) => promisify<StoredRecord | undefined>(store.get(key)));
       if (!rec) return undefined;
-      // Best-effort LRU touch.
-      const meta = metas.get(key);
-      if (meta) {
-        meta.lastAccess = Date.now();
-        void withStore("readwrite", (store) => promisify(store.put({ ...rec, lastAccess: meta.lastAccess })));
+      const read = await storedImage(rec);
+      if (!read) {
+        // Unreadable: forget it, and the caller draws the thumbnail again.
+        metas.delete(key);
+        void withStore("readwrite", (store) => promisify(store.delete(key)));
+        return undefined;
       }
-      return rec.image;
+      // Best-effort LRU touch, as bytes (never the Blob just read).
+      const meta = metas.get(key);
+      const lastAccess = Date.now();
+      if (meta) meta.lastAccess = lastAccess;
+      const type = read.blob.type;
+      void withStore("readwrite", (store) => promisify(store.put({ key, bytes: read.bytes, type, size: rec.size, lastAccess } satisfies StoredRecord)));
+      return read.blob;
     },
 
     async put(key, image) {
       const size = image.size;
+      // A fresh picture (from a canvas, never one read from this store) is
+      // stored as is; only the touch in `get` rewrites, and it writes bytes.
       const record: StoredRecord = { key, image, size, lastAccess: Date.now() };
-      const ok = await withStore("readwrite", (store) => promisify(store.put(record)));
-      if (ok === undefined) return;
+      let ok = await withStore("readwrite", (store) => promisify(store.put(record)));
+      if (ok === undefined) {
+        // WebKit refuses Blobs in IndexedDB in private browsing (a DataCloneError);
+        // its bytes it keeps.
+        let bytes: ArrayBuffer;
+        try {
+          bytes = await image.arrayBuffer();
+        } catch {
+          return;
+        }
+        const asBytes: StoredRecord = { key, bytes, type: image.type, size, lastAccess: record.lastAccess };
+        ok = await withStore("readwrite", (store) => promisify(store.put(asBytes)));
+        if (ok === undefined) return;
+      }
       metas.set(key, { key, size, lastAccess: record.lastAccess });
 
       const toEvict = planEviction([...metas.values()], budget);
