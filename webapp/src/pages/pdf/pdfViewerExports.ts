@@ -4,7 +4,8 @@
 
 import type { Id, NoteMeta, PageRef, Theme } from "../../core/types";
 import { rawFileUrl } from "../../core/fileKind";
-import type { NoteLayersController, NoteLayerView } from "../noteLayers";
+import type { NoteLayersController } from "../noteLayers";
+import type { NoteLayerView } from "../noteLayerModel";
 import {
   composeMarkExportModel,
   inkAlpha,

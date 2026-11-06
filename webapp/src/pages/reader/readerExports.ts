@@ -6,7 +6,8 @@
 import { el } from "../../ui/dom";
 import { createExporter, download, savedPdfMessage, type Exporter } from "../../export/exporter";
 import { exportFlatPng, exportOra, flattenLayers, type ExportWhich } from "../../export/layered";
-import { noteLayerExportFilename, type NoteLayersController, type NoteLayerStack } from "../noteLayers";
+import { noteLayerExportFilename } from "../noteLayerModel";
+import type { NoteLayersController, NoteLayerStack } from "../noteLayers";
 import type { ViewerExportMenu } from "../viewer/viewerExportMenu";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";

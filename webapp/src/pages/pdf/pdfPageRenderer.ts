@@ -5,7 +5,7 @@ import type { Id, NoteMeta, PageRef, Theme } from "../../core/types";
 import type { ViewerBody } from "../viewer/viewerChrome";
 import type { LayersPanel } from "../layersPanel";
 import type { NoteLayersController } from "../noteLayers";
-import { toPanelLayers } from "../noteLayers";
+import { toPanelLayers } from "../noteLayerModel";
 import { FIT_PAGE, FIT_WIDTH } from "../viewer/viewerControls";
 import type { LinkLayer } from "../linkLayer";
 import type { PdfSelectionLayer } from "./pdfSelectionLayer";

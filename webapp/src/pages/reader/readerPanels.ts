@@ -3,7 +3,7 @@
 import { type FileKind } from "../../core/fileKind";
 import { isPhone } from "../../ui/breakpoints";
 import { tokenPx, MIN_PAGE_W } from "../../ui/sidePanel";
-import { toPanelLayers } from "../noteLayers";
+import { toPanelLayers } from "../noteLayerModel";
 import type { ReaderCtx } from "./readerContext";
 
 export interface ReaderPanels {

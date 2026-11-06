@@ -1,4 +1,4 @@
-// The `.note` layers glue's pure core; the DOM/wasm half is in e2e/noteLayers.spec.ts.
+// The `.note` layers' pure model (pages/noteLayerModel.ts); the stack that draws them is in e2e/noteLayers.spec.ts.
 
 import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
@@ -14,7 +14,7 @@ import {
   noteLayerExportFilename,
   type NoteLayerView,
   type SnpgRecord,
-} from "../../src/pages/noteLayers";
+} from "../../src/pages/noteLayerModel";
 import { normalizeLayers } from "../../src/api/client";
 import { layeredPagePayload, layeredPageLayers } from "../../src/api/layeredFixture";
 import type { PageLayer } from "../../src/core/types";

@@ -14,7 +14,7 @@ import {
   type ExportWhich,
   type LayeredExportModel,
 } from "../../export/layered";
-import { noteLayerExportFilename } from "../noteLayers";
+import { noteLayerExportFilename } from "../noteLayerModel";
 import { markExportMatrix, type ExportSpace, type Size } from "../../render/markGeometry";
 import type { PdfInkOverlay } from "../../render/pdfClient";
 import type { ViewerExportMenu } from "../viewer/viewerExportMenu";
