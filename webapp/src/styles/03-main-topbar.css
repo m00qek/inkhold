@@ -112,7 +112,7 @@
 }
 .search svg.search__glyph {
   position: absolute;
-  left: 12px;
+  inset-inline-start: 12px;
   top: 50%;
   transform: translateY(-50%);
   width: 16px;
@@ -132,7 +132,7 @@
 }
 .search__ocr {
   position: absolute;
-  right: 8px;
+  inset-inline-end: 8px;
   top: 50%;
   transform: translateY(-50%);
   font-family: var(--font-mono);
@@ -170,7 +170,7 @@
 }
 /* Restores the position the search box held, so the topbar doesn't shift. */
 .sn-root.is-destination:not(.is-todo-browse) .tools {
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 
 /* A labelled destination action (Empty bin, Lock console). `.btn.topbar__action`
@@ -241,7 +241,7 @@
 }
 .select svg {
   position: absolute;
-  right: 8px;
+  inset-inline-end: 8px;
   /* Both axes: with `right` alone the chevron kept its static vertical position. */
   top: 50%;
   transform: translateY(-50%);

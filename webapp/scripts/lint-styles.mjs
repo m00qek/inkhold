@@ -60,6 +60,37 @@ for (let i = 0; i < tokens.length; i++) {
   }
 }
 
+// Dead selectors: every class the styles name must be named by the app. A
+// few are built from parts at runtime (`${block}__count`, `is-${state}`); they
+// are listed here, so a new one is a decision, not an accident.
+const BUILT = new Set([
+  "admin-chip--admin", "admin-chip--pending", // adminParts: admin-chip--${kind}
+  "is-cancelled", "is-tight", // transferList: is-${state}; adminParts: is-${tone}
+  "findbar__ask", "findbar__count", "findbar__field", // findBar: ${block}__…
+  "pdfbar__ask", "pdfbar__count", "pdfbar__field",
+  "txtbar__ask", "txtbar__count", "txtbar__field",
+  "ocr__body", // sidePanel: ${hookPrefix}__body
+  "pdf-outline__row--d0", "pdf-outline__row--d1", "pdf-outline__row--d2", "pdf-outline__row--d3", // --d${depth}
+]);
+const srcDir = join(stylesDir, "..");
+const sources = [join(srcDir, "..", "index.html")];
+const walk = (dir) => {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const f = join(dir, e.name);
+    if (e.isDirectory()) walk(f);
+    else if (f.endsWith(".ts")) sources.push(f);
+  }
+};
+walk(srcDir);
+const code = sources.map((f) => readFileSync(f, "utf8")).join("\n");
+for (const file of [...files, "00-tokens.css"]) {
+  const css = readFileSync(join(stylesDir, file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/url\([^)]*\)/g, "");
+  for (const cls of new Set([...css.matchAll(/\.([a-zA-Z][\w-]*)/g)].map((m) => m[1]))) {
+    if (BUILT.has(cls)) continue;
+    if (!new RegExp(`(?<![\\w-])${cls}(?![\\w-])`).test(code)) problems.push(`${file}  .${cls} — no element in the app carries this class (dead, or add it to BUILT)`);
+  }
+}
+
 if (problems.length) {
   console.error(
     `\nstyle drift: ${problems.length} raw value(s) that must come from 00-tokens.css\n`,

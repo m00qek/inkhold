@@ -9,7 +9,7 @@
 .admin {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: var(--z-cover);
   overflow-y: auto;
   background: var(--desk);
 
@@ -26,7 +26,7 @@
 .admin-booting {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: var(--z-cover);
   background: var(--desk);
   padding: 26px 28px 60px;
 }

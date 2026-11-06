@@ -27,7 +27,7 @@
   flex: 1;
   margin: 20px 0 4px;
   padding: 11px 14px 11px 13px;
-  border-left: 2px solid var(--accent);
+  border-inline-start: 2px solid var(--accent);
   background: color-mix(in srgb, var(--accent) 6%, transparent);
   border-radius: 0 6px 6px 0;
   font-size: var(--fs-body);
@@ -101,12 +101,12 @@
 }
 /* A child is nested under its trashed folder: restoring it restores its ancestors. */
 .bin__row.is-child {
-  padding-left: 34px;
+  padding-inline-start: 34px;
 }
 .bin__row.is-child::before {
   content: "";
   position: absolute;
-  left: 19px;
+  inset-inline-start: 19px;
   top: 0;
   bottom: 0;
   width: 1px;
@@ -124,7 +124,7 @@
   padding: 0;
   font: inherit;
   color: inherit;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 /* A folder has nothing to open, so its lead is not a control. */
@@ -256,7 +256,7 @@
 }
 .life__label {
   margin-top: 6px;
-  text-align: right;
+  text-align: end;
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
   color: var(--ink-faint);
@@ -384,12 +384,12 @@
    offer must outlast a 2.4s notification. */
 .bin-toast {
   position: fixed;
-  left: 50%;
+  inset-inline-start: 50%;
   bottom: 26px;
   transform: translateX(-50%) translateY(20px);
   opacity: 0;
   pointer-events: none;
-  z-index: 60;
+  z-index: var(--z-toast-top);
   display: flex;
   align-items: center;
   gap: 14px;
@@ -449,7 +449,7 @@
 .bin-preview {
   position: fixed;
   inset: 0;
-  z-index: 55;
+  z-index: var(--z-panel);
   display: flex;
   flex-direction: column;
   background: var(--desk);

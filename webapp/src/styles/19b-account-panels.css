@@ -39,7 +39,7 @@
 .acct-kind .acct-row__v {
   flex: none;
   width: 92px;
-  text-align: right;
+  text-align: end;
   color: var(--ink);
 }
 /* The same reservation on the action side (only the bin row has a button). */
@@ -120,10 +120,10 @@
   transition: background 0.12s ease, color 0.12s ease;
 }
 .acct-step:first-child {
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
 }
 .acct-step:last-child {
-  border-left: 1px solid var(--line);
+  border-inline-start: 1px solid var(--line);
 }
 .acct-step:hover {
   background: var(--hover);
@@ -137,7 +137,7 @@
 /* `Save` lands at the row's right edge like every action on this page. */
 .acct-keep__save {
   flex: none;
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 .acct-keep__save[hidden] {
   display: none;
@@ -174,7 +174,7 @@
   height: var(--control-h-sm);
   padding: 0 var(--sp-3);
   border: 0;
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   background: transparent;
   color: var(--ink-soft);
   font-family: var(--font-mono);
@@ -187,7 +187,7 @@
     color 0.12s ease;
 }
 .acct-theme__opt:last-child {
-  border-right: 0;
+  border-inline-end: 0;
 }
 .acct-theme__opt svg {
   width: 14px;
@@ -211,18 +211,18 @@
     --acct-gutter: 16px;
   }
   .acct__body {
-    padding-left: calc(var(--acct-gutter) + 22px);
+    padding-inline-start: calc(var(--acct-gutter) + 22px);
   }
 
   .acct-sec::before {
-    left: -22px;
+    inset-inline-start: -22px;
   }
   .acct-sec__label {
     position: static;
     width: auto;
     padding-top: 0;
     margin: 0 0 var(--sp-3);
-    text-align: left;
+    text-align: start;
   }
   .acct-row {
     flex-wrap: wrap;

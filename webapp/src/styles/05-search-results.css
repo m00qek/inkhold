@@ -9,7 +9,7 @@
   max-width: 760px;
   margin: 0 2px 14px;
   padding: 10px 12px;
-  border-left: 2px solid var(--accent);
+  border-inline-start: 2px solid var(--accent);
   border-radius: 0 4px 4px 0;
   background: var(--hover);
   font-size: var(--fs-caption);
@@ -59,7 +59,7 @@
   margin-top: 4px;
 }
 .card__excerpt-page {
-  margin-right: 6px;
+  margin-inline-end: 6px;
   font-family: var(--font-mono);
   color: var(--ink-faint);
   font-variant-numeric: tabular-nums;

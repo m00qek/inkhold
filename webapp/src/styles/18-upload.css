@@ -9,7 +9,7 @@
 .dropzone {
   position: absolute;
   inset: 0;
-  z-index: 40;
+  z-index: var(--z-dropzone);
   display: grid;
   place-items: center;
   padding: var(--sp-6);
@@ -169,9 +169,9 @@
 /* Bottom right, so it never covers the bottom-centre toast. */
 .transfers {
   position: fixed;
-  right: var(--sp-6);
+  inset-inline-end: var(--sp-6);
   bottom: var(--sp-6);
-  z-index: 55;
+  z-index: var(--z-panel);
   width: min(340px, calc(100vw - 2 * var(--sp-4)));
   border: 1px solid var(--line);
   border-radius: var(--radius-card);

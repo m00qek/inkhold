@@ -103,7 +103,7 @@
   height: 100%;
   border-radius: 1px;
   background: color-mix(in srgb, var(--accent) 26%, transparent);
-  border-right: 2px solid var(--accent);
+  border-inline-end: 2px solid var(--accent);
   box-sizing: border-box;
 }
 .layers-panel__bar:focus-visible {
@@ -117,7 +117,7 @@
   color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
   min-width: 34px;
-  text-align: right;
+  text-align: end;
 }
 /* Dim and freeze the bar for a hidden layer (JS also drops it from tab order). */
 .layers-panel__barwrap.is-disabled {
@@ -141,5 +141,5 @@
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--sheet, #fff);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-hairline);
 }

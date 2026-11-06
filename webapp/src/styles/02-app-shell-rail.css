@@ -41,14 +41,14 @@
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto 1fr auto;
   min-height: 0;
-  border-right: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
 }
 .rail::after {
   content: "";
   position: absolute;
   top: 0;
   bottom: 0;
-  right: -1px;
+  inset-inline-end: -1px;
   width: 1.5px;
   background: var(--accent);
   opacity: 0.7;
@@ -94,12 +94,12 @@
   width: 100%;
   padding: 8px 10px;
   /* One 22px step per nesting level (`--depth`, set by the rail builder). */
-  padding-left: calc(10px + var(--depth, 0) * 22px);
+  padding-inline-start: calc(10px + var(--depth, 0) * 22px);
   border: 0;
-  border-left: 2px solid transparent;
+  border-inline-start: 2px solid transparent;
   background: transparent;
   color: var(--ink-soft);
-  text-align: left;
+  text-align: start;
   text-decoration: none;
   cursor: pointer;
   border-radius: 3px;
@@ -111,7 +111,7 @@
 .nav__item.is-nested::before {
   content: "";
   position: absolute;
-  left: calc(16px + (var(--depth, 1) - 1) * 22px);
+  inset-inline-start: calc(16px + (var(--depth, 1) - 1) * 22px);
   top: 50%;
   width: 8px;
   height: 1px;
@@ -162,7 +162,7 @@
 .nav__item[aria-current="page"],
 .nav__item[aria-current="true"] {
   color: var(--ink);
-  border-left-color: var(--accent);
+  border-inline-start-color: var(--accent);
   background: var(--hover);
   font-weight: 500;
 }
@@ -185,7 +185,7 @@
   background: transparent;
   color: inherit;
   font: inherit;
-  text-align: left;
+  text-align: start;
   text-decoration: none;
   cursor: pointer;
   transition: background 0.12s ease;
@@ -327,7 +327,7 @@
   place-items: center;
   width: 26px;
   height: 26px;
-  margin-left: 2px;
+  margin-inline-start: 2px;
   border: 0;
   border-radius: 3px;
   background: transparent;

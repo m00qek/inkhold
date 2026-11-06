@@ -54,7 +54,7 @@
   /* The ink gutter, reserved on every row so thumbnails don't shift. On the row,
      because `VirtualList` positions rows absolutely; also clears the
      `aria-current` outline. */
-  padding-left: var(--sp-3);
+  padding-inline-start: var(--sp-3);
 }
 
 /* ── The ink edge ──
@@ -65,7 +65,7 @@
 .filmstrip__page--inked::before {
   content: "";
   position: absolute;
-  left: 0;
+  inset-inline-start: 0;
   /* The thumbnail sits at the row's top, so no offset. */
   top: 0;
   width: 2px;
@@ -75,7 +75,7 @@
 }
 .filmstrip__hits {
   position: absolute;
-  right: 4px;
+  inset-inline-end: 4px;
   top: 4px;
   min-width: 15px;
   height: 15px;
@@ -210,16 +210,16 @@
 }
 
 /* --- the Export dropdown ---
- * `.menu__item--off` rows stay visible, dimmed, with their reason as a second
- * line, rather than hiding unavailable formats. */
+ * An unavailable format stays visible and disabled, dimmed, rather than
+ * hidden. */
 .menu {
   position: relative;
 }
 .menu__pop {
   position: absolute;
-  right: 0;
+  inset-inline-end: 0;
   top: calc(100% + 6px);
-  z-index: 10;
+  z-index: var(--z-menu);
   min-width: 244px;
   padding: 6px;
   display: none;
@@ -238,7 +238,7 @@
    its own `is-open`. Export menus don't portal and keep the absolute pop. */
 .menu__pop--float {
   position: fixed;
-  right: auto;
+  inset-inline-end: auto;
   top: auto;
   z-index: var(--z-popover);
 }
@@ -268,7 +268,7 @@
   border-radius: 5px;
   color: var(--ink);
   font-size: var(--fs-body);
-  text-align: left;
+  text-align: start;
 }
 .menu__item > span {
   display: flex;
@@ -284,7 +284,6 @@
   color: var(--ink-faint);
   padding-top: 1px;
 }
-.menu__item--off,
 .menu__item:disabled {
   cursor: not-allowed;
   color: var(--ink-faint);
@@ -302,12 +301,6 @@
 .menu__item-mark svg {
   width: 16px;
   height: 16px;
-}
-.menu__why {
-  font-family: var(--font-mono);
-  font-size: var(--fs-eyebrow);
-  line-height: 1.35;
-  color: var(--ink-faint);
 }
 .menu__sep {
   height: 1px;

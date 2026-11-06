@@ -9,7 +9,7 @@
 .acct {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: var(--z-cover);
   overflow-y: auto;
   background: var(--desk);
 
@@ -34,7 +34,7 @@
   top: 0;
   bottom: 0;
   /* 30px left of the content (`.acct__body` pads `gutter + 30px`). */
-  left: -30px;
+  inset-inline-start: -30px;
   width: 1.5px;
   background: var(--margin);
   opacity: 0.72;
@@ -80,11 +80,11 @@
 /* In the margin: right-aligned against the rule, a note beside the text. */
 .acct-sec__label {
   position: absolute;
-  left: calc(-1 * (var(--acct-gutter) + 30px) + 28px);
+  inset-inline-start: calc(-1 * (var(--acct-gutter) + 30px) + 28px);
   width: calc(var(--acct-gutter) - 28px - var(--acct-label-gap));
   margin: 0;
   padding-top: 3px;
-  text-align: right;
+  text-align: end;
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
   font-weight: 600;
@@ -236,8 +236,8 @@
 /* The disclosure chevron (down closed, up open), the rail's shape. */
 .acct-btn__chevron {
   display: inline-flex;
-  margin-left: 6px;
-  margin-right: -2px;
+  margin-inline-start: 6px;
+  margin-inline-end: -2px;
   transition: transform 0.15s ease;
 }
 .acct-btn__chevron svg {

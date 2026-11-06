@@ -116,7 +116,7 @@
 }
 .life--inline .life__label {
   margin-top: 0;
-  text-align: right;
+  text-align: end;
 }
 /* On the toolbar ground: no image fill or blur, same quiet border. */
 .viewer__bin-actions .card__more {

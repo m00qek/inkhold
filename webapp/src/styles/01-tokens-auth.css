@@ -307,7 +307,7 @@ body:has(.sn-root) {
     padding: 34px 26px 34px 52px;
   }
   .sheet::before {
-    left: 28px;
+    inset-inline-start: 28px;
   }
   .title {
     font-size: var(--fs-heading);
@@ -325,7 +325,7 @@ body:has(.sn-root) {
 .theme {
   position: fixed;
   top: 18px;
-  right: 18px;
+  inset-inline-end: 18px;
   width: var(--control-h);
   height: var(--control-h);
   display: grid;
@@ -394,7 +394,7 @@ body:has(.sn-root) {
   font-size: var(--fs-caption);
   line-height: 1.55;
   color: var(--ink-soft);
-  border-left: 2px solid var(--margin);
+  border-inline-start: 2px solid var(--margin);
   padding: 2px 0 2px 12px;
 }
 .aside b {

@@ -77,7 +77,7 @@
   border: 0;
   background: transparent;
   padding: 0;
-  text-align: left;
+  text-align: start;
   text-decoration: none;
   cursor: pointer;
   font: inherit;
@@ -161,7 +161,7 @@
 }
 .thumb .card__marks {
   position: absolute;
-  left: 8px;
+  inset-inline-start: 8px;
   top: 8px;
   /* The badge is a server-supplied type of unbounded length. */
   max-width: calc(100% - 16px);
@@ -335,7 +335,7 @@
 }
 .thumb--category .cat__glyph {
   position: absolute;
-  left: 50%;
+  inset-inline-start: 50%;
   top: 58%;
   transform: translate(-50%, -50%);
   width: 34%;
@@ -405,7 +405,7 @@
 .card .card__menu {
   position: absolute;
   top: 8px;
-  right: 8px;
+  inset-inline-end: 8px;
 }
 /* In a list row the "…" is a trailing flow item and keeps `.menu`'s own
    `position: relative` (which anchors its popover). */

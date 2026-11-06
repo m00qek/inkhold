@@ -666,6 +666,53 @@ silently.
 - MuPDF is a pinned, unpatched dependency; upstream bugs are worked around by
   excluding sources and supplying stubs (`load-jpx.c`), not by patching.
 
+### 11.8 Markup and styles
+
+Held by `tests/e2e/semantics.spec.ts` (every main screen, at desktop in both
+themes and at phone width): axe-core's WCAG 2.2 AA and best-practice rules,
+plus the structure axe doesn't judge (`helpers/semantics.ts`). Both must find
+nothing; the per-screen record (`semantics-baseline/`) is empty and may only
+stay so.
+
+- **Landmarks:** one `<main>` (the content area; pre-auth screens have their
+  own), the top bar a `<header>`, the search box a search landmark, the rail
+  the navigation landmark ("Library"), breadcrumbs a "Breadcrumb" navigation.
+  Panels inside `<main>` are named regions, not asides. A "Skip to content"
+  link comes first.
+- **Where you are:** one `<h1>` per screen, and the tab's title with it
+  (`ui/place.ts`): library screens are named by the breadcrumbs' current
+  place, a viewer or To-Do by itself. Focus moves to the heading on a change of
+  screen, only after the person has acted and never while typing. Sections
+  are `<h2>`s.
+- **Links and buttons:** anything that goes somewhere is an `<a href>` (it
+  opens in a new tab, says where it leads); a plain click still runs the app's
+  own action (`ui/link.ts`). Buttons are actions. A place with no address (a
+  category the tablet hasn't created) is a button marked `data-no-address`.
+- **Collections are lists.** Gallery cards are `<li>`s in `ul.cards`, which is
+  `display: contents` so each card stays a grid cell (`masonry.ts` looks
+  inside).
+- **Announcements** are small status regions holding the message only, never
+  the buttons beside it. Icons are hidden from screen readers (`svg()` emits
+  `aria-hidden`).
+- **Targets:** at least 24px with a mouse and 44px on a touch screen
+  (`pointer: coarse` grows the control tokens; a zero-specificity rule gives
+  anything pressable a minimum).
+- **Contrast:** 4.5:1 for all text in both themes; the soft and faint greys
+  are tuned to it on every surface they sit on.
+- **Styles** (`scripts/lint-styles.mjs` enforces): sizes from tokens; type,
+  spacing and control heights in rem (they follow the reader's text size;
+  touch minimums keep a px floor); start/end, never left/right; z-index only
+  from the `--z-…` scale; colours and shadows only from tokens; no class the
+  app never sets (the few built at runtime are listed). Breakpoints are the set
+  written in `00-tokens.css`: phone below 700px, tablet to 1099px, desktop
+  from 1100px.
+- **Pixel proof:** `VISUAL_DIR=<dir> npx playwright test visual` and
+  `scripts/visual-diff.sh <before> <after>` show a change that must move
+  nothing moved nothing.
+- **Engines:** Chromium runs everything; `E2E_BROWSER=webkit` runs Safari's
+  engine (every iPhone browser) on devlab's inkhold-ci, since WebKit needs
+  Debian/Ubuntu libraries.
+
 ## 12. Where things live
 
 The directories are layers. An import points down the list, never up: a file

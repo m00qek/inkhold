@@ -25,6 +25,9 @@ export async function settle(page: Page): Promise<void> {
   if ((await page.locator(".rail").count()) > 0) await page.locator(".rail .nav__item", { hasText: "Files" }).first().waitFor({ state: "attached", timeout: 15_000 });
   // To-Do joins the rail when its first read lands, apart from the walk.
   if ((await page.locator(".rail").count()) > 0) await page.locator(".rail .nav__item", { hasText: "To-Do" }).first().waitFor({ state: "attached", timeout: 15_000 });
+  // A preview learns its shape when its image loads, moving the card's text:
+  // measure after every image is in.
+  await page.waitForFunction(() => [...document.images].every((i) => i.complete), undefined, { timeout: 15_000 }).catch(() => {});
   let last = "";
   let still = 0;
   for (let i = 0; i < 100 && still < 10; i++) {

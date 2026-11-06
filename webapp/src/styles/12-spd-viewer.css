@@ -44,7 +44,7 @@
    the Reference Layer's own canvas). */
 .spd-canvas-wrap {
   position: relative;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 6px 20px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-paper);
   line-height: 0;
   /* The shared "transparent" checker (00-tokens.css). */
   background-color: var(--checker-base);

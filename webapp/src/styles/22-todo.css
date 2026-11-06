@@ -9,7 +9,7 @@
 .todo {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: var(--z-cover);
   overflow-y: auto;
   background: var(--desk);
   padding: 46px 28px 96px;
@@ -60,7 +60,7 @@
   gap: var(--sp-2);
   flex: 0 1 auto;
   min-width: 0;
-  margin-right: var(--sp-2);
+  margin-inline-end: var(--sp-2);
   font-size: var(--fs-caption);
   color: var(--ink-soft);
   white-space: nowrap;
@@ -134,15 +134,15 @@
 .todo-card .card__menu {
   position: absolute;
   top: 10px;
-  right: 10px;
-  z-index: 1;
+  inset-inline-end: 10px;
+  z-index: var(--z-raised);
 }
 /* Clear of the ⋯ in the corner. */
 .todo-card__head {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  padding-right: calc(var(--control-h-sm) + 8px);
+  padding-inline-end: calc(var(--control-h-sm) + 8px);
   color: var(--ink-soft);
 }
 .todo-card__name {
@@ -196,7 +196,7 @@
 }
 /* "and N more": no ring, but in line with the tasks' text. */
 .todo-card__peek .todo-card__more {
-  padding-left: 17px;
+  padding-inline-start: 17px;
   font: var(--fs-caption) var(--font-mono);
 }
 /* The Inbox's ⋯: there like every card's, but nothing to offer. */
@@ -368,7 +368,7 @@
   background: transparent;
   color: var(--ink-soft);
   font-weight: 600;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
 }
 .todo-group__head.is-overdue {
@@ -415,7 +415,7 @@
 /* The grip sits in the row's left padding: there on pointing, faint on touch. */
 .todo-grip {
   position: absolute;
-  left: 0;
+  inset-inline-start: 0;
   top: 10px;
   display: grid;
   place-items: center;
@@ -445,7 +445,7 @@
 }
 /* Lifted while dragged: it follows the pointer, the others make room. */
 .todo-row.is-dragging {
-  z-index: 2;
+  z-index: var(--z-lifted);
   transform: translateY(var(--drag-y, 0));
   background: var(--sheet);
   box-shadow: 0 10px 24px -12px var(--shadow);
@@ -508,8 +508,8 @@
 /* Completing draws a pen line across the title before the row moves. */
 .todo-strike {
   position: absolute;
-  left: -2px;
-  right: -2px;
+  inset-inline-start: -2px;
+  inset-inline-end: -2px;
   top: 52%;
   height: 2px;
   border-radius: 2px;
@@ -602,7 +602,7 @@
   height: 22px;
   min-width: 0;
   padding: 0 6px;
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 .todo-card__peek .todo-ink {
   --ink-h: 14px;

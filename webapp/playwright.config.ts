@@ -14,7 +14,13 @@ export default defineConfig({
     baseURL: `http://localhost:${PORT}`,
     trace: "on-first-retry",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  // Chromium by default; E2E_BROWSER=webkit runs Safari's engine (what every
+  // iPhone browser uses). WebKit needs Debian/Ubuntu libraries: run it on
+  // devlab's inkhold-ci, not on an Arch laptop.
+  projects:
+    process.env.E2E_BROWSER === "webkit"
+      ? [{ name: "webkit", use: { ...devices["Desktop Safari"] } }]
+      : [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
     command: `npm run dev -- --port ${PORT} --strictPort`,
     url: `http://localhost:${PORT}`,

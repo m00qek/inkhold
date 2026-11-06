@@ -62,7 +62,7 @@
 }
 .pdfbar__field svg {
   position: absolute;
-  left: 11px;
+  inset-inline-start: 11px;
   top: 50%;
   transform: translateY(-50%);
   width: 14px;
@@ -243,7 +243,7 @@
   border: 0;
   border-radius: var(--radius);
   background: none;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
   padding: var(--sp-1) var(--sp-2) var(--sp-1)
     calc(var(--sp-3) + var(--depth, 0) * var(--sp-3));
@@ -316,7 +316,7 @@
 .pdf-outline__row[aria-current="true"]::before {
   content: "";
   position: absolute;
-  left: 0;
+  inset-inline-start: 0;
   top: 2px;
   bottom: 2px;
   width: 2px;

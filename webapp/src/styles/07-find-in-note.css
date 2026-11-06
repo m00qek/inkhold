@@ -22,7 +22,7 @@
 }
 .findbar__field svg {
   position: absolute;
-  left: 11px;
+  inset-inline-start: 11px;
   top: 50%;
   transform: translateY(-50%);
   width: 14px;
@@ -192,7 +192,7 @@
 
 .toast {
   position: fixed;
-  left: 50%;
+  inset-inline-start: 50%;
   bottom: 26px;
   transform: translateX(-50%) translateY(20px);
   opacity: 0;
@@ -208,7 +208,7 @@
   transition:
     transform 0.22s ease,
     opacity 0.22s ease;
-  z-index: 50;
+  z-index: var(--z-toast);
 }
 .toast.is-shown {
   opacity: 1;

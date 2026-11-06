@@ -44,7 +44,23 @@
   /* The layers panel's opacity fill-bar track height. */
   --layer-bar-h: 6px;
 
-  /* Above all app chrome (max 60), for the portaled popover menus. */
+  /* Breakpoints, by the room there is, not the device (media queries can't
+     read variables, so they are written out): phone below 700px, tablet
+     700–1099px, desktop from 1100px. New rules use only these edges:
+     (max-width: 699px), (min-width: 700px), (max-width: 1099px),
+     (min-width: 1100px). The older narrow-screen rules (480, 620, 640, 860px)
+     are replaced by the phone layout. */
+
+  /* The stacking scale, lowest first. Every z-index is one of these. */
+  --z-raised: 1; /* above a stretched link inside the same card (a card's ⋯) */
+  --z-cover: 2; /* a destination's page over the gallery (To-Do, admin, account) */
+  --z-lifted: 2; /* a row being dragged, over its neighbours */
+  --z-menu: 10; /* an in-place menu over its row */
+  --z-dropzone: 40; /* the upload drop target over the page */
+  --z-toast: 50; /* the shell's toast */
+  --z-panel: 55; /* floating panels: transfers, the bin's preview */
+  --z-toast-top: 60; /* the bin's undo toast, over its preview */
+  /* Above all app chrome, for the portaled popover menus and the skip link. */
   --z-popover: 100;
 
   --radius: 2px; /* the app's corner, everywhere */
@@ -101,6 +117,10 @@
   --margin-ink: #ab4239;
   --accent: #3f6b4a; /* green ink — brand, selection, focus, search highlight */
   --shadow: rgba(36, 32, 22, 0.18);
+  /* Theme-independent lifts: a sheet of paper (the .spd canvas) and a hairline
+     (the layers panel's swatch); black at low alpha reads on both themes. */
+  --shadow-paper: 0 1px 3px rgba(0, 0, 0, 0.12), 0 6px 20px rgba(0, 0, 0, 0.08);
+  --shadow-hairline: 0 1px 2px rgba(0, 0, 0, 0.08);
   --hover: rgba(28, 27, 23, 0.05);
   --paper-ink: #33302a; /* handwriting rendered onto a note page */
   --paper-rule: rgba(28, 27, 23, 0.11);
