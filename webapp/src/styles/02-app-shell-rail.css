@@ -393,3 +393,14 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* A finger's size for everything you can press, on a touch screen. Zero
+   specificity, and `min-` sizes: a component keeps its look and only grows. */
+@media (pointer: coarse) {
+  .sn-root :where(a[href], button, summary, select, [role="menuitem"], input:not([type="checkbox"], [type="radio"])) {
+    min-block-size: var(--hit-target-touch);
+  }
+  .sn-root :where(a[href], button, [role="menuitem"]) {
+    min-inline-size: var(--hit-target-touch);
+  }
+}

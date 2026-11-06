@@ -448,3 +448,12 @@
   backdrop-filter: none;
 }
 
+
+/* A run of cards is a list for screen readers, and no box at all for the
+   grid: each card stays one of its cells. */
+.cards {
+  display: contents;
+}
+.card {
+  list-style: none;
+}

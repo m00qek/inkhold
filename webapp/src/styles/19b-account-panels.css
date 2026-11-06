@@ -79,6 +79,7 @@
 }
 .acct-keep {
   width: 3em;
+  min-inline-size: var(--hit-target-min);
   height: 100%;
   padding: 0;
   border: 0;

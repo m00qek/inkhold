@@ -7,6 +7,18 @@ export interface Masonry {
 }
 
 /** `active` says whether the gallery is the icon masonry right now. */
+/**
+ * The grid's cells: the gallery's children, looking inside any that are
+ * `display: contents` (a list of cards), whose children are the cells.
+ */
+function* tiles(parent: Element): Generator<HTMLElement> {
+  for (const child of parent.children) {
+    if (!(child instanceof HTMLElement)) continue;
+    if (getComputedStyle(child).display === "contents") yield* tiles(child);
+    else yield child;
+  }
+}
+
 export function createMasonry(gallery: HTMLElement, active: () => boolean): Masonry {
   let scheduled = false;
 
@@ -20,8 +32,7 @@ export function createMasonry(gallery: HTMLElement, active: () => boolean): Maso
     const unit = parseFloat(grid.gridAutoRows);
     const gap = parseFloat(grid.getPropertyValue("--masonry-gap"));
     if (!Number.isFinite(unit) || unit <= 0) return; // not the masonry right now
-    for (const child of gallery.children) {
-      if (!(child instanceof HTMLElement)) continue;
+    for (const child of tiles(gallery)) {
       const height = child.getBoundingClientRect().height;
       if (height <= 0) continue;
       const cs = getComputedStyle(child);

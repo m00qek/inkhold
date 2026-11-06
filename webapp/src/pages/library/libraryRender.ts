@@ -1,5 +1,6 @@
 // The library's gallery painting: crumbs, the folder listing or search results, and the empty states.
 
+import { cardList } from "../galleryCards";
 import type { Id } from "../../core/types";
 import { crumbHere, crumbLink, crumbSep } from "../../ui/crumbs";
 import { el } from "../../ui/dom";
@@ -177,9 +178,13 @@ export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
 
     ctx.gallery.append(el("h2", { class: "section-head" }, el("span", { text: listingSummary(entries) })));
 
-    for (const [i, entry] of entries.entries()) {
-      ctx.gallery.append(entry.kind === "folder" ? ctx.features.galleryCards.folderCard(entry) : ctx.features.galleryCards.noteCard(entry, i));
-    }
+    ctx.gallery.append(
+      cardList(
+        ...entries.map((entry, i) =>
+          entry.kind === "folder" ? ctx.features.galleryCards.folderCard(entry) : ctx.features.galleryCards.noteCard(entry, i),
+        ),
+      ),
+    );
   }
 
   function plural(n: number, one: string): string {

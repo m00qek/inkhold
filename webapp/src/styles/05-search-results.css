@@ -128,6 +128,8 @@
   gap: var(--sp-1) var(--sp-3);
   cursor: pointer;
   list-style: none;
+  align-items: center;
+  min-block-size: var(--hit-target-min);
 }
 .coverage summary::-webkit-details-marker {
   display: none;
@@ -164,6 +166,9 @@
   border-bottom: 1px solid var(--row-rule);
 }
 .coverage__name {
+  display: inline-flex;
+  align-items: center;
+  min-block-size: var(--hit-target-min);
   color: var(--ink);
   font-size: var(--fs-body);
   text-decoration: none;

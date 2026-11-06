@@ -51,8 +51,21 @@ export function createSearchExcerpts(d: SearchExcerptsDeps): SearchExcerpts {
     }
   }, { rootMargin: "200px" });
 
-  /** Lines of results a newer search replaced: stop watching them. */
+  /**
+   * Lines of results a newer search replaced: stop watching them. Run after
+   * the repaint that asked (a microtask), so lines built for it and not yet
+   * attached are not taken for gone.
+   */
+  let pruning = false;
   function prune(): void {
+    if (pruning) return;
+    pruning = true;
+    queueMicrotask(() => {
+      pruning = false;
+      pruneNow();
+    });
+  }
+  function pruneNow(): void {
     for (const t of waiting.keys()) {
       if (t.isConnected) continue;
       waiting.delete(t);

@@ -87,6 +87,9 @@
   white-space: nowrap;
 }
 .crumbs a {
+  display: inline-flex;
+  align-items: center;
+  min-block-size: var(--hit-target-min);
   color: var(--ink-soft);
   text-decoration: none;
   padding: 2px;

@@ -83,6 +83,28 @@ describe("the excerpt line", () => {
     expect(opened).toBe(false);
   });
 
+  it("lines built together and attached after are all filled (one repaint builds every card first)", async () => {
+    // An observer that sees every line as soon as it is watched, as a screen would.
+    (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver = class {
+      constructor(private readonly cb: (e: { isIntersecting: boolean; target: Element }[]) => void) {}
+      observe(target: Element) {
+        setTimeout(() => this.cb([{ isIntersecting: true, target }]), 0);
+      }
+      unobserve() {}
+    };
+    const x = createSearchExcerpts({ store: { get: async () => DOC }, indexVersion: () => 16 });
+    const one = x.slot({ md5: MD5, pages: [2] }, "reuniao", [], "p.", () => {});
+    const two = x.slot({ md5: MD5, pages: [2] }, "pais", [], "p.", () => {});
+    // Attached only after both were built, in the same task.
+    document.body.append(one, two);
+    await tick();
+    await tick();
+    expect(one.querySelector("mark")?.textContent).toBe("reunião");
+    expect(two.querySelector("mark")?.textContent).toBe("pais");
+    one.remove();
+    two.remove();
+  });
+
   it("shows nothing, and reads nothing, when the text version is unknown", async () => {
     const s = slowStore();
     const x = createSearchExcerpts({ store: s.store, indexVersion: () => null });

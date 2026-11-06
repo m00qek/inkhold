@@ -416,7 +416,8 @@ describe("names follow the index's rule", () => {
     expect(h.folderRows()).toEqual(["Aulas de Francês"]);
     expect(h.rows()).toEqual(["Francês 3"]);
     expect(g.querySelector(".section-head")?.textContent).toBe("1 folder");
-    expect(g.firstElementChild?.nextElementSibling?.className).toBe("card--folder");
+    // The folders' heading, then their list.
+    expect(g.querySelector(".section-head + ul.cards > .card--folder")?.textContent).toBe("Aulas de Francês");
   });
 
   it("a folder alone is an answer, not 'no matches'", () => {

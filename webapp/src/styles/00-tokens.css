@@ -34,6 +34,8 @@
   --hit-target: 32px;
   /* The smallest thing a finger is asked to hit (WCAG 2.5.5, platform guides). */
   --hit-target-touch: 44px;
+  /* The smallest a pointer target may be anywhere (WCAG 2.5.8). */
+  --hit-target-min: 24px;
   --topbar-control-h: var(--control-h);
 
   /* The layers panel's opacity fill-bar track height. */
@@ -154,4 +156,15 @@
   --paper-rule: rgba(233, 230, 221, 0.12);
   --hover-fill: color-mix(in srgb, var(--sheet), var(--ink) 7%);
   --hover-fill-ink: color-mix(in srgb, var(--ink) 90%, var(--accent));
+}
+
+/* On a touch screen every control is a finger's size (44 px, WCAG 2.5.5 and
+   the platforms' guides); with a mouse they keep their desktop size. */
+@media (pointer: coarse) {
+  :root {
+    --control-h: var(--hit-target-touch);
+    --control-h-sm: var(--hit-target-touch);
+    --hit-target: var(--hit-target-touch);
+    --hit-target-min: var(--hit-target-touch);
+  }
 }

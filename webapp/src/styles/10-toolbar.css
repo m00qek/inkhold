@@ -56,6 +56,7 @@
   color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
   min-width: 66px;
+  min-block-size: var(--hit-target-min);
   text-align: center;
   padding: 0;
   border: 0;

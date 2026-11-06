@@ -107,7 +107,12 @@ function structure(opts: CheckOptions): Record<string, string[]> {
   for (const e of document.querySelectorAll("a[href],button,[role=button],input:not([type=hidden]),select,summary,[role=menuitem]")) {
     if (!shown(e)) continue;
     if (e.tagName === "A" && e.closest("p")) continue;
-    const r = e.getBoundingClientRect();
+    // A stretched link: its absolutely placed ::after covers its containing
+    // block (a whole card), and that is what a finger hits.
+    const after = getComputedStyle(e, "::after");
+    const stretched = after.content !== "none" && after.position === "absolute";
+    const box = stretched ? (getComputedStyle(e).position !== "static" ? e : (e as HTMLElement).offsetParent ?? e) : e;
+    const r = box.getBoundingClientRect();
     if (r.width < opts.minTarget || r.height < opts.minTarget) add("target-size", `${(e.getAttribute("aria-label") ?? e.textContent ?? e.tagName).trim().slice(0, 24)} ${Math.round(r.width)}x${Math.round(r.height)}`);
   }
 

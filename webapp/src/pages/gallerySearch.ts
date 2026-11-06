@@ -2,6 +2,7 @@
 // with transcript hits from the index into one list, painted whole (no append
 // path; a corpus change is a repaint).
 
+import { cardList } from "./galleryCards";
 import { el } from "../ui/dom";
 import { coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail";
@@ -189,7 +190,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     // Folders first: a name typed to get somewhere. Their own group, like the to-dos'.
     if (folders.length > 0) {
       gallery.append(el("h2", { class: "section-head" }, el("span", { text: plural(folders.length, "folder") })));
-      for (const f of folders) gallery.append(ctx.folderCard(f));
+      gallery.append(cardList(...folders.map((f) => ctx.folderCard(f))));
     }
 
     const more = ctx.moreResults?.(q) ?? null;
@@ -233,11 +234,12 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     // The to-dos are the person's writing: before the first document that is
     // neither named like the query nor a note, else at the end.
     const at = results.findIndex((r) => !r.nameMatched && !r.written);
-    for (const [i, result] of results.entries()) {
-      if (i === at && more) gallery.append(more);
-      gallery.append(ctx.resultCard(result, i, q, expansions));
-    }
-    if (more && at < 0) gallery.append(more);
+    const cards = results.map((result, i) => ctx.resultCard(result, i, q, expansions));
+    // Two lists around the to-dos when they sit between the results.
+    const split = more && at >= 0 ? at : cards.length;
+    if (split > 0) gallery.append(cardList(...cards.slice(0, split)));
+    if (more) gallery.append(more);
+    if (split < cards.length) gallery.append(cardList(...cards.slice(split)));
     const cov = coverageBlock();
     if (cov) gallery.append(cov);
   }

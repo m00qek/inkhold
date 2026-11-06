@@ -661,6 +661,7 @@
 .todo-keys summary {
   width: fit-content;
   cursor: pointer;
+  min-block-size: var(--hit-target-min);
 }
 .todo-keys ul {
   display: flex;

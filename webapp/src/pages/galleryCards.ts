@@ -66,6 +66,14 @@ export interface GalleryCardsCtx {
   excerpts?: SearchExcerpts;
 }
 
+/**
+ * A run of cards as a list: `display: contents`, so each card stays a cell of
+ * the gallery's grid (the masonry pass looks inside it, `masonry.ts`).
+ */
+export function cardList(...cards: HTMLElement[]): HTMLElement {
+  return el("ul", { class: "cards", role: "list" }, ...cards);
+}
+
 export interface GalleryCards {
   folderCard: (folder: Folder) => HTMLElement;
   noteCard: (note: NoteSummary, i: number) => HTMLElement;
@@ -298,7 +306,7 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
     );
     // List view only: the grid chip has nowhere for "…". None on a stand-in.
     return el(
-      "div",
+      "li",
       { class: catIcon ? "card card--folder card--category" : "card card--folder" },
       open,
       inList && !pendingCat ? ctx.cardMenu(folder) : null,
@@ -339,7 +347,7 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
     );
 
     const card = el(
-      "div",
+      "li",
       { class: "card" },
       open,
       ctx.cardMenu(note),
@@ -399,7 +407,7 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
       ),
     );
 
-    const card = el("div", { class: "card card--result" }, open);
+    const card = el("li", { class: "card card--result" }, open);
     card.style.animationDelay = `${Math.min(i * 24, 240)}ms`;
     if (target) galleryEngine.add({ target, noteId: note.id, page: note.firstPage, size: "thumb", thumb, alt });
     return card;
