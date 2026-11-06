@@ -57,7 +57,8 @@
 .pdfbar__field {
   position: relative;
   flex: 1;
-  min-width: 0;
+  /* Never squeezed out by what sits beside it (a long status line). */
+  min-width: 8rem;
   max-width: 340px;
 }
 .pdfbar__field svg {

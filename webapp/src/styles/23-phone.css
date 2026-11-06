@@ -403,10 +403,40 @@ html {
     min-block-size: calc(var(--hit-target-touch) + var(--sp-2));
     font-size: var(--fs-title);
   }
+}
 
-  /* The page keeps clear of that bar. */
-  .sn-root.is-reading .content {
-    padding-block-end: var(--phone-bar-h);
+/* ---- a phone's find bars (note, PDF, text) ----
+   Two rows: the field and its ‹ › × across, then what the search found (or
+   why it couldn't) under them, the width of the screen, free to wrap. On one
+   row a long status ("Couldn't search this note. Keep typing to retry.")
+   would not wrap and squeezed the field out from under the typing. */
+@media (max-width: 699px) {
+  :is(.findbar, .pdfbar, .txtbar) {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    row-gap: var(--sp-1);
+  }
+  :is(.findbar, .pdfbar, .txtbar) > :is([class*="__field"]) {
+    flex: 1 1 0;
+    max-width: none;
+  }
+  :is(.findbar, .pdfbar, .txtbar) > :is([class*="__count"], [class*="__ask"], [class*="__fuzzy"], [class*="__note"]) {
+    order: 1;
+    flex-basis: 100%;
+    white-space: normal;
+  }
+  :is(.findbar, .pdfbar, .txtbar) > :is([class*="__count"], [class*="__ask"], [class*="__fuzzy"], [class*="__note"]):empty,
+  :is(.findbar, .pdfbar, .txtbar) > [hidden] {
+    display: none;
+  }
+}
+
+/* ---- any touch screen: text fields at 16px ----
+   Smaller, and iOS zooms the whole app in when one is focused (and back out,
+   or not), the page jumping under the field. */
+@media (pointer: coarse) {
+  .sn-root :is(input, select, textarea) {
+    font-size: var(--fs-field-touch);
   }
 }
 

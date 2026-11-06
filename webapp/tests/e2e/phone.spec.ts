@@ -249,6 +249,32 @@ test.describe("on a phone", () => {
     expect(Math.round(box.y + box.height)).toBe(844);
   });
 
+  // On an iPhone the reader slid off the list it covers (Find's field scrolled
+  // into view scrolled the library under it) and the field jumped (iOS zooms
+  // in on a field under 16px).
+  test("an open file never scrolls off the library under it, and Find's field holds still", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/folder/files");
+    await railSettled(page);
+    await page.goto("/#/note/101");
+    const reader = page.locator(".reader.is-open");
+    await expect(reader).toBeVisible();
+    await page.locator(".content").evaluate((c) => {
+      c.scrollTop = 400;
+      c.scrollBy(0, 400);
+    });
+    expect(Math.round((await reader.boundingBox())!.y)).toBe(0);
+    const bar = page.locator(".reader__bar");
+    await bar.getByRole("button", { name: "Find in this note" }).click();
+    const field = page.getByRole("textbox", { name: "Find in this note" });
+    await expect(field).toBeFocused();
+    expect(parseFloat(await field.evaluate((f) => getComputedStyle(f).fontSize))).toBeGreaterThanOrEqual(16);
+    // A long status line sits under the field, not beside it squeezing it.
+    await page.locator(".reader .findbar__count").evaluate((c) => (c.textContent = "Couldn't search this note. Keep typing to retry."));
+    expect((await field.boundingBox())!.width).toBeGreaterThan(150);
+    expect((await reader.boundingBox())!.y).toBe(0);
+  });
+
   // Zoom on a phone is a pinch, and a double tap back to Fit. Dispatched as
   // touch events, which is what the viewer listens to.
   test("a pinch zooms the page sharp, a double tap puts it back to Fit", async ({ page }) => {

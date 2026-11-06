@@ -30,6 +30,17 @@
 /* Reading is a mode: the library topbar (sort, view, and a search box that
    would close the reader) leaves. The theme toggle lives on the account page,
    reachable from the always-visible rail nameplate. */
+/* The library stays mounted under an open file, in the same scroll area, and
+   the reader covers exactly one screen of it: were that area to scroll, the
+   reader would slide away and the list show through. A swipe chaining past
+   the page, or iOS scrolling a focused field (Find) into view, both did.
+   `clip`, not `hidden`: a hidden overflow can still be scrolled by script
+   and by the browser; a clipped one is no scroll area at all. */
+.sn-root.is-reading .content {
+  overflow: hidden;
+  overflow: clip;
+}
+
 .sn-root.is-reading .topbar {
   display: none;
 }
