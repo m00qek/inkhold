@@ -3,20 +3,18 @@
 // protobuf layer tree (see `parsers/spd/spd-format.md`). Each layer gets its own
 // base-resolution canvas drawn once; opacity, visibility and zoom are pure CSS.
 
-import { contentBox, el } from "../../ui/dom";
+import { el } from "../../ui/dom";
 import { bytesBudget } from "../../api/client";
 import type { NoteMeta, NoteSummary } from "../../core/types";
 import { formatBytes, rawFileUrl, historyFileUrl } from "../../core/fileKind";
 import { createToolbar } from "../toolbar";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
-import { createZoomStepper, FIT_PAGE } from "../viewer/viewerControls";
-import { createViewerExportMenu } from "../viewer/viewerExportMenu";
 import { backWord, createViewerHeader, createViewerBody, createVersionBanner } from "../viewer/viewerChrome";
 import { createBinViewerActions } from "../../ui/binViewerActions";
 import { createLayersPanel, type PanelLayer } from "../layersPanel";
 import { closeWith } from "../../ui/sidePanel";
-import { attachPinch, isFit, pinchLabel } from "../../ui/pinchZoom";
-import { exportSpdPng, exportSpdOra, type ExportWhich } from "./spdExport";
+import { createSpdZoom } from "./spdZoom";
+import { createSpdExportMenu, spdExportModel } from "./spdExportMenu";
 import type { ExportLayer, LayeredExportModel } from "../../export/layered";
 import { parseSpd, spdBbox, spdBaseDims, browserLoader, browserDecodeTile, REFERENCE_LAYER_ID, TILE, DEFAULT_WASM_URL, type SpdDecoderExports, type SpdDoc, type SpdLayer, type SpdBbox, type TileBitmap } from "../../render/spdDecode";
 import type { ReaderOrigin, Viewer, ViewerDeps } from "../viewer/viewer";
@@ -39,8 +37,6 @@ export interface SpdViewerOptions {
   loader?: () => Promise<SpdDecoderExports>;
   decodeTile?: (png: Uint8Array) => Promise<TileBitmap>;
 }
-
-const ZOOMS = [FIT_PAGE, "100%", "150%"] as const;
 
 export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): Viewer {
   const loadDecoder = opts.loader ?? browserLoader(opts.wasmUrl ?? DEFAULT_WASM_URL);
@@ -74,61 +70,17 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
     html: svg(VIEWER_IC.layers, 1.7),
   }) as HTMLButtonElement;
 
-  // Own readout class: a shared `.zoom` would match several mounted viewers.
-  const zoomStepper = createZoomStepper({
-    readoutClass: "spd-zoom",
-    initial: 0,
-    format: (i: number) => ZOOMS[i]!,
-    onStep: (dir) => {
-      // A step leaves a pinch for the ladder, from the rung it was on.
-      pinch = null;
-      zoomIdx = Math.max(0, Math.min(ZOOMS.length - 1, zoomIdx + dir));
-      applyZoom();
-      return zoomIdx;
-    },
+  // The wrap is the zoom surface and the checkerboard backdrop for transparency.
+  const canvasWrap = el("div", { class: "spd-canvas-wrap" });
+  const stage = el("div", { class: "spd-stage" }, canvasWrap);
+  const zoom = createSpdZoom({ stage, surface: canvasWrap, dims: () => (doc ? spdBaseDims(doc, bbox) : null) });
+  const downloads = createSpdExportMenu({
+    toast: deps.toast,
+    name: () => meta?.name ?? null,
+    model: () => exportModel(),
   });
-
-  const exportMenu = createViewerExportMenu({ toast: deps.toast, className: "viewer__export" });
-  const rawItem = exportMenu.rawItem("Atelier sketch", ".spd");
-
-  function exportBaseName(): string {
-    const name = meta?.name ?? "sketch";
-    return name.replace(/\.spd$/i, "") || "sketch";
-  }
-
-  function saveBlob(filename: string, blob: Blob): void {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.rel = "noopener";
-    document.body.append(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
-  }
-
-  function runFlatten(kind: "png" | "ora", which: ExportWhich): () => Promise<void> {
-    return async () => {
-      const model = exportModel();
-      if (!model) return;
-      const blob = kind === "png" ? await exportSpdPng(model, which) : await exportSpdOra(model, which);
-      saveBlob(`${exportBaseName()}_${which}.${kind}`, blob);
-    };
-  }
-
-  exportMenu.pop.append(
-    el("div", { class: "menu__head", text: "Current view" }),
-    exportMenu.item("Flattened image", ".png", runFlatten("png", "current")),
-    exportMenu.item("Layered image", ".ora", runFlatten("ora", "current")),
-    el("div", { class: "menu__sep" }),
-    el("div", { class: "menu__head", text: "Original view" }),
-    exportMenu.item("Flattened image", ".png", runFlatten("png", "original")),
-    exportMenu.item("Layered image", ".ora", runFlatten("ora", "original")),
-    el("div", { class: "menu__sep" }),
-    el("div", { class: "menu__head", text: "Original file" }),
-    rawItem.el,
-  );
+  const exportMenu = downloads.menu;
+  const rawItem = downloads.raw;
 
   const moveBin = el("button", {
     class: "btn",
@@ -167,7 +119,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
     leading: [{ el: back, focus: [back] }, { el: title }],
     view: [
       // On a phone a pinch zooms; the stepper waits in ⋯ as its one-finger way.
-      { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus, fold: true },
+      { kind: "custom", key: "zoom", el: zoom.stepper.el, focus: zoom.stepper.focus, fold: true },
       { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle] },
     ],
     file: [
@@ -187,9 +139,6 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
   const viewerBody = createViewerBody({ mark: "SPD" });
   const main = viewerBody.main;
 
-  // The wrap is the zoom surface and the checkerboard backdrop for transparency.
-  const canvasWrap = el("div", { class: "spd-canvas-wrap" });
-  const stage = el("div", { class: "spd-stage" }, canvasWrap);
   const layersPanel = createLayersPanel({
     id: "spd-layers-panel",
     hookPrefix: "spd",
@@ -218,9 +167,6 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
   let bbox: SpdBbox | null = null;
   /** Z-order, index 0 = topmost (mirrors `doc.layers`). */
   let layerViews: LayerView[] = [];
-  let zoomIdx = 0;
-  /** A pinch's size as a factor of Fit; set, it stands in for `zoomIdx`. */
-  let pinch: number | null = null;
   let panelOpen = false;
   /** Bumped on every open/hide/destroy so a stale async render cannot paint. */
   let renderToken = 0;
@@ -259,20 +205,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
 
   /** Export snapshot, bottom-to-top; `current` is captured live. */
   function exportModel(): SpdExportModel | null {
-    if (!doc || layerViews.length === 0) return null;
-    const { w, h } = baseDims();
-    const layers: SpdExportLayer[] = [];
-    for (let i = layerViews.length - 1; i >= 0; i--) {
-      const v = layerViews[i]!;
-      layers.push({
-        id: v.layer.id,
-        name: v.layer.name,
-        canvas: v.canvas,
-        authored: { opacity: v.layer.opacity / 255, visible: v.layer.visible },
-        current: { opacity: v.current.opacity, visible: v.current.visible },
-      });
-    }
-    return { width: w, height: h, layers };
+    return spdExportModel(layerViews, doc ? spdBaseDims(doc, bbox) : null);
   }
 
   function showBody(rendered: boolean): void {
@@ -296,37 +229,9 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
     layersToggle.setAttribute("aria-pressed", String(open));
     layersToggle.setAttribute("aria-expanded", String(open));
     // The panel narrows the stage (or, on a phone, pads it clear of the sheet).
-    applyZoom();
+    zoom.apply();
   }
   layersToggle.addEventListener("click", () => setPanelOpen(!panelOpen));
-
-  function baseDims(): { w: number; h: number } {
-    return doc ? spdBaseDims(doc, bbox) : { w: 1404, h: 1872 };
-  }
-
-  function zoomScale(): number {
-    const z = ZOOMS[zoomIdx]!;
-    if (pinch !== null) return fitScale() * pinch;
-    if (z !== FIT_PAGE) return Number.parseInt(z, 10) / 100;
-    return fitScale();
-  }
-
-  function fitScale(): number {
-    const { w, h } = baseDims();
-    // The content box: on a phone the stage pads itself clear of the layers sheet.
-    const box = contentBox(stage);
-    const availW = Math.max(box.w, 64);
-    const availH = Math.max(box.h, 64);
-    return Math.min(1, availW / w, availH / h) || 1;
-  }
-
-  function applyZoom(): void {
-    if (!doc) return;
-    const scale = zoomScale();
-    const { w, h } = baseDims();
-    canvasWrap.style.width = `${Math.max(1, Math.round(w * scale))}px`;
-    canvasWrap.style.height = `${Math.max(1, Math.round(h * scale))}px`;
-  }
 
   function buildLayersPanel(): void {
     layersPanel.setLayers(
@@ -340,30 +245,6 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       ),
     );
   }
-
-  function onResize(): void {
-    if (!doc || zoomIdx !== 0) return;
-    applyZoom();
-  }
-  window.addEventListener("resize", onResize);
-
-  // Pinch and double tap on the sketch.
-  attachPinch({
-    scroller: stage,
-    surface: () => (doc ? canvasWrap : null),
-    scale: () => zoomScale() / (fitScale() || 1),
-    setScale: (k) => {
-      if (isFit(k)) {
-        pinch = null;
-        zoomIdx = 0;
-        zoomStepper.set(0);
-      } else {
-        pinch = k;
-        zoomStepper.show(pinchLabel(k));
-      }
-      applyZoom();
-    },
-  });
 
   /**
    * Never rejects. Each tile is drawn once onto its layer canvas and `.close()`d
@@ -446,12 +327,10 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
         applyLayerStyle(v);
         canvasWrap.append(v.canvas);
       }
-      zoomIdx = 0;
-      pinch = null;
-      zoomStepper.set(0);
+      zoom.reset();
       buildLayersPanel();
       showBody(true);
-      applyZoom();
+      zoom.apply();
     } catch {
       if (token !== renderToken) return;
       showError(m.name, "Couldn't open this .spd sketch. You can still download the original.");
@@ -476,9 +355,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       // files of the same type, and Move to bin would otherwise trash the old file.
       meta = null;
       setPanelOpen(false);
-      zoomIdx = 0;
-      pinch = null;
-      zoomStepper.set(0);
+      zoom.reset();
 
       header.setName(summary.name);
       header.setSubtitle(summary.fileType.toUpperCase());
@@ -541,7 +418,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       load?.abort();
       load = null;
       releaseRender();
-      window.removeEventListener("resize", onResize);
+      zoom.destroy();
       exportMenu.destroy();
     },
   };
